@@ -1,0 +1,51 @@
+identity_fields:
+  - validator_name
+  - validator_index
+  - validator_id
+  - validator_address
+  - operator_address
+  - reward_address
+  - account_address
+  - public_ip
+  - private_ip
+  - hostname
+  - wireguard_private_key
+  - wireguard_public_key
+  - peer_id
+  - node_id
+  - node_identity_public_key
+  - node_identity_private_key
+  - p2p_public_key
+  - p2p_private_key
+  - consensus_public_key
+  - consensus_private_key
+  - validator_public_key
+  - validator_private_key
+  - account_public_key
+  - account_private_key
+  - p2p_advertise_addr
+  - rpc_advertise_addr
+  - metrics_advertise_addr
+  - local_chain_data
+  - local_logs
+  - timestamps
+  - pid_files
+  - socket_files
+
+masking_rules:
+  dotenv:
+    - SYNERGY_VALIDATOR_NAME
+    - SYNERGY_VALIDATOR_INDEX
+    - SYNERGY_VALIDATOR_ADDRESS
+    - SYNERGY_PUBLIC_IP
+    - SYNERGY_PRIVATE_IP
+    - SYNERGY_RPC_TOKEN
+  key_name_patterns:
+    - private
+    - secret
+    - token
+    - password
+    - seed
+    - mnemonic
+  preserve_public_key_fields: true
+

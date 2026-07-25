@@ -1,0 +1,15 @@
+[package]
+name = "synq-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = { version = "0.7", features = ["json"] }
+tokio = { version = "1", features = ["full"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tower-http = { version = "0.5", features = ["cors"] }
+synq-compiler = { path = "../compiler" }
+synq-vm       = { path = "../vm" }
+hex = { workspace = true }
+ruint = { workspace = true }

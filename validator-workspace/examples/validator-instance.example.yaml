@@ -1,0 +1,14 @@
+validator_name: CHANGE_ME_VALIDATOR_NAME
+validator_index: CHANGE_ME_VALIDATOR_INDEX
+validator_address: CHANGE_ME_VALIDATOR_ADDRESS
+hostname: CHANGE_ME_HOSTNAME
+public_ip: CHANGE_ME_PUBLIC_IP
+private_ip: CHANGE_ME_PRIVATE_IP
+p2p_port: 5622
+qrpc_port: 5640
+ws_port: 5660
+discovery_port: 5680
+metrics_port: 6030
+workspace: /home/node/.synergy/testnet/nodes/validator-workspace
+service: synergy-validator.service
+

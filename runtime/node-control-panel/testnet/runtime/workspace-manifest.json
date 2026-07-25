@@ -1,0 +1,50 @@
+{
+  "workspace_resource_version": "19.0.53+c82280372aae",
+  "app_version": "19.0.53",
+  "chain_id": 1264,
+  "chain_id_hex": "0x4f0",
+  "network_id": "synergy-testnet-v3",
+  "network_native_id": 1264,
+  "network_slug": "synergy-testnet",
+  "genesis_hash": "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789",
+  "network_magic_bytes": "ec6a253c",
+  "bundle_digest": "c82280372aae10896a71d4ad5f3e36819b95571afef0281b102003b57e1a8e1f",
+  "platform_binaries": [
+    "binaries/synergy-testnet-darwin-arm64",
+    "binaries/synergy-testnet-macos-arm64",
+    "binaries/synergy-testnet-linux-amd64",
+    "binaries/synergy-testnet-windows-amd64.exe"
+  ],
+  "required_paths": [
+    "testnet/runtime/workspace-manifest.json",
+    "testnet/runtime/configs/genesis/genesis.json",
+    "testnet/runtime/configs/consensus/consensus-fork-migration.json",
+    "testnet/runtime/configs/operational/operational-manifest.json",
+    "testnet/runtime/validator-vpn/validator-vpn-coordinator.env",
+    "testnet/runtime/installers/Validator-01/config/genesis.json",
+    "testnet/runtime/installers/Validator-01/config/consensus-fork-migration.json",
+    "testnet/runtime/installers/Validator-01/config/peers.toml",
+    "testnet/runtime/installers/Node-RPC/nginx.conf",
+    "testnet/runtime/installers/Node-EXP/nginx.conf",
+    "testnet/runtime/installers/Node-EXP/explorer-app/dist/index.html",
+    "testnet/runtime/installers/Node-EXP/explorer-app/dist/assets",
+    "testnet/runtime/installers/Node-EXP/explorer-app/backend/dist",
+    "testnet/runtime/installers/Node-EXP/explorer-app/backend/scripts/migrate.js",
+    "testnet/runtime/installers/Node-EXP/explorer-app/backend/migrations",
+    "testnet/runtime/installers/Node-EXP/explorer-app/backend/node_modules/fastify/package.json",
+    "testnet/runtime/installers/Node-EXP/explorer-app/indexer/dist",
+    "testnet/runtime/installers/Node-EXP/explorer-app/indexer/scripts/migrate.js",
+    "testnet/runtime/installers/Node-EXP/explorer-app/indexer/migrations",
+    "testnet/runtime/installers/Node-EXP/explorer-app/indexer/node_modules/pg/package.json",
+    "scripts/testnet/validator-vpn-agent.sh",
+    "scripts/testnet/remote-node-orchestrator.sh",
+    "scripts/reset-testnet.sh",
+    "guides/SYNERGY_TESTNET_CONTROL_PANEL_USER_MANUAL.md"
+  ],
+  "checksums": {
+    "binaries/synergy-testnet-darwin-arm64": "e030da63404b4d59d43b721081137425a2939edef5e94233705a8fee43b9a7cd",
+    "binaries/synergy-testnet-macos-arm64": "e030da63404b4d59d43b721081137425a2939edef5e94233705a8fee43b9a7cd",
+    "binaries/synergy-testnet-linux-amd64": "99367f7ccd881f6656c93ff2141925c41dabb1e1aeb383f72d83b1713ea467c9",
+    "binaries/synergy-testnet-windows-amd64.exe": "b11fe559fd9943d09a26056fdd4fde6d27133d01116df9fd28bfe16e9bdf198e"
+  }
+}

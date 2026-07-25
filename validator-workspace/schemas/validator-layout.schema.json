@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Synergy Validator Layout Manifest",
+  "type": "object",
+  "required": ["version", "entries"],
+  "properties": {
+    "version": { "type": "string" },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "type", "owner", "group", "mode", "secret", "generated", "description"],
+        "properties": {
+          "path": { "type": "string" },
+          "type": { "enum": ["file", "directory"] },
+          "owner": { "type": "string" },
+          "group": { "type": "string" },
+          "mode": { "type": "string", "pattern": "^[0-7]{4}$" },
+          "secret": { "type": "boolean" },
+          "generated": { "type": "boolean" },
+          "validator_specific": {},
+          "identical_across_validators": {},
+          "description": { "type": "string" }
+        }
+      }
+    }
+  }
+}
+

@@ -1,0 +1,890 @@
+# Chain Stall Incident Log
+
+This file is the authoritative incident log for every Testnet chain stall
+starting on 2026-04-26.
+
+Rules for this log:
+
+- Append every new stall incident in chronological order.
+- Record the exact time the stall was first observed.
+- Record the exact evidence used to confirm the stall.
+- Record the exact root cause once confirmed.
+- Record the exact code, config, or operational changes used to fix it.
+- Record whether the chain was reset to genesis for the recovery.
+- Record the exact runtime checksum(s), commit(s), and node groups involved.
+- Do not replace older incident entries; add follow-up notes under the incident.
+
+## Incident Template
+
+### Incident N
+- First observed:
+- Detection surface:
+- Initial symptom:
+- Confirmation evidence:
+- Affected nodes:
+- Root cause:
+- Fix implemented:
+- Reset to genesis:
+- Block 1 transaction handling:
+- Runtime checksum(s):
+- Repo commit(s):
+- Restart / rollout scope:
+- Final verification:
+- Follow-up work:
+
+---
+
+## Incident 1
+
+- First observed: 2026-04-26 America/Chicago
+- Detection surface: user-reported stall plus live RPC / validator verification
+- Initial symptom: the user reported that the chain had stalled and requested full diagnosis, documentation, and a controlled genesis reset with a mandatory block-1 transaction
+- Confirmation evidence:
+  - incident opened; live evidence collection started from the control-panel-managed fleet
+  - initial public RPC sample at incident start returned:
+    - `synergy_getNodeStatus.last_block = 15282`
+    - `synergy_getNodeStatus.average_block_time = 5.947368421052632`
+    - `synergy_getNodeStatus.sync_status = synced`
+  - deeper stall confirmation, root cause, and fix details will be appended below as they are verified
+- Affected nodes: pending live verification
+- Root cause:
+  - the public/service plane stalled at height `15282` while validator-side consensus activity continued briefly into the `15316-15322` range
+  - live validator logs showed repeated:
+    - `Leader proposal timeout — following shared leader rotation`
+    - `QC error - block proposal failed`
+    - `Insufficient validator votes: ... 4 required for quorum`
+    - `Failed to dial peer ... Connection refused (os error 111)`
+  - relayer/service nodes simultaneously diverged from validator visibility and repeatedly served `synergy_getValidators called, returning 0 validators`
+  - recovery required a controlled genesis reset, but the first reset attempt exposed a second root-cause class in the launch tooling:
+    - the mandatory block-1 transaction envelope had been generated from the local network-profile treasury wallet
+    - that wallet was not funded by the canonical genesis bundled into the runtime
+    - validators aborted during startup with `Failed to preload deterministic launch block-1 transaction ... has insufficient SNRG balance`
+  - exact control-plane source-of-truth split that caused the failed restart:
+    - canonical runtime genesis owner: `/Users/devpup/Desktop/Testnet/synergy-testnet/config/genesis.json`
+    - launch-transaction signer before the fix: local generated network-profile wallet under `~/.synergy/testnet/network/profile.json`
+    - runtime-shipped private keys available for launch-time signing: validator and service identities under `node-control-panel/testnet/runtime/keys/`
+- Fix implemented:
+  - replaced the launch block-1 transaction signer source so it no longer depends on the generated local network profile
+  - `send-launch-block1-transaction.sh` now:
+    - signs with the shipped `GenVal-01` runtime identity key
+    - derives the default recipient from canonical genesis (`Faucet`)
+    - validates the sender balance directly against canonical genesis before writing any envelope files
+  - canonical genesis was updated to fund `GenVal-01` with a small unlocked launch-sponsor balance:
+    - `synv114cvu472rkdgpmzvkj70zk9tu8cqqlu4x9ra` funded with `2000000000` nWei
+    - that amount was deducted from the unlocked faucet allocation so total supply and unlocked-supply discipline remained consistent
+  - canonical genesis propagation was fixed so the copied runtime artifacts stay aligned:
+    - runtime genesis copy
+    - installer `config/genesis.json` copies
+    - bootstrap-bundle `config/genesis.json` copies
+    - validator `keys/setup-package.json` `artifacts.genesis` payloads
+  - all live roles were reset and redeployed onto the recomputed genesis hash
+- Reset to genesis: yes
+- Block 1 transaction handling:
+  - required transaction was pre-generated into each genesis-validator installer bundle at:
+    - `testnet/runtime/installers/GenVal-0*/config/launch-block1-transaction.json`
+  - verified live in block `1` after restart:
+    - hash: `syntxn-46fa7f453bd6ba150a62ac10070269ec5aec3761979ba89e082fefab95bde984`
+    - from: `synv114cvu472rkdgpmzvkj70zk9tu8cqqlu4x9ra`
+    - to: `synw1y9vkp3pfdq88vs32v5378dvq23py2k9kkavm`
+    - amount: `1000000000` nWei
+    - fee: `21000000` nWei
+    - memo: `launch-block-1`
+- Runtime checksum(s):
+  - bundled Linux runtime used for this reset:
+    - `23f0e25e39c14703f3a61ece479a9780c49bf83557d9e3f116051a5805b34971`
+- Repo commit(s): pending until the post-recovery control-panel work is completed and released cleanly
+- Restart / rollout scope:
+  - bootnodes:
+    - `Node-0A`
+    - `Node-0B`
+    - `Node-0C`
+  - genesis validators:
+    - `GenVal-01`
+    - `GenVal-02`
+    - `GenVal-03`
+    - `GenVal-04`
+    - `GenVal-05`
+  - public/service plane:
+    - `Node-RPC`
+    - `Node-EXP`
+    - `relayer1`
+    - `relayer2`
+    - `observer`
+- Final verification:
+  - all verified live roles now run the same genesis hash:
+    - `f838a1ff39d9dcac47c3b22492f1636d88cc9238f9034706db3f5144d3cd96c9`
+  - public RPC verification after restart:
+    - `synergy_getBlockNumber => 159`
+    - `synergy_getNodeStatus.average_block_time => 1.8235294117647058`
+    - `synergy_getNodeStatus.sync_status => synced`
+  - validator-direct verification on `GenVal-01`:
+    - block `1` exists
+    - block `1` transaction count is `1`
+    - the required launch transaction is present in block `1`
+- Follow-up work:
+  - publish a Node Control Panel update after chain recovery
+  - fix setup chat option rendering in the Jarvis setup flow
+  - fix standard non-genesis validator onboarding on arbitrary machines / IPs
+  - support validator catch-up and consensus join for non-genesis validators
+  - implement dual-cluster behavior once the validator count reaches 10
+
+### Incident 1 Working Notes
+
+- 2026-04-26: incident log created in the Testnet root before recovery work began
+- 2026-04-26: current recovery target is the real control-panel-managed runtime, not ad hoc standalone node instances
+- 2026-04-26: confirmed public/service-side stall at height `15282`
+  - repeated public `synergy_blockNumber` samples stayed pinned at `15282` across seven samples over about `31s`
+  - `Node-RPC` local RPC (`127.0.0.1:5646`) also returned `15282`
+  - `Node-EXP` local RPC (`127.0.0.1:5647`) also returned `15282`
+- 2026-04-26: validator-side incident evidence shows quorum collapse rather than a generic process crash
+  - validator logs repeatedly reported:
+    - `Leader proposal timeout — following shared leader rotation`
+    - `QC error - block proposal failed`
+    - `Insufficient validator votes: 3 votes, 4 required for quorum`
+    - one sample also hit `Insufficient validator votes: 2 votes, 4 required for quorum`
+- 2026-04-26: validator P2P evidence shows peer reachability failures inside the validator mesh
+  - validators logged repeated `Failed to dial peer` events with `Connection refused (os error 111)`
+  - failed peers observed in the live logs included:
+    - `10.69.0.1:5622`
+    - `10.69.0.3:5622`
+    - `10.69.0.4:5622`
+    - `10.69.0.5:5622`
+- 2026-04-26: at least part of the validator set continued selecting leaders and applying blocks beyond the public stall height
+  - validator logs showed block selection / application up through the `15316-15322` range while the public/service side remained pinned at `15282`
+  - this indicates the incident is not a simple full-stop crash; it involves quorum instability and a split between validator-side progress and service-side visibility
+- 2026-04-26: validator-side live state was still internally aware of the full genesis validator set even after the public plane stalled
+  - live validator logs on validators `1`, `2`, `3`, `4`, and `5` all continued reporting `visible_validators: 5`
+  - validators `1`, `2`, `3`, `4`, and `5` all showed continued `Block applied` activity through the `15319-15322` range before the final stall window
+  - the live validator logs show repeated retries on the same heights during leader rotation rather than a complete validator-process crash
+- 2026-04-26: the relayer / service plane diverged from the validator mesh
+  - both relayers were still running their control-panel-managed runtime
+  - both relayers timed out on localhost JSON-RPC (`curl_exit=28` against `127.0.0.1:5640`)
+  - both relayer logs were repeatedly serving:
+    - `synergy_getValidators called, returning 0 validators`
+  - validator nodes, by contrast, were repeatedly serving:
+    - `synergy_getValidators called, returning 5 validators`
+  - the observer still marked validator and relayer metrics targets as `up`, so this was not a full host outage across the fleet
+- 2026-04-26: validator-4 public management reachability failed while private-mesh reachability remained intact
+  - public TCP/22 to `73.79.66.255` timed out from the operator workstation during the incident
+  - validator-4 was still reachable through the observer over the private mesh at `10.69.0.4`
+  - validator-4 was still running and logging consensus activity through the private path
+- 2026-04-26: provisional root-cause statement
+  - the incident is now narrowed to a two-part failure:
+    - the genesis validator mesh entered repeated leader-rotation retries and quorum failures at the active `4 of 5` vote threshold
+    - the relayer/service plane lost validator-registry visibility entirely and kept serving `0 validators`, leaving the public RPC / explorer path pinned at height `15282`
+  - validator consensus activity continued past the public stall height up to the `15322` range before stalling in the same leader-timeout / insufficient-vote pattern
+  - this is the current confirmed incident shape before the genesis reset; the exact code-level correction is still being finalized before the recovery is executed
+- 2026-04-27: the first restart attempt failed before consensus could resume
+  - all three initial quorum validators aborted during startup with:
+    - `Failed to preload deterministic launch block-1 transaction: ... has insufficient SNRG balance`
+  - the failed envelope had been signed by a locally generated network-profile treasury wallet that was not funded in canonical genesis
+  - that failure was not a consensus regression; it was a launch-artifact source-of-truth split between:
+    - local `~/.synergy/testnet/network/profile.json`
+    - canonical bundled genesis `config/genesis.json`
+    - runtime-shipped validator/service identity keys
+- 2026-04-27: the corrected reset path funded `GenVal-01` directly in canonical genesis and regenerated all copied genesis artifacts plus validator setup-package genesis payloads
+- 2026-04-27: the first full post-reset verification pass found one remaining outlier
+  - `Node-EXP` was the only running role still reporting the old genesis hash `ce86...`
+  - root cause:
+    - the live `Node-EXP` directory still contained stale `data/chain.json`
+    - after the full installer redeploy, the node correctly refused to start against the new canonical genesis because that stale chain-state file still referenced `ce86...`
+  - fix:
+    - removed stale runtime data from `/opt/synergy/Node-EXP/data/`
+    - restarted `Node-EXP`
+    - re-verified that the live `Node-EXP` config hash is now `f838...`
+
+---
+
+## Incident 2
+
+- First observed: 2026-04-28 America/Chicago
+- Detection surface: user report plus control-panel-managed validator status/log inspection
+- Initial symptom: `GenVal-03` and `GenVal-05` were no longer participating after both had stalled around block `10300-10309`
+- Confirmation evidence:
+  - public RPC was still advancing during the investigation, so this was a validator recovery incident rather than a full public RPC outage
+  - the control-panel remote orchestrator reported:
+    - `GenVal-03 is stopped`
+    - `GenVal-05 is stopped`
+  - `GenVal-03` live workspace evidence:
+    - `data/chain.json` was `0 bytes`
+    - the deployed runtime checksum was the older `23f0e25e39c14703f3a61ece479a9780c49bf83557d9e3f116051a5805b34971`
+    - after redeploy from genesis-only state, startup aborted with `Transaction timestamp is too old` while preloading `config/launch-block1-transaction.json`
+  - `GenVal-05` logs showed it had received/sent consensus traffic around height `10309`, then saw `10.69.0.3:5622` reset the peer connection and remained outside normal consensus progress until redeployed
+- Affected nodes:
+  - primary: `GenVal-03`
+  - secondary: `GenVal-05`
+  - rollout completed across all genesis validators to avoid checksum split:
+    - `GenVal-01`
+    - `GenVal-02`
+    - `GenVal-03`
+    - `GenVal-04`
+    - `GenVal-05`
+- Root cause:
+  - `GenVal-03` had two real defects in sequence:
+    - chain state was written directly to `data/chain.json`, so an interrupted write could leave a zero-byte chain-state file
+    - after falling back to genesis-only recovery, startup treated the historical launch block-1 transaction envelope as mandatory even though the live network was already past genesis
+  - the stale launch envelope was a launch-only artifact that had been committed into every validator installer bundle; once its timestamp aged past normal transaction validity, any validator recovering at local height `0` could abort before P2P sync
+  - `GenVal-05` was caught in the same stall window and lost `GenVal-03` as a live consensus peer; redeploying the fixed runtime let it sync back to the live head
+- Fix implemented:
+  - changed `BlockChain::save_to_file` to write chain state atomically:
+    - serialize to a temporary file in the same directory
+    - flush with `sync_all`
+    - atomically rename over `data/chain.json`
+  - changed launch block-1 preload logic so validators:
+    - check the live fallback RPC / `node.env` fallback URL before preloading a launch envelope
+    - skip the envelope when a live network is already past genesis
+    - still fail hard on stale or malformed launch envelopes before network launch
+  - removed committed stale `launch-block1-transaction.json` files from validator installer bundles
+  - added an ignore rule so future generated launch envelopes remain launch artifacts, not persistent release assets
+  - changed the launch transaction helper so default outputs target only the initial quorum validators:
+    - `GenVal-01`
+    - `GenVal-02`
+    - `GenVal-04`
+  - changed `clean-launch-testnet.sh launch-quorum` to regenerate and redeploy a fresh block-1 transaction immediately before quorum launch
+- Reset to genesis: no
+- Block 1 transaction handling:
+  - no new genesis reset was performed for this incident
+  - the existing verified block-1 transaction remains the canonical launch transaction for the current chain
+  - future clean launches now regenerate a fresh transaction for the quorum validators immediately before launch instead of shipping stale envelopes in normal bundles
+- Runtime checksum(s):
+  - fixed Linux runtime deployed to validator workspaces:
+    - `6f971ce5525cbc5f422630fda5083d6f0b2f8b649979f038b92742cb38478a22`
+- Repo commit(s):
+  - `synergy-testnet`: `e8eb659` (`Stabilize validator recovery and launch preload`), tag `v9.0.11`
+  - `synergy-testnet/node-control-panel`: `5ccb4bc` (`Release control panel v9.0.11`), tag `v9.0.11`
+- Restart / rollout scope:
+  - deployed and restarted through the control-panel-managed workspaces
+  - `GenVal-03` was deployed and started first because it was stopped
+  - `GenVal-05` was then deployed and restarted
+  - `GenVal-01`, `GenVal-02`, and `GenVal-04` were then rolled one at a time so all genesis validators run the same fixed checksum
+- Final verification:
+  - all five validator workspace binaries report:
+    - `6f971ce5525cbc5f422630fda5083d6f0b2f8b649979f038b92742cb38478a22`
+  - control-panel orchestrator status confirmed running validators:
+    - `GenVal-01`
+    - `GenVal-02`
+    - `GenVal-03`
+    - `GenVal-04`
+    - `GenVal-05`
+  - `GenVal-03` logs showed:
+    - live peer status around height `20361`
+    - `visible_validators: 5`
+    - no repeat of the launch block-1 timestamp abort
+  - `GenVal-05` logs showed:
+    - block application after restart
+    - vote request handling and `Vote sent`
+    - `visible_validators: 5`
+  - live public RPC samples during verification advanced from `20359` to `20361`
+- Follow-up work:
+  - block cadence is still not at the target; public samples advanced `20359 -> 20360 -> 20360 -> 20361` across roughly `30s`
+  - the remaining stabilization item is the missed-leader / proposal-timeout path, not the GenVal-03/GenVal-05 startup stall fixed here
+  - Node Control Panel community validator setup source work is complete and published in `v9.0.11`:
+    - arbitrary-machine / public-IP non-genesis validator setup now requires an explicit publicly routable endpoint
+    - private, localhost, malformed, carrier-grade NAT, documentation, and other reserved endpoint ranges are rejected before provisioning
+    - standard setup now pauses for device review, public endpoint review, folder review, and explicit provisioning instead of auto-provisioning immediately after role selection
+  - genesis validators remain on the private VPN / ceremony flow
+
+---
+
+## Incident 3
+
+- First observed: 2026-04-28 America/Chicago
+- Detection surface: public RPC, relayer logs, validator metrics, and live P2P status
+- Initial symptom:
+  - public RPC was pinned at block `20657`
+  - `Node-RPC` local status also reported last block `20657`
+  - validators continued advancing beyond that height, so this was a service-plane catch-up stall, not a full validator-chain halt
+- Confirmation evidence:
+  - validator private metrics reported live block heights above `20720` while public RPC stayed at `20657`
+  - `Node-RPC` was connected only through the relayer path and repeatedly asked relayer peers for blocks beginning at `20658`
+  - Relayer-1 reported peers connected to all five genesis validators but stayed at `20657`
+  - Relayer-2 had a valid relayer workspace but was stopped, which reduced service-plane redundancy and caused refused sentry connections
+  - validator logs showed service peers repeatedly requesting blocks from `20658`, while the relayer never applied a replacement chain segment
+- Affected nodes:
+  - primary public symptom: `Node-RPC`
+  - service-plane peers: `Relayer-1`, `Relayer-2`
+  - validators were rolled after the fix because the corrected P2P catch-up behavior is shared runtime code
+- Root cause:
+  - P2P catch-up requests started strictly at `local_tip + 1`
+  - when a service-plane node's local tip diverged from the validator chain, the first returned block did not link to the local tip
+  - `apply_block_batch` can roll back and replay only when the incoming batch contains a common ancestor
+  - because the request did not include overlap, the service node repeated the same ineffective request forever and never reconciled to the validator chain
+  - Relayer-2 being stopped made the public path more dependent on the stuck relayer state
+- Fix implemented:
+  - added a block-sync reconciliation lookback to P2P catch-up requests
+  - both immediate status-driven sync and the background bootstrap missing-block loop now request an overlapping range instead of only `local_tip + 1`
+  - the overlap gives `apply_block_batch` a common ancestor so a lagging or divergent service node can roll back and replay to the validator tip
+  - restarted Relayer-2 through its relayer workspace so both relayers are live again
+  - rolled the same fixed runtime through all five control-panel-managed validator workspaces to avoid checksum split
+- Reset to genesis: no
+- Block 1 transaction handling:
+  - no genesis reset was performed for this incident
+  - the verified current-chain block-1 transaction remains unchanged
+- Runtime checksum(s):
+  - fixed Linux runtime deployed to `Node-RPC`, `Relayer-1`, `Relayer-2`, and all five validator workspaces:
+    - `efbe76acb9fc24273c2b08778196321563d05000714994d5e141308bf33cc5b2`
+- Repo commit(s):
+  - `synergy-testnet`: `6b62af1` (`Fix service-plane block sync overlap`), tag `v9.0.12`
+- Restart / rollout scope:
+  - `Node-RPC` restarted from `/opt/synergy/Node-RPC`
+  - `Relayer-1` restarted from `/opt/synergy/testnet/relayer`
+  - `Relayer-2` started from `/opt/synergy/testnet/relayer`
+  - validators restarted one at a time through their control-panel-managed workspaces:
+    - `GenVal-01`
+    - `GenVal-02`
+    - `GenVal-03`
+    - `GenVal-04`
+    - `GenVal-05`
+- Final verification:
+  - public RPC advanced past the pinned height:
+    - `20657 -> 20739 -> 20740 -> 20741 -> 20742`
+  - later public samples advanced:
+    - `20752 -> 20764`
+  - all five validators reported the fixed checksum:
+    - `efbe76acb9fc24273c2b08778196321563d05000714994d5e141308bf33cc5b2`
+  - all five validators reported:
+    - `synergy_best_peer_height_delta 0`
+    - `synergy_peer_count 6`
+    - `synergy_live_validators 5`
+    - `synergy_status_ready_validators 5`
+  - Relayer-1 and Relayer-2 reported:
+    - fixed checksum `efbe76acb9fc24273c2b08778196321563d05000714994d5e141308bf33cc5b2`
+    - `peer_count: 6`
+    - `sync_status: synced`
+  - logs confirmed overlapped service-plane requests such as:
+    - `from_height: 20145`
+    - `from_height: 20225`
+    - `from_height: 20234`
+- Follow-up work:
+  - this fixed the service-plane catch-up deadlock and restored public RPC visibility
+  - the next stabilization target remains the consensus missed-leader / proposal-timeout path so block cadence stays below `5s` under normal load
+  - the Node Control Panel bundle must be updated to include the `v9.0.12` runtime so new community validator installs inherit this fix
+
+---
+
+## Incident 4
+
+- First observed: 2026-04-28 America/Chicago
+- Detection surface: public RPC, validator chain files, validator logs, and live workspace process checks
+- Initial symptom:
+  - public RPC and validator tips stopped at block `21200`
+  - `GenVal-03` and `GenVal-05` were reported stalled after the earlier recovery work
+  - local validator RPC handlers on several hosts stopped responding even though the control-panel-managed processes were still running
+- Confirmation evidence:
+  - `GenVal-01`, `GenVal-02`, `GenVal-03`, and `GenVal-04` had block `21200` hash:
+    - `f8ef0296e5d26bebecc5aa6b278beb4e97e5b797eb2ee2bb7c882da90dbacdc2`
+  - `GenVal-05` had a minority block `21200` hash before repair:
+    - `51fdb834ccdc449b2a9b0f21be1f2af68c2584658d6a6b4a707ccd810ee20884`
+  - after `GenVal-05` was truncated to `21199` and restarted, it replayed the majority block `21200`
+  - logs then showed peers refusing a stale `21201` vote request from `GenVal-05` with:
+    - `proposal parent hash does not match local tip at height 21200`
+  - the same refusal path incorrectly triggered 514-block catch-up requests beginning at `20688`
+  - after the bulk request storm, `GenVal-01`, `GenVal-02`, and `GenVal-03` stopped logging and dropped out of usable status traffic while their processes remained alive
+- Affected nodes:
+  - consensus plane:
+    - `GenVal-01`
+    - `GenVal-02`
+    - `GenVal-03`
+    - `GenVal-04`
+    - `GenVal-05`
+  - service plane updated after consensus recovery:
+    - `Node-RPC`
+    - `Node-EXP`
+    - `Relayer-1`
+    - `Relayer-2`
+- Root cause:
+  - an unsafe local-vote optimization created a same-height fork at block `21200`
+  - `GenVal-05` committed the minority `21200` block while the other genesis validators committed the majority `21200` block
+  - after the minority fork was repaired, `GenVal-05` still emitted a stale `21201` vote request built on the old parent
+  - the vote-request parent validation correctly refused the bad-parent proposal, but the recovery path treated the `tip + 1` wrong-parent proposal as a missing-block case
+  - that caused unnecessary 514-block sync requests against healthy peers and blocked the P2P/status path long enough to stall consensus again
+- Fix implemented:
+  - removed the unsafe local-vote optimization from the live/runtime source path
+  - kept remote vote verification parallelization and the verified-signature cache that had passed live testing
+  - patched `vote_request_parent_sync_range` so only true height gaps request block sync
+  - wrong-parent proposals at `local_tip + 1` are now refused without starting bulk catch-up
+  - rebuilt the Linux runtime and rolled it through all five control-panel-managed validator workspaces
+  - restarted all five genesis validators through their workspace `nodectl.sh` scripts, preserving the Node Control Panel ownership model
+  - rolled the same runtime to `Node-RPC`, `Node-EXP`, `Relayer-1`, and `Relayer-2`
+  - started `Node-EXP`, which had been stopped at height `10304`, so Atlas could catch up to the current chain
+- Reset to genesis: no
+- Block 1 transaction handling:
+  - no genesis reset was performed because the majority chain was recoverable and all checked nodes shared the same genesis hash
+  - the verified current-chain block-1 transaction remains unchanged
+- Runtime checksum(s):
+  - fixed Linux runtime deployed to all five validators, `Node-RPC`, `Node-EXP`, `Relayer-1`, and `Relayer-2`:
+    - `cd6757c717cf6811398913438dec38f44ebe013e522be4a19753cc12a75b8003`
+- Repo commit(s):
+  - `synergy-testnet`: commit `967a611` (`Stabilize vote request recovery`), tag `v9.0.13`
+  - `synergy-testnet/node-control-panel`: commit `902044c` (`Release control panel v9.0.13`), tag `v9.0.13`
+- Restart / rollout scope:
+  - validators restarted through their control-panel-managed workspaces:
+    - `GenVal-01`
+    - `GenVal-02`
+    - `GenVal-03`
+    - `GenVal-04`
+    - `GenVal-05`
+  - service-plane nodes restarted or started:
+    - `Node-RPC` from `/opt/synergy/Node-RPC`
+    - `Node-EXP` from `/opt/synergy/Node-EXP`
+    - `Relayer-1` from `/opt/synergy/testnet/relayer`
+    - `Relayer-2` from `/opt/synergy/testnet/relayer`
+- Final verification:
+  - validator chain advanced past the stall:
+    - `21200 -> 21212`
+  - later public RPC samples advanced:
+    - `21319 -> 21320 -> 21329 -> 21347 -> 21348 -> 21350 -> 21352`
+  - `GenVal-03` and `GenVal-05` were rechecked through their control-panel-managed workspaces and both reported local RPC height `21342`
+  - recent `GenVal-03` and `GenVal-05` logs showed accepted remote proposals and received blocks above `21347`, confirming they were no longer stalled around `10300`
+  - `GenVal-05` recent block deltas after recovery:
+    - `8s, 4s, 7s, 5s, 5s, 7s, 4s, 7s, 6s, 6s, 7s`
+  - public RPC advanced after service rollout:
+    - `21200 -> 21210 -> 21214 -> 21215 -> 21219 -> 21241 -> 21253`
+  - `Node-RPC` reported `sync_status: synced` and a live tip above `21240`
+  - `Node-EXP` caught up from stale height `10304` to `21250`
+  - public Atlas API reported:
+    - `latestBlock: 21501`
+    - `activeValidators: 5`
+    - `sourceRpc: https://testnet-core-rpc.synergy-network.io`
+  - Node Control Panel `v9.0.13` release workflow completed successfully:
+    - run: `https://github.com/synergy-network-hq/synergy-node-control-panel/actions/runs/25084136059`
+    - release: `https://github.com/synergy-network-hq/synergy-node-control-panel-releases/releases/tag/v9.0.13`
+    - verified uploaded assets:
+      - `Synergy.Node.Control.Panel.Setup.9.0.13.exe`
+      - `Synergy.Node.Control.Panel-9.0.13-arm64.dmg`
+      - `Synergy.Node.Control.Panel-9.0.13-arm64.zip`
+      - `synergy-node-control-panel_9.0.13_amd64.deb`
+      - `Synergy.Node.Control.Panel-9.0.13.AppImage`
+      - `latest.yml`
+      - `latest-mac.yml`
+      - `latest-linux.yml`
+- Follow-up work:
+  - use the `v9.0.13` Node Control Panel release line for community validator setup so new installs inherit this fix
+  - continue consensus timing work; post-recovery block deltas are healthy enough to move, but still not consistently below the `5s` target
+
+---
+
+## Incident 5
+
+- First observed: 2026-04-28 America/Chicago
+- Detection surface: live validator RPC, validator logs, chain reset verification, public RPC, and Atlas API
+- Initial symptom:
+  - after the same-height local vote lock fix was deployed, the fresh reset chain advanced normally and then stalled again at height `773`
+  - validator logs repeatedly reported local-vote refusals for height `773` after the local validator had already voted for a different block hash at that same height
+- Confirmation evidence:
+  - the replacement runtime before this fix had correctly prevented same-height double voting
+  - `GenVal-03` had already locked a local vote for height `773` hash:
+    - `b8e3493a82804184d73b0fea7c38d6bc21ff3450adb45af641cbc8bb750ff884`
+  - the same node later retried leadership for height `773` and generated different proposal hashes because each retry rebuilt the block with a new timestamp and current transaction snapshot
+  - the local anti-equivocation lock then correctly refused the new hash, leaving the validator unable to propose or vote for the retry path at that height
+- Affected nodes:
+  - consensus plane:
+    - `GenVal-01`
+    - `GenVal-02`
+    - `GenVal-03`
+    - `GenVal-04`
+    - `GenVal-05`
+  - service plane reset and restarted after consensus recovery:
+    - `Relayer-1`
+    - `Relayer-2`
+    - `Node-RPC`
+    - `Node-EXP`
+    - `Observer`
+  - bootstrap plane kept on the same genesis and restarted before validator launch:
+    - `Bootnode1`
+    - `Bootnode2`
+    - `Bootnode3`
+    - `Seed Server1`
+    - `Seed Server2`
+    - `Seed Server3`
+- Root cause:
+  - the local same-height vote lock was required and correct, but the leader retry path was not deterministic
+  - `create_block_proposal` rebuilt a new block on each retry for the same height, parent hash, and leader
+  - rebuilding changed proposal hash material, especially the proposal timestamp, so retries for the same height could conflict with the validator's own persisted vote lock
+  - this produced a real self-conflict after the anti-equivocation fix instead of the previous unsafe double-vote behavior
+- Fix implemented:
+  - added a persistent local leader proposal cache under `data/consensus_proposals`
+  - the cache key is derived from target height, parent hash, and leader address
+  - when the same leader retries the same height on the same parent, the runtime reloads and rebroadcasts the exact same signed block proposal
+  - cached proposals are validated by recalculating the block hash and transaction root before reuse
+  - proposal cache files are written atomically with owner-only file permissions
+  - committed-height proposal cache entries are pruned after block commit
+  - this preserves the strict same-height vote lock while making retries deterministic
+- Reset to genesis: yes
+- Block 1 transaction handling:
+  - all active chain data was cleared from validators, relayers, `Node-RPC`, `Node-EXP`, observer, bootnodes, and seed hosts before the fresh restart
+  - the required launch transaction was confirmed in block `1`
+  - verified fresh block `1` hash:
+    - `5050e23ccfc170493452651071675106f6685cc04230e180d1bbbbeb4a06b8cd`
+  - verified block `1` transaction count:
+    - `1`
+  - verified block `1` memo:
+    - `launch-block-1`
+- Explorer reset:
+  - Atlas old-chain PostgreSQL data was cleared before restart
+  - public Atlas API later reported fresh-chain data only:
+    - latest block around `450` during verification
+    - total transactions `1`
+    - source RPC `https://testnet-core-rpc.synergy-network.io`
+- Runtime checksum(s):
+  - fixed Linux runtime deployed to all five validators, `Node-RPC`, `Node-EXP`, both relayers, observer, bootnodes, and seed services:
+    - `f516ed8348e09d63306ca14ee3e8c448fd2138f99de7c4d7b142c3b1e76dfe40`
+- Repo commit(s):
+  - `synergy-testnet`: commit `657f459` (`Stabilize leader proposal retries`), tag `v9.0.15`
+- Restart / rollout scope:
+  - validators restarted together through their control-panel-managed validator workspaces:
+    - `GenVal-01`
+    - `GenVal-02`
+    - `GenVal-03`
+    - `GenVal-04`
+    - `GenVal-05`
+  - relayers restarted from clean state:
+    - `Relayer-1`
+    - `Relayer-2`
+  - public service plane restarted:
+    - `Node-RPC`
+    - `Node-EXP`
+  - observer restarted:
+    - `Observer`
+- Verification so far:
+  - all five validators agreed on fresh block `1` hash:
+    - `5050e23ccfc170493452651071675106f6685cc04230e180d1bbbbeb4a06b8cd`
+  - all five validators agreed on block `50` hash:
+    - `2a6c4e35aecb2f194fcffdd07eeda1503f969a2128e8b2a8882a5d950c29f2a9`
+  - public RPC reported fresh-chain height above `400` and the same block `1` hash
+  - `Node-EXP` reported fresh-chain height above `450` and the same block `1` hash
+  - Atlas API reported fresh-chain height around `450` with `totalTransactions: 1`
+  - final post-fix verification crossed the prior height-`773` failure point:
+    - public RPC advanced past `773` to `801`, then later to `1364`
+    - all five genesis validators returned block `773` hash:
+      - `37dd91ab8ecf6c731870ddcda06baa24e94f77b8b2ed6ddf997df64667ab07b6`
+    - all five genesis validators reported heights above `816` during private-plane verification
+    - Atlas API later reported fresh-chain latest block `1364`, `totalTransactions: 1`, and `activeValidators: 5`
+- Follow-up work:
+  - update and publish the Node Control Panel bundle so public-IP community validator setup inherits the deterministic proposal retry fix
+  - continue the community validator sync/join work before returning to the remaining RPC and developer-onboarding checklist items
+
+### Follow-up 2026-04-28/2026-04-29
+
+- Published follow-up runtime/control-panel hardening after the Incident 5 reset.
+- Additional public-validator onboarding defect found:
+  - the control panel generated `[validator] state_sync_before_join = true`
+  - the runtime did not parse or enforce that setting
+  - a public, non-genesis validator could therefore continue into self-registration and consensus startup after startup sync failed
+- Additional fix:
+  - runtime now parses `[validator] state_sync_before_join`
+  - public auto-registering validators must complete sync before self-registration or consensus starts
+  - static genesis validators are not put into that public-join gate, preserving the private genesis validator restart path
+- Source commits/tags:
+  - `synergy-testnet`: `bc1bb3d` (`Enforce validator sync before public join`), tag `v9.0.16`
+  - `synergy-testnet/node-control-panel`: `0b20408` (`Release control panel v9.0.16`), tag `v9.0.16`
+- Control Panel release:
+  - cancelled in-flight `v9.0.15` before publication
+  - published `v9.0.16` successfully
+  - release: `https://github.com/synergy-network-hq/synergy-node-control-panel-releases/releases/tag/v9.0.16`
+- Fresh-chain status after release verification:
+  - public RPC height: `2860`
+  - Atlas latest block: `2860`
+  - Atlas average block time window: `1.625s`
+  - Atlas total transactions: `1`
+  - Atlas active validators: `5`
+  - Atlas source RPC: `https://testnet-core-rpc.synergy-network.io`
+- No additional chain reset was performed for this follow-up because the Incident 5 reset chain remained healthy and continued advancing.
+
+---
+
+## Incident 6
+
+- First observed: 2026-04-30 19:49 America/Chicago / 2026-05-01 00:49 UTC
+- Detection surface: user-reported stall plus public RPC and Atlas API sampling
+- Initial symptom:
+  - user reported the chain had stalled again and requested a documented diagnosis, cause, and recovery path
+  - public RPC and Atlas both reported height `10617`
+- Confirmation evidence:
+  - `2026-05-01T00:49:44Z` public RPC `synergy_getNodeStatus` returned:
+    - `last_block = 10617`
+    - `sync_status = synced`
+    - `peer_count = 2`
+    - `average_block_time = 3.8947368421052633`
+  - Atlas `GET /api/v1/network/summary` returned:
+    - `latestBlock = 10617`
+    - `avgBlockTimeSeconds = 4.333333333333333`
+    - `activeValidators = 5`
+    - `totalTransactions = 19`
+  - block-height sampling confirmed no progress:
+    - `2026-05-01T00:50:04Z` public RPC `synergy_blockNumber = 10617`
+    - `2026-05-01T00:50:24Z` public RPC `synergy_blockNumber = 10617`
+- Affected nodes:
+  - all five genesis validators had the same local chain tip at height `10617`
+  - `GenVal-01`, `GenVal-02`, `GenVal-03`, and `GenVal-05` were still running from their control-panel-managed validator workspaces
+  - `GenVal-04` had stopped and could not restart because its workspace `config/genesis.json` had drifted to genesis hash `f838a1ff39d9dcac47c3b22492f1636d88cc9238f9034706db3f5144d3cd96c9`, while its persisted chain data was created from the live-chain genesis hash `a3d02e446c01b464c23b96f88798608e649a04678e896f515e0d96e89d672657`
+- Root cause:
+  - the stall was a protocol-level same-height view-change deadlock at block `10618`, not a peer-connectivity failure
+  - validator logs showed multiple validators locked different proposal hashes for height `10618`
+  - the local vote-safety file was keyed only by `epoch:block:validator`, so after a leader timeout it refused any later-round vote for a different same-height proposal
+  - vote observation used the same round-agnostic key shape, so cross-round view-change votes could be treated like equivocation
+  - `GenVal-04` also had a separate genesis artifact rewrite that caused restart panic before it could rejoin
+- `GenVal-04` genesis rewrite forensics:
+  - `f838a1ff39d9dcac47c3b22492f1636d88cc9238f9034706db3f5144d3cd96c9` was not random; it was the prior valid live genesis hash from the earlier 2026-04-29 chain state
+  - active workspace files were rewritten together around `2026-05-01T00:33:03Z`:
+    - `config/genesis.json`
+    - `config/operational-manifest.json`
+    - `config/node.toml`
+    - `config/peers.toml`
+  - the stale control-panel monitor runtime on `GenVal-04` still contained `f838...` in:
+    - `/home/node/.synergy-node-control-panel/monitor-workspace/testnet/runtime/configs/genesis/genesis.json`
+    - several installer genesis/setup-package artifacts
+  - the same monitor runtime also had a mixed artifact state where the `GenVal-04` installer genesis was already `a3d02...`, but the global runtime genesis and most other installer genesis files were still `f838...`
+  - conclusion: a control-panel/runtime refresh copied or regenerated active workspace config from a stale/mixed monitor runtime cache without first checking persisted `data/chain.json` genesis compatibility
+- Fix implemented:
+  - patched the runtime vote-safety keying so local vote locks and observed-vote conflict detection are scoped by `epoch:block:round:validator`
+  - same-round conflicting votes remain rejected
+  - later-round conflicting votes are allowed so a timed-out leader can be replaced without permanently deadlocking the height
+  - added/updated targeted regression coverage for:
+    - later-round view-change votes
+    - same-round double-sign protection
+    - persisted local vote-intent locking
+  - built a native Linux hotfix runtime on `GenVal-04`
+- Reset to genesis: no reset planned for this incident; the current chain tip is internally consistent at `10617`, so the recovery path is runtime/config correction plus controlled restart
+- Block 1 transaction handling:
+  - current chain block `1` previously verified with `19` launch faucet transfers from the regenerated faucet wallet
+  - do not mutate block-1 handling during this incident unless a full reset becomes unavoidable
+- Runtime checksum(s):
+  - old validator runtime checksum observed on validator workspaces:
+    - `54041afdf11395d39e3e76ae3f97f2bc032f6ae0ba1de43b36ba6a3f96144fa6`
+  - patched Linux runtime built for this incident:
+    - `fee19feed415f083262daecdc5d3567bf79bcab19d0566063eff449b9f61a40d`
+- Repo commit(s):
+  - source patch currently applied in working tree:
+    - `synergy-testnet/src/consensus/dual_quorum.rs`
+  - not committed/tagged yet during live recovery
+- Restart / rollout scope:
+  - deploy patched runtime to all five genesis validators through their existing control-panel-managed validator workspaces
+  - correct `GenVal-04` workspace genesis file from `f838...` back to the live-chain genesis `a3d02...`
+  - restart validators through `./nodectl.sh`, not by launching ad hoc processes
+- Final verification:
+  - targeted Rust vote tests passed locally on macOS:
+    - `cargo test --manifest-path synergy-testnet/src/Cargo.toml vote -- --nocapture`
+    - result: `14 passed; 0 failed`
+  - targeted Rust vote tests passed on the Linux build host before release build:
+    - `cargo test --manifest-path src/Cargo.toml vote -- --nocapture`
+    - result: `14 passed; 0 failed`
+  - patched release binary built natively on Linux:
+    - checksum `fee19feed415f083262daecdc5d3567bf79bcab19d0566063eff449b9f61a40d`
+  - validators were restarted through their control-panel-managed `./nodectl.sh` scripts:
+    - `GenVal-01` PID `2001522`
+    - `GenVal-02` PID `666693`
+    - `GenVal-03` PID `4067545`
+    - `GenVal-04` PID `1351399`
+    - `GenVal-05` PID `2138115`
+  - all five validators agreed on recovered block `10629`:
+    - hash `e4b6f4159b8e3e933c56c64cb61647eeb6c7b7f67156d4eb830aa22e6a7618e0`
+    - proposer `synw1wdcw7l57ujdtxz24u4dt2ld4alzqa3m5vqca`
+  - public RPC showed the chain advancing past the stalled height:
+    - `2026-05-01T01:17:05Z`: height `10641`, average block time `3.4210526315789473s`
+    - `2026-05-01T01:17:20Z`: height `10645`, average block time `3.526315789473684s`
+    - `2026-05-01T01:17:35Z`: height `10650`, average block time `3.5789473684210527s`
+    - later public RPC status: height `10686`, average block time `3.6315789473684212s`
+  - all five private validator RPCs later reported heights at or above `10661` with `peer_count = 6`
+- Follow-up work:
+  - commit/tag the `dual_quorum.rs` hotfix after continued live observation
+  - rebuild/publish the control-panel/runtime bundle so future installs inherit the round-scoped vote lock
+  - add a packaging/runtime guard to prevent a validator workspace from drifting to a different canonical genesis file while retaining existing chain data
+  - continue monitoring public RPC block cadence and validator logs for repeat same-height vote-lock errors
+
+---
+
+## Incident 7
+
+- First observed: 2026-05-06 America/Chicago
+- Detection surface: user report plus public RPC timeout and direct validator RPC checks
+- Initial symptom:
+  - user reported the chain had stalled and requested a full reset to block 0, Atlas reset, block-1 transaction handling, and a control-panel fix for public non-VPN validator onboarding
+  - public RPC at `74.208.227.23:5641` timed out from the operator workstation
+- Confirmation evidence:
+  - direct validator RPCs were still reachable through control-panel-managed validator workspaces, but were unhealthy for the target cadence:
+    - `GenVal-01`: height `74478`, average block time `11.631578947368421s`
+    - `GenVal-02`: height `74477`, average block time `11.368421052631579s`
+    - `GenVal-03`: height `74477`, average block time `11.368421052631579s`
+    - `GenVal-05`: height `74478`, average block time `11.631578947368421s`
+  - `GenVal-04` public SSH was unreachable, but was reachable through the observer private WireGuard path at `10.69.0.4`
+  - all five live validator configs had:
+    - `block_time_secs = 2`
+    - `leader_timeout_secs = 999999`
+  - first reset attempt proved stale non-validator peers could repopulate the new chain:
+    - clean validators received old-chain status from `10.69.0.202` around height `49067`
+    - validators began applying thousands of pre-reset blocks until relayers/observer were stopped and cleared
+- Affected nodes:
+  - genesis validators:
+    - `GenVal-01`
+    - `GenVal-02`
+    - `GenVal-03`
+    - `GenVal-04`
+    - `GenVal-05`
+  - stale service/VPN peers:
+    - `Relayer-1`
+    - `Relayer-2`
+    - `Observer`
+    - `Node-RPC`
+    - `Node-EXP`
+- Root cause:
+  - live validator runtime config drifted to `leader_timeout_secs = 999999`, which effectively disabled normal leader timeout recovery and pushed block cadence far outside the 1s-4s target
+  - the first reset did not stop and clear all stale service/VPN peers, so reset validators could sync old chain state back from relayer/observer peers
+  - `Node-RPC` also retained a stale malformed `config/launch-block1-transaction.json`, causing it to abort after the reset until that non-validator launch artifact was removed
+  - control-panel public-validator start/sync had a separate onboarding blocker:
+    - non-genesis validators were initially generated with public sentry relayer targets
+    - later start/sync topology repair rewrote validator `peers.toml` from canonical private genesis-validator targets, which could poison an outside-VPN validator with `10.69.0.x` peers
+- Fix implemented:
+  - generated a fresh deterministic launch block-1 transaction envelope from the live `GenVal-01` identity and installed it on all five genesis validators
+  - corrected live validator/service configs back to:
+    - `leader_timeout_secs = 15`
+    - `heartbeat_interval = 5`
+  - stopped and cleared chain/token/validator state for:
+    - all five genesis validators
+    - `Relayer-1`
+    - `Relayer-2`
+    - `Observer`
+    - `Node-RPC`
+    - `Node-EXP`
+  - reset `Node-0B` bootnode chain data and restarted it cleanly
+  - relaunched `GenVal-01`, `GenVal-02`, and `GenVal-04` first, verified block 1, then added `GenVal-03` and `GenVal-05`
+  - removed the stale `Node-RPC` launch-block1 artifact and restarted public RPC successfully
+  - reset Atlas through `POST /v1/admin/reindex-from-genesis`
+  - reseeded Atlas genesis contract metadata/ABI records with `backend/scripts/seed-genesis-contracts.ts`
+  - patched `node-control-panel/control-service/src/testnet.rs` so start/sync only writes private validator mesh peers for canonical genesis validators; public non-genesis validators keep public sentry/bootstrap peers
+- Reset to genesis: yes
+- Block 1 transaction handling:
+  - verified reset-chain block `1` contains one transaction:
+    - data: `token_transfer:{"to":"synw1zp7cxme7xm838663yrd43lxtxlw0ck90z4am","token":"SNRG","amount":1000000000,"memo":"launch-block-1"}`
+- Runtime checksum(s):
+  - live genesis validator runtime checksum:
+    - `c81aa2e99281b66e35d33403dd23dff5c927bde029049c88a3a6477603dfa244`
+- Repo commit(s):
+  - working tree patch, not committed yet:
+    - `synergy-testnet/node-control-panel/control-service/src/testnet.rs`
+- Restart / rollout scope:
+  - validators restarted through existing control-panel-managed `~/.synergy/testnet/nodes/validator-workspace/nodectl.sh`
+  - service nodes restarted through existing `/opt/synergy/.../nodectl.sh` workspaces
+  - no ad hoc validator processes were started
+- Final verification:
+  - all five genesis validators were running on the reset chain
+  - fresh block cadence after all five validators joined:
+    - `GenVal-01`: height `38`, average block time `3.5789473684210527s`, `peer_count = 7`
+    - `GenVal-03`: height `38`, average block time `3.5789473684210527s`, `peer_count = 7`
+    - `GenVal-05`: height `39`, average block time `3.526315789473684s`, `peer_count = 6`
+    - `Node-RPC`: height `37`, average block time `3.526315789473684s`, `peer_count = 5`
+  - public RPC domain returned reset-chain height `44`
+  - Atlas after reset:
+    - `latestBlock = 56`
+    - `avgBlockTimeSeconds = 3.375`
+    - `totalTransactions = 1`
+    - `activeValidators = 5`
+    - latest block timestamps are `2026-05-06`
+    - 8 genesis contracts reseeded into Atlas
+- Follow-up work:
+  - publish the Node Control Panel update so non-VPN validator start/sync inherits the public-peer fix
+  - add a real control-panel staking/activation workflow with preflight checks before allowing a public validator into consensus
+  - investigate why `Node-0C` / bootnode3 SSH was not reachable with the supplied credential path
+
+---
+
+## Incident 8
+
+- First observed: 2026-05-07 America/Chicago
+- Detection surface: user report plus Atlas `/api/v1/network/summary` and recent block timestamps
+- Symptom:
+  - Atlas reported `avgBlockTimeSeconds = 5.958333333333333` at reset-chain block `23885`
+  - the most recent 100 indexed block intervals averaged `5.858585858585859s`, with most blocks landing between `5s` and `7s`
+- Confirmation evidence:
+  - all five validators remained active and peer-connected; this was not a stalled chain
+  - live validator configs on `GenVal-01` and `GenVal-02` were already set to:
+    - `block_time_secs = 2`
+    - `leader_timeout_secs = 15`
+    - `vote_timeout_secs = 8`
+    - `heartbeat_interval = 5`
+  - live validator logs showed the proposer spending roughly two seconds inside the quorum round after receiving immediate votes, then the next leader waiting another local block interval from when it observed the committed block
+- Root cause:
+  - the consensus loop anchored the next block wait to the local node's observation/commit time instead of the previous block's canonical timestamp
+  - quorum and block-propagation time were therefore added on top of the configured `2s` block interval, pushing effective block cadence toward `5s-6s`
+- Fix implemented in source:
+  - `src/consensus/consensus_algorithm.rs` now initializes and resets the production wait from the previous block timestamp, not local observation time
+  - this keeps the configured interval measured against canonical chain time and prevents quorum overhead from accumulating into the displayed block interval
+- Related release hardening:
+  - control-panel release bundle generation now syncs rendered `node.toml` configs into installer bundles and updates `keys/setup-package.json` runtime config from those rendered configs
+  - bundled validator configs and setup packages now validate with:
+    - `min_validators = 4`
+    - `status_ready_min_validators = 4`
+    - `heartbeat_interval = 5`
+  - the control panel now includes staking/activation preflight, stake, and activate actions for validator nodes
+- Verification:
+  - `cargo check --manifest-path src/Cargo.toml`
+  - `cargo test --manifest-path src/Cargo.toml chain_activation_registers_bonded_validator_with_activation_hash -- --test-threads=1`
+  - `cargo test --manifest-path src/Cargo.toml synid -- --test-threads=1`
+  - `cargo test --manifest-path src/Cargo.toml native_transfer -- --test-threads=1`
+  - `cargo check --manifest-path control-service/Cargo.toml --bin control-service --no-default-features`
+  - `cargo test --manifest-path control-service/Cargo.toml setup_node_writes_non_genesis_validator_bootstrap_inputs -- --test-threads=1`
+  - `cargo test --manifest-path control-service/Cargo.toml node_control_start_uses_generic_runner_and_marks_workspace_running -- --test-threads=1`
+  - `npm run build`
+  - `SKIP_BUNDLED_ASSET_GIT_CLEAN_CHECK=1 npm run build:bundle-prep`
+  - `./scripts/release/preflight.sh`
+- Follow-up work:
+  - push matching runtime/control-panel tags for `v10.1.5`
+  - let GitHub Actions build signed/installable artifacts
+  - install the new control-panel build on the validator machines and verify the running app/runtime process versions
+
+---
+
+## Incident 9
+
+- First observed: 2026-05-07 America/Chicago
+- Detection surface: user report during new non-genesis validator sync retry plus live genesis validator logs
+- Symptom:
+  - Atlas remained at `latestBlock = 24375` / `24376` while the user reported that a new validator sync attempt caused the existing validators to stop producing blocks
+  - all five genesis validators still had running `synergy-testnet-linux-amd64` processes, but their logs stopped around `2026-05-07T16:06:27Z` / `2026-05-07T16:06:28Z`
+- Confirmation evidence:
+  - `GenVal-04` committed block `24376` at `2026-05-07T16:06:28Z`
+  - immediately before log silence, validators handled large catch-up block requests such as:
+    - `from_height = 23833`, `count = 515`
+    - `from_height = 23862`, `count = 514`
+  - the local desktop validator workspace log showed a separate gating failure:
+    - bootstrap peers reported height `0`
+    - the runtime logged `Sync complete` at height `0`
+    - the runtime then logged `Starting consensus engine` even though it was a non-genesis validator with `auto_register_validator = false`
+- Root cause:
+  - the runtime only required `state_sync_before_join` when `auto_register_validator = true`; public non-genesis validators with explicit activation disabled could still leave the sync loop and start consensus after a false height-0 sync
+  - the P2P sync path requested and served 500+ block overlap batches near tip because the reconciliation lookback was `512`
+  - validators sent bulk block responses while holding the shared peer map lock, so slow catch-up clients could starve consensus peer operations and stall block production
+- Fix implemented in source:
+  - `src/role_runtime.rs` now requires state sync before join for validator profiles regardless of `auto_register_validator`
+  - `src/role_runtime.rs` now starts validator consensus only for:
+    - allowlisted genesis validators
+    - validators already activated on-chain after sync
+  - `src/p2p/networking.rs` now caps status/background sync batches, reduces reconciliation lookback, caps block/header response sizes, and adds a write timeout for block response sends
+  - `src/sync/manager.rs` now uses smaller catch-up batches and reduced reconciliation overlap
+- Release hardening:
+  - control-panel release workflow now regenerates runtime binary `.sha256` files immediately after the tag-driven fresh node binary build
+  - bundled asset validation now fails if a platform binary checksum file is missing or stale
+  - `v10.1.6` control-panel release build was canceled after the macOS job exposed a workflow-only checksum portability bug; no release asset was published
+  - `v10.1.7` updates the release workflow to use `sha256sum` when available and `shasum -a 256` on macOS runners
+- Rollout status:
+  - Synergy Node Control Panel `10.1.5` was installed on `GenVal-01` through `GenVal-05`
+  - each host had a live non-deleted control panel/control-service process after install
+  - the running validator consensus processes were still the older workspace binary checksum `c81aa2e99281b66e35d33403dd23dff5c927bde029049c88a3a6477603dfa244`, so a new runtime release/restart is required before retrying the non-genesis validator sync
+  - runtime source tag `v10.1.7` points at the same tested consensus/sync gating fix commit as `v10.1.6`
+  - control-panel source tag `v10.1.7` includes the packaging fix and is awaiting GitHub Actions installer completion
+  - `v10.1.7` GitHub Actions completed successfully for Linux, macOS, and Windows installers
+  - Synergy Node Control Panel `10.1.7` was installed and relaunched on `GenVal-01` through `GenVal-05`
+  - all five genesis validator workspaces applied the staged `v10.1.7` runtime binary checksum `b0379e2bc75e55673376a0b1830ced81ed404e9d3f6f9e872b8cc3d5b6358905`
+  - the RPC gateway, Atlas node, and both relayers were updated to the same runtime checksum so public RPC, Atlas indexing, and new-validator sync paths no longer use the old bulk-sync behavior
+  - the local macOS Synergy Node Control Panel was updated to `10.1.7`; its new non-genesis validator synced to the live chain and logged `Consensus engine disabled for this node profile`
+  - Atlas recovered from stale block `24375` and reported live height `24564`, average block time `3.75s`, and `peerCount = 5` after rollout
+- Verification:
+  - `cargo check --manifest-path src/Cargo.toml`
+  - `cargo test --manifest-path src/Cargo.toml public_non_genesis -- --test-threads=1`
+  - `cargo test --manifest-path src/Cargo.toml allowlisted_genesis_validator_starts_consensus -- --test-threads=1`
+  - `cargo test --manifest-path src/Cargo.toml status_sync_batch_only_requests_blocks_for_ahead_peer -- --test-threads=1`
+  - `cargo test --manifest-path src/Cargo.toml block_sync_request_range_includes_reconciliation_overlap -- --test-threads=1`
+  - `cargo check --manifest-path control-service/Cargo.toml --bin control-service --no-default-features`
+  - `cargo test --manifest-path control-service/Cargo.toml setup_node_writes_non_genesis_validator_bootstrap_inputs -- --test-threads=1`
+  - `SKIP_BUNDLED_ASSET_GIT_CLEAN_CHECK=1 ./scripts/release/validate-bundled-assets.sh`
+  - `npm run build`

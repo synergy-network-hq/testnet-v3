@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Synergy Node Env",
+  "type": "object",
+  "required": [
+    "SYNERGY_CHAIN_ID",
+    "SYNERGY_NETWORK_ID",
+    "SYNERGY_WORKSPACE",
+    "SYNERGY_CONFIG_FILE",
+    "SYNERGY_DATA_DIR",
+    "SYNERGY_LOG_DIR",
+    "SYNERGY_BINARY",
+    "SYNERGY_CANONICAL_LOCK_RETAIN_ENTRIES",
+    "SYNERGY_COMMITTED_QC_HOT_RETENTION_BLOCKS"
+  ],
+  "properties": {
+    "SYNERGY_CHAIN_ID": { "const": "1264" },
+    "SYNERGY_NETWORK_ID": { "const": "synergy-testnet-v3" },
+    "SYNERGY_WORKSPACE": { "const": "/home/node/.synergy/testnet/nodes/validator-workspace" },
+    "SYNERGY_CONFIG_FILE": { "const": "/etc/synergy/validator/config.toml" },
+    "SYNERGY_DATA_DIR": { "const": "/var/lib/synergy/validator" },
+    "SYNERGY_LOG_DIR": { "const": "/var/log/synergy/validator" },
+    "SYNERGY_BINARY": { "const": "/opt/synergy/bin/synergy-validator" },
+    "SYNERGY_CANONICAL_LOCK_RETAIN_ENTRIES": { "const": "512" },
+    "SYNERGY_COMMITTED_QC_HOT_RETENTION_BLOCKS": { "const": "4096" }
+  }
+}

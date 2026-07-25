@@ -1,0 +1,38 @@
+[package]
+name = "synergy-address-engine"
+version = "1.0.0"
+edition = "2021"
+authors = ["Synergy Network"]
+description = "Quantum-safe address generation using FN-DSA-1024"
+
+[lib]
+name = "synergy_address_engine"
+path = "src/lib.rs"
+
+[dependencies]
+# Post-Quantum Cryptography - FN-DSA-1024
+pqcrypto-falcon = "0.3"
+pqcrypto-traits = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Encoding
+base64 = "0.21"
+bech32 = "0.9"
+
+# Hashing (Quantum-resistant)
+sha3 = "0.10"
+sha2 = "0.10"
+
+# Encryption
+aes-gcm = "0.10"
+pbkdf2 = "0.12"
+
+# Date/Time
+chrono = "0.4"
+
+# Random
+rand = "0.8"

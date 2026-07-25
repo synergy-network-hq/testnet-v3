@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.synergynetwork.archive-snapshot-api</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/synergy/bin/synergy-archive</string>
+    <string>serve</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>SYNERGY_ARCHIVE_CONFIG</key>
+    <string>/Volumes/Synergy_Archive/archive-validator/config/archive-validator.toml</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Volumes/Synergy_Archive/archive-validator/logs/snapshot-api.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Volumes/Synergy_Archive/archive-validator/logs/snapshot-api.err.log</string>
+</dict>
+</plist>

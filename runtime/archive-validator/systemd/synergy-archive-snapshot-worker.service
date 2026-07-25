@@ -1,0 +1,21 @@
+[Unit]
+Description=Synergy Archive Snapshot Worker
+After=synergy-archive-validator.service
+Requires=synergy-archive-validator.service
+
+[Service]
+Type=simple
+User=synergy
+Group=synergy
+Environment=SYNERGY_ARCHIVE_ROOT=/Volumes/Synergy_Archive/archive-validator
+Environment=SYNERGY_SNAPSHOT_PUBLISH_ROOT=/Volumes/Synergy_Archive/archive-validator/snapshots
+Environment=SYNERGY_ARCHIVE_RUNTIME=/usr/local/bin/synergy-archive-validator-node
+Environment=SYNERGY_AEGIS_CLI=/usr/local/bin/aegis-pqvm
+ExecStart=/usr/local/bin/synergy-archive worker --root ${SYNERGY_ARCHIVE_ROOT} --publish-root ${SYNERGY_SNAPSHOT_PUBLISH_ROOT} --runtime ${SYNERGY_ARCHIVE_RUNTIME} --aegis ${SYNERGY_AEGIS_CLI} --workspace ${SYNERGY_ARCHIVE_ROOT}/workspace --majority-proof-marker ${SYNERGY_ARCHIVE_ROOT}/evidence/source-majority-branch-proven.json
+Restart=always
+RestartSec=60
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

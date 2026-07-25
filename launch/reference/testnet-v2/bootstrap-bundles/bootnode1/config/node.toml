@@ -1,0 +1,105 @@
+[identity]
+node_id = "bootnode1"
+role = ""
+role_display = "bootnode"
+address = ""
+label = "bootnode1"
+
+[role]
+compiled_profile = ""
+services = []
+
+[network]
+id = 1264
+name = "synergy-testnet"
+network_id = "synergy-testnet-v3"
+p2p_port = 5620
+rpc_port = 5640
+ws_port = 5660
+max_peers = 128
+bootnodes = ["bootnode1.synergynode.xyz:5620", "bootnode2.synergynode.xyz:5620", "bootnode3.synergynode.xyz:5620"]
+seed_servers = ["http://seed1.synergynode.xyz:5621", "http://seed2.synergynode.xyz:5621", "http://seed3.synergynode.xyz:5621"]
+bootstrap_dns_records = ["_dnsaddr.bootstrap.synergynode.xyz"]
+additional_dial_targets = ["relay1.synergynode.xyz:5622", "relay2.synergynode.xyz:5622"]
+persistent_peers = ["relay1.synergynode.xyz:5622", "relay2.synergynode.xyz:5622"]
+
+[blockchain]
+block_time = 2
+max_gas_limit = "0x2fefd8"
+chain_id = 1264
+
+[consensus]
+algorithm = "Proof of Synergy"
+block_time_secs = 2
+epoch_length = 1000
+min_validators = 3
+validator_cluster_size = 6
+validator_vote_threshold = 0
+max_validators = 0
+status_ready_gate_enabled = true
+status_ready_min_validators = 4
+status_ready_genesis_grace_secs = 0
+allow_genesis_status_bypass = false
+mesh_settle_secs = 1
+leader_timeout_secs = 4
+vote_timeout_secs = 2
+block_timeout_secs = 6
+penalization_enabled = false
+synergy_score_decay_rate = 0.05
+vrf_enabled = false
+vrf_seed_epoch_interval = 1000
+max_synergy_points_per_epoch = 100
+max_tasks_per_validator = 10
+
+[consensus.reward_weighting]
+task_accuracy = 0.5
+uptime = 0.3
+collaboration = 0.2
+
+[logging]
+log_level = "debug"
+log_file = "data/logs/bootnode1.log"
+enable_console = true
+max_file_size = 10485760
+max_files = 5
+
+[rpc]
+bind_address = "127.0.0.1:5640"
+enable_http = true
+http_port = 5640
+enable_ws = true
+ws_port = 5660
+enable_grpc = true
+grpc_port = 5640
+cors_enabled = false
+cors_origins = []
+
+[p2p]
+listen_address = "0.0.0.0:5620"
+public_address = "bootnode1.synergynode.xyz:5620"
+discovery_listen_address = "0.0.0.0:5680"
+discovery_public_address = "bootnode1.synergynode.xyz:5680"
+node_name = "bootnode1"
+enable_discovery = true
+discovery_port = 5680
+heartbeat_interval = 10
+bootstrap_refresh_secs = 60
+
+[storage]
+database = "rocksdb"
+path = "data/chain"
+enable_pruning = true
+pruning_interval = 86400
+
+[node]
+bootstrap_only = true
+auto_register_validator = false
+validator_address = ""
+strict_validator_allowlist = true
+allowed_validator_addresses = ["synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs", "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt", "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re", "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5", "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f", "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx"]
+
+[telemetry]
+enabled = true
+metrics_bind = "127.0.0.1:6030"
+structured_logs = true
+log_level = "debug"

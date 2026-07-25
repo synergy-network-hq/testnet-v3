@@ -1,0 +1,8 @@
+{
+  "address": "replace-with-testnet-cluster-address",
+  "public_key": "replace-with-public-key",
+  "private_key": "generate-locally-and-do-not-commit",
+  "address_type": "ClusterGroup1",
+  "algorithm": "FN-DSA-1024",
+  "created_at": "1970-01-01T00:00:00Z"
+}

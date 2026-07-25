@@ -1,0 +1,19 @@
+[Unit]
+Description=Synergy Node Control Panel
+After=network-online.target synergy-validator.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=node
+Group=node
+EnvironmentFile=/etc/synergy/validator/node.env
+WorkingDirectory=/var/lib/synergy/validator/runtime
+Environment=SYNERGY_VALIDATOR_WORKSPACE=/var/lib/synergy/validator
+Environment=SYNERGY_VALIDATOR_APPLIANCE_ROOT=/var/lib/synergy/validator
+ExecStart=/opt/synergy/bin/synergy-node-control-panel
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

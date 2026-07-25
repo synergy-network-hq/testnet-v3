@@ -1,0 +1,6 @@
+# Local host overrides
+hosts.env
+hosts.env.bak.*
+
+# Generated installer bundles embed per-node key folders copied from /keys
+installers/node-*/keys/

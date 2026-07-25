@@ -1,0 +1,61 @@
+[consensus]
+algorithm = "Proof-of-Synergy"
+block_time = 5
+stake_required = "100 SNRG"
+validators = 100
+slashing_penalty = "synergy_score_decay"
+reward_per_block = "2 SNRG"
+tx_pool_limit = 5000
+minimum_stake_period = "24 hours"
+
+[consensus.parameters]
+cluster_size = 30
+clusters = 4
+epoch_length = 1000
+rotation_interval = 1000
+checkpoint_interval = 100
+finality_threshold = 0.67
+proposer_selection = "synergy_score_weighted"
+validation_quorum_threshold = 0.67
+cooperation_quorum_threshold = 0.67
+vote_timeout = 3
+block_timeout = 5
+
+[consensus.security]
+sybil_resistance = true
+validator_rotation = true
+rotation_randomness = "ml-kem"
+min_uptime_threshold = 0.85
+slashing_tiers = "light, moderate, severe"
+cartel_detection_enabled = true
+cartel_correlation_threshold = 0.85
+cartel_timing_threshold = 0.9
+cartel_size_threshold = 10
+
+[consensus.cryptography]
+pqc_algorithm = "FN-DSA-1024"
+signature_scheme = "FN-DSA-1024"
+key_encapsulation = "ML-KEM-1024"
+hybrid_signing_enabled = true
+fallback_algorithm = "SLH-DSA-128f"
+key_rotation_interval = 180
+key_overlap_period = 30
+address_encoding = "Bech32m"
+security_level = "NIST Level 5"
+
+[consensus.synergy_scoring]
+stake_cap = 0.05
+decay_rate = 0.0001
+contribution_coefficients = [0.5, 0.3, 0.2]
+reputation_uptime_weight = 0.3
+reputation_accuracy_weight = 0.3
+reputation_slashing_weight = 0.4
+
+[consensus.governance]
+dao_enabled = true
+proposal_bond_requirement = 0.05
+approval_thresholds = { parameter = 0.5, protocol = 0.67, emergency = 0.8 }
+discussion_period_days = 7
+voting_period_days = 3
+timelock_period_days = 2
+quorum_requirement = 0.4

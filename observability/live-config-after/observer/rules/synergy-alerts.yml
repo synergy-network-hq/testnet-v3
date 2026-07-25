@@ -1,0 +1,97 @@
+groups:
+  - name: synergy-observability-targets
+    interval: 30s
+    rules:
+      - alert: SynergyMetricsTargetDown
+        expr: synergy_metrics_target_up == 0
+        for: 2m
+        labels: {severity: critical, network: synergy-testnet}
+        annotations:
+          summary: "{{ $labels.instance_label }} metrics target is down"
+          description: "{{ $labels.node }} ({{ $labels.role }}) is not exposing its configured {{ $labels.telemetry_path }} metrics path."
+          runbook: "Check the target route in TARGET_INVENTORY.md before changing observer connectivity."
+      - alert: SynergyQrpcProbeDown
+        expr: synergy_qrpc_probe_up == 0
+        for: 2m
+        labels: {severity: warning, network: synergy-testnet}
+        annotations:
+          summary: "{{ $labels.instance_label }} qRPC route is down"
+          description: "The observer cannot connect to {{ $labels.target }} through {{ $labels.telemetry_path }}."
+          runbook: "Verify the approved public or relayer proxy listener; do not add a direct validator Innernet target."
+      - alert: SynergyHttpProbeDown
+        expr: synergy_public_health_probe_up == 0
+        for: 3m
+        labels: {severity: warning, network: synergy-testnet}
+        annotations:
+          summary: "{{ $labels.instance_label }} HTTPS health probe is down"
+          description: "The public health endpoint {{ $labels.target }} is failing from the observer."
+          runbook: "Check public ingress and the service health endpoint."
+      - alert: SynergyNodeExporterDown
+        expr: synergy_node_host_up{instance!=""} == 0
+        for: 5m
+        labels: {severity: warning, network: synergy-testnet}
+        annotations:
+          summary: "{{ $labels.instance_label }} node_exporter is down"
+          description: "Host telemetry for {{ $labels.node }} is unavailable through its approved path."
+          runbook: "Check the exporter or relayer proxy route; bootstrap hosts intentionally use service probes only."
+
+  - name: synergy-chain-health
+    interval: 30s
+    rules:
+      - alert: SynergyFinalizedDataStale
+        expr: synergy_canonical_latest_block_age_seconds{instance!="",role=~"validator|relayer|observer|rpc_gateway|explorer_indexer|archive"} > 60
+        for: 2m
+        labels: {severity: critical, network: synergy-testnet}
+        annotations:
+          summary: "{{ $labels.node }} finalized/local data is stale"
+          description: "The latest block sample for {{ $labels.node }} is {{ $value | printf \"%.0f\" }} seconds old."
+          runbook: "Compare qRPC, metrics, and network-majority height before declaring a consensus incident."
+      - alert: SynergyNodeHeightGapHigh
+        expr: synergy_canonical_node_height_gap{role=~"validator|relayer|observer|rpc_gateway|explorer_indexer|archive"} > 5
+        for: 3m
+        labels: {severity: warning, network: synergy-testnet}
+        annotations:
+          summary: "{{ $labels.instance_label }} is lagging the network"
+          description: "{{ $labels.node }} is {{ $value | printf \"%.0f\" }} blocks behind the observed network median."
+          runbook: "Inspect the node route, qRPC probe, and peer metrics."
+      - alert: SynergyConsensusStale
+        expr: max(synergy_canonical_latest_block_age_seconds{instance!="",role=~"validator|relayer|observer|rpc_gateway|explorer_indexer|archive"}) > 60
+        for: 2m
+        labels: {severity: critical, network: synergy-testnet}
+        annotations:
+          summary: "Testnet finalized data is stale across the fleet"
+          description: "The newest observed block sample is {{ $value | printf \"%.0f\" }} seconds old."
+          runbook: "Check validator qRPC routes and the relayer/public telemetry paths first."
+      - alert: SynergyActiveValidatorCountBelowQuorum
+        expr: max(synergy_canonical_active_validator_count) < 4
+        for: 5m
+        labels: {severity: critical, network: synergy-testnet}
+        annotations:
+          summary: "Active validator count is below quorum safety threshold"
+          description: "Only {{ $value | printf \"%.0f\" }} active validators are visible in the canonical registry view."
+          runbook: "Inspect validator qRPC probes and registry metrics."
+
+  - name: synergy-host-health
+    interval: 60s
+    rules:
+      - alert: SynergyHostHighCPU
+        expr: (1 - avg by (node, instance_label, host) (rate(node_cpu_seconds_total{mode="idle"}[5m]))) * 100 > 90
+        for: 10m
+        labels: {severity: warning, network: synergy-testnet}
+        annotations:
+          summary: "CPU is above 90% on {{ $labels.instance_label }}"
+          description: "{{ $labels.node }} sustained CPU above 90% for 10 minutes."
+      - alert: SynergyHostMemoryHigh
+        expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 > 90
+        for: 10m
+        labels: {severity: warning, network: synergy-testnet}
+        annotations:
+          summary: "Memory usage is above 90% on {{ $labels.instance_label }}"
+          description: "{{ $labels.node }} has less than 10% available memory."
+      - alert: SynergyHostDiskHigh
+        expr: 100 - (node_filesystem_avail_bytes{mountpoint="/", fstype!~"tmpfs|overlay|squashfs"} / node_filesystem_size_bytes{mountpoint="/", fstype!~"tmpfs|overlay|squashfs"}) * 100 > 85
+        for: 15m
+        labels: {severity: warning, network: synergy-testnet}
+        annotations:
+          summary: "Root filesystem usage is above 85% on {{ $labels.instance_label }}"
+          description: "{{ $labels.node }} root filesystem usage exceeded 85% for 15 minutes."

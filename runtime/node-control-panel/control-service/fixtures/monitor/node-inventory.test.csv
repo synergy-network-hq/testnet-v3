@@ -1,0 +1,4 @@
+node_slot_id,node_alias,role_group,role,node_type,p2p_port,rpc_port,ws_port,grpc_port,discovery_port,host,management_host,public_ip,local_ip,physical_machine_id,operator,device
+validator-01,Validator-01,validator,validator,validator,5620,5640,5660,5640,5680,203.0.113.11,198.51.100.11,203.0.113.11,198.51.100.11,validator-01,test-operator,test-fixture
+node-rpc,Node-RPC,service,rpc_gateway,rpc_gateway,5621,5641,5661,5641,5681,203.0.113.12,198.51.100.12,203.0.113.12,198.51.100.12,node-rpc,test-operator,test-fixture
+node-0a,Node-0A,service,observer,observer,5622,5642,5662,5642,5682,203.0.113.13,198.51.100.13,203.0.113.13,198.51.100.13,node-0a,test-operator,test-fixture

@@ -1,0 +1,174 @@
+// Testnet-v3 native SNRG staking and delegation.
+pragma synq ^1.0.0;
+
+contract Staking {
+    governanceKey: MLDSAPublicKey public;
+    validatorRegistry: Address public;
+    slashingContract: Address public;
+    paused: Bool public;
+
+    minStake: UInt256 public;
+    maxStake: UInt256 public;
+    minDelegation: UInt256 public;
+    maxDelegation: UInt256 public;
+    unbondingPeriod: UInt256 public;
+
+    selfStakeOf: mapping(Address => UInt256) public;
+    delegatedStakeOf: mapping(Address => UInt256) public;
+    delegationOf: mapping(Address => mapping(Address => UInt256)) public;
+    unbondingCount: mapping(Address => UInt256) public;
+    unbondingAmount: mapping(Address => mapping(UInt256 => UInt256)) public;
+    unbondingWithdrawAfter: mapping(Address => mapping(UInt256 => UInt256)) public;
+    unbondingWithdrawn: mapping(Address => mapping(UInt256 => Bool)) public;
+    totalSelfStake: UInt256 public;
+    totalDelegatedStake: UInt256 public;
+
+    event SelfStaked(validator: Address indexed, amount: UInt256);
+    event Delegated(delegator: Address indexed, validator: Address indexed, amount: UInt256);
+    event UnbondingStarted(account: Address indexed, validator: Address indexed, requestId: UInt256, amount: UInt256, withdrawAfter: UInt256);
+    event UnbondingWithdrawn(account: Address indexed, requestId: UInt256, amount: UInt256);
+    event SelfStakeSlashed(validator: Address indexed, requestedAmount: UInt256, actualSlashed: UInt256);
+    event SlashingContractUpdated(newSlashingContract: Address indexed);
+    event PauseStateUpdated(paused: Bool);
+
+    constructor(
+        initialGovernanceKey: MLDSAPublicKey,
+        registry: Address,
+        minimumStake: UInt256,
+        maximumStake: UInt256,
+        minimumDelegation: UInt256,
+        maximumDelegation: UInt256,
+        unbondingBlocks: UInt256
+    ) {
+        require(registry != Address(0), "Invalid validator registry");
+        require(minimumStake > 0, "Minimum stake is zero");
+        require(maximumStake >= minimumStake, "Invalid stake limits");
+        require(minimumDelegation > 0, "Minimum delegation is zero");
+        require(maximumDelegation >= minimumDelegation, "Invalid delegation limits");
+        governanceKey = initialGovernanceKey;
+        validatorRegistry = registry;
+        minStake = minimumStake;
+        maxStake = maximumStake;
+        minDelegation = minimumDelegation;
+        maxDelegation = maximumDelegation;
+        unbondingPeriod = unbondingBlocks;
+        paused = false;
+    }
+
+    @gas_cost(base: 85000)
+    @public function selfStake() {
+        require(!paused, "Staking paused");
+        require(registryIsKnownValidator(validatorRegistry, msg.sender), "Unknown validator");
+        require(msg.value >= minStake, "Stake below minimum");
+        let nextStake: UInt256 = selfStakeOf[msg.sender] + msg.value;
+        require(nextStake <= maxStake, "Stake above maximum");
+        selfStakeOf[msg.sender] = nextStake;
+        totalSelfStake = totalSelfStake + msg.value;
+        emit SelfStaked(msg.sender, msg.value);
+    }
+
+    @gas_cost(base: 90000)
+    @public function delegate(validator: Address) {
+        require(!paused, "Staking paused");
+        require(registryIsActiveValidator(validatorRegistry, validator), "Validator is not active");
+        require(msg.value >= minDelegation, "Delegation below minimum");
+        let nextDelegation: UInt256 = delegationOf[validator][msg.sender] + msg.value;
+        require(nextDelegation <= maxDelegation, "Delegation above maximum");
+        delegationOf[validator][msg.sender] = nextDelegation;
+        delegatedStakeOf[validator] = delegatedStakeOf[validator] + msg.value;
+        totalDelegatedStake = totalDelegatedStake + msg.value;
+        emit Delegated(msg.sender, validator, msg.value);
+    }
+
+    @gas_cost(base: 85000)
+    @public function beginUnbondSelfStake(amount: UInt256) -> UInt256 {
+        require(!paused, "Staking paused");
+        require(amount > 0, "Amount is zero");
+        require(amount <= selfStakeOf[msg.sender], "Insufficient self stake");
+        selfStakeOf[msg.sender] = selfStakeOf[msg.sender] - amount;
+        totalSelfStake = totalSelfStake - amount;
+        let requestId: UInt256 = createUnbonding(msg.sender, amount);
+        emit UnbondingStarted(msg.sender, msg.sender, requestId, amount, unbondingWithdrawAfter[msg.sender][requestId]);
+        return requestId;
+    }
+
+    @gas_cost(base: 90000)
+    @public function beginUndelegate(validator: Address, amount: UInt256) -> UInt256 {
+        require(!paused, "Staking paused");
+        require(amount > 0, "Amount is zero");
+        require(amount <= delegationOf[validator][msg.sender], "Insufficient delegation");
+        delegationOf[validator][msg.sender] = delegationOf[validator][msg.sender] - amount;
+        delegatedStakeOf[validator] = delegatedStakeOf[validator] - amount;
+        totalDelegatedStake = totalDelegatedStake - amount;
+        let requestId: UInt256 = createUnbonding(msg.sender, amount);
+        emit UnbondingStarted(msg.sender, validator, requestId, amount, unbondingWithdrawAfter[msg.sender][requestId]);
+        return requestId;
+    }
+
+    @gas_cost(base: 65000)
+    function createUnbonding(account: Address, amount: UInt256) internal -> UInt256 {
+        let requestId: UInt256 = unbondingCount[account];
+        unbondingAmount[account][requestId] = amount;
+        unbondingWithdrawAfter[account][requestId] = block.number + unbondingPeriod;
+        unbondingWithdrawn[account][requestId] = false;
+        unbondingCount[account] = requestId + 1;
+        return requestId;
+    }
+
+    @gas_cost(base: 80000)
+    @public function withdrawUnbonding(requestId: UInt256) {
+        require(!unbondingWithdrawn[msg.sender][requestId], "Already withdrawn");
+        require(block.number >= unbondingWithdrawAfter[msg.sender][requestId], "Unbonding period active");
+        let amount: UInt256 = unbondingAmount[msg.sender][requestId];
+        require(amount > 0, "Unbonding not found");
+        unbondingWithdrawn[msg.sender][requestId] = true;
+        sendNative(msg.sender, amount);
+        emit UnbondingWithdrawn(msg.sender, requestId, amount);
+    }
+
+    @gas_cost(base: 80000)
+    @public function slashSelfStake(validator: Address, amount: UInt256) -> UInt256 {
+        require(msg.sender == slashingContract, "Unauthorized slashing caller");
+        let available: UInt256 = selfStakeOf[validator];
+        let actualSlashed: UInt256 = amount > available ? available : amount;
+        selfStakeOf[validator] = available - actualSlashed;
+        totalSelfStake = totalSelfStake - actualSlashed;
+        emit SelfStakeSlashed(validator, amount, actualSlashed);
+        return actualSlashed;
+    }
+
+    @gas_cost(base: 25000)
+    @public function currentVotingPower(account: Address) -> UInt256 {
+        return selfStakeOf[account] + delegatedStakeOf[account];
+    }
+
+    @gas_cost(base: 25000)
+    @public function totalVotingPower() -> UInt256 {
+        return totalSelfStake + totalDelegatedStake;
+    }
+
+    @gas_cost(base: 90000, mldsa_verify: 35000)
+    @public function setSlashingContract(
+        newSlashingContract: Address,
+        message: Bytes,
+        signature: MLDSASignature
+    ) {
+        require(newSlashingContract != Address(0), "Invalid slashing contract");
+        require_pqc {
+            let valid: Bool = verifyMLDSASignature(governanceKey, message, signature);
+            require(valid, "Invalid governance signature");
+        } or revert("PQC verification failed");
+        slashingContract = newSlashingContract;
+        emit SlashingContractUpdated(newSlashingContract);
+    }
+
+    @gas_cost(base: 90000, mldsa_verify: 35000)
+    @public function setPaused(newPaused: Bool, message: Bytes, signature: MLDSASignature) {
+        require_pqc {
+            let valid: Bool = verifyMLDSASignature(governanceKey, message, signature);
+            require(valid, "Invalid governance signature");
+        } or revert("PQC verification failed");
+        paused = newPaused;
+        emit PauseStateUpdated(newPaused);
+    }
+}

@@ -1,0 +1,28 @@
+.DS_Store
+*.log
+*.tmp
+*.bak
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.db
+*.sqlite
+*.sqlite3
+
+# Never commit live secrets or captured runtime payloads.
+*.pem
+*.key
+*.secret
+*.token
+*.seed
+*.wallet
+*.keystore
+id_*
+!*.example
+!README.md
+
+# Local test output.
+.tmp/
+reports/generated/
+

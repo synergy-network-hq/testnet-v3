@@ -1,0 +1,345 @@
+/* ============================================
+   SYNERGY NETWORK TYPOGRAPHY
+   Font families, sizes, weights, and text styling
+   ============================================ */
+
+/* === IMPORTS === */
+@import url("https://fonts.googleapis.com/css2?family=Orbitron:wght@500;600;700;800&family=Sora:wght@400;500;600;700;800&family=Roboto:wght@400;500;700&family=Quantico:wght@400;700&family=Shantell+Sans:wght@400;500;600;700&family=Montserrat+Alternates:wght@400;500;600;700&display=swap");
+@import url("https://fonts.googleapis.com/icon?family=Material+Icons");
+
+:root {
+  /* Font Families */
+  --snrg-font-primary: "Sora", sans-serif;
+  --snrg-font-secondary: "Sora", sans-serif;
+  --snrg-font-body: "Sora", "Roboto", sans-serif;
+  --snrg-font-display: "Sora", sans-serif;
+  --snrg-font-tech: "Orbitron", sans-serif;
+  --snrg-font-code: source-code-pro, Menlo, Monaco, Consolas, "Courier New", monospace;
+
+  /* Font Sizes */
+  --snrg-text-xs: 0.75rem;
+  /* 12px */
+  --snrg-text-sm: 0.875rem;
+  /* 14px */
+  --snrg-text-base: 1rem;
+  /* 16px */
+  --snrg-text-lg: 1.125rem;
+  /* 18px */
+  --snrg-text-xl: 1.25rem;
+  /* 20px */
+  --snrg-text-2xl: 1.5rem;
+  /* 24px */
+  --snrg-text-3xl: 1.875rem;
+  /* 30px */
+  --snrg-text-4xl: 2.25rem;
+  /* 36px */
+  --snrg-text-5xl: 3rem;
+  /* 48px */
+  --snrg-text-6xl: 3.25rem;
+  /* 52px */
+
+  /* Line Heights */
+  --snrg-leading-tight: 1.2;
+  --snrg-leading-snug: 1.375;
+  --snrg-leading-normal: 1.5;
+  --snrg-leading-relaxed: 1.625;
+  --snrg-leading-loose: 2;
+
+  /* Font Weights */
+  --snrg-font-light: 300;
+  --snrg-font-normal: 400;
+  --snrg-font-medium: 500;
+  --snrg-font-semibold: 600;
+  --snrg-font-bold: 700;
+  --snrg-font-black: 900;
+
+  /* Letter Spacing */
+  --snrg-tracking-tighter: -0.05em;
+  --snrg-tracking-tight: -0.025em;
+  --snrg-tracking-normal: 0em;
+  --snrg-tracking-wide: 0.025em;
+  --snrg-tracking-wider: 0.05em;
+  --snrg-tracking-widest: 0.1em;
+}
+
+/* === BASE TYPOGRAPHY === */
+html {
+  font-size: 16px;
+  line-height: var(--snrg-leading-normal);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: var(--snrg-font-body);
+  color: var(--snrg-text-secondary);
+  font-weight: var(--snrg-font-normal);
+}
+
+/* === HEADINGS === */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: var(--snrg-font-primary);
+  font-weight: var(--snrg-font-bold);
+  line-height: var(--snrg-leading-tight);
+  color: var(--snrg-text-primary);
+  margin: 0;
+}
+
+h1 {
+  font-size: var(--snrg-text-5xl);
+}
+
+h2 {
+  font-size: var(--snrg-text-4xl);
+}
+
+h3 {
+  font-size: var(--snrg-text-3xl);
+}
+
+h4 {
+  font-size: var(--snrg-text-2xl);
+  font-weight: var(--snrg-font-semibold);
+}
+
+h5 {
+  font-size: var(--snrg-text-xl);
+  font-weight: var(--snrg-font-semibold);
+}
+
+h6 {
+  font-size: var(--snrg-text-lg);
+  font-weight: var(--snrg-font-semibold);
+}
+
+/* === TEXT ELEMENTS === */
+p {
+  margin: 0;
+  line-height: var(--snrg-leading-relaxed);
+}
+
+a {
+  color: var(--snrg-primary-cyan);
+  text-decoration: none;
+  transition: color 0.3s ease;
+}
+
+a:hover {
+  color: var(--snrg-primary-lime);
+  text-decoration: underline;
+}
+
+code {
+  font-family: var(--snrg-font-code);
+  font-size: 0.9em;
+  background: var(--snrg-bg-glass-light);
+  padding: 0.2em 0.4em;
+  border-radius: 0.25rem;
+}
+
+pre {
+  font-family: var(--snrg-font-code);
+  background: var(--snrg-bg-glass-medium);
+  padding: 1rem;
+  border-radius: 0.5rem;
+  overflow-x: auto;
+}
+
+strong,
+b {
+  font-weight: var(--snrg-font-bold);
+}
+
+em,
+i {
+  font-style: italic;
+}
+
+small {
+  font-size: var(--snrg-text-sm);
+}
+
+/* === UTILITY CLASSES === */
+.snrg-text-xs {
+  font-size: var(--snrg-text-xs);
+}
+
+.snrg-text-sm {
+  font-size: var(--snrg-text-sm);
+}
+
+.snrg-text-base {
+  font-size: var(--snrg-text-base);
+}
+
+.snrg-text-lg {
+  font-size: var(--snrg-text-lg);
+}
+
+.snrg-text-xl {
+  font-size: var(--snrg-text-xl);
+}
+
+.snrg-text-2xl {
+  font-size: var(--snrg-text-2xl);
+}
+
+.snrg-text-3xl {
+  font-size: var(--snrg-text-3xl);
+}
+
+.snrg-text-4xl {
+  font-size: var(--snrg-text-4xl);
+}
+
+.snrg-text-5xl {
+  font-size: var(--snrg-text-5xl);
+}
+
+.snrg-text-6xl {
+  font-size: var(--snrg-text-6xl);
+}
+
+/* Font Weight Classes */
+.snrg-font-light {
+  font-weight: var(--snrg-font-light);
+}
+
+.snrg-font-normal {
+  font-weight: var(--snrg-font-normal);
+}
+
+.snrg-font-medium {
+  font-weight: var(--snrg-font-medium);
+}
+
+.snrg-font-semibold {
+  font-weight: var(--snrg-font-semibold);
+}
+
+.snrg-font-bold {
+  font-weight: var(--snrg-font-bold);
+}
+
+.snrg-font-black {
+  font-weight: var(--snrg-font-black);
+}
+
+/* Text Transform */
+.snrg-uppercase {
+  text-transform: uppercase;
+}
+
+.snrg-lowercase {
+  text-transform: lowercase;
+}
+
+.snrg-capitalize {
+  text-transform: capitalize;
+}
+
+.snrg-normal-case {
+  text-transform: none;
+}
+
+/* Text Alignment */
+.snrg-text-left {
+  text-align: left;
+}
+
+.snrg-text-center {
+  text-align: center;
+}
+
+.snrg-text-right {
+  text-align: right;
+}
+
+.snrg-text-justify {
+  text-align: justify;
+}
+
+/* Text Style */
+.snrg-italic {
+  font-style: italic;
+}
+
+.snrg-not-italic {
+  font-style: normal;
+}
+
+.snrg-underline {
+  text-decoration: underline;
+}
+
+.snrg-line-through {
+  text-decoration: line-through;
+}
+
+.snrg-no-underline {
+  text-decoration: none;
+}
+
+/* === RESPONSIVE TYPOGRAPHY === */
+/* Mobile first (< 576px) - Base styles above */
+
+/* Small devices (≥ 576px) - Smartphones landscape, small tablets */
+@media (min-width: 576px) {
+  h1 {
+    font-size: calc(var(--snrg-text-5xl) * 1.05);
+  }
+
+  h2 {
+    font-size: calc(var(--snrg-text-4xl) * 1.05);
+  }
+
+  h3 {
+    font-size: calc(var(--snrg-text-3xl) * 1.05);
+  }
+}
+
+/* Medium devices (≥ 768px) - Tablets landscape, small laptops */
+@media (min-width: 768px) {
+  html {
+    font-size: 17px;
+  }
+
+  h1 {
+    font-size: calc(var(--snrg-text-5xl) * 1.1);
+  }
+
+  h2 {
+    font-size: calc(var(--snrg-text-4xl) * 1.1);
+  }
+
+  h3 {
+    font-size: calc(var(--snrg-text-3xl) * 1.1);
+  }
+}
+
+/* Large devices (≥ 992px) - Laptops, desktops */
+@media (min-width: 992px) {
+  h1 {
+    font-size: calc(var(--snrg-text-5xl) * 1.15);
+  }
+
+  h2 {
+    font-size: calc(var(--snrg-text-4xl) * 1.15);
+  }
+}
+
+/* Extra large devices (≥ 1200px) - Large desktops */
+@media (min-width: 1200px) {
+  h1 {
+    font-size: calc(var(--snrg-text-5xl) * 1.2);
+  }
+
+  h2 {
+    font-size: calc(var(--snrg-text-4xl) * 1.2);
+  }
+}

@@ -1,0 +1,63 @@
+name: PQVM Module Security Baseline
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'aegis-pqvm/src/**'
+      - 'aegis-pqvm/tests/**'
+      - 'aegis-pqvm/scripts/**'
+      - 'aegis-pqvm/.github/workflows/module-security-baseline.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'aegis-pqvm/src/**'
+      - 'aegis-pqvm/tests/**'
+      - 'aegis-pqvm/scripts/**'
+      - 'aegis-pqvm/.github/workflows/module-security-baseline.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: aegis-pqvm
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Rust fmt
+        run: cargo fmt --all -- --check
+
+      - name: Rust check
+        run: cargo check --all-targets --all-features --locked
+
+      - name: Rust test
+        run: cargo test --all-targets --all-features --locked
+
+      - name: Rust clippy (strict)
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      - name: Cargo audit
+        run: |
+          cargo install cargo-audit --locked
+          cargo audit
+
+      - name: Naming policy gate
+        run: ./scripts/check_naming_policy.sh
+
+      - name: KAT ignore policy gate
+        run: ./scripts/check_no_ignored_kat.sh
+
+      - name: Absolute path policy gate
+        run: ./scripts/check_no_absolute_paths.sh

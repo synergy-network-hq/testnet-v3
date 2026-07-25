@@ -1,0 +1,284 @@
+// Post-Quantum Escrow Contract
+// Secure escrow with PQC signature verification for release
+
+pragma synq ^1.0.0;
+
+contract PQCEscrow {
+    // Escrow structure
+    struct Escrow {
+        UInt256 id;
+        Address buyer;
+        Address seller;
+        UInt256 amount;
+        String description;
+        UInt256 createdAt;
+        UInt256 expiresAt;
+        EscrowStatus status;
+        Bytes releaseData; // Data required for release
+        MLDSAPublicKey releaseKey; // Key required to release
+    }
+    
+    enum EscrowStatus {
+        Pending,
+        Released,
+        Refunded,
+        Disputed,
+        Expired
+    }
+    
+    // Escrow storage
+    mapping(UInt256 => Escrow) public escrows;
+    mapping(Address => UInt256[]) public buyerEscrows;
+    mapping(Address => UInt256[]) public sellerEscrows;
+    UInt256 public escrowCount;
+    
+    // Dispute resolution
+    MLDSAPublicKey public arbitratorKey;
+    mapping(UInt256 => Address) public disputeRaisedBy;
+    mapping(UInt256 => Bool) public disputeResolved;
+    
+    // Events
+    event EscrowCreated(
+        UInt256 indexed id,
+        Address indexed buyer,
+        Address indexed seller,
+        UInt256 amount
+    );
+    event EscrowReleased(UInt256 indexed id, Address indexed recipient);
+    event EscrowRefunded(UInt256 indexed id, Address indexed recipient);
+    event EscrowDisputed(UInt256 indexed id, Address indexed raisedBy);
+    event EscrowExpired(UInt256 indexed id);
+    event DisputeResolved(UInt256 indexed id, Bool favorBuyer);
+    
+    // Constructor
+    constructor(MLDSAPublicKey _arbitratorKey) {
+        arbitratorKey = _arbitratorKey;
+        escrowCount = 0;
+    }
+    
+    // Create escrow
+    function createEscrow(
+        Address seller,
+        String description,
+        UInt256 duration, // Duration in blocks
+        MLDSAPublicKey releaseKey
+    ) public -> UInt256 {
+        require(seller != Address(0), "Invalid seller");
+        require(seller != msg.sender, "Cannot escrow to self");
+        require(duration > 0, "Invalid duration");
+        
+        UInt256 id = escrowCount;
+        escrowCount = escrowCount + 1;
+        
+        UInt256 createdAt = block.number;
+        UInt256 expiresAt = createdAt + duration;
+        
+        escrows[id] = Escrow({
+            id: id,
+            buyer: msg.sender,
+            seller: seller,
+            amount: msg.value, // In real implementation, would transfer tokens
+            description: description,
+            createdAt: createdAt,
+            expiresAt: expiresAt,
+            status: EscrowStatus.Pending,
+            releaseData: Bytes(""),
+            releaseKey: releaseKey
+        });
+        
+        buyerEscrows[msg.sender].push(id);
+        sellerEscrows[seller].push(id);
+        
+        emit EscrowCreated(id, msg.sender, seller, msg.value);
+        return id;
+    }
+    
+    // Release escrow (requires seller's PQC signature)
+    @gas_cost(base: 100000, dilithium_verify: 35000)
+    function releaseEscrow(
+        UInt256 escrowId,
+        Bytes messageToSign,
+        MLDSASignature signature
+    ) public {
+        Escrow storage escrow = escrows[escrowId];
+        
+        require(escrow.id == escrowId, "Escrow does not exist");
+        require(escrow.status == EscrowStatus.Pending, "Escrow not pending");
+        require(msg.sender == escrow.seller, "Only seller can release");
+        require(block.number <= escrow.expiresAt, "Escrow expired");
+        require(!disputeResolved[escrowId], "Escrow under dispute");
+        
+        // Verify PQC signature
+        require_pqc {
+            let isValid = verifyMLDSASignature(
+                escrow.releaseKey,
+                messageToSign,
+                signature
+            );
+            require(isValid, "Invalid release signature");
+        } or revert("PQC verification failed");
+        
+        escrow.status = EscrowStatus.Released;
+        
+        // Transfer funds to seller (in real implementation)
+        // seller.transfer(escrow.amount);
+        
+        emit EscrowReleased(escrowId, escrow.seller);
+    }
+    
+    // Refund escrow (buyer can refund if conditions met)
+    function refundEscrow(UInt256 escrowId) public {
+        Escrow storage escrow = escrows[escrowId];
+        
+        require(escrow.id == escrowId, "Escrow does not exist");
+        require(escrow.status == EscrowStatus.Pending, "Escrow not pending");
+        require(msg.sender == escrow.buyer, "Only buyer can refund");
+        require(block.number > escrow.expiresAt, "Escrow not expired");
+        require(!disputeResolved[escrowId], "Escrow under dispute");
+        
+        escrow.status = EscrowStatus.Refunded;
+        
+        // Transfer funds back to buyer (in real implementation)
+        // buyer.transfer(escrow.amount);
+        
+        emit EscrowRefunded(escrowId, escrow.buyer);
+    }
+    
+    // Raise dispute
+    function raiseDispute(UInt256 escrowId) public {
+        Escrow storage escrow = escrows[escrowId];
+        
+        require(escrow.id == escrowId, "Escrow does not exist");
+        require(escrow.status == EscrowStatus.Pending, "Escrow not pending");
+        require(
+            msg.sender == escrow.buyer || msg.sender == escrow.seller,
+            "Not party to escrow"
+        );
+        require(!disputeResolved[escrowId], "Dispute already resolved");
+        
+        escrow.status = EscrowStatus.Disputed;
+        disputeRaisedBy[escrowId] = msg.sender;
+        
+        emit EscrowDisputed(escrowId, msg.sender);
+    }
+    
+    // Resolve dispute (requires arbitrator signature)
+    @gas_cost(base: 100000, dilithium_verify: 35000)
+    function resolveDispute(
+        UInt256 escrowId,
+        Bool favorBuyer, // true = refund buyer, false = release to seller
+        Bytes messageToSign,
+        MLDSASignature signature
+    ) public {
+        Escrow storage escrow = escrows[escrowId];
+        
+        require(escrow.id == escrowId, "Escrow does not exist");
+        require(escrow.status == EscrowStatus.Disputed, "Escrow not disputed");
+        require(!disputeResolved[escrowId], "Dispute already resolved");
+        
+        // Verify arbitrator signature
+        require_pqc {
+            let isValid = verifyMLDSASignature(
+                arbitratorKey,
+                messageToSign,
+                signature
+            );
+            require(isValid, "Invalid arbitrator signature");
+        } or revert("PQC verification failed");
+        
+        disputeResolved[escrowId] = true;
+        
+        if (favorBuyer) {
+            escrow.status = EscrowStatus.Refunded;
+            // Transfer to buyer
+            emit EscrowRefunded(escrowId, escrow.buyer);
+        } else {
+            escrow.status = EscrowStatus.Released;
+            // Transfer to seller
+            emit EscrowReleased(escrowId, escrow.seller);
+        }
+        
+        emit DisputeResolved(escrowId, favorBuyer);
+    }
+    
+    // Check and expire escrows
+    function checkExpiration(UInt256 escrowId) public {
+        Escrow storage escrow = escrows[escrowId];
+        
+        require(escrow.id == escrowId, "Escrow does not exist");
+        require(escrow.status == EscrowStatus.Pending, "Escrow not pending");
+        require(block.number > escrow.expiresAt, "Escrow not expired");
+        
+        escrow.status = EscrowStatus.Expired;
+        emit EscrowExpired(escrowId);
+    }
+    
+    // Get escrow details
+    function getEscrow(UInt256 escrowId) public -> (
+        UInt256,
+        Address,
+        Address,
+        UInt256,
+        String,
+        UInt256,
+        UInt256,
+        EscrowStatus
+    ) {
+        Escrow storage escrow = escrows[escrowId];
+        return (
+            escrow.id,
+            escrow.buyer,
+            escrow.seller,
+            escrow.amount,
+            escrow.description,
+            escrow.createdAt,
+            escrow.expiresAt,
+            escrow.status
+        );
+    }
+    
+    // Get escrows for buyer
+    function getBuyerEscrows(Address buyer) public -> UInt256[] {
+        return buyerEscrows[buyer];
+    }
+    
+    // Get escrows for seller
+    function getSellerEscrows(Address seller) public -> UInt256[] {
+        return sellerEscrows[seller];
+    }
+    
+    // Update arbitrator key (requires current arbitrator signature)
+    @gas_cost(base: 100000, dilithium_verify: 35000)
+    function updateArbitratorKey(
+        MLDSAPublicKey newKey,
+        Bytes messageToSign,
+        MLDSASignature signature
+    ) public {
+        require_pqc {
+            let isValid = verifyMLDSASignature(
+                arbitratorKey,
+                messageToSign,
+                signature
+            );
+            require(isValid, "Invalid arbitrator signature");
+        } or revert("PQC verification failed");
+        
+        arbitratorKey = newKey;
+    }
+    
+    // Calculate time remaining
+    function timeRemaining(UInt256 escrowId) public -> UInt256 {
+        Escrow storage escrow = escrows[escrowId];
+        
+        if (block.number >= escrow.expiresAt) {
+            return 0;
+        }
+        return escrow.expiresAt - block.number;
+    }
+    
+    // Check if escrow is expired
+    function isExpired(UInt256 escrowId) public -> Bool {
+        Escrow storage escrow = escrows[escrowId];
+        return block.number > escrow.expiresAt;
+    }
+}

@@ -1,0 +1,10 @@
+/var/log/synergy/validator/*.log {
+  daily
+  rotate 14
+  compress
+  missingok
+  notifempty
+  copytruncate
+  create 0640 node node
+}
+

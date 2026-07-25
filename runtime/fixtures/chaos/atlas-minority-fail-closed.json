@@ -1,0 +1,25 @@
+{
+  "scenario": "atlas_minority_fork",
+  "expected_behavior": "surface_fail_closed",
+  "chain_id": 1264,
+  "network_id": "synergy-testnet-v3",
+  "validators": [
+    { "validator_id": "validator-1", "cluster_id": 0, "height": 100, "block_hash": "hash-100", "fault": "none" },
+    { "validator_id": "validator-2", "cluster_id": 0, "height": 100, "block_hash": "hash-100", "fault": "none" },
+    { "validator_id": "validator-3", "cluster_id": 0, "height": 100, "block_hash": "hash-100", "fault": "none" },
+    { "validator_id": "validator-4", "cluster_id": 0, "height": 100, "block_hash": "hash-100", "fault": "none" },
+    { "validator_id": "validator-5", "cluster_id": 0, "height": 100, "block_hash": "hash-100", "fault": "none" },
+    { "validator_id": "validator-6", "cluster_id": 0, "height": 100, "block_hash": "hash-100", "fault": "none" }
+  ],
+  "public_rpc_backends": [],
+  "atlas": {
+    "name": "atlas",
+    "available": true,
+    "height": 100,
+    "block_hash": "minority-hash",
+    "synthetic_height": false,
+    "lag_tolerance_blocks": 0
+  },
+  "archive": null,
+  "community_join": null
+}

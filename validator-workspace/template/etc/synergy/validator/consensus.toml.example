@@ -1,0 +1,12 @@
+[consensus]
+chain_id = 1264
+network_id = "synergy-testnet-v3"
+epoch_size = 1000
+target_block_time_ms = 1000
+proposal_timeout_ms = 1500
+vote_timeout_ms = 1500
+qc_timeout_ms = 1500
+configured_launch_quorum_minimum_votes = 4
+reject_quarantined_validators = true
+self_quarantine_on_canonical_lock_conflict = true
+

@@ -1,0 +1,385 @@
+{
+  "schema_version": 1,
+  "source_generation": "testnet-v2",
+  "target_release": "testnet-v3",
+  "chain_id": 1264,
+  "runtime_network_id": "synergy-testnet-v3",
+  "components": [
+    {
+      "id": "native_snrg",
+      "description": "Native SNRG supply, balances, mint policy, transfers, staking, and burn accounting",
+      "required_paths": [
+        "runtime/src/token.rs",
+        "runtime/src/genesis.rs",
+        "runtime/testnet-allocation-manifest.json",
+        "runtime/docs/sts/SYNERGY_TOKEN_SYSTEM.md"
+      ],
+      "required_markers": [
+        {
+          "path": "runtime/src/token.rs",
+          "contains": [
+            "pub const SNRG_SYMBOL",
+            "initialize_snrg_token",
+            "canonical_genesis"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "synergy_token_system",
+      "description": "Native STS B1, B2, B3, NFT, multi-asset, identity credential, policy, persistence, CLI, and RPC capabilities",
+      "required_paths": [
+        "runtime/src/sts.rs",
+        "runtime/src/bin/synergy-sts.rs",
+        "runtime/docs/sts/SYNERGY_TOKEN_SYSTEM.md",
+        "runtime/docs/sts/STS_RPC_API.md"
+      ],
+      "required_markers": [
+        {
+          "path": "runtime/src/sts.rs",
+          "contains": [
+            "CreateFungible",
+            "CreateNftCollection",
+            "CreateMultiAssetCollection",
+            "CreateCredentialSchema",
+            "process_finalized_sts_transaction_data"
+          ]
+        },
+        {
+          "path": "runtime/src/lib.rs",
+          "contains": [
+            "pub mod sts;"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "transaction_fees",
+      "description": "Deterministic gas and protocol fees charged during execution and credited to the fee collector account",
+      "required_paths": [
+        "runtime/src/gas/mod.rs",
+        "runtime/src/execution.rs",
+        "runtime/docs/testnet-fee-model.md"
+      ],
+      "required_markers": [
+        {
+          "path": "runtime/src/execution.rs",
+          "contains": [
+            "charge_fee_to_collector",
+            "FEE_COLLECTOR_ADDRESS",
+            "record_fee_event"
+          ]
+        },
+        {
+          "path": "runtime/src/gas/mod.rs",
+          "contains": [
+            "NetworkFeeBreakdown",
+            "fee_collector_address"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "node_rewards",
+      "description": "Epoch fee distribution, validator allocation, cluster escrow, settlement, reliability bonus, and invariant audit",
+      "required_paths": [
+        "runtime/src/rewards.rs",
+        "runtime/docs/testnet-deployment-notes.md"
+      ],
+      "required_markers": [
+        {
+          "path": "runtime/src/rewards.rs",
+          "contains": [
+            "allocate_epoch_validator_rewards",
+            "record_fee_collector_distribution",
+            "get_validator_reward_status",
+            "check_invariants"
+          ]
+        },
+        {
+          "path": "runtime/src/token.rs",
+          "contains": [
+            "escrow_epoch_validator_rewards",
+            "settle_epoch_validator_rewards_from_escrows"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "staking_and_validator_lifecycle",
+      "description": "Native staking, validator activation, dynamic membership, cluster assignment, and slashing integration",
+      "required_paths": [
+        "runtime/src/validator.rs",
+        "runtime/src/validator_lifecycle.rs",
+        "runtime/src/cluster.rs",
+        "genesis-contracts/contracts/Staking.synq",
+        "genesis-contracts/contracts/ValidatorRegistry.synq",
+        "genesis-contracts/contracts/Slashing.synq"
+      ],
+      "required_markers": [
+        {
+          "path": "runtime/src/lib.rs",
+          "contains": [
+            "pub mod validator;",
+            "pub mod validator_lifecycle;"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "genesis_contracts",
+      "description": "Native eight-contract SynQ suite with source, compiled bytecode, ABI, manifest, and deployment configuration",
+      "required_paths": [
+        "genesis-contracts/synq.toml",
+        "genesis-contracts/deployment-config.example.json",
+        "genesis-contracts/host-capabilities.json",
+        "runtime/scripts/testnet/genesis_tool.py"
+      ],
+      "required_markers": [
+        {
+          "path": "runtime/scripts/testnet/genesis_tool.py",
+          "contains": [
+            "RUNTIME_NETWORK_ID = \"synergy-testnet-v3\"",
+            "def build_genesis",
+            "def recompute_hashes",
+            "def validate_documents"
+          ]
+        }
+      ],
+      "contracts": [
+        "ValidatorRegistry",
+        "SynergyOracle",
+        "Staking",
+        "Governance",
+        "Treasury",
+        "RewardDistributor",
+        "Slashing",
+        "Identity"
+      ]
+    },
+    {
+      "id": "synq",
+      "description": "SynQ compiler and VM dependency, PQ admission, artifact registration, deploy/call execution, receipts, and replay",
+      "required_paths": [
+        "runtime/synq-language/compiler",
+        "runtime/synq-language/vm",
+        "runtime/synq-language/aegis-pqsynq/pqsynq",
+        "runtime/src/synq_admission.rs",
+        "runtime/src/synq_execution.rs",
+        "runtime/src/synq_receipts.rs"
+      ],
+      "required_markers": [
+        {
+          "path": "runtime/src/Cargo.toml",
+          "contains": [
+            "pqsynq =",
+            "../synq-language"
+          ]
+        },
+        {
+          "path": "runtime/src/execution.rs",
+          "contains": [
+            "execute_synq_transaction_at",
+            "synq_aivm_state"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "aivm",
+      "description": "AIVM execution prototype, deterministic in-memory state, artifact policy, limited SynQ/STS paths, and receipts",
+      "required_paths": [
+        "runtime/synergy-aivm/runtime/aivm-core/Cargo.toml",
+        "runtime/synergy-aivm/runtime/aivm-core/src/execution.rs",
+        "runtime/synergy-aivm/runtime/aivm-core/src/state.rs",
+        "runtime/synergy-aivm/runtime/aivm-core/src/synq_runtime.rs"
+      ],
+      "required_markers": [
+        {
+          "path": "runtime/src/Cargo.toml",
+          "contains": [
+            "aivm-core =",
+            "../synergy-aivm/runtime/aivm-core"
+          ]
+        },
+        {
+          "path": "runtime/src/synq_execution.rs",
+          "contains": [
+            "aivm_core::execution",
+            "deploy_synq_contract",
+            "call_synq_contract"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "post_quantum_security",
+      "description": "Aegis PQVM and FN-DSA, ML-DSA, ML-KEM security dependencies used by transactions and SynQ admission",
+      "required_paths": [
+        "runtime/aegis-pqvm/Cargo.toml",
+        "runtime/src/crypto/aegis_pqvm.rs",
+        "runtime/src/bin/aegis-pqvm.rs"
+      ],
+      "required_markers": [
+        {
+          "path": "runtime/src/Cargo.toml",
+          "contains": [
+            "aegis-pqvm =",
+            "features = [\"mlkem\", \"mldsa\", \"fndsa\", \"security\"]"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "governance_treasury_oracle_identity_slashing",
+      "description": "Native SynQ governance, treasury, oracle, identity, and slashing system contracts",
+      "required_paths": [
+        "genesis-contracts/contracts/Governance.synq",
+        "genesis-contracts/contracts/Treasury.synq",
+        "genesis-contracts/contracts/SynergyOracle.synq",
+        "genesis-contracts/contracts/Identity.synq",
+        "genesis-contracts/contracts/Slashing.synq"
+      ]
+    },
+    {
+      "id": "treasury_recovery_and_burn",
+      "description": "Treasury recovery routing, explicit burn, burn-address transfers, supply accounting, and RPC audit",
+      "required_paths": [
+        "runtime/src/token.rs",
+        "runtime/src/execution.rs",
+        "runtime/src/address.rs"
+      ],
+      "required_markers": [
+        {
+          "path": "runtime/src/token.rs",
+          "contains": [
+            "TREASURY_RECOVERY_WALLET_ADDRESS",
+            "burn_tokens",
+            "burn_records"
+          ]
+        },
+        {
+          "path": "runtime/src/execution.rs",
+          "contains": [
+            "BurnAddressTransferEvent",
+            "parse_explicit_native_burn_payload"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "consensus_dag_and_p2p",
+      "description": "PoSy consensus, DAG mempool, quorum certificates, epochs, P2P networking, and synchronization",
+      "required_paths": [
+        "runtime/src/consensus",
+        "runtime/src/dag.rs",
+        "runtime/src/dag_mempool.rs",
+        "runtime/src/epoch.rs",
+        "runtime/src/p2p",
+        "runtime/src/sync"
+      ]
+    },
+    {
+      "id": "rpc_and_role_services",
+      "description": "RPC, gateway, relayer, archive, indexer/explorer, validator, observer, AIVM, and SynQ node roles",
+      "required_paths": [
+        "runtime/src/rpc/rpc_server.rs",
+        "runtime/src/role_profiles.rs",
+        "runtime/src/bin/synergy-rpc-gateway-node.rs",
+        "runtime/src/bin/synergy-archive-validator-node.rs",
+        "runtime/src/bin/synergy-indexer-and-explorer-node.rs"
+      ],
+      "required_markers": [
+        {
+          "path": "runtime/src/rpc/rpc_server.rs",
+          "contains": [
+            "synergy_getFeeCollector",
+            "synergy_getEpochFeeDistribution",
+            "synergy_checkRewardInvariants"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "archive_snapshot_and_recovery",
+      "description": "Archive runtime, snapshots, compact-state migration, consensus recovery, and fleet status",
+      "required_paths": [
+        "runtime/src/archive_validator.rs",
+        "runtime/src/recovery.rs",
+        "runtime/src/fleet_status.rs",
+        "runtime/src/consensus_state.rs"
+      ]
+    },
+    {
+      "id": "validator_onboarding_and_clusters",
+      "description": "Community validator enrollment, lifecycle, dynamic clusters, role profiles, and appliance control surfaces",
+      "required_paths": [
+        "runtime/src/community_onboarding.rs",
+        "runtime/src/cluster.rs",
+        "runtime/src/role_profiles.rs",
+        "runtime/node-control-panel",
+        "validator-workspace"
+      ]
+    },
+    {
+      "id": "sxcp_cross_chain",
+      "description": "SXCP cross-chain protocol, runtime module, binary, and operational assets",
+      "required_paths": [
+        "runtime/src/sxcp",
+        "runtime/src/bin/synergy-cross-chain-verifier-node.rs",
+        "runtime/sxcp"
+      ],
+      "required_markers": [
+        {
+          "path": "runtime/src/lib.rs",
+          "contains": [
+            "pub mod sxcp;"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "synid_and_address_system",
+      "description": "SynID resolution and Synergy address classes including system, fee collector, token, and contract prefixes",
+      "required_paths": [
+        "runtime/src/synid.rs",
+        "runtime/src/address.rs",
+        "runtime/src/synergy-address-engine"
+      ],
+      "required_markers": [
+        {
+          "path": "runtime/src/lib.rs",
+          "contains": [
+            "pub mod synid;",
+            "pub mod address;"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "observability_and_operations",
+      "description": "Metrics, logging, telemetry, topology, service definitions, and external observability validation",
+      "required_paths": [
+        "runtime/src/telemetry.rs",
+        "runtime/src/logging.rs",
+        "runtime/services",
+        "runtime/ops",
+        "observability/OBSERVABILITY.md"
+      ]
+    }
+  ],
+  "operational_blockers": [
+    {
+      "id": "aivm_general_synq_execution",
+      "status": "blocked",
+      "evidence": "runtime/synergy-aivm/docs/readiness/CURRENT_STATUS.md",
+      "reason": "The inherited AIVM does not execute constructors or general stateful SynQ bytecode with canonical calldata, persistent storage, events, and host calls."
+    },
+    {
+      "id": "synq_genesis_contract_deployment",
+      "status": "blocked",
+      "evidence": "genesis-contracts/README.md",
+      "reason": "The eight native SynQ contracts compile, but end-to-end AIVM deployment, stateful calls, restart, and replay are not yet proven."
+    }
+  ]
+}

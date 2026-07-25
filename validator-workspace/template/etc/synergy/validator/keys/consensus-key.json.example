@@ -1,0 +1,7 @@
+{
+  "validator_address": "CHANGE_ME_VALIDATOR_ADDRESS",
+  "algorithm": "FN-DSA",
+  "public_key": "CHANGE_ME_CONSENSUS_PUBLIC_KEY",
+  "private_key": "CHANGE_ME_CONSENSUS_PRIVATE_KEY"
+}
+

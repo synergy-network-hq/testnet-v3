@@ -1,0 +1,6 @@
+[logging]
+directory = "/var/log/synergy/validator"
+level = "info"
+json = true
+rotate = true
+

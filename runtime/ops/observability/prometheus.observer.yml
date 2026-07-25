@@ -1,0 +1,229 @@
+# Prometheus configuration for the Synergy Testnet observer.
+# Location on observer: /opt/prometheus/config/prometheus.yml
+# P2P probes intentionally track public P2P endpoints; runtime metrics and
+# node-exporter targets are separate monitoring surfaces.
+
+global:
+  scrape_interval: 10s
+  scrape_timeout: 8s
+  evaluation_interval: 15s
+  external_labels:
+    network: testnet
+    chain_id: "1264"
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+
+rule_files:
+  - "/opt/prometheus/config/rules/*.yml"
+
+scrape_configs:
+  - job_name: "synergy-public-p2p-probes"
+    metrics_path: /probe
+    params:
+      module: ["tcp_connect"]
+    static_configs:
+      - targets: ["bootnode1.synergynode.xyz:5620"]
+        labels: { role: bootnode, host: bootnode1, instance_label: "Bootnode-1", probe_label: "p2p_tcp" }
+      - targets: ["bootnode2.synergynode.xyz:5620"]
+        labels: { role: bootnode, host: bootnode2, instance_label: "Bootnode-2", probe_label: "p2p_tcp" }
+      - targets: ["bootnode3.synergynode.xyz:5620"]
+        labels: { role: bootnode, host: bootnode3, instance_label: "Bootnode-3", probe_label: "p2p_tcp" }
+      - targets: ["seed1.synergynode.xyz:5621"]
+        labels: { role: seed, host: seed1, instance_label: "Seed-1", probe_label: "seed_tcp" }
+      - targets: ["seed2.synergynode.xyz:5621"]
+        labels: { role: seed, host: seed2, instance_label: "Seed-2", probe_label: "seed_tcp" }
+      - targets: ["seed3.synergynode.xyz:5621"]
+        labels: { role: seed, host: seed3, instance_label: "Seed-3", probe_label: "seed_tcp" }
+      - targets: ["relay1.synergynode.xyz:5622"]
+        labels: { role: relayer, host: relay1, instance_label: "Relayer-1", probe_label: "p2p_tcp" }
+      - targets: ["relay2.synergynode.xyz:5622"]
+        labels: { role: relayer, host: relay2, instance_label: "Relayer-2", probe_label: "p2p_tcp" }
+      - targets: ["rpc.synergynode.xyz:5623"]
+        labels: { role: rpc_gateway, host: rpc-gateway, instance_label: "RPC-Gateway-P2P", probe_label: "p2p_tcp" }
+      - targets: ["archive.synergynode.xyz:5615"]
+        labels: { role: archive_validator, host: archive-validator, instance_label: "Archive Validator", probe_label: "p2p_tcp" }
+      - targets: ["62.146.182.207:5622"]
+        labels: { role: validator, host: val1, instance_label: "Val1", probe_label: "p2p_tcp" }
+      - targets: ["62.146.182.208:5622"]
+        labels: { role: validator, host: val2, instance_label: "Val2", probe_label: "p2p_tcp" }
+      - targets: ["62.146.182.209:5622"]
+        labels: { role: validator, host: val3, instance_label: "Val3", probe_label: "p2p_tcp" }
+      - targets: ["73.79.66.255:5622"]
+        labels: { role: validator, host: val4, instance_label: "Val4", probe_label: "p2p_tcp" }
+      - targets: ["194.163.183.166:5622"]
+        labels: { role: validator, host: val5, instance_label: "Val5", probe_label: "p2p_tcp" }
+      - targets: ["157.173.192.45:5622"]
+        labels: { role: validator, host: val6, instance_label: "Val6", probe_label: "p2p_tcp" }
+      - targets: ["209.145.50.9:5622"]
+        labels: { role: observer, host: observer, instance_label: "Observer", probe_label: "p2p_tcp" }
+      - targets: ["74.208.227.23:5622"]
+        labels: { role: explorer_indexer, host: explorer-indexer, instance_label: "Explorer Indexer", probe_label: "p2p_tcp" }
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - target_label: __address__
+        replacement: 127.0.0.1:9115
+      - source_labels: [__param_target]
+        target_label: target
+
+  - job_name: "synergy-seed-registry-metrics"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["seed1.synergynode.xyz:5621"]
+        labels: { role: seed, host: seed1, instance_label: "Seed-1" }
+      - targets: ["seed2.synergynode.xyz:5621"]
+        labels: { role: seed, host: seed2, instance_label: "Seed-2" }
+      - targets: ["seed3.synergynode.xyz:5621"]
+        labels: { role: seed, host: seed3, instance_label: "Seed-3" }
+
+  - job_name: "synergy-runtime-metrics"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["bootnode1.synergynode.xyz:6030"]
+        labels: { role: bootnode, host: bootnode1, instance_label: "Bootnode-1" }
+      - targets: ["bootnode2.synergynode.xyz:6030"]
+        labels: { role: bootnode, host: bootnode2, instance_label: "Bootnode-2" }
+      - targets: ["bootnode3.synergynode.xyz:6030"]
+        labels: { role: bootnode, host: bootnode3, instance_label: "Bootnode-3" }
+      - targets: ["relay1.synergynode.xyz:6030"]
+        labels: { role: relayer, host: relay1, instance_label: "Relayer-1" }
+      - targets: ["relay2.synergynode.xyz:6030"]
+        labels: { role: relayer, host: relay2, instance_label: "Relayer-2" }
+      - targets: ["rpc.synergynode.xyz:6030"]
+        labels: { role: rpc_gateway, host: rpc-gateway, instance_label: "RPC-Gateway" }
+      - targets: ["archive.synergynode.xyz:6030"]
+        labels: { role: archive_validator, host: archive-validator, instance_label: "Archive Validator" }
+      - targets: ["62.146.182.207:6030"]
+        labels: { role: validator, host: val1, instance_label: "Val1" }
+      - targets: ["62.146.182.208:6030"]
+        labels: { role: validator, host: val2, instance_label: "Val2" }
+      - targets: ["62.146.182.209:6030"]
+        labels: { role: validator, host: val3, instance_label: "Val3" }
+      - targets: ["73.79.66.255:6030"]
+        labels: { role: validator, host: val4, instance_label: "Val4" }
+      - targets: ["194.163.183.166:6030"]
+        labels: { role: validator, host: val5, instance_label: "Val5" }
+      - targets: ["157.173.192.45:6030"]
+        labels: { role: validator, host: val6, instance_label: "Val6" }
+      - targets: ["127.0.0.1:6030"]
+        labels: { role: observer, host: observer, instance_label: "Observer" }
+      - targets: ["74.208.227.23:6030"]
+        labels: { role: explorer_indexer, host: explorer-indexer, instance_label: "Explorer Indexer" }
+
+  - job_name: "synergy-public-qrpc-probes"
+    metrics_path: /probe
+    params:
+      module: ["tcp_connect"]
+    static_configs:
+      - targets: ["relay1.synergynode.xyz:5640"]
+        labels: { role: relayer, host: relay1, instance_label: "Relayer-1", probe_label: "qrpc_tcp" }
+      - targets: ["relay2.synergynode.xyz:5640"]
+        labels: { role: relayer, host: relay2, instance_label: "Relayer-2", probe_label: "qrpc_tcp" }
+      - targets: ["rpc.synergynode.xyz:5640"]
+        labels: { role: rpc_gateway, host: rpc-gateway, instance_label: "RPC-Gateway", probe_label: "qrpc_tcp" }
+      - targets: ["archive.synergynode.xyz:5640"]
+        labels: { role: archive_validator, host: archive-validator, instance_label: "Archive Validator", probe_label: "qrpc_tcp" }
+      - targets: ["62.146.182.207:5640"]
+        labels: { role: validator, host: val1, instance_label: "Val1", probe_label: "qrpc_tcp" }
+      - targets: ["62.146.182.208:5640"]
+        labels: { role: validator, host: val2, instance_label: "Val2", probe_label: "qrpc_tcp" }
+      - targets: ["62.146.182.209:5640"]
+        labels: { role: validator, host: val3, instance_label: "Val3", probe_label: "qrpc_tcp" }
+      - targets: ["73.79.66.255:5640"]
+        labels: { role: validator, host: val4, instance_label: "Val4", probe_label: "qrpc_tcp" }
+      - targets: ["194.163.183.166:5640"]
+        labels: { role: validator, host: val5, instance_label: "Val5", probe_label: "qrpc_tcp" }
+      - targets: ["157.173.192.45:5640"]
+        labels: { role: validator, host: val6, instance_label: "Val6", probe_label: "qrpc_tcp" }
+      - targets: ["209.145.50.9:5640"]
+        labels: { role: observer, host: observer, instance_label: "Observer", probe_label: "qrpc_tcp" }
+      - targets: ["74.208.227.23:5640"]
+        labels: { role: explorer_indexer, host: explorer-indexer, instance_label: "Explorer Indexer", probe_label: "qrpc_tcp" }
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - target_label: __address__
+        replacement: 127.0.0.1:9115
+      - source_labels: [__param_target]
+        target_label: target
+
+  - job_name: "node-exporter-public"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["bootnode1.synergynode.xyz:9100"]
+        labels: { role: bootseed, host: bootseed1, instance_label: "Bootnode-1/Seed-1" }
+      - targets: ["bootnode2.synergynode.xyz:9100"]
+        labels: { role: bootseed, host: bootseed2, instance_label: "Bootnode-2/Seed-2" }
+      - targets: ["bootnode3.synergynode.xyz:9100"]
+        labels: { role: bootseed, host: bootseed3, instance_label: "Bootnode-3/Seed-3" }
+      - targets: ["relay1.synergynode.xyz:9100"]
+        labels: { role: relayer, host: relay1, instance_label: "Relayer-1" }
+      - targets: ["relay2.synergynode.xyz:9100"]
+        labels: { role: relayer, host: relay2, instance_label: "Relayer-2" }
+      - targets: ["rpc.synergynode.xyz:9100"]
+        labels: { role: rpc_gateway, host: rpc-gateway, instance_label: "RPC-Gateway" }
+      - targets: ["archive.synergynode.xyz:9100"]
+        labels: { role: archive_validator, host: archive-validator, instance_label: "Archive Validator" }
+      - targets: ["62.146.182.207:9100"]
+        labels: { role: validator, host: val1, instance_label: "Val1" }
+      - targets: ["62.146.182.208:9100"]
+        labels: { role: validator, host: val2, instance_label: "Val2" }
+      - targets: ["62.146.182.209:9100"]
+        labels: { role: validator, host: val3, instance_label: "Val3" }
+      - targets: ["73.79.66.255:9100"]
+        labels: { role: validator, host: val4, instance_label: "Val4" }
+      - targets: ["194.163.183.166:9100"]
+        labels: { role: validator, host: val5, instance_label: "Val5" }
+      - targets: ["157.173.192.45:9100"]
+        labels: { role: validator, host: val6, instance_label: "Val6" }
+      - targets: ["127.0.0.1:9100"]
+        labels: { role: observer, host: observer, instance_label: "Observer" }
+      - targets: ["74.208.227.23:9100"]
+        labels: { role: explorer_indexer, host: explorer-indexer, instance_label: "Explorer Indexer" }
+
+  - job_name: "synergy-rpc-gateway-http"
+    scheme: https
+    metrics_path: /metrics/node-rpc
+    static_configs:
+      - targets: ["testnet-core-rpc.synergy-network.io"]
+        labels: { role: rpc_gateway, host: rpc-gateway, instance_label: "RPC-Gateway" }
+
+  - job_name: "synergy-explorer-http"
+    scheme: https
+    metrics_path: /metrics/node-exp
+    static_configs:
+      - targets: ["testnet-explorer.synergy-network.io"]
+        labels: { role: explorer, host: explorer, instance_label: "Explorer" }
+
+  - job_name: "public-http-probes"
+    metrics_path: /probe
+    params:
+      module: ["http_2xx"]
+    static_configs:
+      - targets: ["http://seed1.synergynode.xyz:5621/health"]
+        labels: { role: seed, host: seed1, instance_label: "Seed-1", probe_label: "http_health" }
+      - targets: ["http://seed2.synergynode.xyz:5621/health"]
+        labels: { role: seed, host: seed2, instance_label: "Seed-2", probe_label: "http_health" }
+      - targets: ["http://seed3.synergynode.xyz:5621/health"]
+        labels: { role: seed, host: seed3, instance_label: "Seed-3", probe_label: "http_health" }
+      - targets: ["https://testnet-core-rpc.synergy-network.io/healthz"]
+        labels: { role: rpc_gateway, host: rpc-gateway, instance_label: "RPC-Gateway", probe_label: "https_health" }
+      - targets: ["https://testnet-explorer.synergy-network.io/healthz"]
+        labels: { role: explorer, host: explorer, instance_label: "Explorer", probe_label: "https_health" }
+      - targets: ["https://testnet-atlas-api.synergy-network.io/healthz"]
+        labels: { role: atlas_api, host: atlas-api, instance_label: "Atlas-API", probe_label: "https_health" }
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - target_label: __address__
+        replacement: 127.0.0.1:9115
+      - source_labels: [__param_target]
+        target_label: target
+
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["127.0.0.1:9090"]
+        labels: { role: observer, host: observer, instance_label: "Observer Prometheus" }

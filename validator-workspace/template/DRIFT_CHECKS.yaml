@@ -1,0 +1,69 @@
+byte_identical_across_validators:
+  - /etc/systemd/system/synergy-validator.service
+  - /etc/logrotate.d/synergy-validator
+  - /etc/sysctl.d/99-synergy-validator.conf
+  - /etc/security/limits.d/synergy-validator.conf
+  - /opt/synergy/bin/synergy-validator
+  - /etc/synergy/validator/genesis.json
+  - /etc/synergy/validator/chain-spec.json
+  - /etc/synergy/validator/consensus.toml
+  - /etc/synergy/validator/dag.toml
+  - /etc/synergy/validator/mempool.toml
+  - /etc/synergy/validator/logging.toml
+  - /etc/synergy/validator/metrics.toml
+  - /etc/synergy/validator/rpc.toml
+
+identical_after_identity_masking:
+  - /etc/synergy/validator/config.toml
+  - /etc/synergy/validator/node.env
+  - /etc/synergy/validator/peers.toml
+  - /etc/wireguard/wg0.conf
+
+expected_to_differ:
+  - /etc/synergy/validator/keys/validator-key.json
+  - /etc/synergy/validator/keys/node-identity-key.json
+  - /etc/synergy/validator/keys/p2p-key.json
+  - /etc/synergy/validator/keys/consensus-key.json
+  - /etc/synergy/validator/keys/account-key.json
+  - /var/lib/synergy/validator
+  - /var/log/synergy/validator
+  - /var/backups/synergy/validator
+
+must_exist_may_be_empty:
+  - /var/lib/synergy/validator/identity
+  - /var/lib/synergy/validator/config
+  - /var/lib/synergy/validator/state/store
+  - /var/lib/synergy/validator/state/derived
+  - /var/lib/synergy/validator/state/checkpoints
+  - /var/lib/synergy/validator/state/snapshots
+  - /var/lib/synergy/validator/state/quarantine
+  - /var/lib/synergy/validator/evidence
+  - /var/lib/synergy/validator/logs
+  - /var/lib/synergy/validator/runtime
+  - /var/log/synergy/validator
+
+never_exist_on_live_validator:
+  - /etc/synergy/validator/keys/*.example
+  - /etc/synergy/validator/*.example
+  - /etc/wireguard/*.example
+  - /home/node/.synergy/testnet/nodes/validator-workspace
+  - /home/node/.synergy/testnet/nodes/validator-6-control-panel
+  - /home/justin/.synergy/testnet/nodes/validator-workspace
+  - /home/rob/.synergy/testnet/nodes/validator-workspace
+  - /home/synergyop/.synergy/testnet/nodes/validator-6-control-panel
+
+backup_only_not_active_runtime:
+  - /var/backups/synergy/validator
+  - /var/backups/synergy/validator-workspace-archives
+  - /opt/synergy/backups/appliance-layout-migration-*
+
+active_health_checks:
+  - active_process_user_is_node
+  - exactly_one_validator_process
+  - local_qrpc_listens_on_5640
+  - metrics_listens_on_6030
+  - quarantine_status_is_healthy
+  - no_validator_quarantine_marker_in_active_data
+  - binary_hash_matches_fleet
+  - genesis_hash_matches_fleet
+  - service_has_no_old_home_reference

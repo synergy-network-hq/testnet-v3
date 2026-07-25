@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>io.synergynetwork.archive-snapshot-worker</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PYTHON3__</string><string>__BIN_ROOT__/synergy-archive</string><string>worker</string>
+    <string>--root</string><string>__APP_ROOT__</string>
+    <string>--publish-root</string><string>__PUBLISH_ROOT__</string>
+    <string>--storage-volume</string><string>__STORAGE_VOLUME__</string>
+    <string>--runtime</string><string>__BIN_ROOT__/synergy-archive-validator-node</string>
+    <string>--aegis</string><string>__BIN_ROOT__/aegis-pqvm</string>
+    <string>--workspace</string><string>__WORKSPACE__</string>
+    <string>--majority-proof-marker</string><string>__PROOF_MARKER__</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>__BIN_ROOT__:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>SYNERGY_ARCHIVE_APP_ROOT</key><string>__APP_ROOT__</string>
+    <key>SYNERGY_SNAPSHOT_PUBLISH_ROOT</key><string>__PUBLISH_ROOT__</string>
+    <key>SYNERGY_ARCHIVE_STORAGE_VOLUME</key><string>__STORAGE_VOLUME__</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StartInterval</key><integer>300</integer>
+  <key>ThrottleInterval</key><integer>60</integer>
+  <key>StandardOutPath</key><string>__LOG_ROOT__/snapshot-worker.out.log</string>
+  <key>StandardErrorPath</key><string>__LOG_ROOT__/snapshot-worker.err.log</string>
+</dict>
+</plist>

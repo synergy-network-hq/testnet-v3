@@ -1,0 +1,339 @@
+// Post-Quantum DAO Voting Contract
+// Implements a complete DAO with PQC-secured governance
+
+pragma synq ^1.0.0;
+
+contract PQCGovernanceDAO {
+    // DAO configuration
+    Address public tokenContract; // ERC20 token for voting
+    UInt256 public proposalThreshold; // Minimum tokens to create proposal
+    UInt256 public votingPeriod; // Voting period in blocks
+    UInt256 public quorum; // Minimum votes for proposal to pass
+    MLDSAPublicKey public governanceKey; // Key for executing proposals
+    
+    // Proposal structure
+    struct Proposal {
+        UInt256 id;
+        Address proposer;
+        String description;
+        UInt256 startBlock;
+        UInt256 endBlock;
+        UInt256 forVotes;
+        UInt256 againstVotes;
+        UInt256 abstainVotes;
+        Bool executed;
+        Bool canceled;
+        Bytes calldata; // Data for proposal execution
+        Address target; // Target contract for execution
+    }
+    
+    // Proposal storage
+    mapping(UInt256 => Proposal) public proposals;
+    mapping(UInt256 => mapping(Address => Bool)) public hasVoted;
+    mapping(UInt256 => mapping(Address => UInt8)) public votes; // 0 = against, 1 = for, 2 = abstain
+    UInt256 public proposalCount;
+    
+    // Events
+    event ProposalCreated(
+        UInt256 indexed id,
+        Address indexed proposer,
+        String description,
+        UInt256 startBlock,
+        UInt256 endBlock
+    );
+    event VoteCast(
+        UInt256 indexed proposalId,
+        Address indexed voter,
+        UInt8 support, // 0 = against, 1 = for, 2 = abstain
+        UInt256 weight
+    );
+    event ProposalExecuted(UInt256 indexed id);
+    event ProposalCanceled(UInt256 indexed id);
+    event GovernanceKeyUpdated(MLDSAPublicKey newKey);
+    event QuorumUpdated(UInt256 oldQuorum, UInt256 newQuorum);
+    
+    // Constructor
+    constructor(
+        Address _tokenContract,
+        UInt256 _proposalThreshold,
+        UInt256 _votingPeriod,
+        UInt256 _quorum,
+        MLDSAPublicKey _governanceKey
+    ) {
+        tokenContract = _tokenContract;
+        proposalThreshold = _proposalThreshold;
+        votingPeriod = _votingPeriod;
+        quorum = _quorum;
+        governanceKey = _governanceKey;
+        proposalCount = 0;
+    }
+    
+    // Create a new proposal
+    function propose(
+        String description,
+        Address target,
+        Bytes calldata
+    ) public -> UInt256 {
+        // Check if proposer has enough tokens
+        // In real implementation, would call tokenContract.balanceOf(msg.sender)
+        // For now, assume check is done off-chain
+        
+        UInt256 proposalId = proposalCount;
+        proposalCount = proposalCount + 1;
+        
+        UInt256 startBlock = block.number;
+        UInt256 endBlock = startBlock + votingPeriod;
+        
+        proposals[proposalId] = Proposal({
+            id: proposalId,
+            proposer: msg.sender,
+            description: description,
+            startBlock: startBlock,
+            endBlock: endBlock,
+            forVotes: 0,
+            againstVotes: 0,
+            abstainVotes: 0,
+            executed: false,
+            canceled: false,
+            calldata: calldata,
+            target: target
+        });
+        
+        emit ProposalCreated(proposalId, msg.sender, description, startBlock, endBlock);
+        return proposalId;
+    }
+    
+    // Vote on a proposal
+    function castVote(
+        UInt256 proposalId,
+        UInt8 support // 0 = against, 1 = for, 2 = abstain
+    ) public {
+        require(support <= 2, "Invalid vote type");
+        require(proposals[proposalId].id == proposalId, "Proposal does not exist");
+        require(!proposals[proposalId].canceled, "Proposal is canceled");
+        require(!proposals[proposalId].executed, "Proposal already executed");
+        require(block.number >= proposals[proposalId].startBlock, "Voting not started");
+        require(block.number <= proposals[proposalId].endBlock, "Voting period ended");
+        require(!hasVoted[proposalId][msg.sender], "Already voted");
+        
+        // Get voter's token balance (would call tokenContract in real implementation)
+        // For now, assume 1 vote per address
+        UInt256 weight = 1;
+        
+        hasVoted[proposalId][msg.sender] = true;
+        votes[proposalId][msg.sender] = support;
+        
+        if (support == 1) {
+            proposals[proposalId].forVotes = proposals[proposalId].forVotes + weight;
+        } else if (support == 0) {
+            proposals[proposalId].againstVotes = proposals[proposalId].againstVotes + weight;
+        } else {
+            proposals[proposalId].abstainVotes = proposals[proposalId].abstainVotes + weight;
+        }
+        
+        emit VoteCast(proposalId, msg.sender, support, weight);
+    }
+    
+    // Vote with PQC signature (for off-chain voting)
+    @gas_cost(base: 75000, dilithium_verify: 35000)
+    function castVoteWithSignature(
+        UInt256 proposalId,
+        UInt8 support,
+        Address voter,
+        MLDSAPublicKey voterKey,
+        Bytes messageToSign,
+        MLDSASignature signature
+    ) public {
+        require(support <= 2, "Invalid vote type");
+        require(proposals[proposalId].id == proposalId, "Proposal does not exist");
+        require(!proposals[proposalId].canceled, "Proposal is canceled");
+        require(!proposals[proposalId].executed, "Proposal already executed");
+        require(block.number >= proposals[proposalId].startBlock, "Voting not started");
+        require(block.number <= proposals[proposalId].endBlock, "Voting period ended");
+        require(!hasVoted[proposalId][voter], "Already voted");
+        
+        // Verify PQC signature
+        require_pqc {
+            let isValid = verifyMLDSASignature(
+                voterKey,
+                messageToSign,
+                signature
+            );
+            require(isValid, "Invalid signature");
+        } or revert("PQC verification failed");
+        
+        UInt256 weight = 1; // Would get from token balance
+        
+        hasVoted[proposalId][voter] = true;
+        votes[proposalId][voter] = support;
+        
+        if (support == 1) {
+            proposals[proposalId].forVotes = proposals[proposalId].forVotes + weight;
+        } else if (support == 0) {
+            proposals[proposalId].againstVotes = proposals[proposalId].againstVotes + weight;
+        } else {
+            proposals[proposalId].abstainVotes = proposals[proposalId].abstainVotes + weight;
+        }
+        
+        emit VoteCast(proposalId, voter, support, weight);
+    }
+    
+    // Execute a proposal (requires governance signature)
+    @gas_cost(base: 100000, dilithium_verify: 35000)
+    function executeProposal(
+        UInt256 proposalId,
+        Bytes messageToSign,
+        MLDSASignature signature
+    ) public {
+        Proposal storage proposal = proposals[proposalId];
+        
+        require(proposal.id == proposalId, "Proposal does not exist");
+        require(!proposal.executed, "Proposal already executed");
+        require(!proposal.canceled, "Proposal is canceled");
+        require(block.number > proposal.endBlock, "Voting period not ended");
+        
+        // Check quorum
+        UInt256 totalVotes = proposal.forVotes + proposal.againstVotes + proposal.abstainVotes;
+        require(totalVotes >= quorum, "Quorum not met");
+        
+        // Check if proposal passed
+        require(proposal.forVotes > proposal.againstVotes, "Proposal did not pass");
+        
+        // Verify governance signature
+        require_pqc {
+            let isValid = verifyMLDSASignature(
+                governanceKey,
+                messageToSign,
+                signature
+            );
+            require(isValid, "Invalid governance signature");
+        } or revert("PQC verification failed");
+        
+        proposal.executed = true;
+        
+        // Execute proposal (would call target contract in real implementation)
+        // For now, just mark as executed
+        
+        emit ProposalExecuted(proposalId);
+    }
+    
+    // Cancel a proposal (only proposer or governance)
+    function cancelProposal(UInt256 proposalId) public {
+        Proposal storage proposal = proposals[proposalId];
+        
+        require(proposal.id == proposalId, "Proposal does not exist");
+        require(!proposal.executed, "Proposal already executed");
+        require(!proposal.canceled, "Proposal already canceled");
+        require(
+            msg.sender == proposal.proposer || msg.sender == Address(0), // Governance
+            "Not authorized to cancel"
+        );
+        
+        proposal.canceled = true;
+        emit ProposalCanceled(proposalId);
+    }
+    
+    // Update governance key (requires current governance signature)
+    @gas_cost(base: 100000, dilithium_verify: 35000)
+    function updateGovernanceKey(
+        MLDSAPublicKey newKey,
+        Bytes messageToSign,
+        MLDSASignature signature
+    ) public {
+        require_pqc {
+            let isValid = verifyMLDSASignature(
+                governanceKey,
+                messageToSign,
+                signature
+            );
+            require(isValid, "Invalid governance signature");
+        } or revert("PQC verification failed");
+        
+        governanceKey = newKey;
+        emit GovernanceKeyUpdated(newKey);
+    }
+    
+    // Update quorum (requires governance proposal)
+    @gas_cost(base: 100000, dilithium_verify: 35000)
+    function updateQuorum(
+        UInt256 newQuorum,
+        Bytes messageToSign,
+        MLDSASignature signature
+    ) public {
+        require_pqc {
+            let isValid = verifyMLDSASignature(
+                governanceKey,
+                messageToSign,
+                signature
+            );
+            require(isValid, "Invalid governance signature");
+        } or revert("PQC verification failed");
+        
+        UInt256 oldQuorum = quorum;
+        quorum = newQuorum;
+        emit QuorumUpdated(oldQuorum, newQuorum);
+    }
+    
+    // Get proposal details
+    function getProposal(UInt256 proposalId) public -> (
+        UInt256,
+        Address,
+        String,
+        UInt256,
+        UInt256,
+        UInt256,
+        UInt256,
+        UInt256,
+        Bool,
+        Bool
+    ) {
+        Proposal storage proposal = proposals[proposalId];
+        return (
+            proposal.id,
+            proposal.proposer,
+            proposal.description,
+            proposal.startBlock,
+            proposal.endBlock,
+            proposal.forVotes,
+            proposal.againstVotes,
+            proposal.abstainVotes,
+            proposal.executed,
+            proposal.canceled
+        );
+    }
+    
+    // Check if address has voted
+    function hasVotedOn(UInt256 proposalId, Address voter) public -> Bool {
+        return hasVoted[proposalId][voter];
+    }
+    
+    // Get vote for address
+    function getVote(UInt256 proposalId, Address voter) public -> UInt8 {
+        return votes[proposalId][voter];
+    }
+    
+    // Get proposal state
+    function getProposalState(UInt256 proposalId) public -> String {
+        Proposal storage proposal = proposals[proposalId];
+        
+        if (proposal.canceled) {
+            return "Canceled";
+        }
+        if (proposal.executed) {
+            return "Executed";
+        }
+        if (block.number < proposal.startBlock) {
+            return "Pending";
+        }
+        if (block.number <= proposal.endBlock) {
+            return "Active";
+        }
+        if (proposal.forVotes <= proposal.againstVotes) {
+            return "Defeated";
+        }
+        if ((proposal.forVotes + proposal.againstVotes + proposal.abstainVotes) < quorum) {
+            return "QuorumNotMet";
+        }
+        return "Succeeded";
+    }
+}

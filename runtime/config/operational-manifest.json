@@ -1,0 +1,31 @@
+{
+  "version": 3,
+  "environment_id": "testnet",
+  "release_id": "testnet-v3",
+  "display_name": "Synergy Testnet-v3",
+  "runtime_network_id": "synergy-testnet-v3",
+  "network_id": 1264,
+  "chain_id": 1264,
+  "launch_status": "BLOCKED_PENDING_FRESH_IDENTITIES_AND_SIGNED_GENESIS",
+  "source_topology": "config/testnet/network-topology.toml",
+  "token": {
+    "symbol": "SNRG",
+    "denom": "SNRG",
+    "decimals": 9
+  },
+  "bootstrap": {
+    "bootnodes": [],
+    "seed_servers": [],
+    "sentries": []
+  },
+  "validators": [],
+  "ports": {
+    "bootnode": 5620,
+    "seed_http": 5621,
+    "node_listener_base": 5622,
+    "rpc_base": 5640,
+    "ws_base": 5660,
+    "discovery_base": 5680,
+    "metrics_base": 6030
+  }
+}

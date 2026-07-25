@@ -1,0 +1,5 @@
+[metrics]
+enabled = true
+bind_address = "0.0.0.0:6030"
+node_exporter_bind_address = "0.0.0.0:9100"
+

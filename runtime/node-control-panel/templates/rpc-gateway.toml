@@ -1,0 +1,109 @@
+[identity]
+node_id = "rpc-gateway-01"
+role = "rpc_gateway"
+role_display = "rpc-gateway"
+address = ""
+label = "rpc-gateway-01"
+
+[role]
+compiled_profile = "rpc_gateway_node"
+services = []
+
+[network]
+id = 1264
+name = "synergy-testnet"
+p2p_port = 5623
+rpc_port = 5641
+ws_port = 5661
+max_peers = 100
+bootnodes = ["snr://bootstrap@bootnode1.synergynode.xyz:5620", "snr://bootstrap@bootnode2.synergynode.xyz:5620", "snr://bootstrap@bootnode3.synergynode.xyz:5620"]
+seed_servers = ["http://seed1.synergynode.xyz:5621", "http://seed2.synergynode.xyz:5621", "http://seed3.synergynode.xyz:5621"]
+bootstrap_dns_records = ["_dnsaddr.bootstrap.synergynode.xyz"]
+additional_dial_targets = ["relay1.synergynode.xyz:5622", "relay2.synergynode.xyz:5622", "62.146.182.207:5622", "62.146.182.208:5622", "62.146.182.209:5622", "73.79.66.255:5622", "194.163.183.166:5622", "157.173.192.45:5622", "archive.synergynode.xyz:5615", "209.145.50.9:5622"]
+persistent_peers = ["relay1.synergynode.xyz:5622", "relay2.synergynode.xyz:5622", "62.146.182.207:5622", "62.146.182.208:5622", "62.146.182.209:5622", "73.79.66.255:5622", "194.163.183.166:5622", "157.173.192.45:5622", "archive.synergynode.xyz:5615", "209.145.50.9:5622"]
+
+[blockchain]
+block_time = 2
+max_gas_limit = "0x2fefd8"
+chain_id = 1264
+
+[consensus]
+algorithm = "Proof of Synergy"
+block_time_secs = 2
+epoch_length = 1000
+emergency_stable_committee_mode = false
+freeze_validator_set = false
+freeze_score_weighted_proposer_order = false
+vote_only_rejoin_enabled = true
+vote_only_probation_blocks = 1000
+min_validators = 4
+validator_cluster_size = 6
+validator_vote_threshold = 0
+max_validators = 0
+status_ready_gate_enabled = true
+status_ready_min_validators = 4
+status_ready_genesis_grace_secs = 0
+allow_genesis_status_bypass = false
+mesh_settle_secs = 1
+leader_timeout_secs = 4
+vote_timeout_secs = 2
+block_timeout_secs = 6
+penalization_enabled = false
+synergy_score_decay_rate = 0.05
+vrf_enabled = false
+vrf_seed_epoch_interval = 1000
+max_synergy_points_per_epoch = 100
+max_tasks_per_validator = 10
+
+[consensus.reward_weighting]
+task_accuracy = 0.5
+uptime = 0.3
+collaboration = 0.2
+
+[logging]
+log_level = "debug"
+log_file = "data/logs/rpc-gateway.log"
+enable_console = true
+max_file_size = 10485760
+max_files = 5
+
+[rpc]
+bind_address = "127.0.0.1:5641"
+enable_http = true
+http_port = 5641
+enable_ws = true
+ws_port = 5661
+enable_grpc = true
+grpc_port = 5641
+cors_enabled = false
+cors_origins = []
+
+[p2p]
+listen_address = "0.0.0.0:5623"
+public_address = "rpc.synergynode.xyz:5623"
+node_name = "rpc-gateway-01"
+enable_discovery = false
+discovery_port = 5681
+discovery_listen_address = "0.0.0.0:5681"
+discovery_public_address = "rpc.synergynode.xyz:5681"
+heartbeat_interval = 10
+bootstrap_refresh_secs = 3600
+
+[storage]
+database = "rocksdb"
+path = "data/chain"
+enable_pruning = true
+pruning_interval = 86400
+
+[node]
+bootstrap_only = false
+auto_register_validator = false
+validator_address = ""
+strict_validator_allowlist = false
+allowed_validator_addresses = ["synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs", "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt", "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re", "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5", "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f", "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx"]
+
+[telemetry]
+enabled = true
+metrics_bind = "127.0.0.1:6031"
+structured_logs = true
+log_level = "debug"

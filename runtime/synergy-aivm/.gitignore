@@ -1,0 +1,83 @@
+# Rust
+**/target/
+**/*.rs.bk
+
+# Node.js / TypeScript
+**/node_modules/
+**/.npm/
+**/.pnpm-store/
+**/.yarn/cache/
+**/.yarn/unplugged/
+**/dist/
+**/build/
+**/.next/
+**/.nuxt/
+**/.parcel-cache/
+**/.turbo/
+**/coverage/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Python
+**/__pycache__/
+*.py[cod]
+*$py.class
+**/.venv/
+**/venv/
+**/env/
+**/ENV/
+**/.eggs/
+**/*.egg-info/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.tox/
+**/.nox/
+**/htmlcov/
+.coverage
+.coverage.*
+pip-wheel-metadata/
+
+# Go
+*.test
+*.prof
+coverage.out
+
+# Logs, runtime state, and temporary files
+*.log
+logs/
+*.pid
+*.tmp
+tmp/
+temp/
+.cache/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Editors
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+*.swp
+*.swo
+*.bak
+*~
+
+# Operating systems
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini

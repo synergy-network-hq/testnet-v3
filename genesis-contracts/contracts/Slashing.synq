@@ -1,0 +1,129 @@
+// Testnet-v3 validator slashing coordinator.
+// Reason: 0=DoubleSign, 1=Downtime, 2=InvalidBlock.
+pragma synq ^1.0.0;
+
+contract Slashing {
+    governanceKey: MLDSAPublicKey public;
+    validatorRegistry: Address public;
+    stakingContract: Address public;
+    slashingAuthority: Address public;
+    paused: Bool public;
+
+    doubleSignSlashBps: UInt256 public;
+    downtimeSlashBps: UInt256 public;
+    invalidBlockSlashBps: UInt256 public;
+    downtimeMissedBlocksThreshold: UInt256 public;
+    jailDurationBlocks: UInt256 public;
+
+    event SlashingAuthorityUpdated(oldAuthority: Address indexed, newAuthority: Address indexed);
+    event ValidatorSlashed(validator: Address indexed, reason: UInt8, requestedAmount: UInt256, actualSlashed: UInt256);
+    event ValidatorJailedBySlashing(validator: Address indexed, untilHeight: UInt256);
+    event ValidatorTombstonedBySlashing(validator: Address indexed);
+    event PauseStateUpdated(paused: Bool);
+
+    constructor(
+        initialGovernanceKey: MLDSAPublicKey,
+        registry: Address,
+        staking: Address,
+        initialSlashingAuthority: Address,
+        initialDoubleSignSlashBps: UInt256,
+        initialDowntimeSlashBps: UInt256,
+        initialInvalidBlockSlashBps: UInt256,
+        missedBlocksThreshold: UInt256,
+        jailBlocks: UInt256
+    ) {
+        require(registry != Address(0), "Invalid validator registry");
+        require(staking != Address(0), "Invalid staking contract");
+        require(initialSlashingAuthority != Address(0), "Invalid slashing authority");
+        require(initialDoubleSignSlashBps <= 10000, "Invalid double-sign rate");
+        require(initialDowntimeSlashBps <= 10000, "Invalid downtime rate");
+        require(initialInvalidBlockSlashBps <= 10000, "Invalid invalid-block rate");
+        governanceKey = initialGovernanceKey;
+        validatorRegistry = registry;
+        stakingContract = staking;
+        slashingAuthority = initialSlashingAuthority;
+        doubleSignSlashBps = initialDoubleSignSlashBps;
+        downtimeSlashBps = initialDowntimeSlashBps;
+        invalidBlockSlashBps = initialInvalidBlockSlashBps;
+        downtimeMissedBlocksThreshold = missedBlocksThreshold;
+        jailDurationBlocks = jailBlocks;
+        paused = false;
+    }
+
+    @gas_cost(base: 150000)
+    @public function slashForDoubleSign(validator: Address) {
+        requireAuthorized();
+        slashAndPunish(validator, 0, doubleSignSlashBps, true, true);
+    }
+
+    @gas_cost(base: 140000)
+    @public function slashForDowntime(validator: Address, missedBlocks: UInt256) {
+        requireAuthorized();
+        require(missedBlocks >= downtimeMissedBlocksThreshold, "Downtime threshold not met");
+        slashAndPunish(validator, 1, downtimeSlashBps, true, false);
+    }
+
+    @gas_cost(base: 140000)
+    @public function slashForInvalidBlock(validator: Address) {
+        requireAuthorized();
+        slashAndPunish(validator, 2, invalidBlockSlashBps, true, false);
+    }
+
+    @gas_cost(base: 25000)
+    function requireAuthorized() internal {
+        require(!paused, "Slashing paused");
+        require(msg.sender == slashingAuthority, "Unauthorized");
+    }
+
+    @gas_cost(base: 110000)
+    function slashAndPunish(
+        validator: Address,
+        reason: UInt8,
+        slashBps: UInt256,
+        jail: Bool,
+        tombstone: Bool
+    ) internal {
+        require(registryIsKnownValidator(validatorRegistry, validator), "Validator not found");
+        let selfStake: UInt256 = registryValidatorSelfStake(validatorRegistry, validator);
+        let requestedAmount: UInt256 = selfStake * slashBps / 10000;
+        let actualSlashed: UInt256 = stakingSlashSelfStake(stakingContract, validator, requestedAmount);
+        registryReduceSelfStake(validatorRegistry, validator, actualSlashed);
+        emit ValidatorSlashed(validator, reason, requestedAmount, actualSlashed);
+
+        if (jail) {
+            let untilHeight: UInt256 = block.number + jailDurationBlocks;
+            registryJailValidator(validatorRegistry, validator, untilHeight);
+            emit ValidatorJailedBySlashing(validator, untilHeight);
+        }
+        if (tombstone) {
+            registryTombstoneValidator(validatorRegistry, validator);
+            emit ValidatorTombstonedBySlashing(validator);
+        }
+    }
+
+    @gas_cost(base: 95000, mldsa_verify: 35000)
+    @public function setSlashingAuthority(
+        newAuthority: Address,
+        message: Bytes,
+        signature: MLDSASignature
+    ) {
+        require(newAuthority != Address(0), "Invalid slashing authority");
+        require_pqc {
+            let valid: Bool = verifyMLDSASignature(governanceKey, message, signature);
+            require(valid, "Invalid governance signature");
+        } or revert("PQC verification failed");
+        let oldAuthority: Address = slashingAuthority;
+        slashingAuthority = newAuthority;
+        emit SlashingAuthorityUpdated(oldAuthority, newAuthority);
+    }
+
+    @gas_cost(base: 90000, mldsa_verify: 35000)
+    @public function setPaused(newPaused: Bool, message: Bytes, signature: MLDSASignature) {
+        require_pqc {
+            let valid: Bool = verifyMLDSASignature(governanceKey, message, signature);
+            require(valid, "Invalid governance signature");
+        } or revert("PQC verification failed");
+        paused = newPaused;
+        emit PauseStateUpdated(newPaused);
+    }
+}

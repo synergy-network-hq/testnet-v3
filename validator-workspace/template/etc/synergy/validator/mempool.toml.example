@@ -1,0 +1,6 @@
+[mempool]
+data_dir = "/var/lib/synergy/validator/mempool"
+max_pending_transactions = 10000
+max_transaction_bytes = 1048576
+flush_interval_ms = 250
+

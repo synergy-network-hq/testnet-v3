@@ -1,0 +1,27 @@
+# Synergy Testnet Archive Validator M4 WireGuard template.
+# This is intentionally not deployable until every placeholder is replaced with
+# live WireGuard key material and hub endpoint data.
+#
+# Fixed archive-validator values:
+# - VPN IP: 10.69.0.220/32
+# - Internal WireGuard listen port: 51820/udp
+# - Public NAT endpoint for hub/server peers: 73.79.66.255:51819/udp
+#
+# NAT requirement:
+# - Forward external UDP 51819 on 73.79.66.255 to this M4 host's internal
+#   WireGuard UDP port 51820. This avoids colliding with Validator 4 on the
+#   shared public IP.
+
+[Interface]
+Address = 10.69.0.220/32
+ListenPort = 51820
+PrivateKey = ARCHIVE_VALIDATOR_M4_PRIVATE_KEY_BASE64
+
+# Add one peer block per existing WireGuard hub/server after pulling live hub
+# public keys and endpoints from the current production WireGuard config.
+[Peer]
+# Name = HUB_OR_SERVER_LABEL
+PublicKey = HUB_OR_SERVER_PUBLIC_KEY_BASE64
+Endpoint = HUB_OR_SERVER_PUBLIC_ENDPOINT:51820
+AllowedIPs = 10.69.0.0/24
+PersistentKeepalive = 25

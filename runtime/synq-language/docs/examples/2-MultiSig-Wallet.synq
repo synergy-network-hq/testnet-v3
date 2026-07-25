@@ -1,0 +1,335 @@
+// Post-Quantum Multi-Signature Wallet
+// Requires multiple PQC signatures to execute transactions
+
+pragma synq ^1.0.0;
+
+contract PQCMultiSigWallet {
+    // Wallet configuration
+    Address[] public owners;
+    UInt256 public requiredSignatures;
+    UInt256 public nonce;
+    
+    // Transaction structure
+    struct Transaction {
+        Address to;
+        UInt256 value;
+        Bytes data;
+        Bool executed;
+        UInt256 confirmations;
+    }
+    
+    // Transaction storage
+    mapping(UInt256 => Transaction) public transactions;
+    mapping(UInt256 => mapping(Address => Bool)) public confirmations;
+    mapping(Address => MLDSAPublicKey) public ownerKeys;
+    
+    UInt256 public transactionCount;
+    
+    // Events
+    event Deposit(Address indexed sender, UInt256 value);
+    event TransactionSubmitted(UInt256 indexed txId, Address indexed to, UInt256 value);
+    event TransactionConfirmed(UInt256 indexed txId, Address indexed owner);
+    event TransactionExecuted(UInt256 indexed txId);
+    event OwnerAdded(Address indexed owner, MLDSAPublicKey key);
+    event OwnerRemoved(Address indexed owner);
+    event RequiredSignaturesChanged(UInt256 oldRequired, UInt256 newRequired);
+    
+    // Modifiers
+    function isOwner(Address addr) private -> Bool {
+        for (i in 0..owners.length) {
+            if (owners[i] == addr) {
+                return true;
+            }
+        }
+        return false;
+    }
+    
+    // Constructor
+    constructor(
+        Address[] _owners,
+        MLDSAPublicKey[] _ownerKeys,
+        UInt256 _requiredSignatures
+    ) {
+        require(_owners.length > 0, "No owners provided");
+        require(_requiredSignatures > 0, "Required signatures must be > 0");
+        require(_requiredSignatures <= _owners.length, "Too many required signatures");
+        require(_owners.length == _ownerKeys.length, "Owners and keys length mismatch");
+        
+        owners = _owners;
+        requiredSignatures = _requiredSignatures;
+        nonce = 0;
+        transactionCount = 0;
+        
+        for (i in 0.._owners.length) {
+            ownerKeys[_owners[i]] = _ownerKeys[i];
+        }
+    }
+    
+    // Receive funds
+    function deposit() public {
+        emit Deposit(msg.sender, msg.value);
+    }
+    
+    // Submit a transaction
+    function submitTransaction(
+        Address to,
+        UInt256 value,
+        Bytes data
+    ) public -> UInt256 {
+        require(isOwner(msg.sender), "Not an owner");
+        require(to != Address(0), "Invalid recipient");
+        
+        UInt256 txId = transactionCount;
+        transactionCount = transactionCount + 1;
+        
+        transactions[txId] = Transaction({
+            to: to,
+            value: value,
+            data: data,
+            executed: false,
+            confirmations: 0
+        });
+        
+        emit TransactionSubmitted(txId, to, value);
+        return txId;
+    }
+    
+    // Confirm transaction with PQC signature
+    @gas_cost(base: 75000, dilithium_verify: 35000)
+    function confirmTransaction(
+        UInt256 txId,
+        Bytes messageToSign,
+        MLDSASignature signature
+    ) public {
+        require(isOwner(msg.sender), "Not an owner");
+        require(transactions[txId].to != Address(0), "Transaction does not exist");
+        require(!transactions[txId].executed, "Transaction already executed");
+        require(!confirmations[txId][msg.sender], "Transaction already confirmed");
+        
+        // Verify PQC signature
+        require_pqc {
+            let isValid = verifyMLDSASignature(
+                ownerKeys[msg.sender],
+                messageToSign,
+                signature
+            );
+            require(isValid, "Invalid signature");
+        } or revert("PQC verification failed");
+        
+        confirmations[txId][msg.sender] = true;
+        transactions[txId].confirmations = transactions[txId].confirmations + 1;
+        
+        emit TransactionConfirmed(txId, msg.sender);
+        
+        // Auto-execute if enough confirmations
+        if (transactions[txId].confirmations >= requiredSignatures) {
+            executeTransaction(txId);
+        }
+    }
+    
+    // Execute transaction
+    function executeTransaction(UInt256 txId) private {
+        require(!transactions[txId].executed, "Transaction already executed");
+        require(transactions[txId].confirmations >= requiredSignatures, "Not enough confirmations");
+        
+        Transaction storage tx = transactions[txId];
+        tx.executed = true;
+        
+        // Execute the transaction
+        // In a real implementation, this would call the target contract
+        // For now, we just mark it as executed
+        
+        emit TransactionExecuted(txId);
+    }
+    
+    // Revoke confirmation
+    function revokeConfirmation(UInt256 txId) public {
+        require(isOwner(msg.sender), "Not an owner");
+        require(transactions[txId].to != Address(0), "Transaction does not exist");
+        require(!transactions[txId].executed, "Transaction already executed");
+        require(confirmations[txId][msg.sender], "Transaction not confirmed");
+        
+        confirmations[txId][msg.sender] = false;
+        transactions[txId].confirmations = transactions[txId].confirmations - 1;
+    }
+    
+    // Add owner (requires governance)
+    @gas_cost(base: 100000, dilithium_verify: 35000)
+    function addOwner(
+        Address newOwner,
+        MLDSAPublicKey newOwnerKey,
+        Bytes messageToSign,
+        MLDSASignature[] signatures
+    ) public {
+        require(!isOwner(newOwner), "Already an owner");
+        require(newOwner != Address(0), "Invalid owner address");
+        require(signatures.length >= requiredSignatures, "Not enough signatures");
+        
+        // Verify all signatures
+        require_pqc {
+            UInt256 validSignatures = 0;
+            for (i in 0..signatures.length) {
+                if (i < owners.length) {
+                    let isValid = verifyMLDSASignature(
+                        ownerKeys[owners[i]],
+                        messageToSign,
+                        signatures[i]
+                    );
+                    if (isValid) {
+                        validSignatures = validSignatures + 1;
+                    }
+                }
+            }
+            require(validSignatures >= requiredSignatures, "Not enough valid signatures");
+        } or revert("PQC verification failed");
+        
+        owners.push(newOwner);
+        ownerKeys[newOwner] = newOwnerKey;
+        
+        emit OwnerAdded(newOwner, newOwnerKey);
+    }
+    
+    // Remove owner (requires governance)
+    @gas_cost(base: 100000, dilithium_verify: 35000)
+    function removeOwner(
+        Address ownerToRemove,
+        Bytes messageToSign,
+        MLDSASignature[] signatures
+    ) public {
+        require(isOwner(ownerToRemove), "Not an owner");
+        require(owners.length - 1 >= requiredSignatures, "Would violate required signatures");
+        require(signatures.length >= requiredSignatures, "Not enough signatures");
+        
+        // Verify all signatures
+        require_pqc {
+            UInt256 validSignatures = 0;
+            for (i in 0..signatures.length) {
+                if (i < owners.length) {
+                    let isValid = verifyMLDSASignature(
+                        ownerKeys[owners[i]],
+                        messageToSign,
+                        signatures[i]
+                    );
+                    if (isValid) {
+                        validSignatures = validSignatures + 1;
+                    }
+                }
+            }
+            require(validSignatures >= requiredSignatures, "Not enough valid signatures");
+        } or revert("PQC verification failed");
+        
+        // Remove owner
+        for (i in 0..owners.length) {
+            if (owners[i] == ownerToRemove) {
+                // Remove from array (simplified - in real implementation use proper array removal)
+                owners[i] = owners[owners.length - 1];
+                owners.pop();
+                break;
+            }
+        }
+        
+        emit OwnerRemoved(ownerToRemove);
+    }
+    
+    // Replace owner (requires governance)
+    @gas_cost(base: 100000, dilithium_verify: 35000)
+    function replaceOwner(
+        Address oldOwner,
+        Address newOwner,
+        MLDSAPublicKey newOwnerKey,
+        Bytes messageToSign,
+        MLDSASignature[] signatures
+    ) public {
+        require(isOwner(oldOwner), "Old owner not found");
+        require(!isOwner(newOwner), "New owner already exists");
+        require(newOwner != Address(0), "Invalid new owner");
+        require(signatures.length >= requiredSignatures, "Not enough signatures");
+        
+        // Verify all signatures
+        require_pqc {
+            UInt256 validSignatures = 0;
+            for (i in 0..signatures.length) {
+                if (i < owners.length) {
+                    let isValid = verifyMLDSASignature(
+                        ownerKeys[owners[i]],
+                        messageToSign,
+                        signatures[i]
+                    );
+                    if (isValid) {
+                        validSignatures = validSignatures + 1;
+                    }
+                }
+            }
+            require(validSignatures >= requiredSignatures, "Not enough valid signatures");
+        } or revert("PQC verification failed");
+        
+        // Replace owner
+        for (i in 0..owners.length) {
+            if (owners[i] == oldOwner) {
+                owners[i] = newOwner;
+                ownerKeys[newOwner] = newOwnerKey;
+                // Clear old owner key (optional)
+                break;
+            }
+        }
+        
+        emit OwnerRemoved(oldOwner);
+        emit OwnerAdded(newOwner, newOwnerKey);
+    }
+    
+    // Change required signatures (requires governance)
+    @gas_cost(base: 100000, dilithium_verify: 35000)
+    function changeRequiredSignatures(
+        UInt256 newRequired,
+        Bytes messageToSign,
+        MLDSASignature[] signatures
+    ) public {
+        require(newRequired > 0, "Required must be > 0");
+        require(newRequired <= owners.length, "Too many required");
+        require(signatures.length >= requiredSignatures, "Not enough signatures");
+        
+        // Verify all signatures
+        require_pqc {
+            UInt256 validSignatures = 0;
+            for (i in 0..signatures.length) {
+                if (i < owners.length) {
+                    let isValid = verifyMLDSASignature(
+                        ownerKeys[owners[i]],
+                        messageToSign,
+                        signatures[i]
+                    );
+                    if (isValid) {
+                        validSignatures = validSignatures + 1;
+                    }
+                }
+            }
+            require(validSignatures >= requiredSignatures, "Not enough valid signatures");
+        } or revert("PQC verification failed");
+        
+        UInt256 oldRequired = requiredSignatures;
+        requiredSignatures = newRequired;
+        
+        emit RequiredSignaturesChanged(oldRequired, newRequired);
+    }
+    
+    // Get transaction details
+    function getTransaction(UInt256 txId) public -> (Address, UInt256, Bytes, Bool, UInt256) {
+        Transaction storage tx = transactions[txId];
+        return (tx.to, tx.value, tx.data, tx.executed, tx.confirmations);
+    }
+    
+    // Check if transaction is confirmed by owner
+    function isConfirmedBy(UInt256 txId, Address owner) public -> Bool {
+        return confirmations[txId][owner];
+    }
+    
+    // Get owners list
+    function getOwners() public -> Address[] {
+        return owners;
+    }
+    
+    // Get owner count
+    function getOwnerCount() public -> UInt256 {
+        return owners.length;
+    }
+}

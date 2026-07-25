@@ -1,0 +1,14 @@
+[wasm-pack]
+# Override default memory settings
+[wasm-pack.profile.release]
+wasm-opt = false
+wasm-bindgen = { version = "0.2" }
+
+# Custom linker arguments for memory configuration
+[wasm-pack.target.web]
+wasm-bindgen = { version = "0.2" }
+wasm-opt = false
+
+# Force our memory settings
+[wasm-pack.target.web.rustflags]
+link-arg = ["--initial-memory=4194304", "--max-memory=4194304"]

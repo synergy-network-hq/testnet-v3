@@ -1,0 +1,17 @@
+[package]
+name = "aivm-core"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["synq"]
+synq = ["dep:quantumvm"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+wasmtime = "45.0.2"
+log = "0.4"
+anyhow = "1.0"
+sha2 = "0.10"
+quantumvm = { path = "../../../synq-language/vm", optional = true }

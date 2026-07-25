@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.synergynetwork.archive-snapshot-worker</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/synergy/bin/synergy-archive</string>
+    <string>worker</string>
+    <string>--root</string>
+    <string>/Volumes/Synergy_Archive/archive-validator</string>
+    <string>--publish-root</string>
+    <string>/Volumes/Synergy_Archive/archive-validator/snapshots</string>
+    <string>--runtime</string>
+    <string>/usr/local/synergy/bin/synergy-archive-validator-node</string>
+    <string>--aegis</string>
+    <string>/usr/local/synergy/bin/aegis-pqvm</string>
+    <string>--workspace</string>
+    <string>/Volumes/Synergy_Archive/archive-validator/workspace</string>
+    <string>--majority-proof-marker</string>
+    <string>/Volumes/Synergy_Archive/archive-validator/evidence/source-majority-branch-proven.json</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/synergy/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>SYNERGY_ARCHIVE_CONFIG</key>
+    <string>/Volumes/Synergy_Archive/archive-validator/config/archive-validator.toml</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+  <key>StandardOutPath</key>
+  <string>/Volumes/Synergy_Archive/archive-validator/logs/snapshot-worker.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Volumes/Synergy_Archive/archive-validator/logs/snapshot-worker.err.log</string>
+</dict>
+</plist>

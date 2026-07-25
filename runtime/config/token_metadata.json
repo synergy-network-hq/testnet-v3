@@ -1,0 +1,17 @@
+{
+  "name": "Synergy Token",
+  "symbol": "SNRG",
+  "decimals": 9,
+  "initial_supply": "7200000000000000000",
+  "contract_address": "0x52b2b0be5f84617ad412700cf0ae7e1a7fdcf00d",
+  "token_address": "0x47bb43a24c5f19c30dd0f9ff64d2cb38ac6efeb3",
+  "wallet_address": "0x3512a14ecbe76ee1b002ab00747dbd8a14644858",
+  "mint_authority": "0x1f845a1813a066d0dfedc1e8f9a3a6cdcae15c88",
+  "update_authority": "0xd2fc7fa336df6b9e7398cb2a67e1dcac6790bbac",
+  "uma": {
+    "universal_meta_address": "uma1f27d5d2be6c4e471add98b01f65e3f7096f1ce189a37ef12d2c1b2ad439c69df"
+  },
+  "sns": {
+    "synergy_name_service_id": "sns1b5acccaa535a4d927a21169ae0c4e2b820d92f9610d7cde68aa42041060de87"
+  }
+}

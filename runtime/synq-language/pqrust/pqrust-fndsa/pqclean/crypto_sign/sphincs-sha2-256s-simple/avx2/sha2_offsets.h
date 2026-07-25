@@ -1,0 +1,22 @@
+#ifndef SHA2_OFFSETS_H_
+#define SHA2_OFFSETS_H_
+
+#define SPX_SHA256_BLOCK_BYTES 64
+#define SPX_SHA256_OUTPUT_BYTES 32
+
+#define SPX_SHA512_BLOCK_BYTES 128
+#define SPX_SHA512_OUTPUT_BYTES 64
+
+#define SPX_OFFSET_LAYER     0   
+#define SPX_OFFSET_TREE      1   
+#define SPX_OFFSET_TYPE      9   
+#define SPX_OFFSET_KP_ADDR2  12  
+#define SPX_OFFSET_KP_ADDR1  13  
+#define SPX_OFFSET_CHAIN_ADDR 17  
+#define SPX_OFFSET_HASH_ADDR 21  
+#define SPX_OFFSET_TREE_HGT  17  
+#define SPX_OFFSET_TREE_INDEX 18 
+
+#define SPX_SHA2 1
+
+#endif 

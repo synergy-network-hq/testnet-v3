@@ -1,0 +1,38 @@
+groups:
+  - name: synergy-testnet-health
+    rules:
+      - alert: SynergyNodeDown
+        expr: synergy_node_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Synergy node is down"
+          description: "Node {{ $labels.node }} has failed RPC health checks for at least 2 minutes."
+
+      - alert: SynergyDeterminismMismatch
+        expr: synergy_determinism_match == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "State root mismatch detected"
+          description: "Node {{ $labels.node }} diverged from the reference state root."
+
+      - alert: SynergyLowPeerCount
+        expr: synergy_peer_count < 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low peer count"
+          description: "Node {{ $labels.node }} is below expected peer count threshold."
+
+      - alert: SynergySlowBlockTime
+        expr: synergy_avg_block_time_seconds > 4
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Block production slowed"
+          description: "Average block time exceeds 4 seconds on node {{ $labels.node }}."

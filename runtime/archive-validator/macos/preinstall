@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+for label in \
+  io.synergynetwork.archive-snapshot-worker \
+  io.synergynetwork.archive-snapshot-api \
+  io.synergynetwork.archive-validator
+do
+  launchctl bootout "system/${label}" >/dev/null 2>&1 || true
+done

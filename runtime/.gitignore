@@ -1,0 +1,69 @@
+# Dependency and build directories
+node_modules/
+target/
+target 2/
+tmp/
+.tmp-docx-venv/
+.venv-docs/
+
+# Runtime data
+data/*
+!data/.gitkeep
+logs/
+**/logs/
+
+# Generated secrets and machine-local config
+config/**/*.key
+config/**/*.pem
+config/**/identity.json
+config/testnet_wallets.json
+testnet/runtime/keys/*
+!testnet/runtime/keys/README.md
+testnet/runtime/hosts.env
+testnet/runtime/installers/
+testnet/runtime/reports/
+
+# Local workspace copies and generated app builds
+tools/control-panel-workspace-files-copies/
+bootstrap-bundles/*/bin/
+node-control-panel/binaries/
+node-control-panel/testnet/runtime/installers/
+release-artifacts/v*/
+release-artifacts/wallet-pqc-cli-testnet-team*/
+
+# Build artifacts
+*.o
+*.so
+*.a
+*.dylib
+*.dll
+*.exe
+.release-cache/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+archive-validator/dist/
+archive-validator/synergy-archive-validator-testnet-v3*.zip
+
+# Temporary files
+*.log
+*.log.*
+*.tmp
+*.swp
+.DS_Store
+outputs/*-status-pre-v19.0.48.md
+
+# Editor settings
+.vscode/
+
+# Docker and env files
+docker-compose.override.yml
+.env
+
+# Databases
+db.sqlite
+*.db
+
+# Compiled Solidity artifacts
+artifacts/
+cache/

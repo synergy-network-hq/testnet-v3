@@ -1,0 +1,15 @@
+node_slot_id,node_alias,role,node_type,address_class,address
+Node-0A,bootnode1,bootnode,bootnode,5,synv514k0lvnx60hnxnd2vq7sg2g3hzpx4m38gw0p
+Node-0B,bootnode2,bootnode,bootnode,5,synv51srfsjjkcryr8prhzv4z43jt795s007nfs7p
+Node-0C,bootnode3,bootnode,bootnode,5,synv51nl5c8wduvlahq6005c3h7sxusca4xzzh9xj
+Node-EXP,genesisindexer,indexer,indexer,5,synv5173scgewnz97w5msuneuznpl7wjc2spggy4m
+Node-RPC,genesisrpc,rpc-gateway,rpc-gateway,5,synv51crtslt548kc9f7p79kkq3srgnxaevms80kx
+Node-REL1,relayer1,relayer,relayer,2,synv21ga3nsdjagzt9pmks4mzjq4vdjyngdwq6jst632
+Node-REL2,relayer2,relayer,relayer,2,synv21xaqlq808sunuchd0jwr4m324h85fza2ps3s4k7
+Node-REL3,relayer3,relayer,relayer,2,synv215vg7ayyhs6yyramp0wy8n6yhg6m35qar2jp
+Validator-01,validator1,validator,validator,1,synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs
+Validator-02,validator2,validator,validator,1,synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt
+Validator-03,validator3,validator,validator,1,synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re
+Validator-04,validator4,validator,validator,1,synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5
+Validator-05,validator5,validator,validator,1,synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f
+Validator-06,validator6,validator,validator,1,synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx

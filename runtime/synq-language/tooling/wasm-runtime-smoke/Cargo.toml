@@ -1,0 +1,11 @@
+[package]
+name = "wasm-runtime-smoke"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+pqc-aegis = ["dep:pqsynq"]
+
+[dependencies]
+pqsynq = { package = "aegis-pqsynq", path = "../../aegis-pqsynq/pqsynq", features = ["full"], optional = true }

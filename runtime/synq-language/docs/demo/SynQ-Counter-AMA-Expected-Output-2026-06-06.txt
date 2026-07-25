@@ -1,0 +1,80 @@
+Environment check: PASS
+synq_language_root=/Volumes/xcode/Synergy-Network-Projects/synq-language
+testnet_root=/Users/devpup/Desktop/Testnet-Beta/synergy-testnet
+aivm_core_root=/Volumes/xcode/Synergy-Network-Projects/synergy-aivm/runtime/aivm-core
+cargo_target_dir=/Users/devpup/Desktop/Testnet-Beta/synergy-testnet/target
+cargo_build_jobs=2
+
+[1/9] Build deterministic Counter artifacts
+synq_build: PASS
+source_path=/Volumes/xcode/Synergy-Network-Projects/synq-language/contracts/Counter.synq
+bytecode_path=/Volumes/xcode/Synergy-Network-Projects/synq-language/contracts/Counter.compiled.synq
+abi_path=/Volumes/xcode/Synergy-Network-Projects/synq-language/contracts/Counter.abi.json
+manifest_path=/Volumes/xcode/Synergy-Network-Projects/synq-language/contracts/Counter.manifest.json
+bytecode_hash=6b8b2d0d1433c0c4941bfc41054a58a004e9cc46e475926f0f70d3d309e92533
+abi_hash=ea9c1f48cad5f0d39d299d854ba578f6909a8475093aa8c616b1ee186c599b26
+manifest_hash=6334f5a98926f3c5eeb4f9337a9602841e5cc9b77b59f0e648203a296d290332
+chain_id=1264
+network_id=synergy-testnet
+normalized_network=synergy-testnet-v3 -> synergy-testnet
+signature_algorithm=ML-DSA-65
+
+[2/9] Verify compiler artifact fixtures
+compiler_artifact_tests: PASS
+
+[3/9] Verify pqsynq deploy/call gates
+pqsynq_verifier_tests: PASS
+deploy_verification=PASS
+call_verification=PASS
+
+[4/9] Exercise pqsynq-backed CLI deploy and call envelopes
+synq_cli_keygen: PASS
+synq_cli_sign_deploy: PASS
+synq_cli_verify_deploy: PASS
+synq_cli_sign_call_increment: PASS
+synq_cli_verify_call_increment: PASS
+synq_cli_sign_call_get: PASS
+synq_cli_verify_call_get: PASS
+cli_keygen=PASS
+cli_deploy_envelope_verified=PASS
+cli_increment_call_envelope_verified=PASS
+cli_get_call_envelope_verified=PASS
+cli_private_key_output=TEMPORARY_LOCAL_FILE_ONLY
+
+[5/9] Verify Model B admission and structured negative paths
+synq_admission_positive_and_negative_tests: PASS
+wrong_chain_error=AEGIS-CHAIN
+wrong_domain_error=AEGIS-DOMAIN
+invalid_signature_error=AEGIS-SIG
+malformed_carrier_error=AEGIS-CANON
+
+[6/9] Admit generated Counter hashes through pqsynq then pqvm
+counter_artifact_linked_pqsynq_then_pqvm: PASS
+aegis_pqvm_outer_admission=PASS
+
+[7/9] Verify receipt summary preservation
+receipt_preserves_synq_verification_summary: PASS
+
+[8/9] Run local quantumvm-backed AIVM Counter overlay
+execution_mode=local-quantumvm-backed-aivm
+counter_before=0
+counter_increment_return=1
+counter_get_return=1
+state_root=1bd01d6d3270341d2f6613b4de853e840575be6b82d71fccd8dd7da751fa344c
+ordinary_gas_used=31
+pq_gas_used=50000
+receipt_hash=f5b8e3bde36244ea08aea937abca982db2b78d48ab3ad7162a503686202cb39c
+
+[9/9] Write visual demo board
+visual_demo=/Volumes/xcode/Synergy-Network-Projects/synq-language/docs/demo/SynQ-Counter-AMA-Demo-Visual.html
+
+What this proves:
+- Counter source builds to deterministic SynQ bytecode, ABI, and manifest artifacts.
+- SynQ CLI keygen, sign-deploy, verify-deploy, sign-call, and verify-call run through aegis-pqsynq.
+- Real ML-DSA-65 pqsynq deploy/call verification runs before existing pqvm outer admission.
+- Local AIVM state overlay records Counter 0 -> 1, reports ordinary gas and PQ-Gas separately, and emits a deterministic receipt hash.
+
+What this does not prove:
+- No public RPC listener or live TESTNET deploy/call was exercised.
+- Public AIVM RPC handlers remain disabled.
+- Persisted chain storage, explorer indexing, and production audit readiness remain pending.

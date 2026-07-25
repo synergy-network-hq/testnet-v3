@@ -1,0 +1,74 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Dependencies
+node_modules
+package-lock.json
+
+# Build outputs
+dist
+electron-dist
+build/electron-runtime
+dist-ssr
+*.local
+target
+
+# Tauri build artifacts
+control-service/target
+control-service/Cargo.lock
+control-service/testnet-agent/Cargo.lock
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Synergy Network specific
+.synergy/
+synergy-testnet
+templates.zip
+testnet/runtime/installers/GenVal-*/config/launch-block1-transaction.json
+testnet/runtime/keys/
+testnet/runtime/installers/*/keys/
+testnet/runtime/installers/*/keys/**
+**/private.key
+**/*.prv.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+.tmp-release-assets-*
+binaries/synergy-testnet-agent-*
+!binaries/synergy-testnet-agent-darwin-arm64
+!binaries/synergy-testnet-agent-linux-amd64
+!binaries/synergy-testnet-agent-windows-amd64.exe
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# Environment
+.env
+.env.*
+!.env.example
+!.env.*.example

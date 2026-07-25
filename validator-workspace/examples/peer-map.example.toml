@@ -1,0 +1,8 @@
+[[validators]]
+name = "CHANGE_ME_VALIDATOR_NAME"
+validator_address = "CHANGE_ME_VALIDATOR_ADDRESS"
+node_id = "CHANGE_ME_NODE_ID"
+peer_id = "CHANGE_ME_PEER_ID"
+p2p_address = "CHANGE_ME_PRIVATE_IP:5622"
+public_address = "CHANGE_ME_PUBLIC_IP:5622"
+

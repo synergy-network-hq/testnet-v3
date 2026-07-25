@@ -1,0 +1,25 @@
+{
+  "schema_version": "v1",
+  "env": "testnet",
+  "release_id": "testnet-v3",
+  "launch_status": "BLOCKED_PENDING_SIGNED_TESTNET_V3_GENESIS",
+  "network": {
+    "chain_id": 1264,
+    "network_id": 1264,
+    "runtime_network_id": "synergy-testnet-v3",
+    "network_type": "testnet"
+  },
+  "integrity": {
+    "genesis_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "state_root": "0000000000000000000000000000000000000000000000000000000000000000",
+    "allocation_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "validator_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "contract_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "recompute_required": true,
+    "signed_by": []
+  },
+  "validators": [],
+  "balances": [],
+  "allocations": [],
+  "contracts": {}
+}

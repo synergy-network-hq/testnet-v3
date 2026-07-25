@@ -1,0 +1,349 @@
+/* ============================================
+    SYNERGY NETWORK BRAND PALETTE
+   ============================================ */
+   :root {
+    /* === QUAD PRIMARY COLORS === */
+    /* The four core brand colors */
+    --snrg-primary-lime: #00ff66;
+    /* Proof of Synergy (PoSy) Consensus */
+    --snrg-primary-cyan: #00ced1;
+    /* Synergy Cross Chain Protocol */
+    --snrg-primary-blue: #0060ff;
+    /* SynQ */
+    --snrg-primary-purple: #7d00ff;
+    /* Aegis */
+  
+    /* Primary Gradient (for backgrounds, borders, etc.) */
+    --snrg-primary-gradient: linear-gradient(135deg,
+        #00ff66 0%,
+        #00ced1 33%,
+        #0060ff 66%,
+        #7d00ff 100%);
+    --snrg-primary-gradient-horizontal: linear-gradient(90deg,
+        #00ff66 0%,
+        #00ced1 33%,
+        #0060ff 66%,
+        #7d00ff 100%);
+    --snrg-primary-gradient-radial: radial-gradient(circle,
+        #00ff66 0%,
+        #00ced1 25%,
+        #0060ff 50%,
+        #7d00ff 100%);
+  
+    /* Primary Variants - Dark Shades */
+    --snrg-primary-lime-dark: #00b82e;
+    --snrg-primary-cyan-dark: #008a8d;
+    --snrg-primary-blue-dark: #0036a5;
+    --snrg-primary-purple-dark: #31008b;
+  
+    /* Primary Variants - Light Tints */
+    --snrg-primary-lime-light: #5fff7d;
+    --snrg-primary-cyan-light: #4ff2f5;
+    --snrg-primary-blue-light: #3f8cff;
+    --snrg-primary-purple-light: #8b4fff;
+  
+    /* Primary Alpha Channels */
+    --snrg-primary-lime-alpha: rgba(0, 255, 65, 0.35);
+    --snrg-primary-cyan-alpha: rgba(0, 206, 209, 0.35);
+    --snrg-primary-blue-alpha: rgba(0, 85, 223, 0.35);
+    --snrg-primary-purple-alpha: rgba(86, 0, 223, 0.35);
+  
+    --snrg-primary-lime-alpha-light: rgba(0, 255, 65, 0.15);
+    --snrg-primary-cyan-alpha-light: rgba(0, 206, 209, 0.15);
+    --snrg-primary-blue-alpha-light: rgba(0, 85, 223, 0.15);
+    --snrg-primary-purple-alpha-light: rgba(86, 0, 223, 0.15);
+  
+    --snrg-primary-lime-alpha-dark: rgba(0, 255, 65, 0.5);
+    --snrg-primary-cyan-alpha-dark: rgba(0, 206, 209, 0.5);
+    --snrg-primary-blue-alpha-dark: rgba(0, 85, 223, 0.5);
+    --snrg-primary-purple-alpha-dark: rgba(86, 0, 223, 0.5);
+  
+    /* Mixed Primary Alphas for Overlays */
+    --snrg-primary-mixed-alpha: rgba(22, 142, 181, 0.35);
+    --snrg-primary-gradient-alpha: linear-gradient(135deg,
+        rgba(0, 255, 65, 0.3) 0%,
+        rgba(0, 206, 209, 0.3) 33%,
+        rgba(0, 85, 223, 0.3) 66%,
+        rgba(86, 0, 223, 0.3) 100%);
+  
+    /* === SECONDARY COLORS === */
+    /* Complementary to the quad-primary system */
+    --snrg-secondary: #1a0a28;
+    /* Deep purple-black base */
+    --snrg-secondary-warm: #2d1b3d;
+    /* Warmer secondary */
+    --snrg-secondary-cool: #0a1820;
+    /* Cooler secondary */
+    --snrg-secondary-alpha: rgba(26, 10, 40, 0.85);
+  
+    /* === ACCENT COLORS === */
+    /* High-contrast pops that work with all primaries */
+    --snrg-accent-electric: #00ffd4;
+    /* Electric mint */
+    --snrg-accent-neon: #ff00e5;
+    /* Neon magenta */
+    --snrg-accent-gold: #ffd700;
+    /* Complementary gold */
+    --snrg-accent-electric-alpha: rgba(0, 255, 212, 0.7);
+    --snrg-accent-neon-alpha: rgba(255, 0, 229, 0.7);
+    --snrg-accent-gold-alpha: rgba(255, 215, 0, 0.7);
+  
+    /* === BACKGROUND LAYERS === */
+    /* Progressively lighter background tiers */
+    --snrg-bg-base: #030206;
+    --snrg-bg-primary: #05070d;
+    --snrg-bg-secondary: #0a0e18;
+    --snrg-bg-tertiary: #111622;
+    --snrg-bg-quaternary: #1a2030;
+    --snrg-bg-elevated: #232d42;
+  
+    /* Glassmorphism Backgrounds */
+    --snrg-bg-glass-ultra: rgba(10, 15, 25, 0.25);
+    --snrg-bg-glass-light: rgba(15, 22, 35, 0.45);
+    --snrg-bg-glass: rgba(10, 18, 28, 0.65);
+    --snrg-bg-glass-medium: rgba(12, 20, 32, 0.75);
+    --snrg-bg-glass-heavy: rgba(8, 12, 20, 0.85);
+    --snrg-bg-glass-solid: rgba(5, 8, 15, 0.95);
+  
+    /* Gradient Backgrounds */
+    --snrg-bg-gradient-primary: linear-gradient(180deg, #05070d 0%, #111622 100%);
+    --snrg-bg-gradient-radial: radial-gradient(circle at 50% 0%,
+        #0a0e18 0%,
+        #030206 100%);
+    --snrg-bg-gradient-mesh:
+      radial-gradient(at 20% 30%, rgba(0, 255, 65, 0.08) 0%, transparent 50%),
+      radial-gradient(at 80% 20%, rgba(0, 206, 209, 0.08) 0%, transparent 50%),
+      radial-gradient(at 40% 80%, rgba(0, 85, 223, 0.08) 0%, transparent 50%),
+      radial-gradient(at 90% 70%, rgba(86, 0, 223, 0.08) 0%, transparent 50%),
+      #05070d;
+  
+    /* === TEXT HIERARCHY === */
+    /* From brightest to most subtle */
+    --snrg-text-bright: #ffffff;
+    --snrg-text-primary: #f2f7ff;
+    --snrg-text-secondary: #c5d9e8;
+    --snrg-text-tertiary: #9ab0c5;
+    --snrg-text-quaternary: #7a8fa3;
+    --snrg-text-muted: #5e7280;
+    --snrg-text-subtle: #48565f;
+    --snrg-text-disabled: #363e45;
+    --snrg-text-ghost: #252b30;
+  
+    /* Colored Text Variants */
+    --snrg-text-lime: #8cffaa;
+    --snrg-text-cyan: #7de8eb;
+    --snrg-text-blue: #6ba3ff;
+    --snrg-text-purple: #a780ff;
+    --snrg-text-accent: #00ffd4;
+  
+    /* === BORDER SYSTEM === */
+    /* Various border intensities for the quad-primary */
+    --snrg-border-lime: rgba(0, 255, 65, 0.35);
+    --snrg-border-cyan: rgba(0, 206, 209, 0.35);
+    --snrg-border-blue: rgba(0, 85, 223, 0.35);
+    --snrg-border-purple: rgba(86, 0, 223, 0.35);
+  
+    --snrg-border-lime-light: rgba(0, 255, 65, 0.15);
+    --snrg-border-cyan-light: rgba(0, 206, 209, 0.15);
+    --snrg-border-blue-light: rgba(0, 85, 223, 0.15);
+    --snrg-border-purple-light: rgba(86, 0, 223, 0.15);
+  
+    --snrg-border-lime-strong: rgba(0, 255, 65, 0.6);
+    --snrg-border-cyan-strong: rgba(0, 206, 209, 0.6);
+    --snrg-border-blue-strong: rgba(0, 85, 223, 0.6);
+    --snrg-border-purple-strong: rgba(86, 0, 223, 0.6);
+  
+    /* Mixed Borders */
+    --snrg-border-mixed: rgba(30, 150, 190, 0.35);
+    --snrg-border-mixed-light: rgba(30, 150, 190, 0.15);
+    --snrg-border-mixed-strong: rgba(30, 150, 190, 0.6);
+  
+    /* Neutral Borders */
+    --snrg-border-neutral: rgba(150, 160, 180, 0.15);
+    --snrg-border-neutral-medium: rgba(150, 160, 180, 0.25);
+    --snrg-border-neutral-strong: rgba(150, 160, 180, 0.45);
+  
+    /* === SHADOW & GLOW EFFECTS === */
+    /* Individual primary glows */
+    --snrg-glow-lime:
+      0 0 8px rgba(0, 255, 65, 0.4), 0 0 20px rgba(0, 255, 65, 0.25);
+    --snrg-glow-cyan:
+      0 0 8px rgba(0, 206, 209, 0.4), 0 0 20px rgba(0, 206, 209, 0.25);
+    --snrg-glow-blue:
+      0 0 8px rgba(0, 85, 223, 0.4), 0 0 20px rgba(0, 85, 223, 0.25);
+    --snrg-glow-purple:
+      0 0 8px rgba(86, 0, 223, 0.4), 0 0 20px rgba(86, 0, 223, 0.25);
+  
+    /* Intense glows */
+    --snrg-glow-lime-intense:
+      0 0 15px rgba(0, 255, 65, 0.6), 0 0 35px rgba(0, 255, 65, 0.4),
+      0 0 55px rgba(0, 255, 65, 0.2);
+    --snrg-glow-cyan-intense:
+      0 0 15px rgba(0, 206, 209, 0.6), 0 0 35px rgba(0, 206, 209, 0.4),
+      0 0 55px rgba(0, 206, 209, 0.2);
+    --snrg-glow-blue-intense:
+      0 0 15px rgba(0, 85, 223, 0.6), 0 0 35px rgba(0, 85, 223, 0.4),
+      0 0 55px rgba(0, 85, 223, 0.2);
+    --snrg-glow-purple-intense:
+      0 0 15px rgba(86, 0, 223, 0.6), 0 0 35px rgba(86, 0, 223, 0.4),
+      0 0 55px rgba(86, 0, 223, 0.2);
+  
+    /* Mixed/Combined glows */
+    --snrg-glow-mixed:
+      0 0 12px rgba(0, 255, 65, 0.2), 0 0 24px rgba(0, 206, 209, 0.2),
+      0 0 36px rgba(0, 85, 223, 0.2);
+    --snrg-glow-quad:
+      0 0 8px rgba(0, 255, 65, 0.25), 0 0 16px rgba(0, 206, 209, 0.25),
+      0 0 24px rgba(0, 85, 223, 0.25), 0 0 32px rgba(86, 0, 223, 0.25);
+  
+    /* Text glows */
+    --snrg-glow-text-lime: 0 0 10px rgba(0, 255, 65, 0.8);
+    --snrg-glow-text-cyan: 0 0 10px rgba(0, 255, 255, 0.8);
+    --snrg-glow-text-blue: 0 0 12px rgba(0, 130, 255, 0.8);
+    --snrg-glow-text-purple: 0 0 12px rgba(150, 0, 255, 0.8);
+    --snrg-glow-text-mixed: 0 0 15px rgba(0, 200, 220, 0.6);
+  
+    /* Depth shadows (non-colored) */
+    --snrg-shadow-sm: 0 2px 4px rgba(0, 0, 0, 0.3);
+    --snrg-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
+    --snrg-shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
+    --snrg-shadow-xl: 0 12px 40px rgba(0, 0, 0, 0.6);
+  
+    /* === STATE COLORS === */
+    /* Success, warning, error, info */
+    --snrg-success: #00ff88;
+    --snrg-success-bg: rgba(0, 255, 136, 0.15);
+    --snrg-success-border: rgba(0, 255, 136, 0.4);
+  
+    --snrg-warning: #ffb800;
+    --snrg-warning-bg: rgba(255, 184, 0, 0.15);
+    --snrg-warning-border: rgba(255, 184, 0, 0.4);
+  
+    --snrg-error: #ff3366;
+    --snrg-error-bg: rgba(255, 51, 102, 0.15);
+    --snrg-error-border: rgba(255, 51, 102, 0.4);
+  
+    --snrg-info: #00b8ff;
+    --snrg-info-bg: rgba(0, 184, 255, 0.15);
+    --snrg-info-border: rgba(0, 184, 255, 0.4);
+  
+    /* Legacy/Compatibility Variables */
+    --snrg-primary: #7d00ff;
+    --snrg-primary-dark: #31008b;
+    --snrg-primary-light: #8b4fff;
+    --snrg-primary-alpha: rgba(86, 0, 223, 0.35);
+    --snrg-primary-alpha-light: rgba(86, 0, 223, 0.15);
+    --snrg-primary-alpha-dark: rgba(86, 0, 223, 0.5);
+  
+    --snrg-lime: #00ff66;
+    --snrg-lime-alpha: rgba(0, 255, 65, 0.35);
+    --snrg-lime-light: #5fff7d;
+    --snrg-lime-dark: #00b82e;
+  
+    --snrg-cyan: #00ced1;
+    --snrg-cyan-alpha: rgba(0, 206, 209, 0.35);
+    --snrg-cyan-light: #4ff2f5;
+    --snrg-cyan-dark: #008a8d;
+  
+    --snrg-blue: #0060ff;
+    --snrg-blue-alpha: rgba(0, 85, 223, 0.35);
+    --snrg-blue-light: #3f8cff;
+    --snrg-blue-dark: #0036a5;
+  
+    --snrg-accent: #00ffd4;
+    --snrg-accent-alpha: rgba(0, 255, 212, 0.7);
+  
+    --snrg-bg-glass-light: rgba(15, 22, 35, 0.45);
+    --snrg-bg-glass-dark: rgba(8, 12, 20, 0.85);
+  
+    --snrg-border-primary: rgba(86, 0, 223, 0.35);
+    --snrg-border-secondary: rgba(86, 0, 223, 0.2);
+    --snrg-border-light: rgba(86, 0, 223, 0.1);
+    --snrg-border-alpha: rgba(86, 0, 223, 0.2);
+  
+    --snrg-shadow-primary:
+      0 0 5px rgba(86, 0, 223, 0.3), 0 0 10px rgba(86, 0, 223, 0.3),
+      0 0 15px rgba(86, 0, 223, 0.3);
+    --snrg-shadow-glow:
+      0 0 15px rgba(86, 0, 223, 0.4), 0 0 25px rgba(86, 0, 223, 0.4);
+    --snrg-shadow-text: 0 0 8px rgba(86, 0, 223, 0.8);
+  
+    /* === ANIMATION KEYFRAMES === */
+    /* CSS animations for the comic-glow effect */
+    --snrg-animation-duration-fast: 0.3s;
+    --snrg-animation-duration-normal: 0.6s;
+    --snrg-animation-duration-slow: 1.2s;
+    --snrg-animation-duration-pulse: 2s;
+    --snrg-animation-duration-cycle: 8s;
+  
+    /* === ANIMATION DEFINITIONS === */
+    /* Comic-style glow cycling through all four primaries */
+    @keyframes snrg-comic-glow {
+  
+      0%,
+      100% {
+        filter: drop-shadow(0 0 8px rgba(0, 255, 65, 0.8)) drop-shadow(0 0 16px rgba(0, 255, 65, 0.4));
+      }
+  
+      25% {
+        filter: drop-shadow(0 0 8px rgba(0, 206, 209, 0.8)) drop-shadow(0 0 16px rgba(0, 206, 209, 0.4));
+      }
+  
+      50% {
+        filter: drop-shadow(0 0 8px rgba(0, 85, 223, 0.8)) drop-shadow(0 0 16px rgba(0, 85, 223, 0.4));
+      }
+  
+      75% {
+        filter: drop-shadow(0 0 8px rgba(86, 0, 223, 0.8)) drop-shadow(0 0 16px rgba(86, 0, 223, 0.4));
+      }
+    }
+  
+    @keyframes snrg-gradient-shift {
+      0% {
+        background-position: 0% 50%;
+      }
+  
+      50% {
+        background-position: 100% 50%;
+      }
+  
+      100% {
+        background-position: 0% 50%;
+      }
+    }
+  
+    @keyframes snrg-pulse-quad {
+  
+      0%,
+      100% {
+        box-shadow: 0 0 8px rgba(0, 255, 65, 0.4), 0 0 20px rgba(0, 255, 65, 0.2);
+      }
+  
+      25% {
+        box-shadow: 0 0 8px rgba(0, 206, 209, 0.4), 0 0 20px rgba(0, 206, 209, 0.2);
+      }
+  
+      50% {
+        box-shadow: 0 0 8px rgba(0, 85, 223, 0.4), 0 0 20px rgba(0, 85, 223, 0.2);
+      }
+  
+      75% {
+        box-shadow: 0 0 8px rgba(86, 0, 223, 0.4), 0 0 20px rgba(86, 0, 223, 0.2);
+      }
+    }
+  
+    /* === UTILITY CLASSES === */
+    .snrg-comic-glow {
+      animation: snrg-comic-glow var(--snrg-animation-duration-cycle) ease-in-out infinite;
+    }
+  
+    .snrg-gradient-animated {
+      background: var(--snrg-primary-gradient-horizontal);
+      background-size: 200% 200%;
+      animation: snrg-gradient-shift var(--snrg-animation-duration-cycle) ease infinite;
+    }
+  
+    .snrg-pulse-quad {
+      animation: snrg-pulse-quad var(--snrg-animation-duration-cycle) ease-in-out infinite;
+    }
+  }

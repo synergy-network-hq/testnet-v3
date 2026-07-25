@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Synergy Validator Identity",
+  "type": "object",
+  "required": ["validator_name", "validator_address", "peer_id", "public_ip"],
+  "properties": {
+    "validator_name": { "type": "string" },
+    "validator_index": { "type": ["integer", "string"] },
+    "validator_address": { "type": "string" },
+    "peer_id": { "type": "string" },
+    "public_ip": { "type": "string" },
+    "private_ip": { "type": "string" }
+  },
+  "additionalProperties": true
+}
+

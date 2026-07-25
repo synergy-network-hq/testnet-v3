@@ -1,0 +1,474 @@
+/* ============================================
+   SYNERGY PORTAL - GLOBAL ANIMATIONS
+   ============================================
+   All @keyframes animations and animation utilities
+   ============================================ */
+
+/* ============================================
+   ROTATION ANIMATIONS
+   ============================================ */
+@keyframes rotate {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes spin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes footer-logo-rotate {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes rotate-logo {
+  from {
+    transform: translate(-50%, -50%) rotate(0deg);
+  }
+  to {
+    transform: translate(-50%, -50%) rotate(360deg);
+  }
+}
+
+/* ============================================
+   GLOW & PULSE ANIMATIONS
+   ============================================ */
+
+/* Comic-style glow cycling through all four primaries */
+@keyframes snrg-comic-glow {
+  0%,
+  100% {
+    filter: drop-shadow(0 0 8px rgba(0, 255, 65, 0.8))
+      drop-shadow(0 0 16px rgba(0, 255, 65, 0.4));
+  }
+  25% {
+    filter: drop-shadow(0 0 8px rgba(0, 206, 209, 0.8))
+      drop-shadow(0 0 16px rgba(0, 206, 209, 0.4));
+  }
+  50% {
+    filter: drop-shadow(0 0 8px rgba(0, 85, 223, 0.8))
+      drop-shadow(0 0 16px rgba(0, 85, 223, 0.4));
+  }
+  75% {
+    filter: drop-shadow(0 0 8px rgba(86, 0, 223, 0.8))
+      drop-shadow(0 0 16px rgba(86, 0, 223, 0.4));
+  }
+}
+
+@keyframes comic-glow {
+  0%,
+  100% {
+    box-shadow:
+      0 0 8px rgba(0, 255, 65, 0.4),
+      0 0 20px rgba(0, 255, 65, 0.2);
+    border-color: var(--snrg-primary-lime);
+  }
+  25% {
+    box-shadow:
+      0 0 8px rgba(0, 206, 209, 0.4),
+      0 0 20px rgba(0, 206, 209, 0.2);
+    border-color: var(--snrg-primary-cyan);
+  }
+  50% {
+    box-shadow:
+      0 0 8px rgba(0, 85, 223, 0.4),
+      0 0 20px rgba(0, 85, 223, 0.2);
+    border-color: var(--snrg-primary-blue);
+  }
+  75% {
+    box-shadow:
+      0 0 8px rgba(86, 0, 223, 0.4),
+      0 0 20px rgba(86, 0, 223, 0.2);
+    border-color: var(--snrg-primary-purple);
+  }
+}
+
+@keyframes comic-glow-text {
+  0% {
+    text-shadow:
+      0 0 10px var(--snrg-lime),
+      0 0 20px var(--snrg-lime-alpha),
+      0 0 5px rgba(255, 255, 255, 0.4);
+    color: var(--snrg-lime-light);
+  }
+  25% {
+    text-shadow:
+      0 0 10px var(--snrg-cyan),
+      0 0 20px var(--snrg-cyan-alpha),
+      0 0 5px rgba(255, 255, 255, 0.4);
+    color: var(--snrg-cyan-light);
+  }
+  50% {
+    text-shadow:
+      0 0 10px var(--snrg-blue),
+      0 0 20px var(--snrg-blue-alpha),
+      0 0 5px rgba(255, 255, 255, 0.4);
+    color: var(--snrg-blue-light);
+  }
+  75% {
+    text-shadow:
+      0 0 10px var(--snrg-primary),
+      0 0 20px var(--snrg-primary-alpha),
+      0 0 5px rgba(255, 255, 255, 0.4);
+    color: var(--snrg-primary-light);
+  }
+  100% {
+    text-shadow:
+      0 0 10px var(--snrg-lime),
+      0 0 20px var(--snrg-lime-alpha),
+      0 0 5px rgba(255, 255, 255, 0.4);
+    color: var(--snrg-lime-light);
+  }
+}
+
+@keyframes snrg-pulse-quad {
+  0%,
+  100% {
+    box-shadow:
+      0 0 8px rgba(0, 255, 65, 0.4),
+      0 0 20px rgba(0, 255, 65, 0.2);
+  }
+  25% {
+    box-shadow:
+      0 0 8px rgba(0, 206, 209, 0.4),
+      0 0 20px rgba(0, 206, 209, 0.2);
+  }
+  50% {
+    box-shadow:
+      0 0 8px rgba(0, 85, 223, 0.4),
+      0 0 20px rgba(0, 85, 223, 0.2);
+  }
+  75% {
+    box-shadow:
+      0 0 8px rgba(86, 0, 223, 0.4),
+      0 0 20px rgba(86, 0, 223, 0.2);
+  }
+}
+
+@keyframes pulse {
+  0% {
+    opacity: 0.6;
+    transform: scale(0.8);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1.2);
+  }
+}
+
+@keyframes footer-logo-glow {
+  from {
+    opacity: 0.6;
+    transform: translate(-50%, -50%) scale(0.8);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1.2);
+  }
+}
+
+/* Early Bird Stage Color-Shifting Glow Effect */
+@keyframes color-shift-glow {
+  0% {
+    color: #00ff66;
+    text-shadow: 0 0 10px #00ff66, 0 0 20px #00ff66;
+  }
+  25% {
+    color: #00ced1;
+    text-shadow: 0 0 10px #00ced1, 0 0 20px #00ced1;
+  }
+  50% {
+    color: #0060ff;
+    text-shadow: 0 0 10px #0060ff, 0 0 20px #0060ff;
+  }
+  75% {
+    color: #7d00ff;
+    text-shadow: 0 0 10px #7d00ff, 0 0 20px #7d00ff;
+  }
+  100% {
+    color: #00ff66;
+    text-shadow: 0 0 10px #00ff66, 0 0 20px #00ff66;
+  }
+}
+
+/* ============================================
+   GRADIENT ANIMATIONS
+   ============================================ */
+@keyframes snrg-gradient-shift {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+/* ============================================
+   MOVEMENT & POSITION ANIMATIONS
+   ============================================ */
+@keyframes shooting-star {
+  0% {
+    left: -10px;
+    top: var(--start-y);
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+  }
+  90% {
+    opacity: 1;
+  }
+  100% {
+    left: 100vw;
+    top: var(--end-y);
+    opacity: 0;
+  }
+}
+
+@keyframes marquee-scroll {
+  0% {
+    transform: translateX(100%);
+  }
+  100% {
+    transform: translateX(-100%);
+  }
+}
+
+@keyframes float {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-10px);
+  }
+}
+
+/* ============================================
+   FADE ANIMATIONS
+   ============================================ */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(30px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ============================================
+   MODAL ANIMATIONS
+   ============================================ */
+@keyframes modal-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.9) translateY(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes modal-exit {
+  from {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.9) translateY(-20px);
+  }
+}
+
+@keyframes backdrop-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes backdrop-exit {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+/* ============================================
+   TOOLTIP ANIMATIONS
+   ============================================ */
+@keyframes tooltip-fade-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+/* ============================================
+   TYPING CURSOR ANIMATION
+   ============================================ */
+@keyframes blink {
+  0%, 50% {
+    opacity: 1;
+  }
+  51%, 100% {
+    opacity: 0;
+  }
+}
+
+/* ============================================
+   SHIMMER ANIMATION
+   ============================================ */
+@keyframes shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+/* ============================================
+   SOCIAL BUTTON SHEEN ANIMATION
+   ============================================ */
+@keyframes snrg-sheen-sweep {
+  0% {
+    left: -150%;
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+  }
+  100% {
+    left: 150%;
+    opacity: 0;
+  }
+}
+
+/* ============================================
+   ANIMATION UTILITY CLASSES
+   ============================================ */
+
+/* Apply comic glow animation */
+.snrg-comic-glow {
+  animation: snrg-comic-glow var(--snrg-animation-duration-cycle) ease-in-out infinite;
+}
+
+/* Apply gradient animation */
+.snrg-gradient-animated {
+  background: var(--snrg-primary-gradient-horizontal);
+  background-size: 200% 200%;
+  animation: snrg-gradient-shift var(--snrg-animation-duration-cycle) ease infinite;
+}
+
+/* Apply pulse quad animation */
+.snrg-pulse-quad {
+  animation: snrg-pulse-quad var(--snrg-animation-duration-cycle) ease-in-out infinite;
+}
+
+/* Apply rotation */
+.snrg-rotating {
+  animation: rotate 20s linear infinite;
+}
+
+/* Apply spin */
+.snrg-spinning {
+  animation: spin 1s linear infinite;
+}
+
+/* Apply float */
+.snrg-floating {
+  animation: float 3s ease-in-out infinite;
+}
+
+/* Apply fade in */
+.snrg-fade-in {
+  animation: fadeIn 0.6s ease-out;
+}
+
+/* Apply fade in up */
+.snrg-fade-in-up {
+  animation: fadeInUp 0.8s ease-out;
+}
+
+/* ============================================
+   TRANSITION UTILITIES
+   ============================================ */
+.snrg-transition-fast {
+  transition: all var(--snrg-transition-fast);
+}
+
+.snrg-transition-normal {
+  transition: all var(--snrg-transition-normal);
+}
+
+.snrg-transition-slow {
+  transition: all var(--snrg-transition-slow);
+}
+
+.snrg-transition-colors {
+  transition: color var(--snrg-transition-normal), background-color var(--snrg-transition-normal), border-color var(--snrg-transition-normal);
+}
+
+.snrg-transition-opacity {
+  transition: opacity var(--snrg-transition-normal);
+}
+
+.snrg-transition-transform {
+  transition: transform var(--snrg-transition-normal);
+}
+
+.snrg-transition-all {
+  transition: all var(--snrg-transition-normal);
+}
+
+/* ============================================
+   COLLAPSE ANIMATION
+   ============================================ */
+.snrg-collapse {
+  transition: max-height 0.3s ease;
+}
+
+.snrg-collapse-open {
+  max-height: 1000px;
+}
+
+.snrg-collapse-closed {
+  max-height: 0;
+  overflow: hidden;
+}

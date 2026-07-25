@@ -1,0 +1,38 @@
+{
+  "fork_height": 204216,
+  "parent_height": 204215,
+  "parent_hash": "e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816",
+  "state_root": "REPLACE_WITH_CANONICAL_STATE_OR_DETERMINISM_DIGEST",
+  "old_consensus_algorithm": "FN-DSA",
+  "new_consensus_algorithm": "FN-DSA",
+  "new_validator_registry": [
+    {
+      "validator_address": "REPLACE_WITH_VAL1_OPERATOR_ADDRESS",
+      "consensus_key_type": "FN-DSA",
+      "consensus_public_key": "fn-dsa:REPLACE_WITH_VAL1_FNDSA_PUBLIC_KEY_BASE64"
+    },
+    {
+      "validator_address": "REPLACE_WITH_VAL2_OPERATOR_ADDRESS",
+      "consensus_key_type": "FN-DSA",
+      "consensus_public_key": "fn-dsa:REPLACE_WITH_VAL2_FNDSA_PUBLIC_KEY_BASE64"
+    },
+    {
+      "validator_address": "REPLACE_WITH_VAL3_OPERATOR_ADDRESS",
+      "consensus_key_type": "FN-DSA",
+      "consensus_public_key": "fn-dsa:REPLACE_WITH_VAL3_FNDSA_PUBLIC_KEY_BASE64"
+    },
+    {
+      "validator_address": "REPLACE_WITH_VAL4_OPERATOR_ADDRESS",
+      "consensus_key_type": "FN-DSA",
+      "consensus_public_key": "fn-dsa:REPLACE_WITH_VAL4_FNDSA_PUBLIC_KEY_BASE64"
+    },
+    {
+      "validator_address": "REPLACE_WITH_VAL5_OPERATOR_ADDRESS",
+      "consensus_key_type": "FN-DSA",
+      "consensus_public_key": "fn-dsa:REPLACE_WITH_VAL5_FNDSA_PUBLIC_KEY_BASE64"
+    }
+  ],
+  "migration_reason": "Checkpointed consensus-signature migration using FN-DSA validator keys while preserving chain_id=1264, network_id=synergy-testnet-v3, height, state, balances, token state, and historical data.",
+  "parser_mode": "fail_closed",
+  "migration_signature": null
+}

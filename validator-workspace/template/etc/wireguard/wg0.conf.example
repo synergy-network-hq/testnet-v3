@@ -1,0 +1,11 @@
+[Interface]
+Address = CHANGE_ME_PRIVATE_IP/24
+ListenPort = 51820
+PrivateKey = CHANGE_ME_WIREGUARD_PRIVATE_KEY
+
+[Peer]
+PublicKey = CHANGE_ME_PEER_WIREGUARD_PUBLIC_KEY
+AllowedIPs = CHANGE_ME_PEER_PRIVATE_IP/32
+Endpoint = CHANGE_ME_PEER_PUBLIC_IP:51820
+PersistentKeepalive = 25
+

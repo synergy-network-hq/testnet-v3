@@ -1,0 +1,182 @@
+version: 0.1.0
+defaults:
+  validator_user: node
+  validator_group: node
+workspace: /var/lib/synergy/validator
+entries:
+  - path: /home/node
+    type: directory
+    owner: node
+    group: node
+    mode: "0750"
+    secret: false
+    generated: false
+    validator_specific: false
+    identical_across_validators: true
+    description: Canonical validator user home.
+    source_of_truth: operating-system
+  - path: /home/node/.synergy/testnet/nodes/validator-workspace
+    type: directory
+    owner: node
+    group: node
+    mode: "0750"
+    secret: false
+    generated: false
+    validator_specific: false
+    identical_across_validators: true
+    description: Legacy operator-facing validator workspace. After appliance migration this may exist only as an inert README marker; it must not be active runtime state or a symlink.
+    source_of_truth: appliance migration archive marker
+  - path: /etc/synergy/validator
+    type: directory
+    owner: root
+    group: node
+    mode: "0750"
+    secret: false
+    generated: false
+    validator_specific: partially
+    identical_across_validators: false_after_identity_masking
+    description: Canonical validator config directory.
+    source_of_truth: appliance template
+  - path: /etc/synergy/validator/node.env
+    type: file
+    owner: root
+    group: node
+    mode: "0640"
+    secret: true
+    generated: true
+    validator_specific: partially
+    identical_across_validators: false_after_identity_masking
+    description: Environment file. May reference secret files and tokens.
+    source_of_truth: rendered from node.env.example
+  - path: /etc/synergy/validator/config.toml
+    type: file
+    owner: root
+    group: node
+    mode: "0640"
+    secret: false
+    generated: true
+    validator_specific: partially
+    identical_across_validators: false_after_identity_masking
+    description: Main validator runtime configuration.
+    source_of_truth: rendered from config.toml.example
+  - path: /etc/synergy/validator/genesis.json
+    type: file
+    owner: root
+    group: node
+    mode: "0644"
+    secret: false
+    generated: true
+    validator_specific: false
+    identical_across_validators: true
+    description: Canonical genesis file.
+    source_of_truth: canonical testnet release artifact
+  - path: /etc/synergy/validator/chain-spec.json
+    type: file
+    owner: root
+    group: node
+    mode: "0644"
+    secret: false
+    generated: true
+    validator_specific: false
+    identical_across_validators: true
+    description: Canonical chain specification.
+    source_of_truth: canonical testnet release artifact
+  - path: /etc/synergy/validator/keys
+    type: directory
+    owner: node
+    group: node
+    mode: "0700"
+    secret: true
+    generated: false
+    validator_specific: true
+    identical_across_validators: false
+    description: Validator-specific private key directory.
+    source_of_truth: live validator identity
+  - path: /etc/synergy/validator/keys/validator-key.json
+    type: file
+    owner: node
+    group: node
+    mode: "0600"
+    secret: true
+    generated: false
+    validator_specific: true
+    identical_across_validators: false
+    description: Validator identity key file.
+    source_of_truth: preserved live validator identity
+  - path: /etc/wireguard/wg0.conf
+    type: file
+    owner: root
+    group: root
+    mode: "0600"
+    secret: true
+    generated: true
+    validator_specific: true
+    identical_across_validators: false_after_identity_masking
+    description: WireGuard validator VPN configuration.
+    source_of_truth: live VPN inventory
+  - path: /opt/synergy/bin/synergy-validator
+    type: file
+    owner: root
+    group: root
+    mode: "0755"
+    secret: false
+    generated: true
+    validator_specific: false
+    identical_across_validators: true
+    description: Canonical validator binary. Hash must match across all validators.
+    source_of_truth: tagged release artifact
+  - path: /opt/synergy/scripts
+    type: directory
+    owner: root
+    group: root
+    mode: "0755"
+    secret: false
+    generated: false
+    validator_specific: false
+    identical_across_validators: true
+    description: Canonical operations scripts.
+    source_of_truth: appliance template
+  - path: /var/lib/synergy/validator
+    type: directory
+    owner: node
+    group: node
+    mode: "0750"
+    secret: false
+    generated: true
+    validator_specific: true
+    identical_across_validators: false
+    description: Chain data and runtime state.
+    source_of_truth: live validator runtime
+  - path: /var/log/synergy/validator
+    type: directory
+    owner: node
+    group: node
+    mode: "0750"
+    secret: false
+    generated: true
+    validator_specific: true
+    identical_across_validators: false
+    description: Validator logs.
+    source_of_truth: live validator runtime
+  - path: /var/backups/synergy/validator
+    type: directory
+    owner: root
+    group: node
+    mode: "0750"
+    secret: true
+    generated: true
+    validator_specific: true
+    identical_across_validators: false
+    description: Rollback backups. May contain copied secret-bearing config and keys.
+    source_of_truth: migration tooling
+  - path: /etc/systemd/system/synergy-validator.service
+    type: file
+    owner: root
+    group: root
+    mode: "0644"
+    secret: false
+    generated: false
+    validator_specific: false
+    identical_across_validators: true
+    description: Canonical validator systemd service.
+    source_of_truth: appliance template

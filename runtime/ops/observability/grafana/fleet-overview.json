@@ -1,0 +1,1115 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Health of every Synergy Testnet node and host. Start here for at-a-glance triage.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Validators Online",
+      "id": 1,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count(up{job=\"synergy-validators\"} == 1)",
+          "legendFormat": "online",
+          "instant": true
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 2
+              },
+              {
+                "color": "green",
+                "value": 3
+              }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "description": "Number of validator metric targets currently online. Val5 is included even if down."
+    },
+    {
+      "type": "stat",
+      "title": "Validators Offline",
+      "id": 2,
+      "gridPos": {
+        "x": 4,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count(up{job=\"synergy-validators\"} == 0) or vector(0)",
+          "legendFormat": "offline",
+          "instant": true
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 2
+              }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "description": "Number of validator metric targets currently offline. Val5 is included even if down."
+    },
+    {
+      "type": "stat",
+      "title": "Current Block Height",
+      "id": 3,
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(synergy_chain_height{job=\"synergy-validators\"} or synergy_chain_height{job=~\"synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"})",
+          "legendFormat": "height",
+          "instant": true
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        }
+      },
+      "description": "Highest reported block height across the reporting testnet nodes. Unit: blocks."
+    },
+    {
+      "type": "stat",
+      "title": "Validator Height Difference",
+      "id": 4,
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(synergy_chain_height{job=\"synergy-validators\"}) - min(synergy_chain_height{job=\"synergy-validators\"})",
+          "legendFormat": "difference",
+          "instant": true
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 3
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          }
+        }
+      },
+      "description": "Difference between the highest and lowest reporting validator block height. A small number means validators are aligned."
+    },
+    {
+      "type": "stat",
+      "title": "Average Peer Count",
+      "id": 5,
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "avg(synergy_p2p_peers_connected{job=~\"synergy-validators|synergy-relayers|synergy-archive-validators|synergy-rpc-gateways|synergy-explorer\"} or synergy_peer_count{job=~\"synergy-validators|synergy-relayers|synergy-archive-validators|synergy-rpc-gateways|synergy-explorer\"} or synergy_validator_peer_count{job=\"synergy-validators\"})",
+          "legendFormat": "peers",
+          "instant": true
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 3
+              },
+              {
+                "color": "green",
+                "value": 5
+              }
+            ]
+          }
+        }
+      },
+      "description": "Average peer count across nodes that expose peer metrics. Higher is usually healthier."
+    },
+    {
+      "type": "stat",
+      "title": "Average Block Time",
+      "id": 6,
+      "gridPos": {
+        "x": 20,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "300 / clamp_min(max(delta(synergy_chain_height{job=\"synergy-validators\"}[5m])), 1)",
+          "legendFormat": "seconds/block",
+          "instant": true
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 3
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          }
+        }
+      },
+      "description": "Average seconds per block over the selected window. Lower is faster. This answers: \"How quickly are blocks being created?\" Formula for the 5 minute panel: 300 / max(delta(synergy_chain_height{job=\"synergy-validators\"}[5m])). The denominator is clamped to 1 so a stalled window is visible instead of blank."
+    },
+    {
+      "type": "table",
+      "title": "Node Metrics Roster",
+      "id": 10,
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "up{job=~\"synergy-validators|synergy-relayers|synergy-archive-validators|synergy-rpc-gateways|synergy-explorer|node_exporter_private|node_exporter_public_roles|prometheus|private-qrpc-probes|public-http-probes|public-tcp-probes\"}",
+          "legendFormat": "Up",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "B",
+          "expr": "synergy_chain_height{job=\"synergy-validators\"} or synergy_chain_height{job=~\"synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"}",
+          "legendFormat": "Block Height",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "C",
+          "expr": "synergy_p2p_peers_connected{job=~\"synergy-validators|synergy-relayers|synergy-archive-validators|synergy-rpc-gateways|synergy-explorer\"} or synergy_peer_count{job=~\"synergy-validators|synergy-relayers|synergy-archive-validators|synergy-rpc-gateways|synergy-explorer\"} or synergy_validator_peer_count{job=\"synergy-validators\"}",
+          "legendFormat": "Peer Count",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "D",
+          "expr": "synergy_sync_in_progress{job=~\"synergy-validators|synergy-relayers|synergy-archive-validators|synergy-rpc-gateways|synergy-explorer\"}",
+          "legendFormat": "Syncing",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "E",
+          "expr": "time() - timestamp(up{job=~\"synergy-validators|synergy-relayers|synergy-archive-validators|synergy-rpc-gateways|synergy-explorer|node_exporter_private|node_exporter_public_roles|prometheus|private-qrpc-probes|public-http-probes|public-tcp-probes\"})",
+          "legendFormat": "Last Seen",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "refId": "F",
+          "expr": "label_replace(up{job=~\"synergy-validators|synergy-relayers|synergy-archive-validators|synergy-rpc-gateways|synergy-explorer|node_exporter_private|node_exporter_public_roles|prometheus|private-qrpc-probes|public-http-probes|public-tcp-probes\"} * 0, \"status_note\", \"Configured target\", \"instance_label\", \".*\")",
+          "legendFormat": "Notes/Status",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "instance_label",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "instance_label": "Node Name",
+              "role": "Role",
+              "instance": "Target",
+              "host": "Host",
+              "job": "Job",
+              "Value #A": "Up",
+              "Value #B": "Block Height",
+              "Value #C": "Peer Count",
+              "Value #D": "Syncing",
+              "Value #E": "Last Seen",
+              "status_note": "Notes/Status",
+              "Value #F": "Notes/Status Value"
+            },
+            "indexByName": {
+              "Node Name": 0,
+              "Role": 1,
+              "Target": 2,
+              "Up": 3,
+              "Block Height": 4,
+              "Peer Count": 5,
+              "Syncing": 6,
+              "Last Seen": 7,
+              "Notes/Status": 8,
+              "Host": 9,
+              "Job": 10,
+              "Notes/Status Value": 11
+            },
+            "excludeByName": {
+              "Notes/Status Value": true
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "left"
+          },
+          "mappings": [
+            {
+              "type": "special",
+              "options": {
+                "match": "null",
+                "result": {
+                  "text": "N/A"
+                }
+              }
+            }
+          ]
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Up"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "green",
+                      "value": 1
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "description": "Roster table with Node Name, Role, Target, Up, Block Height, Peer Count, Syncing, Last Seen, and Notes/Status. Missing role-specific metrics are displayed as N/A."
+    },
+    {
+      "type": "timeseries",
+      "title": "Block Height by Validator",
+      "id": 20,
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "synergy_chain_height{job=\"synergy-validators\"}",
+          "legendFormat": "{{instance_label}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "description": "Block Height by Validator for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "type": "timeseries",
+      "title": "Peer Count by Node",
+      "id": 21,
+      "gridPos": {
+        "x": 12,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "synergy_p2p_peers_connected{job=~\"synergy-validators|synergy-relayers|synergy-archive-validators|synergy-rpc-gateways|synergy-explorer\"} or synergy_peer_count{job=~\"synergy-validators|synergy-relayers|synergy-archive-validators|synergy-rpc-gateways|synergy-explorer\"} or synergy_validator_peer_count{job=\"synergy-validators\"}",
+          "legendFormat": "{{instance_label}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "description": "Current peer count for every node exposing peer metrics, including validators, relayers, RPC gateway, explorer, and archive validator when configured. Missing peer metrics should be treated as N/A."
+    },
+    {
+      "type": "timeseries",
+      "title": "Host CPU Usage",
+      "id": 30,
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(1 - avg by (instance_label) (rate(node_cpu_seconds_total{mode=\"idle\"}[5m]))) * 100",
+          "legendFormat": "{{instance_label}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        }
+      },
+      "description": "CPU utilization by host as a percentage. Lower is healthier."
+    },
+    {
+      "type": "timeseries",
+      "title": "Host Memory Usage",
+      "id": 31,
+      "gridPos": {
+        "x": 8,
+        "y": 20,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100",
+          "legendFormat": "{{instance_label}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        }
+      },
+      "description": "Memory utilization by host as a percentage. Lower is healthier."
+    },
+    {
+      "type": "timeseries",
+      "title": "Host Disk Usage",
+      "id": 32,
+      "gridPos": {
+        "x": 16,
+        "y": 20,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "100 - (node_filesystem_avail_bytes{mountpoint=\"/\",fstype!~\"tmpfs|overlay|squashfs\"} / node_filesystem_size_bytes{mountpoint=\"/\",fstype!~\"tmpfs|overlay|squashfs\"}) * 100",
+          "legendFormat": "{{instance_label}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        }
+      },
+      "description": "Filesystem utilization by host as a percentage. Lower is healthier; high archive-validator usage may indicate storage pressure."
+    },
+    {
+      "type": "stat",
+      "title": "Archive Validator Online",
+      "id": 33,
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(up{job=\"synergy-archive-validators\"}) or vector(0)",
+          "legendFormat": "archive",
+          "instant": true
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 2
+              },
+              {
+                "color": "green",
+                "value": 3
+              }
+            ]
+          },
+          "unit": "bool"
+        }
+      },
+      "description": "Whether the Archive Validator metrics target is reachable. 1 means online; 0 means down or not yet configured."
+    },
+    {
+      "type": "stat",
+      "title": "Current Block Production Rate",
+      "id": 34,
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "60 * max(rate(synergy_chain_height{job=\"synergy-validators\"}[5m]))",
+          "legendFormat": "blocks/min",
+          "instant": true
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 2
+              },
+              {
+                "color": "green",
+                "value": 3
+              }
+            ]
+          },
+          "unit": "ops"
+        }
+      },
+      "description": "Current canonical block production rate in blocks per minute using the highest validator block-height slope. Higher means blocks are being produced faster."
+    },
+    {
+      "type": "stat",
+      "title": "Nodes With Zero Peers",
+      "id": 35,
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count((synergy_p2p_peers_connected{job=~\"synergy-validators|synergy-relayers|synergy-archive-validators|synergy-rpc-gateways|synergy-explorer\"} or synergy_peer_count{job=~\"synergy-validators|synergy-relayers|synergy-archive-validators|synergy-rpc-gateways|synergy-explorer\"} or synergy_validator_peer_count{job=\"synergy-validators\"}) == 0) or vector(0)",
+          "legendFormat": "zero peers",
+          "instant": true
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 2
+              },
+              {
+                "color": "green",
+                "value": 3
+              }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "description": "Count of reporting nodes with zero peers. Any nonzero value needs investigation."
+    },
+    {
+      "type": "table",
+      "title": "qRPC Availability by Node",
+      "id": 36,
+      "gridPos": {
+        "x": 18,
+        "y": 4,
+        "w": 6,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "probe_success{job=\"private-qrpc-probes\"}",
+          "legendFormat": "{{instance_label}}",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "instance",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time 1": true,
+              "Time 2": true,
+              "Time 3": true,
+              "Time 4": true,
+              "__name__ 1": true,
+              "__name__ 2": true,
+              "__name__ 3": true,
+              "__name__ 4": true,
+              "job 1": true,
+              "job 2": true,
+              "job 3": true,
+              "job 4": true
+            },
+            "renameByName": {
+              "instance": "Target",
+              "instance_label 1": "Label",
+              "role 1": "Role",
+              "host 1": "Host",
+              "Value #up": "Up",
+              "Value #height": "Height",
+              "Value #peers": "Peers",
+              "Value #syncing": "Syncing"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "left"
+          },
+          "unit": "bool"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Up"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "green",
+                      "value": 1
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "description": "TCP reachability of private qRPC ports. 1 means reachable; 0 means unavailable or blocked."
+    },
+    {
+      "type": "timeseries",
+      "title": "Block Height by Node",
+      "id": 37,
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "synergy_chain_height{job=\"synergy-validators\"} or synergy_chain_height{job=~\"synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"}",
+          "legendFormat": "{{instance_label}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      },
+      "description": "Block height for every reporting chain node, including relayers, RPC gateway, explorer, and archive validator when configured."
+    }
+  ],
+  "refresh": "15s",
+  "schemaVersion": 39,
+  "tags": [
+    "synergy",
+    "testnet",
+    "overview"
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "network",
+        "label": "Network",
+        "type": "custom",
+        "query": "testnet",
+        "current": {
+          "selected": true,
+          "text": "testnet",
+          "value": "testnet"
+        },
+        "options": [
+          {
+            "selected": true,
+            "text": "testnet",
+            "value": "testnet"
+          }
+        ],
+        "hide": 0,
+        "skipUrlSync": false
+      },
+      {
+        "name": "role",
+        "label": "Role",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(up, role)",
+        "query": "label_values(up, role)",
+        "refresh": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "node",
+        "label": "Node",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(up, host)",
+        "query": "label_values(up, host)",
+        "refresh": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "instance",
+        "label": "Instance",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(up, instance)",
+        "query": "label_values(up, instance)",
+        "refresh": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "job",
+        "label": "Job",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(up, job)",
+        "query": "label_values(up, job)",
+        "refresh": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Synergy \u00b7 Fleet Overview",
+  "uid": "synergy-fleet",
+  "version": 1,
+  "weekStart": ""
+}

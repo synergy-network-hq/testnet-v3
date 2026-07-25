@@ -1,0 +1,219 @@
+# Canonical Prometheus configuration for the Synergy Testnet observer.
+#
+# The observer is not an Innernet validator-VPN peer. Validator metrics, qRPC,
+# and node_exporter traffic therefore use the approved public relayer proxy
+# ports below. Do not replace these targets with 10.70.10.0/24 addresses.
+# Canonical Innernet addresses are recorded in TARGET_INVENTORY.md only.
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+  external_labels:
+    environment: testnet
+    network: synergy-testnet
+    chain_id: '1264'
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+
+rule_files:
+  - /opt/prometheus/config/rules/*.yml
+
+scrape_configs:
+  - job_name: synergy-observer
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['127.0.0.1:6030']
+        labels: {role: observer, node_type: observer, node: observer, host: observer, instance_label: Observer, telemetry_path: local}
+
+  # The observer-side PoSy collector polls the approved relayer qRPC route and
+  # exposes current network/validator summaries locally. Keep it separate from
+  # native observer metrics so source freshness remains visible.
+  - job_name: synergy-posy-exporter
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['127.0.0.1:9201']
+        labels: {role: observer, node_type: observer, node: observer, host: observer, instance_label: Observer PoSy Collector, telemetry_path: local-collector}
+
+  # Validator telemetry is exposed by the public relayer proxy allocation.
+  # Each proxy port maps one-to-one to a validator and never dials the
+  # validator Innernet address from Prometheus.
+  - job_name: synergy-validators
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['relay1.synergynode.xyz:16031']
+        labels: {role: validator, node_type: validator, node: validator-1, host: validator-1, instance_label: Validator-1, canonical_innernet: 10.70.10.1, telemetry_path: relayer-1-proxy}
+      - targets: ['relay1.synergynode.xyz:16032']
+        labels: {role: validator, node_type: validator, node: validator-2, host: validator-2, instance_label: Validator-2, canonical_innernet: 10.70.10.2, telemetry_path: relayer-1-proxy}
+      - targets: ['relay2.synergynode.xyz:16033']
+        labels: {role: validator, node_type: validator, node: validator-3, host: validator-3, instance_label: Validator-3, canonical_innernet: 10.70.10.3, telemetry_path: relayer-2-proxy}
+      - targets: ['relay2.synergynode.xyz:16034']
+        labels: {role: validator, node_type: validator, node: validator-4, host: validator-4, instance_label: Validator-4, canonical_innernet: 10.70.10.4, telemetry_path: relayer-2-proxy}
+      - targets: ['relay3.synergynode.xyz:16035']
+        labels: {role: validator, node_type: validator, node: validator-5, host: validator-5, instance_label: Validator-5, canonical_innernet: 10.70.10.5, telemetry_path: relayer-3-proxy}
+      - targets: ['relay3.synergynode.xyz:16036']
+        labels: {role: validator, node_type: validator, node: validator-6, host: validator-6, instance_label: Validator-6, canonical_innernet: 10.70.10.6, telemetry_path: relayer-3-proxy}
+
+  # Relayers are monitored through node_exporter and their restricted qRPC
+  # proxies below. They do not publish the validator-only :6030 metrics port.
+  # The stateless RPC router is covered by node_exporter_public and the HTTPS
+  # health probe; the retired local full-chain process has no metrics target.
+
+  - job_name: synergy-explorer-indexer
+    scheme: https
+    metrics_path: /metrics/node-exporter
+    static_configs:
+      - targets: ['testnet-atlas-api.synergy-network.io']
+        labels: {role: explorer_indexer, node_type: explorer_indexer, node: explorer-indexer, host: explorer-indexer, instance_label: Explorer/Indexer, telemetry_path: public}
+
+  - job_name: synergy-rpc-gateway
+    scheme: https
+    metrics_path: /metrics/node-rpc
+    static_configs:
+      - targets: ['testnet-core-rpc.synergy-network.io']
+        labels: {role: rpc_gateway, node_type: rpc_gateway, node: rpc-gateway, host: rpc-gateway, instance_label: RPC Gateway, telemetry_path: public-app-metrics}
+
+  - job_name: synergy-archive
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets: ['https://archive-store.synergynode.xyz/snapshots/latest.json']
+        labels: {role: archive, node_type: archive, node: archive, host: archive, instance_label: Archive Snapshot Service, telemetry_path: public-r2}
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - target_label: __address__
+        replacement: 127.0.0.1:9115
+      - source_labels: [__param_target]
+        target_label: target
+
+  # Host metrics for validators use the same approved relayer proxy mapping as
+  # application metrics. Service-node exporters use their public endpoints.
+  - job_name: node_exporter
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['127.0.0.1:9100']
+        labels: {role: observer, node_type: observer, node: observer, host: observer, instance_label: Observer, telemetry_path: local}
+      - targets: ['relay1.synergynode.xyz:19101']
+        labels: {role: validator, node_type: validator, node: validator-1, host: validator-1, instance_label: Validator-1, canonical_innernet: 10.70.10.1, telemetry_path: relayer-1-proxy}
+      - targets: ['relay1.synergynode.xyz:19102']
+        labels: {role: validator, node_type: validator, node: validator-2, host: validator-2, instance_label: Validator-2, canonical_innernet: 10.70.10.2, telemetry_path: relayer-1-proxy}
+      - targets: ['relay2.synergynode.xyz:19103']
+        labels: {role: validator, node_type: validator, node: validator-3, host: validator-3, instance_label: Validator-3, canonical_innernet: 10.70.10.3, telemetry_path: relayer-2-proxy}
+      - targets: ['relay2.synergynode.xyz:19104']
+        labels: {role: validator, node_type: validator, node: validator-4, host: validator-4, instance_label: Validator-4, canonical_innernet: 10.70.10.4, telemetry_path: relayer-2-proxy}
+      - targets: ['relay3.synergynode.xyz:19105']
+        labels: {role: validator, node_type: validator, node: validator-5, host: validator-5, instance_label: Validator-5, canonical_innernet: 10.70.10.5, telemetry_path: relayer-3-proxy}
+      - targets: ['relay3.synergynode.xyz:19106']
+        labels: {role: validator, node_type: validator, node: validator-6, host: validator-6, instance_label: Validator-6, canonical_innernet: 10.70.10.6, telemetry_path: relayer-3-proxy}
+      - targets: ['relay1.synergynode.xyz:9100']
+        labels: {role: relayer, node_type: relayer, node: relayer-1, host: relayer-1, instance_label: Relayer-1, canonical_innernet: 10.70.20.1, telemetry_path: public}
+      - targets: ['relay2.synergynode.xyz:9100']
+        labels: {role: relayer, node_type: relayer, node: relayer-2, host: relayer-2, instance_label: Relayer-2, canonical_innernet: 10.70.20.2, telemetry_path: public}
+      - targets: ['relay3.synergynode.xyz:9100']
+        labels: {role: relayer, node_type: relayer, node: relayer-3, host: relayer-3, instance_label: Relayer-3, canonical_innernet: 10.70.20.3, telemetry_path: public}
+      - targets: ['vpn-coordinator.synergy-network.io:9100']
+        labels: {role: coordinator, node_type: website_coordinator, node: website-coordinator, host: website-coordinator, instance_label: Website/VPN Coordinator, telemetry_path: public}
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: (.+)
+        target_label: target
+
+  # Optional public exporter routes for service hosts and the
+  # website/coordinator machine. These remain separate from node_exporter so
+  # missing HTTP publication is visible without being an application alert.
+  - job_name: node_exporter_public
+    scheme: https
+    metrics_path: /metrics/node-exporter
+    static_configs:
+      - targets: ['testnet-core-rpc.synergy-network.io']
+        labels: {role: rpc_gateway, node_type: rpc_gateway, node: rpc-gateway, host: rpc-gateway, instance_label: RPC Gateway, telemetry_path: public}
+
+  # qRPC probes are TCP-connect checks from the observer. Validator checks use
+  # the public relayer proxy allocation, never 10.70.10.0/24.
+  - job_name: synergy-qrpc-probes
+    metrics_path: /probe
+    params:
+      module: [tcp_connect]
+    static_configs:
+      - targets: ['relay1.synergynode.xyz:15631']
+        labels: {role: validator, node_type: validator, node: validator-1, host: validator-1, instance_label: Validator-1, canonical_innernet: 10.70.10.1, probe_label: qrpc_tcp, telemetry_path: relayer-1-proxy}
+      - targets: ['relay1.synergynode.xyz:15632']
+        labels: {role: validator, node_type: validator, node: validator-2, host: validator-2, instance_label: Validator-2, canonical_innernet: 10.70.10.2, probe_label: qrpc_tcp, telemetry_path: relayer-1-proxy}
+      - targets: ['relay2.synergynode.xyz:15633']
+        labels: {role: validator, node_type: validator, node: validator-3, host: validator-3, instance_label: Validator-3, canonical_innernet: 10.70.10.3, probe_label: qrpc_tcp, telemetry_path: relayer-2-proxy}
+      - targets: ['relay2.synergynode.xyz:15634']
+        labels: {role: validator, node_type: validator, node: validator-4, host: validator-4, instance_label: Validator-4, canonical_innernet: 10.70.10.4, probe_label: qrpc_tcp, telemetry_path: relayer-2-proxy}
+      - targets: ['relay3.synergynode.xyz:15635']
+        labels: {role: validator, node_type: validator, node: validator-5, host: validator-5, instance_label: Validator-5, canonical_innernet: 10.70.10.5, probe_label: qrpc_tcp, telemetry_path: relayer-3-proxy}
+      - targets: ['relay3.synergynode.xyz:15636']
+        labels: {role: validator, node_type: validator, node: validator-6, host: validator-6, instance_label: Validator-6, canonical_innernet: 10.70.10.6, probe_label: qrpc_tcp, telemetry_path: relayer-3-proxy}
+      - targets: ['relay1.synergynode.xyz:15640']
+        labels: {role: relayer, node_type: relayer, node: relayer-1, host: relayer-1, instance_label: Relayer-1 Read Proxy, canonical_innernet: 10.70.20.1, probe_label: qrpc_tcp, telemetry_path: restricted-public-proxy}
+      - targets: ['relay2.synergynode.xyz:15640']
+        labels: {role: relayer, node_type: relayer, node: relayer-2, host: relayer-2, instance_label: Relayer-2 Read Proxy, canonical_innernet: 10.70.20.2, probe_label: qrpc_tcp, telemetry_path: restricted-public-proxy}
+      - targets: ['relay3.synergynode.xyz:15640']
+        labels: {role: relayer, node_type: relayer, node: relayer-3, host: relayer-3, instance_label: Relayer-3 Read Proxy, canonical_innernet: 10.70.20.3, probe_label: qrpc_tcp, telemetry_path: restricted-public-proxy}
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - target_label: __address__
+        replacement: 127.0.0.1:9115
+      - source_labels: [__param_target]
+        target_label: target
+
+  - job_name: synergy-http-probes
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets: ['https://testnet-core-rpc.synergy-network.io/healthz']
+        labels: {role: rpc_gateway, node_type: rpc_gateway, node: rpc-gateway, host: rpc-gateway, instance_label: RPC Gateway, probe_label: https_health, telemetry_path: public-health}
+      - targets: ['https://testnet-explorer.synergy-network.io/healthz']
+        labels: {role: explorer_indexer, node_type: explorer_indexer, node: explorer-indexer, host: explorer-indexer, instance_label: Explorer/Indexer, probe_label: https_health, telemetry_path: public-health}
+      - targets: ['https://testnet-atlas-api.synergy-network.io/healthz']
+        labels: {role: atlas_api, node_type: atlas_api, node: atlas-api, host: atlas-api, instance_label: Atlas API, probe_label: https_health, telemetry_path: public-health}
+      - targets: ['https://testnet.synergy-network.io/']
+        labels: {role: website, node_type: website_coordinator, node: website-coordinator, host: website-coordinator, instance_label: Website, probe_label: https_health, telemetry_path: public-health}
+      - targets: ['https://vpn-coordinator.synergy-network.io/health']
+        labels: {role: coordinator, node_type: website_coordinator, node: website-coordinator, host: website-coordinator, instance_label: Validator VPN Coordinator, probe_label: https_health, telemetry_path: public-health}
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - target_label: __address__
+        replacement: 127.0.0.1:9115
+      - source_labels: [__param_target]
+        target_label: target
+
+  - job_name: synergy-bootstrap-probes
+    metrics_path: /probe
+    params:
+      module: [tcp_connect]
+    static_configs:
+      - targets: ['170.64.187.206:5620']
+        labels: {role: bootnode, node_type: bootnode, node: bootnode-1, host: bootseed-1, instance_label: Bootnode-1, probe_label: p2p_tcp, telemetry_path: public-tcp}
+      - targets: ['146.190.210.121:5620']
+        labels: {role: bootnode, node_type: bootnode, node: bootnode-2, host: bootseed-2, instance_label: Bootnode-2, probe_label: p2p_tcp, telemetry_path: public-tcp}
+      - targets: ['157.245.226.240:5620']
+        labels: {role: bootnode, node_type: bootnode, node: bootnode-3, host: bootseed-3, instance_label: Bootnode-3, probe_label: p2p_tcp, telemetry_path: public-tcp}
+      - targets: ['170.64.187.206:5621']
+        labels: {role: seed, node_type: seed, node: seed-1, host: bootseed-1, instance_label: Seed-1, probe_label: seed_tcp, telemetry_path: public-tcp}
+      - targets: ['146.190.210.121:5621']
+        labels: {role: seed, node_type: seed, node: seed-2, host: bootseed-2, instance_label: Seed-2, probe_label: seed_tcp, telemetry_path: public-tcp}
+      - targets: ['157.245.226.240:5621']
+        labels: {role: seed, node_type: seed, node: seed-3, host: bootseed-3, instance_label: Seed-3, probe_label: seed_tcp, telemetry_path: public-tcp}
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - target_label: __address__
+        replacement: 127.0.0.1:9115
+      - source_labels: [__param_target]
+        target_label: target
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ['127.0.0.1:9090']
+        labels: {role: observer, node_type: observer, node: observer, host: observer, instance_label: Prometheus, telemetry_path: local}

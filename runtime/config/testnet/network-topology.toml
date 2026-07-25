@@ -1,0 +1,353 @@
+schema_version = 1
+generated_config_version = 1
+description = "Canonical Synergy testnet public P2P topology."
+
+[network]
+environment_id = "testnet"
+release_id = "testnet-v3"
+network_name = "synergy-testnet-v3"
+runtime_network_id = "synergy-testnet-v3"
+network_id = 1264
+chain_id = 1264
+bootstrap_dns = "_dnsaddr.bootstrap.synergynode.xyz"
+public_rpc_endpoint = "https://testnet-core-rpc.synergy-network.io"
+public_rpc_host = "testnet-core-rpc.synergy-network.io"
+rpc_gateway_p2p_endpoint = "rpc.synergynode.xyz:5623"
+
+[common]
+bootnodes = [
+  "bootnode1.synergynode.xyz:5620",
+  "bootnode2.synergynode.xyz:5620",
+  "bootnode3.synergynode.xyz:5620",
+]
+seed_servers = [
+  "http://seed1.synergynode.xyz:5621",
+  "http://seed2.synergynode.xyz:5621",
+  "http://seed3.synergynode.xyz:5621",
+]
+relayer_peers = [
+  "relay1.synergynode.xyz:5622",
+  "relay2.synergynode.xyz:5622",
+  "relay3.synergynode.xyz:5622",
+]
+bootstrap_dns_records = [
+  "_dnsaddr.bootstrap.synergynode.xyz",
+]
+
+[policies]
+stable_infrastructure_endpoint_policy = "dns_only"
+validator_endpoint_policy = "coordinator_private_runtime_only"
+vpn_admin_only = true
+reject_private_public_p2p = true
+validator_configs_uniform_minus_self = true
+strict_validator_allowlist_uniform = true
+observer_separates_p2p_peers_from_monitoring_targets = true
+archive_public_endpoint = "archive.synergynode.xyz:5615"
+rpc_gateway_p2p_endpoint = "rpc.synergynode.xyz:5623"
+public_rpc_endpoint = "https://testnet-core-rpc.synergy-network.io"
+forbidden_public_p2p_endpoints = [
+  "73.79.66.255:5622",
+  "10.69.0.220:5622",
+  "127.0.0.1:5622",
+  "192.168.11.140:5622",
+]
+private_advertise_cidrs = [
+  "10.0.0.0/8",
+  "172.16.0.0/12",
+  "192.168.0.0/16",
+  "127.0.0.0/8",
+  "169.254.0.0/16",
+  "::1/128",
+  "fc00::/7",
+  "fe80::/10",
+]
+private_advertise_hosts = [
+  "localhost",
+  "0.0.0.0",
+  "::1",
+]
+
+[consensus]
+active_validator_set_source = "static_allowlist_manifest"
+excluded_validator_names = [
+  "Jenny",
+  "archive-validator",
+]
+strict_validator_allowlist = [
+  "synv1<TESTNET_V3_VALIDATOR_01_ADDRESS>",
+  "synv1<TESTNET_V3_VALIDATOR_02_ADDRESS>",
+  "synv1<TESTNET_V3_VALIDATOR_03_ADDRESS>",
+  "synv1<TESTNET_V3_VALIDATOR_04_ADDRESS>",
+  "synv1<TESTNET_V3_VALIDATOR_05_ADDRESS>",
+  "synv1<TESTNET_V3_VALIDATOR_06_ADDRESS>",
+]
+
+[seed_registry]
+ttl_seconds = 120
+dialback_required = true
+replication_required = true
+health_endpoint = "/health"
+metrics_endpoint = "/metrics"
+peer_list_endpoint = "/peer-list.json"
+peers_endpoint = "/peers"
+register_endpoint = "/register"
+heartbeat_endpoint = "/heartbeat"
+roles = [
+  "validator",
+  "relayer",
+  "observer",
+  "rpc_gateway",
+  "archive_validator",
+  "explorer_indexer",
+  "bootnode",
+  "seed_server",
+]
+required_fields = [
+  "chain_id",
+  "role",
+  "node_name",
+  "peer_id_or_node_public_key",
+  "public_endpoint",
+  "observed_remote_ip",
+  "listen_port",
+  "protocol_version",
+  "app_version",
+  "current_height",
+  "highest_known_height",
+  "sync_gap",
+  "last_seen",
+  "ttl_seconds",
+  "health_status",
+  "source_seed",
+  "dialback_status",
+  "score",
+]
+validator_required_fields = [
+  "validator_address",
+]
+output_stable_infrastructure = "dns"
+output_validators = "runtime_enrolled_private_transport"
+output_rpc_gateway = "rpc.synergynode.xyz:5623"
+output_archive_validator = "archive.synergynode.xyz:5615"
+output_observer = "209.145.50.9:5622"
+output_explorer_indexer_after_verified = true
+
+[[bootnodes]]
+name = "bootnode1"
+node_id = "bootnode1"
+host = "bootnode1.synergynode.xyz"
+ip_address = "170.64.187.206"
+port = 5620
+public_endpoint = "bootnode1.synergynode.xyz:5620"
+
+[[bootnodes]]
+name = "bootnode2"
+node_id = "bootnode2"
+host = "bootnode2.synergynode.xyz"
+ip_address = "146.190.210.121"
+port = 5620
+public_endpoint = "bootnode2.synergynode.xyz:5620"
+
+[[bootnodes]]
+name = "bootnode3"
+node_id = "bootnode3"
+host = "bootnode3.synergynode.xyz"
+ip_address = "157.245.226.240"
+port = 5620
+public_endpoint = "bootnode3.synergynode.xyz:5620"
+
+[[seed_servers]]
+name = "seed1"
+node_id = "seed1"
+host = "seed1.synergynode.xyz"
+ip_address = "170.64.187.206"
+port = 5621
+public_endpoint = "seed1.synergynode.xyz:5621"
+http_endpoint = "http://seed1.synergynode.xyz:5621"
+
+[[seed_servers]]
+name = "seed2"
+node_id = "seed2"
+host = "seed2.synergynode.xyz"
+ip_address = "146.190.210.121"
+port = 5621
+public_endpoint = "seed2.synergynode.xyz:5621"
+http_endpoint = "http://seed2.synergynode.xyz:5621"
+
+[[seed_servers]]
+name = "seed3"
+node_id = "seed3"
+host = "seed3.synergynode.xyz"
+ip_address = "157.245.226.240"
+port = 5621
+public_endpoint = "seed3.synergynode.xyz:5621"
+http_endpoint = "http://seed3.synergynode.xyz:5621"
+
+[[relayers]]
+name = "relay1"
+node_id = "relay1"
+host = "relay1.synergynode.xyz"
+ip_address = "195.26.241.95"
+port = 5622
+public_endpoint = "relay1.synergynode.xyz:5622"
+peers = [
+  "relay2.synergynode.xyz:5622",
+  "relay3.synergynode.xyz:5622",
+  "rpc.synergynode.xyz:5623",
+  "archive.synergynode.xyz:5615",
+  "209.145.50.9:5622",
+]
+
+[[relayers]]
+name = "relay2"
+node_id = "relay2"
+host = "relay2.synergynode.xyz"
+ip_address = "94.72.117.108"
+port = 5622
+public_endpoint = "relay2.synergynode.xyz:5622"
+peers = [
+  "relay1.synergynode.xyz:5622",
+  "relay3.synergynode.xyz:5622",
+  "rpc.synergynode.xyz:5623",
+  "archive.synergynode.xyz:5615",
+  "209.145.50.9:5622",
+]
+
+[[relayers]]
+name = "relay3"
+node_id = "relay3"
+host = "relay3.synergynode.xyz"
+ip_address = "209.145.48.117"
+port = 5622
+public_endpoint = "relay3.synergynode.xyz:5622"
+peers = [
+  "relay1.synergynode.xyz:5622",
+  "relay2.synergynode.xyz:5622",
+  "rpc.synergynode.xyz:5623",
+  "archive.synergynode.xyz:5615",
+  "209.145.50.9:5622",
+]
+
+[[validators]]
+name = "Val1"
+node_id = "validator-node-01"
+validator_address = "synv1<TESTNET_V3_VALIDATOR_01_ADDRESS>"
+port = 5622
+active_consensus = true
+
+[[validators]]
+name = "Val2"
+node_id = "validator-node-02"
+validator_address = "synv1<TESTNET_V3_VALIDATOR_02_ADDRESS>"
+port = 5622
+active_consensus = true
+
+[[validators]]
+name = "Val3"
+node_id = "validator-node-03"
+validator_address = "synv1<TESTNET_V3_VALIDATOR_03_ADDRESS>"
+port = 5622
+active_consensus = true
+
+[[validators]]
+name = "Val4"
+node_id = "validator-node-04"
+validator_address = "synv1<TESTNET_V3_VALIDATOR_04_ADDRESS>"
+port = 5622
+active_consensus = true
+
+[[validators]]
+name = "Val5"
+node_id = "validator-node-05"
+validator_address = "synv1<TESTNET_V3_VALIDATOR_05_ADDRESS>"
+port = 5622
+active_consensus = true
+
+[[validators]]
+name = "Val6"
+node_id = "validator-node-06"
+validator_address = "synv1<TESTNET_V3_VALIDATOR_06_ADDRESS>"
+port = 5622
+active_consensus = true
+
+[[rpc_gateways]]
+name = "rpc-gateway"
+node_id = "rpc-gateway"
+host = "rpc.synergynode.xyz"
+ip_address = "167.86.83.83"
+port = 5623
+public_endpoint = "rpc.synergynode.xyz:5623"
+public_json_rpc_endpoint = "https://testnet-core-rpc.synergy-network.io"
+peers = [
+  "relay1.synergynode.xyz:5622",
+  "relay2.synergynode.xyz:5622",
+  "relay3.synergynode.xyz:5622",
+]
+
+[[observers]]
+name = "observer"
+node_id = "observer"
+ip_address = "209.145.50.9"
+port = 5622
+public_endpoint = "209.145.50.9:5622"
+p2p_peers = [
+  "relay1.synergynode.xyz:5622",
+  "relay2.synergynode.xyz:5622",
+  "relay3.synergynode.xyz:5622",
+]
+monitoring_targets = [
+  "bootnode1.synergynode.xyz:5620",
+  "bootnode2.synergynode.xyz:5620",
+  "bootnode3.synergynode.xyz:5620",
+  "seed1.synergynode.xyz:5621",
+  "seed2.synergynode.xyz:5621",
+  "seed3.synergynode.xyz:5621",
+  "relay1.synergynode.xyz:5622",
+  "relay2.synergynode.xyz:5622",
+  "rpc.synergynode.xyz:5623",
+  "testnet-core-rpc.synergy-network.io",
+  "archive.synergynode.xyz:5615",
+  "62.146.182.207:5622",
+  "62.146.182.208:5622",
+  "62.146.182.209:5622",
+  "73.79.66.255:5622",
+  "194.163.183.166:5622",
+  "157.173.192.45:5622",
+  "74.208.227.23",
+]
+
+[[explorer_indexers]]
+name = "explorer-indexer"
+node_id = "explorer-indexer"
+ip_address = "74.208.227.23"
+port = 5622
+public_endpoint = "74.208.227.23:5622"
+service_name = "synergy-explorer-indexer.service"
+config_paths = [
+  "/etc/synergy/explorer-indexer/node.toml",
+  "/etc/synergy/explorer-indexer/peers.toml",
+]
+peers = [
+  "relay1.synergynode.xyz:5622",
+  "relay2.synergynode.xyz:5622",
+  "relay3.synergynode.xyz:5622",
+]
+
+[[archive_validators]]
+name = "archive-validator"
+node_id = "archive-validator"
+host = "archive.synergynode.xyz"
+ip_address = "73.79.66.255"
+port = 5615
+public_endpoint = "archive.synergynode.xyz:5615"
+forbidden_public_endpoints = [
+  "73.79.66.255:5622",
+  "10.69.0.220:5622",
+  "127.0.0.1:5622",
+  "192.168.11.140:5622",
+]
+peers = [
+  "relay1.synergynode.xyz:5622",
+  "relay2.synergynode.xyz:5622",
+  "relay3.synergynode.xyz:5622",
+]

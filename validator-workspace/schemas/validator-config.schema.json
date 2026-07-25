@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Synergy Validator Config",
+  "type": "object",
+  "required": ["chain_id", "network_id", "validator_address"],
+  "properties": {
+    "chain_id": { "const": 1264 },
+    "network_id": { "const": "synergy-testnet-v3" },
+    "validator_address": { "type": "string", "minLength": 1 },
+    "data_dir": { "const": "/var/lib/synergy/validator" },
+    "log_dir": { "const": "/var/log/synergy/validator" },
+    "key_dir": { "const": "/etc/synergy/validator/keys" }
+  }
+}
+

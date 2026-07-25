@@ -1,0 +1,16 @@
+# Grafana dashboard provisioning.
+# Location on observer: /etc/grafana/provisioning/dashboards/synergy.yml
+apiVersion: 1
+
+providers:
+  - name: 'Synergy Testnet'
+    orgId: 2
+    folder: 'Synergy'
+    folderUid: 'synergy'
+    type: file
+    disableDeletion: false
+    editable: true
+    allowUiUpdates: true
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards/synergy

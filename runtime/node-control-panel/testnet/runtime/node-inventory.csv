@@ -1,0 +1,15 @@
+node_slot_id,node_alias,role_group,role,node_type,address_class,p2p_port,rpc_port,ws_port,grpc_port,discovery_port,host,management_host,physical_machine_id,auto_register_validator,enable_pruning,vrf_enabled,operator,device,operating_system,public_ip,local_ip
+Node-0A,bootnode1,bootstrap,bootnode,bootnode,0,5620,5640,5660,50051,5680,bootnode1.synergy-network.io,bootnode1.synergy-network.io,Node-0A,false,true,false,Network,Ionos VPS,Ubuntu 25.10 Server,170.64.187.206,
+Node-0B,bootnode2,bootstrap,bootnode,bootnode,0,5620,5640,5660,50051,5680,bootnode2.synergy-network.io,bootnode2.synergy-network.io,Node-0B,false,true,false,Network,DigitalOcean VPS,Ubuntu 25.10 Server,146.190.210.121,
+Node-0C,bootnode3,bootstrap,bootnode,bootnode,0,5620,5640,5660,50051,5680,bootnode3.synergy-network.io,bootnode3.synergy-network.io,Node-0C,false,true,false,Network,DigitalOcean VPS,Ubuntu 25.10 Server,157.245.226.240,
+Node-EXP,genesisindexer,services,indexer,indexer,5,5622,5640,5660,5640,5680,testnet-explorer.synergy-network.io,testnet-explorer.synergy-network.io,Node-EXP,false,false,false,Network,Ionos VPS,Ubuntu 25.10 Server,74.208.227.23,
+Node-RPC,genesisrpc,services,rpc-gateway,rpc-gateway,5,5623,5641,5661,5641,5681,testnet-core-rpc.synergy-network.io,testnet-core-rpc.synergy-network.io,Node-RPC,false,false,false,Network,Ionos VPS,Ubuntu 25.10 Server,74.208.227.23,
+Node-REL1,relayer1,services,relayer,relayer,2,5622,5640,5660,5640,5680,10.70.20.1,10.70.20.1,Node-REL1,false,true,false,Network,Ubuntu VPS,Ubuntu 24.04 Server,195.26.241.95,10.70.20.1
+Node-REL2,relayer2,services,relayer,relayer,2,5622,5640,5660,5640,5680,10.70.20.2,10.70.20.2,Node-REL2,false,true,false,Network,Ubuntu VPS,Ubuntu 24.04 Server,94.72.117.108,10.70.20.2
+Node-REL3,relayer3,services,relayer,relayer,2,5622,5640,5660,5640,5680,10.70.20.3,10.70.20.3,Node-REL3,false,true,false,Network,Ubuntu VPS,Ubuntu 24.04 Server,209.145.48.117,10.70.20.3
+Validator-01,validator1,consensus,validator,validator,1,5622,5640,5660,5640,5680,10.70.10.1,10.70.10.1,Validator-01,false,false,true,Justin,Mac Mini,MacOS 26 Tahoe (beta),62.146.182.207,10.70.10.1
+Validator-02,validator2,consensus,validator,validator,1,5622,5640,5660,5640,5680,10.70.10.2,10.70.10.2,Validator-02,false,false,true,Rob,Synergy Mini,MacOS 26 Tahoe (beta),62.146.182.208,10.70.10.2
+Validator-03,validator3,consensus,validator,validator,1,5622,5640,5660,5640,5680,10.70.10.3,10.70.10.3,Validator-03,false,false,true,Rob,,Windows 11,62.146.182.209,10.70.10.3
+Validator-04,validator4,consensus,validator,validator,1,5622,5640,5660,5640,5680,10.70.10.4,10.70.10.4,Validator-04,false,false,true,Rob,,Windows 11,73.79.66.255,10.70.10.4
+Validator-05,validator5,consensus,validator,validator,1,5622,5640,5660,5640,5680,10.70.10.5,10.70.10.5,Validator-05,false,false,true,David,Ubuntu VPS,Ubuntu 24.04 Server,194.163.183.166,10.70.10.5
+Validator-06,validator6,consensus,validator,validator,1,5622,5640,5660,5640,5680,10.70.10.6,10.70.10.6,Validator-06,false,false,true,Justin,Ubuntu VPS,Ubuntu 24.04 Server,157.173.192.45,10.70.10.6

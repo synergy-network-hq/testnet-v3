@@ -1,0 +1,27 @@
+[package]
+name = "synq-compiler"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Core dependencies from workspace
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+
+# Parser dependencies
+pest = "2.7.7"
+pest_derive = "2.7.7"
+
+# SynQ VM dependency
+quantumvm = { package = "synq-vm", path = "../vm" }
+synq_pqc_shims = { package = "synq-pqc-shims", path = "../pqc-shims" }
+
+# PQC dependencies
+pqcrypto = { workspace = true }
+sha3 = "0.10"
+
+ruint = { workspace = true }
+
+[dev-dependencies]
+assert_matches = "1.5.0"

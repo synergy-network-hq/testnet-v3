@@ -1,0 +1,20 @@
+[package]
+name = "synergy-node"
+version = "1.0.0"
+edition = "2021"
+authors = ["Synergy Network"]
+description = "Synergy Network Node Implementation"
+license = "MIT"
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+clap = { version = "4.0", features = ["derive"] }
+log = "0.4"
+env_logger = "0.10"
+rand = "0.8"
+sha2 = "0.10"
+ed25519-dalek = "2.0"
+base64 = "0.21"
+bech32 = "0.9"

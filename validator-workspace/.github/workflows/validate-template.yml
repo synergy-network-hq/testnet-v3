@@ -1,0 +1,22 @@
+name: Validate Template
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+      - name: Required files
+        run: tests/test-required-files.sh
+      - name: Secret scan
+        run: tests/test-template-no-secrets.sh
+      - name: Render config
+        run: tests/test-render-config.sh
+      - name: Mask identity
+        run: python3 tests/test-mask-identity.py
+

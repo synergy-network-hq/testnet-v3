@@ -1,0 +1,21 @@
+[Unit]
+Description=Synergy Testnet Validator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=node
+Group=node
+EnvironmentFile=/etc/synergy/validator/node.env
+WorkingDirectory=/var/lib/synergy/validator
+ExecStart=/opt/synergy/bin/synergy-validator start --config /etc/synergy/validator/config.toml
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=1048576
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/synergy/validator /var/log/synergy/validator /var/backups/synergy/validator
+
+[Install]
+WantedBy=multi-user.target

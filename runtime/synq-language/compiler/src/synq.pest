@@ -1,0 +1,105 @@
+// SynQ Language Grammar (pest)
+
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+COMMENT    = _{ "//" ~ (!"\n" ~ ANY)* ~ ("\n" | EOI) | "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
+
+source_file = { SOI ~ pragma_version? ~ item* ~ EOI }
+pragma_version = { "pragma" ~ "synq" ~ version_requirement ~ ";" }
+version_requirement = { version_comparator ~ VERSION_NUMBER ~ (version_comparator ~ VERSION_NUMBER)* }
+version_comparator = { "^" | ">=" | "<=" | ">" | "<" | "=" }
+VERSION_NUMBER = @{ ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? }
+
+item = { struct_definition | contract_definition | function_definition_global }
+
+// Annotations
+annotation = { "@" ~ IDENT ~ ("(" ~ annotation_args ~ ")")? }
+annotation_args = { annotation_arg ~ ("," ~ annotation_arg)* }
+annotation_arg = { IDENT ~ ":" ~ expression }
+
+// Structs
+struct_definition = { annotation* ~ "struct" ~ IDENT ~ ("<" ~ generic_params ~ ">")? ~ "{" ~ struct_field* ~ "}" }
+enum_definition = { annotation* ~ "enum" ~ IDENT ~ "{" ~ IDENT ~ ("," ~ IDENT)* ~ ","? ~ "}" }
+struct_field = { synq_struct_field | solidity_struct_field }
+synq_struct_field = { IDENT ~ ":" ~ type_decl ~ ";" }
+solidity_struct_field = { type_decl ~ IDENT ~ ";" }
+generic_params = { IDENT ~ ("," ~ IDENT)* }
+
+// Contracts
+contract_definition = { annotation* ~ "contract" ~ IDENT ~ ("<" ~ generic_params ~ ">")? ~ "{" ~ contract_part* ~ "}" }
+contract_part = { state_variable_declaration | constructor_definition | function_definition | event_definition | struct_definition | enum_definition }
+
+state_variable_declaration = { annotation* ~ (synq_state_variable_declaration | solidity_state_variable_declaration) }
+synq_state_variable_declaration = { IDENT ~ ":" ~ type_decl ~ ("public")? ~ ";" }
+solidity_state_variable_declaration = { type_decl ~ ("public")? ~ IDENT ~ ("=" ~ expression)? ~ ";" }
+
+constructor_definition = { annotation* ~ "constructor" ~ "(" ~ (param ~ ("," ~ param)*)? ~ ")" ~ block }
+
+visibility_kw = { "public" | "private" | "internal" | "external" }
+return_type = { type_decl | tuple_type }
+tuple_type = { "(" ~ type_decl ~ ("," ~ type_decl)+ ~ ")" }
+function_definition = { annotation* ~ ("@public")? ~ "function" ~ IDENT ~ "(" ~ (param ~ ("," ~ param)*)? ~ ")" ~ (visibility_kw)* ~ ("->" ~ return_type)? ~ (modifier)* ~ block }
+function_definition_global = { annotation* ~ "function" ~ IDENT ~ "(" ~ (param ~ ("," ~ param)*)? ~ ")" ~ ("->" ~ return_type)? ~ block }
+modifier = { IDENT ~ "(" ~ expression_list ~ ")" }
+param_modifier = { "memory" | "storage" }
+param = { synq_param | solidity_param }
+synq_param = { IDENT ~ ":" ~ type_decl }
+solidity_param = { type_decl ~ param_modifier? ~ IDENT }
+
+// Events
+event_definition = { annotation* ~ "event" ~ IDENT ~ "(" ~ (event_param ~ ("," ~ event_param)*)? ~ ")" ~ ";"? }
+event_param = { synq_event_param | solidity_event_param }
+synq_event_param = { IDENT ~ ":" ~ type_decl ~ ("indexed")? }
+solidity_event_param = { type_decl ~ ("indexed")? ~ IDENT }
+
+// Types
+type_decl = { mapping_type | (base_type ~ ("<" ~ type_params ~ ">")? ~ array_suffix?) }
+mapping_type = { "mapping" ~ "(" ~ type_decl ~ "=>" ~ type_decl ~ ")" }
+base_type = { "Address" | "UInt256" | "UInt128" | "UInt64" | "UInt32" | "UInt8" | "Int256" | "Int128" | "Int64" | "Int32" | "Int8" | "Bool" | "Bytes" | "String" | "MLDSAPublicKey" | "MLDSAKeyPair" | "MLDSASignature" | "FNDSAPublicKey" | "FNDSAKeyPair" | "FNDSASignature" | "MLKEMPublicKey" | "MLKEMKeyPair" | "MLKEMCiphertext" | "SLHDSAPublicKey" | "SLHDSAKeyPair" | "SLHDSASignature" | "PQAuth" | IDENT }
+type_params = { type_decl ~ ("," ~ type_decl)* }
+array_suffix = { "[" ~ (NUMBER)? ~ "]" | "[]" }
+
+// Statements
+block = { "{" ~ statement* ~ "}" }
+statement = { variable_declaration | assignment | return_statement | require_statement | revert_statement | if_statement | for_statement | emit_statement | typed_variable_declaration | expression_statement | require_pqc_block }
+
+variable_declaration = { "let" ~ IDENT ~ (":" ~ type_decl)? ~ "=" ~ expression ~ ";" }
+typed_variable_declaration = { type_decl ~ param_modifier? ~ IDENT ~ ("=" ~ expression)? ~ ";" }
+lvalue = { IDENT ~ (("[" ~ expression ~ "]") | ("." ~ IDENT))* }
+assignment = { lvalue ~ "=" ~ expression ~ ";" }
+return_statement = { "return" ~ (expression)? ~ ";" }
+require_statement = { "require" ~ "(" ~ expression ~ ("," ~ STRING_LITERAL)? ~ ")" ~ ";" }
+revert_statement = { "revert" ~ "(" ~ STRING_LITERAL ~ ")" ~ ";" }
+if_statement = { "if" ~ "(" ~ expression ~ ")" ~ block ~ ("else" ~ (block | if_statement))? }
+for_statement = { "for" ~ "(" ~ for_init ~ ")" ~ block }
+for_init = { IDENT ~ "in" ~ expression ~ ".." ~ expression | IDENT ~ "=" ~ expression ~ ";" ~ expression ~ ";" ~ expression }
+emit_statement = { "emit" ~ IDENT ~ "(" ~ expression_list ~ ")" ~ ";" }
+expression_statement = { expression ~ ";" }
+require_pqc_block = { "require_pqc" ~ block ~ ("or" ~ (revert_statement | return_statement))? }
+
+// Expressions
+expression = { ternary_expression }
+ternary_expression = { logical_or ~ ("?" ~ expression ~ ":" ~ expression)? }
+logical_or = { logical_and ~ ("||" ~ logical_and)* }
+logical_and = { equality ~ ("&&" ~ equality)* }
+equality = { comparison ~ (("==" | "!=") ~ comparison)* }
+comparison = { additive ~ (("<=" | ">=" | "<" | ">") ~ additive)* }
+additive = { multiplicative ~ (("+" | "-") ~ multiplicative)* }
+multiplicative = { unary ~ (("*" | "/" | "%") ~ unary)* }
+unary = { ("!" | "-" | "++" | "--")* ~ postfix }
+postfix = { primary ~ (("++" | "--") | ("[" ~ expression ~ "]") | ("." ~ IDENT) | ("(" ~ expression_list ~ ")"))* }
+primary = { tuple_literal | literal | object_literal | array_literal | IDENT | "(" ~ expression ~ ")" | "msg.sender" | "msg.value" | "block.timestamp" | "block.number" }
+expression_list = { (expression ~ ("," ~ expression)*)? }
+object_literal = { "{" ~ (IDENT ~ ":" ~ expression ~ ("," ~ IDENT ~ ":" ~ expression)*)? ~ ","? ~ "}" }
+array_literal = { "[" ~ (expression ~ ("," ~ expression)*)? ~ "]" }
+tuple_literal = { "(" ~ expression ~ ("," ~ expression)+ ~ ")" }
+
+// Literals
+literal = { NUMBER | STRING_LITERAL | BOOL_LITERAL | ADDRESS_LITERAL | BYTES_LITERAL | "null" | "true" | "false" }
+NUMBER = @{ ("-")? ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? ~ (("e" | "E") ~ ("+" | "-")? ~ ASCII_DIGIT+)? }
+STRING_LITERAL = { "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
+BOOL_LITERAL = { "true" | "false" }
+ADDRESS_LITERAL = { "0x" ~ ASCII_HEX_DIGIT{40} }
+BYTES_LITERAL = { "Bytes" ~ "(" ~ "\"" ~ ASCII_HEX_DIGIT* ~ "\"" ~ ")" }
+
+// Identifiers
+IDENT = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }

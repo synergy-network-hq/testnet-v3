@@ -1,0 +1,24 @@
+Intent Marker Template (Bitcoin Testnet)
+--------------------------------------
+
+Relayers may monitor the blockchain for intent declarations embedded in
+transactions using OP_RETURN. This optional marker indicates that a user
+intends to initiate an SXCP atomic swap. The marker is purely for
+discoverability and does not lock funds.
+
+Example OP_RETURN script:
+
+```
+OP_RETURN 0x5358435001<USER_ID><DEST_CHAIN_ID><AMOUNT><EXPIRATION>
+```
+
+* `0x53584350` – ASCII for "SXCP" (protocol identifier)
+* `01` – Version byte
+* `<USER_ID>` – 20‑byte Synergy identity hash (e.g., ripemd160)
+* `<DEST_CHAIN_ID>` – 4‑byte destination chain identifier
+* `<AMOUNT>` – 8‑byte big‑endian amount (satoshis)
+* `<EXPIRATION>` – 4‑byte UNIX timestamp or block height for swap expiration
+
+Relayers watch for this pattern, parse the marker and coordinate matching
+counterparty orders off‑chain. Since OP_RETURN outputs are provably unspendable
+and do not affect the UTXO set, they incur minimal overhead.

@@ -1,0 +1,6 @@
+[dag]
+data_dir = "/var/lib/synergy/validator/dag"
+proposal_cache_dir = "/var/lib/synergy/validator/proposal-cache"
+max_pending_proposals = 1024
+persist_interval_ms = 1000
+

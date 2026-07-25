@@ -1,0 +1,52 @@
+chain_id = 1264
+network_id = "synergy-testnet-v3"
+node_role = "validator"
+validator_name = "CHANGE_ME_VALIDATOR_NAME"
+validator_index = "CHANGE_ME_VALIDATOR_INDEX"
+validator_address = "CHANGE_ME_VALIDATOR_ADDRESS"
+workspace = "/var/lib/synergy/validator"
+data_dir = "/var/lib/synergy/validator"
+log_dir = "/var/log/synergy/validator"
+key_dir = "/etc/synergy/validator/keys"
+genesis_file = "/etc/synergy/validator/genesis.json"
+chain_spec_file = "/etc/synergy/validator/chain-spec.json"
+
+[network]
+p2p_port = 5622
+rpc_port = 5640
+ws_port = 5660
+discovery_port = 5680
+public_ip = "CHANGE_ME_PUBLIC_IP"
+private_ip = "CHANGE_ME_PRIVATE_IP"
+p2p_advertise_addr = "CHANGE_ME_P2P_ADVERTISE_ADDR"
+rpc_advertise_addr = "CHANGE_ME_RPC_ADVERTISE_ADDR"
+peer_id = "CHANGE_ME_PEER_ID"
+
+[rpc]
+bind_address = "0.0.0.0:5640"
+http_port = 5640
+ws_port = 5660
+enable_grpc = true
+grpc_port = 5640
+token_env = "SYNERGY_RPC_TOKEN"
+
+[p2p]
+listen_address = "0.0.0.0:5622"
+discovery_listen_address = "0.0.0.0:5680"
+bootstrap_peers_file = "/etc/synergy/validator/peers.toml"
+
+[consensus]
+config_file = "/etc/synergy/validator/consensus.toml"
+key_file = "/etc/synergy/validator/keys/consensus-key.json"
+
+[dag]
+config_file = "/etc/synergy/validator/dag.toml"
+
+[mempool]
+config_file = "/etc/synergy/validator/mempool.toml"
+
+[metrics]
+config_file = "/etc/synergy/validator/metrics.toml"
+
+[logging]
+config_file = "/etc/synergy/validator/logging.toml"

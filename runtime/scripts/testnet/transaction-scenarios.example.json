@@ -1,0 +1,32 @@
+[
+  {
+    "label": "stake-genesis-wallet-a-to-validator-1",
+    "method": "synergy_stakeTokensDirect",
+    "params": [
+      "synw1hrm96txgnalsjjrx5yjfxuyqkt4mxf8j0tsr",
+      "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs",
+      "SNRG",
+      1
+    ]
+  },
+  {
+    "label": "stake-genesis-wallet-b-to-validator-2",
+    "method": "synergy_stakeTokensDirect",
+    "params": [
+      "synw1xwwrtdg84jcj4kcj423lcma67fnqlr2zq9fd",
+      "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt",
+      "SNRG",
+      2
+    ]
+  },
+  {
+    "label": "stake-genesis-wallet-c-to-validator-4",
+    "method": "synergy_stakeTokensDirect",
+    "params": [
+      "synw1nr0mf40j2fzs3f09602xwhmyjdk7dv0m35v4",
+      "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5",
+      "SNRG",
+      3
+    ]
+  }
+]

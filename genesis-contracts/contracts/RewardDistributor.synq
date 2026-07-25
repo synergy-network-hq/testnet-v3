@@ -1,0 +1,84 @@
+// Testnet-v3 node reward payout contract.
+pragma synq ^1.0.0;
+
+contract RewardDistributor {
+    governanceKey: MLDSAPublicKey public;
+    distributorAuthority: Address public;
+    paused: Bool public;
+    totalDistributed: UInt256 public;
+    distributionCount: UInt256 public;
+
+    event DistributorAuthorityUpdated(oldAuthority: Address indexed, newAuthority: Address indexed);
+    event RewardDistributed(recipient: Address indexed, amount: UInt256);
+    event RewardBatchDistributed(recipients: UInt256, totalAmount: UInt256);
+    event PauseStateUpdated(paused: Bool);
+
+    constructor(initialGovernanceKey: MLDSAPublicKey, initialDistributorAuthority: Address) {
+        require(initialDistributorAuthority != Address(0), "Invalid distributor authority");
+        governanceKey = initialGovernanceKey;
+        distributorAuthority = initialDistributorAuthority;
+        paused = false;
+        totalDistributed = 0;
+        distributionCount = 0;
+    }
+
+    @gas_cost(base: 70000)
+    @public function distribute(recipient: Address, amount: UInt256) {
+        require(!paused, "Distribution paused");
+        require(msg.sender == distributorAuthority, "Unauthorized");
+        require(recipient != Address(0), "Invalid recipient");
+        require(amount > 0, "Amount is zero");
+        sendNative(recipient, amount);
+        totalDistributed = totalDistributed + amount;
+        distributionCount = distributionCount + 1;
+        emit RewardDistributed(recipient, amount);
+    }
+
+    @gas_cost(base: 100000, per_recipient: 30000)
+    @public function distributeBatch(recipients: Address[], amounts: UInt256[]) {
+        require(!paused, "Distribution paused");
+        require(msg.sender == distributorAuthority, "Unauthorized");
+        require(recipients.length > 0, "Empty batch");
+        require(recipients.length == amounts.length, "Batch length mismatch");
+
+        let totalAmount: UInt256 = 0;
+        for (i in 0..recipients.length) {
+            require(recipients[i] != Address(0), "Invalid recipient");
+            require(amounts[i] > 0, "Amount is zero");
+            totalAmount = totalAmount + amounts[i];
+        }
+        for (i in 0..recipients.length) {
+            sendNative(recipients[i], amounts[i]);
+            emit RewardDistributed(recipients[i], amounts[i]);
+        }
+        totalDistributed = totalDistributed + totalAmount;
+        distributionCount = distributionCount + recipients.length;
+        emit RewardBatchDistributed(recipients.length, totalAmount);
+    }
+
+    @gas_cost(base: 90000, mldsa_verify: 35000)
+    @public function setDistributorAuthority(
+        newAuthority: Address,
+        message: Bytes,
+        signature: MLDSASignature
+    ) {
+        require(newAuthority != Address(0), "Invalid authority");
+        require_pqc {
+            let valid: Bool = verifyMLDSASignature(governanceKey, message, signature);
+            require(valid, "Invalid governance signature");
+        } or revert("PQC verification failed");
+        let oldAuthority: Address = distributorAuthority;
+        distributorAuthority = newAuthority;
+        emit DistributorAuthorityUpdated(oldAuthority, newAuthority);
+    }
+
+    @gas_cost(base: 90000, mldsa_verify: 35000)
+    @public function setPaused(newPaused: Bool, message: Bytes, signature: MLDSASignature) {
+        require_pqc {
+            let valid: Bool = verifyMLDSASignature(governanceKey, message, signature);
+            require(valid, "Invalid governance signature");
+        } or revert("PQC verification failed");
+        paused = newPaused;
+        emit PauseStateUpdated(newPaused);
+    }
+}

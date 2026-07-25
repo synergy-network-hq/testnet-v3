@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "environment": "testnet",
+  "network": "synergy-testnet",
+  "chain_id": "1264",
+  "policy": {
+    "observer_outside_validator_vpn": true,
+    "validator_telemetry_via_relayers_only": true,
+    "public_service_nodes_must_not_dial_validator_innernet": true
+  },
+  "observer": {
+    "prometheus_config_source": "live-config-after/observer/prometheus/prometheus.yml",
+    "prometheus_config_destination": "/opt/prometheus/config/prometheus.yml",
+    "rules_source": "live-config-after/observer/rules",
+    "rules_destination": "/opt/prometheus/config/rules",
+    "service": "prometheus.service"
+  },
+  "relayers": [
+    {
+      "id": "relayer-1",
+      "canonical_innernet": "10.70.20.1",
+      "public_dns": "relay1.synergynode.xyz",
+      "direct_telemetry": {"node_exporter": 9100, "read_proxy": 15640},
+      "validators": [
+        {
+          "id": "validator-1",
+          "canonical_innernet": "10.70.10.1",
+          "proxy_ports": {"app_metrics": 16031, "qrpc": 15631, "node_exporter": 19101},
+          "backend_ports": {"app_metrics": 6030, "qrpc": 5640, "node_exporter": 9100}
+        },
+        {
+          "id": "validator-2",
+          "canonical_innernet": "10.70.10.2",
+          "proxy_ports": {"app_metrics": 16032, "qrpc": 15632, "node_exporter": 19102},
+          "backend_ports": {"app_metrics": 6030, "qrpc": 5640, "node_exporter": 9100}
+        }
+      ]
+    },
+    {
+      "id": "relayer-2",
+      "canonical_innernet": "10.70.20.2",
+      "public_dns": "relay2.synergynode.xyz",
+      "direct_telemetry": {"node_exporter": 9100, "read_proxy": 15640},
+      "validators": [
+        {
+          "id": "validator-3",
+          "canonical_innernet": "10.70.10.3",
+          "proxy_ports": {"app_metrics": 16033, "qrpc": 15633, "node_exporter": 19103},
+          "backend_ports": {"app_metrics": 6030, "qrpc": 5640, "node_exporter": 9100}
+        },
+        {
+          "id": "validator-4",
+          "canonical_innernet": "10.70.10.4",
+          "proxy_ports": {"app_metrics": 16034, "qrpc": 15634, "node_exporter": 19104},
+          "backend_ports": {"app_metrics": 6030, "qrpc": 5640, "node_exporter": 9100}
+        }
+      ]
+    },
+    {
+      "id": "relayer-3",
+      "canonical_innernet": "10.70.20.3",
+      "public_dns": "relay3.synergynode.xyz",
+      "direct_telemetry": {"node_exporter": 9100, "read_proxy": 15640},
+      "validators": [
+        {
+          "id": "validator-5",
+          "canonical_innernet": "10.70.10.5",
+          "proxy_ports": {"app_metrics": 16035, "qrpc": 15635, "node_exporter": 19105},
+          "backend_ports": {"app_metrics": 6030, "qrpc": 5640, "node_exporter": 9100}
+        },
+        {
+          "id": "validator-6",
+          "canonical_innernet": "10.70.10.6",
+          "proxy_ports": {"app_metrics": 16036, "qrpc": 15636, "node_exporter": 19106},
+          "backend_ports": {"app_metrics": 6030, "qrpc": 5640, "node_exporter": 9100}
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,54 @@
+{
+  "name": "aegis-crypto-core",
+  "version": "0.1.0",
+  "description": "Aegis: Unified WebAssembly, Rust, and Python PQ cryptography core with FIPS 203 ML-KEM, FIPS 204 ML-DSA, FIPS 206 FN-DSA/Falcon, SLH-DSA, HQC, and Classic McEliece.",
+  "keywords": [
+    "post-quantum",
+    "cryptography",
+    "pqrust",
+    "wasm",
+    "rust",
+    "blockchain",
+    "ml-kem",
+    "ml-dsa",
+    "falcon",
+    "sphincsplus",
+    "hqc",
+    "classicmceliece",
+    "secure messaging",
+    "wallet"
+  ],
+  "homepage": "https://synergy-network.io",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/synergy-network-hq/aegis"
+  },
+  "license": "MIT OR Apache-2.0",
+  "author": "Justin Hutzler <justin@synergy-network.io>",
+  "engines": {
+    "node": ">=18"
+  },
+  "main": "pkg/aegis_crypto_core.js",
+  "module": "pkg/aegis_crypto_core.js",
+  "types": "pkg/aegis_crypto_core.d.ts",
+  "files": [
+    "pkg/",
+    "README.md",
+    "docs/",
+    "examples/"
+  ],
+  "scripts": {
+    "build": "wasm-pack build --release --target web --out-dir pkg",
+    "build:web": "wasm-pack build --release --target web --out-dir pkg",
+    "build:node": "wasm-pack build --release --target nodejs --out-dir pkg",
+    "build:bundler": "wasm-pack build --release --target bundler --out-dir pkg",
+    "test": "wasm-pack test --headless --chrome",
+    "test:native": "cargo test --workspace",
+    "lint": "echo 'No JS linting configured yet.'",
+    "prepublishOnly": "npm run build"
+  },
+  "optionalDependencies": {},
+  "publishConfig": {
+    "access": "public"
+  }
+}

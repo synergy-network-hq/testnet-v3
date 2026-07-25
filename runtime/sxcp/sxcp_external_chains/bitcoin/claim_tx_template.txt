@@ -1,0 +1,28 @@
+Claim Transaction Template (Bitcoin Testnet)
+-------------------------------------------
+
+This template spends an HTLC output by providing the preimage and recipient
+signature. Replace placeholders with actual values before broadcasting.
+
+Inputs:
+  * Previous TXID: `<FUNDING_TXID>`
+  * Output index: `<OUTPUT_INDEX>` (the HTLC output)
+
+Unlocking script (scriptSig):
+
+```
+<RECIPIENT_SIGNATURE> <RECIPIENT_PUBKEY> <PREIMAGE> OP_TRUE
+```
+
+* `<RECIPIENT_SIGNATURE>` – Signature created with the recipient’s private key
+  covering the spending transaction
+* `<RECIPIENT_PUBKEY>` – Recipient’s public key
+* `<PREIMAGE>` – The secret whose hash matches the HTLC hash
+* `OP_TRUE` – Pushes a non‑zero value to select the “if” branch of the HTLC
+  (claim path)
+
+Outputs:
+  * Send the entire value minus fees to the recipient’s address.
+
+Make sure to set the appropriate `nLockTime` less than `<TIMEOUT>` and use
+sequence numbers of `0xffffffff` to make the transaction valid immediately.

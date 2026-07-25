@@ -1,0 +1,11 @@
+[
+  {"module":"aegis-pqvm","algorithm":"ML-KEM-512","operation":"keypair","iterations":100,"avg_duration":"avg"},
+  {"module":"aegis-pqvm","algorithm":"ML-KEM-512","operation":"encapsulate","iterations":100,"avg_duration":"avg"},
+  {"module":"aegis-pqvm","algorithm":"ML-KEM-512","operation":"decapsulate","iterations":100,"avg_duration":"avg"},
+  {"module":"aegis-pqvm","algorithm":"ML-DSA-44","operation":"keypair","iterations":100,"avg_duration":"avg"},
+  {"module":"aegis-pqvm","algorithm":"ML-DSA-44","operation":"sign(detached)","iterations":100,"avg_duration":"avg"},
+  {"module":"aegis-pqvm","algorithm":"ML-DSA-44","operation":"verify(detached)","iterations":100,"avg_duration":"avg"},
+  {"module":"aegis-pqvm","algorithm":"FN-DSA-512","operation":"keypair","iterations":100,"avg_duration":"avg"},
+  {"module":"aegis-pqvm","algorithm":"FN-DSA-512","operation":"sign(detached)","iterations":100,"avg_duration":"avg"},
+  {"module":"aegis-pqvm","algorithm":"FN-DSA-512","operation":"verify(detached)","iterations":100,"avg_duration":"avg"}
+]

@@ -1,0 +1,275 @@
+/*
+ * Synergy reusable button effects pack
+ *
+ * Copy this file together with SNRGButton.jsx into another project for the
+ * homepage-hero CTA treatment used across Synergy surfaces.
+ *
+ * Pure CSS usage:
+ * <div class="snrgfx-btn-grid-hero">
+ *   <button class="snrgfx-btn snrgfx-btn-whitepaper snrgfx-btn-hero snrgfx-btn-block">Read the Whitepaper</button>
+ *   <button class="snrgfx-btn snrgfx-btn-architecture snrgfx-btn-hero snrgfx-btn-block">Explore the Architecture</button>
+ *   <button class="snrgfx-btn snrgfx-btn-community snrgfx-btn-hero snrgfx-btn-block">Join the Community</button>
+ *   <button class="snrgfx-btn snrgfx-btn-presale snrgfx-btn-hero snrgfx-btn-block">Participate in the Presale</button>
+ * </div>
+ */
+
+:root {
+  --snrgfx-btn-font-family:
+    var(--snrg-font-primary, "Inter Variable"),
+    var(--snrg-font-body, Inter),
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+  --snrgfx-btn-radius: 16px;
+  --snrgfx-btn-bg: rgba(11, 17, 30, 0.9);
+  --snrgfx-btn-text: #f2f7ff;
+  --snrgfx-btn-border: rgba(255, 255, 255, 0.1);
+  --snrgfx-btn-border-width: 2px;
+  --snrgfx-btn-hover-border: #2f78ff;
+  --snrgfx-btn-hover-shadow: rgba(47, 120, 255, 0.34);
+  --snrgfx-btn-focus-ring: rgba(255, 255, 255, 0.18);
+}
+
+.snrgfx-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-width: 0;
+  min-height: 3rem;
+  padding: 0.78rem 1rem;
+  border: var(--snrgfx-btn-border-width) solid var(--snrgfx-btn-border);
+  border-radius: var(--snrgfx-btn-radius);
+  background: var(--snrgfx-btn-bg);
+  color: var(--snrgfx-btn-text);
+  font-family: var(--snrgfx-btn-font-family);
+  font-size: 0.95rem;
+  font-weight: 600;
+  line-height: 1.2;
+  text-align: center;
+  text-decoration: none;
+  text-wrap: balance;
+  white-space: normal;
+  appearance: none;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  will-change: transform;
+  transition: all 0.3s ease;
+}
+
+a.snrgfx-btn,
+a.snrgfx-btn:visited,
+a.snrgfx-btn:hover,
+a.snrgfx-btn:focus-visible,
+.snrgfx-btn,
+.snrgfx-btn:visited,
+.snrgfx-btn:hover,
+.snrgfx-btn:focus-visible {
+  color: var(--snrgfx-btn-text) !important;
+  text-decoration: none !important;
+}
+
+.snrgfx-btn::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -110%;
+  width: 110%;
+  height: 100%;
+  background: rgba(255, 255, 255, 0.08);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    left 0.55s ease,
+    opacity 0.3s ease;
+}
+
+.snrgfx-btn:hover {
+  border-color: var(--snrgfx-btn-hover-border);
+  box-shadow: 0 0 30px var(--snrgfx-btn-hover-shadow);
+  transform: translateY(-2px);
+}
+
+.snrgfx-btn:hover::before {
+  left: 0;
+  opacity: 1;
+}
+
+.snrgfx-btn:focus-visible {
+  outline: none;
+  border-color: var(--snrgfx-btn-hover-border);
+  box-shadow:
+    0 0 0 3px var(--snrgfx-btn-focus-ring),
+    0 0 30px var(--snrgfx-btn-hover-shadow);
+}
+
+.snrgfx-btn:active {
+  transform: translateY(0) scale(0.985);
+}
+
+.snrgfx-btn:disabled,
+.snrgfx-btn[disabled],
+.snrgfx-btn[aria-disabled="true"] {
+  opacity: 0.56;
+  cursor: not-allowed;
+  pointer-events: none;
+  filter: grayscale(0.18);
+}
+
+/* SOON badge is opt-in via data-soon="true" so most disabled buttons stay clean. */
+.snrgfx-btn[data-soon="true"]:disabled::after,
+.snrgfx-btn[data-soon="true"][disabled]::after,
+.snrgfx-btn[data-soon="true"][aria-disabled="true"]::after {
+  content: "Soon";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  padding: 0.24rem 0.52rem;
+  border-radius: 999px;
+  background: rgba(62, 247, 161, 0.96);
+  color: #04101b;
+  font-size: 0.58rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  box-shadow: 0 0 0 1px rgba(4, 16, 27, 0.16), 0 0 18px rgba(62, 247, 161, 0.24);
+  z-index: 2;
+}
+
+.snrgfx-btn-block {
+  width: 100%;
+}
+
+.snrgfx-btn-sm {
+  min-height: 2.7rem;
+  padding: 0.64rem 0.9rem;
+  font-size: 0.88rem;
+}
+
+.snrgfx-btn-md {
+  min-height: 3rem;
+  padding: 0.78rem 1rem;
+  font-size: 0.95rem;
+}
+
+.snrgfx-btn-lg {
+  min-height: 3.25rem;
+  padding: 0.88rem 1.15rem;
+  font-size: 1rem;
+}
+
+.snrgfx-btn-hero {
+  min-height: 3.45rem;
+  padding: 0.78rem 0.92rem;
+  font-size: 0.95rem;
+  line-height: 1.22;
+}
+
+.snrgfx-btn-blue,
+.snrgfx-btn-whitepaper {
+  --snrgfx-btn-bg: rgba(8, 14, 26, 0.82);
+  --snrgfx-btn-border: rgba(47, 120, 255, 0.58);
+  --snrgfx-btn-hover-border: #2f78ff;
+  --snrgfx-btn-hover-shadow: rgba(47, 120, 255, 0.34);
+  --snrgfx-btn-text: #dbe8ff;
+}
+
+.snrgfx-btn-cyan,
+.snrgfx-btn-architecture {
+  --snrgfx-btn-bg: rgba(8, 14, 26, 0.82);
+  --snrgfx-btn-border: rgba(0, 206, 209, 0.58);
+  --snrgfx-btn-hover-border: #00ced1;
+  --snrgfx-btn-hover-shadow: rgba(0, 206, 209, 0.34);
+  --snrgfx-btn-text: #dcfbff;
+}
+
+.snrgfx-btn-yellow {
+  --snrgfx-btn-bg: rgba(30, 24, 7, 0.82);
+  --snrgfx-btn-border: rgba(255, 205, 52, 0.58);
+  --snrgfx-btn-hover-border: #ffcd34;
+  --snrgfx-btn-hover-shadow: rgba(255, 205, 52, 0.34);
+  --snrgfx-btn-text: #fff6cf;
+}
+
+.snrgfx-btn-red {
+  --snrgfx-btn-bg: rgba(33, 10, 14, 0.82);
+  --snrgfx-btn-border: rgba(255, 88, 113, 0.58);
+  --snrgfx-btn-hover-border: #ff5871;
+  --snrgfx-btn-hover-shadow: rgba(255, 88, 113, 0.34);
+  --snrgfx-btn-text: #ffe3e8;
+}
+
+.snrgfx-btn-purple,
+.snrgfx-btn-community {
+  --snrgfx-btn-bg: rgba(8, 14, 26, 0.82);
+  --snrgfx-btn-border: rgba(142, 93, 255, 0.58);
+  --snrgfx-btn-hover-border: #8e5dff;
+  --snrgfx-btn-hover-shadow: rgba(142, 93, 255, 0.34);
+  --snrgfx-btn-text: #f1e8ff;
+}
+
+.snrgfx-btn-lime,
+.snrgfx-btn-presale {
+  --snrgfx-btn-bg: rgba(8, 14, 26, 0.82);
+  --snrgfx-btn-border: rgba(0, 255, 102, 0.58);
+  --snrgfx-btn-hover-border: #00ff66;
+  --snrgfx-btn-hover-shadow: rgba(0, 255, 102, 0.34);
+  --snrgfx-btn-text: #dfffe9;
+}
+
+.snrgfx-btn-green {
+  --snrgfx-btn-bg: rgba(6, 22, 16, 0.82);
+  --snrgfx-btn-border: rgba(62, 247, 161, 0.62);
+  --snrgfx-btn-hover-border: #3ef7a1;
+  --snrgfx-btn-hover-shadow: rgba(62, 247, 161, 0.34);
+  --snrgfx-btn-text: #d6ffe7;
+}
+
+.snrgfx-btn-orange {
+  --snrgfx-btn-bg: rgba(28, 16, 8, 0.82);
+  --snrgfx-btn-border: rgba(255, 154, 90, 0.6);
+  --snrgfx-btn-hover-border: #ff9a5a;
+  --snrgfx-btn-hover-shadow: rgba(255, 154, 90, 0.34);
+  --snrgfx-btn-text: #ffe5cf;
+}
+
+.snrgfx-btn-grid-hero {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.72rem;
+  width: min(100%, 58rem);
+  align-items: stretch;
+}
+
+@media (max-width: 1120px) {
+  .snrgfx-btn-grid-hero {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .snrgfx-btn-grid-hero {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .snrgfx-btn,
+  .snrgfx-btn::before {
+    transition-duration: 0.01ms;
+  }
+
+  .snrgfx-btn:hover {
+    transform: none;
+  }
+
+  .snrgfx-btn:hover::before {
+    left: -110%;
+  }
+}

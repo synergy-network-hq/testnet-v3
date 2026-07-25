@@ -1,0 +1,989 @@
+name: Electron Release Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      testnet_runtime_ref:
+        description: 'Trusted synergy-network-hq/testnet release/tag/branch to bundle, or bundled to use committed binaries'
+        required: false
+        default: ''
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  AEGIS_PQVM_SOURCE_REPOSITORY: ${{ vars.AEGIS_PQVM_SOURCE_REPOSITORY || 'synergy-network-hq/aegis-pqvm' }}
+  AEGIS_PQVM_SOURCE_REV: ${{ vars.AEGIS_PQVM_SOURCE_REV || '6756777e43cf7ed772fb0535055e0447b3c031db' }}
+  TESTNET_SOURCE_REPOSITORY: ${{ vars.TESTNET_SOURCE_REPOSITORY || 'synergy-network-hq/testnet' }}
+  INNERNET_SOURCE_REPOSITORY: ${{ vars.INNERNET_SOURCE_REPOSITORY || 'tonarino/innernet' }}
+  INNERNET_SOURCE_REV: ${{ vars.INNERNET_SOURCE_REV || 'dbdb0097b397fa5b10566ae58d33c699142102f2' }}
+
+jobs:
+  verify-release-identity:
+    name: Verify release identity
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - id: version
+        name: Validate version and tag identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_version="$(node -p "require('./package.json').version")"
+          package_lock_version="$(node -p "require('./package-lock.json').version")"
+          package_lock_root_version="$(node -p "require('./package-lock.json').packages[''].version")"
+          cargo_version="$(awk -F' = ' '/^version = / { gsub(/"/, "", $2); print $2; exit }' control-service/Cargo.toml)"
+          [[ -n "$package_version" ]] || { echo "package.json version is empty" >&2; exit 1; }
+          [[ "$package_lock_version" == "$package_version" ]] || {
+            echo "package-lock.json version ($package_lock_version) does not match package.json ($package_version)" >&2
+            exit 1
+          }
+          [[ "$package_lock_root_version" == "$package_version" ]] || {
+            echo "package-lock root version ($package_lock_root_version) does not match package.json ($package_version)" >&2
+            exit 1
+          }
+          [[ "$cargo_version" == "$package_version" ]] || {
+            echo "control-service version ($cargo_version) does not match package.json ($package_version)" >&2
+            exit 1
+          }
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            expected_tag="v${package_version}"
+            [[ "${GITHUB_REF_NAME}" == "$expected_tag" ]] || {
+              echo "Release tag ${GITHUB_REF_NAME} does not match ${expected_tag}" >&2
+              exit 1
+            }
+          fi
+          echo "version=$package_version" >> "$GITHUB_OUTPUT"
+
+  verify-archive-readiness:
+    name: Verify public archive readiness
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Checkout canonical Aegis-PQVM source
+        shell: bash
+        env:
+          AEGIS_PQVM_REPO_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ "$AEGIS_PQVM_SOURCE_REV" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "AEGIS_PQVM_SOURCE_REV must be a full immutable commit SHA" >&2
+            exit 1
+          }
+          mkdir aegis-pqvm-source
+          pushd aegis-pqvm-source >/dev/null
+          git init --quiet
+          git remote add origin "https://github.com/${AEGIS_PQVM_SOURCE_REPOSITORY}.git"
+          if [[ -n "${AEGIS_PQVM_REPO_TOKEN:-}" ]]; then
+            auth_header="$(printf 'x-access-token:%s' "$AEGIS_PQVM_REPO_TOKEN" | base64 | tr -d '\n')"
+            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth_header}" fetch --depth 1 origin "$AEGIS_PQVM_SOURCE_REV"
+          else
+            git fetch --depth 1 origin "$AEGIS_PQVM_SOURCE_REV"
+          fi
+          git checkout --detach --quiet FETCH_HEAD
+          [[ "$(git rev-parse HEAD)" == "$AEGIS_PQVM_SOURCE_REV" ]]
+          popd >/dev/null
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build canonical archive verifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/build-aegis-snapshot-verifier.sh \
+            --aegis-pqvm "$GITHUB_WORKSPACE/aegis-pqvm-source" \
+            --output "$RUNNER_TEMP/synergy-aegis-linux-amd64"
+          "$RUNNER_TEMP/synergy-aegis-linux-amd64" --version
+
+      - name: Verify public archive catalog and signer
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test scripts/qa/archive-readiness-preflight-test.mjs
+          node scripts/release/archive-readiness-preflight.mjs \
+            --verifier "$RUNNER_TEMP/synergy-aegis-linux-amd64"
+
+  build-linux-onboarding-sidecars:
+    name: Build native Linux onboarding sidecars
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build native Linux sidecars
+        shell: bash
+        run: |
+          set -euo pipefail
+          CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu bash scripts/build-sidecars.sh
+          test -x binaries/synergy-control-linux-amd64
+          test -x binaries/synergy-testnet-agent-linux-amd64
+          file binaries/synergy-control-linux-amd64 | grep -q 'ELF 64-bit'
+          file binaries/synergy-testnet-agent-linux-amd64 | grep -q 'ELF 64-bit'
+
+      - name: Upload native Linux sidecars
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-onboarding-sidecars
+          if-no-files-found: error
+          retention-days: 1
+          path: |
+            binaries/synergy-control-linux-amd64
+            binaries/synergy-testnet-agent-linux-amd64
+
+  build:
+    needs:
+      - verify-release-identity
+      - verify-archive-readiness
+      - build-linux-onboarding-sidecars
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-26
+            artifact_name: macos
+            build_cmd: npx electron-builder --config electron-builder.yml --mac dmg zip --publish never
+            artifact_glob: |
+              electron-dist/*.dmg
+              electron-dist/*.zip
+              electron-dist/*.yml
+              electron-dist/*.yaml
+              electron-dist/*.blockmap
+          - os: ubuntu-22.04
+            artifact_name: linux
+            build_cmd: npx electron-builder --config electron-builder.yml --linux deb AppImage --publish never
+            artifact_glob: |
+              electron-dist/*.deb
+              electron-dist/*.AppImage
+              electron-dist/*.yml
+              electron-dist/*.yaml
+              electron-dist/*.blockmap
+          # Windows installer builds are intentionally disabled while Windows support is paused.
+          # Re-enable this matrix entry with the Windows binary download/copy/release steps below.
+          # - os: windows-latest
+          #   artifact_name: windows
+          #   build_cmd: npx electron-builder --config electron-builder.yml --win nsis --publish never
+          #   artifact_glob: |
+          #     electron-dist/*.exe
+          #     electron-dist/*.yml
+          #     electron-dist/*.yaml
+          #     electron-dist/*.blockmap
+
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    env:
+      # Derive the immutable Testnet tag from package.json through the verified
+      # job output. Manual dispatch may override it only explicitly.
+      TESTNET_RUNTIME_REF: ${{ github.event.inputs.testnet_runtime_ref || format('v{0}', needs.verify-release-identity.outputs.version) }}
+      TESTNET_SOURCE_REF: ${{ github.event.inputs.testnet_runtime_ref || format('v{0}', needs.verify-release-identity.outputs.version) }}
+      CSC_LINK: ${{ secrets.CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Checkout Testnet node source
+        shell: bash
+        env:
+          TESTNET_REPO_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          TESTNET_SOURCE_REPOSITORY="${TESTNET_SOURCE_REPOSITORY:-synergy-network-hq/testnet}"
+          TESTNET_RUNTIME_REF="${TESTNET_RUNTIME_REF:?Set TESTNET_RUNTIME_REF to the trusted Testnet runtime release/tag/branch.}"
+          TESTNET_SOURCE_REF="${TESTNET_SOURCE_REF:-main}"
+          if [[ "${TESTNET_RUNTIME_REF}" == "bundled" || "${TESTNET_RUNTIME_REF}" == "committed" ]]; then
+            echo "Using committed Testnet runtime binaries; validating source identity with ${TESTNET_SOURCE_REPOSITORY}@${TESTNET_SOURCE_REF}"
+          else
+            echo "Bundling Testnet runtime source ${TESTNET_SOURCE_REPOSITORY}@${TESTNET_SOURCE_REF}"
+          fi
+
+          if [[ -n "${TESTNET_REPO_TOKEN:-}" ]]; then
+            auth_header="$(printf 'x-access-token:%s' "$TESTNET_REPO_TOKEN" | base64 | tr -d '\n')"
+            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth_header}" clone \
+              --depth 1 \
+              --branch "${TESTNET_SOURCE_REF}" \
+              --single-branch \
+              "https://github.com/${TESTNET_SOURCE_REPOSITORY}.git" \
+              testnet-source
+
+          else
+            git clone \
+              --depth 1 \
+              --branch "${TESTNET_SOURCE_REF}" \
+              --single-branch \
+              "https://github.com/${TESTNET_SOURCE_REPOSITORY}.git" \
+              testnet-source
+          fi
+
+      - name: Checkout canonical Aegis-PQVM source
+        shell: bash
+        env:
+          AEGIS_PQVM_REPO_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          AEGIS_PQVM_SOURCE_REPOSITORY="${AEGIS_PQVM_SOURCE_REPOSITORY:-synergy-network-hq/aegis-pqvm}"
+          AEGIS_PQVM_SOURCE_REV="${AEGIS_PQVM_SOURCE_REV:?Set AEGIS_PQVM_SOURCE_REV to a full canonical commit SHA.}"
+          [[ "$AEGIS_PQVM_SOURCE_REV" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "AEGIS_PQVM_SOURCE_REV must be a full immutable commit SHA" >&2
+            exit 1
+          }
+
+          mkdir aegis-pqvm-source
+          pushd aegis-pqvm-source >/dev/null
+          git init --quiet
+          git remote add origin "https://github.com/${AEGIS_PQVM_SOURCE_REPOSITORY}.git"
+          if [[ -n "${AEGIS_PQVM_REPO_TOKEN:-}" ]]; then
+            auth_header="$(printf 'x-access-token:%s' "$AEGIS_PQVM_REPO_TOKEN" | base64 | tr -d '\n')"
+            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth_header}" fetch --depth 1 origin "$AEGIS_PQVM_SOURCE_REV"
+          else
+            git fetch --depth 1 origin "$AEGIS_PQVM_SOURCE_REV"
+          fi
+          git checkout --detach --quiet FETCH_HEAD
+          [[ "$(git rev-parse HEAD)" == "$AEGIS_PQVM_SOURCE_REV" ]] || {
+            echo "Fetched Aegis-PQVM revision does not match the configured immutable source revision" >&2
+            exit 1
+          }
+          popd >/dev/null
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Download native Linux remote onboarding sidecars
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-onboarding-sidecars
+          path: .release-sidecars
+
+      - name: Stage native Linux remote onboarding sidecars
+        shell: bash
+        run: |
+          set -euo pipefail
+          for binary in synergy-control-linux-amd64 synergy-testnet-agent-linux-amd64; do
+            source_path="$(find .release-sidecars -type f -name "$binary" -print -quit)"
+            [[ -n "$source_path" ]] || {
+              echo "Required native Linux sidecar was not present in the workflow artifact: $binary" >&2
+              find .release-sidecars -maxdepth 3 -type f -print >&2 || true
+              exit 1
+            }
+            install -m 0755 "$source_path" "binaries/$binary"
+          done
+
+      - name: Verify native Linux remote onboarding sidecars
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x binaries/synergy-control-linux-amd64
+          test -x binaries/synergy-testnet-agent-linux-amd64
+          file binaries/synergy-control-linux-amd64 | grep -q 'ELF 64-bit'
+          file binaries/synergy-testnet-agent-linux-amd64 | grep -q 'ELF 64-bit'
+
+      - name: Build official Innernet client CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${RUNNER_OS}" == "macOS" ]]; then
+            targets=("darwin-arm64" "linux-amd64")
+            rustup target add x86_64-unknown-linux-gnu
+            if ! command -v cargo-zigbuild >/dev/null 2>&1; then
+              cargo install cargo-zigbuild --locked
+            fi
+            if ! command -v zig >/dev/null 2>&1; then
+              brew install zig
+            fi
+          elif [[ "${RUNNER_OS}" == "Linux" ]]; then
+            targets=("linux-amd64")
+          else
+            echo "Unsupported runner OS for Innernet client build: ${RUNNER_OS}" >&2
+            exit 1
+          fi
+
+          rm -rf binaries/innernet
+          node scripts/electron/build-innernet.mjs $(printf -- '--target %q ' "${targets[@]}")
+          if [[ "${RUNNER_OS}" == "macOS" ]]; then
+            brew install wireguard-go wireguard-tools
+            install -m 0755 "$(command -v wireguard-go)" binaries/innernet/wireguard-go
+            install -m 0755 "$(command -v wg)" binaries/innernet/wg
+            file binaries/innernet/wireguard-go | grep -q 'Mach-O 64-bit executable arm64'
+            file binaries/innernet/wg | grep -q 'Mach-O 64-bit executable arm64'
+          fi
+          for binary in binaries/innernet/*; do
+            [[ "${binary}" == *.json ]] && continue
+            test -x "${binary}"
+            if [[ "${RUNNER_OS}" == "macOS" && "${binary}" == *linux-* ]]; then
+              continue
+            fi
+            if [[ "${binary}" == */wireguard-go ]]; then
+              continue
+            fi
+            "${binary}" --version
+          done
+
+      - name: Install release validation tools
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          case "${RUNNER_OS}" in
+            Linux)
+              sudo apt-get update
+              sudo apt-get install -y ripgrep
+              ;;
+            macOS)
+              brew install ripgrep
+              ;;
+            Windows)
+              choco install ripgrep --yes --no-progress
+              ;;
+            *)
+              echo "Unsupported runner OS for release validation tools: ${RUNNER_OS}" >&2
+              exit 1
+              ;;
+          esac
+
+          rg --version
+
+      - name: Validate Testnet genesis alignment
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('node:fs');
+
+          (async () => {
+            const readJson = (filePath) => JSON.parse(fs.readFileSync(filePath, 'utf8'));
+            const readGenesisIdentity = (filePath) => {
+              const payload = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+              const hash = payload?.integrity?.genesis_hash;
+              if (!hash) {
+                throw new Error(`${filePath} is missing integrity.genesis_hash`);
+              }
+              return {
+                chainId: payload?.network?.chain_id,
+                nativeNetworkId: payload?.network?.network_id,
+                hash: String(hash).trim().toLowerCase(),
+                magic: String(payload?.p2p_identity?.network_magic_bytes || '').trim().toLowerCase(),
+                chainIdHex: String(payload?.network_identity?.synergy_native_chain_id_hex || '').trim().toLowerCase(),
+              };
+            };
+
+            const source = readGenesisIdentity('testnet-source/config/genesis.json');
+            const bundled = readGenesisIdentity('testnet/runtime/configs/genesis/genesis.json');
+            if (source.hash !== bundled.hash || source.magic !== bundled.magic || source.chainId !== bundled.chainId || source.nativeNetworkId !== bundled.nativeNetworkId) {
+              throw new Error(`Bundled genesis does not match testnet source. source=${JSON.stringify(source)} bundled=${JSON.stringify(bundled)}`);
+            }
+            if (bundled.chainId !== 1264 || bundled.nativeNetworkId !== 1264 || bundled.chainIdHex !== '0x4f0') {
+              throw new Error(`Bundled genesis must be public Testnet chain 1264. got=${JSON.stringify(bundled)}`);
+            }
+
+            const identifiers = readJson('testnet-source/network-identifiers.testnet.json');
+            const identifierHash = String(identifiers?.cryptographic_identity?.genesis_hash || '').trim().toLowerCase();
+            const identifierMagic = String(identifiers?.cryptographic_identity?.network_magic_bytes?.value || '').trim().toLowerCase();
+            const identifierChainHex = String(identifiers?.wallet_metadata?.wallet_add_network_payload?.chainId || '').trim().toLowerCase();
+            if (identifierHash !== bundled.hash || identifierMagic !== bundled.magic) {
+              throw new Error(`Network identifiers do not match bundled genesis. identifiers=${identifierHash}/${identifierMagic} bundled=${bundled.hash}/${bundled.magic}`);
+            }
+            if (identifierChainHex && identifierChainHex !== '0x4f0') {
+              throw new Error(`Network identifiers must declare chain_id_hex 0x4f0. got=${identifierChainHex}`);
+            }
+
+            const manifest = readJson('testnet/runtime/workspace-manifest.json');
+            if (manifest?.chain_id !== 1264 && manifest?.chainId !== 1264) {
+              throw new Error('Workspace manifest must declare chain ID 1264');
+            }
+            if (manifest?.chain_id_hex !== '0x4f0') {
+              throw new Error('Workspace manifest must declare chain_id_hex 0x4f0');
+            }
+            if (manifest?.network_id !== 'synergy-testnet-v3') {
+              throw new Error('Workspace manifest must declare network_id synergy-testnet-v3');
+            }
+
+            console.log(`Testnet genesis alignment OK: ${bundled.hash}`);
+          })().catch((error) => {
+            console.error(error);
+            process.exit(1);
+          });
+          NODE
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: control-service -> target
+
+      - name: Install frontend dependencies
+        run: npm install
+
+      - name: Prepare native terminal dependencies
+        run: npm run prepare:native-deps
+
+      - name: Build bundled Aegis snapshot verifier
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          case "${RUNNER_OS}" in
+            Linux)
+              verifier_name="synergy-aegis-linux-amd64"
+              ;;
+            macOS)
+              verifier_name="synergy-aegis-darwin-arm64"
+              ;;
+            *)
+              echo "No supported Aegis verifier bundle target for ${RUNNER_OS}" >&2
+              exit 1
+              ;;
+          esac
+
+          mkdir -p binaries
+          bash scripts/build-aegis-snapshot-verifier.sh \
+            --aegis-pqvm "$GITHUB_WORKSPACE/aegis-pqvm-source" \
+            --output "binaries/${verifier_name}"
+          "binaries/${verifier_name}" --version
+          bash scripts/qa/aegis-snapshot-verifier-test.sh "binaries/${verifier_name}"
+
+      - name: Download trusted Testnet node release binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TESTNET_SOURCE_REPOSITORY="${TESTNET_SOURCE_REPOSITORY:-synergy-network-hq/testnet}"
+          TESTNET_RUNTIME_REF="${TESTNET_RUNTIME_REF:?Set TESTNET_RUNTIME_REF to the trusted Testnet runtime release.}"
+
+          if [[ "${TESTNET_RUNTIME_REF}" == "bundled" || "${TESTNET_RUNTIME_REF}" == "committed" ]]; then
+            echo "Using committed Testnet runtime binaries from this control-panel checkout."
+            test -f binaries/synergy-testnet-linux-amd64
+            test -f binaries/synergy-testnet-darwin-arm64
+            test -f binaries/synergy-testnet-windows-amd64.exe
+            chmod +x \
+              binaries/synergy-testnet-linux-amd64 \
+              binaries/synergy-testnet-darwin-arm64 \
+              binaries/synergy-testnet-macos-arm64 \
+              2>/dev/null || true
+            rg --fixed-strings "old_consensus_algorithm must resolve to FN-DSA" \
+              binaries/synergy-testnet-linux-amd64 \
+              binaries/synergy-testnet-darwin-arm64
+            exit 0
+          fi
+
+          release_base="https://github.com/${TESTNET_SOURCE_REPOSITORY}/releases/download/${TESTNET_RUNTIME_REF}"
+          echo "Downloading trusted Testnet runtime binaries from ${release_base}"
+          mkdir -p binaries
+
+          if ! curl --fail --location --retry 5 --retry-delay 2 \
+            --output testnet-latest.json \
+            "${release_base}/latest.json"; then
+            echo "latest.json was not available; falling back to platform manifests."
+            curl --fail --location --retry 5 --retry-delay 2 \
+              --output testnet-latest-linux-amd64.json \
+              "${release_base}/latest-linux-amd64.json"
+            curl --fail --location --retry 5 --retry-delay 2 \
+              --output testnet-latest-macos-arm64.json \
+              "${release_base}/latest-macos-arm64.json"
+            node -e '
+              const fs = require("node:fs");
+              const merged = { version: process.env.TESTNET_RUNTIME_REF, binaries: {} };
+              for (const filePath of ["testnet-latest-linux-amd64.json", "testnet-latest-macos-arm64.json"]) {
+                const manifest = JSON.parse(fs.readFileSync(filePath, "utf8"));
+                Object.assign(merged.binaries, manifest.binaries || {});
+              }
+              fs.writeFileSync("testnet-latest.json", `${JSON.stringify(merged, null, 2)}\n`);
+            '
+          fi
+
+          sha256_file() {
+            node -e 'const crypto = require("node:crypto"); const fs = require("node:fs"); process.stdout.write(crypto.createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex"));' "$1"
+          }
+
+          release_field() {
+            local platform="$1"
+            local binary="$2"
+            local field="$3"
+            node -e '
+              const fs = require("node:fs");
+              const [platform, binary, field] = process.argv.slice(1);
+              const manifest = JSON.parse(fs.readFileSync("testnet-latest.json", "utf8"));
+              const value = manifest?.binaries?.[platform]?.[binary]?.[field];
+              if (!value) {
+                throw new Error("Missing " + platform + "/" + binary + "/" + field + " in Testnet latest.json");
+              }
+              process.stdout.write(value);
+            ' "$platform" "$binary" "$field"
+          }
+
+          download_binary() {
+            local platform="$1"
+            local binary="$2"
+            local output_path="$3"
+            local url expected actual
+
+            url="$(release_field "$platform" "$binary" url)"
+            expected="$(release_field "$platform" "$binary" sha256)"
+            if [[ "$url" != http://* && "$url" != https://* ]]; then
+              url="${release_base}/${url}"
+            fi
+            curl --fail --location --retry 5 --retry-delay 2 --output "$output_path" "$url"
+            actual="$(sha256_file "$output_path")"
+            if [[ "$actual" != "$expected" ]]; then
+              echo "Checksum mismatch for $output_path from $url" >&2
+              echo "expected=$expected actual=$actual" >&2
+              exit 1
+            fi
+            printf "%s  %s\n" "$actual" "$(basename "$output_path")" > "${output_path}.sha256"
+          }
+
+          download_binary linux-amd64 synergy-testnet binaries/synergy-testnet-linux-amd64
+          download_binary macos-arm64 synergy-testnet binaries/synergy-testnet-darwin-arm64
+          cp binaries/synergy-testnet-darwin-arm64 binaries/synergy-testnet-macos-arm64
+          printf "%s  %s\n" "$(sha256_file binaries/synergy-testnet-macos-arm64)" "synergy-testnet-macos-arm64" > binaries/synergy-testnet-macos-arm64.sha256
+          # Keep every bundled runtime aligned even while Windows installer publication is paused.
+          download_binary windows-amd64 synergy-testnet binaries/synergy-testnet-windows-amd64.exe
+
+          chmod +x binaries/synergy-testnet-linux-amd64 binaries/synergy-testnet-darwin-arm64 binaries/synergy-testnet-macos-arm64
+
+      - name: Verify Control Panel and Testnet runtime version alignment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          control_panel_version="$(node -p "require('./package.json').version")"
+          expected_runtime_ref="v${control_panel_version}"
+          if [[ "${TESTNET_RUNTIME_REF}" != "${expected_runtime_ref}" ]]; then
+            echo "Control Panel ${control_panel_version} must bundle Testnet ${expected_runtime_ref}; got ${TESTNET_RUNTIME_REF}" >&2
+            exit 1
+          fi
+          if [[ "${TESTNET_SOURCE_REF}" != "${expected_runtime_ref}" ]]; then
+            echo "Control Panel ${control_panel_version} must build against Testnet source ${expected_runtime_ref}; got ${TESTNET_SOURCE_REF}" >&2
+            exit 1
+          fi
+
+          source_version="$(awk -F '"' '/^version = "/ { print $2; exit }' testnet-source/src/Cargo.toml)"
+          if [[ "${source_version}" != "${control_panel_version}" ]]; then
+            echo "Testnet source package version ${source_version} does not match Control Panel ${control_panel_version}" >&2
+            exit 1
+          fi
+
+          manifest_version="$(node -p "require('./testnet-latest.json').version")"
+          if [[ "${manifest_version}" != "${expected_runtime_ref}" ]]; then
+            echo "Testnet manifest version ${manifest_version} does not match ${expected_runtime_ref}" >&2
+            exit 1
+          fi
+
+          SYNERGY_SKIP_WORKSPACE_MANIFEST_CHECK=1 node scripts/qa/runtime-version-alignment-test.mjs
+          echo "Version alignment verified: Control Panel ${control_panel_version}, Testnet ${control_panel_version}"
+
+      - name: Sync trusted Testnet binaries into runtime installers
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sha256_file() {
+            node -e 'const crypto = require("node:crypto"); const fs = require("node:fs"); process.stdout.write(crypto.createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex"));' "$1"
+          }
+
+          write_binary_status() {
+            local installer_dir="$1"
+            cat > "${installer_dir}/BINARY_STATUS.txt" <<EOF
+          Synergy Testnet Binary Status
+          ============================
+
+          Linux Binary
+          ------------
+          Path: ./bin/synergy-testnet-linux-amd64
+          SHA-256: $(sha256_file "${installer_dir}/bin/synergy-testnet-linux-amd64")
+
+          Darwin Binary
+          -------------
+          Path: ./bin/synergy-testnet-darwin-arm64
+          SHA-256: $(sha256_file "${installer_dir}/bin/synergy-testnet-darwin-arm64")
+
+          Windows Binary
+          --------------
+          Path: ./bin/synergy-testnet-windows-amd64.exe
+          SHA-256: $(sha256_file "${installer_dir}/bin/synergy-testnet-windows-amd64.exe")
+
+          Interpretation
+          --------------
+          - These checksums reflect the exact bundled binaries shipped in this installer.
+          EOF
+          }
+
+          installer_root="testnet/runtime/installers"
+          if [[ ! -d "$installer_root" ]]; then
+            echo "Missing runtime installer root: $installer_root" >&2
+            exit 1
+          fi
+
+          for installer_dir in "$installer_root"/*; do
+            [[ -d "$installer_dir" ]] || continue
+            mkdir -p "$installer_dir/bin"
+            cp binaries/synergy-testnet-linux-amd64 "$installer_dir/bin/synergy-testnet-linux-amd64"
+            cp binaries/synergy-testnet-darwin-arm64 "$installer_dir/bin/synergy-testnet-darwin-arm64"
+            cp binaries/synergy-testnet-windows-amd64.exe "$installer_dir/bin/synergy-testnet-windows-amd64.exe"
+            chmod +x "$installer_dir/bin/synergy-testnet-linux-amd64" "$installer_dir/bin/synergy-testnet-darwin-arm64"
+            write_binary_status "$installer_dir"
+          done
+
+          bash scripts/release/generate-workspace-manifest.sh
+          node scripts/qa/runtime-version-alignment-test.mjs
+          SKIP_BUNDLED_ASSET_GIT_CLEAN_CHECK=1 ./scripts/release/validate-bundled-assets.sh
+
+      - name: Create .env from testnet example if missing
+        shell: bash
+        run: |
+          if [ ! -f .env ]; then
+            cp .env.example .env
+          fi
+
+      - name: Install Linux packaging dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libarchive-tools \
+            fakeroot \
+            rpm \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libfuse2
+
+      - name: Build renderer assets
+        run: npm run build
+
+      - name: Build headless control-service runtime
+        run: cargo build --manifest-path control-service/Cargo.toml --bin control-service --release --no-default-features
+
+      - name: Run native terminal QA
+        run: npm run test:terminal-pty
+
+      - name: Run release-critical onboarding and coordinator checks
+        if: matrix.os == 'ubuntu-22.04'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --manifest-path control-service/Cargo.toml innernet::tests:: -- --test-threads=1
+          node scripts/qa/macos-updater-policy-test.cjs
+          node scripts/qa/onboarding-innernet-contract-test.cjs
+          node scripts/qa/bond-stake-envelope-test.cjs
+          node scripts/qa/onboarding-deterministic-contract-test.cjs
+          npm run test:onboarding-monitor
+          node --test scripts/qa/wallet-account-null-safety-test.mjs
+          npm run test:protocol-policy
+          npm run test:operations
+          npm run test:visualizations
+          node --test scripts/qa/testnet-telemetry-contract-test.mjs
+          SYNERGY_RENDER_CONFIGS_CLUSTER_POLICY_TEST=true bash scripts/testnet/render-configs.sh
+          bash scripts/qa/validator-vpn-coordinator-readiness-test.sh
+          bash scripts/qa/release-retired-vpn-literal-gate-test.sh
+          node scripts/qa/control-panel-uiux-revamp-check.mjs
+
+      - name: Run macOS archive catalog persistence checks
+        if: matrix.artifact_name == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/qa/archive-catalog-uploader-install-test.sh
+          bash scripts/qa/archive-catalog-uploader-repair-test.sh
+
+      - name: Verify bundled archive signature verifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${RUNNER_OS}" in
+            Linux) verifier="binaries/synergy-aegis-linux-amd64" ;;
+            macOS) verifier="binaries/synergy-aegis-darwin-arm64" ;;
+            *) exit 1 ;;
+          esac
+          test -x "${verifier}"
+          "${verifier}" --version
+
+      - name: Verify staged remote onboarding sidecars
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x binaries/synergy-control-linux-amd64
+          test -x binaries/synergy-testnet-agent-linux-amd64
+          file binaries/synergy-control-linux-amd64 | grep -q 'ELF 64-bit'
+          file binaries/synergy-testnet-agent-linux-amd64 | grep -q 'ELF 64-bit'
+
+      - name: Stage Electron runtime bundle
+        run: node scripts/electron/prepare-runtime.mjs
+
+      - name: Remove non-portable bundled service bin shims
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle_root="testnet/runtime/installers/Node-EXP/explorer-app"
+          if [[ -d "$bundle_root" ]]; then
+            find "$bundle_root" -path '*/node_modules/.bin' -type d -prune -exec rm -rf {} +
+          fi
+
+      - name: Clear stale packaged artifacts
+        shell: bash
+        run: rm -rf electron-dist
+
+      - name: Verify macOS signing and notarization inputs
+        if: matrix.artifact_name == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for secret_name in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [[ -z "${!secret_name:-}" ]]; then
+              echo "${secret_name} is required for the signed macOS release build." >&2
+              exit 1
+            fi
+          done
+          echo "macOS signing and notarization inputs are present."
+
+      - name: Build installer
+        shell: bash
+        run: ${{ matrix.build_cmd }}
+
+      - name: Notarize and staple macOS disk image
+        if: matrix.artifact_name == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg_path="$(find electron-dist -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          [[ -n "$dmg_path" ]] || { echo "No macOS DMG found for notarization" >&2; exit 1; }
+          xcrun notarytool submit "$dmg_path" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple "$dmg_path"
+
+      - name: Remove duplicate builder-debug.yml from artifacts
+        shell: bash
+        run: rm -f electron-dist/builder-debug.yml
+
+      - name: Repair updater metadata artifact names
+        shell: bash
+        run: python3 scripts/release/repair-electron-update-metadata.py electron-dist
+
+      - name: Verify signed and notarized macOS installer
+        if: matrix.artifact_name == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_path="$(find electron-dist -type d -name '*.app' -print -quit)"
+          dmg_path="$(find electron-dist -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          zip_path="$(find electron-dist -maxdepth 1 -type f -name '*.zip' -print -quit)"
+          [[ -n "$app_path" ]] || { echo "No macOS app bundle found for signature validation" >&2; exit 1; }
+          [[ -n "$dmg_path" ]] || { echo "No macOS DMG found for Gatekeeper validation" >&2; exit 1; }
+          [[ -n "$zip_path" ]] || { echo "No macOS updater ZIP found for signature validation" >&2; exit 1; }
+
+          assess_gatekeeper_with_quarantine() {
+            local source_app="$1"
+            local label="$2"
+            local assessment_app="$RUNNER_TEMP/gatekeeper-${label}.app"
+            local quarantine_value
+            local assessment_target
+            quarantine_value="0081;$(printf '%x' "$(date +%s)");GitHub Actions;${label}"
+
+            rm -rf "$assessment_app"
+            ditto "$source_app" "$assessment_app"
+            if command -v xattr >/dev/null 2>&1 && xattr -w com.apple.quarantine "$quarantine_value" "$assessment_app"; then
+              assessment_target="$assessment_app"
+            else
+              echo "Could not set synthetic quarantine for ${label}; running the direct Gatekeeper assessment." >&2
+              assessment_target="$source_app"
+            fi
+            spctl --assess --type execute --verbose=4 "$assessment_target" || {
+              rm -rf "$assessment_app"
+              return 1
+            }
+            rm -rf "$assessment_app"
+          }
+
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+          codesign -dv --verbose=4 "$app_path" 2>&1 | grep -q 'Authority=Developer ID Application:'
+          codesign -d --entitlements :- "$app_path" 2>/dev/null | grep -q 'com.apple.security.cs.allow-jit'
+          for helper in innernet-darwin-arm64 wireguard-go wg; do
+            helper_path="$app_path/Contents/Resources/innernet/$helper"
+            test -x "$helper_path"
+            file "$helper_path" | grep -q 'Mach-O 64-bit executable arm64'
+            codesign --verify --strict --verbose=2 "$helper_path"
+          done
+          xcrun stapler validate "$app_path"
+          xcrun stapler validate "$dmg_path"
+          assess_gatekeeper_with_quarantine "$app_path" "packaged"
+
+          zip_extract_dir="$(mktemp -d)"
+          mount_dir="$(mktemp -d)"
+          cleanup() {
+            hdiutil detach "$mount_dir" -quiet || true
+            rm -rf "$mount_dir" "$zip_extract_dir"
+          }
+          trap cleanup EXIT
+
+          ditto -x -k "$zip_path" "$zip_extract_dir"
+          updater_app="$(find "$zip_extract_dir" -type d -name '*.app' -print -quit)"
+          [[ -n "$updater_app" ]] || { echo "No app bundle found inside updater ZIP" >&2; exit 1; }
+          codesign --verify --deep --strict --verbose=2 "$updater_app"
+          xcrun stapler validate "$updater_app"
+          assess_gatekeeper_with_quarantine "$updater_app" "updater-zip"
+
+          hdiutil attach "$dmg_path" -nobrowse -readonly -mountpoint "$mount_dir" >/dev/null
+          mounted_app="$(find "$mount_dir" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          [[ -n "$mounted_app" ]] || { echo "No app bundle found inside notarized DMG" >&2; exit 1; }
+          codesign --verify --deep --strict --verbose=2 "$mounted_app"
+          xcrun stapler validate "$mounted_app"
+          assess_gatekeeper_with_quarantine "$mounted_app" "notarized-dmg"
+
+      - name: Upload installer artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ matrix.artifact_name }}
+          if-no-files-found: error
+          path: ${{ matrix.artifact_glob }}
+
+  publish-releases-repo:
+    name: Publish installers to releases repo
+    needs:
+      - verify-release-identity
+      - build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout source for operator manual archive
+        uses: actions/checkout@v4
+
+      - name: Download macOS installers
+        uses: actions/download-artifact@v4
+        with:
+          name: installer-macos
+          path: release-assets/macos
+
+      - name: Download Linux installers
+        uses: actions/download-artifact@v4
+        with:
+          name: installer-linux
+          path: release-assets/linux
+
+      - name: Verify complete installer release set
+        shell: bash
+        run: |
+          set -euo pipefail
+          require_asset() {
+            local label="$1"
+            local pattern="$2"
+            compgen -G "$pattern" >/dev/null || {
+              echo "Missing required ${label} asset matching ${pattern}" >&2
+              find release-assets -maxdepth 3 -type f -print >&2 || true
+              exit 1
+            }
+          }
+          require_asset "macOS DMG" 'release-assets/macos/*.dmg'
+          require_asset "macOS ZIP" 'release-assets/macos/*.zip'
+          require_asset "macOS update metadata" 'release-assets/macos/*.yml'
+          require_asset "Linux Debian package" 'release-assets/linux/*.deb'
+          require_asset "Linux AppImage" 'release-assets/linux/*.AppImage'
+          require_asset "Linux update metadata" 'release-assets/linux/*.yml'
+
+      - name: Create versioned operator manual archive
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.verify-release-identity.outputs.version }}
+        run: |
+          set -euo pipefail
+          archive="release-assets/Synergy.Node.Control.Panel-${RELEASE_VERSION}-operator-manual.tar.gz"
+          tar -czf "$archive" -C docs \
+            operator-manual/README.md \
+            operator-manual/macos.md \
+            operator-manual/ubuntu-desktop.md \
+            operator-manual/headless-ubuntu-linux.md \
+            operator-manual/validator-lifecycle.md
+          tar -tzf "$archive" > "$RUNNER_TEMP/operator-manual-files.txt"
+          grep -Fxq 'operator-manual/README.md' "$RUNNER_TEMP/operator-manual-files.txt"
+          grep -Fxq 'operator-manual/macos.md' "$RUNNER_TEMP/operator-manual-files.txt"
+          grep -Fxq 'operator-manual/ubuntu-desktop.md' "$RUNNER_TEMP/operator-manual-files.txt"
+          grep -Fxq 'operator-manual/headless-ubuntu-linux.md' "$RUNNER_TEMP/operator-manual-files.txt"
+          grep -Fxq 'operator-manual/validator-lifecycle.md' "$RUNNER_TEMP/operator-manual-files.txt"
+          test -s "$archive"
+
+      - name: Verify complete release set
+        shell: bash
+        run: |
+          set -euo pipefail
+          compgen -G 'release-assets/Synergy.Node.Control.Panel-*-operator-manual.tar.gz' >/dev/null || {
+            echo "Missing versioned operator manual archive" >&2
+            find release-assets -maxdepth 2 -type f -print >&2 || true
+            exit 1
+          }
+
+      - name: Create release checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          find release-assets -type f ! -name SHA256SUMS -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            | sed 's#  release-assets/#  #' > release-assets/SHA256SUMS
+          test -s release-assets/SHA256SUMS
+
+      - name: Publish complete installer release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          repo="synergy-network-hq/synergy-node-control-panel-releases"
+          title="Synergy Node Control Panel ${tag#v}"
+          notes="Automated build from ${GITHUB_REPOSITORY}@${GITHUB_SHA}."
+          if ! gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
+            gh release create "$tag" --repo "$repo" --title "$title" --notes "$notes"
+          else
+            gh release edit "$tag" --repo "$repo" --title "$title" --notes "$notes"
+          fi
+          find release-assets -type f -print0 | xargs -0 gh release upload "$tag" --repo "$repo" --clobber

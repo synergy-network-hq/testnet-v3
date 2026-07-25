@@ -1,0 +1,29 @@
+[network]
+name = "synergy-testnet"
+network_id = "synergy-testnet-v3"
+chain_id = 1264
+p2p_port = 5622
+rpc_port = 5640
+ws_port = 5660
+
+[node]
+role = "validator"
+enable_rpc = true
+enable_metrics = true
+metrics_port = 6030
+
+[p2p]
+discovery_port = 5680
+
+[logging]
+log_level = "info"
+enable_console = true
+log_file = "logs/validator.log"
+max_file_size = 10485760
+max_files = 5
+
+[consensus]
+algorithm = "proof-of-synergy"
+vrf_enabled = true
+vrf_seed_interval = 100
+cluster_size = 3

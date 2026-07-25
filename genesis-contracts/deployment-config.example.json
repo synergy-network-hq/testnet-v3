@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "release_id": "testnet-v3",
+  "chain_id": 1264,
+  "network_id": "synergy-testnet-v3",
+  "signature_algorithm": "ML-DSA-65",
+  "contracts": [
+    {
+      "name": "ValidatorRegistry",
+      "artifact": "contracts/ValidatorRegistry.compiled.synq",
+      "constructor": {
+        "initialGovernanceKey": "<NEW_TESTNET_V3_ML_DSA_65_PUBLIC_KEY>",
+        "initialAuthority": "<NEW_VALIDATOR_AUTHORITY_ADDRESS>",
+        "maximumValidators": 100,
+        "minimumValidators": 3,
+        "minimumSelfStake": "<APPROVED_MINIMUM_SELF_STAKE>"
+      }
+    },
+    {
+      "name": "Staking",
+      "artifact": "contracts/Staking.compiled.synq",
+      "depends_on": ["ValidatorRegistry"],
+      "constructor": {
+        "initialGovernanceKey": "<NEW_TESTNET_V3_ML_DSA_65_PUBLIC_KEY>",
+        "registry": "<DEPLOYED_VALIDATOR_REGISTRY_ADDRESS>",
+        "minimumStake": "<APPROVED_MINIMUM_STAKE>",
+        "maximumStake": "<APPROVED_MAXIMUM_STAKE>",
+        "minimumDelegation": "<APPROVED_MINIMUM_DELEGATION>",
+        "maximumDelegation": "<APPROVED_MAXIMUM_DELEGATION>",
+        "unbondingBlocks": "<APPROVED_UNBONDING_BLOCKS>"
+      }
+    },
+    {
+      "name": "RewardDistributor",
+      "artifact": "contracts/RewardDistributor.compiled.synq",
+      "constructor": {
+        "initialGovernanceKey": "<NEW_TESTNET_V3_ML_DSA_65_PUBLIC_KEY>",
+        "initialDistributorAuthority": "<NEW_NODE_REWARDS_AUTHORITY_ADDRESS>"
+      }
+    },
+    {
+      "name": "Governance",
+      "artifact": "contracts/Governance.compiled.synq",
+      "depends_on": ["Staking"],
+      "constructor": {
+        "initialGovernanceKey": "<NEW_TESTNET_V3_ML_DSA_65_PUBLIC_KEY>",
+        "stakingVotesProvider": "<DEPLOYED_STAKING_ADDRESS>",
+        "quorumBps": "<APPROVED_QUORUM_BPS>",
+        "approvalBps": "<APPROVED_APPROVAL_BPS>",
+        "vetoBps": "<APPROVED_VETO_BPS>",
+        "minimumDeposit": "<APPROVED_PROPOSAL_DEPOSIT>",
+        "votingBlocks": "<APPROVED_VOTING_BLOCKS>",
+        "timelockBlocks": "<APPROVED_TIMELOCK_BLOCKS>"
+      }
+    },
+    {
+      "name": "Treasury",
+      "artifact": "contracts/Treasury.compiled.synq",
+      "depends_on": ["Governance"],
+      "constructor": {
+        "initialGovernanceKey": "<NEW_TESTNET_V3_ML_DSA_65_PUBLIC_KEY>",
+        "initialGovernanceContract": "<DEPLOYED_GOVERNANCE_ADDRESS>",
+        "initialRequiredSigners": "<APPROVED_TREASURY_THRESHOLD>"
+      }
+    },
+    {
+      "name": "SynergyOracle",
+      "artifact": "contracts/SynergyOracle.compiled.synq",
+      "constructor": {
+        "initialGovernanceKey": "<NEW_TESTNET_V3_ML_DSA_65_PUBLIC_KEY>",
+        "initialQuorumThreshold": "<APPROVED_ORACLE_QUORUM>",
+        "enableReplayProtection": true
+      }
+    },
+    {
+      "name": "Identity",
+      "artifact": "contracts/Identity.compiled.synq",
+      "constructor": {
+        "initialGovernanceKey": "<NEW_TESTNET_V3_ML_DSA_65_PUBLIC_KEY>",
+        "initialFeeCollector": "<NEW_TESTNET_V3_FEE_COLLECTOR_ADDRESS>",
+        "initialRegistrationFee": "<APPROVED_REGISTRATION_FEE>"
+      }
+    },
+    {
+      "name": "Slashing",
+      "artifact": "contracts/Slashing.compiled.synq",
+      "depends_on": ["ValidatorRegistry", "Staking"],
+      "constructor": {
+        "initialGovernanceKey": "<NEW_TESTNET_V3_ML_DSA_65_PUBLIC_KEY>",
+        "registry": "<DEPLOYED_VALIDATOR_REGISTRY_ADDRESS>",
+        "staking": "<DEPLOYED_STAKING_ADDRESS>",
+        "initialSlashingAuthority": "<NEW_SLASHING_AUTHORITY_ADDRESS>",
+        "initialDoubleSignSlashBps": "<APPROVED_DOUBLE_SIGN_BPS>",
+        "initialDowntimeSlashBps": "<APPROVED_DOWNTIME_BPS>",
+        "initialInvalidBlockSlashBps": "<APPROVED_INVALID_BLOCK_BPS>",
+        "missedBlocksThreshold": "<APPROVED_MISSED_BLOCK_THRESHOLD>",
+        "jailBlocks": "<APPROVED_JAIL_BLOCKS>"
+      }
+    }
+  ]
+}

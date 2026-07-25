@@ -1,0 +1,9 @@
+core_rpc = "https://testnet-core-rpc.synergy-network.io"
+
+[[validators]]
+name = "CHANGE_ME_PEER_NAME"
+validator_address = "CHANGE_ME_VALIDATOR_ADDRESS"
+node_id = "CHANGE_ME_NODE_ID"
+p2p_address = "CHANGE_ME_PRIVATE_OR_PUBLIC_P2P_ADDRESS"
+peer_id = "CHANGE_ME_PEER_ID"
+

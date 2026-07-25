@@ -1,0 +1,71 @@
+// SynQ Language Grammar (pest) - Full implementation
+
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+COMMENT    = _{ "//" ~ (!"\n" ~ ANY)* ~ ("\n" | EOI)
+             | "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
+
+source_file = { SOI ~ top_level_item* ~ EOI }
+top_level_item = { pragma_directive | synq_pragma | struct_definition | contract_definition }
+
+// Legacy @-style pragma: @version "0.1.0"
+pragma_directive = { "@" ~ IDENT ~ string_literal }
+// Standard pragma: pragma synq ^0.9;
+synq_pragma = { "pragma" ~ "synq" ~ ("^" | "~" | ">=" | "")? ~ version_number ~ ";" }
+version_number = @{ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)* }
+
+struct_definition = { "struct" ~ IDENT ~ "{" ~ struct_field* ~ "}" }
+struct_field = { IDENT ~ ":" ~ type_decl ~ ";" }
+
+contract_definition = { "contract" ~ IDENT ~ ("{" ~ contract_part* ~ "}") }
+contract_part = { state_variable_declaration | function_definition }
+
+state_variable_declaration = { IDENT ~ ":" ~ type_decl ~ ";" }
+
+// Accept both `fn` and `function`; optional `-> ReturnType` annotation (consumed, not used at codegen)
+function_keyword = _{ "function" | "fn" }
+return_type      = _{ "->" ~ type_decl }
+function_definition = { function_keyword ~ IDENT ~ "(" ~ param_list? ~ ")" ~ return_type? ~ block }
+param_list = { param ~ ("," ~ param)* }
+param = { IDENT ~ ":" ~ type_decl }
+
+block = { "{" ~ statement* ~ "}" }
+
+statement = { return_statement
+            | require_statement
+            | assignment_statement
+            | expr_statement }
+
+return_statement    = { "return" ~ expression? ~ ";" }
+require_statement   = { "require" ~ "(" ~ expression ~ "," ~ string_literal ~ ")" ~ ";" }
+assignment_statement = { IDENT ~ "=" ~ expression ~ ";" }
+expr_statement      = { expression ~ ";" }
+
+// Precedence-climbing expression grammar (no left recursion)
+expression = { comparison }
+
+comparison = { additive ~ (compare_op ~ additive)* }
+compare_op = { ">=" | "<=" | "!=" | "==" | ">" | "<" }
+
+additive = { multiplicative ~ (add_op ~ multiplicative)* }
+add_op = { "+" | "-" }
+
+multiplicative = { unary ~ (mul_op ~ unary)* }
+mul_op = { "*" | "/" | "%" }
+
+unary = { ("-" ~ unary) | primary }
+
+primary = { call_expr | literal | "(" ~ expression ~ ")" | IDENT }
+
+call_expr = { IDENT ~ "(" ~ arg_list? ~ ")" }
+arg_list  = { expression ~ ("," ~ expression)* }
+
+literal = { number_literal | string_literal | bool_literal }
+number_literal = @{ ASCII_DIGIT+ }
+string_literal = @{ "\"" ~ (!("\"") ~ ANY)* ~ "\"" }
+bool_literal   = { "true" | "false" }
+
+// Types
+type_decl = { mapping_type | IDENT }
+mapping_type = { "mapping" ~ "<" ~ type_decl ~ "," ~ type_decl ~ ">" }
+
+IDENT = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }

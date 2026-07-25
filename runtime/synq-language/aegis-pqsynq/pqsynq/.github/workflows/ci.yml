@@ -1,0 +1,97 @@
+name: aegis-pqsynq CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+defaults:
+  run:
+    working-directory: pqsynq
+
+jobs:
+  validate:
+    name: Validate (${{ matrix.os }} / ${{ matrix.toolchain }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        toolchain: [stable]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown,wasm32-wasip1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cache WASI SDK
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/synq/wasi-sdk-20.0
+          key: wasi-sdk-20.0-${{ runner.os }}
+
+      - name: Bootstrap WASI SDK
+        run: bash scripts/bootstrap_wasi_sdk.sh
+
+      - name: Export WASI environment
+        run: |
+          echo "WASI_SDK_DIR=${HOME}/.cache/synq/wasi-sdk-20.0/share/wasi-sysroot" >> "${GITHUB_ENV}"
+          echo "CC_wasm32_wasi=${HOME}/.cache/synq/wasi-sdk-20.0/bin/clang" >> "${GITHUB_ENV}"
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features --no-deps --locked -- -D warnings
+
+      - name: Tests
+        run: cargo test --all-targets --all-features --locked
+
+      - name: Bench compile
+        run: cargo bench --no-run --locked
+
+      - name: no-default compile
+        run: cargo check --no-default-features --locked
+
+      - name: wasm32-unknown-unknown compile
+        run: cargo check --target wasm32-unknown-unknown --no-default-features --locked
+
+      - name: wasm32-wasip1 full-feature compile
+        run: cargo check --target wasm32-wasip1 --no-default-features --features "mlkem,mldsa,fndsa,hqckem" --locked
+
+      - name: Generate compliance report
+        run: bash scripts/generate_compliance_report.sh
+
+      - name: Upload compliance artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pqsynq-compliance-${{ matrix.os }}
+          path: pqsynq/artifacts
+
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Run cargo-audit
+        run: cargo audit

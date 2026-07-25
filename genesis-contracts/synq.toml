@@ -1,0 +1,18 @@
+[package]
+name = "testnet-v3-genesis-contracts"
+version = "0.1.0"
+
+[compiler]
+language_version = "0.1"
+bytecode_version = 1
+target_aivm_version = "0.1"
+
+[network]
+chain_id = 1264
+network_id = "synergy-testnet-v3"
+address_hrp = "tsynq"
+
+[security]
+signature_algorithm = "ML-DSA-65"
+deploy_domain = "SYNQ_CONTRACT_DEPLOY_V1"
+call_domain = "SYNQ_CONTRACT_CALL_V1"

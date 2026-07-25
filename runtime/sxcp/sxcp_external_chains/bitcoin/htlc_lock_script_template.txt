@@ -1,0 +1,27 @@
+HTLC Lock Script Template (Bitcoin Testnet)
+------------------------------------------
+
+This script locks bitcoin using a hash‑time locked contract (HTLC). To claim
+the funds, the recipient must provide the preimage of the specified hash
+(`<HASH>`). After the timeout (`<TIMEOUT>`), the sender can refund the funds.
+
+```
+OP_IF
+    OP_HASH160 <HASH> OP_EQUALVERIFY    # Require hash preimage
+    OP_DUP OP_HASH160 <RECIPIENT_PUBKEY_HASH> OP_EQUALVERIFY OP_CHECKSIG
+OP_ELSE
+    <TIMEOUT> OP_CHECKLOCKTIMEVERIFY OP_DROP
+    OP_DUP OP_HASH160 <SENDER_PUBKEY_HASH> OP_EQUALVERIFY OP_CHECKSIG
+OP_ENDIF
+```
+
+* `<HASH>` – RIPEMD‑160 hash of the secret preimage
+* `<TIMEOUT>` – Absolute lock time (UNIX timestamp or block height)
+* `<RECIPIENT_PUBKEY_HASH>` – recipient’s p2pkh hash
+* `<SENDER_PUBKEY_HASH>` – sender’s p2pkh hash
+
+The funding transaction should set the output script to this template and
+include the amount to be locked. When the recipient broadcasts the claim
+transaction, they must include the preimage and their signature. If the
+timeout passes, the sender may broadcast the refund transaction using their
+signature.

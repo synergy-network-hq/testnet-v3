@@ -1,0 +1,28 @@
+[package]
+name = "pqrust"
+description = "Post-Quantum cryptographic primitives"
+version = "0.18.1"
+edition = "2021"
+keywords = ["cryptography", "post-quantum", "security"]
+categories = ["cryptography"]
+
+[dependencies]
+pqrust-traits = { path = "../pqrust-traits", version = "0.3.5" }
+pqrust-mlkem = { path = "../pqrust-mlkem", version = "0.1.0", optional = true }
+pqrust-cmce = { path = "../pqrust-cmce", version = "0.2.0", optional = true }
+pqrust-hqckem = { path = "../pqrust-hqckem", version = "0.2.1", optional = true }
+pqrust-mldsa = { path = "../pqrust-mldsa", version = "0.1.1", optional = true }
+pqrust-fndsa = { path = "../pqrust-fndsa", version = "0.4.0", optional = true }
+pqrust-slhdsa = { path = "../pqrust-slhdsa", version = "0.7.1", optional = true }
+
+[features]
+default = ["pqrust-mlkem","pqrust-cmce","pqrust-hqckem","pqrust-mldsa","pqrust-fndsa","pqrust-slhdsa",]
+cryptographically-insecure = []
+serialization = ["pqrust-mlkem/serialization","pqrust-cmce/serialization","pqrust-hqckem/serialization","pqrust-mldsa/serialization","pqrust-fndsa/serialization","pqrust-slhdsa/serialization",]
+
+[badges]
+travis-ci = { repository = "rustpq/pqrust", branch = "master" }
+maintenance = { status = "actively-developed" }
+
+[package.metadata.docs.rs]
+all-features = true

@@ -1,0 +1,11 @@
+{
+  "validator_name": "CHANGE_ME_VALIDATOR_NAME",
+  "validator_index": "CHANGE_ME_VALIDATOR_INDEX",
+  "validator_address": "CHANGE_ME_VALIDATOR_ADDRESS",
+  "peer_id": "CHANGE_ME_PEER_ID",
+  "node_id": "CHANGE_ME_NODE_ID",
+  "public_ip": "CHANGE_ME_PUBLIC_IP",
+  "private_ip": "CHANGE_ME_PRIVATE_IP",
+  "wireguard_public_key": "CHANGE_ME_WIREGUARD_PUBLIC_KEY"
+}
+

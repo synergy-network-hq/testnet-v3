@@ -1,0 +1,84 @@
+groups:
+  - name: synergy-canonical-inventory
+    interval: 30s
+    rules:
+      - record: synergy_inventory_node_info
+        expr: max by (node, node_type, role, host, environment, network, chain_id) (
+                up{job=~"synergy-observer|synergy-validators|synergy-rpc-gateway|synergy-explorer-indexer|synergy-archive|node_exporter|node_exporter_public|synergy-qrpc-probes|synergy-http-probes|synergy-bootstrap-probes"} * 0 + 1
+              )
+      - record: synergy_metrics_target_up
+        expr: max by (job, instance, node, node_type, role, host, instance_label, environment, network, chain_id, telemetry_path) (
+                up{job=~"synergy-observer|synergy-validators|synergy-rpc-gateway|synergy-explorer-indexer"}
+              )
+      - record: synergy_qrpc_probe_up
+        expr: max by (job, node, node_type, role, host, instance_label, environment, network, chain_id, target, telemetry_path) (
+                probe_success{job="synergy-qrpc-probes"}
+              )
+      - record: synergy_public_health_probe_up
+        expr: max by (job, node, node_type, role, host, instance_label, environment, network, chain_id, target, telemetry_path) (
+                probe_success{job="synergy-http-probes"}
+              )
+      - record: synergy_bootstrap_probe_up
+        expr: max by (job, node, node_type, role, host, instance_label, environment, network, chain_id, target, probe_label, telemetry_path) (
+                probe_success{job="synergy-bootstrap-probes"}
+              )
+      - record: synergy_node_metrics_up
+        expr: max by (job, instance, node, node_type, role, host, instance_label, environment, network, chain_id, telemetry_path) (synergy_metrics_target_up{instance!=""})
+      - record: synergy_node_qrpc_up
+        expr: max by (job, node, node_type, role, host, instance_label, environment, network, chain_id, target, telemetry_path) (synergy_qrpc_probe_up{target!=""})
+      - record: synergy_node_host_up
+        expr: max by (job, instance, node, node_type, role, host, instance_label, environment, network, chain_id, telemetry_path) (up{job=~"node_exporter|node_exporter_public",instance!=""})
+      - record: synergy_operational_cluster_count
+        expr: vector(1)
+
+  - name: synergy-canonical-chain
+    interval: 30s
+    rules:
+      - record: synergy_canonical_local_chain_height
+        expr: max by (job, instance, node, node_type, role, host, instance_label, environment, network, chain_id) (
+                synergy_chain_height{job=~"synergy-observer|synergy-validators|synergy-rpc-gateway|synergy-explorer-indexer|synergy-archive"} > 0
+              )
+      - record: synergy_canonical_finalized_height
+        expr: synergy_canonical_local_chain_height
+      - record: synergy_canonical_latest_block_timestamp_seconds
+        expr: max by (job, instance, node, node_type, role, host, instance_label, environment, network, chain_id) (
+                synergy_chain_last_block_timestamp_seconds{job=~"synergy-observer|synergy-validators|synergy-rpc-gateway|synergy-explorer-indexer|synergy-archive"} > 0
+              )
+      - record: synergy_canonical_latest_block_age_seconds
+        expr: max by (instance, node, node_type, role, host, instance_label, environment, network, chain_id, telemetry_path) (
+                time() - synergy_canonical_latest_block_timestamp_seconds{instance!=""}
+              )
+      - record: synergy_canonical_average_block_time_seconds
+        expr: max by (node, node_type, role, host, environment, network, chain_id) (
+                synergy_chain_recent_avg_block_time_seconds{job=~"synergy-observer|synergy-validators|synergy-rpc-gateway|synergy-explorer-indexer|synergy-archive"} > 0
+              )
+      - record: synergy_node_chain_height
+        expr: max by (instance, node, node_type, role, host, instance_label, environment, network, chain_id, telemetry_path) (synergy_canonical_local_chain_height{instance!=""})
+      - record: synergy_canonical_network_majority_height
+        expr: quantile(0.5, synergy_node_chain_height{instance!="",role=~"validator|relayer|observer|rpc_gateway|explorer_indexer|archive"})
+      - record: synergy_canonical_node_height_gap
+        expr: clamp_min(
+                scalar(synergy_canonical_network_majority_height)
+                - synergy_node_chain_height{instance!="",role=~"validator|relayer|observer|rpc_gateway|explorer_indexer|archive"}, 0
+              )
+      - record: synergy_node_height_gap
+        expr: synergy_canonical_node_height_gap
+      - record: synergy_node_peer_count
+        expr: max by (node, role, host) (
+                synergy_p2p_peers_connected
+                or synergy_peer_count
+                or (up{job=~"synergy-observer|synergy-validators|synergy-rpc-gateway|synergy-explorer-indexer|synergy-archive"} * 0)
+              )
+
+  - name: synergy-canonical-validator-state
+    interval: 30s
+    rules:
+      - record: synergy_canonical_active_validator_count
+        expr: max(synergy_validator_status_total{status="active", job=~"synergy-observer|synergy-rpc-gateway|synergy-explorer-indexer|synergy-archive"})
+      - record: synergy_canonical_expected_validator_count
+        expr: max(
+                synergy_validator_registry_total{job=~"synergy-observer|synergy-rpc-gateway|synergy-explorer-indexer|synergy-archive"}
+                or synergy_validators_total{job="synergy-validators"}
+              )
+      - record: synergy_canonical_status_ready_validators
+        expr: count(synergy_node_qrpc_up{role="validator"} == 1)

@@ -1,0 +1,14 @@
+{
+  "chain_id": 1264,
+  "network_id": "synergy-testnet-v3",
+  "genesis_hash": "CHANGE_ME_CANONICAL_GENESIS_HASH",
+  "validators": [
+    {
+      "validator_address": "CHANGE_ME_VALIDATOR_ADDRESS",
+      "consensus_public_key": "CHANGE_ME_CONSENSUS_PUBLIC_KEY",
+      "node_identity_public_key": "CHANGE_ME_NODE_IDENTITY_PUBLIC_KEY",
+      "stake_nwei": "CHANGE_ME_STAKE_NWEI"
+    }
+  ]
+}
+

@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "network_id": "synergy-testnet-v3",
+  "chain_id": 1264,
+  "capabilities": {
+    "ValidatorRegistry": [
+      "verifyMLDSASignature"
+    ],
+    "Staking": [
+      "registryIsKnownValidator",
+      "registryIsActiveValidator",
+      "sendNative",
+      "verifyMLDSASignature"
+    ],
+    "RewardDistributor": [
+      "sendNative",
+      "verifyMLDSASignature"
+    ],
+    "Governance": [
+      "stakingVotingPower",
+      "stakingTotalVotingPower",
+      "callContract",
+      "sendNative",
+      "verifyMLDSASignature"
+    ],
+    "Treasury": [
+      "callContract",
+      "verifyMLDSASignature"
+    ],
+    "SynergyOracle": [
+      "verifyMLDSASignature"
+    ],
+    "Identity": [
+      "synidNameHash",
+      "synidNormalize",
+      "sendNative",
+      "verifyMLDSASignature"
+    ],
+    "Slashing": [
+      "registryIsKnownValidator",
+      "registryValidatorSelfStake",
+      "stakingSlashSelfStake",
+      "registryReduceSelfStake",
+      "registryJailValidator",
+      "registryTombstoneValidator",
+      "verifyMLDSASignature"
+    ]
+  },
+  "status": "blocked_until_aivm_host_registry_is_implemented"
+}

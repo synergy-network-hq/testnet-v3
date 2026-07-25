@@ -1,0 +1,28 @@
+[package]
+name = "pqrust-slhdsa"
+description = "Post-Quantum Signature Scheme SLH-DSA (Stateless Hash-Based Digital Signature Algorithm)"
+readme = "README.md"
+version = "0.7.1"
+edition = "2021"
+keywords = ["cryptography", "post-quantum", "security"]
+categories = ["cryptography", "no-std"]
+
+[dependencies]
+pqrust-internals = { path = "../pqrust-internals" }
+pqrust-traits = { path = "../pqrust-traits", default-features = false }
+libc = "0.2.0"
+serde = { version = "1.0", features = ["derive"], optional = true }
+serde-big-array = { version = "0.5.1", optional = true }
+
+[features]
+default = ["avx2", "std"]
+avx2 = ["std"]
+std = ["pqrust-traits/std"]
+serialization = ["serde", "serde-big-array"]
+
+[dev-dependencies]
+rand = "0.9"
+
+[build-dependencies]
+cc = { version = "1.0", features = ["parallel"] }
+glob = "0.3.0"

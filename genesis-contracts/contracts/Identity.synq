@@ -1,0 +1,160 @@
+// Testnet-v3 SynID-compatible primary-name registry.
+pragma synq ^1.0.0;
+
+contract Identity {
+    governanceKey: MLDSAPublicKey public;
+    feeCollector: Address public;
+    paused: Bool public;
+    registrationFee: UInt256 public;
+
+    reservedNameHash: mapping(Bytes => Bool) public;
+    nameOwner: mapping(Bytes => Address) public;
+    normalizedName: mapping(Bytes => String) public;
+    registeredAt: mapping(Bytes => UInt256) public;
+    nameActive: mapping(Bytes => Bool) public;
+    primaryNameOf: mapping(Address => Bytes) public;
+
+    event NameRegistered(owner: Address indexed, name: String, normalizedHash: Bytes indexed);
+    event NameTransferred(name: String, normalizedHash: Bytes indexed, oldOwner: Address indexed, newOwner: Address);
+    event NameReleased(owner: Address indexed, name: String, normalizedHash: Bytes indexed);
+    event RegistrationFeeUpdated(oldFee: UInt256, newFee: UInt256);
+    event FeeCollectorUpdated(feeCollector: Address indexed);
+    event ReservedNameSet(name: String, normalizedHash: Bytes indexed, reserved: Bool);
+    event PauseStateUpdated(paused: Bool);
+
+    constructor(
+        initialGovernanceKey: MLDSAPublicKey,
+        initialFeeCollector: Address,
+        initialRegistrationFee: UInt256
+    ) {
+        require(initialFeeCollector != Address(0), "Invalid fee collector");
+        governanceKey = initialGovernanceKey;
+        feeCollector = initialFeeCollector;
+        registrationFee = initialRegistrationFee;
+        paused = false;
+    }
+
+    @gas_cost(base: 110000)
+    @public function register(name: String, canonicalHash: Bytes) {
+        require(!paused, "Identity registry paused");
+        require(msg.value == registrationFee, "Incorrect registration fee");
+        require(!reservedNameHash[canonicalHash], "Reserved name");
+        require(!nameActive[canonicalHash], "Name already registered");
+        require(!primaryNameActive(msg.sender), "Account already has a primary name");
+        require(synidNameHash(name) == canonicalHash, "Non-canonical name hash");
+
+        nameOwner[canonicalHash] = msg.sender;
+        normalizedName[canonicalHash] = synidNormalize(name);
+        registeredAt[canonicalHash] = block.number;
+        nameActive[canonicalHash] = true;
+        primaryNameOf[msg.sender] = canonicalHash;
+        if (registrationFee > 0) {
+            sendNative(feeCollector, registrationFee);
+        }
+        emit NameRegistered(msg.sender, normalizedName[canonicalHash], canonicalHash);
+    }
+
+    @gas_cost(base: 70000)
+    @public function transferName(canonicalHash: Bytes, newOwner: Address) {
+        require(!paused, "Identity registry paused");
+        require(newOwner != Address(0), "Invalid new owner");
+        require(nameActive[canonicalHash], "Name not found");
+        require(nameOwner[canonicalHash] == msg.sender, "Unauthorized");
+        require(!primaryNameActive(newOwner), "New owner already has a primary name");
+
+        let oldOwner: Address = nameOwner[canonicalHash];
+        primaryNameOf[oldOwner] = Bytes("");
+        primaryNameOf[newOwner] = canonicalHash;
+        nameOwner[canonicalHash] = newOwner;
+        emit NameTransferred(normalizedName[canonicalHash], canonicalHash, oldOwner, newOwner);
+    }
+
+    @gas_cost(base: 65000)
+    @public function releaseName(canonicalHash: Bytes) {
+        require(!paused, "Identity registry paused");
+        require(nameActive[canonicalHash], "Name not found");
+        require(nameOwner[canonicalHash] == msg.sender, "Unauthorized");
+        let currentOwner: Address = nameOwner[canonicalHash];
+        primaryNameOf[currentOwner] = Bytes("");
+        nameActive[canonicalHash] = false;
+        nameOwner[canonicalHash] = Address(0);
+        emit NameReleased(currentOwner, normalizedName[canonicalHash], canonicalHash);
+    }
+
+    @gas_cost(base: 25000)
+    @public function isRegistered(canonicalHash: Bytes) -> Bool {
+        return nameActive[canonicalHash];
+    }
+
+    @gas_cost(base: 25000)
+    @public function resolve(canonicalHash: Bytes) -> Address {
+        return nameOwner[canonicalHash];
+    }
+
+    @gas_cost(base: 25000)
+    @public function reverseResolve(account: Address) -> String {
+        return normalizedName[primaryNameOf[account]];
+    }
+
+    @gas_cost(base: 25000)
+    function primaryNameActive(account: Address) internal -> Bool {
+        return nameActive[primaryNameOf[account]];
+    }
+
+    @gas_cost(base: 95000, mldsa_verify: 35000)
+    @public function setReservedName(
+        name: String,
+        canonicalHash: Bytes,
+        reserved: Bool,
+        message: Bytes,
+        signature: MLDSASignature
+    ) {
+        require(synidNameHash(name) == canonicalHash, "Non-canonical name hash");
+        require_pqc {
+            let valid: Bool = verifyMLDSASignature(governanceKey, message, signature);
+            require(valid, "Invalid governance signature");
+        } or revert("PQC verification failed");
+        reservedNameHash[canonicalHash] = reserved;
+        emit ReservedNameSet(name, canonicalHash, reserved);
+    }
+
+    @gas_cost(base: 95000, mldsa_verify: 35000)
+    @public function setRegistrationFee(
+        newFee: UInt256,
+        message: Bytes,
+        signature: MLDSASignature
+    ) {
+        require_pqc {
+            let valid: Bool = verifyMLDSASignature(governanceKey, message, signature);
+            require(valid, "Invalid governance signature");
+        } or revert("PQC verification failed");
+        let oldFee: UInt256 = registrationFee;
+        registrationFee = newFee;
+        emit RegistrationFeeUpdated(oldFee, newFee);
+    }
+
+    @gas_cost(base: 95000, mldsa_verify: 35000)
+    @public function setFeeCollector(
+        newFeeCollector: Address,
+        message: Bytes,
+        signature: MLDSASignature
+    ) {
+        require(newFeeCollector != Address(0), "Invalid fee collector");
+        require_pqc {
+            let valid: Bool = verifyMLDSASignature(governanceKey, message, signature);
+            require(valid, "Invalid governance signature");
+        } or revert("PQC verification failed");
+        feeCollector = newFeeCollector;
+        emit FeeCollectorUpdated(newFeeCollector);
+    }
+
+    @gas_cost(base: 90000, mldsa_verify: 35000)
+    @public function setPaused(newPaused: Bool, message: Bytes, signature: MLDSASignature) {
+        require_pqc {
+            let valid: Bool = verifyMLDSASignature(governanceKey, message, signature);
+            require(valid, "Invalid governance signature");
+        } or revert("PQC verification failed");
+        paused = newPaused;
+        emit PauseStateUpdated(newPaused);
+    }
+}

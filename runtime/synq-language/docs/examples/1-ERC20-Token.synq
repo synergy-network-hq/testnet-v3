@@ -1,0 +1,278 @@
+// Complete ERC20-like Token Contract with Post-Quantum Security
+// This contract demonstrates all standard token functions plus PQC features
+
+pragma synq ^1.0.0;
+
+contract PQCToken {
+    // Token metadata
+    String public name;
+    String public symbol;
+    UInt8 public decimals;
+    UInt256 public totalSupply;
+    
+    // State variables
+    Address public owner;
+    mapping(Address => UInt256) public balanceOf;
+    mapping(Address => mapping(Address => UInt256)) public allowance;
+    
+    // PQC governance key for critical operations
+    MLDSAPublicKey public governanceKey;
+    
+    // Events
+    event Transfer(Address indexed from, Address indexed to, UInt256 value);
+    event Approval(Address indexed owner, Address indexed spender, UInt256 value);
+    event Mint(Address indexed to, UInt256 amount);
+    event Burn(Address indexed from, UInt256 amount);
+    event GovernanceKeyUpdated(MLDSAPublicKey newKey);
+    
+    // Constructor
+    constructor(
+        String _name,
+        String _symbol,
+        UInt8 _decimals,
+        UInt256 _initialSupply,
+        MLDSAPublicKey _governanceKey
+    ) {
+        name = _name;
+        symbol = _symbol;
+        decimals = _decimals;
+        owner = msg.sender;
+        governanceKey = _governanceKey;
+        totalSupply = _initialSupply;
+        balanceOf[msg.sender] = _initialSupply;
+        emit Transfer(Address(0), msg.sender, _initialSupply);
+    }
+    
+    // Standard ERC20 Functions
+    
+    // Get total supply
+    function totalSupply() public -> UInt256 {
+        return totalSupply;
+    }
+    
+    // Get balance of an address
+    function balanceOf(Address account) public -> UInt256 {
+        return balanceOf[account];
+    }
+    
+    // Transfer tokens
+    function transfer(Address to, UInt256 amount) public -> Bool {
+        require(to != Address(0), "Transfer to zero address");
+        require(balanceOf[msg.sender] >= amount, "Insufficient balance");
+        
+        balanceOf[msg.sender] = balanceOf[msg.sender] - amount;
+        balanceOf[to] = balanceOf[to] + amount;
+        
+        emit Transfer(msg.sender, to, amount);
+        return true;
+    }
+    
+    // Transfer from (for approved spending)
+    function transferFrom(
+        Address from,
+        Address to,
+        UInt256 amount
+    ) public -> Bool {
+        require(to != Address(0), "Transfer to zero address");
+        require(balanceOf[from] >= amount, "Insufficient balance");
+        require(allowance[from][msg.sender] >= amount, "Insufficient allowance");
+        
+        balanceOf[from] = balanceOf[from] - amount;
+        balanceOf[to] = balanceOf[to] + amount;
+        allowance[from][msg.sender] = allowance[from][msg.sender] - amount;
+        
+        emit Transfer(from, to, amount);
+        return true;
+    }
+    
+    // Approve spending
+    function approve(Address spender, UInt256 amount) public -> Bool {
+        require(spender != Address(0), "Approve to zero address");
+        
+        allowance[msg.sender][spender] = amount;
+        emit Approval(msg.sender, spender, amount);
+        return true;
+    }
+    
+    // Get allowance
+    function allowance(Address owner, Address spender) public -> UInt256 {
+        return allowance[owner][spender];
+    }
+    
+    // Advanced Token Functions
+    
+    // Increase allowance
+    function increaseAllowance(Address spender, UInt256 addedValue) public -> Bool {
+        require(spender != Address(0), "Approve to zero address");
+        
+        allowance[msg.sender][spender] = allowance[msg.sender][spender] + addedValue;
+        emit Approval(msg.sender, spender, allowance[msg.sender][spender]);
+        return true;
+    }
+    
+    // Decrease allowance
+    function decreaseAllowance(Address spender, UInt256 subtractedValue) public -> Bool {
+        require(spender != Address(0), "Approve to zero address");
+        require(allowance[msg.sender][spender] >= subtractedValue, "Decreased allowance below zero");
+        
+        allowance[msg.sender][spender] = allowance[msg.sender][spender] - subtractedValue;
+        emit Approval(msg.sender, spender, allowance[msg.sender][spender]);
+        return true;
+    }
+    
+    // Mint new tokens (requires governance signature)
+    @gas_cost(base: 100000, mldsa_verify: 35000)
+    function mint(
+        Address to,
+        UInt256 amount,
+        Bytes messageToSign,
+        MLDSASignature signature
+    ) public {
+        require(to != Address(0), "Mint to zero address");
+        require(amount > 0, "Mint amount must be positive");
+        
+        // Verify governance signature
+        require_pqc {
+            let isValid = verifyMLDSASignature(
+                governanceKey,
+                messageToSign,
+                signature
+            );
+            require(isValid, "Invalid governance signature");
+        } or revert("PQC verification failed");
+        
+        totalSupply = totalSupply + amount;
+        balanceOf[to] = balanceOf[to] + amount;
+        
+        emit Mint(to, amount);
+        emit Transfer(Address(0), to, amount);
+    }
+    
+    // Burn tokens
+    function burn(UInt256 amount) public {
+        require(balanceOf[msg.sender] >= amount, "Insufficient balance to burn");
+        require(amount > 0, "Burn amount must be positive");
+        
+        balanceOf[msg.sender] = balanceOf[msg.sender] - amount;
+        totalSupply = totalSupply - amount;
+        
+        emit Burn(msg.sender, amount);
+        emit Transfer(msg.sender, Address(0), amount);
+    }
+    
+    // Burn from (for approved burning)
+    function burnFrom(Address from, UInt256 amount) public {
+        require(balanceOf[from] >= amount, "Insufficient balance to burn");
+        require(allowance[from][msg.sender] >= amount, "Insufficient allowance");
+        require(amount > 0, "Burn amount must be positive");
+        
+        balanceOf[from] = balanceOf[from] - amount;
+        allowance[from][msg.sender] = allowance[from][msg.sender] - amount;
+        totalSupply = totalSupply - amount;
+        
+        emit Burn(from, amount);
+        emit Transfer(from, Address(0), amount);
+    }
+    
+    // Pause/Resume functionality (requires governance)
+    Bool public paused;
+    
+    @gas_cost(base: 75000, mldsa_verify: 35000)
+    function pause(
+        Bytes messageToSign,
+        MLDSASignature signature
+    ) public {
+        require_pqc {
+            let isValid = verifyMLDSASignature(
+                governanceKey,
+                messageToSign,
+                signature
+            );
+            require(isValid, "Invalid governance signature");
+        } or revert("PQC verification failed");
+        
+        paused = true;
+    }
+    
+    @gas_cost(base: 75000, mldsa_verify: 35000)
+    function unpause(
+        Bytes messageToSign,
+        MLDSASignature signature
+    ) public {
+        require_pqc {
+            let isValid = verifyMLDSASignature(
+                governanceKey,
+                messageToSign,
+                signature
+            );
+            require(isValid, "Invalid governance signature");
+        } or revert("PQC verification failed");
+        
+        paused = false;
+    }
+    
+    // Modified transfer with pause check
+    function transfer(Address to, UInt256 amount) public -> Bool {
+        require(!paused, "Token transfers are paused");
+        require(to != Address(0), "Transfer to zero address");
+        require(balanceOf[msg.sender] >= amount, "Insufficient balance");
+        
+        balanceOf[msg.sender] = balanceOf[msg.sender] - amount;
+        balanceOf[to] = balanceOf[to] + amount;
+        
+        emit Transfer(msg.sender, to, amount);
+        return true;
+    }
+    
+    // Update governance key (requires current governance signature)
+    @gas_cost(base: 100000, mldsa_verify: 35000)
+    function updateGovernanceKey(
+        MLDSAPublicKey newKey,
+        Bytes messageToSign,
+        MLDSASignature signature
+    ) public {
+        require_pqc {
+            let isValid = verifyMLDSASignature(
+                governanceKey,
+                messageToSign,
+                signature
+            );
+            require(isValid, "Invalid governance signature");
+        } or revert("PQC verification failed");
+        
+        governanceKey = newKey;
+        emit GovernanceKeyUpdated(newKey);
+    }
+    
+    // Batch transfer (gas optimized)
+    @gas_cost(base: 50000, per_transfer: 21000)
+    function batchTransfer(
+        Address[] recipients,
+        UInt256[] amounts
+    ) public -> Bool {
+        require(recipients.length == amounts.length, "Array length mismatch");
+        require(recipients.length > 0, "Empty arrays");
+        require(recipients.length <= 100, "Too many recipients");
+        
+        UInt256 totalAmount = 0;
+        for (i in 0..recipients.length) {
+            totalAmount = totalAmount + amounts[i];
+        }
+        
+        require(balanceOf[msg.sender] >= totalAmount, "Insufficient balance for batch");
+        
+        for (i in 0..recipients.length) {
+            require(recipients[i] != Address(0), "Invalid recipient address");
+            balanceOf[msg.sender] = balanceOf[msg.sender] - amounts[i];
+            balanceOf[recipients[i]] = balanceOf[recipients[i]] + amounts[i];
+            emit Transfer(msg.sender, recipients[i], amounts[i]);
+        }
+        
+        return true;
+    }
+    
+    // Get token info
+    function getTokenInfo() public -> (String, String, UInt8, UInt256) {
+        return (name, symbol, decimals, totalSupply);
+    }
+}

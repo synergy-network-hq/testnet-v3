@@ -1,0 +1,30 @@
+node_type: pqc_crypto
+role: pqc-crypto-provider
+steps:
+  - name: recipe
+    description: Validating PQC crypto setup recipe
+    progress: 0
+  - name: init
+    description: Initializing PQC crypto environment
+    progress: 10
+  - name: directories
+    description: Creating sandbox and key directories
+    progress: 25
+  - name: keygen
+    description: Generating post-quantum keys and deriving your node address
+    progress: 40
+  - name: binary
+    description: Preparing Synergy node binary
+    progress: 60
+  - name: config
+    description: Preparing configuration files for the PQC crypto node
+    progress: 75
+  - name: register
+    description: Registering the node on the Synergy testnet
+    progress: 90
+  - name: sync
+    description: Syncing blockchain data to the latest block
+    progress: 95
+  - name: complete
+    description: PQC crypto node setup finished
+    progress: 100

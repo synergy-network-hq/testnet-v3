@@ -1,0 +1,7 @@
+[rpc]
+enabled = true
+http_bind_address = "0.0.0.0:5640"
+ws_bind_address = "0.0.0.0:5660"
+max_request_body_bytes = 1048576
+token = "CHANGE_ME_RPC_TOKEN"
+

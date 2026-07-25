@@ -1,0 +1,26 @@
+[Unit]
+Description=Synergy Testnet Bootnode
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=devpup
+Group=synergydev
+WorkingDirectory=/opt/synergy/synergy-testnet
+ExecStart=/opt/synergy/synergy-testnet/target/release/synergy-testnet start --config /opt/synergy/synergy-testnet/config/bootnode1.toml
+Restart=always
+RestartSec=10
+StandardOutput=append:/opt/synergy/synergy-testnet/data/logs/bootnode1.out
+StandardError=append:/opt/synergy/synergy-testnet/data/logs/bootnode1.out
+
+# Resource limits to prevent memory issues
+MemoryLimit=2G
+CPUQuota=200%
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

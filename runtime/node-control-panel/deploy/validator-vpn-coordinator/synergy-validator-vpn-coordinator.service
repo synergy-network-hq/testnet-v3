@@ -1,0 +1,27 @@
+[Unit]
+Description=Synergy Validator VPN Coordinator
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# innernet-server v2.0.0 rejects every management command unless getuid() is
+# zero. This service is loopback-only behind nginx and runs no local desktop
+# agent; retain the hardening below and do not grant public access to its port.
+User=root
+Group=root
+WorkingDirectory=/opt/synergy/node-control-panel
+EnvironmentFile=/etc/synergy/validator-vpn-coordinator.env
+ExecStart=/opt/synergy/node-control-panel/control-service --port 47895 --token ${SYNERGY_VALIDATOR_VPN_COORDINATOR_TOKEN}
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+ReadWritePaths=/var/lib/synergy/node-control-panel /var/lib/innernet-server /etc/innernet-server
+
+[Install]
+WantedBy=multi-user.target
