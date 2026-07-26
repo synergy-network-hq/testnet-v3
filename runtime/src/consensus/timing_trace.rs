@@ -273,7 +273,7 @@ mod tests {
         assert_eq!(value["event"], "test_event");
         assert_eq!(value["height"], 42);
         assert_eq!(value["block_hash"], "abc");
-        assert_eq!(value["chain_id"], 1264);
+        assert_eq!(value["chain_id"], 1266);
         assert!(value["utc_time"].as_str().is_some());
         assert!(value["process_monotonic_ms"].as_u64().is_some());
         let _ = fs::remove_file(path);

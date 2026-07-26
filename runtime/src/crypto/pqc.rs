@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use aegis_pqvm::pqc::signatures::fndsa::fndsa1024;
+use aegis_pqvm::pqc::signatures::mldsa::{mldsa65, mldsa87};
 use pqcrypto_hqc::hqc256;
 use pqcrypto_mlkem::mlkem1024;
 use pqcrypto_sphincsplus::sphincsshake128fsimple;
@@ -12,7 +13,11 @@ use pqrust_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum PQCAlgorithm {
     MLKEM1024, // ML-KEM-1024 (Module-Lattice-based Key Encapsulation Mechanism)
-    #[serde(alias = "MLDSA", alias = "ML-DSA", alias = "mldsa", alias = "fn-dsa")]
+    #[serde(alias = "ML-DSA-65", alias = "mldsa65", alias = "ml-dsa-65")]
+    MLDSA65, // ML-DSA-65 (FIPS 204 security category 3)
+    #[serde(alias = "ML-DSA-87", alias = "mldsa87", alias = "ml-dsa-87")]
+    MLDSA87, // ML-DSA-87 (FIPS 204 security category 5)
+    #[serde(alias = "FN-DSA", alias = "FN-DSA-1024", alias = "fn-dsa")]
     FNDSA, // FN-DSA-1024 (Fast Fourier lattice Digital Signature Algorithm)
     SLHDSA,    // SLH-DSA (Stateless Hash-based Digital Signature Algorithm)
     HQCKEM,    // HQC-KEM (Hamming Quasi-Cyclic Key Encapsulation Mechanism)
@@ -91,10 +96,59 @@ impl PQCManager {
 
         match algorithm {
             PQCAlgorithm::MLKEM1024 => self.generate_mlkem_keypair(key_id, timestamp),
+            PQCAlgorithm::MLDSA65 => self.generate_mldsa65_keypair(key_id, timestamp),
+            PQCAlgorithm::MLDSA87 => self.generate_mldsa87_keypair(key_id, timestamp),
             PQCAlgorithm::FNDSA => self.generate_fndsa_keypair(key_id, timestamp),
             PQCAlgorithm::SLHDSA => self.generate_slhdsa_keypair(key_id, timestamp),
             PQCAlgorithm::HQCKEM => self.generate_hqckem_keypair(key_id, timestamp),
         }
+    }
+
+    fn generate_mldsa65_keypair(
+        &mut self,
+        key_id: String,
+        timestamp: u64,
+    ) -> Result<(PQCPublicKey, PQCPrivateKey), String> {
+        let (pk, sk) = mldsa65::keypair();
+        let public_key = PQCPublicKey {
+            algorithm: PQCAlgorithm::MLDSA65,
+            key_data: pk.as_bytes().to_vec(),
+            key_id: key_id.clone(),
+            created_at: timestamp,
+        };
+        let private_key = PQCPrivateKey {
+            algorithm: PQCAlgorithm::MLDSA65,
+            key_data: sk.as_bytes().to_vec(),
+            public_key_id: key_id,
+            created_at: timestamp,
+        };
+        Ok((public_key, private_key))
+    }
+
+    fn generate_mldsa87_keypair(
+        &mut self,
+        key_id: String,
+        timestamp: u64,
+    ) -> Result<(PQCPublicKey, PQCPrivateKey), String> {
+        let (pk, sk) = mldsa87::keypair();
+
+        let public_key = PQCPublicKey {
+            algorithm: PQCAlgorithm::MLDSA87,
+            key_data: pk.as_bytes().to_vec(),
+            key_id: key_id.clone(),
+            created_at: timestamp,
+        };
+
+        let private_key = PQCPrivateKey {
+            algorithm: PQCAlgorithm::MLDSA87,
+            key_data: sk.as_bytes().to_vec(),
+            public_key_id: key_id.clone(),
+            created_at: timestamp,
+        };
+
+        self.keypairs
+            .insert(key_id.clone(), (public_key.clone(), private_key.clone()));
+        Ok((public_key, private_key))
     }
 
     fn generate_mlkem_keypair(
@@ -212,6 +266,17 @@ impl PQCManager {
             .as_secs();
 
         let signature_data = match private_key.algorithm {
+            PQCAlgorithm::MLDSA65 => {
+                let sk = mldsa65::SecretKey::from_bytes(&private_key.key_data)
+                    .map_err(|_| "Invalid ML-DSA-65 secret key bytes".to_string())?;
+                mldsa65::detached_sign(message, &sk).as_bytes().to_vec()
+            }
+            PQCAlgorithm::MLDSA87 => {
+                let sk = mldsa87::SecretKey::from_bytes(&private_key.key_data)
+                    .map_err(|_| "Invalid ML-DSA-87 secret key bytes".to_string())?;
+                let signature = mldsa87::detached_sign(message, &sk);
+                signature.as_bytes().to_vec()
+            }
             PQCAlgorithm::FNDSA => {
                 let sk = fndsa1024::SecretKey::from_bytes(&private_key.key_data)
                     .map_err(|_| "Invalid FN-DSA secret key bytes".to_string())?;
@@ -247,6 +312,24 @@ impl PQCManager {
         message: &[u8],
     ) -> Result<bool, String> {
         match public_key.algorithm {
+            PQCAlgorithm::MLDSA65 => {
+                let pk = mldsa65::PublicKey::from_bytes(&public_key.key_data)
+                    .map_err(|_| "Invalid ML-DSA-65 public key bytes".to_string())?;
+                let sig = mldsa65::DetachedSignature::from_bytes(&signature.signature_data)
+                    .map_err(|_| "Invalid ML-DSA-65 signature bytes".to_string())?;
+                mldsa65::verify_detached_signature(&sig, message, &pk)
+                    .map(|_| true)
+                    .map_err(|_| "ML-DSA-65 signature verification failed".to_string())
+            }
+            PQCAlgorithm::MLDSA87 => {
+                let pk = mldsa87::PublicKey::from_bytes(&public_key.key_data)
+                    .map_err(|_| "Invalid ML-DSA-87 public key bytes".to_string())?;
+                let sig = mldsa87::DetachedSignature::from_bytes(&signature.signature_data)
+                    .map_err(|_| "Invalid ML-DSA-87 signature bytes".to_string())?;
+                mldsa87::verify_detached_signature(&sig, message, &pk)
+                    .map(|_| true)
+                    .map_err(|_| "ML-DSA-87 signature verification failed".to_string())
+            }
             PQCAlgorithm::FNDSA => {
                 let pk = fndsa1024::PublicKey::from_bytes(&public_key.key_data)
                     .map_err(|_| "Invalid FN-DSA public key bytes".to_string())?;
@@ -429,6 +512,8 @@ impl PQCManager {
     pub fn get_supported_algorithms(&self) -> Vec<PQCAlgorithm> {
         vec![
             PQCAlgorithm::MLKEM1024,
+            PQCAlgorithm::MLDSA65,
+            PQCAlgorithm::MLDSA87,
             PQCAlgorithm::FNDSA,
             PQCAlgorithm::SLHDSA,
             PQCAlgorithm::HQCKEM,
@@ -471,6 +556,8 @@ impl PQCManager {
 fn algorithm_name(algorithm: &PQCAlgorithm) -> &'static str {
     match algorithm {
         PQCAlgorithm::MLKEM1024 => "mlkem1024",
+        PQCAlgorithm::MLDSA65 => "mldsa65",
+        PQCAlgorithm::MLDSA87 => "mldsa87",
         PQCAlgorithm::FNDSA => "fndsa",
         PQCAlgorithm::SLHDSA => "slhdsa",
         PQCAlgorithm::HQCKEM => "hqckem",
@@ -505,7 +592,51 @@ mod tests {
 
         assert!(manager
             .get_supported_algorithms()
+            .contains(&PQCAlgorithm::MLDSA65));
+        assert!(manager
+            .get_supported_algorithms()
+            .contains(&PQCAlgorithm::MLDSA87));
+        assert!(manager
+            .get_supported_algorithms()
             .contains(&PQCAlgorithm::FNDSA));
+    }
+
+    #[test]
+    fn test_mldsa87_sign_verify() {
+        let mut manager = PQCManager::new();
+        let (public_key, private_key) = manager
+            .generate_keypair(PQCAlgorithm::MLDSA87)
+            .expect("ML-DSA-87 key generation should succeed");
+        let message = b"ML-DSA-87 consensus integration test";
+        let signature = manager
+            .sign(&private_key, message)
+            .expect("ML-DSA-87 signing should succeed");
+
+        assert_eq!(public_key.key_data.len(), mldsa87::public_key_bytes());
+        assert_eq!(private_key.key_data.len(), mldsa87::secret_key_bytes());
+        assert_eq!(signature.signature_data.len(), mldsa87::signature_bytes());
+        assert!(manager
+            .verify(&public_key, &signature, message)
+            .expect("ML-DSA-87 verification should return bool"));
+    }
+
+    #[test]
+    fn test_mldsa65_sign_verify() {
+        let mut manager = PQCManager::new();
+        let (public_key, private_key) = manager
+            .generate_keypair(PQCAlgorithm::MLDSA65)
+            .expect("ML-DSA-65 key generation should succeed");
+        let message = b"ML-DSA-65 consensus integration test";
+        let signature = manager
+            .sign(&private_key, message)
+            .expect("ML-DSA-65 signing should succeed");
+
+        assert_eq!(public_key.key_data.len(), mldsa65::public_key_bytes());
+        assert_eq!(private_key.key_data.len(), mldsa65::secret_key_bytes());
+        assert_eq!(signature.signature_data.len(), mldsa65::signature_bytes());
+        assert!(manager
+            .verify(&public_key, &signature, message)
+            .expect("ML-DSA-65 verification should return bool"));
     }
 
     #[test]
@@ -526,24 +657,24 @@ mod tests {
     }
 
     #[test]
-    fn legacy_mldsa_algorithm_label_deserializes_as_fndsa() {
+    fn explicit_mldsa65_algorithm_label_deserializes_without_a_legacy_alias() {
         let algorithm: PQCAlgorithm =
-            serde_json::from_str("\"MLDSA\"").expect("legacy MLDSA label should parse");
-        assert_eq!(algorithm, PQCAlgorithm::FNDSA);
+            serde_json::from_str("\"ML-DSA-65\"").expect("ML-DSA-65 label should parse");
+        assert_eq!(algorithm, PQCAlgorithm::MLDSA65);
         assert_eq!(
             serde_json::to_string(&algorithm).expect("algorithm should serialize"),
-            "\"FNDSA\""
+            "\"MLDSA65\""
         );
 
         let signature: PQCSignature = serde_json::from_value(serde_json::json!({
-            "algorithm": "MLDSA",
+            "algorithm": "ML-DSA-65",
             "signature_data": [],
             "message_hash": [],
             "public_key_id": "legacy-qc-vote",
             "created_at": 0
         }))
-        .expect("legacy QC signature should parse");
-        assert_eq!(signature.algorithm, PQCAlgorithm::FNDSA);
+        .expect("ML-DSA QC signature should parse");
+        assert_eq!(signature.algorithm, PQCAlgorithm::MLDSA65);
     }
 
     #[test]

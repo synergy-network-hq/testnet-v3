@@ -29,7 +29,7 @@ decimals = _decimals;
 owner = msg.sender;
 governanceKey = _governanceKey;
 totalSupply = _initialSupply;
-balanceOf = _initialSupply;
+balanceOf[msg.sender] = _initialSupply;
 emit Transfer((Address(0), msg.sender, _initialSupply));
 }
 
@@ -50,8 +50,8 @@ return balanceOf[account];
 function transfer(address to, uint256 amount) external returns (bool) public {
 require(to != Address(0), "Transfer to zero address");
 require(balanceOf[msg.sender] >= amount, "Insufficient balance");
-balanceOf = balanceOf[msg.sender] - amount;
-balanceOf = balanceOf[to] + amount;
+balanceOf[msg.sender] = balanceOf[msg.sender] - amount;
+balanceOf[to] = balanceOf[to] + amount;
 emit Transfer((msg.sender, to, amount));
 return true;
 }
@@ -60,16 +60,16 @@ function transferFrom(address from, address to, uint256 amount) external returns
 require(to != Address(0), "Transfer to zero address");
 require(balanceOf[from] >= amount, "Insufficient balance");
 require(allowance[from][msg.sender] >= amount, "Insufficient allowance");
-balanceOf = balanceOf[from] - amount;
-balanceOf = balanceOf[to] + amount;
-allowance = allowance[from][msg.sender] - amount;
+balanceOf[from] = balanceOf[from] - amount;
+balanceOf[to] = balanceOf[to] + amount;
+allowance[from][msg.sender] = allowance[from][msg.sender] - amount;
 emit Transfer((from, to, amount));
 return true;
 }
 
 function approve(address spender, uint256 amount) external returns (bool) public {
 require(spender != Address(0), "Approve to zero address");
-allowance = amount;
+allowance[msg.sender][spender] = amount;
 emit Approval((msg.sender, spender, amount));
 return true;
 }
@@ -80,7 +80,7 @@ return allowance[owner][spender];
 
 function increaseAllowance(address spender, uint256 addedValue) external returns (bool) public {
 require(spender != Address(0), "Approve to zero address");
-allowance = allowance[msg.sender][spender] + addedValue;
+allowance[msg.sender][spender] = allowance[msg.sender][spender] + addedValue;
 emit Approval((msg.sender, spender, allowance[msg.sender][spender]));
 return true;
 }
@@ -88,7 +88,7 @@ return true;
 function decreaseAllowance(address spender, uint256 subtractedValue) external returns (bool) public {
 require(spender != Address(0), "Approve to zero address");
 require(allowance[msg.sender][spender] >= subtractedValue, "Decreased allowance below zero");
-allowance = allowance[msg.sender][spender] - subtractedValue;
+allowance[msg.sender][spender] = allowance[msg.sender][spender] - subtractedValue;
 emit Approval((msg.sender, spender, allowance[msg.sender][spender]));
 return true;
 }
@@ -107,7 +107,7 @@ revert("PQC verification failed");
 }
 }
 totalSupply = totalSupply + amount;
-balanceOf = balanceOf[to] + amount;
+balanceOf[to] = balanceOf[to] + amount;
 emit Mint((to, amount));
 emit Transfer((Address(0), to, amount));
 }
@@ -115,7 +115,7 @@ emit Transfer((Address(0), to, amount));
 function burn(uint256 amount) public {
 require(balanceOf[msg.sender] >= amount, "Insufficient balance to burn");
 require(amount > 0, "Burn amount must be positive");
-balanceOf = balanceOf[msg.sender] - amount;
+balanceOf[msg.sender] = balanceOf[msg.sender] - amount;
 totalSupply = totalSupply - amount;
 emit Burn((msg.sender, amount));
 emit Transfer((msg.sender, Address(0), amount));
@@ -125,8 +125,8 @@ function burnFrom(address from, uint256 amount) public {
 require(balanceOf[from] >= amount, "Insufficient balance to burn");
 require(allowance[from][msg.sender] >= amount, "Insufficient allowance");
 require(amount > 0, "Burn amount must be positive");
-balanceOf = balanceOf[from] - amount;
-allowance = allowance[from][msg.sender] - amount;
+balanceOf[from] = balanceOf[from] - amount;
+allowance[from][msg.sender] = allowance[from][msg.sender] - amount;
 totalSupply = totalSupply - amount;
 emit Burn((from, amount));
 emit Transfer((from, Address(0), amount));
@@ -164,8 +164,8 @@ function transfer(address to, uint256 amount) external returns (bool) public {
 require(!paused, "Token transfers are paused");
 require(to != Address(0), "Transfer to zero address");
 require(balanceOf[msg.sender] >= amount, "Insufficient balance");
-balanceOf = balanceOf[msg.sender] - amount;
-balanceOf = balanceOf[to] + amount;
+balanceOf[msg.sender] = balanceOf[msg.sender] - amount;
+balanceOf[to] = balanceOf[to] + amount;
 emit Transfer((msg.sender, to, amount));
 return true;
 }
@@ -197,8 +197,8 @@ totalAmount = totalAmount + amounts[i];
 require(balanceOf[msg.sender] >= totalAmount, "Insufficient balance for batch");
 for (uint256 i = 0; i < recipients.length; i++) {
 require(recipients[i] != Address(0), "Invalid recipient address");
-balanceOf = balanceOf[msg.sender] - amounts[i];
-balanceOf = balanceOf[recipients[i]] + amounts[i];
+balanceOf[msg.sender] = balanceOf[msg.sender] - amounts[i];
+balanceOf[recipients[i]] = balanceOf[recipients[i]] + amounts[i];
 emit Transfer((msg.sender, recipients[i], amounts[i]));
 }
 return true;

@@ -2306,6 +2306,8 @@ impl RewardLedger {
         release_coefficients: &HashMap<String, u64>,
         settled_block_height: u64,
     ) -> Result<Vec<ValidatorRewardSettlement>, String> {
+        let treasury_recovery_wallet_address =
+            crate::token::testnet_v3_system_addresses()?.treasury_recovery;
         let mut settlements = Vec::new();
         for pending in self
             .pending_rewards
@@ -2339,8 +2341,7 @@ impl RewardLedger {
                     validator_id: settlement.validator_id.clone(),
                     cluster_id: settlement.cluster_id.clone(),
                     amount_nwei: settlement.unreleased_reward_nwei,
-                    treasury_recovery_wallet_address:
-                        crate::token::TREASURY_RECOVERY_WALLET_ADDRESS.to_string(),
+                    treasury_recovery_wallet_address: treasury_recovery_wallet_address.clone(),
                     reason_codes: reason_codes.clone(),
                 };
                 self.treasury_recovery_ledger

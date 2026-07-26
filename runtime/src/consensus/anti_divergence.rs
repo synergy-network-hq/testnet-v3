@@ -1,6 +1,7 @@
 use crate::consensus::dual_quorum::required_validator_quorum;
 use crate::consensus::posy::LocalConsensusContext;
 use crate::consensus::self_realign::{QuarantineMarker, RealignmentState};
+use crate::consensus_parameters::ConsensusParameterRoot;
 use crate::crypto::aegis_pqvm::AegisPqvmVerifier;
 use crate::dag_mempool::compute_tx_order_root;
 use crate::execution::{execute_block, ExecutionState};
@@ -240,7 +241,7 @@ pub struct BlockCommitRecord {
     pub qc_hash: Hash,
     pub active_validator_set_hash: Hash,
     pub cluster_map_hash: Hash,
-    pub protocol_config_hash: Hash,
+    pub protocol_config_hash: ConsensusParameterRoot,
     pub written_at_unix_ms: u64,
 }
 
@@ -346,20 +347,31 @@ impl<'a> PreCommitGuard<'a> {
             return Err("block state_root_before mismatch".to_string());
         }
         if block.header.active_validator_set_hash
-            != local_consensus_context.active_validator_set_hash
-            || block.header.active_validator_set_hash != self.validator_set.hash()?
+            != local_consensus_context
+                .height_context
+                .active_validator_set_root
         {
             return Err("block active validator set hash mismatch".to_string());
         }
-        if block.header.cluster_map_hash != local_consensus_context.cluster_map_hash
-            || block.header.cluster_map_hash != self.cluster_map.hash()?
+        if block.header.cluster_map_hash != local_consensus_context.height_context.cluster_map_root
         {
             return Err("block cluster map hash mismatch".to_string());
         }
-        if block.header.protocol_config_hash != local_consensus_context.protocol_config_hash
-            || block.header.protocol_config_hash != self.protocol_config.hash()?
+        if block.header.protocol_config_hash
+            != local_consensus_context
+                .height_context
+                .consensus_parameter_root
         {
             return Err("block protocol config hash mismatch".to_string());
+        }
+        local_consensus_context.height_context.validate_against(
+            self.validator_set,
+            self.cluster_map,
+            self.protocol_config,
+        )?;
+        let expected_context_root = local_consensus_context.height_context.root()?;
+        if block.header.height_context_root != expected_context_root {
+            return Err("block height context root mismatch".to_string());
         }
         locks.verify_canonical_lock(block.header.height, block)?;
 
@@ -385,7 +397,12 @@ impl<'a> PreCommitGuard<'a> {
         let qc =
             qc.ok_or_else(|| "QC missing; finalized PoSy block requires valid QC".to_string())?;
         self.verifier
-            .verify_qc_checked(qc, self.validator_set, self.cluster_map)
+            .verify_qc_checked(
+                qc,
+                self.validator_set,
+                self.cluster_map,
+                &local_consensus_context.height_context,
+            )
             .map_err(|error| error.to_string())?;
         if qc.block_id != block.block_id()? {
             return Err("QC block_id does not match exact block".to_string());
@@ -393,6 +410,7 @@ impl<'a> PreCommitGuard<'a> {
         if qc.height != block.header.height
             || qc.epoch != block.header.epoch
             || qc.cluster_id != block.header.cluster_id
+            || qc.height_context_root != block.header.height_context_root
             || qc.active_validator_set_hash != block.header.active_validator_set_hash
             || qc.cluster_map_hash != block.header.cluster_map_hash
         {
@@ -763,8 +781,8 @@ mod tests {
     use crate::consensus::posy::{LocalConsensusContext, ProofOfSynergyBft};
     use crate::crypto::aegis_pqvm::AegisPqvmSigner;
     use crate::synergy_types::{
-        AegisPqKeyRole, ChainId, ClusterAssignment, ClusterId, Epoch, NetworkId, ProtocolConfig,
-        Round, UmaId, ValidatorId, ValidatorStatus,
+        deterministic_test_height_context, AegisPqKeyRole, ClusterAssignment, ClusterId, Epoch,
+        ProtocolConfig, Round, UmaId, ValidatorId, ValidatorStatus,
     };
 
     fn setup() -> (
@@ -779,7 +797,7 @@ mod tests {
     ) {
         let mut signer = AegisPqvmSigner::initialize_required().expect("aegis");
         let mut validators = Vec::new();
-        for index in 0..5 {
+        for index in 0..6 {
             let uma = format!("uma-{index}");
             let key_id = signer
                 .generate_and_register_key(
@@ -821,20 +839,17 @@ mod tests {
         };
         let protocol = ProtocolConfig::testnet_v3();
         let context = LocalConsensusContext {
-            chain_id: ChainId::synergy_testnet_v3(),
-            network_id: NetworkId::synergy_testnet_v3(),
+            height_context: deterministic_test_height_context(
+                &set,
+                &cluster,
+                &protocol,
+                Height(1),
+                ClusterId(0),
+            ),
             latest_finalized_height: Height(0),
             latest_finalized_block_hash: Hash::zero(),
             latest_finalized_state_root: Hash::zero(),
-            last_finalized_qc_hash: Hash::zero(),
-            epoch: Epoch(0),
             round: Round(0),
-            cluster_id: ClusterId(0),
-            active_validator_set_hash: set.hash().unwrap(),
-            eligible_validator_set_hash: set.hash().unwrap(),
-            cluster_map_hash: cluster.hash().unwrap(),
-            proposer_schedule_hash: Hash::zero(),
-            protocol_config_hash: protocol.hash().unwrap(),
             evidence_root: Hash::zero(),
             app_version: 1,
             execution_version: 1,
@@ -845,7 +860,7 @@ mod tests {
         let mut consensus =
             ProofOfSynergyBft::new(&verifier, set.clone(), cluster.clone(), protocol.clone());
         let proposer = consensus
-            .proposer_for(Height(1), Round(0), ClusterId(0))
+            .proposer_for(&context.height_context, Round(0))
             .unwrap();
         let state = ExecutionState::new();
         let block = consensus
@@ -858,11 +873,26 @@ mod tests {
                 Hash::zero(),
             )
             .unwrap();
-        let votes = set.validators[0..4]
+        let validation_votes = set.validators[0..5]
             .iter()
-            .map(|validator| consensus.vote(&mut signer, validator, &block).unwrap())
+            .map(|validator| {
+                consensus
+                    .validation_vote(&mut signer, validator, &block, &context.height_context)
+                    .unwrap()
+            })
             .collect::<Vec<_>>();
-        let qc = consensus.form_qc(&votes).unwrap();
+        let vc = consensus
+            .form_vc(&validation_votes, &context.height_context)
+            .unwrap();
+        let votes = set.validators[0..5]
+            .iter()
+            .map(|validator| {
+                consensus
+                    .finality_vote(&mut signer, validator, &block, &vc, &context.height_context)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let qc = consensus.form_qc(&votes, &context.height_context).unwrap();
         (signer, set, cluster, protocol, context, block, qc, state)
     }
 
@@ -1070,7 +1100,7 @@ mod tests {
             qc_hash: Hash::zero(),
             active_validator_set_hash: Hash::zero(),
             cluster_map_hash: Hash::zero(),
-            protocol_config_hash: Hash::zero(),
+            protocol_config_hash: ConsensusParameterRoot::zero(),
             written_at_unix_ms: 0,
         };
         detector.set_canonical(Height(1), &record);

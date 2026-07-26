@@ -880,7 +880,7 @@ pub fn calculate_network_fee(
         storage_fee_nwei: input.storage_fee_nwei,
         priority_fee_nwei: input.priority_fee_nwei,
         total_network_fee_nwei: total_network_fee,
-        fee_collector_address: crate::token::FEE_COLLECTOR_ADDRESS.to_string(),
+        fee_collector_address: crate::token::fee_collector_address()?,
     })
 }
 

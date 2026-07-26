@@ -705,6 +705,8 @@ impl Transaction {
 fn algorithm_name(algorithm: &PQCAlgorithm) -> &'static str {
     match algorithm {
         PQCAlgorithm::MLKEM1024 => "mlkem1024",
+        PQCAlgorithm::MLDSA65 => "mldsa65",
+        PQCAlgorithm::MLDSA87 => "mldsa87",
         PQCAlgorithm::FNDSA => "fndsa",
         PQCAlgorithm::SLHDSA => "slhdsa",
         PQCAlgorithm::HQCKEM => "hqckem",
@@ -714,11 +716,13 @@ fn algorithm_name(algorithm: &PQCAlgorithm) -> &'static str {
 // Helper function to parse algorithm name
 pub fn parse_algorithm_name(name: &str) -> Result<PQCAlgorithm, String> {
     match name.to_lowercase().as_str() {
+        "mldsa65" | "ml-dsa-65" | "ml_dsa_65" => Ok(PQCAlgorithm::MLDSA65),
+        "mldsa87" | "ml-dsa-87" | "ml_dsa_87" => Ok(PQCAlgorithm::MLDSA87),
         "fndsa" | "fn-dsa" | "fn-dsa-512" | "fn-dsa-1024" | "falcon" | "falcon-1024" => {
             Ok(PQCAlgorithm::FNDSA)
         }
         _ => Err(format!(
-            "Unsupported transaction signature algorithm: {}; use fndsa",
+            "Unsupported transaction signature algorithm: {}; use mldsa65, mldsa87, or fndsa",
             name
         )),
     }

@@ -24,12 +24,12 @@ fn signed_payload(
 ) -> (SynQSigningPayload, SynQSignature) {
     let payload = SynQSigningPayload {
         domain_tag,
-        chain_id: ChainId::testnet_1264(),
+        chain_id: ChainId::testnet_1266(),
         network_id: NetworkId::testnet(),
         protocol_version: 1,
         algorithm_id: AlgorithmId::MlDsa65,
         signature_purpose: purpose,
-        nonce: 1264,
+        nonce: 1266,
         not_before_unix: 0,
         expiration_unix: NOW_UNIX + 600,
         signer_address,
@@ -43,7 +43,7 @@ fn signed_payload(
 }
 
 fn main() {
-    let verifier = AegisSynQVerifier::testnet_1264();
+    let verifier = AegisSynQVerifier::testnet_1266();
     let context = VerificationContext::testnet(NOW_UNIX);
     let (public_key, secret_key) = Sign::mldsa65().keygen().expect("ML-DSA-65 keypair");
     let public_key = SynQPublicKey::new(public_key);
@@ -110,7 +110,7 @@ fn main() {
         .verify_contract_call(&call, &context)
         .expect("call verifies");
 
-    println!("chain_id=1264");
+    println!("chain_id=1266");
     println!("network=synergy-testnet");
     println!("address={}", verified_call.caller.to_testnet_debug_string());
     println!("deploy=verified");

@@ -11,7 +11,7 @@ fn main() -> Result<(), String> {
     let deploy_request = synq_execution_request(
         "Counter",
         artifact.clone(),
-        ExecutionContext::testnet_1264_for_contract("Counter", 10_000),
+        ExecutionContext::testnet_1266_for_contract("Counter", 10_000),
         Vec::new(),
     );
     let deploy_receipt = deploy_synq_contract(&deploy_request, &mut state);
@@ -25,7 +25,7 @@ fn main() -> Result<(), String> {
     let increment_request = synq_execution_request(
         "Counter",
         artifact.clone(),
-        ExecutionContext::testnet_1264_for_contract("Counter", 10_000),
+        ExecutionContext::testnet_1266_for_contract("Counter", 10_000),
         COUNTER_INCREMENT_SELECTOR.to_vec(),
     );
     let increment_receipt = call_synq_contract(&increment_request, &mut state);
@@ -39,7 +39,7 @@ fn main() -> Result<(), String> {
     let get_request = synq_execution_request(
         "Counter",
         artifact,
-        ExecutionContext::testnet_1264_for_contract("Counter", 10_000),
+        ExecutionContext::testnet_1266_for_contract("Counter", 10_000),
         COUNTER_GET_SELECTOR.to_vec(),
     );
     let get_receipt = call_synq_contract(&get_request, &mut state);

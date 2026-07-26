@@ -24,7 +24,7 @@ fn signed_payload(
 ) -> (SynQSigningPayload, SynQSignature) {
     let payload = SynQSigningPayload {
         domain_tag,
-        chain_id: ChainId::testnet_1264(),
+        chain_id: ChainId::testnet_1266(),
         network_id: NetworkId::testnet(),
         protocol_version: 1,
         algorithm_id: AlgorithmId::MlDsa65,
@@ -45,7 +45,7 @@ fn valid_deploy() -> (
     VerificationContext,
     ContractDeployEnvelope,
 ) {
-    let verifier = AegisSynQVerifier::testnet_1264();
+    let verifier = AegisSynQVerifier::testnet_1266();
     let context = VerificationContext::testnet(NOW);
     let (public_key, secret_key) = Sign::mldsa65().keygen().unwrap();
     let public_key = SynQPublicKey::new(public_key);
@@ -86,7 +86,7 @@ fn valid_deploy() -> (
 }
 
 fn valid_call() -> (AegisSynQVerifier, VerificationContext, ContractCallEnvelope) {
-    let verifier = AegisSynQVerifier::testnet_1264();
+    let verifier = AegisSynQVerifier::testnet_1266();
     let context = VerificationContext::testnet(NOW);
     let (public_key, secret_key) = Sign::mldsa65().keygen().unwrap();
     let public_key = SynQPublicKey::new(public_key);

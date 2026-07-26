@@ -39,11 +39,11 @@ version = "0.1.0"
 
 [compiler]
 language_version = "0.1"
-bytecode_version = 1
+bytecode_version = 2
 target_aivm_version = "0.1"
 
 [network]
-chain_id = 1264
+chain_id = 1266
 network_id = "{network_id}"
 address_hrp = "tsynq"
 
@@ -319,7 +319,7 @@ fn test_compile_counter_example() {
     let manifest: serde_json::Value =
         serde_json::from_slice(&fs::read(source_path.with_extension("manifest.json")).unwrap())
             .unwrap();
-    assert_eq!(manifest["required_chain_id"], 1264);
+    assert_eq!(manifest["required_chain_id"], 1266);
     assert_eq!(manifest["required_network_id"], "synergy-testnet");
     assert_eq!(manifest["required_signature_algorithm"], "ML-DSA-65");
 }
@@ -350,7 +350,7 @@ fn test_check_abi_manifest_and_simulate_counter() {
     manifest_cmd
         .assert()
         .success()
-        .stdout(predicate::str::contains(r#""required_chain_id":1264"#))
+        .stdout(predicate::str::contains(r#""required_chain_id":1266"#))
         .stdout(predicate::str::contains(
             r#""required_signature_algorithm":"ML-DSA-65""#,
         ));
@@ -474,7 +474,7 @@ fn test_build_consumes_synq_toml_network_alias() {
 #[test]
 fn test_build_rejects_unsupported_synq_toml_chain() {
     let dir = tempdir().unwrap();
-    let config = valid_synq_toml("synergy-testnet").replace("chain_id = 1264", "chain_id = 999");
+    let config = valid_synq_toml("synergy-testnet").replace("chain_id = 1266", "chain_id = 999");
     let source_path = write_counter_project(dir.path(), &config);
 
     let mut build_cmd = Command::new(assert_cmd::cargo::cargo_bin!("cli"));
@@ -576,7 +576,7 @@ fn test_keygen_sign_deploy_and_verify_deploy_use_pqsynq() {
 
     let envelope: serde_json::Value =
         serde_json::from_slice(&fs::read(&envelope_path).unwrap()).unwrap();
-    assert_eq!(envelope["signing_payload"]["chain_id"], 1264);
+    assert_eq!(envelope["signing_payload"]["chain_id"], 1266);
     assert_eq!(envelope["signing_payload"]["network_id"], "synergy-testnet");
     assert_eq!(envelope["signing_payload"]["nonce"], 42);
 
@@ -620,7 +620,7 @@ fn test_keygen_sign_deploy_and_verify_deploy_use_pqsynq() {
 
     let call_envelope: serde_json::Value =
         serde_json::from_slice(&fs::read(&call_envelope_path).unwrap()).unwrap();
-    assert_eq!(call_envelope["signing_payload"]["chain_id"], 1264);
+    assert_eq!(call_envelope["signing_payload"]["chain_id"], 1266);
     assert_eq!(
         call_envelope["signing_payload"]["network_id"],
         "synergy-testnet"

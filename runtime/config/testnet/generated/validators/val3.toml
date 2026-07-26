@@ -10,10 +10,10 @@ address = "synv1<TESTNET_V3_VALIDATOR_03_ADDRESS>"
 label = "Val3"
 
 [network]
-id = 1264
+id = 1266
 name = "synergy-testnet-v3"
 network_id = "synergy-testnet-v3"
-chain_id = 1264
+chain_id = 1266
 p2p_port = 5622
 bootnodes = []
 seed_servers = []

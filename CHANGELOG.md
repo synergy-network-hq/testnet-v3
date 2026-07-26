@@ -4,7 +4,7 @@
 
 - Replaced the invalid Solidity genesis-contract package with eight native SynQ
   contracts and compiler-produced SynQ bytecode, ABI, and manifest artifacts.
-- Bound every contract manifest to chain `1264`, network
+- Bound every contract manifest to chain `1266`, network
   `synergy-testnet-v3`, and `ML-DSA-65`.
 - Added placeholder-only deployment inputs for new Testnet-v3 identities and
   system addresses.
@@ -15,7 +15,7 @@
 ## 3.0.0-prelaunch.1 - 2026-07-24
 
 - Created the dedicated Testnet-v3 workspace from the current Testnet runtime hotfix source.
-- Preserved chain ID and numeric network ID `1264`.
+- Preserved chain ID and numeric network ID `1266`.
 - Changed the runtime isolation ID to `synergy-testnet-v3`.
 - Renamed Testnet-v2 runtime constants, commands, tests, and package labels for Testnet-v3.
 - Added Testnet-v3 topology metadata and generated-config runtime network IDs.

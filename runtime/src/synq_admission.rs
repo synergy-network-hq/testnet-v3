@@ -15,6 +15,7 @@ pub const SYNQ_CANONICAL_TESTNET_NETWORK_ID: &str = "synergy-testnet";
 pub const MAX_SYNQ_DEPLOY_BYTECODE_BYTES: usize = 256 * 1024;
 pub const MAX_SYNQ_DEPLOY_ABI_JSON_BYTES: usize = 64 * 1024;
 pub const MAX_SYNQ_DEPLOY_MANIFEST_JSON_BYTES: usize = 64 * 1024;
+pub const MAX_SYNQ_CONSTRUCTOR_ARGS_BYTES: usize = 16 * 1024;
 pub const MAX_SYNQ_CALL_ARGS_BYTES: usize = 16 * 1024;
 pub const MAX_STS9_VERIFICATION_JSON_BYTES: usize = 128 * 1024;
 pub const STS9_HORIZON_CONTRACT_NAME: &str = "STS9HorizonToken";
@@ -58,6 +59,8 @@ pub struct SynQAdmissionEnvelope {
     pub abi_json: Option<String>,
     #[serde(default)]
     pub manifest_json: Option<String>,
+    #[serde(default)]
+    pub constructor_args: Option<Vec<u8>>,
     #[serde(default)]
     pub encoded_args: Option<Vec<u8>>,
     #[serde(default)]
@@ -213,15 +216,14 @@ pub fn is_synq_admission_carrier(payload: &[u8]) -> bool {
     payload.starts_with(SYNQ_ADMISSION_CARRIER_PREFIX)
 }
 
-pub fn build_deploy_admission_envelope_from_pqsynq_bytes(
+fn build_deploy_admission_envelope_unverified(
     chain_id: u64,
     network_id: &str,
     encoded_pqsynq_envelope: &[u8],
-    now_unix: u64,
 ) -> Result<SynQAdmissionEnvelope, SynQAdmissionError> {
     let deploy: ContractDeployEnvelope =
         decode_pqsynq_envelope(encoded_pqsynq_envelope, "decode SynQ deploy envelope")?;
-    let envelope = SynQAdmissionEnvelope {
+    Ok(SynQAdmissionEnvelope {
         version: SYNQ_ADMISSION_VERSION,
         kind: SynQAdmissionKind::Deploy,
         chain_id,
@@ -238,9 +240,20 @@ pub fn build_deploy_admission_envelope_from_pqsynq_bytes(
         bytecode: None,
         abi_json: None,
         manifest_json: None,
+        constructor_args: None,
         encoded_args: None,
         sts9_verification_json: None,
-    };
+    })
+}
+
+pub fn build_deploy_admission_envelope_from_pqsynq_bytes(
+    chain_id: u64,
+    network_id: &str,
+    encoded_pqsynq_envelope: &[u8],
+    now_unix: u64,
+) -> Result<SynQAdmissionEnvelope, SynQAdmissionError> {
+    let envelope =
+        build_deploy_admission_envelope_unverified(chain_id, network_id, encoded_pqsynq_envelope)?;
     verify_synq_deploy_for_chain_admission(&envelope, now_unix)?;
     Ok(envelope)
 }
@@ -261,6 +274,24 @@ pub fn build_deploy_admission_envelope_from_pqsynq_bytes_with_artifacts(
         now_unix,
     )?;
     attach_deploy_artifacts(&mut envelope, bytecode, abi_json, manifest_json)?;
+    Ok(envelope)
+}
+
+pub fn build_deploy_admission_envelope_from_pqsynq_bytes_with_artifacts_and_constructor_args(
+    chain_id: u64,
+    network_id: &str,
+    encoded_pqsynq_envelope: &[u8],
+    bytecode: Vec<u8>,
+    abi_json: String,
+    manifest_json: String,
+    constructor_args: Vec<u8>,
+    now_unix: u64,
+) -> Result<SynQAdmissionEnvelope, SynQAdmissionError> {
+    let mut envelope =
+        build_deploy_admission_envelope_unverified(chain_id, network_id, encoded_pqsynq_envelope)?;
+    attach_deploy_artifacts(&mut envelope, bytecode, abi_json, manifest_json)?;
+    attach_constructor_args(&mut envelope, constructor_args)?;
+    verify_synq_deploy_for_chain_admission(&envelope, now_unix)?;
     Ok(envelope)
 }
 
@@ -313,6 +344,7 @@ pub fn build_call_admission_envelope_from_pqsynq_bytes(
         bytecode: None,
         abi_json: None,
         manifest_json: None,
+        constructor_args: None,
         encoded_args: None,
         sts9_verification_json: None,
     };
@@ -371,6 +403,30 @@ pub fn build_deploy_admission_carrier_from_pqsynq_bytes_with_artifacts(
         manifest_json,
         now_unix,
     )?;
+    encode_synq_admission_carrier(&envelope)
+}
+
+pub fn build_deploy_admission_carrier_from_pqsynq_bytes_with_artifacts_and_constructor_args(
+    chain_id: u64,
+    network_id: &str,
+    encoded_pqsynq_envelope: &[u8],
+    bytecode: Vec<u8>,
+    abi_json: String,
+    manifest_json: String,
+    constructor_args: Vec<u8>,
+    now_unix: u64,
+) -> Result<Vec<u8>, SynQAdmissionError> {
+    let envelope =
+        build_deploy_admission_envelope_from_pqsynq_bytes_with_artifacts_and_constructor_args(
+            chain_id,
+            network_id,
+            encoded_pqsynq_envelope,
+            bytecode,
+            abi_json,
+            manifest_json,
+            constructor_args,
+            now_unix,
+        )?;
     encode_synq_admission_carrier(&envelope)
 }
 
@@ -480,7 +536,7 @@ pub fn verify_synq_deploy_for_chain_admission(
         "decode SynQ deploy envelope",
     )?;
     let context = pqsynq_context(envelope.chain_id, &normalized.pqsynq_network_id, now_unix);
-    let verified = AegisSynQVerifier::testnet_1264()
+    let verified = AegisSynQVerifier::testnet_1266()
         .verify_contract_deploy(&deploy, &context)
         .map_err(pqsynq_error)?;
 
@@ -504,6 +560,7 @@ pub fn verify_synq_deploy_for_chain_admission(
         });
     }
     validate_attached_deploy_artifacts(envelope)?;
+    validate_constructor_args_hash(envelope, &deploy)?;
     validate_sts9_deploy_gate(envelope)?;
 
     Ok(summary_from_payload(
@@ -526,7 +583,7 @@ pub fn verify_synq_call_for_chain_admission(
         "decode SynQ call envelope",
     )?;
     let context = pqsynq_context(envelope.chain_id, &normalized.pqsynq_network_id, now_unix);
-    let verified = AegisSynQVerifier::testnet_1264()
+    let verified = AegisSynQVerifier::testnet_1266()
         .verify_contract_call(&call, &context)
         .map_err(pqsynq_error)?;
 
@@ -603,6 +660,24 @@ fn attach_call_args(
         None
     } else {
         Some(encoded_args)
+    };
+    Ok(())
+}
+
+fn attach_constructor_args(
+    envelope: &mut SynQAdmissionEnvelope,
+    constructor_args: Vec<u8>,
+) -> Result<(), SynQAdmissionError> {
+    ensure_kind(envelope, SynQAdmissionKind::Deploy)?;
+    ensure_artifact_size(
+        "constructor_args",
+        constructor_args.len(),
+        MAX_SYNQ_CONSTRUCTOR_ARGS_BYTES,
+    )?;
+    envelope.constructor_args = if constructor_args.is_empty() {
+        None
+    } else {
+        Some(constructor_args)
     };
     Ok(())
 }
@@ -695,6 +770,27 @@ fn validate_call_args_hash(
             code: "AEGIS-CANON",
             message:
                 "SynQ call encoded_args bytes do not match the verified aegis-pqsynq args hash"
+                    .to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_constructor_args_hash(
+    envelope: &SynQAdmissionEnvelope,
+    deploy: &ContractDeployEnvelope,
+) -> Result<(), SynQAdmissionError> {
+    let constructor_args = envelope.constructor_args.as_deref().unwrap_or(&[]);
+    ensure_artifact_size(
+        "constructor_args",
+        constructor_args.len(),
+        MAX_SYNQ_CONSTRUCTOR_ARGS_BYTES,
+    )?;
+    if sha256_array(constructor_args) != deploy.constructor_args_hash {
+        return Err(SynQAdmissionError::InvalidCarrier {
+            code: "AEGIS-CANON",
+            message:
+                "SynQ deploy constructor_args bytes do not match the verified aegis-pqsynq args hash"
                     .to_string(),
         });
     }
@@ -799,7 +895,7 @@ fn validate_sts9_horizon_verification(
     expect_u64_any(
         verification,
         &[&["chain_id"], &["network", "chain_id"]],
-        1264,
+        1266,
     )?;
     expect_str_any(
         verification,
@@ -972,8 +1068,8 @@ fn validate_sts9_manifest_binding(manifest: &serde_json::Value) -> Result<(), Sy
         .get("required_chain_id")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or_default();
-    if chain_id != 1264 {
-        return Err(invalid_sts9("manifest required_chain_id must be 1264"));
+    if chain_id != 1266 {
+        return Err(invalid_sts9("manifest required_chain_id must be 1266"));
     }
     let network_id = manifest
         .get("required_network_id")
@@ -1295,7 +1391,7 @@ fn pqsynq_context(chain_id: u64, network_id: &str, now_unix: u64) -> Verificatio
         chain_id: ChainId(chain_id),
         network_id: NetworkId(network_id.to_string()),
         now_unix,
-        policy: SynQSecurityPolicy::testnet_1264_policy(),
+        policy: SynQSecurityPolicy::testnet_1266_policy(),
     }
 }
 
@@ -1394,11 +1490,18 @@ pub(crate) mod test_support {
     }
 
     pub(crate) fn deploy_carrier(network_id: &str) -> SynQAdmissionEnvelope {
+        deploy_carrier_with_constructor_args(network_id, Vec::new())
+    }
+
+    pub(crate) fn deploy_carrier_with_constructor_args(
+        network_id: &str,
+        constructor_args: Vec<u8>,
+    ) -> SynQAdmissionEnvelope {
         let (public_key, private_key, signer) = test_identity();
         let bytecode_hash = hash(1);
         let manifest_hash = hash(2);
         let abi_hash = hash(3);
-        let constructor_args_hash = hash(4);
+        let constructor_args_hash = sha256_array(&constructor_args);
         let payload_hash = hash_contract_deploy_body(
             &bytecode_hash,
             &manifest_hash,
@@ -1441,6 +1544,7 @@ pub(crate) mod test_support {
             bytecode: None,
             abi_json: None,
             manifest_json: None,
+            constructor_args: (!constructor_args.is_empty()).then_some(constructor_args),
             encoded_args: None,
             sts9_verification_json: None,
         }
@@ -1491,6 +1595,7 @@ pub(crate) mod test_support {
             bytecode: None,
             abi_json: None,
             manifest_json: None,
+            constructor_args: None,
             encoded_args: None,
             sts9_verification_json: None,
         }
@@ -1545,7 +1650,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn network_alias_normalization_accepts_testnet_names_for_chain_1264() {
+    fn network_alias_normalization_accepts_testnet_names_for_chain_1266() {
         let canonical = normalize_synq_network(
             SYNERGY_TESTNET_V3_CHAIN_ID,
             SYNQ_CANONICAL_TESTNET_NETWORK_ID,
@@ -1587,6 +1692,21 @@ mod tests {
         assert_eq!(summary.algorithm, "ML-DSA-65");
         assert!(summary.verified_at_admission);
         assert_eq!(summary.bytecode_hash, Some(hash(1)));
+    }
+
+    #[test]
+    fn non_empty_constructor_args_are_hash_bound_and_tamper_evident() {
+        let args = br#"["authority","6"]"#.to_vec();
+        let carrier =
+            deploy_carrier_with_constructor_args(SYNERGY_TESTNET_V3_NETWORK_ID, args.clone());
+        verify_synq_deploy_for_chain_admission(&carrier, TEST_NOW)
+            .expect("non-empty constructor args verify");
+
+        let mut tampered = carrier;
+        tampered.constructor_args = Some(br#"["authority","7"]"#.to_vec());
+        let error = verify_synq_deploy_for_chain_admission(&tampered, TEST_NOW)
+            .expect_err("constructor argument tampering rejected");
+        assert_eq!(error.code(), "AEGIS-CANON");
     }
 
     #[test]

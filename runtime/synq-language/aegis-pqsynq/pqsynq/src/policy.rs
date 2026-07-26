@@ -25,7 +25,7 @@ pub struct SynQSecurityPolicy {
 }
 
 impl SynQSecurityPolicy {
-    pub fn testnet_1264_policy() -> Self {
+    pub fn testnet_1266_policy() -> Self {
         let mut tx = BTreeSet::new();
         tx.insert(AlgorithmId::MlDsa65);
         let deploy = tx.clone();
@@ -42,32 +42,32 @@ impl SynQSecurityPolicy {
             require_expiration: true,
             max_signature_size_bytes: 8 * 1024,
             max_public_key_size_bytes: 4 * 1024,
-            required_chain_id: Some(ChainId::testnet_1264()),
+            required_chain_id: Some(ChainId::testnet_1266()),
             required_network_id: Some(NetworkId::testnet()),
         }
     }
 
     pub fn devnet_policy() -> Self {
-        let mut policy = Self::testnet_1264_policy();
+        let mut policy = Self::testnet_1266_policy();
         policy.required_chain_id = None;
         policy.required_network_id = Some(NetworkId(alloc::string::String::from("devnet")));
         policy
     }
 
     pub fn mainnet_candidate_policy() -> Self {
-        let mut policy = Self::testnet_1264_policy();
+        let mut policy = Self::testnet_1266_policy();
         policy.required_chain_id = None;
         policy.required_network_id = Some(NetworkId(alloc::string::String::from("mainnet")));
         policy
     }
 
     pub fn strict_policy() -> Self {
-        Self::testnet_1264_policy()
+        Self::testnet_1266_policy()
     }
 }
 
 impl Default for SynQSecurityPolicy {
     fn default() -> Self {
-        Self::testnet_1264_policy()
+        Self::testnet_1266_policy()
     }
 }

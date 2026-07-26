@@ -11,6 +11,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = ROOT / "launch" / "component-parity-manifest.json"
+HOST_CAPABILITIES_PATH = ROOT / "genesis-contracts" / "host-capabilities.json"
 VENDORED_DEPENDENCIES = (
     ROOT / "runtime" / "synergy-aivm",
     ROOT / "runtime" / "synq-language",
@@ -37,6 +38,22 @@ def load_manifest(errors: list[str]) -> dict[str, Any]:
 def check_component(component: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     component_id = component.get("id", "<unnamed>")
+    configured_host_capabilities: dict[str, list[str]] = {}
+
+    if component.get("contracts"):
+        try:
+            host_capabilities = json.loads(
+                HOST_CAPABILITIES_PATH.read_text(encoding="utf-8")
+            )
+            raw_capabilities = host_capabilities.get("capabilities", {})
+            if not isinstance(raw_capabilities, dict):
+                raise ValueError("capabilities must be a JSON object")
+            configured_host_capabilities = raw_capabilities
+        except (OSError, json.JSONDecodeError, ValueError) as error:
+            errors.append(
+                f"{component_id}: invalid host capability registry "
+                f"{relative(HOST_CAPABILITIES_PATH)}: {error}"
+            )
 
     for raw_path in component.get("required_paths", []):
         path = ROOT / raw_path
@@ -75,7 +92,7 @@ def check_component(component: dict[str, Any]) -> list[str]:
                 f"{component_id}: cannot read bytecode {relative(bytecode)}: {error}"
             )
             continue
-        if len(bytecode_bytes) < 8 or not bytecode_bytes.startswith(b"\x00MVQ"):
+        if len(bytecode_bytes) < 8 or not bytecode_bytes.startswith(b"SYNQIR2\x00"):
             errors.append(
                 f"{component_id}: invalid SynQ bytecode header: {relative(bytecode)}"
             )
@@ -109,8 +126,9 @@ def check_component(component: dict[str, Any]) -> list[str]:
             continue
         expected_values = {
             "contract_name": contract,
-            "artifact_format": "synq-bytecode-v1",
-            "required_chain_id": 1264,
+            "artifact_format": "synq-stateful-ir-v2",
+            "bytecode_version": 2,
+            "required_chain_id": 1266,
             "required_network_id": "synergy-testnet-v3",
             "required_signature_algorithm": "ML-DSA-65",
         }
@@ -131,6 +149,21 @@ def check_component(component: dict[str, Any]) -> list[str]:
                     f"{component_id}: manifest {field} does not match artifact: "
                     f"{relative(manifest_path)}"
                 )
+        expected_host_functions = configured_host_capabilities.get(contract)
+        if not isinstance(expected_host_functions, list) or not all(
+            isinstance(value, str) for value in expected_host_functions
+        ):
+            errors.append(
+                f"{component_id}: host capability registry has no valid entry for "
+                f"{contract}"
+            )
+        elif sorted(manifest.get("host_functions", [])) != sorted(
+            expected_host_functions
+        ):
+            errors.append(
+                f"{component_id}: manifest host_functions do not match the "
+                f"capability registry: {relative(manifest_path)}"
+            )
 
     solidity_files = list((ROOT / "genesis-contracts").rglob("*.sol"))
     for path in solidity_files:
@@ -164,8 +197,8 @@ def audit() -> dict[str, Any]:
     results: list[dict[str, Any]] = []
 
     if manifest:
-        if manifest.get("chain_id") != 1264:
-            errors.append("component manifest chain_id must be 1264")
+        if manifest.get("chain_id") != 1266:
+            errors.append("component manifest chain_id must be 1266")
         if manifest.get("runtime_network_id") != "synergy-testnet-v3":
             errors.append(
                 "component manifest runtime_network_id must be synergy-testnet-v3"

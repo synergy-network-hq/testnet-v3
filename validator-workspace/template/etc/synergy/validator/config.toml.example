@@ -1,4 +1,4 @@
-chain_id = 1264
+chain_id = 1266
 network_id = "synergy-testnet-v3"
 node_role = "validator"
 validator_name = "CHANGE_ME_VALIDATOR_NAME"

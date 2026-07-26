@@ -65,11 +65,15 @@ pub struct ExecutionContext {
     pub tx_hash: [u8; 32],
     pub caller: Vec<u8>,
     pub contract_address: Vec<u8>,
+    #[serde(default)]
+    pub call_value: u128,
     pub gas_limit: u64,
     pub pq_gas_limit: u64,
     pub security_policy: AivmSecurityPolicyRef,
     #[serde(default)]
     pub sts_host: Option<StsHostContext>,
+    #[serde(default)]
+    pub resolved_synq_contracts: BTreeMap<String, ContractArtifact>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -168,24 +172,26 @@ pub struct ExecutionReceiptContext {
 }
 
 impl ExecutionContext {
-    pub fn testnet_1264_for_contract(contract_id: &str, gas_limit: u64) -> Self {
+    pub fn testnet_1266_for_contract(contract_id: &str, gas_limit: u64) -> Self {
         Self {
             admission_pq_gas_used: 0,
             runtime_block_height: 0,
-            chain_id: 1264,
+            chain_id: 1266,
             network_id: "synergy-testnet".to_string(),
             block_height: 0,
             block_timestamp_unix: 0,
             tx_hash: [0_u8; 32],
             caller: Vec::new(),
             contract_address: contract_id.as_bytes().to_vec(),
+            call_value: 0,
             gas_limit,
             pq_gas_limit: 300_000,
             security_policy: AivmSecurityPolicyRef {
-                policy_id: "synq-testnet-1264-v1".to_string(),
+                policy_id: "synq-testnet-1266-v1".to_string(),
                 required_signature_policy: "ml-dsa-65".to_string(),
             },
             sts_host: None,
+            resolved_synq_contracts: BTreeMap::new(),
         }
     }
 }
@@ -217,7 +223,7 @@ impl ExecutionRequest {
     pub fn synq(contract_id: impl Into<String>, bytecode: Vec<u8>, gas_limit: u64) -> Self {
         let contract_id = contract_id.into();
         Self {
-            context: ExecutionContext::testnet_1264_for_contract(&contract_id, gas_limit),
+            context: ExecutionContext::testnet_1266_for_contract(&contract_id, gas_limit),
             contract_id,
             artifact: ContractArtifact {
                 format: ContractFormat::SynqBytecodeV1,
@@ -348,23 +354,22 @@ pub fn validate_synq_artifact(request: &ExecutionRequest) -> Result<(), AivmErro
         )
     })?;
 
-    if manifest.artifact_format != "synq-bytecode-v1" {
+    let legacy_v1 =
+        manifest.artifact_format == "synq-bytecode-v1" && manifest.bytecode_version == 1;
+    let stateful_v2 =
+        manifest.artifact_format == "synq-stateful-ir-v2" && manifest.bytecode_version == 2;
+    if !legacy_v1 && !stateful_v2 {
         return Err(AivmError::new(
             AivmErrorCode::Manifest,
             format!(
-                "unsupported SynQ artifact format {}; expected synq-bytecode-v1",
-                manifest.artifact_format
+                "unsupported SynQ artifact format/version {}/{}",
+                manifest.artifact_format, manifest.bytecode_version
             ),
         ));
     }
-    if manifest.bytecode_version != 1 {
-        return Err(AivmError::new(
-            AivmErrorCode::Bytecode,
-            format!(
-                "unsupported SynQ bytecode version {}",
-                manifest.bytecode_version
-            ),
-        ));
+    if stateful_v2 {
+        synq_compiler::StatefulSynQExecutable::decode(&request.artifact.bytes)
+            .map_err(AivmError::bytecode)?;
     }
     let bytecode_hash = sha256_hex(&request.artifact.bytes);
     if manifest.bytecode_hash != bytecode_hash {
@@ -388,7 +393,7 @@ pub fn validate_synq_artifact(request: &ExecutionRequest) -> Result<(), AivmErro
             ));
         }
     }
-    if manifest.required_chain_id != 1264 || request.context.chain_id != manifest.required_chain_id
+    if manifest.required_chain_id != 1266 || request.context.chain_id != manifest.required_chain_id
     {
         return Err(AivmError::new(
             AivmErrorCode::Manifest,
@@ -566,7 +571,7 @@ mod tests {
                 source_hash: None,
             },
             calldata: Vec::new(),
-            context: ExecutionContext::testnet_1264_for_contract("minimal-wasm", 10_000),
+            context: ExecutionContext::testnet_1266_for_contract("minimal-wasm", 10_000),
         };
 
         let receipt = execute_contract(&request);
@@ -575,9 +580,9 @@ mod tests {
 
     #[test]
     fn execution_context_carries_chain_and_metering_inputs() {
-        let context = ExecutionContext::testnet_1264_for_contract("counter", 50_000);
+        let context = ExecutionContext::testnet_1266_for_contract("counter", 50_000);
 
-        assert_eq!(context.chain_id, 1264);
+        assert_eq!(context.chain_id, 1266);
         assert_eq!(context.admission_pq_gas_used, 0);
         assert_eq!(context.network_id, "synergy-testnet");
         assert_eq!(context.gas_limit, 50_000);
@@ -608,7 +613,7 @@ mod tests {
                 source_hash: None,
             },
             calldata: Vec::new(),
-            context: ExecutionContext::testnet_1264_for_contract("host-import", 10_000),
+            context: ExecutionContext::testnet_1266_for_contract("host-import", 10_000),
         };
 
         let receipt = execute_contract(&request);
@@ -642,7 +647,7 @@ mod tests {
                 source_hash: None,
             },
             calldata: Vec::new(),
-            context: ExecutionContext::testnet_1264_for_contract("minimal-wasm", 10_000),
+            context: ExecutionContext::testnet_1266_for_contract("minimal-wasm", 10_000),
         };
 
         let first = execute_contract(&request);
@@ -663,11 +668,11 @@ mod tests {
             compiler_version: None,
             source_hash: None,
         };
-        let mut first_context = ExecutionContext::testnet_1264_for_contract("minimal-wasm", 10_000);
+        let mut first_context = ExecutionContext::testnet_1266_for_contract("minimal-wasm", 10_000);
         first_context.tx_hash = [1_u8; 32];
         first_context.caller = b"caller-a".to_vec();
         let mut second_context =
-            ExecutionContext::testnet_1264_for_contract("minimal-wasm", 10_000);
+            ExecutionContext::testnet_1266_for_contract("minimal-wasm", 10_000);
         second_context.tx_hash = [2_u8; 32];
         second_context.caller = b"caller-b".to_vec();
 
@@ -776,7 +781,7 @@ mod tests {
         let mut request = checked_in_counter_request();
         request.artifact.manifest_json = request.artifact.manifest_json.as_ref().map(|manifest| {
             manifest.replace(
-                "6b8b2d0d1433c0c4941bfc41054a58a004e9cc46e475926f0f70d3d309e92533",
+                "9fe99c76286d6fab0cab50911d398b08723068beac8503d146a122bae635516a",
                 "0000000000000000000000000000000000000000000000000000000000000000",
             )
         });
@@ -795,7 +800,7 @@ mod tests {
             "00",
             &sha256_hex(valid_abi_json().as_bytes()),
             "synergy-testnet",
-            1264,
+            1266,
             "ML-DSA-65",
             "synq-bytecode-v1",
             1,
@@ -821,7 +826,7 @@ mod tests {
             &sha256_hex(&bytecode),
             "00",
             "synergy-testnet",
-            1264,
+            1266,
             "ML-DSA-65",
             "synq-bytecode-v1",
             1,
@@ -857,7 +862,7 @@ mod tests {
 
     #[cfg(feature = "synq")]
     #[test]
-    fn node_testnet_v3_alias_is_accepted_for_chain_1264() {
+    fn node_testnet_v3_alias_is_accepted_for_chain_1266() {
         let mut request =
             synq_request_with_manifest("network-alias", minimal_synq_bytecode(), None, 10_000);
         request.context.network_id = "synergy-testnet-v3".to_string();
@@ -876,7 +881,7 @@ mod tests {
             &sha256_hex(&bytecode),
             &sha256_hex(valid_abi_json().as_bytes()),
             "synergy-testnet",
-            1264,
+            1266,
             "ML-DSA-65",
             "wasm-module-v1",
             1,
@@ -897,7 +902,7 @@ mod tests {
             &sha256_hex(&bytecode),
             &sha256_hex(valid_abi_json().as_bytes()),
             "synergy-testnet",
-            1264,
+            1266,
             "FN-DSA",
             "synq-bytecode-v1",
             1,
@@ -926,7 +931,7 @@ mod tests {
             &sha256_hex(&bytecode),
             &abi_hash,
             "synergy-testnet",
-            1264,
+            1266,
             "ML-DSA-65",
             "synq-bytecode-v1",
             1,
@@ -957,7 +962,7 @@ mod tests {
         bytecode_version: u16,
     ) -> String {
         format!(
-            r#"{{"abi_hash":"{abi_hash}","artifact_format":"{artifact_format}","bytecode_hash":"{bytecode_hash}","bytecode_version":{bytecode_version},"compiler_version":"0.1.0","contract_name":"Counter","host_functions":[],"manifest_version":"0.1","permissions":[],"required_aivm_version":"0.1","required_chain_id":{chain_id},"required_network_id":"{network_id}","required_signature_algorithm":"{signature_algorithm}","security_policy":"synq-testnet-1264-v1","source_hash":"00","storage_schema_hash":"00"}}"#
+            r#"{{"abi_hash":"{abi_hash}","artifact_format":"{artifact_format}","bytecode_hash":"{bytecode_hash}","bytecode_version":{bytecode_version},"compiler_version":"0.1.0","contract_name":"Counter","host_functions":[],"manifest_version":"0.1","permissions":[],"required_aivm_version":"0.1","required_chain_id":{chain_id},"required_network_id":"{network_id}","required_signature_algorithm":"{signature_algorithm}","security_policy":"synq-testnet-1266-v1","source_hash":"00","storage_schema_hash":"00"}}"#
         )
     }
 

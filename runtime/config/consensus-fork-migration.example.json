@@ -32,7 +32,7 @@
       "consensus_public_key": "fn-dsa:REPLACE_WITH_VAL5_FNDSA_PUBLIC_KEY_BASE64"
     }
   ],
-  "migration_reason": "Checkpointed consensus-signature migration using FN-DSA validator keys while preserving chain_id=1264, network_id=synergy-testnet-v3, height, state, balances, token state, and historical data.",
+  "migration_reason": "Checkpointed consensus-signature migration using FN-DSA validator keys while preserving chain_id=1266, network_id=synergy-testnet-v3, height, state, balances, token state, and historical data.",
   "parser_mode": "fail_closed",
   "migration_signature": null
 }

@@ -43,3 +43,7 @@ full = ["std", "mlkem", "mldsa", "fndsa", "hqckem"]
 [[bench]]
 name = "pqc_benchmarks"
 harness = false
+
+[[example]]
+name = "generate_pinned_vectors"
+required-features = ["full"]

@@ -5,14 +5,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::AegisSynQError;
 
-pub const SYNERGY_TESTNET_CHAIN_ID: u64 = 1264;
+pub const SYNERGY_TESTNET_CHAIN_ID: u64 = 1266;
 pub const SYNERGY_TESTNET_NETWORK: &str = "synergy-testnet";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChainId(pub u64);
 
 impl ChainId {
-    pub const fn testnet_1264() -> Self {
+    pub const fn testnet_1266() -> Self {
         Self(SYNERGY_TESTNET_CHAIN_ID)
     }
 }

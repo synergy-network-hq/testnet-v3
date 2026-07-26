@@ -2,8 +2,41 @@ use serde::{Deserialize, Serialize};
 
 use crate::block::{Block, BlockHeader};
 use crate::consensus::dual_quorum::{QuorumCertificate, Vote};
+use crate::etdag::{ProtectedBlockInput, TargetAdmissionContext};
 use crate::synergy_types::AegisPqSignature;
+use crate::synergy_types::{
+    Block as TypedBlock, HeightConsensusContext, QuorumCertificate as TypedQuorumCertificate,
+    TimeoutCertificate, ValidationCertificate, Vote as TypedVote,
+};
 use crate::transaction::Transaction;
+
+/// The only wire representation for the typed PoSy v2.2 state machine.
+///
+/// This is deliberately separate from the inherited `Block`/`Vote` variants
+/// below. A peer must not be able to reinterpret legacy messages as typed
+/// certificates, and every typed proposal carries the exact immutable context
+/// it will be checked against before any vote or finality action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TypedConsensusMessage {
+    Proposal {
+        height_context: HeightConsensusContext,
+        target_context: TargetAdmissionContext,
+        protected_block: ProtectedBlockInput,
+        block: TypedBlock,
+    },
+    Vote {
+        vote: TypedVote,
+    },
+    ValidationCertificate {
+        certificate: ValidationCertificate,
+    },
+    QuorumCertificate {
+        certificate: TypedQuorumCertificate,
+    },
+    TimeoutCertificate {
+        certificate: TimeoutCertificate,
+    },
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NetworkMessage {
@@ -65,6 +98,11 @@ pub enum NetworkMessage {
     Vote {
         vote: Vote,
     },
+    /// Typed PoSy v2.2 messages. These are dispatched through the dedicated
+    /// coordinator mailbox and never through inherited consensus handlers.
+    TypedConsensus {
+        message: TypedConsensusMessage,
+    },
     Transaction {
         transaction_data: Transaction,
     },
@@ -121,4 +159,53 @@ pub enum NetworkMessage {
         #[serde(default)]
         quorum_certificates: Vec<QuorumCertificate>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::synergy_types::{
+        AegisPqKeyId, BlockId, ChainId, ClusterId, Epoch, Hash, Height, NetworkId, Round, UmaId,
+        ValidatorId, VotePhase,
+    };
+
+    #[test]
+    fn typed_consensus_vote_round_trips_without_legacy_reinterpretation() {
+        let message = NetworkMessage::TypedConsensus {
+            message: TypedConsensusMessage::Vote {
+                vote: TypedVote {
+                    chain_id: ChainId::synergy_testnet_v3(),
+                    network_id: NetworkId::synergy_testnet_v3(),
+                    protocol_version: "posy-v2.2".to_string(),
+                    height: Height(1),
+                    round: Round(0),
+                    epoch: Epoch(0),
+                    cluster_id: ClusterId(0),
+                    height_context_root: Hash::from_domain_bytes("test", b"context"),
+                    phase: VotePhase::Validate,
+                    block_id: BlockId("candidate".to_string()),
+                    highest_prepared_vc_root: None,
+                    validator_id: ValidatorId("validator-1".to_string()),
+                    validator_uma_id: UmaId("uma-1".to_string()),
+                    key_id: AegisPqKeyId("key-1".to_string()),
+                    active_validator_set_hash: Hash::from_domain_bytes("test", b"set"),
+                    cluster_map_hash: Hash::from_domain_bytes("test", b"cluster"),
+                    aegis_pq_signature: AegisPqSignature {
+                        algorithm: "mldsa65".to_string(),
+                        signature_bytes: vec![1],
+                    },
+                },
+            },
+        };
+
+        let encoded = serde_json::to_vec(&message).expect("serialize typed wire message");
+        let decoded: NetworkMessage =
+            serde_json::from_slice(&encoded).expect("deserialize typed wire message");
+        assert!(matches!(
+            decoded,
+            NetworkMessage::TypedConsensus {
+                message: TypedConsensusMessage::Vote { .. }
+            }
+        ));
+    }
 }

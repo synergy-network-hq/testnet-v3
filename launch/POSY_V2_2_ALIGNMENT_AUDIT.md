@@ -1,6 +1,6 @@
 # Testnet-v3 PoSy v2.2 Alignment Audit
 
-Status: **BLOCKED — not ready for identity generation, validator signing, genesis, or launch**
+Status: **BLOCKED — typed protocol implementation is advancing, but the operational validator engine, wallet sealing, genesis binding, security qualification, and launch gates are not complete**
 
 Audit date: 2026-07-25
 
@@ -37,28 +37,75 @@ readiness.
 
 No workbook row has been changed to Passed by this audit.
 
+## Identity-workstream boundary
+
+Fresh Testnet-v3 wallet, validator, node, consensus, ingress, and fee-collector
+identities are generated and recorded by a separate user-controlled workstream.
+This implementation workstream does not generate, replace, or edit those
+identities and does not edit `node-machine-credentials.xlsx`. It will consume
+and validate only the completed public registry and genesis inputs. The
+identity-assigned JSON files and `testnet-v3-identity-files/` currently present
+in the worktree are therefore excluded from this audit's changes.
+
+Testnet-v3 is a new chain from genesis. A height-scoped consensus context is a
+new-chain protocol object derived at height 1 from genesis and thereafter from
+the prior finalized transition; it is not a pending historical snapshot import.
+
 ## Requirement-to-runtime findings
 
 | Requirement | Current evidence | Status | Required closure |
 | --- | --- | --- | --- |
-| Unique Testnet-v3 identity | Chain ID `1264` and runtime network ID `synergy-testnet-v3` appear in current templates. | Partial | Bind both values into every signed consensus object and finalized genesis roots. |
-| Strict distinct-signer and voting-weight quorum | The inherited runtime used inclusive two-thirds and treated every validator's weight as `1.0`. Count quorum now computes `floor(2n/3)+1`, and QC formation/verification additionally requires integer bonded weight satisfying `3 * signed_weight > 2 * total_weight`. Tests prove 5-of-6, 4-of-5, unequal-weight fail-closed behavior, and fail-closed chaos behavior. The weights are still resolved independently from the height-scoped registry path rather than one signed consensus-context root. | Partial | Bind the exact membership and bonded weights into the common height-scoped context used by proposals, votes, QCs, VCs, and TCs; replace the legacy floating-point QC compatibility field with the canonical v2 integer schema. |
-| Height-scoped consensus context binding (not a chain-state snapshot) | Testnet-v3 starts from a clean genesis and requires no historical snapshot import. For each proposed height, however, PoSy requires every validator to use the same frozen active set, keys, bonded weights, parameters, cluster map, and leader schedule. The current proposal/vote/QC paths do not yet sign one common root proving that context. | Blocked | Derive the height-1 context directly from Testnet-v3 genesis, derive later contexts only from finalized state transitions, calculate one deterministic root, and bind it into every signed proposal, vote, VC, QC, and TC with cross-node vectors. |
-| Durable signer journal | Timeout-, age-, leader-selection-, diagnostics-, and checkpoint-fork recovery paths can no longer erase a persisted same-height vote lock. Conflicting candidates remain fail-closed, and focused preservation tests pass. The runtime still uses a single `LocalVoteLock`; it does not yet implement the complete normative phase-scoped `SigningSlot`, height-scoped `FinalitySlot`, or exact prepared-certificate carry-forward model. | Partial | Implement the canonical phase and finality slot schemas, atomic write-ahead persistence, exact VC-prepared carry-forward, restart vectors, and durable SafetyHalt integration. |
-| Stable CandidateID and proof-carrying view change | The complete v2 proposal/vote/certificate schema and exact VC-prepared carry-forward proof are not evidenced. | Blocked | Implement CandidateHeader/CandidateID separation, VC/QC/TC v2 schemas, exact carry-forward, and conflict vectors. |
-| SafetyHalt on conflicting valid QCs | Some anti-divergence handling exists, but a complete durable SafetyHalt that stops every signing path across restart is not evidenced. | Blocked | Implement and test durable global signing halt with evidence retention. |
-| Dynamic cluster schedule | Runtime topology assigns one cluster for 1–9 validators, two for 10–20, three for 21–27, four at 28, and one additional cluster at every subsequent seven-validator boundary (`floor(N/7)` for `N >= 21`). The six-validator Testnet-v3 set therefore remains one cluster. | Partial | Bind the deterministic cluster schedule, map root, member roots, counts, and weights into the common height-scoped consensus context and every signed consensus object. |
-| Leader authority | Runtime code contains liveness-based leader fallback and stale-lock recovery behavior. PoSy requires one proposer per round from a frozen schedule and a valid TC before a later leader gains authority. | Blocked | Remove local live-set authority from consensus decisions and bind the complete schedule into the height snapshot. |
-| Canonical parameter manifest | `runtime/config/consensus-config.toml` still contains legacy values such as block time 5 seconds, cluster size 30, epoch length 1000, and floating-point `0.67` quorum thresholds. Other node configs use different values. | Blocked | Create one machine-readable governed manifest, make its hash the `parameter_root`, and make the runtime load exactly that source. |
-| Protocol and schema version | Genesis templates declare `schema_version: v1`; PoSy requires the v2 signer-safety schema and explicit critical feature bits. | Blocked | Define and enforce protocol/schema v2 plus critical feature bits at genesis. |
-| Epoch length | Runtime hard-codes 1000 blocks. The workbook marks this nonconforming and proposes 3600 slots for an approximately two-hour epoch at the 2-second target, while preserving the decision as governed. | Blocked decision | Finalize the Testnet-v3 value in the parameter manifest, then remove competing constants and templates. |
-| Healthy finality | The 2-second target appears in some configs, but no 10,000-finalized-block production-cryptography soak evidence exists for P95 <= 2.5 seconds and P99 <= 3.0 seconds. | Blocked | Run the release binary on minimum node hardware and retain raw monotonic traces and telemetry. |
-| Wallet-local encrypted transaction | `runtime/src/dag_mempool.rs` accepts a plaintext canonical `Transaction`. | Blocked | Implement the Encrypted Transaction Envelope and wallet-side sealing of the complete signed InnerTransaction. |
-| Content-blind ordering | `runtime/src/dag_mempool.rs` includes `max_fee_nwei` in its order key. PoSy v2.2 prohibits fee, tip, proposer identity, and network proximity as ordering inputs. | Blocked | Implement DCC-anchored commitment ordering using the governed order seed. |
-| VAC/DCC/BVC/BOC/BTC state machines | No runtime implementation of these certificates or their durable journal slots was found. | Blocked | Implement canonical schemas, strict dual-quorum verification, persistence, restart behavior, and adversarial vectors. |
-| Threshold reveal | No `RevealGate`, validator share capsule, Shamir threshold, `DecryptReleaseSlot`, or public ordered-reveal feed was found. | Blocked | Implement and independently review the complete threshold-reveal pipeline. |
-| Plaintext rejection | `ERR_PLAINTEXT_USER_TX_DISABLED` is absent. | Blocked | Reject every ordinary plaintext user-send path after atomic activation, with no automatic transparent fallback. |
-| Exact protected execution | Current block execution is not bound to a BOC, DCC, reveal transcript, or index-preserving Execution Manifest. | Blocked | Bind the protected batch and every required root into CandidateID and deterministic execution. |
+| Unique Testnet-v3 identity | Chain ID `1266` and runtime network ID `synergy-testnet-v3` appear in current templates. | BLOCKED | Bind both values into every signed consensus object and finalized genesis roots. |
+| Strict distinct-signer and voting-weight quorum | The inherited runtime used inclusive two-thirds and treated every validator's weight as `1.0`. Count quorum now computes `floor(2n/3)+1`, and QC formation/verification additionally requires integer bonded weight satisfying `3 * signed_weight > 2 * total_weight`. Tests prove 5-of-6, 4-of-5, unequal-weight fail-closed behavior, and fail-closed chaos behavior. The weights are still resolved independently from the height-scoped registry path rather than one signed consensus-context root. | BLOCKED | Bind the exact membership and bonded weights into the common height-scoped context used by proposals, votes, QCs, VCs, and TCs; replace the legacy floating-point QC compatibility field with the canonical v2 integer schema. |
+| Height-scoped consensus context binding (not a chain-state snapshot) | `runtime/src/synergy_types.rs` now defines one canonical `HeightConsensusContext` and root containing the exact active set, keys, integer weights, cluster schedule/map/membership, leader schedule, 512-bit parameter root, crypto profile, and prior finalized transition. Typed proposal, vote, VC, QC, TC, state-sync, archive, recovery, and replay validation paths bind that root. Validator startup now refuses the inherited `ProofOfSynergy` engine, but the typed replacement is not yet a complete cross-process coordinator. | BLOCKED | Wire the typed path as the sole operational coordinator, derive height 1 from the final external public genesis inputs, and add cross-process transition vectors. |
+| Durable signer journal | `runtime/src/consensus/signing_authority.rs` implements an atomic process-wide phase-separated signing journal with round-scoped proposal/validation/timeout authorization and height-scoped finality authorization. Typed proposal, validate, finality, and timeout signing paths use it; conflict, restart, phase-separation, and carry-forward tests pass. The inherited engine is disabled rather than allowed to bypass it. | PASS | Parent engine-convergence gate remains blocked until the typed coordinator is operational and crash-between-persist-and-broadcast vectors pass cross-process. |
+| Stable CandidateID and proof-carrying view change | The typed engine separates stable CandidateID from mutable proposal-envelope round/proposer fields and implements VC-prepared exact carry-forward after TC. Focused conflict/carry-forward tests pass, and the inherited one-stage live loop is disabled. | PASS | Make the typed VC/QC/TC state machine the sole operational cross-process engine and qualify restart/state-sync behavior. |
+| Durable SafetyHalt on conflicting valid QCs/BOCs | A conflicting verified QC or BOC persists both evidence roots in the process-wide signing journal before returning. The halt is irreversible through the runtime API, survives restart, is idempotent, and blocks proposal, validation, finality, timeout, ETDAG availability/vote/vertex, and decrypt-share signing. Read-only `synergy_getConsensusSafetyHalt` reports fail-closed status and incident evidence without signing material. Focused QC, BOC, all-phase, restart, RPC, and exposure tests pass. | PASS | Add distributed crash/restart/partition qualification; the parent operational engine gate remains BLOCKED. |
+| Candidate validator consensus signatures | Testnet-v3 consensus domains require ML-DSA-65, matching the checked-in candidate's six active and 21 preconfigured validator identities. Typed parsing and validator-set validation enforce the exact 1,952-byte public-key size; the historical `MLDSA`-to-FN-DSA alias remains rejected. | PASS | Cross-process signing and verification with the final approved validator key stores/HSMs remain required before launch. |
+| Dynamic cluster schedule | Runtime topology assigns one cluster for 1–9 validators, two for 10–20, three for 21–27, four at 28, and one additional cluster at every subsequent seven-validator boundary (`floor(N/7)` for `N >= 21`). The six-validator Testnet-v3 set therefore remains one cluster. | BLOCKED | Bind the deterministic cluster schedule, map root, member roots, counts, and weights into the common height-scoped consensus context and every signed consensus object. |
+| Leader authority | Runtime code contains liveness-based leader fallback and stale-lock recovery behavior. PoSy requires one proposer per round from a frozen schedule and a valid TC before a later leader gains authority. | BLOCKED | Remove local live-set authority from consensus decisions and bind the complete schedule into the height snapshot. |
+| Canonical parameter manifest | `runtime/src/consensus_parameters.rs` implements one deny-unknown-fields canonical JSON schema, exact-byte loader, and SHA3-512 parameter root. The 512-bit root is bound into typed consensus/ETDAG objects, and mutation without a newly bound manifest fails closed. Four focused tests pass. The epoch value is intentionally unresolved, no governance approval ID exists, the production manifest is therefore absent, and competing legacy constants/configs remain. | BLOCKED | Approve every governed value including epoch length, emit the exact canonical production manifest, make operational startup load only that file, remove competing constants, and bind its root into genesis. |
+| Fresh Testnet-v3 genesis boundary | The historical checkpointed FN-DSA fork-migration default is now ignored by Testnet-v3 production code. Any explicit `SYNERGY_CONSENSUS_FORK_MIGRATION_FILE` import is rejected, and ambiguous ML-DSA labels are rejected by the retired parser rather than treated as FN-DSA. | PASS | Keep the retired migration path excluded from the typed coordinator and generated launch bundle. |
+| Protocol and schema version | Genesis templates declare `schema_version: v1`; PoSy requires the v2 signer-safety schema and explicit critical feature bits. | BLOCKED | Define and enforce protocol/schema v2 plus critical feature bits at genesis. |
+| Epoch length | Runtime hard-codes 1000 blocks. The workbook marks this nonconforming and proposes 3600 slots for an approximately two-hour epoch at the 2-second target, while preserving the decision as governed. | BLOCKED | Finalize the Testnet-v3 value in the parameter manifest, then remove competing constants and templates. |
+| Healthy finality | The 2-second target appears in some configs, but no 10,000-finalized-block production-cryptography soak evidence exists for P95 <= 2.5 seconds and P99 <= 3.0 seconds. | BLOCKED | Run the release binary on minimum node hardware and retain raw monotonic traces and telemetry. |
+| Immutable H+3 target-admission context and ingress-key discovery | `TargetAdmissionContext` freezes every admission-relevant validator/key/weight/cluster/parameter/crypto root without requiring or inventing the target height's future prior-QC reference. A strict dual-quorum `TargetAdmissionCertificate`, exact assigned-cluster ML-KEM registry validation, append-only restart-safe package store, and public `synergy_getEtdagAdmissionPackage` discovery method are implemented. The later height context must match every overlapping root. | PASS | Focused tests prove H+3 linkage, a changed weight root, incomplete/malformed key registry, 4-of-6 certificate, store conflict, restart, and corruption behavior. Final public records and signed packages must still be supplied and installed by the external identity/operational workstreams. |
+| Wallet-local encrypted transaction | `runtime/src/etdag.rs` implements AES-256-GCM full-payload sealing, ML-KEM-1024 validator capsules, Shamir sharing, outer authorization, deterministic envelope commitments, and certified target-admission package discovery. The network RPC accepts only sealed envelopes. The Wallet application and STS wallet path are not yet integrated with that discovery and sealer. | BLOCKED | Use the certified package and native sealer in every Wallet platform before any network call. |
+| Content-blind ordering | The ETDAG path derives a DCC-anchored order seed and canonical topological order that excludes fees, proposer identity, and arrival order; fee/proposer/arrival invariance tests pass. The legacy plaintext `DagMempool` remains only in disabled inherited code and local test tooling. | BLOCKED | Exercise ETDAG ordering through the full typed node network and prove no production selection path can reactivate plaintext ordering. |
+| VAC/DCC/BVC/BOC/BTC state machines | Canonical phase domains, strict dual-quorum certificates, DCC causal-union reconstruction, BVC/BOC/BTC wrappers, height-scoped batch finality, and persistent vote slots are implemented in `runtime/src/etdag.rs`. The full distributed service coordinator is not yet wired into the operational node loop. | BLOCKED | Wire the state machines to P2P workers, add withholding/equivocation/partition tests, and prove cross-process recovery. |
+| Threshold reveal | ML-KEM share capsules, governed Shamir thresholds, `RevealGate`, durable `DecryptReleaseSlot`, signed public shares, authenticated ciphertext reconstruction, and exact public plaintext equality are implemented and tested. Public propagation/resource isolation and whole-node anti-sweeper qualification remain. | BLOCKED | Implement the public reveal service, h+1 close/h+2 open coordinator, resource bounds, and distributed adversarial tests. |
+| Plaintext rejection | Public RPC rejects all legacy plaintext send/simulation/pending-content paths with `ERR_PLAINTEXT_USER_TX_DISABLED`; CLI live submit paths fail closed and `synergy-node tx submit-etdag` accepts only a sealed envelope. The external Wallet still contains legacy submission methods. | BLOCKED | Convert all Wallet/service/extension/mobile/web/desktop paths and prove no network-facing plaintext path remains. |
+| Exact protected execution | Typed consensus now proposes and validates header version 2 only from a verified DCC causal union, deterministic BOC, authenticated public reveal, locally derived Execution Manifest, receipt root, and state root. Insertion/substitution/reordering/manifest-root attacks fail. The inherited engine is disabled, leaving validator startup fail-closed until the typed coordinator is wired. | BLOCKED | Wire the operational proposer/validator coordinator and add full-network replay/state-sync tests. |
+
+The H+3 target-admission `PASS` is backed by
+`runtime/src/etdag.rs` SHA-256
+`337c1fcd7c54ef5e173a84de6146b5e4577d8c7fff404902eaa8e9b334169416`
+and `runtime/src/rpc/rpc_server.rs` SHA-256
+`13ca9b3cc991553fa3e052a750b778b6fe9e4f46ee49280eb8ee976ac2da766d`.
+These are implementation snapshots, not final release hashes.
+
+## Current implementation evidence
+
+- General stateful SynQ IR v2 and AIVM execution are implemented without
+  contract-name handlers. All eight native genesis contracts deploy, execute,
+  persist, restart, and replay through the general engine.
+- Compiler, SynQ admission, and AIVM focused suites pass.
+- ETDAG focused suite: 13 passed, 0 failed.
+- Protected PoSy proposal/validation end-to-end test: 1 passed, 0 failed.
+- Durable signer-authority suite: 4 passed, 0 failed.
+- Conflicting verified QC SafetyHalt test: 1 passed, 0 failed.
+- Conflicting verified BOC SafetyHalt test: 1 passed, 0 failed.
+- Read-only SafetyHalt status and public exposure tests: 2 passed, 0 failed.
+- Inherited production consensus-loop refusal test: 1 passed, 0 failed.
+- RPC plaintext rejection and encrypted-client exposure tests pass.
+- `cargo check --lib`, `cargo check --bin synergy-node --bin synergy-sts`, and
+  `cargo fmt --all -- --check` pass.
+
+These are focused implementation results, not full launch qualification. The
+typed operational runtime coordinator, production target-package issuance and propagation,
+final external ingress-key records, Wallet sealing, Security v7, full-suite
+regression, deterministic genesis, reproducible release, chaos/performance
+profiles, and 10,000-block soak are still mandatory blockers.
 
 ## Changes completed during this audit
 
@@ -82,13 +129,20 @@ The dynamic cluster schedule was also aligned to the workbook:
 - 28–34 use four balanced clusters.
 - One cluster is added at every subsequent seven-validator boundary.
 
-The inherited timer-based vote-lock erasure path was disabled:
+The inherited timer-based vote-lock erasure path and inherited production
+consensus loop were disabled:
 
 - Signer-journal inspection APIs are now read-only above the finalized head.
 - Recovery age, leader selection, diagnostics, and checkpoint forks cannot
   delete a same-height signing authorization.
 - A conflicting candidate remains rejected until the required exact
   prepared-certificate view-change model is implemented and verified.
+- Validator role startup fails closed instead of running the inherited
+  `ProofOfSynergy`/`DualQuorumConsensus` loop.
+- Proposal signatures now pass through the same durable signing authority as
+  validate, finality, and timeout signatures.
+- Conflicting verified QCs or BOCs durably enter an irreversible SafetyHalt
+  that prevents every typed consensus and ETDAG signing phase.
 
 Focused evidence:
 
@@ -124,8 +178,9 @@ The full suite is therefore not green and is not launch evidence.
 
 ## Launch ordering decision
 
-Do not generate Testnet-v3 key material or modify live nodes yet. The next
-required work is:
+Do not modify or start live nodes yet. Fresh identity generation is owned by
+the separate user-controlled workstream; this workstream must not alter it.
+The next required implementation work is:
 
 1. Complete the remaining PoSy v2.1 signer-safety and dynamic-topology runtime
    implementation.

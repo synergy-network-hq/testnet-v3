@@ -11,7 +11,7 @@ global:
   external_labels:
     environment: testnet
     network: synergy-testnet
-    chain_id: '1264'
+    chain_id: '1266'
 
 alerting:
   alertmanagers:

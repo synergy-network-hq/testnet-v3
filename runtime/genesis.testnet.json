@@ -4,8 +4,8 @@
   "release_id": "testnet-v3",
   "launch_status": "BLOCKED_PENDING_SIGNED_TESTNET_V3_GENESIS",
   "network": {
-    "chain_id": 1264,
-    "network_id": 1264,
+    "chain_id": 1266,
+    "network_id": 1266,
     "runtime_network_id": "synergy-testnet-v3",
     "network_type": "testnet"
   },

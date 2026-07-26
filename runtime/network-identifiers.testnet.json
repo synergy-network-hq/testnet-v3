@@ -189,9 +189,9 @@
       "eip155": {
         "activation_condition": "Activate only when EVM/EIP-155 compatibility is implemented and publicly supported.",
         "namespace": "eip155",
-        "reference": "1264",
+        "reference": "1266",
         "status": "reserved_inactive",
-        "value": "eip155:1264"
+        "value": "eip155:1266"
       }
     },
     "reserved_range": {
@@ -201,7 +201,7 @@
     },
     "synergy_native": {
       "canonical_caip2": "synergy:testnet",
-      "decimal": 1264,
+      "decimal": 1266,
       "hex": "0x4f0",
       "status": "active",
       "type": "uint64"
@@ -266,7 +266,7 @@
         "status": "reserved"
       },
       "hyperlane": {
-        "domain_id": 1264,
+        "domain_id": 1266,
         "status": "reserved"
       },
       "ibc": {
@@ -287,7 +287,7 @@
     },
     "sxcp": {
       "chain_reference": "synergy:testnet",
-      "domain_id": 1264,
+      "domain_id": 1266,
       "status": "planned_or_active_depending_on_module_activation",
       "transaction_prefix": "synxxn"
     }

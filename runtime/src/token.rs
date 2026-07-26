@@ -3,19 +3,110 @@ use crate::transaction::Transaction;
 use crate::warn;
 use hex;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha3::{Digest, Sha3_256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 pub const SNRG_SYMBOL: &str = "SNRG";
+#[cfg(test)]
 pub const FEE_COLLECTOR_ADDRESS: &str = "synf1y42p7p6jrxrg472ts6jea5y34yg7tgj6qg2j";
+#[cfg(test)]
 pub const DAO_TREASURY_ADDRESS: &str = "synw1pqwglyfjynrxt7ms9nvggntav6x3lx9c2l4r";
+#[cfg(test)]
 pub const TREASURY_RECOVERY_WALLET_ADDRESS: &str = "synw1syv3tnu6r2y5e3u9f0wqmxhavylfxena0z92";
+#[cfg(test)]
 pub const VALIDATOR_REWARDS_POOL_ADDRESS: &str = "synw1at607x35rkmsmvgz069nx0j3q5km93krrvge";
 pub const RELIABILITY_BONUS_POOL_ADDRESS: &str = "synw1mct6a33g7hyt6jzkjdwrvxzf644lc4vytqcz";
 pub const BURN_SINK_ADDRESS: &str = "synb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqjk5cn";
 pub const NETWORK_BURN_ADDRESS: &str = crate::address::NETWORK_BURN_ADDRESS;
+
+/// Canonical protocol-controlled addresses resolved from the active Testnet-v3
+/// genesis. Production must never fall back to an inherited network address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestnetV3SystemAddresses {
+    pub fee_collector: String,
+    pub dao_treasury: String,
+    pub treasury_recovery: String,
+    pub validator_rewards_pool: String,
+    pub burn_sink: String,
+}
+
+fn required_genesis_account_address(value: &Value, account_id: &str) -> Result<String, String> {
+    value
+        .get("accounts")
+        .and_then(Value::as_array)
+        .and_then(|accounts| {
+            accounts.iter().find_map(|account| {
+                (account.get("account_id").and_then(Value::as_str) == Some(account_id))
+                    .then(|| account.get("address").and_then(Value::as_str))
+                    .flatten()
+            })
+        })
+        .map(str::trim)
+        .filter(|address| !address.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| format!("canonical genesis is missing {account_id} address binding"))
+}
+
+pub(crate) fn testnet_v3_system_addresses_from_genesis(
+    value: &Value,
+) -> Result<TestnetV3SystemAddresses, String> {
+    if value
+        .get("network")
+        .and_then(|network| network.get("chain_id"))
+        .and_then(Value::as_u64)
+        != Some(crate::synergy_types::SYNERGY_TESTNET_V3_CHAIN_ID)
+    {
+        return Err("system address resolution requires Testnet-v3 chain ID 1266".to_string());
+    }
+
+    let validator_rewards_pool = value
+        .get("contracts")
+        .and_then(|contracts| contracts.get("reward_distributor"))
+        .and_then(|contract| contract.get("address"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|address| !address.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            "canonical genesis is missing RewardDistributor address binding".to_string()
+        })?;
+
+    Ok(TestnetV3SystemAddresses {
+        fee_collector: required_genesis_account_address(value, "SYS-01")?,
+        dao_treasury: required_genesis_account_address(value, "DAO-A01")?,
+        treasury_recovery: required_genesis_account_address(value, "SYS-02")?,
+        validator_rewards_pool,
+        burn_sink: required_genesis_account_address(value, "SYS-04")?,
+    })
+}
+
+#[cfg(not(test))]
+pub fn testnet_v3_system_addresses() -> Result<TestnetV3SystemAddresses, String> {
+    let genesis = canonical_genesis().map_err(|error| {
+        format!("load canonical Testnet-v3 genesis for system addresses: {error}")
+    })?;
+    testnet_v3_system_addresses_from_genesis(genesis.value())
+}
+
+#[cfg(test)]
+pub fn testnet_v3_system_addresses() -> Result<TestnetV3SystemAddresses, String> {
+    // Unit fixtures intentionally use minimal legacy-shaped genesis documents.
+    // Candidate-specific tests below exercise the production resolver directly.
+    Ok(TestnetV3SystemAddresses {
+        fee_collector: FEE_COLLECTOR_ADDRESS.to_string(),
+        dao_treasury: DAO_TREASURY_ADDRESS.to_string(),
+        treasury_recovery: TREASURY_RECOVERY_WALLET_ADDRESS.to_string(),
+        validator_rewards_pool: VALIDATOR_REWARDS_POOL_ADDRESS.to_string(),
+        burn_sink: BURN_SINK_ADDRESS.to_string(),
+    })
+}
+
+pub fn fee_collector_address() -> Result<String, String> {
+    Ok(testnet_v3_system_addresses()?.fee_collector)
+}
 
 pub fn token_state_path() -> PathBuf {
     crate::utils::resolve_data_path("data/token_state.json")
@@ -604,6 +695,7 @@ impl TokenManager {
         tx_hash: Option<String>,
         block_height: u64,
     ) -> Result<String, String> {
+        let system_addresses = testnet_v3_system_addresses()?;
         if crate::address::is_network_burn_address(from) {
             return Err("Network burn address cannot send funds".to_string());
         }
@@ -661,7 +753,7 @@ impl TokenManager {
 
             if fee > 0 {
                 let fee_collector_balances = balances
-                    .entry(FEE_COLLECTOR_ADDRESS.to_string())
+                    .entry(system_addresses.fee_collector.clone())
                     .or_insert_with(HashMap::new);
                 let current_fee_balance = fee_collector_balances
                     .get(SNRG_SYMBOL)
@@ -730,6 +822,7 @@ impl TokenManager {
         total_fees_nwei: u64,
         distribution_block_height: u64,
     ) -> Result<crate::rewards::EpochFeeDistribution, String> {
+        let system_addresses = testnet_v3_system_addresses()?;
         if let Ok(ledger) = crate::rewards::REWARD_LEDGER.lock() {
             if let Some(existing) = ledger.fee_distributions.get(&epoch_id) {
                 return Ok(existing.clone());
@@ -746,7 +839,7 @@ impl TokenManager {
             distribution_block_height,
         )?;
 
-        let collector_balance = self.get_balance(FEE_COLLECTOR_ADDRESS, SNRG_SYMBOL);
+        let collector_balance = self.get_balance(&system_addresses.fee_collector, SNRG_SYMBOL);
         if collector_balance < total_fees_nwei {
             return Err(format!(
                 "FeeCollector balance {} below epoch fees {}",
@@ -763,8 +856,8 @@ impl TokenManager {
 
         if validator_share > 0 {
             self.transfer_tokens_with_metadata(
-                FEE_COLLECTOR_ADDRESS,
-                VALIDATOR_REWARDS_POOL_ADDRESS,
+                &system_addresses.fee_collector,
+                &system_addresses.validator_rewards_pool,
                 SNRG_SYMBOL,
                 validator_share,
                 0,
@@ -774,8 +867,8 @@ impl TokenManager {
         }
         if treasury_share > 0 {
             self.transfer_tokens_with_metadata(
-                FEE_COLLECTOR_ADDRESS,
-                DAO_TREASURY_ADDRESS,
+                &system_addresses.fee_collector,
+                &system_addresses.dao_treasury,
                 SNRG_SYMBOL,
                 treasury_share,
                 0,
@@ -784,7 +877,7 @@ impl TokenManager {
             )?;
         }
         if burn_share > 0 {
-            self.burn_tokens(FEE_COLLECTOR_ADDRESS, SNRG_SYMBOL, burn_share)?;
+            self.burn_tokens(&system_addresses.fee_collector, SNRG_SYMBOL, burn_share)?;
         }
 
         let mut ledger = crate::rewards::REWARD_LEDGER
@@ -795,10 +888,10 @@ impl TokenManager {
             .clone();
         ledger.record_fee_collector_distribution(crate::rewards::FeeCollectorDistribution {
             epoch_id,
-            from_address: FEE_COLLECTOR_ADDRESS.to_string(),
-            validator_reward_pool_address: VALIDATOR_REWARDS_POOL_ADDRESS.to_string(),
+            from_address: system_addresses.fee_collector.clone(),
+            validator_reward_pool_address: system_addresses.validator_rewards_pool.clone(),
             validator_reward_pool_amount_nwei: distribution.validator_share_nwei,
-            treasury_wallet_address: DAO_TREASURY_ADDRESS.to_string(),
+            treasury_wallet_address: system_addresses.dao_treasury.clone(),
             treasury_amount_nwei: distribution.treasury_share_nwei,
             burn_amount_nwei: distribution.burn_share_nwei,
             dust_nwei: distribution.rounding_dust_nwei,
@@ -814,6 +907,7 @@ impl TokenManager {
         allocation: &crate::rewards::EpochRewardAllocation,
         funded_block_height: u64,
     ) -> Result<String, String> {
+        let system_addresses = testnet_v3_system_addresses()?;
         if let Ok(ledger) = crate::rewards::REWARD_LEDGER.lock() {
             if ledger
                 .epoch_reward_allocations
@@ -832,7 +926,7 @@ impl TokenManager {
             "validator reward pool allocation",
             allocation.total_cluster_rewards_nwei,
         )?;
-        let pool_balance = self.get_balance(VALIDATOR_REWARDS_POOL_ADDRESS, SNRG_SYMBOL);
+        let pool_balance = self.get_balance(&system_addresses.validator_rewards_pool, SNRG_SYMBOL);
         if pool_balance < total_cluster_rewards {
             return Err(format!(
                 "Validator rewards pool balance {} below cluster allocation {}",
@@ -861,7 +955,7 @@ impl TokenManager {
                 continue;
             }
             self.transfer_tokens_with_metadata(
-                VALIDATOR_REWARDS_POOL_ADDRESS,
+                &system_addresses.validator_rewards_pool,
                 &cluster.cluster_address,
                 SNRG_SYMBOL,
                 cluster_reward,
@@ -879,7 +973,7 @@ impl TokenManager {
             .map_err(|_| "Failed to access reward ledger".to_string())?;
         ledger.record_epoch_reward_allocation(
             allocation.clone(),
-            VALIDATOR_REWARDS_POOL_ADDRESS,
+            &system_addresses.validator_rewards_pool,
             funded_block_height,
         )?;
 
@@ -895,6 +989,7 @@ impl TokenManager {
         release_coefficients: &HashMap<String, u64>,
         settled_block_height: u64,
     ) -> Result<Vec<crate::rewards::ValidatorRewardSettlement>, String> {
+        let system_addresses = testnet_v3_system_addresses()?;
         let pending_rewards = {
             let ledger = crate::rewards::REWARD_LEDGER
                 .lock()
@@ -976,7 +1071,7 @@ impl TokenManager {
             if unreleased > 0 {
                 self.transfer_tokens_with_metadata(
                     &settlement.original_cluster_address,
-                    TREASURY_RECOVERY_WALLET_ADDRESS,
+                    &system_addresses.treasury_recovery,
                     SNRG_SYMBOL,
                     unreleased,
                     0,
@@ -1382,6 +1477,7 @@ impl TokenManager {
         if crate::address::is_network_burn_address(payer) {
             return Err("Network burn address cannot pay transaction fees".to_string());
         }
+        let collector_address = fee_collector_address()?;
         if let Ok(mut balances) = self.balances.lock() {
             let payer_balances = balances
                 .get_mut(payer)
@@ -1393,7 +1489,7 @@ impl TokenManager {
             payer_balances.insert(SNRG_SYMBOL.to_string(), current - fee_nwei);
 
             let collector_balances = balances
-                .entry(FEE_COLLECTOR_ADDRESS.to_string())
+                .entry(collector_address)
                 .or_insert_with(HashMap::new);
             let collector = collector_balances.get(SNRG_SYMBOL).copied().unwrap_or(0);
             collector_balances.insert(
@@ -1588,8 +1684,9 @@ impl TokenManager {
     ) -> Result<String, String> {
         const SCORE_BPS_DENOMINATOR: u64 = 10_000;
 
+        let pool_address = Self::get_rewards_pool_address()?;
         // Check rewards pool balance
-        let pool_balance = self.get_balance(VALIDATOR_REWARDS_POOL_ADDRESS, SNRG_SYMBOL);
+        let pool_balance = self.get_balance(&pool_address, SNRG_SYMBOL);
         if pool_balance < reward_amount {
             return Err(format!(
                 "Insufficient rewards pool balance: {} < {}",
@@ -1611,7 +1708,7 @@ impl TokenManager {
 
         // Deduct total reward from rewards pool
         if let Ok(mut balances) = self.balances.lock() {
-            if let Some(pool_balances) = balances.get_mut(VALIDATOR_REWARDS_POOL_ADDRESS) {
+            if let Some(pool_balances) = balances.get_mut(&pool_address) {
                 let current = pool_balances.get(SNRG_SYMBOL).unwrap_or(&0);
                 if *current < reward_amount {
                     return Err(format!(
@@ -1768,9 +1865,9 @@ impl TokenManager {
         if crate::address::is_network_burn_address(validator) {
             return Err("Network burn address cannot receive validator rewards".to_string());
         }
-        // Rewards pool address from genesis.json
-        // First, check if rewards pool has sufficient balance
-        let pool_balance = self.get_balance(VALIDATOR_REWARDS_POOL_ADDRESS, "SNRG");
+        let pool_address = Self::get_rewards_pool_address()?;
+        // First, check the genesis-bound rewards pool has sufficient balance.
+        let pool_balance = self.get_balance(&pool_address, "SNRG");
         if pool_balance < reward_amount {
             return Err(format!(
                 "Insufficient rewards pool balance: {} < {}",
@@ -1816,7 +1913,7 @@ impl TokenManager {
 
         // Deduct total reward amount from rewards pool
         if let Ok(mut balances) = self.balances.lock() {
-            if let Some(pool_balances) = balances.get_mut(VALIDATOR_REWARDS_POOL_ADDRESS) {
+            if let Some(pool_balances) = balances.get_mut(&pool_address) {
                 let current = pool_balances.get("SNRG").unwrap_or(&0);
                 if *current < reward_amount {
                     return Err(format!(
@@ -2242,52 +2339,28 @@ impl TokenManager {
     }
 
     /// Ensure the rewards pool has sufficient balance for validator rewards
-    /// This should be called on startup to verify the pool is funded
+    /// This should be called on startup to verify the pool binding. Testnet-v3
+    /// has a fixed token cap, so startup must never mint an undisclosed refill.
     pub fn ensure_rewards_pool_funded(&self) -> Result<(), String> {
-        const MIN_POOL_BALANCE: u64 = 1_000_000_000_000_000_000u64; // 1B SNRG minimum
-        const REFILL_AMOUNT: u64 = 2_000_000_000_000_000_000u64; // 2B SNRG refill
-
-        let pool_balance = self.get_balance(VALIDATOR_REWARDS_POOL_ADDRESS, "SNRG");
-
-        if pool_balance < MIN_POOL_BALANCE {
+        let addresses = testnet_v3_system_addresses()?;
+        let pool_balance = self.get_balance(&addresses.validator_rewards_pool, SNRG_SYMBOL);
+        if pool_balance == 0 {
             println!(
-                "⚠️ Rewards pool balance low: {} nWei. Initializing...",
-                pool_balance
+                "Validator reward pool is empty at startup; it remains fee/governance funded and no tokens were minted"
             );
-
-            // Mint tokens to rewards pool if it's empty or low
-            match self.mint_tokens(VALIDATOR_REWARDS_POOL_ADDRESS, "SNRG", REFILL_AMOUNT) {
-                Ok(_) => {
-                    let new_balance = self.get_balance(VALIDATOR_REWARDS_POOL_ADDRESS, "SNRG");
-                    println!(
-                        "✅ Rewards pool initialized with {} SNRG (balance: {} nWei)",
-                        REFILL_AMOUNT / 1_000_000_000,
-                        new_balance
-                    );
-                    Ok(())
-                }
-                Err(e) => {
-                    println!("❌ Failed to initialize rewards pool: {}", e);
-                    Err(e)
-                }
-            }
-        } else {
-            println!(
-                "✅ Rewards pool balance OK: {} SNRG",
-                pool_balance / 1_000_000_000
-            );
-            Ok(())
         }
+        Ok(())
     }
 
     /// Get the rewards pool address
-    pub fn get_rewards_pool_address() -> &'static str {
-        VALIDATOR_REWARDS_POOL_ADDRESS
+    pub fn get_rewards_pool_address() -> Result<String, String> {
+        Ok(testnet_v3_system_addresses()?.validator_rewards_pool)
     }
 
     /// Get rewards pool balance
-    pub fn get_rewards_pool_balance(&self) -> u64 {
-        self.get_balance(Self::get_rewards_pool_address(), "SNRG")
+    pub fn get_rewards_pool_balance(&self) -> Result<u64, String> {
+        let address = Self::get_rewards_pool_address()?;
+        Ok(self.get_balance(&address, SNRG_SYMBOL))
     }
 
     pub fn get_total_stake_for_validator(&self, validator: &str) -> u64 {
@@ -2582,6 +2655,31 @@ mod tests {
     use super::*;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn testnet_v3_candidate_binds_generated_fee_and_reward_addresses() {
+        let candidate: Value = serde_json::from_str(include_str!(
+            "../../genesis.testnet-v3.identity-assigned.json"
+        ))
+        .expect("Testnet-v3 candidate genesis must be valid JSON");
+
+        let addresses = testnet_v3_system_addresses_from_genesis(&candidate)
+            .expect("candidate must bind all protocol-controlled addresses");
+
+        assert_eq!(
+            addresses.fee_collector,
+            "synf1pnchsrnyral0u9r65xusjrexuctfh465h06l"
+        );
+        assert_eq!(
+            addresses.validator_rewards_pool,
+            "synq1lep2gks85cwlyumx89nxjdqwt5zvnmjcsjm8"
+        );
+        assert_ne!(addresses.fee_collector, FEE_COLLECTOR_ADDRESS);
+        assert_ne!(
+            addresses.validator_rewards_pool,
+            VALIDATOR_REWARDS_POOL_ADDRESS
+        );
+    }
 
     lazy_static::lazy_static! {
         static ref ENV_GUARD: Mutex<()> = Mutex::new(());

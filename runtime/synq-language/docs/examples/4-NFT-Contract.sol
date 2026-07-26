@@ -63,7 +63,7 @@ function approve(address to, uint256 tokenId) public {
 address owner = ownerOf[tokenId];
 require(owner == msg.sender || operatorApprovals[owner][msg.sender], "Not authorized");
 require(to != owner, "Approval to current owner");
-tokenApprovals = to;
+tokenApprovals[tokenId] = to;
 emit Approval((owner, to, tokenId));
 }
 
@@ -74,7 +74,7 @@ return tokenApprovals[tokenId];
 
 function setApprovalForAll(address operator, bool approved) public {
 require(operator != msg.sender, "Approve to caller");
-operatorApprovals = approved;
+operatorApprovals[msg.sender][operator] = approved;
 emit ApprovalForAll((msg.sender, operator, approved));
 }
 
@@ -85,15 +85,13 @@ return operatorApprovals[owner][operator];
 function transferFrom(address from, address to, uint256 tokenId) public {
 require(ownerOf[tokenId] == from, "Transfer from incorrect owner");
 require(to != Address(0), "Transfer to zero address");
-require(        msg.sender == from ||
-                    msg.sender == tokenApprovals[tokenId] ||
-                    operatorApprovals[from][msg.sender], "Transfer not authorized");
+require(msg.sender == from || msg.sender == tokenApprovals[tokenId] || operatorApprovals[from][msg.sender], "Transfer not authorized");
 if (tokenApprovals[tokenId] != Address(0)) {
-tokenApprovals = Address(0);
+tokenApprovals[tokenId] = Address(0);
 }
-balanceOf = balanceOf[from] - 1;
-balanceOf = balanceOf[to] + 1;
-ownerOf = to;
+balanceOf[from] = balanceOf[from] - 1;
+balanceOf[to] = balanceOf[to] + 1;
+ownerOf[tokenId] = to;
 emit Transfer((from, to, tokenId));
 }
 
@@ -116,11 +114,11 @@ revert("PQC verification failed");
 }
 uint256 tokenId = totalSupply;
 totalSupply = totalSupply + 1;
-ownerOf = to;
-balanceOf = balanceOf[to] + 1;
-tokenURI = _tokenURI;
-tokenName = _tokenName;
-tokenDescription = _tokenDescription;
+ownerOf[tokenId] = to;
+balanceOf[to] = balanceOf[to] + 1;
+tokenURI[tokenId] = _tokenURI;
+tokenName[tokenId] = _tokenName;
+tokenDescription[tokenId] = _tokenDescription;
 emit Mint((to, tokenId, _tokenURI));
 emit Transfer((Address(0), to, tokenId));
 return tokenId;
@@ -132,11 +130,11 @@ require(to != Address(0), "Mint to zero address");
 require(totalSupply < maxSupply, "Max supply reached");
 uint256 tokenId = totalSupply;
 totalSupply = totalSupply + 1;
-ownerOf = to;
-balanceOf = balanceOf[to] + 1;
-tokenURI = _tokenURI;
-tokenName = _tokenName;
-tokenDescription = _tokenDescription;
+ownerOf[tokenId] = to;
+balanceOf[to] = balanceOf[to] + 1;
+tokenURI[tokenId] = _tokenURI;
+tokenName[tokenId] = _tokenName;
+tokenDescription[tokenId] = _tokenDescription;
 emit Mint((to, tokenId, _tokenURI));
 emit Transfer((Address(0), to, tokenId));
 return tokenId;
@@ -162,11 +160,11 @@ for (uint256 i = 0; i < recipients.length; i++) {
 require(recipients[i] != Address(0), "Invalid recipient");
 uint256 tokenId = totalSupply;
 totalSupply = totalSupply + 1;
-ownerOf = recipients[i];
-balanceOf = balanceOf[recipients[i]] + 1;
-tokenURI = tokenURIs[i];
-tokenName = tokenNames[i];
-tokenDescription = tokenDescriptions[i];
+ownerOf[tokenId] = recipients[i];
+balanceOf[recipients[i]] = balanceOf[recipients[i]] + 1;
+tokenURI[tokenId] = tokenURIs[i];
+tokenName[tokenId] = tokenNames[i];
+tokenDescription[tokenId] = tokenDescriptions[i];
 emit Mint((recipients[i], tokenId, tokenURIs[i]));
 emit Transfer((Address(0), recipients[i], tokenId));
 }
@@ -176,10 +174,10 @@ function burn(uint256 tokenId) public {
 address owner = ownerOf[tokenId];
 require(owner == msg.sender || operatorApprovals[owner][msg.sender], "Not authorized");
 if (tokenApprovals[tokenId] != Address(0)) {
-tokenApprovals = Address(0);
+tokenApprovals[tokenId] = Address(0);
 }
-balanceOf = balanceOf[owner] - 1;
-ownerOf = Address(0);
+balanceOf[owner] = balanceOf[owner] - 1;
+ownerOf[tokenId] = Address(0);
 totalSupply = totalSupply - 1;
 emit Transfer((owner, Address(0), tokenId));
 emit Burn((tokenId));
@@ -187,14 +185,14 @@ emit Burn((tokenId));
 
 function setTokenURI(uint256 tokenId, string _tokenURI) public {
 require(ownerOf[tokenId] == msg.sender, "Not token owner");
-tokenURI = _tokenURI;
+tokenURI[tokenId] = _tokenURI;
 }
 
 function setRoyalty(uint256 tokenId, address recipient, uint256 percentage) public {
 require(ownerOf[tokenId] == msg.sender, "Not token owner");
 require(percentage <= 10000, "Royalty too high");
-royaltyRecipient = recipient;
-royaltyPercentage = percentage;
+royaltyRecipient[tokenId] = recipient;
+royaltyPercentage[tokenId] = percentage;
 emit RoyaltyUpdated((tokenId, recipient, percentage));
 }
 

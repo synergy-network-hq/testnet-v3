@@ -43,7 +43,7 @@ uint256 proposalId = proposalCount;
 proposalCount = proposalCount + 1;
 uint256 startBlock = block.number;
 uint256 endBlock = startBlock + votingPeriod;
-proposals = Proposal(        {
+proposals[proposalId] = Proposal(        {
                     id: proposalId,
                     proposer: msg.sender,
                     description: description,
@@ -70,15 +70,15 @@ require(block.number >= proposals[proposalId].startBlock, "Voting not started");
 require(block.number <= proposals[proposalId].endBlock, "Voting period ended");
 require(!hasVoted[proposalId][msg.sender], "Already voted");
 uint256 weight = 1;
-hasVoted = true;
-votes = support;
+hasVoted[proposalId][msg.sender] = true;
+votes[proposalId][msg.sender] = support;
 if (support == 1) {
-proposals = proposals[proposalId].forVotes + weight;
+proposals[proposalId].forVotes = proposals[proposalId].forVotes + weight;
 } else {
 if (support == 0) {
-proposals = proposals[proposalId].againstVotes + weight;
+proposals[proposalId].againstVotes = proposals[proposalId].againstVotes + weight;
 } else {
-proposals = proposals[proposalId].abstainVotes + weight;
+proposals[proposalId].abstainVotes = proposals[proposalId].abstainVotes + weight;
 }
 }
 emit VoteCast((proposalId, msg.sender, support, weight));
@@ -103,15 +103,15 @@ revert("PQC verification failed");
 }
 }
 uint256 weight = 1;
-hasVoted = true;
-votes = support;
+hasVoted[proposalId][voter] = true;
+votes[proposalId][voter] = support;
 if (support == 1) {
-proposals = proposals[proposalId].forVotes + weight;
+proposals[proposalId].forVotes = proposals[proposalId].forVotes + weight;
 } else {
 if (support == 0) {
-proposals = proposals[proposalId].againstVotes + weight;
+proposals[proposalId].againstVotes = proposals[proposalId].againstVotes + weight;
 } else {
-proposals = proposals[proposalId].abstainVotes + weight;
+proposals[proposalId].abstainVotes = proposals[proposalId].abstainVotes + weight;
 }
 }
 emit VoteCast((proposalId, voter, support, weight));
@@ -136,7 +136,7 @@ if (!__synq_pqc_ok) {
 revert("PQC verification failed");
 }
 }
-proposal = true;
+proposal.executed = true;
 emit ProposalExecuted((proposalId));
 }
 
@@ -146,7 +146,7 @@ require(proposal.id == proposalId, "Proposal does not exist");
 require(!proposal.executed, "Proposal already executed");
 require(!proposal.canceled, "Proposal already canceled");
 require(msg.sender == proposal.proposer || msg.sender == Address(0), "Not authorized to cancel");
-proposal = true;
+proposal.canceled = true;
 emit ProposalCanceled((proposalId));
 }
 
@@ -222,7 +222,7 @@ return "Active";
 if (proposal.forVotes <= proposal.againstVotes) {
 return "Defeated";
 }
-if ((proposal.forVotes + proposal.againstVotes + proposal.abstainVotes) < quorum) {
+if (proposal.forVotes + proposal.againstVotes + proposal.abstainVotes < quorum) {
 return "QuorumNotMet";
 }
 return "Succeeded";

@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 pub const EXPECTED_GENESIS_HASH: &str =
     "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789";
-pub const BASELINE_VALIDATOR_COUNT: usize = 5;
+pub const BASELINE_VALIDATOR_COUNT: usize = 6;
 const ALLOWED_STATE_FILES: &[&str] = &[
     "chain.json",
     "canonical_locks.json",
@@ -210,6 +210,7 @@ struct RecoveryProof {
     #[serde(default)]
     source_canonical_lock_hash: String,
     qc: AegisQuorumCertificate,
+    height_context: crate::synergy_types::HeightConsensusContext,
     validator_set: ValidatorSet,
     cluster_map: ClusterMap,
 }
@@ -1679,7 +1680,7 @@ pub fn build_plan(input: BuildPlanInput) -> RecoveryPlan {
         qc_summary.height,
     ));
     let mut preconditions = vec![
-        "chain_id=1264".to_string(),
+        "chain_id=1266".to_string(),
         "network_id=synergy-testnet-v3".to_string(),
         "genesis_hash_matches_canonical".to_string(),
         "source_qc_aegis_pqc_verified=true".to_string(),
@@ -2703,7 +2704,7 @@ fn verify_recovery_proof(proof: &RecoveryProof, source_dir: &Path) -> QcProofSum
         .count();
     let required_quorum = required_validator_quorum(active_validator_count);
     if proof.chain_id != 0 && proof.chain_id != SYNERGY_TESTNET_V3_CHAIN_ID {
-        failure.push(format!("proof chain_id {} is not 1264", proof.chain_id));
+        failure.push(format!("proof chain_id {} is not 1266", proof.chain_id));
     }
     if !proof.network_id.is_empty() && proof.network_id != SYNERGY_TESTNET_V3_NETWORK_ID {
         failure.push(format!(
@@ -2735,7 +2736,12 @@ fn verify_recovery_proof(proof: &RecoveryProof, source_dir: &Path) -> QcProofSum
     let verified = if failure.is_empty() {
         match verifier_from_validator_set(&proof.validator_set).and_then(|verifier| {
             verifier
-                .verify_qc_checked(&proof.qc, &proof.validator_set, &proof.cluster_map)
+                .verify_qc_checked(
+                    &proof.qc,
+                    &proof.validator_set,
+                    &proof.cluster_map,
+                    &proof.height_context,
+                )
                 .map_err(|error| error.to_string())
         }) {
             Ok(()) => true,
@@ -3218,8 +3224,9 @@ mod tests {
     use super::*;
     use crate::crypto::aegis_pqvm::AegisPqvmSigner;
     use crate::synergy_types::{
-        BlockId, ChainId, ClusterAssignment, ClusterId, Epoch, Height, NetworkId, Round, UmaId,
-        ValidatorId, Vote, VotePhase,
+        deterministic_test_height_context, BlockId, ChainId, ClusterAssignment, ClusterId, Epoch,
+        Height, HeightConsensusContext, NetworkId, ProtocolConfig, Round, UmaId, ValidatorId, Vote,
+        VotePhase, POSY_PROTOCOL_VERSION,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -3724,6 +3731,7 @@ mod tests {
         AegisPqvmSigner,
         ValidatorSet,
         ClusterMap,
+        HeightConsensusContext,
         AegisQuorumCertificate,
     ) {
         let mut signer = AegisPqvmSigner::initialize_required().unwrap();
@@ -3764,18 +3772,25 @@ mod tests {
         };
         let set_hash = set.hash().unwrap();
         let cluster_hash = cluster.hash().unwrap();
+        let protocol = ProtocolConfig::testnet_v3();
+        let height_context =
+            deterministic_test_height_context(&set, &cluster, &protocol, Height(10), ClusterId(0));
+        let height_context_root = height_context.root().unwrap();
         let block_id = BlockId::from("majority-hash");
         let votes = (0..signer_count)
             .map(|index| {
                 let mut vote = Vote {
                     chain_id: ChainId::synergy_testnet_v3(),
                     network_id: NetworkId::synergy_testnet_v3(),
+                    protocol_version: POSY_PROTOCOL_VERSION.to_string(),
                     height: Height(10),
                     round: Round(0),
                     epoch: Epoch(0),
                     cluster_id: ClusterId(0),
-                    phase: VotePhase::Commit,
+                    height_context_root,
+                    phase: VotePhase::Finality,
                     block_id: block_id.clone(),
+                    highest_prepared_vc_root: None,
                     validator_id: records[index].validator_id.clone(),
                     validator_uma_id: records[index].validator_uma_id.clone(),
                     key_id: key_ids[index].clone(),
@@ -3796,15 +3811,18 @@ mod tests {
             qc_version: 1,
             chain_id: ChainId::synergy_testnet_v3(),
             network_id: NetworkId::synergy_testnet_v3(),
+            protocol_version: POSY_PROTOCOL_VERSION.to_string(),
             height: Height(10),
             round: Round(0),
             epoch: Epoch(0),
             cluster_id: ClusterId(0),
-            phase: VotePhase::Commit,
+            height_context_root,
+            phase: VotePhase::Finality,
             block_id,
+            highest_prepared_vc_root: None,
             active_validator_set_hash: set_hash,
             cluster_map_hash: cluster_hash,
-            threshold_weight_required: genesis_required_quorum() as u64,
+            threshold_weight_required: height_context.strict_weight_quorum().unwrap(),
             signed_weight: signer_count as u64,
             signer_bitmap: vec![((1u16 << signer_count) - 1) as u8],
             aegis_pq_signatures: votes
@@ -3813,7 +3831,7 @@ mod tests {
                 .collect(),
             aegis_pq_key_ids: key_ids[0..signer_count].to_vec(),
         };
-        (signer, set, cluster, qc)
+        (signer, set, cluster, height_context, qc)
     }
 
     fn write_proof(
@@ -3821,6 +3839,7 @@ mod tests {
         qc: &AegisQuorumCertificate,
         set: &ValidatorSet,
         cluster: &ClusterMap,
+        height_context: &HeightConsensusContext,
     ) {
         fs::write(
             root.join("recovery-proof.json"),
@@ -3836,6 +3855,7 @@ mod tests {
                 "source_canonical_lock_height": 10,
                 "source_canonical_lock_hash": "majority-hash",
                 "qc": qc,
+                "height_context": height_context,
                 "validator_set": set,
                 "cluster_map": cluster,
             }))
@@ -4585,8 +4605,9 @@ mod tests {
         write_lock(&source, 10, "majority-hash");
         write_recoverable_files(&source);
         write_legacy_qc_fixture(&source, genesis_required_quorum());
-        let (_signer, set, cluster, qc) = signed_qc_fixture(genesis_required_quorum());
-        write_proof(&source, &qc, &set, &cluster);
+        let (_signer, set, cluster, height_context, qc) =
+            signed_qc_fixture(genesis_required_quorum());
+        write_proof(&source, &qc, &set, &cluster, &height_context);
         let plan = build_plan(base_input(&target, &source));
         (target, source, plan)
     }
@@ -4601,8 +4622,9 @@ mod tests {
         write_lock(&source, 10, "majority-hash");
         write_recoverable_files(&source);
         write_legacy_qc_fixture(&source, genesis_required_quorum());
-        let (_signer, set, cluster, qc) = signed_qc_fixture(genesis_required_quorum());
-        write_proof(&source, &qc, &set, &cluster);
+        let (_signer, set, cluster, height_context, qc) =
+            signed_qc_fixture(genesis_required_quorum());
+        write_proof(&source, &qc, &set, &cluster, &height_context);
 
         let plan = build_plan(base_input(&target, &source));
 
@@ -4621,8 +4643,9 @@ mod tests {
         write_lock(&source, 10, "majority-hash");
         write_recoverable_files(&source);
         write_legacy_qc_fixture(&source, genesis_required_quorum());
-        let (_signer, set, cluster, qc) = signed_qc_fixture(genesis_required_quorum());
-        write_proof(&source, &qc, &set, &cluster);
+        let (_signer, set, cluster, height_context, qc) =
+            signed_qc_fixture(genesis_required_quorum());
+        write_proof(&source, &qc, &set, &cluster, &height_context);
 
         let plan = build_plan(base_input(&target, &source));
 
@@ -4667,9 +4690,10 @@ mod tests {
         write_chain(&source, &[("majority-hash", 10)]);
         write_lock(&source, 10, "majority-hash");
         write_recoverable_files(&source);
-        let (_signer, set, cluster, mut qc) = signed_qc_fixture(genesis_required_quorum());
+        let (_signer, set, cluster, height_context, mut qc) =
+            signed_qc_fixture(genesis_required_quorum());
         qc.aegis_pq_signatures[0].signature_bytes[0] ^= 1;
-        write_proof(&source, &qc, &set, &cluster);
+        write_proof(&source, &qc, &set, &cluster, &height_context);
         let plan = build_plan(base_input(&target, &source));
         assert!(!plan.source_qc_aegis_pqc_verified);
         assert!(plan.operator_approval_required);
@@ -4693,8 +4717,8 @@ mod tests {
         write_chain(&source, &[("majority-hash", 10)]);
         write_lock(&source, 10, "majority-hash");
         write_recoverable_files(&source);
-        let (_signer, set, cluster, qc) = signed_qc_fixture(3);
-        write_proof(&source, &qc, &set, &cluster);
+        let (_signer, set, cluster, height_context, qc) = signed_qc_fixture(3);
+        write_proof(&source, &qc, &set, &cluster, &height_context);
         let plan = build_plan(base_input(&target, &source));
         assert!(verify_plan(&plan)
             .errors
@@ -4723,9 +4747,10 @@ mod tests {
         write_chain(&source, &[("majority-hash", 10)]);
         write_lock(&source, 10, "majority-hash");
         write_recoverable_files(&source);
-        let (_signer, mut set, cluster, qc) = signed_qc_fixture(genesis_required_quorum());
+        let (_signer, mut set, cluster, height_context, qc) =
+            signed_qc_fixture(genesis_required_quorum());
         set.validators[0].status = ValidatorStatus::Shadow;
-        write_proof(&source, &qc, &set, &cluster);
+        write_proof(&source, &qc, &set, &cluster, &height_context);
         let plan = build_plan(base_input(&target, &source));
         assert!(!plan.source_qc_aegis_pqc_verified);
     }
@@ -4824,8 +4849,9 @@ mod tests {
         write_lock(&target, 5, "minority-hash");
         write_lock(&source, 10, "majority-hash");
         write_legacy_qc_fixture(&source, genesis_required_quorum());
-        let (_signer, set, cluster, qc) = signed_qc_fixture(genesis_required_quorum());
-        write_proof(&source, &qc, &set, &cluster);
+        let (_signer, set, cluster, height_context, qc) =
+            signed_qc_fixture(genesis_required_quorum());
+        write_proof(&source, &qc, &set, &cluster, &height_context);
 
         let mut input = base_input(&target, &source);
         input.source_common_height = Some(10);
@@ -4853,8 +4879,9 @@ mod tests {
         write_chain(&source, &[("majority-hash", 10)]);
         write_lock(&source, 10, "majority-hash");
         write_legacy_qc_fixture(&source, genesis_required_quorum());
-        let (_signer, set, cluster, qc) = signed_qc_fixture(genesis_required_quorum());
-        write_proof(&source, &qc, &set, &cluster);
+        let (_signer, set, cluster, height_context, qc) =
+            signed_qc_fixture(genesis_required_quorum());
+        write_proof(&source, &qc, &set, &cluster, &height_context);
 
         let mut input = base_input(&target, &source);
         input.source_common_height = Some(10);

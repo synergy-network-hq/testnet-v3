@@ -1,5 +1,5 @@
 [consensus]
-chain_id = 1264
+chain_id = 1266
 network_id = "synergy-testnet-v3"
 epoch_size = 1000
 target_block_time_ms = 1000

@@ -10,6 +10,7 @@ use aivm_core::execution::{
     ExecutionStatus, StsHostContext, StsHostCredential, StsHostFungibleToken, StsHostNft,
 };
 use aivm_core::state::ContractState;
+use aivm_core::stateful_synq::SynQNativeTransfer;
 use aivm_core::synq_runtime::{
     call_synq_contract, deploy_synq_contract, synq_execution_request, SynQRuntimeOperation,
     SynQRuntimeReceipt,
@@ -120,6 +121,8 @@ pub struct SynQAivmReceiptSummary {
     pub post_state_root: String,
     pub receipt_hash: String,
     pub logs: Vec<String>,
+    #[serde(default)]
+    pub native_transfers: Vec<SynQNativeTransfer>,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
 }
@@ -341,8 +344,14 @@ fn execute_deploy(
     let request = synq_execution_request(
         contract_address.clone(),
         artifact.to_aivm_artifact(),
-        aivm_context(tx, verification, &contract_address, execution_context)?,
-        Vec::new(),
+        aivm_context(
+            tx,
+            verification,
+            &contract_address,
+            execution_context,
+            resolved_synq_contracts(artifacts, deployments),
+        )?,
+        envelope.constructor_args.clone().unwrap_or_default(),
     );
     let receipt = deploy_synq_contract(&request, aivm_state);
     let summary = summary_from_aivm_receipt(&contract_address, &receipt);
@@ -482,7 +491,13 @@ fn execute_call(
     let request = synq_execution_request(
         contract_address.clone(),
         artifact.to_aivm_artifact(),
-        aivm_context(tx, verification, &contract_address, execution_context)?,
+        aivm_context(
+            tx,
+            verification,
+            &contract_address,
+            execution_context,
+            resolved_synq_contracts(artifacts, deployments),
+        )?,
         calldata,
     );
     let receipt = call_synq_contract(&request, aivm_state);
@@ -530,7 +545,7 @@ fn validate_artifact_hashes(
         contract_id: contract_id.clone(),
         artifact: artifact.to_aivm_artifact(),
         calldata: Vec::new(),
-        context: ExecutionContext::testnet_1264_for_contract(&contract_id, 150_000),
+        context: ExecutionContext::testnet_1266_for_contract(&contract_id, 150_000),
     };
     aivm_core::execution::validate_synq_artifact(&request)
         .map_err(|error| format!("AIVM artifact validation failed: {error}"))?;
@@ -545,25 +560,42 @@ fn aivm_context(
     _verification: &SynQVerificationSummary,
     contract_address: &str,
     execution_context: SynQExecutionContext,
+    resolved_synq_contracts: BTreeMap<String, ContractArtifact>,
 ) -> Result<ExecutionContext, String> {
     Ok(ExecutionContext {
         admission_pq_gas_used: GasSchedule::default().pqc_signature_verify_gas,
         runtime_block_height: execution_context.runtime_block_height,
         chain_id: tx.chain_id.0,
         network_id: tx.network_id.0.clone(),
-        block_height: 0,
+        block_height: execution_context.runtime_block_height,
         block_timestamp_unix: execution_context.runtime_block_timestamp_unix,
         tx_hash: tx.canonical_tx_bytes_hash()?.0,
         caller: tx.sender_uma_or_account.as_bytes().to_vec(),
         contract_address: contract_address.as_bytes().to_vec(),
+        call_value: tx.amount_nwei,
         gas_limit: tx.gas_limit,
         pq_gas_limit: 300_000,
         security_policy: AivmSecurityPolicyRef {
-            policy_id: "synq-testnet-1264-v1".to_string(),
+            policy_id: "synq-testnet-1266-v1".to_string(),
             required_signature_policy: "ml-dsa-65".to_string(),
         },
         sts_host: execution_context.sts_host.clone(),
+        resolved_synq_contracts,
     })
+}
+
+fn resolved_synq_contracts(
+    artifacts: &BTreeMap<SynQArtifactKey, SynQContractArtifact>,
+    deployments: &BTreeMap<String, SynQDeploymentRecord>,
+) -> BTreeMap<String, ContractArtifact> {
+    deployments
+        .iter()
+        .filter_map(|(address, deployment)| {
+            artifacts
+                .get(&deployment.artifact_key)
+                .map(|artifact| (address.clone(), artifact.to_aivm_artifact()))
+        })
+        .collect()
 }
 
 fn summary_from_aivm_receipt(
@@ -581,6 +613,7 @@ fn summary_from_aivm_receipt(
         post_state_root: hex::encode(receipt.post_state_root),
         receipt_hash: hex::encode(receipt.canonical_hash()),
         logs: receipt.logs.clone(),
+        native_transfers: receipt.native_transfers.clone(),
         error_code: receipt.error_code.map(|code| format!("{code:?}")),
         error_message: receipt.error.clone(),
     }
@@ -605,6 +638,7 @@ fn pre_aivm_failed_summary(
         post_state_root: state_root,
         receipt_hash: String::new(),
         logs: Vec::new(),
+        native_transfers: Vec::new(),
         error_code: Some(code.to_string()),
         error_message: Some(message.to_string()),
     };

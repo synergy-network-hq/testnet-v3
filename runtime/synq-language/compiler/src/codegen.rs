@@ -40,6 +40,15 @@ impl CodeGenerator {
         Ok(self.assembler.build())
     }
 
+    pub fn generate_stateful(self, ast: &[SourceUnit]) -> Result<Vec<u8>, String> {
+        // Stateful IR v2 is authoritative. The embedded v1 program is only a
+        // compatibility aid and may be empty when the legacy stack backend
+        // cannot represent stateful constructs such as mapping writes.
+        let legacy_quantum_vm_bytecode = self.generate(ast).unwrap_or_default();
+        crate::executable::StatefulSynQExecutable::new(ast.to_vec(), legacy_quantum_vm_bytecode)
+            .encode()
+    }
+
     fn patch_jumps(&mut self) -> Result<(), String> {
         for (patch_pos, label) in &self.jump_patches {
             if let Some(&target_pos) = self.label_positions.get(label) {
@@ -147,9 +156,17 @@ impl CodeGenerator {
                 }
                 self.emit_variable_store(name);
             }
-            Statement::Assignment(name, expr) => {
+            Statement::Assignment(target, expr) => {
                 self.gen_expression(expr)?;
-                self.emit_variable_store(name);
+                match target {
+                    Expression::Identifier(name) => self.emit_variable_store(name),
+                    _ => {
+                        return Err(
+                            "legacy bytecode backend does not support indexed assignment; use stateful SynQ IR v2"
+                                .to_string(),
+                        )
+                    }
+                }
             }
             Statement::Return(expr) => {
                 if let Some(ref expr) = expr {

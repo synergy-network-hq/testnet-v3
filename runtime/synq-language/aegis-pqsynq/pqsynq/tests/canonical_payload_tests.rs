@@ -13,7 +13,7 @@ fn payload_fixture() -> SynQSigningPayload {
 
     SynQSigningPayload {
         domain_tag: DomainTag::SynqContractDeployV1,
-        chain_id: ChainId::testnet_1264(),
+        chain_id: ChainId::testnet_1266(),
         network_id: NetworkId::testnet(),
         protocol_version: 1,
         algorithm_id: AlgorithmId::MlDsa65,
@@ -40,7 +40,7 @@ fn canonical_payload_bytes_are_deterministic_and_versioned() {
         &first[6..8],
         &DomainTag::SynqContractDeployV1.code().to_be_bytes()
     );
-    assert_eq!(&first[8..16], &1264_u64.to_be_bytes());
+    assert_eq!(&first[8..16], &1266_u64.to_be_bytes());
 }
 
 #[test]

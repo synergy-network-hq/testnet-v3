@@ -751,10 +751,11 @@ impl ArchiveValidatorNode {
         verifier: &AegisPqvmVerifier,
         validator_set: &crate::synergy_types::ValidatorSet,
         cluster_map: &crate::synergy_types::ClusterMap,
+        height_context: &crate::synergy_types::HeightConsensusContext,
     ) -> Result<(), String> {
         self.config.validate()?;
         verifier
-            .verify_qc_checked(qc, validator_set, cluster_map)
+            .verify_qc_checked(qc, validator_set, cluster_map, height_context)
             .map_err(|error| error.to_string())
     }
 

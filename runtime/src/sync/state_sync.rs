@@ -26,6 +26,7 @@ pub struct StateSyncRequest {
     pub local_hash: String,
     pub target_height: u64,
     pub target_hash: String,
+    pub target_height_context_root: String,
     pub reason: String,
 }
 
@@ -44,6 +45,7 @@ pub struct StateSyncSourceProof {
     pub common_hash: String,
     pub target_height: u64,
     pub target_hash: String,
+    pub target_height_context_root: String,
     pub source_height: u64,
     pub source_hash: String,
     pub finalized_qc_aegis_pqc_verified: bool,
@@ -108,6 +110,7 @@ pub struct StateSyncRepairPlan {
     pub local_hash: String,
     pub target_height: u64,
     pub target_hash: String,
+    pub target_height_context_root: String,
     pub transfer_id: String,
     pub transfer_content_sha256: String,
     pub validator_set_hash: String,
@@ -138,6 +141,7 @@ pub struct StateSyncRepairReceipt {
     pub local_height: u64,
     pub target_height: u64,
     pub target_hash: String,
+    pub target_height_context_root: String,
     pub workspace: String,
     pub backup_path: String,
     pub repaired_data_dir: String,
@@ -174,6 +178,7 @@ struct StateSyncRepairBundleManifest {
     source_role: String,
     #[serde(default)]
     source_cluster_id: Option<String>,
+    target_height_context_root: String,
     #[serde(default)]
     validator_set_digest: String,
     #[serde(default)]
@@ -221,7 +226,7 @@ pub fn build_state_sync_repair_plan(
         .any(|finding| finding.severity == ConsensusStateSeverity::Error);
     let repair_start = request.local_height.saturating_add(1);
     let actions = vec![
-        "verify source proof against chain_id, network_id, genesis hash, common block, and target block".to_string(),
+        "verify source proof against chain_id, network_id, genesis hash, common block, target block, and immutable target height context".to_string(),
         format!("verify block bodies for h{repair_start}..h{}", request.target_height),
         format!("verify committed QC proof for h{repair_start}..h{}", request.target_height),
         format!("verify canonical lock proof for h{repair_start}..h{}", request.target_height),
@@ -249,6 +254,7 @@ pub fn build_state_sync_repair_plan(
         local_hash: request.local_hash.clone(),
         target_height: request.target_height,
         target_hash: request.target_hash.clone(),
+        target_height_context_root: request.target_height_context_root.clone(),
         transfer_id: transfer.transfer_id.clone(),
         transfer_content_sha256: transfer.transfer_content_sha256.clone(),
         validator_set_hash: source.validator_set_hash.clone(),
@@ -395,6 +401,7 @@ pub fn apply_state_sync_repair(
             local_height: plan.local_height,
             target_height: plan.target_height,
             target_hash: plan.target_hash.clone(),
+            target_height_context_root: plan.target_height_context_root.clone(),
             workspace: workspace.display().to_string(),
             backup_path: backup_dir.display().to_string(),
             repaired_data_dir: data_dir.display().to_string(),
@@ -481,9 +488,11 @@ pub fn apply_state_sync_repair(
 struct RepairBundle {
     chain: Vec<Value>,
     chain_heights: BTreeMap<u64, String>,
+    chain_height_context_roots: BTreeMap<u64, String>,
     canonical_locks: BTreeMap<u64, Value>,
     committed_qcs: Vec<Value>,
     committed_qc_heights: BTreeMap<u64, String>,
+    committed_qc_height_context_roots: BTreeMap<u64, String>,
     state_checkpoint: Option<Value>,
 }
 
@@ -545,6 +554,11 @@ fn validate_apply_plan(plan: &StateSyncRepairPlan, findings: &mut Vec<StateSyncF
     ] {
         require_hash(label, value, findings);
     }
+    require_nonzero_hash(
+        "plan.target_height_context_root",
+        &plan.target_height_context_root,
+        findings,
+    );
     if plan.target_height <= plan.local_height {
         findings.push(error(
             "state_sync_repair_target_not_ahead",
@@ -677,10 +691,13 @@ fn read_repair_bundle(
     let qcs_path = bundle_dir.join("committed_qcs.jsonl");
     let chain = read_json_array(&chain_path, "state_sync_repair_chain_unreadable", findings)?;
     let chain_heights = collect_height_hashes(&chain, "repair chain", findings);
+    let chain_height_context_roots = collect_height_context_roots(&chain, "repair chain", findings);
     let canonical_locks =
         read_height_value_map(&locks_path, "state_sync_repair_locks_unreadable", findings)?;
     let committed_qcs = read_jsonl_values(&qcs_path, "state_sync_repair_qcs_unreadable", findings)?;
     let committed_qc_heights = collect_height_hashes(&committed_qcs, "repair QC", findings);
+    let committed_qc_height_context_roots =
+        collect_height_context_roots(&committed_qcs, "repair QC", findings);
     let checkpoint_path = bundle_dir.join("state_checkpoint.json");
     let state_checkpoint = if checkpoint_path.is_file() {
         match read_json_value(&checkpoint_path) {
@@ -697,9 +714,11 @@ fn read_repair_bundle(
     Some(RepairBundle {
         chain,
         chain_heights,
+        chain_height_context_roots,
         canonical_locks,
         committed_qcs,
         committed_qc_heights,
+        committed_qc_height_context_roots,
         state_checkpoint,
     })
 }
@@ -729,6 +748,19 @@ fn validate_bundle_coverage(
                 format!("repair bundle is missing canonical lock h{height}"),
             ));
         }
+        match (
+            bundle.chain_height_context_roots.get(&height),
+            bundle.committed_qc_height_context_roots.get(&height),
+        ) {
+            (Some(block_root), Some(qc_root)) if block_root == qc_root => {}
+            (Some(block_root), Some(qc_root)) => findings.push(error(
+                "state_sync_repair_height_context_mismatch",
+                format!(
+                    "repair block and committed QC at h{height} bind different height contexts: {block_root} and {qc_root}"
+                ),
+            )),
+            _ => {}
+        }
     }
     match bundle.chain_heights.get(&plan.target_height) {
         Some(hash) if hash == &plan.target_hash => {}
@@ -741,6 +773,25 @@ fn validate_bundle_coverage(
         )),
         None => {}
     }
+    for root in [
+        bundle.chain_height_context_roots.get(&plan.target_height),
+        bundle
+            .committed_qc_height_context_roots
+            .get(&plan.target_height),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if root != &plan.target_height_context_root {
+            findings.push(error(
+                "state_sync_repair_target_height_context_mismatch",
+                format!(
+                    "repair bundle target h{} context root {} does not match plan {}",
+                    plan.target_height, root, plan.target_height_context_root
+                ),
+            ));
+        }
+    }
 }
 
 fn validate_bundle_manifest(
@@ -749,6 +800,17 @@ fn validate_bundle_manifest(
     content_sha256: Option<&str>,
     findings: &mut Vec<StateSyncFinding>,
 ) {
+    require_nonzero_hash(
+        "manifest.target_height_context_root",
+        &manifest.target_height_context_root,
+        findings,
+    );
+    if manifest.target_height_context_root != plan.target_height_context_root {
+        findings.push(error(
+            "state_sync_repair_height_context_mismatch",
+            "repair manifest target height context root does not match plan",
+        ));
+    }
     if manifest.transfer_id != plan.transfer_id {
         findings.push(error(
             "state_sync_repair_transfer_id_mismatch",
@@ -1031,6 +1093,41 @@ fn collect_height_hashes(
     map
 }
 
+fn collect_height_context_roots(
+    values: &[Value],
+    label: &str,
+    findings: &mut Vec<StateSyncFinding>,
+) -> BTreeMap<u64, String> {
+    let mut map = BTreeMap::new();
+    for (index, value) in values.iter().enumerate() {
+        match (value_height(value), value_height_context_root(value)) {
+            (Some(height), Some(root)) => match Hash::from_hex(&root) {
+                Ok(hash) if !hash.is_zero() => {
+                    if let Some(previous) = map.insert(height, root.clone()) {
+                        findings.push(error(
+                            "state_sync_repair_duplicate_height_context",
+                            format!(
+                                "{label} has duplicate height h{height} context roots {previous} and {root}"
+                            ),
+                        ));
+                    }
+                }
+                _ => findings.push(error(
+                    "state_sync_repair_height_context_invalid",
+                    format!(
+                        "{label} entry at index {index} has an invalid or zero height context root"
+                    ),
+                )),
+            },
+            _ => findings.push(error(
+                "state_sync_repair_height_context_missing",
+                format!("{label} entry at index {index} is missing height or height_context_root"),
+            )),
+        }
+    }
+    map
+}
+
 fn value_height(value: &Value) -> Option<u64> {
     let qc = value.get("qc").unwrap_or(value);
     [
@@ -1073,6 +1170,30 @@ fn value_hash(value: &Value) -> Option<String> {
                 .and_then(Value::as_array)
                 .and_then(|votes| votes.first())
                 .and_then(value_hash)
+        })
+}
+
+fn value_height_context_root(value: &Value) -> Option<String> {
+    let qc = value.get("qc").unwrap_or(value);
+    let header = value
+        .get("header")
+        .or_else(|| qc.get("header"))
+        .unwrap_or(qc);
+    ["height_context_root", "heightContextRoot"]
+        .into_iter()
+        .find_map(|key| {
+            header
+                .get(key)
+                .or_else(|| qc.get(key))
+                .or_else(|| value.get(key))
+                .and_then(Value::as_str)
+        })
+        .map(str::to_string)
+        .or_else(|| {
+            qc.get("votes")
+                .and_then(Value::as_array)
+                .and_then(|votes| votes.first())
+                .and_then(value_height_context_root)
         })
 }
 
@@ -1206,6 +1327,11 @@ fn validate_request(request: &StateSyncRequest, findings: &mut Vec<StateSyncFind
     require_hash("request.genesis_hash", &request.genesis_hash, findings);
     require_hash("request.local_hash", &request.local_hash, findings);
     require_hash("request.target_hash", &request.target_hash, findings);
+    require_nonzero_hash(
+        "request.target_height_context_root",
+        &request.target_height_context_root,
+        findings,
+    );
     if request.target_height <= request.local_height {
         findings.push(error(
             "state_sync_target_not_ahead",
@@ -1257,6 +1383,11 @@ fn validate_source_proof(
     ] {
         require_hash(label, value, findings);
     }
+    require_nonzero_hash(
+        "source.target_height_context_root",
+        &source.target_height_context_root,
+        findings,
+    );
     if source.common_height != request.local_height || source.common_hash != request.local_hash {
         findings.push(error(
             "state_sync_common_block_mismatch",
@@ -1267,6 +1398,12 @@ fn validate_source_proof(
         findings.push(error(
             "state_sync_target_block_mismatch",
             "source proof target block does not match the requested target block",
+        ));
+    }
+    if source.target_height_context_root != request.target_height_context_root {
+        findings.push(error(
+            "state_sync_target_height_context_mismatch",
+            "source proof target height context root does not match the requested immutable context",
         ));
     }
     if source.source_height < request.target_height {
@@ -1470,6 +1607,20 @@ fn require_hash(label: &str, value: &str, findings: &mut Vec<StateSyncFinding>) 
     }
 }
 
+fn require_nonzero_hash(label: &str, value: &str, findings: &mut Vec<StateSyncFinding>) {
+    match Hash::from_hex(value) {
+        Ok(hash) if !hash.is_zero() => {}
+        Ok(_) => findings.push(error(
+            "state_sync_zero_hash",
+            format!("{label} must not be the zero hash"),
+        )),
+        Err(_) => findings.push(error(
+            "state_sync_invalid_hash",
+            format!("{label} must be a 32-byte hex hash"),
+        )),
+    }
+}
+
 fn error(code: impl Into<String>, detail: impl Into<String>) -> StateSyncFinding {
     StateSyncFinding {
         code: code.into(),
@@ -1506,6 +1657,13 @@ mod tests {
         hex::encode(hasher.finalize())
     }
 
+    fn height_context_hash(height: u64) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(b"SYNERGY_TEST_HEIGHT_CONTEXT_V1");
+        hasher.update(height.to_be_bytes());
+        hex::encode(hasher.finalize())
+    }
+
     fn temp_workspace(label: &str) -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1524,6 +1682,7 @@ mod tests {
                 json!({
                     "block_index": height,
                     "hash": height_hash(height),
+                    "height_context_root": height_context_hash(height),
                 })
             })
             .collect::<Vec<_>>();
@@ -1535,6 +1694,7 @@ mod tests {
                 json!({
                     "height": height,
                     "block_hash": height_hash(height),
+                    "height_context_root": height_context_hash(height),
                 })
                 .to_string()
             })
@@ -1568,6 +1728,7 @@ mod tests {
                 json!({
                     "block_index": height,
                     "hash": branch_hash(height),
+                    "height_context_root": height_context_hash(height),
                 })
             })
             .collect::<Vec<_>>();
@@ -1579,6 +1740,7 @@ mod tests {
                 json!({
                     "height": height,
                     "block_hash": branch_hash(height),
+                    "height_context_root": height_context_hash(height),
                 })
                 .to_string()
             })
@@ -1629,6 +1791,7 @@ mod tests {
                 json!({
                     "block_index": height,
                     "hash": height_hash(height),
+                    "height_context_root": height_context_hash(height),
                 })
             })
             .collect::<Vec<_>>();
@@ -1640,6 +1803,7 @@ mod tests {
                 json!({
                     "height": height,
                     "block_hash": height_hash(height),
+                    "height_context_root": height_context_hash(height),
                 })
                 .to_string()
             })
@@ -1677,6 +1841,7 @@ mod tests {
             "source_node_id": "validator-2",
             "source_role": "validator",
             "source_cluster_id": "cluster-1",
+            "target_height_context_root": height_context_hash(end),
             "validator_set_digest": hash(4),
             "cluster_map_digest": hash(5),
             "protocol_config_digest": hash(6),
@@ -1700,13 +1865,14 @@ mod tests {
             protocol_version: STATE_SYNC_PROTOCOL_VERSION.to_string(),
             requesting_node_id: "validator-6".to_string(),
             requesting_role: "validator".to_string(),
-            chain_id: 1264,
+            chain_id: 1266,
             network_id: SYNERGY_TESTNET_V3_NETWORK_ID.to_string(),
             genesis_hash: hash(1),
             local_height: 100,
             local_hash: hash(2),
             target_height: 105,
             target_hash: hash(3),
+            target_height_context_root: height_context_hash(105),
             reason: "lagging validator dry-run repair".to_string(),
         }
     }
@@ -1718,13 +1884,14 @@ mod tests {
             source_role: "validator".to_string(),
             source_cluster_id: Some("cluster-1".to_string()),
             source_peer_quarantined: false,
-            chain_id: 1264,
+            chain_id: 1266,
             network_id: SYNERGY_TESTNET_V3_NETWORK_ID.to_string(),
             genesis_hash: hash(1),
             common_height: 100,
             common_hash: hash(2),
             target_height: 105,
             target_hash: hash(3),
+            target_height_context_root: height_context_hash(105),
             source_height: 105,
             source_hash: hash(3),
             finalized_qc_aegis_pqc_verified: true,
@@ -1891,6 +2058,28 @@ mod tests {
     }
 
     #[test]
+    fn mismatched_target_height_context_is_rejected_before_source_trust() {
+        let mut source = source();
+        source.target_height_context_root = height_context_hash(104);
+        let plan =
+            build_state_sync_repair_plan(&request(), &source, &transfer(), Some(&local_state()));
+
+        assert!(!plan.ok);
+        assert!(codes(&plan).contains(&"state_sync_target_height_context_mismatch".to_string()));
+    }
+
+    #[test]
+    fn zero_target_height_context_is_rejected() {
+        let mut request = request();
+        request.target_height_context_root = Hash::zero().to_hex();
+        let plan =
+            build_state_sync_repair_plan(&request, &source(), &transfer(), Some(&local_state()));
+
+        assert!(!plan.ok);
+        assert!(codes(&plan).contains(&"state_sync_zero_hash".to_string()));
+    }
+
+    #[test]
     fn malicious_or_unverified_source_peer_is_rejected() {
         let mut source = source();
         source.source_peer_quarantined = true;
@@ -1949,12 +2138,14 @@ mod tests {
         req.local_hash = height_hash(local_height);
         req.target_height = target_height;
         req.target_hash = height_hash(target_height);
+        req.target_height_context_root = height_context_hash(target_height);
 
         let mut src = source();
         src.common_height = local_height;
         src.common_hash = height_hash(local_height);
         src.target_height = target_height;
         src.target_hash = height_hash(target_height);
+        src.target_height_context_root = height_context_hash(target_height);
         src.source_height = target_height;
         src.source_hash = height_hash(target_height);
 

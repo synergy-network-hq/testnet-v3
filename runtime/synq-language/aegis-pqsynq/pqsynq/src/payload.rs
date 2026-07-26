@@ -65,10 +65,10 @@ pub struct VerificationContext {
 impl VerificationContext {
     pub fn testnet(now_unix: u64) -> Self {
         Self {
-            chain_id: ChainId::testnet_1264(),
+            chain_id: ChainId::testnet_1266(),
             network_id: NetworkId::testnet(),
             now_unix,
-            policy: SynQSecurityPolicy::testnet_1264_policy(),
+            policy: SynQSecurityPolicy::testnet_1266_policy(),
         }
     }
 }

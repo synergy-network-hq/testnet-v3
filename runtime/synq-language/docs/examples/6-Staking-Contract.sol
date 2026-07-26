@@ -84,19 +84,19 @@ Staker s = stakers[msg.sender];
 if (s.stakedAmount > 0) {
 uint256 pendingReward = earned(msg.sender);
 if (pendingReward > 0) {
-s = s.totalEarned + pendingReward;
+s.totalEarned = s.totalEarned + pendingReward;
 }
 }
 if (!s.active) {
-s = true;
+s.active = true;
 stakerList.push(msg.sender);
 }
-s = s.stakedAmount + amount;
-s = (s.stakedAmount * rewardPerTokenStored) / 1e18;
-s = block.number;
+s.stakedAmount = s.stakedAmount + amount;
+s.rewardDebt = (s.stakedAmount * rewardPerTokenStored) / 1e18;
+s.lastStakeBlock = block.number;
 uint256 newLockUntil = block.number + lockPeriod;
 if (lockUntil[msg.sender] < newLockUntil) {
-lockUntil = newLockUntil;
+lockUntil[msg.sender] = newLockUntil;
 }
 totalStaked = totalStaked + amount;
 emit Staked((msg.sender, amount, lockUntil[msg.sender]));
@@ -110,14 +110,14 @@ require(block.number >= lockUntil[msg.sender], "Stake still locked");
 updateReward();
 uint256 pendingReward = earned(msg.sender);
 if (pendingReward > 0) {
-s = s.totalEarned + pendingReward;
+s.totalEarned = s.totalEarned + pendingReward;
 emit RewardClaimed((msg.sender, pendingReward));
 }
-s = s.stakedAmount - amount;
-s = (s.stakedAmount * rewardPerTokenStored) / 1e18;
+s.stakedAmount = s.stakedAmount - amount;
+s.rewardDebt = (s.stakedAmount * rewardPerTokenStored) / 1e18;
 totalStaked = totalStaked - amount;
 if (s.stakedAmount == 0) {
-s = false;
+s.active = false;
 }
 emit Unstaked((msg.sender, amount));
 }
@@ -128,8 +128,8 @@ require(s.stakedAmount > 0, "No staked amount");
 updateReward();
 uint256 pendingReward = earned(msg.sender);
 require(pendingReward > 0, "No rewards to claim");
-s = s.totalEarned + pendingReward;
-s = (s.stakedAmount * rewardPerTokenStored) / 1e18;
+s.totalEarned = s.totalEarned + pendingReward;
+s.rewardDebt = (s.stakedAmount * rewardPerTokenStored) / 1e18;
 emit RewardClaimed((msg.sender, pendingReward));
 }
 
@@ -147,10 +147,10 @@ if (!__synq_pqc_ok) {
 revert("PQC verification failed");
 }
 }
-s = s.stakedAmount - amount;
+s.stakedAmount = s.stakedAmount - amount;
 totalStaked = totalStaked - amount;
 if (s.stakedAmount == 0) {
-s = false;
+s.active = false;
 }
 emit Unstaked((msg.sender, amount));
 }
@@ -234,9 +234,9 @@ require(s.stakedAmount > 0, "No staked amount");
 updateReward();
 uint256 pendingReward = earned(msg.sender);
 require(pendingReward > 0, "No rewards to compound");
-s = s.totalEarned + pendingReward;
-s = ((s.stakedAmount + pendingReward) * rewardPerTokenStored) / 1e18;
-s = s.stakedAmount + pendingReward;
+s.totalEarned = s.totalEarned + pendingReward;
+s.rewardDebt = ((s.stakedAmount + pendingReward) * rewardPerTokenStored) / 1e18;
+s.stakedAmount = s.stakedAmount + pendingReward;
 totalStaked = totalStaked + pendingReward;
 emit Staked((msg.sender, pendingReward, lockUntil[msg.sender]));
 }

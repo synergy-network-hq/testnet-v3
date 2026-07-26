@@ -1089,6 +1089,7 @@ impl ValidatorLifecycleManager {
         validator_id: &str,
         finalized_qc: &QuorumCertificate,
         validator_set: &ValidatorSet,
+        height_context: &crate::synergy_types::HeightConsensusContext,
         verifier: &AegisPqvmVerifier,
     ) -> Result<(), String> {
         let state = self
@@ -1123,6 +1124,7 @@ impl ValidatorLifecycleManager {
                     })
                     .collect(),
             },
+            height_context,
         ) {
             stake.stake_status = StakeStatus::InvalidSignature;
             return Err("stake finalized block QC failed Aegis PQC verification".to_string());
@@ -1232,9 +1234,10 @@ mod tests {
     use super::*;
     use crate::crypto::aegis_pqvm::AegisPqvmSigner;
     use crate::synergy_types::{
-        AegisPqKeyId, AegisPqKeyRole, AegisPqSignature, BlockId, ChainId, ClusterAssignment,
-        ClusterId, ClusterMap, Epoch, Hash, Height, NetworkId, QuorumCertificate, Round, TxId,
-        UmaId, ValidatorId, ValidatorSet, Vote, VotePhase,
+        deterministic_test_height_context, AegisPqKeyId, AegisPqKeyRole, AegisPqSignature, BlockId,
+        ChainId, ClusterAssignment, ClusterId, ClusterMap, Epoch, Hash, Height,
+        HeightConsensusContext, NetworkId, QuorumCertificate, Round, TxId, UmaId, ValidatorId,
+        ValidatorSet, Vote, VotePhase, POSY_PROTOCOL_VERSION,
     };
     use std::path::PathBuf;
 
@@ -1312,10 +1315,12 @@ mod tests {
         tx
     }
 
-    fn finalized_stake_qc(signer: &mut AegisPqvmSigner) -> (ValidatorSet, QuorumCertificate) {
+    fn finalized_stake_qc(
+        signer: &mut AegisPqvmSigner,
+    ) -> (ValidatorSet, HeightConsensusContext, QuorumCertificate) {
         let mut records = Vec::new();
         let mut key_ids = Vec::new();
-        for index in 0..5 {
+        for index in 0..6 {
             let uma = format!("qc-uma-{index}");
             let key_id = signer
                 .generate_and_register_key(&uma, vec![AegisPqKeyRole::ConsensusVote], Epoch(0))
@@ -1350,18 +1355,25 @@ mod tests {
         };
         let set_hash = set.hash().unwrap();
         let cluster_hash = cluster.hash().unwrap();
+        let protocol = ProtocolConfig::testnet_v3();
+        let height_context =
+            deterministic_test_height_context(&set, &cluster, &protocol, Height(1), ClusterId(0));
+        let height_context_root = height_context.root().unwrap();
         let block_id = BlockId::from("stake-finalized-block");
-        let votes = (0..4)
+        let votes = (0..5)
             .map(|index| {
                 let mut vote = Vote {
                     chain_id: ChainId::synergy_testnet_v3(),
                     network_id: NetworkId::synergy_testnet_v3(),
+                    protocol_version: POSY_PROTOCOL_VERSION.to_string(),
                     height: Height(1),
                     round: Round(0),
                     epoch: Epoch(0),
                     cluster_id: ClusterId(0),
-                    phase: VotePhase::Commit,
+                    height_context_root,
+                    phase: VotePhase::Finality,
                     block_id: block_id.clone(),
+                    highest_prepared_vc_root: None,
                     validator_id: records[index].validator_id.clone(),
                     validator_uma_id: records[index].validator_uma_id.clone(),
                     key_id: key_ids[index].clone(),
@@ -1382,24 +1394,27 @@ mod tests {
             qc_version: 1,
             chain_id: ChainId::synergy_testnet_v3(),
             network_id: NetworkId::synergy_testnet_v3(),
+            protocol_version: POSY_PROTOCOL_VERSION.to_string(),
             height: Height(1),
             round: Round(0),
             epoch: Epoch(0),
             cluster_id: ClusterId(0),
-            phase: VotePhase::Commit,
+            height_context_root,
+            phase: VotePhase::Finality,
             block_id,
+            highest_prepared_vc_root: None,
             active_validator_set_hash: set_hash,
             cluster_map_hash: cluster_hash,
-            threshold_weight_required: 4,
-            signed_weight: 4,
-            signer_bitmap: vec![0b0000_1111],
+            threshold_weight_required: height_context.strict_weight_quorum().unwrap(),
+            signed_weight: 5,
+            signer_bitmap: vec![0b0001_1111],
             aegis_pq_signatures: votes
                 .iter()
                 .map(|vote| vote.aegis_pq_signature.clone())
                 .collect(),
-            aegis_pq_key_ids: key_ids[0..4].to_vec(),
+            aegis_pq_key_ids: key_ids[0..5].to_vec(),
         };
-        (set, qc)
+        (set, height_context, qc)
     }
 
     #[test]
@@ -1535,10 +1550,16 @@ mod tests {
         assert!(!manager.can_vote("validator-1"));
         assert!(!manager.can_propose("validator-1"));
 
-        let (validator_set, qc) = finalized_stake_qc(&mut signer);
+        let (validator_set, height_context, qc) = finalized_stake_qc(&mut signer);
         let verifier = signer.verifier();
         manager
-            .confirm_stake("validator-1", &qc, &validator_set, &verifier)
+            .confirm_stake(
+                "validator-1",
+                &qc,
+                &validator_set,
+                &height_context,
+                &verifier,
+            )
             .unwrap();
         assert!(manager
             .advance_after_stake(
@@ -1608,10 +1629,16 @@ mod tests {
         manager
             .submit_stake("validator-1", stake_record(amount), &tx, &verifier)
             .unwrap();
-        let (validator_set, qc) = finalized_stake_qc(&mut signer);
+        let (validator_set, height_context, qc) = finalized_stake_qc(&mut signer);
         let verifier = signer.verifier();
         manager
-            .confirm_stake("validator-1", &qc, &validator_set, &verifier)
+            .confirm_stake(
+                "validator-1",
+                &qc,
+                &validator_set,
+                &height_context,
+                &verifier,
+            )
             .unwrap();
         assert!(manager
             .advance_after_stake(

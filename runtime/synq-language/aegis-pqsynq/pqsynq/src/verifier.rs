@@ -27,8 +27,8 @@ impl AegisSynQVerifier {
         Self { policy }
     }
 
-    pub fn testnet_1264() -> Self {
-        Self::new(SynQSecurityPolicy::testnet_1264_policy())
+    pub fn testnet_1266() -> Self {
+        Self::new(SynQSecurityPolicy::testnet_1266_policy())
     }
 
     pub fn verify_synq_transaction(

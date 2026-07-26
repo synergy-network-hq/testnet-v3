@@ -223,8 +223,8 @@ impl SolidityGenerator {
                 }
                 self.writeln(";");
             }
-            Statement::Assignment(name, expr) => {
-                self.write(name);
+            Statement::Assignment(target, expr) => {
+                self.gen_expression(target)?;
                 self.write(" = ");
                 self.gen_expression(expr)?;
                 self.writeln(";");

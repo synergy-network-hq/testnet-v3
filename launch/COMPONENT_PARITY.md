@@ -45,7 +45,7 @@ those bindings with new identities rather than preserve the old ones.
 
 The genesis contract suite is native SynQ source plus compiler-produced
 artifacts. No Solidity contract is part of the Testnet-v3 package.
-`runtime/scripts/testnet/genesis_tool.py` builds chain-1264 genesis documents
+`runtime/scripts/testnet/genesis_tool.py` builds chain-1266 genesis documents
 from public inputs, recomputes their integrity values, and validates them. The
 contracts are not claimed to be deployed merely because they are present in
 this repository; deployment belongs to the final Testnet-v3 genesis

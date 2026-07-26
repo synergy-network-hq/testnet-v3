@@ -22,7 +22,8 @@ The suite contains:
 8. `Slashing`
 
 Governance configuration methods require ML-DSA verification. Operational
-contract-to-contract and runtime-authority calls remain explicitly gated.
+contract-to-contract and runtime-authority calls are explicitly capability
+gated by each compiled artifact manifest.
 Authorities and addresses in `deployment-config.example.json` are placeholders
 for newly generated Testnet-v3 values; no Testnet-v2 identity is approved.
 
@@ -30,8 +31,9 @@ The contracts are native SynQ adaptations of the functional responsibilities
 described by the legacy files, not Solidity compatibility outputs. Native SNRG
 movement, cross-contract calls, validator-registry access, staking access, and
 SynID normalization are expressed as required AIVM host capabilities. The
-current AIVM does not yet provide the complete general host environment. The
-required host surface is enumerated in `host-capabilities.json`.
+stateful SynQ IR v2 AIVM path implements that host surface and enforces the
+per-contract allowlist emitted in each manifest. The canonical capability
+registry is `host-capabilities.json`.
 
 ## Rebuild and verify
 
@@ -44,15 +46,22 @@ for source in ../../genesis-contracts/contracts/*.synq; do
 done
 ```
 
-The current `synq build` command additionally emits a `.sol` compatibility
-preview. That preview is not production-deployable and must not be included in
-this package.
+Any locally generated `.sol` compatibility preview is not production-deployable
+and must not be included in this package. Synergy deployment artifacts are the
+native `.compiled.synq`, ABI, and manifest files.
 
-## Deployment blocker
+## Deployment evidence
 
-Compilation is not deployment proof. The inherited AIVM currently records
-generic contract metadata but does not execute constructors or provide general
-stateful SynQ bytecode with calldata, caller/value context, persistent storage,
-events, or host calls. These contracts must not be marked deployed until that
-general AIVM execution path is implemented and an end-to-end deployment/call/
-restart/replay test passes for this suite.
+Compilation alone is not deployment proof. The Testnet-v3 AIVM now executes
+constructors and general stateful SynQ IR v2 with canonical calldata,
+caller/value and block context, persistent storage, events, PQ verification,
+native transfers, capability-gated host calls, and transaction-scoped nested
+contract calls. The `aivm-core` test
+`all_eight_genesis_contracts_deploy_call_restart_and_replay_deterministically`
+deploys all eight artifacts, exercises representative calls, restores the
+serialized state, and proves deterministic receipt and state-root replay.
+
+This local execution evidence does not mark the contracts deployed to the
+network. Public Testnet-v3 deployment remains gated on the separately generated
+and approved identity/genesis inputs, complete launch validation, and controlled
+network start.

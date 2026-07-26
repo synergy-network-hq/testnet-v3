@@ -118,6 +118,69 @@ lazy_static! {
 }
 
 lazy_static! {
+    static ref ETDAG_INGRESS_POOL: Mutex<EtdagIngressPool> =
+        Mutex::new(EtdagIngressPool::default());
+}
+
+/// Opaque user ingress must be independently bounded.  Finality traffic does
+/// not share this pool, so a saturated ETDAG lane fails new user submissions
+/// closed rather than consuming the validator's unbounded memory budget.
+const MAX_ETDAG_INGRESS_POOL_ENTRIES: usize = 2_048;
+const MAX_ETDAG_INGRESS_POOL_SERIALIZED_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Default)]
+struct EtdagIngressPool {
+    entries: BTreeMap<crate::etdag::EtdagDigest, crate::etdag::EtdagSubmissionEnvelope>,
+    serialized_bytes: usize,
+}
+
+impl EtdagIngressPool {
+    fn insert(
+        &mut self,
+        commitment: crate::etdag::EtdagDigest,
+        submission: crate::etdag::EtdagSubmissionEnvelope,
+        serialized_bytes: usize,
+    ) -> Result<(), &'static str> {
+        if let Some(existing) = self.entries.get(&commitment) {
+            return if existing == &submission {
+                Ok(())
+            } else {
+                Err("ERR_ETDAG_COMMITMENT_COLLISION")
+            };
+        }
+        let next_bytes = next_etdag_ingress_pool_bytes(
+            self.entries.len(),
+            self.serialized_bytes,
+            serialized_bytes,
+        )?;
+        self.entries.insert(commitment, submission);
+        self.serialized_bytes = next_bytes;
+        Ok(())
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+fn next_etdag_ingress_pool_bytes(
+    entry_count: usize,
+    current_bytes: usize,
+    new_entry_bytes: usize,
+) -> Result<usize, &'static str> {
+    if entry_count >= MAX_ETDAG_INGRESS_POOL_ENTRIES {
+        return Err("ERR_ETDAG_INGRESS_POOL_FULL");
+    }
+    let next_bytes = current_bytes
+        .checked_add(new_entry_bytes)
+        .ok_or("ERR_ETDAG_INGRESS_POOL_FULL")?;
+    if next_bytes > MAX_ETDAG_INGRESS_POOL_SERIALIZED_BYTES {
+        return Err("ERR_ETDAG_INGRESS_POOL_FULL");
+    }
+    Ok(next_bytes)
+}
+
+lazy_static! {
     static ref NODE_START_TIME: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
 }
 
@@ -1415,7 +1478,7 @@ fn validator_set_snapshot_json(
             None => {
                 return json!({
                     "error": "canonical finalized chain tip is unavailable",
-                    "chain_id": 1264,
+                    "chain_id": 1266,
                     "fail_closed": true,
                     "is_latest": false,
                 });
@@ -1424,7 +1487,7 @@ fn validator_set_snapshot_json(
         Err(_) => {
             return json!({
                 "error": "canonical finalized chain lock is unavailable",
-                "chain_id": 1264,
+                "chain_id": 1266,
                 "fail_closed": true,
                 "is_latest": false,
             });
@@ -1437,7 +1500,7 @@ fn validator_set_snapshot_json(
         Err(_) => {
             return json!({
                 "error": "validator registry is temporarily unavailable",
-                "chain_id": 1264,
+                "chain_id": 1266,
                 "fail_closed": true,
                 "is_latest": false,
             });
@@ -1451,7 +1514,7 @@ fn validator_set_snapshot_json(
         Err(error) => {
             return json!({
                 "error": format!("validator membership is unavailable at finalized height {finalized_height}: {error}"),
-                "chain_id": 1264,
+                "chain_id": 1266,
                 "current_finalized_height": finalized_height,
                 "fail_closed": true,
                 "is_latest": false,
@@ -1471,7 +1534,7 @@ fn validator_set_snapshot_json(
             if let Err(error) = validator_manager.save_registry(VALIDATOR_REGISTRY_PATH) {
                 return json!({
                     "error": format!("canonical validator cluster reconciliation could not be persisted at finalized height {finalized_height}: {error}"),
-                    "chain_id": 1264,
+                    "chain_id": 1266,
                     "current_finalized_height": finalized_height,
                     "epoch_id": canonical_epoch,
                     "fail_closed": true,
@@ -1483,7 +1546,7 @@ fn validator_set_snapshot_json(
         Err(error) => {
             return json!({
                 "error": format!("canonical validator cluster seed is unavailable at finalized height {finalized_height}: {error}"),
-                "chain_id": 1264,
+                "chain_id": 1266,
                 "current_finalized_height": finalized_height,
                 "epoch_id": canonical_epoch,
                 "fail_closed": true,
@@ -1499,7 +1562,7 @@ fn validator_set_snapshot_json(
         Err(_) => {
             return json!({
                 "error": "validator registry is temporarily unavailable after reconciliation",
-                "chain_id": 1264,
+                "chain_id": 1266,
                 "current_finalized_height": finalized_height,
                 "fail_closed": true,
                 "is_latest": false,
@@ -1512,7 +1575,7 @@ fn validator_set_snapshot_json(
         Err(_) => {
             return json!({
                 "error": "validator registry is temporarily unavailable",
-                "chain_id": 1264,
+                "chain_id": 1266,
                 "fail_closed": true,
                 "is_latest": false,
             });
@@ -1527,7 +1590,7 @@ fn validator_set_snapshot_json(
         Err(error) => {
             return json!({
                 "error": format!("validator membership is unavailable at finalized height {finalized_height}: {error}"),
-                "chain_id": 1264,
+                "chain_id": 1266,
                 "current_finalized_height": finalized_height,
                 "fail_closed": true,
                 "is_latest": false,
@@ -1542,7 +1605,7 @@ fn validator_set_snapshot_json(
         Err(error) => {
             return json!({
                 "error": format!("validator cluster epoch is unavailable at finalized height {finalized_height}: {error}"),
-                "chain_id": 1264,
+                "chain_id": 1266,
                 "current_finalized_height": finalized_height,
                 "fail_closed": true,
                 "is_latest": false,
@@ -1563,7 +1626,7 @@ fn validator_set_snapshot_json(
         Err(error) => {
             return json!({
                 "error": format!("canonical epoch randomness evidence is unavailable at finalized height {finalized_height}: {error}"),
-                "chain_id": 1264,
+                "chain_id": 1266,
                 "current_finalized_height": finalized_height,
                 "epoch_id": effective_epoch,
                 "fail_closed": true,
@@ -1582,7 +1645,7 @@ fn validator_set_snapshot_json(
     if seeds.len() != 1 || !seeds.contains(expected_assignment_seed.as_str()) {
         return json!({
             "error": format!("canonical validator cluster seed does not match verified {} evidence at finalized height {finalized_height}", randomness_evidence.scheme),
-            "chain_id": 1264,
+            "chain_id": 1266,
             "current_finalized_height": finalized_height,
             "epoch_id": effective_epoch,
             "fail_closed": true,
@@ -1599,7 +1662,7 @@ fn validator_set_snapshot_json(
         Err(error) => {
             return json!({
                 "error": format!("canonical validator cluster assignment is unavailable at finalized height {finalized_height}: {error}"),
-                "chain_id": 1264,
+                "chain_id": 1266,
                 "current_finalized_height": finalized_height,
                 "fail_closed": true,
                 "is_latest": false,
@@ -1615,7 +1678,7 @@ fn validator_set_snapshot_json(
         Err(error) => {
             return json!({
                 "error": format!("validator-set transition metadata is unavailable at finalized height {finalized_height}: {error}"),
-                "chain_id": 1264,
+                "chain_id": 1266,
                 "current_finalized_height": finalized_height,
                 "is_latest": false,
             });
@@ -1700,7 +1763,7 @@ fn validator_set_snapshot_json(
     if !cluster_assignments_complete {
         return json!({
             "error": format!("canonical validator cluster assignments are not proven at finalized height {finalized_height}"),
-            "chain_id": 1264,
+            "chain_id": 1266,
             "epoch_id": effective_epoch,
             "current_finalized_height": finalized_height,
             "active_validators": active.iter().map(|validator| validator.address.clone()).collect::<Vec<_>>(),
@@ -1781,7 +1844,7 @@ fn validator_set_snapshot_json(
         .collect::<Vec<_>>();
 
     json!({
-        "chain_id": 1264,
+        "chain_id": 1266,
         "network_id": current_network_id(),
         "snapshot_format_version": 1,
         "protocol_version": current_protocol_version(),
@@ -1814,7 +1877,7 @@ fn validator_set_snapshot_json(
         "cluster_assignment_boundary_height": randomness_evidence.boundary_height,
         "cluster_assignment_boundary_hash": randomness_evidence.boundary_block_hash.clone(),
         "cluster_assignment_evidence": {
-            "chain_id": 1264,
+            "chain_id": 1266,
             "next_epoch": randomness_evidence.next_epoch,
             "boundary_height": randomness_evidence.boundary_height,
             "boundary_block_hash": randomness_evidence.boundary_block_hash,
@@ -2252,8 +2315,13 @@ fn execute_rpc_method(
     subscriptions: Option<&mut HashMap<String, SubscriptionCursor>>,
     _request_context: &RpcRequestContext,
 ) -> Result<Value, RpcError> {
+    if method == "synergy_simulateTransaction" {
+        return Err(RpcError::new(
+            -32072,
+            "ERR_CONFIDENTIAL_SIMULATION_REQUIRED: public plaintext simulation is disabled after ETDAG activation",
+        ));
+    }
     match method {
-        "synergy_simulateTransaction" => simulate_transaction(&params, tx_pool, chain),
         "synergy_getAccountNonce" | "synergy_getAccountAuthNonce" => {
             get_account_nonce(&params, tx_pool, chain)
         }
@@ -2274,6 +2342,216 @@ fn execute_rpc_method(
             chain,
             validator_manager,
         )),
+    }
+}
+
+fn submit_etdag_transaction_envelope(envelope_value: &Value) -> Value {
+    let submission = match serde_json::from_value::<crate::etdag::EtdagSubmissionEnvelope>(
+        envelope_value.clone(),
+    ) {
+        Ok(submission) => submission,
+        Err(error) => {
+            return json!({
+                "success": false,
+                "code": "ERR_INVALID_ETDAG_ENVELOPE",
+                "error": format!("Invalid encrypted transaction envelope: {error}"),
+            });
+        }
+    };
+    let envelope = &submission.sealed_bundle.envelope;
+    let target_height = envelope.target_height;
+    let assigned_cluster_id = envelope.assigned_cluster_id;
+    if envelope.chain_id.0 != current_chain_id() {
+        return json!({
+            "success": false,
+            "code": "ERR_WRONG_CHAIN",
+            "error": format!(
+                "ETDAG envelope chain {} does not match local chain {}",
+                envelope.chain_id.0,
+                current_chain_id()
+            ),
+        });
+    }
+    let admission_package = match crate::etdag::EtdagAdmissionPackageStore::process_wide()
+        .get(envelope.target_height)
+    {
+        Ok(Some(package)) => package,
+        Ok(None) => {
+            return json!({
+                "success": false,
+                "code": "ERR_TARGET_ADMISSION_PACKAGE_UNAVAILABLE",
+                "error": "The certified target-admission package is not available locally; the envelope was not accepted",
+                "target_height": envelope.target_height.0,
+            });
+        }
+        Err(error) => {
+            return json!({
+                "success": false,
+                "code": "ERR_TARGET_ADMISSION_PACKAGE_STORE",
+                "error": error,
+            });
+        }
+    };
+    if let Err(error) = submission.verify(
+        &admission_package.context,
+        &crate::etdag::EtdagParameters::default(),
+    ) {
+        return json!({
+            "success": false,
+            "code": "ERR_ETDAG_ADMISSION_REJECTED",
+            "error": error,
+        });
+    }
+    let serialized_bytes = match serde_json::to_vec(&submission) {
+        Ok(bytes) => bytes.len(),
+        Err(error) => {
+            return json!({
+                "success": false,
+                "code": "ERR_ETDAG_ENVELOPE_SERIALIZATION",
+                "error": format!("ETDAG envelope cannot be accounted for safely: {error}"),
+            });
+        }
+    };
+    let commitment = envelope.tx_commitment.clone();
+    let mut pool = match ETDAG_INGRESS_POOL.lock() {
+        Ok(pool) => pool,
+        Err(_) => {
+            return json!({
+                "success": false,
+                "code": "ERR_ETDAG_INGRESS_UNAVAILABLE",
+                "error": "ETDAG ingress pool lock poisoned",
+            });
+        }
+    };
+    if let Err(code) = pool.insert(commitment.clone(), submission, serialized_bytes) {
+        let error = match code {
+            "ERR_ETDAG_COMMITMENT_COLLISION" => {
+                "A different sealed envelope already occupies this commitment"
+            }
+            "ERR_ETDAG_INGRESS_POOL_FULL" => {
+                "The opaque ETDAG ingress budget is exhausted; retry after finality drains the target lane"
+            }
+            _ => "The opaque ETDAG ingress pool rejected the envelope",
+        };
+        return json!({
+            "success": false,
+            "code": code,
+            "error": error,
+            "automatic_plaintext_fallback": false,
+        });
+    }
+    json!({
+        "success": true,
+        "tx_commitment": commitment.0,
+        "target_height": target_height.0,
+        "assigned_cluster_id": assigned_cluster_id.0,
+        "admission_status": "OPAQUE_INGRESS_RECEIVED",
+        "vac_certified": false,
+        "receipt_scope": "transport receipt only; final admission requires a VAC inclusion proof",
+        "plaintext_exposed": false,
+    })
+}
+
+fn etdag_admission_package_json(params: &Value) -> Value {
+    let Some(height) = params
+        .get(0)
+        .and_then(|value| value.as_u64())
+        .map(crate::synergy_types::Height)
+    else {
+        return json!({
+            "success": false,
+            "code": "ERR_MISSING_TARGET_HEIGHT",
+            "error": "A positive target height is required",
+        });
+    };
+    if height.0 == 0 {
+        return json!({
+            "success": false,
+            "code": "ERR_INVALID_TARGET_HEIGHT",
+            "error": "Target height must be positive",
+        });
+    }
+    match crate::etdag::EtdagAdmissionPackageStore::process_wide().get(height) {
+        Ok(Some(package)) => match package.package_digest() {
+            Ok(package_digest) => json!({
+                "success": true,
+                "target_height": height.0,
+                "package_digest": package_digest.0,
+                "package": package,
+                "contains_secret_key_material": false,
+                "client_must_verify_certificate": true,
+            }),
+            Err(error) => json!({
+                "success": false,
+                "code": "ERR_TARGET_ADMISSION_PACKAGE_INVALID",
+                "error": error,
+            }),
+        },
+        Ok(None) => json!({
+            "success": false,
+            "code": "ERR_TARGET_ADMISSION_PACKAGE_UNAVAILABLE",
+            "error": "No certified target-admission package is installed for that height",
+            "target_height": height.0,
+        }),
+        Err(error) => json!({
+            "success": false,
+            "code": "ERR_TARGET_ADMISSION_PACKAGE_STORE",
+            "error": error,
+        }),
+    }
+}
+
+fn etdag_status_json() -> Value {
+    match ETDAG_INGRESS_POOL.lock() {
+        Ok(pool) => json!({
+            "profile_id": crate::etdag::ETDAG_PROFILE_ID,
+            "enabled": true,
+            "plaintext_user_tx_allowed": false,
+            "automatic_plaintext_fallback_allowed": false,
+            "opaque_ingress_count": pool.len(),
+            "opaque_ingress_serialized_bytes": pool.serialized_bytes,
+            "opaque_ingress_max_entries": MAX_ETDAG_INGRESS_POOL_ENTRIES,
+            "opaque_ingress_max_serialized_bytes": MAX_ETDAG_INGRESS_POOL_SERIALIZED_BYTES,
+            "opaque_ingress_saturation_behavior": "reject_new_encrypted_submission_without_plaintext_fallback",
+            "target_admission_package_method": "synergy_getEtdagAdmissionPackage",
+            "target_admission_context_requires_future_qc": false,
+            "public_pending_content_before_reveal_gate": false,
+            "public_ordered_reveal_required": true,
+        }),
+        Err(_) => json!({
+            "profile_id": crate::etdag::ETDAG_PROFILE_ID,
+            "enabled": true,
+            "fail_closed": true,
+            "error": "ETDAG ingress pool unavailable",
+        }),
+    }
+}
+
+fn consensus_safety_halt_status_json() -> Value {
+    consensus_safety_halt_status_for(
+        &crate::consensus::signing_authority::DurableConsensusSigningAuthority::process_wide(),
+    )
+}
+
+fn consensus_safety_halt_status_for(
+    authority: &crate::consensus::signing_authority::DurableConsensusSigningAuthority,
+) -> Value {
+    match authority.safety_halt_incidents() {
+        Ok(incidents) => json!({
+            "status": if incidents.is_empty() { "SIGNING_ALLOWED" } else { "SAFETY_HALT" },
+            "signing_allowed": incidents.is_empty(),
+            "incident_count": incidents.len(),
+            "incidents": incidents,
+            "clearable_by_runtime": false,
+        }),
+        Err(error) => json!({
+            "status": "SAFETY_HALT_STATUS_UNAVAILABLE",
+            "signing_allowed": false,
+            "incident_count": Value::Null,
+            "incidents": [],
+            "clearable_by_runtime": false,
+            "error": error,
+        }),
     }
 }
 
@@ -2403,6 +2681,45 @@ fn handle_json_rpc(
     // Temporarily disabled AIVM for quick compile
     // aivm_runtime: &Arc<AIVMRuntime>,
 ) -> Value {
+    if matches!(
+        method,
+        "synergy_sendTransaction"
+            | "synergy_submitAegisTransaction"
+            | "synergy_submitAegisDagTransaction"
+            | "synergy_submitAegisDagTransactionBatch"
+            | "synergy_submitAegisTransactionBatch"
+    ) {
+        return json!({
+            "success": false,
+            "code": crate::etdag::ERR_PLAINTEXT_USER_TX_DISABLED,
+            "error": "Ordinary plaintext transaction submission is disabled after Testnet-v3 ETDAG activation",
+            "required_method": "synergy_submitEncryptedTransaction",
+            "automatic_plaintext_fallback": false,
+        });
+    }
+    if matches!(
+        method,
+        "synergy_getTransactionPool"
+            | "synergy_getTransaction"
+            | "synergy_getTransactionStatus"
+            | "synergy_getPendingTransaction"
+            | "synergy_getPendingTransactions"
+            | "synergy_getDagVertices"
+            | "synergy_getDagFrontier"
+            | "synergy_getDagVertex"
+            | "synergy_getDagNode"
+            | "synergy_getDagTransactionStatus"
+            | "synergy_getDagTopology"
+            | "synergy_getDagGraph"
+            | "synergy_getDagDependencies"
+            | "synergy_getDagTxOrderRoot"
+    ) {
+        return json!({
+            "success": false,
+            "code": "ERR_PRE_REVEAL_PENDING_CONTENT_DISABLED",
+            "error": "Pre-RevealGate pending transaction content and legacy plaintext DAG views are disabled",
+        });
+    }
     match method {
         // Blockchain queries
         "synergy_chainId" | "synergy_networkId" | "synergy_genesisHash" => {
@@ -2722,8 +3039,27 @@ fn handle_json_rpc(
             "Snapshot catalog verification requires the signed archive catalog payload",
         ),
 
-        // DAG transaction graph methods
-        "synergy_getDagStatus" => crate::dag::status_json(),
+        // PoSy v2.2 encrypted transaction DAG methods.
+        "synergy_submitEncryptedTransaction" | "synergy_submitEtdagTransaction" => {
+            if let Some(envelope_value) = params.get(0) {
+                submit_etdag_transaction_envelope(envelope_value)
+            } else {
+                json!({
+                    "success": false,
+                    "code": "ERR_MISSING_ETDAG_ENVELOPE",
+                    "error": "Missing encrypted transaction submission envelope",
+                })
+            }
+        }
+
+        "synergy_getEtdagStatus" | "synergy_getDagStatus" => etdag_status_json(),
+
+        "synergy_getEtdagAdmissionPackage" => etdag_admission_package_json(&params),
+
+        "synergy_getConsensusSafetyHalt" => consensus_safety_halt_status_json(),
+
+        // Legacy plaintext DAG query routes below remain unreachable after
+        // activation through the fail-closed policy above.
 
         "synergy_getDagFrontier" => crate::dag::frontier_json(),
 
@@ -3555,14 +3891,14 @@ fn handle_json_rpc(
         "synergy_registerValidator" => {
             json!({
                 "success": false,
-                "error": "Legacy direct validator registration is disabled on Synergy Testnet chain 1264. Submit the validator activation transaction after Aegis PQC key binding and a finalized 50,000 SNRG stake lock."
+                "error": "Legacy direct validator registration is disabled on Synergy Testnet chain 1266. Submit the validator activation transaction after Aegis PQC key binding and a finalized 50,000 SNRG stake lock."
             })
         }
 
         "synergy_approveValidator" => {
             json!({
                 "success": false,
-                "error": "Legacy direct validator approval is disabled on Synergy Testnet chain 1264. Activation must be finalized by the epoch-gated staking/onboarding path."
+                "error": "Legacy direct validator approval is disabled on Synergy Testnet chain 1266. Activation must be finalized by the epoch-gated staking/onboarding path."
             })
         }
 
@@ -4519,20 +4855,25 @@ fn handle_json_rpc(
         "synergy_getTransactionFees" => transaction_fees_json(&params, chain),
 
         "synergy_getFeeCollectorBalance" => {
-            let collector = crate::token::FEE_COLLECTOR_ADDRESS;
-            json!({
-                "fee_collector": collector,
-                "balance_nwei": TOKEN_MANAGER.get_balance(collector, "SNRG"),
-                "chain": chain_identity_json(),
-            })
+            match crate::token::fee_collector_address() {
+                Ok(collector) => json!({
+                    "fee_collector": collector,
+                    "balance_nwei": TOKEN_MANAGER.get_balance(&collector, "SNRG"),
+                    "chain": chain_identity_json(),
+                }),
+                Err(error) => json!({"error": error, "chain": chain_identity_json()}),
+            }
         }
 
-        "synergy_getFeeCollectorDeposits" => json!({
-            "fee_collector": crate::token::FEE_COLLECTOR_ADDRESS,
-            "deposits": [],
-            "indexing_status": "not_available_in_runtime_rpc",
-            "chain": chain_identity_json(),
-        }),
+        "synergy_getFeeCollectorDeposits" => match crate::token::fee_collector_address() {
+            Ok(collector) => json!({
+                "fee_collector": collector,
+                "deposits": [],
+                "indexing_status": "not_available_in_runtime_rpc",
+                "chain": chain_identity_json(),
+            }),
+            Err(error) => json!({"error": error, "chain": chain_identity_json()}),
+        },
 
         // 7. synergy_getLogs
         // Get event logs matching filters.
@@ -5785,6 +6126,7 @@ fn rpc_method_exposure(method: &str) -> Option<RpcMethodExposure> {
         | "synergy_getFinalizedHead"
         | "synergy_getCanonicalLock"
         | "synergy_getCommittedQC"
+        | "synergy_getConsensusSafetyHalt"
         | "synergy_getDivergenceStatus"
         | "synergy_getQuarantineStatus"
         | "synergy_getReconciliationPlan"
@@ -5881,6 +6223,7 @@ fn rpc_method_exposure(method: &str) -> Option<RpcMethodExposure> {
         | "synergy_getTransactionByHash"
         | "synergy_getTransactionsInBlock"
         | "synergy_getDagStatus"
+        | "synergy_getEtdagStatus"
         | "synergy_getDagFrontier"
         | "synergy_getDagVertices"
         | "synergy_getDagVertex"
@@ -5930,6 +6273,7 @@ fn rpc_method_exposure(method: &str) -> Option<RpcMethodExposure> {
         | "synergy_maxPriorityFeePerGas"
         | "synergy_getFeeHistory"
         | "synergy_getChainId"
+        | "synergy_getEtdagAdmissionPackage"
         | "synergy_getValidatorByCluster"
         | "synergy_getValidatorRewards"
         | "synergy_getValidatorRewardStatus"
@@ -5962,6 +6306,8 @@ fn rpc_method_exposure(method: &str) -> Option<RpcMethodExposure> {
         | "synergy_getAddressBook"
         | "synergy_status" => Some(RpcMethodExposure::PublicRead),
         "synergy_simulateTransaction"
+        | "synergy_submitEncryptedTransaction"
+        | "synergy_submitEtdagTransaction"
         | "synergy_sendTransaction"
         | "synergy_submitAegisTransaction"
         | "synergy_submitAegisTransactionBatch"
@@ -6174,7 +6520,7 @@ fn current_chain_id() -> u64 {
     crate::config::load_node_config(None)
         .ok()
         .map(|cfg| cfg.blockchain.chain_id)
-        .unwrap_or(1264)
+        .unwrap_or(1266)
 }
 
 fn current_network_id() -> String {
@@ -8188,7 +8534,7 @@ fn confirmed_transaction_receipt_json(
         "gasUsed": gas_used,
         "effectiveGasPrice": tx.gas_price,
         "feeCharged": fee_charged,
-        "feeCollector": crate::token::FEE_COLLECTOR_ADDRESS,
+        "feeCollector": crate::token::fee_collector_address().ok(),
         "feeBreakdown": fee_breakdown.as_ref().map(fee_breakdown_json).unwrap_or(Value::Null),
         "status": status,
         "logs": [],
@@ -8479,7 +8825,7 @@ fn transaction_fees_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Valu
     json!({
         "transactionHash": receipt.get("transactionHash").cloned(),
         "feeCharged": receipt.get("feeCharged").cloned().unwrap_or_else(|| json!(0)),
-        "feeCollector": receipt.get("feeCollector").cloned().unwrap_or_else(|| json!(crate::token::FEE_COLLECTOR_ADDRESS)),
+        "feeCollector": receipt.get("feeCollector").cloned().unwrap_or_else(|| json!(crate::token::fee_collector_address().ok())),
         "feeBreakdown": receipt.get("feeBreakdown").cloned().unwrap_or(Value::Null),
         "gasUsed": receipt.get("gasUsed").cloned().unwrap_or_else(|| json!(0)),
         "effectiveGasPrice": receipt.get("effectiveGasPrice").cloned().unwrap_or_else(|| json!(0)),
@@ -8527,7 +8873,7 @@ fn estimate_fee_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
                 "maxFee": u128_rpc_value(max_fee),
                 "gas": gas,
                 "gasPrice": gas_price,
-                "feeCollector": crate::token::FEE_COLLECTOR_ADDRESS,
+                "feeCollector": crate::token::fee_collector_address().ok(),
                 "feeBreakdown": safe_breakdown.as_ref().map(fee_breakdown_json).unwrap_or(Value::Null),
                 "maxFeeBreakdown": max_breakdown.as_ref().map(fee_breakdown_json).unwrap_or(Value::Null),
                 "components": {
@@ -8563,7 +8909,7 @@ fn fee_schedule_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
         })
         .collect::<Vec<_>>();
     json!({
-        "feeCollector": crate::token::FEE_COLLECTOR_ADDRESS,
+        "feeCollector": crate::token::fee_collector_address().ok(),
         "gasPrice": gas_price,
         "minGasPrice": crate::gas::constants::MIN_GAS_PRICE,
         "maxGasPrice": crate::gas::constants::MAX_GAS_PRICE,
@@ -8576,12 +8922,15 @@ fn fee_schedule_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
 }
 
 fn fee_collector_json() -> Value {
-    json!({
-        "address": crate::token::FEE_COLLECTOR_ADDRESS,
-        "uma": crate::token::FEE_COLLECTOR_ADDRESS,
-        "source": "protocol_constant_and_genesis_allocation",
-        "chain": chain_identity_json(),
-    })
+    match crate::token::fee_collector_address() {
+        Ok(collector) => json!({
+            "address": collector,
+            "uma": collector,
+            "source": "testnet_v3_genesis_system_account",
+            "chain": chain_identity_json(),
+        }),
+        Err(error) => json!({"error": error, "chain": chain_identity_json()}),
+    }
 }
 
 fn parse_u64ish(value: Option<&Value>) -> Result<Option<u64>, RpcError> {
@@ -9679,6 +10028,26 @@ mod tests {
 
     static RPC_VALIDATOR_ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    #[test]
+    fn etdag_ingress_budget_rejects_entry_and_byte_saturation() {
+        assert_eq!(
+            next_etdag_ingress_pool_bytes(0, 0, MAX_ETDAG_INGRESS_POOL_SERIALIZED_BYTES),
+            Ok(MAX_ETDAG_INGRESS_POOL_SERIALIZED_BYTES)
+        );
+        assert_eq!(
+            next_etdag_ingress_pool_bytes(0, 0, MAX_ETDAG_INGRESS_POOL_SERIALIZED_BYTES + 1),
+            Err("ERR_ETDAG_INGRESS_POOL_FULL")
+        );
+        assert_eq!(
+            next_etdag_ingress_pool_bytes(MAX_ETDAG_INGRESS_POOL_ENTRIES, 0, 1),
+            Err("ERR_ETDAG_INGRESS_POOL_FULL")
+        );
+        assert_eq!(
+            next_etdag_ingress_pool_bytes(0, usize::MAX, 1),
+            Err("ERR_ETDAG_INGRESS_POOL_FULL")
+        );
+    }
+
     struct RpcEnvVarGuard {
         key: &'static str,
         previous: Option<String>,
@@ -10358,7 +10727,7 @@ mod tests {
     }
 
     #[test]
-    fn public_gateway_allows_canonical_client_pipeline() {
+    fn public_gateway_allows_encrypted_client_pipeline() {
         let mut headers = HashMap::new();
         headers.insert("x-forwarded-for".to_string(), "198.51.100.22".to_string());
         let context = RpcRequestContext {
@@ -10368,10 +10737,57 @@ mod tests {
             role_profile: crate::role_profiles::profile_from_compiled_profile("rpc_gateway_node"),
         };
 
-        enforce_rpc_exposure_policy("synergy_sendTransaction", &context)
-            .expect("canonical public client method should be allowed");
-        enforce_rpc_exposure_policy("synergy_simulateTransaction", &context)
-            .expect("simulation should be allowed on the public client surface");
+        enforce_rpc_exposure_policy("synergy_submitEncryptedTransaction", &context)
+            .expect("encrypted public client method should be allowed");
+        enforce_rpc_exposure_policy("synergy_getEtdagStatus", &context)
+            .expect("content-free ETDAG status should be public");
+        enforce_rpc_exposure_policy("synergy_getEtdagAdmissionPackage", &context)
+            .expect("certified public ETDAG admission package should be public");
+        enforce_rpc_exposure_policy("synergy_getConsensusSafetyHalt", &context)
+            .expect("content-free consensus SafetyHalt status should be public");
+    }
+
+    #[test]
+    fn consensus_safety_halt_status_is_operator_visible_and_fail_closed() {
+        let path = std::env::temp_dir().join(format!(
+            "synergy-rpc-safety-halt-{}-{}.json",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let authority =
+            crate::consensus::signing_authority::DurableConsensusSigningAuthority::at_path(path);
+        let allowed = consensus_safety_halt_status_for(&authority);
+        assert_eq!(allowed["status"], "SIGNING_ALLOWED");
+        assert_eq!(allowed["signing_allowed"], true);
+
+        authority
+            .enter_safety_halt(
+                &crate::consensus::signing_authority::SafetyHaltIncident {
+                    incident_version: 1,
+                    kind: crate::consensus::signing_authority::SafetyHaltKind::ConflictingFinalityCertificates,
+                    chain_id: crate::synergy_types::ChainId::synergy_testnet_v3(),
+                    network_id: crate::synergy_types::NetworkId::synergy_testnet_v3(),
+                    protocol_version: crate::synergy_types::POSY_PROTOCOL_VERSION.to_string(),
+                    epoch: crate::synergy_types::Epoch(0),
+                    height: crate::synergy_types::Height(8),
+                    context_root: Hash::from_domain_bytes("rpc-halt-context", b"height-eight"),
+                    first_evidence_root: Hash::from_domain_bytes("rpc-halt-qc", b"candidate-a"),
+                    second_evidence_root: Hash::from_domain_bytes("rpc-halt-qc", b"candidate-b"),
+                },
+            )
+            .unwrap();
+        let halted = consensus_safety_halt_status_for(&authority);
+        assert_eq!(halted["status"], "SAFETY_HALT");
+        assert_eq!(halted["signing_allowed"], false);
+        assert_eq!(halted["incident_count"], 1);
+        assert_eq!(halted["clearable_by_runtime"], false);
+        assert_eq!(
+            halted["incidents"][0]["kind"],
+            "CONFLICTING_FINALITY_CERTIFICATES"
+        );
     }
 
     #[test]
@@ -10415,7 +10831,7 @@ mod tests {
     }
 
     #[test]
-    fn public_gateway_allows_launch_aegis_submit_methods() {
+    fn legacy_plaintext_submit_routes_are_classified_but_fail_closed_in_execution() {
         let mut headers = HashMap::new();
         headers.insert("x-forwarded-for".to_string(), "198.51.100.22".to_string());
         let context = RpcRequestContext {
@@ -10426,6 +10842,7 @@ mod tests {
         };
 
         for method in [
+            "synergy_sendTransaction",
             "synergy_submitAegisTransaction",
             "synergy_submitAegisTransactionBatch",
             "synergy_submitAegisDagTransaction",
@@ -10434,6 +10851,48 @@ mod tests {
             enforce_rpc_exposure_policy(method, &context)
                 .unwrap_or_else(|error| panic!("{method} should be client-safe: {error:?}"));
         }
+
+        let tx_pool = Arc::new(Mutex::new(Vec::<Transaction>::new()));
+        let chain = Arc::new(Mutex::new(BlockChain::new()));
+        let validator_manager = Arc::new(ValidatorManager::new());
+        for method in [
+            "synergy_sendTransaction",
+            "synergy_submitAegisTransaction",
+            "synergy_submitAegisTransactionBatch",
+            "synergy_submitAegisDagTransaction",
+            "synergy_submitAegisDagTransactionBatch",
+        ] {
+            let result = handle_json_rpc(method, json!([{}]), &tx_pool, &chain, &validator_manager);
+            assert_eq!(
+                result["code"],
+                json!(crate::etdag::ERR_PLAINTEXT_USER_TX_DISABLED),
+                "{method} did not fail closed"
+            );
+            assert_eq!(result["automatic_plaintext_fallback"], json!(false));
+        }
+        let pending = handle_json_rpc(
+            "synergy_getDagGraph",
+            json!([]),
+            &tx_pool,
+            &chain,
+            &validator_manager,
+        );
+        assert_eq!(
+            pending["code"],
+            json!("ERR_PRE_REVEAL_PENDING_CONTENT_DISABLED")
+        );
+        let status = handle_json_rpc(
+            "synergy_getEtdagStatus",
+            json!([]),
+            &tx_pool,
+            &chain,
+            &validator_manager,
+        );
+        assert_eq!(status["plaintext_user_tx_allowed"], json!(false));
+        assert_eq!(
+            status["public_pending_content_before_reveal_gate"],
+            json!(false)
+        );
     }
 
     #[test]
@@ -10450,7 +10909,7 @@ mod tests {
             &validator_manager,
         );
 
-        assert_eq!(identity["chain_id"], 1264);
+        assert_eq!(identity["chain_id"], 1266);
         assert_eq!(identity["chain_id_hex"], "0x4f0");
         assert_eq!(identity["network_id"], "synergy-testnet-v3");
         assert_eq!(
@@ -11777,7 +12236,7 @@ mod tests {
             rpc_method_exposure("synergy_getValidatorSetSnapshot"),
             Some(RpcMethodExposure::PublicRead)
         );
-        assert_eq!(snapshot["chain_id"], json!(1264));
+        assert_eq!(snapshot["chain_id"], json!(1266));
         assert_eq!(snapshot["snapshot_format_version"], json!(1));
         assert_eq!(snapshot["membership_bundle_format_version"], json!(2));
         assert_eq!(snapshot["epoch_id"], json!(0));

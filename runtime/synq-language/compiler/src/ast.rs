@@ -1,28 +1,29 @@
 //! Abstract Syntax Tree (AST) for the SynQ language.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum SourceUnit {
     Contract(ContractDefinition),
     Struct(StructDefinition),
     Event(EventDefinition),
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct Annotation {
     pub name: String,
     pub args: Vec<Expression>,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ContractDefinition {
     pub name: String,
     pub annotations: Vec<Annotation>,
     pub parts: Vec<ContractPart>,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum ContractPart {
     StateVariable(StateVariableDeclaration),
     Constructor(ConstructorDefinition),
@@ -30,7 +31,7 @@ pub enum ContractPart {
     Event(EventDefinition),
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct StateVariableDeclaration {
     pub name: String,
     pub ty: Type,
@@ -38,14 +39,14 @@ pub struct StateVariableDeclaration {
     pub annotations: Vec<Annotation>,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ConstructorDefinition {
     pub params: Vec<Parameter>,
     pub body: Block,
     pub annotations: Vec<Annotation>,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct FunctionDefinition {
     pub name: String,
     pub params: Vec<Parameter>,
@@ -55,36 +56,36 @@ pub struct FunctionDefinition {
     pub annotations: Vec<Annotation>,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct StructDefinition {
     pub name: String,
     pub fields: Vec<Parameter>,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct EventDefinition {
     pub name: String,
     pub params: Vec<Parameter>,
     pub annotations: Vec<Annotation>,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct Parameter {
     pub name: String,
     pub ty: Type,
     pub is_indexed: bool,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct Block {
     pub statements: Vec<Statement>,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum Statement {
     Expression(Expression),
     VariableDeclaration(String, Type, Option<Expression>),
-    Assignment(String, Expression),
+    Assignment(Expression, Expression),
     Return(Option<Expression>),
     Require(Expression, String),
     Revert(String),
@@ -94,7 +95,7 @@ pub enum Statement {
     RequirePqc(Block, Option<Box<Statement>>), // require_pqc block with optional fallback (revert/return)
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum Expression {
     Call(String, Vec<Expression>),
     MemberAccess(Box<Expression>, String),
@@ -106,7 +107,7 @@ pub enum Expression {
     Ternary(Box<Expression>, Box<Expression>, Box<Expression>),
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum BinaryOp {
     Add,
     Sub,
@@ -125,7 +126,7 @@ pub enum BinaryOp {
     Shr,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum UnaryOp {
     Not,
     Neg,
@@ -133,7 +134,7 @@ pub enum UnaryOp {
     Dec,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum Type {
     Address,
     UInt256,
@@ -167,7 +168,7 @@ pub enum Type {
     Generic(String, Vec<Type>),
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum Literal {
     String(String),
     Number(u64),
@@ -177,7 +178,7 @@ pub enum Literal {
 }
 
 // Semantic analysis types
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct Symbol {
     pub name: String,
     pub ty: Type,
@@ -185,7 +186,7 @@ pub struct Symbol {
     pub is_mutable: bool,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum Scope {
     Global,
     Contract(String),
@@ -193,14 +194,14 @@ pub enum Scope {
     Block,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct SemanticError {
     pub message: String,
     pub line: Option<usize>,
     pub column: Option<usize>,
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct SemanticContext {
     pub symbols: HashMap<String, Symbol>,
     pub current_contract: Option<String>,

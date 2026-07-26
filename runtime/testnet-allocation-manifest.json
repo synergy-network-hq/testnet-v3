@@ -134,7 +134,7 @@
       "validator_id": "validator-5"
     }
   ],
-  "chain_id": 1264,
+  "chain_id": 1266,
   "nwei_per_snrg": "1000000000",
   "rounding_policy": "exact integer nWei allocation; no rounding required for screenshot token counts",
   "rounding_remainder_nwei": "0",

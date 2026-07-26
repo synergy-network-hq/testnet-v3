@@ -6,11 +6,11 @@ Dedicated, fail-closed preparation workspace for Synergy Testnet-v3.
 
 - Release ID: `testnet-v3`
 - Runtime network ID: `synergy-testnet-v3`
-- Chain ID: `1264`
-- Numeric network ID: `1264`
+- Chain ID: `1266`
+- Numeric network ID: `1266`
 - Token: `SNRG`
 
-The chain and numeric network IDs remain `1264`. The runtime network ID changes
+The chain and numeric network IDs remain `1266`. The runtime network ID changes
 to prevent Testnet-v3 nodes, transactions, snapshots, and recovery artifacts
 from being accepted by the Testnet-v2 runtime.
 
@@ -61,9 +61,10 @@ identity:
 python3 scripts/check-component-parity.py
 ```
 
-The packaging portion currently passes. The command exits nonzero because
-general stateful SynQ execution and end-to-end deployment of the eight genesis
-contracts remain blocked in the inherited AIVM.
+This gate verifies native stateful SynQ IR v2 artifacts, their hashes and
+manifest-bound host capabilities, and the resolved local AIVM execution
+evidence for the eight genesis contracts. It does not approve identities,
+genesis, binaries, or a network launch; those remain under the full launch gate.
 
 ## Source repository
 

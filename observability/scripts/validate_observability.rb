@@ -45,7 +45,7 @@ end
 expect(manifest["schema_version"] == 1, "unsupported proxy contract schema")
 expect(manifest["environment"] == "testnet", "proxy contract environment must be testnet")
 expect(manifest["network"] == "synergy-testnet", "proxy contract network must be synergy-testnet")
-expect(manifest["chain_id"] == "1264", "proxy contract chain_id must be 1264")
+expect(manifest["chain_id"] == "1266", "proxy contract chain_id must be 1266")
 policy = require_key(manifest, "policy", "manifest")
 expect(policy["observer_outside_validator_vpn"] == true, "observer must be outside the validator VPN")
 expect(policy["validator_telemetry_via_relayers_only"] == true, "validator telemetry must use relayers")

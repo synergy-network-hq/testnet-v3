@@ -1105,117 +1105,15 @@ impl RpcClient {
 }
 
 fn submit_payload(
-    args: &[String],
-    sender: &str,
-    payload_hex: &str,
-    estimated_gas: u64,
+    _args: &[String],
+    _sender: &str,
+    _payload_hex: &str,
+    _estimated_gas: u64,
 ) -> Result<serde_json::Value, String> {
-    let wallet = load_wallet_material(args)?;
-    if wallet.address != sender {
-        return Err(format!(
-            "--from ({sender}) must match wallet address ({}) for STS submission",
-            wallet.address
-        ));
-    }
-
-    let rpc_url = optional_arg(args, "--rpc-url")
-        .or_else(|| std::env::var("SYNERGY_RPC_URL").ok())
-        .unwrap_or_else(|| DEFAULT_RPC_URL.to_string());
-    let timeout_seconds =
-        optional_u64_arg(args, "--rpc-timeout-seconds")?.unwrap_or(DEFAULT_SUBMIT_TIMEOUT_SECONDS);
-    let rpc = RpcClient::new(rpc_url, timeout_seconds)?;
-    verify_rpc_native_asset(&rpc)?;
-
-    let gas_price_nwei = match optional_u64_arg(args, "--gas-price-nwei")? {
-        Some(price) => price,
-        None => parse_json_u64(
-            &rpc.call("synergy_gasPrice", json!([]))?,
-            "synergy_gasPrice",
-        )?
-        .max(DEFAULT_GAS_PRICE_NWEI),
-    };
-    let gas_limit = optional_u64_arg(args, "--gas-limit")?
-        .unwrap_or_else(|| estimated_gas.saturating_add(DEFAULT_STS_GAS_LIMIT_BUFFER));
-    if gas_limit < estimated_gas {
-        return Err(format!(
-            "--gas-limit {gas_limit} is below estimated STS gas {estimated_gas}"
-        ));
-    }
-    let carrier_amount_nwei =
-        optional_u64_arg(args, "--carrier-amount-nwei")?.unwrap_or(DEFAULT_STS_CARRIER_AMOUNT_NWEI);
-    let nonce = match optional_u64_arg(args, "--nonce")? {
-        Some(nonce) => nonce,
-        None => parse_json_u64(
-            &rpc.call("synergy_getAccountNonce", json!([sender]))?,
-            "synergy_getAccountNonce",
-        )?,
-    };
-    let balance_nwei = parse_json_u128(
-        &rpc.call("synergy_getTokenBalance", json!([sender, "SNRG"]))?,
-        "synergy_getTokenBalance",
-    )?;
-    let fee_cap_nwei = (gas_limit as u128)
-        .checked_mul(gas_price_nwei as u128)
-        .and_then(|fee| fee.checked_add(carrier_amount_nwei as u128))
-        .ok_or_else(|| "fee cap overflow".to_string())?;
-    if balance_nwei < fee_cap_nwei {
-        return Err(format!(
-            "wallet SNRG balance {balance_nwei} nwei is below fee cap {fee_cap_nwei} nwei"
-        ));
-    }
-
-    let tx_options = CarrierTransactionOptions {
-        nonce,
-        gas_price_nwei,
-        gas_limit,
-        carrier_amount_nwei,
-        receiver: optional_arg(args, "--receiver").unwrap_or_else(|| sender.to_string()),
-        timestamp: optional_u64_arg(args, "--timestamp")?.unwrap_or(current_timestamp()?),
-    };
-    let signed = build_signed_sts_carrier_transaction(&wallet, sender, payload_hex, tx_options)?;
-    let tx_hash = signed.hash();
-    let signed_value = serde_json::to_value(&signed)
-        .map_err(|error| format!("failed to serialize signed transaction: {error}"))?;
-    let submit_result = rpc.call("synergy_sendTransaction", json!([signed_value.clone()]))?;
-    if !submit_result
-        .get("success")
-        .and_then(|value| value.as_bool())
-        .unwrap_or(false)
-    {
-        return Err(format!(
-            "synergy_sendTransaction did not accept transaction: {submit_result}"
-        ));
-    }
-
-    let mut submission = json!({
-        "submitted": true,
-        "rpc_url": rpc.url,
-        "wallet": {
-            "address": wallet.address,
-            "source": wallet.source,
-        },
-        "chain_id": SYNERGY_TESTNET_V3_CHAIN_ID,
-        "network_id": SYNERGY_TESTNET_V3_NETWORK_ID,
-        "tx_hash": submit_result
-            .get("tx_hash")
-            .and_then(|value| value.as_str())
-            .unwrap_or(tx_hash.as_str()),
-        "mempool_status": submit_result.get("mempool_status").cloned().unwrap_or(serde_json::Value::Null),
-        "nonce": nonce,
-        "gas_price_nwei": gas_price_nwei,
-        "gas_limit": gas_limit,
-        "carrier_amount_nwei": carrier_amount_nwei,
-        "fee_cap_nwei": fee_cap_nwei.to_string(),
-        "message": submit_result.get("message").cloned().unwrap_or(serde_json::Value::Null),
-        "policy_warnings": submit_result.get("policy_warnings").cloned().unwrap_or(json!([])),
-    });
-    if has_flag(args, "--include-signed-transaction") || has_flag(args, "--include-signed-tx") {
-        submission
-            .as_object_mut()
-            .ok_or_else(|| "submission report was not an object".to_string())?
-            .insert("signed_transaction".to_string(), signed_value);
-    }
-    Ok(submission)
+    Err(
+        "ERR_PLAINTEXT_USER_TX_DISABLED: STS submission must be sealed locally as a PoSy v2.2 ETDAG envelope before any network-facing RPC; this command will not transmit the plaintext carrier"
+            .to_string(),
+    )
 }
 
 fn build_signed_sts_carrier_transaction(

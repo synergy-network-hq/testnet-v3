@@ -30,7 +30,7 @@ requiredSignatures = _requiredSignatures;
 nonce = 0;
 transactionCount = 0;
 for (uint256 i = 0; i < _owners.length; i++) {
-ownerKeys = _ownerKeys[i];
+ownerKeys[_owners[i]] = _ownerKeys[i];
 }
 }
 
@@ -60,7 +60,7 @@ require(isOwner(msg.sender), "Not an owner");
 require(to != Address(0), "Invalid recipient");
 uint256 txId = transactionCount;
 transactionCount = transactionCount + 1;
-transactions = Transaction(        {
+transactions[txId] = Transaction(        {
                     to: to,
                     value: value,
                     data: data,
@@ -86,8 +86,8 @@ if (!__synq_pqc_ok) {
 revert("PQC verification failed");
 }
 }
-confirmations = true;
-transactions = transactions[txId].confirmations + 1;
+confirmations[txId][msg.sender] = true;
+transactions[txId].confirmations = transactions[txId].confirmations + 1;
 emit TransactionConfirmed((txId, msg.sender));
 if (transactions[txId].confirmations >= requiredSignatures) {
 executeTransaction(txId);
@@ -98,7 +98,7 @@ function executeTransaction(uint256 txId) internal {
 require(!transactions[txId].executed, "Transaction already executed");
 require(transactions[txId].confirmations >= requiredSignatures, "Not enough confirmations");
 Transaction tx = transactions[txId];
-tx = true;
+tx.executed = true;
 emit TransactionExecuted((txId));
 }
 
@@ -107,8 +107,8 @@ require(isOwner(msg.sender), "Not an owner");
 require(transactions[txId].to != Address(0), "Transaction does not exist");
 require(!transactions[txId].executed, "Transaction already executed");
 require(confirmations[txId][msg.sender], "Transaction not confirmed");
-confirmations = false;
-transactions = transactions[txId].confirmations - 1;
+confirmations[txId][msg.sender] = false;
+transactions[txId].confirmations = transactions[txId].confirmations - 1;
 }
 
 // @gas_cost
@@ -134,7 +134,7 @@ revert("PQC verification failed");
 }
 }
 owners.push(newOwner);
-ownerKeys = newOwnerKey;
+ownerKeys[newOwner] = newOwnerKey;
 emit OwnerAdded((newOwner, newOwnerKey));
 }
 
@@ -162,7 +162,7 @@ revert("PQC verification failed");
 }
 for (uint256 i = 0; i < owners.length; i++) {
 if (owners[i] == ownerToRemove) {
-owners = owners[owners.length - 1];
+owners[i] = owners[owners.length - 1];
 owners.pop();
 break;
 }
@@ -195,8 +195,8 @@ revert("PQC verification failed");
 }
 for (uint256 i = 0; i < owners.length; i++) {
 if (owners[i] == oldOwner) {
-owners = newOwner;
-ownerKeys = newOwnerKey;
+owners[i] = newOwner;
+ownerKeys[newOwner] = newOwnerKey;
 break;
 }
 }

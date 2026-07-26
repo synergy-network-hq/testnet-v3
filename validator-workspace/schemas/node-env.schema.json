@@ -14,7 +14,7 @@
     "SYNERGY_COMMITTED_QC_HOT_RETENTION_BLOCKS"
   ],
   "properties": {
-    "SYNERGY_CHAIN_ID": { "const": "1264" },
+    "SYNERGY_CHAIN_ID": { "const": "1266" },
     "SYNERGY_NETWORK_ID": { "const": "synergy-testnet-v3" },
     "SYNERGY_WORKSPACE": { "const": "/home/node/.synergy/testnet/nodes/validator-workspace" },
     "SYNERGY_CONFIG_FILE": { "const": "/etc/synergy/validator/config.toml" },

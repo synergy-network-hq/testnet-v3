@@ -12,7 +12,6 @@ use crate::config::{
     list_available_templates, load_node_config, load_node_config_from_template, NodeConfig,
 };
 use crate::consensus::cartel_detection::{CartelDetectionEngine, WhistleblowerSystem};
-use crate::consensus::consensus_algorithm::ProofOfSynergy;
 use crate::consensus::consensus_fork;
 use crate::consensus::dao_governance::{DAOGovernance, SynergyOracle};
 use crate::consensus::dual_quorum::{EntropyBeacon, ValidatorRotation};
@@ -20,6 +19,7 @@ use crate::consensus::self_realign::{
     persisted_recovery_state, RealignmentState, EXPECTED_GENESIS_HASH,
 };
 use crate::consensus::synergy_score::SynergyScoreCalculator;
+use crate::consensus::testnet_v3_bootstrap::load_testnet_v3_genesis_bootstrap;
 use crate::consensus::validator_keys::{
     load_local_validator_keypair_for_height, validator_public_key_with_declared_algorithm,
 };
@@ -240,7 +240,7 @@ fn run_offline_snapshot_command_isolated(args: &[String], command: &str) -> Resu
 
 fn require_testnet_v3_operator_args(args: &[String]) -> Result<(), String> {
     let chain_id = arg_value(args, "--chain-id")
-        .ok_or_else(|| "missing --chain-id 1264".to_string())?
+        .ok_or_else(|| "missing --chain-id 1266".to_string())?
         .parse::<u64>()
         .map_err(|error| format!("invalid --chain-id: {error}"))?;
     if chain_id != SYNERGY_TESTNET_V3_CHAIN_ID {
@@ -927,18 +927,17 @@ fn should_watch_for_validator_activation_consensus(
     !consensus_enabled && is_validator_profile(profile) && !config.node.bootstrap_only
 }
 
-fn spawn_consensus_engine() -> thread::JoinHandle<()> {
-    thread::spawn(|| {
-        let mut consensus = ProofOfSynergy::new();
-        consensus.initialize();
-        consensus.execute();
-    })
+fn spawn_consensus_engine() -> Result<thread::JoinHandle<()>, String> {
+    Err(
+        "POSY_V2_2_OPERATIONAL_COORDINATOR_NOT_READY: the inherited ProofOfSynergy/DualQuorumConsensus loop is disabled; refusing validator signing until the typed HeightConsensusContext + VC/QC/TC + protected ETDAG coordinator is fully wired"
+            .to_string(),
+    )
 }
 
 fn ensure_consensus_pqc_runtime_ready(config: &NodeConfig) -> Result<(), String> {
-    if config.blockchain.chain_id != 1264 || config.network.id != 1264 {
+    if config.blockchain.chain_id != 1266 || config.network.id != 1266 {
         return Err(format!(
-            "validator consensus requires Testnet chain_id 1264, found blockchain.chain_id={} network.id={}",
+            "validator consensus requires Testnet chain_id 1266, found blockchain.chain_id={} network.id={}",
             config.blockchain.chain_id, config.network.id
         ));
     }
@@ -951,6 +950,13 @@ fn ensure_consensus_pqc_runtime_ready(config: &NodeConfig) -> Result<(), String>
     if config.consensus.allow_genesis_status_bypass {
         return Err("validator consensus refuses genesis status bypass configuration".to_string());
     }
+    let genesis = canonical_genesis()
+        .map_err(|error| format!("validator consensus cannot load canonical Genesis: {error}"))?;
+    load_testnet_v3_genesis_bootstrap(genesis).map_err(|error| {
+        format!(
+            "validator consensus canonical Genesis is not a valid typed Testnet-v3 bootstrap: {error}"
+        )
+    })?;
     ensure_local_validator_consensus_key_bound(config)
 }
 
@@ -1124,7 +1130,7 @@ fn print_usage(binary_name: &str, expected_profile: Option<&RoleProfile>) {
     eprintln!();
     eprintln!("SNAPSHOT OPTIONS:");
     eprintln!(
-        "    --chain-id 1264 --network-id synergy-testnet-v3 --genesis-hash {}",
+        "    --chain-id 1266 --network-id synergy-testnet-v3 --genesis-hash {}",
         EXPECTED_GENESIS_HASH
     );
     eprintln!("    --source-workspace <PATH>  Source workspace for offline create/list/verify");
@@ -2426,7 +2432,13 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                     "Starting consensus engine",
                     "algorithm" => config.consensus.algorithm.clone()
                 );
-                Some(spawn_consensus_engine())
+                match spawn_consensus_engine() {
+                    Ok(handle) => Some(handle),
+                    Err(error) => {
+                        eprintln!("Consensus startup failed closed: {error}");
+                        process::exit(1);
+                    }
+                }
             };
             let watch_for_activation_consensus = should_watch_for_validator_activation_consensus(
                 &config,
@@ -2470,7 +2482,13 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                         eprintln!("Consensus activation failed closed: {error}");
                         process::exit(1);
                     }
-                    consensus_handle = Some(spawn_consensus_engine());
+                    consensus_handle = match spawn_consensus_engine() {
+                        Ok(handle) => Some(handle),
+                        Err(error) => {
+                            eprintln!("Consensus activation failed closed: {error}");
+                            process::exit(1);
+                        }
+                    };
                     refresh_sync_source_policy(&config, role_profile);
                     write_role_runtime_report(
                         binary_name,
@@ -2806,7 +2824,7 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
 
             let _ = (address, key_path);
             eprintln!(
-                "Error: legacy direct validator registration is disabled on Synergy Testnet chain 1264. Use the on-chain validator activation flow: bind Aegis PQC keys, submit and finalize a 50,000 SNRG stake lock, sync/replay/shadow, then activate at a finalized epoch boundary."
+                "Error: legacy direct validator registration is disabled on Synergy Testnet chain 1266. Use the on-chain validator activation flow: bind Aegis PQC keys, submit and finalize a 50,000 SNRG stake lock, sync/replay/shadow, then activate at a finalized epoch boundary."
             );
             process::exit(1);
         }
@@ -2998,12 +3016,20 @@ mod tests {
         ))
     }
 
+    #[test]
+    fn production_role_runtime_cannot_start_inherited_consensus_loop() {
+        let error = spawn_consensus_engine()
+            .expect_err("legacy consensus must remain unreachable in production role runtime");
+        assert!(error.contains("POSY_V2_2_OPERATIONAL_COORDINATOR_NOT_READY"));
+        assert!(error.contains("inherited ProofOfSynergy/DualQuorumConsensus loop is disabled"));
+    }
+
     fn snapshot_args(extra: &[&str]) -> Vec<String> {
         let mut args = vec![
             "synergy-testnet".to_string(),
             "create-snapshot".to_string(),
             "--chain-id".to_string(),
-            "1264".to_string(),
+            "1266".to_string(),
             "--network-id".to_string(),
             "synergy-testnet-v3".to_string(),
             "--genesis-hash".to_string(),
@@ -3018,7 +3044,7 @@ mod tests {
             "synergy-testnet".to_string(),
             "quarantine-stopped-validator".to_string(),
             "--chain-id".to_string(),
-            "1264".to_string(),
+            "1266".to_string(),
             "--network-id".to_string(),
             "synergy-testnet-v3".to_string(),
             "--genesis-hash".to_string(),
@@ -3033,7 +3059,7 @@ mod tests {
             "synergy-testnet".to_string(),
             command.to_string(),
             "--chain-id".to_string(),
-            "1264".to_string(),
+            "1266".to_string(),
             "--network-id".to_string(),
             "synergy-testnet-v3".to_string(),
             "--genesis-hash".to_string(),
@@ -3053,7 +3079,7 @@ mod tests {
         ];
         let error =
             require_testnet_v3_operator_args(&missing).expect_err("chain id must be required");
-        assert!(error.contains("--chain-id 1264"));
+        assert!(error.contains("--chain-id 1266"));
 
         let wrong = vec![
             "synergy-testnet".to_string(),
@@ -3064,7 +3090,7 @@ mod tests {
             "synergy-testnet-v3".to_string(),
         ];
         let error = require_testnet_v3_operator_args(&wrong).expect_err("wrong chain id must fail");
-        assert!(error.contains("expected 1264"));
+        assert!(error.contains("expected 1266"));
     }
 
     #[test]
@@ -3073,7 +3099,7 @@ mod tests {
             "synergy-testnet".to_string(),
             "create-snapshot".to_string(),
             "--chain-id".to_string(),
-            "1264".to_string(),
+            "1266".to_string(),
             "--network-id".to_string(),
             "synergy-testnet-v1".to_string(),
             "--genesis-hash".to_string(),
@@ -3090,7 +3116,7 @@ mod tests {
             "synergy-testnet".to_string(),
             "create-snapshot".to_string(),
             "--chain-id".to_string(),
-            "1264".to_string(),
+            "1266".to_string(),
             "--network-id".to_string(),
             "synergy-testnet-v3".to_string(),
             "--genesis-hash".to_string(),
@@ -3106,7 +3132,7 @@ mod tests {
         let args = vec![
             "synergy-testnet".to_string(),
             "create-snapshot".to_string(),
-            "--chain-id=1264".to_string(),
+            "--chain-id=1266".to_string(),
             "--network-id=synergy-testnet-v3".to_string(),
             format!("--genesis-hash={EXPECTED_GENESIS_HASH}"),
         ];

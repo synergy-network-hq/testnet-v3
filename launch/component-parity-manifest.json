@@ -2,7 +2,7 @@
   "schema_version": 1,
   "source_generation": "testnet-v2",
   "target_release": "testnet-v3",
-  "chain_id": 1264,
+  "chain_id": 1266,
   "runtime_network_id": "synergy-testnet-v3",
   "components": [
     {
@@ -280,6 +280,42 @@
       ]
     },
     {
+      "id": "encrypted_etdag",
+      "description": "PoSy v2.2 wallet sealing, encrypted DAG availability, DCC ordering, batch certificates, threshold public reveal, durable journals, protected execution, and plaintext rejection",
+      "required_paths": [
+        "runtime/src/etdag.rs",
+        "runtime/src/consensus/posy.rs",
+        "runtime/src/consensus/signing_authority.rs",
+        "runtime/src/rpc/rpc_server.rs"
+      ],
+      "required_markers": [
+        {
+          "path": "runtime/src/etdag.rs",
+          "contains": [
+            "pub struct EncryptedTransactionEnvelope",
+            "pub struct DagCutCertificate",
+            "pub struct BatchOrderCertificate",
+            "pub struct RevealGate",
+            "pub struct ProtectedBlockInput"
+          ]
+        },
+        {
+          "path": "runtime/src/consensus/posy.rs",
+          "contains": [
+            "propose_protected_block",
+            "validate_protected_proposal"
+          ]
+        },
+        {
+          "path": "runtime/src/rpc/rpc_server.rs",
+          "contains": [
+            "ERR_PLAINTEXT_USER_TX_DISABLED",
+            "synergy_submitEncryptedTransaction"
+          ]
+        }
+      ]
+    },
+    {
       "id": "rpc_and_role_services",
       "description": "RPC, gateway, relayer, archive, indexer/explorer, validator, observer, AIVM, and SynQ node roles",
       "required_paths": [
@@ -371,15 +407,39 @@
   "operational_blockers": [
     {
       "id": "aivm_general_synq_execution",
-      "status": "blocked",
+      "status": "resolved",
       "evidence": "runtime/synergy-aivm/docs/readiness/CURRENT_STATUS.md",
-      "reason": "The inherited AIVM does not execute constructors or general stateful SynQ bytecode with canonical calldata, persistent storage, events, and host calls."
+      "reason": "Testnet-v3 stateful SynQ IR v2 executes constructors and general calls with canonical calldata, caller/value and block context, persistent storage, events, PQ verification, manifest-gated host calls, native transfers, nested contract calls, and atomic rollback."
     },
     {
       "id": "synq_genesis_contract_deployment",
-      "status": "blocked",
+      "status": "resolved",
       "evidence": "genesis-contracts/README.md",
-      "reason": "The eight native SynQ contracts compile, but end-to-end AIVM deployment, stateful calls, restart, and replay are not yet proven."
+      "reason": "The focused AIVM integration test deploys all eight native SynQ contracts, exercises representative stateful and cross-contract calls, restores serialized state, and proves deterministic state-root and receipt replay."
+    },
+    {
+      "id": "operational_posy_v2_2_engine_convergence",
+      "status": "blocked",
+      "evidence": "launch/POSY_V2_2_ALIGNMENT_AUDIT.md",
+      "reason": "The inherited ProofOfSynergy/DualQuorumConsensus startup path is now disabled and fails closed. The typed height-context, VC/QC/TC, durable SafetyHalt, signer-journal, and protected ETDAG implementation is not yet wired as the sole cross-process operational coordinator, so validator signing remains intentionally unavailable."
+    },
+    {
+      "id": "wallet_etdag_sealing",
+      "status": "blocked",
+      "evidence": "launch/POSY_V2_2_ALIGNMENT_AUDIT.md",
+      "reason": "The external Wallet platforms still contain legacy plaintext/Aegis submission methods and are not integrated with the native ETDAG sealer."
+    },
+    {
+      "id": "etdag_target_context_and_ingress_keys",
+      "status": "blocked",
+      "evidence": "launch/POSY_V2_2_ALIGNMENT_AUDIT.md",
+      "reason": "The certified H+3 context, strict certificate validation, public ML-KEM registry schema, append-only store, and discovery RPC are implemented. Operational package issuance/propagation and the final public records from the separate identity workstream are not yet bound into genesis or installed."
+    },
+    {
+      "id": "security_performance_genesis_launch_qualification",
+      "status": "blocked",
+      "evidence": "launch/launch-readiness.json",
+      "reason": "Security v7, full regression/chaos/replay, deterministic external-input genesis, reproducible release, required performance profiles, and the 10,000-block soak remain incomplete."
     }
   ]
 }

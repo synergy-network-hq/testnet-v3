@@ -8,7 +8,7 @@ fn counter_bundle_from(relative_path: &str) -> ArtifactBundle {
     let source = fs::read_to_string(source_path).unwrap();
     let (_version, ast) = parse(&source).unwrap();
     analyze(&ast).unwrap();
-    let bytecode = CodeGenerator::new().generate(&ast).unwrap();
+    let bytecode = CodeGenerator::new().generate_stateful(&ast).unwrap();
     ArtifactBundle::generate(&source, &ast, bytecode).unwrap()
 }
 
@@ -28,8 +28,8 @@ fn counter_artifacts_are_deterministic_and_chain_bound() {
         second.manifest_json().unwrap()
     );
     assert_eq!(first.abi.contract, "Counter");
-    assert_eq!(first.manifest.artifact_format, "synq-bytecode-v1");
-    assert_eq!(first.manifest.required_chain_id, 1264);
+    assert_eq!(first.manifest.artifact_format, "synq-stateful-ir-v2");
+    assert_eq!(first.manifest.required_chain_id, 1266);
     assert_eq!(first.manifest.required_network_id, "synergy-testnet");
     assert_eq!(first.manifest.required_signature_algorithm, "ML-DSA-65");
     assert!(!first.hashes.bytecode_hash.is_empty());
@@ -65,7 +65,7 @@ fn counter_artifacts_match_checked_in_canonical_fixtures() {
     assert_eq!(bundle.manifest_json().unwrap(), expected_manifest);
     assert_eq!(
         bundle.hashes.bytecode_hash,
-        "6b8b2d0d1433c0c4941bfc41054a58a004e9cc46e475926f0f70d3d309e92533"
+        "9fe99c76286d6fab0cab50911d398b08723068beac8503d146a122bae635516a"
     );
     assert_eq!(
         bundle.hashes.abi_hash,
@@ -73,7 +73,7 @@ fn counter_artifacts_match_checked_in_canonical_fixtures() {
     );
     assert_eq!(
         bundle.hashes.manifest_hash,
-        "6334f5a98926f3c5eeb4f9337a9602841e5cc9b77b59f0e648203a296d290332"
+        "42d2da3985343a9d9b678f10ed2b7e31acaaf78290ba268d131ea4947a078b62"
     );
 }
 
@@ -87,7 +87,7 @@ fn counter_manifest_references_generated_hashes_and_policy() {
         bundle.manifest.storage_schema_hash,
         bundle.hashes.storage_schema_hash
     );
-    assert_eq!(bundle.manifest.required_chain_id, 1264);
+    assert_eq!(bundle.manifest.required_chain_id, 1266);
     assert_eq!(bundle.manifest.required_network_id, "synergy-testnet");
     assert_eq!(bundle.manifest.required_signature_algorithm, "ML-DSA-65");
     assert_eq!(
@@ -106,13 +106,13 @@ fn manifest_generation_uses_explicit_artifact_config() {
     let source = fs::read_to_string(source_path).unwrap();
     let (_version, ast) = parse(&source).unwrap();
     analyze(&ast).unwrap();
-    let bytecode = CodeGenerator::new().generate(&ast).unwrap();
-    let mut config = ArtifactConfig::testnet_1264();
+    let bytecode = CodeGenerator::new().generate_stateful(&ast).unwrap();
+    let mut config = ArtifactConfig::testnet_1266();
     config.required_network_id = "synergy-testnet-v3".to_string();
 
     let bundle = ArtifactBundle::generate_with_config(&source, &ast, bytecode, &config).unwrap();
 
-    assert_eq!(bundle.manifest.required_chain_id, 1264);
+    assert_eq!(bundle.manifest.required_chain_id, 1266);
     assert_eq!(bundle.manifest.required_network_id, "synergy-testnet-v3");
     assert_eq!(bundle.manifest.required_signature_algorithm, "ML-DSA-65");
 }

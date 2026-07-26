@@ -4,6 +4,7 @@ extern crate pest_derive;
 pub mod artifacts;
 pub mod ast;
 pub mod codegen;
+pub mod executable;
 pub mod parser;
 pub mod pqc_integration;
 pub mod semantic;
@@ -14,6 +15,9 @@ pub use artifacts::{
     ArtifactBundle, ArtifactConfig, ArtifactHashes, SynQAbiArtifact, SynQManifestArtifact,
 };
 pub use codegen::CodeGenerator;
+pub use executable::{
+    StatefulSynQExecutable, STATEFUL_SYNQ_EXECUTABLE_MAGIC, STATEFUL_SYNQ_EXECUTABLE_VERSION,
+};
 pub use parser::parse;
 pub use pqc_integration::PqcIntegration;
 pub use semantic::analyze;

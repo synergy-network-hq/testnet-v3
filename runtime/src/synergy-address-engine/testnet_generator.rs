@@ -97,7 +97,7 @@ fn write_genesis_file() {
             "dateGenerated": Utc::now().to_rfc3339()
         },
         "config": {
-            "chainId": 1264,
+            "chainId": 1266,
             "synergyConsensus": {
                 "algorithm": "Proof of Synergy",
                 "parameters": {
@@ -151,7 +151,7 @@ fn write_node_configs() {
     for i in 1..=9 {
         let (rpc, p2p, metrics) = validator_ports[i - 1];
         let cfg = format!(
-            "[node]\nrole='validator'\nchain_id=1264\naddress_file='node_identity.json'\n\n\
+            "[node]\nrole='validator'\nchain_id=1266\naddress_file='node_identity.json'\n\n\
              [network]\nrpc_port={}\np2p_port={}\nmetrics_port={}\n\n\
              [consensus]\nalgorithm='Proof of Synergy'\nblock_time=5\ncluster_size=3\n\n\
              [cryptography]\nsignature_scheme='FN-DSA-1024'\n",
@@ -169,7 +169,7 @@ fn write_node_configs() {
     for i in 1..=5 {
         let (rpc, p2p, metrics) = relayer_ports[i - 1];
         let cfg = format!(
-            "[node]\nrole='relayer'\nchain_id=1264\naddress_file='node_identity.json'\n\n\
+            "[node]\nrole='relayer'\nchain_id=1266\naddress_file='node_identity.json'\n\n\
              [network]\nrpc_port={}\np2p_port={}\nmetrics_port={}\n\n\
              [sxcp]\nthreshold='3-of-5'\n\n\
              [cryptography]\nsignature_scheme='FN-DSA-1024'\n",
@@ -179,7 +179,7 @@ fn write_node_configs() {
     }
 
     // RPC Gateway config
-    let cfg = "[node]\nrole='rpc-gateway'\nchain_id=1264\naddress_file='node_identity.json'\n\n\
+    let cfg = "[node]\nrole='rpc-gateway'\nchain_id=1266\naddress_file='node_identity.json'\n\n\
                [network]\nrpc_port=8600\np2p_port=31400\nmetrics_port=9300\n\n\
                [cryptography]\nsignature_scheme='FN-DSA-1024'\n";
     fs::write("testnet/rpc-gateway/node_config.toml", cfg).unwrap();

@@ -274,85 +274,85 @@ fn run() -> Result<(), String> {
         }
         _ => {
             println!("Commands:");
-            println!("  synergy-node tx create-aegis --chain-id 1264 --network-id synergy-testnet-v3 [tx options]");
-            println!("  synergy-node tx sign-aegis --chain-id 1264 --network-id synergy-testnet-v3 [tx options]");
-            println!("  synergy-node tx submit-aegis --chain-id 1264 --network-id synergy-testnet-v3 [tx options]");
-            println!("  synergy-node synq replay-flow --chain-id 1264 --network-id synergy-testnet-v3 --synq-deploy-envelope <ContractDeployEnvelope.json> --synq-bytecode <Counter.compiled.synq> --synq-manifest <Counter.manifest.json> --synq-abi <Counter.abi.json> [--synq-call-envelope <ContractCallEnvelope.json> ...]");
-            println!("  synergy-node dag submit-test-fixture --real-aegis-pqvm --chain-id 1264 --network-id synergy-testnet-v3");
+            println!("  synergy-node tx create-aegis --chain-id 1266 --network-id synergy-testnet-v3 [tx options]");
+            println!("  synergy-node tx sign-aegis --chain-id 1266 --network-id synergy-testnet-v3 [tx options]");
+            println!("  synergy-node tx submit-aegis --chain-id 1266 --network-id synergy-testnet-v3 [tx options]");
+            println!("  synergy-node synq replay-flow --chain-id 1266 --network-id synergy-testnet-v3 --synq-deploy-envelope <ContractDeployEnvelope.json> --synq-bytecode <Counter.compiled.synq> --synq-manifest <Counter.manifest.json> --synq-abi <Counter.abi.json> [--synq-call-envelope <ContractCallEnvelope.json> ...]");
+            println!("  synergy-node dag submit-test-fixture --real-aegis-pqvm --chain-id 1266 --network-id synergy-testnet-v3");
             println!(
-                "  synergy-node recovery status --chain-id 1264 --network-id synergy-testnet-v3"
+                "  synergy-node recovery status --chain-id 1266 --network-id synergy-testnet-v3"
             );
-            println!("  synergy-node recovery inspect-divergence --target-node-id <id> --target-role validator|relayer|rpc|archive --target-data-dir <dir> --source-state-dir <dir> --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node recovery build-plan --target-node-id <id> --target-role validator|relayer|rpc|archive --target-data-dir <dir> --source-state-dir <dir> --source-node <validator-id>... --evidence-path <dir> --rollback-path <dir> --output <plan.json> --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node recovery verify-plan --plan <plan.json> --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node recovery apply-plan --plan <plan.json> --confirm-target-stopped --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator inspect-state --state-root <runtime-root-or-data-dir> --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator verify-state --state-root <runtime-root-or-data-dir> [--allow-testnet-recovery-checkpoint] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator verify-live-state --state-root <runtime-root-or-data-dir> [--expected-height <height> --expected-hash <hash>] [--max-expected-lag <blocks>] [--max-qc-ahead <blocks>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator repair-missing-qc --state-root <runtime-root-or-data-dir> --expected-height <height> --expected-qc-sha256 <sha256> --source-qc <qc.json> --source-node <validator> --source-qc <qc.json> --source-node <validator> --block <block.json> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator adopt-compacted-checkpoint --state-root <runtime-root-or-data-dir> --source-validator <source-validator> --source-bundle-path <path> --source-bundle-sha256 <sha256> --source-state-dir <path> --operator-approval-id <id> --recovery-reason <text> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator migrate-state --state-root <runtime-root-or-data-dir> --dry-run|--force [--allow-testnet-recovery-checkpoint] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator rebuild-derived-indexes --state-root <runtime-root-or-data-dir> [--dry-run] [--allow-testnet-recovery-checkpoint] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator state-sync-plan --request <request.json> --source-proof <proof.json> --transfer-proof <transfer.json> [--state-root <runtime-root-or-data-dir>] [--output <plan.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator state-sync repair --plan <plan.json> --workspace <offline-workspace> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator classify-supervisor-state --evidence <evidence.json> --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator supervisor-transition --evidence <evidence.json> [--previous-state <state.json>] [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator supervisor-write --transition <transition.json> --workspace <offline-workspace> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator onboarding-preflight --input <candidate.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator onboarding-bundle --input <bundle-input.json> [--output <manifest.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator onboarding-dry-run-join --input <join-input.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator enrollment-token verify --input <token.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator package verify --manifest <package.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator identity-bundle verify --input <identity.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator cluster-assignment preview --input <assignment.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator activation-eligibility --input <activation.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator export-compat-json --state-root <runtime-root-or-data-dir> [--output <state.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node fleet status --snapshot <fleet-status.json> [--strict] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node archive status --archive-services-disabled --snapshot-api-disabled --snapshot-worker-disabled --archive-publication-disabled --unsafe-inventory-reviewed --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node archive verify-canonical --manifest <signed-manifest.json> --snapshot-root <dir> --expected-height <height> --expected-block-hash <hash> --expected-snapshot-class <class> --source-canonical [--allow-validator-pruned-support-snapshot] [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node archive reseed-plan --manifest <signed-manifest.json> --snapshot-root <dir> --archive-services-disabled --archive-publication-disabled --unsafe-inventory-reviewed [--output <plan.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node archive reseed --dry-run --plan <plan.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node archive publish-snapshot --dry-run --manifest <signed-manifest.json> --snapshot-root <dir> --snapshot-api-disabled --snapshot-worker-disabled --source-canonical [--unsafe-snapshot] [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node archive list-unsafe-snapshots [--inventory <inventory.json>] [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node archive mark-unsafe-snapshot --snapshot-id <id> --height <height> --snapshot-class <class> --block-hash <hash> --reason <reason> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node archive quarantine-snapshot --snapshot-id <id> --height <height> --snapshot-class <class> --block-hash <hash> --reason <reason> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node chaos run --input <scenario.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node diagnose-sync-target --rpc-url <url> --chain-id 1264 --network-id synergy-testnet-v3 [--expected-genesis-hash <hash>]");
-            println!("  synergy-node diagnose-consensus-stall --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node diagnose-vote-locks --chain-id 1264 --network-id synergy-testnet-v3 [--finalized-height <height>]");
+            println!("  synergy-node recovery inspect-divergence --target-node-id <id> --target-role validator|relayer|rpc|archive --target-data-dir <dir> --source-state-dir <dir> --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node recovery build-plan --target-node-id <id> --target-role validator|relayer|rpc|archive --target-data-dir <dir> --source-state-dir <dir> --source-node <validator-id>... --evidence-path <dir> --rollback-path <dir> --output <plan.json> --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node recovery verify-plan --plan <plan.json> --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node recovery apply-plan --plan <plan.json> --confirm-target-stopped --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator inspect-state --state-root <runtime-root-or-data-dir> --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator verify-state --state-root <runtime-root-or-data-dir> [--allow-testnet-recovery-checkpoint] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator verify-live-state --state-root <runtime-root-or-data-dir> [--expected-height <height> --expected-hash <hash>] [--max-expected-lag <blocks>] [--max-qc-ahead <blocks>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator repair-missing-qc --state-root <runtime-root-or-data-dir> --expected-height <height> --expected-qc-sha256 <sha256> --source-qc <qc.json> --source-node <validator> --source-qc <qc.json> --source-node <validator> --block <block.json> --dry-run|--apply --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator adopt-compacted-checkpoint --state-root <runtime-root-or-data-dir> --source-validator <source-validator> --source-bundle-path <path> --source-bundle-sha256 <sha256> --source-state-dir <path> --operator-approval-id <id> --recovery-reason <text> --dry-run|--apply --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator migrate-state --state-root <runtime-root-or-data-dir> --dry-run|--force [--allow-testnet-recovery-checkpoint] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator rebuild-derived-indexes --state-root <runtime-root-or-data-dir> [--dry-run] [--allow-testnet-recovery-checkpoint] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator state-sync-plan --request <request.json> --source-proof <proof.json> --transfer-proof <transfer.json> [--state-root <runtime-root-or-data-dir>] [--output <plan.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator state-sync repair --plan <plan.json> --workspace <offline-workspace> --dry-run|--apply --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator classify-supervisor-state --evidence <evidence.json> --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator supervisor-transition --evidence <evidence.json> [--previous-state <state.json>] [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator supervisor-write --transition <transition.json> --workspace <offline-workspace> --dry-run|--apply --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator onboarding-preflight --input <candidate.json> [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator onboarding-bundle --input <bundle-input.json> [--output <manifest.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator onboarding-dry-run-join --input <join-input.json> [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator enrollment-token verify --input <token.json> [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator package verify --manifest <package.json> [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator identity-bundle verify --input <identity.json> [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator cluster-assignment preview --input <assignment.json> [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator activation-eligibility --input <activation.json> [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator export-compat-json --state-root <runtime-root-or-data-dir> [--output <state.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node fleet status --snapshot <fleet-status.json> [--strict] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node archive status --archive-services-disabled --snapshot-api-disabled --snapshot-worker-disabled --archive-publication-disabled --unsafe-inventory-reviewed --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node archive verify-canonical --manifest <signed-manifest.json> --snapshot-root <dir> --expected-height <height> --expected-block-hash <hash> --expected-snapshot-class <class> --source-canonical [--allow-validator-pruned-support-snapshot] [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node archive reseed-plan --manifest <signed-manifest.json> --snapshot-root <dir> --archive-services-disabled --archive-publication-disabled --unsafe-inventory-reviewed [--output <plan.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node archive reseed --dry-run --plan <plan.json> [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node archive publish-snapshot --dry-run --manifest <signed-manifest.json> --snapshot-root <dir> --snapshot-api-disabled --snapshot-worker-disabled --source-canonical [--unsafe-snapshot] [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node archive list-unsafe-snapshots [--inventory <inventory.json>] [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node archive mark-unsafe-snapshot --snapshot-id <id> --height <height> --snapshot-class <class> --block-hash <hash> --reason <reason> [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node archive quarantine-snapshot --snapshot-id <id> --height <height> --snapshot-class <class> --block-hash <hash> --reason <reason> [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node chaos run --input <scenario.json> [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node diagnose-sync-target --rpc-url <url> --chain-id 1266 --network-id synergy-testnet-v3 [--expected-genesis-hash <hash>]");
+            println!("  synergy-node diagnose-consensus-stall --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node diagnose-vote-locks --chain-id 1266 --network-id synergy-testnet-v3 [--finalized-height <height>]");
             println!(
-                "  synergy-node divergence-status --chain-id 1264 --network-id synergy-testnet-v3"
-            );
-            println!(
-                "  synergy-node quarantine-status --chain-id 1264 --network-id synergy-testnet-v3"
+                "  synergy-node divergence-status --chain-id 1266 --network-id synergy-testnet-v3"
             );
             println!(
-                "  synergy-node self-heal-status --chain-id 1264 --network-id synergy-testnet-v3"
-            );
-            println!("  synergy-node recover-transient-vote-locks --chain-id 1264 --network-id synergy-testnet-v3 [--finalized-height <height>] [--min-age-secs <seconds>]");
-            println!("  synergy-node self-heal --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node sync-from-canonical-peer --chain-id 1264 --network-id synergy-testnet-v3 --canonical-height <height> --canonical-hash <hash> --source-qc-aegis-pqc-verified --parent-continuity-verified --state-root-matches --source-peer-not-quarantined [--source-peer <id>]");
-            println!("  synergy-node create-snapshot --chain-id 1264 --network-id synergy-testnet-v3 --source-node-majority-branch-proven [--source-role VALIDATOR] [--snapshot-class validator-pruned|support-relayer|support-rpc|support-observer|indexer-replay|indexer-full|archive-full|archive-bootstrap] [--allowed-role <role> ...] [--conflict-height-hash <hash>]");
-            println!(
-                "  synergy-node list-snapshots --chain-id 1264 --network-id synergy-testnet-v3"
-            );
-            println!("  synergy-node verify-snapshot --manifest <path> --chain-id 1264 --network-id synergy-testnet-v3 [--snapshot-root <dir>] [--snapshot-class <class>] [--target-role <role>]");
-            println!("  synergy-node self-heal-from-snapshot --manifest <path> --chain-id 1264 --network-id synergy-testnet-v3 [--snapshot-root <dir>]");
-            println!("  synergy-node quarantine-stopped-validator --chain-id 1264 --network-id synergy-testnet-v3 --target-stopped --operator-approved-containment --quorum-majority-height <height> --quorum-majority-hash <hash> [--local-conflicting-height <height>] [--local-conflicting-hash <hash>]");
-            println!("  synergy-node start-shadow-observe --chain-id 1264 --network-id synergy-testnet-v3 [--required-blocks <blocks>]");
-            println!(
-                "  synergy-node shadow-status --chain-id 1264 --network-id synergy-testnet-v3"
+                "  synergy-node quarantine-status --chain-id 1266 --network-id synergy-testnet-v3"
             );
             println!(
-                "  synergy-node rejoin-eligibility --chain-id 1264 --network-id synergy-testnet-v3"
+                "  synergy-node self-heal-status --chain-id 1266 --network-id synergy-testnet-v3"
+            );
+            println!("  synergy-node recover-transient-vote-locks --chain-id 1266 --network-id synergy-testnet-v3 [--finalized-height <height>] [--min-age-secs <seconds>]");
+            println!("  synergy-node self-heal --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node sync-from-canonical-peer --chain-id 1266 --network-id synergy-testnet-v3 --canonical-height <height> --canonical-hash <hash> --source-qc-aegis-pqc-verified --parent-continuity-verified --state-root-matches --source-peer-not-quarantined [--source-peer <id>]");
+            println!("  synergy-node create-snapshot --chain-id 1266 --network-id synergy-testnet-v3 --source-node-majority-branch-proven [--source-role VALIDATOR] [--snapshot-class validator-pruned|support-relayer|support-rpc|support-observer|indexer-replay|indexer-full|archive-full|archive-bootstrap] [--allowed-role <role> ...] [--conflict-height-hash <hash>]");
+            println!(
+                "  synergy-node list-snapshots --chain-id 1266 --network-id synergy-testnet-v3"
+            );
+            println!("  synergy-node verify-snapshot --manifest <path> --chain-id 1266 --network-id synergy-testnet-v3 [--snapshot-root <dir>] [--snapshot-class <class>] [--target-role <role>]");
+            println!("  synergy-node self-heal-from-snapshot --manifest <path> --chain-id 1266 --network-id synergy-testnet-v3 [--snapshot-root <dir>]");
+            println!("  synergy-node quarantine-stopped-validator --chain-id 1266 --network-id synergy-testnet-v3 --target-stopped --operator-approved-containment --quorum-majority-height <height> --quorum-majority-hash <hash> [--local-conflicting-height <height>] [--local-conflicting-hash <hash>]");
+            println!("  synergy-node start-shadow-observe --chain-id 1266 --network-id synergy-testnet-v3 [--required-blocks <blocks>]");
+            println!(
+                "  synergy-node shadow-status --chain-id 1266 --network-id synergy-testnet-v3"
             );
             println!(
-                "  synergy-node request-rejoin --chain-id 1264 --network-id synergy-testnet-v3 --common-height <height> --common-hash <hash> --exact-common-height-match --latest-finalized-qc-aegis-pqc-verified --state-root-matches --rejoin-at-finalized-safe-boundary --cluster-marks-pending-reactivation [--operator-approved-emergency-leader-stall-recovery]"
+                "  synergy-node rejoin-eligibility --chain-id 1266 --network-id synergy-testnet-v3"
             );
-            println!("  synergy-node promote-vote-only-to-active --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node emergency-promote-leader-stall-to-active --chain-id 1264 --network-id synergy-testnet-v3 --common-height <height> --common-hash <hash> --exact-common-height-match --latest-finalized-qc-aegis-pqc-verified --state-root-matches --rejoin-at-finalized-safe-boundary --cluster-marks-pending-reactivation --operator-approved-emergency-leader-stall-recovery");
-            println!("  synergy-node sync-from-archive --archive-url <url> --chain-id 1264 --network-id synergy-testnet-v3 --expected-genesis-hash <hash>");
-            println!("  synergy-node self-heal-from-archive --archive-url <url> --divergence-height <height> --chain-id 1264 --network-id synergy-testnet-v3 --expected-genesis-hash <hash>");
+            println!(
+                "  synergy-node request-rejoin --chain-id 1266 --network-id synergy-testnet-v3 --common-height <height> --common-hash <hash> --exact-common-height-match --latest-finalized-qc-aegis-pqc-verified --state-root-matches --rejoin-at-finalized-safe-boundary --cluster-marks-pending-reactivation [--operator-approved-emergency-leader-stall-recovery]"
+            );
+            println!("  synergy-node promote-vote-only-to-active --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node emergency-promote-leader-stall-to-active --chain-id 1266 --network-id synergy-testnet-v3 --common-height <height> --common-hash <hash> --exact-common-height-match --latest-finalized-qc-aegis-pqc-verified --state-root-matches --rejoin-at-finalized-safe-boundary --cluster-marks-pending-reactivation --operator-approved-emergency-leader-stall-recovery");
+            println!("  synergy-node sync-from-archive --archive-url <url> --chain-id 1266 --network-id synergy-testnet-v3 --expected-genesis-hash <hash>");
+            println!("  synergy-node self-heal-from-archive --archive-url <url> --divergence-height <height> --chain-id 1266 --network-id synergy-testnet-v3 --expected-genesis-hash <hash>");
         }
     }
     Ok(())
@@ -649,7 +649,7 @@ fn run_validator_command(args: &[String]) -> Result<(), String> {
                 }
                 _ => {
                     println!("Validator state-sync commands:");
-                    println!("  synergy-node validator state-sync repair --plan <plan.json> --workspace <offline-workspace> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v3");
+                    println!("  synergy-node validator state-sync repair --plan <plan.json> --workspace <offline-workspace> --dry-run|--apply --chain-id 1266 --network-id synergy-testnet-v3");
                 }
             }
         }
@@ -957,27 +957,27 @@ fn run_validator_command(args: &[String]) -> Result<(), String> {
         }
         _ => {
             println!("Validator commands:");
-            println!("  synergy-node validator inspect-state --state-root <runtime-root-or-data-dir> --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator verify-state --state-root <runtime-root-or-data-dir> [--allow-testnet-recovery-checkpoint] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator verify-live-state --state-root <runtime-root-or-data-dir> [--expected-height <height> --expected-hash <hash>] [--max-expected-lag <blocks>] [--max-qc-ahead <blocks>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator repair-missing-qc --state-root <runtime-root-or-data-dir> --expected-height <height> --expected-qc-sha256 <sha256> --source-qc <qc.json> --source-node <validator> --source-qc <qc.json> --source-node <validator> --block <block.json> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator adopt-compacted-checkpoint --state-root <runtime-root-or-data-dir> --source-validator <source-validator> --source-bundle-path <path> --source-bundle-sha256 <sha256> --source-state-dir <path> --operator-approval-id <id> --recovery-reason <text> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator migrate-state --state-root <runtime-root-or-data-dir> --dry-run|--force [--allow-testnet-recovery-checkpoint] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator rebuild-derived-indexes --state-root <runtime-root-or-data-dir> [--dry-run] [--allow-testnet-recovery-checkpoint] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator state-sync-plan --request <request.json> --source-proof <proof.json> --transfer-proof <transfer.json> [--state-root <runtime-root-or-data-dir>] [--output <plan.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator state-sync repair --plan <plan.json> --workspace <offline-workspace> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator classify-supervisor-state --evidence <evidence.json> --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator supervisor-transition --evidence <evidence.json> [--previous-state <state.json>] [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator supervisor-write --transition <transition.json> --workspace <offline-workspace> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator onboarding-preflight --input <candidate.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator onboarding-bundle --input <bundle-input.json> [--output <manifest.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator onboarding-dry-run-join --input <join-input.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator enrollment-token verify --input <token.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator package verify --manifest <package.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator identity-bundle verify --input <identity.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator cluster-assignment preview --input <assignment.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator activation-eligibility --input <activation.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator export-compat-json --state-root <runtime-root-or-data-dir> [--output <state.json>] --chain-id 1264 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator inspect-state --state-root <runtime-root-or-data-dir> --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator verify-state --state-root <runtime-root-or-data-dir> [--allow-testnet-recovery-checkpoint] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator verify-live-state --state-root <runtime-root-or-data-dir> [--expected-height <height> --expected-hash <hash>] [--max-expected-lag <blocks>] [--max-qc-ahead <blocks>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator repair-missing-qc --state-root <runtime-root-or-data-dir> --expected-height <height> --expected-qc-sha256 <sha256> --source-qc <qc.json> --source-node <validator> --source-qc <qc.json> --source-node <validator> --block <block.json> --dry-run|--apply --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator adopt-compacted-checkpoint --state-root <runtime-root-or-data-dir> --source-validator <source-validator> --source-bundle-path <path> --source-bundle-sha256 <sha256> --source-state-dir <path> --operator-approval-id <id> --recovery-reason <text> --dry-run|--apply --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator migrate-state --state-root <runtime-root-or-data-dir> --dry-run|--force [--allow-testnet-recovery-checkpoint] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator rebuild-derived-indexes --state-root <runtime-root-or-data-dir> [--dry-run] [--allow-testnet-recovery-checkpoint] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator state-sync-plan --request <request.json> --source-proof <proof.json> --transfer-proof <transfer.json> [--state-root <runtime-root-or-data-dir>] [--output <plan.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator state-sync repair --plan <plan.json> --workspace <offline-workspace> --dry-run|--apply --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator classify-supervisor-state --evidence <evidence.json> --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator supervisor-transition --evidence <evidence.json> [--previous-state <state.json>] [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator supervisor-write --transition <transition.json> --workspace <offline-workspace> --dry-run|--apply --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator onboarding-preflight --input <candidate.json> [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator onboarding-bundle --input <bundle-input.json> [--output <manifest.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator onboarding-dry-run-join --input <join-input.json> [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator enrollment-token verify --input <token.json> [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator package verify --manifest <package.json> [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator identity-bundle verify --input <identity.json> [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator cluster-assignment preview --input <assignment.json> [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator activation-eligibility --input <activation.json> [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator export-compat-json --state-root <runtime-root-or-data-dir> [--output <state.json>] --chain-id 1266 --network-id synergy-testnet-v3");
         }
     }
     Ok(())
@@ -1018,7 +1018,7 @@ fn run_fleet_command(args: &[String]) -> Result<(), String> {
         }
         _ => {
             println!("Fleet commands:");
-            println!("  synergy-node fleet status --snapshot <fleet-status.json> [--strict] --chain-id 1264 --network-id synergy-testnet-v3");
+            println!("  synergy-node fleet status --snapshot <fleet-status.json> [--strict] --chain-id 1266 --network-id synergy-testnet-v3");
         }
     }
     Ok(())
@@ -1241,14 +1241,14 @@ fn run_archive_command(args: &[String]) -> Result<(), String> {
         }
         _ => {
             println!("Archive commands:");
-            println!("  synergy-node archive status --archive-services-disabled --snapshot-api-disabled --snapshot-worker-disabled --archive-publication-disabled --unsafe-inventory-reviewed --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node archive verify-canonical --manifest <signed-manifest.json> --snapshot-root <dir> --expected-height <height> --expected-block-hash <hash> --expected-snapshot-class <class> --source-canonical [--allow-validator-pruned-support-snapshot] [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node archive reseed-plan --manifest <signed-manifest.json> --snapshot-root <dir> --archive-services-disabled --archive-publication-disabled --unsafe-inventory-reviewed [--current-finalized-height <height>] [--output <plan.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node archive reseed --dry-run --plan <plan.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node archive publish-snapshot --dry-run --manifest <signed-manifest.json> --snapshot-root <dir> --snapshot-api-disabled --snapshot-worker-disabled --source-canonical [--unsafe-snapshot] [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node archive list-unsafe-snapshots [--inventory <inventory.json>] [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node archive mark-unsafe-snapshot --snapshot-id <id> --height <height> --snapshot-class <class> --block-hash <hash> --reason <reason> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node archive quarantine-snapshot --snapshot-id <id> --height <height> --snapshot-class <class> --block-hash <hash> --reason <reason> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
+            println!("  synergy-node archive status --archive-services-disabled --snapshot-api-disabled --snapshot-worker-disabled --archive-publication-disabled --unsafe-inventory-reviewed --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node archive verify-canonical --manifest <signed-manifest.json> --snapshot-root <dir> --expected-height <height> --expected-block-hash <hash> --expected-snapshot-class <class> --source-canonical [--allow-validator-pruned-support-snapshot] [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node archive reseed-plan --manifest <signed-manifest.json> --snapshot-root <dir> --archive-services-disabled --archive-publication-disabled --unsafe-inventory-reviewed [--current-finalized-height <height>] [--output <plan.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node archive reseed --dry-run --plan <plan.json> [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node archive publish-snapshot --dry-run --manifest <signed-manifest.json> --snapshot-root <dir> --snapshot-api-disabled --snapshot-worker-disabled --source-canonical [--unsafe-snapshot] [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node archive list-unsafe-snapshots [--inventory <inventory.json>] [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node archive mark-unsafe-snapshot --snapshot-id <id> --height <height> --snapshot-class <class> --block-hash <hash> --reason <reason> [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node archive quarantine-snapshot --snapshot-id <id> --height <height> --snapshot-class <class> --block-hash <hash> --reason <reason> [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
         }
     }
     Ok(())
@@ -1306,7 +1306,7 @@ fn run_chaos_command(args: &[String]) -> Result<(), String> {
         }
         _ => {
             println!("Chaos commands:");
-            println!("  synergy-node chaos run --input <scenario.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
+            println!("  synergy-node chaos run --input <scenario.json> [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
         }
     }
     Ok(())
@@ -1372,12 +1372,12 @@ fn run_recovery_command(args: &[String]) -> Result<(), String> {
         _ => {
             println!("Recovery commands:");
             println!(
-                "  synergy-node recovery status --chain-id 1264 --network-id synergy-testnet-v3"
+                "  synergy-node recovery status --chain-id 1266 --network-id synergy-testnet-v3"
             );
-            println!("  synergy-node recovery inspect-divergence --target-node-id <id> --target-role validator|relayer|rpc|archive --target-data-dir <dir> --source-state-dir <dir> --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node recovery build-plan --target-node-id <id> --target-role validator|relayer|rpc|archive --target-data-dir <dir> --source-state-dir <dir> --source-node <validator-id>... --evidence-path <dir> --rollback-path <dir> --output <plan.json> --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node recovery verify-plan --plan <plan.json> --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node recovery apply-plan --plan <plan.json> --confirm-target-stopped --chain-id 1264 --network-id synergy-testnet-v3");
+            println!("  synergy-node recovery inspect-divergence --target-node-id <id> --target-role validator|relayer|rpc|archive --target-data-dir <dir> --source-state-dir <dir> --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node recovery build-plan --target-node-id <id> --target-role validator|relayer|rpc|archive --target-data-dir <dir> --source-state-dir <dir> --source-node <validator-id>... --evidence-path <dir> --rollback-path <dir> --output <plan.json> --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node recovery verify-plan --plan <plan.json> --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node recovery apply-plan --plan <plan.json> --confirm-target-stopped --chain-id 1266 --network-id synergy-testnet-v3");
         }
     }
     Ok(())
@@ -1393,7 +1393,7 @@ fn recovery_build_input_from_args(
             .ok_or_else(|| "missing --target-role validator|relayer|rpc|archive".to_string())?,
     )?;
     let chain_id = arg_value(args, "--chain-id")
-        .ok_or_else(|| "missing --chain-id 1264".to_string())?
+        .ok_or_else(|| "missing --chain-id 1266".to_string())?
         .parse::<u64>()
         .map_err(|error| format!("invalid --chain-id: {error}"))?;
     let network_id = arg_value(args, "--network-id")
@@ -1502,31 +1502,38 @@ fn run_tx_command(args: &[String]) -> Result<(), String> {
             print_json(output)?;
         }
         "submit-aegis" => {
-            let report = sign_with_new_aegis_transaction_key(tx_options_from_args(args)?)?;
-            let mut output = signed_tx_summary(subcommand, &report);
-            if let Some(rpc_url) = arg_value(args, "--rpc-url") {
-                let response = submit_aegis_transaction(
-                    &rpc_url,
-                    "synergy_submitAegisDagTransaction",
-                    &report.submission_envelope,
-                )?;
-                output["live_submission_status"] =
-                    serde_json::Value::String("submitted_to_rpc".to_string());
-                output["rpc_url"] = serde_json::Value::String(rpc_url);
-                output["rpc_response"] = response;
-            } else {
-                output["live_submission_status"] = serde_json::Value::String(
-                    "not_attempted: pass --rpc-url to submit through synergy_submitAegisTransaction"
-                        .to_string(),
-                );
-            }
-            print_json(output)?;
+            return Err(
+                "ERR_PLAINTEXT_USER_TX_DISABLED: submit-aegis cannot transmit a plaintext transaction after ETDAG activation; use tx submit-etdag with a wallet-sealed envelope"
+                    .to_string(),
+            );
+        }
+        "submit-etdag" => {
+            let rpc_url = arg_value(args, "--rpc-url")
+                .ok_or_else(|| "tx submit-etdag requires --rpc-url <url>".to_string())?;
+            let envelope_path = arg_value(args, "--sealed-envelope")
+                .or_else(|| arg_value(args, "--sealed-envelope-file"))
+                .ok_or_else(|| {
+                    "tx submit-etdag requires --sealed-envelope <EtdagSubmissionEnvelope.json>"
+                        .to_string()
+                })?;
+            let envelope: synergy_testnet::etdag::EtdagSubmissionEnvelope =
+                read_json_file(&envelope_path)?;
+            let response = submit_etdag_transaction(&rpc_url, &envelope)?;
+            print_json(serde_json::json!({
+                "command": subcommand,
+                "live_submission_status": "submitted_sealed_etdag_envelope",
+                "plaintext_transmitted": false,
+                "automatic_plaintext_fallback": false,
+                "rpc_url": rpc_url,
+                "sealed_envelope": envelope_path,
+                "rpc_response": response,
+            }))?;
         }
         _ => {
             println!("Commands:");
-            println!("  synergy-node tx create-aegis --chain-id 1264 --network-id synergy-testnet-v3 [--sender <uma>] [--receiver <uma>] [--nonce <n>] [--amount-nwei <n>] [--gas-limit <n>] [--max-fee-nwei <n>] [--ttl-height <h>] [--read <key>] [--write <key>] [--dependency <tx_id>] [--payload <text> | --synq-deploy-envelope <ContractDeployEnvelope.json> [--synq-bytecode <Counter.compiled.synq> --synq-manifest <Counter.manifest.json> --synq-abi <Counter.abi.json>] | --synq-call-envelope <ContractCallEnvelope.json>]");
-            println!("  synergy-node tx sign-aegis --chain-id 1264 --network-id synergy-testnet-v3 [same options]");
-            println!("  synergy-node tx submit-aegis --chain-id 1264 --network-id synergy-testnet-v3 [same options]");
+            println!("  synergy-node tx create-aegis --chain-id 1266 --network-id synergy-testnet-v3 [--sender <uma>] [--receiver <uma>] [--nonce <n>] [--amount-nwei <n>] [--gas-limit <n>] [--max-fee-nwei <n>] [--ttl-height <h>] [--read <key>] [--write <key>] [--dependency <tx_id>] [--payload <text> | --synq-deploy-envelope <ContractDeployEnvelope.json> [--synq-bytecode <Counter.compiled.synq> --synq-manifest <Counter.manifest.json> --synq-abi <Counter.abi.json>] | --synq-call-envelope <ContractCallEnvelope.json>]");
+            println!("  synergy-node tx sign-aegis --chain-id 1266 --network-id synergy-testnet-v3 [same options]");
+            println!("  synergy-node tx submit-etdag --chain-id 1266 --network-id synergy-testnet-v3 --rpc-url <url> --sealed-envelope <EtdagSubmissionEnvelope.json>");
         }
     }
     Ok(())
@@ -1545,21 +1552,13 @@ fn run_dag_command(args: &[String]) -> Result<(), String> {
             }
             let report = build_fixture_report()?;
             let rpc_url = arg_value(args, "--rpc-url");
-            let rpc_submissions = if let Some(rpc_url) = rpc_url.as_deref() {
-                report
-                    .transactions
-                    .iter()
-                    .map(|tx| {
-                        submit_aegis_transaction(
-                            rpc_url,
-                            "synergy_submitAegisDagTransaction",
-                            &tx.submission_envelope,
-                        )
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-            } else {
-                Vec::new()
-            };
+            if rpc_url.is_some() {
+                return Err(
+                    "ERR_PLAINTEXT_USER_TX_DISABLED: DAG test fixtures are local-only and cannot be submitted to Testnet-v3 RPC"
+                        .to_string(),
+                );
+            }
+            let rpc_submissions: Vec<serde_json::Value> = Vec::new();
             print_json(serde_json::json!({
                 "command": subcommand,
                 "aegis_pqvm_path": "synergy_testnet::crypto::aegis_pqvm::AegisPqvmSigner",
@@ -1584,7 +1583,7 @@ fn run_dag_command(args: &[String]) -> Result<(), String> {
                 "selected_ancestor_closed_set": report.selected_ancestor_closed_set,
                 "tx_order_root": report.tx_order_root,
                 "dag_frontier_root": report.dag_frontier_root,
-                "live_submission_status": if rpc_url.is_some() { "submitted_to_rpc" } else { "not_attempted: pass --rpc-url to submit through synergy_submitAegisDagTransaction" },
+                "live_submission_status": "local_fixture_only",
                 "rpc_url": rpc_url,
                 "rpc_submissions": rpc_submissions,
                 "atlas_ingestion_status": if rpc_submissions.is_empty() { report.atlas_ingestion_status } else { "submitted_to_rpc: verify finalized block inclusion and Atlas DAG API from canonical chain data".to_string() },
@@ -1592,7 +1591,7 @@ fn run_dag_command(args: &[String]) -> Result<(), String> {
         }
         _ => {
             println!("Commands:");
-            println!("  synergy-node dag submit-test-fixture --real-aegis-pqvm --chain-id 1264 --network-id synergy-testnet-v3 [--rpc-url <url>]");
+            println!("  synergy-node dag submit-test-fixture --real-aegis-pqvm --chain-id 1266 --network-id synergy-testnet-v3 [--rpc-url <url>]");
         }
     }
     Ok(())
@@ -1622,7 +1621,7 @@ fn run_synq_command(args: &[String]) -> Result<(), String> {
         }
         _ => {
             println!("Commands:");
-            println!("  synergy-node synq replay-flow --chain-id 1264 --network-id synergy-testnet-v3 --synq-deploy-envelope <ContractDeployEnvelope.json> --synq-bytecode <Counter.compiled.synq> --synq-manifest <Counter.manifest.json> --synq-abi <Counter.abi.json> [--synq-call-envelope <ContractCallEnvelope.json> ...] [--base-nonce <n>]");
+            println!("  synergy-node synq replay-flow --chain-id 1266 --network-id synergy-testnet-v3 --synq-deploy-envelope <ContractDeployEnvelope.json> --synq-bytecode <Counter.compiled.synq> --synq-manifest <Counter.manifest.json> --synq-abi <Counter.abi.json> [--synq-call-envelope <ContractCallEnvelope.json> ...] [--base-nonce <n>]");
         }
     }
     Ok(())
@@ -1676,7 +1675,7 @@ fn synq_replay_flow_report(args: &[String]) -> Result<serde_json::Value, String>
 
     Ok(serde_json::json!({
         "command": "synq replay-flow",
-        "chain_id": 1264,
+        "chain_id": 1266,
         "network_id": "synergy-testnet-v3",
         "normalized_synq_network_id": "synergy-testnet",
         "aegis_pqsynq_path": "synergy_testnet::synq_admission",
@@ -1873,35 +1872,36 @@ fn read_json_file<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, Strin
     serde_json::from_str(&content).map_err(|error| format!("parse {path}: {error}"))
 }
 
-fn submit_aegis_transaction(
+fn submit_etdag_transaction(
     rpc_url: &str,
-    method: &str,
-    envelope: &synergy_testnet::aegis_tx_tool::AegisTxSubmissionEnvelope,
+    envelope: &synergy_testnet::etdag::EtdagSubmissionEnvelope,
 ) -> Result<serde_json::Value, String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()
-        .map_err(|error| format!("failed to initialize RPC client: {error}"))?;
+        .map_err(|error| format!("failed to initialize encrypted RPC client: {error}"))?;
     let request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
-        "method": method,
+        "method": "synergy_submitEncryptedTransaction",
         "params": [envelope],
     });
     let response = client
         .post(rpc_url)
         .json(&request)
         .send()
-        .map_err(|error| format!("failed to submit Aegis transaction to {rpc_url}: {error}"))?;
+        .map_err(|error| format!("failed to submit sealed ETDAG envelope to {rpc_url}: {error}"))?;
     let status = response.status();
     let value = response
         .json::<serde_json::Value>()
-        .map_err(|error| format!("failed to parse RPC response: {error}"))?;
+        .map_err(|error| format!("failed to parse encrypted RPC response: {error}"))?;
     if !status.is_success() {
-        return Err(format!("RPC returned HTTP {status}: {value}"));
+        return Err(format!("encrypted RPC returned HTTP {status}: {value}"));
     }
     if let Some(error) = value.get("error") {
-        return Err(format!("RPC returned JSON-RPC error: {error}"));
+        if !error.is_null() {
+            return Err(format!("encrypted RPC returned JSON-RPC error: {error}"));
+        }
     }
     Ok(value)
 }
@@ -2169,7 +2169,7 @@ fn diagnose_sync_target(
         (None, None) => false,
     };
     let canonical_network_id = genesis_verified.then(|| "synergy-testnet-v3".to_string());
-    let usable = chain_id == Some(1264)
+    let usable = chain_id == Some(1266)
         && canonical_network_id.as_deref() == Some("synergy-testnet-v3")
         && latest_height.is_some()
         && genesis_verified;
@@ -2268,65 +2268,65 @@ fn print_validator_command_help(args: &[String]) {
     let nested = args.get(2).map(String::as_str).unwrap_or("");
     match (subcommand, nested) {
         ("inspect-state", _) => {
-            println!("Usage: synergy-node validator inspect-state --state-root <runtime-root-or-data-dir> --chain-id 1264 --network-id synergy-testnet-v3");
+            println!("Usage: synergy-node validator inspect-state --state-root <runtime-root-or-data-dir> --chain-id 1266 --network-id synergy-testnet-v3");
             println!("Read-only validator state inventory and digest report.");
         }
         ("verify-state", _) => {
-            println!("Usage: synergy-node validator verify-state --state-root <runtime-root-or-data-dir> [--allow-testnet-recovery-checkpoint] --chain-id 1264 --network-id synergy-testnet-v3");
+            println!("Usage: synergy-node validator verify-state --state-root <runtime-root-or-data-dir> [--allow-testnet-recovery-checkpoint] --chain-id 1266 --network-id synergy-testnet-v3");
             println!(
                 "Read-only validator state verifier. Exits nonzero when safety checks fail closed."
             );
         }
         ("verify-live-state", _) => {
-            println!("Usage: synergy-node validator verify-live-state --state-root <runtime-root-or-data-dir> [--expected-height <height> --expected-hash <hash>] [--max-expected-lag <blocks>] [--max-qc-ahead <blocks>] --chain-id 1264 --network-id synergy-testnet-v3");
+            println!("Usage: synergy-node validator verify-live-state --state-root <runtime-root-or-data-dir> [--expected-height <height> --expected-hash <hash>] [--max-expected-lag <blocks>] [--max-qc-ahead <blocks>] --chain-id 1266 --network-id synergy-testnet-v3");
             println!(
                 "Read-only bounded-edge validator state verifier for live restart preflight. Exits nonzero when durable state is too stale or inconsistent."
             );
         }
         ("repair-missing-qc", _) => {
-            println!("Usage: synergy-node validator repair-missing-qc --state-root <runtime-root-or-data-dir> --expected-height <height> --expected-qc-sha256 <sha256> --source-qc <qc.json> --source-node <validator> --source-qc <qc.json> --source-node <validator> --block <block.json> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v3");
+            println!("Usage: synergy-node validator repair-missing-qc --state-root <runtime-root-or-data-dir> --expected-height <height> --expected-qc-sha256 <sha256> --source-qc <qc.json> --source-node <validator> --source-qc <qc.json> --source-node <validator> --block <block.json> --dry-run|--apply --chain-id 1266 --network-id synergy-testnet-v3");
             println!("Repair one exact internal committed-QC gap using independently collected, byte-identical quorum evidence. Requires a stopped-validator marker and performs full Aegis, block-continuity, atomic-backup, and post-repair state verification.");
         }
         ("migrate-state", _) => {
-            println!("Usage: synergy-node validator migrate-state --state-root <runtime-root-or-data-dir> --dry-run|--force [--allow-testnet-recovery-checkpoint] --chain-id 1264 --network-id synergy-testnet-v3");
+            println!("Usage: synergy-node validator migrate-state --state-root <runtime-root-or-data-dir> --dry-run|--force [--allow-testnet-recovery-checkpoint] --chain-id 1266 --network-id synergy-testnet-v3");
             println!("Verify and migrate consensus state into the durable store. Compact testnet state is accepted only with the explicit recovery flag.");
         }
         ("rebuild-derived-indexes", _) => {
-            println!("Usage: synergy-node validator rebuild-derived-indexes --state-root <runtime-root-or-data-dir> [--dry-run] [--allow-testnet-recovery-checkpoint] --chain-id 1264 --network-id synergy-testnet-v3");
+            println!("Usage: synergy-node validator rebuild-derived-indexes --state-root <runtime-root-or-data-dir> [--dry-run] [--allow-testnet-recovery-checkpoint] --chain-id 1266 --network-id synergy-testnet-v3");
             println!("Verify consensus state and rebuild derived indexes. Compact testnet state is accepted only with the explicit recovery flag.");
         }
         ("state-sync-plan", _) => {
-            println!("Usage: synergy-node validator state-sync-plan --request <request.json> --source-proof <proof.json> --transfer-proof <transfer.json> [--state-root <runtime-root-or-data-dir>] [--output <plan.json>] --chain-id 1264 --network-id synergy-testnet-v3");
+            println!("Usage: synergy-node validator state-sync-plan --request <request.json> --source-proof <proof.json> --transfer-proof <transfer.json> [--state-root <runtime-root-or-data-dir>] [--output <plan.json>] --chain-id 1266 --network-id synergy-testnet-v3");
             println!("Build a protocol-native state-sync repair plan from verified request, source, and transfer proofs.");
         }
         ("state-sync", "repair") => {
-            println!("Usage: synergy-node validator state-sync repair --plan <plan.json> --workspace <offline-workspace> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v3");
+            println!("Usage: synergy-node validator state-sync repair --plan <plan.json> --workspace <offline-workspace> --dry-run|--apply --chain-id 1266 --network-id synergy-testnet-v3");
             println!(
                 "Apply a verified state-sync repair plan to a marker-gated offline workspace."
             );
         }
         ("supervisor-transition", _) => {
-            println!("Usage: synergy-node validator supervisor-transition --evidence <evidence.json> [--previous-state <state.json>] [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
+            println!("Usage: synergy-node validator supervisor-transition --evidence <evidence.json> [--previous-state <state.json>] [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
             println!("Plan the next validator supervisor state from explicit evidence without writing it.");
         }
         ("supervisor-write", _) => {
-            println!("Usage: synergy-node validator supervisor-write --transition <transition.json> --workspace <offline-workspace> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v3");
+            println!("Usage: synergy-node validator supervisor-write --transition <transition.json> --workspace <offline-workspace> --dry-run|--apply --chain-id 1266 --network-id synergy-testnet-v3");
             println!(
                 "Write a validated supervisor transition into a marker-gated offline workspace."
             );
         }
         _ => {
             println!("Validator commands:");
-            println!("  synergy-node validator inspect-state --state-root <runtime-root-or-data-dir> --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator verify-state --state-root <runtime-root-or-data-dir> [--allow-testnet-recovery-checkpoint] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator verify-live-state --state-root <runtime-root-or-data-dir> [--expected-height <height> --expected-hash <hash>] [--max-expected-lag <blocks>] [--max-qc-ahead <blocks>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator repair-missing-qc --state-root <runtime-root-or-data-dir> --expected-height <height> --expected-qc-sha256 <sha256> --source-qc <qc.json> --source-node <validator> --source-qc <qc.json> --source-node <validator> --block <block.json> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator migrate-state --state-root <runtime-root-or-data-dir> --dry-run|--force [--allow-testnet-recovery-checkpoint] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator rebuild-derived-indexes --state-root <runtime-root-or-data-dir> [--dry-run] [--allow-testnet-recovery-checkpoint] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator state-sync-plan --request <request.json> --source-proof <proof.json> --transfer-proof <transfer.json> [--state-root <runtime-root-or-data-dir>] [--output <plan.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator state-sync repair --plan <plan.json> --workspace <offline-workspace> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator supervisor-transition --evidence <evidence.json> [--previous-state <state.json>] [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node validator supervisor-write --transition <transition.json> --workspace <offline-workspace> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator inspect-state --state-root <runtime-root-or-data-dir> --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator verify-state --state-root <runtime-root-or-data-dir> [--allow-testnet-recovery-checkpoint] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator verify-live-state --state-root <runtime-root-or-data-dir> [--expected-height <height> --expected-hash <hash>] [--max-expected-lag <blocks>] [--max-qc-ahead <blocks>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator repair-missing-qc --state-root <runtime-root-or-data-dir> --expected-height <height> --expected-qc-sha256 <sha256> --source-qc <qc.json> --source-node <validator> --source-qc <qc.json> --source-node <validator> --block <block.json> --dry-run|--apply --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator migrate-state --state-root <runtime-root-or-data-dir> --dry-run|--force [--allow-testnet-recovery-checkpoint] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator rebuild-derived-indexes --state-root <runtime-root-or-data-dir> [--dry-run] [--allow-testnet-recovery-checkpoint] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator state-sync-plan --request <request.json> --source-proof <proof.json> --transfer-proof <transfer.json> [--state-root <runtime-root-or-data-dir>] [--output <plan.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator state-sync repair --plan <plan.json> --workspace <offline-workspace> --dry-run|--apply --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator supervisor-transition --evidence <evidence.json> [--previous-state <state.json>] [--output <report.json>] --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node validator supervisor-write --transition <transition.json> --workspace <offline-workspace> --dry-run|--apply --chain-id 1266 --network-id synergy-testnet-v3");
         }
     }
 }
@@ -2334,12 +2334,12 @@ fn print_validator_command_help(args: &[String]) {
 fn print_fleet_command_help(subcommand: &str) {
     match subcommand {
         "status" => {
-            println!("Usage: synergy-node fleet status --snapshot <fleet-status.json> [--strict] --chain-id 1264 --network-id synergy-testnet-v3");
+            println!("Usage: synergy-node fleet status --snapshot <fleet-status.json> [--strict] --chain-id 1266 --network-id synergy-testnet-v3");
             println!("Evaluate validator, public RPC, and Atlas evidence. Strict mode fails closed on stale, minority, synthetic, or mismatched surfaces.");
         }
         _ => {
             println!("Fleet commands:");
-            println!("  synergy-node fleet status --snapshot <fleet-status.json> [--strict] --chain-id 1264 --network-id synergy-testnet-v3");
+            println!("  synergy-node fleet status --snapshot <fleet-status.json> [--strict] --chain-id 1266 --network-id synergy-testnet-v3");
         }
     }
 }
@@ -2347,23 +2347,23 @@ fn print_fleet_command_help(subcommand: &str) {
 fn print_archive_command_help(subcommand: &str) {
     match subcommand {
         "reseed-plan" => {
-            println!("Usage: synergy-node archive reseed-plan --manifest <signed-manifest.json> --snapshot-root <dir> --archive-services-disabled --archive-publication-disabled --unsafe-inventory-reviewed [--current-finalized-height <height>] [--output <plan.json>] --chain-id 1264 --network-id synergy-testnet-v3");
+            println!("Usage: synergy-node archive reseed-plan --manifest <signed-manifest.json> --snapshot-root <dir> --archive-services-disabled --archive-publication-disabled --unsafe-inventory-reviewed [--current-finalized-height <height>] [--output <plan.json>] --chain-id 1266 --network-id synergy-testnet-v3");
             println!("Build a dry-run canonical archive reseed plan from a signed, verified archive-bootstrap or archive-full manifest.");
         }
         "status" => {
-            println!("Usage: synergy-node archive status --archive-services-disabled --snapshot-api-disabled --snapshot-worker-disabled --archive-publication-disabled --unsafe-inventory-reviewed --chain-id 1264 --network-id synergy-testnet-v3");
+            println!("Usage: synergy-node archive status --archive-services-disabled --snapshot-api-disabled --snapshot-worker-disabled --archive-publication-disabled --unsafe-inventory-reviewed --chain-id 1266 --network-id synergy-testnet-v3");
         }
         _ => {
             println!("Archive commands:");
-            println!("  synergy-node archive status --archive-services-disabled --snapshot-api-disabled --snapshot-worker-disabled --archive-publication-disabled --unsafe-inventory-reviewed --chain-id 1264 --network-id synergy-testnet-v3");
-            println!("  synergy-node archive reseed-plan --manifest <signed-manifest.json> --snapshot-root <dir> --archive-services-disabled --archive-publication-disabled --unsafe-inventory-reviewed [--current-finalized-height <height>] [--output <plan.json>] --chain-id 1264 --network-id synergy-testnet-v3");
+            println!("  synergy-node archive status --archive-services-disabled --snapshot-api-disabled --snapshot-worker-disabled --archive-publication-disabled --unsafe-inventory-reviewed --chain-id 1266 --network-id synergy-testnet-v3");
+            println!("  synergy-node archive reseed-plan --manifest <signed-manifest.json> --snapshot-root <dir> --archive-services-disabled --archive-publication-disabled --unsafe-inventory-reviewed [--current-finalized-height <height>] [--output <plan.json>] --chain-id 1266 --network-id synergy-testnet-v3");
         }
     }
 }
 
 fn require_testnet_args(args: &[String]) -> Result<(), String> {
     let chain_id = arg_value(args, "--chain-id")
-        .ok_or_else(|| "missing --chain-id 1264".to_string())?
+        .ok_or_else(|| "missing --chain-id 1266".to_string())?
         .parse::<u64>()
         .map_err(|error| format!("invalid --chain-id: {error}"))?;
     ChainId(chain_id).require_testnet_v3()?;

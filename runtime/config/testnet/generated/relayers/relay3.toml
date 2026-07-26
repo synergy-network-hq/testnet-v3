@@ -10,10 +10,10 @@ address = ""
 label = "relay3"
 
 [network]
-id = 1264
+id = 1266
 name = "synergy-testnet-v3"
 network_id = "synergy-testnet-v3"
-chain_id = 1264
+chain_id = 1266
 p2p_port = 5622
 bootnodes = ["bootnode1.synergynode.xyz:5620", "bootnode2.synergynode.xyz:5620", "bootnode3.synergynode.xyz:5620"]
 seed_servers = ["http://seed1.synergynode.xyz:5621", "http://seed2.synergynode.xyz:5621", "http://seed3.synergynode.xyz:5621"]

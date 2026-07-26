@@ -2,7 +2,7 @@ use crate::address::generate_cluster_address;
 use crate::consensus::consensus_fork;
 use crate::epoch::{epoch_start_height, TESTNET_EPOCH_LENGTH_BLOCKS};
 use crate::genesis::canonical_genesis;
-use crate::synergy_types::SYNERGY_TESTNET_V3_CHAIN_ID;
+use crate::synergy_types::{testnet_v3_cluster_count, SYNERGY_TESTNET_V3_CHAIN_ID};
 use crate::token::TokenManager;
 use crate::transaction::Transaction;
 use serde::{Deserialize, Serialize};
@@ -47,15 +47,7 @@ macro_rules! validator_log {
 }
 
 pub fn target_validator_cluster_count(active_validator_count: usize) -> usize {
-    if active_validator_count == 0 {
-        0
-    } else if active_validator_count < TESTNET_FIRST_CLUSTER_SPLIT_THRESHOLD {
-        1
-    } else if active_validator_count < TESTNET_THIRD_CLUSTER_SPLIT_THRESHOLD {
-        2
-    } else {
-        active_validator_count / TESTNET_VALIDATOR_CLUSTER_SIZE
-    }
+    testnet_v3_cluster_count(active_validator_count)
 }
 
 #[derive(Debug, Clone)]
@@ -2886,7 +2878,7 @@ mod tests {
             &snapshot_path,
             serde_json::json!({
                 "epoch_validator_sets": [{
-                    "chain_id": 1264,
+                    "chain_id": 1266,
                     "epoch_id": 7,
                     "validator_set_version": 3,
                     "effective_from_height": 100,
@@ -2932,7 +2924,7 @@ mod tests {
             &snapshot_path,
             serde_json::json!([{
                 "snapshot_format_version": SUPPORTED_EPOCH_VALIDATOR_SET_FORMAT_VERSION + 1,
-                "chain_id": 1264,
+                "chain_id": 1266,
                 "epoch_id": 7,
                 "validator_set_version": 3,
                 "effective_from_height": 100,
@@ -2965,7 +2957,7 @@ mod tests {
             &snapshot_path,
             serde_json::json!([{
                 "snapshot_format_version": SUPPORTED_EPOCH_VALIDATOR_SET_FORMAT_VERSION,
-                "chain_id": 1264,
+                "chain_id": 1266,
                 "epoch_id": 7,
                 "validator_set_version": 3,
                 "effective_from_height": 100,
@@ -3032,7 +3024,7 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
         write_epoch_validator_sets(
             &snapshot_path,
             serde_json::json!([{
-                "chain_id": 1264,
+                "chain_id": 1266,
                 "epoch_id": 7,
                 "validator_set_version": 3,
                 "effective_from_height": 100,
@@ -3089,7 +3081,7 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
             &snapshot_path,
             serde_json::json!([
                 {
-                    "chain_id": 1264,
+                    "chain_id": 1266,
                     "epoch_id": 7,
                     "validator_set_version": 3,
                     "effective_from_height": 100,
@@ -3100,7 +3092,7 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
                     "validator_set_hash": "dynamic-validator-set-a"
                 },
                 {
-                    "chain_id": 1264,
+                    "chain_id": 1266,
                     "epoch_id": 8,
                     "validator_set_version": 4,
                     "effective_from_height": 200,
@@ -3147,7 +3139,7 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
             &snapshot_path,
             serde_json::json!([
                 {
-                    "chain_id": 1264,
+                    "chain_id": 1266,
                     "epoch_id": 7,
                     "validator_set_version": 3,
                     "effective_from_height": 100,
@@ -3158,7 +3150,7 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
                     "validator_set_hash": "dynamic-validator-set-a"
                 },
                 {
-                    "chain_id": 1264,
+                    "chain_id": 1266,
                     "epoch_id": 8,
                     "validator_set_version": 4,
                     "effective_from_height": 200,

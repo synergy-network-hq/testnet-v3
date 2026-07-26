@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const TOTAL_SUPPLY_NWEI: u128 = 12_000_000_000_000_000_000;
-const CHAIN_ID: u64 = 1264;
+const CHAIN_ID: u64 = 1266;
 const CAIP2: &str = "synergy:testnet";
 
 fn repo_root() -> PathBuf {
@@ -283,7 +283,7 @@ fn network_identifiers_agree_with_genesis() {
     );
     assert_eq!(
         network["chain_identifiers"]["caip2_identifiers"]["eip155"]["value"],
-        "eip155:1264"
+        "eip155:1266"
     );
     assert_eq!(
         network["chain_identifiers"]["caip2_identifiers"]["eip155"]["status"],

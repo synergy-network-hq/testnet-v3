@@ -1,10 +1,49 @@
-# Synergy AIVM Current Status
+# Testnet-v3 AIVM implementation update
+
+Update date: 2026-07-25
+
+Current Testnet-v3 verdict: **the local general SynQ smart-contract execution
+blocker is resolved; decentralized AI inference and public network deployment
+are not yet proven**
+
+The historical inherited-baseline audit below predates the Testnet-v3 stateful
+SynQ implementation. Testnet-v3 now has an AIVM-owned stateful SynQ IR v2 path
+with:
+
+- deterministic constructor and public/internal function execution;
+- canonical typed JSON arguments and return values;
+- caller, call value, contract address, block height, and timestamp context;
+- persistent simple, mapping, nested-mapping, and array storage;
+- atomic transaction overlays with revert rollback;
+- events, checked arithmetic, and bounded loops;
+- manifest-allowlisted host functions, including actual ML-DSA-65 verification,
+  native transfers, SynID operations, validator-registry/staking operations,
+  and transaction-scoped nested contract calls; and
+- consensus-bound state roots, receipts, logs, and native-transfer effects.
+
+The focused `aivm-core` test
+`all_eight_genesis_contracts_deploy_call_restart_and_replay_deterministically`
+deploys the checked-in ValidatorRegistry, Staking, RewardDistributor,
+Governance, Treasury, SynergyOracle, Identity, and Slashing artifacts, exercises
+representative calls, serializes/restores AIVM state, and proves identical state
+roots and receipt hashes on replay.
+
+This resolves the local Testnet-v3 smart-contract capability blocker. It does
+not prove decentralized AI inference, public RPC availability, production
+storage durability, signed release packaging, identity/genesis approval, or
+live Testnet-v3 deployment. Those remain separate launch gates.
+
+---
+
+# Historical inherited-baseline AIVM audit
 
 Audit date: 2026-07-15
 
 Audited authoritative AIVM revision: `d2d8e67df88145d2262f5997800d6bb2171577ea`
 
-Verdict: **not production-ready, not operational for general SynQ smart contracts, and not operational for decentralized AI inference**
+Historical verdict at the audited revision: **not production-ready, not
+operational for general SynQ smart contracts, and not operational for
+decentralized AI inference**
 
 ## Architectural rule used by this audit
 

@@ -15,6 +15,9 @@ pub enum AlgorithmFamily {
     MLKEM512,
     MLKEM768,
     MLKEM1024,
+    MLDSA44,
+    MLDSA65,
+    MLDSA87,
     FNDSA512,
     FNDSA1024,
 }
@@ -25,6 +28,9 @@ impl AlgorithmFamily {
             Self::MLKEM512 => "ML-KEM-512",
             Self::MLKEM768 => "ML-KEM-768",
             Self::MLKEM1024 => "ML-KEM-1024",
+            Self::MLDSA44 => "ML-DSA-44",
+            Self::MLDSA65 => "ML-DSA-65",
+            Self::MLDSA87 => "ML-DSA-87",
             Self::FNDSA512 => "FN-DSA-512",
             Self::FNDSA1024 => "FN-DSA-1024",
         }
@@ -424,5 +430,12 @@ mod tests {
         let contents = std::fs::read_to_string(out.path()).unwrap();
         assert!(contents.contains("\"event\":\"registered\""));
         assert!(contents.contains("\"event\":\"accessed\""));
+    }
+
+    #[test]
+    fn lifecycle_exposes_enabled_ml_dsa_families() {
+        assert_eq!(AlgorithmFamily::MLDSA44.as_str(), "ML-DSA-44");
+        assert_eq!(AlgorithmFamily::MLDSA65.as_str(), "ML-DSA-65");
+        assert_eq!(AlgorithmFamily::MLDSA87.as_str(), "ML-DSA-87");
     }
 }

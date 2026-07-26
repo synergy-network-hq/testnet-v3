@@ -236,24 +236,27 @@ impl SemanticAnalyzer {
                 }
                 false
             }
-            Statement::Assignment(name, expr) => {
-                let target_ty = self.lookup_symbol_type(name, ctx);
-                if target_ty.is_none() {
+            Statement::Assignment(target, expr) => {
+                let root = assignment_target_root(target);
+                if root
+                    .and_then(|name| self.lookup_symbol_type(name, ctx))
+                    .is_none()
+                {
+                    let target_name = root.unwrap_or("<invalid>");
                     self.push_error(format!(
                         "Function `{}` in contract `{}` assigns to undefined symbol `{}`",
-                        ctx.function_name, ctx.contract.name, name
+                        ctx.function_name, ctx.contract.name, target_name
                     ));
                 }
 
+                let target_ty = self.infer_expression_type(target, ctx);
                 let value_ty = self.infer_expression_type(expr, ctx);
-                if let (Some(expected), Some(actual)) = (target_ty.as_ref(), value_ty.as_type()) {
-                    // Parser currently stores assignment lvalues as root symbols.
-                    // Skip strict type checks for container-like lvalues until full lvalue AST support lands.
+                if let (Some(expected), Some(actual)) = (target_ty.as_type(), value_ty.as_type()) {
                     if is_precise_assignment_target(expected) && !types_compatible(expected, actual)
                     {
                         self.push_error(format!(
-                            "Function `{}` in contract `{}` assigns incompatible type to `{}` (expected `{:?}`, found `{:?}`)",
-                            ctx.function_name, ctx.contract.name, name, expected, actual
+                            "Function `{}` in contract `{}` assigns incompatible type (expected `{:?}`, found `{:?}`)",
+                            ctx.function_name, ctx.contract.name, expected, actual
                         ));
                     }
                 }
@@ -392,6 +395,17 @@ impl SemanticAnalyzer {
             Expression::Identifier(raw) => self.infer_identifier_type(raw, ctx),
             Expression::Call(name, args) => self.infer_call_type(name, args, ctx),
             Expression::MemberAccess(object, member) => {
+                if matches!(
+                    &**object,
+                    Expression::Identifier(name)
+                        if name.chars().next().is_some_and(char::is_uppercase)
+                ) {
+                    // Enum definitions are accepted by the surface grammar but
+                    // are not yet represented as source units. Preserve their
+                    // numeric member semantics without treating the enum name
+                    // as a missing runtime variable.
+                    return InferredType::known(Type::UInt256);
+                }
                 let object_ty = self.infer_expression_type(object, ctx);
                 match object_ty {
                     InferredType::Known(Type::Array(_, _))
@@ -716,6 +730,16 @@ impl SemanticAnalyzer {
             line: None,
             column: None,
         });
+    }
+}
+
+fn assignment_target_root(expression: &Expression) -> Option<&str> {
+    match expression {
+        Expression::Identifier(name) => Some(name),
+        Expression::MemberAccess(object, _) | Expression::IndexAccess(object, _) => {
+            assignment_target_root(object)
+        }
+        _ => None,
     }
 }
 

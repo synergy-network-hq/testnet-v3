@@ -4,7 +4,7 @@
   "type": "object",
   "required": ["chain_id", "network_id", "validator_address"],
   "properties": {
-    "chain_id": { "const": 1264 },
+    "chain_id": { "const": 1266 },
     "network_id": { "const": "synergy-testnet-v3" },
     "validator_address": { "type": "string", "minLength": 1 },
     "data_dir": { "const": "/var/lib/synergy/validator" },

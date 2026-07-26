@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import sys
@@ -19,10 +20,22 @@ REFERENCE = ROOT / "launch" / "reference"
 RETIRED_V2_GENESIS_SHA256 = (
     "085c4283cf587ff8a22e8bf4a3de022f86a99d8af7d9fe9b4c0dbdfd082a5a95"
 )
-EXPECTED_CHAIN_ID = 1264
+EXPECTED_CHAIN_ID = 1266
 EXPECTED_RELEASE_ID = "testnet-v3"
 EXPECTED_RUNTIME_NETWORK_ID = "synergy-testnet-v3"
 ZERO_HASH = "0" * 64
+TESTNET_V3_CANDIDATE = ROOT / "genesis.testnet-v3.identity-assigned.json"
+CONTROL_STATUS_PATH = ROOT / "launch" / "launch-control-status.json"
+REQUIRED_LAUNCH_CONTROL_IDS = {
+    "POSY-CTX-01", "POSY-CRYPTO-01", "POSY-QRM-01", "POSY-SIGN-01",
+    "POSY-LEGACY-OFF-01", "POSY-FRESH-01", "POSY-ENGINE-01",
+    "POSY-HALT-01", "POSY-PARAM-01", "SYNQ-AIVM-01", "ETDAG-CORE-01",
+    "ETDAG-TARGET-01", "ETDAG-KEYS-01", "ETDAG-KEY-BIND-01",
+    "ETDAG-WALLET-01", "ETDAG-OPS-01", "RESOURCE-ISO-01",
+    "GENESIS-DET-01", "SECURITY-V7-01", "PERF-10K-01", "RELEASE-01",
+    "LAUNCH-01",
+}
+ALLOWED_CONTROL_STATUSES = {"PASS", "FAIL", "BLOCKED", "NOT_APPLICABLE"}
 
 
 def sha256(path: Path) -> str:
@@ -138,6 +151,7 @@ def validate_structure() -> list[str]:
         ROOT / "VERSION",
         ROOT / "SOURCE_PROVENANCE.md",
         ROOT / "launch" / "launch-readiness.json",
+        CONTROL_STATUS_PATH,
         RUNTIME / "Cargo.toml",
         RUNTIME / "config" / "testnet" / "network-topology.toml",
         RUNTIME / "src" / "synergy_types.rs",
@@ -174,17 +188,148 @@ def validate_structure() -> list[str]:
         )
     if readiness.get("chain_id") != EXPECTED_CHAIN_ID:
         errors.append(f"launch readiness chain_id must be {EXPECTED_CHAIN_ID}")
+    if readiness.get("canonical_control_status") != "launch/launch-control-status.json":
+        errors.append("launch readiness must point to the canonical control-status mapping")
+
+    control_status = load_json(CONTROL_STATUS_PATH, errors)
+    if control_status.get("release_id") != EXPECTED_RELEASE_ID:
+        errors.append("launch control status release_id must be testnet-v3")
+    if control_status.get("chain_id") != EXPECTED_CHAIN_ID:
+        errors.append("launch control status chain_id must be 1266")
+    if control_status.get("network_id") != EXPECTED_RUNTIME_NETWORK_ID:
+        errors.append("launch control status network_id must be synergy-testnet-v3")
+    if control_status.get("launch_decision") not in ALLOWED_CONTROL_STATUSES:
+        errors.append("launch control status has an invalid launch_decision")
+    controls = control_status.get("controls")
+    if not isinstance(controls, list):
+        errors.append("launch control status controls must be a list")
+    else:
+        ids = []
+        required_fields = (
+            "component_implementation_status",
+            "production_path_integration_status",
+            "distributed_qualification_status",
+            "operational_evidence_status",
+            "final_gate_status",
+        )
+        for control in controls:
+            if not isinstance(control, dict):
+                errors.append("launch control status contains a non-object control")
+                continue
+            control_id = control.get("id")
+            if not isinstance(control_id, str) or not control_id:
+                errors.append("launch control status contains a control without an ID")
+                continue
+            ids.append(control_id)
+            for field in required_fields:
+                if control.get(field) not in ALLOWED_CONTROL_STATUSES:
+                    errors.append(
+                        f"launch control {control_id} has invalid {field}"
+                    )
+            evidence_paths = control.get("evidence_paths")
+            if not isinstance(evidence_paths, list) or not evidence_paths:
+                errors.append(f"launch control {control_id} has no evidence paths")
+            if not isinstance(control.get("closure_criteria"), str) or not control["closure_criteria"].strip():
+                errors.append(f"launch control {control_id} has no closure criteria")
+        if len(ids) != len(set(ids)):
+            errors.append("launch control status contains duplicate control IDs")
+        missing_ids = REQUIRED_LAUNCH_CONTROL_IDS.difference(ids)
+        unexpected_ids = set(ids).difference(REQUIRED_LAUNCH_CONTROL_IDS)
+        if missing_ids:
+            errors.append(
+                "launch control status is missing required controls: "
+                + ", ".join(sorted(missing_ids))
+            )
+        if unexpected_ids:
+            errors.append(
+                "launch control status has unknown controls: "
+                + ", ".join(sorted(unexpected_ids))
+            )
 
     constants_path = RUNTIME / "src" / "synergy_types.rs"
     if constants_path.is_file():
         constants = constants_path.read_text(encoding="utf-8")
-        if "SYNERGY_TESTNET_V3_CHAIN_ID: u64 = 1264" not in constants:
+        if "SYNERGY_TESTNET_V3_CHAIN_ID: u64 = 1266" not in constants:
             errors.append("runtime Testnet-v3 chain constant is missing or incorrect")
         if (
             'SYNERGY_TESTNET_V3_NETWORK_ID: &str = "synergy-testnet-v3"'
             not in constants
         ):
             errors.append("runtime Testnet-v3 network constant is missing or incorrect")
+
+    # The candidate is the sole fresh-genesis source for Testnet-v3.  Its
+    # launch topology starts at six active validators in one cluster; the
+    # pre-generated control-panel records must not be mistaken for active
+    # validators.  A strict 2/3 quorum at six is five, and the next cluster is
+    # created only when validator ten is explicitly activated.
+    candidate = load_json(TESTNET_V3_CANDIDATE, errors)
+    if candidate:
+        candidate_network = candidate.get("network", {})
+        candidate_consensus = candidate.get("consensus", {})
+        if candidate_network.get("chain_id") != EXPECTED_CHAIN_ID:
+            errors.append("candidate genesis chain_id must be 1266")
+        if len(candidate.get("validators", [])) != 6:
+            errors.append("candidate genesis must contain exactly six active validators")
+        if len(candidate.get("preconfigured_validators", [])) != 21:
+            errors.append(
+                "candidate genesis must retain exactly 21 preconfigured validator identities"
+            )
+        expected_consensus = {
+            "min_validator_count": 6,
+            "min_quorum_threshold": 5,
+            "initial_active_validator_count": 6,
+            "initial_cluster_count": 1,
+            "cluster_schedule_version": "dynamic-v3-floor7",
+        }
+        for field, expected in expected_consensus.items():
+            if candidate_consensus.get(field) != expected:
+                errors.append(
+                    f"candidate genesis consensus.{field} must be {expected!r}"
+                )
+        derivation = candidate_consensus.get("cluster_assignment_derivation", "")
+        if "tenth validator" not in derivation:
+            errors.append(
+                "candidate genesis must state that the second cluster starts at validator 10"
+            )
+
+        crypto = candidate.get("crypto", {})
+        key_types = crypto.get("key_types", {}) if isinstance(crypto, dict) else {}
+        if key_types.get("validator") != "ML-DSA-65":
+            errors.append(
+                "candidate genesis crypto.key_types.validator must be ML-DSA-65"
+            )
+        for group_name, validators in (
+            ("active", candidate.get("validators", [])),
+            ("preconfigured", candidate.get("preconfigured_validators", [])),
+        ):
+            for index, validator in enumerate(validators, start=1):
+                if not isinstance(validator, dict):
+                    errors.append(
+                        f"candidate {group_name} validator {index} must be an object"
+                    )
+                    continue
+                if validator.get("consensus_key_type") != "ML-DSA-65":
+                    errors.append(
+                        f"candidate {group_name} validator {index} consensus_key_type must be ML-DSA-65"
+                    )
+                    continue
+                key = validator.get("consensus_public_key")
+                if not isinstance(key, str):
+                    errors.append(
+                        f"candidate {group_name} validator {index} must have a base64 consensus_public_key"
+                    )
+                    continue
+                try:
+                    decoded = base64.b64decode(key, validate=True)
+                except (ValueError, TypeError):
+                    errors.append(
+                        f"candidate {group_name} validator {index} consensus_public_key is not valid base64"
+                    )
+                    continue
+                if len(decoded) != 1952:
+                    errors.append(
+                        f"candidate {group_name} validator {index} ML-DSA-65 public key must decode to 1952 bytes"
+                    )
 
     errors.extend(secret_filename_findings())
     errors.extend(active_v2_marker_findings())
@@ -222,9 +367,9 @@ def validate_full_launch() -> list[str]:
             errors.append(f"{path.relative_to(ROOT)} is still a blocking placeholder")
         network = genesis.get("network", {})
         if network.get("chain_id") != EXPECTED_CHAIN_ID:
-            errors.append(f"{path.relative_to(ROOT)} chain_id must be 1264")
+            errors.append(f"{path.relative_to(ROOT)} chain_id must be 1266")
         if network.get("network_id") != EXPECTED_CHAIN_ID:
-            errors.append(f"{path.relative_to(ROOT)} numeric network_id must be 1264")
+            errors.append(f"{path.relative_to(ROOT)} numeric network_id must be 1266")
         if network.get("runtime_network_id") != EXPECTED_RUNTIME_NETWORK_ID:
             errors.append(
                 f"{path.relative_to(ROOT)} runtime network ID must be synergy-testnet-v3"

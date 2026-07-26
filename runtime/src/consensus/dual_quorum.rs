@@ -4370,7 +4370,7 @@ mod tests {
             &snapshot_path,
             serde_json::json!({
                 "epoch_validator_sets": [{
-                    "chain_id": 1264,
+                    "chain_id": 1266,
                     "epoch_id": 0,
                     "validator_set_version": 1,
                     "effective_from_height": 1,
@@ -4484,7 +4484,7 @@ mod tests {
             serde_json::json!({
                 "epoch_validator_sets": [
                     {
-                        "chain_id": 1264,
+                        "chain_id": 1266,
                         "epoch_id": 0,
                         "validator_set_version": 1,
                         "effective_from_height": 1,
@@ -4502,7 +4502,7 @@ mod tests {
                         "validator_set_hash": "pre-transition-set"
                     },
                     {
-                        "chain_id": 1264,
+                        "chain_id": 1266,
                         "epoch_id": 1,
                         "validator_set_version": 2,
                         "effective_from_height": 100,
@@ -4639,7 +4639,7 @@ mod tests {
             serde_json::json!({
                 "epoch_validator_sets": [{
                     "snapshot_format_version": crate::validator::SUPPORTED_EPOCH_VALIDATOR_SET_FORMAT_VERSION,
-                    "chain_id": 1264,
+                    "chain_id": 1266,
                     "epoch_id": 0,
                     "validator_set_version": 1,
                     "effective_from_height": 1,

@@ -5,15 +5,18 @@ use serde_json::{json, Value};
 #[cfg(test)]
 use std::cell::RefCell;
 use std::collections::BTreeSet;
+#[cfg(not(test))]
 use std::env;
-use std::fs;
-use std::path::PathBuf;
 
 pub const CONSENSUS_FORK_MIGRATION_ENV: &str = "SYNERGY_CONSENSUS_FORK_MIGRATION_FILE";
-pub const DEFAULT_CONSENSUS_FORK_MIGRATION_PATH: &str = "config/consensus-fork-migration.json";
 pub const CONSENSUS_FORK_PARSER_MODE_FAIL_CLOSED: &str = "fail_closed";
-pub const LEGACY_CONSENSUS_ALGORITHM_LABEL: &str = "FN-DSA";
-pub const POST_FORK_CONSENSUS_ALGORITHM_LABEL: &str = "FN-DSA";
+pub const TESTNET_V3_FRESH_GENESIS_POLICY: &str = "fresh_genesis_no_legacy_fork_import";
+
+fn legacy_fork_import_forbidden_error() -> String {
+    format!(
+        "Testnet-v3 is a fresh genesis chain and forbids {CONSENSUS_FORK_MIGRATION_ENV}: legacy consensus-fork migrations cannot be imported"
+    )
+}
 
 #[cfg(test)]
 thread_local! {
@@ -162,48 +165,32 @@ impl ForkValidatorConsensusKey {
 }
 
 pub fn active_consensus_fork_migration() -> Result<Option<ConsensusForkMigration>, String> {
-    #[cfg(test)]
-    if let Some(migration) = TEST_ACTIVE_CONSENSUS_FORK_MIGRATION.with(|slot| slot.borrow().clone())
+    #[cfg(not(test))]
     {
-        migration
-            .validate()
-            .map_err(|error| format!("invalid test consensus fork migration: {error}"))?;
-        return Ok(Some(migration));
+        if env::var(CONSENSUS_FORK_MIGRATION_ENV)
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            return Err(legacy_fork_import_forbidden_error());
+        }
+        // The checked-in migration document is retained as historical recovery
+        // evidence only. It must never affect Testnet-v3 validator admission,
+        // consensus membership, signing, recovery, state sync, or genesis.
+        return Ok(None);
     }
 
-    let env_path = env::var(CONSENSUS_FORK_MIGRATION_ENV)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-    let path = match env_path {
-        Some(value) => PathBuf::from(value),
-        None => {
-            let project_root_path = env::var("SYNERGY_PROJECT_ROOT")
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-                .map(|value| PathBuf::from(value).join(DEFAULT_CONSENSUS_FORK_MIGRATION_PATH));
-            let default = project_root_path
-                .filter(|path| path.is_file())
-                .unwrap_or_else(|| PathBuf::from(DEFAULT_CONSENSUS_FORK_MIGRATION_PATH));
-            if !default.is_file() {
-                return Ok(None);
-            }
-            default
+    #[cfg(test)]
+    {
+        if let Some(migration) =
+            TEST_ACTIVE_CONSENSUS_FORK_MIGRATION.with(|slot| slot.borrow().clone())
+        {
+            migration
+                .validate()
+                .map_err(|error| format!("invalid test consensus fork migration: {error}"))?;
+            return Ok(Some(migration));
         }
-    };
-
-    let raw = fs::read_to_string(&path)
-        .map_err(|error| format!("read consensus fork migration {}: {error}", path.display()))?;
-    let migration: ConsensusForkMigration = serde_json::from_str(&raw)
-        .map_err(|error| format!("parse consensus fork migration {}: {error}", path.display()))?;
-    migration.validate().map_err(|error| {
-        format!(
-            "invalid consensus fork migration {}: {error}",
-            path.display()
-        )
-    })?;
-    Ok(Some(migration))
+        Ok(None)
+    }
 }
 
 pub fn active_consensus_validator_addresses() -> Result<Option<BTreeSet<String>>, String> {
@@ -305,8 +292,8 @@ pub fn active_consensus_fork_status() -> Value {
         }),
         Ok(None) => json!({
             "fork_configured": false,
-            "old_consensus_algorithm": LEGACY_CONSENSUS_ALGORITHM_LABEL,
-            "new_consensus_algorithm": POST_FORK_CONSENSUS_ALGORITHM_LABEL,
+            "fresh_genesis_policy": TESTNET_V3_FRESH_GENESIS_POLICY,
+            "legacy_migration_import": "forbidden",
             "parser_mode": CONSENSUS_FORK_PARSER_MODE_FAIL_CLOSED,
         }),
         Err(error) => json!({
@@ -319,8 +306,12 @@ pub fn active_consensus_fork_status() -> Value {
 
 pub fn normalize_consensus_key_algorithm(label: &str) -> Result<PQCAlgorithm, String> {
     match label.trim().to_ascii_lowercase().as_str() {
-        "fndsa" | "fn-dsa" | "fn-dsa-512" | "fn-dsa-1024" | "falcon" | "falcon-1024" | "mldsa"
-        | "ml-dsa" | "ml-dsa-44" | "ml-dsa-65" | "ml-dsa-87" => Ok(PQCAlgorithm::FNDSA),
+        "fndsa" | "fn-dsa" | "fn-dsa-512" | "fn-dsa-1024" | "falcon" | "falcon-1024" => {
+            Ok(PQCAlgorithm::FNDSA)
+        }
+        "mldsa" | "ml-dsa" | "ml-dsa-44" | "ml-dsa-65" | "ml-dsa-87" => Err(format!(
+            "ML-DSA label '{label}' is not valid in the retired FN-DSA fork-migration parser"
+        )),
         "slhdsa" | "slh-dsa" => Ok(PQCAlgorithm::SLHDSA),
         "" => Err("missing consensus key algorithm".to_string()),
         "pqc" | "aegis" => Err(format!(
@@ -473,13 +464,17 @@ mod tests {
     }
 
     #[test]
-    fn consensus_algorithm_normalizer_accepts_live_ml_dsa_labels_as_fndsa() {
+    fn consensus_algorithm_normalizer_rejects_ml_dsa_as_fndsa() {
         for label in ["ml-dsa", "ml-dsa-65", "ML-DSA-65", "mldsa"] {
-            assert_eq!(
-                normalize_consensus_key_algorithm(label).unwrap(),
-                PQCAlgorithm::FNDSA
-            );
+            assert!(normalize_consensus_key_algorithm(label).is_err());
         }
+    }
+
+    #[test]
+    fn fresh_genesis_policy_forbids_legacy_fork_import() {
+        let error = legacy_fork_import_forbidden_error();
+        assert!(error.contains("fresh genesis chain"));
+        assert!(error.contains(CONSENSUS_FORK_MIGRATION_ENV));
     }
 
     #[test]

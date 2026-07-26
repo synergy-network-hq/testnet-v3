@@ -4387,7 +4387,7 @@ mod tests {
     }
 
     #[test]
-    fn finalized_sts_snapshot_round_trip_uses_chain_1264() {
+    fn finalized_sts_snapshot_round_trip_uses_chain_1266() {
         let path = temp_sts_snapshot_path("snapshot-round-trip");
         let mut snapshot = StsStateSnapshot::empty_at(77, "block-hash-77");
         let token_id = snapshot

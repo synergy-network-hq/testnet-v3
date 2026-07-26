@@ -639,7 +639,7 @@ mod tests {
     #[test]
     fn fixture_uses_dependencies_and_no_wallet_cli_path() {
         let report = build_fixture_report().unwrap();
-        assert_eq!(report.chain_id, 1264);
+        assert_eq!(report.chain_id, 1266);
         assert_eq!(report.network_id, "synergy-testnet-v3");
         assert_eq!(report.transactions.len(), 3);
         assert!(report

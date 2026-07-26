@@ -403,21 +403,13 @@ fn parse_statement(pair: Pair<Rule>) -> Option<Statement> {
             Some(Statement::VariableDeclaration(name, ty, expr))
         }
         Rule::assignment => {
-            let mut name = String::new();
+            let mut target: Option<Expression> = None;
             let mut rhs_expr: Option<Expression> = None;
 
             for item in statement.into_inner() {
                 match item.as_rule() {
                     Rule::lvalue => {
-                        for lvalue_item in item.into_inner() {
-                            if lvalue_item.as_rule() == Rule::IDENT && name.is_empty() {
-                                name = lvalue_item.as_str().to_string();
-                                break;
-                            }
-                        }
-                    }
-                    Rule::IDENT if name.is_empty() => {
-                        name = item.as_str().to_string();
+                        target = parse_expression_text(item.as_str());
                     }
                     Rule::expression => {
                         rhs_expr = Some(parse_expression(item));
@@ -426,11 +418,12 @@ fn parse_statement(pair: Pair<Rule>) -> Option<Statement> {
                 }
             }
 
-            if name.is_empty() {
-                return None;
+            match (target, rhs_expr) {
+                (Some(target), Some(value)) if is_assignable_expression(&target) => {
+                    Some(Statement::Assignment(target, value))
+                }
+                _ => None,
             }
-
-            rhs_expr.map(|expr| Statement::Assignment(name, expr))
         }
         Rule::require_statement => {
             let mut condition: Option<Expression> = None;
@@ -709,8 +702,37 @@ fn parse_expression_text(raw: &str) -> Option<Expression> {
         return Some(Expression::Literal(literal));
     }
 
+    if let Some(rest) = text.strip_suffix("++") {
+        let expr = parse_expression_text(rest)?;
+        return Some(Expression::Unary(UnaryOp::Inc, Box::new(expr)));
+    }
+
+    if let Some(rest) = text.strip_suffix("--") {
+        let expr = parse_expression_text(rest)?;
+        return Some(Expression::Unary(UnaryOp::Dec, Box::new(expr)));
+    }
+
     if let Some((callee, args)) = parse_call_expression(text) {
         return Some(Expression::Call(callee.to_string(), args));
+    }
+
+    if text.ends_with(']') {
+        if let Some(open) = find_last_top_level_bracket(text) {
+            let object = parse_expression_text(&text[..open])?;
+            let index = parse_expression_text(&text[open + 1..text.len() - 1])?;
+            return Some(Expression::IndexAccess(Box::new(object), Box::new(index)));
+        }
+    }
+
+    if let Some(dot) = find_last_top_level_member_dot(text) {
+        let member = text[dot + 1..].trim();
+        if is_identifier(member) {
+            let object = parse_expression_text(&text[..dot])?;
+            return Some(Expression::MemberAccess(
+                Box::new(object),
+                member.to_string(),
+            ));
+        }
     }
 
     if is_identifier(text) {
@@ -727,7 +749,7 @@ fn parse_call_expression(text: &str) -> Option<(&str, Vec<Expression>)> {
 
     let open = find_top_level_open_paren(text)?;
     let callee = text[..open].trim();
-    if !is_identifier(callee) {
+    if !is_qualified_identifier(callee) {
         return None;
     }
 
@@ -751,6 +773,83 @@ fn parse_call_expression(text: &str) -> Option<(&str, Vec<Expression>)> {
     };
 
     Some((callee, args))
+}
+
+fn find_last_top_level_bracket(text: &str) -> Option<usize> {
+    let mut depth_paren = 0usize;
+    let mut depth_bracket = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut candidate = None;
+
+    for (idx, ch) in text.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match ch {
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '(' => depth_paren += 1,
+            ')' => depth_paren = depth_paren.saturating_sub(1),
+            '[' if depth_paren == 0 && depth_bracket == 0 => {
+                candidate = Some(idx);
+                depth_bracket = 1;
+            }
+            '[' if depth_paren == 0 => depth_bracket += 1,
+            ']' if depth_paren == 0 => depth_bracket = depth_bracket.saturating_sub(1),
+            _ => {}
+        }
+    }
+
+    if depth_paren == 0 && depth_bracket == 0 {
+        candidate
+    } else {
+        None
+    }
+}
+
+fn find_last_top_level_member_dot(text: &str) -> Option<usize> {
+    let mut depth_paren = 0usize;
+    let mut depth_bracket = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut candidate = None;
+
+    for (idx, ch) in text.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match ch {
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '(' => depth_paren += 1,
+            ')' => depth_paren = depth_paren.saturating_sub(1),
+            '[' => depth_bracket += 1,
+            ']' => depth_bracket = depth_bracket.saturating_sub(1),
+            '.' if depth_paren == 0 && depth_bracket == 0 => candidate = Some(idx),
+            _ => {}
+        }
+    }
+
+    candidate
 }
 
 fn parse_literal(text: &str) -> Option<Literal> {
@@ -1090,6 +1189,17 @@ fn is_identifier(text: &str) -> bool {
         return false;
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn is_qualified_identifier(text: &str) -> bool {
+    !text.is_empty() && text.split('.').all(is_identifier)
+}
+
+fn is_assignable_expression(expression: &Expression) -> bool {
+    matches!(
+        expression,
+        Expression::Identifier(_) | Expression::MemberAccess(_, _) | Expression::IndexAccess(_, _)
+    )
 }
 
 fn parse_type(pair: Pair<Rule>) -> Type {

@@ -9,6 +9,9 @@ use crate::execution::{
 };
 use crate::metering::AivmGasMeter;
 use crate::state::{ContractState, CounterStateMachine, StateKey, StateOverlay};
+use crate::stateful_synq::{
+    call_stateful_synq, deploy_stateful_synq, StatefulSynQFailure, SynQNativeTransfer,
+};
 
 pub const COUNTER_INCREMENT_SELECTOR: [u8; 4] = [0x58, 0x42, 0xf1, 0xbe];
 pub const COUNTER_GET_SELECTOR: [u8; 4] = [0x75, 0xb7, 0x04, 0x57];
@@ -52,6 +55,7 @@ pub struct SynQRuntimeReceipt {
     pub pqc_gas_used: u64,
     pub return_data: Vec<u8>,
     pub logs: Vec<String>,
+    pub native_transfers: Vec<SynQNativeTransfer>,
     pub error_code: Option<AivmErrorCode>,
     pub error: Option<String>,
     pub pre_state_root: [u8; 32],
@@ -72,6 +76,12 @@ impl SynQRuntimeReceipt {
         push_u64(&mut out, self.logs.len() as u64);
         for log in &self.logs {
             push_bytes(&mut out, log.as_bytes());
+        }
+        push_u64(&mut out, self.native_transfers.len() as u64);
+        for transfer in &self.native_transfers {
+            push_bytes(&mut out, transfer.from.as_bytes());
+            push_bytes(&mut out, transfer.to.as_bytes());
+            out.extend_from_slice(&transfer.amount_nwei.to_be_bytes());
         }
         match self.error_code {
             Some(code) => push_u16(&mut out, aivm_error_code_value(code)),
@@ -132,7 +142,7 @@ pub fn deploy_synq_contract(
             )
         }
     };
-    if !request.calldata.is_empty() {
+    if !matches!(profile, SynQRuntimeProfile::Stateful { .. }) && !request.calldata.is_empty() {
         return failed(
             request,
             SynQRuntimeOperation::Deploy,
@@ -152,6 +162,10 @@ pub fn deploy_synq_contract(
             &meter,
             error,
         );
+    }
+
+    if let SynQRuntimeProfile::Stateful { contract_name } = &profile {
+        return deploy_stateful_contract(request, state, pre_state_root, &mut meter, contract_name);
     }
 
     let mut overlay = StateOverlay::default();
@@ -216,6 +230,9 @@ pub fn call_synq_contract(
             )
         }
     };
+    if let SynQRuntimeProfile::Stateful { contract_name } = &profile {
+        return call_stateful_contract(request, state, pre_state_root, &mut meter, contract_name);
+    }
     if let SynQRuntimeProfile::Generic {
         contract_name,
         token,
@@ -361,6 +378,9 @@ enum CounterMethod {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SynQRuntimeProfile {
     Counter,
+    Stateful {
+        contract_name: String,
+    },
     Generic {
         contract_name: String,
         token: Option<SynQTokenMetadata>,
@@ -371,6 +391,7 @@ impl SynQRuntimeProfile {
     fn contract_name(&self) -> &str {
         match self {
             Self::Counter => "Counter",
+            Self::Stateful { contract_name } => contract_name,
             Self::Generic { contract_name, .. } => contract_name,
         }
     }
@@ -378,13 +399,14 @@ impl SynQRuntimeProfile {
     fn runtime_name(&self) -> &'static str {
         match self {
             Self::Counter => "counter-state-machine",
+            Self::Stateful { .. } => "stateful-synq-ir-v2",
             Self::Generic { .. } => "generic-synq-bytecode",
         }
     }
 
     fn deploy_logs(&self) -> Vec<String> {
         match self {
-            Self::Counter => Vec::new(),
+            Self::Counter | Self::Stateful { .. } => Vec::new(),
             Self::Generic { token, .. } => token
                 .as_ref()
                 .map(|token| {
@@ -479,6 +501,12 @@ fn validate_runtime_artifact(request: &ExecutionRequest) -> Result<SynQRuntimePr
                 manifest.contract_name, abi.contract
             ),
         ));
+    }
+
+    if manifest.artifact_format == "synq-stateful-ir-v2" && manifest.bytecode_version == 2 {
+        return Ok(SynQRuntimeProfile::Stateful {
+            contract_name: manifest.contract_name,
+        });
     }
 
     if manifest.contract_name == "Counter" {
@@ -716,6 +744,10 @@ fn initialize_contract_state(
             }
             Ok(())
         }
+        SynQRuntimeProfile::Stateful { .. } => Err(AivmError::new(
+            AivmErrorCode::InternalInvariant,
+            "stateful SynQ deploy reached the legacy initializer",
+        )),
         SynQRuntimeProfile::Generic {
             contract_name,
             token,
@@ -723,6 +755,220 @@ fn initialize_contract_state(
             initialize_generic_contract_state(request, state, overlay, contract_name, token, meter)
         }
     }
+}
+
+fn deploy_stateful_contract(
+    request: &ExecutionRequest,
+    state: &mut ContractState,
+    pre_state_root: [u8; 32],
+    meter: &mut AivmGasMeter,
+    contract_name: &str,
+) -> SynQRuntimeReceipt {
+    let manifest = match decode_manifest_artifact(request) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            return failed(
+                request,
+                SynQRuntimeOperation::Deploy,
+                pre_state_root,
+                meter,
+                error,
+            )
+        }
+    };
+    let executable = match synq_compiler::StatefulSynQExecutable::decode(&request.artifact.bytes) {
+        Ok(executable) => executable,
+        Err(message) => {
+            return failed(
+                request,
+                SynQRuntimeOperation::Deploy,
+                pre_state_root,
+                meter,
+                AivmError::bytecode(message),
+            )
+        }
+    };
+    let mut overlay = StateOverlay::default();
+    match deploy_stateful_synq(
+        &executable,
+        &manifest,
+        &request.calldata,
+        &request.context,
+        &request.contract_id,
+        state,
+        &mut overlay,
+        meter,
+    ) {
+        Ok(outcome) => {
+            overlay.commit(state);
+            let post_state_root = state.state_root();
+            let mut logs = vec![
+                format!("synq.deploy.contract={contract_name}"),
+                "synq.deploy.runtime=stateful-synq-ir-v2".to_string(),
+                format!("synq.state.pre={}", hex(&pre_state_root)),
+                format!("synq.state.post={}", hex(&post_state_root)),
+            ];
+            logs.extend(outcome.logs);
+            succeeded_with_transfers(
+                request,
+                SynQRuntimeOperation::Deploy,
+                meter,
+                outcome.return_data,
+                logs,
+                outcome.native_transfers,
+                pre_state_root,
+                post_state_root,
+            )
+        }
+        Err(failure) => {
+            overlay.rollback();
+            failed_stateful(
+                request,
+                SynQRuntimeOperation::Deploy,
+                pre_state_root,
+                meter,
+                failure,
+            )
+        }
+    }
+}
+
+fn call_stateful_contract(
+    request: &ExecutionRequest,
+    state: &mut ContractState,
+    pre_state_root: [u8; 32],
+    meter: &mut AivmGasMeter,
+    contract_name: &str,
+) -> SynQRuntimeReceipt {
+    if let Err(error) = meter.charge_gas(CALL_BASE_GAS) {
+        return failed(
+            request,
+            SynQRuntimeOperation::Call,
+            pre_state_root,
+            meter,
+            error,
+        );
+    }
+    let manifest = match decode_manifest_artifact(request) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            return failed(
+                request,
+                SynQRuntimeOperation::Call,
+                pre_state_root,
+                meter,
+                error,
+            )
+        }
+    };
+    let abi = match decode_abi_artifact(request, "stateful SynQ execution requires an ABI") {
+        Ok(abi) => abi,
+        Err(error) => {
+            return failed(
+                request,
+                SynQRuntimeOperation::Call,
+                pre_state_root,
+                meter,
+                error,
+            )
+        }
+    };
+    let (method_name, encoded_args) = match decode_stateful_method(&abi, &request.calldata) {
+        Ok(decoded) => decoded,
+        Err(error) => {
+            return failed(
+                request,
+                SynQRuntimeOperation::Call,
+                pre_state_root,
+                meter,
+                error,
+            )
+        }
+    };
+    let executable = match synq_compiler::StatefulSynQExecutable::decode(&request.artifact.bytes) {
+        Ok(executable) => executable,
+        Err(message) => {
+            return failed(
+                request,
+                SynQRuntimeOperation::Call,
+                pre_state_root,
+                meter,
+                AivmError::bytecode(message),
+            )
+        }
+    };
+    let mut overlay = StateOverlay::default();
+    match call_stateful_synq(
+        &executable,
+        &manifest,
+        method_name,
+        encoded_args,
+        &request.context,
+        &request.contract_id,
+        state,
+        &mut overlay,
+        meter,
+    ) {
+        Ok(outcome) => {
+            overlay.commit(state);
+            let post_state_root = state.state_root();
+            let mut logs = vec![
+                format!("synq.call.contract={contract_name}"),
+                "synq.call.runtime=stateful-synq-ir-v2".to_string(),
+                format!("synq.call.method={method_name}"),
+                format!("synq.state.pre={}", hex(&pre_state_root)),
+                format!("synq.state.post={}", hex(&post_state_root)),
+            ];
+            logs.extend(outcome.logs);
+            succeeded_with_transfers(
+                request,
+                SynQRuntimeOperation::Call,
+                meter,
+                outcome.return_data,
+                logs,
+                outcome.native_transfers,
+                pre_state_root,
+                post_state_root,
+            )
+        }
+        Err(failure) => {
+            overlay.rollback();
+            failed_stateful(
+                request,
+                SynQRuntimeOperation::Call,
+                pre_state_root,
+                meter,
+                failure,
+            )
+        }
+    }
+}
+
+fn decode_stateful_method<'a>(
+    abi: &'a SynQAbiArtifact,
+    calldata: &'a [u8],
+) -> Result<(&'a str, &'a [u8]), AivmError> {
+    if calldata.len() < 4 {
+        return Err(AivmError::new(
+            AivmErrorCode::Abi,
+            format!(
+                "stateful SynQ calldata requires a 4-byte selector; got {} bytes",
+                calldata.len()
+            ),
+        ));
+    }
+    let selector = format!("0x{}", hex(&calldata[..4]));
+    let method = abi
+        .methods
+        .iter()
+        .find(|method| method.selector == selector)
+        .ok_or_else(|| {
+            AivmError::new(
+                AivmErrorCode::Abi,
+                format!("unsupported stateful SynQ selector {selector}"),
+            )
+        })?;
+    Ok((&method.name, &calldata[4..]))
 }
 
 fn initialize_generic_contract_state(
@@ -941,6 +1187,7 @@ fn call_generic_synq_contract(
         pqc_gas_used: meter.pq_gas_used().saturating_add(vm_receipt.pqc_gas_used),
         return_data: vm_receipt.return_data,
         logs,
+        native_transfers: Vec::new(),
         error_code: vm_receipt.error_code,
         error: vm_receipt.error,
         pre_state_root,
@@ -1843,6 +2090,7 @@ fn failed(
         pqc_gas_used: meter.pq_gas_used(),
         return_data: Vec::new(),
         logs: Vec::new(),
+        native_transfers: Vec::new(),
         error_code: Some(error.code),
         error: Some(error.message),
         pre_state_root: state_root,
@@ -1859,6 +2107,28 @@ fn succeeded(
     pre_state_root: [u8; 32],
     post_state_root: [u8; 32],
 ) -> SynQRuntimeReceipt {
+    succeeded_with_transfers(
+        request,
+        operation,
+        meter,
+        return_data,
+        logs,
+        Vec::new(),
+        pre_state_root,
+        post_state_root,
+    )
+}
+
+fn succeeded_with_transfers(
+    request: &ExecutionRequest,
+    operation: SynQRuntimeOperation,
+    meter: &AivmGasMeter,
+    return_data: Vec<u8>,
+    logs: Vec<String>,
+    native_transfers: Vec<SynQNativeTransfer>,
+    pre_state_root: [u8; 32],
+    post_state_root: [u8; 32],
+) -> SynQRuntimeReceipt {
     SynQRuntimeReceipt {
         contract_id: request.contract_id.clone(),
         context: ExecutionReceiptContext::from_request(request),
@@ -1868,10 +2138,39 @@ fn succeeded(
         pqc_gas_used: meter.pq_gas_used(),
         return_data,
         logs,
+        native_transfers,
         error_code: None,
         error: None,
         pre_state_root,
         post_state_root,
+    }
+}
+
+fn failed_stateful(
+    request: &ExecutionRequest,
+    operation: SynQRuntimeOperation,
+    state_root: [u8; 32],
+    meter: &AivmGasMeter,
+    failure: StatefulSynQFailure,
+) -> SynQRuntimeReceipt {
+    SynQRuntimeReceipt {
+        contract_id: request.contract_id.clone(),
+        context: ExecutionReceiptContext::from_request(request),
+        operation,
+        status: if failure.reverted {
+            ExecutionStatus::Reverted
+        } else {
+            ExecutionStatus::Failed
+        },
+        gas_used: meter.gas_used(),
+        pqc_gas_used: meter.pq_gas_used(),
+        return_data: Vec::new(),
+        logs: Vec::new(),
+        native_transfers: Vec::new(),
+        error_code: Some(failure.error.code),
+        error: Some(failure.error.message),
+        pre_state_root: state_root,
+        post_state_root: state_root,
     }
 }
 
@@ -2340,7 +2639,7 @@ mod tests {
         synq_execution_request(
             "Counter",
             artifact,
-            ExecutionContext::testnet_1264_for_contract("Counter", gas_limit),
+            ExecutionContext::testnet_1266_for_contract("Counter", gas_limit),
             calldata,
         )
     }
@@ -2383,10 +2682,10 @@ mod tests {
             "manifest_version": "0.1",
             "permissions": [],
             "required_aivm_version": "0.1",
-            "required_chain_id": 1264,
+            "required_chain_id": 1266,
             "required_network_id": "synergy-testnet",
             "required_signature_algorithm": "ML-DSA-65",
-            "security_policy": "synq-testnet-1264-v1",
+            "security_policy": "synq-testnet-1266-v1",
             "source_hash": "test-source",
             "storage_schema_hash": "test-storage"
         })
@@ -2396,7 +2695,7 @@ mod tests {
             "standard_id": "STS-9",
             "token_name": "Horizon Token",
             "token_symbol": "HRZN",
-            "chain_id": 1264,
+            "chain_id": 1266,
             "network_id": "synergy-testnet",
             "decimals": 9,
             "initial_supply_base_units": "1000000000000000000",
@@ -2417,15 +2716,24 @@ mod tests {
             compiler_version: None,
             source_hash: None,
         };
-        let mut context = ExecutionContext::testnet_1264_for_contract(contract_id, 20_000);
+        let mut context = ExecutionContext::testnet_1266_for_contract(contract_id, 20_000);
         context.runtime_block_height = runtime_block_height;
         context.caller = b"synw1jmtpyjw62nxgattrcjc2tx2hezwj6rka5war".to_vec();
         synq_execution_request(contract_id, artifact, context, calldata)
     }
 
     fn decode_u256(data: &[u8]) -> u64 {
-        assert_eq!(data.len(), 32);
-        u64::from_be_bytes(data[24..32].try_into().expect("u64 tail"))
+        if data.len() == 32 {
+            return u64::from_be_bytes(data[24..32].try_into().expect("u64 tail"));
+        }
+        match serde_json::from_slice::<crate::stateful_synq::SynQValue>(data)
+            .expect("stateful SynQ return value")
+        {
+            crate::stateful_synq::SynQValue::Uint(value) => {
+                u64::try_from(value).expect("u64 stateful value")
+            }
+            value => panic!("expected stateful uint, found {value:?}"),
+        }
     }
 
     fn decode_u256_u128(data: &[u8]) -> u128 {

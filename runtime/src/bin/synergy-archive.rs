@@ -16,7 +16,7 @@ fn run() -> Result<(), String> {
     match command {
         "init" => {
             AegisPqvmSigner::initialize_required().map_err(|error| error.to_string())?;
-            println!("Archive validator initialized for chain_id=1264 network_id=synergy-testnet-v3");
+            println!("Archive validator initialized for chain_id=1266 network_id=synergy-testnet-v3");
         }
         "start" => println!("Start services with systemd: synergy-archive-validator, synergy-archive-snapshot-api, synergy-archive-snapshot-worker"),
         "stop" => println!("Stop services with systemd: synergy-archive-validator, synergy-archive-snapshot-api, synergy-archive-snapshot-worker"),

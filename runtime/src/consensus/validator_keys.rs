@@ -4,6 +4,7 @@ use crate::consensus::consensus_fork::{
 };
 use crate::crypto::pqc::{PQCAlgorithm, PQCManager, PQCPrivateKey, PQCPublicKey, PQCSignature};
 use crate::genesis::canonical_genesis;
+use crate::synergy_types::TESTNET_V3_MLDSA65_PUBLIC_KEY_BYTES;
 use crate::validator::ValidatorManager;
 use base64::{engine::general_purpose, Engine as _};
 use lazy_static::lazy_static;
@@ -22,6 +23,8 @@ lazy_static! {
 
 pub fn consensus_algorithm_label(algorithm: &PQCAlgorithm) -> &'static str {
     match algorithm {
+        PQCAlgorithm::MLDSA65 => "ml-dsa-65",
+        PQCAlgorithm::MLDSA87 => "ml-dsa-87",
         PQCAlgorithm::FNDSA => "fn-dsa",
         PQCAlgorithm::SLHDSA => "slh-dsa",
         PQCAlgorithm::MLKEM1024 => "ml-kem-1024",
@@ -215,9 +218,9 @@ fn parse_validator_public_key_inner(
         split_algorithm_prefix(encoded, declared_algorithm_label).map_err(|error| {
             format!("validator {validator_address} consensus key algorithm is invalid: {error}")
         })?;
-    if algorithm != PQCAlgorithm::FNDSA {
+    if algorithm != PQCAlgorithm::MLDSA65 {
         return Err(format!(
-            "validator {validator_address} consensus key algorithm must be FN-DSA"
+            "validator {validator_address} consensus key algorithm must be ML-DSA-65"
         ));
     }
     let key_data = decode_key_material(material).map_err(|error| {
@@ -226,6 +229,11 @@ fn parse_validator_public_key_inner(
     if key_data.is_empty() {
         return Err(format!(
             "validator {validator_address} consensus public key is empty"
+        ));
+    }
+    if key_data.len() != TESTNET_V3_MLDSA65_PUBLIC_KEY_BYTES {
+        return Err(format!(
+            "validator {validator_address} ML-DSA-65 consensus public key must be exactly {TESTNET_V3_MLDSA65_PUBLIC_KEY_BYTES} bytes"
         ));
     }
 
@@ -451,7 +459,7 @@ fn load_private_key_from_config(
         format!("candidate errors: {}", errors.join("; "))
     };
     Err(format!(
-        "Aegis PQC consensus private key unavailable for validator {validator_address}; set SYNERGY_VALIDATOR_CONSENSUS_PRIVATE_KEY_FILE, SYNERGY_VALIDATOR_FNDSA_CONSENSUS_PRIVATE_KEY_FILE, or SYNERGY_VALIDATOR_CONSENSUS_PRIVATE_KEY_B64 ({detail})"
+        "Aegis PQC consensus private key unavailable for validator {validator_address}; set SYNERGY_VALIDATOR_MLDSA65_CONSENSUS_PRIVATE_KEY_FILE, SYNERGY_VALIDATOR_CONSENSUS_PRIVATE_KEY_FILE, or SYNERGY_VALIDATOR_CONSENSUS_PRIVATE_KEY_B64 ({detail})"
     ))
 }
 
@@ -485,9 +493,9 @@ fn ensure_private_key_matches_public_key(
         ));
     }
 
-    if expected_public_key.algorithm != PQCAlgorithm::FNDSA {
+    if expected_public_key.algorithm != PQCAlgorithm::MLDSA65 {
         return Err(format!(
-            "Aegis PQC consensus key self-test for validator {validator_address} requires FN-DSA"
+            "Aegis PQC consensus key self-test for validator {validator_address} requires ML-DSA-65"
         ));
     }
 
@@ -535,7 +543,25 @@ fn candidate_private_key_paths(expected_public_key: &PQCPublicKey) -> Vec<PathBu
         }
     };
 
-    if expected_public_key.algorithm == PQCAlgorithm::FNDSA {
+    if expected_public_key.algorithm == PQCAlgorithm::MLDSA65 {
+        for key in [
+            "SYNERGY_VALIDATOR_MLDSA65_CONSENSUS_PRIVATE_KEY_FILE",
+            "SYNERGY_MLDSA65_CONSENSUS_PRIVATE_KEY_FILE",
+        ] {
+            if let Ok(path) = env::var(key) {
+                push_private_key_path_variants(&mut push_path, path.trim());
+            }
+        }
+        for path in [
+            "config/validator/mldsa65-consensus.private.key",
+            "config/validator/mldsa65.private.key",
+            "keys/mldsa65-consensus/private.key",
+            "keys/mldsa65.private.key",
+            "keys/mldsa65_private.key",
+        ] {
+            push_private_key_path_variants(&mut push_path, path);
+        }
+    } else if expected_public_key.algorithm == PQCAlgorithm::FNDSA {
         for key in [
             "SYNERGY_VALIDATOR_FNDSA_CONSENSUS_PRIVATE_KEY_FILE",
             "SYNERGY_FNDSA_CONSENSUS_PRIVATE_KEY_FILE",
@@ -758,8 +784,7 @@ fn split_algorithm_prefix<'a>(
 
     let Some(label) = declared_algorithm_label else {
         return Err(
-            "missing consensus key algorithm prefix; expected fn-dsa:<base64> or falcon:<base64>"
-                .to_string(),
+            "missing consensus key algorithm prefix; expected ml-dsa-65:<base64>".to_string(),
         );
     };
     Ok((algorithm_from_label(label)?, encoded))
@@ -771,6 +796,13 @@ fn block_signature_algorithm(label: &str) -> Result<PQCAlgorithm, String> {
 }
 
 fn algorithm_from_label(label: &str) -> Result<PQCAlgorithm, String> {
+    match label.trim().to_ascii_lowercase().as_str() {
+        "mldsa65" | "ml-dsa-65" | "ml_dsa_65" => return Ok(PQCAlgorithm::MLDSA65),
+        _ => {}
+    }
+    // The historical migration parser stays FN-DSA-only by design.  New
+    // Testnet-v3 genesis keys are parsed here before that legacy parser is
+    // consulted, so they cannot be reinterpreted as an old fork key.
     normalize_consensus_key_algorithm(label)
 }
 
@@ -911,12 +943,13 @@ mod tests {
     }
 
     #[test]
-    fn parses_explicit_fndsa_validator_public_key_prefix() {
-        let encoded = format!("falcon:{}", general_purpose::STANDARD.encode([1, 2, 3, 4]));
+    fn parses_explicit_mldsa65_validator_public_key_prefix() {
+        let key_bytes = vec![1; TESTNET_V3_MLDSA65_PUBLIC_KEY_BYTES];
+        let encoded = format!("mldsa65:{}", general_purpose::STANDARD.encode(&key_bytes));
         let key = parse_validator_public_key("synval1test", &encoded).unwrap();
 
-        assert_eq!(key.algorithm, PQCAlgorithm::FNDSA);
-        assert_eq!(key.key_data, vec![1, 2, 3, 4]);
+        assert_eq!(key.algorithm, PQCAlgorithm::MLDSA65);
+        assert_eq!(key.key_data, key_bytes);
     }
 
     #[test]
@@ -929,21 +962,23 @@ mod tests {
 
     #[test]
     fn parses_unprefixed_genesis_public_key_only_with_declared_algorithm() {
-        let encoded = general_purpose::STANDARD.encode([1, 2, 3, 4]);
+        let key_bytes = vec![2; TESTNET_V3_MLDSA65_PUBLIC_KEY_BYTES];
+        let encoded = general_purpose::STANDARD.encode(&key_bytes);
         let key = parse_validator_public_key_with_declared_algorithm(
             "synval1test",
             &encoded,
-            "FN-DSA-1024",
+            "ML-DSA-65",
         )
         .unwrap();
 
-        assert_eq!(key.algorithm, PQCAlgorithm::FNDSA);
-        assert_eq!(key.key_data, vec![1, 2, 3, 4]);
+        assert_eq!(key.algorithm, PQCAlgorithm::MLDSA65);
+        assert_eq!(key.key_data, key_bytes);
     }
 
     #[test]
-    fn parses_live_ml_dsa_declared_genesis_public_key_as_fndsa() {
-        let encoded = general_purpose::STANDARD.encode([1, 2, 3, 4]);
+    fn parses_live_ml_dsa65_declared_genesis_public_key_as_mldsa65() {
+        let key_bytes = vec![3; TESTNET_V3_MLDSA65_PUBLIC_KEY_BYTES];
+        let encoded = general_purpose::STANDARD.encode(&key_bytes);
         let key = parse_validator_public_key_with_declared_algorithm(
             "synval1test",
             &encoded,
@@ -951,8 +986,53 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(key.algorithm, PQCAlgorithm::FNDSA);
-        assert_eq!(key.key_data, vec![1, 2, 3, 4]);
+        assert_eq!(key.algorithm, PQCAlgorithm::MLDSA65);
+        assert_eq!(key.key_data, key_bytes);
+    }
+
+    #[test]
+    fn rejects_wrong_length_mldsa65_validator_public_key() {
+        let encoded = general_purpose::STANDARD.encode([1, 2, 3, 4]);
+        let error = parse_validator_public_key_with_declared_algorithm(
+            "synval1test",
+            &encoded,
+            "ML-DSA-65",
+        )
+        .unwrap_err();
+
+        assert!(error.contains("must be exactly 1952 bytes"));
+    }
+
+    #[test]
+    fn testnet_v3_candidate_consensus_keys_parse_as_mldsa65() {
+        let candidate: Value = serde_json::from_str(include_str!(
+            "../../../genesis.testnet-v3.identity-assigned.json"
+        ))
+        .expect("candidate genesis must be valid JSON");
+        for (group_name, expected_count) in [("validators", 6), ("preconfigured_validators", 21)] {
+            let validators = candidate[group_name]
+                .as_array()
+                .expect("candidate validators must be an array");
+
+            assert_eq!(validators.len(), expected_count);
+            for validator in validators {
+                let address = validator["operator_address"]
+                    .as_str()
+                    .expect("candidate operator address must be a string");
+                let key = validator["consensus_public_key"]
+                    .as_str()
+                    .expect("candidate consensus public key must be a string");
+                let algorithm = validator["consensus_key_type"]
+                    .as_str()
+                    .expect("candidate consensus key type must be a string");
+                let parsed =
+                    parse_validator_public_key_with_declared_algorithm(address, key, algorithm)
+                        .expect("candidate consensus key must parse");
+
+                assert_eq!(parsed.algorithm, PQCAlgorithm::MLDSA65);
+                assert_eq!(parsed.key_data.len(), 1_952);
+            }
+        }
     }
 
     #[test]
@@ -974,19 +1054,20 @@ mod tests {
         let error = parse_validator_public_key("synval1test", &encoded).unwrap_err();
 
         assert!(
-            error.contains("must be FN-DSA")
+            error.contains("must be ML-DSA-65")
                 || error.contains("unsupported consensus key algorithm")
         );
     }
 
     #[test]
     fn prefixes_declared_validator_public_key_for_registry_storage() {
-        let encoded = general_purpose::STANDARD.encode([1, 2, 3, 4]);
+        let encoded =
+            general_purpose::STANDARD.encode(vec![4; TESTNET_V3_MLDSA65_PUBLIC_KEY_BYTES]);
         let prefixed =
-            validator_public_key_with_declared_algorithm("synval1test", &encoded, "falcon")
+            validator_public_key_with_declared_algorithm("synval1test", &encoded, "ML-DSA-65")
                 .unwrap();
 
-        assert_eq!(prefixed, format!("fn-dsa:{encoded}"));
+        assert_eq!(prefixed, format!("ml-dsa-65:{encoded}"));
     }
 
     #[test]

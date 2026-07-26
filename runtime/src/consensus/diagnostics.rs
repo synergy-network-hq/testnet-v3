@@ -34,7 +34,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const EXPECTED_CHAIN_ID: u64 = 1264;
+const EXPECTED_CHAIN_ID: u64 = 1266;
 const EXPECTED_NETWORK_ID: &str = "synergy-testnet-v3";
 const EXPECTED_GENESIS_HASH: &str =
     "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789";
@@ -4719,7 +4719,7 @@ mod tests {
             .expect("diagnostics env lock should succeed");
         let root = test_runtime_root("snapshot-retry-staging");
         install_test_genesis(&root);
-        install_test_config(&root, 1264, "synergy-testnet-v3");
+        install_test_config(&root, 1266, "synergy-testnet-v3");
         write_chain_range(&root, 100, 101);
         write_canonical_lock_at_height(&root, 101);
         write_legacy_qc_fixture_at_height(&root, 101);
@@ -5553,7 +5553,7 @@ mod tests {
             .expect("diagnostics env lock should succeed");
         let root = test_runtime_root("operator-quarantine-wrong-network");
         install_test_genesis(&root);
-        install_test_config(&root, 1264, "synergy-testnet-v1");
+        install_test_config(&root, 1266, "synergy-testnet-v1");
 
         let error = with_runtime_root(&root, || {
             quarantine_stopped_validator_with_options(operator_quarantine_options())
@@ -5571,7 +5571,7 @@ mod tests {
             .expect("diagnostics env lock should succeed");
         let root = test_runtime_root("operator-quarantine-wrong-genesis");
         install_mutated_test_genesis(&root);
-        install_test_config(&root, 1264, "synergy-testnet-v3");
+        install_test_config(&root, 1266, "synergy-testnet-v3");
 
         let error = with_runtime_root(&root, || {
             quarantine_stopped_validator_with_options(operator_quarantine_options())
@@ -5708,7 +5708,7 @@ mod tests {
         let root = test_runtime_root("operator-quarantine-keeps-configs");
         install_test_genesis(&root);
         write_minimal_chain_state(&root);
-        install_test_config(&root, 1264, "synergy-testnet-v3");
+        install_test_config(&root, 1266, "synergy-testnet-v3");
         let config_path = root.join("config/node.toml");
         let before = fs::read(&config_path).unwrap();
 
@@ -6358,7 +6358,7 @@ mod tests {
             .expect("diagnostics env lock should succeed");
         let root = test_runtime_root("shadow-process-proof-only");
         install_test_genesis(&root);
-        install_test_config(&root, 1264, "synergy-testnet-v3");
+        install_test_config(&root, 1266, "synergy-testnet-v3");
         write_quarantine_marker(&root);
         write_empty_vote_locks(&root);
         write_shadow_observation(&root, 89957, 500);
@@ -6419,7 +6419,7 @@ mod tests {
             .expect("diagnostics env lock should succeed");
         let root = test_runtime_root("shadow-committed-log-fallback");
         install_test_genesis(&root);
-        install_test_config(&root, 1264, "synergy-testnet-v3");
+        install_test_config(&root, 1266, "synergy-testnet-v3");
         write_quarantine_marker(&root);
         write_empty_vote_locks(&root);
         write_shadow_observation(&root, 89957, 500);
@@ -6487,7 +6487,7 @@ mod tests {
             .expect("diagnostics env lock should succeed");
         let root = test_runtime_root("shadow-full-epoch-no-boundary");
         install_test_genesis(&root);
-        install_test_config(&root, 1264, "synergy-testnet-v3");
+        install_test_config(&root, 1266, "synergy-testnet-v3");
         write_quarantine_marker(&root);
         write_empty_vote_locks(&root);
         write_shadow_observation(&root, 89957, 500);
@@ -6536,7 +6536,7 @@ mod tests {
             .expect("diagnostics env lock should succeed");
         let root = test_runtime_root("shadow-missed-epoch-boundary");
         install_test_genesis(&root);
-        install_test_config(&root, 1264, "synergy-testnet-v3");
+        install_test_config(&root, 1266, "synergy-testnet-v3");
         write_quarantine_marker(&root);
         write_empty_vote_locks(&root);
         write_shadow_observation(&root, 89957, 500);
@@ -6577,7 +6577,7 @@ mod tests {
             .expect("diagnostics env lock should succeed");
         let root = test_runtime_root("rejoin-rejects-process-proof");
         install_test_genesis(&root);
-        install_test_config(&root, 1264, "synergy-testnet-v3");
+        install_test_config(&root, 1266, "synergy-testnet-v3");
         write_quarantine_marker(&root);
         write_empty_vote_locks(&root);
         write_shadow_observation(&root, 89957, 500);
@@ -6654,7 +6654,7 @@ mod tests {
             .expect("diagnostics env lock should succeed");
         let root = test_runtime_root("promote-fresh-live-locks");
         install_test_genesis(&root);
-        install_test_config(&root, 1264, "synergy-testnet-v3");
+        install_test_config(&root, 1266, "synergy-testnet-v3");
         write_chain_range(&root, 100, 101);
         write_canonical_lock_at_height(&root, 101);
         write_legacy_qc_fixture_at_height(&root, 101);
@@ -6700,7 +6700,7 @@ mod tests {
             .expect("diagnostics env lock should succeed");
         let root = test_runtime_root("promote-stale-locks");
         install_test_genesis(&root);
-        install_test_config(&root, 1264, "synergy-testnet-v3");
+        install_test_config(&root, 1266, "synergy-testnet-v3");
         write_chain_range(&root, 100, 101);
         write_canonical_lock_at_height(&root, 101);
         write_legacy_qc_fixture_at_height(&root, 101);
@@ -6749,7 +6749,7 @@ mod tests {
             .expect("diagnostics env lock should succeed");
         let root = test_runtime_root("rejoin-emergency-leader-stall");
         install_test_genesis(&root);
-        install_test_config(&root, 1264, "synergy-testnet-v3");
+        install_test_config(&root, 1266, "synergy-testnet-v3");
         write_quarantine_marker(&root);
         write_empty_vote_locks(&root);
         write_shadow_observation(&root, 89957, 500);
@@ -6803,7 +6803,7 @@ mod tests {
             .expect("diagnostics env lock should succeed");
         let root = test_runtime_root("rejoin-qc-binding-mismatch");
         install_test_genesis(&root);
-        install_test_config(&root, 1264, "synergy-testnet-v3");
+        install_test_config(&root, 1266, "synergy-testnet-v3");
         write_quarantine_marker(&root);
         write_empty_vote_locks(&root);
         write_shadow_observation(&root, 89957, 500);
@@ -6851,7 +6851,7 @@ mod tests {
             .expect("diagnostics env lock should succeed");
         let root = test_runtime_root("emergency-promote-leader-stall");
         install_test_genesis(&root);
-        install_test_config(&root, 1264, "synergy-testnet-v3");
+        install_test_config(&root, 1266, "synergy-testnet-v3");
         write_quarantine_marker(&root);
         write_empty_vote_locks(&root);
         write_shadow_observation(&root, 89957, 500);
@@ -6947,7 +6947,7 @@ mod tests {
             .expect("diagnostics env lock should succeed");
         let root = test_runtime_root("rejoin-rejects-non-boundary");
         install_test_genesis(&root);
-        install_test_config(&root, 1264, "synergy-testnet-v3");
+        install_test_config(&root, 1266, "synergy-testnet-v3");
         write_quarantine_marker(&root);
         write_empty_vote_locks(&root);
         write_shadow_observation(&root, 89957, 500);

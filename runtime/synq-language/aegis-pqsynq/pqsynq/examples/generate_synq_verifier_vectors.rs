@@ -29,7 +29,7 @@ fn hash32(label: &[u8]) -> Hash32 {
 }
 
 fn valid_deploy() -> ContractDeployEnvelope {
-    let verifier = AegisSynQVerifier::testnet_1264();
+    let verifier = AegisSynQVerifier::testnet_1266();
     let (public_key, secret_key) = Sign::mldsa65().keygen().unwrap();
     let public_key = SynQPublicKey::new(public_key);
     let signer_address = verifier
@@ -48,7 +48,7 @@ fn valid_deploy() -> ContractDeployEnvelope {
     );
     let signing_payload = SynQSigningPayload {
         domain_tag: DomainTag::SynqContractDeployV1,
-        chain_id: ChainId::testnet_1264(),
+        chain_id: ChainId::testnet_1266(),
         network_id: NetworkId::testnet(),
         protocol_version: 1,
         algorithm_id: AlgorithmId::MlDsa65,

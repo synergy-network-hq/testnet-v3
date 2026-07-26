@@ -4,7 +4,8 @@ Every item must be complete before any node joins Testnet-v3.
 
 ## Identity and genesis
 
-- [ ] Fresh FN-DSA validator consensus identities generated offline.
+- [ ] The approved ML-DSA-65 validator consensus profile is recorded with the final launch approval.
+- [ ] Every validator consensus public key matches the approved profile and is bound to the canonical Testnet-v3 genesis input.
 - [ ] Fresh node and P2P identities generated for every node.
 - [ ] Validator addresses replaced in `runtime/config/testnet/network-topology.toml`.
 - [ ] Canonical genesis configuration uses the final validator set and allocations.
@@ -16,7 +17,7 @@ Every item must be complete before any node joins Testnet-v3.
 
 ## Runtime and artifacts
 
-- [ ] Runtime enforces chain ID `1264`.
+- [ ] Runtime enforces chain ID `1266`.
 - [ ] Runtime enforces network ID `synergy-testnet-v3`.
 - [ ] Complete test suite passes from the v3 source tree.
 - [ ] Linux AMD64, macOS ARM64, and required Windows artifacts are built.

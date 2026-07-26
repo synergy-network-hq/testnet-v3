@@ -45,12 +45,20 @@ impl ExecutionState {
     }
 
     pub fn mark_authorized(&mut self, tx: &Transaction) -> Result<TxId, String> {
+        self.mark_authorized_at(tx, current_unix_timestamp())
+    }
+
+    pub fn mark_authorized_at(
+        &mut self,
+        tx: &Transaction,
+        consensus_timestamp_unix: u64,
+    ) -> Result<TxId, String> {
         let tx_id = tx_id(tx)?;
         self.verified_authorizations
             .insert(tx_id.clone(), tx.canonical_tx_bytes_hash()?);
         match crate::synq_admission::verify_transaction_payload_for_chain_admission(
             tx,
-            current_unix_timestamp(),
+            consensus_timestamp_unix,
         ) {
             Ok(Some(summary)) => {
                 self.synq_verifications.insert(tx_id.clone(), summary);
@@ -372,6 +380,9 @@ fn execute_transaction(
         });
     }
 
+    let mut candidate_synq_aivm_state = state.synq_aivm_state.clone();
+    let mut candidate_synq_artifacts = state.synq_artifacts.clone();
+    let mut candidate_synq_contracts = state.synq_contracts.clone();
     let synq_aivm = if let Some(summary) = synq_verification.as_ref() {
         let mut synq_context = synq_context.clone();
         synq_context.sts_host = Some(sts_host_context_from_sts_state(
@@ -382,9 +393,9 @@ fn execute_transaction(
             &id,
             tx,
             summary,
-            &mut state.synq_aivm_state,
-            &mut state.synq_artifacts,
-            &mut state.synq_contracts,
+            &mut candidate_synq_aivm_state,
+            &mut candidate_synq_artifacts,
+            &mut candidate_synq_contracts,
             synq_context,
         )?
     } else {
@@ -447,12 +458,11 @@ fn execute_transaction(
         });
     }
 
-    state
-        .balances_nwei
-        .insert(sender.clone(), sender_balance - total_debit);
-    let collector = crate::token::FEE_COLLECTOR_ADDRESS.to_string();
-    let collector_balance = state.balances_nwei.get(&collector).copied().unwrap_or(0);
-    state.balances_nwei.insert(
+    let mut candidate_balances = state.balances_nwei.clone();
+    candidate_balances.insert(sender.clone(), sender_balance - total_debit);
+    let collector = fee_breakdown.fee_collector_address.clone();
+    let collector_balance = candidate_balances.get(&collector).copied().unwrap_or(0);
+    candidate_balances.insert(
         collector,
         collector_balance
             .checked_add(fee_breakdown.total_network_fee_nwei)
@@ -469,8 +479,8 @@ fn execute_transaction(
         });
     } else {
         let receiver = tx.receiver_uma_or_account.clone();
-        let receiver_balance = state.balances_nwei.get(&receiver).copied().unwrap_or(0);
-        state.balances_nwei.insert(
+        let receiver_balance = candidate_balances.get(&receiver).copied().unwrap_or(0);
+        candidate_balances.insert(
             receiver.clone(),
             receiver_balance
                 .checked_add(tx.amount_nwei)
@@ -487,6 +497,29 @@ fn execute_transaction(
             });
         }
     }
+    if let Some(receipt) = synq_aivm.as_ref() {
+        for transfer in &receipt.native_transfers {
+            let from_balance = candidate_balances.get(&transfer.from).copied().unwrap_or(0);
+            if from_balance < transfer.amount_nwei {
+                return Err(format!(
+                    "SynQ native transfer effect exceeds balance for {}",
+                    transfer.from
+                ));
+            }
+            let to_balance = candidate_balances.get(&transfer.to).copied().unwrap_or(0);
+            candidate_balances.insert(transfer.from.clone(), from_balance - transfer.amount_nwei);
+            candidate_balances.insert(
+                transfer.to.clone(),
+                to_balance
+                    .checked_add(transfer.amount_nwei)
+                    .ok_or_else(|| "SynQ native transfer recipient overflow".to_string())?,
+            );
+        }
+    }
+    state.balances_nwei = candidate_balances;
+    state.synq_aivm_state = candidate_synq_aivm_state;
+    state.synq_artifacts = candidate_synq_artifacts;
+    state.synq_contracts = candidate_synq_contracts;
     record_fee_event(
         state,
         &id,
@@ -609,7 +642,7 @@ fn charge_fee_to_collector(
     state
         .balances_nwei
         .insert(sender.to_string(), sender_balance - fee_nwei);
-    let collector = crate::token::FEE_COLLECTOR_ADDRESS.to_string();
+    let collector = crate::token::fee_collector_address()?;
     let collector_balance = state.balances_nwei.get(&collector).copied().unwrap_or(0);
     let next_collector_balance = collector_balance
         .checked_add(fee_nwei)
@@ -931,10 +964,15 @@ mod tests {
                 version: 1,
                 chain_id: ChainId::synergy_testnet_v3(),
                 network_id: NetworkId::synergy_testnet_v3(),
+                protocol_version: crate::synergy_types::POSY_PROTOCOL_VERSION.to_string(),
                 height: Height(1),
                 round: crate::synergy_types::Round(0),
                 epoch: Epoch(0),
                 cluster_id: crate::synergy_types::ClusterId(0),
+                height_context_root: Hash::from_domain_bytes(
+                    "SYNERGY_TEST_HEIGHT_CONTEXT_V1",
+                    b"execution",
+                ),
                 parent_block_hash: Hash::zero(),
                 parent_state_root: Hash::zero(),
                 last_finalized_qc_hash: Hash::zero(),
@@ -943,12 +981,33 @@ mod tests {
                 proposer_key_id: AegisPqKeyId("key".to_string()),
                 active_validator_set_hash: Hash::zero(),
                 eligible_validator_set_hash: Hash::zero(),
+                validator_consensus_key_root: Hash::from_domain_bytes(
+                    "SYNERGY_TEST_CONSENSUS_KEY_ROOT_V1",
+                    b"execution",
+                ),
+                frozen_bonded_weight_root: Hash::from_domain_bytes(
+                    "SYNERGY_TEST_BONDED_WEIGHT_ROOT_V1",
+                    b"execution",
+                ),
+                cluster_schedule_version: crate::synergy_types::TESTNET_V3_CLUSTER_SCHEDULE_VERSION
+                    .to_string(),
                 cluster_map_hash: Hash::zero(),
+                assigned_cluster_membership_root: Hash::from_domain_bytes(
+                    "SYNERGY_TEST_CLUSTER_MEMBERSHIP_ROOT_V1",
+                    b"execution",
+                ),
+                assigned_cluster_validator_count: 6,
+                assigned_cluster_total_voting_weight: 6,
                 proposer_schedule_hash: Hash::zero(),
-                protocol_config_hash: Hash::zero(),
+                protocol_config_hash: crate::consensus_parameters::ConsensusParameterRoot::zero(),
+                cryptographic_profile_root: Hash::from_domain_bytes(
+                    "SYNERGY_TEST_CRYPTOGRAPHIC_PROFILE_V1",
+                    b"execution",
+                ),
                 dag_frontier_root: Hash::zero(),
                 tx_order_root: Hash::zero(),
                 tx_count: transactions.len() as u64,
+                protected_batch: None,
                 evidence_root: Hash::zero(),
                 state_root_before: Hash::zero(),
                 state_root_after: Hash::zero(),

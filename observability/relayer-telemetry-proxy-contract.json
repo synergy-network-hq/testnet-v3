@@ -2,7 +2,7 @@
   "schema_version": 1,
   "environment": "testnet",
   "network": "synergy-testnet",
-  "chain_id": "1264",
+  "chain_id": "1266",
   "policy": {
     "observer_outside_validator_vpn": true,
     "validator_telemetry_via_relayers_only": true,

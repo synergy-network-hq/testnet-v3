@@ -40,7 +40,7 @@ uint256 id = escrowCount;
 escrowCount = escrowCount + 1;
 uint256 createdAt = block.number;
 uint256 expiresAt = createdAt + duration;
-escrows = Escrow(        {
+escrows[id] = Escrow(        {
                     id: id,
                     buyer: msg.sender,
                     seller: seller,
@@ -75,7 +75,7 @@ if (!__synq_pqc_ok) {
 revert("PQC verification failed");
 }
 }
-escrow = EscrowStatus.Released;
+escrow.status = EscrowStatus.Released;
 emit EscrowReleased((escrowId, escrow.seller));
 }
 
@@ -86,7 +86,7 @@ require(escrow.status == EscrowStatus.Pending, "Escrow not pending");
 require(msg.sender == escrow.buyer, "Only buyer can refund");
 require(block.number > escrow.expiresAt, "Escrow not expired");
 require(!disputeResolved[escrowId], "Escrow under dispute");
-escrow = EscrowStatus.Refunded;
+escrow.status = EscrowStatus.Refunded;
 emit EscrowRefunded((escrowId, escrow.buyer));
 }
 
@@ -96,8 +96,8 @@ require(escrow.id == escrowId, "Escrow does not exist");
 require(escrow.status == EscrowStatus.Pending, "Escrow not pending");
 require(msg.sender == escrow.buyer || msg.sender == escrow.seller, "Not party to escrow");
 require(!disputeResolved[escrowId], "Dispute already resolved");
-escrow = EscrowStatus.Disputed;
-disputeRaisedBy = msg.sender;
+escrow.status = EscrowStatus.Disputed;
+disputeRaisedBy[escrowId] = msg.sender;
 emit EscrowDisputed((escrowId, msg.sender));
 }
 
@@ -116,12 +116,12 @@ if (!__synq_pqc_ok) {
 revert("PQC verification failed");
 }
 }
-disputeResolved = true;
+disputeResolved[escrowId] = true;
 if (favorBuyer) {
-escrow = EscrowStatus.Refunded;
+escrow.status = EscrowStatus.Refunded;
 emit EscrowRefunded((escrowId, escrow.buyer));
 } else {
-escrow = EscrowStatus.Released;
+escrow.status = EscrowStatus.Released;
 emit EscrowReleased((escrowId, escrow.seller));
 }
 emit DisputeResolved((escrowId, favorBuyer));
@@ -132,7 +132,7 @@ Escrow escrow = escrows[escrowId];
 require(escrow.id == escrowId, "Escrow does not exist");
 require(escrow.status == EscrowStatus.Pending, "Escrow not pending");
 require(block.number > escrow.expiresAt, "Escrow not expired");
-escrow = EscrowStatus.Expired;
+escrow.status = EscrowStatus.Expired;
 emit EscrowExpired((escrowId));
 }
 

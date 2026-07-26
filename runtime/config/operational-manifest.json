@@ -4,8 +4,8 @@
   "release_id": "testnet-v3",
   "display_name": "Synergy Testnet-v3",
   "runtime_network_id": "synergy-testnet-v3",
-  "network_id": 1264,
-  "chain_id": 1264,
+  "network_id": 1266,
+  "chain_id": 1266,
   "launch_status": "BLOCKED_PENDING_FRESH_IDENTITIES_AND_SIGNED_GENESIS",
   "source_topology": "config/testnet/network-topology.toml",
   "token": {

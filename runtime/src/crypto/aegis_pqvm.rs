@@ -1,8 +1,12 @@
+use crate::consensus::signing_authority::{
+    ConsensusSigningAuthorization, ConsensusSigningPhase, DurableConsensusSigningAuthority,
+};
 use crate::crypto::pqc::{PQCAlgorithm, PQCManager, PQCPrivateKey, PQCPublicKey, PQCSignature};
 use crate::synergy_types::{
     AegisPqKeyId, AegisPqKeyRole, AegisPqPublicKey, AegisPqSignature, BlockId, ChainId, ClusterMap,
-    Epoch, EpochTransition, Hash, NetworkId, PeerHello, QuorumCertificate, TxId, ValidatorRecord,
-    ValidatorSet, ValidatorStatus, Vote,
+    Epoch, EpochTransition, Hash, HeightConsensusContext, NetworkId, PeerHello, QuorumCertificate,
+    TimeoutCertificate, TxId, ValidationCertificate, ValidatorRecord, ValidatorSet,
+    ValidatorStatus, Vote, VotePhase,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -11,6 +15,11 @@ use std::sync::OnceLock;
 pub const SYNERGY_TX_V1: &str = "SYNERGY_TX_V1";
 pub const SYNERGY_BLOCK_V1: &str = "SYNERGY_BLOCK_V1";
 pub const SYNERGY_VOTE_V1: &str = "SYNERGY_VOTE_V1";
+pub const SYNERGY_VALIDATE_VOTE_V1: &str = "SYNERGY_VALIDATE_VOTE_V1";
+pub const SYNERGY_FINALITY_VOTE_V1: &str = "SYNERGY_FINALITY_VOTE_V1";
+pub const SYNERGY_TIMEOUT_VOTE_V1: &str = "SYNERGY_TIMEOUT_VOTE_V1";
+pub const SYNERGY_VALIDATION_CERTIFICATE_V1: &str = "SYNERGY_VALIDATION_CERTIFICATE_V1";
+pub const SYNERGY_TIMEOUT_CERTIFICATE_V1: &str = "SYNERGY_TIMEOUT_CERTIFICATE_V1";
 pub const SYNERGY_QC_V1: &str = "SYNERGY_QC_V1";
 pub const SYNERGY_EPOCH_TRANSITION_V1: &str = "SYNERGY_EPOCH_TRANSITION_V1";
 pub const SYNERGY_VALIDATOR_REGISTRATION_V1: &str = "SYNERGY_VALIDATOR_REGISTRATION_V1";
@@ -306,10 +315,10 @@ pub struct AegisPqvmSigner {
 static AEGIS_PQVM_SIGNER_SMOKE: OnceLock<Result<(), String>> = OnceLock::new();
 static AEGIS_PQVM_VERIFIER_SMOKE: OnceLock<Result<(), String>> = OnceLock::new();
 
-fn run_aegis_pqvm_fndsa_smoke(message: &[u8], context: &str) -> Result<(), String> {
+fn run_aegis_pqvm_mldsa65_smoke(message: &[u8], context: &str) -> Result<(), String> {
     let mut manager = PQCManager::new();
     let (public_key, private_key) = manager
-        .generate_keypair(PQCAlgorithm::FNDSA)
+        .generate_keypair(PQCAlgorithm::MLDSA65)
         .map_err(|error| format!("{context} key generation failed: {error}"))?;
     let signature = manager
         .sign(&private_key, message)
@@ -330,7 +339,7 @@ fn ensure_cached_aegis_pqvm_smoke(
     context: &'static str,
 ) -> Result<(), AegisPqvmError> {
     cache
-        .get_or_init(|| run_aegis_pqvm_fndsa_smoke(message, context))
+        .get_or_init(|| run_aegis_pqvm_mldsa65_smoke(message, context))
         .clone()
         .map_err(AegisPqvmError)
 }
@@ -358,7 +367,7 @@ impl AegisPqvmSigner {
         self.ensure_initialized()?;
         let (mut public_key, mut private_key) = self
             .manager
-            .generate_keypair(PQCAlgorithm::FNDSA)
+            .generate_keypair(PQCAlgorithm::MLDSA65)
             .map_err(|error| {
                 AegisPqvmError(format!("aegis-pqvm key generation failed: {error}"))
             })?;
@@ -442,7 +451,45 @@ impl AegisPqvmSigner {
         vote_signing_payload: &[u8],
         key_id: &AegisPqKeyId,
     ) -> Result<AegisPqSignature, AegisPqvmError> {
-        self.sign_domain(SYNERGY_VOTE_V1, vote_signing_payload, key_id)
+        self.sign_domain(SYNERGY_FINALITY_VOTE_V1, vote_signing_payload, key_id)
+    }
+
+    pub fn sign_consensus_vote(
+        &mut self,
+        vote: &Vote,
+        authority: &DurableConsensusSigningAuthority,
+    ) -> Result<AegisPqSignature, AegisPqvmError> {
+        let (phase, domain) = match vote.phase {
+            VotePhase::Validate => (ConsensusSigningPhase::Validate, SYNERGY_VALIDATE_VOTE_V1),
+            VotePhase::Finality => (ConsensusSigningPhase::Finality, SYNERGY_FINALITY_VOTE_V1),
+            VotePhase::Timeout => (ConsensusSigningPhase::Timeout, SYNERGY_TIMEOUT_VOTE_V1),
+        };
+        let candidate_id = match vote.phase {
+            VotePhase::Validate | VotePhase::Finality => Some(vote.block_id.clone()),
+            VotePhase::Timeout if vote.block_id.0.is_empty() => None,
+            VotePhase::Timeout => Some(vote.block_id.clone()),
+        };
+        authority
+            .authorize_before_signature(&ConsensusSigningAuthorization {
+                chain_id: vote.chain_id,
+                network_id: vote.network_id.clone(),
+                protocol_version: vote.protocol_version.clone(),
+                epoch: vote.epoch,
+                height: vote.height,
+                round: vote.round,
+                height_context_root: vote.height_context_root,
+                validator_id: vote.validator_id.clone(),
+                key_id: vote.key_id.clone(),
+                phase,
+                candidate_id,
+                highest_prepared_vc_root: vote.highest_prepared_vc_root,
+            })
+            .map_err(AegisPqvmError)?;
+        self.sign_domain(
+            domain,
+            &vote.signing_bytes().map_err(AegisPqvmError)?,
+            &vote.key_id,
+        )
     }
 
     pub fn sign_epoch_transition(
@@ -475,6 +522,11 @@ impl AegisPqvmSigner {
         let private_key = self.registry.private_key(key_id).cloned().ok_or_else(|| {
             AegisPqvmError(format!("validator signing key {} is unavailable", key_id.0))
         })?;
+        if domain_requires_mldsa65(domain) && private_key.algorithm != PQCAlgorithm::MLDSA65 {
+            return Err(AegisPqvmError(format!(
+                "Testnet-v3 consensus domain {domain} requires ML-DSA-65"
+            )));
+        }
         let domain_payload = domain_payload(domain, payload);
         let signature = self
             .manager
@@ -595,8 +647,13 @@ impl AegisPqvmVerifier {
         )
     }
 
-    pub fn verify_vote_signature(&self, vote: &Vote, validator_record: &ValidatorRecord) -> bool {
-        self.verify_vote_signature_checked(vote, validator_record)
+    pub fn verify_vote_signature(
+        &self,
+        vote: &Vote,
+        validator_record: &ValidatorRecord,
+        expected_height_context_root: Hash,
+    ) -> bool {
+        self.verify_vote_signature_checked(vote, validator_record, expected_height_context_root)
             .is_ok()
     }
 
@@ -604,12 +661,20 @@ impl AegisPqvmVerifier {
         &self,
         vote: &Vote,
         validator_record: &ValidatorRecord,
+        expected_height_context_root: Hash,
     ) -> Result<(), AegisPqvmError> {
         self.ensure_initialized()?;
         vote.chain_id.require_testnet_v3().map_err(AegisPqvmError)?;
         vote.network_id
             .require_testnet_v3()
             .map_err(AegisPqvmError)?;
+        if expected_height_context_root.is_zero()
+            || vote.height_context_root != expected_height_context_root
+        {
+            return Err(AegisPqvmError(
+                "vote height context root is missing or mismatched".to_string(),
+            ));
+        }
         if !vote.aegis_pq_signature.is_present() {
             return Err(AegisPqvmError(
                 "missing vote Aegis PQC signature".to_string(),
@@ -633,8 +698,13 @@ impl AegisPqvmVerifier {
                 "vote key id is not the validator consensus key".to_string(),
             ));
         }
+        let domain = match vote.phase {
+            VotePhase::Validate => SYNERGY_VALIDATE_VOTE_V1,
+            VotePhase::Finality => SYNERGY_FINALITY_VOTE_V1,
+            VotePhase::Timeout => SYNERGY_TIMEOUT_VOTE_V1,
+        };
         self.verify_domain_signature(
-            SYNERGY_VOTE_V1,
+            domain,
             &vote.signing_bytes().map_err(AegisPqvmError)?,
             &vote.validator_uma_id.0,
             &vote.key_id,
@@ -649,8 +719,9 @@ impl AegisPqvmVerifier {
         qc: &QuorumCertificate,
         validator_set: &ValidatorSet,
         cluster_map: &ClusterMap,
+        height_context: &HeightConsensusContext,
     ) -> bool {
-        self.verify_qc_checked(qc, validator_set, cluster_map)
+        self.verify_qc_checked(qc, validator_set, cluster_map, height_context)
             .is_ok()
     }
 
@@ -659,20 +730,103 @@ impl AegisPqvmVerifier {
         qc: &QuorumCertificate,
         validator_set: &ValidatorSet,
         cluster_map: &ClusterMap,
+        height_context: &HeightConsensusContext,
+    ) -> Result<(), AegisPqvmError> {
+        self.verify_consensus_certificate_checked(
+            qc,
+            VotePhase::Finality,
+            validator_set,
+            cluster_map,
+            height_context,
+        )
+    }
+
+    pub fn verify_validation_certificate_checked(
+        &self,
+        certificate: &ValidationCertificate,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        height_context: &HeightConsensusContext,
+    ) -> Result<(), AegisPqvmError> {
+        self.verify_consensus_certificate_checked(
+            &certificate.as_verification_certificate(),
+            VotePhase::Validate,
+            validator_set,
+            cluster_map,
+            height_context,
+        )
+    }
+
+    pub fn verify_timeout_certificate_checked(
+        &self,
+        certificate: &TimeoutCertificate,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        height_context: &HeightConsensusContext,
+    ) -> Result<(), AegisPqvmError> {
+        if certificate.next_round.0 != certificate.closing_round.0.saturating_add(1) {
+            return Err(AegisPqvmError(
+                "TC next round must be exactly closing round plus one".to_string(),
+            ));
+        }
+        if certificate.highest_prepared_vc_root.is_some()
+            != certificate.carry_forward_candidate_id.is_some()
+        {
+            return Err(AegisPqvmError(
+                "TC prepared VC root and carry-forward candidate must appear together".to_string(),
+            ));
+        }
+        self.verify_consensus_certificate_checked(
+            &certificate.as_verification_certificate(),
+            VotePhase::Timeout,
+            validator_set,
+            cluster_map,
+            height_context,
+        )
+    }
+
+    fn verify_consensus_certificate_checked(
+        &self,
+        qc: &QuorumCertificate,
+        expected_phase: VotePhase,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        height_context: &HeightConsensusContext,
     ) -> Result<(), AegisPqvmError> {
         self.ensure_initialized()?;
+        if qc.phase != expected_phase {
+            return Err(AegisPqvmError(format!(
+                "wrong certificate phase: expected {expected_phase:?}, found {:?}",
+                qc.phase
+            )));
+        }
+        height_context
+            .validate_validator_and_cluster_bindings(validator_set, cluster_map)
+            .map_err(AegisPqvmError)?;
+        let expected_height_context_root = height_context.root().map_err(AegisPqvmError)?;
         qc.chain_id.require_testnet_v3().map_err(AegisPqvmError)?;
         qc.network_id.require_testnet_v3().map_err(AegisPqvmError)?;
-        let validator_set_hash = validator_set.hash().map_err(AegisPqvmError)?;
-        if qc.active_validator_set_hash != validator_set_hash {
+        if qc.protocol_version != height_context.protocol_version
+            || qc.height != height_context.height
+            || qc.epoch != height_context.epoch
+            || qc.cluster_id != height_context.assigned_cluster_id
+            || qc.height_context_root != expected_height_context_root
+        {
+            return Err(AegisPqvmError(
+                "QC height context is missing, stale, future, or mismatched".to_string(),
+            ));
+        }
+        if qc.active_validator_set_hash != height_context.active_validator_set_root {
             return Err(AegisPqvmError("QC validator set hash mismatch".to_string()));
         }
-        let cluster_map_hash = cluster_map.hash().map_err(AegisPqvmError)?;
-        if qc.cluster_map_hash != cluster_map_hash {
+        if qc.cluster_map_hash != height_context.cluster_map_root {
             return Err(AegisPqvmError("QC cluster map hash mismatch".to_string()));
         }
 
-        let validators = validator_set.canonicalized().validators;
+        let validators = validator_set
+            .active_for_epoch(qc.epoch)
+            .canonicalized()
+            .validators;
         let signer_indexes = bitmap_signer_indexes(&qc.signer_bitmap, validators.len())?;
         if signer_indexes.len() != qc.aegis_pq_signatures.len()
             || signer_indexes.len() != qc.aegis_pq_key_ids.len()
@@ -717,15 +871,20 @@ impl AegisPqvmVerifier {
                 cluster_id: qc.cluster_id,
                 phase: qc.phase.clone(),
                 block_id: qc.block_id.clone(),
+                highest_prepared_vc_root: qc.highest_prepared_vc_root,
                 validator_id: validator.validator_id.clone(),
                 validator_uma_id: validator.validator_uma_id.clone(),
                 key_id,
                 active_validator_set_hash: qc.active_validator_set_hash,
                 cluster_map_hash: qc.cluster_map_hash,
+                protocol_version: qc.protocol_version.clone(),
+                height_context_root: qc.height_context_root,
                 aegis_pq_signature: qc.aegis_pq_signatures[position].clone(),
             };
-            self.verify_vote_signature_checked(&vote, validator)?;
-            signed_weight = signed_weight.saturating_add(validator.voting_weight);
+            self.verify_vote_signature_checked(&vote, validator, expected_height_context_root)?;
+            signed_weight = signed_weight
+                .checked_add(validator.voting_weight)
+                .ok_or_else(|| AegisPqvmError("QC signed-weight overflow".to_string()))?;
         }
 
         if signed_weight != qc.signed_weight {
@@ -734,14 +893,32 @@ impl AegisPqvmVerifier {
                 qc.signed_weight
             )));
         }
-        if signed_weight < qc.threshold_weight_required {
+        let required_count = height_context
+            .strict_count_quorum()
+            .map_err(AegisPqvmError)?;
+        if (signer_indexes.len() as u64) < required_count
+            || 3u128 * signer_indexes.len() as u128
+                <= 2u128 * height_context.assigned_cluster_validator_count as u128
+        {
             return Err(AegisPqvmError(
-                "QC signed weight below threshold".to_string(),
+                "QC strict distinct-signer quorum failed".to_string(),
             ));
         }
-        if qc.threshold_weight_required < validator_set.threshold_weight() {
+        let required_weight = height_context
+            .strict_weight_quorum()
+            .map_err(AegisPqvmError)?;
+        if qc.threshold_weight_required != required_weight {
+            return Err(AegisPqvmError(format!(
+                "QC threshold mismatch: expected {required_weight}, declared {}",
+                qc.threshold_weight_required
+            )));
+        }
+        if signed_weight < required_weight
+            || 3u128 * signed_weight as u128
+                <= 2u128 * height_context.assigned_cluster_total_voting_weight as u128
+        {
             return Err(AegisPqvmError(
-                "QC threshold is below active validator set threshold".to_string(),
+                "QC strict frozen-weight quorum failed".to_string(),
             ));
         }
         Ok(())
@@ -763,19 +940,9 @@ impl AegisPqvmVerifier {
     ) -> Result<(), AegisPqvmError> {
         self.ensure_initialized()?;
         epoch_transition
-            .chain_id
-            .require_testnet_v3()
+            .validate_structure()
             .map_err(AegisPqvmError)?;
-        epoch_transition
-            .network_id
-            .require_testnet_v3()
-            .map_err(AegisPqvmError)?;
-        if epoch_transition.signer_key_ids.len() != epoch_transition.signatures.len() {
-            return Err(AegisPqvmError(
-                "epoch transition signer/signature length mismatch".to_string(),
-            ));
-        }
-        let payload = epoch_transition_payload_without_signatures(epoch_transition)?;
+        let payload = epoch_transition.signing_bytes().map_err(AegisPqvmError)?;
         let mut signed_weight = 0u64;
         let mut seen = BTreeSet::new();
         for (key_id, signature) in epoch_transition
@@ -927,6 +1094,11 @@ impl AegisPqvmVerifier {
                 "signature algorithm does not match public key".to_string(),
             ));
         }
+        if domain_requires_mldsa65(domain) && algorithm != PQCAlgorithm::MLDSA65 {
+            return Err(AegisPqvmError(format!(
+                "Testnet-v3 consensus domain {domain} requires ML-DSA-65"
+            )));
+        }
         let pqc_signature = PQCSignature {
             algorithm,
             signature_data: signature.signature_bytes.clone(),
@@ -1016,15 +1188,19 @@ fn domain_payload(domain: &str, payload: &[u8]) -> Vec<u8> {
 
 fn parse_algorithm(value: &str) -> Result<PQCAlgorithm, AegisPqvmError> {
     match value {
+        "mldsa65" | "ml-dsa-65" | "ML-DSA-65" => Ok(PQCAlgorithm::MLDSA65),
+        "mldsa87" | "ml-dsa-87" | "ML-DSA-87" => Ok(PQCAlgorithm::MLDSA87),
         "fndsa" => Ok(PQCAlgorithm::FNDSA),
         other => Err(AegisPqvmError(format!(
-            "unsupported Aegis PQC signature algorithm: {other}; use fndsa"
+            "unsupported Aegis PQC signature algorithm: {other}; use mldsa65"
         ))),
     }
 }
 
 fn algorithm_name(algorithm: &PQCAlgorithm) -> &'static str {
     match algorithm {
+        PQCAlgorithm::MLDSA65 => "mldsa65",
+        PQCAlgorithm::MLDSA87 => "mldsa87",
         PQCAlgorithm::FNDSA => "fndsa",
         PQCAlgorithm::SLHDSA => "slhdsa",
         PQCAlgorithm::MLKEM1024 => "mlkem1024",
@@ -1032,42 +1208,28 @@ fn algorithm_name(algorithm: &PQCAlgorithm) -> &'static str {
     }
 }
 
-#[derive(Serialize)]
-struct EpochTransitionUnsigned<'a> {
-    chain_id: ChainId,
-    network_id: &'a NetworkId,
-    from_epoch: Epoch,
-    to_epoch: Epoch,
-    finalized_height: crate::synergy_types::Height,
-    finalized_block_id: &'a BlockId,
-    active_validator_set_hash: Hash,
-    next_validator_set_hash: Hash,
-    cluster_map_hash: Hash,
-}
-
-fn epoch_transition_payload_without_signatures(
-    transition: &EpochTransition,
-) -> Result<Vec<u8>, AegisPqvmError> {
-    serde_json::to_vec(&EpochTransitionUnsigned {
-        chain_id: transition.chain_id,
-        network_id: &transition.network_id,
-        from_epoch: transition.from_epoch,
-        to_epoch: transition.to_epoch,
-        finalized_height: transition.finalized_height,
-        finalized_block_id: &transition.finalized_block_id,
-        active_validator_set_hash: transition.active_validator_set_hash,
-        next_validator_set_hash: transition.next_validator_set_hash,
-        cluster_map_hash: transition.cluster_map_hash,
-    })
-    .map_err(|error| AegisPqvmError(format!("epoch transition unsigned serialize: {error}")))
+fn domain_requires_mldsa65(domain: &str) -> bool {
+    matches!(
+        domain,
+        SYNERGY_BLOCK_V1
+            | SYNERGY_VOTE_V1
+            | SYNERGY_VALIDATE_VOTE_V1
+            | SYNERGY_FINALITY_VOTE_V1
+            | SYNERGY_TIMEOUT_VOTE_V1
+            | SYNERGY_VALIDATION_CERTIFICATE_V1
+            | SYNERGY_TIMEOUT_CERTIFICATE_V1
+            | SYNERGY_QC_V1
+            | SYNERGY_EPOCH_TRANSITION_V1
+    ) || domain.starts_with("PoSy/ETDAG/")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::synergy_types::{
-        AegisPqKeyRole, BlockId, ChainId, ClusterAssignment, ClusterId, Height, NetworkId,
-        QuorumCertificate, Round, UmaId, ValidatorId, VotePhase,
+        deterministic_test_height_context, AegisPqKeyRole, BlockId, ChainId, ClusterAssignment,
+        ClusterId, Height, NetworkId, ProtocolConfig, QuorumCertificate, Round, UmaId, ValidatorId,
+        VotePhase, POSY_PROTOCOL_VERSION,
     };
 
     fn validator_record(
@@ -1099,16 +1261,20 @@ mod tests {
         block_id: &str,
         validator_set_hash: Hash,
         cluster_map_hash: Hash,
+        height_context_root: Hash,
     ) -> Vote {
         let mut vote = Vote {
             chain_id: ChainId::synergy_testnet_v3(),
             network_id: NetworkId::synergy_testnet_v3(),
+            protocol_version: POSY_PROTOCOL_VERSION.to_string(),
             height: Height(1),
             round: Round(0),
             epoch: Epoch(0),
             cluster_id: ClusterId(0),
-            phase: VotePhase::Commit,
+            height_context_root,
+            phase: VotePhase::Finality,
             block_id: BlockId::from(block_id),
+            highest_prepared_vc_root: None,
             validator_id: ValidatorId::from(validator_id),
             validator_uma_id: UmaId::from(uma_id),
             key_id: key_id.clone(),
@@ -1157,17 +1323,44 @@ mod tests {
             "block-a",
             set.hash().unwrap(),
             cluster.hash().unwrap(),
+            Hash::from_domain_bytes("SYNERGY_TEST_HEIGHT_CONTEXT_V1", b"vote"),
         );
         let verifier = signer.verifier();
-        assert!(verifier.verify_vote_signature(&vote, &record));
+        assert!(verifier.verify_vote_signature(&vote, &record, vote.height_context_root));
 
         let mut altered = vote.clone();
         altered.block_id = BlockId::from("block-b");
-        assert!(!verifier.verify_vote_signature(&altered, &record));
+        assert!(!verifier.verify_vote_signature(&altered, &record, vote.height_context_root));
 
         let mut altered_sig = vote.clone();
         altered_sig.aegis_pq_signature.signature_bytes[0] ^= 0x01;
-        assert!(!verifier.verify_vote_signature(&altered_sig, &record));
+        assert!(!verifier.verify_vote_signature(&altered_sig, &record, vote.height_context_root));
+    }
+
+    #[test]
+    fn testnet_v3_consensus_domains_reject_fndsa_keys_before_signature_release() {
+        let mut signer = AegisPqvmSigner::initialize_required().expect("aegis signer");
+        let mut legacy_manager = PQCManager::new();
+        let (public_key, private_key) = legacy_manager
+            .generate_keypair(PQCAlgorithm::FNDSA)
+            .expect("legacy FN-DSA fixture");
+        let key_id = signer
+            .register_existing_keypair(
+                "uma-legacy",
+                public_key,
+                private_key,
+                vec![
+                    AegisPqKeyRole::ConsensusVote,
+                    AegisPqKeyRole::ConsensusProposer,
+                ],
+                Epoch(0),
+            )
+            .expect("register legacy fixture");
+
+        let error = signer
+            .sign_domain(SYNERGY_FINALITY_VOTE_V1, b"candidate", &key_id)
+            .expect_err("FN-DSA must not sign Testnet-v3 consensus transcripts");
+        assert!(error.to_string().contains("requires ML-DSA-65"));
     }
 
     #[test]
@@ -1202,9 +1395,10 @@ mod tests {
             "block-a",
             set.hash().unwrap(),
             cluster.hash().unwrap(),
+            Hash::from_domain_bytes("SYNERGY_TEST_HEIGHT_CONTEXT_V1", b"wrong-role"),
         );
         let verifier = signer.verifier();
-        assert!(!verifier.verify_vote_signature(&vote, &record));
+        assert!(!verifier.verify_vote_signature(&vote, &record, vote.height_context_root));
 
         let mut signer = AegisPqvmSigner::initialize_required().expect("aegis signer");
         let key_id = signer
@@ -1226,8 +1420,11 @@ mod tests {
             "block-a",
             Hash::zero(),
             Hash::zero(),
+            Hash::from_domain_bytes("SYNERGY_TEST_HEIGHT_CONTEXT_V1", b"revoked"),
         );
-        assert!(!signer.verifier().verify_vote_signature(&vote, &record));
+        assert!(!signer
+            .verifier()
+            .verify_vote_signature(&vote, &record, vote.height_context_root));
     }
 
     #[test]
@@ -1274,6 +1471,10 @@ mod tests {
         };
         let set_hash = set.hash().unwrap();
         let cluster_hash = cluster.hash().unwrap();
+        let protocol = ProtocolConfig::testnet_v3();
+        let height_context =
+            deterministic_test_height_context(&set, &cluster, &protocol, Height(1), ClusterId(0));
+        let height_context_root = height_context.root().unwrap();
         let votes = (0..4)
             .map(|index| {
                 signed_vote(
@@ -1284,6 +1485,7 @@ mod tests {
                     "block-a",
                     set_hash,
                     cluster_hash,
+                    height_context_root,
                 )
             })
             .collect::<Vec<_>>();
@@ -1291,12 +1493,15 @@ mod tests {
             qc_version: 1,
             chain_id: ChainId::synergy_testnet_v3(),
             network_id: NetworkId::synergy_testnet_v3(),
+            protocol_version: POSY_PROTOCOL_VERSION.to_string(),
             height: Height(1),
             round: Round(0),
             epoch: Epoch(0),
             cluster_id: ClusterId(0),
-            phase: VotePhase::Commit,
+            height_context_root,
+            phase: VotePhase::Finality,
             block_id: BlockId::from("block-a"),
+            highest_prepared_vc_root: None,
             active_validator_set_hash: set_hash,
             cluster_map_hash: cluster_hash,
             threshold_weight_required: 4,
@@ -1308,7 +1513,9 @@ mod tests {
                 .collect(),
             aegis_pq_key_ids: key_ids[0..4].to_vec(),
         };
-        assert!(signer.verifier().verify_qc(&qc, &set, &cluster));
+        assert!(signer
+            .verifier()
+            .verify_qc(&qc, &set, &cluster, &height_context));
 
         let mut below_threshold = qc.clone();
         below_threshold.signer_bitmap = vec![0b0000_0111];
@@ -1317,15 +1524,19 @@ mod tests {
         below_threshold.signed_weight = 3;
         assert!(!signer
             .verifier()
-            .verify_qc(&below_threshold, &set, &cluster));
+            .verify_qc(&below_threshold, &set, &cluster, &height_context));
 
         let mut duplicate_key = qc.clone();
         duplicate_key.aegis_pq_key_ids[1] = duplicate_key.aegis_pq_key_ids[0].clone();
-        assert!(!signer.verifier().verify_qc(&duplicate_key, &set, &cluster));
+        assert!(!signer
+            .verifier()
+            .verify_qc(&duplicate_key, &set, &cluster, &height_context));
 
         let mut inactive_set = set.clone();
         inactive_set.validators[0].status = ValidatorStatus::Shadow;
-        assert!(!signer.verifier().verify_qc(&qc, &inactive_set, &cluster));
+        assert!(!signer
+            .verifier()
+            .verify_qc(&qc, &inactive_set, &cluster, &height_context));
     }
 
     #[test]
@@ -1349,7 +1560,7 @@ mod tests {
             latest_state_root: Hash::zero(),
             active_validator_set_hash: Hash::zero(),
             cluster_map_hash: Hash::zero(),
-            protocol_config_hash: Hash::zero(),
+            protocol_config_hash: crate::consensus_parameters::ConsensusParameterRoot::zero(),
             aegis_pq_public_key_id: AegisPqKeyId::from("missing"),
         };
         assert!(!verifier.verify_peer_identity(

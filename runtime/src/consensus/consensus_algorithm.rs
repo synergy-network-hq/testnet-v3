@@ -3333,7 +3333,7 @@ impl ProofOfSynergy {
         )?;
         let randomness = Self::deterministic_epoch_randomness_from_boundary_with_domain(
             BOUNDARY_HASH_CLUSTER_RANDOMNESS_DOMAIN,
-            1264,
+            1266,
             next_epoch,
             &boundary.boundary_block_hash,
         );
@@ -3559,9 +3559,9 @@ impl ProofOfSynergy {
         let epoch_length = epoch_length.max(1);
         let genesis = canonical_genesis()?;
         let chain_id = genesis.chain_id();
-        if chain_id != 1264 {
+        if chain_id != 1266 {
             return Err(format!(
-                "canonical epoch randomness requires testnet chain id 1264, found {chain_id}"
+                "canonical epoch randomness requires testnet chain id 1266, found {chain_id}"
             ));
         }
 
@@ -5459,7 +5459,7 @@ mod tests {
             serde_json::json!({
                 "epoch_validator_sets": [
                     {
-                        "chain_id": 1264,
+                        "chain_id": 1266,
                         "epoch_id": 7,
                         "validator_set_version": 3,
                         "effective_from_height": 100,
@@ -5470,7 +5470,7 @@ mod tests {
                         "validator_set_hash": "dynamic-validator-set-a"
                     },
                     {
-                        "chain_id": 1264,
+                        "chain_id": 1266,
                         "epoch_id": 8,
                         "validator_set_version": 4,
                         "effective_from_height": 200,
@@ -5568,7 +5568,7 @@ mod tests {
             &snapshot_path,
             serde_json::json!({
                 "epoch_validator_sets": [{
-                    "chain_id": 1264,
+                    "chain_id": 1266,
                     "epoch_id": 9,
                     "validator_set_version": 1,
                     "effective_from_height": 100,
@@ -6652,7 +6652,7 @@ mod tests {
         assert_ne!(leader.randomness, cluster.randomness);
 
         let leader_v3 = ProofOfSynergy::deterministic_epoch_randomness_from_boundary(
-            1264,
+            1266,
             1_150,
             cluster.boundary_block_hash.as_deref().unwrap(),
         );

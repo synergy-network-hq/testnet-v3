@@ -4,6 +4,8 @@ pub mod execution;
 pub mod metering;
 pub mod orchestration;
 pub mod state;
+#[cfg(feature = "synq")]
+pub mod stateful_synq;
 pub mod synq_runtime;
 pub mod transcript;
 pub mod vm;

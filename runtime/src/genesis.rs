@@ -117,6 +117,10 @@ impl GenesisDocument {
 
 fn load_canonical_genesis_from_disk() -> Result<GenesisDocument, String> {
     let path = genesis_path();
+    load_canonical_genesis_from_path(path)
+}
+
+fn load_canonical_genesis_from_path(path: PathBuf) -> Result<GenesisDocument, String> {
     let bytes = fs::read(&path)
         .map_err(|error| format!("read canonical genesis {}: {error}", path.display()))?;
     let value: Value = serde_json::from_slice(&bytes)
@@ -140,7 +144,11 @@ fn load_canonical_genesis_from_disk() -> Result<GenesisDocument, String> {
     if genesis_hash.is_empty() {
         return Err("integrity.genesis_hash must not be empty".to_string());
     }
-    let network_magic_bytes = required_string(&value, &["p2p_identity", "network_magic_bytes"])?;
+    let network_magic_bytes = if is_testnet_v3_candidate_schema(&value) {
+        required_string(&value, &["network_magic_bytes", "value"])?
+    } else {
+        required_string(&value, &["p2p_identity", "network_magic_bytes"])?
+    };
     if network_magic_bytes.is_empty() {
         return Err("p2p_identity.network_magic_bytes must not be empty".to_string());
     }
@@ -159,6 +167,11 @@ fn load_canonical_genesis_from_disk() -> Result<GenesisDocument, String> {
         validators,
         token,
     })
+}
+
+#[cfg(test)]
+pub(crate) fn load_genesis_from_path_for_test(path: PathBuf) -> Result<GenesisDocument, String> {
+    load_canonical_genesis_from_path(path)
 }
 
 fn genesis_path() -> PathBuf {
@@ -220,6 +233,10 @@ fn parse_token_config(value: &Value) -> Result<GenesisTokenConfig, String> {
 }
 
 fn validate_integrity_hashes(value: &Value) -> Result<(), String> {
+    if is_testnet_v3_candidate_schema(value) {
+        return validate_testnet_v3_candidate_integrity_hashes(value);
+    }
+
     let empty_hash = hash_bytes(&[]);
     let allocation_hash = hash_json(required(value, &["allocations"])?);
     let validator_hash = hash_json(required(value, &["validators"])?);
@@ -351,6 +368,142 @@ fn validate_integrity_hashes(value: &Value) -> Result<(), String> {
         "p2p_identity.network_magic_bytes",
     )?;
 
+    Ok(())
+}
+
+/// The Testnet-v3 ceremony artifact uses a deliberately smaller, fully
+/// canonicalized genesis schema than the inherited runtime template.  It must
+/// be validated as-is; translating it through the legacy schema would change
+/// consensus bytes and invalidate every approved public binding.
+fn is_testnet_v3_candidate_schema(value: &Value) -> bool {
+    value
+        .get("canonicalization")
+        .and_then(|entry| entry.get("json_profile"))
+        .and_then(Value::as_str)
+        == Some("deterministic_sorted_keys_no_insignificant_whitespace")
+}
+
+fn validate_testnet_v3_candidate_integrity_hashes(value: &Value) -> Result<(), String> {
+    let empty_hash = hash_bytes(&[]);
+    let allocation_hash = hash_json(required(value, &["allocations"])?);
+    let validator_hash = hash_json(required(value, &["validators"])?);
+    let validator_set_hash = hash_json(required(
+        value,
+        &[
+            "contracts",
+            "validator_registry",
+            "init_params",
+            "validators",
+        ],
+    )?);
+    let contract_hash = hash_json(required(value, &["contracts"])?);
+    let state_root = hash_json(&json!({
+        "accounts": required(value, &["accounts"] )?,
+        "balances": required(value, &["balances"] )?,
+        "allocations": required(value, &["allocations"] )?,
+        "contracts": required(value, &["contracts"] )?,
+        "consensus": required(value, &["consensus"] )?,
+        "governance": required(value, &["governance"] )?,
+        "modules": required(value, &["modules"] )?,
+        "network": required(value, &["network"] )?,
+        "security": required(value, &["security"] )?,
+        "synergy_state": required(value, &["synergy_state"] )?,
+        "token": required(value, &["token"] )?,
+        "validators": required(value, &["validators"] )?,
+    }));
+    let data_root = hash_json(&json!({
+        "contracts": required(value, &["contracts"] )?,
+        "modules": required(value, &["modules"] )?,
+        "precompiles": required(value, &["precompiles"] )?,
+    }));
+
+    compare_hash(
+        value,
+        &["header", "parent_hash"],
+        ZERO_HASH,
+        "header.parent_hash",
+    )?;
+    compare_hash(
+        value,
+        &["header", "transactions_root"],
+        &empty_hash,
+        "header.transactions_root",
+    )?;
+    compare_hash(
+        value,
+        &["header", "receipts_root"],
+        &empty_hash,
+        "header.receipts_root",
+    )?;
+    compare_hash(
+        value,
+        &["header", "state_root"],
+        &state_root,
+        "header.state_root",
+    )?;
+    compare_hash(
+        value,
+        &["header", "data_root"],
+        &data_root,
+        "header.data_root",
+    )?;
+    compare_hash(
+        value,
+        &["integrity", "allocation_hash"],
+        &allocation_hash,
+        "integrity.allocation_hash",
+    )?;
+    compare_hash(
+        value,
+        &["integrity", "validator_hash"],
+        &validator_hash,
+        "integrity.validator_hash",
+    )?;
+    compare_hash(
+        value,
+        &[
+            "contracts",
+            "validator_registry",
+            "init_params",
+            "validator_set_hash",
+        ],
+        &validator_set_hash,
+        "contracts.validator_registry.init_params.validator_set_hash",
+    )?;
+    compare_hash(
+        value,
+        &["integrity", "validator_set_hash"],
+        &validator_set_hash,
+        "integrity.validator_set_hash",
+    )?;
+    compare_hash(
+        value,
+        &["integrity", "contract_hash"],
+        &contract_hash,
+        "integrity.contract_hash",
+    )?;
+    compare_hash(
+        value,
+        &["integrity", "state_root"],
+        &state_root,
+        "integrity.state_root",
+    )?;
+
+    let expected_genesis_hash = hash_json(&genesis_hash_payload(value));
+    compare_hash(
+        value,
+        &["integrity", "genesis_hash"],
+        &expected_genesis_hash,
+        "integrity.genesis_hash",
+    )?;
+    let caip2 = "synergy:testnet-v3";
+    let network_magic_bytes = network_magic_bytes_for(caip2, &expected_genesis_hash);
+    compare_hash(
+        value,
+        &["network_magic_bytes", "value"],
+        &network_magic_bytes,
+        "network_magic_bytes.value",
+    )?;
     Ok(())
 }
 
@@ -554,5 +707,87 @@ fn canonical_json(value: &Value) -> String {
                 .join(",");
             format!("{{{rendered}}}")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine as _;
+
+    fn testnet_v3_candidate() -> Value {
+        serde_json::from_str(include_str!(
+            "../../genesis.testnet-v3.identity-assigned.json"
+        ))
+        .expect("checked-in Testnet-v3 candidate genesis must be valid JSON")
+    }
+
+    #[test]
+    fn testnet_v3_candidate_schema_recomputes_all_bound_roots() {
+        let candidate = testnet_v3_candidate();
+        assert!(is_testnet_v3_candidate_schema(&candidate));
+        assert_eq!(
+            required_u64(&candidate, &["network", "chain_id"]).unwrap(),
+            1266
+        );
+        assert_eq!(
+            candidate["consensus"]["initial_active_validator_count"].as_u64(),
+            Some(6)
+        );
+        assert_eq!(
+            candidate["consensus"]["initial_cluster_count"].as_u64(),
+            Some(1)
+        );
+        assert_eq!(
+            candidate["consensus"]["min_validator_count"].as_u64(),
+            Some(6)
+        );
+        assert_eq!(
+            candidate["consensus"]["min_quorum_threshold"].as_u64(),
+            Some(5)
+        );
+        let validators = candidate["validators"]
+            .as_array()
+            .expect("candidate validators must be an array");
+        assert_eq!(validators.len(), 6);
+        for validator in validators {
+            assert_eq!(validator["consensus_key_type"].as_str(), Some("ML-DSA-65"));
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(
+                    validator["consensus_public_key"]
+                        .as_str()
+                        .expect("candidate consensus public key must be a string"),
+                )
+                .expect("candidate consensus public key must be base64");
+            assert_eq!(bytes.len(), 1_952);
+        }
+        assert_eq!(
+            candidate["testnet_v3_initialization"]["preconfigured_validator_count"].as_u64(),
+            Some(21)
+        );
+        validate_integrity_hashes(&candidate).unwrap();
+    }
+
+    #[test]
+    fn testnet_v3_candidate_rejects_network_magic_mutation() {
+        let mut candidate = testnet_v3_candidate();
+        candidate["network_magic_bytes"]["value"] = Value::String("00000000".to_string());
+        let error = validate_integrity_hashes(&candidate).unwrap_err();
+        assert!(error.contains("network_magic_bytes.value mismatch"));
+    }
+
+    #[test]
+    fn runtime_loader_accepts_the_verified_testnet_v3_candidate_schema() {
+        let candidate = testnet_v3_candidate();
+        let expected_magic = candidate["network_magic_bytes"]["value"]
+            .as_str()
+            .expect("candidate network magic must be a string");
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../genesis.testnet-v3.identity-assigned.json");
+        let document = load_canonical_genesis_from_path(path).unwrap();
+        assert_eq!(document.chain_id(), 1266);
+        assert_eq!(document.network_id(), 1266);
+        assert_eq!(document.validators().len(), 6);
+        assert_eq!(document.network_magic_bytes(), expected_magic);
     }
 }

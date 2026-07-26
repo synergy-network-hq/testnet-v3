@@ -327,7 +327,7 @@ impl Default for NodeConfig {
     fn default() -> Self {
         NodeConfig {
             network: NetworkConfig {
-                id: 1264,
+                id: 1266,
                 network_id: default_network_id(),
                 name: "Synergy Testnet".to_string(),
                 p2p_port: 5622,
@@ -344,7 +344,7 @@ impl Default for NodeConfig {
             blockchain: BlockchainConfig {
                 block_time: 2,
                 max_gas_limit: "0x2fefd8".to_string(),
-                chain_id: 1264,
+                chain_id: 1266,
             },
             consensus: ConsensusConfig {
                 algorithm: "Proof of Synergy".to_string(),
@@ -507,9 +507,9 @@ pub fn load_node_config_from_template(node_type: &str) -> Result<NodeConfig, Box
 }
 
 fn enforce_consensus_config_invariants(config: &NodeConfig) -> Result<(), Box<dyn Error>> {
-    if config.blockchain.chain_id != 1264 || config.network.id != 1264 {
+    if config.blockchain.chain_id != 1266 || config.network.id != 1266 {
         return Err(format!(
-            "Synergy Testnet v3 requires chain_id/network id 1264, found blockchain.chain_id={} network.id={}",
+            "Synergy Testnet v3 requires chain_id/network id 1266, found blockchain.chain_id={} network.id={}",
             config.blockchain.chain_id, config.network.id
         )
         .into());
@@ -1345,7 +1345,7 @@ label = "Validator Node 01"
 
 [network]
 chain_name = "synergy-testnet"
-chain_id = 1264
+chain_id = 1266
 p2p_listen = "0.0.0.0:5622"
 bootnodes = ["bootnode1.synergy-network.io:5620"]
 seed_servers = ["http://seed1.synergy-network.io:5621"]
@@ -1369,8 +1369,8 @@ log_level = "debug"
         assert_eq!(config.identity.role, "validator");
         assert_eq!(config.role.compiled_profile, "validator_node");
         assert_eq!(config.network.name, "synergy-testnet");
-        assert_eq!(config.network.id, 1264);
-        assert_eq!(config.blockchain.chain_id, 1264);
+        assert_eq!(config.network.id, 1266);
+        assert_eq!(config.blockchain.chain_id, 1266);
         assert_eq!(config.network.p2p_port, 5622);
         assert_eq!(config.p2p.listen_address, "0.0.0.0:5622");
         assert_eq!(
@@ -1468,7 +1468,7 @@ metrics_bind = "0.0.0.0:6030"
             &node_path,
             r#"
 [network]
-id = 1264
+id = 1266
 name = "synergy-testnet"
 p2p_port = 5622
 rpc_port = 5640
@@ -1478,7 +1478,7 @@ bootnodes = ["bootnode1.synergy-network.io:5620"]
 [blockchain]
 block_time = 5
 max_gas_limit = "0x2fefd8"
-chain_id = 1264
+chain_id = 1266
 
 [consensus]
 algorithm = "Proof of Synergy"
@@ -1591,7 +1591,7 @@ label = "Validator 3 Node"
 
 [network]
 chain_name = "synergy-testnet"
-chain_id = 1264
+chain_id = 1266
 p2p_port = 5622
 public_host = "genesisval3.synergy-network.io"
 
@@ -1614,7 +1614,7 @@ public_address = "genesisval3.synergy-network.io:5622"
         let content = r#"
 [network]
 chain_name = "synergy-testnet"
-chain_id = 1264
+chain_id = 1266
 p2p_port = 5622
 public_host = "genesisval1.synergy-network.io"
 
@@ -1639,7 +1639,7 @@ listen_address = "0.0.0.0:5622"
         let content = r#"
 [network]
 chain_name = "synergy-testnet"
-chain_id = 1264
+chain_id = 1266
 p2p_port = 5622
 public_host = "genesisval1.synergy-network.io"
 
@@ -1885,7 +1885,7 @@ state_sync_before_join = true
             &config_path,
             r#"
 [network]
-id = 1264
+id = 1266
 name = "synergy-testnet"
 p2p_port = 5622
 rpc_port = 5640
@@ -1895,7 +1895,7 @@ max_peers = 32
 [blockchain]
 block_time = 5
 max_gas_limit = "0x2fefd8"
-chain_id = 1264
+chain_id = 1266
 
 [consensus]
 algorithm = "Proof of Synergy"

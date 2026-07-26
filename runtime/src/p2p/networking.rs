@@ -13,13 +13,18 @@ use crate::consensus::legacy_canonical_lock::{
     verify_legacy_canonical_lock, verify_legacy_canonical_locks, write_legacy_canonical_lock,
     write_legacy_canonical_locks,
 };
+use crate::consensus::testnet_v3_bootstrap::{
+    authenticate_active_typed_consensus_peer, load_testnet_v3_genesis_bootstrap,
+};
 use crate::consensus::timing_trace;
+use crate::consensus::typed_coordinator::AuthenticatedTypedConsensusPeer;
+use crate::consensus::validator_keys::load_local_validator_keypair;
 use crate::crypto::aegis_pqvm::{
     AegisPqvmKeyRegistry, AegisPqvmSigner, AegisPqvmVerifier, SYNERGY_P2P_HANDSHAKE_V1,
 };
-use crate::crypto::pqc::{PQCAlgorithm, PQCPublicKey};
+use crate::crypto::pqc::{PQCAlgorithm, PQCPrivateKey, PQCPublicKey};
 use crate::genesis::canonical_genesis;
-use crate::p2p::messages::NetworkMessage;
+use crate::p2p::messages::{NetworkMessage, TypedConsensusMessage};
 #[cfg(not(test))]
 use crate::p2p::validator_transport_registry::refresh_validator_transports;
 use crate::p2p::validator_transport_registry::{
@@ -97,6 +102,11 @@ const PUBLIC_RELAYER_DIAL_ADDRESSES: &[&str] = &[
     "relay3.synergynode.xyz:5622",
 ];
 const MAX_BLOCK_SYNC_RESPONSE_BLOCKS: u32 = 64;
+const TYPED_POSY_VALIDATOR_CAPABILITY: &str = "typed-posy-v2.2-validator";
+// Identity bindings are session-scoped and bounded.  A socket address is not a
+// consensus identity, so this registry exists solely to carry the result of a
+// verified Genesis-bound handshake into the typed coordinator mailbox.
+const MAX_TYPED_CONSENSUS_PEER_SESSIONS: usize = 1024;
 const MAX_VALIDATOR_SUPPORT_SYNC_RESPONSE_BLOCKS: u32 = 64;
 const MAX_SUPPORT_NODE_BLOCK_SYNC_RESPONSE_BLOCKS: u32 = 128;
 const MAX_SUPPORT_PEER_DEEP_SYNC_LAG: u64 = 64_000;
@@ -141,7 +151,7 @@ const SERVICE_BLOCK_SYNC_APPLY_TIMEOUT_SECS: u64 = 180;
 const BLOCK_SYNC_RECONCILIATION_LOOKBACK: u64 = 8;
 const BLOCK_SYNC_PROGRESS_OVERLAP: u64 = 2;
 const TESTNET_NATIVE_CAIP2: &str = "synergy:testnet";
-const TESTNET_RESERVED_EIP155: &str = "eip155:1264";
+const TESTNET_RESERVED_EIP155: &str = "eip155:1266";
 const TESTNET_NETWORK_ID_TEXT: &str = "synergy-testnet-v3";
 const TESTNET_AEGIS_PQVM_VERSION: &str = "aegis-pqvm";
 const DEFAULT_MAX_CHAIN_SNAPSHOT_CLONE_HEIGHT: u64 = 50_000;
@@ -191,6 +201,8 @@ lazy_static! {
     static ref PEER_WRITE_GATES: Mutex<HashMap<String, Arc<Mutex<()>>>> =
         Mutex::new(HashMap::new());
     static ref PEER_SESSION_IDS: Mutex<HashMap<String, u64>> = Mutex::new(HashMap::new());
+    static ref TYPED_CONSENSUS_PEER_SESSIONS: Mutex<HashMap<(String, u64), AuthenticatedTypedConsensusPeer>> =
+        Mutex::new(HashMap::new());
     static ref NEXT_PEER_SESSION_ID: AtomicU64 = AtomicU64::new(1);
     static ref BLOCK_SYNC_SERVE_QUEUE: (
         mpsc::SyncSender<BlockServeJob>,
@@ -632,10 +644,14 @@ fn handshake_pq_signing_payload(message: &NetworkMessage) -> Result<Vec<u8>, Str
 fn parse_handshake_pqc_algorithm(value: &str) -> Result<PQCAlgorithm, String> {
     match value.trim() {
         "fndsa" | "FN-DSA-1024" => Ok(PQCAlgorithm::FNDSA),
+        "mldsa65" | "ML-DSA-65" => Ok(PQCAlgorithm::MLDSA65),
+        "mldsa87" | "ML-DSA-87" => Ok(PQCAlgorithm::MLDSA87),
         "slhdsa" | "SLH-DSA" => Err(format!(
-            "unsupported Aegis PQC peer key algorithm: {value}; use fndsa"
+            "unsupported Aegis PQC peer key algorithm: {value}; use fndsa, mldsa65, or mldsa87"
         )),
-        other => Err(format!("unsupported Aegis PQC peer key algorithm: {other}")),
+        other => Err(format!(
+            "unsupported Aegis PQC peer key algorithm: {other}; use fndsa, mldsa65, or mldsa87"
+        )),
     }
 }
 
@@ -656,13 +672,37 @@ fn build_local_handshake_with_extra_capabilities(
         .is_empty()
         .then_some("synergy-node")
         .unwrap_or_else(|| config.p2p.node_name.trim());
-    let key_id = signer
-        .generate_and_register_key(peer_uma, vec![AegisPqKeyRole::PeerIdentity], Epoch(0))
-        .map_err(|error| format!("aegis-pqvm P2P key loading failed: {error}"))?;
+    let key_id = if local_consensus_handshake_required(config) {
+        let validator_address = announced_validator_address(config).ok_or_else(|| {
+            "typed PoSy validator handshake requires a configured validator address".to_string()
+        })?;
+        let (public_key, private_key) = load_local_validator_keypair(
+            &validator_address,
+            &VALIDATOR_MANAGER,
+        )
+        .map_err(|error| {
+            format!(
+                "typed PoSy validator handshake cannot load the assigned ML-DSA-65 consensus key: {error}"
+            )
+        })?;
+        register_validator_consensus_handshake_key(
+            &mut signer,
+            &validator_address,
+            public_key,
+            private_key,
+        )?
+    } else {
+        signer
+            .generate_and_register_key(peer_uma, vec![AegisPqKeyRole::PeerIdentity], Epoch(0))
+            .map_err(|error| format!("aegis-pqvm P2P key loading failed: {error}"))?
+    };
     let public_key = signer
         .public_key_record(&key_id)
         .map_err(|error| format!("aegis-pqvm P2P public key loading failed: {error}"))?;
     let mut capabilities = vec!["blocks".to_string(), "transactions".to_string()];
+    if local_consensus_handshake_required(config) {
+        capabilities.push(TYPED_POSY_VALIDATOR_CAPABILITY.to_string());
+    }
     for capability in extra_capabilities {
         let capability = capability.trim();
         if !capability.is_empty() && !capabilities.iter().any(|value| value == capability) {
@@ -708,11 +748,52 @@ fn build_local_handshake_with_extra_capabilities(
     Ok(handshake)
 }
 
-fn verify_handshake_pq_signature(message: &NetworkMessage) -> Result<(), String> {
+/// A typed validator handshake is a proof of possession of the exact
+/// Genesis-assigned ML-DSA-65 consensus key.  It must never fall back to an
+/// ephemeral P2P key: that would authenticate a connection but not the
+/// validator authorized to emit typed PoSy artifacts.
+fn local_consensus_handshake_required(config: &NodeConfig) -> bool {
+    config.consensus.algorithm.trim() == "posy/2.2"
+        && !config.node.bootstrap_only
+        && !config.node.validator_address.trim().is_empty()
+}
+
+fn register_validator_consensus_handshake_key(
+    signer: &mut AegisPqvmSigner,
+    validator_address: &str,
+    public_key: PQCPublicKey,
+    private_key: PQCPrivateKey,
+) -> Result<AegisPqKeyId, String> {
+    if public_key.algorithm != PQCAlgorithm::MLDSA65 {
+        return Err(
+            "typed PoSy validator handshake requires an ML-DSA-65 consensus key".to_string(),
+        );
+    }
+    signer
+        .register_existing_keypair(
+            validator_address,
+            public_key,
+            private_key,
+            vec![
+                AegisPqKeyRole::PeerIdentity,
+                AegisPqKeyRole::ConsensusProposer,
+                AegisPqKeyRole::ConsensusVote,
+                AegisPqKeyRole::EpochTransition,
+            ],
+            Epoch(0),
+        )
+        .map_err(|error| format!("register typed PoSy validator handshake key: {error}"))
+}
+
+fn verify_handshake_pq_signature(
+    message: &NetworkMessage,
+) -> Result<Option<AuthenticatedTypedConsensusPeer>, String> {
     let NetworkMessage::Handshake {
         node_id,
+        capabilities,
         chain_id,
         network_id_text,
+        validator_address,
         aegis_pq_public_key_id,
         aegis_pq_public_key_algorithm,
         aegis_pq_public_key,
@@ -723,8 +804,8 @@ fn verify_handshake_pq_signature(message: &NetworkMessage) -> Result<(), String>
         return Err("P2P handshake verification requested for non-handshake".to_string());
     };
 
-    if *chain_id != Some(1264) {
-        return Err("Aegis PQC handshake must bind chain_id 1264".to_string());
+    if *chain_id != Some(1266) {
+        return Err("Aegis PQC handshake must bind chain_id 1266".to_string());
     }
     if network_id_text.as_deref() != Some(TESTNET_NETWORK_ID_TEXT) {
         return Err(format!(
@@ -774,7 +855,40 @@ fn verify_handshake_pq_signature(message: &NetworkMessage) -> Result<(), String>
             AegisPqKeyRole::PeerIdentity,
             signature,
         )
-        .map_err(|error| format!("Aegis PQC peer handshake verification failed: {error}"))
+        .map_err(|error| format!("Aegis PQC peer handshake verification failed: {error}"))?;
+
+    if capabilities
+        .iter()
+        .any(|capability| capability == TYPED_POSY_VALIDATOR_CAPABILITY)
+    {
+        let validator_address = validator_address
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "typed PoSy validator handshake omits validator_address".to_string())?;
+        let genesis = canonical_genesis().map_err(|error| {
+            format!("typed PoSy peer handshake cannot load canonical Genesis: {error}")
+        })?;
+        let bootstrap = load_testnet_v3_genesis_bootstrap(genesis).map_err(|error| {
+            format!("typed PoSy peer handshake canonical Genesis is not a valid bootstrap: {error}")
+        })?;
+        let validator = authenticate_active_typed_consensus_peer(
+            &bootstrap,
+            validator_address,
+            key_id.0.as_str(),
+            aegis_pq_public_key_algorithm.as_deref().unwrap_or_default(),
+            aegis_pq_public_key,
+        )
+        .map_err(|error| {
+            format!("typed PoSy validator handshake identity binding failed: {error}")
+        })?;
+        return Ok(Some(AuthenticatedTypedConsensusPeer {
+            validator_id: validator.validator_id,
+            validator_uma_id: validator.validator_uma_id,
+            consensus_key_id: validator.consensus_public_key.key_id,
+        }));
+    }
+    Ok(None)
 }
 
 fn handshake_mismatch_reason(
@@ -784,12 +898,16 @@ fn handshake_mismatch_reason(
     network_id_text: Option<&str>,
     genesis_hash: &str,
     network_magic_bytes: &str,
+    protocol_version: Option<&str>,
+    consensus_version: Option<&str>,
     native_caip2: Option<&str>,
 ) -> Option<String> {
     let expected_chain_id = local_chain_id(config);
     let expected_network_id = local_network_id(config);
     let expected_genesis_hash = canonical_genesis_hash();
     let expected_network_magic_bytes = canonical_network_magic_bytes();
+    let expected_protocol_version = local_protocol_version(config);
+    let expected_consensus_version = local_consensus_version(config);
 
     match chain_id {
         Some(value) if value == expected_chain_id => {}
@@ -849,6 +967,22 @@ fn handshake_mismatch_reason(
         ));
     }
 
+    if let Some(reason) = handshake_version_mismatch_reason(
+        "protocol_version",
+        &expected_protocol_version,
+        protocol_version,
+    ) {
+        return Some(reason);
+    }
+
+    if let Some(reason) = handshake_version_mismatch_reason(
+        "consensus_version",
+        &expected_consensus_version,
+        consensus_version,
+    ) {
+        return Some(reason);
+    }
+
     if let Some(caip2) = native_caip2 {
         if caip2 != TESTNET_NATIVE_CAIP2 {
             return Some(format!(
@@ -858,6 +992,20 @@ fn handshake_mismatch_reason(
     }
 
     None
+}
+
+fn handshake_version_mismatch_reason(
+    label: &str,
+    expected: &str,
+    remote: Option<&str>,
+) -> Option<String> {
+    match remote.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) if value == expected => None,
+        Some(value) => Some(format!(
+            "{label} differs: expected {expected}, remote {value}"
+        )),
+        None => Some(format!("{label} missing: expected {expected}")),
+    }
 }
 
 fn resolve_local_genesis_hash(blockchain: &BlockchainArc) -> String {
@@ -3031,6 +3179,10 @@ fn disconnect_peer_entry(
         }
     }
     PEER_SESSION_IDS.lock().unwrap().remove(peer_key);
+    TYPED_CONSENSUS_PEER_SESSIONS
+        .lock()
+        .unwrap()
+        .retain(|(address, _), _| address != peer_key);
     drop(gate_guard);
     remove_peer_write_gate(peer_key);
 }
@@ -3048,7 +3200,42 @@ fn begin_peer_session(peer_address: &str) -> u64 {
         .lock()
         .unwrap()
         .insert(peer_address.to_string(), session_id);
+    TYPED_CONSENSUS_PEER_SESSIONS
+        .lock()
+        .unwrap()
+        .retain(|(address, _), _| address != peer_address);
     session_id
+}
+
+fn register_typed_consensus_peer_session(
+    peer_address: &str,
+    session_id: u64,
+    identity: AuthenticatedTypedConsensusPeer,
+) -> Result<(), String> {
+    if !peer_session_is_current(peer_address, session_id) {
+        return Err("cannot bind typed consensus identity to a replaced peer session".to_string());
+    }
+    let mut sessions = TYPED_CONSENSUS_PEER_SESSIONS.lock().unwrap();
+    let session_key = (peer_address.to_string(), session_id);
+    if !sessions.contains_key(&session_key) && sessions.len() >= MAX_TYPED_CONSENSUS_PEER_SESSIONS {
+        return Err("typed consensus peer-session registry capacity is exhausted".to_string());
+    }
+    sessions.insert(session_key, identity);
+    Ok(())
+}
+
+fn typed_consensus_peer_for_session(
+    peer_address: &str,
+    session_id: u64,
+) -> Option<AuthenticatedTypedConsensusPeer> {
+    if !peer_session_is_current(peer_address, session_id) {
+        return None;
+    }
+    TYPED_CONSENSUS_PEER_SESSIONS
+        .lock()
+        .unwrap()
+        .get(&(peer_address.to_string(), session_id))
+        .cloned()
 }
 
 fn current_peer_session_id(peer_address: &str) -> Option<u64> {
@@ -5273,6 +5460,60 @@ impl P2PNetwork {
         );
     }
 
+    /// Sends a typed PoSy v2.2 artifact only to currently connected,
+    /// consensus-eligible validator peers. The coordinator remains
+    /// responsible for verifying every inbound context/certificate; this
+    /// method only supplies the bounded authenticated transport fanout.
+    pub fn broadcast_typed_consensus(&self, message: &TypedConsensusMessage) -> usize {
+        let wire_message = NetworkMessage::TypedConsensus {
+            message: message.clone(),
+        };
+        let targets = {
+            let peers = self.connected_peers.lock().unwrap();
+            peers
+                .iter()
+                .filter_map(|(address, peer)| {
+                    if peer.stream.is_none()
+                        || !peer_is_active_consensus_validator(&self.config, peer)
+                    {
+                        return None;
+                    }
+                    current_peer_session_id(address).map(|session_id| (address.clone(), session_id))
+                })
+                .collect::<Vec<_>>()
+        };
+        let send_results = run_with_bounded_parallelism(
+            &targets,
+            targets.len(),
+            "typed consensus fanout",
+            |(address, session_id)| {
+                send_peer_message_for_session(
+                    &self.connected_peers,
+                    &self.peer_state_cache,
+                    address,
+                    *session_id,
+                    &wire_message,
+                    Duration::from_millis(CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                    "typed-consensus",
+                )
+            },
+        );
+        let mut sent = 0usize;
+        for ((address, _session_id), result) in targets.into_iter().zip(send_results) {
+            match result {
+                Ok(true) => sent += 1,
+                Ok(false) => {}
+                Err(error) => warn!(
+                    "p2p",
+                    "Failed to send typed consensus message",
+                    "peer" => address,
+                    "error" => error
+                ),
+            }
+        }
+        sent
+    }
+
     pub fn broadcast_vote_request(
         &self,
         block: &Block,
@@ -7380,6 +7621,7 @@ fn bypasses_shared_message_queue(message: &NetworkMessage) -> bool {
         message,
         NetworkMessage::VoteRequest { .. }
             | NetworkMessage::Vote { .. }
+            | NetworkMessage::TypedConsensus { .. }
             | NetworkMessage::Block { .. }
             | NetworkMessage::GetBlocks { .. }
             | NetworkMessage::Blocks { .. }
@@ -7433,6 +7675,23 @@ fn dispatch_peer_message(
         }
         NetworkMessage::Vote { vote } => {
             handle_vote_message(connected_peers, config, peer_address, session_id, vote);
+            Ok(())
+        }
+        NetworkMessage::TypedConsensus { message } => {
+            if let Err(error) =
+                crate::consensus::typed_coordinator::dispatch_typed_consensus_message(
+                    peer_address,
+                    typed_consensus_peer_for_session(peer_address, session_id),
+                    message,
+                )
+            {
+                warn!(
+                    "p2p",
+                    "Rejected typed consensus message",
+                    "peer" => peer_address.to_string(),
+                    "error" => error
+                );
+            }
             Ok(())
         }
         NetworkMessage::Block {
@@ -7919,6 +8178,8 @@ fn handle_messages(
                             network_id_text.as_deref(),
                             &genesis_hash,
                             &network_magic_bytes,
+                            protocol_version.as_deref(),
+                            consensus_version.as_deref(),
                             native_caip2.as_deref(),
                         ) {
                             warn!(
@@ -7942,24 +8203,49 @@ fn handle_messages(
                             continue;
                         }
 
-                        if let Err(reason) =
-                            verify_handshake_pq_signature(&handshake_for_verification)
-                        {
-                            warn!(
-                                "p2p",
-                                "Rejecting peer handshake because Aegis PQC authentication failed",
-                                "peer" => peer_address.clone(),
-                                "node_id" => node_id.clone(),
-                                "reason" => reason
-                            );
-                            let mut peers = connected_peers.lock().unwrap();
-                            disconnect_peer_entry_for_session(
-                                &peer_state_cache,
-                                &mut peers,
+                        let typed_consensus_peer = match verify_handshake_pq_signature(
+                            &handshake_for_verification,
+                        ) {
+                            Ok(identity) => identity,
+                            Err(reason) => {
+                                warn!(
+                                    "p2p",
+                                    "Rejecting peer handshake because Aegis PQC authentication failed",
+                                    "peer" => peer_address.clone(),
+                                    "node_id" => node_id.clone(),
+                                    "reason" => reason
+                                );
+                                let mut peers = connected_peers.lock().unwrap();
+                                disconnect_peer_entry_for_session(
+                                    &peer_state_cache,
+                                    &mut peers,
+                                    &peer_address,
+                                    session_id,
+                                );
+                                continue;
+                            }
+                        };
+                        if let Some(identity) = typed_consensus_peer {
+                            if let Err(reason) = register_typed_consensus_peer_session(
                                 &peer_address,
                                 session_id,
-                            );
-                            continue;
+                                identity,
+                            ) {
+                                warn!(
+                                    "p2p",
+                                    "Rejecting typed PoSy peer because its authenticated session cannot be bound",
+                                    "peer" => peer_address.clone(),
+                                    "reason" => reason
+                                );
+                                let mut peers = connected_peers.lock().unwrap();
+                                disconnect_peer_entry_for_session(
+                                    &peer_state_cache,
+                                    &mut peers,
+                                    &peer_address,
+                                    session_id,
+                                );
+                                continue;
+                            }
                         }
 
                         if reserved_eip155
@@ -8452,6 +8738,22 @@ fn handle_messages(
                         session_id,
                         vote,
                     ),
+                    NetworkMessage::TypedConsensus { message } => {
+                        if let Err(error) =
+                            crate::consensus::typed_coordinator::dispatch_typed_consensus_message(
+                                &peer_address,
+                                typed_consensus_peer_for_session(&peer_address, session_id),
+                                message,
+                            )
+                        {
+                            warn!(
+                                "p2p",
+                                "Rejected typed consensus message",
+                                "peer" => peer_address.clone(),
+                                "error" => error
+                            );
+                        }
+                    }
                     NetworkMessage::Transaction { transaction_data } => {
                         if config.node.bootstrap_only {
                             debug!(
@@ -11079,8 +11381,9 @@ mod tests {
         connected_validator_participants, current_bootstrap_refresh_interval, current_timestamp,
         dial_with_timeout, disconnect_peer_after_poisoned_write, disconnect_peer_entry,
         dispatch_peer_message, ensure_peer_status_allows_chain_data, handle_get_blocks_message,
-        handle_status_message, hydrate_peer_from_cache, insert_seed_server_target,
-        is_validator_vpn_dial_address, is_validator_vpn_relayer_dial_address,
+        handle_status_message, handshake_version_mismatch_reason, hydrate_peer_from_cache,
+        insert_seed_server_target, is_validator_vpn_dial_address,
+        is_validator_vpn_relayer_dial_address, local_consensus_handshake_required,
         local_node_runs_validator_consensus, local_node_uses_service_batch_durability,
         local_peer_identity, merge_peer_state_from_existing, normalize_peer_target,
         parse_block_sync_busy_retry, parse_bootnode_dial_address, peer_has_identifying_metadata,
@@ -11090,7 +11393,8 @@ mod tests {
         peer_readiness_exclusion_reason_at, peer_write_gate,
         pending_incoming_connections_from_host, preferred_connection_direction,
         preflight_validator_activation_transactions, receive_message,
-        recover_peer_validator_address_for_vote_target, release_block_sync_apply_slot_after_worker,
+        recover_peer_validator_address_for_vote_target, register_typed_consensus_peer_session,
+        register_validator_consensus_handshake_key, release_block_sync_apply_slot_after_worker,
         release_block_sync_peer, reserve_block_sync_peer, reset_service_sync_coordinator_for_tests,
         resolve_bootstrap_dial_targets, resolve_duplicate_connection,
         resolve_peer_transport_address, select_block_sync_response_blocks,
@@ -11101,8 +11405,8 @@ mod tests {
         status_peer_is_eligible_block_sync_source, status_ready_validator_addresses,
         status_ready_validator_addresses_with_local_duty_gate, status_ready_validator_participants,
         status_sync_batch, support_peer_sync_request_is_too_deep, sync_batch_limit_for_role,
-        validate_outbound_frame_length, validate_vote_request_extends_local_tip,
-        validator_status_genesis_grace_remaining_secs,
+        typed_consensus_peer_for_session, validate_outbound_frame_length,
+        validate_vote_request_extends_local_tip, validator_status_genesis_grace_remaining_secs,
         validator_status_genesis_within_grace_window, verify_batch_with_bounded_parallelism,
         verify_handshake_pq_signature, vote_request_parent_sync_range,
         with_peer_stream_outside_peers_lock, ConnectionDirection, DialTargetsArc,
@@ -11116,11 +11420,12 @@ mod tests {
         STALE_UNIDENTIFIED_PEER_SECS, STALE_VALIDATOR_STATUS_SECS, STATUS_READY_TTL_SECS,
         STATUS_REQUEST_MIN_INTERVAL_SECS, STATUS_RESPONSE_MIN_INTERVAL_SECS,
         SUPPORT_NODE_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS, TEST_COMMIT_VERIFIER_VALIDATOR_MANAGER,
-        VALIDATOR_SUPPORT_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS,
+        TYPED_CONSENSUS_PEER_SESSIONS, VALIDATOR_SUPPORT_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS,
     };
     use crate::block::{Block, BlockChain};
     use crate::config::{NodeConfig, ValidatorVpnTransportConfig};
     use crate::consensus::dual_quorum::{DualQuorumConsensus, QuorumCertificate, Vote};
+    use crate::consensus::typed_coordinator::AuthenticatedTypedConsensusPeer;
     use crate::consensus::validator_keys::{
         consensus_algorithm_label, load_local_validator_keypair,
         register_test_validator_signing_key,
@@ -11133,8 +11438,10 @@ mod tests {
             clear_legacy_canonical_locks_for_tests, write_legacy_canonical_lock,
         },
     };
+    use crate::crypto::aegis_pqvm::AegisPqvmSigner;
     use crate::crypto::pqc::{PQCAlgorithm, PQCManager, PQCSignature};
     use crate::p2p::messages::NetworkMessage;
+    use crate::synergy_types::{AegisPqKeyId, AegisPqKeyRole, Epoch, UmaId, ValidatorId};
     use crate::transaction::Transaction;
     use crate::validator::{
         Validator, ValidatorManager, ValidatorRegistration, ValidatorStatus, VALIDATOR_MANAGER,
@@ -11861,6 +12168,43 @@ mod tests {
     }
 
     #[test]
+    fn typed_consensus_identity_binding_is_scoped_to_one_live_peer_session() {
+        let peer_address = format!("typed-identity-test-{}", std::process::id());
+        let first_session = begin_peer_session(&peer_address);
+        let identity = AuthenticatedTypedConsensusPeer {
+            validator_id: ValidatorId("validator-test".to_string()),
+            validator_uma_id: UmaId("uma-test".to_string()),
+            consensus_key_id: AegisPqKeyId("consensus-key-test".to_string()),
+        };
+        register_typed_consensus_peer_session(&peer_address, first_session, identity.clone())
+            .expect("current peer session should accept the verified identity binding");
+        assert_eq!(
+            typed_consensus_peer_for_session(&peer_address, first_session),
+            Some(identity)
+        );
+
+        let replacement_session = begin_peer_session(&peer_address);
+        assert_ne!(replacement_session, first_session);
+        assert!(typed_consensus_peer_for_session(&peer_address, first_session).is_none());
+        assert!(typed_consensus_peer_for_session(&peer_address, replacement_session).is_none());
+        PEER_SESSION_IDS.lock().unwrap().remove(&peer_address);
+        TYPED_CONSENSUS_PEER_SESSIONS
+            .lock()
+            .unwrap()
+            .retain(|(address, _), _| address != &peer_address);
+    }
+
+    #[test]
+    fn handshake_rejects_stale_posy_consensus_version() {
+        let error =
+            handshake_version_mismatch_reason("consensus_version", "posy/2.2", Some("posy/1.0.0"))
+                .expect("stale PoSy peers must be rejected");
+
+        assert!(error.contains("consensus_version differs"), "{error}");
+        assert!(error.contains("posy/2.2"));
+    }
+
+    #[test]
     fn direct_vote_handshake_capability_is_signed_and_verifiable() {
         configure_canonical_genesis_path_for_tests();
         let mut config = NodeConfig::default();
@@ -11937,6 +12281,56 @@ mod tests {
             .expect_err("missing network name must fail closed");
 
         assert!(err.contains("network_id synergy-testnet-v3"));
+    }
+
+    #[test]
+    fn typed_validator_handshake_uses_the_assigned_mldsa65_key_only() {
+        let mut key_manager = PQCManager::new();
+        let (public_key, private_key) = key_manager
+            .generate_keypair(PQCAlgorithm::MLDSA65)
+            .expect("generate ML-DSA-65 test key");
+        let expected_bytes = public_key.key_data.clone();
+        let mut signer = AegisPqvmSigner::initialize_required().expect("initialize signer");
+        let key_id = register_validator_consensus_handshake_key(
+            &mut signer,
+            "synv1validator",
+            public_key,
+            private_key,
+        )
+        .expect("register assigned validator key");
+        assert_eq!(
+            signer.public_key_record(&key_id).unwrap().key_bytes,
+            expected_bytes
+        );
+        assert!(signer.registry.key_is_active_for_epoch(
+            "synv1validator",
+            &key_id,
+            Epoch(0),
+            AegisPqKeyRole::PeerIdentity
+        ));
+
+        let (wrong_public, wrong_private) = key_manager
+            .generate_keypair(PQCAlgorithm::FNDSA)
+            .expect("generate FN-DSA test key");
+        let error = register_validator_consensus_handshake_key(
+            &mut signer,
+            "synv1wrong",
+            wrong_public,
+            wrong_private,
+        )
+        .expect_err("typed validator handshake must reject FN-DSA");
+        assert!(error.contains("ML-DSA-65"));
+    }
+
+    #[test]
+    fn typed_validator_handshake_requirement_excludes_bootstrap_and_legacy_profiles() {
+        let mut config = NodeConfig::default();
+        config.node.validator_address = "synv1validator".to_string();
+        assert!(!local_consensus_handshake_required(&config));
+        config.consensus.algorithm = "posy/2.2".to_string();
+        assert!(local_consensus_handshake_required(&config));
+        config.node.bootstrap_only = true;
+        assert!(!local_consensus_handshake_required(&config));
     }
 
     #[test]
