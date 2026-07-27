@@ -160,7 +160,7 @@ Select-String -Path $Log -Pattern 'Handshake received|Received status|Peer disco
 Example for validator `#1`:
 
 ```powershell
-Select-String -Path $Log -Pattern 'synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs' |
+Select-String -Path $Log -Pattern 'synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t' |
   Select-Object -Last 80
 ```
 

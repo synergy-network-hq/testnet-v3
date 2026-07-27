@@ -239,11 +239,11 @@ resolve_public_p2p_port() {
   fi
 
   case "$validator_address" in
-    synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs) echo "5622" ;;
-    synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt) echo "5622" ;;
-    synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re) echo "5622" ;;
-    synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5) echo "5622" ;;
-    synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f) echo "5622" ;;
+    synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t) echo "5622" ;;
+    synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk) echo "5622" ;;
+    synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj) echo "5622" ;;
+    synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg) echo "5622" ;;
+    synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu) echo "5622" ;;
     *) echo "$default_port" ;;
   esac
 }

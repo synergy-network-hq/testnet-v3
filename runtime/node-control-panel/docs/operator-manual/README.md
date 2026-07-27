@@ -1,6 +1,6 @@
 # Synergy Node Control Panel Operator Manual
 
-This is the community guide for operating a Synergy Testnet validator with the Synergy Node Control Panel. It documents the current v19.0.53 release and its bundled runtime. Always use the newest signed release from the official release page; the Control Panel, control service, and runtime must report the same version.
+This is the community guide for operating a Synergy Testnet validator with the Synergy Node Control Panel. It documents the current v20.0.0 release and its bundled runtime. Always use the newest signed release from the official release page; the Control Panel, control service, and runtime must report the same version.
 
 ## Choose Your Guide
 
@@ -15,7 +15,7 @@ This is the community guide for operating a Synergy Testnet validator with the S
 
 | Item | Value |
 | --- | --- |
-| Control Panel release covered here | `19.0.53` |
+| Control Panel release covered here | `20.0.0` |
 | Chain ID | `1264` (`0x4f0`) |
 | Network ID | `synergy-testnet-v3` |
 | Consensus and validator key algorithm | `FN-DSA` / `FN-DSA-1024` |

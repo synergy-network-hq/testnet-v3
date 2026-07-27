@@ -34,12 +34,12 @@ const CANONICAL_BOOTSTRAP_PEERS: [&str; 9] = [
     "validator-6",
 ];
 const CANONICAL_BOOTSTRAP_VALIDATORS: [(&str, &str); 6] = [
-    ("validator-1", "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs"),
-    ("validator-2", "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt"),
-    ("validator-3", "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re"),
-    ("validator-4", "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5"),
-    ("validator-5", "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f"),
-    ("validator-6", "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx"),
+    ("validator-1", "synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t"),
+    ("validator-2", "synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk"),
+    ("validator-3", "synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj"),
+    ("validator-4", "synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg"),
+    ("validator-5", "synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu"),
+    ("validator-6", "synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc"),
 ];
 
 #[derive(Debug, Clone, Serialize)]
@@ -2279,15 +2279,15 @@ mod tests {
     fn canonical_bootstrap_validator_addresses_are_bound_to_validator_slots() {
         assert_eq!(
             canonical_bootstrap_validator_address("validator-1"),
-            Some("synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs")
+            Some("synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t")
         );
         assert_eq!(
             canonical_bootstrap_validator_address("validator-6"),
-            Some("synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx")
+            Some("synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc")
         );
         assert_eq!(canonical_bootstrap_validator_address("relayer-1"), None);
         assert!(is_validator_address(
-            "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs"
+            "synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t"
         ));
         assert!(!is_validator_address("syn1wallet"));
     }

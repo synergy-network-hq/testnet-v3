@@ -800,6 +800,31 @@ jobs:
             --wait
           xcrun stapler staple "$dmg_path"
 
+      - name: Audit packaged installer for prohibited validator material
+        shell: bash
+        run: |
+          set -euo pipefail
+          audit_script="scripts/release/audit-installer-secret-surface.mjs"
+          if [[ "${{ matrix.artifact_name }}" == "macos" ]]; then
+            dmg_path="$(find electron-dist -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+            [[ -n "$dmg_path" ]] || { echo "No macOS DMG found for installer content audit" >&2; exit 1; }
+            mount_dir="$(mktemp -d)"
+            cleanup() {
+              hdiutil detach "$mount_dir" -quiet || true
+              rm -rf "$mount_dir"
+            }
+            trap cleanup EXIT
+            hdiutil attach "$dmg_path" -nobrowse -readonly -mountpoint "$mount_dir" >/dev/null
+            node "$audit_script" --root "$mount_dir" --label "macOS DMG"
+          else
+            deb_path="$(find electron-dist -maxdepth 1 -type f -name '*.deb' -print -quit)"
+            [[ -n "$deb_path" ]] || { echo "No Linux DEB found for installer content audit" >&2; exit 1; }
+            extract_dir="$(mktemp -d)"
+            trap 'rm -rf "$extract_dir"' EXIT
+            dpkg-deb --fsys-tarfile "$deb_path" | tar -x -C "$extract_dir"
+            node "$audit_script" --root "$extract_dir" --label "Linux DEB"
+          fi
+
       - name: Remove duplicate builder-debug.yml from artifacts
         shell: bash
         run: rm -f electron-dist/builder-debug.yml
@@ -884,6 +909,74 @@ jobs:
           name: installer-${{ matrix.artifact_name }}
           if-no-files-found: error
           path: ${{ matrix.artifact_glob }}
+
+  prepare-validator-distribution:
+    name: Prepare Validator 1-21 secure distribution
+    needs:
+      - verify-release-identity
+      - build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    env:
+      # Deployment/release secret: 21 unique validator, identity, publicKey records.
+      # It is never printed and contains no private key or custody passphrase.
+      VALIDATOR_ASSIGNMENTS_JSON: ${{ secrets.VALIDATOR_ASSIGNMENTS_JSON }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Download signed macOS installer
+        uses: actions/download-artifact@v4
+        with:
+          name: installer-macos
+          path: release-input/macos
+
+      - name: Download Linux installer
+        uses: actions/download-artifact@v4
+        with:
+          name: installer-linux
+          path: release-input/linux
+
+      - name: Build key-free Validator 1-21 matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "${VALIDATOR_ASSIGNMENTS_JSON:-}" ]] || {
+            echo "VALIDATOR_ASSIGNMENTS_JSON is required for the secure validator distribution." >&2
+            exit 1
+          }
+          assignments_path="$RUNNER_TEMP/validator-assignments.json"
+          printf '%s' "$VALIDATOR_ASSIGNMENTS_JSON" > "$assignments_path"
+          macos_path="$(find release-input/macos -type f -name '*.dmg' -print -quit)"
+          linux_path="$(find release-input/linux -type f -name '*.deb' -print -quit)"
+          [[ -n "$macos_path" && -n "$linux_path" ]] || {
+            echo "Signed macOS DMG and Linux DEB artifacts are required." >&2
+            exit 1
+          }
+          node scripts/release/prepare-validator-distribution.mjs \
+            --macos "$macos_path" \
+            --linux "$linux_path" \
+            --assignments "$assignments_path" \
+            --output validator-distribution
+          test -f validator-distribution/SHA256SUMS
+          test -f validator-distribution/Validator-01/SHA256SUMS
+          test -f validator-distribution/Validator-21/SHA256SUMS
+          rm -f "$assignments_path"
+
+      - name: Upload private validator distribution matrix
+        uses: actions/upload-artifact@v4
+        with:
+          name: validator-distribution-${{ needs.verify-release-identity.outputs.version }}
+          if-no-files-found: error
+          retention-days: 30
+          path: validator-distribution
 
   publish-releases-repo:
     name: Publish installers to releases repo

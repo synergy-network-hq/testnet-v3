@@ -48,6 +48,9 @@ function validatorIdentityFields(input = {}) {
       source.wallet_address,
     ),
     stake_tx_hash: stringValue(source.stakeTxHash, source.stake_tx_hash),
+    assignment_id: stringValue(source.assignmentId, source.assignment_id),
+    validator_public_key: stringValue(source.validatorPublicKey, source.validator_public_key, source.identityPublicKey, source.identity_public_key),
+    identity_proof: stringValue(source.identityProof, source.identity_proof),
   };
   return Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== null));
 }

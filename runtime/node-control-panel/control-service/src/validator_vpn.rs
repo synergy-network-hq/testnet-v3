@@ -12,6 +12,7 @@ use std::fs;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use synergy_address_engine::{verify_address, verify_identity_proof};
 use uuid::Uuid;
 
 pub const VALIDATOR_VPN_NETWORK: &str = "synergy-validator-vpn-testnet";
@@ -29,12 +30,12 @@ const WIREGUARD_INACTIVE_MINUTES: i64 = 15;
 const DEFAULT_ENROLLMENT_SIGNATURE_MODE: &str = "challenge-sha256";
 const MIN_VERIFIED_HANDSHAKES: usize = 1;
 const BOOTSTRAP_VALIDATOR_ADDRESSES: [&str; 6] = [
-    "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs",
-    "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt",
-    "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re",
-    "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5",
-    "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f",
-    "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx",
+    "synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t",
+    "synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk",
+    "synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj",
+    "synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg",
+    "synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu",
+    "synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc",
 ];
 const BOOTSTRAP_RELAYER_COUNT: u32 = 3;
 
@@ -231,6 +232,14 @@ pub struct ValidatorVpnOnboardingToken {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operator_label: Option<String>,
     pub peer_type: ValidatorVpnRole,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignment_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_validator_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_validator_public_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_proof_verified_at: Option<String>,
     pub issued_at: String,
     pub expires_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -518,10 +527,36 @@ pub fn issue_validator_vpn_onboarding_token(
     app_context: &AppContext,
     operator_label: Option<String>,
     peer_type: ValidatorVpnRole,
+    assignment_id: Option<String>,
+    assigned_validator_identity: Option<String>,
+    assigned_validator_public_key: Option<String>,
     expires_at: DateTime<Utc>,
 ) -> Result<String, String> {
     if expires_at <= Utc::now() {
         return Err("Token expiry must be in the future".to_string());
+    }
+    let assignment_id = clean_optional(assignment_id);
+    let assigned_validator_identity = clean_optional(assigned_validator_identity);
+    let assigned_validator_public_key = clean_optional(assigned_validator_public_key);
+    if peer_type == ValidatorVpnRole::Validator {
+        let identity = assigned_validator_identity.as_deref().ok_or_else(|| {
+            "Validator onboarding tokens require an assigned synv identity.".to_string()
+        })?;
+        validate_validator_identity(identity)?;
+        let public_key = assigned_validator_public_key.as_deref().ok_or_else(|| {
+            "Validator onboarding tokens require the assigned validator public key.".to_string()
+        })?;
+        if !verify_address(identity, public_key)? {
+            return Err(
+                "Validator public key does not derive the assigned synv identity.".to_string(),
+            );
+        }
+        let assignment = assignment_id
+            .as_deref()
+            .ok_or_else(|| "Validator onboarding tokens require an assignment id.".to_string())?;
+        if !assignment.starts_with("validator-") {
+            return Err("Validator assignment id is invalid.".to_string());
+        }
     }
     let state_path = validator_vpn_state_path(app_context)?;
     let mut state = load_or_initialize_state(&state_path)?;
@@ -534,6 +569,10 @@ pub fn issue_validator_vpn_onboarding_token(
         token_hash: hash_onboarding_token(&token),
         operator_label: clean_optional(operator_label),
         peer_type: peer_type.clone(),
+        assignment_id,
+        assigned_validator_identity,
+        assigned_validator_public_key,
+        identity_proof_verified_at: None,
         issued_at: now_rfc3339(),
         expires_at: expires_at.to_rfc3339(),
         reserved_node_id: None,
@@ -558,6 +597,11 @@ pub fn reserve_validator_vpn_onboarding(
     token: &str,
     peer_name: &str,
     role: ValidatorVpnRole,
+    assignment_id: Option<&str>,
+    validator_identity: Option<&str>,
+    validator_public_key: Option<&str>,
+    identity_proof: Option<&str>,
+    node_id: Option<&str>,
 ) -> Result<ValidatorVpnInviteAssignment, String> {
     validate_node_name(peer_name)?;
     let _reservation_guard = reservation_lock()
@@ -579,6 +623,21 @@ pub fn reserve_validator_vpn_onboarding(
         })
         .cloned()
         .ok_or_else(|| "invalid_or_used_token".to_string())?;
+    if !onboarding_token_assignment_matches(&token_record, &role, assignment_id, validator_identity)
+    {
+        return Err("invalid_or_used_token".to_string());
+    }
+    if role == ValidatorVpnRole::Validator
+        && !verify_validator_identity_enrollment_proof(
+            &token_record,
+            peer_name,
+            node_id,
+            validator_public_key,
+            identity_proof,
+        )?
+    {
+        return Err("invalid_or_used_token".to_string());
+    }
     let now = now_rfc3339();
     let existing = state
         .nodes
@@ -653,6 +712,9 @@ pub fn reserve_validator_vpn_onboarding(
         .find(|record| record.id == token_record.id)
     {
         record.reserved_node_id = Some(node.id.clone());
+        if role == ValidatorVpnRole::Validator {
+            record.identity_proof_verified_at = Some(now_rfc3339());
+        }
     }
     save_state(&state_path, &mut state)?;
     Ok(ValidatorVpnInviteAssignment {
@@ -661,6 +723,78 @@ pub fn reserve_validator_vpn_onboarding(
         vpn_ip: node.vpn_ip,
         expires_at: token_record.expires_at,
     })
+}
+
+fn onboarding_token_assignment_matches(
+    token_record: &ValidatorVpnOnboardingToken,
+    role: &ValidatorVpnRole,
+    assignment_id: Option<&str>,
+    validator_identity: Option<&str>,
+) -> bool {
+    role != &ValidatorVpnRole::Validator
+        || (token_record.assignment_id.as_deref() == assignment_id.map(str::trim)
+            && token_record.assigned_validator_identity.as_deref()
+                == validator_identity.map(str::trim))
+}
+
+fn validator_identity_proof_message(
+    assignment_id: &str,
+    validator_identity: &str,
+    peer_name: &str,
+    node_id: &str,
+) -> String {
+    format!(
+        "synergy-validator-enrollment-proof-v1|{}|{}|{}|{}",
+        assignment_id.trim(),
+        validator_identity.trim(),
+        peer_name.trim(),
+        node_id.trim(),
+    )
+}
+
+fn verify_validator_identity_enrollment_proof(
+    token_record: &ValidatorVpnOnboardingToken,
+    peer_name: &str,
+    node_id: Option<&str>,
+    validator_public_key: Option<&str>,
+    identity_proof: Option<&str>,
+) -> Result<bool, String> {
+    let Some(assignment_id) = token_record.assignment_id.as_deref() else {
+        return Ok(false);
+    };
+    let Some(validator_identity) = token_record.assigned_validator_identity.as_deref() else {
+        return Ok(false);
+    };
+    let Some(expected_public_key) = token_record.assigned_validator_public_key.as_deref() else {
+        return Ok(false);
+    };
+    let Some(node_id) = node_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(false);
+    };
+    let Some(provided_public_key) = validator_public_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(false);
+    };
+    let Some(proof) = identity_proof
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(false);
+    };
+    if expected_public_key != provided_public_key {
+        return Ok(false);
+    }
+    let message =
+        validator_identity_proof_message(assignment_id, validator_identity, peer_name, node_id);
+    Ok(verify_identity_proof(
+        validator_identity,
+        expected_public_key,
+        message.as_bytes(),
+        proof,
+    )
+    .unwrap_or(false))
 }
 
 pub fn consume_validator_vpn_onboarding_token(
@@ -2694,6 +2828,91 @@ mod tests {
 
         verify_enrollment_signature(&challenge, &request)
             .expect("packaged default verifier should accept the signed challenge");
+    }
+
+    #[test]
+    fn validator_onboarding_token_requires_its_exact_assignment_and_identity() {
+        let token = ValidatorVpnOnboardingToken {
+            id: "token-7".to_string(),
+            token_hash: "hash".to_string(),
+            operator_label: None,
+            peer_type: ValidatorVpnRole::Validator,
+            assignment_id: Some("validator-07".to_string()),
+            assigned_validator_identity: Some("synv1validator7".to_string()),
+            assigned_validator_public_key: Some("public-key".to_string()),
+            identity_proof_verified_at: None,
+            issued_at: now_rfc3339(),
+            expires_at: (Utc::now() + Duration::minutes(5)).to_rfc3339(),
+            reserved_node_id: None,
+            used_at: None,
+        };
+
+        assert!(onboarding_token_assignment_matches(
+            &token,
+            &ValidatorVpnRole::Validator,
+            Some(" validator-07 "),
+            Some(" synv1validator7 "),
+        ));
+        assert!(!onboarding_token_assignment_matches(
+            &token,
+            &ValidatorVpnRole::Validator,
+            Some("validator-08"),
+            Some("synv1validator7"),
+        ));
+        assert!(!onboarding_token_assignment_matches(
+            &token,
+            &ValidatorVpnRole::Validator,
+            Some("validator-07"),
+            Some("synv1validator8"),
+        ));
+    }
+
+    #[test]
+    fn validator_onboarding_requires_a_proof_from_its_assigned_key() {
+        let identity = synergy_address_engine::generate_identity(
+            synergy_address_engine::AddressType::NodeClass1,
+        )
+        .expect("identity");
+        let token = ValidatorVpnOnboardingToken {
+            id: "token-7".to_string(),
+            token_hash: "hash".to_string(),
+            operator_label: None,
+            peer_type: ValidatorVpnRole::Validator,
+            assignment_id: Some("validator-07".to_string()),
+            assigned_validator_identity: Some(identity.address.clone()),
+            assigned_validator_public_key: Some(identity.public_key.clone()),
+            identity_proof_verified_at: None,
+            issued_at: now_rfc3339(),
+            expires_at: (Utc::now() + Duration::minutes(5)).to_rfc3339(),
+            reserved_node_id: None,
+            used_at: None,
+        };
+        let message = validator_identity_proof_message(
+            "validator-07",
+            &identity.address,
+            "validator-seven",
+            "node-7",
+        );
+        let proof =
+            synergy_address_engine::sign_identity_proof(&identity.private_key, message.as_bytes())
+                .expect("proof");
+
+        assert!(verify_validator_identity_enrollment_proof(
+            &token,
+            "validator-seven",
+            Some("node-7"),
+            Some(&identity.public_key),
+            Some(&proof),
+        )
+        .expect("valid proof"));
+        assert!(!verify_validator_identity_enrollment_proof(
+            &token,
+            "validator-eight",
+            Some("node-7"),
+            Some(&identity.public_key),
+            Some(&proof),
+        )
+        .expect("proof should be bound to its peer name"));
     }
 
     #[test]

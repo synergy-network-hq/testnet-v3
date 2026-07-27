@@ -102,8 +102,11 @@ function setupOnboardingIpc(ipcMain, {
       stakeTxHash: input.stakeTxHash,
       identityPublicKey: input.identityPublicKey,
       identityFingerprint: input.identityFingerprint,
+      validatorPublicKey: input.validatorPublicKey,
+      identityProof: input.identityProof,
       eligibility: input.eligibility,
       validatorIdentity: input.validatorIdentity,
+      assignmentId: input.assignmentId,
     });
     pendingInvitesByTarget.set(id, invite);
     await pendingInviteStore.save(pendingInvitesByTarget);

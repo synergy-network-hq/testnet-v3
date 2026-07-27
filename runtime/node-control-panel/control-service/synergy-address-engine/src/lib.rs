@@ -10,7 +10,7 @@ use bech32::{u5, Variant};
 use chrono::Utc;
 use pbkdf2::pbkdf2_hmac;
 use pqcrypto_falcon::falcon1024;
-use pqcrypto_traits::sign::{PublicKey as _, SecretKey as _};
+use pqcrypto_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use sha3::{Digest, Sha3_256};
@@ -327,6 +327,44 @@ pub fn verify_address(address: &str, public_key_b64: &str) -> Result<bool, Strin
     Ok(data == expected)
 }
 
+/// Create a detached FN-DSA-1024 proof with a locally held validator key.
+/// The caller supplies a domain-separated, single-use enrollment message; this
+/// helper never writes or logs the private key.
+pub fn sign_identity_proof(private_key_b64: &str, message: &[u8]) -> Result<String, String> {
+    let private_key_bytes = general_purpose::STANDARD
+        .decode(private_key_b64.trim())
+        .map_err(|error| format!("Invalid validator private-key encoding: {error}"))?;
+    let private_key = falcon1024::SecretKey::from_bytes(&private_key_bytes)
+        .map_err(|error| format!("Invalid validator private key: {error}"))?;
+    let signature = falcon1024::detached_sign(message, &private_key);
+    Ok(general_purpose::STANDARD.encode(signature.as_bytes()))
+}
+
+/// Verify that an enrollment proof was made by the public key which derives
+/// the assigned Synergy validator address. A syntactically valid address is
+/// insufficient: both address derivation and the detached signature must pass.
+pub fn verify_identity_proof(
+    address: &str,
+    public_key_b64: &str,
+    message: &[u8],
+    signature_b64: &str,
+) -> Result<bool, String> {
+    if !verify_address(address, public_key_b64)? {
+        return Ok(false);
+    }
+    let public_key_bytes = general_purpose::STANDARD
+        .decode(public_key_b64.trim())
+        .map_err(|error| format!("Invalid validator public-key encoding: {error}"))?;
+    let signature_bytes = general_purpose::STANDARD
+        .decode(signature_b64.trim())
+        .map_err(|error| format!("Invalid validator proof encoding: {error}"))?;
+    let public_key = falcon1024::PublicKey::from_bytes(&public_key_bytes)
+        .map_err(|error| format!("Invalid validator public key: {error}"))?;
+    let signature = falcon1024::DetachedSignature::from_bytes(&signature_bytes)
+        .map_err(|error| format!("Invalid validator proof: {error}"))?;
+    Ok(falcon1024::verify_detached_signature(&signature, message, &public_key).is_ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,5 +385,26 @@ mod tests {
             assert!(verify_address(&identity.address, &identity.public_key)
                 .expect("generated address should verify"));
         }
+    }
+
+    #[test]
+    fn identity_proof_requires_the_key_that_derives_the_address() {
+        let identity = generate_identity(AddressType::NodeClass1).expect("identity");
+        let message = b"synergy-validator-enrollment-proof-v1";
+        let signature = sign_identity_proof(&identity.private_key, message).expect("signature");
+        assert!(verify_identity_proof(
+            &identity.address,
+            &identity.public_key,
+            message,
+            &signature
+        )
+        .expect("proof verification"));
+        assert!(!verify_identity_proof(
+            &identity.address,
+            &identity.public_key,
+            b"different-message",
+            &signature,
+        )
+        .expect("proof verification"));
     }
 }

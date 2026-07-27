@@ -23,6 +23,9 @@ const appSource = read('src/App.jsx');
 assertIncludes(appSource, '<ControlPanelV18 />', 'App v18 shell mount');
 assertNotIncludes(appSource, 'TestnetJarvisSetup', 'App setup routing');
 
+const indexHtml = read('index.html');
+assertIncludes(indexHtml, '/branding/assets/ncp-logo.png', 'Node Operator favicon');
+
 const v18Source = read('src/components/control-panel-v18/ControlPanelV18.jsx');
 for (const label of ['Overview', 'Setup Node', 'Operations', 'Performance', 'Monitoring', 'Logs', 'Settings']) {
   assertIncludes(v18Source, `label: '${label}'`, 'Primary navigation');
@@ -88,16 +91,22 @@ assertIncludes(v18Source, 'settingsService.updateSettings', 'Settings persistenc
 assertIncludes(v18Source, '<section className="v18-overview-status-strip"', 'Overview status strip');
 assertIncludes(v18Source, 'v18-overview-trend-grid', 'Overview live metric trends');
 assertIncludes(v18Source, 'alt="Node Operator Control Panel"', 'Node Operator sidebar banner label');
+assertIncludes(v18Source, 'v18-mobile-nav-toggle', 'Responsive navigation toggle');
+assertIncludes(v18Source, 'aria-controls="v18-primary-navigation"', 'Responsive navigation toggle semantics');
+assertIncludes(v18Source, 'setMobileNavOpen(false)', 'Responsive navigation closes after route selection');
 assertNotIncludes(v18Source, 'v18-window-dots', 'Mock macOS window controls');
 assertNotIncludes(v18Source, 'v18-brand-icon', 'Redundant sidebar icon above banner');
 
 const v18Css = read('src/styles/controlPanelV18.css');
+assertIncludes(v18Css, '.v18-nav.is-mobile-open', 'Responsive expanded navigation state');
 assertNotIncludes(v18Css, '.v18-window-dots', 'Mock macOS window control styles');
 assertNotIncludes(v18Css, '.v18-brand-icon', 'Redundant sidebar icon styles');
 
 const nodeOperatorBanner = fs.readFileSync(path.join(root, 'public/branding/assets/control-panel-banner.png'));
 assert(nodeOperatorBanner.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])), 'Control panel banner must be a PNG.');
-assert(nodeOperatorBanner.readUInt32BE(16) === 445 && nodeOperatorBanner.readUInt32BE(20) === 150, 'Control panel banner must use the supplied Node Operator artwork dimensions.');
+assert(nodeOperatorBanner.readUInt32BE(16) === 525 && nodeOperatorBanner.readUInt32BE(20) === 150, 'Control panel banner must use the supplied Node Operator artwork dimensions.');
+const nodeOperatorFavicon = fs.readFileSync(path.join(root, 'public/branding/assets/ncp-logo.png'));
+assert(nodeOperatorFavicon.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])), 'Node Operator favicon must be a PNG.');
 
 const walletConfig = read('src/components/wallet/synergyOnlyWalletConnectionConfig.js');
 assertIncludes(walletConfig, 'bannerSrc: controlPanelBannerSrc', 'Control panel wallet banner override');
@@ -128,7 +137,7 @@ assertIncludes(masterCss, '.wallet-modal__family--evm:hover', 'EVM hover glow');
 assertIncludes(masterCss, '.wallet-modal__family--non-evm:hover', 'Non-EVM hover glow');
 
 const packageJson = JSON.parse(read('package.json'));
-assert(/^19\.\d+\.\d+$/.test(packageJson.version), `package.json must remain on the v19 release line, got ${packageJson.version}`);
+assert(/^20\.\d+\.\d+$/.test(packageJson.version), `package.json must remain on the v20 release line, got ${packageJson.version}`);
 assertIncludes(v18Source, "useState('unknown')", 'Panel version fallback');
 assert(!v18Source.includes(`useState('${packageJson.version}')`), 'Panel version fallback must not hardcode the package version');
 

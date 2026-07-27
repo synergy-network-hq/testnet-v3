@@ -31,12 +31,10 @@ function hasAssignedSynergyEndpoint(value) {
 }
 
 const CANONICAL_VALIDATOR_HOSTS = new Map([
-  ['62.146.182.207', 'synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs'],
-  ['62.146.182.208', 'synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt'],
-  ['62.146.182.209', 'synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re'],
-  ['73.79.66.255', 'synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5'],
-  ['194.163.183.166', 'synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f'],
-  ['157.173.192.45', 'synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx'],
+  // Testnet-v3: no public validator host->identity assignments exist. The
+  // retired Testnet-v2 IP mappings were removed under the inherited-identity
+  // bindings launch gate; v3 validator endpoints are coordinator-private and
+  // must be derived from runtime node metadata, never hardcoded here.
 ]);
 const PEER_READY_GRACE_SECONDS = 25;
 const PEER_STALE_SECONDS = 45;

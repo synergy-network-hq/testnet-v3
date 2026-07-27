@@ -122,7 +122,7 @@ grep -nE 'Handshake received|Received status|Peer disconnected|Failed to dial pe
 Example for validator `#1`:
 
 ```bash
-grep -n 'synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs' "$LOG" | tail -n 80
+grep -n 'synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t' "$LOG" | tail -n 80
 ```
 
 ## Show Listening Sockets On Validator Ports

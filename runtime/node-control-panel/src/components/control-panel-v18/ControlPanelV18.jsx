@@ -2173,6 +2173,7 @@ function AppShell({ children }) {
   const [unlockError, setUnlockError] = useState('');
   const [autoStartAttempted, setAutoStartAttempted] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const runtime = statusLabel(context);
   const runtimeTone = statusToneClass(context.selectedNodeLive, context.error);
   const setupVisible = setupVisibleForContext(context);
@@ -2249,12 +2250,22 @@ function AppShell({ children }) {
       <aside className="v18-sidebar">
         <div className="v18-sidebar-brand">
           <img className="v18-brand-banner" src={controlPanelBannerSrc} alt="Node Operator Control Panel" />
+          <button
+            type="button"
+            className="v18-mobile-nav-toggle"
+            aria-expanded={mobileNavOpen}
+            aria-controls="v18-primary-navigation"
+            onClick={() => setMobileNavOpen((value) => !value)}
+          >
+            <List size={19} />
+            <span>{mobileNavOpen ? 'Close navigation' : 'Navigation'}</span>
+          </button>
         </div>
-        <nav className="v18-nav" aria-label="Primary">
+        <nav id="v18-primary-navigation" className={cls('v18-nav', mobileNavOpen && 'is-mobile-open')} aria-label="Primary">
           {navItems.map((item) => {
             const Icon = item.icon;
             return (
-              <NavLink key={item.path} to={item.path} end={item.path === '/'} className={({ isActive }) => cls('v18-nav-link', isActive && 'is-active')}>
+              <NavLink key={item.path} to={item.path} end={item.path === '/'} onClick={() => setMobileNavOpen(false)} className={({ isActive }) => cls('v18-nav-link', isActive && 'is-active')}>
                 <Icon size={22} />
                 <span>{item.label}</span>
               </NavLink>
@@ -2880,10 +2891,17 @@ function SetupStepContent({ step, eligibility, setupConfig, setSetupConfig, setC
   });
   const [targetInstall, setTargetInstall] = useState('');
   const [secureNetworkToken, setSecureNetworkToken] = useState('');
+  const [validatorAssignmentId, setValidatorAssignmentId] = useState('');
+  const [validatorIdentityPublicKey, setValidatorIdentityPublicKey] = useState('');
+  const [validatorIdentityProof, setValidatorIdentityProof] = useState('');
   const provisioningCancelRef = useRef(false);
   const activationMonitorStartedRef = useRef(false);
   const encryptedKeyPath = context.selectedNode?.encrypted_private_key_path || context.selectedNode?.encryptedPrivateKeyPath || '';
   const validatorAddress = setupConfig.remoteNodeAddress || context.selectedNode?.node_address || '';
+  const validatorPeerName = setupConfig.nodeNickname || context.selectedNode?.node_address || nodeId;
+  const validatorEnrollmentProofMessage = nodeId && validatorAddress && validatorAssignmentId.trim()
+    ? `synergy-validator-enrollment-proof-v1|${validatorAssignmentId.trim()}|${validatorAddress.trim()}|${validatorPeerName.trim()}|${nodeId.trim()}`
+    : '';
   const identityReady = identityGenerated || Boolean(validatorAddress);
   const consensusReady = consensusKeysGenerated || identityReady;
   const encryptedReady = keysEncrypted || Boolean(encryptedKeyPath);
@@ -3159,6 +3177,14 @@ function SetupStepContent({ step, eligibility, setupConfig, setSetupConfig, setC
       setStepError('Generate the validator identity before connecting the secure validator network.');
       return;
     }
+    if (!/^validator-(?:0[1-9]|1[0-9]|2[0-1])$/.test(validatorAssignmentId.trim())) {
+      setStepError('Enter the Validator package assignment ID from the downloaded enrollment metadata.');
+      return;
+    }
+    if (!validatorIdentityPublicKey.trim() || !validatorIdentityProof.trim()) {
+      setStepError('Install the encrypted validator bundle through the approved custody channel, then provide its public-key enrollment proof.');
+      return;
+    }
     setVpnSetupState({ status: 'running', message: 'Preparing local secure-network keys and enrolling with the coordinator.' });
     const ok = await runStepAction(
       'vpn-setup',
@@ -3170,7 +3196,10 @@ function SetupStepContent({ step, eligibility, setupConfig, setSetupConfig, setC
         stakeTxHash: eligibility.stakeTxHash || eligibility.stake_tx_hash || null,
         eligibility,
         onboardingToken: secureNetworkToken,
-        peerName: setupConfig.nodeNickname || context.selectedNode?.node_address || nodeId,
+        assignmentId: validatorAssignmentId.trim(),
+        validatorPublicKey: validatorIdentityPublicKey.trim(),
+        identityProof: validatorIdentityProof.trim(),
+        peerName: validatorPeerName,
         targetId: setupConfig.targetId || (setupConfig.targetMode === 'remote' ? '' : 'local'),
         target: {
           id: setupConfig.targetId || undefined,
@@ -3180,6 +3209,8 @@ function SetupStepContent({ step, eligibility, setupConfig, setSetupConfig, setC
       async (result) => {
         await context.refresh({ silent: true });
         setSecureNetworkToken('');
+        setValidatorAssignmentId('');
+        setValidatorIdentityProof('');
         setVpnSetupState({
           status: 'success',
           message: result?.message || 'Coordinator-managed Innernet enrollment and signed membership receipt were confirmed.',
@@ -4422,10 +4453,25 @@ function SetupStepContent({ step, eligibility, setupConfig, setSetupConfig, setC
           <Card title="Secure Validator Network" icon={Wifi}>
             <p>Use coordinator-managed secure networking so new validators can join without manually editing every existing validator config.</p>
             {!vpnReady ? (
-              <label className="v18-input-row">
-                <span>One-time onboarding token</span>
-                <input type="password" autoComplete="off" value={secureNetworkToken} onChange={(event) => setSecureNetworkToken(event.target.value)} />
-              </label>
+              <>
+                <label className="v18-input-row">
+                  <span>Validator package assignment ID</span>
+                  <input autoComplete="off" value={validatorAssignmentId} onChange={(event) => setValidatorAssignmentId(event.target.value)} placeholder="validator-07" />
+                </label>
+                <label className="v18-input-row">
+                  <span>One-time onboarding token</span>
+                  <input type="password" autoComplete="off" value={secureNetworkToken} onChange={(event) => setSecureNetworkToken(event.target.value)} />
+                </label>
+                <label className="v18-input-row">
+                  <span>Assigned validator public key</span>
+                  <input autoComplete="off" value={validatorIdentityPublicKey} onChange={(event) => setValidatorIdentityPublicKey(event.target.value)} placeholder="Public key from the approved custody bundle" />
+                </label>
+                <label className="v18-input-row">
+                  <span>Validator enrollment proof</span>
+                  <input type="password" autoComplete="off" value={validatorIdentityProof} onChange={(event) => setValidatorIdentityProof(event.target.value)} placeholder="Detached proof from the custody bundle" />
+                </label>
+                {validatorEnrollmentProofMessage ? <CopyValue label="Enrollment proof message" value={validatorEnrollmentProofMessage} copyLabel="Copy enrollment proof message" /> : null}
+              </>
             ) : null}
             <div className={cls('v18-vpn-setup-panel', vpnReady && 'is-success', vpnSetupState.status === 'error' && 'is-error')}>
               <div>

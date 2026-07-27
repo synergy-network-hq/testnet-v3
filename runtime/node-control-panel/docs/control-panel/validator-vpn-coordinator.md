@@ -74,9 +74,12 @@ Bearer-token protected endpoints:
 - `POST /api/validator-vpn/bootstrap/import`
 
 POST /v1/invite is the Phase-1 Electron onboarding API. It requires a
-provisioned node id, validator identity, operator wallet, and the same live
-50,000 SNRG stake gate used by validator enrollment. It accepts the single-use
-token issued by POST /v1/invite/admin, reserves the next Innernet-only address,
+provisioned node id, validator identity, operator wallet, the identity's
+matching public key, a detached FN-DSA proof over the exact enrollment message,
+and the same live 50,000 SNRG stake gate used by validator enrollment. The
+admin token issuance request binds one assignment ID, `synv…` identity, and
+public key. The coordinator verifies address derivation plus the detached proof
+before accepting the single-use token, reserves the next Innernet-only address,
 calls the loopback innernet-server add-peer command, and returns an opaque
 invite plus an enrollment id, configuration version, confirmation credential,
 assigned address, interface, and expiry. The onboarding token is consumed only
@@ -85,7 +88,8 @@ handshake. Confirmation returns a signed Ed25519 membership receipt; the
 desktop writes that receipt into validator onboarding evidence before
 activation can continue. The admin endpoint requires X-Admin-Key equal to the
 coordinator service token. Token plaintext is returned once; only its SHA-256
-hash is stored. Invite requests are limited to 10 per source and 5 per token
+hash is stored; audit state records proof verification time but never a private
+key or signature. Invite requests are limited to 10 per source and 5 per token
 per minute. Invalid, expired, or redeemed tokens return 401; rate limits return
 429.
 

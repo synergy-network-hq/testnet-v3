@@ -150,12 +150,12 @@ const TESTNET_P2P_BOOTSTRAP_REFRESH_SECS: usize = 3600;
 const TESTNET_P2P_HEARTBEAT_INTERVAL_SECS: usize = 1;
 const TESTNET_VALIDATOR_STATE_SYNC_BEFORE_JOIN: bool = true;
 const TESTNET_BOOTSTRAP_VALIDATOR_ORDER: [&str; 6] = [
-    "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs",
-    "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt",
-    "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re",
-    "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5",
-    "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f",
-    "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx",
+    "synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t",
+    "synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk",
+    "synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj",
+    "synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg",
+    "synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu",
+    "synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc",
 ];
 
 fn validator_funding_requirement_nwei() -> u64 {
@@ -30045,7 +30045,7 @@ mod tests {
     #[test]
     fn validator_vpn_peers_toml_stays_private_and_uses_signed_targets() {
         let rendered = build_validator_vpn_peers_toml_with_additional(&[
-            "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs".to_string(),
+            "synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t".to_string(),
             "10.70.20.1:5622".to_string(),
         ]);
         let parsed: toml::Value = toml::from_str(&rendered).expect("peers.toml should parse");
@@ -30059,7 +30059,7 @@ mod tests {
         assert!(bootnodes.is_empty());
         assert!(seed_servers.is_empty());
         assert!(bootstrap_dns_records.is_empty());
-        assert!(additional.contains(&"synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs".to_string()));
+        assert!(additional.contains(&"synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t".to_string()));
         assert!(additional.contains(&"10.70.20.1:5622".to_string()));
     }
 
@@ -30601,7 +30601,7 @@ mod tests {
 
     #[test]
     fn validator_six_is_operational_validator() {
-        let validator_six_address = "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx";
+        let validator_six_address = "synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc";
 
         assert!(
             is_current_operational_validator_address(validator_six_address),
@@ -31458,11 +31458,11 @@ mod tests {
 bootnodes = []
 seed_servers = []
 bootstrap_dns_records = []
-additional_dial_targets = ["synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs"]
-persistent_peers = ["synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs"]
+additional_dial_targets = ["synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t"]
+persistent_peers = ["synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t"]
 
 [[network.validator_vpn_transports]]
-validator_address = "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs"
+validator_address = "synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t"
 dial_address = "10.70.10.1:5622"
 
 [p2p]
@@ -31502,7 +31502,7 @@ allowed_validator_addresses = []
                         "wg_pubkey": "validator1pubkey1234567890123456789012345678901234567890=",
                         "endpoint": null,
                         "status": "active",
-                        "validator_pubkey": "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs",
+                        "validator_pubkey": "synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t",
                         "operator_address": null
                     },
                     {
@@ -31533,12 +31533,12 @@ allowed_validator_addresses = []
         protocol_version: &str,
     ) {
         let mut active_validators = vec![
-            "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs",
-            "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt",
-            "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re",
-            "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5",
-            "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f",
-            "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx",
+            "synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t",
+            "synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk",
+            "synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj",
+            "synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg",
+            "synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu",
+            "synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc",
         ]
         .into_iter()
         .map(str::to_string)
@@ -32813,7 +32813,7 @@ allowed_validator_addresses = []
             let mut node = test_onboarding_node(&workspace);
             node.id = "testnet-validator6".to_string();
             node.display_label = "Validator 6 Node".to_string();
-            node.node_address = "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx".to_string();
+            node.node_address = "synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc".to_string();
             save_registry(
                 &root,
                 &TestnetRegistryFile {
@@ -33528,7 +33528,7 @@ allowed_validator_addresses = []
             "epoch_id": 42,
             "validator_set_version": 7,
             "effective_from_height": 247_000,
-            "active_validators": ["synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs"],
+            "active_validators": ["synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t"],
             "quorum_threshold": 1,
             "validator_set_hash": "canonical-hash",
             "local_validator_set_hash": "different-hash",
@@ -34331,7 +34331,7 @@ allowed_validator_addresses = []
     fn setup_node_honors_node_address_override() {
         with_temp_home(|_| {
             let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
-            let override_address = "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5".to_string();
+            let override_address = "synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg".to_string();
             let result = runtime
                 .block_on(testnet_setup_node(TestnetSetupInput {
                     role_id: "validator".to_string(),
@@ -34352,7 +34352,7 @@ allowed_validator_addresses = []
                 .expect("node.toml should exist");
             assert!(
                 node_toml
-                    .contains("validator_address = \"synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5\""),
+                    .contains("validator_address = \"synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg\""),
                 "node.toml should be rendered with the override address"
             );
             assert!(
@@ -34976,7 +34976,7 @@ persistent_peers = []
                     wg_pubkey: "validator-1-pubkey".to_string(),
                     endpoint: None,
                     status: "active".to_string(),
-                    validator_pubkey: Some("synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs".to_string()),
+                    validator_pubkey: Some("synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t".to_string()),
                     operator_address: None,
                 },
                 ValidatorVpnPeerRecord {
@@ -35054,7 +35054,7 @@ persistent_peers = []
             vec![TESTNET_BOOTSTRAP_DNS_RECORD.to_string()]
         );
         let targets = extract_toml_string_array(&node_value, "network", "persistent_peers");
-        assert!(targets.contains(&"synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs".to_string()));
+        assert!(targets.contains(&"synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t".to_string()));
         assert!(targets.contains(&"10.70.20.1:5622".to_string()));
         assert!(!targets.iter().any(|target| target == "10.69.10.1:5622"));
         assert!(!targets.contains(&"synv1validator7".to_string()));
@@ -35075,7 +35075,7 @@ persistent_peers = []
             transport
                 .get("validator_address")
                 .and_then(toml::Value::as_str),
-            Some("synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs")
+            Some("synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t")
         );
         assert_eq!(
             transport.get("dial_address").and_then(toml::Value::as_str),
@@ -35096,7 +35096,7 @@ persistent_peers = []
         assert!(
             allowlist
                 .iter()
-                .any(|address| address == "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs"),
+                .any(|address| address == "synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t"),
             "canonical foundation validators must be retained when VPN bootstrap peers do not carry validator identities"
         );
         let unique_allowlist = allowlist.iter().collect::<HashSet<_>>();
@@ -35374,7 +35374,7 @@ reward_address = "synv1stalevalidator"
                         endpoint: None,
                         status: "active".to_string(),
                         validator_pubkey: Some(
-                            "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs".to_string(),
+                            "synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t".to_string(),
                         ),
                         operator_address: None,
                     },
@@ -35435,8 +35435,8 @@ reward_address = "synv1stalevalidator"
     fn validator_vpn_transport_validation_rejects_local_validator_routes() {
         let value: toml::Value = toml::from_str(
             r#"[network]
-additional_dial_targets = ["synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs"]
-persistent_peers = ["synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs"]
+additional_dial_targets = ["synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t"]
+persistent_peers = ["synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t"]
 
 [[network.validator_vpn_transports]]
 validator_address = "synv1local"
@@ -35451,7 +35451,7 @@ validator_address = "synv1local"
 "#,
         )
         .expect("test config should parse");
-        let peer_targets = vec!["synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs".to_string()];
+        let peer_targets = vec!["synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t".to_string()];
 
         let failures = validator_vpn_transport_validation_failures(&value, &peer_targets);
 
@@ -35511,7 +35511,7 @@ persistent_peers = []
             .expect("peers.toml should write");
         }
 
-        let validator1_address = "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs";
+        let validator1_address = "synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t";
         let validator7_address = "synv1validator7";
         let validator1 = TestnetProvisionedNode {
             id: "testnet-validator1".to_string(),
@@ -36223,19 +36223,19 @@ persistent_peers = []
         assert_eq!(
             targets,
             vec![
-                "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs".to_string(),
-                "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt".to_string(),
+                "synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t".to_string(),
+                "synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk".to_string(),
             ]
         );
         assert_eq!(
             transports,
             vec![
                 (
-                    "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs".to_string(),
+                    "synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t".to_string(),
                     "10.70.10.1:5622".to_string()
                 ),
                 (
-                    "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt".to_string(),
+                    "synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk".to_string(),
                     "10.70.10.2:5622".to_string()
                 ),
             ]
@@ -36639,7 +36639,7 @@ persistent_peers = []
                 },
                 "runtime_identity": {
                     "label": "Validator 4",
-                    "address": "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5",
+                    "address": "synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg",
                     "address_type": "synv1",
                     "algorithm": "ed25519",
                     "created_at": Utc::now().to_rfc3339(),
@@ -37008,7 +37008,7 @@ esac
             fs::write(
                 &config_path,
                 format!(
-                    "[rpc]\nhttp_port = 5640\n\n[node]\nvalidator_address = \"synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5\"\n\n[storage]\npath = \"{}\"\n",
+                    "[rpc]\nhttp_port = 5640\n\n[node]\nvalidator_address = \"synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg\"\n\n[storage]\npath = \"{}\"\n",
                     data_path.display()
                 ),
             )
@@ -37038,11 +37038,11 @@ if [ "${{SYNERGY_DATA_PATH:-}}" != "{data}" ]; then
   echo "missing data env" >&2
   exit 1
 fi
-if [ "${{SYNERGY_VALIDATOR_ADDRESS:-}}" != "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5" ]; then
+if [ "${{SYNERGY_VALIDATOR_ADDRESS:-}}" != "synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg" ]; then
   echo "missing validator env" >&2
   exit 1
 fi
-if [ "${{NODE_ADDRESS:-}}" != "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5" ]; then
+if [ "${{NODE_ADDRESS:-}}" != "synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg" ]; then
   echo "missing node address env" >&2
   exit 1
 fi
@@ -37088,7 +37088,7 @@ EOF
                 "data env should be passed through to runner"
             );
             assert!(
-                env_dump.contains("synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5"),
+                env_dump.contains("synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg"),
                 "validator identity env should be passed through to runner"
             );
         });

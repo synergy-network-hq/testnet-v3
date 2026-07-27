@@ -5,7 +5,7 @@ Use this guide for a validator running on an Ubuntu or Debian desktop. Continue 
 ## Requirements
 
 - Ubuntu 22.04 LTS or newer. Ubuntu 24.04 LTS is recommended. A compatible Debian-based desktop may work when the required runtime libraries are present.
-- Linux `x86_64`/`amd64`. The published v19.0.53 Linux installer assets are amd64.
+- Linux `x86_64`/`amd64`. The published v20.0.0 Linux installer assets are amd64.
 - A graphical desktop session. The Control Panel is a desktop application.
 - 8 logical CPU cores, 16 GB RAM, and 200 GB free SSD space. **Run Device Check** is authoritative and blocks setup when the selected machine fails.
 - An account that can use `sudo` for package installation and secure-network setup.
@@ -32,11 +32,11 @@ The official release offers both a Debian package and an AppImage. Prefer the De
 
 ### Debian package
 
-1. Download `synergy-node-control-panel_19.0.53_amd64.deb` from the official [releases page](https://github.com/synergy-network-hq/synergy-node-control-panel-releases/releases).
+1. Download `synergy-node-control-panel_20.0.0_amd64.deb` from the official [releases page](https://github.com/synergy-network-hq/synergy-node-control-panel-releases/releases).
 2. Install it:
 
 ```bash
-sudo dpkg -i synergy-node-control-panel_19.0.53_amd64.deb
+sudo dpkg -i synergy-node-control-panel_20.0.0_amd64.deb
 sudo apt-get install -f
 ```
 
@@ -48,11 +48,11 @@ synergy-node-control-panel
 
 ### AppImage
 
-Download `Synergy.Node.Control.Panel-19.0.53.AppImage`, verify it against `SHA256SUMS`, then run:
+Download `Synergy.Node.Control.Panel-20.0.0.AppImage`, verify it against `SHA256SUMS`, then run:
 
 ```bash
-chmod +x Synergy.Node.Control.Panel-19.0.53.AppImage
-./Synergy.Node.Control.Panel-19.0.53.AppImage
+chmod +x Synergy.Node.Control.Panel-20.0.0.AppImage
+./Synergy.Node.Control.Panel-20.0.0.AppImage
 ```
 
 Open **Settings**, check the displayed version, and run **Run Device Check** before beginning setup.

@@ -25,7 +25,14 @@ extraResources:
     to: testnet/runtime
     filter:
       - "**/*"
+      # Validator setup packages are release-prep inputs, never generic
+      # installer payload. The panel receives only assignment metadata and an
+      # opaque one-time claim during enrollment.
       - "!keys/**"
+      - "!**/keys/**"
+      - "!**/setup-package.json"
+      - "!**/*.private"
+      - "!**/*.private.*"
       - "!**/*.exe"
       - "!**/*.exe.sha256"
   - from: scripts/testnet

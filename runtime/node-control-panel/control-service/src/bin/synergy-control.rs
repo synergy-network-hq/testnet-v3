@@ -1,3 +1,4 @@
+use synergy_address_engine::{sign_identity_proof, verify_address};
 use synergy_node_control_panel::app_context::AppContext;
 use synergy_node_control_panel::event_bus::EventBus;
 use synergy_node_control_panel::testnet::{
@@ -63,6 +64,42 @@ async fn run() -> Result<(), String> {
         "validator-vpn-status" => {
             let payload = validator_vpn_status(&AppContext::from_env())?;
             print_json(&payload)?;
+        }
+        "sign-validator-enrollment-proof" => {
+            let private_key_path = arg_value(&args, "--private-key-file").ok_or_else(|| {
+                "sign-validator-enrollment-proof requires --private-key-file <path>".to_string()
+            })?;
+            let message_path = arg_value(&args, "--message-file").ok_or_else(|| {
+                "sign-validator-enrollment-proof requires --message-file <path>".to_string()
+            })?;
+            let private_key = std::fs::read_to_string(&private_key_path)
+                .map_err(|error| format!("failed to read private-key file: {error}"))?;
+            let message = std::fs::read(&message_path)
+                .map_err(|error| format!("failed to read enrollment message: {error}"))?;
+            let signature = sign_identity_proof(private_key.trim(), &message)?;
+            print_json(&serde_json::json!({ "signature": signature }))?;
+        }
+        "verify-validator-identity" => {
+            let address = arg_value(&args, "--address").ok_or_else(|| {
+                "verify-validator-identity requires --address <synv...>".to_string()
+            })?;
+            let public_key_path = arg_value(&args, "--public-key-file").ok_or_else(|| {
+                "verify-validator-identity requires --public-key-file <identity.pub.json>"
+                    .to_string()
+            })?;
+            let raw = std::fs::read_to_string(&public_key_path)
+                .map_err(|error| format!("failed to read public-key file: {error}"))?;
+            let document: serde_json::Value = serde_json::from_str(&raw)
+                .map_err(|error| format!("failed to parse public-key file: {error}"))?;
+            let public_key = document
+                .get("public_key")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "public-key file does not contain public_key".to_string())?;
+            let valid = verify_address(&address, public_key)?;
+            print_json(&serde_json::json!({ "valid": valid }))?;
+            if !valid {
+                return Err("validator public key does not derive the supplied address".to_string());
+            }
         }
         "testnet-state" => {
             let payload = testnet_get_state()?;
@@ -268,6 +305,8 @@ async fn run() -> Result<(), String> {
             println!("  synergy-control stake-validator --input <json-file>");
             println!("  synergy-control verify-validator-eligibility --input <json-file>");
             println!("  synergy-control validator-vpn-status");
+            println!("  synergy-control sign-validator-enrollment-proof --private-key-file <path> --message-file <path>");
+            println!("  synergy-control verify-validator-identity --address <synv...> --public-key-file <identity.pub.json>");
             println!(
                 "  synergy-control validator-vpn-import-bootstrap --file <public-key-artifact.json>"
             );

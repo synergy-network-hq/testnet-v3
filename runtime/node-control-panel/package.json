@@ -1,6 +1,6 @@
 {
   "name": "synergy-node-control-panel",
-  "version": "19.0.53",
+  "version": "20.0.0",
   "description": "Synergy Node Control Panel",
   "author": "Synergy Network <support@synergy-network.io>",
   "type": "module",
@@ -16,6 +16,8 @@
     "dist:electron": "npm run build:electron && electron-builder --config electron-builder.yml",
     "build:sidecars": "bash scripts/build-sidecars.sh",
     "build:bundle-prep": "bash scripts/release/build-bundle-prep.sh",
+    "release:extract-validator-assignments": "node scripts/release/extract-validator-assignment-map.mjs",
+    "release:validator-distribution": "node scripts/release/prepare-validator-distribution.mjs",
     "preview": "vite preview",
     "test:uiux-revamp": "node scripts/qa/control-panel-uiux-revamp-check.mjs",
     "test:visualizations": "node --test scripts/qa/control-panel-v18-visualization-test.mjs",
@@ -34,6 +36,8 @@
     "test:archive-health": "bash scripts/qa/archive-health-supervisor-test.sh && bash scripts/qa/archive-snapshot-worker-test.sh && bash scripts/qa/archive-catalog-uploader-install-test.sh && bash scripts/qa/archive-catalog-uploader-repair-test.sh",
     "test:onboarding-contracts": "node scripts/qa/onboarding-deterministic-contract-test.cjs",
     "test:onboarding-monitor": "node --test scripts/qa/control-panel-v18-onboarding-monitor-test.mjs",
+    "test:validator-distribution": "node --test scripts/qa/validator-distribution-contract-test.mjs",
+    "test:validator-assignment": "node --test scripts/qa/validator-assignment-contract-test.mjs",
     "test:selected-node-persistence": "node scripts/qa/control-panel-selected-node-persistence-test.mjs",
     "test:wallet-null-safety": "node --test scripts/qa/wallet-account-null-safety-test.mjs"
   },

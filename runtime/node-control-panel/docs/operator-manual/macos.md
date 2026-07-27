@@ -5,7 +5,7 @@ Use this guide for a validator running on the same Mac that runs the Synergy Nod
 ## Requirements
 
 - macOS 12 Monterey or newer. macOS 14 or newer is recommended.
-- Apple Silicon. The current v19.0.53 signed macOS release is `arm64`; do not install it on an Intel Mac unless the releases page provides a separate signed Intel build.
+- Apple Silicon. The current v20.0.0 signed macOS release is `arm64`; do not install it on an Intel Mac unless the releases page provides a separate signed Intel build.
 - 8 logical CPU cores, 16 GB RAM, and 200 GB free SSD space. The Control Panel enforces these values in **Run Device Check**.
 - A stable internet connection, automatic date and time, and a macOS administrator account available when the app requests secure-network approval.
 - `50,001 SNRG` available through the operator's Synergy Wallet and a coordinator-issued one-time onboarding token.
@@ -15,7 +15,7 @@ Normal installation does not require Node.js, Rust, Git, Xcode, Homebrew, a stan
 ## Install The Signed App
 
 1. Open the official [Node Control Panel releases](https://github.com/synergy-network-hq/synergy-node-control-panel-releases/releases) page.
-2. For the current release, download `Synergy.Node.Control.Panel-19.0.53-arm64.dmg`. The same release also provides a signed ZIP for update delivery.
+2. For the current release, download `Synergy.Node.Control.Panel-20.0.0-arm64.dmg`. The same release also provides a signed ZIP for update delivery.
 3. Open the DMG and drag **Synergy Node Control Panel** into **Applications**.
 4. Start the app from **Applications**. When macOS asks to open a signed app from the official release, approve it.
 5. Open **Settings** and confirm the version. It must match the bundled runtime version shown by the app.

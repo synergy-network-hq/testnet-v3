@@ -4,7 +4,7 @@ This is the end-to-end runbook for a new Synergy Testnet validator using the Nod
 
 ## What You Need Before Starting
 
-- A current signed Control Panel release. This manual covers v19.0.53.
+- A current signed Control Panel release. This manual covers v20.0.0.
 - A target that passes **Run Device Check**: 8 logical CPU cores, 16 GB RAM, 200 GB free SSD space, a writable workspace, working internet, and correct system time.
 - A durable location for the encrypted identity backup and its passphrase. Do not keep the only backup inside the active validator workspace.
 - A Synergy Wallet with `50,001 SNRG` available for this validator plus any wallet-side network fee.

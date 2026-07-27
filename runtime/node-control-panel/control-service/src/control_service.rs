@@ -412,6 +412,12 @@ struct InviteRequest {
     operator_address: Option<String>,
     #[serde(default)]
     stake_tx_hash: Option<String>,
+    #[serde(default)]
+    assignment_id: Option<String>,
+    #[serde(default)]
+    validator_public_key: Option<String>,
+    #[serde(default)]
+    identity_proof: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -431,6 +437,12 @@ struct AdminInviteRequest {
     operator_email: String,
     #[serde(default)]
     peer_type: Option<ValidatorVpnRole>,
+    #[serde(default)]
+    assignment_id: Option<String>,
+    #[serde(default)]
+    validator_identity: Option<String>,
+    #[serde(default)]
+    validator_public_key: Option<String>,
     expires_in_hours: u64,
 }
 
@@ -760,6 +772,9 @@ async fn admin_invite_handler(
         &state.app_context,
         Some(input.operator_email),
         role,
+        input.assignment_id,
+        input.validator_identity,
+        input.validator_public_key,
         chrono::Utc::now() + chrono::Duration::hours(expires_in_hours as i64),
     ) {
         Ok(token) => (StatusCode::OK, Json(AdminInviteResponse { token })).into_response(),
@@ -1230,6 +1245,11 @@ async fn invite_handler(
         &input.auth.token,
         &input.peer_name,
         input.peer_type.clone(),
+        input.assignment_id.as_deref(),
+        input.validator_address.as_deref(),
+        input.validator_public_key.as_deref(),
+        input.identity_proof.as_deref(),
+        input.node_id.as_deref(),
     ) {
         Ok(assignment) => assignment,
         Err(error) if error == "invalid_or_used_token" => {
