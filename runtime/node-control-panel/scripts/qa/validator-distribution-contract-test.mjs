@@ -5,7 +5,7 @@ import test from "node:test";
 const source = await readFile(new URL("../release/prepare-validator-distribution.mjs", import.meta.url), "utf8");
 const extractor = await readFile(new URL("../release/extract-validator-assignment-map.mjs", import.meta.url), "utf8");
 const artifactAudit = await readFile(new URL("../release/audit-installer-secret-surface.mjs", import.meta.url), "utf8");
-const releaseWorkflow = await readFile(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8");
+const releaseWorkflow = await readFile(new URL("../../../../.github/workflows/node-control-panel-release.yml", import.meta.url), "utf8");
 const electronBuilder = await readFile(new URL("../../electron-builder.yml", import.meta.url), "utf8");
 
 test("validator distribution produces the complete 1–21 matrix without private provisioning material", () => {
@@ -35,6 +35,7 @@ test("assignment-map extraction verifies public identity derivation without open
 });
 
 test("native packaging audits the final DMG and DEB payloads before validator distribution", () => {
+  assert.match(releaseWorkflow, /working-directory: runtime\/node-control-panel/);
   assert.match(artifactAudit, /endsWith\("\.asar"\)/);
   assert.match(artifactAudit, /PRIVATE_KEY_FILENAMES/);
   assert.match(artifactAudit, /PRIVATE_KEY_CONTENT/);

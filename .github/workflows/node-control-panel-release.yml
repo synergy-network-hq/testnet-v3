@@ -19,6 +19,13 @@ env:
   INNERNET_SOURCE_REPOSITORY: ${{ vars.INNERNET_SOURCE_REPOSITORY || 'tonarino/innernet' }}
   INNERNET_SOURCE_REV: ${{ vars.INNERNET_SOURCE_REV || 'dbdb0097b397fa5b10566ae58d33c699142102f2' }}
 
+# The repository houses the desktop app under runtime/node-control-panel.
+# GitHub discovers this workflow only from the repository root, so every
+# shell step runs from the app directory.
+defaults:
+  run:
+    working-directory: runtime/node-control-panel
+
 jobs:
   verify-release-identity:
     name: Verify release identity
@@ -155,8 +162,8 @@ jobs:
           if-no-files-found: error
           retention-days: 1
           path: |
-            binaries/synergy-control-linux-amd64
-            binaries/synergy-testnet-agent-linux-amd64
+            runtime/node-control-panel/binaries/synergy-control-linux-amd64
+            runtime/node-control-panel/binaries/synergy-testnet-agent-linux-amd64
 
   build:
     needs:
@@ -171,20 +178,20 @@ jobs:
             artifact_name: macos
             build_cmd: npx electron-builder --config electron-builder.yml --mac dmg zip --publish never
             artifact_glob: |
-              electron-dist/*.dmg
-              electron-dist/*.zip
-              electron-dist/*.yml
-              electron-dist/*.yaml
-              electron-dist/*.blockmap
+              runtime/node-control-panel/electron-dist/*.dmg
+              runtime/node-control-panel/electron-dist/*.zip
+              runtime/node-control-panel/electron-dist/*.yml
+              runtime/node-control-panel/electron-dist/*.yaml
+              runtime/node-control-panel/electron-dist/*.blockmap
           - os: ubuntu-22.04
             artifact_name: linux
             build_cmd: npx electron-builder --config electron-builder.yml --linux deb AppImage --publish never
             artifact_glob: |
-              electron-dist/*.deb
-              electron-dist/*.AppImage
-              electron-dist/*.yml
-              electron-dist/*.yaml
-              electron-dist/*.blockmap
+              runtime/node-control-panel/electron-dist/*.deb
+              runtime/node-control-panel/electron-dist/*.AppImage
+              runtime/node-control-panel/electron-dist/*.yml
+              runtime/node-control-panel/electron-dist/*.yaml
+              runtime/node-control-panel/electron-dist/*.blockmap
           # Windows installer builds are intentionally disabled while Windows support is paused.
           # Re-enable this matrix entry with the Windows binary download/copy/release steps below.
           # - os: windows-latest
@@ -291,7 +298,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: linux-onboarding-sidecars
-          path: .release-sidecars
+          path: runtime/node-control-panel/.release-sidecars
 
       - name: Stage native Linux remote onboarding sidecars
         shell: bash
@@ -936,13 +943,13 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: installer-macos
-          path: release-input/macos
+          path: runtime/node-control-panel/release-input/macos
 
       - name: Download Linux installer
         uses: actions/download-artifact@v4
         with:
           name: installer-linux
-          path: release-input/linux
+          path: runtime/node-control-panel/release-input/linux
 
       - name: Build key-free Validator 1-21 matrix
         shell: bash
@@ -976,7 +983,7 @@ jobs:
           name: validator-distribution-${{ needs.verify-release-identity.outputs.version }}
           if-no-files-found: error
           retention-days: 30
-          path: validator-distribution
+          path: runtime/node-control-panel/validator-distribution
 
   publish-releases-repo:
     name: Publish installers to releases repo
@@ -995,13 +1002,13 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: installer-macos
-          path: release-assets/macos
+          path: runtime/node-control-panel/release-assets/macos
 
       - name: Download Linux installers
         uses: actions/download-artifact@v4
         with:
           name: installer-linux
-          path: release-assets/linux
+          path: runtime/node-control-panel/release-assets/linux
 
       - name: Verify complete installer release set
         shell: bash
