@@ -74,12 +74,12 @@ excluded_validator_names = [
   "archive-validator",
 ]
 strict_validator_allowlist = [
-  "synv1<TESTNET_V3_VALIDATOR_01_ADDRESS>",
-  "synv1<TESTNET_V3_VALIDATOR_02_ADDRESS>",
-  "synv1<TESTNET_V3_VALIDATOR_03_ADDRESS>",
-  "synv1<TESTNET_V3_VALIDATOR_04_ADDRESS>",
-  "synv1<TESTNET_V3_VALIDATOR_05_ADDRESS>",
-  "synv1<TESTNET_V3_VALIDATOR_06_ADDRESS>",
+  "synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t",
+  "synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk",
+  "synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj",
+  "synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg",
+  "synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu",
+  "synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc",
 ]
 
 [seed_registry]
@@ -231,42 +231,42 @@ peers = [
 [[validators]]
 name = "Val1"
 node_id = "validator-node-01"
-validator_address = "synv1<TESTNET_V3_VALIDATOR_01_ADDRESS>"
+validator_address = "synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t"
 port = 5622
 active_consensus = true
 
 [[validators]]
 name = "Val2"
 node_id = "validator-node-02"
-validator_address = "synv1<TESTNET_V3_VALIDATOR_02_ADDRESS>"
+validator_address = "synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk"
 port = 5622
 active_consensus = true
 
 [[validators]]
 name = "Val3"
 node_id = "validator-node-03"
-validator_address = "synv1<TESTNET_V3_VALIDATOR_03_ADDRESS>"
+validator_address = "synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj"
 port = 5622
 active_consensus = true
 
 [[validators]]
 name = "Val4"
 node_id = "validator-node-04"
-validator_address = "synv1<TESTNET_V3_VALIDATOR_04_ADDRESS>"
+validator_address = "synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg"
 port = 5622
 active_consensus = true
 
 [[validators]]
 name = "Val5"
 node_id = "validator-node-05"
-validator_address = "synv1<TESTNET_V3_VALIDATOR_05_ADDRESS>"
+validator_address = "synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu"
 port = 5622
 active_consensus = true
 
 [[validators]]
 name = "Val6"
 node_id = "validator-node-06"
-validator_address = "synv1<TESTNET_V3_VALIDATOR_06_ADDRESS>"
+validator_address = "synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc"
 port = 5622
 active_consensus = true
 

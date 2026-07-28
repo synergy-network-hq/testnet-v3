@@ -20,10 +20,15 @@ use crate::consensus::self_realign::{
 };
 use crate::consensus::synergy_score::SynergyScoreCalculator;
 use crate::consensus::testnet_v3_bootstrap::load_testnet_v3_genesis_bootstrap;
+use crate::consensus::typed_coordinator::{
+    import_local_genesis_bound_typed_signer, TypedPosyCoordinator, TypedPosyCoordinatorStartup,
+};
+use crate::consensus::typed_finality_store::TypedFinalityStore;
 use crate::consensus::validator_keys::{
     load_local_validator_keypair_for_height, validator_public_key_with_declared_algorithm,
 };
 use crate::crypto::pqc::PQCManager;
+use crate::etdag::EtdagParameters;
 use crate::genesis::{canonical_genesis, GenesisDocument};
 use crate::logging::{init_logger, LogLevel};
 use crate::p2p;
@@ -32,8 +37,9 @@ use crate::rpc;
 use crate::rpc::rpc_server::{SHARED_CHAIN, SYNC_MANAGER, TX_POOL};
 use crate::sxcp;
 use crate::sync::SyncManager;
-use crate::synergy_types::{SYNERGY_TESTNET_V3_CHAIN_ID, SYNERGY_TESTNET_V3_NETWORK_ID};
+use crate::synergy_types::{Hash, SYNERGY_TESTNET_V3_CHAIN_ID, SYNERGY_TESTNET_V3_NETWORK_ID};
 use crate::telemetry;
+use crate::testnet_v3_execution_bootstrap::load_finalized_testnet_v3_genesis_execution_state;
 use crate::token::TOKEN_MANAGER;
 use crate::transaction::Transaction;
 use crate::utils;
@@ -991,6 +997,88 @@ fn spawn_consensus_engine() -> Result<thread::JoinHandle<()>, String> {
     )
 }
 
+/// Builds the only signing-capable typed PoSy coordinator startup input from
+/// the canonical finalized Genesis document and the local canonical validator
+/// key loader.  This function intentionally has no candidate-Genesis,
+/// generated-key, legacy-consensus, or P2P-address fallback.
+///
+/// It does not itself start the mailbox worker: the operational driver must
+/// atomically pair the worker with deterministic ETDAG scheduling and typed
+/// P2P egress.  Starting an inbound-only signer would make the node appear
+/// live while omitting its required proposal/vote/timeout lifecycle.
+fn build_finalized_typed_posy_coordinator(
+    config: &NodeConfig,
+) -> Result<TypedPosyCoordinator, String> {
+    let genesis = canonical_genesis()
+        .map_err(|error| format!("typed PoSy startup cannot load canonical Genesis: {error}"))?;
+    let genesis_bootstrap = load_testnet_v3_genesis_bootstrap(genesis).map_err(|error| {
+        format!("typed PoSy startup cannot derive finalized Genesis bootstrap: {error}")
+    })?;
+    let consensus_parameters = genesis.consensus_parameters().cloned().ok_or_else(|| {
+        "typed PoSy startup requires a finalized consensus parameter binding in canonical Genesis"
+            .to_string()
+    })?;
+    consensus_parameters
+        .require_genesis_binding()
+        .map_err(|error| {
+            format!("typed PoSy startup refuses a non-Genesis-bound parameter manifest: {error}")
+        })?;
+
+    // This restoration refuses the candidate/pre-approval path and verifies
+    // the embedded ceremony snapshot, its roots, deployed contracts, and
+    // balances before any signing authority can exist.
+    let execution_state =
+        load_finalized_testnet_v3_genesis_execution_state(genesis).map_err(|error| {
+            format!("typed PoSy startup requires finalized Genesis execution state: {error}")
+        })?;
+    let genesis_anchor = Hash::from_hex(genesis.hash())
+        .map_err(|error| format!("canonical Genesis hash is not a typed anchor: {error}"))?;
+    let deployed_genesis_state_root = genesis
+        .value()
+        .get("execution")
+        .and_then(|execution| execution.get("genesis_execution_state_root"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "finalized Genesis omits execution.genesis_execution_state_root".to_string())
+        .and_then(|root| {
+            Hash::from_hex(root).map_err(|error| {
+                format!("finalized Genesis execution state root is not canonical: {error}")
+            })
+        })?;
+
+    let validator_address = resolve_local_validator_address(config);
+    ensure_local_validator_record_available(&validator_address)?;
+    let (public_key, private_key) =
+        load_local_validator_keypair_for_height(0, &validator_address, &VALIDATOR_MANAGER)
+            .map_err(|error| {
+                format!(
+                    "typed PoSy startup cannot load canonical local consensus signing key: {error}"
+                )
+            })?;
+    let (signer, local_validator_id) = import_local_genesis_bound_typed_signer(
+        &genesis_bootstrap,
+        &validator_address,
+        public_key,
+        private_key,
+    )
+    .map_err(|error| format!("typed PoSy startup rejects local signer: {error}"))?;
+    let finality_store = TypedFinalityStore::for_genesis_anchor(genesis_anchor)
+        .map_err(|error| format!("typed PoSy finality store initialization failed: {error}"))?;
+
+    TypedPosyCoordinatorStartup {
+        genesis_bootstrap,
+        consensus_parameters,
+        signer,
+        local_validator_id,
+        genesis_anchor,
+        deployed_genesis_state_root,
+        execution_state,
+        etdag_parameters: EtdagParameters::default(),
+        finality_store,
+    }
+    .build()
+    .map_err(|error| format!("typed PoSy finalized coordinator startup rejected: {error}"))
+}
+
 fn ensure_consensus_pqc_runtime_ready(config: &NodeConfig) -> Result<(), String> {
     if config.blockchain.chain_id != 1266 || config.network.id != 1266 {
         return Err(format!(
@@ -1014,7 +1102,13 @@ fn ensure_consensus_pqc_runtime_ready(config: &NodeConfig) -> Result<(), String>
             "validator consensus canonical Genesis is not a valid typed Testnet-v3 bootstrap: {error}"
         )
     })?;
-    ensure_local_validator_consensus_key_bound(config)
+    ensure_local_validator_consensus_key_bound(config)?;
+    // Constructing the coordinator proves the local key, immutable Genesis
+    // anchor, parameter root, ceremony execution snapshot, and typed finality
+    // boundary agree before the still-separate operational driver is allowed
+    // to request signing authority.
+    let _coordinator = build_finalized_typed_posy_coordinator(config)?;
+    Ok(())
 }
 
 fn ensure_local_validator_consensus_key_bound(config: &NodeConfig) -> Result<(), String> {

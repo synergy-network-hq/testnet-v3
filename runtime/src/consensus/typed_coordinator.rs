@@ -1423,7 +1423,7 @@ mod tests {
 
         let mut wrong_public_key = public_key;
         wrong_public_key.key_data[0] ^= 0x01;
-        let error = import_local_genesis_bound_typed_signer(
+        let result = import_local_genesis_bound_typed_signer(
             &bootstrap,
             &local.validator_uma_id.0,
             wrong_public_key,
@@ -1432,8 +1432,11 @@ mod tests {
                 .private_key(&local.consensus_public_key.key_id)
                 .unwrap()
                 .clone(),
-        )
-        .expect_err("a public key that disagrees with Genesis must be rejected");
+        );
+        let error = match result {
+            Ok(_) => panic!("a public key that disagrees with Genesis must be rejected"),
+            Err(error) => error,
+        };
         assert!(error.contains("does not exactly match"));
     }
 
