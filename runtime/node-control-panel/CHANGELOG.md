@@ -4,6 +4,10 @@ Historical release notes reconstructed from local git tag ranges for the control
 
 ## Unreleased
 
+- Prepare Testnet-v3 chain 1266 onboarding with 21 installer-bound encrypted validator identity bundles and complete per-validator WireGuard topology files; Validators 01–06 are the initial cohort and Validators 07–21 remain provisioned for gradual activation.
+- Reduce packaged-validator VPN onboarding to the coordinator-issued one-time token: the panel creates the assignment-bound identity proof, installs the checksum-verified `sy-vpn.conf`, verifies client and coordinator handshakes, and only then consumes the token.
+- Repair the Settings route so defaults render even when the desktop settings bridge is unavailable, with a visible warning instead of a blank screen.
+- Add native macOS DMG and Linux DEB release tooling that stages one validator at a time, creates uniquely named artifacts for Validators 01–21, emits SHA-256 manifests, and clears secret staging on exit.
 - Route all 66 Operations actions through an owner-scoped, allowlisted local PTY bridge while preserving typed control-service execution and single-copy command output.
 - Reconstruct validator membership on service-node restart from finalized activation evidence so relayer and RPC snapshots cannot remain on a stale registry epoch while the chain advances.
 - Report validator-set transition height and independent per-cluster quorum semantics explicitly, including exact 3-of-5 enforcement for each cluster at ten active validators.

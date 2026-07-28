@@ -15,7 +15,7 @@ const now = 1_800_000_000;
 function catalog() {
   return {
     schema: 'synergy-archive-snapshot-catalog-v1',
-    chain_id: 1264,
+    chain_id: 1266,
     network_id: 'synergy-testnet-v3',
     genesis_hash: genesisHash,
     updated_at: now,
@@ -26,7 +26,7 @@ function catalog() {
     snapshots: [{
       snapshot_id: 'snapshot-000843613-e0a953a8',
       snapshot_class: 'validator-pruned',
-      chain_id: 1264,
+      chain_id: 1266,
       network_id: 'synergy-testnet-v3',
       genesis_hash: genesisHash,
       height: 843613,

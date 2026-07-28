@@ -219,7 +219,7 @@ fi
 
 "$HEALTH_GATE"
 "$RUNTIME" create-snapshot \
-  --chain-id 1264 \
+  --chain-id 1266 \
   --network-id synergy-testnet-v3 \
   --genesis-hash f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789 \
   --source-workspace "$WORKSPACE" \
@@ -311,7 +311,7 @@ import time
 evidence_path, marker_path, height, source_hash, public_height, public_hash = sys.argv[1:]
 height = int(height)
 evidence = {
-    "chain_id": 1264,
+    "chain_id": 1266,
     "network_id": "synergy-testnet-v3",
     "genesis_hash": "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789",
     "height": height,
@@ -352,7 +352,7 @@ env \
     --workspace "$WORKSPACE" \
     --publish-root "$PUBLISH_ROOT" \
     --source-node-id archive-validator \
-    --chain-id 1264 \
+    --chain-id 1266 \
     --network-id synergy-testnet-v3 \
     --genesis-hash f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789 \
     --consensus-fork "$CONSENSUS_FORK" \

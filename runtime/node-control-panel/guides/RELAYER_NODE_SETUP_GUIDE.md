@@ -211,7 +211,7 @@ identity_file = "config/relayer1/identity.json"
 data_dir = "./data/relayer1"
 
 [network]
-id = 1264  # Synergy Testnet chain ID
+id = 1266  # Synergy Testnet chain ID
 p2p_port = 5622
 rpc_port = 5650
 ws_port = 5670
@@ -285,7 +285,7 @@ poll_interval_ms = 2000  # Polygon is faster
 
 # Destination chain (Synergy Testnet)
 [sxcp.destination]
-chain_id = 1264
+chain_id = 1266
 name = "synergy-testnet"
 rpc_endpoint = "https://testnet-core-rpc.synergy-network.io"
 ws_endpoint = "wss://testnet-core-ws.synergy-network.io"

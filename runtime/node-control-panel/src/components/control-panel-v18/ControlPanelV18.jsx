@@ -109,13 +109,13 @@ import { useControlPanel } from '../control-panel/ControlPanelProvider';
 import {
   arcPath,
   areaPathFrom,
+  axisLabelFormatter,
   axisTickIndices,
   finiteNumber,
   formatCompactNumber,
   linePathFor,
   niceScale,
   polarPoint,
-  segmentCoordinates,
   seriesDelta,
   seriesStats,
   useElementSize,
@@ -134,7 +134,11 @@ import {
 } from '../control-panel/controlPanelModel';
 import SynergyWalletConnection from '../wallet/SynergyWalletConnection';
 import { nodeService } from '../../services/nodeService';
-import { sessionTimeoutMs, settingsService } from '../../services/settingsService';
+import {
+  defaultControlPanelSettings,
+  sessionTimeoutMs,
+  settingsService,
+} from '../../services/settingsService';
 import {
   ELIGIBILITY_STATUSES,
   VALIDATOR_FEE_RESERVE_SNRG,
@@ -1306,7 +1310,7 @@ const CPU_THRESHOLD_BANDS = [
 const CHART_MAX_SAMPLES = 60;
 const CHART_PLOT_INSET = { left: 58, right: 20, top: 20, bottom: 30 };
 
-function chartAxisDomain(values, fixedDomain) {
+function chartAxisDomain(values, fixedDomain, integer = false) {
   if (Array.isArray(fixedDomain) && fixedDomain.length === 2) {
     const [min, max] = fixedDomain;
     const span = (max - min) || 1;
@@ -1319,12 +1323,17 @@ function chartAxisDomain(values, fixedDomain) {
     };
   }
   if (!values.length) return { min: 0, max: 1, step: 0.25, ticks: [0, 0.25, 0.5, 0.75, 1] };
-  return niceScale(Math.min(...values), Math.max(...values), 5);
+  return niceScale(Math.min(...values), Math.max(...values), 5, { integerSteps: integer });
 }
 
-function chartAxisLabel(value, formatValue) {
+/** Whole-number display for discrete metrics (peers, blocks, sync gap). */
+function integerFormatter(value) {
+  return formatNumber(Math.round(Number(value) || 0), { maximumFractionDigits: 0 });
+}
+
+function chartMarkerLabel(value, formatValue) {
   const label = String(formatValue(value));
-  return label.length > 8 ? formatCompactNumber(value) : label;
+  return label.length > 9 ? formatCompactNumber(value) : label;
 }
 
 /**
@@ -1337,17 +1346,23 @@ function OperationalLineChart({
   points = [],
   current,
   tone = 'green',
-  formatValue = formatNumber,
+  formatValue: formatValueProp = formatNumber,
   unit = '',
   fixedDomain,
+  integer = false,
   sampleLabel = 'samples',
   emptyText = 'No history returned for this metric.',
   className = '',
   smooth = true,
   compact = false,
   thresholds = null,
-  showReferenceLines = true,
+  showReferenceLines = null,
+  showTitle = true,
 }) {
+  // Compact tiles have no room for an average line without colliding with the
+  // direct value label, so reference lines default off at that density.
+  const referenceLinesVisible = showReferenceLines ?? !compact;
+  const formatValue = integer && formatValueProp === formatNumber ? integerFormatter : formatValueProp;
   const gradientId = useId().replace(/:/g, '');
   const [plotRef, plotSize] = useElementSize(460, 200);
   const drawn = useMountedFlag();
@@ -1368,7 +1383,8 @@ function OperationalLineChart({
   const innerHeight = height - plot.top - plot.bottom;
   const baselineY = height - plot.bottom;
 
-  const domain = chartAxisDomain(values, fixedDomain);
+  const domain = chartAxisDomain(values, fixedDomain, integer);
+  const axisLabel = axisLabelFormatter(domain, formatValue);
   const range = domain.max - domain.min || 1;
   const toY = (value) => plot.top + (1 - ((value - domain.min) / range)) * innerHeight;
   const toX = (index) => plot.left + (index / Math.max(1, samples.length - 1)) * innerWidth;
@@ -1376,7 +1392,17 @@ function OperationalLineChart({
   const coordinates = samples.map((point, index) => (
     point.value == null ? null : { x: toX(index), y: toY(point.value), index, point }
   ));
-  const segments = segmentCoordinates(coordinates);
+  const segments = [];
+  let currentSegment = [];
+  coordinates.forEach((coordinate) => {
+    if (coordinate) {
+      currentSegment.push(coordinate);
+    } else if (currentSegment.length) {
+      segments.push(currentSegment);
+      currentSegment = [];
+    }
+  });
+  if (currentSegment.length) segments.push(currentSegment);
   const stats = seriesStats(values);
   const delta = seriesDelta(values);
   const lastCoordinate = [...coordinates].reverse().find(Boolean) || null;
@@ -1409,7 +1435,7 @@ function OperationalLineChart({
     <section className={cls('v18-operational-chart', `is-${tone}`, compact && 'is-compact', className)} aria-label={`${title} chart`}>
       <header className="v18-operational-chart__header">
         <div>
-          <span>{title}</span>
+          {showTitle ? <span>{title}</span> : null}
           <strong>{valueLabel}</strong>
         </div>
         <div className="v18-operational-chart__meta">
@@ -1481,16 +1507,16 @@ function OperationalLineChart({
               <g className="v18-operational-chart__axis-labels" aria-hidden="true">
                 {domain.ticks.map((tick) => (
                   <text key={`label-${tick}`} x={plot.left - 10} y={toY(tick) + 3.5} textAnchor="end">
-                    {chartAxisLabel(tick, formatValue)}
+                    {axisLabel(tick)}
                   </text>
                 ))}
               </g>
 
-              {showReferenceLines && stats && stats.count > 3 ? (
+              {referenceLinesVisible && stats && stats.count > 3 ? (
                 <g className="v18-operational-chart__reference" aria-hidden="true">
                   <line x1={plot.left} x2={width - plot.right} y1={toY(stats.average)} y2={toY(stats.average)} />
                   <text x={width - plot.right} y={toY(stats.average) - 5} textAnchor="end">
-                    avg {chartAxisLabel(stats.average, formatValue)}
+                    avg {axisLabel(stats.average)}
                   </text>
                 </g>
               ) : null}
@@ -1531,7 +1557,7 @@ function OperationalLineChart({
                 <g className="v18-operational-chart__extreme is-max" aria-hidden="true">
                   <circle cx={extremeCoordinates.max.x} cy={extremeCoordinates.max.y} r="2.8" />
                   <text x={extremeCoordinates.max.x} y={extremeCoordinates.max.y - 8} textAnchor="middle">
-                    {chartAxisLabel(stats.max, formatValue)}
+                    {chartMarkerLabel(stats.max, axisLabel)}
                   </text>
                 </g>
               ) : null}
@@ -1539,7 +1565,7 @@ function OperationalLineChart({
                 <g className="v18-operational-chart__extreme is-min" aria-hidden="true">
                   <circle cx={extremeCoordinates.min.x} cy={extremeCoordinates.min.y} r="2.8" />
                   <text x={extremeCoordinates.min.x} y={extremeCoordinates.min.y + 13} textAnchor="middle">
-                    {chartAxisLabel(stats.min, formatValue)}
+                    {chartMarkerLabel(stats.min, axisLabel)}
                   </text>
                 </g>
               ) : null}
@@ -2654,7 +2680,7 @@ function AppShell({ children }) {
   );
 }
 
-function LiveTrendChart({ title, value, points, tone = 'green', formatValue = formatNumber }) {
+function LiveTrendChart({ title, value, points, tone = 'green', formatValue = formatNumber, integer = false }) {
   return (
     <OperationalLineChart
       title={title}
@@ -2662,6 +2688,7 @@ function LiveTrendChart({ title, value, points, tone = 'green', formatValue = fo
       points={points}
       tone={tone}
       formatValue={formatValue}
+      integer={integer}
       sampleLabel="live samples"
       emptyText="No current metric or polling history was returned."
       className="v18-live-trend"
@@ -2708,9 +2735,9 @@ function OverviewPage() {
         <MetricCard icon={Users} label="Peers" value={peerCount == null ? 'Unavailable' : formatNumber(peerCount)} detail={peerCount == null ? 'No peer count returned' : 'Connected peers'} tone="purple" />
       </div>
       <section className="v18-overview-trend-grid" aria-label="Live metric trends">
-        <LiveTrendChart title="Block height" value={blockHeight} points={trendPoints(history, 'blockHeight')} tone="blue" />
-        <LiveTrendChart title="Peer count" value={peerCount} points={trendPoints(history, 'localPeerCount')} tone="purple" />
-        <LiveTrendChart title="Sync gap" value={syncGap} points={trendPoints(history, 'syncGap')} tone="yellow" />
+        <LiveTrendChart title="Block height" value={blockHeight} points={trendPoints(history, 'blockHeight')} tone="blue" integer />
+        <LiveTrendChart title="Peer count" value={peerCount} points={trendPoints(history, 'localPeerCount')} tone="purple" integer />
+        <LiveTrendChart title="Sync gap" value={syncGap} points={trendPoints(history, 'syncGap')} tone="yellow" integer />
         <LiveTrendChart title="RPC latency" value={rpcLatency} points={trendPoints(history, 'rpcLatencyMs')} tone="cyan" formatValue={(value) => `${formatNumber(value)} ms`} />
       </section>
       <section className="v18-overview-operations-row">
@@ -3226,6 +3253,7 @@ function SetupStepContent({ step, eligibility, setupConfig, setSetupConfig, setC
   const [validatorAssignmentId, setValidatorAssignmentId] = useState('');
   const [validatorIdentityPublicKey, setValidatorIdentityPublicKey] = useState('');
   const [validatorIdentityProof, setValidatorIdentityProof] = useState('');
+  const [validatorPackage, setValidatorPackage] = useState({ loading: true, available: false, error: '' });
   const provisioningCancelRef = useRef(false);
   const activationMonitorStartedRef = useRef(false);
   const encryptedKeyPath = context.selectedNode?.encrypted_private_key_path || context.selectedNode?.encryptedPrivateKeyPath || '';
@@ -3280,6 +3308,32 @@ function SetupStepContent({ step, eligibility, setupConfig, setSetupConfig, setC
     setVpnSetupState(restored.vpnSetupState || { status: 'idle', message: '' });
     setSnapshotState(restored.snapshotState || { status: 'idle', message: '' });
   }, [nodeId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    invokeOnboarding('getValidatorPackage')
+      .then((result) => {
+        if (cancelled) return;
+        const next = { loading: false, available: result?.available === true, error: '', ...result };
+        setValidatorPackage(next);
+        if (next.available) {
+          setValidatorAssignmentId(next.assignmentId || '');
+          setValidatorIdentityPublicKey(next.validatorPublicKey || '');
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setValidatorPackage({
+            loading: false,
+            available: false,
+            error: String(error?.message || error),
+          });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => listenOnboardingMeshProgress((progress = {}) => {
     const messageByStep = {
@@ -3509,11 +3563,11 @@ function SetupStepContent({ step, eligibility, setupConfig, setSetupConfig, setC
       setStepError('Generate the validator identity before connecting the secure validator network.');
       return;
     }
-    if (!/^validator-(?:0[1-9]|1[0-9]|2[0-1])$/.test(validatorAssignmentId.trim())) {
+    if (!validatorPackage.available && !/^validator-(?:0[1-9]|1[0-9]|2[0-1])$/.test(validatorAssignmentId.trim())) {
       setStepError('Enter the Validator package assignment ID from the downloaded enrollment metadata.');
       return;
     }
-    if (!validatorIdentityPublicKey.trim() || !validatorIdentityProof.trim()) {
+    if (!validatorPackage.available && (!validatorIdentityPublicKey.trim() || !validatorIdentityProof.trim())) {
       setStepError('Install the encrypted validator bundle through the approved custody channel, then provide its public-key enrollment proof.');
       return;
     }
@@ -3528,9 +3582,9 @@ function SetupStepContent({ step, eligibility, setupConfig, setSetupConfig, setC
         stakeTxHash: eligibility.stakeTxHash || eligibility.stake_tx_hash || null,
         eligibility,
         onboardingToken: secureNetworkToken,
-        assignmentId: validatorAssignmentId.trim(),
-        validatorPublicKey: validatorIdentityPublicKey.trim(),
-        identityProof: validatorIdentityProof.trim(),
+        assignmentId: validatorPackage.assignmentId || validatorAssignmentId.trim(),
+        validatorPublicKey: validatorPackage.validatorPublicKey || validatorIdentityPublicKey.trim(),
+        identityProof: validatorPackage.available ? undefined : validatorIdentityProof.trim(),
         peerName: validatorPeerName,
         targetId: setupConfig.targetId || (setupConfig.targetMode === 'remote' ? '' : 'local'),
         target: {
@@ -3761,7 +3815,7 @@ function SetupStepContent({ step, eligibility, setupConfig, setSetupConfig, setC
   const createValidatorNodeFromSetup = async (identityPassphrase) => {
     const nickname = String(setupConfig.nodeNickname || '').trim();
     const isRemote = setupConfig.targetMode === 'remote';
-    const result = await nodeService.setupValidatorNode({
+    const setupRequest = {
       targetId: setupConfig.targetId || (setupConfig.targetMode === 'remote' ? '' : 'local'),
       target: {
         mode: setupConfig.targetMode || 'local',
@@ -3774,7 +3828,10 @@ function SetupStepContent({ step, eligibility, setupConfig, setSetupConfig, setC
       displayLabel: nickname,
       intendedDirectory: setupConfig.storageLocation,
       identityPassphrase,
-    });
+    };
+    const result = validatorPackage.available
+      ? await invokeOnboarding('installPackagedValidatorIdentity', setupRequest)
+      : await nodeService.setupValidatorNode(setupRequest);
     const createdNode = result?.node;
     if (!createdNode?.id) {
       throw new Error('Validator setup did not return a validator node record.');
@@ -3821,7 +3878,9 @@ function SetupStepContent({ step, eligibility, setupConfig, setSetupConfig, setC
     });
     clearSetupWizardState(null);
     if (isRemote) {
-      setSetupConfigStatus('Remote validator workspace created and identity encrypted on the target. Continue with the owner wallet and bonded stake.');
+      setSetupConfigStatus(validatorPackage.available
+        ? `Installed ${validatorPackage.assignmentId} on the remote target. Continue with the owner wallet and bonded stake.`
+        : 'Remote validator workspace created and identity encrypted on the target. Continue with the owner wallet and bonded stake.');
       return result;
     }
     context.setSelectedNodeId?.(createdNode.id);
@@ -3831,8 +3890,10 @@ function SetupStepContent({ step, eligibility, setupConfig, setSetupConfig, setC
         input: { nodeId: createdNode.id },
       });
       setSetupConfigStatus(publish?.published
-        ? 'Validator workspace created, keys encrypted, and profile published to Atlas.'
-        : `Validator workspace created, keys encrypted, and nickname saved locally. Atlas sync is pending: ${publish?.message || publish?.status || 'unknown Atlas response'}`);
+        ? validatorPackage.available
+          ? `${validatorPackage.assignmentId} identity installed and profile published to Atlas.`
+          : 'Validator workspace created, keys encrypted, and profile published to Atlas.'
+        : `${validatorPackage.available ? 'Packaged validator identity installed' : 'Validator workspace created'}, keys encrypted, and nickname saved locally. Atlas sync is pending: ${publish?.message || publish?.status || 'unknown Atlas response'}`);
     } catch (error) {
       setSetupConfigStatus(`Validator workspace created and nickname saved locally. Atlas sync is pending: ${String(error?.message || error)}`);
     }
@@ -4581,14 +4642,26 @@ function SetupStepContent({ step, eligibility, setupConfig, setSetupConfig, setC
     const validatorGenerated = Boolean(nodeId && validatorAddress);
     const selectedAddress = validatorAddress;
     const passphraseStatus = passphraseStrength(setupPassphrase);
-    const keyProtection = setupConfig.targetMode === 'remote' ? 'Encrypted on target' : 'Encrypted backup required';
+    const keyProtection = validatorPackage.available
+      ? `Installer-bound encrypted identity (${validatorPackage.assignmentId})`
+      : setupConfig.targetMode === 'remote'
+        ? 'Encrypted on target'
+        : 'Encrypted backup required';
     const backupReadyForStake = validatorGenerated && backupConfirmed;
     const remoteTargetReady = setupConfig.targetMode === 'local' || Boolean(setupConfig.targetId && targetState === 'connected');
     return (
       <div className="v18-setup-config-grid">
         <div className="v18-setup-config-main">
-          <Card title="Create Validator Identity & Backup" icon={KeyRound}>
-            <p>Create the validator address and encrypted identity before connecting a wallet or bonding stake.</p>
+          <Card title={validatorPackage.available ? 'Install Assigned Validator Identity & Backup' : 'Create Validator Identity & Backup'} icon={KeyRound}>
+            <p>{validatorPackage.available
+              ? `This installer is assigned to ${validatorPackage.assignmentId}. Unlock its encrypted Testnet-v3 identity locally before connecting a wallet or bonding stake.`
+              : 'Create the validator address and encrypted identity before connecting a wallet or bonding stake.'}</p>
+            {validatorPackage.available ? (
+              <div className="v18-alert is-success">
+                Validator {validatorPackage.validator} · {validatorPackage.validatorAddress} · VPN {validatorPackage.vpnIp} · {validatorPackage.cohort === 'initial-six' ? 'initial launch cohort' : 'gradual activation cohort'}
+              </div>
+            ) : null}
+            {validatorPackage.error ? <div className="v18-alert is-warning">{validatorPackage.error}</div> : null}
             <div className="v18-setup-config-columns">
               <div>
                 <label className="v18-field">
@@ -4655,7 +4728,7 @@ function SetupStepContent({ step, eligibility, setupConfig, setSetupConfig, setC
               </div>
               <form onSubmit={createValidatorIdentityFromScreen}>
                 <label className="v18-field">
-                  <span>Encryption passphrase</span>
+                  <span>{validatorPackage.available ? 'Assigned identity passphrase' : 'Encryption passphrase'}</span>
                   <input
                     type="password"
                     value={setupPassphrase}
@@ -4666,7 +4739,7 @@ function SetupStepContent({ step, eligibility, setupConfig, setSetupConfig, setC
                   />
                 </label>
                 <label className="v18-field">
-                  <span>Confirm encryption passphrase</span>
+                  <span>Confirm {validatorPackage.available ? 'assigned identity' : 'encryption'} passphrase</span>
                   <input
                     type="password"
                     value={setupPassphraseConfirm}
@@ -4681,14 +4754,14 @@ function SetupStepContent({ step, eligibility, setupConfig, setSetupConfig, setC
                 {setupPassphraseError ? <small className="v18-error-text">{friendlySetupError(setupPassphraseError)}</small> : null}
                 <button type="submit" className="v18-primary-button" disabled={validatorGenerated || stepBusy === 'node-config' || !remoteTargetReady}>
                   {stepBusy === 'node-config' ? <RefreshCw size={16} className="v18-spin" /> : <KeyRound size={16} />}
-                  Create Validator Identity
+                  {validatorPackage.available ? 'Unlock & Install Assigned Identity' : 'Create Validator Identity'}
                 </button>
               </form>
             </div>
           </Card>
 
           {validatorGenerated ? (
-            <Card title="Validator identity created" icon={Shield} className="v18-generated-validator-card">
+            <Card title={validatorPackage.available ? 'Assigned validator identity installed' : 'Validator identity created'} icon={Shield} className="v18-generated-validator-card">
               <div className="v18-generated-validator-grid">
                 <div><span>Validator Address / Node Address</span><strong>{selectedAddress}</strong><CopyButton value={selectedAddress} /></div>
                 <div><span>Nickname</span><strong>{setupConfig.nodeNickname}</strong></div>
@@ -4725,7 +4798,7 @@ function SetupStepContent({ step, eligibility, setupConfig, setSetupConfig, setC
             </button>
           </div>
         </div>
-        <SetupSummary eligibility={eligibility} setupConfig={setupConfig} backupConfirmed={backupConfirmed} currentStatus={validatorGenerated ? 'Identity created' : remoteTargetReady ? 'Create identity' : 'Connect target'} />
+        <SetupSummary eligibility={eligibility} setupConfig={setupConfig} backupConfirmed={backupConfirmed} currentStatus={validatorGenerated ? (validatorPackage.available ? 'Assigned identity installed' : 'Identity created') : remoteTargetReady ? (validatorPackage.available ? 'Unlock assigned identity' : 'Create identity') : 'Connect target'} />
       </div>
     );
   }
@@ -4783,26 +4856,36 @@ function SetupStepContent({ step, eligibility, setupConfig, setSetupConfig, setC
           </Card>
 
           <Card title="Secure Validator Network" icon={Wifi}>
-            <p>Use coordinator-managed secure networking so new validators can join without manually editing every existing validator config.</p>
+            <p>{validatorPackage.available
+              ? `The full ${validatorPackage.assignmentId} VPN topology is already included. Enter the one-time coordinator token to prove this assignment and activate its secure interface.`
+              : 'Use coordinator-managed secure networking so new validators can join without manually editing every existing validator config.'}</p>
             {!vpnReady ? (
               <>
-                <label className="v18-input-row">
-                  <span>Validator package assignment ID</span>
-                  <input autoComplete="off" value={validatorAssignmentId} onChange={(event) => setValidatorAssignmentId(event.target.value)} placeholder="validator-07" />
-                </label>
+                {validatorPackage.available ? (
+                  <CopyValue label="Installer assignment" value={validatorPackage.assignmentId} copyLabel="Copy installer assignment" />
+                ) : (
+                  <label className="v18-input-row">
+                    <span>Validator package assignment ID</span>
+                    <input autoComplete="off" value={validatorAssignmentId} onChange={(event) => setValidatorAssignmentId(event.target.value)} placeholder="validator-07" />
+                  </label>
+                )}
                 <label className="v18-input-row">
                   <span>One-time onboarding token</span>
                   <input type="password" autoComplete="off" value={secureNetworkToken} onChange={(event) => setSecureNetworkToken(event.target.value)} />
                 </label>
-                <label className="v18-input-row">
-                  <span>Assigned validator public key</span>
-                  <input autoComplete="off" value={validatorIdentityPublicKey} onChange={(event) => setValidatorIdentityPublicKey(event.target.value)} placeholder="Public key from the approved custody bundle" />
-                </label>
-                <label className="v18-input-row">
-                  <span>Validator enrollment proof</span>
-                  <input type="password" autoComplete="off" value={validatorIdentityProof} onChange={(event) => setValidatorIdentityProof(event.target.value)} placeholder="Detached proof from the custody bundle" />
-                </label>
-                {validatorEnrollmentProofMessage ? <CopyValue label="Enrollment proof message" value={validatorEnrollmentProofMessage} copyLabel="Copy enrollment proof message" /> : null}
+                {!validatorPackage.available ? (
+                  <>
+                    <label className="v18-input-row">
+                      <span>Assigned validator public key</span>
+                      <input autoComplete="off" value={validatorIdentityPublicKey} onChange={(event) => setValidatorIdentityPublicKey(event.target.value)} placeholder="Public key from the approved custody bundle" />
+                    </label>
+                    <label className="v18-input-row">
+                      <span>Validator enrollment proof</span>
+                      <input type="password" autoComplete="off" value={validatorIdentityProof} onChange={(event) => setValidatorIdentityProof(event.target.value)} placeholder="Detached proof from the custody bundle" />
+                    </label>
+                    {validatorEnrollmentProofMessage ? <CopyValue label="Enrollment proof message" value={validatorEnrollmentProofMessage} copyLabel="Copy enrollment proof message" /> : null}
+                  </>
+                ) : null}
               </>
             ) : null}
             <div className={cls('v18-vpn-setup-panel', vpnReady && 'is-success', vpnSetupState.status === 'error' && 'is-error')}>
@@ -4815,7 +4898,7 @@ function SetupStepContent({ step, eligibility, setupConfig, setSetupConfig, setC
                 </div>
               </div>
               <CopyValue label="Assigned VPN IP" value={secureNetwork.assignedIp} copyLabel="Copy assigned VPN IP" />
-              <button type="button" className="v18-primary-button" disabled={!healthReady || stepBusy || vpnReady} onClick={setupValidatorVpn}>
+              <button type="button" className="v18-primary-button" disabled={!healthReady || !secureNetworkToken.trim() || stepBusy || vpnReady} onClick={setupValidatorVpn}>
                 {stepBusy === 'vpn-setup' ? <RefreshCw size={16} className="v18-spin" /> : <Wifi size={16} />}
                 {vpnReady ? 'Secure Network Confirmed' : vpnSetupState.status === 'success' ? 'Recheck Secure Network' : 'Connect Secure Network'}
               </button>
@@ -5797,7 +5880,7 @@ function MonitoringPage() {
           </div>
           <div className="v18-two-column">
             <Card title="Disk Utilization"><UsageGauge value={firstFiniteValue(live, ['disk_percent'])} detail="Workspace storage used" /></Card>
-            <ChartCard title="Block Height" current={firstFiniteValue(live, ['local_chain_height', 'sync_target_height', 'best_network_height'])} points={trendPoints(history, 'blockHeight')} tone="blue" unit="blocks" emptyText="No chain-height history was returned for this node." />
+            <ChartCard title="Block Height" current={firstFiniteValue(live, ['local_chain_height', 'sync_target_height', 'best_network_height'])} points={trendPoints(history, 'blockHeight')} tone="blue" unit="blocks" integer emptyText="No chain-height history was returned for this node." />
           </div>
           <Card title="Health Timeline" action={<span className={cls('v18-readiness-state', readinessState.error && 'is-error')}>{readinessStateLabel}</span>}>
             <div className="v18-health-timeline">
@@ -5847,10 +5930,10 @@ function MonitoringPage() {
   );
 }
 
-function ChartCard({ title, current, points = [], tone = 'green', formatValue = formatNumber, unit = '', fixedDomain, emptyText, thresholds = null }) {
+function ChartCard({ title, current, points = [], tone = 'green', formatValue = formatNumber, unit = '', fixedDomain, emptyText, thresholds = null, integer = false }) {
   return (
     <Card title={title}>
-      <OperationalLineChart title={title} current={current} points={points} tone={tone} formatValue={formatValue} unit={unit} fixedDomain={fixedDomain} emptyText={emptyText} thresholds={thresholds} sampleLabel="polling samples" />
+      <OperationalLineChart title={title} showTitle={false} current={current} points={points} tone={tone} formatValue={formatValue} unit={unit} fixedDomain={fixedDomain} integer={integer} emptyText={emptyText} thresholds={thresholds} sampleLabel="polling samples" />
     </Card>
   );
 }
@@ -6025,7 +6108,7 @@ function LogsPage({ runAction }) {
 
 function SettingsPage() {
   const context = useControlPanel();
-  const [settings, setSettings] = useState(null);
+  const [settings, setSettings] = useState(() => ({ ...defaultControlPanelSettings }));
   const [activeTab, setActiveTab] = useState('General');
   const [status, setStatus] = useState('');
   const [updateInfo, setUpdateInfo] = useState(null);
@@ -6034,7 +6117,11 @@ function SettingsPage() {
   const [lockPasswordConfirm, setLockPasswordConfirm] = useState('');
   const [lockPasswordError, setLockPasswordError] = useState('');
   useEffect(() => {
-    settingsService.getSettings().then(setSettings).catch((error) => setStatus(String(error?.message || error)));
+    settingsService.getSettings()
+      .then(setSettings)
+      .catch((error) => {
+        setStatus(`Settings are using safe defaults because persistent desktop settings could not be loaded: ${String(error?.message || error)}`);
+      });
   }, []);
   const update = async (patch, afterUpdate = null) => {
     try {
@@ -6110,7 +6197,6 @@ function SettingsPage() {
     setActiveTab(label);
     document.getElementById(`v18-settings-${label.toLowerCase().replace(/\s+/g, '-')}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
-  if (!settings) return null;
   return (
     <>
       <PageHeader title="Synergy Node Control Panel" subtitle="Configure your node settings, preferences, and maintenance." />

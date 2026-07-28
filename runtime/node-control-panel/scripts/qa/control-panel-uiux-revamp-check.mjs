@@ -144,7 +144,10 @@ assert(!v18Source.includes(`useState('${packageJson.version}')`), 'Panel version
 const cargoToml = read('control-service/Cargo.toml');
 assertIncludes(cargoToml, `version = "${packageJson.version}"`, 'control-service version');
 
-const workflow = read('.github/workflows/release.yml');
+const workflow = fs.readFileSync(
+  path.resolve(root, '../../.github/workflows/node-control-panel-release.yml'),
+  'utf8',
+);
 assertIncludes(workflow, '# Windows installer builds are intentionally disabled', 'Windows workflow pause');
 assertIncludes(workflow, '# - os: windows-latest', 'Windows matrix commented');
 assertIncludes(workflow, '#     electron-dist/*.exe', 'Windows release upload commented');

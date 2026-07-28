@@ -6,12 +6,20 @@ const {
   requestInvite,
   waitForMeshPropagation,
 } = require('../onboarding/coordinator-client.cjs');
-const { getMeshHealth, redeemInvite } = require('../onboarding/innernet.cjs');
+const {
+  activatePackagedWireguardConfig,
+  getMeshHealth,
+  redeemInvite,
+} = require('../onboarding/innernet.cjs');
 const {
   PendingInviteStore,
   isPendingInviteRecoverable,
 } = require('../onboarding/pending-invites.cjs');
 const { TargetRegistry } = require('../onboarding/targets.cjs');
+const {
+  decryptValidatorPackage,
+  loadValidatorPackage,
+} = require('../onboarding/validator-package.cjs');
 
 const REQUIRED_VALIDATOR_STAKE_SNRG = 50_000;
 const VALIDATOR_FEE_RESERVE_SNRG = 1;
@@ -90,23 +98,75 @@ function setupOnboardingIpc(ipcMain, {
     await pendingInvitesReady;
     const id = targetId(input);
     await targets.find(id);
+    let validatorFields = {
+      validatorAddress: input.validatorAddress,
+      validatorPublicKey: input.validatorPublicKey,
+      identityProof: input.identityProof,
+      assignmentId: input.assignmentId,
+      preconfiguredVpnIp: input.preconfiguredVpnIp,
+      preconfiguredWireguardPublicKey: input.preconfiguredWireguardPublicKey,
+      preconfiguredConfigVersion: input.preconfiguredConfigVersion,
+    };
+    if (String(input.peerType || '').trim() === 'validator') {
+      const packaged = await loadValidatorPackage();
+      if (packaged.available) {
+        const nodeId = requireString(
+          input,
+          'nodeId',
+          'NODE_REQUIRED',
+          'Install the packaged validator identity before activating its secure network.',
+        );
+        const peerName = requireString(
+          input,
+          'peerName',
+          'PEER_NAME_REQUIRED',
+          'A validator nickname is required before activating the secure network.',
+        );
+        const proof = await runOnTarget(input, {
+          localCommand: 'testnet_sign_packaged_validator_enrollment_proof',
+          localArgs: {
+            nodeId,
+            assignmentId: packaged.assignmentId,
+            peerName,
+          },
+          remoteCommand: 'sign-packaged-validator-enrollment-proof',
+          remotePayload: {
+            nodeId,
+            assignmentId: packaged.assignmentId,
+            peerName,
+          },
+        });
+        validatorFields = {
+          validatorAddress: proof.validatorAddress || proof.validator_address,
+          validatorPublicKey: proof.validatorPublicKey || proof.validator_public_key,
+          identityProof: proof.identityProof || proof.identity_proof,
+          assignmentId: packaged.assignmentId,
+          preconfiguredVpnIp: packaged.vpnIp,
+          preconfiguredWireguardPublicKey: packaged.wireguardPublicKey,
+          preconfiguredConfigVersion: packaged.vpnConfigVersion,
+        };
+      }
+    }
     const invite = await requestInvite({
       onboardingToken: requireString(input, 'onboardingToken', 'ONBOARDING_TOKEN_REQUIRED', 'Enter the secure-network onboarding token.'),
       peerType: requireString(input, 'peerType', 'PEER_TYPE_REQUIRED', 'A peer type is required before requesting a secure-network invite.'),
       peerName: requireString(input, 'peerName', 'PEER_NAME_REQUIRED', 'A validator nickname is required before requesting a secure-network invite.'),
       nodeId: input.nodeId,
-      validatorAddress: input.validatorAddress,
+      validatorAddress: validatorFields.validatorAddress,
       operatorAddress: input.operatorAddress,
       ownerWalletAddress: input.ownerWalletAddress,
       walletAddress: input.walletAddress,
       stakeTxHash: input.stakeTxHash,
       identityPublicKey: input.identityPublicKey,
       identityFingerprint: input.identityFingerprint,
-      validatorPublicKey: input.validatorPublicKey,
-      identityProof: input.identityProof,
+      validatorPublicKey: validatorFields.validatorPublicKey,
+      identityProof: validatorFields.identityProof,
       eligibility: input.eligibility,
       validatorIdentity: input.validatorIdentity,
-      assignmentId: input.assignmentId,
+      assignmentId: validatorFields.assignmentId,
+      preconfiguredVpnIp: validatorFields.preconfiguredVpnIp,
+      preconfiguredWireguardPublicKey: validatorFields.preconfiguredWireguardPublicKey,
+      preconfiguredConfigVersion: validatorFields.preconfiguredConfigVersion,
     });
     pendingInvitesByTarget.set(id, invite);
     await pendingInviteStore.save(pendingInvitesByTarget);
@@ -117,6 +177,7 @@ function setupOnboardingIpc(ipcMain, {
       configurationVersion: invite.configurationVersion,
       interfaceName: invite.interfaceName,
       propagation: invite.propagation,
+      preconfigured: invite.preconfigured,
     };
   }
 
@@ -130,15 +191,21 @@ function setupOnboardingIpc(ipcMain, {
     let completed = false;
     try {
       const result = await targets.withExecutor(input, async (executor) => {
-        const mesh = await redeemInviteFn(
-          executor,
-          invite,
-          {
-            assignedIp: invite.assignedIp,
-            interfaceName: invite.interfaceName,
-          },
-          (progress) => emitProgress(event, { targetId: id, ...progress }),
-        );
+        const mesh = invite.preconfigured
+          ? await activatePackagedWireguardConfig(
+            executor,
+            await loadValidatorPackage({ includeSecrets: true }),
+            (progress) => emitProgress(event, { targetId: id, ...progress }),
+          )
+          : await redeemInviteFn(
+            executor,
+            invite,
+            {
+              assignedIp: invite.assignedIp,
+              interfaceName: invite.interfaceName,
+            },
+            (progress) => emitProgress(event, { targetId: id, ...progress }),
+          );
         emitProgress(event, { targetId: id, step: 'confirming_redemption' });
         const redemption = await confirmRedemption({
           enrollmentId: invite.enrollmentId,
@@ -151,6 +218,7 @@ function setupOnboardingIpc(ipcMain, {
           enrollmentId: invite.enrollmentId,
           configurationVersion: invite.configurationVersion,
           confirmationToken: invite.confirmationToken,
+          preconfigured: invite.preconfigured,
         });
         const innernetTransportSnapshot = await getMeshTransportSnapshot({
           enrollmentId: invite.enrollmentId,
@@ -312,9 +380,9 @@ function setupOnboardingIpc(ipcMain, {
       tokenAmountNwei: amountNwei,
       gasLimit: VALIDATOR_FUNDING_GAS_LIMIT,
       maxFee: '1000',
-      chainId: 1264,
-      chain_id: 1264,
-      chainIdHex: '0x4f0',
+      chainId: 1266,
+      chain_id: 1266,
+      chainIdHex: '0x4f2',
       networkId: 'synergy-testnet-v3',
       network_id: 'synergy-testnet-v3',
       data: `token_transfer:${JSON.stringify({
@@ -481,6 +549,54 @@ function setupOnboardingIpc(ipcMain, {
       'IDENTITY_CREATION_REQUIRED',
       'Create Validator Identity generates and encrypts all validator key material on the selected target as one atomic operation.',
     );
+  });
+
+  handle('onboarding:get-validator-package', async () => loadValidatorPackage());
+
+  handle('onboarding:install-packaged-validator-identity', async (input = {}) => {
+    const { packageData, packagedValidatorIdentity } = await decryptValidatorPackage(
+      requireString(
+        input,
+        'identityPassphrase',
+        'VALIDATOR_PASSPHRASE_REQUIRED',
+        'Enter the validator identity passphrase.',
+      ),
+    );
+    const setupInput = {
+      roleId: 'validator',
+      displayLabel: input.displayLabel || input.validatorMoniker || packageData.validatorLabel || `Validator ${packageData.validator}`,
+      intendedDirectory: input.intendedDirectory || undefined,
+      publicHost: input.publicHost || undefined,
+      publicP2pPort: input.publicP2pPort || undefined,
+      natMode: input.natMode || undefined,
+      nodeAddressOverride: packageData.validatorAddress,
+      packagedValidatorIdentity,
+    };
+    const result = await runOnTarget(input, {
+      localCommand: 'testnet_setup_node',
+      localArgs: { input: setupInput },
+      remoteCommand: 'setup-node',
+      remotePayload: setupInput,
+    });
+    const node = result?.node || {};
+    const configPaths = Array.isArray(node.configPaths) ? node.configPaths : [];
+    const configPath = configPaths.find((candidate) => /(?:^|\/)node\.toml$/i.test(String(candidate))) || configPaths[0] || null;
+    configuredNodesByTarget.set(targetId(input), {
+      nodeId: node.id || input.nodeId || null,
+      configPath,
+      workspaceDirectory: node.workspaceDirectory || node.workspace_directory || null,
+    });
+    return {
+      ...result,
+      validatorPackage: {
+        assignmentId: packageData.assignmentId,
+        validator: packageData.validator,
+        validatorAddress: packageData.validatorAddress,
+        vpnIp: packageData.vpnIp,
+        activationStatus: packageData.activationStatus,
+      },
+      message: `Installed the encrypted ${packageData.assignmentId} identity and its assigned Testnet-v3 key roles.`,
+    };
   });
 
   handle('onboarding:create-validator-identity', async (input = {}) => {

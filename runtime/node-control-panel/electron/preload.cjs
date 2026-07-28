@@ -65,6 +65,9 @@ contextBridge.exposeInMainWorld('synergyDesktop', {
     verifyValidatorEligibility: (request) =>
       ipcRenderer.invoke('onboarding:verify-validator-eligibility', request),
     generateKeys: (request) => ipcRenderer.invoke('onboarding:generate-keys', request),
+    getValidatorPackage: () => ipcRenderer.invoke('onboarding:get-validator-package'),
+    installPackagedValidatorIdentity: (request) =>
+      ipcRenderer.invoke('onboarding:install-packaged-validator-identity', request),
     createValidatorIdentity: (request) =>
       ipcRenderer.invoke('onboarding:create-validator-identity', request),
     exportEncryptedBackup: (request) =>

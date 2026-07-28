@@ -5,11 +5,11 @@ Scope: Synergy Testnet post-fork operations and first-start checks
 
 ## 1. Core Facts
 
-- Chain ID: `1264`
+- Chain ID: `1266`
 - Network ID: `synergy-testnet-v3`
-- Checkpoint fork: height `204216`, parent `204215`
+- Testnet-v3 genesis: height `0`
 - Consensus signing after fork: `FN-DSA`
-- Validator key algorithm: `FN-DSA-1024`
+- Consensus key algorithm: `ML-DSA-65`
 - Parser mode: `fail_closed`
 - Token: `SNRG`
 - Core RPC: `https://testnet-core-rpc.synergy-network.io`

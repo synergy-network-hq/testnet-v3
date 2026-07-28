@@ -31,7 +31,7 @@ async function main() {
   const durableStorage = new MemoryStorage();
   const legacyStorage = new MemoryStorage();
   const legacyRecord = {
-    wallet: { address: 'synw1owner', chainId: 1264, chainIdHex: '0x4f0' },
+    wallet: { address: 'synw1owner', chainId: 1266, chainIdHex: '0x4f2' },
     session: {
       sessionId: 'session-1',
       pollUrl: 'https://relay.example/sessions/session-1',
@@ -47,7 +47,7 @@ async function main() {
 
   assert.equal(persistWalletSession({
     storage: durableStorage,
-    wallet: { address: 'synw1new', chainId: 1264, chainIdHex: '0x4f0' },
+    wallet: { address: 'synw1new', chainId: 1266, chainIdHex: '0x4f2' },
     session: { sessionId: 'session-2', pollUrl: 'https://relay.example/sessions/session-2', relayUrl: 'https://relay.example' },
   }), true);
   assert.equal(readPersistedWalletSession({ storage: durableStorage }).wallet.address, 'synw1new');
@@ -114,7 +114,10 @@ async function main() {
   const cargoToml = fs.readFileSync(path.join(root, 'control-service/Cargo.toml'), 'utf8');
   const innernetCoordinator = fs.readFileSync(path.join(root, 'control-service/src/innernet.rs'), 'utf8');
   const testnetControlService = fs.readFileSync(path.join(root, 'control-service/src/testnet.rs'), 'utf8');
-  const workflow = fs.readFileSync(path.join(root, '.github/workflows/release.yml'), 'utf8');
+  const workflow = fs.readFileSync(
+    path.resolve(root, '../../.github/workflows/node-control-panel-release.yml'),
+    'utf8',
+  );
   assert.match(cargoToml, new RegExp(`^version = "${packageJson.version}"$`, 'm'));
   assert.equal(packageLock.version, packageJson.version);
   assert.equal(packageLock.packages[''].version, packageJson.version);

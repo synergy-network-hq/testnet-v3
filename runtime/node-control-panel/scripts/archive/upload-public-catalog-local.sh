@@ -338,7 +338,7 @@ if candidate_height < current_height:
         f"refusing catalog downgrade from trusted height {current_height} to {candidate_height}"
     )
 local_path = str(candidate.get("local_path", ""))
-allowed = "/Users/Shared/Synergy/archive-validator/published-snapshots-v19/testnet-1264/validator-pruned/snapshot-"
+allowed = "/Users/Shared/Synergy/archive-validator/published-snapshots-v19/testnet-1266/validator-pruned/snapshot-"
 if candidate_height > current_height and not local_path.startswith(allowed):
     raise SystemExit("new snapshot local_path is outside the canonical archive publication root")
 with open(sys.argv[3], "w", encoding="utf-8") as handle:

@@ -5,7 +5,7 @@ It is a sequential operator playbook; all state-changing steps are performed by 
 
 ## Scope and constants
 
-- Network: `chain_id=1264`, `network_id=synergy-testnet-v3`
+- Network: `chain_id=1266`, `network_id=synergy-testnet-v3`
 - Required stake: `50,000 SNRG` (`50_000_000_000_000 nWei`)
 - Validator role only (role class 1)
 - Maximum post-snapshot catch-up gap: `10,000` blocks

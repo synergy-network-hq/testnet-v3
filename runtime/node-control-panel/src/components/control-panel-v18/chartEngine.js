@@ -32,7 +32,7 @@ function roundToStep(value, step) {
  * human-readable values (1 / 2 / 5 x 10^n) instead of arbitrary fractions.
  */
 export function niceScale(minValue, maxValue, targetTicks = 5, options = {}) {
-  const { zeroBaseline = false, padRatio = 0.08 } = options;
+  const { zeroBaseline = false, padRatio = 0.08, integerSteps = false } = options;
   let min = finiteNumber(minValue) ?? 0;
   let max = finiteNumber(maxValue) ?? 1;
 
@@ -41,6 +41,10 @@ export function niceScale(minValue, maxValue, targetTicks = 5, options = {}) {
     min = max;
     max = swap;
   }
+
+  // Telemetry that is physically non-negative (peer counts, latency, sync gap)
+  // must never render a negative axis floor just because of domain padding.
+  const nonNegativeSeries = min >= 0;
 
   if (min === max) {
     const pad = Math.abs(min) > 0 ? Math.abs(min) * 0.12 : 1;
@@ -61,10 +65,15 @@ export function niceScale(minValue, maxValue, targetTicks = 5, options = {}) {
   const magnitude = 10 ** Math.floor(Math.log10(Math.abs(rawStep) || 1));
   const residual = rawStep / magnitude;
   const stepMultiplier = residual > 5 ? 10 : residual > 2 ? 5 : residual > 1 ? 2 : 1;
-  const step = stepMultiplier * magnitude;
+  // Discrete metrics (peer counts, block gaps) must not produce fractional
+  // gridlines - a "12.5 peers" tick is not a real quantity.
+  const step = integerSteps
+    ? Math.max(1, Math.round(stepMultiplier * magnitude))
+    : stepMultiplier * magnitude;
 
-  const niceMin = Math.floor(min / step) * step;
+  let niceMin = Math.floor(min / step) * step;
   const niceMax = Math.ceil(max / step) * step;
+  if (nonNegativeSeries && niceMin < 0) niceMin = 0;
   const tickCount = Math.max(1, Math.round((niceMax - niceMin) / step));
 
   const ticks = [];
@@ -93,6 +102,38 @@ export function formatCompactNumber(value) {
 function trimZeros(value) {
   const rounded = Math.round(value * 10) / 10;
   return Number.isInteger(rounded) ? `${rounded}` : rounded.toFixed(1);
+}
+
+/**
+ * Build an axis label formatter for a specific domain.
+ *
+ * Prefers the caller's own formatter when its output is short and unambiguous.
+ * Otherwise falls back to compact notation carrying just enough decimal places
+ * that adjacent ticks stay distinguishable - without this, a block-height axis
+ * spanning 1,284,000-1,288,000 renders every tick as "1.3M".
+ */
+export function axisLabelFormatter(domain, formatValue = (value) => `${value}`) {
+  const { ticks = [], step = 1 } = domain || {};
+  if (!ticks.length) return (value) => String(formatValue(value));
+
+  const direct = ticks.map((tick) => String(formatValue(tick)));
+  const readable = direct.every((label) => label.length <= 8);
+  const distinct = new Set(direct).size === direct.length;
+  if (readable && distinct) {
+    const lookup = new Map(ticks.map((tick, index) => [tick, direct[index]]));
+    return (value) => lookup.get(value) ?? String(formatValue(value));
+  }
+
+  const magnitude = Math.max(...ticks.map((tick) => Math.abs(tick)), 0);
+  const [suffix, divisor] = magnitude >= 1e9
+    ? ['B', 1e9]
+    : magnitude >= 1e6
+      ? ['M', 1e6]
+      : magnitude >= 1e3
+        ? ['k', 1e3]
+        : ['', 1];
+  const decimals = Math.min(4, Math.max(0, Math.ceil(Math.log10(divisor / Math.abs(step || 1)))));
+  return (value) => `${(value / divisor).toFixed(decimals)}${suffix}`;
 }
 
 /** Percentage delta between the first and last sample of a series. */

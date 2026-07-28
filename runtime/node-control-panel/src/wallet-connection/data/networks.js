@@ -149,7 +149,7 @@ const EXTERNAL_NETWORKS = [
 export const NETWORKS = [
   {
     id: "synergy",
-    chainId: 1264,
+    chainId: 1266,
     name: "Synergy",
     short: "SYN",
     label: "Synergy Network",

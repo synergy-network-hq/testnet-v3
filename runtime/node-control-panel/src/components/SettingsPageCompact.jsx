@@ -187,8 +187,8 @@ export default function SettingsPageCompact() {
         <SettingsCard kicker="General" title="General Preferences">
           <div className="settings-shell-definition-grid">
             <Definition label="App" value="Synergy Node Control Panel" detail={version || 'Version not reported'} />
-            <Definition label="Environment" value={state?.display_name || 'Testnet'} detail={`chain_id ${state?.chain_id || state?.network_profile?.chain_id || 1264} / network_id ${state?.network_id || state?.network_profile?.network_id || 'synergy-testnet-v3'}`} />
-            <Definition label="Checkpoint Fork" value={fork?.new_consensus_algorithm || 'FN-DSA'} detail={`height ${fork?.fork_height || 204216}, parent ${fork?.fork_parent_height || 204215}, parser ${fork?.parser_mode || 'fail_closed'}`} />
+            <Definition label="Environment" value={state?.display_name || 'Testnet'} detail={`chain_id ${state?.chain_id || state?.network_profile?.chain_id || 1266} / network_id ${state?.network_id || state?.network_profile?.network_id || 'synergy-testnet-v3'}`} />
+            <Definition label="Genesis Consensus" value={fork?.new_consensus_algorithm || 'ML-DSA-65'} detail={`height ${fork?.fork_height ?? 0}, network ${state?.network_id || state?.network_profile?.network_id || 'synergy-testnet-v3'}, parser ${fork?.parser_mode || 'fail_closed'}`} />
             <Definition label="Machine" value={state?.device_profile?.hostname || 'Unknown'} detail={state?.device_profile?.operating_system || 'Local operator host'} />
           </div>
         </SettingsCard>

@@ -20,7 +20,7 @@ pub const PRODUCER_NODE_KIND: &str = "archive-validator";
 pub const BINARY_COMPATIBILITY: &str = "synergy-testnet-v3-validator-pruned-v1";
 pub const ARCHIVE_CHUNK_SIZE: u64 = 512 * 1024 * 1024;
 pub const RETAIN_PER_CLASS: usize = 2;
-const CANONICAL_TESTNET_CHAIN_ID: u64 = 1264;
+const CANONICAL_TESTNET_CHAIN_ID: u64 = 1266;
 const CANONICAL_TESTNET_NETWORK_ID: &str = "synergy-testnet-v3";
 const CANONICAL_TESTNET_GENESIS_HASH: &str =
     "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789";
@@ -1635,7 +1635,7 @@ fn validate_canonical_testnet_request(
             .eq_ignore_ascii_case(CANONICAL_TESTNET_GENESIS_HASH)
     {
         return Err(
-            "Imported snapshot does not identify canonical Synergy Testnet v3 (chain 1264)."
+            "Imported snapshot does not identify canonical Synergy Testnet v3 (chain 1266)."
                 .to_string(),
         );
     }
@@ -2427,7 +2427,7 @@ esac
         json!({
             "snapshot_id": "snapshot-000000010-abcdef12",
             "snapshot_class": SNAPSHOT_CLASS_VALIDATOR_PRUNED,
-            "chain_id": 1264,
+            "chain_id": 1266,
             "network_id": "synergy-testnet-v3",
             "genesis_hash": "genesis",
             "height": 10,
@@ -2458,7 +2458,7 @@ esac
         let snapshots = vec![entry];
         json!({
             "schema": CATALOG_SCHEMA,
-            "chain_id": 1264,
+            "chain_id": 1266,
             "network_id": "synergy-testnet-v3",
             "genesis_hash": "genesis",
             "producer_role": SOURCE_ROLE_ARCHIVE_VALIDATOR,
@@ -2480,7 +2480,7 @@ esac
         entry["producer_role"] = json!("GENESIS_VALIDATOR");
         let error = validate_catalog_for_consumer(
             &catalog_with(entry),
-            1264,
+            1266,
             "synergy-testnet-v3",
             "genesis",
             &fork(),
@@ -2495,7 +2495,7 @@ esac
         entry["snapshot_url"] = json!("/local/snapshot.tar.zst");
         let error = validate_catalog_for_consumer(
             &catalog_with(entry),
-            1264,
+            1266,
             "synergy-testnet-v3",
             "genesis",
             &fork(),
@@ -2510,7 +2510,7 @@ esac
         entry["binary_compatibility"] = json!("legacy-validator");
         let error = validate_catalog_for_consumer(
             &catalog_with(entry),
-            1264,
+            1266,
             "synergy-testnet-v3",
             "genesis",
             &fork(),

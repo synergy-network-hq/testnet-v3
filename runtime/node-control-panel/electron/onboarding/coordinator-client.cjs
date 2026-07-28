@@ -51,6 +51,15 @@ function validatorIdentityFields(input = {}) {
     assignment_id: stringValue(source.assignmentId, source.assignment_id),
     validator_public_key: stringValue(source.validatorPublicKey, source.validator_public_key, source.identityPublicKey, source.identity_public_key),
     identity_proof: stringValue(source.identityProof, source.identity_proof),
+    preconfigured_vpn_ip: stringValue(source.preconfiguredVpnIp, source.preconfigured_vpn_ip),
+    preconfigured_wireguard_public_key: stringValue(
+      source.preconfiguredWireguardPublicKey,
+      source.preconfigured_wireguard_public_key,
+    ),
+    preconfigured_config_version: stringValue(
+      source.preconfiguredConfigVersion,
+      source.preconfigured_config_version,
+    ),
   };
   return Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== null));
 }
@@ -145,6 +154,7 @@ async function requestInvite({ onboardingToken, peerName, peerType, ...input } =
     confirmationToken: payload.confirmation_token || payload.confirmationToken || null,
     interfaceName: payload.interface_name || payload.interfaceName || payload.innernet_interface || payload.innernetInterface || payload.interface || null,
     propagation: payload.propagation || null,
+    preconfigured: payload.preconfigured === true,
   };
 }
 
@@ -240,6 +250,7 @@ async function waitForMeshPropagation(enrollmentOrGeneration, { attempts = 20, i
   const expectedGeneration = Number(enrollment.configurationVersion ?? enrollment.configuration_version);
   const confirmationToken = stringValue(enrollment.confirmationToken, enrollment.confirmation_token);
   const enrollmentId = stringValue(enrollment.enrollmentId, enrollment.enrollment_id);
+  const preconfigured = enrollment.preconfigured === true;
   if (!confirmationToken) {
     throw coordinatorError('CONFIRMATION_TOKEN_REQUIRED', 'A per-enrollment Innernet confirmation token is required to verify mesh status.');
   }
@@ -264,7 +275,8 @@ async function waitForMeshPropagation(enrollmentOrGeneration, { attempts = 20, i
         ?? status?.configurationVersion,
     );
     const bootstrapComplete = status?.bootstrap_complete === true || status?.bootstrapComplete === true;
-    if (bootstrapComplete && latestGeneration >= expectedGeneration) {
+    const propagationComplete = status?.propagation_complete === true || status?.propagationComplete === true;
+    if ((preconfigured ? propagationComplete : bootstrapComplete) && latestGeneration >= expectedGeneration) {
       return {
         ...status,
         status: 'confirmed',

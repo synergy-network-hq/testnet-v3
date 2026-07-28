@@ -6,11 +6,11 @@ For the current post-fork operator handoff, use the full cross-platform install 
 
 Current post-fork requirements:
 
-- Chain ID: `1264`
+- Chain ID: `1266`
 - Network ID: `synergy-testnet-v3`
-- Fork height: `204216`
+- Genesis height: `0`
 - Consensus signing after fork: `FN-DSA`
-- Validator key algorithm: `FN-DSA-1024`
+- Consensus key algorithm: `ML-DSA-65`
 - Parser mode: `fail_closed`
 - Required stake: `50,000 SNRG`
 

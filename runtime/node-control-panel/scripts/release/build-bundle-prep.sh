@@ -266,10 +266,10 @@ canonical_manifest_path = next(
 def normalize_manifest(manifest):
     if not isinstance(manifest, dict):
         return manifest
-    manifest["chain_id"] = 1264
-    manifest["chain_id_hex"] = "0x4f0"
+    manifest["chain_id"] = 1266
+    manifest["chain_id_hex"] = "0x4f2"
     manifest["network_id"] = "synergy-testnet-v3"
-    manifest["network_native_id"] = 1264
+    manifest["network_native_id"] = 1266
     return manifest
 
 if not canonical_manifest_path.exists():
@@ -280,8 +280,8 @@ canonical_manifest = normalize_manifest(
 
 for package_path in sorted(installers_root.glob("Validator-*/keys/setup-package.json")):
     package = json.loads(package_path.read_text(encoding="utf-8"))
-    package["chain_id"] = 1264
-    package["chain_id_hex"] = "0x4f0"
+    package["chain_id"] = 1266
+    package["chain_id_hex"] = "0x4f2"
     package["network_id"] = "synergy-testnet-v3"
     package.setdefault("artifacts", {})["operational_manifest"] = copy.deepcopy(canonical_manifest)
     package_path.write_text(json.dumps(package, indent=2) + "\n", encoding="utf-8")
@@ -473,7 +473,7 @@ for package_path in sorted(installers_root.glob("Validator-*/keys/setup-package.
 
     config = parse_node_toml(node_toml)
     package = json.loads(package_path.read_text(encoding="utf-8"))
-    package["chain_id"] = 1264
+    package["chain_id"] = 1266
     runtime = package.setdefault("runtime_config", {})
 
     consensus = config.get("consensus", {})
@@ -531,7 +531,7 @@ for wrapper in list(installers_root.glob("*/nodectl.sh")) + list(installers_root
 
 for env_file in installers_root.glob("*/node.env"):
     text = env_file.read_text(encoding="utf-8")
-    text = text.replace("SYNERGY_NETWORK_ID=1264", "SYNERGY_NETWORK_ID=synergy-testnet-v3")
+    text = text.replace("SYNERGY_NETWORK_ID=1266", "SYNERGY_NETWORK_ID=synergy-testnet-v3")
     env_file.write_text(text, encoding="utf-8")
 
 with inventory_path.open(newline="", encoding="utf-8") as handle:

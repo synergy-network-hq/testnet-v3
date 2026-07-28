@@ -38,8 +38,8 @@ use std::process::{Command as ProcessCommand, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use synergy_address_engine::{
-    encrypted_private_key_json, generate_identity, is_valid_address, AddressType, SynergyIdentity,
-    TARGET_ADDRESS_LEN,
+    encrypted_private_key_json, generate_identity, is_valid_address, sign_identity_proof,
+    verify_address, verify_identity_proof, AddressType, SynergyIdentity, TARGET_ADDRESS_LEN,
 };
 use sysinfo::{Disks, Pid, System};
 use tar::{Archive, Builder};
@@ -54,13 +54,14 @@ const TESTNET_ENVIRONMENT_ID: &str = "testnet";
 const TESTNET_DISPLAY_NAME: &str = "Testnet";
 const TESTNET_CHAIN_NAME: &str = "synergy-testnet";
 const TESTNET_NETWORK_ID_V2: &str = "synergy-testnet-v3";
-const TESTNET_CHAIN_ID: u64 = 1264;
-const TESTNET_FORK_HEIGHT: u64 = 204_216;
-const TESTNET_FORK_PARENT_HEIGHT: u64 = 204_215;
+const TESTNET_CHAIN_ID: u64 = 1266;
+const TESTNET_FORK_HEIGHT: u64 = 0;
+const TESTNET_FORK_PARENT_HEIGHT: u64 = 0;
 const TESTNET_FORK_PARENT_HASH: &str =
-    "e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816";
-const TESTNET_CONSENSUS_ALGORITHM: &str = "FN-DSA";
-const TESTNET_VALIDATOR_KEY_ALGORITHM: &str = "FN-DSA-1024";
+    "0000000000000000000000000000000000000000000000000000000000000000";
+const TESTNET_CONSENSUS_ALGORITHM: &str = "ML-DSA-65";
+const TESTNET_VALIDATOR_KEY_ALGORITHM: &str = "ML-DSA-65";
+const TESTNET_VALIDATOR_IDENTITY_ALGORITHM: &str = "FN-DSA-1024";
 const TESTNET_PARSER_MODE: &str = "fail_closed";
 const TESTNET_BOOTNODE_PORT: u16 = 5620;
 const TESTNET_SEED_PORT: u16 = 5621;
@@ -105,7 +106,7 @@ const TREASURY_SUPPLY_SNRG: u64 = 100_000_000;
 const FAUCET_SUPPLY_SNRG: u64 = 4_000_000_000;
 const TESTNET_BLOCK_TIME_SECS: usize = 2;
 const TESTNET_STATIC_MIN_VALIDATORS: usize = 0;
-const TESTNET_GENESIS_SETUP_PACKAGE_VALIDATOR_COUNT: usize = 5;
+const TESTNET_GENESIS_SETUP_PACKAGE_VALIDATOR_COUNT: usize = 6;
 const TESTNET_STATUS_READY_GATE_ENABLED: bool = true;
 const TESTNET_STATIC_STATUS_READY_MIN_VALIDATORS: usize = 0;
 const TESTNET_STATUS_READY_GENESIS_GRACE_SECS: usize = 0;
@@ -1766,7 +1767,7 @@ pub async fn testnet_get_validator_live_status(node_id: Option<String>) -> Resul
         "cluster-map:testnet-v3:{active_validator_count}:{}",
         testnet_validator_cluster_count(active_validator_count)
     ));
-    let protocol_config_hash = stable_status_hash("protocol-config:testnet-v3:chain-1264");
+    let protocol_config_hash = stable_status_hash("protocol-config:testnet-v3:chain-1266");
     let aegis_version = "aegis-pqvm-required";
     let mut warnings = if is_syncing {
         vec![json!("Validator is behind the canonical public head.")]
@@ -2180,8 +2181,52 @@ pub struct TestnetSetupInput {
     pub node_address_override: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_passphrase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packaged_validator_identity: Option<TestnetPackagedValidatorIdentity>,
     #[serde(default)]
     pub skip_canonical_manifests: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestnetPackagedValidatorIdentity {
+    pub address: String,
+    pub address_type: String,
+    pub algorithm: String,
+    pub created_at: String,
+    pub primary_public_key: String,
+    pub primary_private_key: String,
+    pub consensus_algorithm: String,
+    pub consensus_public_key: String,
+    pub consensus_private_key: String,
+    pub node_identity_algorithm: String,
+    pub node_identity_public_key: String,
+    pub node_identity_private_key: String,
+    pub account_algorithm: String,
+    pub account_public_key: String,
+    pub account_private_key: String,
+    pub entropy_algorithm: String,
+    pub entropy_public_key: String,
+    pub entropy_private_key: String,
+    pub encrypted_envelope: String,
+    pub assignment_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestnetValidatorEnrollmentProofInput {
+    pub node_id: String,
+    pub assignment_id: String,
+    pub peer_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestnetValidatorEnrollmentProofResult {
+    pub assignment_id: String,
+    pub validator_address: String,
+    pub validator_public_key: String,
+    pub identity_proof: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2832,6 +2877,7 @@ pub async fn testnet_import_ceremony_package(
                 .as_ref()
                 .map(|identity| identity.address.clone()),
             identity_passphrase: input.identity_passphrase.clone(),
+            packaged_validator_identity: None,
             skip_canonical_manifests: true,
         })
         .await?
@@ -6019,7 +6065,7 @@ pub async fn testnet_activate_validator(
     let amount_snrg = input.amount_snrg.unwrap_or(MINIMUM_STAKE_SNRG);
     let preflight = build_validator_activation_preflight(&state, &node).await?;
     if !preflight.can_activate {
-        return Err("Validator activation preflight is not passing yet. The node must be on canonical chain 1264, within two blocks of head, visible through relayer peers, registered with seeds, and bonded before activation.".to_string());
+        return Err("Validator activation preflight is not passing yet. The node must be on canonical chain 1266, within two blocks of head, visible through relayer peers, registered with seeds, and bonded before activation.".to_string());
     }
     let policy = build_validator_onboarding_policy_evidence(&node);
     if let Some(error) = validator_activation_policy_error(&policy) {
@@ -9414,7 +9460,7 @@ async fn build_validator_activation_preflight(
     let epoch_validator_set_ok = onboarding_policy.epoch_validator_set.status == "pass";
     let epoch_boundary_ok = onboarding_policy.epoch_boundary.status == "pass";
     let fork_metadata_ok = node_config_fork_metadata_ready(&node_config_path).unwrap_or(false);
-    let fndsa_key_ok = key_inspection.algorithm == TESTNET_VALIDATOR_KEY_ALGORITHM
+    let fndsa_key_ok = key_inspection.algorithm == TESTNET_VALIDATOR_IDENTITY_ALGORITHM
         && key_inspection.public_key_bytes == Some(1793);
     let workspace_genesis_ok = match (
         workspace_genesis_hash(&workspace_directory),
@@ -9507,26 +9553,26 @@ async fn build_validator_activation_preflight(
         "canonical-workspace-genesis",
         "Canonical workspace genesis",
         workspace_genesis_ok,
-        "The validator workspace has the canonical chain 1264 genesis hash.",
+        "The validator workspace has the canonical chain 1266 genesis hash.",
         "Re-provision this workspace with the canonical Testnet bundle before staking or activation.",
     ));
     checks.push(preflight_check(
         "canonical-chain-state",
         "Canonical chain state",
         chain_state_genesis_ok,
-        "Existing local chain data belongs to the canonical chain 1264 genesis.",
+        "Existing local chain data belongs to the canonical chain 1266 genesis.",
         "Stop the node and reset stale local chain data before staking or activation.",
     ));
     checks.push(preflight_check(
-        "post-fork-fndsa-metadata",
-        "Checkpointed FN-DSA fork metadata",
+        "testnet-v3-consensus-metadata",
+        "Testnet-v3 genesis consensus metadata",
         fork_metadata_ok,
-        "node.toml declares chain_id 1264, network_id synergy-testnet-v3, fork height 204216, parent hash e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816, FN-DSA consensus keys, and fail_closed parsing.",
+        "node.toml declares chain_id 1266, network_id synergy-testnet-v3, genesis-height ML-DSA-65 consensus keys, and fail_closed parsing.",
         "Re-provision or repair node.toml with the current Control Panel before staking or activation.",
     ));
     checks.push(preflight_check(
-        "fndsa-consensus-key",
-        "FN-DSA validator consensus key",
+        "validator-primary-identity-key",
+        "FN-DSA-1024 validator primary identity",
         fndsa_key_ok,
         &format!(
             "identity.json reports algorithm {} and public key size {} bytes.",
@@ -9536,7 +9582,7 @@ async fn build_validator_activation_preflight(
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "unknown".to_string())
         ),
-        "Generate or import explicit FN-DSA-1024 validator key material. ML-DSA, Dilithium, missing, unknown, or untyped key material is rejected.",
+        "Install the assigned five-role validator bundle. Its primary identity must be FN-DSA-1024 and its consensus role must be ML-DSA-65.",
     ));
     checks.push(preflight_check(
         "local-rpc",
@@ -9834,7 +9880,8 @@ fn node_config_fork_metadata_ready(config_path: &Path) -> Result<bool, String> {
     let parser_mode_ok = policy.get("parser_mode").and_then(toml::Value::as_str)
         == Some(TESTNET_PARSER_MODE)
         && fork.get("parser_mode").and_then(toml::Value::as_str) == Some(TESTNET_PARSER_MODE);
-    let no_legacy_algorithm = !contents.to_ascii_lowercase().contains("ml-dsa")
+    let no_legacy_algorithm = !contents.to_ascii_lowercase().contains("fn-dsa")
+        && !contents.to_ascii_lowercase().contains("falcon")
         && !contents.to_ascii_lowercase().contains("dilithium");
     let fork_file_ok = config_path
         .parent()
@@ -10013,14 +10060,14 @@ fn repair_actions_for_preflight(
                 &mut actions,
                 "repair-fork-config",
                 "Repair Fork Config",
-                "Regenerate node.toml from the current Control Panel so chain 1264, fork 204216, FN-DSA, and fail_closed parser metadata are explicit.",
+                "Regenerate node.toml from the current Control Panel so Testnet-v3 chain 1266 genesis consensus, ML-DSA-65, and fail_closed parser metadata are explicit.",
                 "config",
             ),
             "fndsa-consensus-key" => push_unique_repair_action(
                 &mut actions,
                 "regenerate-fndsa-identity",
                 "Regenerate FN-DSA Identity",
-                "Provision or import explicit FN-DSA-1024 validator identity material before staking.",
+                "Install the assigned validator key bundle with its FN-DSA-1024 primary identity and ML-DSA-65 consensus role before staking.",
                 "identity",
             ),
             "local-signing-key" | "runtime-wallet-loaded" => push_unique_repair_action(
@@ -15126,7 +15173,7 @@ fn latest_validator_pruned_snapshot(
         && catalog.get("chain_id").and_then(Value::as_u64) != Some(TESTNET_CHAIN_ID)
     {
         return Err(
-            "Archive snapshot catalog is not for Synergy Testnet chain_id 1264.".to_string(),
+            "Archive snapshot catalog is not for Synergy Testnet chain_id 1266.".to_string(),
         );
     }
     if catalog_has_snapshot_list
@@ -15239,7 +15286,7 @@ fn validate_validator_pruned_snapshot_policy(
             || snapshot.get("network_id").and_then(Value::as_str) != Some(TESTNET_NETWORK_ID_V2)
         {
             return Err(
-                "Archive-validator-produced validator-pruned snapshot entry is not for Synergy Testnet chain_id 1264 / network_id synergy-testnet-v3."
+                "Archive-validator-produced validator-pruned snapshot entry is not for Synergy Testnet chain_id 1266 / network_id synergy-testnet-v3."
                     .to_string(),
             );
         }
@@ -18177,7 +18224,7 @@ fn validator_transaction_from_payload(
         .transpose()?;
     if chain_id != Some(TESTNET_CHAIN_ID) {
         return Err(
-            "The submitted transaction does not target Synergy Testnet chain 1264.".to_string(),
+            "The submitted transaction does not target Synergy Testnet chain 1266.".to_string(),
         );
     }
     let network_id = transaction
@@ -19654,7 +19701,10 @@ pub async fn testnet_setup_node(input: TestnetSetupInput) -> Result<TestnetSetup
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    if role.id == "validator" && identity_passphrase.map(str::len).unwrap_or(0) < 8 {
+    if role.id == "validator"
+        && input.packaged_validator_identity.is_none()
+        && identity_passphrase.map(str::len).unwrap_or(0) < 8
+    {
         return Err(
             "Validator setup requires an identity encryption passphrase with at least 8 characters."
                 .to_string(),
@@ -19666,7 +19716,18 @@ pub async fn testnet_setup_node(input: TestnetSetupInput) -> Result<TestnetSetup
             .map_err(|error| format!("Failed to create {}: {error}", directory.display()))?;
     }
 
-    let node_identity = generate_node_wallet(&role, &layout.identity, identity_passphrase)?;
+    let node_identity = match input.packaged_validator_identity.as_ref() {
+        Some(identity) if role.id == "validator" => {
+            import_packaged_validator_identity(&layout, identity)?
+        }
+        Some(_) => {
+            return Err(
+                "Packaged validator identities may only be installed for the validator role."
+                    .to_string(),
+            )
+        }
+        None => generate_node_wallet(&role, &layout.identity, identity_passphrase)?,
+    };
     let effective_node_address = input
         .node_address_override
         .as_deref()
@@ -20178,6 +20239,81 @@ pub async fn testnet_setup_node(input: TestnetSetupInput) -> Result<TestnetSetup
             }
             steps
         },
+    })
+}
+
+pub fn testnet_sign_packaged_validator_enrollment_proof(
+    input: TestnetValidatorEnrollmentProofInput,
+) -> Result<TestnetValidatorEnrollmentProofResult, String> {
+    let root = ensure_testnet_root()?;
+    let registry = load_registry(&root)?;
+    let node_id = input.node_id.trim();
+    let assignment_id = input.assignment_id.trim();
+    let peer_name = input.peer_name.trim();
+    if node_id.is_empty() || assignment_id.is_empty() || peer_name.is_empty() {
+        return Err(
+            "Packaged validator enrollment proof requires nodeId, assignmentId, and peerName."
+                .to_string(),
+        );
+    }
+    let node = registry
+        .nodes
+        .iter()
+        .find(|candidate| candidate.id == node_id)
+        .ok_or_else(|| format!("Validator node not found: {node_id}"))?;
+    if node.role_id != "validator" {
+        return Err("Enrollment proofs may only be created by validator nodes.".to_string());
+    }
+    let identity_directory = node_identity_directory(node);
+    let package_assignment: Value = serde_json::from_str(
+        &fs::read_to_string(identity_directory.join("package-assignment.json")).map_err(|_| {
+            "This validator was not installed from a validator-specific package.".to_string()
+        })?,
+    )
+    .map_err(|_| "The installed validator package assignment is invalid.".to_string())?;
+    if package_assignment
+        .get("assignment_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        != Some(assignment_id)
+        || package_assignment
+            .get("validator_address")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            != Some(node.node_address.trim())
+    {
+        return Err(
+            "The requested VPN token assignment does not match the installed validator package."
+                .to_string(),
+        );
+    }
+    let private_key = fs::read_to_string(&node.private_key_path)
+        .map_err(|error| format!("Failed to open the installed validator identity: {error}"))?;
+    let public_key = fs::read_to_string(&node.public_key_path)
+        .map_err(|error| format!("Failed to open the installed validator public key: {error}"))?;
+    let message = format!(
+        "synergy-validator-enrollment-proof-v1|{}|{}|{}|{}",
+        assignment_id,
+        node.node_address.trim(),
+        peer_name,
+        node_id,
+    );
+    let signature = sign_identity_proof(private_key.trim(), message.as_bytes())?;
+    if !verify_identity_proof(
+        node.node_address.trim(),
+        public_key.trim(),
+        message.as_bytes(),
+        &signature,
+    )? {
+        return Err(
+            "The installed validator identity proof failed local verification.".to_string(),
+        );
+    }
+    Ok(TestnetValidatorEnrollmentProofResult {
+        assignment_id: assignment_id.to_string(),
+        validator_address: node.node_address.clone(),
+        validator_public_key: public_key.trim().to_string(),
+        identity_proof: signature,
     })
 }
 
@@ -21075,7 +21211,7 @@ fn select_verified_sync_target(
             if public_height.saturating_add(TESTNET_ACTIVATION_MAX_SYNC_GAP) < relayer_height {
                 return SyncTargetSelection {
                     height: Some(relayer_height),
-                    source: "trusted-relayer-rpc:verified-chain-1264".to_string(),
+                    source: "trusted-relayer-rpc:verified-chain-1266".to_string(),
                     verified: true,
                     error: Some(format!(
                         "Public RPC head {public_height} is stale behind trusted relayer head {relayer_height}."
@@ -21086,7 +21222,7 @@ fn select_verified_sync_target(
 
         return SyncTargetSelection {
             height: Some(relayer_height),
-            source: "trusted-relayer-rpc:verified-chain-1264".to_string(),
+            source: "trusted-relayer-rpc:verified-chain-1266".to_string(),
             verified: true,
             error: None,
         };
@@ -21104,7 +21240,7 @@ fn select_verified_sync_target(
             });
         return SyncTargetSelection {
             height: Some(public_height),
-            source: "public-rpc:verified-chain-1264".to_string(),
+            source: "public-rpc:verified-chain-1266".to_string(),
             verified: true,
             error,
         };
@@ -21402,9 +21538,9 @@ async fn build_node_live_status_with_remote_details(
             "trusted-relayer-rpc",
             "relayer-1/relayer-2",
             trusted_relayer_chain_height,
-            "verified-chain-1264",
+            "verified-chain-1266",
             true,
-            "Trusted Testnet relayer RPC head verified against chain_id 1264.",
+            "Trusted Testnet relayer RPC head verified against chain_id 1266.",
         ));
     }
     let mut public_rpc_source = height_source_record(
@@ -21412,12 +21548,12 @@ async fn build_node_live_status_with_remote_details(
         TESTNET_PUBLIC_RPC_ENDPOINT,
         public_chain_height,
         if public_chain_height.is_some() {
-            "verified-chain-1264"
+            "verified-chain-1266"
         } else {
             "unavailable"
         },
         public_chain_height.is_some(),
-        "Canonical public RPC head for Synergy Testnet chain 1264.",
+        "Canonical public RPC head for Synergy Testnet chain 1266.",
     );
     if public_chain_height.is_some() {
         public_rpc_source.chain_id = Some(TESTNET_CHAIN_ID);
@@ -25120,13 +25256,13 @@ async fn build_node_readiness_report(
         label: "Canonical Genesis".to_string(),
         status: if canonical_genesis_status { "pass" } else { "fail" }.to_string(),
         detail: if canonical_genesis_status && is_initial_validator {
-            "Canonical chain 1264 genesis is present and includes this validator address."
+            "Canonical chain 1266 genesis is present and includes this validator address."
                 .to_string()
         } else if canonical_genesis_status && role_supports_validator_registration(&node.role_id) {
-            "Canonical chain 1264 genesis is present and does not include this validator address."
+            "Canonical chain 1266 genesis is present and does not include this validator address."
                 .to_string()
         } else if canonical_genesis_status {
-            "Canonical chain 1264 genesis is present.".to_string()
+            "Canonical chain 1266 genesis is present.".to_string()
         } else if is_initial_validator {
             "Validator workspace is missing the canonical genesis or its validator address."
                 .to_string()
@@ -25134,14 +25270,14 @@ async fn build_node_readiness_report(
             "This validator address appears in genesis.json, which would create a non-canonical chain identity."
                 .to_string()
         } else {
-            "Canonical chain 1264 genesis is missing or has the wrong genesis hash.".to_string()
+            "Canonical chain 1266 genesis is missing or has the wrong genesis hash.".to_string()
         },
         suggestion: if canonical_genesis_status {
             None
         } else if role_supports_validator_registration(&node.role_id) && genesis_address_present {
             Some("Do not edit genesis for new validators. Re-provision from the canonical Testnet bundle before starting this node.".to_string())
         } else {
-            Some("Re-run setup with the updated Control Panel so the workspace receives the canonical chain 1264 genesis.".to_string())
+            Some("Re-run setup with the updated Control Panel so the workspace receives the canonical chain 1266 genesis.".to_string())
         },
     });
 
@@ -26301,6 +26437,7 @@ fn canonical_testnet_genesis_path() -> Result<PathBuf, String> {
         "testnet/runtime/installers/Validator-03/config/genesis.json",
         "testnet/runtime/installers/Validator-04/config/genesis.json",
         "testnet/runtime/installers/Validator-05/config/genesis.json",
+        "testnet/runtime/installers/Validator-06/config/genesis.json",
         "config/genesis.json",
         "testnet/runtime/configs/genesis/genesis.json",
     ])
@@ -27756,6 +27893,164 @@ fn generate_node_wallet(
     Ok(GeneratedWalletFiles {
         wallet: persist_identity(keys_directory, &label, identity, identity_passphrase)?,
     })
+}
+
+fn import_packaged_validator_identity(
+    layout: &NodeWorkspaceLayout,
+    identity: &TestnetPackagedValidatorIdentity,
+) -> Result<GeneratedWalletFiles, String> {
+    let address = identity.address.trim();
+    let primary_public_key = identity.primary_public_key.trim();
+    let primary_private_key = identity.primary_private_key.trim();
+    if identity.assignment_id.trim().is_empty()
+        || !identity.assignment_id.starts_with("validator-")
+        || identity.consensus_algorithm.trim() != "ML-DSA-65"
+        || [
+            primary_public_key,
+            primary_private_key,
+            identity.consensus_public_key.trim(),
+            identity.consensus_private_key.trim(),
+            identity.node_identity_public_key.trim(),
+            identity.node_identity_private_key.trim(),
+            identity.account_public_key.trim(),
+            identity.account_private_key.trim(),
+            identity.entropy_public_key.trim(),
+            identity.entropy_private_key.trim(),
+            identity.encrypted_envelope.trim(),
+        ]
+        .iter()
+        .any(|value| value.is_empty())
+    {
+        return Err("The packaged validator identity is incomplete.".to_string());
+    }
+    if !verify_address(address, primary_public_key)? {
+        return Err(
+            "The packaged validator primary public key does not derive its assigned address."
+                .to_string(),
+        );
+    }
+    let challenge = format!(
+        "synergy-packaged-validator-identity-v1|{}|{}",
+        identity.assignment_id.trim(),
+        address
+    );
+    let proof = sign_identity_proof(primary_private_key, challenge.as_bytes())?;
+    if !verify_identity_proof(address, primary_public_key, challenge.as_bytes(), &proof)? {
+        return Err(
+            "The packaged validator primary private key does not match its assigned public identity."
+                .to_string(),
+        );
+    }
+
+    let imported = SynergyIdentity {
+        address: address.to_string(),
+        public_key: primary_public_key.to_string(),
+        private_key: primary_private_key.to_string(),
+        address_type: identity.address_type.trim().to_string(),
+        algorithm: identity.algorithm.trim().to_string(),
+        created_at: identity.created_at.trim().to_string(),
+    };
+    let mut wallet = persist_identity(
+        &layout.identity,
+        "Packaged Testnet-v3 Validator Identity",
+        imported,
+        None,
+    )?;
+    let encrypted_path = layout.identity.join("private.key.enc");
+    write_private_key_file(&encrypted_path, identity.encrypted_envelope.trim())?;
+    wallet.encrypted_private_key_path = Some(encrypted_path.to_string_lossy().to_string());
+
+    let role_directory = layout.identity.join("roles");
+    fs::create_dir_all(&role_directory)
+        .map_err(|error| format!("Failed to create {}: {error}", role_directory.display()))?;
+    for (role, algorithm, public_key, private_key) in [
+        (
+            "consensus",
+            identity.consensus_algorithm.as_str(),
+            identity.consensus_public_key.as_str(),
+            identity.consensus_private_key.as_str(),
+        ),
+        (
+            "node_identity",
+            identity.node_identity_algorithm.as_str(),
+            identity.node_identity_public_key.as_str(),
+            identity.node_identity_private_key.as_str(),
+        ),
+        (
+            "account",
+            identity.account_algorithm.as_str(),
+            identity.account_public_key.as_str(),
+            identity.account_private_key.as_str(),
+        ),
+        (
+            "entropy_contribution",
+            identity.entropy_algorithm.as_str(),
+            identity.entropy_public_key.as_str(),
+            identity.entropy_private_key.as_str(),
+        ),
+    ] {
+        write_file(
+            &role_directory.join(format!("{role}.public.key")),
+            public_key.trim(),
+        )?;
+        write_private_key_file(
+            &role_directory.join(format!("{role}.private.key")),
+            private_key.trim(),
+        )?;
+        write_file(
+            &role_directory.join(format!("{role}.json")),
+            &serde_json::to_string_pretty(&json!({
+                "role": role,
+                "algorithm": algorithm,
+                "public_key_path": format!("{role}.public.key"),
+                "private_key_path": format!("{role}.private.key"),
+            }))
+            .map_err(|error| {
+                format!("Failed to serialize packaged {role} key metadata: {error}")
+            })?,
+        )?;
+    }
+
+    let consensus_config = layout.config.join("validator");
+    let consensus_keys = layout.root.join("keys").join("mldsa65-consensus");
+    fs::create_dir_all(&consensus_config).map_err(|error| {
+        format!(
+            "Failed to create packaged consensus config {}: {error}",
+            consensus_config.display()
+        )
+    })?;
+    fs::create_dir_all(&consensus_keys).map_err(|error| {
+        format!(
+            "Failed to create packaged consensus key directory {}: {error}",
+            consensus_keys.display()
+        )
+    })?;
+    write_private_key_file(
+        &consensus_config.join("mldsa65-consensus.private.key"),
+        identity.consensus_private_key.trim(),
+    )?;
+    write_private_key_file(
+        &consensus_keys.join("private.key"),
+        identity.consensus_private_key.trim(),
+    )?;
+    write_file(
+        &layout.identity.join("package-assignment.json"),
+        &serde_json::to_string_pretty(&json!({
+            "assignment_id": identity.assignment_id.trim(),
+            "validator_address": address,
+            "chain_id": 1266,
+            "network_id": "synergy-testnet-v3",
+            "key_roles": [
+                "primary",
+                "consensus",
+                "node_identity",
+                "account",
+                "entropy_contribution"
+            ],
+        }))
+        .map_err(|error| format!("Failed to serialize validator package assignment: {error}"))?,
+    )?;
+    Ok(GeneratedWalletFiles { wallet })
 }
 
 fn node_address_type_for_role(role: &TestnetRoleProfile) -> AddressType {
@@ -30647,7 +30942,7 @@ mod tests {
 
         assert_eq!(selection.height, Some(1_200));
         assert!(selection.verified);
-        assert_eq!(selection.source, "public-rpc:verified-chain-1264");
+        assert_eq!(selection.source, "public-rpc:verified-chain-1266");
         assert!(selection
             .error
             .as_deref()
@@ -30660,7 +30955,7 @@ mod tests {
 
         assert_eq!(selection.height, Some(1_650));
         assert!(selection.verified);
-        assert_eq!(selection.source, "trusted-relayer-rpc:verified-chain-1264");
+        assert_eq!(selection.source, "trusted-relayer-rpc:verified-chain-1266");
         assert!(selection
             .error
             .as_deref()
@@ -30708,18 +31003,18 @@ mod tests {
     }
 
     #[test]
-    fn fork_metadata_matches_checkpointed_fndsa_fork() {
+    fn fork_metadata_matches_testnet_v3_genesis_consensus() {
         let fork = testnet_fork_metadata();
-        assert_eq!(fork.chain_id, 1264);
+        assert_eq!(fork.chain_id, 1266);
         assert_eq!(fork.network_id, "synergy-testnet-v3");
-        assert_eq!(fork.fork_height, 204_216);
-        assert_eq!(fork.fork_parent_height, 204_215);
+        assert_eq!(fork.fork_height, 0);
+        assert_eq!(fork.fork_parent_height, 0);
         assert_eq!(
             fork.parent_hash,
-            "e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816"
+            "0000000000000000000000000000000000000000000000000000000000000000"
         );
-        assert_eq!(fork.new_consensus_algorithm, "FN-DSA");
-        assert_eq!(fork.validator_key_algorithm, "FN-DSA-1024");
+        assert_eq!(fork.new_consensus_algorithm, "ML-DSA-65");
+        assert_eq!(fork.validator_key_algorithm, "ML-DSA-65");
         assert_eq!(fork.parser_mode, "fail_closed");
     }
 
@@ -30751,6 +31046,7 @@ mod tests {
                     nat_mode: None,
                     node_address_override: None,
                     identity_passphrase: Some("test-passphrase".to_string()),
+                    packaged_validator_identity: None,
                     skip_canonical_manifests: false,
                 }))
                 .expect("setup should succeed");
@@ -31207,6 +31503,7 @@ mod tests {
                     nat_mode: Some("custom_public_port".to_string()),
                     node_address_override: None,
                     identity_passphrase: Some("test-passphrase".to_string()),
+                    packaged_validator_identity: None,
                     skip_canonical_manifests: false,
                 }))
                 .expect("setup should succeed");
@@ -31946,14 +32243,14 @@ allowed_validator_addresses = []
         std::env::remove_var("SYNERGY_ARCHIVE_SNAPSHOT_BASE_URL");
         let _guard = env_var_guard(
             "SYNERGY_ARCHIVE_SNAPSHOT_CATALOG_URLS",
-            "https://mirror.example.net/testnet-1264/validator-pruned/catalog.json",
+            "https://mirror.example.net/testnet-1266/validator-pruned/catalog.json",
         );
 
         let sources = archive_snapshot_sources();
         assert_eq!(sources.len(), 1);
         assert_eq!(
             sources[0].base_url,
-            "https://mirror.example.net/testnet-1264/validator-pruned"
+            "https://mirror.example.net/testnet-1266/validator-pruned"
         );
     }
 
@@ -32110,14 +32407,14 @@ allowed_validator_addresses = []
         };
         let snapshot = json!({
             "snapshot_id": "snapshot-000675736",
-            "local_path": "/Volumes/Synergy_Archive-1/archive-validator/snapshots/testnet-1264/validator-pruned/snapshot-000675736",
+            "local_path": "/Volumes/Synergy_Archive-1/archive-validator/snapshots/testnet-1266/validator-pruned/snapshot-000675736",
             "mirror_urls": ["https://archive-store.synergynode.xyz/snapshots/"],
             "object_storage_prefix": null
         });
 
         assert_eq!(
             snapshot_download_base_url(&source, &snapshot, "snapshot-000675736"),
-            "https://archive-store.synergynode.xyz/snapshots/testnet-1264/validator-pruned/snapshot-000675736"
+            "https://archive-store.synergynode.xyz/snapshots/testnet-1266/validator-pruned/snapshot-000675736"
         );
     }
 
@@ -32129,7 +32426,7 @@ allowed_validator_addresses = []
         };
         let snapshot = json!({
             "snapshot_id": "snapshot-000973312-6e3b45dd8dd5cb26",
-            "local_path": "/Users/Shared/Synergy/archive-validator/published-snapshots-v19/testnet-1264/validator-pruned/snapshot-000973312-6e3b45dd8dd5cb26",
+            "local_path": "/Users/Shared/Synergy/archive-validator/published-snapshots-v19/testnet-1266/validator-pruned/snapshot-000973312-6e3b45dd8dd5cb26",
             "manifest_url": "https://archive-store.synergynode.xyz/snapshots/973312/distribution-manifest.json"
         });
 
@@ -32147,14 +32444,14 @@ allowed_validator_addresses = []
         };
         let snapshot = json!({
             "snapshot_id": "snapshot-000743026",
-            "local_path": "/Users/Shared/Synergy/archive-validator/public-snapshots/testnet-1264/validator-pruned/snapshot-000743026",
+            "local_path": "/Users/Shared/Synergy/archive-validator/public-snapshots/testnet-1266/validator-pruned/snapshot-000743026",
             "mirror_urls": [],
             "object_storage_prefix": null
         });
 
         assert_eq!(
             snapshot_download_base_url(&source, &snapshot, "snapshot-000743026"),
-            "https://archive-store.synergynode.xyz/snapshots/testnet-1264/validator-pruned/snapshot-000743026"
+            "https://archive-store.synergynode.xyz/snapshots/testnet-1266/validator-pruned/snapshot-000743026"
         );
     }
 
@@ -32162,7 +32459,7 @@ allowed_validator_addresses = []
     fn validator_snapshot_download_base_falls_back_to_configured_base_url() {
         let source = ArchiveSnapshotSource {
             catalog_url: "https://mirror.example.net/catalog.json".to_string(),
-            base_url: "https://mirror.example.net/testnet-1264/validator-pruned".to_string(),
+            base_url: "https://mirror.example.net/testnet-1266/validator-pruned".to_string(),
         };
         let snapshot = json!({
             "snapshot_id": "snapshot-000239900"
@@ -32170,7 +32467,7 @@ allowed_validator_addresses = []
 
         assert_eq!(
             snapshot_download_base_url(&source, &snapshot, "snapshot-000239900"),
-            "https://mirror.example.net/testnet-1264/validator-pruned/snapshot-000239900"
+            "https://mirror.example.net/testnet-1266/validator-pruned/snapshot-000239900"
         );
     }
 
@@ -34045,6 +34342,7 @@ allowed_validator_addresses = []
                     nat_mode: None,
                     node_address_override: None,
                     identity_passphrase: Some("test-passphrase".to_string()),
+                    packaged_validator_identity: None,
                     skip_canonical_manifests: false,
                 }))
                 .expect("validator setup should succeed");
@@ -34096,6 +34394,7 @@ allowed_validator_addresses = []
                     nat_mode: None,
                     node_address_override: None,
                     identity_passphrase: Some("funding-passphrase".to_string()),
+                    packaged_validator_identity: None,
                     skip_canonical_manifests: false,
                 }))
                 .expect("validator setup should succeed");
@@ -34225,6 +34524,7 @@ allowed_validator_addresses = []
                     nat_mode: None,
                     node_address_override: None,
                     identity_passphrase: None,
+                    packaged_validator_identity: None,
                     skip_canonical_manifests: false,
                 }))
                 .expect_err("validator setup should require passphrase");
@@ -34250,6 +34550,7 @@ allowed_validator_addresses = []
                     nat_mode: None,
                     node_address_override: None,
                     identity_passphrase: Some("test-passphrase".to_string()),
+                    packaged_validator_identity: None,
                     skip_canonical_manifests: false,
                 }))
                 .expect("validator public host override should be ignored");
@@ -34272,6 +34573,7 @@ allowed_validator_addresses = []
                     nat_mode: None,
                     node_address_override: None,
                     identity_passphrase: Some("test-passphrase".to_string()),
+                    packaged_validator_identity: None,
                     skip_canonical_manifests: false,
                 }))
                 .expect("validator private public host override should be ignored");
@@ -34294,6 +34596,7 @@ allowed_validator_addresses = []
                     nat_mode: None,
                     node_address_override: None,
                     identity_passphrase: Some("test-passphrase".to_string()),
+                    packaged_validator_identity: None,
                     skip_canonical_manifests: false,
                 }))
                 .expect("validator reserved public host override should be ignored");
@@ -34316,6 +34619,7 @@ allowed_validator_addresses = []
                     nat_mode: None,
                     node_address_override: Some("syns1walletaddresswrongtype".to_string()),
                     identity_passphrase: Some("test-passphrase".to_string()),
+                    packaged_validator_identity: None,
                     skip_canonical_manifests: false,
                 }))
                 .expect_err("validator address override should require synv1 prefix");
@@ -34342,6 +34646,7 @@ allowed_validator_addresses = []
                     nat_mode: None,
                     node_address_override: Some(override_address.clone()),
                     identity_passphrase: Some("test-passphrase".to_string()),
+                    packaged_validator_identity: None,
                     skip_canonical_manifests: false,
                 }))
                 .expect("setup should succeed");
@@ -34416,6 +34721,7 @@ allowed_validator_addresses = []
                     nat_mode: None,
                     node_address_override: None,
                     identity_passphrase: Some("test-passphrase".to_string()),
+                    packaged_validator_identity: None,
                     skip_canonical_manifests: false,
                 }))
                 .expect("setup should succeed");
@@ -34728,6 +35034,7 @@ public_address = "62.146.182.207:5622"
                     nat_mode: None,
                     node_address_override: None,
                     identity_passphrase: Some("test-passphrase".to_string()),
+                    packaged_validator_identity: None,
                     skip_canonical_manifests: true,
                 }))
                 .expect("setup should succeed");
@@ -36868,6 +37175,7 @@ esac
                     nat_mode: None,
                     node_address_override: None,
                     identity_passphrase: Some("test-passphrase".to_string()),
+                    packaged_validator_identity: None,
                     skip_canonical_manifests: false,
                 }))
                 .expect("setup should succeed");
@@ -37110,6 +37418,7 @@ EOF
                     nat_mode: None,
                     node_address_override: None,
                     identity_passphrase: Some("test-passphrase".to_string()),
+                    packaged_validator_identity: None,
                     skip_canonical_manifests: false,
                 }))
                 .expect("first setup should succeed");
@@ -37123,6 +37432,7 @@ EOF
                     nat_mode: None,
                     node_address_override: None,
                     identity_passphrase: None,
+                    packaged_validator_identity: None,
                     skip_canonical_manifests: false,
                 }))
                 .expect_err("second setup should require erase first");
@@ -37942,6 +38252,7 @@ EOF
                     nat_mode: Some("router_port_forward".to_string()),
                     node_address_override: None,
                     identity_passphrase: Some("preserved-passphrase".to_string()),
+                    packaged_validator_identity: None,
                     skip_canonical_manifests: false,
                 }))
                 .expect("validator workspace should provision");

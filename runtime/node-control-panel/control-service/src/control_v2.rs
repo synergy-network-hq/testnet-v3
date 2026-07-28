@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 pub const CURRENT_NETWORK_ID: &str = "synergy-testnet-v3";
-pub const CURRENT_CHAIN_ID: &str = "1264";
+pub const CURRENT_CHAIN_ID: &str = "1266";
 pub const CURRENT_CONTROL_PANEL_VERSION: &str = env!("CARGO_PKG_VERSION");
 const MIN_VALIDATOR_PACKAGE_VERSION: &str = "15.0.5";
 const MIN_CONFIG_SCHEMA_VERSION: &str = "2";
@@ -1035,7 +1035,7 @@ fn validator_recovery_transient_vote_lock_recover(
         "transient_vote_locks_above_finalized": locks_above,
         "min_age_secs": min_age_secs,
         "preferred_live_method": "synergy_recoverTransientVoteLocks",
-        "offline_cli_command": "synergy-node recover-transient-vote-locks --chain-id 1264 --network-id synergy-testnet-v3 --finalized-height <height> --min-age-secs <seconds>",
+        "offline_cli_command": "synergy-node recover-transient-vote-locks --chain-id 1266 --network-id synergy-testnet-v3 --finalized-height <height> --min-age-secs <seconds>",
         "canonical_locks_mutated": false,
         "committed_qcs_mutated": false,
         "keys_or_configs_copied": false,
@@ -1128,7 +1128,7 @@ fn onboarding_verify(command: &str, args: &V2CommandArgs) -> ControlActionEnvelo
             "WRONG_CHAIN_ID",
             "fatal",
             "The runtime chain id does not match Synergy testnet.",
-            "Use chain id 1264 before validator activation.",
+            "Use chain id 1266 before validator activation.",
         ));
     }
     if archive_state != "CANONICAL" {
@@ -1369,7 +1369,7 @@ fn promote_vote_only_to_active(command: &str, args: &V2CommandArgs) -> ControlAc
         "stale_vote_locks_above_finalized": stale_locks,
         "conflicting_vote_lock_heights": conflicting_heights,
         "preferred_helper_command": "scripts/testnet/validator-appliance-recovery.sh promote-vote-only-to-active --target <validator> --execute",
-        "runtime_cli_command": "synergy-node promote-vote-only-to-active --chain-id 1264 --network-id synergy-testnet-v3",
+        "runtime_cli_command": "synergy-node promote-vote-only-to-active --chain-id 1266 --network-id synergy-testnet-v3",
         "fresh_non_conflicting_live_locks_allowed": true,
         "manual_state_surgery_allowed": false,
         "service_restart_required": false,
@@ -2103,7 +2103,7 @@ pub fn appliance_filesystem_report(root: impl AsRef<Path>) -> ApplianceFilesyste
 pub fn validator_appliance_template() -> String {
     [
         "network_id = \"synergy-testnet-v3\"",
-        "chain_id = \"1264\"",
+        "chain_id = \"1266\"",
         "role = \"validator\"",
         "identity_public_key = \"REPLACE_WITH_PUBLIC_VALIDATOR_KEY\"",
         "identity_private_key_path = \"identity/validator.key\"",
@@ -2357,7 +2357,7 @@ fn package_manifest_blockers(manifest: &ValidatorAppliancePackageManifest) -> Ve
             "PACKAGE_WRONG_CHAIN",
             "fatal",
             "The package targets the wrong chain id.",
-            "Use a package built for chain id 1264.",
+            "Use a package built for chain id 1266.",
         ));
     }
     if manifest.binary_digests.is_empty() {

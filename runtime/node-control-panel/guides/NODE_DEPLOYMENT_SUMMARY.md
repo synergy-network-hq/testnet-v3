@@ -557,7 +557,7 @@ curl -s -X POST http://localhost:5640/rpc \
 
 ### Quick Reference
 
-- **Chain ID**: 1264 (Testnet)
+- **Chain ID**: 1266 (Testnet)
 - **Block Time**: ~6 seconds
 - **Epoch Length**: ~1000 blocks (~1 hour)
 - **Minimum Stake**: 50,000 SNRG bonded before activation

@@ -8179,9 +8179,9 @@ fn apply_topology_to_installer_node_env(path: &Path, management_host: &str) -> R
 
     upsert_key_value_line(&mut lines, "MONITOR_HOST", management_host);
     upsert_key_value_line(&mut lines, "MANAGEMENT_HOST", management_host);
-    upsert_key_value_line(&mut lines, "CHAIN_ID", "1264");
+    upsert_key_value_line(&mut lines, "CHAIN_ID", "1266");
     upsert_key_value_line(&mut lines, "NETWORK_ID", "synergy-testnet");
-    upsert_key_value_line(&mut lines, "SYNERGY_CHAIN_ID", "1264");
+    upsert_key_value_line(&mut lines, "SYNERGY_CHAIN_ID", "1266");
     upsert_key_value_line(&mut lines, "SYNERGY_NETWORK_ID", "synergy-testnet");
     upsert_key_value_line(&mut lines, "SYNERGY_CONFIG_PATH", "config/node.toml");
     upsert_key_value_line(&mut lines, "RPC_BIND_ADDRESS", &rpc_bind);

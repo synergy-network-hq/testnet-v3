@@ -1,32 +1,77 @@
-# Secure Validator Distribution
+# Secure Validator Installer Distribution
 
-The Validator 1–21 artifact matrix is built only from the signed generic Node Control Panel macOS `.dmg` and Linux `.deb` releases. It must never be assembled from validator runtime directories, local key stores, backups, or custody exports.
+Testnet-v3 uses 21 installer-bound validator packages. Each validator receives
+one macOS DMG and one Linux DEB containing only that validator's:
 
-Before the release, derive the nonsecret assignment map from the authoritative allocation manifest and public identity registry. This command reads only `identity.pub.json` records and verifies every `synv…` address derivation with the bundled coordinator utility; it never opens encrypted identity bundles.
+- encrypted five-role identity bundle and public manifest;
+- WireGuard private/public key pair;
+- complete `sy-vpn.conf` topology for all 21 validators and relayers;
+- VPN binding and checksum-bound assignment metadata.
+
+The identity passphrase is never placed in an installer. Treat every unique
+installer as custody-sensitive because it contains an encrypted private
+identity and a WireGuard private key. Do not publish these artifacts in the
+generic GitHub release.
+
+## Build on each native release host
+
+Build DMGs on the signed and notarizing macOS release host:
 
 ```bash
-npm run release:extract-validator-assignments -- \
-  --allocation-manifest /secure-testnet-inputs/testnet-allocation-manifest.json \
-  --identity-registry /secure-testnet-inputs/identity-registry.public.json \
-  --verifier ./binaries/synergy-control-darwin-arm64 \
-  --output /secure-release-inputs/validator-identities.json
+npm run release:build-validator-installers -- \
+  --identity-root /secure/testnet-v3-identity-files \
+  --platform mac \
+  --output /secure/releases/testnet-v3/validators/macos
 ```
 
-Use `synergy-control-linux-amd64` or the appropriate platform sidecar name when running the verification command on another release host.
-
-Use the full verified map for the Validator 1–21 release workflow. Provision only its Validator 7–21 subset as Forge's deployment-only `NODE_OPERATOR_ASSIGNMENTS` value; do not put either map in browser assets or a public download location.
+Build DEBs on the Linux release host:
 
 ```bash
-npm run release:validator-distribution -- \
-  --macos electron-dist/Synergy.Node.Control.Panel-<version>-arm64.dmg \
-  --linux electron-dist/synergy-node-control-panel_<version>_amd64.deb \
-  --assignments /secure-release-inputs/validator-identities.json
+npm run release:build-validator-installers -- \
+  --identity-root /secure/testnet-v3-identity-files \
+  --platform linux \
+  --output /secure/releases/testnet-v3/validators/linux
 ```
 
-The nonsecret assignment map must contain exactly one unique `synv…` identity and its matching FN-DSA public key for every Validator 1–21. The command fails closed if it is incomplete, duplicated, malformed, or reuses a public key. It then creates `Validator-01` through `Validator-21`, each with macOS and Linux artifacts, identity-bound nonsecret assignment metadata, installation instructions, and SHA-256 checksums. Validators 1–6 are retained for the internal launch; Validators 7–21 are released by the protected Forge Node Operators delivery service.
+The command stages and validates exactly one assignment at a time, builds the
+native installer, assigns a validator-specific filename, records its SHA-256
+digest, and clears the secret staging directory before the next build and on
+exit. The default range is Validator 01 through Validator 21. `--from` and
+`--to` may be used only for a controlled resume.
 
-Every download is generic until enrollment. The operator receives the encrypted validator-specific bundle through the approved custody channel, then enters the package assignment ID and single-use coordinator token in Node Control Panel. The panel displays a domain-separated enrollment message. The local custody bundle signs that exact message with the assigned FN-DSA key; the panel submits the detached proof and nonsecret public key. The coordinator verifies both the `synv…` derivation and the proof before it issues the Innernet invite. Innernet then proves possession of the newly generated WireGuard key through the confirmed handshake; the coordinator observes or securely receives the endpoint, updates routing, and permanently consumes the token. The installer must not contain a reusable validator private identity key, custody passphrase, or unencrypted consensus private key. VPN enrollment does not activate consensus; that approval remains separate.
+The macOS release host must have the Developer ID and notarization credentials
+required by `electron-builder.yml`. Linux packages must be built on Linux.
 
-For a Forge Node Operators package, the coordinator must also send the opaque `enrollmentClaim` from `assignment.json` to Forge's authenticated consume endpoint after the server-observed WireGuard handshake succeeds. This marks the Forge allocation terminal using the claim, never a predictable URL or private identity material.
+## Release checks
 
-Do not move the private key into the downloadable ZIP to make this easier. The custody bundle is delivered only after the coordinator validates the claim and is installed locally with restrictive permissions. To create an offline proof without printing key material, use the bundled `synergy-control sign-validator-enrollment-proof --private-key-file <path> --message-file <path>` command, then paste only its detached signature into Node Control Panel.
+Before distribution:
+
+1. Confirm each platform manifest contains exactly 21 unique assignments and
+   21 unique artifacts.
+2. Verify every checksum in each `SHA256SUMS`.
+3. Mount or extract a sample from Validators 01, 06, 07, and 21 and confirm its
+   `assignment.json`, identity manifest, VPN binding, and checksums agree.
+4. Confirm Validators 01–06 are marked `initial-six`; Validators 07–21 are
+   marked `gradual-activation`.
+5. Confirm every `sy-vpn.conf` contains the complete topology and that only the
+   assigned validator's `[Interface]` private key is present.
+6. Gatekeeper-check and notarization-check every DMG. Inspect every DEB with
+   `dpkg-deb --info` and `dpkg-deb --contents`.
+
+Deliver each validator's pair through the approved private custody channel.
+Do not interchange packages between validators.
+
+## Operator activation
+
+The operator unlocks and installs the assigned identity locally, then enters
+only the one-time token supplied by the VPN coordinator. The control panel
+creates the assignment-bound identity proof automatically, sends the packaged
+VPN address/public key/config version to the coordinator, installs the
+checksum-verified `sy-vpn.conf`, starts `sy-vpn`, and waits for a real
+WireGuard handshake. Only after both the client and coordinator observe that
+handshake is the token permanently consumed and the signed membership receipt
+recorded.
+
+VPN activation does not activate consensus. Validators 01–06 form the initial
+cohort; Validators 07–21 remain provisioned but inactive until their separate
+consensus activation approval.

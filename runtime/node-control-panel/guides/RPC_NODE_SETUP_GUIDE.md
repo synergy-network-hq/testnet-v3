@@ -99,7 +99,7 @@ node_type = "rpc"  # Class II node (no consensus participation)
 data_dir = "./data/rpc-node"
 
 [network]
-id = 1264  # Testnet chain ID
+id = 1266  # Testnet chain ID
 p2p_port = 5622
 rpc_port = 5640
 ws_port = 5660
@@ -212,7 +212,7 @@ mkdir -p data/rpc-node data/logs
 
 ```
 [INFO] Synergy RPC Node starting...
-[INFO] Chain ID: 1264 (Testnet)
+[INFO] Chain ID: 1266 (Testnet)
 [INFO] P2P listening on 0.0.0.0:5622
 [INFO] RPC HTTP listening on 0.0.0.0:5640
 [INFO] RPC WebSocket listening on 0.0.0.0:5660

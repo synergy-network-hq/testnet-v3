@@ -8,7 +8,6 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const read = (relativePath) => fs.readFileSync(path.join(root, relativePath), 'utf8');
 const jsx = read('src/components/control-panel-v18/ControlPanelV18.jsx');
 const css = read('src/styles/controlPanelV18.css');
-const engine = read('src/components/control-panel-v18/chartEngine.js');
 
 test('monitoring and performance use operational SVG visualizations', () => {
   for (const required of [
@@ -42,11 +41,7 @@ test('null telemetry values remain unavailable and create line gaps', () => {
   assert.match(jsx, /function finiteChartValue\(value\)/);
   assert.match(jsx, /value == null \|\| value === ''/);
   assert.match(jsx, /point\.value == null \? null/);
-  // Gap segmentation lives in the shared chart engine; the contract is that a
-  // null sample breaks the line instead of interpolating across missing data.
-  assert.match(jsx, /segmentCoordinates\(coordinates\)/);
-  assert.match(engine, /export function segmentCoordinates/);
-  assert.match(engine, /const segments = \[\]/);
+  assert.match(jsx, /const segments = \[\]/);
   assert.match(jsx, /No CPU history was returned/);
   assert.match(jsx, /No memory history was returned/);
   assert.match(jsx, /No chain-height history was returned/);

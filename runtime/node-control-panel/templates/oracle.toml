@@ -10,7 +10,7 @@ compiled_profile = "oracle_node"
 services = []
 
 [network]
-id = 1264
+id = 1266
 name = "synergy-testnet"
 p2p_port = 5622
 rpc_port = 5640
@@ -25,7 +25,7 @@ persistent_peers = []
 [blockchain]
 block_time = 2
 max_gas_limit = "0x2fefd8"
-chain_id = 1264
+chain_id = 1266
 
 [consensus]
 algorithm = "Proof of Synergy"

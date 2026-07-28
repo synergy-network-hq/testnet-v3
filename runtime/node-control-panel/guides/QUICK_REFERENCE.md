@@ -2,7 +2,7 @@
 
 ## Network Configuration
 
-- **Chain ID**: 1264
+- **Chain ID**: 1266
 - **P2P Port**: 5622
 - **RPC Port**: 5640
 - **WebSocket Port**: 5660
@@ -61,7 +61,7 @@
 
 - **Total Supply**: 12,000,000,000 SNRG
 - **Burn Address**: `synergy00000000000000000000000burn`
-- **Chain ID**: `1264`
+- **Chain ID**: `1266`
 - **Runtime Network ID**: `synergy-testnet-v3`
 
 ## Quick Commands

@@ -9,7 +9,7 @@ import {
 } from './ControlPanelShared';
 
 const CURRENT_NETWORK_ID = 'synergy-testnet-v3';
-const CURRENT_CHAIN_ID = '1264';
+const CURRENT_CHAIN_ID = '1266';
 
 const WIZARD_STEPS = [
   { key: 'welcome', title: 'Welcome', command: 'validator.lifecycle.status', args: { lifecycle_state: 'pending' } },

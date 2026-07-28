@@ -2074,20 +2074,26 @@
  * Sparkline (metric cards)
  * ================================================================== */
 
-.v18-sparkline {
-  grid-column: 1 / -1;
+.v18-sparkline,
+.v18-metric-card > svg.v18-sparkline {
+  grid-column: 2 / -1;
   width: 100%;
   height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
   color: var(--v18-green);
   opacity: 0.9;
 }
 
-.v18-sparkline.is-blue { color: var(--v18-blue); }
-.v18-sparkline.is-purple { color: var(--v18-purple); }
-.v18-sparkline.is-yellow { color: var(--v18-yellow); }
-.v18-sparkline.is-cyan { color: var(--v18-cyan); }
-.v18-sparkline.is-gray { color: var(--v18-gray); }
-.v18-sparkline.is-neutral { color: var(--v18-gray); }
+.v18-metric-card > svg.v18-sparkline.is-blue { color: var(--v18-blue); }
+.v18-metric-card > svg.v18-sparkline.is-purple { color: var(--v18-purple); }
+.v18-metric-card > svg.v18-sparkline.is-yellow { color: var(--v18-yellow); }
+.v18-metric-card > svg.v18-sparkline.is-cyan { color: var(--v18-cyan); }
+.v18-metric-card > svg.v18-sparkline.is-gray { color: var(--v18-gray); }
+.v18-metric-card > svg.v18-sparkline.is-neutral { color: var(--v18-gray); }
+.v18-metric-card > svg.v18-sparkline.is-green { color: var(--v18-green); }
 
 .v18-sparkline__line {
   stroke: currentColor;
@@ -3403,11 +3409,10 @@
   vector-effect: non-scaling-stroke;
 }
 
+/* The readout tucks into the open bottom of the arc, clear of the needle hub. */
 .v18-usage-gauge__readout {
-  position: absolute;
-  left: 50%;
-  bottom: 2%;
-  transform: translateX(-50%);
+  position: relative;
+  margin-top: -22px;
   display: grid;
   justify-items: center;
   gap: 2px;

@@ -16,6 +16,8 @@ package-lock.json
 dist
 electron-dist
 build/electron-runtime
+build/validator-package/*
+!build/validator-package/.gitkeep
 dist-ssr
 *.local
 target
@@ -62,6 +64,7 @@ binaries/synergy-testnet-agent-*
 !binaries/synergy-testnet-agent-darwin-arm64
 !binaries/synergy-testnet-agent-linux-amd64
 !binaries/synergy-testnet-agent-windows-amd64.exe
+binaries/synergy-keygen-*
 
 # IDE
 .vscode/

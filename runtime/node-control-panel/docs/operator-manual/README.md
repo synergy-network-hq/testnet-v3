@@ -16,7 +16,7 @@ This is the community guide for operating a Synergy Testnet validator with the S
 | Item | Value |
 | --- | --- |
 | Control Panel release covered here | `20.0.0` |
-| Chain ID | `1264` (`0x4f0`) |
+| Chain ID | `1266` (`0x4f2`) |
 | Network ID | `synergy-testnet-v3` |
 | Consensus and validator key algorithm | `FN-DSA` / `FN-DSA-1024` |
 | Required self-bond | `50,000 SNRG` (`50,000,000,000,000 nWei`) |

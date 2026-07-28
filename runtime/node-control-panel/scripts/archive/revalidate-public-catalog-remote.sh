@@ -171,7 +171,7 @@ env \
   SYNERGY_CONFIG_PATH="${SOURCE_WORKSPACE}/config/node.toml" \
   SYNERGY_SNAPSHOT_SOURCE_NODE_ID=archive-validator \
   "$RUNTIME" verify-snapshot \
-    --chain-id 1264 \
+    --chain-id 1266 \
     --network-id synergy-testnet-v3 \
     --genesis-hash f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789 \
     --source-workspace "$SOURCE_WORKSPACE" \

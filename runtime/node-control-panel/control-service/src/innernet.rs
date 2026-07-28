@@ -167,6 +167,8 @@ struct InnernetEnrollment {
     bootstrap: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     handshake_verified_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preconfigured_wireguard_public_key: Option<String>,
 }
 
 /// Validate the coordinator configuration without requiring migration cutover.
@@ -545,6 +547,40 @@ pub fn create_enrollment(
         interface_name,
         expires_at,
         false,
+        None,
+    )
+}
+
+pub fn create_preconfigured_enrollment(
+    app_context: &AppContext,
+    node_id: &str,
+    vpn_node_id: &str,
+    peer_name: &str,
+    validator_address: &str,
+    assigned_ip: &str,
+    wireguard_public_key: &str,
+    expires_at: &str,
+) -> Result<EnrollmentOffer, String> {
+    require_coordinator_ready()?;
+    let public_key = wireguard_public_key.trim();
+    let decoded = general_purpose::STANDARD
+        .decode(public_key)
+        .map_err(|_| "Preconfigured WireGuard public key is invalid.".to_string())?;
+    if decoded.len() != 32 {
+        return Err("Preconfigured WireGuard public key is invalid.".to_string());
+    }
+    create_enrollment_state(
+        app_context,
+        node_id,
+        vpn_node_id,
+        peer_name,
+        "validator",
+        Some(validator_address),
+        assigned_ip,
+        "sy-vpn",
+        expires_at,
+        false,
+        Some(public_key),
     )
 }
 
@@ -665,6 +701,7 @@ pub fn create_bootstrap_enrollment(
         interface_name,
         expires_at,
         true,
+        None,
     )
 }
 
@@ -923,6 +960,7 @@ fn create_enrollment_state(
     interface_name: &str,
     expires_at: &str,
     bootstrap: bool,
+    preconfigured_wireguard_public_key: Option<&str>,
 ) -> Result<EnrollmentOffer, String> {
     let validator_address = match (peer_type, validator_address.map(str::trim)) {
         ("validator", Some(value)) if is_validator_address(value) => Some(value.to_string()),
@@ -973,6 +1011,7 @@ fn create_enrollment_state(
         acknowledged_generation: 0,
         bootstrap,
         handshake_verified_at: None,
+        preconfigured_wireguard_public_key: preconfigured_wireguard_public_key.map(str::to_string),
     };
     let offer = EnrollmentOffer {
         enrollment_id: enrollment.id.clone(),
@@ -999,7 +1038,7 @@ pub fn confirm_enrollment(
         .iter()
         .position(|entry| entry.id == confirmation.enrollment_id)
         .ok_or_else(|| "Innernet enrollment was not found.".to_string())?;
-    let (peer_name, interface_name, assigned_ip) = {
+    let (peer_name, interface_name, assigned_ip, preconfigured_wireguard_public_key) = {
         let enrollment = &state.enrollments[index];
         // Redemption can complete before expiry while the desktop process fails
         // before confirmation. The secret, interface, address, active redeemed
@@ -1024,9 +1063,14 @@ pub fn confirm_enrollment(
             enrollment.peer_name.clone(),
             enrollment.interface_name.clone(),
             enrollment.assigned_ip.clone(),
+            enrollment.preconfigured_wireguard_public_key.clone(),
         )
     };
-    verify_server_handshake(&peer_name, &interface_name, &assigned_ip)?;
+    if let Some(public_key) = preconfigured_wireguard_public_key {
+        verify_preconfigured_server_handshake(&interface_name, &public_key)?;
+    } else {
+        verify_server_handshake(&peer_name, &interface_name, &assigned_ip)?;
+    }
     let (receipt, vpn_node_id, bootstrap) = {
         let enrollment = &mut state.enrollments[index];
         if enrollment.confirmed_at.is_none() {
@@ -1144,6 +1188,21 @@ fn verify_server_handshake(
     if !has_fresh_server_handshake(&wireguard_dump, &peer.public_key, Utc::now().timestamp()) {
         return Err(
             "The Innernet peer has not completed a fresh server-observed WireGuard handshake."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn verify_preconfigured_server_handshake(
+    interface_name: &str,
+    public_key: &str,
+) -> Result<(), String> {
+    validate_identifier(interface_name, "WireGuard interface name")?;
+    let wireguard_dump = wireguard_dump(interface_name)?;
+    if !has_fresh_server_handshake(&wireguard_dump, public_key, Utc::now().timestamp()) {
+        return Err(
+            "The preconfigured validator has not completed a fresh server-observed WireGuard handshake."
                 .to_string(),
         );
     }
@@ -2023,6 +2082,7 @@ mod tests {
             acknowledged_generation,
             bootstrap: false,
             handshake_verified_at: None,
+            preconfigured_wireguard_public_key: None,
         }
     }
 
@@ -2057,6 +2117,7 @@ mod tests {
             acknowledged_generation: configuration_version,
             bootstrap: true,
             handshake_verified_at: Some("2026-07-10T00:00:00Z".to_string()),
+            preconfigured_wireguard_public_key: None,
         }
     }
 

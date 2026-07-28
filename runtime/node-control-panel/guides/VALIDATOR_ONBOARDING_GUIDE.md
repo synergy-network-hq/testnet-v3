@@ -191,7 +191,7 @@ synergetic_mode = true
 vrf_enabled = true
 
 [blockchain]
-chain_id = 1264
+chain_id = 1266
 sync_mode = "fast"  # Fast sync from existing blockchain
 start_from_genesis = false
 
@@ -274,7 +274,7 @@ mkdir -p data/logs
 
 # You should see:
 # [INFO] Synergy Network Validator Starting...
-# [INFO] Chain ID: 1264
+# [INFO] Chain ID: 1266
 # [INFO] Validator Address: synv1...
 # [INFO] Connecting to bootnodes...
 # [INFO] Syncing blockchain... (this may take a while)

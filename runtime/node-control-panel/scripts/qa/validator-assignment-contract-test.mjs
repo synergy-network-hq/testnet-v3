@@ -5,11 +5,14 @@ import test from "node:test";
 const root = new URL("../../", import.meta.url);
 const source = (path) => readFile(new URL(path, root), "utf8");
 
-test("coordinator binds a validator token to its package assignment and cryptographic synv proof", async () => {
-  const [vpn, service, client, ui] = await Promise.all([
+test("coordinator binds the one-time token to the installer assignment and a locally generated synv proof", async () => {
+  const [vpn, service, client, ipc, innernet, packaged, ui] = await Promise.all([
     source("control-service/src/validator_vpn.rs"),
     source("control-service/src/control_service.rs"),
     source("electron/onboarding/coordinator-client.cjs"),
+    source("electron/ipc/onboarding-ipc.cjs"),
+    source("electron/onboarding/innernet.cjs"),
+    source("electron/onboarding/validator-package.cjs"),
     source("src/components/control-panel-v18/ControlPanelV18.jsx"),
   ]);
   assert.match(vpn, /assigned_validator_identity/);
@@ -27,8 +30,22 @@ test("coordinator binds a validator token to its package assignment and cryptogr
   assert.match(service, /identity_proof: Option<String>/);
   assert.match(client, /assignment_id:/);
   assert.match(client, /identity_proof:/);
+  assert.match(client, /preconfigured_vpn_ip:/);
+  assert.match(client, /preconfigured_wireguard_public_key:/);
+  assert.match(packaged, /VALIDATOR_PACKAGE_CHECKSUM_FAILED/);
+  assert.match(packaged, /decryptValidatorPackage/);
+  assert.match(ipc, /testnet_sign_packaged_validator_enrollment_proof/);
+  assert.match(ipc, /packaged\.assignmentId/);
+  assert.match(ipc, /install-packaged-validator-identity/);
+  assert.match(ipc, /activatePackagedWireguardConfig/);
+  assert.match(innernet, /install.*\/etc\/wireguard\/\$\{interfaceName\}\.conf/s);
+  assert.match(innernet, /wg-quick@sy-vpn\.service/);
+  assert.match(innernet, /PACKAGED_WIREGUARD_KEY_MISMATCH/);
+  assert.match(service, /create_preconfigured_enrollment/);
   assert.match(ui, /Validator package assignment ID/);
   assert.match(ui, /Validator enrollment proof/);
   assert.match(ui, /validatorEnrollmentProofMessage/);
-  assert.match(ui, /assignmentId: validatorAssignmentId\.trim\(\)/);
+  assert.match(ui, /validatorPackage\.assignmentId \|\| validatorAssignmentId\.trim\(\)/);
+  assert.match(ui, /One-time onboarding token/);
+  assert.match(ui, /full .* VPN topology is already included/);
 });

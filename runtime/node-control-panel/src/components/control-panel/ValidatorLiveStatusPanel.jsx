@@ -53,7 +53,7 @@ function fallbackStatus(node, nodeLive = {}) {
     validator_id: node?.id || 'unknown',
     validator_uma_id: node?.node_address || '',
     role: node?.role_id || 'validator',
-    chain_id: 1264,
+    chain_id: 1266,
     network_id: 'synergy-testnet-v3',
     current_status: 'TELEMETRY_UNAVAILABLE',
     status_headline: 'VALIDATOR TELEMETRY UNAVAILABLE',
@@ -538,8 +538,8 @@ export function AegisPqvmStatusCard({ status }) {
     <StatusCard title="Aegis PQC Status">
       <DetailRow label="aegis-pqvm status" value={aegis.status || 'UNKNOWN'} strong />
       <DetailRow label="aegis-pqvm version" value={aegis.version || status.aegis_pqvm_version || 'required'} />
-      <DetailRow label="Consensus algorithm" value={aegis.consensus_algorithm || fork.new_consensus_algorithm || 'FN-DSA'} strong />
-      <DetailRow label="Validator key algorithm" value={aegis.validator_key_algorithm || fork.validator_key_algorithm || 'FN-DSA-1024'} />
+      <DetailRow label="Consensus algorithm" value={aegis.consensus_algorithm || fork.new_consensus_algorithm || 'ML-DSA-65'} strong />
+      <DetailRow label="Consensus key algorithm" value={aegis.validator_key_algorithm || fork.validator_key_algorithm || 'ML-DSA-65'} />
       <DetailRow label="Parser mode" value={aegis.parser_mode || fork.parser_mode || 'fail_closed'} />
       <DetailRow label="Fork checkpoint" value={fork.fork_height ? `${formatNumber(fork.fork_height)} / parent ${formatNumber(fork.fork_parent_height)}` : '204,216 / parent 204,215'} />
       <DetailRow label="Consensus key" value={aegis.validator_consensus_key_status || 'Pending'} />

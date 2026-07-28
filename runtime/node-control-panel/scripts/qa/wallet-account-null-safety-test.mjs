@@ -14,19 +14,19 @@ test('normalizes a transient null Wagmi account before chainId access', () => {
 });
 
 test('preserves a connected Wagmi account snapshot', () => {
-  const connected = { address: '0x1234', chainId: 1264, isConnected: true };
+  const connected = { address: '0x1234', chainId: 1266, isConnected: true };
 
   assert.equal(normalizeAccountSnapshot(connected), connected);
 });
 
 test('does not dereference an absent Synergy wallet while persistence mounts', () => {
-  assert.equal(withWalletNetworkDefaults(null, { chainId: 1264, chainIdHex: '0x4f0' }), null);
+  assert.equal(withWalletNetworkDefaults(null, { chainId: 1266, chainIdHex: '0x4f2' }), null);
 });
 
 test('adds Synergy network defaults to a wallet before persistence', () => {
   assert.deepEqual(
-    withWalletNetworkDefaults({ address: 'syn1operator' }, { chainId: 1264, chainIdHex: '0x4f0' }),
-    { address: 'syn1operator', chainId: 1264, chainIdHex: '0x4f0' },
+    withWalletNetworkDefaults({ address: 'syn1operator' }, { chainId: 1266, chainIdHex: '0x4f2' }),
+    { address: 'syn1operator', chainId: 1266, chainIdHex: '0x4f2' },
   );
 });
 

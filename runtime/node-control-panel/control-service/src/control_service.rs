@@ -35,21 +35,23 @@ use crate::testnet::{
     testnet_rename_node, testnet_request_validator_rejoin, testnet_reset_innernet_client_state,
     testnet_restore_backup, testnet_restore_validator_snapshot, testnet_reuse_innernet_enrollment,
     testnet_run_register_with_seeds, testnet_run_validator_onboarding, testnet_set_validator_owner,
-    testnet_setup_node, testnet_stake_validator, testnet_start_validator_normal_sync,
-    testnet_sync_catch_up_rejoin, testnet_transfer_validator_tokens, testnet_unstake_validator,
-    testnet_validate_path, testnet_validator_vpn_status, testnet_verify_backup,
-    testnet_verify_validator_eligibility, testnet_verify_validator_snapshot,
-    TestnetApplyAtlasValidatorProfileInput, TestnetEraseNodeDataInput, TestnetFeatureSnapshotInput,
-    TestnetFilesystemTargetInput, TestnetForcePeerConnectInput, TestnetInnernetEnrollmentInput,
-    TestnetKeyEncryptionInput, TestnetLogRetentionInput, TestnetNodeControlInput,
-    TestnetPathValidationInput, TestnetPublishValidatorProfileInput, TestnetRemoveNodeInput,
-    TestnetRenameNodeInput, TestnetSetValidatorOwnerInput, TestnetSetupInput,
-    TestnetSetupSyncCompleteInput, TestnetSnapshotRestoreInput, TestnetValidatorActivateInput,
-    TestnetValidatorCatchUpInput, TestnetValidatorEligibilityInput, TestnetValidatorFundingInput,
-    TestnetValidatorOnboardingInput, TestnetValidatorRejoinRequestInput,
-    TestnetValidatorSnapshotApplyInput, TestnetValidatorSnapshotDownloadInput,
-    TestnetValidatorSnapshotVerifyInput, TestnetValidatorStakeInput, TestnetValidatorTransferInput,
-    TestnetValidatorUnstakeInput, TestnetValidatorVpnInput,
+    testnet_setup_node, testnet_sign_packaged_validator_enrollment_proof, testnet_stake_validator,
+    testnet_start_validator_normal_sync, testnet_sync_catch_up_rejoin,
+    testnet_transfer_validator_tokens, testnet_unstake_validator, testnet_validate_path,
+    testnet_validator_vpn_status, testnet_verify_backup, testnet_verify_validator_eligibility,
+    testnet_verify_validator_snapshot, TestnetApplyAtlasValidatorProfileInput,
+    TestnetEraseNodeDataInput, TestnetFeatureSnapshotInput, TestnetFilesystemTargetInput,
+    TestnetForcePeerConnectInput, TestnetInnernetEnrollmentInput, TestnetKeyEncryptionInput,
+    TestnetLogRetentionInput, TestnetNodeControlInput, TestnetPathValidationInput,
+    TestnetPublishValidatorProfileInput, TestnetRemoveNodeInput, TestnetRenameNodeInput,
+    TestnetSetValidatorOwnerInput, TestnetSetupInput, TestnetSetupSyncCompleteInput,
+    TestnetSnapshotRestoreInput, TestnetValidatorActivateInput, TestnetValidatorCatchUpInput,
+    TestnetValidatorEligibilityInput, TestnetValidatorEnrollmentProofInput,
+    TestnetValidatorFundingInput, TestnetValidatorOnboardingInput,
+    TestnetValidatorRejoinRequestInput, TestnetValidatorSnapshotApplyInput,
+    TestnetValidatorSnapshotDownloadInput, TestnetValidatorSnapshotVerifyInput,
+    TestnetValidatorStakeInput, TestnetValidatorTransferInput, TestnetValidatorUnstakeInput,
+    TestnetValidatorVpnInput,
 };
 use crate::validator_vpn::{
     consume_reserved_validator_vpn_onboarding_token, create_validator_vpn_challenge,
@@ -418,6 +420,12 @@ struct InviteRequest {
     validator_public_key: Option<String>,
     #[serde(default)]
     identity_proof: Option<String>,
+    #[serde(default)]
+    preconfigured_vpn_ip: Option<String>,
+    #[serde(default)]
+    preconfigured_wireguard_public_key: Option<String>,
+    #[serde(default)]
+    preconfigured_config_version: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -430,6 +438,7 @@ struct InviteResponse {
     enrollment_id: String,
     confirmation_token: String,
     configuration_version: u64,
+    preconfigured: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1217,7 +1226,39 @@ async fn invite_handler(
         )
             .into_response();
     }
-    if let Err(error) = innernet::require_migration_ready(&state.app_context) {
+    let preconfigured = match (
+        input.preconfigured_vpn_ip.as_deref().map(str::trim).filter(|value| !value.is_empty()),
+        input
+            .preconfigured_wireguard_public_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        input
+            .preconfigured_config_version
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+    ) {
+        (None, None, None) => false,
+        (Some(_), Some(_), Some(version))
+            if version.len() <= 128
+                && version
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || ".-_".contains(character)) =>
+        {
+            true
+        }
+        _ => return validator_vpn_error(
+            "Packaged VPN activation requires its assigned IP, WireGuard public key, and configuration version."
+                .to_string(),
+        ),
+    };
+    let coordinator_readiness = if preconfigured {
+        innernet::require_coordinator_ready()
+    } else {
+        innernet::require_migration_ready(&state.app_context)
+    };
+    if let Err(error) = coordinator_readiness {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "error": "innernet_migration_not_ready", "detail": error })),
@@ -1250,6 +1291,8 @@ async fn invite_handler(
         input.validator_public_key.as_deref(),
         input.identity_proof.as_deref(),
         input.node_id.as_deref(),
+        input.preconfigured_vpn_ip.as_deref(),
+        input.preconfigured_wireguard_public_key.as_deref(),
     ) {
         Ok(assignment) => assignment,
         Err(error) if error == "invalid_or_used_token" => {
@@ -1261,6 +1304,45 @@ async fn invite_handler(
         }
         Err(error) => return validator_vpn_error(error),
     };
+    if preconfigured {
+        let enrollment = match innernet::create_preconfigured_enrollment(
+            &state.app_context,
+            node_id,
+            &assignment.node_id,
+            &input.peer_name,
+            input.validator_address.as_deref().unwrap_or_default(),
+            &assignment.vpn_ip,
+            input
+                .preconfigured_wireguard_public_key
+                .as_deref()
+                .unwrap_or_default(),
+            &assignment.expires_at,
+        ) {
+            Ok(enrollment) => enrollment,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": "coordinator_state_commit_failed", "detail": error })),
+                )
+                    .into_response()
+            }
+        };
+        return (
+            StatusCode::OK,
+            Json(InviteResponse {
+                invite: None,
+                resume_existing: false,
+                assigned_ip: assignment.vpn_ip,
+                interface_name: "sy-vpn".to_string(),
+                expires_at: assignment.expires_at,
+                enrollment_id: enrollment.enrollment_id,
+                confirmation_token: enrollment.confirmation_token,
+                configuration_version: enrollment.configuration_version,
+                preconfigured: true,
+            }),
+        )
+            .into_response();
+    }
     match innernet::recover_redeemed_enrollment_confirmation(
         &state.app_context,
         node_id,
@@ -1283,6 +1365,7 @@ async fn invite_handler(
                     enrollment_id: recovery.enrollment.enrollment_id,
                     confirmation_token: recovery.enrollment.confirmation_token,
                     configuration_version: recovery.enrollment.configuration_version,
+                    preconfigured: false,
                 }),
             )
                 .into_response();
@@ -1352,6 +1435,7 @@ async fn invite_handler(
             enrollment_id: enrollment.enrollment_id,
             confirmation_token: enrollment.confirmation_token,
             configuration_version: enrollment.configuration_version,
+            preconfigured: false,
         }),
     )
         .into_response()
@@ -1762,6 +1846,10 @@ async fn dispatch_command(
         "testnet_setup_node" => {
             let args: TestnetSetupArgs = parse_args(request.args)?;
             to_value(testnet_setup_node(args.input).await?)
+        }
+        "testnet_sign_packaged_validator_enrollment_proof" => {
+            let args: TestnetValidatorEnrollmentProofInput = parse_args(request.args)?;
+            to_value(testnet_sign_packaged_validator_enrollment_proof(args)?)
         }
         "testnet_node_control" => {
             let args: TestnetNodeControlArgs = parse_args(request.args)?;

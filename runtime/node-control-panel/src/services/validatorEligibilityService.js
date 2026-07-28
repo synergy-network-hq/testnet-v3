@@ -24,8 +24,8 @@ const SYNERGY_TESTNET_RPC_URLS = Object.freeze([
   'https://testnet-rpc.synergy-network.io',
   'https://testnet-core-rpc.synergy-network.io',
 ]);
-const SYNERGY_TESTNET_CHAIN_ID = 1264;
-const SYNERGY_TESTNET_CHAIN_ID_HEX = '0x4f0';
+const SYNERGY_TESTNET_CHAIN_ID = 1266;
+const SYNERGY_TESTNET_CHAIN_ID_HEX = '0x4f2';
 const SYNERGY_TESTNET_NETWORK_ID = 'synergy-testnet-v3';
 const STAKE_CONFIRMATION_ATTEMPTS = 15;
 const STAKE_CONFIRMATION_INTERVAL_MS = 4000;

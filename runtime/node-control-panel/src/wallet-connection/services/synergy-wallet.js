@@ -4,8 +4,8 @@ export const SYNERGY_TESTNET = Object.freeze({
   key: "testnet",
   displayName: "Synergy Testnet",
   slug: "synergy-testnet",
-  chainIdDecimal: 1264,
-  chainIdHex: "0x4f0",
+  chainIdDecimal: 1266,
+  chainIdHex: "0x4f2",
   rpcUrl: "https://testnet-rpc.synergy-network.io",
 });
 

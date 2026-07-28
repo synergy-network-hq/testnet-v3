@@ -411,13 +411,13 @@ EOF
   fi
 done
 
-if ! rg -q '"chain_id"[[:space:]]*:[[:space:]]*1264' "$runtime_operational_manifest_path"; then
-  echo "Runtime operational manifest is not pinned to chain_id 1264" >&2
+if ! rg -q '"chain_id"[[:space:]]*:[[:space:]]*1266' "$runtime_operational_manifest_path"; then
+  echo "Runtime operational manifest is not pinned to chain_id 1266" >&2
   exit 1
 fi
 
-if ! rg -q '"chain_id_hex"[[:space:]]*:[[:space:]]*"0x4f0"' "$runtime_operational_manifest_path"; then
-  echo "Runtime operational manifest is not pinned to chain_id_hex 0x4f0" >&2
+if ! rg -q '"chain_id_hex"[[:space:]]*:[[:space:]]*"0x4f2"' "$runtime_operational_manifest_path"; then
+  echo "Runtime operational manifest is not pinned to chain_id_hex 0x4f2" >&2
   exit 1
 fi
 
@@ -431,8 +431,8 @@ if ! rg -q '"network_id"[[:space:]]*:[[:space:]]*"synergy-testnet-v3"' "testnet/
   exit 1
 fi
 
-if ! rg -q '"chain_id_hex"[[:space:]]*:[[:space:]]*"0x4f0"' "testnet/runtime/workspace-manifest.json"; then
-  echo "Workspace manifest is not pinned to chain_id_hex 0x4f0" >&2
+if ! rg -q '"chain_id_hex"[[:space:]]*:[[:space:]]*"0x4f2"' "testnet/runtime/workspace-manifest.json"; then
+  echo "Workspace manifest is not pinned to chain_id_hex 0x4f2" >&2
   exit 1
 fi
 

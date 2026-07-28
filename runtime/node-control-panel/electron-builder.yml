@@ -21,6 +21,11 @@ extraResources:
       - "!**/*.exe.sha256"
   - from: binaries/innernet
     to: innernet
+  - from: build/validator-package
+    to: validator-package
+    filter:
+      - "**/*"
+      - "!**/.gitkeep"
   - from: testnet/runtime
     to: testnet/runtime
     filter:

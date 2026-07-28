@@ -9,7 +9,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use synergy_address_engine::{verify_address, verify_identity_proof};
@@ -602,6 +602,8 @@ pub fn reserve_validator_vpn_onboarding(
     validator_public_key: Option<&str>,
     identity_proof: Option<&str>,
     node_id: Option<&str>,
+    preconfigured_vpn_ip: Option<&str>,
+    preconfigured_wireguard_public_key: Option<&str>,
 ) -> Result<ValidatorVpnInviteAssignment, String> {
     validate_node_name(peer_name)?;
     let _reservation_guard = reservation_lock()
@@ -638,13 +640,49 @@ pub fn reserve_validator_vpn_onboarding(
     {
         return Err("invalid_or_used_token".to_string());
     }
+    let preconfigured = match (
+        preconfigured_vpn_ip
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        preconfigured_wireguard_public_key
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+    ) {
+        (None, None) => None,
+        (Some(vpn_ip), Some(public_key)) if role == ValidatorVpnRole::Validator => {
+            let assignment_id = assignment_id
+                .map(str::trim)
+                .ok_or_else(|| "invalid_or_used_token".to_string())?;
+            let validator = assignment_id
+                .strip_prefix("validator-")
+                .and_then(|value| value.parse::<u8>().ok())
+                .filter(|value| (1..=21).contains(value))
+                .ok_or_else(|| "invalid_or_used_token".to_string())?;
+            let expected_ip = format!("10.70.10.{validator}");
+            let normalized_ip = vpn_ip
+                .split('/')
+                .next()
+                .unwrap_or_default()
+                .parse::<IpAddr>()
+                .map_err(|_| "invalid_or_used_token".to_string())?
+                .to_string();
+            let public_key_bytes = general_purpose::STANDARD
+                .decode(public_key)
+                .map_err(|_| "invalid_or_used_token".to_string())?;
+            if normalized_ip != expected_ip || public_key_bytes.len() != 32 {
+                return Err("invalid_or_used_token".to_string());
+            }
+            Some((normalized_ip, public_key.to_string()))
+        }
+        _ => return Err("invalid_or_used_token".to_string()),
+    };
     let now = now_rfc3339();
     let existing = state
         .nodes
         .iter()
         .find(|node| node.node_name == peer_name.trim() && node.role == role)
         .cloned();
-    let node = if let Some(node) = existing {
+    let node = if let Some(mut node) = existing {
         if token_record
             .reserved_node_id
             .as_deref()
@@ -655,19 +693,41 @@ pub fn reserve_validator_vpn_onboarding(
         if node.status.is_snapshot_active() && node.wg_pubkey.is_some() {
             return Err("peer_name is already enrolled".to_string());
         }
+        if let Some((vpn_ip, public_key)) = preconfigured.as_ref() {
+            if node.vpn_ip != *vpn_ip {
+                return Err("invalid_or_used_token".to_string());
+            }
+            node.wg_pubkey = Some(public_key.clone());
+            if let Some(stored) = state.nodes.iter_mut().find(|entry| entry.id == node.id) {
+                stored.wg_pubkey = Some(public_key.clone());
+                stored.updated_at = now.clone();
+            }
+        }
         node
     } else {
-        // This reservation backs the coordinator-owned Innernet invite API.
-        // Innernet owns its address space and rejects overlapping migrations.
-        let authoritative_used = innernet::authoritative_assigned_ips()?;
-        let vpn_ip = allocate_next_innernet_ip_excluding(&state, &role, &authoritative_used)?;
+        let vpn_ip = if let Some((vpn_ip, _)) = preconfigured.as_ref() {
+            if state.nodes.iter().any(|node| node.vpn_ip == *vpn_ip)
+                || state.ip_leases.iter().any(|lease| {
+                    lease.vpn_ip == *vpn_ip && lease.state != ValidatorVpnLeaseState::Available
+                })
+            {
+                return Err("invalid_or_used_token".to_string());
+            }
+            vpn_ip.clone()
+        } else {
+            // Dynamic enrollment remains available to generic installers.
+            let authoritative_used = innernet::authoritative_assigned_ips()?;
+            allocate_next_innernet_ip_excluding(&state, &role, &authoritative_used)?
+        };
         let node = ValidatorVpnNode {
             id: Uuid::new_v4().to_string(),
             role: role.clone(),
             node_name: peer_name.trim().to_string(),
             validator_pubkey: None,
             operator_address: None,
-            wg_pubkey: None,
+            wg_pubkey: preconfigured
+                .as_ref()
+                .map(|(_, public_key)| public_key.clone()),
             vpn_ip: vpn_ip.clone(),
             endpoint_host: None,
             endpoint_port: VALIDATOR_VPN_LISTEN_PORT,

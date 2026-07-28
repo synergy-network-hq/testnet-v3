@@ -42,8 +42,8 @@ function requireFresh(timestamp, nowSeconds, label) {
 }
 
 function requireIdentity(value, expectedGenesisHash, label) {
-  if (value.chain_id !== 1264 || value.network_id !== 'synergy-testnet-v3') {
-    throw new Error(`${label} is not Synergy Testnet chain 1264 / synergy-testnet-v3`);
+  if (value.chain_id !== 1266 || value.network_id !== 'synergy-testnet-v3') {
+    throw new Error(`${label} is not Synergy Testnet chain 1266 / synergy-testnet-v3`);
   }
   if (String(value.genesis_hash || '').toLowerCase() !== expectedGenesisHash) {
     throw new Error(`${label} genesis hash does not match the bundled Testnet genesis`);

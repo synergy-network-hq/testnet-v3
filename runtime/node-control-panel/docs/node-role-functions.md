@@ -4,7 +4,7 @@ This guide is the bundled Node Control Panel role reference for Synergy Testnet
 operators. It describes what each role may do, what it must not do, and which
 control-panel surfaces are allowed to manage that role.
 
-Current runtime note: Synergy Testnet uses chain id `1264` and network id
+Current runtime note: Synergy Testnet uses chain id `1266` and network id
 `synergy-testnet-v3`. Validator, archive, relayer, observer, RPC gateway, and
 Atlas/indexer responsibilities remain separated so the control panel can block
 unsafe actions instead of hiding role drift.

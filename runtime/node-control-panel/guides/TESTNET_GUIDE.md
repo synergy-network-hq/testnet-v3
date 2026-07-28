@@ -381,7 +381,7 @@ Output format (JSON):
 ## Network Information
 
 - **Network Name**: synergy-testnet
-- **Chain ID**: 1264
+- **Chain ID**: 1266
 - **Default P2P Port**: 5622
 - **Default RPC Port**: 5640
 - **Default WS Port**: 5660

@@ -41,7 +41,7 @@ Observed root causes:
 
 - `monitor::terminal_command_tests::binding_targets_follow_current_topology` cannot resolve `GenVal-01` from inventory and reports `None` instead of `Some("genval-01")`.
 - `monitor::terminal_command_tests::logical_nodes_follow_current_topology` cannot resolve `node-inventory.csv` without `SYNERGY_MONITOR_INVENTORY`.
-- `testnet::tests::ceremony_import_applies_assigned_validator_ports` fails because the legacy genesis setup-package import test embeds an operational manifest with `network_id` `1264` where strict package validation expects `synergy-testnet-v3`.
+- `testnet::tests::ceremony_import_applies_assigned_validator_ports` fails because the legacy genesis setup-package import test embeds an operational manifest with `network_id` `1266` where strict package validation expects `synergy-testnet-v3`.
 - `testnet::tests::role_functions_document_current_runtime_state_for_all_roles` fails because the bundled control-panel role reference is missing.
 - The remaining `testnet::tests::*` failures are follow-on `env lock poisoned` failures after the legacy genesis setup-package import panic.
 
@@ -67,7 +67,7 @@ Remaining caveats:
 ## Public Read-Only Network Check
 
 - `https://testnet-core-rpc.synergy-network.io` returned `synergy_getBlockNumber = 647415`.
-- `https://testnet-atlas-api.synergy-network.io/api/v1/network/summary` returned `latestBlock = 647414`, `activeValidators = 6`, `totalValidators = 6`, `chainId = 1264`, and `indexedAt = 2026-06-26T06:13:04.586Z`.
+- `https://testnet-atlas-api.synergy-network.io/api/v1/network/summary` returned `latestBlock = 647414`, `activeValidators = 6`, `totalValidators = 6`, `chainId = 1266`, and `indexedAt = 2026-06-26T06:13:04.586Z`.
 
 ## Live-Safety Statement
 

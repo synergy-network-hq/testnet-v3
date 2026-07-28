@@ -9,14 +9,16 @@ use synergy_node_control_panel::testnet::{
     testnet_record_innernet_enrollment, testnet_record_validator_funding,
     testnet_restore_validator_snapshot, testnet_reuse_innernet_enrollment,
     testnet_run_validator_onboarding, testnet_set_validator_owner, testnet_setup_node,
-    testnet_stake_validator, testnet_start_validator_normal_sync, testnet_sync_catch_up_rejoin,
+    testnet_sign_packaged_validator_enrollment_proof, testnet_stake_validator,
+    testnet_start_validator_normal_sync, testnet_sync_catch_up_rejoin,
     testnet_validator_vpn_status, testnet_verify_validator_eligibility,
     testnet_verify_validator_snapshot, TestnetFilesystemTargetInput,
     TestnetInnernetEnrollmentInput, TestnetSetValidatorOwnerInput, TestnetSetupInput,
     TestnetSnapshotRestoreInput, TestnetValidatorCatchUpInput, TestnetValidatorEligibilityInput,
-    TestnetValidatorFundingInput, TestnetValidatorOnboardingInput,
-    TestnetValidatorSnapshotApplyInput, TestnetValidatorSnapshotDownloadInput,
-    TestnetValidatorSnapshotVerifyInput, TestnetValidatorStakeInput, TestnetValidatorVpnInput,
+    TestnetValidatorEnrollmentProofInput, TestnetValidatorFundingInput,
+    TestnetValidatorOnboardingInput, TestnetValidatorSnapshotApplyInput,
+    TestnetValidatorSnapshotDownloadInput, TestnetValidatorSnapshotVerifyInput,
+    TestnetValidatorStakeInput, TestnetValidatorVpnInput,
 };
 use synergy_node_control_panel::validator_vpn::{
     import_validator_vpn_bootstrap_nodes, validator_vpn_status, ValidatorVpnBootstrapImportRequest,
@@ -116,6 +118,12 @@ async fn run() -> Result<(), String> {
         "setup-node" => {
             let input: TestnetSetupInput = input_json(&args, "setup-node")?;
             let payload = testnet_setup_node(input).await?;
+            print_json(&payload)?;
+        }
+        "sign-packaged-validator-enrollment-proof" => {
+            let input: TestnetValidatorEnrollmentProofInput =
+                input_json(&args, "sign-packaged-validator-enrollment-proof")?;
+            let payload = testnet_sign_packaged_validator_enrollment_proof(input)?;
             print_json(&payload)?;
         }
         "backup-keys" => {

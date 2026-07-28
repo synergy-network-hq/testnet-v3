@@ -181,6 +181,22 @@ async function resolveInnernetClientBinary({ targetPlatform = innernetPlatformKe
   return 'innernet';
 }
 
+async function resolveWireguardQuickBinary(executor) {
+  if (executor?.mode === 'remote') return 'wg-quick';
+  const root = isPackagedRuntime() ? process.resourcesPath : REPO_ROOT;
+  const bundled = root && path.join(root, 'innernet', 'wg-quick');
+  if (bundled && await isRegularFile(bundled)) return bundled;
+  return 'wg-quick';
+}
+
+async function resolveWireguardBinary(executor) {
+  if (executor?.mode === 'remote') return 'wg';
+  const root = isPackagedRuntime() ? process.resourcesPath : REPO_ROOT;
+  const bundled = root && path.join(root, 'innernet', 'wg');
+  if (bundled && await isRegularFile(bundled)) return bundled;
+  return 'wg';
+}
+
 async function resolveRemoteInnernetPlatform(executor) {
   const [operatingSystem, architecture] = await Promise.all([
     executor.run('uname', ['-s']),
@@ -399,6 +415,124 @@ set -eu
   } finally {
     await removeExecutorFile(executor, unitPath);
   }
+}
+
+function renderWireguardLaunchdPlist(wgQuickCommand) {
+  const binary = String(wgQuickCommand || '').trim();
+  if (!path.posix.isAbsolute(binary) || /[\u0000\r\n]/.test(binary)) {
+    throw meshError('WIREGUARD_QUICK_PATH_INVALID', 'The persistent WireGuard service requires an absolute wg-quick path.');
+  }
+  const searchPath = [path.dirname(binary), '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(':');
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>network.synergy.wireguard</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${xmlEscape(binary)}</string>
+    <string>up</string>
+    <string>sy-vpn</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>${xmlEscape(searchPath)}</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/var/log/synergy-wireguard.log</string>
+  <key>StandardErrorPath</key><string>/var/log/synergy-wireguard.err.log</string>
+</dict>
+</plist>
+`;
+}
+
+async function ensurePersistentPackagedWireguard(executor, wgQuickCommand) {
+  if (requiresLaunchdPersistence(executor)) {
+    const label = 'network.synergy.wireguard';
+    const plistPath = `/tmp/synergy-ncp-wireguard-${crypto.randomUUID()}.plist`;
+    const installerPath = `/tmp/synergy-ncp-wireguard-${crypto.randomUUID()}.sh`;
+    try {
+      await writeExecutorFile(executor, plistPath, renderWireguardLaunchdPlist(wgQuickCommand), '0600');
+      await writeExecutorFile(executor, installerPath, `#!/bin/sh
+set -eu
+/usr/bin/install -o root -g wheel -m 0644 '${plistPath}' '/Library/LaunchDaemons/${label}.plist'
+/bin/launchctl bootout 'system/${label}' >/dev/null 2>&1 || true
+/bin/launchctl bootstrap system '/Library/LaunchDaemons/${label}.plist'
+/bin/launchctl enable 'system/${label}'
+`, '0700');
+      await executor.runElevated('/bin/sh', [installerPath], { timeoutMs: 90_000 });
+    } finally {
+      await removeExecutorFile(executor, plistPath);
+      await removeExecutorFile(executor, installerPath);
+    }
+    return;
+  }
+  if (requiresSystemdPersistence(executor)) {
+    await executor.runElevated('systemctl', ['enable', 'wg-quick@sy-vpn.service'], { timeoutMs: 90_000 });
+  }
+}
+
+function validatePackagedWireguardConfig(packageData) {
+  if (!packageData?.available || !packageData?.wireguardConfig || !packageData?.wireguardPrivateKey) {
+    throw meshError('PACKAGED_WIREGUARD_REQUIRED', 'This installer does not contain its assigned WireGuard configuration.');
+  }
+  const config = String(packageData.wireguardConfig);
+  const address = config.match(/^Address\s*=\s*([^\s,]+)/m)?.[1]?.split('/')[0];
+  const privateKey = config.match(/^PrivateKey\s*=\s*(\S+)/m)?.[1];
+  const peerCount = (config.match(/^\[Peer\]$/gm) || []).length;
+  if (
+    address !== normaliseIp(packageData.vpnIp)
+    || privateKey !== packageData.wireguardPrivateKey
+    || peerCount < 20
+    || !/^\[Interface\]$/m.test(config)
+  ) {
+    throw meshError('PACKAGED_WIREGUARD_INVALID', 'The packaged WireGuard configuration does not match its validator assignment.');
+  }
+}
+
+async function activatePackagedWireguardConfig(executor, packageData, emitProgress) {
+  validatePackagedWireguardConfig(packageData);
+  const interfaceName = 'sy-vpn';
+  const assignedIp = normaliseIp(packageData.vpnIp);
+  const wgQuickCommand = await resolveWireguardQuickBinary(executor);
+  const wgCommand = await resolveWireguardBinary(executor);
+  const temporaryPath = `/tmp/synergy-ncp-${interfaceName}-${crypto.randomUUID()}.conf`;
+  try {
+    emitProgress?.({ step: 'requesting_elevation' });
+    await writeExecutorFile(executor, temporaryPath, packageData.wireguardConfig, '0600');
+    const derivedPublicKey = String((await executor.run(wgCommand, ['pubkey'], {
+      input: `${packageData.wireguardPrivateKey}\n`,
+    })).stdout || '').trim();
+    if (derivedPublicKey !== packageData.wireguardPublicKey) {
+      throw meshError('PACKAGED_WIREGUARD_KEY_MISMATCH', 'The packaged WireGuard private and public keys do not match.');
+    }
+    await executor.runElevated('mkdir', ['-p', '/etc/wireguard']);
+    await executor.runElevated('install', ['-m', '0600', temporaryPath, `/etc/wireguard/${interfaceName}.conf`]);
+    await executor.runElevated(wgQuickCommand, ['down', interfaceName], { timeoutMs: 90_000 }).catch((error) => {
+      if (error?.code === 'ELEVATION_REQUIRED' || error?.code === 'REMOTE_SUDO_REQUIRED') throw error;
+    });
+    emitProgress?.({ step: 'activating_packaged_wireguard' });
+    await executor.runElevated(wgQuickCommand, ['up', interfaceName], { timeoutMs: 90_000 });
+  } finally {
+    await removeExecutorFile(executor, temporaryPath);
+  }
+  let health = await getMeshHealth(executor, { interfaceName, assignedIp }).catch((error) => {
+    if (!isRetryableMeshHealthError(error)) throw error;
+    return null;
+  });
+  if (!health?.handshakeConfirmed) {
+    health = await waitForMeshHandshake(executor, {
+      interfaceName,
+      assignedIp,
+      initialHealth: health,
+      emitProgress,
+    });
+  }
+  if (!health.handshakeConfirmed) {
+    throw meshError('NO_HANDSHAKE', 'The packaged secure-network configuration started, but no validator peer completed a handshake.');
+  }
+  await ensurePersistentPackagedWireguard(executor, wgQuickCommand);
+  emitProgress?.({ step: 'packaged_wireguard_active' });
+  return health;
 }
 
 function parseWireGuardDump(interfaceName, stdout) {
@@ -832,6 +966,7 @@ async function redeemInvite(executor, inviteOrPayload, optionsOrEmit, maybeEmit)
 }
 
 module.exports = {
+  activatePackagedWireguardConfig,
   getMeshHealth,
   hasExistingInterfaceConfig,
   innernetPlatformKey,

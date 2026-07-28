@@ -185,7 +185,7 @@ The control panel connects to the Synergy Testnet network:
 | Explorer | `https://testnet-explorer.synergy-network.io` |
 | Faucet | `https://testnet-faucet.synergy-network.io` |
 
-**Chain ID:** `1264`
+**Chain ID:** `1266`
 
 **Default Ports:**
 

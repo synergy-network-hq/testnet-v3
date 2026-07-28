@@ -123,13 +123,13 @@ RPC Gateway uses public-facing role ports `5623`, `5641`, `5661`, and `5681` in 
 | Testnet API | `https://testnet-api.synergy-network.io` |
 | Explorer / Atlas | `https://testnet-explorer.synergy-network.io` |
 | Atlas API | `https://testnet-atlas-api.synergy-network.io` |
-| Chain ID | `1264` |
+| Chain ID | `1266` |
 | Network ID | `synergy-testnet-v3` |
-| Fork height | `204216` |
-| Fork parent height | `204215` |
-| Fork parent hash | `e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816` |
+| Genesis height | `0` |
+| Genesis parent height | `0` |
+| Fork parent hash | `0000000000000000000000000000000000000000000000000000000000000000` |
 | New consensus | `FN-DSA` |
-| Validator key algorithm | `FN-DSA-1024` |
+| Consensus key algorithm | `ML-DSA-65` |
 | Parser mode | `fail_closed` |
 | Token | `SNRG` |
 
@@ -586,8 +586,8 @@ The Node Details page is the main runtime control surface for the selected node.
 
 For validator nodes, the page shows a step-by-step activation guide:
 
-1. Verify canonical chain `1264`.
-2. Verify network `synergy-testnet-v3`, fork height `204216`, parent hash `e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816`, parser mode `fail_closed`, and post-fork FN-DSA consensus.
+1. Verify canonical chain `1266`.
+2. Verify network `synergy-testnet-v3`, genesis height `0`, parent hash `0000000000000000000000000000000000000000000000000000000000000000`, parser mode `fail_closed`, and Testnet-v3 ML-DSA-65 consensus.
 3. Sync through relayers and register discovery.
 4. Request Core team funding for the validator address.
 5. Stake the received SNRG.
@@ -962,7 +962,7 @@ If Help cannot load the manual, close and reopen the app so the monitor workspac
 9. Open **Onboarding** from the Basic sidebar or validator top bar.
 10. Click **Verify Onboarding**. This is proof-only and does not start the runtime, resync time, restore snapshots, stake, or activate.
 11. Review the proof and confirm the address starts with `synv1`.
-12. Confirm the generated workspace uses chain `1264`, network `synergy-testnet-v3`, fork height `204216`, parent hash `e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816`, consensus `FN-DSA`, validator key algorithm `FN-DSA-1024`, and parser mode `fail_closed`.
+12. Confirm the generated workspace uses chain `1266`, network `synergy-testnet-v3`, genesis height `0`, parent hash `0000000000000000000000000000000000000000000000000000000000000000`, consensus `ML-DSA-65`, consensus key algorithm `ML-DSA-65`, and parser mode `fail_closed`.
 13. Click **Run Safe Onboarding** when the proof shows only retryable start, seed, snapshot, or catch-up work remains.
 14. Wait for runtime health to show running.
 15. Click **Bootstrap / reconnect** if peer count is low.
@@ -1024,11 +1024,11 @@ Activation Preflight checks:
 - canonical `synv1...` validator address
 - canonical workspace genesis
 - canonical chain state
-- chain ID `1264`
+- chain ID `1266`
 - network ID `synergy-testnet-v3`
-- fork height `204216`
-- parent hash `e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816`
-- consensus `FN-DSA`
+- genesis height `0`
+- parent hash `0000000000000000000000000000000000000000000000000000000000000000`
+- consensus `ML-DSA-65`
 - validator key algorithm `FN-DSA-1024`
 - parser mode `fail_closed`
 - public P2P endpoint
@@ -1397,7 +1397,7 @@ Fix:
 
 1. Treat this as a safety block, not a cosmetic status.
 2. Open Validator Lifecycle and identify the first failed gate.
-3. Confirm chain `1264`, network `synergy-testnet-v3`, fork height `204216`, parent hash `e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816`, consensus `FN-DSA`, key algorithm `FN-DSA-1024`, and parser mode `fail_closed`.
+3. Confirm chain `1266`, network `synergy-testnet-v3`, genesis height `0`, parent hash `0000000000000000000000000000000000000000000000000000000000000000`, consensus `ML-DSA-65`, consensus key algorithm `ML-DSA-65`, and parser mode `fail_closed`.
 4. Use **Sync Catch Up** for chain lag or stale state.
 5. Use **Bootstrap / reconnect** and **Re-register** for peer or seed failures.
 6. Restart the runtime if the runtime wallet or local signing key check does not load after provisioning.

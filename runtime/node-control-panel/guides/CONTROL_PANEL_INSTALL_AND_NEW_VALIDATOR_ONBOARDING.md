@@ -22,13 +22,13 @@ No live deployment, validator restart, live validator state mutation, or archive
 
 | Item | Value |
 | --- | --- |
-| Chain ID | `1264` |
+| Chain ID | `1266` |
 | Network ID | `synergy-testnet-v3` |
-| Fork height | `204216` |
-| Fork parent height | `204215` |
-| Fork parent hash | `e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816` |
+| Genesis height | `0` |
+| Genesis parent height | `0` |
+| Fork parent hash | `0000000000000000000000000000000000000000000000000000000000000000` |
 | Consensus signing after fork | `FN-DSA` |
-| Validator key algorithm | `FN-DSA-1024` |
+| Consensus key algorithm | `ML-DSA-65` |
 | Parser mode | `fail_closed` |
 | Public RPC | `https://testnet-core-rpc.synergy-network.io` |
 | Public WS | `wss://testnet-core-ws.synergy-network.io` |
@@ -218,9 +218,9 @@ Install the Microsoft Visual C++ Redistributable x64 only if Windows reports mis
 1. Start the Control Panel.
 2. Open **Settings**.
 3. Confirm these values:
-   - Chain ID `1264`.
+   - Chain ID `1266`.
    - Network ID `synergy-testnet-v3`.
-   - Checkpoint fork `204216`.
+   - Testnet-v3 genesis height `0`.
    - Consensus algorithm `FN-DSA`.
    - Parser mode `fail_closed`.
 4. Open the validator or onboarding screen.
@@ -270,7 +270,7 @@ The Control Panel generates:
 - a new `synv1...` validator address;
 - FN-DSA validator identity material;
 - encrypted private key exports;
-- `node.toml` with `chain_id=1264`, `network_id=synergy-testnet-v3`, and fork metadata;
+- `node.toml` with `chain_id=1266`, `network_id=synergy-testnet-v3`, and fork metadata;
 - `peers.toml` with public relayers, bootnodes, seed services, DNS bootstrap, and seed-discovered peers;
 - funding and bootstrap manifests;
 - local logs and evidence directories.
@@ -402,13 +402,13 @@ Run **Activation Preflight** and confirm all required checks pass:
 
 - Validator role is correct.
 - Validator address starts with `synv1` and is canonical.
-- Chain ID is `1264`.
+- Chain ID is `1266`.
 - Network ID is `synergy-testnet-v3`.
-- Fork metadata matches height `204216` and the expected parent hash.
+- Genesis metadata matches height `0` and the zero parent hash.
 - Consensus algorithm is `FN-DSA`.
-- Validator key algorithm is `FN-DSA-1024`.
+- Consensus key algorithm is `ML-DSA-65`; the primary validator identity remains FN-DSA-1024.
 - Parser mode is `fail_closed`.
-- Workspace genesis and local chain state are canonical for chain `1264`.
+- Workspace genesis and local chain state are canonical for chain `1266`.
 - Local qRPC is responding.
 - Runtime wallet has imported the validator identity and can sign.
 - P2P listener is reachable.

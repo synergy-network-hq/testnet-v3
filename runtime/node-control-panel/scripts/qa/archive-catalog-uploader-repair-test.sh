@@ -29,7 +29,7 @@ import time
 
 path, height, snapshot = sys.argv[1:]
 json.dump({
-    "chain_id": 1264,
+    "chain_id": 1266,
     "network_id": "synergy-testnet-v3",
     "updated_at": int(time.time()),
     "snapshots": [{
@@ -37,7 +37,7 @@ json.dump({
         "status": "published",
         "height": int(height),
         "snapshot_id": snapshot,
-        "local_path": "/Users/Shared/Synergy/archive-validator/published-snapshots-v19/testnet-1264/validator-pruned/snapshot-" + snapshot,
+        "local_path": "/Users/Shared/Synergy/archive-validator/published-snapshots-v19/testnet-1266/validator-pruned/snapshot-" + snapshot,
         "snapshot_url": "public://snapshot",
         "manifest_url": "public://manifest",
         "manifest_signature_url": "public://manifest.sig",

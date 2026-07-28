@@ -30,12 +30,12 @@ import {
 } from './controlPanelActions';
 
 const SYNC_READY_GAP = 2;
-const REQUIRED_CHAIN_ID = '1264';
+const REQUIRED_CHAIN_ID = '1266';
 const REQUIRED_NETWORK_ID = 'synergy-testnet-v3';
-const REQUIRED_FORK_HEIGHT = 204216;
-const REQUIRED_FORK_PARENT_HEIGHT = 204215;
-const REQUIRED_FORK_PARENT_HASH = 'e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816';
-const REQUIRED_CONSENSUS_ALGORITHM = 'FN-DSA';
+const REQUIRED_FORK_HEIGHT = 0;
+const REQUIRED_FORK_PARENT_HEIGHT = 0;
+const REQUIRED_FORK_PARENT_HASH = '0000000000000000000000000000000000000000000000000000000000000000';
+const REQUIRED_CONSENSUS_ALGORITHM = 'ML-DSA-65';
 const REQUIRED_PARSER_MODE = 'fail_closed';
 
 function safeArray(value) {
@@ -253,7 +253,7 @@ function buildMetrics(featureKey, snapshot, selectedNodeLive, networkStats) {
     return [
       metric('Chain ID', chainId || 'Not reported', `Required ${REQUIRED_CHAIN_ID}`, chainId === REQUIRED_CHAIN_ID ? 'good' : 'warn', 'tag'),
       metric('Network', networkId || 'Not reported', REQUIRED_NETWORK_ID, networkId === REQUIRED_NETWORK_ID ? 'good' : 'warn', 'hub'),
-      metric('Fork height', reportedForkHeight ? formatNumber(reportedForkHeight) : 'Not reported', `Required ${formatNumber(REQUIRED_FORK_HEIGHT)}`, reportedForkHeight === REQUIRED_FORK_HEIGHT ? 'good' : 'warn', 'call_split'),
+      metric('Consensus start height', formatNumber(reportedForkHeight), `Required ${formatNumber(REQUIRED_FORK_HEIGHT)}`, reportedForkHeight === REQUIRED_FORK_HEIGHT ? 'good' : 'warn', 'call_split'),
       metric('Consensus', reportedAlgorithm || 'Not reported', `Parser ${reportedParserMode || 'not reported'}`, reportedAlgorithm === REQUIRED_CONSENSUS_ALGORITHM && reportedParserMode === REQUIRED_PARSER_MODE ? 'good' : 'warn', 'how_to_reg'),
     ];
   }
@@ -389,8 +389,8 @@ function buildChecks(featureKey, snapshot) {
       },
       {
         id: 'fork-height',
-        label: 'Checkpointed FN-DSA fork',
-        detail: `Live fork height ${forkHeight || 'not reported'}; required ${formatNumber(REQUIRED_FORK_HEIGHT)}.`,
+        label: 'Testnet-v3 genesis consensus',
+        detail: `Live consensus start height ${formatNumber(forkHeight)}; required ${formatNumber(REQUIRED_FORK_HEIGHT)}.`,
         status: forkHeight === REQUIRED_FORK_HEIGHT ? 'pass' : 'fail',
       },
       {
@@ -543,7 +543,7 @@ function buildTable(featureKey, snapshot) {
       rows: [
         ['chain_id', REQUIRED_CHAIN_ID, liveChainId(snapshot, null) || 'not reported', liveChainId(snapshot, null) === REQUIRED_CHAIN_ID ? 'pass' : 'check'],
         ['network_id', REQUIRED_NETWORK_ID, liveNetworkId(snapshot, null) || 'not reported', liveNetworkId(snapshot, null) === REQUIRED_NETWORK_ID ? 'pass' : 'check'],
-        ['fork_height', formatNumber(REQUIRED_FORK_HEIGHT), Number(fork.fork_height ?? fork.forkHeight ?? 0) ? formatNumber(fork.fork_height ?? fork.forkHeight) : 'not reported', Number(fork.fork_height ?? fork.forkHeight ?? 0) === REQUIRED_FORK_HEIGHT ? 'pass' : 'check'],
+        ['consensus_start_height', formatNumber(REQUIRED_FORK_HEIGHT), formatNumber(Number(fork.fork_height ?? fork.forkHeight ?? 0)), Number(fork.fork_height ?? fork.forkHeight ?? 0) === REQUIRED_FORK_HEIGHT ? 'pass' : 'check'],
         ['consensus', REQUIRED_CONSENSUS_ALGORITHM, fork.new_consensus_algorithm || fork.newConsensusAlgorithm || 'not reported', String(fork.new_consensus_algorithm || fork.newConsensusAlgorithm || '') === REQUIRED_CONSENSUS_ALGORITHM ? 'pass' : 'check'],
         ['parser_mode', REQUIRED_PARSER_MODE, fork.parser_mode || fork.parserMode || 'not reported', String(fork.parser_mode || fork.parserMode || '') === REQUIRED_PARSER_MODE ? 'pass' : 'check'],
       ],
@@ -790,9 +790,9 @@ function ValidatorOnboardingWorkflow({
     },
     {
       id: 'fork',
-      label: 'Use checkpointed FN-DSA fork metadata',
+      label: 'Use Testnet-v3 genesis consensus metadata',
       done: forkReady && keyReady,
-      detail: `Required fork ${formatNumber(REQUIRED_FORK_HEIGHT)}, parent ${formatNumber(REQUIRED_FORK_PARENT_HEIGHT)}, ${REQUIRED_CONSENSUS_ALGORITHM}, parser ${REQUIRED_PARSER_MODE}. Live fork ${forkHeight || 'not reported'}.`,
+      detail: `Required consensus start ${formatNumber(REQUIRED_FORK_HEIGHT)}, ${REQUIRED_CONSENSUS_ALGORITHM}, parser ${REQUIRED_PARSER_MODE}. Live start ${formatNumber(forkHeight)}.`,
       actions: (
         <SNRGButton variant="blue" size="sm" disabled={actionBusy === 'activation-preflight'} onClick={() => onAction({ id: 'activation-preflight', label: 'Activation Preflight' })}>
           Verify Metadata
@@ -901,7 +901,7 @@ function ValidatorOnboardingWorkflow({
         </div>
         <div className="cp-definition-item">
           <span>fork height</span>
-          <strong>{forkHeight ? formatNumber(forkHeight) : 'not reported'}</strong>
+          <strong>{formatNumber(forkHeight)}</strong>
         </div>
         <div className="cp-definition-item">
           <span>preflight</span>
