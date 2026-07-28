@@ -34,10 +34,12 @@ npm run release:build-validator-installers -- \
 ```
 
 The command stages and validates exactly one assignment at a time, builds the
-native installer, assigns a validator-specific filename, records its SHA-256
-digest, and clears the secret staging directory before the next build and on
-exit. The default range is Validator 01 through Validator 21. `--from` and
-`--to` may be used only for a controlled resume.
+native installer, notarizes and staples every DMG, extracts or mounts every
+artifact to verify its one embedded assignment and checksums, assigns a
+validator-specific filename, records its SHA-256 digest, and clears the secret
+staging directory before the next build and on exit. The default range is
+Validator 01 through Validator 21. `--from` and `--to` may be used only for a
+controlled resume.
 
 The macOS release host must have the Developer ID and notarization credentials
 required by `electron-builder.yml`. Linux packages must be built on Linux.
@@ -49,14 +51,14 @@ Before distribution:
 1. Confirm each platform manifest contains exactly 21 unique assignments and
    21 unique artifacts.
 2. Verify every checksum in each `SHA256SUMS`.
-3. Mount or extract a sample from Validators 01, 06, 07, and 21 and confirm its
-   `assignment.json`, identity manifest, VPN binding, and checksums agree.
+3. Confirm the build log records a successful mount/extract, signature check,
+   and embedded assignment/checksum verification for every artifact.
 4. Confirm Validators 01–06 are marked `initial-six`; Validators 07–21 are
    marked `gradual-activation`.
 5. Confirm every `sy-vpn.conf` contains the complete topology and that only the
    assigned validator's `[Interface]` private key is present.
-6. Gatekeeper-check and notarization-check every DMG. Inspect every DEB with
-   `dpkg-deb --info` and `dpkg-deb --contents`.
+6. Confirm the automated Gatekeeper and notarization checks passed for every
+   DMG, and `dpkg-deb --info` passed for every DEB.
 
 Deliver each validator's pair through the approved private custody channel.
 Do not interchange packages between validators.

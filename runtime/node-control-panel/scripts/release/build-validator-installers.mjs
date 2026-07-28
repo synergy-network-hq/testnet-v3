@@ -41,6 +41,28 @@ function run(command, args, env = process.env) {
   });
 }
 
+function requiredEnvironment(name) {
+  const value = String(process.env[name] || "").trim();
+  if (!value) throw new Error(`${name} is required for signed and notarized macOS validator installers.`);
+  return value;
+}
+
+async function notarizeMacDmg(filePath) {
+  await run("xcrun", [
+    "notarytool",
+    "submit",
+    filePath,
+    "--apple-id",
+    requiredEnvironment("APPLE_ID"),
+    "--password",
+    requiredEnvironment("APPLE_APP_SPECIFIC_PASSWORD"),
+    "--team-id",
+    requiredEnvironment("APPLE_TEAM_ID"),
+    "--wait",
+  ]);
+  await run("xcrun", ["stapler", "staple", filePath]);
+}
+
 async function sha256(filePath) {
   return createHash("sha256").update(await readFile(filePath)).digest("hex");
 }
@@ -82,6 +104,11 @@ if (
   if (platform === "linux" && process.platform !== "linux") {
     throw new Error("Linux DEB installers must be built on Linux.");
   }
+  if (platform === "mac") {
+    for (const name of ["APPLE_ID", "APPLE_APP_SPECIFIC_PASSWORD", "APPLE_TEAM_ID"]) {
+      requiredEnvironment(name);
+    }
+  }
   await mkdir(output, { recursive: true });
   if (!skipBuildElectron) await run("npm", ["run", "build:electron"]);
 
@@ -113,6 +140,16 @@ if (
         : `synergy-node-control-panel_${APP_VERSION}_validator-${id}_amd64.deb`;
       const destination = join(output, fileName);
       await copyFile(built, destination);
+      if (platform === "mac") await notarizeMacDmg(destination);
+      await run(process.execPath, [
+        "scripts/release/verify-validator-installer.mjs",
+        "--installer",
+        destination,
+        "--platform",
+        platform,
+        "--validator",
+        String(validator),
+      ]);
       manifest.push({
         validator,
         assignmentId: `validator-${id}`,
