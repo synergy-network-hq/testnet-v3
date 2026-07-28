@@ -15,7 +15,9 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   AEGIS_PQVM_SOURCE_REPOSITORY: ${{ vars.AEGIS_PQVM_SOURCE_REPOSITORY || 'synergy-network-hq/aegis-pqvm' }}
   AEGIS_PQVM_SOURCE_REV: ${{ vars.AEGIS_PQVM_SOURCE_REV || '6756777e43cf7ed772fb0535055e0447b3c031db' }}
-  TESTNET_SOURCE_REPOSITORY: ${{ vars.TESTNET_SOURCE_REPOSITORY || 'synergy-network-hq/testnet' }}
+  TESTNET_SOURCE_REPOSITORY: ${{ vars.TESTNET_SOURCE_REPOSITORY || 'synergy-network-hq/testnet-v3' }}
+  ADDRESS_ENGINE_SOURCE_REPOSITORY: ${{ vars.ADDRESS_ENGINE_SOURCE_REPOSITORY || 'synergy-network-hq/synergy-address-engine' }}
+  ADDRESS_ENGINE_SOURCE_REV: ${{ vars.ADDRESS_ENGINE_SOURCE_REV || '94422c42a3a9ba1e5aa300a37a488b9edc174869' }}
   INNERNET_SOURCE_REPOSITORY: ${{ vars.INNERNET_SOURCE_REPOSITORY || 'tonarino/innernet' }}
   INNERNET_SOURCE_REV: ${{ vars.INNERNET_SOURCE_REV || 'dbdb0097b397fa5b10566ae58d33c699142102f2' }}
 
@@ -228,7 +230,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          TESTNET_SOURCE_REPOSITORY="${TESTNET_SOURCE_REPOSITORY:-synergy-network-hq/testnet}"
+          TESTNET_SOURCE_REPOSITORY="${TESTNET_SOURCE_REPOSITORY:-synergy-network-hq/testnet-v3}"
           TESTNET_RUNTIME_REF="${TESTNET_RUNTIME_REF:?Set TESTNET_RUNTIME_REF to the trusted Testnet runtime release/tag/branch.}"
           TESTNET_SOURCE_REF="${TESTNET_SOURCE_REF:-main}"
           if [[ "${TESTNET_RUNTIME_REF}" == "bundled" || "${TESTNET_RUNTIME_REF}" == "committed" ]]; then
@@ -286,6 +288,30 @@ jobs:
           }
           popd >/dev/null
 
+      - name: Checkout validator identity decryptor source
+        shell: bash
+        env:
+          ADDRESS_ENGINE_REPO_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ "$ADDRESS_ENGINE_SOURCE_REV" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "ADDRESS_ENGINE_SOURCE_REV must be a full immutable commit SHA" >&2
+            exit 1
+          }
+          mkdir address-engine-source
+          pushd address-engine-source >/dev/null
+          git init --quiet
+          git remote add origin "https://github.com/${ADDRESS_ENGINE_SOURCE_REPOSITORY}.git"
+          if [[ -n "${ADDRESS_ENGINE_REPO_TOKEN:-}" ]]; then
+            auth_header="$(printf 'x-access-token:%s' "$ADDRESS_ENGINE_REPO_TOKEN" | base64 | tr -d '\n')"
+            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth_header}" fetch --depth 1 origin "$ADDRESS_ENGINE_SOURCE_REV"
+          else
+            git fetch --depth 1 origin "$ADDRESS_ENGINE_SOURCE_REV"
+          fi
+          git checkout --detach --quiet FETCH_HEAD
+          [[ "$(git rev-parse HEAD)" == "$ADDRESS_ENGINE_SOURCE_REV" ]]
+          popd >/dev/null
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -339,6 +365,8 @@ jobs:
             fi
           elif [[ "${RUNNER_OS}" == "Linux" ]]; then
             targets=("linux-amd64")
+            sudo apt-get update
+            sudo apt-get install -y wireguard-tools
           else
             echo "Unsupported runner OS for Innernet client build: ${RUNNER_OS}" >&2
             exit 1
@@ -350,8 +378,12 @@ jobs:
             brew install wireguard-go wireguard-tools
             install -m 0755 "$(command -v wireguard-go)" binaries/innernet/wireguard-go
             install -m 0755 "$(command -v wg)" binaries/innernet/wg
+            install -m 0755 "$(command -v wg-quick)" binaries/innernet/wg-quick
             file binaries/innernet/wireguard-go | grep -q 'Mach-O 64-bit executable arm64'
             file binaries/innernet/wg | grep -q 'Mach-O 64-bit executable arm64'
+          else
+            install -m 0755 "$(command -v wg)" binaries/innernet/wg
+            install -m 0755 "$(command -v wg-quick)" binaries/innernet/wg-quick
           fi
           for binary in binaries/innernet/*; do
             [[ "${binary}" == *.json ]] && continue
@@ -362,8 +394,28 @@ jobs:
             if [[ "${binary}" == */wireguard-go ]]; then
               continue
             fi
+            if [[ "${binary}" == */wg-quick ]]; then
+              head -n 1 "${binary}" | grep -q '^#!'
+              continue
+            fi
             "${binary}" --version
           done
+
+      - name: Build packaged validator identity decryptor
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --manifest-path "$GITHUB_WORKSPACE/address-engine-source/Cargo.toml" \
+            --release --bin synergy-keygen
+          case "${RUNNER_OS}" in
+            macOS) keygen_name="synergy-keygen-darwin-arm64" ;;
+            Linux) keygen_name="synergy-keygen-linux-amd64" ;;
+            *) echo "Unsupported validator identity platform: ${RUNNER_OS}" >&2; exit 1 ;;
+          esac
+          install -m 0755 \
+            "$GITHUB_WORKSPACE/address-engine-source/target/release/synergy-keygen" \
+            "binaries/${keygen_name}"
+          "binaries/${keygen_name}" --help >/dev/null
 
       - name: Install release validation tools
         shell: bash
@@ -398,6 +450,13 @@ jobs:
 
           (async () => {
             const readJson = (filePath) => JSON.parse(fs.readFileSync(filePath, 'utf8'));
+            const firstExisting = (...filePaths) => {
+              const filePath = filePaths.find((candidate) => fs.existsSync(candidate));
+              if (!filePath) {
+                throw new Error(`None of the required files exist: ${filePaths.join(', ')}`);
+              }
+              return filePath;
+            };
             const readGenesisIdentity = (filePath) => {
               const payload = JSON.parse(fs.readFileSync(filePath, 'utf8'));
               const hash = payload?.integrity?.genesis_hash;
@@ -408,37 +467,77 @@ jobs:
                 chainId: payload?.network?.chain_id,
                 nativeNetworkId: payload?.network?.network_id,
                 hash: String(hash).trim().toLowerCase(),
-                magic: String(payload?.p2p_identity?.network_magic_bytes || '').trim().toLowerCase(),
-                chainIdHex: String(payload?.network_identity?.synergy_native_chain_id_hex || '').trim().toLowerCase(),
+                magic: String(
+                  payload?.network_magic_bytes?.value
+                  || payload?.p2p_identity?.network_magic_bytes
+                  || '',
+                ).trim().toLowerCase(),
+                chainIdHex: String(
+                  payload?.network_identity?.synergy_native_chain_id_hex
+                  || `0x${Number(payload?.network?.chain_id).toString(16)}`
+                  || '',
+                ).trim().toLowerCase(),
+                launchStatus: String(payload?.launch_status || '').trim(),
+                signedBy: Array.isArray(payload?.integrity?.signed_by)
+                  ? payload.integrity.signed_by.length
+                  : 0,
+                validatorCount: Array.isArray(payload?.validators)
+                  ? payload.validators.length
+                  : 0,
               };
             };
 
-            const source = readGenesisIdentity('testnet-source/config/genesis.json');
+            const sourceGenesisPath = firstExisting(
+              'testnet-source/runtime/config/genesis.json',
+              'testnet-source/config/genesis.json',
+            );
+            const source = readGenesisIdentity(sourceGenesisPath);
             const bundled = readGenesisIdentity('testnet/runtime/configs/genesis/genesis.json');
             if (source.hash !== bundled.hash || source.magic !== bundled.magic || source.chainId !== bundled.chainId || source.nativeNetworkId !== bundled.nativeNetworkId) {
               throw new Error(`Bundled genesis does not match testnet source. source=${JSON.stringify(source)} bundled=${JSON.stringify(bundled)}`);
             }
-            if (bundled.chainId !== 1264 || bundled.nativeNetworkId !== 1264 || bundled.chainIdHex !== '0x4f0') {
-              throw new Error(`Bundled genesis must be public Testnet chain 1264. got=${JSON.stringify(bundled)}`);
+            for (const [label, identity] of [['source', source], ['bundled', bundled]]) {
+              if (
+                !/^[0-9a-f]{64}$/.test(identity.hash)
+                || /^0{64}$/.test(identity.hash)
+                || !/^[0-9a-f]{8}$/.test(identity.magic)
+                || identity.launchStatus
+                || identity.signedBy < 1
+                || identity.validatorCount < 6
+              ) {
+                throw new Error(`${label} genesis is not an approved, signed Testnet-v3 genesis: ${JSON.stringify(identity)}`);
+              }
+            }
+            if (bundled.chainId !== 1266 || bundled.nativeNetworkId !== 1266 || bundled.chainIdHex !== '0x4f2') {
+              throw new Error(`Bundled genesis must be Testnet-v3 chain 1266. got=${JSON.stringify(bundled)}`);
             }
 
-            const identifiers = readJson('testnet-source/network-identifiers.testnet.json');
+            const identifiersPath = firstExisting(
+              'testnet-source/network-identifiers.testnet-v3.json',
+              'testnet-source/network-identifiers.testnet-v3.identity-assigned.json',
+              'testnet-source/runtime/network-identifiers.testnet.json',
+            );
+            const identifiers = readJson(identifiersPath);
             const identifierHash = String(identifiers?.cryptographic_identity?.genesis_hash || '').trim().toLowerCase();
             const identifierMagic = String(identifiers?.cryptographic_identity?.network_magic_bytes?.value || '').trim().toLowerCase();
             const identifierChainHex = String(identifiers?.wallet_metadata?.wallet_add_network_payload?.chainId || '').trim().toLowerCase();
+            const identifierStatus = String(identifiers?.cryptographic_identity?.genesis_hash_status || '').trim().toLowerCase();
             if (identifierHash !== bundled.hash || identifierMagic !== bundled.magic) {
               throw new Error(`Network identifiers do not match bundled genesis. identifiers=${identifierHash}/${identifierMagic} bundled=${bundled.hash}/${bundled.magic}`);
             }
-            if (identifierChainHex && identifierChainHex !== '0x4f0') {
-              throw new Error(`Network identifiers must declare chain_id_hex 0x4f0. got=${identifierChainHex}`);
+            if (identifierChainHex && identifierChainHex !== '0x4f2') {
+              throw new Error(`Network identifiers must declare chain_id_hex 0x4f2. got=${identifierChainHex}`);
+            }
+            if (identifierStatus.includes('candidate') || identifierStatus.includes('pending')) {
+              throw new Error(`Network identifiers are not final: ${identifierStatus}`);
             }
 
             const manifest = readJson('testnet/runtime/workspace-manifest.json');
-            if (manifest?.chain_id !== 1264 && manifest?.chainId !== 1264) {
-              throw new Error('Workspace manifest must declare chain ID 1264');
+            if (manifest?.chain_id !== 1266 && manifest?.chainId !== 1266) {
+              throw new Error('Workspace manifest must declare chain ID 1266');
             }
-            if (manifest?.chain_id_hex !== '0x4f0') {
-              throw new Error('Workspace manifest must declare chain_id_hex 0x4f0');
+            if (manifest?.chain_id_hex !== '0x4f2') {
+              throw new Error('Workspace manifest must declare chain_id_hex 0x4f2');
             }
             if (manifest?.network_id !== 'synergy-testnet-v3') {
               throw new Error('Workspace manifest must declare network_id synergy-testnet-v3');
@@ -492,7 +591,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          TESTNET_SOURCE_REPOSITORY="${TESTNET_SOURCE_REPOSITORY:-synergy-network-hq/testnet}"
+          TESTNET_SOURCE_REPOSITORY="${TESTNET_SOURCE_REPOSITORY:-synergy-network-hq/testnet-v3}"
           TESTNET_RUNTIME_REF="${TESTNET_RUNTIME_REF:?Set TESTNET_RUNTIME_REF to the trusted Testnet runtime release.}"
 
           if [[ "${TESTNET_RUNTIME_REF}" == "bundled" || "${TESTNET_RUNTIME_REF}" == "committed" ]]; then
@@ -602,7 +701,7 @@ jobs:
             exit 1
           fi
 
-          source_version="$(awk -F '"' '/^version = "/ { print $2; exit }' testnet-source/src/Cargo.toml)"
+          source_version="$(awk -F '"' '/^version = "/ { print $2; exit }' testnet-source/runtime/src/Cargo.toml)"
           if [[ "${source_version}" != "${control_panel_version}" ]]; then
             echo "Testnet source package version ${source_version} does not match Control Panel ${control_panel_version}" >&2
             exit 1
@@ -884,6 +983,13 @@ jobs:
             file "$helper_path" | grep -q 'Mach-O 64-bit executable arm64'
             codesign --verify --strict --verbose=2 "$helper_path"
           done
+          wg_quick_path="$app_path/Contents/Resources/innernet/wg-quick"
+          test -x "$wg_quick_path"
+          head -n 1 "$wg_quick_path" | grep -q '^#!'
+          keygen_path="$app_path/Contents/Resources/binaries/synergy-keygen-darwin-arm64"
+          test -x "$keygen_path"
+          file "$keygen_path" | grep -q 'Mach-O 64-bit executable arm64'
+          codesign --verify --strict --verbose=2 "$keygen_path"
           xcrun stapler validate "$app_path"
           xcrun stapler validate "$dmg_path"
           assess_gatekeeper_with_quarantine "$app_path" "packaged"
@@ -916,74 +1022,6 @@ jobs:
           name: installer-${{ matrix.artifact_name }}
           if-no-files-found: error
           path: ${{ matrix.artifact_glob }}
-
-  prepare-validator-distribution:
-    name: Prepare Validator 1-21 secure distribution
-    needs:
-      - verify-release-identity
-      - build
-    runs-on: ubuntu-22.04
-    permissions:
-      contents: read
-    env:
-      # Deployment/release secret: 21 unique validator, identity, publicKey records.
-      # It is never printed and contains no private key or custody passphrase.
-      VALIDATOR_ASSIGNMENTS_JSON: ${{ secrets.VALIDATOR_ASSIGNMENTS_JSON }}
-
-    steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Download signed macOS installer
-        uses: actions/download-artifact@v4
-        with:
-          name: installer-macos
-          path: runtime/node-control-panel/release-input/macos
-
-      - name: Download Linux installer
-        uses: actions/download-artifact@v4
-        with:
-          name: installer-linux
-          path: runtime/node-control-panel/release-input/linux
-
-      - name: Build key-free Validator 1-21 matrix
-        shell: bash
-        run: |
-          set -euo pipefail
-          [[ -n "${VALIDATOR_ASSIGNMENTS_JSON:-}" ]] || {
-            echo "VALIDATOR_ASSIGNMENTS_JSON is required for the secure validator distribution." >&2
-            exit 1
-          }
-          assignments_path="$RUNNER_TEMP/validator-assignments.json"
-          printf '%s' "$VALIDATOR_ASSIGNMENTS_JSON" > "$assignments_path"
-          macos_path="$(find release-input/macos -type f -name '*.dmg' -print -quit)"
-          linux_path="$(find release-input/linux -type f -name '*.deb' -print -quit)"
-          [[ -n "$macos_path" && -n "$linux_path" ]] || {
-            echo "Signed macOS DMG and Linux DEB artifacts are required." >&2
-            exit 1
-          }
-          node scripts/release/prepare-validator-distribution.mjs \
-            --macos "$macos_path" \
-            --linux "$linux_path" \
-            --assignments "$assignments_path" \
-            --output validator-distribution
-          test -f validator-distribution/SHA256SUMS
-          test -f validator-distribution/Validator-01/SHA256SUMS
-          test -f validator-distribution/Validator-21/SHA256SUMS
-          rm -f "$assignments_path"
-
-      - name: Upload private validator distribution matrix
-        uses: actions/upload-artifact@v4
-        with:
-          name: validator-distribution-${{ needs.verify-release-identity.outputs.version }}
-          if-no-files-found: error
-          retention-days: 30
-          path: runtime/node-control-panel/validator-distribution
 
   publish-releases-repo:
     name: Publish installers to releases repo
