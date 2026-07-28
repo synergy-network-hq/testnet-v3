@@ -985,7 +985,7 @@ fn validate_no_placeholders(value: &Value) -> Result<(), String> {
 fn find_placeholder_path(value: &Value, path: &str) -> Option<String> {
     match value {
         Value::String(entry) => {
-            if entry.contains('<') && entry.contains('>') {
+            if contains_unresolved_placeholder(entry) {
                 Some(path.to_string())
             } else {
                 None
@@ -1000,6 +1000,47 @@ fn find_placeholder_path(value: &Value, path: &str) -> Option<String> {
             .find_map(|(key, entry)| find_placeholder_path(entry, &format!("{path}.{key}"))),
         _ => None,
     }
+}
+
+/// Returns true only for unresolved configuration placeholders, not for the
+/// angle-bracket generic type syntax embedded in a verified SynQ ABI (for
+/// example `map<address,u8>`).  Finalized Genesis embeds the executed SynQ
+/// artifact snapshot, so a broad "contains `<` and `>`" check would reject a
+/// valid, hash-bound production artifact before the snapshot verifier can run.
+fn contains_unresolved_placeholder(entry: &str) -> bool {
+    let trimmed = entry.trim();
+    if trimmed.starts_with('<') && trimmed.ends_with('>') {
+        return true;
+    }
+
+    let mut remainder = entry;
+    while let Some(open) = remainder.find('<') {
+        let token_start = open + 1;
+        let Some(close_offset) = remainder[token_start..].find('>') else {
+            break;
+        };
+        let token = &remainder[token_start..token_start + close_offset];
+        let marker = token.to_ascii_lowercase();
+        let explicit_placeholder = marker.contains("placeholder")
+            || marker.contains("todo")
+            || marker.contains("tbd")
+            || marker.contains("replace")
+            || marker.contains("insert");
+        let symbolic_placeholder = !token.is_empty()
+            && token.chars().all(|character| {
+                character.is_ascii_uppercase()
+                    || character.is_ascii_digit()
+                    || matches!(character, '_' | '-' | '.' | ':')
+            })
+            && token
+                .chars()
+                .any(|character| character.is_ascii_uppercase());
+        if explicit_placeholder || symbolic_placeholder {
+            return true;
+        }
+        remainder = &remainder[token_start + close_offset + 1..];
+    }
+    false
 }
 
 /// A genesis document marked as a unit-test fixture must never be loadable by a
@@ -1188,6 +1229,25 @@ mod tests {
         candidate["network_magic_bytes"]["value"] = Value::String("00000000".to_string());
         let error = validate_integrity_hashes(&candidate).unwrap_err();
         assert!(error.contains("network_magic_bytes.value mismatch"));
+    }
+
+    #[test]
+    fn placeholder_validation_accepts_synq_generic_types_but_rejects_unresolved_values() {
+        let verified_abi = json!({
+            "type": "map<address,map<u256,bool>>",
+            "state_schema": "[address]"
+        });
+        validate_no_placeholders(&verified_abi).unwrap();
+
+        for unresolved in [
+            "<validator-address>",
+            "synv1<TESTNET_V3_VALIDATOR_01_ADDRESS>",
+            "authority <PLACEHOLDER>",
+            "key <replace-me>",
+        ] {
+            let error = validate_no_placeholders(&json!({ "value": unresolved })).unwrap_err();
+            assert_eq!(error, "placeholder value found at $.value");
+        }
     }
 
     #[test]

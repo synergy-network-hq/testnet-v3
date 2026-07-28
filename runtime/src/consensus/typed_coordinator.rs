@@ -11,7 +11,7 @@ use crate::consensus::typed_finality_store::{
     TypedEpochTransitionRecord, TypedFinalityRecord, TypedFinalityStore,
 };
 use crate::crypto::aegis_pqvm::{AegisPqKeyLifecycleRecord, AegisPqvmSigner, AegisPqvmVerifier};
-use crate::crypto::pqc::{PQCAlgorithm, PQCPublicKey};
+use crate::crypto::pqc::{PQCAlgorithm, PQCManager, PQCPrivateKey, PQCPublicKey};
 use crate::etdag::{EtdagParameters, ProtectedBlockInput, TargetAdmissionContext};
 use crate::execution::{compute_state_root_after, execute_block, ExecutionState};
 use crate::p2p::messages::TypedConsensusMessage;
@@ -195,6 +195,107 @@ pub struct TypedPosyCoordinatorStartup {
     pub execution_state: ExecutionState,
     pub etdag_parameters: EtdagParameters,
     pub finality_store: TypedFinalityStore,
+}
+
+/// Imports the one locally held consensus key that is already committed by
+/// finalized Genesis into the typed coordinator signer.
+///
+/// This is deliberately an import, never a key-generation path.  The caller
+/// obtains the keypair through the canonical validator-key loader, which
+/// verifies the private key against the canonical local validator record
+/// without exposing its material.  This function then requires an exact
+/// match with the frozen Testnet-v3 validator set before registering the key
+/// for the three Genesis-authorized consensus roles.
+pub fn import_local_genesis_bound_typed_signer(
+    genesis_bootstrap: &TestnetV3GenesisBootstrap,
+    local_validator_operator_address: &str,
+    public_key: PQCPublicKey,
+    private_key: PQCPrivateKey,
+) -> Result<(AegisPqvmSigner, ValidatorId), String> {
+    let operator = local_validator_operator_address.trim();
+    if operator.is_empty() {
+        return Err("typed PoSy local validator operator address is empty".to_string());
+    }
+    let validator = genesis_bootstrap
+        .validator_set
+        .validators
+        .iter()
+        .find(|validator| validator.validator_uma_id.0 == operator)
+        .ok_or_else(|| {
+            "local validator operator address is absent from finalized Testnet-v3 Genesis"
+                .to_string()
+        })?;
+    if validator.status != ValidatorStatus::Active || validator.activation_epoch.0 != 0 {
+        return Err(
+            "local validator is not active for the finalized Testnet-v3 Genesis epoch".to_string(),
+        );
+    }
+    if public_key.algorithm != PQCAlgorithm::MLDSA65
+        || private_key.algorithm != PQCAlgorithm::MLDSA65
+    {
+        return Err("typed PoSy local consensus key must use ML-DSA-65".to_string());
+    }
+    if public_key.key_id != validator.consensus_public_key.key_id.0
+        || private_key.public_key_id != public_key.key_id
+        || public_key.key_data != validator.consensus_public_key.key_bytes
+    {
+        return Err(
+            "local consensus key does not exactly match the finalized Genesis validator key"
+                .to_string(),
+        );
+    }
+
+    // Check the imported private material against the exact frozen public key
+    // before it is registered for signing.  Neither the key nor the signature
+    // is logged or returned from this boundary.
+    let mut key_check = PQCManager::new();
+    let challenge = b"SYNERGY_TESTNET_V3_TYPED_POSY_LOCAL_KEY_BINDING_V1";
+    let signature = key_check
+        .sign(&private_key, challenge)
+        .map_err(|_| "local consensus private key self-test failed".to_string())?;
+    if !key_check
+        .verify(&public_key, &signature, challenge)
+        .map_err(|_| "local consensus private key verification failed".to_string())?
+    {
+        return Err("local consensus private key does not match finalized Genesis".to_string());
+    }
+
+    let mut signer = AegisPqvmSigner::initialize_required()
+        .map_err(|error| format!("initialize typed PoSy Aegis signer: {error}"))?;
+    let registered_key_id = signer
+        .register_existing_keypair(
+            &validator.validator_uma_id.0,
+            public_key,
+            private_key,
+            vec![
+                AegisPqKeyRole::ConsensusProposer,
+                AegisPqKeyRole::ConsensusVote,
+                AegisPqKeyRole::EpochTransition,
+            ],
+            validator.activation_epoch,
+        )
+        .map_err(|error| format!("import canonical local consensus key: {error}"))?;
+    if registered_key_id != validator.consensus_public_key.key_id {
+        return Err(
+            "typed PoSy signer assigned a key identifier different from finalized Genesis"
+                .to_string(),
+        );
+    }
+    for role in [
+        AegisPqKeyRole::ConsensusProposer,
+        AegisPqKeyRole::ConsensusVote,
+        AegisPqKeyRole::EpochTransition,
+    ] {
+        if !signer.registry.key_is_active_for_epoch(
+            &validator.validator_uma_id.0,
+            &registered_key_id,
+            validator.activation_epoch,
+            role,
+        ) {
+            return Err("typed PoSy signer lifecycle disagrees with finalized Genesis".to_string());
+        }
+    }
+    Ok((signer, validator.validator_id.clone()))
 }
 
 impl TypedPosyCoordinatorStartup {
@@ -1259,6 +1360,81 @@ mod tests {
             store,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn local_signer_import_requires_the_exact_finalized_validator_key() {
+        let coordinator = coordinator_fixture();
+        let TypedPosyCoordinator {
+            consensus,
+            signer,
+            local_validator_id,
+            ..
+        } = coordinator;
+        let local = consensus
+            .validator_set
+            .validators
+            .iter()
+            .find(|validator| validator.validator_id == local_validator_id)
+            .unwrap()
+            .clone();
+        let public_key = signer
+            .registry
+            .public_key(&local.consensus_public_key.key_id)
+            .unwrap()
+            .clone();
+        let private_key = signer
+            .registry
+            .private_key(&local.consensus_public_key.key_id)
+            .unwrap()
+            .clone();
+        let bootstrap = TestnetV3GenesisBootstrap {
+            validator_set: consensus.validator_set,
+            cluster_map: consensus.cluster_map,
+            verifier: consensus.verifier,
+            finalized_epoch_seed_root: Hash::from_domain_bytes(
+                "typed-coordinator-test",
+                b"finalized-genesis-epoch-seed",
+            ),
+            genesis_transition_root: Hash::from_domain_bytes(
+                "typed-coordinator-test",
+                b"finalized-genesis-transition",
+            ),
+            cryptographic_profile_root: Hash::from_domain_bytes(
+                "typed-coordinator-test",
+                b"finalized-genesis-crypto-profile",
+            ),
+        };
+
+        let (imported, imported_validator_id) = import_local_genesis_bound_typed_signer(
+            &bootstrap,
+            &local.validator_uma_id.0,
+            public_key.clone(),
+            private_key,
+        )
+        .expect("the canonical locally held test key must import");
+        assert_eq!(imported_validator_id, local.validator_id);
+        assert_eq!(
+            imported
+                .public_key_record(&local.consensus_public_key.key_id)
+                .unwrap(),
+            local.consensus_public_key
+        );
+
+        let mut wrong_public_key = public_key;
+        wrong_public_key.key_data[0] ^= 0x01;
+        let error = import_local_genesis_bound_typed_signer(
+            &bootstrap,
+            &local.validator_uma_id.0,
+            wrong_public_key,
+            signer
+                .registry
+                .private_key(&local.consensus_public_key.key_id)
+                .unwrap()
+                .clone(),
+        )
+        .expect_err("a public key that disagrees with Genesis must be rejected");
+        assert!(error.contains("does not exactly match"));
     }
 
     fn genesis_bound_parameters() -> crate::consensus_parameters::LoadedConsensusParameters {

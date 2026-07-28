@@ -1165,8 +1165,10 @@ fn main() {
     let temporary = output.with_extension(format!("tmp-{}", std::process::id()));
     fs::write(&temporary, &bytes)
         .unwrap_or_else(|error| fail(format!("write {}: {error}", temporary.display())));
-    load_genesis_from_path(&temporary)
-        .unwrap_or_else(|error| fail(format!("runtime rejected staged candidate: {error}")));
+    if let Err(error) = load_genesis_from_path(&temporary) {
+        let _ = fs::remove_file(&temporary);
+        fail(format!("runtime rejected staged candidate: {error}"));
+    }
     fs::rename(&temporary, &output)
         .unwrap_or_else(|error| fail(format!("publish {}: {error}", output.display())));
 
