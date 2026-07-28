@@ -1201,7 +1201,7 @@ mod tests {
             let lock = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
             let previous = env::current_dir().expect("current dir should resolve");
             let previous_genesis_file = env::var("SYNERGY_GENESIS_FILE").ok();
-            let runtime_dir = env::temp_dir().join(format!(
+            let runtime_dir = crate::utils::test_temp_root(format!(
                 "synergy-telemetry-test-{}-{}",
                 std::process::id(),
                 SystemTime::now()

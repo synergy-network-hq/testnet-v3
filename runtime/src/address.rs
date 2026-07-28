@@ -78,6 +78,25 @@ fn derive_address_from_bytes(prefix: &str, public_key_bytes: &[u8]) -> String {
         .unwrap_or_else(|e| panic!("Bech32m encode failed for prefix '{}': {}", prefix, e))
 }
 
+/// Bech32m prefix for a Standard Account (SNTS-01 `syna`).
+///
+/// This is the canonical public identity of an ML-DSA-87 account on
+/// Testnet-v3: the account itself, an operational authority, a SynQ deploy or
+/// call signer, and `msg.sender` are all this one value. There is deliberately
+/// no second public address format for the same key — execution-domain
+/// separation lives in the signed payload, not in a second HRP.
+pub const STANDARD_ACCOUNT_PREFIX: &str = "syna";
+
+/// Derives the canonical Standard Account address from raw public-key bytes.
+pub fn derive_standard_account_address(public_key_bytes: &[u8]) -> String {
+    derive_address_from_bytes(STANDARD_ACCOUNT_PREFIX, public_key_bytes)
+}
+
+/// True when `address` is the Standard Account address of `public_key_bytes`.
+pub fn is_standard_account_of(address: &str, public_key_bytes: &[u8]) -> bool {
+    !public_key_bytes.is_empty() && derive_standard_account_address(public_key_bytes) == address
+}
+
 /// Decodes a hex-encoded public-key string to raw bytes.  If the string is
 /// not valid hex it falls back to the raw UTF-8 bytes of the string so that
 /// non-hex seeds (e.g. cluster seeds) are still hashed deterministically.

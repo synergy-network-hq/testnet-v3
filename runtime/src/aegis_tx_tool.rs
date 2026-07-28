@@ -596,7 +596,7 @@ mod tests {
             .as_ref()
             .expect("SynQ verification summary");
         assert_eq!(summary.domain, "SYNQ_CONTRACT_DEPLOY_V1");
-        assert_eq!(summary.algorithm, "ML-DSA-65");
+        assert_eq!(summary.algorithm, "ML-DSA-87");
         assert_eq!(summary.payload_hash, synq_carrier.payload_hash);
         assert_eq!(summary.bytecode_hash, synq_carrier.bytecode_hash);
         validate_legacy_aegis_carrier_transaction(&report.rpc_transaction).unwrap();

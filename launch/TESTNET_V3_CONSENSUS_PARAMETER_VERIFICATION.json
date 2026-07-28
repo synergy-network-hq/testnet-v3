@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "status": "APPROVED_PARAMETER_RELEASE_IMPLEMENTED_FINAL_DEPLOYMENT_PENDING_CEREMONY",
+  "decision_id": "TV3-POSY-PARAMS-2026-07-28-01",
+  "decision_record_sha256": "46cfd83b47d4a463f4954c6f0e1d94a824f94cc0e0c94582322c0c0de817bb1a",
+  "canonical_manifest": {
+    "path": "launch/TESTNET_V3_CONSENSUS_PARAMETERS.json",
+    "schema_version": 2,
+    "sha256": "5451f7084bfd97d136a1ab035d70b09ddc3262e6cc4e142b90091bac3a3ea854",
+    "sha3_512_root": "2e6760bed60c8f8e44b3b693254367f0da9a8aa9efae46c517856fb78be7402cf232c064083116b805278e95a952660f7a92e16ca9cd9349aa74467d577127cd",
+    "activation_boundary": "genesis_or_declared_epoch_boundary"
+  },
+  "source_genesis_binding": {
+    "path": "genesis.testnet-v3.identity-assigned.json",
+    "sha256": "72f025beb04702eb881fa3c5545c73ab04b9b1f362d532db1198edee3b25dfc4",
+    "genesis_hash": "dfc6ad18a62f51d429d23e4005de3664c46c29aa396cafcb645a4b2721b413f3",
+    "parameter_root_bound": true,
+    "final_deployed_genesis": false
+  },
+  "test_fixture_binding": {
+    "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+    "sha256": "b6817283761d9b0bba3d4ae5cf3ba7128155cb1b2e47b673edbcfa5240b20388",
+    "genesis_hash": "dfc6ad18a62f51d429d23e4005de3664c46c29aa396cafcb645a4b2721b413f3"
+  },
+  "next_ceremony_candidate_input_id": "6226cbebc7b4d7589f4a12c2b42fd052d7844194b1b0f1fd38e41d81b1f690bc",
+  "requirements": {
+    "remove_or_supersede_7200_slot_fixture": "PASS",
+    "replace_old_genesis_timeout_values": "PASS",
+    "single_finalized_manifest": "PASS",
+    "bind_sha3_512_root_into_final_genesis": "SOURCE_GENESIS_PASS_FINAL_DEPLOYED_GENESIS_PENDING_FRESH_CEREMONY",
+    "typed_coordinator_loads_only_finalized_manifest": "PASS_GENESIS_BOUND_STARTUP_ENFORCED_COORDINATOR_OPERATIONAL_WIRING_STILL_BLOCKED",
+    "startup_fails_on_configuration_disagreement": "PASS",
+    "healthy_targets_are_not_consensus_timeouts": "PASS_SEPARATELY_TYPED_IN_MANIFEST",
+    "activation_only_at_genesis_or_epoch_boundary": "PASS"
+  },
+  "verification": {
+    "consensus_parameter_tests": "6 passed, 0 failed",
+    "genesis_binding_tests": "5 passed, 0 failed",
+    "node_config_mismatch_test": "1 passed, 0 failed",
+    "typed_coordinator_tests": "8 passed twice after eliminating parallel test fixture collisions",
+    "ceremony_finalizer_binding_binaries": "compiled successfully",
+    "production_contract_address_rederivation": "exact match for 9 contracts"
+  },
+  "remaining_blockers": [
+    "A fresh custody-prompted dry-run and execute ceremony must produce current execution-state evidence before final Genesis publication.",
+    "The production role runtime still deliberately rejects validator consensus startup until the typed coordinator scheduler, local proposal and vote production, certificate collection, broadcast egress, and height advancement loop are fully wired.",
+    "Remaining ETDAG, wallet, distributed, security, performance, recovery, and rollout gates remain open."
+  ]
+}

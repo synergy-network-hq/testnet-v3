@@ -1,0 +1,182 @@
+[
+  {
+    "operation": "deploy",
+    "contract_address": "sync1tasz8xg3wyvxg8hfujndutgp967ekc25393w",
+    "status": "succeeded",
+    "gas_used": 454,
+    "pqc_gas_used": 12000,
+    "return_data_hex": "7b226b696e64223a226e756c6c227d",
+    "pre_state_root": "479ad84615d53c9e2c903e28fca7a9517e8c95c116c111d71270ed72b3a99a5a",
+    "post_state_root": "1720abc9886514fe7d0e01e327f0a132d2237d99500a89467551d68033f32b66",
+    "receipt_hash": "a91706d7a9e275da45f3d933d420ee7fee23a5acb20fef5385aeac1a70bd473c",
+    "logs": [
+      "synq.deploy.contract=Identity",
+      "synq.deploy.runtime=stateful-synq-ir-v2",
+      "synq.state.pre=479ad84615d53c9e2c903e28fca7a9517e8c95c116c111d71270ed72b3a99a5a",
+      "synq.state.post=1720abc9886514fe7d0e01e327f0a132d2237d99500a89467551d68033f32b66"
+    ],
+    "native_transfers": [],
+    "error_code": null,
+    "error_message": null
+  },
+  {
+    "operation": "deploy",
+    "contract_address": "sync1q2s4w0h2q98e2hv9rjycf4th4zwu7r9wxtmz",
+    "status": "succeeded",
+    "gas_used": 766,
+    "pqc_gas_used": 12000,
+    "return_data_hex": "7b226b696e64223a226e756c6c227d",
+    "pre_state_root": "1720abc9886514fe7d0e01e327f0a132d2237d99500a89467551d68033f32b66",
+    "post_state_root": "6df8cee3bd18083e9a2a969deecf9b287dbe39529341b090c6a45f16a157afe0",
+    "receipt_hash": "a6c54fa0042b105787a98b6269653a105f9a8bc7ec50a8178c911e984f465472",
+    "logs": [
+      "synq.deploy.contract=ValidatorRegistry",
+      "synq.deploy.runtime=stateful-synq-ir-v2",
+      "synq.state.pre=1720abc9886514fe7d0e01e327f0a132d2237d99500a89467551d68033f32b66",
+      "synq.state.post=6df8cee3bd18083e9a2a969deecf9b287dbe39529341b090c6a45f16a157afe0"
+    ],
+    "native_transfers": [],
+    "error_code": null,
+    "error_message": null
+  },
+  {
+    "operation": "deploy",
+    "contract_address": "sync1qqd5u3v4wgqxvfhh49ax08s8pq7uf7kk23l5",
+    "status": "succeeded",
+    "gas_used": 1043,
+    "pqc_gas_used": 12000,
+    "return_data_hex": "7b226b696e64223a226e756c6c227d",
+    "pre_state_root": "6df8cee3bd18083e9a2a969deecf9b287dbe39529341b090c6a45f16a157afe0",
+    "post_state_root": "9eea2daedc0395858893bcbab47fcfb6233234ee8810eb4e0b26c123224baf86",
+    "receipt_hash": "639300cd302370acee3263344d092ae85e64da3e784cfaa601569f12e997a4dc",
+    "logs": [
+      "synq.deploy.contract=Staking",
+      "synq.deploy.runtime=stateful-synq-ir-v2",
+      "synq.state.pre=6df8cee3bd18083e9a2a969deecf9b287dbe39529341b090c6a45f16a157afe0",
+      "synq.state.post=9eea2daedc0395858893bcbab47fcfb6233234ee8810eb4e0b26c123224baf86"
+    ],
+    "native_transfers": [],
+    "error_code": null,
+    "error_message": null
+  },
+  {
+    "operation": "deploy",
+    "contract_address": "sync12j7reatl4p09l4p63kyrxky5t89wp4a8mylg",
+    "status": "succeeded",
+    "gas_used": 1008,
+    "pqc_gas_used": 12000,
+    "return_data_hex": "7b226b696e64223a226e756c6c227d",
+    "pre_state_root": "9eea2daedc0395858893bcbab47fcfb6233234ee8810eb4e0b26c123224baf86",
+    "post_state_root": "481b4162f7990c430dadac4cd26dd611a0db3be8edfbb2d6a65dbd0df535e680",
+    "receipt_hash": "ff6af30153e67c5d135d7a0fbbb8b33c4ffd8e4a9d909fd28c4d8a1b34449eaa",
+    "logs": [
+      "synq.deploy.contract=Governance",
+      "synq.deploy.runtime=stateful-synq-ir-v2",
+      "synq.state.pre=9eea2daedc0395858893bcbab47fcfb6233234ee8810eb4e0b26c123224baf86",
+      "synq.state.post=481b4162f7990c430dadac4cd26dd611a0db3be8edfbb2d6a65dbd0df535e680"
+    ],
+    "native_transfers": [],
+    "error_code": null,
+    "error_message": null
+  },
+  {
+    "operation": "deploy",
+    "contract_address": "sync1puq5nz4wacn25de9suur53esyn99zp9j6jx8",
+    "status": "succeeded",
+    "gas_used": 668,
+    "pqc_gas_used": 12000,
+    "return_data_hex": "7b226b696e64223a226e756c6c227d",
+    "pre_state_root": "481b4162f7990c430dadac4cd26dd611a0db3be8edfbb2d6a65dbd0df535e680",
+    "post_state_root": "576077cf286713319e1a1fe8d19107a9b7abe210bb23d9873de51e44ebc1f8c1",
+    "receipt_hash": "906ab16f52e44acc11f62ae5988dab644809e1118bedc97de4491213ed4ba62e",
+    "logs": [
+      "synq.deploy.contract=Treasury",
+      "synq.deploy.runtime=stateful-synq-ir-v2",
+      "synq.state.pre=481b4162f7990c430dadac4cd26dd611a0db3be8edfbb2d6a65dbd0df535e680",
+      "synq.state.post=576077cf286713319e1a1fe8d19107a9b7abe210bb23d9873de51e44ebc1f8c1"
+    ],
+    "native_transfers": [],
+    "error_code": null,
+    "error_message": null
+  },
+  {
+    "operation": "deploy",
+    "contract_address": "sync186smh2hyslf7yf5mwa2dq0dt52dpw0eufht3",
+    "status": "succeeded",
+    "gas_used": 1031,
+    "pqc_gas_used": 12000,
+    "return_data_hex": "7b226b696e64223a226e756c6c227d",
+    "pre_state_root": "576077cf286713319e1a1fe8d19107a9b7abe210bb23d9873de51e44ebc1f8c1",
+    "post_state_root": "6ada17c54831846a2bd678060f5c734feec07d84131d0f57c7181d9cf4dcdbf7",
+    "receipt_hash": "d9996868eadf50c314e47f3f59656d56f054aa9d98405c672a2d5d7563c5ac08",
+    "logs": [
+      "synq.deploy.contract=Slashing",
+      "synq.deploy.runtime=stateful-synq-ir-v2",
+      "synq.state.pre=576077cf286713319e1a1fe8d19107a9b7abe210bb23d9873de51e44ebc1f8c1",
+      "synq.state.post=6ada17c54831846a2bd678060f5c734feec07d84131d0f57c7181d9cf4dcdbf7"
+    ],
+    "native_transfers": [],
+    "error_code": null,
+    "error_message": null
+  },
+  {
+    "operation": "deploy",
+    "contract_address": "sync1gx6zkzqjhfymqz2rz868n8zqf06fe790wued",
+    "status": "succeeded",
+    "gas_used": 535,
+    "pqc_gas_used": 12000,
+    "return_data_hex": "7b226b696e64223a226e756c6c227d",
+    "pre_state_root": "6ada17c54831846a2bd678060f5c734feec07d84131d0f57c7181d9cf4dcdbf7",
+    "post_state_root": "4dc70ad61245beb2f3e0167f236899e4a53afa10ef11207d409f763bf580cdc5",
+    "receipt_hash": "b9e929cc7259f163985077850f3664d8d1380b5c202912ad0b8e912a3e6dddb5",
+    "logs": [
+      "synq.deploy.contract=RewardDistributor",
+      "synq.deploy.runtime=stateful-synq-ir-v2",
+      "synq.state.pre=6ada17c54831846a2bd678060f5c734feec07d84131d0f57c7181d9cf4dcdbf7",
+      "synq.state.post=4dc70ad61245beb2f3e0167f236899e4a53afa10ef11207d409f763bf580cdc5"
+    ],
+    "native_transfers": [],
+    "error_code": null,
+    "error_message": null
+  },
+  {
+    "operation": "deploy",
+    "contract_address": "sync17yd3kddpn7g9mjeazhnw7ky9pmk5ujjl0rkn",
+    "status": "succeeded",
+    "gas_used": 451,
+    "pqc_gas_used": 12000,
+    "return_data_hex": "7b226b696e64223a226e756c6c227d",
+    "pre_state_root": "4dc70ad61245beb2f3e0167f236899e4a53afa10ef11207d409f763bf580cdc5",
+    "post_state_root": "c6a9584b24c2a6a7f05d6f720795c3935fe34c59b0a8d13258ad901b1989a773",
+    "receipt_hash": "896d0266f05e4a67a906e24fadc0668bc9da7588170332374b6cf1a12d9f6dd4",
+    "logs": [
+      "synq.deploy.contract=SynergyOracle",
+      "synq.deploy.runtime=stateful-synq-ir-v2",
+      "synq.state.pre=4dc70ad61245beb2f3e0167f236899e4a53afa10ef11207d409f763bf580cdc5",
+      "synq.state.post=c6a9584b24c2a6a7f05d6f720795c3935fe34c59b0a8d13258ad901b1989a773"
+    ],
+    "native_transfers": [],
+    "error_code": null,
+    "error_message": null
+  },
+  {
+    "operation": "deploy",
+    "contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+    "status": "succeeded",
+    "gas_used": 2427,
+    "pqc_gas_used": 12000,
+    "return_data_hex": "7b226b696e64223a226e756c6c227d",
+    "pre_state_root": "c6a9584b24c2a6a7f05d6f720795c3935fe34c59b0a8d13258ad901b1989a773",
+    "post_state_root": "4820041ac7447819668346740efd3b8443a52469b753ef67d0c1c3f5c1fe61c3",
+    "receipt_hash": "81f6e93812dd0121a1cfba11999053f4bb5338b7622932aca1c7195273d5d4df",
+    "logs": [
+      "synq.deploy.contract=TeamVesting",
+      "synq.deploy.runtime=stateful-synq-ir-v2",
+      "synq.state.pre=c6a9584b24c2a6a7f05d6f720795c3935fe34c59b0a8d13258ad901b1989a773",
+      "synq.state.post=4820041ac7447819668346740efd3b8443a52469b753ef67d0c1c3f5c1fe61c3"
+    ],
+    "native_transfers": [],
+    "error_code": null,
+    "error_message": null
+  }
+]

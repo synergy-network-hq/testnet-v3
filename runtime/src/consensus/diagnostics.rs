@@ -36,8 +36,22 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const EXPECTED_CHAIN_ID: u64 = 1266;
 const EXPECTED_NETWORK_ID: &str = "synergy-testnet-v3";
-const EXPECTED_GENESIS_HASH: &str =
-    "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789";
+/// Canonical Testnet-v3 genesis hash, read from the loaded genesis.
+/// Previously a hardcoded Testnet-v2 literal, which let a v3 node assert a
+/// retired chain identity during recovery/realignment/diagnostics.
+/// Canonical genesis hash for the runtime root this diagnostic is operating on.
+///
+/// Diagnostics act on a specific runtime root (see `with_runtime_root`), so the
+/// expected hash must be read from THAT root rather than from the process-wide
+/// `canonical_genesis()` lazy_static, which caches whichever genesis the first
+/// caller in the process happened to load. Falls back to the process canonical
+/// genesis only when the runtime root cannot be read.
+fn expected_genesis_hash() -> String {
+    crate::genesis::load_canonical_genesis_for_runtime()
+        .map(|genesis| genesis.hash().to_string())
+        .or_else(|_| crate::genesis::canonical_genesis().map(|genesis| genesis.hash().to_string()))
+        .unwrap_or_default()
+}
 const DIAGNOSTIC_STALE_TRANSIENT_VOTE_LOCK_SECS: u64 = 30;
 const SHADOW_REJOIN_EPOCH_SIZE: u64 = 1_000;
 const PRUNED_SNAPSHOT_HISTORY_WINDOW_BLOCKS: u64 = 5_000;
@@ -400,7 +414,7 @@ fn configured_network_id() -> String {
 fn configured_genesis_hash() -> String {
     crate::genesis::load_canonical_genesis_for_runtime()
         .map(|genesis| genesis.hash().to_string())
-        .unwrap_or_else(|_| EXPECTED_GENESIS_HASH.to_string())
+        .unwrap_or_else(|_| expected_genesis_hash())
 }
 
 fn chain_identity() -> Value {
@@ -431,9 +445,10 @@ fn require_local_testnet_v3() -> Result<(), String> {
             "wrong network_id {network_id}; expected {EXPECTED_NETWORK_ID}"
         ));
     }
-    if !genesis_hash.eq_ignore_ascii_case(EXPECTED_GENESIS_HASH) {
+    if !genesis_hash.eq_ignore_ascii_case(&expected_genesis_hash()) {
         return Err(format!(
-            "wrong genesis_hash {genesis_hash}; expected {EXPECTED_GENESIS_HASH}"
+            "wrong genesis_hash {genesis_hash}; expected {}",
+            expected_genesis_hash()
         ));
     }
     Ok(())
@@ -4234,7 +4249,7 @@ mod tests {
     }
 
     fn test_runtime_root(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
+        let root = crate::utils::test_temp_root(format!(
             "synergy-diagnostics-{name}-{}-{}",
             std::process::id(),
             now_secs_for_test()
@@ -4249,7 +4264,7 @@ mod tests {
         let source = manifest_dir
             .parent()
             .unwrap_or(&manifest_dir)
-            .join("config/genesis.json");
+            .join("config/genesis.testnet-v3.test-fixture.json");
         fs::copy(source, root.join("config/genesis.json")).expect("test genesis should be copied");
     }
 
@@ -4258,7 +4273,7 @@ mod tests {
         let source = manifest_dir
             .parent()
             .unwrap_or(&manifest_dir)
-            .join("config/genesis.json");
+            .join("config/genesis.testnet-v3.test-fixture.json");
         let mut genesis: Value =
             serde_json::from_slice(&fs::read(source).expect("test genesis should be readable"))
                 .expect("test genesis should parse");
@@ -4291,7 +4306,7 @@ mod tests {
                     "validator_address": validator_address,
                     "consensus_key_type": "FN-DSA",
                     "consensus_public_key": format!(
-                        "fn-dsa:{}",
+                        "ml-dsa-65:{}",
                         general_purpose::STANDARD.encode(format!("validator-{index}-fndsa-key"))
                     ),
                 })
@@ -4604,13 +4619,15 @@ mod tests {
         let mut manager = PQCManager::new();
         let mut registry = ValidatorRegistry::new();
         let mut keys = Vec::new();
-        for index in 0..5 {
+        // Testnet-v3 initial ACTIVE set is six validators; proofs still need
+        // only five supporters (strict 5-of-6 count quorum).
+        for index in 0..crate::recovery::BASELINE_VALIDATOR_COUNT {
             let address = format!("synv11testvalidator{index}");
             let (public_key, private_key) = manager
-                .generate_keypair(PQCAlgorithm::FNDSA)
+                .generate_keypair(PQCAlgorithm::MLDSA65)
                 .expect("test PQC keypair should be generated");
             let encoded_public_key = format!(
-                "fn-dsa:{}",
+                "ml-dsa-65:{}",
                 general_purpose::STANDARD.encode(&public_key.key_data)
             );
             let mut validator = Validator::new(
@@ -4628,9 +4645,13 @@ mod tests {
             .expect("test validator registry should be written");
 
         let block_hash = test_hash(height);
+        // Strict 5-of-6: six authorized validators, five supporters sign.
+        let required_signers = crate::consensus::dual_quorum::required_validator_quorum(
+            crate::recovery::BASELINE_VALIDATOR_COUNT,
+        );
         let votes = keys
             .iter()
-            .take(4)
+            .take(required_signers)
             .map(|(address, public_key, private_key)| {
                 let payload = format!("{address}:{height}:0:{block_hash}:0");
                 let signature = manager
@@ -4653,8 +4674,8 @@ mod tests {
             "epoch_number": 0,
             "round_number": 0,
             "aggregate_signature": [1, 2, 3, 4],
-            "participant_bitmap": [15],
-            "cumulative_weight": 4.0,
+            "participant_bitmap": [31],
+            "cumulative_weight": required_signers as f64,
             "validation_quorum_met": true,
             "cooperation_quorum_met": true,
             "timestamp": 100,
@@ -4700,23 +4721,22 @@ mod tests {
 
     #[test]
     fn create_snapshot_requires_majority_branch_proof() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("snapshot-requires-proof");
         install_test_genesis(&root);
         let result = with_runtime_root(&root, || {
             create_snapshot_with_options(CreateSnapshotOptions::default())
         });
         let error = result.expect_err("snapshot creation should fail closed without proof");
-        assert!(error.contains("source_node_majority_branch_proven"));
+        assert!(
+            error.contains("source_node_majority_branch_proven"),
+            "actual error: {error}"
+        );
     }
 
     #[test]
     fn snapshot_retry_uses_unique_staging_artifacts_and_cleans_failed_attempt() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("snapshot-retry-staging");
         install_test_genesis(&root);
         install_test_config(&root, 1266, "synergy-testnet-v3");
@@ -4802,9 +4822,7 @@ mod tests {
 
     #[test]
     fn snapshot_source_node_id_falls_back_to_config_identity() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("snapshot-source-node-id");
         let config_path = root.join("config/node.toml");
         let mut config = NodeConfig::default();
@@ -5340,9 +5358,7 @@ mod tests {
 
     #[test]
     fn operator_quarantine_requires_explicit_approval() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("operator-quarantine-requires-approval");
         install_test_genesis(&root);
 
@@ -5374,9 +5390,7 @@ mod tests {
 
     #[test]
     fn operator_quarantine_requires_target_stopped_confirmation() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("operator-quarantine-requires-stopped");
         install_test_genesis(&root);
 
@@ -5408,9 +5422,7 @@ mod tests {
 
     #[test]
     fn operator_quarantine_writes_marker_and_preserves_evidence_without_state_mutation() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("operator-quarantine-marker");
         install_test_genesis(&root);
         fs::write(
@@ -5530,9 +5542,7 @@ mod tests {
 
     #[test]
     fn operator_quarantine_rejects_wrong_chain_id() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("operator-quarantine-wrong-chain");
         install_test_genesis(&root);
         install_test_config(&root, 1263, "synergy-testnet-v3");
@@ -5548,9 +5558,7 @@ mod tests {
 
     #[test]
     fn operator_quarantine_rejects_wrong_network_id() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("operator-quarantine-wrong-network");
         install_test_genesis(&root);
         install_test_config(&root, 1266, "synergy-testnet-v1");
@@ -5566,9 +5574,7 @@ mod tests {
 
     #[test]
     fn operator_quarantine_rejects_wrong_genesis_hash() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("operator-quarantine-wrong-genesis");
         install_mutated_test_genesis(&root);
         install_test_config(&root, 1266, "synergy-testnet-v3");
@@ -5584,9 +5590,7 @@ mod tests {
 
     #[test]
     fn operator_quarantine_preserves_evidence_before_marker() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("operator-quarantine-evidence-first");
         install_test_genesis(&root);
         write_minimal_chain_state(&root);
@@ -5623,9 +5627,7 @@ mod tests {
 
     #[test]
     fn operator_quarantine_writes_standard_marker_schema() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("operator-quarantine-standard-marker");
         install_test_genesis(&root);
         write_minimal_chain_state(&root);
@@ -5645,9 +5647,7 @@ mod tests {
 
     #[test]
     fn operator_quarantine_disables_all_consensus_duties() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("operator-quarantine-disables-duties");
         install_test_genesis(&root);
         write_minimal_chain_state(&root);
@@ -5685,9 +5685,7 @@ mod tests {
 
     #[test]
     fn operator_quarantine_does_not_mutate_keys() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("operator-quarantine-keeps-keys");
         install_test_genesis(&root);
         write_minimal_chain_state(&root);
@@ -5702,9 +5700,7 @@ mod tests {
 
     #[test]
     fn operator_quarantine_does_not_mutate_configs() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("operator-quarantine-keeps-configs");
         install_test_genesis(&root);
         write_minimal_chain_state(&root);
@@ -5719,9 +5715,7 @@ mod tests {
 
     #[test]
     fn operator_quarantine_does_not_mutate_genesis() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("operator-quarantine-keeps-genesis");
         install_test_genesis(&root);
         write_minimal_chain_state(&root);
@@ -5735,9 +5729,7 @@ mod tests {
 
     #[test]
     fn operator_quarantine_does_not_delete_canonical_locks() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("operator-quarantine-keeps-locks");
         install_test_genesis(&root);
         write_minimal_chain_state(&root);
@@ -5751,9 +5743,7 @@ mod tests {
 
     #[test]
     fn operator_quarantine_does_not_delete_committed_qcs() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("operator-quarantine-keeps-qcs");
         install_test_genesis(&root);
         write_minimal_chain_state(&root);
@@ -5767,9 +5757,7 @@ mod tests {
 
     #[test]
     fn self_heal_rejects_non_quarantined_stale_validator() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("self-heal-rejects-non-quarantined");
         install_test_genesis(&root);
         write_minimal_chain_state(&root);
@@ -5797,9 +5785,7 @@ mod tests {
 
     #[test]
     fn self_heal_rejects_snapshot_when_current_finalized_height_is_unavailable() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("self-heal-requires-current-finalized-height");
         install_test_genesis(&root);
         let (snapshot_root, manifest_path) = write_valid_signed_snapshot(&root);
@@ -5822,9 +5808,7 @@ mod tests {
 
     #[test]
     fn self_heal_rejects_snapshot_beyond_allowed_lag() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("self-heal-rejects-old-snapshot");
         install_test_genesis(&root);
         write_minimal_chain_state(&root);
@@ -5855,9 +5839,7 @@ mod tests {
 
     #[test]
     fn self_heal_rejects_manual_or_malformed_quarantine_marker() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("self-heal-rejects-malformed-marker");
         install_test_genesis(&root);
         write_minimal_chain_state(&root);
@@ -5882,9 +5864,7 @@ mod tests {
 
     #[test]
     fn self_heal_accepts_operator_quarantined_validator_only_after_signed_snapshot_verification() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("self-heal-accepts-operator-marker");
         install_test_genesis(&root);
         write_minimal_chain_state(&root);
@@ -5922,9 +5902,7 @@ mod tests {
 
     #[test]
     fn fresh_self_heal_invalidates_old_shadow_pass_marker() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("self-heal-invalidates-old-shadow");
         install_test_genesis(&root);
         write_minimal_chain_state(&root);
@@ -5977,9 +5955,7 @@ mod tests {
 
     #[test]
     fn rejoin_requires_shadow_observation_after_restore() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("rejoin-requires-shadow-after-restore");
         install_test_genesis(&root);
         write_minimal_chain_state(&root);
@@ -6003,9 +5979,7 @@ mod tests {
 
     #[test]
     fn read_block_at_height_streams_chain_array() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("stream-chain-read");
         let blocks: Vec<Value> = (0u64..4096)
             .map(|height| {
@@ -6031,9 +6005,7 @@ mod tests {
 
     #[test]
     fn read_latest_block_summary_streams_chain_array() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("stream-chain-latest");
         let blocks: Vec<Value> = (0u64..4096)
             .map(|height| {
@@ -6059,9 +6031,7 @@ mod tests {
 
     #[test]
     fn read_latest_block_summary_uses_newer_committed_block_log_tip() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("committed-log-latest-tip");
         let chain_blocks: Vec<Value> = (0u64..=10)
             .map(|height| {
@@ -6121,9 +6091,7 @@ mod tests {
 
     #[test]
     fn committed_block_log_diagnostics_skip_malformed_lines() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("committed-log-malformed-line");
         write_chain_range(&root, 0, 10);
         let committed_log_path = root.join("data/committed_blocks.jsonl");
@@ -6172,9 +6140,7 @@ mod tests {
 
     #[test]
     fn committed_block_log_diagnostics_fail_on_inconsistent_entries() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("committed-log-inconsistent-entry");
         write_chain_range(&root, 0, 11);
         let committed_log_path = root.join("data/committed_blocks.jsonl");
@@ -6214,9 +6180,7 @@ mod tests {
 
     #[test]
     fn read_block_at_height_tolerates_stale_trailing_bytes_after_chain_array() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("stream-chain-stale-tail");
         let blocks: Vec<Value> = (0u64..16)
             .map(|height| {
@@ -6240,9 +6204,7 @@ mod tests {
 
     #[test]
     fn sync_from_canonical_peer_requires_verified_source_proof() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("sync-requires-proof");
         install_test_genesis(&root);
         write_quarantine_marker(&root);
@@ -6270,9 +6232,7 @@ mod tests {
 
     #[test]
     fn start_shadow_observe_requires_verified_head_match() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("shadow-requires-head-match");
         install_test_genesis(&root);
         write_quarantine_marker(&root);
@@ -6302,9 +6262,7 @@ mod tests {
 
     #[test]
     fn request_rejoin_requires_common_height_proof() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("rejoin-requires-common-height");
         install_test_genesis(&root);
         write_quarantine_marker(&root);
@@ -6331,9 +6289,7 @@ mod tests {
 
     #[test]
     fn shadow_status_is_read_only_idle_without_observation() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("shadow-idle");
         install_test_genesis(&root);
 
@@ -6353,9 +6309,7 @@ mod tests {
 
     #[test]
     fn shadow_status_classifies_500_blocks_as_process_proof_only() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("shadow-process-proof-only");
         install_test_genesis(&root);
         install_test_config(&root, 1266, "synergy-testnet-v3");
@@ -6414,9 +6368,7 @@ mod tests {
 
     #[test]
     fn shadow_status_uses_committed_block_log_when_chain_snapshot_lags() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("shadow-committed-log-fallback");
         install_test_genesis(&root);
         install_test_config(&root, 1266, "synergy-testnet-v3");
@@ -6482,9 +6434,7 @@ mod tests {
 
     #[test]
     fn shadow_status_requires_full_epoch_before_rejoin_boundary() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("shadow-full-epoch-no-boundary");
         install_test_genesis(&root);
         install_test_config(&root, 1266, "synergy-testnet-v3");
@@ -6531,9 +6481,7 @@ mod tests {
 
     #[test]
     fn shadow_status_reports_missed_epoch_rejoin_boundary() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("shadow-missed-epoch-boundary");
         install_test_genesis(&root);
         install_test_config(&root, 1266, "synergy-testnet-v3");
@@ -6572,9 +6520,7 @@ mod tests {
 
     #[test]
     fn request_rejoin_allows_vote_only_before_full_shadow_epoch_with_exact_proof() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("rejoin-rejects-process-proof");
         install_test_genesis(&root);
         install_test_config(&root, 1266, "synergy-testnet-v3");
@@ -6649,9 +6595,7 @@ mod tests {
 
     #[test]
     fn promote_vote_only_allows_fresh_live_vote_locks_above_finalized() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("promote-fresh-live-locks");
         install_test_genesis(&root);
         install_test_config(&root, 1266, "synergy-testnet-v3");
@@ -6695,9 +6639,7 @@ mod tests {
 
     #[test]
     fn promote_vote_only_fails_closed_with_stale_vote_locks_above_finalized() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("promote-stale-locks");
         install_test_genesis(&root);
         install_test_config(&root, 1266, "synergy-testnet-v3");
@@ -6744,9 +6686,7 @@ mod tests {
 
     #[test]
     fn request_rejoin_allows_operator_approved_emergency_leader_stall_recovery() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("rejoin-emergency-leader-stall");
         install_test_genesis(&root);
         install_test_config(&root, 1266, "synergy-testnet-v3");
@@ -6798,9 +6738,7 @@ mod tests {
 
     #[test]
     fn request_rejoin_rejects_common_point_not_bound_to_latest_finalized_qc() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("rejoin-qc-binding-mismatch");
         install_test_genesis(&root);
         install_test_config(&root, 1266, "synergy-testnet-v3");
@@ -6846,9 +6784,7 @@ mod tests {
 
     #[test]
     fn emergency_leader_stall_promotion_requires_exact_finalized_vote_only_proof() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("emergency-promote-leader-stall");
         install_test_genesis(&root);
         install_test_config(&root, 1266, "synergy-testnet-v3");
@@ -6942,9 +6878,7 @@ mod tests {
 
     #[test]
     fn request_rejoin_rejects_non_epoch_boundary_after_full_epoch() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("rejoin-rejects-non-boundary");
         install_test_genesis(&root);
         install_test_config(&root, 1266, "synergy-testnet-v3");
@@ -7000,11 +6934,66 @@ mod tests {
         Arc::new(Mutex::new(chain))
     }
 
+    /// Panic-safe restoration of the process-global environment that diagnostics
+    /// tests mutate.
+    ///
+    /// `DIAGNOSTICS_TEST_ENV_LOCK` is a `Mutex<()>` — it guards no data, so
+    /// recovering it with `into_inner()` cannot resurrect corrupted
+    /// lock-protected state. The real shared state is the process ENVIRONMENT
+    /// (`SYNERGY_PROJECT_ROOT`, `SYNERGY_CONFIG_PATH`, `SYNERGY_GENESIS_FILE`,
+    /// the consensus-fork override). The previous `with_runtime_root` restored
+    /// those only on the success path, so a panicking test leaked its overrides
+    /// into every later test — the actual contamination vector behind the
+    /// cascade. This guard restores them in `Drop`, which runs during unwind.
+    struct DiagnosticsTestEnvironmentGuard {
+        project_root: Option<String>,
+        config_path: Option<String>,
+        genesis_file: Option<String>,
+        fork_migration: Option<String>,
+    }
+
+    impl DiagnosticsTestEnvironmentGuard {
+        fn capture() -> Self {
+            Self {
+                project_root: std::env::var("SYNERGY_PROJECT_ROOT").ok(),
+                config_path: std::env::var("SYNERGY_CONFIG_PATH").ok(),
+                genesis_file: std::env::var("SYNERGY_GENESIS_FILE").ok(),
+                fork_migration: std::env::var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV).ok(),
+            }
+        }
+
+        fn restore_var(key: &str, value: &Option<String>) {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+
+    impl Drop for DiagnosticsTestEnvironmentGuard {
+        fn drop(&mut self) {
+            Self::restore_var("SYNERGY_PROJECT_ROOT", &self.project_root);
+            Self::restore_var("SYNERGY_CONFIG_PATH", &self.config_path);
+            Self::restore_var("SYNERGY_GENESIS_FILE", &self.genesis_file);
+            Self::restore_var(
+                consensus_fork::CONSENSUS_FORK_MIGRATION_ENV,
+                &self.fork_migration,
+            );
+        }
+    }
+
+    /// Acquire the diagnostics serialization lock, recovering it if a previous
+    /// test panicked. Safe because the mutex protects `()`; the environment is
+    /// restored independently by `DiagnosticsTestEnvironmentGuard`.
+    fn diagnostics_test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        DIAGNOSTICS_TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     fn with_runtime_root<T>(root: &Path, test: impl FnOnce() -> T) -> T {
-        let previous_root = std::env::var("SYNERGY_PROJECT_ROOT").ok();
-        let previous_config = std::env::var("SYNERGY_CONFIG_PATH").ok();
-        let previous_genesis = std::env::var("SYNERGY_GENESIS_FILE").ok();
-        let previous_fork = std::env::var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV).ok();
+        // Restoration happens in Drop, so it survives a panic inside `test()`.
+        let _env_guard = DiagnosticsTestEnvironmentGuard::capture();
         std::env::set_var("SYNERGY_PROJECT_ROOT", root);
         let config_path = root.join("config/node.toml");
         if config_path.exists() {
@@ -7014,29 +7003,60 @@ mod tests {
         }
         std::env::remove_var("SYNERGY_GENESIS_FILE");
         std::env::remove_var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV);
-        let result = test();
-        match previous_root {
-            Some(value) => std::env::set_var("SYNERGY_PROJECT_ROOT", value),
-            None => std::env::remove_var("SYNERGY_PROJECT_ROOT"),
-        }
-        match previous_config {
-            Some(value) => std::env::set_var("SYNERGY_CONFIG_PATH", value),
-            None => std::env::remove_var("SYNERGY_CONFIG_PATH"),
-        }
-        match previous_genesis {
-            Some(value) => std::env::set_var("SYNERGY_GENESIS_FILE", value),
-            None => std::env::remove_var("SYNERGY_GENESIS_FILE"),
-        }
-        match previous_fork {
-            Some(value) => std::env::set_var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV, value),
-            None => std::env::remove_var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV),
-        }
-        result
+        test()
     }
 
+    /// Regression: a panic while holding the diagnostics lock must not leak the
+    /// runtime-root environment into later tests, and the lock must remain
+    /// usable. Before the Drop guard, a single panicking test contaminated
+    /// SYNERGY_PROJECT_ROOT/CONFIG_PATH/GENESIS_FILE for the remainder of the
+    /// process and poisoned the mutex, turning 44 unrelated tests into false
+    /// failures.
     #[test]
-    fn post_fork_snapshot_active_set_uses_consensus_fork_registry() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK.lock().unwrap();
+    fn panic_while_holding_diagnostics_lock_does_not_contaminate_later_tests() {
+        let sentinel = "/tmp/synergy-diagnostics-env-sentinel";
+        std::env::set_var("SYNERGY_PROJECT_ROOT", sentinel);
+
+        let root = test_runtime_root("panic-contamination-probe");
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = diagnostics_test_env_lock();
+            with_runtime_root(&root, || {
+                // Prove the override is live inside the scope...
+                assert_eq!(
+                    std::env::var("SYNERGY_PROJECT_ROOT").ok(),
+                    Some(root.display().to_string())
+                );
+                panic!("intentional panic while holding the diagnostics lock");
+            })
+        }));
+        assert!(panicked.is_err(), "probe must actually panic");
+
+        // ...and that Drop restored it despite the unwind.
+        assert_eq!(
+            std::env::var("SYNERGY_PROJECT_ROOT").ok(),
+            Some(sentinel.to_string()),
+            "panicking test leaked its runtime-root override"
+        );
+
+        // The lock is still usable by the next test.
+        let _recovered = diagnostics_test_env_lock();
+
+        std::env::remove_var("SYNERGY_PROJECT_ROOT");
+    }
+
+    /// Testnet-v3 forbids legacy consensus-fork migration
+    /// (`gates.testnet_v3_legacy_fork_migration_forbidden`). A Testnet-v2
+    /// FN-DSA fork registry dropped into the runtime root must therefore be
+    /// INERT: the active set resolves from canonical genesis at every height,
+    /// and the v2 fork validators never appear.
+    ///
+    /// This replaces the former assertion that a fork registry *overrode* the
+    /// genesis active set above height 204216 — that encoded retired Testnet-v2
+    /// behaviour (and a five-validator genesis baseline). The safety invariant
+    /// is preserved by asserting the opposite: the legacy registry is ignored.
+    #[test]
+    fn testnet_v3_ignores_legacy_consensus_fork_registry() {
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("post-fork-snapshot-active-set");
         install_test_config(&root, EXPECTED_CHAIN_ID, EXPECTED_NETWORK_ID);
         install_test_genesis(&root);
@@ -7045,25 +7065,37 @@ mod tests {
             .collect::<Vec<_>>();
         install_test_consensus_fork(&root, &fork_validators);
 
-        let post_fork = with_runtime_root(&root, || {
-            active_validator_addresses_for_snapshot_height(204216)
-                .expect("post-fork active set should resolve from fork metadata")
+        let canonical = with_runtime_root(&root, || {
+            active_validator_addresses_for_snapshot_height(1)
+                .expect("active set should resolve from canonical genesis")
         });
-        assert_eq!(post_fork, fork_validators);
 
-        let pre_fork = with_runtime_root(&root, || {
-            active_validator_addresses_for_snapshot_height(204215)
-                .expect("pre-fork active set should resolve from genesis")
+        // Above the retired Testnet-v2 fork height the answer must be unchanged.
+        let above_retired_fork_height = with_runtime_root(&root, || {
+            active_validator_addresses_for_snapshot_height(204216)
+                .expect("active set should resolve from canonical genesis")
         });
-        assert_eq!(pre_fork.len(), 5);
-        assert_ne!(pre_fork, post_fork);
+
+        assert_eq!(
+            above_retired_fork_height, canonical,
+            "a Testnet-v2 fork registry must not alter the Testnet-v3 active set"
+        );
+        for fork_validator in &fork_validators {
+            assert!(
+                !canonical.contains(fork_validator),
+                "retired Testnet-v2 fork validator {fork_validator} leaked into the active set"
+            );
+        }
+        assert_eq!(
+            canonical.len(),
+            crate::recovery::BASELINE_VALIDATOR_COUNT,
+            "Testnet-v3 genesis active set is six validators"
+        );
     }
 
     #[test]
     fn fresh_vote_lock_above_finalized_does_not_false_report_stall() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("fresh-lock");
         write_canonical_lock(&root);
         write_vote_lock(&root, now_secs_for_test(), None);
@@ -7093,9 +7125,7 @@ mod tests {
 
     #[test]
     fn stale_conflicting_vote_locks_above_finalized_report_stall() {
-        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
-            .lock()
-            .expect("diagnostics env lock should succeed");
+        let _guard = diagnostics_test_env_lock();
         let root = test_runtime_root("stale-conflict");
         write_canonical_lock(&root);
         write_vote_lock(

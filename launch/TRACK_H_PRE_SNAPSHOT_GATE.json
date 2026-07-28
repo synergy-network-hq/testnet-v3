@@ -1,0 +1,2468 @@
+{
+  "schema_version": 1,
+  "status": "FAIL",
+  "mapping_count": 10,
+  "occurrence_count": 299,
+  "active_consumer_review_count": 2,
+  "candidate": "../launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json",
+  "candidate_errors": [
+    "modules.identity.contract_address is not the deployed Identity address",
+    "modules.treasury.contract_address is not the deployed Treasury address",
+    "vesting.0.contract_address is not the deployed TeamVesting address",
+    "accounts.TEM-A01 does not fund deployed TeamVesting",
+    "allocations.TEM-A01 does not fund deployed TeamVesting",
+    "balances.TEM-A01 does not fund deployed TeamVesting",
+    "stale deployed-address consumer at accounts.30.address = synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+    "stale deployed-address consumer at allocations.30.address = synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+    "stale deployed-address consumer at balances.30.address = synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+    "stale deployed-address consumer at modules.identity.contract_address = synq1xe3cccane0hgctg8e2mhpm8nky62j77w2yaq",
+    "stale deployed-address consumer at modules.treasury.contract_address = synq104se4kpa4lq7cdkr9krcky4dfjwg4mks787j",
+    "stale deployed-address consumer at vesting.0.contract_address = synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl"
+  ],
+  "mappings": [
+    {
+      "contract": "Governance",
+      "identity_or_custody_address": "synq1xmk8vnmxsncyzfd5trepwkwvye42r7ugg5yv",
+      "deployed_contract_address": "sync12j7reatl4p09l4p63kyrxky5t89wp4a8mylg"
+    },
+    {
+      "contract": "Identity",
+      "identity_or_custody_address": "synq1xe3cccane0hgctg8e2mhpm8nky62j77w2yaq",
+      "deployed_contract_address": "sync1tasz8xg3wyvxg8hfujndutgp967ekc25393w"
+    },
+    {
+      "contract": "RewardDistributor",
+      "identity_or_custody_address": "synq1lep2gks85cwlyumx89nxjdqwt5zvnmjcsjm8",
+      "deployed_contract_address": "sync1gx6zkzqjhfymqz2rz868n8zqf06fe790wued"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null
+    },
+    {
+      "contract": "Slashing",
+      "identity_or_custody_address": "synq1923udzcjjut08e76gj85ze952aefheezsda9",
+      "deployed_contract_address": "sync186smh2hyslf7yf5mwa2dq0dt52dpw0eufht3"
+    },
+    {
+      "contract": "Staking",
+      "identity_or_custody_address": "synq139erhddek4gl4e0uh3zjnhjty6cg6enz47ny",
+      "deployed_contract_address": "sync1qqd5u3v4wgqxvfhh49ax08s8pq7uf7kk23l5"
+    },
+    {
+      "contract": "SynergyOracle",
+      "identity_or_custody_address": "synq1tkjc442fvagjsd8ue0spr3va6n2ytsxx6l6q",
+      "deployed_contract_address": "sync17yd3kddpn7g9mjeazhnw7ky9pmk5ujjl0rkn"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40"
+    },
+    {
+      "contract": "Treasury",
+      "identity_or_custody_address": "synq104se4kpa4lq7cdkr9krcky4dfjwg4mks787j",
+      "deployed_contract_address": "sync1puq5nz4wacn25de9suur53esyn99zp9j6jx8"
+    },
+    {
+      "contract": "ValidatorRegistry",
+      "identity_or_custody_address": "synq15tvpvxyav9n2skd2yyrw2g7p2vmtlnp0sr08",
+      "deployed_contract_address": "sync1q2s4w0h2q98e2hv9rjycf4th4zwu7r9wxtmz"
+    }
+  ],
+  "occurrences": [
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "genesis-contracts/contracts/TeamVesting.synq",
+      "line": 4,
+      "classification": "artifact_source_provenance_review"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "genesis-contracts/staged-governance-v1/TeamVesting.synq",
+      "line": 4,
+      "classification": "artifact_source_provenance_review"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "genesis.testnet-v3.identity-assigned.json",
+      "line": 206,
+      "classification": "source_genesis_semantic_migration"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "genesis.testnet-v3.identity-assigned.json",
+      "line": 278,
+      "classification": "source_genesis_semantic_migration"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "genesis.testnet-v3.identity-assigned.json",
+      "line": 565,
+      "classification": "source_genesis_semantic_migration"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "genesis.testnet-v3.identity-assigned.json",
+      "line": 645,
+      "classification": "source_genesis_semantic_migration"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "genesis.testnet-v3.identity-assigned.json",
+      "line": 774,
+      "classification": "source_genesis_semantic_migration"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "genesis.testnet-v3.identity-assigned.json",
+      "line": 814,
+      "classification": "source_genesis_semantic_migration"
+    },
+    {
+      "contract": "Governance",
+      "identity_or_custody_address": "synq1xmk8vnmxsncyzfd5trepwkwvye42r7ugg5yv",
+      "deployed_contract_address": "sync12j7reatl4p09l4p63kyrxky5t89wp4a8mylg",
+      "path": "genesis.testnet-v3.identity-assigned.json",
+      "line": 887,
+      "classification": "source_genesis_semantic_migration"
+    },
+    {
+      "contract": "Identity",
+      "identity_or_custody_address": "synq1xe3cccane0hgctg8e2mhpm8nky62j77w2yaq",
+      "deployed_contract_address": "sync1tasz8xg3wyvxg8hfujndutgp967ekc25393w",
+      "path": "genesis.testnet-v3.identity-assigned.json",
+      "line": 917,
+      "classification": "source_genesis_semantic_migration"
+    },
+    {
+      "contract": "RewardDistributor",
+      "identity_or_custody_address": "synq1lep2gks85cwlyumx89nxjdqwt5zvnmjcsjm8",
+      "deployed_contract_address": "sync1gx6zkzqjhfymqz2rz868n8zqf06fe790wued",
+      "path": "genesis.testnet-v3.identity-assigned.json",
+      "line": 950,
+      "classification": "source_genesis_semantic_migration"
+    },
+    {
+      "contract": "Slashing",
+      "identity_or_custody_address": "synq1923udzcjjut08e76gj85ze952aefheezsda9",
+      "deployed_contract_address": "sync186smh2hyslf7yf5mwa2dq0dt52dpw0eufht3",
+      "path": "genesis.testnet-v3.identity-assigned.json",
+      "line": 977,
+      "classification": "source_genesis_semantic_migration"
+    },
+    {
+      "contract": "Staking",
+      "identity_or_custody_address": "synq139erhddek4gl4e0uh3zjnhjty6cg6enz47ny",
+      "deployed_contract_address": "sync1qqd5u3v4wgqxvfhh49ax08s8pq7uf7kk23l5",
+      "path": "genesis.testnet-v3.identity-assigned.json",
+      "line": 1006,
+      "classification": "source_genesis_semantic_migration"
+    },
+    {
+      "contract": "SynergyOracle",
+      "identity_or_custody_address": "synq1tkjc442fvagjsd8ue0spr3va6n2ytsxx6l6q",
+      "deployed_contract_address": "sync17yd3kddpn7g9mjeazhnw7ky9pmk5ujjl0rkn",
+      "path": "genesis.testnet-v3.identity-assigned.json",
+      "line": 1033,
+      "classification": "source_genesis_semantic_migration"
+    },
+    {
+      "contract": "Treasury",
+      "identity_or_custody_address": "synq104se4kpa4lq7cdkr9krcky4dfjwg4mks787j",
+      "deployed_contract_address": "sync1puq5nz4wacn25de9suur53esyn99zp9j6jx8",
+      "path": "genesis.testnet-v3.identity-assigned.json",
+      "line": 1072,
+      "classification": "source_genesis_semantic_migration"
+    },
+    {
+      "contract": "ValidatorRegistry",
+      "identity_or_custody_address": "synq15tvpvxyav9n2skd2yyrw2g7p2vmtlnp0sr08",
+      "deployed_contract_address": "sync1q2s4w0h2q98e2hv9rjycf4th4zwu7r9wxtmz",
+      "path": "genesis.testnet-v3.identity-assigned.json",
+      "line": 1106,
+      "classification": "source_genesis_semantic_migration"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "genesis.testnet-v3.identity-assigned.json",
+      "line": 1326,
+      "classification": "source_genesis_semantic_migration"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "genesis.testnet-v3.identity-assigned.json",
+      "line": 1341,
+      "classification": "source_genesis_semantic_migration"
+    },
+    {
+      "contract": "Identity",
+      "identity_or_custody_address": "synq1xe3cccane0hgctg8e2mhpm8nky62j77w2yaq",
+      "deployed_contract_address": "sync1tasz8xg3wyvxg8hfujndutgp967ekc25393w",
+      "path": "genesis.testnet-v3.identity-assigned.json",
+      "line": 1480,
+      "classification": "source_genesis_semantic_migration"
+    },
+    {
+      "contract": "Treasury",
+      "identity_or_custody_address": "synq104se4kpa4lq7cdkr9krcky4dfjwg4mks787j",
+      "deployed_contract_address": "sync1puq5nz4wacn25de9suur53esyn99zp9j6jx8",
+      "path": "genesis.testnet-v3.identity-assigned.json",
+      "line": 1536,
+      "classification": "source_genesis_semantic_migration"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "genesis.testnet-v3.identity-assigned.json",
+      "line": 1950,
+      "classification": "source_genesis_semantic_migration"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "genesis.testnet-v3.identity-assigned.json",
+      "line": 2244,
+      "classification": "source_genesis_semantic_migration"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "genesis.testnet-v3.identity-assigned.json",
+      "line": 2308,
+      "classification": "source_genesis_semantic_migration"
+    },
+    {
+      "contract": "Governance",
+      "identity_or_custody_address": "synq1xmk8vnmxsncyzfd5trepwkwvye42r7ugg5yv",
+      "deployed_contract_address": "sync12j7reatl4p09l4p63kyrxky5t89wp4a8mylg",
+      "path": "genesis.testnet-v3.identity-assigned.json",
+      "line": 3977,
+      "classification": "source_genesis_semantic_migration"
+    },
+    {
+      "contract": "Identity",
+      "identity_or_custody_address": "synq1xe3cccane0hgctg8e2mhpm8nky62j77w2yaq",
+      "deployed_contract_address": "sync1tasz8xg3wyvxg8hfujndutgp967ekc25393w",
+      "path": "genesis.testnet-v3.identity-assigned.json",
+      "line": 4005,
+      "classification": "source_genesis_semantic_migration"
+    },
+    {
+      "contract": "RewardDistributor",
+      "identity_or_custody_address": "synq1lep2gks85cwlyumx89nxjdqwt5zvnmjcsjm8",
+      "deployed_contract_address": "sync1gx6zkzqjhfymqz2rz868n8zqf06fe790wued",
+      "path": "genesis.testnet-v3.identity-assigned.json",
+      "line": 4033,
+      "classification": "source_genesis_semantic_migration"
+    },
+    {
+      "contract": "Slashing",
+      "identity_or_custody_address": "synq1923udzcjjut08e76gj85ze952aefheezsda9",
+      "deployed_contract_address": "sync186smh2hyslf7yf5mwa2dq0dt52dpw0eufht3",
+      "path": "genesis.testnet-v3.identity-assigned.json",
+      "line": 4061,
+      "classification": "source_genesis_semantic_migration"
+    },
+    {
+      "contract": "Staking",
+      "identity_or_custody_address": "synq139erhddek4gl4e0uh3zjnhjty6cg6enz47ny",
+      "deployed_contract_address": "sync1qqd5u3v4wgqxvfhh49ax08s8pq7uf7kk23l5",
+      "path": "genesis.testnet-v3.identity-assigned.json",
+      "line": 4089,
+      "classification": "source_genesis_semantic_migration"
+    },
+    {
+      "contract": "SynergyOracle",
+      "identity_or_custody_address": "synq1tkjc442fvagjsd8ue0spr3va6n2ytsxx6l6q",
+      "deployed_contract_address": "sync17yd3kddpn7g9mjeazhnw7ky9pmk5ujjl0rkn",
+      "path": "genesis.testnet-v3.identity-assigned.json",
+      "line": 4117,
+      "classification": "source_genesis_semantic_migration"
+    },
+    {
+      "contract": "Treasury",
+      "identity_or_custody_address": "synq104se4kpa4lq7cdkr9krcky4dfjwg4mks787j",
+      "deployed_contract_address": "sync1puq5nz4wacn25de9suur53esyn99zp9j6jx8",
+      "path": "genesis.testnet-v3.identity-assigned.json",
+      "line": 4145,
+      "classification": "source_genesis_semantic_migration"
+    },
+    {
+      "contract": "ValidatorRegistry",
+      "identity_or_custody_address": "synq15tvpvxyav9n2skd2yyrw2g7p2vmtlnp0sr08",
+      "deployed_contract_address": "sync1q2s4w0h2q98e2hv9rjycf4th4zwu7r9wxtmz",
+      "path": "genesis.testnet-v3.identity-assigned.json",
+      "line": 4173,
+      "classification": "source_genesis_semantic_migration"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "genesis.testnet-v3.identity-assigned.json",
+      "line": 4201,
+      "classification": "source_genesis_semantic_migration"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "genesis.testnet-v3.identity-assigned.json",
+      "line": 4212,
+      "classification": "source_genesis_semantic_migration"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/SALE_CLAIM_REQUIREMENTS.md",
+      "line": 89,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TEAM_SUPPORT_ALLOCATION_RECONCILIATION.md",
+      "line": 11,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Governance",
+      "identity_or_custody_address": "synq1xmk8vnmxsncyzfd5trepwkwvye42r7ugg5yv",
+      "deployed_contract_address": "sync12j7reatl4p09l4p63kyrxky5t89wp4a8mylg",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 12,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Identity",
+      "identity_or_custody_address": "synq1xe3cccane0hgctg8e2mhpm8nky62j77w2yaq",
+      "deployed_contract_address": "sync1tasz8xg3wyvxg8hfujndutgp967ekc25393w",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 17,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "RewardDistributor",
+      "identity_or_custody_address": "synq1lep2gks85cwlyumx89nxjdqwt5zvnmjcsjm8",
+      "deployed_contract_address": "sync1gx6zkzqjhfymqz2rz868n8zqf06fe790wued",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 22,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 27,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Slashing",
+      "identity_or_custody_address": "synq1923udzcjjut08e76gj85ze952aefheezsda9",
+      "deployed_contract_address": "sync186smh2hyslf7yf5mwa2dq0dt52dpw0eufht3",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 32,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Staking",
+      "identity_or_custody_address": "synq139erhddek4gl4e0uh3zjnhjty6cg6enz47ny",
+      "deployed_contract_address": "sync1qqd5u3v4wgqxvfhh49ax08s8pq7uf7kk23l5",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 37,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SynergyOracle",
+      "identity_or_custody_address": "synq1tkjc442fvagjsd8ue0spr3va6n2ytsxx6l6q",
+      "deployed_contract_address": "sync17yd3kddpn7g9mjeazhnw7ky9pmk5ujjl0rkn",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 42,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 47,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Treasury",
+      "identity_or_custody_address": "synq104se4kpa4lq7cdkr9krcky4dfjwg4mks787j",
+      "deployed_contract_address": "sync1puq5nz4wacn25de9suur53esyn99zp9j6jx8",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 52,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "ValidatorRegistry",
+      "identity_or_custody_address": "synq15tvpvxyav9n2skd2yyrw2g7p2vmtlnp0sr08",
+      "deployed_contract_address": "sync1q2s4w0h2q98e2hv9rjycf4th4zwu7r9wxtmz",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 57,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 64,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 72,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 80,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 88,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 96,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 104,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 112,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 120,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Governance",
+      "identity_or_custody_address": "synq1xmk8vnmxsncyzfd5trepwkwvye42r7ugg5yv",
+      "deployed_contract_address": "sync12j7reatl4p09l4p63kyrxky5t89wp4a8mylg",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 128,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Identity",
+      "identity_or_custody_address": "synq1xe3cccane0hgctg8e2mhpm8nky62j77w2yaq",
+      "deployed_contract_address": "sync1tasz8xg3wyvxg8hfujndutgp967ekc25393w",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 136,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "RewardDistributor",
+      "identity_or_custody_address": "synq1lep2gks85cwlyumx89nxjdqwt5zvnmjcsjm8",
+      "deployed_contract_address": "sync1gx6zkzqjhfymqz2rz868n8zqf06fe790wued",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 144,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Slashing",
+      "identity_or_custody_address": "synq1923udzcjjut08e76gj85ze952aefheezsda9",
+      "deployed_contract_address": "sync186smh2hyslf7yf5mwa2dq0dt52dpw0eufht3",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 152,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Staking",
+      "identity_or_custody_address": "synq139erhddek4gl4e0uh3zjnhjty6cg6enz47ny",
+      "deployed_contract_address": "sync1qqd5u3v4wgqxvfhh49ax08s8pq7uf7kk23l5",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 160,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SynergyOracle",
+      "identity_or_custody_address": "synq1tkjc442fvagjsd8ue0spr3va6n2ytsxx6l6q",
+      "deployed_contract_address": "sync17yd3kddpn7g9mjeazhnw7ky9pmk5ujjl0rkn",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 168,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Treasury",
+      "identity_or_custody_address": "synq104se4kpa4lq7cdkr9krcky4dfjwg4mks787j",
+      "deployed_contract_address": "sync1puq5nz4wacn25de9suur53esyn99zp9j6jx8",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 176,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "ValidatorRegistry",
+      "identity_or_custody_address": "synq15tvpvxyav9n2skd2yyrw2g7p2vmtlnp0sr08",
+      "deployed_contract_address": "sync1q2s4w0h2q98e2hv9rjycf4th4zwu7r9wxtmz",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 184,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 192,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 200,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Identity",
+      "identity_or_custody_address": "synq1xe3cccane0hgctg8e2mhpm8nky62j77w2yaq",
+      "deployed_contract_address": "sync1tasz8xg3wyvxg8hfujndutgp967ekc25393w",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 208,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Treasury",
+      "identity_or_custody_address": "synq104se4kpa4lq7cdkr9krcky4dfjwg4mks787j",
+      "deployed_contract_address": "sync1puq5nz4wacn25de9suur53esyn99zp9j6jx8",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 216,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 224,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 232,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 240,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Governance",
+      "identity_or_custody_address": "synq1xmk8vnmxsncyzfd5trepwkwvye42r7ugg5yv",
+      "deployed_contract_address": "sync12j7reatl4p09l4p63kyrxky5t89wp4a8mylg",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 248,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Identity",
+      "identity_or_custody_address": "synq1xe3cccane0hgctg8e2mhpm8nky62j77w2yaq",
+      "deployed_contract_address": "sync1tasz8xg3wyvxg8hfujndutgp967ekc25393w",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 256,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "RewardDistributor",
+      "identity_or_custody_address": "synq1lep2gks85cwlyumx89nxjdqwt5zvnmjcsjm8",
+      "deployed_contract_address": "sync1gx6zkzqjhfymqz2rz868n8zqf06fe790wued",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 264,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Slashing",
+      "identity_or_custody_address": "synq1923udzcjjut08e76gj85ze952aefheezsda9",
+      "deployed_contract_address": "sync186smh2hyslf7yf5mwa2dq0dt52dpw0eufht3",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 272,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Staking",
+      "identity_or_custody_address": "synq139erhddek4gl4e0uh3zjnhjty6cg6enz47ny",
+      "deployed_contract_address": "sync1qqd5u3v4wgqxvfhh49ax08s8pq7uf7kk23l5",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 280,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SynergyOracle",
+      "identity_or_custody_address": "synq1tkjc442fvagjsd8ue0spr3va6n2ytsxx6l6q",
+      "deployed_contract_address": "sync17yd3kddpn7g9mjeazhnw7ky9pmk5ujjl0rkn",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 288,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Treasury",
+      "identity_or_custody_address": "synq104se4kpa4lq7cdkr9krcky4dfjwg4mks787j",
+      "deployed_contract_address": "sync1puq5nz4wacn25de9suur53esyn99zp9j6jx8",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 296,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "ValidatorRegistry",
+      "identity_or_custody_address": "synq15tvpvxyav9n2skd2yyrw2g7p2vmtlnp0sr08",
+      "deployed_contract_address": "sync1q2s4w0h2q98e2hv9rjycf4th4zwu7r9wxtmz",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 304,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 312,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 320,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 328,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 336,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 344,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 352,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 360,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 368,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 376,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 384,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 392,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 400,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 408,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 416,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 424,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 432,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 440,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 448,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 456,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 464,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 472,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 480,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 488,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 496,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 504,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 512,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 520,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 528,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Governance",
+      "identity_or_custody_address": "synq1xmk8vnmxsncyzfd5trepwkwvye42r7ugg5yv",
+      "deployed_contract_address": "sync12j7reatl4p09l4p63kyrxky5t89wp4a8mylg",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 536,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Identity",
+      "identity_or_custody_address": "synq1xe3cccane0hgctg8e2mhpm8nky62j77w2yaq",
+      "deployed_contract_address": "sync1tasz8xg3wyvxg8hfujndutgp967ekc25393w",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 544,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "RewardDistributor",
+      "identity_or_custody_address": "synq1lep2gks85cwlyumx89nxjdqwt5zvnmjcsjm8",
+      "deployed_contract_address": "sync1gx6zkzqjhfymqz2rz868n8zqf06fe790wued",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 552,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Slashing",
+      "identity_or_custody_address": "synq1923udzcjjut08e76gj85ze952aefheezsda9",
+      "deployed_contract_address": "sync186smh2hyslf7yf5mwa2dq0dt52dpw0eufht3",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 560,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Staking",
+      "identity_or_custody_address": "synq139erhddek4gl4e0uh3zjnhjty6cg6enz47ny",
+      "deployed_contract_address": "sync1qqd5u3v4wgqxvfhh49ax08s8pq7uf7kk23l5",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 568,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SynergyOracle",
+      "identity_or_custody_address": "synq1tkjc442fvagjsd8ue0spr3va6n2ytsxx6l6q",
+      "deployed_contract_address": "sync17yd3kddpn7g9mjeazhnw7ky9pmk5ujjl0rkn",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 576,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Treasury",
+      "identity_or_custody_address": "synq104se4kpa4lq7cdkr9krcky4dfjwg4mks787j",
+      "deployed_contract_address": "sync1puq5nz4wacn25de9suur53esyn99zp9j6jx8",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 584,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "ValidatorRegistry",
+      "identity_or_custody_address": "synq15tvpvxyav9n2skd2yyrw2g7p2vmtlnp0sr08",
+      "deployed_contract_address": "sync1q2s4w0h2q98e2hv9rjycf4th4zwu7r9wxtmz",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 592,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 600,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 608,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Governance",
+      "identity_or_custody_address": "synq1xmk8vnmxsncyzfd5trepwkwvye42r7ugg5yv",
+      "deployed_contract_address": "sync12j7reatl4p09l4p63kyrxky5t89wp4a8mylg",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 616,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Identity",
+      "identity_or_custody_address": "synq1xe3cccane0hgctg8e2mhpm8nky62j77w2yaq",
+      "deployed_contract_address": "sync1tasz8xg3wyvxg8hfujndutgp967ekc25393w",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 624,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "RewardDistributor",
+      "identity_or_custody_address": "synq1lep2gks85cwlyumx89nxjdqwt5zvnmjcsjm8",
+      "deployed_contract_address": "sync1gx6zkzqjhfymqz2rz868n8zqf06fe790wued",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 632,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Slashing",
+      "identity_or_custody_address": "synq1923udzcjjut08e76gj85ze952aefheezsda9",
+      "deployed_contract_address": "sync186smh2hyslf7yf5mwa2dq0dt52dpw0eufht3",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 640,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Staking",
+      "identity_or_custody_address": "synq139erhddek4gl4e0uh3zjnhjty6cg6enz47ny",
+      "deployed_contract_address": "sync1qqd5u3v4wgqxvfhh49ax08s8pq7uf7kk23l5",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 648,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SynergyOracle",
+      "identity_or_custody_address": "synq1tkjc442fvagjsd8ue0spr3va6n2ytsxx6l6q",
+      "deployed_contract_address": "sync17yd3kddpn7g9mjeazhnw7ky9pmk5ujjl0rkn",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 656,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 664,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Treasury",
+      "identity_or_custody_address": "synq104se4kpa4lq7cdkr9krcky4dfjwg4mks787j",
+      "deployed_contract_address": "sync1puq5nz4wacn25de9suur53esyn99zp9j6jx8",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 672,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "ValidatorRegistry",
+      "identity_or_custody_address": "synq15tvpvxyav9n2skd2yyrw2g7p2vmtlnp0sr08",
+      "deployed_contract_address": "sync1q2s4w0h2q98e2hv9rjycf4th4zwu7r9wxtmz",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 680,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Identity",
+      "identity_or_custody_address": "synq1xe3cccane0hgctg8e2mhpm8nky62j77w2yaq",
+      "deployed_contract_address": "sync1tasz8xg3wyvxg8hfujndutgp967ekc25393w",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 688,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Treasury",
+      "identity_or_custody_address": "synq104se4kpa4lq7cdkr9krcky4dfjwg4mks787j",
+      "deployed_contract_address": "sync1puq5nz4wacn25de9suur53esyn99zp9j6jx8",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 696,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 704,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 712,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 720,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 728,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 736,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 744,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 752,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 760,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 768,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Governance",
+      "identity_or_custody_address": "synq1xmk8vnmxsncyzfd5trepwkwvye42r7ugg5yv",
+      "deployed_contract_address": "sync12j7reatl4p09l4p63kyrxky5t89wp4a8mylg",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 776,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Identity",
+      "identity_or_custody_address": "synq1xe3cccane0hgctg8e2mhpm8nky62j77w2yaq",
+      "deployed_contract_address": "sync1tasz8xg3wyvxg8hfujndutgp967ekc25393w",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 784,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "RewardDistributor",
+      "identity_or_custody_address": "synq1lep2gks85cwlyumx89nxjdqwt5zvnmjcsjm8",
+      "deployed_contract_address": "sync1gx6zkzqjhfymqz2rz868n8zqf06fe790wued",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 792,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Slashing",
+      "identity_or_custody_address": "synq1923udzcjjut08e76gj85ze952aefheezsda9",
+      "deployed_contract_address": "sync186smh2hyslf7yf5mwa2dq0dt52dpw0eufht3",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 800,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Staking",
+      "identity_or_custody_address": "synq139erhddek4gl4e0uh3zjnhjty6cg6enz47ny",
+      "deployed_contract_address": "sync1qqd5u3v4wgqxvfhh49ax08s8pq7uf7kk23l5",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 808,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SynergyOracle",
+      "identity_or_custody_address": "synq1tkjc442fvagjsd8ue0spr3va6n2ytsxx6l6q",
+      "deployed_contract_address": "sync17yd3kddpn7g9mjeazhnw7ky9pmk5ujjl0rkn",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 816,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Treasury",
+      "identity_or_custody_address": "synq104se4kpa4lq7cdkr9krcky4dfjwg4mks787j",
+      "deployed_contract_address": "sync1puq5nz4wacn25de9suur53esyn99zp9j6jx8",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 824,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "ValidatorRegistry",
+      "identity_or_custody_address": "synq15tvpvxyav9n2skd2yyrw2g7p2vmtlnp0sr08",
+      "deployed_contract_address": "sync1q2s4w0h2q98e2hv9rjycf4th4zwu7r9wxtmz",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 832,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 840,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 848,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Governance",
+      "identity_or_custody_address": "synq1xmk8vnmxsncyzfd5trepwkwvye42r7ugg5yv",
+      "deployed_contract_address": "sync12j7reatl4p09l4p63kyrxky5t89wp4a8mylg",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 856,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Identity",
+      "identity_or_custody_address": "synq1xe3cccane0hgctg8e2mhpm8nky62j77w2yaq",
+      "deployed_contract_address": "sync1tasz8xg3wyvxg8hfujndutgp967ekc25393w",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 864,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "RewardDistributor",
+      "identity_or_custody_address": "synq1lep2gks85cwlyumx89nxjdqwt5zvnmjcsjm8",
+      "deployed_contract_address": "sync1gx6zkzqjhfymqz2rz868n8zqf06fe790wued",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 872,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 880,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Slashing",
+      "identity_or_custody_address": "synq1923udzcjjut08e76gj85ze952aefheezsda9",
+      "deployed_contract_address": "sync186smh2hyslf7yf5mwa2dq0dt52dpw0eufht3",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 888,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Staking",
+      "identity_or_custody_address": "synq139erhddek4gl4e0uh3zjnhjty6cg6enz47ny",
+      "deployed_contract_address": "sync1qqd5u3v4wgqxvfhh49ax08s8pq7uf7kk23l5",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 896,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SynergyOracle",
+      "identity_or_custody_address": "synq1tkjc442fvagjsd8ue0spr3va6n2ytsxx6l6q",
+      "deployed_contract_address": "sync17yd3kddpn7g9mjeazhnw7ky9pmk5ujjl0rkn",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 904,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 912,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Treasury",
+      "identity_or_custody_address": "synq104se4kpa4lq7cdkr9krcky4dfjwg4mks787j",
+      "deployed_contract_address": "sync1puq5nz4wacn25de9suur53esyn99zp9j6jx8",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 920,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "ValidatorRegistry",
+      "identity_or_custody_address": "synq15tvpvxyav9n2skd2yyrw2g7p2vmtlnp0sr08",
+      "deployed_contract_address": "sync1q2s4w0h2q98e2hv9rjycf4th4zwu7r9wxtmz",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 928,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Identity",
+      "identity_or_custody_address": "synq1xe3cccane0hgctg8e2mhpm8nky62j77w2yaq",
+      "deployed_contract_address": "sync1tasz8xg3wyvxg8hfujndutgp967ekc25393w",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 936,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Treasury",
+      "identity_or_custody_address": "synq104se4kpa4lq7cdkr9krcky4dfjwg4mks787j",
+      "deployed_contract_address": "sync1puq5nz4wacn25de9suur53esyn99zp9j6jx8",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 944,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 952,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "RewardDistributor",
+      "identity_or_custody_address": "synq1lep2gks85cwlyumx89nxjdqwt5zvnmjcsjm8",
+      "deployed_contract_address": "sync1gx6zkzqjhfymqz2rz868n8zqf06fe790wued",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 960,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 968,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 976,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Governance",
+      "identity_or_custody_address": "synq1xmk8vnmxsncyzfd5trepwkwvye42r7ugg5yv",
+      "deployed_contract_address": "sync12j7reatl4p09l4p63kyrxky5t89wp4a8mylg",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 984,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Governance",
+      "identity_or_custody_address": "synq1xmk8vnmxsncyzfd5trepwkwvye42r7ugg5yv",
+      "deployed_contract_address": "sync12j7reatl4p09l4p63kyrxky5t89wp4a8mylg",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 992,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Identity",
+      "identity_or_custody_address": "synq1xe3cccane0hgctg8e2mhpm8nky62j77w2yaq",
+      "deployed_contract_address": "sync1tasz8xg3wyvxg8hfujndutgp967ekc25393w",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 1000,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Identity",
+      "identity_or_custody_address": "synq1xe3cccane0hgctg8e2mhpm8nky62j77w2yaq",
+      "deployed_contract_address": "sync1tasz8xg3wyvxg8hfujndutgp967ekc25393w",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 1008,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SynergyOracle",
+      "identity_or_custody_address": "synq1tkjc442fvagjsd8ue0spr3va6n2ytsxx6l6q",
+      "deployed_contract_address": "sync17yd3kddpn7g9mjeazhnw7ky9pmk5ujjl0rkn",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 1016,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SynergyOracle",
+      "identity_or_custody_address": "synq1tkjc442fvagjsd8ue0spr3va6n2ytsxx6l6q",
+      "deployed_contract_address": "sync17yd3kddpn7g9mjeazhnw7ky9pmk5ujjl0rkn",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 1024,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "RewardDistributor",
+      "identity_or_custody_address": "synq1lep2gks85cwlyumx89nxjdqwt5zvnmjcsjm8",
+      "deployed_contract_address": "sync1gx6zkzqjhfymqz2rz868n8zqf06fe790wued",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 1032,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "RewardDistributor",
+      "identity_or_custody_address": "synq1lep2gks85cwlyumx89nxjdqwt5zvnmjcsjm8",
+      "deployed_contract_address": "sync1gx6zkzqjhfymqz2rz868n8zqf06fe790wued",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 1040,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Slashing",
+      "identity_or_custody_address": "synq1923udzcjjut08e76gj85ze952aefheezsda9",
+      "deployed_contract_address": "sync186smh2hyslf7yf5mwa2dq0dt52dpw0eufht3",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 1048,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Slashing",
+      "identity_or_custody_address": "synq1923udzcjjut08e76gj85ze952aefheezsda9",
+      "deployed_contract_address": "sync186smh2hyslf7yf5mwa2dq0dt52dpw0eufht3",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 1056,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Staking",
+      "identity_or_custody_address": "synq139erhddek4gl4e0uh3zjnhjty6cg6enz47ny",
+      "deployed_contract_address": "sync1qqd5u3v4wgqxvfhh49ax08s8pq7uf7kk23l5",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 1064,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Staking",
+      "identity_or_custody_address": "synq139erhddek4gl4e0uh3zjnhjty6cg6enz47ny",
+      "deployed_contract_address": "sync1qqd5u3v4wgqxvfhh49ax08s8pq7uf7kk23l5",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 1072,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Treasury",
+      "identity_or_custody_address": "synq104se4kpa4lq7cdkr9krcky4dfjwg4mks787j",
+      "deployed_contract_address": "sync1puq5nz4wacn25de9suur53esyn99zp9j6jx8",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 1080,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Treasury",
+      "identity_or_custody_address": "synq104se4kpa4lq7cdkr9krcky4dfjwg4mks787j",
+      "deployed_contract_address": "sync1puq5nz4wacn25de9suur53esyn99zp9j6jx8",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 1088,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "ValidatorRegistry",
+      "identity_or_custody_address": "synq15tvpvxyav9n2skd2yyrw2g7p2vmtlnp0sr08",
+      "deployed_contract_address": "sync1q2s4w0h2q98e2hv9rjycf4th4zwu7r9wxtmz",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 1096,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "ValidatorRegistry",
+      "identity_or_custody_address": "synq15tvpvxyav9n2skd2yyrw2g7p2vmtlnp0sr08",
+      "deployed_contract_address": "sync1q2s4w0h2q98e2hv9rjycf4th4zwu7r9wxtmz",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 1104,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 1112,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 1120,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 1128,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 1136,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Governance",
+      "identity_or_custody_address": "synq1xmk8vnmxsncyzfd5trepwkwvye42r7ugg5yv",
+      "deployed_contract_address": "sync12j7reatl4p09l4p63kyrxky5t89wp4a8mylg",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 1144,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Identity",
+      "identity_or_custody_address": "synq1xe3cccane0hgctg8e2mhpm8nky62j77w2yaq",
+      "deployed_contract_address": "sync1tasz8xg3wyvxg8hfujndutgp967ekc25393w",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 1152,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SynergyOracle",
+      "identity_or_custody_address": "synq1tkjc442fvagjsd8ue0spr3va6n2ytsxx6l6q",
+      "deployed_contract_address": "sync17yd3kddpn7g9mjeazhnw7ky9pmk5ujjl0rkn",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 1160,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "RewardDistributor",
+      "identity_or_custody_address": "synq1lep2gks85cwlyumx89nxjdqwt5zvnmjcsjm8",
+      "deployed_contract_address": "sync1gx6zkzqjhfymqz2rz868n8zqf06fe790wued",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 1168,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Slashing",
+      "identity_or_custody_address": "synq1923udzcjjut08e76gj85ze952aefheezsda9",
+      "deployed_contract_address": "sync186smh2hyslf7yf5mwa2dq0dt52dpw0eufht3",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 1176,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Staking",
+      "identity_or_custody_address": "synq139erhddek4gl4e0uh3zjnhjty6cg6enz47ny",
+      "deployed_contract_address": "sync1qqd5u3v4wgqxvfhh49ax08s8pq7uf7kk23l5",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 1184,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Treasury",
+      "identity_or_custody_address": "synq104se4kpa4lq7cdkr9krcky4dfjwg4mks787j",
+      "deployed_contract_address": "sync1puq5nz4wacn25de9suur53esyn99zp9j6jx8",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 1192,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "ValidatorRegistry",
+      "identity_or_custody_address": "synq15tvpvxyav9n2skd2yyrw2g7p2vmtlnp0sr08",
+      "deployed_contract_address": "sync1q2s4w0h2q98e2hv9rjycf4th4zwu7r9wxtmz",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 1200,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 1208,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/TRACK_H_ADDRESS_INVENTORY.json",
+      "line": 1216,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/evidence/toolchain-and-build/runtime-tests-round6.txt",
+      "line": 1680,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/evidence/toolchain-and-build/runtime-tests-round6.txt",
+      "line": 1688,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/evidence/toolchain-and-build/runtime-tests-round6.txt",
+      "line": 1726,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/evidence/toolchain-and-build/runtime-tests-round6.txt",
+      "line": 1734,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/evidence/toolchain-and-build/runtime-tests-round6.txt",
+      "line": 1767,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/evidence/toolchain-and-build/runtime-tests-round6.txt",
+      "line": 1775,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/evidence/toolchain-and-build/runtime-tests-round6.txt",
+      "line": 1818,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/evidence/toolchain-and-build/runtime-tests-round6.txt",
+      "line": 1826,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/evidence/toolchain-and-build/runtime-tests-round7.txt",
+      "line": 1701,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/evidence/toolchain-and-build/runtime-tests-round7.txt",
+      "line": 1709,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/evidence/toolchain-and-build/runtime-tests-round7.txt",
+      "line": 1742,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/evidence/toolchain-and-build/runtime-tests-round7.txt",
+      "line": 1750,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/evidence/toolchain-and-build/runtime-tests-round7.txt",
+      "line": 1783,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/evidence/toolchain-and-build/runtime-tests-round7.txt",
+      "line": 1791,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/evidence/toolchain-and-build/runtime-tests-round7.txt",
+      "line": 1824,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/evidence/toolchain-and-build/runtime-tests-round7.txt",
+      "line": 1832,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json",
+      "line": 205,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json",
+      "line": 277,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json",
+      "line": 510,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json",
+      "line": 574,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json",
+      "line": 852,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json",
+      "line": 932,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json",
+      "line": 1064,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json",
+      "line": 1104,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Governance",
+      "identity_or_custody_address": "synq1xmk8vnmxsncyzfd5trepwkwvye42r7ugg5yv",
+      "deployed_contract_address": "sync12j7reatl4p09l4p63kyrxky5t89wp4a8mylg",
+      "path": "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json",
+      "line": 1211,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Identity",
+      "identity_or_custody_address": "synq1xe3cccane0hgctg8e2mhpm8nky62j77w2yaq",
+      "deployed_contract_address": "sync1tasz8xg3wyvxg8hfujndutgp967ekc25393w",
+      "path": "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json",
+      "line": 1223,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "RewardDistributor",
+      "identity_or_custody_address": "synq1lep2gks85cwlyumx89nxjdqwt5zvnmjcsjm8",
+      "deployed_contract_address": "sync1gx6zkzqjhfymqz2rz868n8zqf06fe790wued",
+      "path": "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json",
+      "line": 1235,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Slashing",
+      "identity_or_custody_address": "synq1923udzcjjut08e76gj85ze952aefheezsda9",
+      "deployed_contract_address": "sync186smh2hyslf7yf5mwa2dq0dt52dpw0eufht3",
+      "path": "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json",
+      "line": 1247,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Staking",
+      "identity_or_custody_address": "synq139erhddek4gl4e0uh3zjnhjty6cg6enz47ny",
+      "deployed_contract_address": "sync1qqd5u3v4wgqxvfhh49ax08s8pq7uf7kk23l5",
+      "path": "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json",
+      "line": 1259,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SynergyOracle",
+      "identity_or_custody_address": "synq1tkjc442fvagjsd8ue0spr3va6n2ytsxx6l6q",
+      "deployed_contract_address": "sync17yd3kddpn7g9mjeazhnw7ky9pmk5ujjl0rkn",
+      "path": "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json",
+      "line": 1271,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Treasury",
+      "identity_or_custody_address": "synq104se4kpa4lq7cdkr9krcky4dfjwg4mks787j",
+      "deployed_contract_address": "sync1puq5nz4wacn25de9suur53esyn99zp9j6jx8",
+      "path": "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json",
+      "line": 1283,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "ValidatorRegistry",
+      "identity_or_custody_address": "synq15tvpvxyav9n2skd2yyrw2g7p2vmtlnp0sr08",
+      "deployed_contract_address": "sync1q2s4w0h2q98e2hv9rjycf4th4zwu7r9wxtmz",
+      "path": "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json",
+      "line": 1295,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json",
+      "line": 1307,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json",
+      "line": 1318,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Governance",
+      "identity_or_custody_address": "synq1xmk8vnmxsncyzfd5trepwkwvye42r7ugg5yv",
+      "deployed_contract_address": "sync12j7reatl4p09l4p63kyrxky5t89wp4a8mylg",
+      "path": "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json",
+      "line": 1369,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Identity",
+      "identity_or_custody_address": "synq1xe3cccane0hgctg8e2mhpm8nky62j77w2yaq",
+      "deployed_contract_address": "sync1tasz8xg3wyvxg8hfujndutgp967ekc25393w",
+      "path": "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json",
+      "line": 1442,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "RewardDistributor",
+      "identity_or_custody_address": "synq1lep2gks85cwlyumx89nxjdqwt5zvnmjcsjm8",
+      "deployed_contract_address": "sync1gx6zkzqjhfymqz2rz868n8zqf06fe790wued",
+      "path": "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json",
+      "line": 1517,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Slashing",
+      "identity_or_custody_address": "synq1923udzcjjut08e76gj85ze952aefheezsda9",
+      "deployed_contract_address": "sync186smh2hyslf7yf5mwa2dq0dt52dpw0eufht3",
+      "path": "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json",
+      "line": 1593,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Staking",
+      "identity_or_custody_address": "synq139erhddek4gl4e0uh3zjnhjty6cg6enz47ny",
+      "deployed_contract_address": "sync1qqd5u3v4wgqxvfhh49ax08s8pq7uf7kk23l5",
+      "path": "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json",
+      "line": 1671,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SynergyOracle",
+      "identity_or_custody_address": "synq1tkjc442fvagjsd8ue0spr3va6n2ytsxx6l6q",
+      "deployed_contract_address": "sync17yd3kddpn7g9mjeazhnw7ky9pmk5ujjl0rkn",
+      "path": "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json",
+      "line": 1744,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json",
+      "line": 1829,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Treasury",
+      "identity_or_custody_address": "synq104se4kpa4lq7cdkr9krcky4dfjwg4mks787j",
+      "deployed_contract_address": "sync1puq5nz4wacn25de9suur53esyn99zp9j6jx8",
+      "path": "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json",
+      "line": 1899,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "ValidatorRegistry",
+      "identity_or_custody_address": "synq15tvpvxyav9n2skd2yyrw2g7p2vmtlnp0sr08",
+      "deployed_contract_address": "sync1q2s4w0h2q98e2hv9rjycf4th4zwu7r9wxtmz",
+      "path": "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json",
+      "line": 1977,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Identity",
+      "identity_or_custody_address": "synq1xe3cccane0hgctg8e2mhpm8nky62j77w2yaq",
+      "deployed_contract_address": "sync1tasz8xg3wyvxg8hfujndutgp967ekc25393w",
+      "path": "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json",
+      "line": 3250,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "Treasury",
+      "identity_or_custody_address": "synq104se4kpa4lq7cdkr9krcky4dfjwg4mks787j",
+      "deployed_contract_address": "sync1puq5nz4wacn25de9suur53esyn99zp9j6jx8",
+      "path": "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json",
+      "line": 3303,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json",
+      "line": 5520,
+      "classification": "historical_launch_record"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+      "line": 205,
+      "classification": "historical_test_fixture"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+      "line": 277,
+      "classification": "historical_test_fixture"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+      "line": 510,
+      "classification": "historical_test_fixture"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+      "line": 574,
+      "classification": "historical_test_fixture"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+      "line": 852,
+      "classification": "historical_test_fixture"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+      "line": 932,
+      "classification": "historical_test_fixture"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+      "line": 1064,
+      "classification": "historical_test_fixture"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+      "line": 1104,
+      "classification": "historical_test_fixture"
+    },
+    {
+      "contract": "Governance",
+      "identity_or_custody_address": "synq1xmk8vnmxsncyzfd5trepwkwvye42r7ugg5yv",
+      "deployed_contract_address": "sync12j7reatl4p09l4p63kyrxky5t89wp4a8mylg",
+      "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+      "line": 1210,
+      "classification": "historical_test_fixture"
+    },
+    {
+      "contract": "Identity",
+      "identity_or_custody_address": "synq1xe3cccane0hgctg8e2mhpm8nky62j77w2yaq",
+      "deployed_contract_address": "sync1tasz8xg3wyvxg8hfujndutgp967ekc25393w",
+      "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+      "line": 1238,
+      "classification": "historical_test_fixture"
+    },
+    {
+      "contract": "RewardDistributor",
+      "identity_or_custody_address": "synq1lep2gks85cwlyumx89nxjdqwt5zvnmjcsjm8",
+      "deployed_contract_address": "sync1gx6zkzqjhfymqz2rz868n8zqf06fe790wued",
+      "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+      "line": 1266,
+      "classification": "historical_test_fixture"
+    },
+    {
+      "contract": "Slashing",
+      "identity_or_custody_address": "synq1923udzcjjut08e76gj85ze952aefheezsda9",
+      "deployed_contract_address": "sync186smh2hyslf7yf5mwa2dq0dt52dpw0eufht3",
+      "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+      "line": 1294,
+      "classification": "historical_test_fixture"
+    },
+    {
+      "contract": "Staking",
+      "identity_or_custody_address": "synq139erhddek4gl4e0uh3zjnhjty6cg6enz47ny",
+      "deployed_contract_address": "sync1qqd5u3v4wgqxvfhh49ax08s8pq7uf7kk23l5",
+      "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+      "line": 1322,
+      "classification": "historical_test_fixture"
+    },
+    {
+      "contract": "SynergyOracle",
+      "identity_or_custody_address": "synq1tkjc442fvagjsd8ue0spr3va6n2ytsxx6l6q",
+      "deployed_contract_address": "sync17yd3kddpn7g9mjeazhnw7ky9pmk5ujjl0rkn",
+      "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+      "line": 1350,
+      "classification": "historical_test_fixture"
+    },
+    {
+      "contract": "Treasury",
+      "identity_or_custody_address": "synq104se4kpa4lq7cdkr9krcky4dfjwg4mks787j",
+      "deployed_contract_address": "sync1puq5nz4wacn25de9suur53esyn99zp9j6jx8",
+      "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+      "line": 1378,
+      "classification": "historical_test_fixture"
+    },
+    {
+      "contract": "ValidatorRegistry",
+      "identity_or_custody_address": "synq15tvpvxyav9n2skd2yyrw2g7p2vmtlnp0sr08",
+      "deployed_contract_address": "sync1q2s4w0h2q98e2hv9rjycf4th4zwu7r9wxtmz",
+      "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+      "line": 1406,
+      "classification": "historical_test_fixture"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+      "line": 1434,
+      "classification": "historical_test_fixture"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+      "line": 1445,
+      "classification": "historical_test_fixture"
+    },
+    {
+      "contract": "Governance",
+      "identity_or_custody_address": "synq1xmk8vnmxsncyzfd5trepwkwvye42r7ugg5yv",
+      "deployed_contract_address": "sync12j7reatl4p09l4p63kyrxky5t89wp4a8mylg",
+      "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+      "line": 1458,
+      "classification": "historical_test_fixture"
+    },
+    {
+      "contract": "Identity",
+      "identity_or_custody_address": "synq1xe3cccane0hgctg8e2mhpm8nky62j77w2yaq",
+      "deployed_contract_address": "sync1tasz8xg3wyvxg8hfujndutgp967ekc25393w",
+      "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+      "line": 1488,
+      "classification": "historical_test_fixture"
+    },
+    {
+      "contract": "RewardDistributor",
+      "identity_or_custody_address": "synq1lep2gks85cwlyumx89nxjdqwt5zvnmjcsjm8",
+      "deployed_contract_address": "sync1gx6zkzqjhfymqz2rz868n8zqf06fe790wued",
+      "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+      "line": 1521,
+      "classification": "historical_test_fixture"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+      "line": 1548,
+      "classification": "historical_test_fixture"
+    },
+    {
+      "contract": "Slashing",
+      "identity_or_custody_address": "synq1923udzcjjut08e76gj85ze952aefheezsda9",
+      "deployed_contract_address": "sync186smh2hyslf7yf5mwa2dq0dt52dpw0eufht3",
+      "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+      "line": 1563,
+      "classification": "historical_test_fixture"
+    },
+    {
+      "contract": "Staking",
+      "identity_or_custody_address": "synq139erhddek4gl4e0uh3zjnhjty6cg6enz47ny",
+      "deployed_contract_address": "sync1qqd5u3v4wgqxvfhh49ax08s8pq7uf7kk23l5",
+      "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+      "line": 1592,
+      "classification": "historical_test_fixture"
+    },
+    {
+      "contract": "SynergyOracle",
+      "identity_or_custody_address": "synq1tkjc442fvagjsd8ue0spr3va6n2ytsxx6l6q",
+      "deployed_contract_address": "sync17yd3kddpn7g9mjeazhnw7ky9pmk5ujjl0rkn",
+      "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+      "line": 1619,
+      "classification": "historical_test_fixture"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+      "line": 1658,
+      "classification": "historical_test_fixture"
+    },
+    {
+      "contract": "Treasury",
+      "identity_or_custody_address": "synq104se4kpa4lq7cdkr9krcky4dfjwg4mks787j",
+      "deployed_contract_address": "sync1puq5nz4wacn25de9suur53esyn99zp9j6jx8",
+      "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+      "line": 1668,
+      "classification": "historical_test_fixture"
+    },
+    {
+      "contract": "ValidatorRegistry",
+      "identity_or_custody_address": "synq15tvpvxyav9n2skd2yyrw2g7p2vmtlnp0sr08",
+      "deployed_contract_address": "sync1q2s4w0h2q98e2hv9rjycf4th4zwu7r9wxtmz",
+      "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+      "line": 1702,
+      "classification": "historical_test_fixture"
+    },
+    {
+      "contract": "Identity",
+      "identity_or_custody_address": "synq1xe3cccane0hgctg8e2mhpm8nky62j77w2yaq",
+      "deployed_contract_address": "sync1tasz8xg3wyvxg8hfujndutgp967ekc25393w",
+      "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+      "line": 2069,
+      "classification": "historical_test_fixture"
+    },
+    {
+      "contract": "Treasury",
+      "identity_or_custody_address": "synq104se4kpa4lq7cdkr9krcky4dfjwg4mks787j",
+      "deployed_contract_address": "sync1puq5nz4wacn25de9suur53esyn99zp9j6jx8",
+      "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+      "line": 2122,
+      "classification": "historical_test_fixture"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "runtime/config/genesis.testnet-v3.test-fixture.json",
+      "line": 4342,
+      "classification": "historical_test_fixture"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "runtime/testnet-allocation-manifest.json",
+      "line": 190,
+      "classification": "active_consumer_review"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "runtime/testnet-allocation-manifest.json",
+      "line": 254,
+      "classification": "active_consumer_review"
+    },
+    {
+      "contract": "Governance",
+      "identity_or_custody_address": "synq1xmk8vnmxsncyzfd5trepwkwvye42r7ugg5yv",
+      "deployed_contract_address": "sync12j7reatl4p09l4p63kyrxky5t89wp4a8mylg",
+      "path": "testnet-v3-identity-files/CONTRACT-GOV_tnv3-contract-governance/identity.pub.json",
+      "line": 2,
+      "classification": "identity_custody_registry_preserve"
+    },
+    {
+      "contract": "Governance",
+      "identity_or_custody_address": "synq1xmk8vnmxsncyzfd5trepwkwvye42r7ugg5yv",
+      "deployed_contract_address": "sync12j7reatl4p09l4p63kyrxky5t89wp4a8mylg",
+      "path": "testnet-v3-identity-files/CONTRACT-GOV_tnv3-contract-governance/manifest.json",
+      "line": 9,
+      "classification": "identity_custody_registry_preserve"
+    },
+    {
+      "contract": "Identity",
+      "identity_or_custody_address": "synq1xe3cccane0hgctg8e2mhpm8nky62j77w2yaq",
+      "deployed_contract_address": "sync1tasz8xg3wyvxg8hfujndutgp967ekc25393w",
+      "path": "testnet-v3-identity-files/CONTRACT-IDENTITY_tnv3-contract-identity/identity.pub.json",
+      "line": 2,
+      "classification": "identity_custody_registry_preserve"
+    },
+    {
+      "contract": "Identity",
+      "identity_or_custody_address": "synq1xe3cccane0hgctg8e2mhpm8nky62j77w2yaq",
+      "deployed_contract_address": "sync1tasz8xg3wyvxg8hfujndutgp967ekc25393w",
+      "path": "testnet-v3-identity-files/CONTRACT-IDENTITY_tnv3-contract-identity/manifest.json",
+      "line": 9,
+      "classification": "identity_custody_registry_preserve"
+    },
+    {
+      "contract": "SynergyOracle",
+      "identity_or_custody_address": "synq1tkjc442fvagjsd8ue0spr3va6n2ytsxx6l6q",
+      "deployed_contract_address": "sync17yd3kddpn7g9mjeazhnw7ky9pmk5ujjl0rkn",
+      "path": "testnet-v3-identity-files/CONTRACT-ORACLE_tnv3-contract-synergy-oracle/identity.pub.json",
+      "line": 2,
+      "classification": "identity_custody_registry_preserve"
+    },
+    {
+      "contract": "SynergyOracle",
+      "identity_or_custody_address": "synq1tkjc442fvagjsd8ue0spr3va6n2ytsxx6l6q",
+      "deployed_contract_address": "sync17yd3kddpn7g9mjeazhnw7ky9pmk5ujjl0rkn",
+      "path": "testnet-v3-identity-files/CONTRACT-ORACLE_tnv3-contract-synergy-oracle/manifest.json",
+      "line": 9,
+      "classification": "identity_custody_registry_preserve"
+    },
+    {
+      "contract": "RewardDistributor",
+      "identity_or_custody_address": "synq1lep2gks85cwlyumx89nxjdqwt5zvnmjcsjm8",
+      "deployed_contract_address": "sync1gx6zkzqjhfymqz2rz868n8zqf06fe790wued",
+      "path": "testnet-v3-identity-files/CONTRACT-REWARD_tnv3-contract-reward-distributor/identity.pub.json",
+      "line": 2,
+      "classification": "identity_custody_registry_preserve"
+    },
+    {
+      "contract": "RewardDistributor",
+      "identity_or_custody_address": "synq1lep2gks85cwlyumx89nxjdqwt5zvnmjcsjm8",
+      "deployed_contract_address": "sync1gx6zkzqjhfymqz2rz868n8zqf06fe790wued",
+      "path": "testnet-v3-identity-files/CONTRACT-REWARD_tnv3-contract-reward-distributor/manifest.json",
+      "line": 9,
+      "classification": "identity_custody_registry_preserve"
+    },
+    {
+      "contract": "Slashing",
+      "identity_or_custody_address": "synq1923udzcjjut08e76gj85ze952aefheezsda9",
+      "deployed_contract_address": "sync186smh2hyslf7yf5mwa2dq0dt52dpw0eufht3",
+      "path": "testnet-v3-identity-files/CONTRACT-SLASHING_tnv3-contract-slashing/identity.pub.json",
+      "line": 2,
+      "classification": "identity_custody_registry_preserve"
+    },
+    {
+      "contract": "Slashing",
+      "identity_or_custody_address": "synq1923udzcjjut08e76gj85ze952aefheezsda9",
+      "deployed_contract_address": "sync186smh2hyslf7yf5mwa2dq0dt52dpw0eufht3",
+      "path": "testnet-v3-identity-files/CONTRACT-SLASHING_tnv3-contract-slashing/manifest.json",
+      "line": 9,
+      "classification": "identity_custody_registry_preserve"
+    },
+    {
+      "contract": "Staking",
+      "identity_or_custody_address": "synq139erhddek4gl4e0uh3zjnhjty6cg6enz47ny",
+      "deployed_contract_address": "sync1qqd5u3v4wgqxvfhh49ax08s8pq7uf7kk23l5",
+      "path": "testnet-v3-identity-files/CONTRACT-STAKING_tnv3-contract-staking/identity.pub.json",
+      "line": 2,
+      "classification": "identity_custody_registry_preserve"
+    },
+    {
+      "contract": "Staking",
+      "identity_or_custody_address": "synq139erhddek4gl4e0uh3zjnhjty6cg6enz47ny",
+      "deployed_contract_address": "sync1qqd5u3v4wgqxvfhh49ax08s8pq7uf7kk23l5",
+      "path": "testnet-v3-identity-files/CONTRACT-STAKING_tnv3-contract-staking/manifest.json",
+      "line": 9,
+      "classification": "identity_custody_registry_preserve"
+    },
+    {
+      "contract": "Treasury",
+      "identity_or_custody_address": "synq104se4kpa4lq7cdkr9krcky4dfjwg4mks787j",
+      "deployed_contract_address": "sync1puq5nz4wacn25de9suur53esyn99zp9j6jx8",
+      "path": "testnet-v3-identity-files/CONTRACT-TREASURY_tnv3-contract-treasury/identity.pub.json",
+      "line": 2,
+      "classification": "identity_custody_registry_preserve"
+    },
+    {
+      "contract": "Treasury",
+      "identity_or_custody_address": "synq104se4kpa4lq7cdkr9krcky4dfjwg4mks787j",
+      "deployed_contract_address": "sync1puq5nz4wacn25de9suur53esyn99zp9j6jx8",
+      "path": "testnet-v3-identity-files/CONTRACT-TREASURY_tnv3-contract-treasury/manifest.json",
+      "line": 9,
+      "classification": "identity_custody_registry_preserve"
+    },
+    {
+      "contract": "ValidatorRegistry",
+      "identity_or_custody_address": "synq15tvpvxyav9n2skd2yyrw2g7p2vmtlnp0sr08",
+      "deployed_contract_address": "sync1q2s4w0h2q98e2hv9rjycf4th4zwu7r9wxtmz",
+      "path": "testnet-v3-identity-files/CONTRACT-VALIDATOR-REGISTRY_tnv3-contract-validator-registry/identity.pub.json",
+      "line": 2,
+      "classification": "identity_custody_registry_preserve"
+    },
+    {
+      "contract": "ValidatorRegistry",
+      "identity_or_custody_address": "synq15tvpvxyav9n2skd2yyrw2g7p2vmtlnp0sr08",
+      "deployed_contract_address": "sync1q2s4w0h2q98e2hv9rjycf4th4zwu7r9wxtmz",
+      "path": "testnet-v3-identity-files/CONTRACT-VALIDATOR-REGISTRY_tnv3-contract-validator-registry/manifest.json",
+      "line": 9,
+      "classification": "identity_custody_registry_preserve"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "testnet-v3-identity-files/SAL-A01_tnv3-sale-reserve/identity.pub.json",
+      "line": 2,
+      "classification": "identity_custody_registry_preserve"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "testnet-v3-identity-files/SAL-A01_tnv3-sale-reserve/manifest.json",
+      "line": 9,
+      "classification": "identity_custody_registry_preserve"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "testnet-v3-identity-files/TEM-A01_tnv3-team-vesting/identity.pub.json",
+      "line": 2,
+      "classification": "identity_custody_registry_preserve"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "testnet-v3-identity-files/TEM-A01_tnv3-team-vesting/manifest.json",
+      "line": 9,
+      "classification": "identity_custody_registry_preserve"
+    },
+    {
+      "contract": "Governance",
+      "identity_or_custody_address": "synq1xmk8vnmxsncyzfd5trepwkwvye42r7ugg5yv",
+      "deployed_contract_address": "sync12j7reatl4p09l4p63kyrxky5t89wp4a8mylg",
+      "path": "testnet-v3-identity-files/identity-registry.public.json",
+      "line": 17,
+      "classification": "identity_custody_registry_preserve"
+    },
+    {
+      "contract": "Identity",
+      "identity_or_custody_address": "synq1xe3cccane0hgctg8e2mhpm8nky62j77w2yaq",
+      "deployed_contract_address": "sync1tasz8xg3wyvxg8hfujndutgp967ekc25393w",
+      "path": "testnet-v3-identity-files/identity-registry.public.json",
+      "line": 47,
+      "classification": "identity_custody_registry_preserve"
+    },
+    {
+      "contract": "SynergyOracle",
+      "identity_or_custody_address": "synq1tkjc442fvagjsd8ue0spr3va6n2ytsxx6l6q",
+      "deployed_contract_address": "sync17yd3kddpn7g9mjeazhnw7ky9pmk5ujjl0rkn",
+      "path": "testnet-v3-identity-files/identity-registry.public.json",
+      "line": 77,
+      "classification": "identity_custody_registry_preserve"
+    },
+    {
+      "contract": "RewardDistributor",
+      "identity_or_custody_address": "synq1lep2gks85cwlyumx89nxjdqwt5zvnmjcsjm8",
+      "deployed_contract_address": "sync1gx6zkzqjhfymqz2rz868n8zqf06fe790wued",
+      "path": "testnet-v3-identity-files/identity-registry.public.json",
+      "line": 107,
+      "classification": "identity_custody_registry_preserve"
+    },
+    {
+      "contract": "Slashing",
+      "identity_or_custody_address": "synq1923udzcjjut08e76gj85ze952aefheezsda9",
+      "deployed_contract_address": "sync186smh2hyslf7yf5mwa2dq0dt52dpw0eufht3",
+      "path": "testnet-v3-identity-files/identity-registry.public.json",
+      "line": 137,
+      "classification": "identity_custody_registry_preserve"
+    },
+    {
+      "contract": "Staking",
+      "identity_or_custody_address": "synq139erhddek4gl4e0uh3zjnhjty6cg6enz47ny",
+      "deployed_contract_address": "sync1qqd5u3v4wgqxvfhh49ax08s8pq7uf7kk23l5",
+      "path": "testnet-v3-identity-files/identity-registry.public.json",
+      "line": 167,
+      "classification": "identity_custody_registry_preserve"
+    },
+    {
+      "contract": "Treasury",
+      "identity_or_custody_address": "synq104se4kpa4lq7cdkr9krcky4dfjwg4mks787j",
+      "deployed_contract_address": "sync1puq5nz4wacn25de9suur53esyn99zp9j6jx8",
+      "path": "testnet-v3-identity-files/identity-registry.public.json",
+      "line": 197,
+      "classification": "identity_custody_registry_preserve"
+    },
+    {
+      "contract": "ValidatorRegistry",
+      "identity_or_custody_address": "synq15tvpvxyav9n2skd2yyrw2g7p2vmtlnp0sr08",
+      "deployed_contract_address": "sync1q2s4w0h2q98e2hv9rjycf4th4zwu7r9wxtmz",
+      "path": "testnet-v3-identity-files/identity-registry.public.json",
+      "line": 227,
+      "classification": "identity_custody_registry_preserve"
+    },
+    {
+      "contract": "SaleClaim",
+      "identity_or_custody_address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "deployed_contract_address": null,
+      "path": "testnet-v3-identity-files/identity-registry.public.json",
+      "line": 1117,
+      "classification": "identity_custody_registry_preserve"
+    },
+    {
+      "contract": "TeamVesting",
+      "identity_or_custody_address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "deployed_contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "path": "testnet-v3-identity-files/identity-registry.public.json",
+      "line": 1266,
+      "classification": "identity_custody_registry_preserve"
+    }
+  ]
+}

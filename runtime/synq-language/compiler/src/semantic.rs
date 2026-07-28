@@ -756,6 +756,22 @@ fn resolve_builtin_signature(name: &str) -> BuiltinResolution {
         );
     }
 
+    // The canonical governance-action authorization host. Typed explicitly so
+    // the authorization tail (nonce, expiry, signature) is checked at compile
+    // time rather than tolerated as an unknown call — a governed setter that
+    // mis-declares its tail must not compile.
+    if normalized == "verifygovernanceauthorization" {
+        return BuiltinResolution::Supported(FunctionSignature {
+            params: vec![
+                Type::MLDSAPublicKey,
+                Type::UInt256,
+                Type::UInt256,
+                Type::MLDSASignature,
+            ],
+            returns: Some(Type::Bool),
+        });
+    }
+
     if normalized.starts_with("verifymldsa") {
         return BuiltinResolution::Supported(FunctionSignature {
             params: vec![Type::MLDSAPublicKey, Type::Bytes, Type::MLDSASignature],

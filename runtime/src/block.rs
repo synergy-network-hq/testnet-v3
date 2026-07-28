@@ -7,9 +7,8 @@ use std::io::{BufReader, BufWriter, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::consensus::consensus_fork::{
-    normalize_consensus_key_algorithm, validate_consensus_key_algorithm_for_height,
-};
+use crate::consensus::consensus_fork::validate_consensus_key_algorithm_for_height;
+use crate::consensus::validator_keys::block_signature_algorithm;
 use crate::crypto::pqc::{PQCManager, PQCPublicKey, PQCSignature};
 use crate::genesis::canonical_genesis;
 
@@ -132,7 +131,7 @@ impl Block {
             );
         }
 
-        let algorithm = normalize_consensus_key_algorithm(&self.block_signature_algorithm)
+        let algorithm = block_signature_algorithm(&self.block_signature_algorithm)
             .map_err(|error| format!("unsupported Aegis PQC block signature algorithm: {error}"))?;
         validate_consensus_key_algorithm_for_height(self.block_index, &algorithm)?;
 
@@ -515,7 +514,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!(
+        let path = crate::utils::test_temp_root(format!(
             "synergy-chain-load-stale-tail-{}-{nonce}.json",
             std::process::id()
         ));
@@ -535,7 +534,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!(
+        let path = crate::utils::test_temp_root(format!(
             "synergy-chain-load-tip-{}-{nonce}.json",
             std::process::id()
         ));

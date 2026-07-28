@@ -516,7 +516,7 @@ mod tests {
     }
 
     fn temp_store(label: &str, anchor: Hash) -> (TypedFinalityStore, PathBuf) {
-        let path = std::env::temp_dir().join(format!(
+        let path = crate::utils::test_temp_root(format!(
             "synergy-typed-finality-{label}-{}-{}.json",
             std::process::id(),
             SystemTime::now()

@@ -26,6 +26,21 @@ pub struct ContractArtifact {
     pub source_hash: Option<String>,
 }
 
+/// The governed **account-domain** signature algorithm that authorizes a SynQ
+/// deploy or call on Testnet-v3, in compiled-manifest label form.
+///
+/// ML-DSA-65 is the *validator consensus* domain and must never authorize a
+/// contract deployment or a governance-signed contract call. The SynQ compiler
+/// emits this label from `compiler::artifacts::SYNQ_TESTNET_SIGNATURE_ALGORITHM`
+/// into every manifest and ABI; AIVM artifact validation gates on the same
+/// value here so the VM and the artifact cannot disagree.
+pub const SYNQ_ACCOUNT_DOMAIN_SIGNATURE_ALGORITHM: &str = "ML-DSA-87";
+
+/// The same governed account domain in `AivmSecurityPolicyRef` policy-label
+/// form. Kept beside the manifest label so the two can only ever be changed
+/// together.
+pub const SYNQ_ACCOUNT_DOMAIN_SIGNATURE_POLICY: &str = "ml-dsa-87";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SynQManifestArtifact {
     pub abi_hash: String,
@@ -188,7 +203,7 @@ impl ExecutionContext {
             pq_gas_limit: 300_000,
             security_policy: AivmSecurityPolicyRef {
                 policy_id: "synq-testnet-1266-v1".to_string(),
-                required_signature_policy: "ml-dsa-65".to_string(),
+                required_signature_policy: SYNQ_ACCOUNT_DOMAIN_SIGNATURE_POLICY.to_string(),
             },
             sts_host: None,
             resolved_synq_contracts: BTreeMap::new(),
@@ -415,8 +430,9 @@ pub fn validate_synq_artifact(request: &ExecutionRequest) -> Result<(), AivmErro
             ),
         ));
     }
-    if manifest.required_signature_algorithm != "ML-DSA-65"
-        || request.context.security_policy.required_signature_policy != "ml-dsa-65"
+    if manifest.required_signature_algorithm != SYNQ_ACCOUNT_DOMAIN_SIGNATURE_ALGORITHM
+        || request.context.security_policy.required_signature_policy
+            != SYNQ_ACCOUNT_DOMAIN_SIGNATURE_POLICY
     {
         return Err(AivmError::new(
             AivmErrorCode::Verification,
@@ -589,7 +605,7 @@ mod tests {
         assert_eq!(context.pq_gas_limit, 300_000);
         assert_eq!(
             context.security_policy.required_signature_policy,
-            "ml-dsa-65"
+            "ml-dsa-87"
         );
     }
 
@@ -801,7 +817,7 @@ mod tests {
             &sha256_hex(valid_abi_json().as_bytes()),
             "synergy-testnet",
             1266,
-            "ML-DSA-65",
+            "ML-DSA-87",
             "synq-bytecode-v1",
             1,
         ));
@@ -827,7 +843,7 @@ mod tests {
             "00",
             "synergy-testnet",
             1266,
-            "ML-DSA-65",
+            "ML-DSA-87",
             "synq-bytecode-v1",
             1,
         ));
@@ -882,7 +898,7 @@ mod tests {
             &sha256_hex(valid_abi_json().as_bytes()),
             "synergy-testnet",
             1266,
-            "ML-DSA-65",
+            "ML-DSA-87",
             "wasm-module-v1",
             1,
         ));
@@ -932,7 +948,7 @@ mod tests {
             &abi_hash,
             "synergy-testnet",
             1266,
-            "ML-DSA-65",
+            "ML-DSA-87",
             "synq-bytecode-v1",
             1,
         ));
@@ -948,7 +964,7 @@ mod tests {
 
     #[cfg(feature = "synq")]
     fn valid_abi_json() -> String {
-        r#"{"abi_version":"0.1","contract":"Counter","errors":[],"events":[],"methods":[],"security_requirements":{"call_domain":"SYNQ_CONTRACT_CALL_V1","deploy_domain":"SYNQ_CONTRACT_DEPLOY_V1","signature_algorithm":"ML-DSA-65"},"state_schema":[]}"#.to_string()
+        r#"{"abi_version":"0.1","contract":"Counter","errors":[],"events":[],"methods":[],"security_requirements":{"call_domain":"SYNQ_CONTRACT_CALL_V1","deploy_domain":"SYNQ_CONTRACT_DEPLOY_V1","signature_algorithm":"ML-DSA-87"},"state_schema":[]}"#.to_string()
     }
 
     #[cfg(feature = "synq")]

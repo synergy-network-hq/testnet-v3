@@ -1,0 +1,123 @@
+{
+  "status": "SUPERSEDED \u2014 DERIVED WITH UNAPPROVED TSYNQ SIGNER ADDRESS",
+  "do_not_consume": true,
+  "reason": "Deployer address input was the retired tsynq execution-signer identifier, not the canonical syna Standard Account address. Retained as historical evidence only.",
+  "superseded_record": {
+    "version": 1,
+    "status": "DERIVED_NOT_EXECUTED",
+    "network_id": "synergy-testnet-v3",
+    "chain_id": 1266,
+    "deployer_address": "tsynq10104f2010336d45035d2c92c71e601ec4619eb0c7ce81aad1f05dafe84c53cfacd1d4ad9dbdb3f2d3a",
+    "reproduced_independently": true,
+    "contracts": [
+      {
+        "nonce": 0,
+        "contract": "Identity",
+        "deployer_address": "tsynq10104f2010336d45035d2c92c71e601ec4619eb0c7ce81aad1f05dafe84c53cfacd1d4ad9dbdb3f2d3a",
+        "payload_hash": "b6f41cf562a8cf3cdc41b7adcdd7087d51809851252a4679385a858d0a721af5",
+        "constructor_args_hash": "c70787e2afeab3174d77c37d2505f28cfe21e02b18c9ad0da0ab9f4198cc2a35",
+        "bytecode_hash": "d35d3806ac57d41da5388380b24f3da0d22fa75960e7c14fb4f67dc47564392c",
+        "abi_hash": "d9965a8d237f6fa5d5cb13d79cb49aaa4eda5d436c92b8ade13e1adfbc7473e9",
+        "manifest_hash": "51727e80960d7a374c958b1f2dc773c12ce5268e52fc6daf4dfd83fc752ec64e",
+        "contract_address": "sync1mzp6r35ym6y74r08wpmptc02rdwepj9qkl6d",
+        "synq_contract_address": "tsynq10104f2c00172b252282abb2d1b4e130261a66a695446854b76681a312dd37c8a48603cbcfeaec804c6"
+      },
+      {
+        "nonce": 1,
+        "contract": "ValidatorRegistry",
+        "deployer_address": "tsynq10104f2010336d45035d2c92c71e601ec4619eb0c7ce81aad1f05dafe84c53cfacd1d4ad9dbdb3f2d3a",
+        "payload_hash": "1ccc064eca440ee111cfa93576ad99b2bce8ce73675d0a3e5cd641f0b43545c8",
+        "constructor_args_hash": "02eee7ff788b245ec1b6b5da96f0d764231b4d813282b2728653d670d80a747f",
+        "bytecode_hash": "0648bf7e3c55fba3737d37739eb6bcb67c37dec709311ea2a3c1a6be56916643",
+        "abi_hash": "161782f8b82c879e600472dba06e812ddda684c3963662b587699aba16bcc2a0",
+        "manifest_hash": "dc0f5b7d5c64cf323389d229cbf5bf704798720b0a657c060abf7d4f649b9b20",
+        "contract_address": "sync1te8m5e5pxnc0gcuylnvxa8hnt33vp6xhl04w",
+        "synq_contract_address": "tsynq10104f2c0010bcce08b071e9c07a83fa091a878b53a7a2a0c3c2140042864f514992a624ce2da113114"
+      },
+      {
+        "nonce": 2,
+        "contract": "Staking",
+        "deployer_address": "tsynq10104f2010336d45035d2c92c71e601ec4619eb0c7ce81aad1f05dafe84c53cfacd1d4ad9dbdb3f2d3a",
+        "payload_hash": "217fbf82b3694f1c7ef5136e529bff9219828316803ac4f9a800360509b57bb8",
+        "constructor_args_hash": "8afd1c08f3ef3af9fc3365acb369318bf9ebda8459b34037ce816d794bf3040e",
+        "bytecode_hash": "49a1a49e4b649bd6ab2a6ab99d32859a5942eee7669bae10cbccc3ff05a7c866",
+        "abi_hash": "0d445de6280d069d84b805a57f903041e7ce83db6094fec5e9bdd624f47b5763",
+        "manifest_hash": "cca957e5f1f4bfda4e265cfbbe86f0c3c03d28a4241b7896f9010e63e9ac4cb7",
+        "contract_address": "sync1w8u4wwrpatq036ugdudehcgdxkqn59t77266",
+        "synq_contract_address": "tsynq10104f2c001304531e58d5052418b803bb9a2b0f50efc913dbc023f677104b8400b695086c7faaa5dd8"
+      },
+      {
+        "nonce": 3,
+        "contract": "Governance",
+        "deployer_address": "tsynq10104f2010336d45035d2c92c71e601ec4619eb0c7ce81aad1f05dafe84c53cfacd1d4ad9dbdb3f2d3a",
+        "payload_hash": "f89f2008c97fa5036f1b838e68d861e0a1cff689391c29ad5ecebc71b85c84b0",
+        "constructor_args_hash": "6b8edff9d4368445227944e6f252a7b5f9a505a8d9300ef08550d9fe4a34b5c7",
+        "bytecode_hash": "b118a914c64c3454884022c5a9c160fc3de4241698c5fde332473e6276c6bf56",
+        "abi_hash": "562370918cd2907cdd65cf379e3ffa34f892ea24e1a5d843d421500f8eeaf52a",
+        "manifest_hash": "54f72bc98254394287d204e1a381558e805925a8546bce3dcccbecd7f387c60d",
+        "contract_address": "sync1eeahc2ydw2wsxhy48dav59k38xwugxvzn6nh",
+        "synq_contract_address": "tsynq10104f2c0010caba130d0562f547550c368b1cec1c987a28ab243b73c4018ce9484d3be293ac329a5e0"
+      },
+      {
+        "nonce": 4,
+        "contract": "Treasury",
+        "deployer_address": "tsynq10104f2010336d45035d2c92c71e601ec4619eb0c7ce81aad1f05dafe84c53cfacd1d4ad9dbdb3f2d3a",
+        "payload_hash": "22d5db6fc17f4f3770f070197371e9b2140abe866de25778af995d614997dd05",
+        "constructor_args_hash": "6e627537566851e7b91ac8f9e4b1b19bb4b060dc380fabc409facb79ad65f6f5",
+        "bytecode_hash": "d35e7736eca4c3a61428809f109631ec4ab39d8a3904ef05a82eb23cdd364408",
+        "abi_hash": "1e5ac5b604a83339eccd3a245fbb46f0f5b0218650ba75e8419dbfee20af7f74",
+        "manifest_hash": "c19a29580b503224aed06cc9ca37381823b5d39fefefb0fb8e72c2389edb9ae2",
+        "contract_address": "sync12rxpcm85ru7zc7l3kf7vx6xecunxljrap8qe",
+        "synq_contract_address": "tsynq10104f2c0015bce9c2c1a68df88040d0e82a57e705e2b39b8e608390d52ec71579f752077d37beceb9c"
+      },
+      {
+        "nonce": 5,
+        "contract": "Slashing",
+        "deployer_address": "tsynq10104f2010336d45035d2c92c71e601ec4619eb0c7ce81aad1f05dafe84c53cfacd1d4ad9dbdb3f2d3a",
+        "payload_hash": "542222921b0694d9cd0bb6917a2ae2492b099b85b3e3207271e54bcdfaabdef5",
+        "constructor_args_hash": "a184acb17ddb5944466bd1829a894ef70edf5aee208aba84eb9838556fb24772",
+        "bytecode_hash": "fe44ea53ddc1c626ef0d73884a317f7e30962df476ee3d5043ec528f738cb1b5",
+        "abi_hash": "7c2aa314689e5b16a7f0edf752a4dff52a13282312a4b41f5eadc5b970b102c5",
+        "manifest_hash": "bfd5dbdcb70244c7006c59df4c2c6df685f1f970aa604686acf65d304a47216a",
+        "contract_address": "sync1g90wdzh53penq8ha4nmn0pqvg84zlar3fh02",
+        "synq_contract_address": "tsynq10104f2c001cff9b684a1399e99f40512beff7fbe3057fbe548cc96d0d24c809413a42745f923f9f4cf"
+      },
+      {
+        "nonce": 6,
+        "contract": "RewardDistributor",
+        "deployer_address": "tsynq10104f2010336d45035d2c92c71e601ec4619eb0c7ce81aad1f05dafe84c53cfacd1d4ad9dbdb3f2d3a",
+        "payload_hash": "cc2bf8b414d91b485396063e294588de209e85dd4c1fbb7e535200fd413f203d",
+        "constructor_args_hash": "584854e27130fd13f0038d35e4cf5a156013de8e36ce62c3997dfbf3dbb4b51f",
+        "bytecode_hash": "1bddb527b9f9f401996fabea1dfced503f483b827ba77258576c255667208e92",
+        "abi_hash": "7f3122c10bcf0f625681915473e21df22a6c24536832345a54a1cd1ca002c596",
+        "manifest_hash": "b98a09e09a335f1242259f40869e417630f35aac9ab84521bc385d1d526295bc",
+        "contract_address": "sync1zwn4fch2m6hw792lw9atpkzllc4fk96230ze",
+        "synq_contract_address": "tsynq10104f2c0014e70b8c4b7bb7c94b7961d1a4cdc7ad0bb0bcc5fdb7be379135a705cf709fe34581714f8"
+      },
+      {
+        "nonce": 7,
+        "contract": "SynergyOracle",
+        "deployer_address": "tsynq10104f2010336d45035d2c92c71e601ec4619eb0c7ce81aad1f05dafe84c53cfacd1d4ad9dbdb3f2d3a",
+        "payload_hash": "70c0cb69d6c887e745de57c6031706212f23be1aaa02b8b92e890e9607d79638",
+        "constructor_args_hash": "75daa95d9e7fa5a4f739d862971337e6f4a94dbc158b65b8a30ba441d5f81f0e",
+        "bytecode_hash": "f2d7c848d7b607754f83da9b18f4f85cb33a5fae2607780f75860d243fc6316a",
+        "abi_hash": "ff5c1d482464a961798523f00a2bccdf9b95a2f723505da34ae8b979dc54a53c",
+        "manifest_hash": "457089cd7572b58489aa9850af2c9523860427fcf1e8d2051666c5441ba3790f",
+        "contract_address": "sync1cklzrcryyg0kmlc46urf7wqvhtgdejgtw493",
+        "synq_contract_address": "tsynq10104f2c001cb24d214c434a9b4cbbfc380ebb54b1746411e9ca7cd66bb2d0140f0210fa74e894312ea"
+      },
+      {
+        "nonce": 8,
+        "contract": "TeamVesting",
+        "deployer_address": "tsynq10104f2010336d45035d2c92c71e601ec4619eb0c7ce81aad1f05dafe84c53cfacd1d4ad9dbdb3f2d3a",
+        "payload_hash": "786ff2a41cf024111cc26056e0d5b71cbc98d686c7d8acfdd435cdd2e2cb353c",
+        "constructor_args_hash": "4d7beefc3bba967a0f5fc2c8824a2239961e4ca3e25f756a8079b78c7724f059",
+        "bytecode_hash": "6a4bf755a81615aed240c51f6842aa1bdc6ca8ef16ffa75ce7a510453f1b7f4c",
+        "abi_hash": "5f7df0c83f56283e9c1f78bfe84f9f8b494f1c300ae9cc412d87164027f00753",
+        "manifest_hash": "c340a5ced8204e5d6dad0e78d0c78bd4a7aaa0ed6f7c2ea9dde053d74ef89383",
+        "contract_address": "sync1lnyn4647vlxlsp2gce7rwsynel57d6c5chls",
+        "synq_contract_address": "tsynq10104f2c001a4a4ed05fcc627a47ce3daf4ef7ef0362f4b077867038bb68fa99484250d8f36c5ddaa87"
+      }
+    ]
+  }
+}

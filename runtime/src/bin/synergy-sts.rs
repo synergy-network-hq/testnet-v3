@@ -1138,7 +1138,7 @@ fn build_signed_sts_carrier_transaction(
         gas_price: options.gas_price_nwei,
         gas_limit: options.gas_limit,
         data: Some(payload_hex.to_string()),
-        signature_algorithm: "fndsa".to_string(),
+        signature_algorithm: "mldsa87".to_string(),
     };
     let private_key = PQCPrivateKey {
         algorithm: PQCAlgorithm::FNDSA,

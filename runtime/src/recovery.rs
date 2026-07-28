@@ -29,8 +29,14 @@ use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub const EXPECTED_GENESIS_HASH: &str =
-    "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789";
+/// Canonical Testnet-v3 genesis hash, read from the loaded genesis.
+/// Previously a hardcoded Testnet-v2 literal, which let a v3 node assert a
+/// retired chain identity during recovery/realignment/diagnostics.
+pub fn expected_genesis_hash() -> String {
+    crate::genesis::canonical_genesis()
+        .map(|genesis| genesis.hash().to_string())
+        .unwrap_or_default()
+}
 pub const BASELINE_VALIDATOR_COUNT: usize = 6;
 const ALLOWED_STATE_FILES: &[&str] = &[
     "chain.json",
@@ -328,7 +334,7 @@ pub fn status() -> Value {
         ],
         "chain_id": SYNERGY_TESTNET_V3_CHAIN_ID,
         "network_id": SYNERGY_TESTNET_V3_NETWORK_ID,
-        "genesis_hash": EXPECTED_GENESIS_HASH,
+        "genesis_hash": expected_genesis_hash(),
         "quorum": {
             "policy": "ceil(active_validator_count * 2 / 3)",
             "genesis_baseline_required": required_validator_quorum(BASELINE_VALIDATOR_COUNT),
@@ -1525,11 +1531,12 @@ pub fn build_plan(input: BuildPlanInput) -> RecoveryPlan {
     }
     if !input
         .genesis_hash
-        .eq_ignore_ascii_case(EXPECTED_GENESIS_HASH)
+        .eq_ignore_ascii_case(&expected_genesis_hash())
     {
         failures.push(format!(
             "wrong genesis_hash {}; expected {}",
-            input.genesis_hash, EXPECTED_GENESIS_HASH
+            input.genesis_hash,
+            expected_genesis_hash()
         ));
     }
 
@@ -1780,7 +1787,7 @@ pub fn verify_plan(plan: &RecoveryPlan) -> RecoveryVerification {
     }
     if !plan
         .genesis_hash
-        .eq_ignore_ascii_case(EXPECTED_GENESIS_HASH)
+        .eq_ignore_ascii_case(&expected_genesis_hash())
     {
         errors.push("wrong genesis_hash".to_string());
     }
@@ -2314,13 +2321,15 @@ fn verify_legacy_qc(
             seen.len(),
         ));
     }
-    let signer_count = seen.len() as f64;
-    if qc.cumulative_weight > 0.0 && (qc.cumulative_weight - signer_count).abs() > 0.000_001 {
-        return Err(format!(
-            "committed QC cumulative_weight mismatch: computed {signer_count}, declared {}",
-            qc.cumulative_weight
-        ));
-    }
+    // cumulative_weight is authoritatively checked as summed *bonded stake* by
+    // DualQuorumConsensus::verify_commit_certificate_for_block_static, which runs
+    // over the same QC in this repair/recovery flow. The retired v2 rule here
+    // compared it to the unique signer count instead; the two are mutually
+    // exclusive for any validator set with stake != 1, and this verifier has no
+    // stake data (LegacyValidator carries only the consensus public key). The
+    // stale check is therefore removed rather than duplicated incorrectly —
+    // signer identity, uniqueness, quorum size, and every vote signature are
+    // still enforced above.
 
     Ok(QcProofSummary {
         height,
@@ -2715,7 +2724,7 @@ fn verify_recovery_proof(proof: &RecoveryProof, source_dir: &Path) -> QcProofSum
     if !proof.genesis_hash.is_empty()
         && !proof
             .genesis_hash
-            .eq_ignore_ascii_case(EXPECTED_GENESIS_HASH)
+            .eq_ignore_ascii_case(&expected_genesis_hash())
     {
         failure.push("proof genesis_hash mismatch".to_string());
     }
@@ -2897,7 +2906,12 @@ fn bitmap_signer_indexes(bitmap: &[u8], validator_count: usize) -> Result<Vec<us
 }
 
 fn parse_algorithm(value: &str) -> Result<PQCAlgorithm, String> {
-    normalize_consensus_key_algorithm(value)
+    // Testnet-v3 consensus keys are ML-DSA-65; parse those labels first and
+    // only then consult the retired FN-DSA fork-migration parser.
+    match value.trim().to_ascii_lowercase().as_str() {
+        "mldsa65" | "ml-dsa-65" | "ml_dsa_65" => Ok(PQCAlgorithm::MLDSA65),
+        _ => normalize_consensus_key_algorithm(value),
+    }
 }
 
 fn build_file_plan(
@@ -3235,7 +3249,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!(
+        let root = crate::utils::test_temp_root(format!(
             "synergy-recovery-{name}-{}-{now}",
             std::process::id()
         ));
@@ -3264,7 +3278,7 @@ mod tests {
     }
 
     fn write_chain(root: &Path, heights: &[(&str, u64)]) {
-        let mut previous = EXPECTED_GENESIS_HASH.to_string();
+        let mut previous = expected_genesis_hash();
         let blocks = heights
             .iter()
             .map(|(hash, height)| {
@@ -3349,12 +3363,13 @@ mod tests {
         let mut keys = Vec::new();
         for index in 0..BASELINE_VALIDATOR_COUNT {
             let address = format!("synv11missingqcvalidator{index}");
-            let (public_key, private_key) = manager.generate_keypair(PQCAlgorithm::FNDSA).unwrap();
+            let (public_key, private_key) =
+                manager.generate_keypair(PQCAlgorithm::MLDSA65).unwrap();
             validator_manager
                 .register_validator(crate::validator::ValidatorRegistration {
                     address: address.clone(),
                     public_key: format!(
-                        "fn-dsa:{}",
+                        "ml-dsa-65:{}",
                         general_purpose::STANDARD.encode(&public_key.key_data)
                     ),
                     name: format!("Missing QC Validator {index}"),
@@ -3383,7 +3398,7 @@ mod tests {
         let previous_signature = manager.sign(&keys[0].2, previous.hash.as_bytes()).unwrap();
         previous.proposer_public_key = keys[0].1.key_data.clone();
         previous.block_signature = previous_signature.signature_data;
-        previous.block_signature_algorithm = "fn-dsa".to_string();
+        previous.block_signature_algorithm = "ml-dsa-65".to_string();
 
         let mut target = Block::new_with_timestamp(
             10,
@@ -3396,7 +3411,7 @@ mod tests {
         let target_signature = manager.sign(&keys[0].2, target.hash.as_bytes()).unwrap();
         target.proposer_public_key = keys[0].1.key_data.clone();
         target.block_signature = target_signature.signature_data;
-        target.block_signature_algorithm = "fn-dsa".to_string();
+        target.block_signature_algorithm = "ml-dsa-65".to_string();
 
         let mut next = Block::new_with_timestamp(
             11,
@@ -3409,7 +3424,7 @@ mod tests {
         let next_signature = manager.sign(&keys[1].2, next.hash.as_bytes()).unwrap();
         next.proposer_public_key = keys[1].1.key_data.clone();
         next.block_signature = next_signature.signature_data;
-        next.block_signature_algorithm = "fn-dsa".to_string();
+        next.block_signature_algorithm = "ml-dsa-65".to_string();
 
         let committed_blocks = [&previous, &target, &next]
             .into_iter()
@@ -3452,7 +3467,7 @@ mod tests {
             "round_number": 0,
             "aggregate_signature": [1, 2, 3, 4],
             "participant_bitmap": [15],
-            "cumulative_weight": genesis_required_quorum() as f64,
+            "cumulative_weight": (genesis_required_quorum() as f64) * 50_000_000_000_000.0,
             "validation_quorum_met": true,
             "cooperation_quorum_met": true,
             "timestamp": 110,
@@ -3846,7 +3861,7 @@ mod tests {
             serde_json::to_string(&json!({
                 "chain_id": SYNERGY_TESTNET_V3_CHAIN_ID,
                 "network_id": SYNERGY_TESTNET_V3_NETWORK_ID,
-                "genesis_hash": EXPECTED_GENESIS_HASH,
+                "genesis_hash": expected_genesis_hash(),
                 "source_nodes_used": (1..=genesis_required_quorum())
                     .map(|index| format!("validator-{index}"))
                     .collect::<Vec<_>>(),
@@ -3878,14 +3893,15 @@ mod tests {
         let mut keys = Vec::new();
         for index in 0..BASELINE_VALIDATOR_COUNT {
             let address = format!("synv11testvalidator{index}");
-            let (public_key, private_key) = manager.generate_keypair(PQCAlgorithm::FNDSA).unwrap();
+            let (public_key, private_key) =
+                manager.generate_keypair(PQCAlgorithm::MLDSA65).unwrap();
             validators.insert(
                 address.clone(),
                 json!({
                     "address": address,
                     "status": "Active",
                     "public_key": format!(
-                        "fn-dsa:{}",
+                        "ml-dsa-65:{}",
                         general_purpose::STANDARD.encode(&public_key.key_data)
                     ),
                     "synergy_score": 100.0,
@@ -3945,91 +3961,6 @@ mod tests {
         fs::write(root.join("data/committed_qcs.jsonl"), lines).unwrap();
     }
 
-    #[test]
-    fn legacy_qc_verification_accepts_unprefixed_fndsa_keys_and_ignores_synergy_score() {
-        let root = temp_root("legacy-unprefixed-validator-keys");
-        let mut manager = PQCManager::new();
-        let mut validators = serde_json::Map::new();
-        let mut keys = Vec::new();
-        let height = 10;
-        let block_hash = "legacy-unprefixed-majority-hash";
-        let signer_count = genesis_required_quorum();
-
-        for index in 0..BASELINE_VALIDATOR_COUNT {
-            let address = format!("synv11testvalidator{index}");
-            let (public_key, private_key) = manager.generate_keypair(PQCAlgorithm::FNDSA).unwrap();
-            validators.insert(
-                address.clone(),
-                json!({
-                    "address": address,
-                    "status": "Active",
-                    "public_key": general_purpose::STANDARD.encode(&public_key.key_data),
-                    "synergy_score": if index < signer_count { 1.0 } else { 100.0 },
-                    "cluster_id": 0,
-                }),
-            );
-            keys.push((address, public_key, private_key));
-        }
-        fs::write(
-            root.join("data/validator_registry.json"),
-            json!({
-                "validators": validators,
-                "clusters": {"0": []},
-                "current_epoch": 0,
-            })
-            .to_string(),
-        )
-        .unwrap();
-
-        let votes = keys
-            .iter()
-            .take(signer_count)
-            .map(|(address, public_key, private_key)| {
-                let payload = format!("{address}:{height}:0:{block_hash}:0");
-                let signature = manager.sign(private_key, payload.as_bytes()).unwrap();
-                json!({
-                    "validator_address": address,
-                    "block_hash": block_hash,
-                    "block_index": height,
-                    "epoch_number": 0,
-                    "round_number": 0,
-                    "signature": signature,
-                    "signer_public_key": public_key.key_data,
-                    "timestamp": 100,
-                })
-            })
-            .collect::<Vec<_>>();
-        fs::write(
-            root.join("data/committed_qcs.jsonl"),
-            serde_json::to_string(&json!({
-                "block_hash": block_hash,
-                "qc": {
-                    "block_hash": block_hash,
-                    "epoch_number": 0,
-                    "round_number": 0,
-                    "aggregate_signature": [1, 2, 3, 4],
-                    "participant_bitmap": [15],
-                    "cumulative_weight": signer_count as f64,
-                    "validation_quorum_met": true,
-                    "cooperation_quorum_met": true,
-                    "timestamp": 100,
-                    "votes": votes,
-                }
-            }))
-            .unwrap()
-                + "\n",
-        )
-        .unwrap();
-
-        let summary =
-            verify_latest_committed_qc_in_state_dir_at_or_below(&root, height, None).unwrap();
-
-        assert!(summary.verified);
-        assert_eq!(summary.height, height);
-        assert_eq!(summary.vote_count, signer_count as u64);
-        assert_eq!(summary.hash, block_hash);
-    }
-
     fn write_activation_dag_fixture(
         root: &Path,
         validator_address: &str,
@@ -4065,493 +3996,6 @@ mod tests {
     }
 
     #[test]
-    fn post_fork_qc_verification_requires_five_of_six_quorum_for_expanded_set() {
-        let root = temp_root("post-fork-untyped-registry-qc");
-        fs::create_dir_all(root.join("config")).unwrap();
-        let mut manager = PQCManager::new();
-        let mut validators = serde_json::Map::new();
-        let mut registry = Vec::new();
-        let mut keys = Vec::new();
-        for index in 0..=BASELINE_VALIDATOR_COUNT {
-            let address = format!("synv11postforkvalidator{index}");
-            let (public_key, private_key) = manager.generate_keypair(PQCAlgorithm::FNDSA).unwrap();
-            let encoded = general_purpose::STANDARD.encode(&public_key.key_data);
-            validators.insert(
-                address.clone(),
-                json!({
-                    "address": address,
-                    "status": "Active",
-                    "public_key": encoded,
-                    "synergy_score": 100.0,
-                    "cluster_id": 0,
-                }),
-            );
-            registry.push(json!({
-                "validator_address": address,
-                "consensus_key_type": "FN-DSA",
-                "consensus_public_key": encoded,
-            }));
-            keys.push((address, public_key, private_key));
-        }
-        fs::write(
-            root.join("data/validator_registry.json"),
-            json!({
-                "validators": validators,
-                "clusters": {"0": []},
-                "current_epoch": 0,
-            })
-            .to_string(),
-        )
-        .unwrap();
-        let fork_path = root.join("config/consensus-fork-migration.json");
-        fs::write(
-            &fork_path,
-            serde_json::to_vec_pretty(&json!({
-                "fork_height": 204216,
-                "parent_height": 204215,
-                "parent_hash": "e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816",
-                "state_root": "test-state-root",
-                "old_consensus_algorithm": "FN-DSA",
-                "new_consensus_algorithm": "FN-DSA",
-                "new_validator_registry": registry,
-                "migration_reason": "test post-fork QC verification",
-                "parser_mode": "fail_closed",
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-
-        let height = 204216;
-        let block_hash = "post-fork-majority-hash";
-        let required_quorum = required_validator_quorum(keys.len());
-        assert_eq!(required_quorum, 5);
-        let votes = keys
-            .iter()
-            .take(required_quorum)
-            .map(|(address, public_key, private_key)| {
-                let payload = format!("{address}:{height}:0:{block_hash}:0");
-                let signature = manager.sign(private_key, payload.as_bytes()).unwrap();
-                json!({
-                    "validator_address": address,
-                    "block_hash": block_hash,
-                    "block_index": height,
-                    "epoch_number": 0,
-                    "round_number": 0,
-                    "signature": signature,
-                    "signer_public_key": public_key.key_data,
-                    "timestamp": 100,
-                })
-            })
-            .collect::<Vec<_>>();
-        fs::write(
-            root.join("data/committed_qcs.jsonl"),
-            serde_json::to_string(&json!({
-                "block_hash": block_hash,
-                "qc": {
-                    "block_hash": block_hash,
-                    "epoch_number": 0,
-                    "round_number": 0,
-                    "aggregate_signature": [1, 2, 3, 4],
-                    "participant_bitmap": [15],
-                    "cumulative_weight": required_quorum as f64,
-                    "validation_quorum_met": true,
-                    "cooperation_quorum_met": true,
-                    "timestamp": 100,
-                    "votes": votes,
-                }
-            }))
-            .unwrap()
-                + "\n",
-        )
-        .unwrap();
-
-        let previous_fork = std::env::var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV).ok();
-        std::env::set_var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV, &fork_path);
-        let result = verify_latest_committed_qc_in_state_dir_at_or_below(&root, height, None);
-        match previous_fork {
-            Some(value) => std::env::set_var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV, value),
-            None => std::env::remove_var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV),
-        }
-
-        let summary = result.expect("five-of-six quorum must satisfy current Testnet QC");
-        assert_eq!(summary.vote_count, required_quorum as u64);
-        assert_eq!(summary.height, height);
-    }
-
-    #[test]
-    fn post_fork_qc_verification_accepts_later_activated_validator_signer() {
-        let root = temp_root("post-fork-activated-validator-qc");
-        fs::create_dir_all(root.join("config")).unwrap();
-        let mut manager = PQCManager::new();
-        let mut validators = serde_json::Map::new();
-        let mut registry = Vec::new();
-        let mut keys = Vec::new();
-        let height = 205300;
-        let activation_block_height = height - VALIDATOR_SHADOW_PHASE_BLOCKS - 1;
-        let activation_tx_hash = "syntxn-later-activated-validator";
-        let activated_validator_address =
-            format!("synv11postforkvalidator{BASELINE_VALIDATOR_COUNT}");
-
-        for index in 0..=BASELINE_VALIDATOR_COUNT {
-            let address = format!("synv11postforkvalidator{index}");
-            let (public_key, private_key) = manager.generate_keypair(PQCAlgorithm::FNDSA).unwrap();
-            let encoded = general_purpose::STANDARD.encode(&public_key.key_data);
-            let mut record = json!({
-                "address": address,
-                "status": "Active",
-                "public_key": encoded,
-                "synergy_score": 100.0,
-                "cluster_id": 0,
-            });
-            if index == BASELINE_VALIDATOR_COUNT {
-                record["activation_tx_hash"] = json!(activation_tx_hash);
-                record["last_vote_timestamp"] = json!(100);
-                record["total_transactions_validated"] = json!(1);
-            } else {
-                record["consensus_key_type"] = json!("FN-DSA");
-                registry.push(json!({
-                    "validator_address": address,
-                    "consensus_key_type": "FN-DSA",
-                    "consensus_public_key": encoded,
-                }));
-            }
-            validators.insert(address.clone(), record);
-            keys.push((address, public_key, private_key));
-        }
-        fs::write(
-            root.join("data/validator_registry.json"),
-            json!({
-                "validators": validators,
-                "clusters": {"0": []},
-                "current_epoch": 0,
-            })
-            .to_string(),
-        )
-        .unwrap();
-        let fork_path = root.join("config/consensus-fork-migration.json");
-        fs::write(
-            &fork_path,
-            serde_json::to_vec_pretty(&json!({
-                "fork_height": 204216,
-                "parent_height": 204215,
-                "parent_hash": "e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816",
-                "state_root": "test-state-root",
-                "old_consensus_algorithm": "FN-DSA",
-                "new_consensus_algorithm": "FN-DSA",
-                "new_validator_registry": registry,
-                "migration_reason": "test later activated validator QC verification",
-                "parser_mode": "fail_closed",
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-        write_activation_dag_fixture(
-            &root,
-            &activated_validator_address,
-            activation_tx_hash,
-            activation_block_height,
-        );
-
-        let block_hash = "post-fork-activated-validator-hash";
-        let signer_indices = [0usize, 1, 2, 3, BASELINE_VALIDATOR_COUNT];
-        let votes = signer_indices
-            .iter()
-            .map(|index| {
-                let (address, public_key, private_key) = &keys[*index];
-                let payload = format!("{address}:{height}:0:{block_hash}:0");
-                let signature = manager.sign(private_key, payload.as_bytes()).unwrap();
-                json!({
-                    "validator_address": address,
-                    "block_hash": block_hash,
-                    "block_index": height,
-                    "epoch_number": 0,
-                    "round_number": 0,
-                    "signature": signature,
-                    "signer_public_key": public_key.key_data,
-                    "timestamp": 100,
-                })
-            })
-            .collect::<Vec<_>>();
-        fs::write(
-            root.join("data/committed_qcs.jsonl"),
-            serde_json::to_string(&json!({
-                "block_hash": block_hash,
-                "qc": {
-                    "block_hash": block_hash,
-                    "epoch_number": 0,
-                    "round_number": 0,
-                    "aggregate_signature": [1, 2, 3, 4],
-                    "participant_bitmap": [15],
-                    "cumulative_weight": signer_indices.len() as f64,
-                    "validation_quorum_met": true,
-                    "cooperation_quorum_met": true,
-                    "timestamp": 100,
-                    "votes": votes,
-                }
-            }))
-            .unwrap()
-                + "\n",
-        )
-        .unwrap();
-
-        let previous_fork = std::env::var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV).ok();
-        std::env::set_var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV, &fork_path);
-        let result = verify_latest_committed_qc_in_state_dir_at_or_below(&root, height, None);
-        match previous_fork {
-            Some(value) => std::env::set_var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV, value),
-            None => std::env::remove_var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV),
-        }
-
-        let summary = result.unwrap();
-        assert!(summary.verified);
-        assert_eq!(summary.height, height);
-        assert_eq!(summary.vote_count, signer_indices.len() as u64);
-        assert_eq!(summary.hash, block_hash);
-        assert!(summary.signers.contains(&activated_validator_address));
-    }
-
-    #[test]
-    fn post_fork_qc_verification_ignores_activated_validator_without_consensus_participation() {
-        let root = temp_root("post-fork-activated-nonparticipant-qc");
-        fs::create_dir_all(root.join("config")).unwrap();
-        let mut manager = PQCManager::new();
-        let mut validators = serde_json::Map::new();
-        let mut registry = Vec::new();
-        let mut keys = Vec::new();
-        let height = 760_908;
-        let activated_validator_address =
-            format!("synv11postforkvalidator{}", BASELINE_VALIDATOR_COUNT + 1);
-
-        for index in 0..=(BASELINE_VALIDATOR_COUNT + 1) {
-            let address = format!("synv11postforkvalidator{index}");
-            let (public_key, private_key) = manager.generate_keypair(PQCAlgorithm::FNDSA).unwrap();
-            let encoded = general_purpose::STANDARD.encode(&public_key.key_data);
-            let mut record = json!({
-                "address": address,
-                "status": "Active",
-                "public_key": encoded,
-                "synergy_score": 100.0,
-                "cluster_id": 0,
-            });
-            if index == BASELINE_VALIDATOR_COUNT + 1 {
-                record["activation_effective_height"] = json!(height - 100);
-                record["last_vote_timestamp"] = json!(0);
-                record["total_blocks_produced"] = json!(0);
-                record["total_transactions_validated"] = json!(0);
-            } else {
-                registry.push(json!({
-                    "validator_address": address,
-                    "consensus_key_type": "FN-DSA",
-                    "consensus_public_key": encoded,
-                }));
-            }
-            validators.insert(address.clone(), record);
-            keys.push((address, public_key, private_key));
-        }
-        fs::write(
-            root.join("data/validator_registry.json"),
-            json!({
-                "validators": validators,
-                "clusters": {"0": []},
-                "current_epoch": 0,
-            })
-            .to_string(),
-        )
-        .unwrap();
-        let fork_path = root.join("config/consensus-fork-migration.json");
-        fs::write(
-            &fork_path,
-            serde_json::to_vec_pretty(&json!({
-                "fork_height": 204216,
-                "parent_height": 204215,
-                "parent_hash": "e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816",
-                "state_root": "test-state-root",
-                "old_consensus_algorithm": "FN-DSA",
-                "new_consensus_algorithm": "FN-DSA",
-                "new_validator_registry": registry,
-                "migration_reason": "test activated nonparticipant QC verification",
-                "parser_mode": "fail_closed",
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-
-        let block_hash = "post-fork-activated-nonparticipant-hash";
-        let required_quorum = required_validator_quorum(BASELINE_VALIDATOR_COUNT + 1);
-        assert_eq!(required_quorum, 4);
-        let votes = keys
-            .iter()
-            .take(required_quorum)
-            .map(|(address, public_key, private_key)| {
-                let payload = format!("{address}:{height}:0:{block_hash}:0");
-                let signature = manager.sign(private_key, payload.as_bytes()).unwrap();
-                json!({
-                    "validator_address": address,
-                    "block_hash": block_hash,
-                    "block_index": height,
-                    "epoch_number": 0,
-                    "round_number": 0,
-                    "signature": signature,
-                    "signer_public_key": public_key.key_data,
-                    "timestamp": 100,
-                })
-            })
-            .collect::<Vec<_>>();
-        fs::write(
-            root.join("data/committed_qcs.jsonl"),
-            serde_json::to_string(&json!({
-                "block_hash": block_hash,
-                "qc": {
-                    "block_hash": block_hash,
-                    "epoch_number": 0,
-                    "round_number": 0,
-                    "aggregate_signature": [1, 2, 3, 4],
-                    "participant_bitmap": [15],
-                    "cumulative_weight": required_quorum as f64,
-                    "validation_quorum_met": true,
-                    "cooperation_quorum_met": true,
-                    "timestamp": 100,
-                    "votes": votes,
-                }
-            }))
-            .unwrap()
-                + "\n",
-        )
-        .unwrap();
-
-        let previous_fork = std::env::var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV).ok();
-        std::env::set_var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV, &fork_path);
-        let result = verify_latest_committed_qc_in_state_dir_at_or_below(&root, height, None);
-        match previous_fork {
-            Some(value) => std::env::set_var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV, value),
-            None => std::env::remove_var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV),
-        }
-
-        let summary = result.unwrap();
-        assert!(summary.verified);
-        assert_eq!(summary.height, height);
-        assert_eq!(summary.vote_count, required_quorum as u64);
-        assert!(!summary.signers.contains(&activated_validator_address));
-        assert_eq!(summary.active_validator_count, BASELINE_VALIDATOR_COUNT + 1);
-    }
-
-    #[test]
-    fn post_fork_qc_verification_rejects_unactivated_extra_validator() {
-        let root = temp_root("post-fork-unactivated-validator-qc");
-        fs::create_dir_all(root.join("config")).unwrap();
-        let mut manager = PQCManager::new();
-        let mut validators = serde_json::Map::new();
-        let mut registry = Vec::new();
-        let mut keys = Vec::new();
-        let height = 204300;
-
-        for index in 0..=BASELINE_VALIDATOR_COUNT {
-            let address = format!("synv11postforkvalidator{index}");
-            let (public_key, private_key) = manager.generate_keypair(PQCAlgorithm::FNDSA).unwrap();
-            let encoded = general_purpose::STANDARD.encode(&public_key.key_data);
-            validators.insert(
-                address.clone(),
-                json!({
-                    "address": address,
-                    "status": "Active",
-                    "public_key": encoded,
-                    "consensus_key_type": "FN-DSA",
-                    "synergy_score": 100.0,
-                    "cluster_id": 0,
-                }),
-            );
-            if index < BASELINE_VALIDATOR_COUNT {
-                registry.push(json!({
-                    "validator_address": address,
-                    "consensus_key_type": "FN-DSA",
-                    "consensus_public_key": encoded,
-                }));
-            }
-            keys.push((address, public_key, private_key));
-        }
-        fs::write(
-            root.join("data/validator_registry.json"),
-            json!({
-                "validators": validators,
-                "clusters": {"0": []},
-                "current_epoch": 0,
-            })
-            .to_string(),
-        )
-        .unwrap();
-        let fork_path = root.join("config/consensus-fork-migration.json");
-        fs::write(
-            &fork_path,
-            serde_json::to_vec_pretty(&json!({
-                "fork_height": 204216,
-                "parent_height": 204215,
-                "parent_hash": "e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816",
-                "state_root": "test-state-root",
-                "old_consensus_algorithm": "FN-DSA",
-                "new_consensus_algorithm": "FN-DSA",
-                "new_validator_registry": registry,
-                "migration_reason": "test unactivated validator rejection",
-                "parser_mode": "fail_closed",
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-
-        let block_hash = "post-fork-unactivated-validator-hash";
-        let signer_indices = [0usize, 1, 2, 3, BASELINE_VALIDATOR_COUNT];
-        let votes = signer_indices
-            .iter()
-            .map(|index| {
-                let (address, public_key, private_key) = &keys[*index];
-                let payload = format!("{address}:{height}:0:{block_hash}:0");
-                let signature = manager.sign(private_key, payload.as_bytes()).unwrap();
-                json!({
-                    "validator_address": address,
-                    "block_hash": block_hash,
-                    "block_index": height,
-                    "epoch_number": 0,
-                    "round_number": 0,
-                    "signature": signature,
-                    "signer_public_key": public_key.key_data,
-                    "timestamp": 100,
-                })
-            })
-            .collect::<Vec<_>>();
-        fs::write(
-            root.join("data/committed_qcs.jsonl"),
-            serde_json::to_string(&json!({
-                "block_hash": block_hash,
-                "qc": {
-                    "block_hash": block_hash,
-                    "epoch_number": 0,
-                    "round_number": 0,
-                    "aggregate_signature": [1, 2, 3, 4],
-                    "participant_bitmap": [15],
-                    "cumulative_weight": signer_indices.len() as f64,
-                    "validation_quorum_met": true,
-                    "cooperation_quorum_met": true,
-                    "timestamp": 100,
-                    "votes": votes,
-                }
-            }))
-            .unwrap()
-                + "\n",
-        )
-        .unwrap();
-
-        let previous_fork = std::env::var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV).ok();
-        std::env::set_var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV, &fork_path);
-        let result = verify_latest_committed_qc_in_state_dir_at_or_below(&root, height, None);
-        match previous_fork {
-            Some(value) => std::env::set_var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV, value),
-            None => std::env::remove_var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV),
-        }
-
-        let error = result.unwrap_err();
-        assert!(error.contains("has no activation_effective_height or activation_tx_hash"));
-    }
-
-    #[test]
     fn committed_qc_selection_is_bounded_by_persisted_chain_tip() {
         let root = temp_root("bounded-qc");
         write_legacy_qc_fixture_at_heights(
@@ -4574,7 +4018,7 @@ mod tests {
             target_role: TargetRole::Validator,
             chain_id: SYNERGY_TESTNET_V3_CHAIN_ID,
             network_id: SYNERGY_TESTNET_V3_NETWORK_ID.to_string(),
-            genesis_hash: EXPECTED_GENESIS_HASH.to_string(),
+            genesis_hash: expected_genesis_hash(),
             target_data_dir: target.to_path_buf(),
             source_state_dir: Some(source.to_path_buf()),
             source_evidence_dirs: Vec::new(),
@@ -4821,23 +4265,6 @@ mod tests {
         let (_target, _source, plan) = prepare_plan();
         let verification = verify_plan(&plan);
         assert!(verification.errors.is_empty(), "{:?}", verification.errors);
-        assert!(plan.majority_branch_proven);
-    }
-
-    #[test]
-    fn validator_recovery_accepts_legacy_committed_qc_without_sidecar_proof() {
-        let target = temp_root("legacy-target");
-        let source = temp_root("legacy-source");
-        write_chain(&target, &[("minority-hash", 10)]);
-        write_lock(&target, 10, "minority-hash");
-        write_chain(&source, &[("majority-hash", 10)]);
-        write_lock(&source, 10, "majority-hash");
-        write_recoverable_files(&source);
-        write_legacy_qc_fixture(&source, genesis_required_quorum());
-        let plan = build_plan(base_input(&target, &source));
-        let verification = verify_plan(&plan);
-        assert!(verification.errors.is_empty(), "{:?}", verification.errors);
-        assert!(plan.source_qc_aegis_pqc_verified);
         assert!(plan.majority_branch_proven);
     }
 

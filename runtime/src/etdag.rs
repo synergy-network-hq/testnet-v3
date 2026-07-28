@@ -4274,7 +4274,7 @@ pub(crate) mod tests {
     }
 
     fn temp_journal(label: &str) -> EtdagSafetyJournal {
-        EtdagSafetyJournal::at_path(std::env::temp_dir().join(format!(
+        EtdagSafetyJournal::at_path(crate::utils::test_temp_root(format!(
             "synergy-etdag-{label}-{}-{}/journal.json",
             std::process::id(),
             current_unix_nanos()
@@ -4282,7 +4282,7 @@ pub(crate) mod tests {
     }
 
     fn temp_admission_store(label: &str) -> EtdagAdmissionPackageStore {
-        EtdagAdmissionPackageStore::at_path(std::env::temp_dir().join(format!(
+        EtdagAdmissionPackageStore::at_path(crate::utils::test_temp_root(format!(
             "synergy-etdag-admission-{label}-{}-{}/packages.json",
             std::process::id(),
             current_unix_nanos()

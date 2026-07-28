@@ -21,3 +21,12 @@ artifacts/*
 !artifacts/SHA256SUMS
 !artifacts/*.json
 !artifacts/*.sig
+
+# Generated contract compilation output and local test transcripts
+genesis-contracts/staged-governance-v1/*.abi.json
+genesis-contracts/staged-governance-v1/*.compiled.synq
+genesis-contracts/staged-governance-v1/*.manifest.json
+launch/evidence/toolchain-and-build/*.txt
+
+# Generated reconciliation payloads can embed copied configuration values.
+launch/evidence/posy-workbook-code-reconciliation/*.adjudicated.json

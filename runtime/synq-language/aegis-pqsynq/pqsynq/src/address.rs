@@ -25,8 +25,20 @@ impl SynQAddress {
         &self.bytes
     }
 
-    pub fn to_testnet_debug_string(&self) -> String {
-        format!("tsynq1{}", hex::encode(self.bytes))
+    /// Internal execution-signer identifier — **not an address**.
+    ///
+    /// These 41 bytes bind the signing key to an algorithm and a network
+    /// inside the signed payload, which is what keeps the SynQ deploy and call
+    /// domains separated. They are not a public account format and must never
+    /// be presented as one: the canonical public identity of an ML-DSA-87
+    /// account on Testnet-v3 is its `syna…` Standard Account address.
+    ///
+    /// The old `to_testnet_debug_string` rendered this as `tsynq1…`, which
+    /// looked like a second account address for the same key and leaked into
+    /// `msg.sender`, receipts, authority manifests and contract-address
+    /// derivation. The prefix here is deliberately not a Bech32 HRP.
+    pub fn to_execution_signer_id(&self) -> String {
+        format!("synq-signer:{}", hex::encode(self.bytes))
     }
 }
 

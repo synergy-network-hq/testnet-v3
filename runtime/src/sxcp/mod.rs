@@ -725,7 +725,7 @@ mod tests {
         let mut manager = PQCManager::new();
         let (public_key, private_key) = manager
             .generate_keypair(PQCAlgorithm::FNDSA)
-            .expect("FN-DSA key generation should succeed");
+            .expect("relayer FN-DSA key generation should succeed");
         let public_b64 = general_purpose::STANDARD.encode(public_key.key_data);
         let result = register_relayer(address, &public_b64);
         assert_eq!(result["success"], true);

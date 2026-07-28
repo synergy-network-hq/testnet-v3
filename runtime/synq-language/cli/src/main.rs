@@ -54,10 +54,10 @@ enum Commands {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
-    /// Generates a local testnet ML-DSA-65 keypair through aegis-pqsynq
+    /// Generates a local testnet ML-DSA-87 keypair through aegis-pqsynq
     Keygen {
         /// Signature algorithm. Launch policy currently supports ml-dsa-65 only.
-        #[arg(long, default_value = "ml-dsa-65")]
+        #[arg(long, default_value = "ml-dsa-87")]
         algorithm: String,
         /// Network profile. Accepts testnet, synergy-testnet, or synergy-testnet-v3.
         #[arg(long, default_value = "testnet")]
@@ -499,7 +499,7 @@ fn keygen(
     name: &str,
     force: bool,
 ) -> Result<(), String> {
-    validate_mldsa65_algorithm(algorithm)?;
+    validate_account_domain_algorithm(algorithm)?;
     let network_id = normalize_cli_network(compiler::artifacts::SYNQ_TESTNET_CHAIN_ID, network)?;
     fs::create_dir_all(out_dir).map_err(|e| {
         format!(
@@ -508,14 +508,14 @@ fn keygen(
         )
     })?;
 
-    let signer = Sign::mldsa65();
+    let signer = Sign::mldsa87();
     let (public_key_bytes, private_key_bytes) = signer
         .keygen()
-        .map_err(|e| format!("aegis-pqsynq ML-DSA-65 keygen failed: {e}"))?;
+        .map_err(|e| format!("aegis-pqsynq ML-DSA-87 keygen failed: {e}"))?;
     let public_key = SynQPublicKey::new(public_key_bytes.clone());
     let address = derive_synq_address(
         &public_key,
-        AlgorithmId::MlDsa65,
+        AlgorithmId::MlDsa87,
         &NetworkId(network_id.clone()),
     )
     .map_err(|e| format!("aegis-pqsynq address derivation failed: {e}"))?;
@@ -543,7 +543,7 @@ fn keygen(
     write_json_file(&private_path, &private, force, true)?;
     write_json_file(&public_path, &public, force, false)?;
 
-    println!("✓ Generated ML-DSA-65 SynQ identity through aegis-pqsynq");
+    println!("✓ Generated ML-DSA-87 SynQ identity through aegis-pqsynq");
     println!("public_key={}", public_path.display());
     println!("private_key={}", private_path.display());
     println!("address={}", public.address);
@@ -562,7 +562,7 @@ fn sign_deploy(options: SignDeployOptions<'_>) -> Result<(), String> {
 
     let network_id = normalize_cli_network(options.chain, options.network)?;
     let key = read_private_key(options.private_key)?;
-    validate_mldsa65_algorithm(&key.algorithm)?;
+    validate_account_domain_algorithm(&key.algorithm)?;
     if key.chain_id != options.chain {
         return Err(format!(
             "Private key is bound to chain_id `{}`, but signing requested chain_id `{}`",
@@ -617,7 +617,7 @@ fn sign_deploy(options: SignDeployOptions<'_>) -> Result<(), String> {
     let public_key = SynQPublicKey::new(public_key_bytes);
     let signer_address = derive_synq_address(
         &public_key,
-        AlgorithmId::MlDsa65,
+        AlgorithmId::MlDsa87,
         &NetworkId(network_id.clone()),
     )
     .map_err(|e| format!("aegis-pqsynq address derivation failed: {e}"))?;
@@ -641,7 +641,7 @@ fn sign_deploy(options: SignDeployOptions<'_>) -> Result<(), String> {
         chain_id: ChainId(options.chain),
         network_id: NetworkId(network_id.clone()),
         protocol_version: 1,
-        algorithm_id: AlgorithmId::MlDsa65,
+        algorithm_id: AlgorithmId::MlDsa87,
         signature_purpose: SignaturePurpose::ContractDeploy,
         nonce: options.nonce,
         not_before_unix: options.not_before_unix,
@@ -651,9 +651,9 @@ fn sign_deploy(options: SignDeployOptions<'_>) -> Result<(), String> {
     };
     let canonical = canonicalize_signing_payload(&signing_payload)
         .map_err(|e| format!("aegis-pqsynq canonical payload failed: {e}"))?;
-    let signature = Sign::mldsa65()
+    let signature = Sign::mldsa87()
         .detached_sign(&canonical, &private_key_bytes)
-        .map_err(|e| format!("aegis-pqsynq ML-DSA-65 signing failed: {e}"))?;
+        .map_err(|e| format!("aegis-pqsynq ML-DSA-87 signing failed: {e}"))?;
     let envelope = ContractDeployEnvelope {
         signing_payload,
         public_key,
@@ -678,7 +678,7 @@ fn sign_deploy(options: SignDeployOptions<'_>) -> Result<(), String> {
     println!("✓ Signed SynQ deploy envelope through aegis-pqsynq");
     println!("envelope={}", options.output.display());
     println!("domain=SYNQ_CONTRACT_DEPLOY_V1");
-    println!("algorithm=ML-DSA-65");
+    println!("algorithm=ML-DSA-87");
     println!("chain_id={}", options.chain);
     println!("network_id={network_id}");
     println!("signer={}", key.address);
@@ -726,7 +726,7 @@ fn verify_deploy(
     println!("✓ Deploy envelope verified through aegis-pqsynq");
     println!("deployer={}", verified.deployer.to_testnet_debug_string());
     println!("domain=SYNQ_CONTRACT_DEPLOY_V1");
-    println!("algorithm=ML-DSA-65");
+    println!("algorithm=ML-DSA-87");
     println!("chain_id={chain}");
     println!("network_id={network_id}");
     println!(
@@ -749,7 +749,7 @@ fn sign_call(options: SignCallOptions<'_>) -> Result<(), String> {
 
     let network_id = normalize_cli_network(options.chain, options.network)?;
     let key = read_private_key(options.private_key)?;
-    validate_mldsa65_algorithm(&key.algorithm)?;
+    validate_account_domain_algorithm(&key.algorithm)?;
     if key.chain_id != options.chain {
         return Err(format!(
             "Private key is bound to chain_id `{}`, but call signing requested chain_id `{}`",
@@ -794,7 +794,7 @@ fn sign_call(options: SignCallOptions<'_>) -> Result<(), String> {
     let public_key = SynQPublicKey::new(public_key_bytes);
     let signer_address = derive_synq_address(
         &public_key,
-        AlgorithmId::MlDsa65,
+        AlgorithmId::MlDsa87,
         &NetworkId(network_id.clone()),
     )
     .map_err(|e| format!("aegis-pqsynq address derivation failed: {e}"))?;
@@ -815,7 +815,7 @@ fn sign_call(options: SignCallOptions<'_>) -> Result<(), String> {
         chain_id: ChainId(options.chain),
         network_id: NetworkId(network_id.clone()),
         protocol_version: 1,
-        algorithm_id: AlgorithmId::MlDsa65,
+        algorithm_id: AlgorithmId::MlDsa87,
         signature_purpose: SignaturePurpose::ContractCall,
         nonce: options.nonce,
         not_before_unix: options.not_before_unix,
@@ -825,9 +825,9 @@ fn sign_call(options: SignCallOptions<'_>) -> Result<(), String> {
     };
     let canonical = canonicalize_signing_payload(&signing_payload)
         .map_err(|e| format!("aegis-pqsynq canonical call payload failed: {e}"))?;
-    let signature = Sign::mldsa65()
+    let signature = Sign::mldsa87()
         .detached_sign(&canonical, &private_key_bytes)
-        .map_err(|e| format!("aegis-pqsynq ML-DSA-65 call signing failed: {e}"))?;
+        .map_err(|e| format!("aegis-pqsynq ML-DSA-87 call signing failed: {e}"))?;
     let envelope = ContractCallEnvelope {
         signing_payload,
         public_key,
@@ -856,7 +856,7 @@ fn sign_call(options: SignCallOptions<'_>) -> Result<(), String> {
     println!("✓ Signed SynQ call envelope through aegis-pqsynq");
     println!("envelope={}", options.output.display());
     println!("domain=SYNQ_CONTRACT_CALL_V1");
-    println!("algorithm=ML-DSA-65");
+    println!("algorithm=ML-DSA-87");
     println!("chain_id={}", options.chain);
     println!("network_id={network_id}");
     println!("method={}", options.method);
@@ -907,7 +907,7 @@ fn verify_call(
         verified.contract_address.to_testnet_debug_string()
     );
     println!("domain=SYNQ_CONTRACT_CALL_V1");
-    println!("algorithm=ML-DSA-65");
+    println!("algorithm=ML-DSA-87");
     println!("chain_id={chain}");
     println!("network_id={network_id}");
     println!(
@@ -985,7 +985,7 @@ network_id = "synergy-testnet"
 address_hrp = "tsynq"
 
 [security]
-signature_algorithm = "ML-DSA-65"
+signature_algorithm = "ML-DSA-87"
 deploy_domain = "SYNQ_CONTRACT_DEPLOY_V1"
 call_domain = "SYNQ_CONTRACT_CALL_V1"
 "#;
@@ -1289,17 +1289,17 @@ impl SynqSecurityConfig {
     }
 }
 
-fn validate_mldsa65_algorithm(algorithm: &str) -> Result<(), String> {
+fn validate_account_domain_algorithm(algorithm: &str) -> Result<(), String> {
     let normalized = algorithm
         .chars()
         .filter(|ch| *ch != '-' && *ch != '_')
         .flat_map(|ch| ch.to_lowercase())
         .collect::<String>();
-    if normalized == "mldsa65" {
+    if normalized == "mldsa87" {
         Ok(())
     } else {
         Err(format!(
-            "Unsupported signature algorithm `{algorithm}`; launch policy requires ML-DSA-65"
+            "Unsupported signature algorithm `{algorithm}`; launch policy requires the account-domain algorithm ML-DSA-87"
         ))
     }
 }
@@ -1412,7 +1412,7 @@ fn validate_manifest_for_signing(
         .get("required_signature_algorithm")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "Manifest missing string required_signature_algorithm".to_string())?;
-    validate_mldsa65_algorithm(signature_algorithm)?;
+    validate_account_domain_algorithm(signature_algorithm)?;
 
     Ok(())
 }
@@ -1452,7 +1452,7 @@ fn validate_manifest_policy_for_call(
         .get("required_signature_algorithm")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "Manifest missing string required_signature_algorithm".to_string())?;
-    validate_mldsa65_algorithm(signature_algorithm)?;
+    validate_account_domain_algorithm(signature_algorithm)?;
     Ok(())
 }
 

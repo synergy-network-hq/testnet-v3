@@ -19,8 +19,14 @@ const TESTNET_RECOVERY_NETWORK_ID: &str = "synergy-testnet-v3";
 const TESTNET_RECOVERY_CHAIN_ID: &str = "1266";
 const TESTNET_RECOVERY_APPROVED_SOURCE_BUNDLE_SHA256: &str =
     "be0724c0320a0846b7b84c848c551e4c0c2679f08cc6b25fd3fd01e4353a6738";
-const TESTNET_RECOVERY_GENESIS_HASH: &str =
-    "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789";
+/// Canonical Testnet-v3 genesis hash, read from the loaded genesis.
+/// Previously a hardcoded Testnet-v2 literal, which let a v3 node assert a
+/// retired chain identity during recovery/realignment/diagnostics.
+fn testnet_recovery_genesis_hash() -> String {
+    crate::genesis::canonical_genesis()
+        .map(|genesis| genesis.hash().to_string())
+        .unwrap_or_default()
+}
 const TESTNET_RECOVERY_CHAIN_SHA256: &str =
     "384235f8d2a5de66269dea913ba138f20c08e448613bbb3f8cd680460320b8e1";
 const TESTNET_RECOVERY_COMMITTED_QCS_SHA256: &str =
@@ -1817,7 +1823,7 @@ fn validate_testnet_recovery_checkpoint(
     expect_stringish(
         raw,
         &["genesis_hash"],
-        TESTNET_RECOVERY_GENESIS_HASH,
+        &testnet_recovery_genesis_hash(),
         "testnet_recovery_genesis_hash_mismatch",
         &mut findings,
     );
@@ -2891,7 +2897,7 @@ fn build_testnet_recovery_checkpoint(
         "checkpoint_type": TESTNET_RECOVERY_CHECKPOINT_TYPE,
         "chain_id": TESTNET_RECOVERY_CHAIN_ID,
         "network_id": TESTNET_RECOVERY_NETWORK_ID,
-        "genesis_hash": TESTNET_RECOVERY_GENESIS_HASH,
+        "genesis_hash": testnet_recovery_genesis_hash(),
         "height": shape.boundary.height,
         "block_hash": shape.boundary.hash,
         "state_root": format!("testnet-recovery-checkpoint-h{}", shape.boundary.height),
@@ -2965,7 +2971,7 @@ fn build_testnet_recovery_manifest(
         "source_state_dir": options.source_state_dir,
         "operator_approval_id": options.operator_approval_id,
         "recovery_reason": options.recovery_reason,
-        "genesis_hash": TESTNET_RECOVERY_GENESIS_HASH,
+        "genesis_hash": testnet_recovery_genesis_hash(),
         "validator_registry_hash": shape.validator_registry_sha256.clone(),
         "source_shape": recovery_source_shape_json(shape),
         "no_manual_consensus_json_repair": true,
@@ -3232,7 +3238,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("synergy-state-{label}-{unique}"));
+        let root = crate::utils::test_temp_root(format!("synergy-state-{label}-{unique}"));
         fs::create_dir_all(root.join("data")).unwrap();
         root
     }

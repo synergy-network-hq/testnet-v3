@@ -10,7 +10,7 @@ SENTRY2_TARGETS='["relay2.synergy-network.io:5622"]'
 SENTRY_EDGE_TARGETS='["relay1.synergy-network.io:5622", "relay2.synergy-network.io:5622"]'
 VALIDATOR_MESH_TARGETS='[]'
 RELAYER_SUPPORT_TARGETS='["relay1.synergynode.xyz:5622", "relay2.synergynode.xyz:5622", "relay3.synergynode.xyz:5622"]'
-ALLOWED_VALIDATOR_ADDRESSES='["synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs", "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt", "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re", "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5", "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f", "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx"]'
+ALLOWED_VALIDATOR_ADDRESSES='["synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t", "synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk", "synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj", "synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg", "synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu", "synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc"]'
 
 generate_template() {
     local node_type=$1

@@ -1,0 +1,151 @@
+{
+  "_registry_sha256": "13d7ba7f8a8dd9a552cf0ed798c4ab80084d49b5fe552afcf1295dc2e013a285",
+  "coordinator": {
+    "config_sha256": "3ef400cfc8c76dd7cba7ac8495b83ae66017f4f7740484502221ad25609ce194",
+    "wireguard_public_key_sha256": "fa8b1e852fbb303483bf1fc33efedcd6921a0c7df8bbc5cb70958ef00cb77479"
+  },
+  "relayer-1": {
+    "binding_sha256": "6add55dce695f0686417275181f5c77252cf250f185ee67bc0ebbbb0e71c54a3",
+    "config_sha256": "5551f54185f03e8e7048c915b5894f0c5a1ad69e79738bd87bbabff81651b2bd",
+    "synv_address": "synv21hr5jcwjfjlhy5zqdg8uhugjsgc3nw2xgjan",
+    "wireguard_public_key_sha256": "c828a8c38c9054516cb660e7a75bca2768bdba8c248552ff947ff6738b38ab8d"
+  },
+  "relayer-2": {
+    "binding_sha256": "2d1b6b05bd526e4f718206094737a31f56de69c3001dfc548391a503e8d9363c",
+    "config_sha256": "b322414216230af45c81223e359406c974302af0e86584f0d214553c9f2d8c95",
+    "synv_address": "synv21lfuahljzwd8eney8h6zclgqta78sqv0radf",
+    "wireguard_public_key_sha256": "472cb7cc4e994fee793644f1b2699f9785b65bb5f7cd1217805c07bc79e79db0"
+  },
+  "relayer-3": {
+    "binding_sha256": "84fdd6ac2bde7c61d2470fb2fd1e93efd4a7201d3bf4f6132a5796a8090e122c",
+    "config_sha256": "94fc7f25f324dc9498e59d0a841c5ce216ee774e4eb4f0251086052ada2dfbb0",
+    "synv_address": "synv21k07a05felgr3rsyz27h9g5saeh0gn0v2zq8",
+    "wireguard_public_key_sha256": "f117812ac2c7c9bdfa4cdb5274ba209a48edbe86a37c16cdfe4bec67dbc947e7"
+  },
+  "validator-1": {
+    "binding_sha256": "5d6d7435f003ea05a288a0b19500949c494a6e91f60a4a6b5ab162f0b438dfb0",
+    "config_sha256": "49861b768f920c6f7464c725b8830b36628ba10558be9f19c175235f55b809e7",
+    "synv_address": "synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t",
+    "wireguard_public_key_sha256": "0aac53a832fde2de7295e484b5b3b0f1fd286d3edd17f30c4acf47516b9f9961"
+  },
+  "validator-10": {
+    "binding_sha256": "66bbcd8cb4334281e9ebb20f5812e6004883c5d47fbfa95d7bac0debcee0d6be",
+    "config_sha256": "0aab1f37fb0f53218bb3e36763a20be4014cc64eecd50f643d881e8ab286ef95",
+    "synv_address": "synv11dm930g9e0l96rxfg65fn8z4y2vm7qz3yfn3",
+    "wireguard_public_key_sha256": "746dd010f438c5466c01f12074601a949ece14bdfb31a09eb07821d7487d5db5"
+  },
+  "validator-11": {
+    "binding_sha256": "0d9a7ba029e16d33425817ac6b1cbbd3997c12ffa2c8a5d6639a31339919cbb2",
+    "config_sha256": "b8b1797dcee41af36ab3c7677432946ad118036810e559007f973449659dbd00",
+    "synv_address": "synv112ggx4l8st0uq3gvy6hqvaa4d90w5uanaqjz",
+    "wireguard_public_key_sha256": "dd52962d5e76be7d0f8c168ad68776f6a29da09b58f7f24489c7e7dd3e78068c"
+  },
+  "validator-12": {
+    "binding_sha256": "459ddcb2c0d28de6abd16e884b65e1ba006f6e0e2d88d0a859175f0c0d967847",
+    "config_sha256": "b3540dd0724a1ecf63da75e5fb5306a9e2ccff4d4040886042dae62c68ace6e2",
+    "synv_address": "synv11tf8hc6fsrdg0jpcqy8xay0awack2k69a36l",
+    "wireguard_public_key_sha256": "e876440fab7893329874d352491a1755a5e58454ca900db7fca116416701596a"
+  },
+  "validator-13": {
+    "binding_sha256": "c093ba255078e6042bcd651ca48ed0a18e3df548cbbfc761f494f4649185c8f7",
+    "config_sha256": "5888b9182782dba8f52f80536664db96de606eb86b5d24465c7bae1994273afd",
+    "synv_address": "synv11p8ej4mxf3uuepqxvnlnus67aut8vtman47g",
+    "wireguard_public_key_sha256": "47a3c8d413966a67a58886de2a9a8090f55c7d52f56b71e6076548efdae0c42d"
+  },
+  "validator-14": {
+    "binding_sha256": "14d7617e22c23299774f70b3c37003888d0eedc6e62e4122898e4c4cbe06cc0f",
+    "config_sha256": "a80f515e7e3eda1d0069b607ed90cd41084578484067535c8f1baacaf3258f28",
+    "synv_address": "synv11sadw92489zclv0v0p56fmjhwqze56ud0wm2",
+    "wireguard_public_key_sha256": "ff021e846b031bdfef1bd77a9470470a7176428b2711ed5bfe4a38cf25d6ea5b"
+  },
+  "validator-15": {
+    "binding_sha256": "803aa7c7e0ac632058912af6a4b4718baad248dbfd2f18afd7f9f7e56e8e332b",
+    "config_sha256": "9fe22498068b73ddcac4b7c1b8103fc83575618ae2627d4f309ae2bac1a9b820",
+    "synv_address": "synv11t2u2xh3elek5q682lqprclauyatn5xjq4pq",
+    "wireguard_public_key_sha256": "0b761d64f8431e7ca757638c7d8b630ff63a1ab2ebf0e9bbfbb3beae00ad0020"
+  },
+  "validator-16": {
+    "binding_sha256": "eadd0c1f4568202efc854ee6f1e2dab22fed72d87759093b91cb380493ecb609",
+    "config_sha256": "e7904bbe99cd57db8a8fb88ade178f22a15c772c39c2aa804ae53a5050524b67",
+    "synv_address": "synv11t4hhy3k4dh9xlnn5fus82e3t70d3q8ur8fa",
+    "wireguard_public_key_sha256": "a58c24146597398098aec0c52222934dc18cc1746cabc25051d405130d037e72"
+  },
+  "validator-17": {
+    "binding_sha256": "9cc950361cdb780709053754eab07ad3c89fcff7a21f4687aec92b81ee211037",
+    "config_sha256": "59f2148fa4f71c77856f13c3eb010a42fea3bcfc72b0b830de494645d20e3f12",
+    "synv_address": "synv11x3pzwp2xvd4jxs6fq5hvahrrglcytahtz7w",
+    "wireguard_public_key_sha256": "9e28064ba64aa40309c758ba1f5a1aad826a1e2f0964eaa2415f1f1de42a1429"
+  },
+  "validator-18": {
+    "binding_sha256": "e48a9a28fc560b8349fc627167a587f6344bd65976ba76793f295fee7c4d13b0",
+    "config_sha256": "05e3922b426cf78c5a7b6695b16293638eecec51185788206463346424d47d03",
+    "synv_address": "synv11daswzvvaklsl2e0hxmtz39de62w9qum6c9k",
+    "wireguard_public_key_sha256": "a1b7886390d32c076d15a97d3803138ac0531259b67a52f89b4e0c981d4af22d"
+  },
+  "validator-19": {
+    "binding_sha256": "9984c18d3aca1dc1a08a2a1053678c836a0fd65550b0c0e27e9f8090a70e67bd",
+    "config_sha256": "8be28d81b10a0b2269c303d11229bcbb6767fa5e42aba5a215362b3fb419e4cb",
+    "synv_address": "synv11p5emxjn9a0y4u8jsq6qupcuwsgwedxnl0p5",
+    "wireguard_public_key_sha256": "a3a6cd51962884577fb15dfe654caf7ed7cabd97917112fb665163dc4ac5f0a6"
+  },
+  "validator-2": {
+    "binding_sha256": "1588a328426e69af43388a83bca35772b903ccc3dbb08d0141d62cef9789f73e",
+    "config_sha256": "c5e4cc6237b1ab2998bdf0a6a1bf9baa011f9d739db66cb950c1efc96b52bae5",
+    "synv_address": "synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk",
+    "wireguard_public_key_sha256": "2f4f8ae4aae7bf2d38e23b474d7f81377e8da1471e2ea3786d059743e1738d0b"
+  },
+  "validator-20": {
+    "binding_sha256": "2cd2d844e4e0e07cd6bdc31e525f496a5cb0cb792feafba047b05582478b7d1d",
+    "config_sha256": "3501fa7b124263bee6d2e5eda487d9513c28ba72237a576f7b2ef19a5498af7d",
+    "synv_address": "synv11gvzqyvuqrtpjck8jdefsfefqz4rjfytw44h",
+    "wireguard_public_key_sha256": "8d586d6334e3c5e2eb15de2eddf73502a9000ec96d1a00b6b10ad7caee05b3ef"
+  },
+  "validator-21": {
+    "binding_sha256": "c18cd417c877a400f98986b81430b6a4403d46a6f16df985dd07c4eaa57e24b9",
+    "config_sha256": "85c5dbcf618c6f1506b133b737b071dfc1248fce2c53798b8b109fec4dd8e54f",
+    "synv_address": "synv119uv7nqfvypqtm7fgpmsjju5y4yz73apw4hx",
+    "wireguard_public_key_sha256": "873fd0e2cff0d25c8c3b6e716fa430b25ce47253254071cafea07270ffda78dc"
+  },
+  "validator-3": {
+    "binding_sha256": "a8730953bb6b6f473701b387884438b0ae567fe573471f099081170002379f48",
+    "config_sha256": "5839b8f911902fd7d9cda7d8b91adcddd5ab35f3613d83a91b9a6a33c360debf",
+    "synv_address": "synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj",
+    "wireguard_public_key_sha256": "d6ef7175ede2960ece0ea759f8a4d4658ade386981a54dc0bd7d13f4e56616d4"
+  },
+  "validator-4": {
+    "binding_sha256": "7188f39e507946cf93433f75c59ab3c3a305fc52ab96df2221175bd2287706b7",
+    "config_sha256": "67fefaf8749134f882991bb1c6000c35802ea639fdd9ecd6e650493813708881",
+    "synv_address": "synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg",
+    "wireguard_public_key_sha256": "7eb548261a11450fe4b832e6421185536aa0a48f8ecbe93eb76a8226e78ba430"
+  },
+  "validator-5": {
+    "binding_sha256": "58ebf536b87a83dbb258a68b66ab70a47a85c1afc3d71cc3a5c2006f444ed69e",
+    "config_sha256": "a54aa29a6a5fcae1d97701bba90bb85f9394fa6576732b575670f60af0c9c3cd",
+    "synv_address": "synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu",
+    "wireguard_public_key_sha256": "adcf32c82c6edaae607a052d30421332dd14ca15e35838b28d2a343238d92601"
+  },
+  "validator-6": {
+    "binding_sha256": "d1db049a2f554967ea310cd956ee0ee5d1694a485304a0d27eb2ed1aa8ad2de0",
+    "config_sha256": "76c45bf4f6e6b6d379c9fec5e2d43dbef3b9e441ff380c282274580a09d25c74",
+    "synv_address": "synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc",
+    "wireguard_public_key_sha256": "ceeb1b9d596a6af70e4646ea73268efdcc3f3cc5f65530be8cc62f7663f2279e"
+  },
+  "validator-7": {
+    "binding_sha256": "2490cfbc335c80ce13f15a18c62f0a9c4e461206368f37a8f7ba24885b88a5f7",
+    "config_sha256": "5858063d0168a14453dfee20cdce8d6b004ce44e6a93297ec196093b6d01ccbd",
+    "synv_address": "synv11lgxgqj3juusy9rdfc6r0z4p0sf2ext4f48g",
+    "wireguard_public_key_sha256": "5c5190407e1c61407c94d7814cb44d1e7aa006533725bae0ad3bb6bd73a44cb7"
+  },
+  "validator-8": {
+    "binding_sha256": "65655cd47300cb3c7a82f199fc12239eb34a647cf8a9cd19d907a36cec5e5b55",
+    "config_sha256": "aea977d9374722cd999061001d566604a5b9e8cb916b77f11ae0f44a5d1dc2b9",
+    "synv_address": "synv11nqlh9w5nrqsg0y0lq6lljtgxnm0d5ep30l5",
+    "wireguard_public_key_sha256": "891ac3e09ff659b0c536cccab72117633b9de700a9fb82fefcc266981d97b544"
+  },
+  "validator-9": {
+    "binding_sha256": "6abef06b771ac5c466906035a212fa4ac2899ea26a776feb153fcb321c3b2033",
+    "config_sha256": "7a395b1719a0a4dd09f86cfce0ab27ad386552ee028b73f112fd7fa3465f7d20",
+    "synv_address": "synv11tcpv98np8eexpua5fq5wc4kvj4ul7e5x3k7",
+    "wireguard_public_key_sha256": "7c3159475bafb69b30e714328c5a3d4504ebee3ba1f4ddee50541acbc5d79785"
+  }
+}

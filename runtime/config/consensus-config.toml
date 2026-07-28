@@ -1,25 +1,31 @@
+# Compatibility projection only. The production runtime loads the finalized
+# Genesis-bound JSON manifest; this file is rejected as an override source.
+# Decision ID: TV3-POSY-PARAMS-2026-07-28-01
 [consensus]
 algorithm = "Proof-of-Synergy"
-block_time = 5
-stake_required = "100 SNRG"
-validators = 100
+block_time = 2
+stake_required = "50000 SNRG"
+validators = 6
 slashing_penalty = "synergy_score_decay"
 reward_per_block = "2 SNRG"
 tx_pool_limit = 5000
 minimum_stake_period = "24 hours"
 
 [consensus.parameters]
-cluster_size = 30
-clusters = 4
+cluster_size = 6
+clusters = 1
 epoch_length = 1000
 rotation_interval = 1000
-checkpoint_interval = 100
-finality_threshold = 0.67
+checkpoint_interval = 50
+count_quorum_rule = "strict_more_than_two_thirds"
+weight_quorum_rule = "strict_more_than_two_thirds"
 proposer_selection = "synergy_score_weighted"
-validation_quorum_threshold = 0.67
-cooperation_quorum_threshold = 0.67
-vote_timeout = 3
-block_timeout = 5
+initial_availability_quorum = 5
+initial_decryption_threshold = 2
+proposal_timeout_ms = 1500
+prevote_timeout_ms = 1500
+precommit_timeout_ms = 1500
+max_round_timeout_ms = 10000
 
 [consensus.security]
 sybil_resistance = true
@@ -33,11 +39,10 @@ cartel_timing_threshold = 0.9
 cartel_size_threshold = 10
 
 [consensus.cryptography]
-pqc_algorithm = "FN-DSA-1024"
-signature_scheme = "FN-DSA-1024"
+pqc_algorithm = "ML-DSA-65"
+signature_scheme = "ML-DSA-65"
 key_encapsulation = "ML-KEM-1024"
-hybrid_signing_enabled = true
-fallback_algorithm = "SLH-DSA-128f"
+hybrid_signing_enabled = false
 key_rotation_interval = 180
 key_overlap_period = 30
 address_encoding = "Bech32m"

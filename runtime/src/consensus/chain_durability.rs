@@ -44,7 +44,7 @@ pub fn committed_block_log_path() -> PathBuf {
                 .chars()
                 .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
                 .collect::<String>();
-            return std::env::temp_dir().join(format!(
+            return crate::utils::test_temp_root(format!(
                 "synergy-test-committed-blocks-{}-{sanitized}.jsonl",
                 std::process::id()
             ));
@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn committed_block_log_replays_chain_body_after_stale_snapshot() {
-        let root = std::env::temp_dir().join(format!(
+        let root = crate::utils::test_temp_root(format!(
             "synergy-chain-durability-replay-{}",
             std::process::id()
         ));
@@ -315,7 +315,7 @@ mod tests {
 
     #[test]
     fn committed_block_log_recovery_skips_malformed_lines() {
-        let root = std::env::temp_dir().join(format!(
+        let root = crate::utils::test_temp_root(format!(
             "synergy-chain-durability-malformed-log-{}",
             std::process::id()
         ));
@@ -352,7 +352,7 @@ mod tests {
 
     #[test]
     fn startup_validation_rejects_canonical_lock_ahead_of_chain_body() {
-        let root = std::env::temp_dir().join(format!(
+        let root = crate::utils::test_temp_root(format!(
             "synergy-chain-durability-gap-{}",
             std::process::id()
         ));

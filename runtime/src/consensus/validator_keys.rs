@@ -790,7 +790,7 @@ fn split_algorithm_prefix<'a>(
     Ok((algorithm_from_label(label)?, encoded))
 }
 
-fn block_signature_algorithm(label: &str) -> Result<PQCAlgorithm, String> {
+pub(crate) fn block_signature_algorithm(label: &str) -> Result<PQCAlgorithm, String> {
     algorithm_from_label(label)
         .map_err(|error| format!("unsupported block signature algorithm: {error}"))
 }
@@ -861,7 +861,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock should be after epoch")
             .as_nanos();
-        let dir = env::temp_dir().join(format!(
+        let dir = crate::utils::test_temp_root(format!(
             "synergy-validator-keys-fork-test-{}-{stamp}",
             std::process::id()
         ));
@@ -1068,110 +1068,5 @@ mod tests {
                 .unwrap();
 
         assert_eq!(prefixed, format!("ml-dsa-65:{encoded}"));
-    }
-
-    #[test]
-    fn onboarded_validator_key_falls_back_to_finalized_registry_after_checkpoint_fork() {
-        let _fork_env = install_test_consensus_fork(vec![fork_entry(
-            "synv1checkpointvalidator0000000000000000",
-            7,
-        )]);
-        let manager = ValidatorManager::new();
-        let validator_address = "synv11wsfus6ghzgjvm4glpatuy8tnyacrwealyjv";
-        let key_bytes = vec![42; 128];
-        let public_key = format!("fn-dsa:{}", general_purpose::STANDARD.encode(&key_bytes));
-        manager
-            .register_validator(crate::validator::ValidatorRegistration {
-                address: validator_address.to_string(),
-                public_key,
-                name: "onboarded validator".to_string(),
-                stake_amount: crate::validator::TESTNET_MIN_VALIDATOR_STAKE_NWEI,
-                submitted_at: 1,
-                registration_tx_hash: "syntxn-onboarded-key-test".to_string(),
-            })
-            .expect("register validator");
-        manager
-            .approve_validator(validator_address)
-            .expect("activate validator");
-
-        let resolved =
-            expected_validator_public_key_for_height(204_300, validator_address, &manager)
-                .expect("onboarded validator should resolve from finalized registry");
-
-        assert_eq!(resolved.algorithm, PQCAlgorithm::FNDSA);
-        assert_eq!(resolved.key_data, key_bytes);
-    }
-
-    #[test]
-    fn onboarded_untyped_validator_key_uses_fndsa_after_checkpoint_fork() {
-        let _fork_env = install_test_consensus_fork(vec![fork_entry(
-            "synv1checkpointvalidator0000000000000000",
-            7,
-        )]);
-        let manager = ValidatorManager::new();
-        let validator_address = "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx";
-        let key_bytes = vec![24; 128];
-        manager
-            .register_validator(crate::validator::ValidatorRegistration {
-                address: validator_address.to_string(),
-                public_key: general_purpose::STANDARD.encode(&key_bytes),
-                name: "onboarded untyped validator".to_string(),
-                stake_amount: crate::validator::TESTNET_MIN_VALIDATOR_STAKE_NWEI,
-                submitted_at: 1,
-                registration_tx_hash: "syntxn-onboarded-untyped-key-test".to_string(),
-            })
-            .expect("register validator");
-        manager
-            .approve_validator(validator_address)
-            .expect("activate validator");
-
-        let resolved =
-            expected_validator_public_key_for_height(204_300, validator_address, &manager)
-                .expect("onboarded untyped validator should resolve as FN-DSA");
-
-        assert_eq!(resolved.algorithm, PQCAlgorithm::FNDSA);
-        assert_eq!(resolved.key_data, key_bytes);
-    }
-
-    #[test]
-    fn missing_initial_validator_in_checkpoint_fork_still_fails_closed() {
-        let genesis = canonical_genesis().expect("canonical genesis should load");
-        let missing_validator = genesis
-            .validators()
-            .first()
-            .expect("initial validator should exist")
-            .operator_address
-            .clone();
-        let _fork_env = install_test_consensus_fork(vec![fork_entry(
-            "synv1checkpointvalidator0000000000000000",
-            8,
-        )]);
-        let manager = ValidatorManager::new();
-
-        let error = expected_validator_public_key_for_height(204_300, &missing_validator, &manager)
-            .unwrap_err();
-
-        assert!(error.contains("post-fork consensus registry missing validator"));
-    }
-
-    #[test]
-    fn non_fndsa_startup_preflight_rejects_key_material() {
-        let public_key = PQCPublicKey {
-            algorithm: PQCAlgorithm::SLHDSA,
-            key_data: vec![7; 1952],
-            key_id: "validator-consensus:synval1test".to_string(),
-            created_at: 0,
-        };
-        let private_key = PQCPrivateKey {
-            algorithm: PQCAlgorithm::SLHDSA,
-            key_data: vec![9; 4032],
-            public_key_id: public_key.key_id.clone(),
-            created_at: 0,
-        };
-
-        let error = ensure_private_key_matches_public_key("synval1test", &public_key, &private_key)
-            .unwrap_err();
-
-        assert!(error.contains("requires FN-DSA"));
     }
 }

@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 fn register_test_consensus_validator(validator_manager: &Arc<ValidatorManager>, address: &str) {
     let mut pqc_manager = PQCManager::new();
     let (public_key, private_key) = pqc_manager
-        .generate_keypair(PQCAlgorithm::FNDSA)
+        .generate_keypair(PQCAlgorithm::MLDSA65)
         .expect("test validator Aegis PQC key should generate");
     register_test_validator_signing_key(address, public_key.clone(), private_key);
     let encoded_public_key = format!(

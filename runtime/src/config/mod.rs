@@ -1432,7 +1432,8 @@ metrics_port = 6060
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let temp_dir = std::env::temp_dir().join(format!("synergy-telemetry-merge-test-{unique}"));
+        let temp_dir =
+            crate::utils::test_temp_root(format!("synergy-telemetry-merge-test-{unique}"));
         fs::create_dir_all(&temp_dir).expect("temp dir should be created");
 
         let node_path = temp_dir.join("node.toml");
@@ -1458,7 +1459,7 @@ metrics_bind = "0.0.0.0:6030"
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let temp_dir = std::env::temp_dir().join(format!("synergy-config-test-{unique}"));
+        let temp_dir = crate::utils::test_temp_root(format!("synergy-config-test-{unique}"));
         fs::create_dir_all(&temp_dir).expect("temp dir should be created");
 
         let node_path = temp_dir.join("node.toml");
@@ -1878,7 +1879,7 @@ state_sync_before_join = true
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let temp_dir = std::env::temp_dir().join(format!("synergy-config-identity-{unique}"));
+        let temp_dir = crate::utils::test_temp_root(format!("synergy-config-identity-{unique}"));
         fs::create_dir_all(&temp_dir).expect("temp dir should be created");
         let config_path = temp_dir.join("node.toml");
         fs::write(

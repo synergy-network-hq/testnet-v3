@@ -6540,11 +6540,13 @@ fn current_chain_name() -> String {
 }
 
 fn current_genesis_hash() -> String {
+    // Fail closed. The previous fallback returned the retired Testnet-v2 genesis
+    // hash whenever the canonical genesis could not be loaded, which made a v3
+    // node advertise a v2 chain identity. Reporting nothing is always safer than
+    // reporting the wrong chain.
     canonical_genesis()
         .map(|genesis| genesis.hash().to_string())
-        .unwrap_or_else(|_| {
-            "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789".to_string()
-        })
+        .unwrap_or_default()
 }
 
 fn current_protocol_version() -> String {
@@ -9047,41 +9049,48 @@ fn normalize_signature_algorithm(
     value: Option<&str>,
     require_signature: bool,
 ) -> Result<String, RpcError> {
+    // Testnet-v3 user/account transactions are ML-DSA-87. FN-DSA labels are
+    // REJECTED rather than silently normalised: FN-DSA material belongs to the
+    // address-derivation domain, and quietly relabelling it as ML-DSA-87 would
+    // collapse the domain separation this endpoint is supposed to enforce.
+    const MISSING: &str = "Missing signatureAlgorithm; use mldsa87 explicitly";
     let Some(value) = value else {
         return if require_signature {
-            Err(RpcError::new(
-                -32602,
-                "Missing signatureAlgorithm; use fndsa explicitly",
-            ))
+            Err(RpcError::new(-32602, MISSING))
         } else {
-            Ok("fndsa".to_string())
+            Ok("mldsa87".to_string())
         };
     };
     let normalized = value.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "" if require_signature => Err(RpcError::new(
-            -32602,
-            "Missing signatureAlgorithm; use fndsa explicitly",
-        )),
-        "" | "fndsa" | "fn-dsa" | "fn-dsa-512" | "fn-dsa-1024" | "falcon" | "falcon-1024" => {
-            Ok("fndsa".to_string())
-        }
-        "slhdsa" | "slh-dsa" | "slh-dsa-128s" | "slh-dsa-192s" | "slh-dsa-256s" => {
+        "" if require_signature => Err(RpcError::new(-32602, MISSING)),
+        "" | "mldsa87" | "ml-dsa-87" | "ml_dsa_87" => Ok("mldsa87".to_string()),
+        "fndsa" | "fn-dsa" | "fn-dsa-512" | "fn-dsa-1024" | "falcon" | "falcon-1024" => {
             Err(RpcError::new(
                 -32602,
-                format!("Unsupported signature algorithm '{}'; use fndsa", value),
+                format!(
+                    "Signature algorithm '{}' is the address-derivation domain and cannot sign a user transaction; use mldsa87",
+                    value
+                ),
             ))
         }
+        "mldsa65" | "ml-dsa-65" | "ml_dsa_65" => Err(RpcError::new(
+            -32602,
+            format!(
+                "Signature algorithm '{}' is the validator consensus domain and cannot sign a user transaction; use mldsa87",
+                value
+            ),
+        )),
         "pqc" | "aegis" => Err(RpcError::new(
             -32602,
             format!(
-                "Ambiguous signature algorithm '{}'; use fndsa explicitly",
+                "Ambiguous signature algorithm '{}'; use mldsa87 explicitly",
                 value
             ),
         )),
         _ => Err(RpcError::new(
             -32602,
-            format!("Unsupported signature algorithm '{}'; use fndsa", value),
+            format!("Unsupported signature algorithm '{}'; use mldsa87", value),
         )),
     }
 }
@@ -10026,7 +10035,12 @@ mod tests {
     const STS_TEST_CREATOR: &str = "synw1creator000000000000000000000000000";
     const STS_TEST_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-    static RPC_VALIDATOR_ENV_LOCK: Mutex<()> = Mutex::new(());
+    /// Shared with `validator`, `consensus_algorithm` and `dual_quorum`: these
+    /// tests override the process-global `SYNERGY_EPOCH_VALIDATOR_SETS_FILE`,
+    /// so the lock has to be the same one everywhere.
+    fn rpc_validator_env_lock() -> &'static Mutex<()> {
+        crate::validator::epoch_validator_sets_env_lock()
+    }
 
     #[test]
     fn etdag_ingress_budget_rejects_entry_and_byte_saturation() {
@@ -10108,7 +10122,7 @@ mod tests {
             gas_price: 40,
             gas_limit: 125_000,
             data: Some(data),
-            signature_algorithm: "fndsa".to_string(),
+            signature_algorithm: "mldsa87".to_string(),
         }
     }
 
@@ -10202,12 +10216,12 @@ mod tests {
 
     impl RpcCounterSynQFixture {
         fn new() -> Option<Self> {
-            let signer = Sign::mldsa65();
-            let (public_key_bytes, private_key) = signer.keygen().expect("ML-DSA-65 keygen");
+            let signer = Sign::mldsa87();
+            let (public_key_bytes, private_key) = signer.keygen().expect("ML-DSA-87 keygen");
             let public_key = SynQPublicKey::new(public_key_bytes);
             let address = derive_synq_address(
                 &public_key,
-                AlgorithmId::MlDsa65,
+                AlgorithmId::MlDsa87,
                 &PqSynQNetworkId(
                     crate::synq_admission::SYNQ_CANONICAL_TESTNET_NETWORK_ID.to_string(),
                 ),
@@ -10339,7 +10353,7 @@ mod tests {
                     crate::synq_admission::SYNQ_CANONICAL_TESTNET_NETWORK_ID.to_string(),
                 ),
                 protocol_version: 1,
-                algorithm_id: AlgorithmId::MlDsa65,
+                algorithm_id: AlgorithmId::MlDsa87,
                 signature_purpose,
                 nonce,
                 not_before_unix: 0,
@@ -10351,7 +10365,7 @@ mod tests {
 
         fn sign_payload(&self, payload: &SynQSigningPayload) -> Vec<u8> {
             let canonical = canonicalize_signing_payload(payload).expect("canonical payload");
-            Sign::mldsa65()
+            Sign::mldsa87()
                 .detached_sign(&canonical, &self.private_key)
                 .expect("ML-DSA-65 sign")
         }
@@ -10389,8 +10403,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system time")
             .as_nanos();
-        let mut path = std::env::temp_dir();
-        path.push(format!(
+        let path = crate::utils::test_temp_root(format!(
             "synergy-synq-receipts-{test_name}-{}-{suffix}.json",
             std::process::id()
         ));
@@ -10401,7 +10414,7 @@ mod tests {
     fn admission_valid_but_runtime_invalid_transaction() -> Transaction {
         let mut manager = PQCManager::new();
         let (public_key, private_key) = manager
-            .generate_keypair(PQCAlgorithm::FNDSA)
+            .generate_keypair(PQCAlgorithm::MLDSA87)
             .expect("test keypair should generate");
         let sender = crate::address::generate_wallet_address(&hex::encode(&public_key.key_data));
         let receiver = crate::address::generate_wallet_address(&hex::encode([7u8; 32]));
@@ -10414,7 +10427,7 @@ mod tests {
             100,
             21_000,
             None,
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
         transaction
             .sign_with_public_key(&public_key, &private_key, &mut manager)
@@ -10433,7 +10446,7 @@ mod tests {
             "maxFee": 1000,
             "signature": "0x01020304",
             "signerPublicKey": "0x05060708",
-            "signatureAlgorithm": "FN-DSA-1024",
+            "signatureAlgorithm": "ML-DSA-87",
             "chainId": "0x1234",
             "networkId": "synergy-testnet-v3"
         });
@@ -10448,7 +10461,7 @@ mod tests {
         assert_eq!(normalized.transaction.gas_price, 1000);
         assert_eq!(normalized.transaction.signature, vec![1, 2, 3, 4]);
         assert_eq!(normalized.transaction.signer_public_key, vec![5, 6, 7, 8]);
-        assert_eq!(normalized.transaction.signature_algorithm, "fndsa");
+        assert_eq!(normalized.transaction.signature_algorithm, "mldsa87");
         assert_eq!(normalized.transaction.network_id, "synergy-testnet-v3");
         assert_eq!(normalized.chain_id, Some(0x1234));
     }
@@ -10517,7 +10530,7 @@ mod tests {
             normalize_rpc_transaction(&envelope, true).expect_err("algorithm is unsupported");
 
         assert_eq!(error.code, -32602);
-        assert!(error.message.contains("use fndsa"));
+        assert!(error.message.contains("use mldsa87"));
     }
 
     #[test]
@@ -10749,7 +10762,7 @@ mod tests {
 
     #[test]
     fn consensus_safety_halt_status_is_operator_visible_and_fail_closed() {
-        let path = std::env::temp_dir().join(format!(
+        let path = crate::utils::test_temp_root(format!(
             "synergy-rpc-safety-halt-{}-{}.json",
             std::process::id(),
             SystemTime::now()
@@ -10910,11 +10923,20 @@ mod tests {
         );
 
         assert_eq!(identity["chain_id"], 1266);
-        assert_eq!(identity["chain_id_hex"], "0x4f0");
+        assert_eq!(identity["chain_id_hex"], "0x4f2"); // 1266
         assert_eq!(identity["network_id"], "synergy-testnet-v3");
-        assert_eq!(
+        // Chain identity is asserted against the genesis actually loaded, never
+        // against a hardcoded literal: a stale literal is how the retired
+        // Testnet-v2 genesis hash survived in this suite.
+        let expected_genesis_hash = canonical_genesis()
+            .expect("canonical genesis must load")
+            .hash()
+            .to_string();
+        assert_eq!(identity["genesis_hash"], expected_genesis_hash);
+        assert_ne!(
             identity["genesis_hash"],
-            "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789"
+            "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789",
+            "Testnet-v2 genesis hash must never be reported by a Testnet-v3 node"
         );
     }
 
@@ -10982,7 +11004,7 @@ mod tests {
 
     #[test]
     fn read_last_nonempty_line_handles_large_lines_and_missing_final_newline() {
-        let path = std::env::temp_dir().join(format!(
+        let path = crate::utils::test_temp_root(format!(
             "synergy-rpc-last-line-{}-{}.jsonl",
             std::process::id(),
             SystemTime::now()
@@ -11039,7 +11061,7 @@ mod tests {
             receipt["synq_verification"]["domain"],
             "SYNQ_CONTRACT_CALL_V1"
         );
-        assert_eq!(receipt["synq_verification"]["algorithm"], "ML-DSA-65");
+        assert_eq!(receipt["synq_verification"]["algorithm"], "ML-DSA-87");
         assert_eq!(receipt["synq_aivm"]["status"], "succeeded");
         assert_eq!(receipt["synq_aivm"]["operation"], "call");
         assert_eq!(
@@ -11211,7 +11233,7 @@ mod tests {
             1000,
             21_000,
             None,
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
         let pending = Transaction::new(
             sender.clone(),
@@ -11222,7 +11244,7 @@ mod tests {
             1000,
             21_000,
             None,
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
         let mut chain = BlockChain::new();
         chain.add_block(Block::new_with_timestamp(
@@ -11393,7 +11415,7 @@ mod tests {
             1000,
             21000,
             None,
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
         let tx_b = Transaction::new(
             "syna1senderb".to_string(),
@@ -11404,7 +11426,7 @@ mod tests {
             1000,
             21000,
             None,
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
 
         {
@@ -11556,12 +11578,16 @@ mod tests {
         );
         assert_eq!(summary["all_clusters_can_finalize"].as_bool(), Some(false));
 
+        // Governed strict count quorum: (n*2)/3 + 1 over the FROZEN eligible set.
+        // 6 eligible -> 5 required. A cluster with only 4 live validators must
+        // NOT finalize; lowering the threshold to the live count would be a
+        // quorum-lowering safety bug.
         assert_eq!(first["validator_count"].as_u64(), Some(6));
         assert_eq!(first["active_validator_count"].as_u64(), Some(4));
-        assert_eq!(first["quorum_threshold"].as_u64(), Some(4));
-        assert_eq!(first["can_finalize"].as_bool(), Some(true));
+        assert_eq!(first["quorum_threshold"].as_u64(), Some(5));
+        assert_eq!(first["can_finalize"].as_bool(), Some(false));
         assert_eq!(first["validators_until_liveness_risk"].as_u64(), Some(0));
-        assert_eq!(first["health"].as_str(), Some("degraded"));
+        assert_eq!(first["health"].as_str(), Some("halted_safely"));
 
         assert_eq!(second["validator_count"].as_u64(), Some(7));
         assert_eq!(second["active_validator_count"].as_u64(), Some(4));
@@ -11636,7 +11662,7 @@ mod tests {
                 "validator_activation:{{\"validator\":\"{}\",\"public_key\":\"{}\",\"name\":\"Startup Replay Validator\",\"stake_amount_nwei\":{}}}",
                 validator_address, public_key, bonded_stake
             )),
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
         let activation_height = 1;
         let recorded_height = activation_height + crate::validator::VALIDATOR_SHADOW_PHASE_BLOCKS;
@@ -11720,7 +11746,7 @@ mod tests {
 
     #[test]
     fn epoch_cluster_rpc_uses_finalized_height_when_registry_epoch_is_stale() {
-        let _env_lock = RPC_VALIDATOR_ENV_LOCK
+        let _env_lock = rpc_validator_env_lock()
             .lock()
             .expect("RPC validator environment mutex should lock");
         let validator_manager = Arc::new(ValidatorManager::new());
@@ -11801,10 +11827,10 @@ mod tests {
 
     #[test]
     fn epoch_cluster_rpc_uses_effective_manifest_epoch_at_current_height() {
-        let _env_lock = RPC_VALIDATOR_ENV_LOCK
+        let _env_lock = rpc_validator_env_lock()
             .lock()
             .expect("RPC validator environment mutex should lock");
-        let temp_dir = std::env::temp_dir().join(format!(
+        let temp_dir = crate::utils::test_temp_root(format!(
             "synergy-rpc-cluster-epoch-{}-{}",
             std::process::id(),
             SystemTime::now()
@@ -11952,6 +11978,11 @@ mod tests {
 
     #[test]
     fn historical_epoch_cluster_rpc_preserves_ledger_snapshots() {
+        // Resolves the epoch validator set path, so it must exclude the tests
+        // that override SYNERGY_EPOCH_VALIDATOR_SETS_FILE.
+        let _env_lock = rpc_validator_env_lock()
+            .lock()
+            .expect("rpc validator env lock should succeed");
         let validator_manager = Arc::new(ValidatorManager::new());
         let cluster_address;
         {
@@ -12061,7 +12092,8 @@ mod tests {
         assert_eq!(status["cluster_address"], json!(cluster_address));
         assert_eq!(status["current_epoch"], json!(12));
         assert_eq!(status["current_validator_ids"].as_array().unwrap().len(), 5);
-        assert_eq!(status["current_quorum_threshold"], json!(3));
+        // governed strict count quorum: (5*2)/3 + 1 = 4
+        assert_eq!(status["current_quorum_threshold"], json!(4));
         assert_eq!(status["status"], json!("Degraded"));
         assert_eq!(status["total_rewards_earned_nwei"], json!(1_234));
         assert_eq!(status["last_rotation_epoch"], json!(9));
@@ -12088,7 +12120,7 @@ mod tests {
     #[test]
     fn network_validator_snapshot_uses_configured_validators_for_read_only_nodes() {
         let genesis_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../config/genesis.json")
+            .join("../config/genesis.testnet-v3.test-fixture.json")
             .canonicalize()
             .expect("repo genesis path should resolve");
         std::env::set_var("SYNERGY_GENESIS_FILE", genesis_path);
@@ -12124,7 +12156,7 @@ mod tests {
 
     #[test]
     fn validator_set_snapshot_handles_non_genesis_seed_without_registry_relock() {
-        let _env_lock = RPC_VALIDATOR_ENV_LOCK
+        let _env_lock = rpc_validator_env_lock()
             .lock()
             .expect("RPC validator environment mutex should lock");
         let validator_manager = Arc::new(ValidatorManager::new());
@@ -12269,8 +12301,9 @@ mod tests {
         let cluster_assignments = snapshot["cluster_assignments"].as_array().unwrap();
         assert_eq!(cluster_assignments.len(), 2);
         assert!(cluster_assignments.iter().all(|cluster| {
+            // governed strict count quorum: (5*2)/3 + 1 = 4
             cluster["validator_ids"].as_array().unwrap().len() == 5
-                && cluster["quorum_threshold"] == json!(3)
+                && cluster["quorum_threshold"] == json!(4)
                 && cluster["validators"]
                     .as_array()
                     .unwrap()
@@ -12347,8 +12380,9 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
+            // governed strict count quorum: (5*2)/3 + 1 = 4
             .all(|cluster| cluster["validator_count"] == json!(5)
-                && cluster["quorum_threshold"] == json!(3)));
+                && cluster["quorum_threshold"] == json!(4)));
 
         {
             let mut registry = validator_manager.registry.lock().unwrap();
@@ -12470,8 +12504,9 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
+            // governed strict count quorum: (5*2)/3 + 1 = 4
             .all(|cluster| cluster["validator_count"] == json!(5)
-                && cluster["quorum_threshold"] == json!(3)));
+                && cluster["quorum_threshold"] == json!(4)));
     }
 
     #[test]
@@ -12571,7 +12606,7 @@ mod tests {
     #[test]
     fn network_validator_snapshot_ages_out_historical_unconfigured_validators() {
         let genesis_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../config/genesis.json")
+            .join("../config/genesis.testnet-v3.test-fixture.json")
             .canonicalize()
             .expect("repo genesis path should resolve");
         std::env::set_var("SYNERGY_GENESIS_FILE", genesis_path);
@@ -12624,7 +12659,7 @@ mod tests {
     #[test]
     fn network_validator_snapshot_keeps_active_registered_validator_active_after_proposer_gap() {
         let genesis_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../config/genesis.json")
+            .join("../config/genesis.testnet-v3.test-fixture.json")
             .canonicalize()
             .expect("repo genesis path should resolve");
         std::env::set_var("SYNERGY_GENESIS_FILE", genesis_path);

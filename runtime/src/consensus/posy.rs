@@ -73,15 +73,19 @@ impl ProofOfSynergyBft {
         cluster_map: ClusterMap,
         protocol_config: ProtocolConfig,
     ) -> Self {
-        let signing_authority = if cfg!(test) {
-            DurableConsensusSigningAuthority::at_path(std::env::temp_dir().join(format!(
+        // `cfg!(test)` is a runtime boolean: both arms are compiled in every
+        // build, so the non-test library still had to resolve the
+        // `#[cfg(test)]`-only `utils::test_temp_root` and did not compile at
+        // all. Conditional *compilation* is what was meant here.
+        #[cfg(test)]
+        let signing_authority =
+            DurableConsensusSigningAuthority::at_path(crate::utils::test_temp_root(format!(
                 "synergy-posy-signing-{}-{:p}.json",
                 std::process::id(),
                 verifier
-            )))
-        } else {
-            DurableConsensusSigningAuthority::process_wide()
-        };
+            )));
+        #[cfg(not(test))]
+        let signing_authority = DurableConsensusSigningAuthority::process_wide();
         Self::new_with_signing_authority(
             verifier.clone(),
             validator_set,
@@ -1369,7 +1373,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        DurableConsensusSigningAuthority::at_path(std::env::temp_dir().join(format!(
+        DurableConsensusSigningAuthority::at_path(crate::utils::test_temp_root(format!(
             "synergy-posy-{label}-{}-{nonce}.json",
             std::process::id()
         )))

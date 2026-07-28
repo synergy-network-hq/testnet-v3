@@ -3,7 +3,7 @@
   "release_id": "testnet-v3",
   "chain_id": 1266,
   "network_id": "synergy-testnet-v3",
-  "signature_algorithm": "ML-DSA-65",
+  "signature_algorithm": "ML-DSA-87",
   "contracts": [
     {
       "name": "ValidatorRegistry",

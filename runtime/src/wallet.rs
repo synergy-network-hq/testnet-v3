@@ -101,7 +101,7 @@ impl WalletManager {
 
     pub fn generate_keypair() -> Result<(String, String, String, String, String), String> {
         let mut pqc_manager = PQCManager::new();
-        let (sign_public, sign_private) = pqc_manager.generate_keypair(PQCAlgorithm::FNDSA)?;
+        let (sign_public, sign_private) = pqc_manager.generate_keypair(PQCAlgorithm::MLDSA87)?;
         let (kem_public, kem_private) = pqc_manager.generate_keypair(PQCAlgorithm::MLKEM1024)?;
 
         let address = generate_wallet_address(&hex::encode(&sign_public.key_data));
@@ -204,7 +204,7 @@ impl WalletManager {
                 .map_err(|e| format!("Invalid public key format: {}", e))?;
 
             let pqc_private_key = PQCPrivateKey {
-                algorithm: PQCAlgorithm::FNDSA,
+                algorithm: PQCAlgorithm::MLDSA87,
                 key_data: private_key_bytes,
                 public_key_id: address.to_string(),
                 created_at: std::time::SystemTime::now()
@@ -213,7 +213,7 @@ impl WalletManager {
                     .as_secs(),
             };
             let pqc_public_key = crate::crypto::pqc::PQCPublicKey {
-                algorithm: PQCAlgorithm::FNDSA,
+                algorithm: PQCAlgorithm::MLDSA87,
                 key_data: public_key_bytes,
                 key_id: address.to_string(),
                 created_at: pqc_private_key.created_at,
@@ -304,7 +304,7 @@ impl WalletManager {
                 serde_json::to_string(&memo.unwrap_or_default())
                     .unwrap_or_else(|_| "\"\"".to_string())
             )),
-            "fndsa".to_string(), // signature algorithm
+            "mldsa87".to_string(), // signature algorithm
         );
         tx.set_gas_limit(tx.estimate_gas())?;
 
@@ -366,7 +366,7 @@ impl WalletManager {
                 "stake:{{\"validator\":\"{}\",\"token\":\"{}\",\"amount\":{}}}",
                 validator, token_symbol, amount
             )),
-            "fndsa".to_string(), // signature algorithm
+            "mldsa87".to_string(), // signature algorithm
         );
         tx.set_gas_limit(tx.estimate_gas())?;
 
@@ -431,7 +431,7 @@ impl WalletManager {
             1000,
             21000,
             Some(format!("validator_activation:{payload}")),
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
         tx.set_gas_limit(tx.estimate_gas())?;
 
@@ -944,12 +944,11 @@ fn decode_key_material(s: &str) -> Result<Vec<u8>, String> {
 }
 
 fn parse_signature_algorithm(value: &str) -> Result<PQCAlgorithm, String> {
+    // Wallet-signed user transactions are ML-DSA-87 (Testnet-v3 account domain).
     match value.trim().to_ascii_lowercase().as_str() {
-        "fndsa" | "fn-dsa" | "fn-dsa-512" | "fn-dsa-1024" | "falcon" | "falcon-1024" => {
-            Ok(PQCAlgorithm::FNDSA)
-        }
+        "mldsa87" | "ml-dsa-87" | "ml_dsa_87" => Ok(PQCAlgorithm::MLDSA87),
         _ => Err(format!(
-            "Unsupported signature algorithm: {}; use fndsa",
+            "Unsupported signature algorithm: {}; use mldsa87",
             value
         )),
     }
@@ -995,7 +994,7 @@ mod tests {
             1,
             21_000,
             None,
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
 
         wallet_manager
@@ -1023,7 +1022,7 @@ mod tests {
             1,
             21_000,
             None,
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
 
         wallet_manager
@@ -1272,7 +1271,7 @@ mod tests {
 
     #[test]
     fn local_identity_loader_uses_sibling_key_files_when_metadata_omits_private_key() {
-        let root = std::env::temp_dir().join(format!(
+        let root = crate::utils::test_temp_root(format!(
             "synergy-wallet-identity-test-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1301,7 +1300,7 @@ mod tests {
 
     #[test]
     fn local_identity_candidates_include_validator_appliance_identity_directory() {
-        let root = std::env::temp_dir().join(format!(
+        let root = crate::utils::test_temp_root(format!(
             "synergy-wallet-appliance-candidate-test-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

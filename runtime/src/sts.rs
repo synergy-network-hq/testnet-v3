@@ -4198,8 +4198,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time")
             .as_nanos();
-        std::env::temp_dir()
-            .join(format!("synergy-sts-{label}-{unique}"))
+        crate::utils::test_temp_root(format!("synergy-sts-{label}-{unique}"))
             .join("data")
             .join("sts_state.json")
     }

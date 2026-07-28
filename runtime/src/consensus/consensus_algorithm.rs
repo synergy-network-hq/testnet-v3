@@ -5008,7 +5008,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock should be after epoch")
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
+        let dir = crate::utils::test_temp_root(format!(
             "synergy-{test_name}-{}-{nanos}",
             std::process::id()
         ));
@@ -5021,13 +5021,12 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock should be after epoch")
             .as_nanos();
-        std::env::temp_dir()
-            .join(format!(
-                "synergy-{test_name}-{}-{nanos}",
-                std::process::id()
-            ))
-            .join("data")
-            .join("consensus_vote_locks.json")
+        crate::utils::test_temp_root(format!(
+            "synergy-{test_name}-{}-{nanos}",
+            std::process::id()
+        ))
+        .join("data")
+        .join("consensus_vote_locks.json")
     }
 
     struct EnvVarGuard {
@@ -5054,8 +5053,7 @@ mod tests {
     }
 
     fn epoch_set_env_test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        crate::validator::epoch_validator_sets_env_lock()
     }
 
     fn test_validator(address: &str) -> Validator {
@@ -5343,6 +5341,13 @@ mod tests {
 
     #[test]
     fn finalized_synergy_scores_ignore_noncanonical_qc_vote_subsets() {
+        // Resolves the epoch validator set path, so it must exclude the tests
+        // that override SYNERGY_EPOCH_VALIDATOR_SETS_FILE. Without this it
+        // intermittently picked up another test's temp snapshot path and failed
+        // with "epoch validator set file ... does not exist".
+        let _env_lock = epoch_set_env_test_lock()
+            .lock()
+            .expect("epoch set env test lock should succeed");
         let _guard = DualQuorumConsensus::test_vote_tracking_guard();
         DualQuorumConsensus::reset_test_vote_tracking();
         let mut chain = BlockChain::new();
@@ -5700,7 +5705,7 @@ mod tests {
         let manager = Arc::new(ValidatorManager::new());
         let mut pqc_manager = PQCManager::new();
         let (public_key, private_key) = pqc_manager
-            .generate_keypair(PQCAlgorithm::FNDSA)
+            .generate_keypair(PQCAlgorithm::MLDSA65)
             .expect("test validator Aegis PQC key should generate");
         register_test_validator_signing_key(address, public_key.clone(), private_key);
         let encoded_public_key = format!(
@@ -5770,7 +5775,7 @@ mod tests {
             round_number: 1,
             aggregate_signature: vec![1],
             participant_bitmap: vec![1],
-            cumulative_weight: 1.0,
+            cumulative_weight: 1_000.0,
             validation_quorum_met: true,
             cooperation_quorum_met: true,
             timestamp: block.timestamp,

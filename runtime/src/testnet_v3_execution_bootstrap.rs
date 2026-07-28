@@ -1,13 +1,13 @@
-//! Read-only Testnet-v3 SynQ genesis-artifact preparation.
+//! Read-only Testnet-v3 SynQ genesis execution-state bootstrap.
 //!
 //! A fresh chain must not treat the presence of a `.synq` file as a deployed
-//! contract.  This adapter proves that the eight Genesis artifacts committed
-//! by the identity-assigned Genesis candidate are the exact local SynQ/AIVM
-//! inputs, while deliberately leaving `synq_contracts` empty until a signed
-//! Genesis deployment manifest supplies the canonical deployments and initial
-//! AIVM state root.
+//! contract. The legacy pre-approval adapter proves eight identity-assigned
+//! artifacts while leaving `synq_contracts` empty. The finalized adapter
+//! restores the complete public ceremony snapshot embedded in Genesis and
+//! verifies its execution root, AIVM root, balances, artifacts, and deployed
+//! addresses before returning any state to consensus.
 
-use crate::execution::{compute_state_root_after, ExecutionState};
+use crate::execution::{compute_state_root_after, ExecutionState, GenesisExecutionSnapshot};
 use crate::genesis::GenesisDocument;
 use crate::synq_execution::{register_synq_artifact, SynQArtifactKey, SynQContractArtifact};
 use serde_json::Value;
@@ -27,7 +27,20 @@ const NATIVE_GENESIS_CONTRACTS: [(&str, &str); 8] = [
     ("slashing", "Slashing"),
 ];
 
+const FINALIZED_NATIVE_GENESIS_CONTRACTS: [(&str, &str); 9] = [
+    ("identity", "Identity"),
+    ("validator_registry", "ValidatorRegistry"),
+    ("staking", "Staking"),
+    ("governance", "Governance"),
+    ("treasury", "Treasury"),
+    ("slashing", "Slashing"),
+    ("reward_distributor", "RewardDistributor"),
+    ("synergy_oracle", "SynergyOracle"),
+    ("team_vesting", "TeamVesting"),
+];
+
 const PRE_APPROVAL_STATUS: &str = "address_assigned_artifact_bound_pending_genesis_approval";
+const FINALIZED_STATUS: &str = "deployed_initialized_genesis_bound";
 
 /// Artifact-validated, but deliberately *not deployed*, Genesis execution
 /// input.  `state_root` is a pre-deployment preparation root and cannot be
@@ -104,6 +117,110 @@ pub fn prepare_testnet_v3_genesis_execution_state(
         artifact_keys,
         pre_deployment_state_root,
     })
+}
+
+/// Restores the exact post-ceremony execution state embedded in a finalized
+/// Testnet-v3 Genesis document. No external artifact path and no authority key
+/// is consulted; the canonical Genesis hash binds the embedded snapshot.
+pub fn load_finalized_testnet_v3_genesis_execution_state(
+    genesis: &GenesisDocument,
+) -> Result<ExecutionState, String> {
+    if genesis.chain_id() != 1266 || genesis.network_id() != 1266 {
+        return Err("finalized SynQ Genesis state requires chain ID 1266".to_string());
+    }
+    if genesis.protocol_version() != "1.0.0" || genesis.consensus_version() != "posy/2.2" {
+        return Err("finalized SynQ Genesis state has invalid protocol binding".to_string());
+    }
+
+    let deployment = genesis
+        .value()
+        .get("genesis_deployment")
+        .filter(|value| value.is_object())
+        .ok_or_else(|| "finalized Genesis is missing genesis_deployment".to_string())?;
+    if required_string(deployment, "status")? != "EXECUTED_AND_BOUND"
+        || deployment.get("deployment_count").and_then(Value::as_u64) != Some(9)
+        || deployment
+            .get("initialization_count")
+            .and_then(Value::as_u64)
+            != Some(27)
+        || required_string(deployment, "genesis_deployer_lifecycle")? != "PermanentlyRetired"
+    {
+        return Err("finalized Genesis deployment boundary is incomplete".to_string());
+    }
+
+    let snapshot_value = deployment
+        .get("execution_state")
+        .ok_or_else(|| "finalized Genesis is missing embedded execution_state".to_string())?;
+    let snapshot: GenesisExecutionSnapshot = serde_json::from_value(snapshot_value.clone())
+        .map_err(|error| format!("decode finalized Genesis execution snapshot: {error}"))?;
+    let canonical_snapshot = serde_json::to_vec(&snapshot)
+        .map_err(|error| format!("encode finalized Genesis execution snapshot: {error}"))?;
+    verify_sha256(
+        &canonical_snapshot,
+        required_string(deployment, "execution_state_snapshot_canonical_sha256")?,
+        "execution-state snapshot",
+    )?;
+    let state = snapshot.restore_testnet_v3()?;
+
+    if required_string(deployment, "post_deployment_execution_state_root")? != snapshot.state_root
+        || required_string(deployment, "post_deployment_aivm_state_root")?
+            != snapshot.aivm_state_root
+        || required_string(
+            genesis
+                .value()
+                .get("execution")
+                .ok_or_else(|| "finalized Genesis is missing execution metadata".to_string())?,
+            "genesis_execution_state_root",
+        )? != snapshot.state_root
+        || required_string(
+            genesis
+                .value()
+                .get("execution")
+                .ok_or_else(|| "finalized Genesis is missing execution metadata".to_string())?,
+            "genesis_aivm_state_root",
+        )? != snapshot.aivm_state_root
+    {
+        return Err(
+            "finalized Genesis execution roots do not match the embedded snapshot".to_string(),
+        );
+    }
+
+    if state.synq_artifacts.len() != FINALIZED_NATIVE_GENESIS_CONTRACTS.len()
+        || state.synq_contracts.len() != FINALIZED_NATIVE_GENESIS_CONTRACTS.len()
+        || state.balances_nwei.len() != genesis.balances().len()
+    {
+        return Err("finalized Genesis execution snapshot has invalid cardinality".to_string());
+    }
+    for balance in genesis.balances() {
+        if state.balances_nwei.get(&balance.address).copied()
+            != Some(u128::from(balance.balance_nwei))
+        {
+            return Err(format!(
+                "finalized Genesis execution balance mismatch for {}",
+                balance.address
+            ));
+        }
+    }
+
+    let contracts = required_object(genesis.value(), "contracts")?;
+    for (genesis_key, contract_name) in FINALIZED_NATIVE_GENESIS_CONTRACTS {
+        let contract = contracts
+            .get(genesis_key)
+            .ok_or_else(|| format!("finalized Genesis contracts.{genesis_key} is missing"))?;
+        if required_string(contract, "status")? != FINALIZED_STATUS {
+            return Err(format!(
+                "finalized Genesis contracts.{genesis_key} has not completed deployment"
+            ));
+        }
+        let address = required_string(contract, "address")?;
+        if !state.synq_contracts.contains_key(address) {
+            return Err(format!(
+                "finalized Genesis snapshot is missing deployed {contract_name} at {address}"
+            ));
+        }
+    }
+
+    Ok(state)
 }
 
 fn verify_pre_approval_contract_record(
@@ -283,22 +400,23 @@ mod tests {
     }
 
     #[test]
-    fn identity_assigned_genesis_prepares_all_eight_native_synq_artifacts() {
-        let prepared = prepare_testnet_v3_genesis_execution_state(&identity_assigned_candidate())
-            .expect("all committed native SynQ artifacts must validate through AIVM admission");
-        assert_eq!(prepared.artifact_keys.len(), 8);
-        assert_eq!(prepared.execution_state.synq_artifacts.len(), 8);
-        assert!(prepared.execution_state.synq_contracts.is_empty());
-        assert_ne!(
-            prepared.pre_deployment_state_root,
-            crate::synergy_types::Hash::zero()
-        );
+    fn retired_identity_assigned_candidate_rejects_migrated_artifacts() {
+        let error = prepare_testnet_v3_genesis_execution_state(&identity_assigned_candidate())
+            .expect_err(
+                "the retired ML-DSA-65 candidate must not accept the active ML-DSA-87 sources",
+            );
+        assert!(error.contains("hash does not match committed value"));
     }
 
     #[test]
     fn prepared_artifacts_cannot_be_mistaken_for_deployed_genesis_contracts() {
-        let prepared = prepare_testnet_v3_genesis_execution_state(&identity_assigned_candidate())
-            .expect("artifact preparation");
+        let execution_state = ExecutionState::new();
+        let prepared = PreparedTestnetV3ExecutionState {
+            pre_deployment_state_root: compute_state_root_after(&execution_state)
+                .expect("pre-deployment root"),
+            execution_state,
+            artifact_keys: BTreeMap::new(),
+        };
         assert!(prepared.reject_as_finalized_genesis_state().is_err());
     }
 }

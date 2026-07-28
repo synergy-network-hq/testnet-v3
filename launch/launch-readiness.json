@@ -24,7 +24,7 @@
     "posy_safety_halt_read_only_rpc_implemented": true,
     "posy_mldsa65_consensus_policy_implemented": true,
     "testnet_v3_legacy_fork_migration_forbidden": true,
-    "external_identity_mldsa65_consensus_keys_validated": false,
+    "external_identity_mldsa65_consensus_keys_validated": true,
     "candidate_consensus_crypto_profile_matches_runtime": true,
     "posy_inherited_operational_engine_disabled": true,
     "posy_operational_engine_converged": false,
@@ -48,17 +48,17 @@
     "security_specification_v7_reviewed": false,
     "security_specification_v7_enforced": false,
     "genesis_configuration_approved": false,
-    "new_validator_identities": false,
-    "new_node_identities": false,
+    "new_validator_identities": true,
+    "new_node_identities": true,
     "functional_component_inventory_verified": true,
-    "component_focused_tests_passed": true,
+    "component_focused_tests_passed": false,
     "synq_genesis_contracts_compiled": true,
     "aivm_general_synq_execution_ready": true,
     "aivm_all_eight_genesis_contracts_execute_and_replay": true,
     "synq_genesis_contracts_deployed_and_verified": false,
     "genesis_dependent_integration_tests_passed": false,
-    "system_wallet_bindings_finalized": false,
-    "external_identity_workstream_public_inputs_validated": false,
+    "system_wallet_bindings_finalized": true,
+    "external_identity_workstream_public_inputs_validated": true,
     "inherited_identity_bindings_removed": false,
     "topology_finalized": false,
     "runtime_tests_passed": false,
@@ -66,7 +66,9 @@
     "bootstrap_bundles_regenerated": false,
     "observability_validated": false,
     "prepare_only_dry_run_passed": false,
-    "launch_approved": false
+    "launch_approved": false,
+    "validator_vpn_material_generated": true,
+    "validator_vpn_live_validation_passed": false
   },
   "approved_genesis_sha256": null,
   "approved_release_version": null,
@@ -74,5 +76,165 @@
   "audit_records": {
     "posy_v2_2": "launch/POSY_V2_2_ALIGNMENT_AUDIT.md",
     "security_v7": "launch/SECURITY_V7_ALIGNMENT_AUDIT.md"
+  },
+  "identity_validation": {
+    "validated_at": "2026-07-26",
+    "basis": "launch/IDENTITY_VALIDATION_REPORT.md; launch/identity-validation-results.json; scripts/validate-identity-records.py",
+    "summary": {
+      "PASS": 54,
+      "BLOCKED": 4,
+      "FAIL_repo_level": 1
+    },
+    "policy": "Existing genesis identity, wallet, validator, node, and contract-address records are the source of truth. Remaining identity gates are validation-and-binding gates (deployment receipts, signing ceremony, genesis approval), not identity-creation gates.",
+    "open_fail": "runtime/config/{node_config,bootnode1,bootnode2,bootnode3,network-config}.toml and consensus-fork-migration.json still contain 6 retired Testnet-v2 validator addresses; tracked by gates.inherited_identity_bindings_removed",
+    "open_blocked": [
+      "P0: no genesis deployment signer identity designated - blocks derivation of all ten deployed contract addresses",
+      "P0: no genesis system-deployment mechanism exists - must be built before any deployment can execute",
+      "P0: SaleClaim under-specified (host capability, attestor set, threshold, state semantics) - blocks its constructor-args hash and therefore its address",
+      "private-key/public-key correspondence proof requires custody-passphrase signing ceremony on the secret-owning machine",
+      "launch/ceremony/challenges.json is stale and must not be regenerated until all ten final addresses, receipts and roots are final"
+    ],
+    "binding_fixes_2026_07_26": {
+      "retired_v2_validator_bindings": "consensus-key bindings: structural PASS (scripts/check-retired-v2-bindings.py). SUPERSEDED 2026-07-27: executing the suite revealed a second, undetected class of inherited v2 binding (v2 genesis hash + v2 node IPs in rpc_server.rs / networking.rs tests). gates.inherited_identity_bindings_removed remains false.",
+      "files_fixed": "runtime/config/{node_config,network-config,bootnode1-3}.toml; runtime/templates/*.toml (20); node-control-panel templates (20), control-service {innernet,validator_vpn,testnet}.rs, testnetPeerInfo.js, testnetBootstrap.js, generate_templates.sh, render-configs.sh, dag-tps-benchmark.rs, docs/runbooks+cheatsheets; p2p/networking.rs v2 dial-order shim removed",
+      "quarantined": "runtime/config/consensus-fork-migration.json and node-control-panel/testnet/runtime (full v2 state) and runtime v2 manifests -> launch/reference/testnet-v2/",
+      "crypto_profile": "launch/CRYPTOGRAPHIC_IDENTITY_PROFILE.md \u2014 consensus ML-DSA-65 per Security Spec v7; PoSy spec \u00a719.2 / workbook CRYPTO-001 amendment required (externally owned)",
+      "etdag_ingress": "BLOCKED \u2014 runtime requires per-validator ML-KEM-1024 ingress keys (1568B); none exist; ML-KEM-768 entropy keys are a different role and were not relabeled",
+      "correspondence_ceremony": "tooling ready + fixture-test PASS; 16 challenges generated; operator custody-passphrase step BLOCKED",
+      "team_vesting_source": "genesis-contracts/contracts/TeamVesting.synq drafted from authoritative genesis vesting block; compile/test pending toolchain",
+      "sale_claim_source": "BLOCKED \u2014 governing Presale Claim Voucher specification not present in repo or protocol_docs; genesis init_params alone underdetermine behavior; refusing to invent semantics"
+    },
+    "runtime_test_execution_2026_07_27": {
+      "toolchain": "rustc/cargo 1.97.1 (macOS aarch64) \u2014 first successful full-suite execution",
+      "synq_language_cli": "builds clean; all 8 genesis contracts + SaleClaim + TeamVesting check PASS",
+      "aivm_core": "42/42 pass incl. all_eight_genesis_contracts_deploy_call_restart_and_replay_deterministically",
+      "runtime_cargo_check": "PASS (workspace, 0 errors)",
+      "runtime_lib_tests": "1039 passed / 59 failed (45 PoisonError cascades + 14 primary)",
+      "primary_failure_root_cause": "inherited Testnet-v2 identity hardcoded in runtime tests (v2 genesis hash f79011f2..., v2 node IPs 73.79.66.255 / 194.163.183.166); see launch/evidence/toolchain-and-build/INHERITED_V2_BINDINGS_IN_RUNTIME_TESTS.md",
+      "gate_impact": "component_focused_tests_passed downgraded true->false; inherited_identity_bindings_removed stays false (session-2 structural check covered consensus keys only, not genesis hash / node IPs)"
+    },
+    "inherited_binding_correction_2026_07_27": {
+      "retraction": "Prior entry classified public IPs 73.79.66.255 (Val4 + Archive Validator) and 194.163.183.166 (Val5) as retired Testnet-v2 bindings. RETRACTED \u2014 both are current, correctly assigned Testnet-v3 infrastructure routes per documentation/unorganized-files/node-machine-credentials.xlsx. Retained machines/IPs are NOT launch blockers.",
+      "identity_model": "route (public IP/VPN IP/port) != tunnel identity (WireGuard pubkey) != Synergy node identity (synv... + proof of possession) != consensus identity (validator addr/consensus key/active set/weight)",
+      "genuine_defect_found": "p2p/networking.rs configured_validator_public_address_map infers node identity by POSITIONAL ZIP of dial endpoints to validator addresses (lines ~1596-1676). 73.79.66.255:5622 is shared by Val4 and Archive Validator (LAN .229/.140), so endpoint-keyed identity is ambiguous by construction. Fix = explicit endpoint<->synv binding via ValidatorVpnTransportConfig + signed topology registry; delete positional inference.",
+      "genuine_stale_binding": "rpc_server.rs:10913 asserts Testnet-v2 genesis hash f79011f2... (chain identity, must not be reused). Belongs in a test-only v3 fixture, not the production candidate hash.",
+      "vpn_scope_conflict": "Requested package = 21 validators + 3 relayers + 1 coordinator (25). Evidence shows 6 validators (Val1-6), 2 relayers, 0 coordinator, full-mesh WireGuard on 10.69.0.0/24; Val6 has NO assigned VPN IP. Generating 21+3+coordinator would require inventing 15 VPN IPs, a 3rd relayer, and a coordinator role that does not exist in the deployed architecture. NOT done - requires operator decision."
+    },
+    "vpn_package_2026_07_27": {
+      "participants": "21 validators + 3 relayers + 1 coordinator (25 X25519 keypairs)",
+      "addressing": "governed plan preserved: 10.70.0.0/16, coordinator 10.70.0.1, validators 10.70.10.1-.21, relayers 10.70.20.1-.3; no subnet invented, no existing assignment changed",
+      "topology": "coordinator-assisted enrollment + full-mesh data plane; validators 7-21 pre-provisioned (no endpoint, roaming) so later activation needs no edit to deployed configs",
+      "offline_validation": "scripts/validate-validator-vpn.py -> 0 failures, 6 live checks skipped",
+      "retained_infrastructure": "all public IPs, VPN IPs, SSH access and machine assignments retained per node-machine-credentials.xlsx",
+      "transaction_domain": "user/account transactions migrated to ML-DSA-87 per operator decision; consensus remains ML-DSA-65; cross-domain negative tests added"
+    },
+    "peer_identity_refactor_2026_07_27": {
+      "positional_zip_inference_removed": "p2p/networking.rs::configured_validator_public_address_map no longer infers node identity from the ORDER of dial targets. Endpoints resolve to a synv... identity only via explicit bindings (synv dial targets, network.validator_vpn_transports, authenticated learned transports). An endpoint claimed by two identities is dropped as ambiguous.",
+      "v2_genesis_hash_purged_from_production": "Testnet-v2 genesis hash f79011f2... was hardcoded in FIVE production paths: consensus_state.rs TESTNET_RECOVERY_GENESIS_HASH, self_realign.rs + recovery.rs + diagnostics.rs EXPECTED_GENESIS_HASH, and rpc_server.rs current_genesis_hash() FALLBACK (a v3 node advertised the v2 chain identity whenever genesis failed to load). All now derive from canonical_genesis(); the RPC fallback fails closed. Only remaining literal is an assert_ne! guard.",
+      "test_fixture": "runtime/config/genesis.testnet-v3.test-fixture.json (chain 1266, 6 validators) marked TEST_FIXTURE_NOT_FOR_PRODUCTION; genesis.rs::reject_test_fixture_genesis refuses it outside cfg(test). Unit tests no longer depend on the BLOCKED placeholder or the unsigned production candidate.",
+      "rpc_domain_separation": "normalize_signature_algorithm previously mapped FN-DSA labels to a valid signature algorithm; it now REJECTS both FN-DSA (address domain) and ML-DSA-65 (consensus domain) with distinct errors.",
+      "suite": "1041 pass / 61 fail (48 PoisonError cascades + 13 primary); was 1039/59 with a different, larger primary set at session start"
+    },
+    "primary_failure_burndown_2026_07_27": {
+      "start": "13 primary / 1041 pass",
+      "now": "9 primary / 1048 pass (45 poison cascades downstream of the 9)",
+      "fixed_sxcp": "sxcp relayer fixture: a prior bulk edit switched the relayer KEY to ML-DSA-87 while the fixtures still declared 'fndsa', so verification failed. SXCP relayer attestation is its own signature domain and production parse_signature_algorithm accepts FN-DSA only; fixture realigned to FN-DSA. 4/4 sxcp tests pass. OPEN GOVERNANCE QUESTION: should SXCP relayer attestation move to ML-DSA-87? Not changed without governance.",
+      "fixed_quorum_expectations": "THREE stale quorum expectations corrected to the governed strict rule (n*2)/3+1 over the FROZEN eligible set: 6-validator cluster 4->5 (and can_finalize true->false, health degraded->halted_safely: the test asserted a 6-validator cluster could finalize on 4 signers, which is a quorum-LOWERING bug), and two 5-validator clusters 3->4.",
+      "verified_production_correct": "testnet_v3_cluster_count matches the governed schedule exactly (6-9:1, 10-20:2, >=21: floor(N/7)); boundary tests for 6,9,10,20,21,27,28,34,35,41,42 already exist and pass. required_validator_quorum uses integer (n*2)/3+1; strict_voting_weight_quorum uses integer cross-multiplication with strict '>'. No floating point, no >=2/3 shortcut. Production rules were NOT changed.",
+      "remaining_9": [
+        "consensus::anti_divergence::precommit_rejects_missing_qc_and_accepts_valid_qc",
+        "consensus::diagnostics::create_snapshot_requires_majority_branch_proof",
+        "p2p::apply_block_batch_accepts_qc_less_matching_overlap_before_new_blocks",
+        "p2p::apply_block_batch_rolls_back_to_common_ancestor_before_replaying",
+        "p2p::configured_validator_dial_is_not_status_ready_until_status_exchange",
+        "p2p::future_blocks_are_cached_and_applied_when_parent_arrives",
+        "p2p::pending_peer_canonical_lock_conflict_after_tip_apply_does_not_self_quarantine",
+        "p2p::service_batch_matches_validator_chain_result",
+        "rpc::historical_epoch_cluster_rpc_preserves_ledger_snapshots"
+      ],
+      "remaining_diagnosis": "7 of 9 are block-apply/sync: the test fixture does not yet supply full Testnet-v3 block context (validator-set root, cluster-map root, parameter root, parent state root, certificate). Per instruction the fixture must be completed rather than block application weakened. NOT yet done."
+    },
+    "session8_2026_07_27": {
+      "suite": "1077 pass / 25 fail (1 poison, 24 primary) \u2014 was 1041/61 (48 poison, 13 primary)",
+      "poison_root_cause": "44 of 45 cascades came from one lock (DIAGNOSTICS_TEST_ENV_LOCK) poisoned by a single panicking test; 47 sites now recover instead of cascading. Primary count rose 9->24 because 12 real diagnostics failures had been hidden.",
+      "sxcp_domain": "SETTLED per operator: FN-DSA-1024 retained as a distinct domain; documented in CRYPTOGRAPHIC_IDENTITY_PROFILE.md",
+      "quorum_fixes": "3 stale expectations corrected to governed (n*2)/3+1 over frozen eligible set; one asserted a 6-validator cluster could finalize on 4 signers (quorum-lowering bug). Production formulas unchanged and verified correct.",
+      "blocking_next_step": "18 of 24 remaining failures share one cause: fixtures invent synv11testvalidator{0..4} (5 addresses absent from canonical genesis) while recovery.rs requires BASELINE_VALIDATOR_COUNT=6 validators whose consensus keys are IN canonical genesis. Fix = purpose-built 6-test-validator fixture genesis whose ML-DSA-65 private keys the harness holds, plus TestnetV3BlockTestContext builder.",
+      "evidence": "launch/evidence/toolchain-and-build/CURRENT_PRIMARY_FAILURES.md"
+    },
+    "session13_2026_07_27": {
+      "suite": "1104 passed / 0 failed, 4 of 5 consecutive runs. No consistent failure remains. The 5th run (38s vs 29s, i.e. under contention) failed consensus::diagnostics::start_shadow_observe_requires_verified_head_match and consensus::dual_quorum::same_height_same_round_double_vote_rejected.",
+      "gate_decision": "runtime_tests_passed REMAINS FALSE. 4/5 is not 5/5; flipping it would misrepresent the evidence.",
+      "session12_finding_retracted": "Session-12 concluded the suite does not leak temp dirs and blamed unrelated WebKit blob temp for the full disk. That check ran in a shell with $TMPDIR unset and globbed the wrong directory. The suite leaks EVERY scratch root it creates: 67 call sites used std::env::temp_dir().join(...) with no cleanup on any path. Measured 327 entries per run; 19,248 accumulated (~4.9 GB, ~60M inodes). That is what exhausted / and produced session-12's 752/351 StorageFull collapse, which was therefore never a code regression.",
+      "temp_leak_fix": "All 67 sites route through utils::test_temp_root(), which sweeps synergy-* entries older than 2h on first use per process. The age floor keeps it safe under the test thread pool and against a concurrently running suite. Regression test: utils::tests::stale_test_temp_roots_are_swept_and_fresh_ones_are_kept.",
+      "disk_reclaimed": "52 GB of regenerable target/ dirs outside Testnet-v3 removed with operator approval (OLD-Testnetv2-DO-NOT-USE, .codex-worktrees/*, .codex-build/*). /Volumes/xcode 891 MB -> 56 GB free.",
+      "shared_state_defect_1_epoch_env": "SYNERGY_EPOCH_VALIDATOR_SETS_FILE is process-global but was guarded by FOUR separate mutexes (consensus_algorithm, dual_quorum, validator, rpc_server). Each serialized one file's writers against themselves and nothing else, so tests expecting the default path intermittently resolved another test's temp snapshot. All four now take validator::epoch_validator_sets_env_lock(); four reader tests were given the lock.",
+      "shared_state_defect_2_p2p": "Peer sessions and the service-sync coordinator are one entangled global (ending a session releases that peer's reservation) but were guarded by two locks, so a peer-session-only test could void a service-sync test's reservation. This \u2014 not socket WouldBlock as session-12 recorded \u2014 is why completed_service_apply_does_not_release_next_batch_slot failed on its first request while passing 5/5 alone. SERVICE_SYNC_TEST_LOCK deleted; service_sync_test_guard() now takes the single PEER_SESSION_TEST_LOCK.",
+      "residual_flake": "p2p::networking::tests::completed_service_apply_does_not_release_next_batch_slot fails ~1 full-suite run in 5 on its first service_sync_request_from_status call. Passes 6/6 alone and 3/3 alongside the whole consensus::diagnostics module. UNCONFIRMED hypothesis: service_sync_test_peer stamps canonical_genesis_hash() and eligibility re-reads it, while diagnostics::with_runtime_root removes SYNERGY_GENESIS_FILE process-wide; a concurrent reader would then see a different canonical genesis and reject the peer. Recorded as a hypothesis, not a finding.",
+      "architectural_note": "Runtime-root and genesis resolution is process-global env state, which is unsound under a parallel test harness. The durable fix is to make that resolution injectable in test builds rather than adding further locks.",
+      "next": "Bisect the residual flake by module (or confirm with --test-threads=1), then re-run 5x for the gate. Phase 8 deterministic deployment is now unblocked. PoSy_Consensus_Parameter_Control_Workbook_v2.2.xlsx still not ingested."
+    },
+    "session11_2026_07_27": {
+      "suite": "1101 pass / 2 fail best run; 1 consistent failure + 2 order-dependent flakes (each passes 5/5 in isolation)",
+      "consistent_failure": "consensus::diagnostics::post_fork_snapshot_active_set_uses_consensus_fork_registry - expects synv1forktest* from a Testnet-v2 FN-DSA fork registry; v3 forbids legacy fork migration. Needs the fork fixture isolated as non-production or replaced with an ML-DSA-65 v3 registry snapshot test.",
+      "order_dependent_flakes": [
+        "consensus_algorithm::finalized_synergy_scores_ignore_noncanonical_qc_vote_subsets",
+        "recovery::apply_plan_writes_rollback_backup"
+      ],
+      "production_bug_fixed_qc_block_id": "anti_divergence::precommit_verify_checked compared qc.block_id against block.block_id() (full header digest) while posy.rs:719 builds votes with block.candidate_id() (stable id excluding round/proposer for TC carry-forward). The gate could never match for any block with a non-zero round or set proposer, so it rejected every otherwise-valid QC. Now compares candidate_id.",
+      "test_fixture_fix_qc_weight": "p2p test_quorum_certificate declared cumulative_weight = signer COUNT; production verifies summed BONDED STAKE. Now sums signer stake. This single fix cleared 5 p2p block-apply failures.",
+      "diagnostics_fixture": "registry writes 6 validators; committed-QC signs required_validator_quorum(6)=5 supporters (was hardcoded 4)"
+    },
+    "phase8_2026_07_27": {
+      "evidence": "launch/PHASE_8_DEPLOYMENT_FINDINGS.md",
+      "artifact_reproducibility": "All eight bound artifacts rebuild bit-for-bit from source and match the genesis-bound bytecode/abi/manifest hashes. All ten sources pass cli check. The SynQ compiler is deterministic.",
+      "address_model_resolved": "Phase 8's 'deterministic deployment must reproduce all ten existing addresses' was unsatisfiable. All ten contract addresses are IDENTITY addresses - Bech32m(synq, SHA3-256(FN-DSA-1024 public key)) - reproduced independently 10/10 from contract_identities. derive_synq_contract_address_from_deploy binds nonce, signer, payload hash and artifact hashes instead and would mint ten different addresses. Corroborated by address_type=ContractSystem, system_reserved_addresses.policy.contract_deployable=false, and testnet_v3_execution_bootstrap binding to declared addresses. OPERATOR RULING: genesis-installed at pre-assigned addresses.",
+      "team_vesting_bound": "TeamVesting compiled, artifacts copied into genesis-contracts/contracts/, artifact object bound, status -> address_assigned_artifact_bound_pending_genesis_approval. bytecode_hash 6a4bf755... reproduces session-4's recorded value. NATIVE_GENESIS_CONTRACTS extended 8 -> 9.",
+      "sale_claim_not_bound": "Deliberate. Its manifest declares host_functions=[] and permissions=[] despite SALE_CLAIM_REQUIREMENTS.md requiring hostVerifyThresholdAttestation, and the approved attestor set and threshold constructor args remain an open DAO/custody input.",
+      "derived_values_recomputed": {
+        "header.state_root": "8e9934ab... -> f560cffbcc12460ab144dc3dd73fc0320c097c64e33af14b44f2aec274da071d",
+        "header.data_root": "61280f6b... -> f711f68700d5444134e3f10fb78b0efe8c82829867416ab209bcc4e0a23a4ad4",
+        "integrity.contract_hash": "f8f512af... -> e5a99ccd0c6819e7e8f6ba20b554ae601a9c264263725795936cc9d56e2d9c5b",
+        "integrity.genesis_hash": "ac5186cb... -> 9f3658d9defd2e5453b91de0152baaf3f6c2e0ce49016e064bf4f675260a1c1f",
+        "network_magic_bytes.value": "845e8eca -> 2ffb1569",
+        "method": "Validated against the pre-change file first - reproduces every derived value exactly. Recomputed in dependency order: contracts -> state_root/data_root -> header -> genesis_hash -> magic. The new state root is exactly what genesis.rs independently expected."
+      },
+      "ceremony_challenges_stale": "launch/ceremony/challenges.json embeds the superseded genesis hash and must be regenerated.",
+      "regression_caused_by_binding": "Binding TeamVesting broke four consensus::diagnostics tests. CAUSAL, not flake: A/B on identical code gave 3/3 green with the pre-change genesis and 2/3 failed with the post-change genesis. All four fail closed. Ruled out the with_runtime_root env race (every call site holds DIAGNOSTICS_TEST_ENV_LOCK). Leading hypothesis: diagnostics fixtures stage only the eight contract artifacts into their temp runtime roots while preparation now requires nine. Binding is PROVISIONAL until fixed.",
+      "phase8_terminus": "testnet_v3_execution_bootstrap.rs requires a SIGNED genesis deployment manifest plus a post-deployment AIVM state-root binding. Custody-gated, same blocker as Phase 9. Not obtainable in-session.",
+      "gate_decision": "synq_genesis_contracts_deployed_and_verified stays false. runtime_tests_passed stays false.",
+      "P0_CORRECTION_2026_07_27": {
+        "ruling_withdrawn": "The 'genesis-installed at pre-assigned identity addresses' ruling recorded in address_model_resolved is WITHDRAWN. FN-DSA-derived Synergy addresses are contract identity/custody records, NOT contract instance addresses.",
+        "governing_model": "Deployed SynQ contract instances must take addresses from the canonical deterministic deployment derivation. Contract identity address and deployed contract address must be separate fields and must never be conflated.",
+        "reversion_completed": "TeamVesting provisional binding fully reverted. Backup validated before restore (sha256 1f0d6ba21147ef3088353870eae750fd6df65fa731f0978392d42d990d951fb6). Restored: genesis_hash ac5186cb4a95130d22986c73c20d0eedd73821a735d944184c94691860008407, network magic 845e8eca, state_root 8e9934abc1fc5e02b2b32b426c45a7c4159342600807c295da5a2bebbc4776d4, 8 artifacts bound. NATIVE_GENESIS_CONTRACTS 9 -> 8; bootstrap test name restored; TeamVesting artifact files removed from genesis-contracts/contracts/. git diff for the genesis document and the bootstrap module is empty.",
+        "regression_cleared": "consensus::diagnostics:: 3 of 3 runs green (59/59) after revert; testnet_v3_execution_bootstrap 2/2. The regression was reverted, not patched around.",
+        "candidates_not_promoted": "ac5186cb... and 845e8eca remain CANDIDATE values and will change again after the real ten-contract deployment.",
+        "derivation_verified": "Deployment address derivation is deterministic and time-independent: payload_hash = hash_contract_deploy_body(bytecode_hash, manifest_hash, abi_hash, signer_address, constructor_args_hash); not_before_unix and expiration_unix feed neither the payload hash nor the address. There is NO salt field in SynQSigningPayload - nonce is the only disambiguator. Deriving addresses does not require custody; only executing a signed deploy does.",
+        "blocker_no_deployment_signer": "The genesis document contains no deployer / deployment_signer / deploy_authority field, and verifier.rs::expect_address requires the signer address to be derivable from the deployer public key under the SynQ address scheme. All ten deployed addresses depend on this identity. OPERATOR INPUT REQUIRED - cannot be invented.",
+        "blocker_no_genesis_deployment_mechanism": "No system_deploy / genesis_deploy / deploy_genesis path exists in the repository. testnet_v3_execution_bootstrap.rs only binds and validates artifacts and leaves synq_contracts empty by design. Correction item 3 is new architecture to build.",
+        "blocker_sale_claim": "SaleClaim's constructor-args hash feeds its address. Its host capability declaration (hostVerifyThresholdAttestation), attestor set, threshold and remaining state semantics are unresolved, so no SaleClaim address can be derived. OPERATOR/DAO INPUT REQUIRED.",
+        "gates": "synq_genesis_contracts_deployed_and_verified false; runtime_tests_passed false; genesis_configuration_approved false. Ceremony challenges remain stale and must NOT be regenerated until all ten final addresses, receipts and roots exist."
+      }
+    },
+    "phase8_corrected_scope_2026_07_27": {
+      "plan": "launch/PHASE_8_CORRECTED_PLAN.md",
+      "scope": "NINE native genesis contracts, not ten. SaleClaim REMOVED from Testnet-v3 scope by operator ruling - claims cannot begin until Mainnet-beta and Testnet-v3 tokens have no redemption value. Source preserved and marked DEFERRED_TO_MAINNET_BETA - NOT ACTIVE OR DEPLOYED ON TESTNET-V3. No claim endpoint, UI, redemption, Base migration, placeholder attestors, placeholder constructor inputs, or reserved nonce on Testnet-v3.",
+      "contracts": [
+        "Identity",
+        "ValidatorRegistry",
+        "Treasury",
+        "Governance",
+        "Staking",
+        "Slashing",
+        "RewardDistributor",
+        "SynergyOracle",
+        "TeamVesting"
+      ],
+      "deployment_order_nonces": "0 Identity, 1 ValidatorRegistry, 2 Treasury, 3 Governance, 4 Staking, 5 Slashing, 6 RewardDistributor, 7 SynergyOracle, 8 TeamVesting. Nonce 9 NOT reserved.",
+      "dependency_graph_verified": "Checked, not assumed: no contract's init_params references another contract's address, so there are no genesis-time ordering constraints. Cross-contract access is runtime host-capability/registry based. The canonical order is therefore free to adopt and is fixed for determinism.",
+      "genesis_deployment_authority": "One new dedicated account (Testnet-v3 Genesis Deployer) on the governed account/deployment signing profile - NOT a validator consensus key, node key, WireGuard key, contract identity key, treasury wallet, Foundation operating wallet, developer wallet, or individual's everyday wallet. Single deployer for all nine, nonces 0-8. No treasury allocation beyond runtime minimum, ideally zero. Deployment authority permanently revoked after final genesis is signed. Custody: preferred threshold-controlled (e.g. 3-of-5); acceptable for testnet, dedicated encrypted deployer key in the existing custody system with multi-operator manifest approval.",
+      "gating_input": "The Genesis Deployment Authority account DOES NOT EXIST YET. All nine addresses derive from its address, and verifier.rs::expect_address requires that address to be derivable from the deployer public key under the SynQ address scheme. No address can be derived until it is created through the custody workflow.",
+      "launch_blocked_on": "The nine-contract deployment only. Not on SaleClaim."
+    }
   }
 }

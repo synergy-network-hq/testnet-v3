@@ -228,10 +228,7 @@ fn build_deploy_admission_envelope_unverified(
         kind: SynQAdmissionKind::Deploy,
         chain_id,
         network_id: network_id.to_string(),
-        signer: deploy
-            .signing_payload
-            .signer_address
-            .to_testnet_debug_string(),
+        signer: canonical_signer_address(&deploy.public_key.bytes),
         payload_hash: deploy.signing_payload.payload_hash,
         bytecode_hash: Some(deploy.bytecode_hash),
         manifest_hash: Some(deploy.manifest_hash),
@@ -332,10 +329,7 @@ pub fn build_call_admission_envelope_from_pqsynq_bytes(
         kind: SynQAdmissionKind::Call,
         chain_id,
         network_id: network_id.to_string(),
-        signer: call
-            .signing_payload
-            .signer_address
-            .to_testnet_debug_string(),
+        signer: canonical_signer_address(&call.public_key.bytes),
         payload_hash: call.signing_payload.payload_hash,
         bytecode_hash: None,
         manifest_hash: None,
@@ -486,6 +480,28 @@ pub fn build_call_admission_carrier_from_pqsynq_bytes_with_args(
     encode_synq_admission_carrier(&envelope)
 }
 
+/// The canonical public identity of a SynQ envelope signer.
+///
+/// Derived from the envelope's own ML-DSA-87 public key, so the value the
+/// carrier advertises, the value the signature verifies against, and the value
+/// the AIVM presents as `msg.sender` are one address that cannot disagree.
+pub fn canonical_signer_address(public_key: &[u8]) -> String {
+    crate::address::derive_standard_account_address(public_key)
+}
+
+/// `tsynq…` was an internal execution-signer identifier rendered with an
+/// address-like prefix. It is retired on Testnet-v3 and must never appear as a
+/// signer, caller or authority.
+fn reject_retired_signer_format(signer: &str) -> Result<(), SynQAdmissionError> {
+    if signer.starts_with("tsynq") {
+        return Err(SynQAdmissionError::InvalidCarrier {
+            code: "AEGIS-ADDRESS",
+            message: "tsynq signer addresses are not accepted on Testnet-v3; use the canonical syna Standard Account address".to_string(),
+        });
+    }
+    Ok(())
+}
+
 pub fn verify_transaction_payload_for_chain_admission(
     tx: &Transaction,
     now_unix: u64,
@@ -527,6 +543,7 @@ pub fn verify_synq_deploy_for_chain_admission(
 ) -> Result<SynQVerificationSummary, SynQAdmissionError> {
     ensure_version(envelope)?;
     ensure_kind(envelope, SynQAdmissionKind::Deploy)?;
+    reject_retired_signer_format(&envelope.signer)?;
     ensure_required_hash(envelope.bytecode_hash, "bytecode_hash")?;
     ensure_required_hash(envelope.manifest_hash, "manifest_hash")?;
     ensure_required_hash(envelope.abi_hash, "abi_hash")?;
@@ -551,7 +568,7 @@ pub fn verify_synq_deploy_for_chain_admission(
         || verified.bytecode_hash != bytecode_hash
         || verified.manifest_hash != manifest_hash
         || verified.abi_hash != abi_hash
-        || verified.deployer.to_testnet_debug_string() != envelope.signer
+        || canonical_signer_address(&deploy.public_key.bytes) != envelope.signer
     {
         return Err(SynQAdmissionError::InvalidCarrier {
             code: "AEGIS-CANON",
@@ -577,6 +594,7 @@ pub fn verify_synq_call_for_chain_admission(
 ) -> Result<SynQVerificationSummary, SynQAdmissionError> {
     ensure_version(envelope)?;
     ensure_kind(envelope, SynQAdmissionKind::Call)?;
+    reject_retired_signer_format(&envelope.signer)?;
     let normalized = normalize_synq_network(envelope.chain_id, &envelope.network_id)?;
     let call: ContractCallEnvelope = decode_pqsynq_envelope(
         &envelope.encoded_pqsynq_envelope,
@@ -588,7 +606,7 @@ pub fn verify_synq_call_for_chain_admission(
         .map_err(pqsynq_error)?;
 
     if call.signing_payload.payload_hash != envelope.payload_hash
-        || verified.caller.to_testnet_debug_string() != envelope.signer
+        || canonical_signer_address(&call.public_key.bytes) != envelope.signer
     {
         return Err(SynQAdmissionError::InvalidCarrier {
             code: "AEGIS-CANON",
@@ -857,10 +875,7 @@ fn validate_sts9_horizon_verification(
     let contract_address = synergy_contract_address_from_pqsynq_address(
         &derive_synq_contract_address_from_deploy_for_admission(&deploy)?,
     );
-    let signer = deploy
-        .signing_payload
-        .signer_address
-        .to_testnet_debug_string();
+    let signer = canonical_signer_address(&deploy.public_key.bytes);
 
     expect_str_any(
         verification,
@@ -1084,12 +1099,39 @@ fn validate_sts9_manifest_binding(manifest: &serde_json::Value) -> Result<(), Sy
         .get("required_signature_algorithm")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
-    if algorithm != "ML-DSA-65" {
-        return Err(invalid_sts9(
-            "manifest required_signature_algorithm must be ML-DSA-65",
-        ));
+    let required = parse_account_domain_algorithm(algorithm)?;
+    if !SynQSecurityPolicy::testnet_1266_policy()
+        .allowed_deploy_signature_algorithms
+        .contains(&required)
+    {
+        return Err(invalid_sts9(&format!(
+            "manifest required_signature_algorithm {} is not admissible in the account/deploy/call domain",
+            algorithm_name(required)
+        )));
     }
     Ok(())
+}
+
+/// Resolves a manifest's `required_signature_algorithm` label to an algorithm.
+///
+/// Fails closed on unknown labels, and rejects the other domains by name so the
+/// error says *why* rather than "unknown algorithm": ML-DSA-65 is validator
+/// consensus and FN-DSA-1024 is the Synergy identity/address and SXCP relayer
+/// domain. Neither may authorize a deploy or a call. Labels are matched
+/// exactly — no aliasing, no silent relabelling.
+fn parse_account_domain_algorithm(label: &str) -> Result<AlgorithmId, SynQAdmissionError> {
+    match label {
+        "ML-DSA-87" => Ok(AlgorithmId::MlDsa87),
+        "ML-DSA-65" => Err(invalid_sts9(
+            "manifest required_signature_algorithm ML-DSA-65 is the validator consensus domain and cannot authorize a SynQ deploy or call",
+        )),
+        "FN-DSA" | "FN-DSA-1024" => Err(invalid_sts9(
+            "manifest required_signature_algorithm FN-DSA-1024 is the Synergy identity/address domain and cannot authorize a SynQ deploy or call",
+        )),
+        other => Err(invalid_sts9(&format!(
+            "manifest required_signature_algorithm `{other}` is not a recognized signature algorithm"
+        ))),
+    }
 }
 
 fn validate_sts9_abi_binding(envelope: &SynQAdmissionEnvelope) -> Result<(), SynQAdmissionError> {
@@ -1532,10 +1574,7 @@ pub(crate) mod test_support {
             kind: SynQAdmissionKind::Deploy,
             chain_id: SYNERGY_TESTNET_V3_CHAIN_ID,
             network_id: network_id.to_string(),
-            signer: deploy
-                .signing_payload
-                .signer_address
-                .to_testnet_debug_string(),
+            signer: canonical_signer_address(&deploy.public_key.bytes),
             payload_hash,
             bytecode_hash: Some(bytecode_hash),
             manifest_hash: Some(manifest_hash),
@@ -1583,10 +1622,7 @@ pub(crate) mod test_support {
             kind: SynQAdmissionKind::Call,
             chain_id: SYNERGY_TESTNET_V3_CHAIN_ID,
             network_id: network_id.to_string(),
-            signer: call
-                .signing_payload
-                .signer_address
-                .to_testnet_debug_string(),
+            signer: canonical_signer_address(&call.public_key.bytes),
             payload_hash,
             bytecode_hash: None,
             manifest_hash: None,
@@ -1602,12 +1638,12 @@ pub(crate) mod test_support {
     }
 
     fn test_identity() -> (SynQPublicKey, Vec<u8>, SynQAddress) {
-        let signer = Sign::mldsa65();
-        let (public_key, private_key) = signer.keygen().expect("ML-DSA-65 keygen");
+        let signer = Sign::mldsa87();
+        let (public_key, private_key) = signer.keygen().expect("ML-DSA-87 keygen");
         let public_key = SynQPublicKey::new(public_key);
         let address = derive_synq_address(
             &public_key,
-            AlgorithmId::MlDsa65,
+            AlgorithmId::MlDsa87,
             &NetworkId(SYNQ_CANONICAL_TESTNET_NETWORK_ID.to_string()),
         )
         .expect("derive SynQ address");
@@ -1626,7 +1662,7 @@ pub(crate) mod test_support {
             chain_id: ChainId(SYNERGY_TESTNET_V3_CHAIN_ID),
             network_id: NetworkId(SYNQ_CANONICAL_TESTNET_NETWORK_ID.to_string()),
             protocol_version: 1,
-            algorithm_id: AlgorithmId::MlDsa65,
+            algorithm_id: AlgorithmId::MlDsa87,
             signature_purpose,
             nonce,
             not_before_unix: 0,
@@ -1638,7 +1674,7 @@ pub(crate) mod test_support {
 
     fn sign_payload(payload: &SynQSigningPayload, private_key: &[u8]) -> Vec<u8> {
         let canonical = canonicalize_signing_payload(payload).expect("canonical payload");
-        Sign::mldsa65()
+        Sign::mldsa87()
             .detached_sign(&canonical, private_key)
             .expect("ML-DSA-65 sign")
     }
@@ -1689,9 +1725,51 @@ mod tests {
         )
         .expect("SynQ deploy carrier verified");
         assert_eq!(summary.domain, "SYNQ_CONTRACT_DEPLOY_V1");
-        assert_eq!(summary.algorithm, "ML-DSA-65");
+        assert_eq!(summary.algorithm, "ML-DSA-87");
         assert!(summary.verified_at_admission);
         assert_eq!(summary.bytecode_hash, Some(hash(1)));
+    }
+
+    /// The account domain (deploy/call) must reject every other domain's
+    /// algorithm by name, and fail closed on anything unrecognized. A manifest
+    /// is attacker-influenced input, so a permissive parse here would let a
+    /// consensus or identity key authorize a deployment.
+    #[test]
+    fn manifest_signature_algorithm_rejects_other_cryptographic_domains() {
+        let consensus = parse_account_domain_algorithm("ML-DSA-65")
+            .expect_err("ML-DSA-65 is the validator consensus domain");
+        assert!(
+            format!("{consensus:?}").contains("consensus domain"),
+            "rejection must name the domain, got {consensus:?}"
+        );
+
+        for identity_label in ["FN-DSA", "FN-DSA-1024"] {
+            let identity = parse_account_domain_algorithm(identity_label)
+                .expect_err("FN-DSA is the Synergy identity/address domain");
+            assert!(
+                format!("{identity:?}").contains("identity/address domain"),
+                "rejection must name the domain, got {identity:?}"
+            );
+        }
+
+        for unknown in [
+            "",
+            "ML-DSA-44",
+            "mldsa87",
+            "ml-dsa-87",
+            "Ed25519",
+            "ML-KEM-1024",
+        ] {
+            assert!(
+                parse_account_domain_algorithm(unknown).is_err(),
+                "`{unknown}` must fail closed — labels are matched exactly, never aliased"
+            );
+        }
+
+        assert_eq!(
+            parse_account_domain_algorithm("ML-DSA-87").expect("account domain"),
+            AlgorithmId::MlDsa87
+        );
     }
 
     #[test]
@@ -1717,7 +1795,7 @@ mod tests {
         )
         .expect("SynQ call carrier verified");
         assert_eq!(summary.domain, "SYNQ_CONTRACT_CALL_V1");
-        assert_eq!(summary.algorithm, "ML-DSA-65");
+        assert_eq!(summary.algorithm, "ML-DSA-87");
         assert!(summary.verified_at_admission);
     }
 

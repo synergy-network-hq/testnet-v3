@@ -25,9 +25,18 @@ pub struct SynQSecurityPolicy {
 }
 
 impl SynQSecurityPolicy {
+    /// Testnet-1266 SynQ admission policy.
+    ///
+    /// Transactions, deploys and calls are the **account** domain and are
+    /// therefore ML-DSA-87. ML-DSA-65 is the **consensus** domain and is not
+    /// admissible here: allowing it would reintroduce exactly the cross-domain
+    /// conflation `launch/CRYPTOGRAPHIC_IDENTITY_PROFILE.md` forbids. Until
+    /// 2026-07-27 this policy named ML-DSA-65 for all three purposes, which
+    /// both violated that separation and would have rejected the governed
+    /// ML-DSA-87 genesis deployment signer.
     pub fn testnet_1266_policy() -> Self {
         let mut tx = BTreeSet::new();
-        tx.insert(AlgorithmId::MlDsa65);
+        tx.insert(AlgorithmId::MlDsa87);
         let deploy = tx.clone();
         let call = tx.clone();
 

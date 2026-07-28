@@ -8,24 +8,24 @@ pub fn broadcast_transaction() {
         "synq1zxy8qhj4j59xp5lwkwpd5qws9aygz8pl9m3kmjx3".to_string(),
         "synq1wlt52dlk9scmzphw7uc8p72v28j47yd8g0drmtc".to_string(),
         1000,
-        1,                   // nonce
-        Vec::new(),          // signature (filled below)
-        1,                   // gas_price
-        21000,               // gas_limit
-        None,                // data
-        "fndsa".to_string(), // signature algorithm
+        1,                     // nonce
+        Vec::new(),            // signature (filled below)
+        1,                     // gas_price
+        21000,                 // gas_limit
+        None,                  // data
+        "mldsa87".to_string(), // signature algorithm
     );
 
     let mut pqc_manager = PQCManager::new();
-    let (public_key, private_key) = match pqc_manager.generate_keypair(PQCAlgorithm::FNDSA) {
+    let (public_key, private_key) = match pqc_manager.generate_keypair(PQCAlgorithm::MLDSA87) {
         Ok(keys) => keys,
         Err(error) => {
-            eprintln!("❌ Failed to create FN-DSA keypair: {}", error);
+            eprintln!("❌ Failed to create ML-DSA-87 keypair: {}", error);
             return;
         }
     };
     if let Err(error) = tx.sign_with_public_key(&public_key, &private_key, &mut pqc_manager) {
-        eprintln!("❌ Failed to sign transaction with FN-DSA: {}", error);
+        eprintln!("❌ Failed to sign transaction with ML-DSA-87: {}", error);
         return;
     }
 

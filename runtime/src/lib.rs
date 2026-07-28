@@ -22,6 +22,7 @@ pub mod execution;
 pub mod fleet_status;
 pub mod gas;
 pub mod genesis;
+pub mod genesis_deployment;
 pub mod logging;
 pub mod node;
 pub mod p2p;

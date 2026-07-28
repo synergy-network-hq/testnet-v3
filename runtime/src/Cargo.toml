@@ -106,3 +106,34 @@ path = "bin/pqc-benchmark.rs"
 [[bin]]
 name = "synergy-indexer-and-explorer-node"
 path = "bin/synergy-indexer-and-explorer-node.rs"
+
+[[bin]]
+name = "derive-genesis-addresses"
+path = "bin/derive-genesis-addresses.rs"
+
+[[bin]]
+name = "finalize-testnet-v3-genesis"
+path = "bin/finalize-testnet-v3-genesis.rs"
+
+[[bin]]
+name = "emit-testnet-v3-consensus-parameters"
+path = "bin/emit-testnet-v3-consensus-parameters.rs"
+
+[[bin]]
+name = "bind-testnet-v3-consensus-genesis"
+path = "bin/bind-testnet-v3-consensus-genesis.rs"
+
+[[bin]]
+name = "audit-testnet-v3-address-migration"
+path = "bin/audit-testnet-v3-address-migration.rs"
+
+[features]
+# Opt-in: the genesis ceremony links the Synergy Address Engine for its approved
+# custody decryptor. Kept behind a feature so the default library build and the
+# release five-run gate are unaffected.
+ceremony = []
+
+[[bin]]
+name = "synergy-genesis-ceremony"
+path = "bin/synergy-genesis-ceremony.rs"
+required-features = ["ceremony"]

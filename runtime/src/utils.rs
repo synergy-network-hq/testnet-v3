@@ -183,18 +183,114 @@ pub fn validate_project_root() -> Result<PathBuf, String> {
     )
 }
 
+/// Allocates a scratch path under the system temp dir for test use.
+///
+/// Every unit test that needs a throwaway runtime root goes through here rather
+/// than calling `std::env::temp_dir()` directly, so that the process gets one
+/// chance to clean up after its predecessors.
+///
+/// Background: the suite creates roughly 320 RocksDB-backed scratch roots per
+/// run (~6 GB) and nothing ever removed them. Nineteen thousand of them had
+/// accumulated, `/` filled, and a run collapsed into 351 spurious
+/// `StorageFull` failures that looked like a consensus regression. Sweeping on
+/// first use bounds the residue to a single run's worth.
+#[cfg(test)]
+pub(crate) fn test_temp_root(name: impl AsRef<std::path::Path>) -> PathBuf {
+    static SWEEP: std::sync::Once = std::sync::Once::new();
+    SWEEP.call_once(sweep_stale_test_temp_roots);
+    std::env::temp_dir().join(name)
+}
+
+/// Removes `synergy-*` scratch entries older than `STALE_TEMP_ROOT_AGE`.
+///
+/// The age floor is what makes this safe: anything the current run created is
+/// seconds old, so neither this suite's other threads nor a concurrently
+/// running suite can have its roots deleted out from under it.
+#[cfg(test)]
+fn sweep_stale_test_temp_roots() {
+    const STALE_TEMP_ROOT_AGE: std::time::Duration = std::time::Duration::from_secs(2 * 60 * 60);
+
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        if !file_name.starts_with("synergy-") {
+            continue;
+        }
+
+        let stale = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= STALE_TEMP_ROOT_AGE);
+        if !stale {
+            continue;
+        }
+
+        let path = entry.path();
+        if path.is_dir() {
+            let _ = std::fs::remove_dir_all(&path);
+        } else {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{get_runtime_root, resolve_data_path};
+    use super::{get_runtime_root, resolve_data_path, sweep_stale_test_temp_roots};
     use std::env;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    /// The sweep is what keeps the suite from filling the disk, so it has to
+    /// delete previous runs' residue while leaving the current run alone.
+    #[test]
+    fn stale_test_temp_roots_are_swept_and_fresh_ones_are_kept() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+
+        let stale = env::temp_dir().join(format!("synergy-sweep-stale-{unique}"));
+        let fresh = env::temp_dir().join(format!("synergy-sweep-fresh-{unique}"));
+        fs::write(&stale, b"stale").expect("stale marker should be writable");
+        fs::write(&fresh, b"fresh").expect("fresh marker should be writable");
+
+        let backdated = SystemTime::now() - Duration::from_secs(6 * 60 * 60);
+        fs::File::options()
+            .write(true)
+            .open(&stale)
+            .expect("stale marker should reopen")
+            .set_modified(backdated)
+            .expect("stale marker mtime should be adjustable");
+
+        sweep_stale_test_temp_roots();
+
+        assert!(
+            !stale.exists(),
+            "a synergy-* entry older than the age floor must be swept"
+        );
+        assert!(
+            fresh.exists(),
+            "a synergy-* entry from the current run must survive the sweep"
+        );
+
+        let _ = fs::remove_file(&fresh);
     }
 
     struct EnvVarGuard {
@@ -236,7 +332,7 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .expect("system time should be after unix epoch")
                 .as_nanos();
-            let root = env::temp_dir().join(format!(
+            let root = super::test_temp_root(format!(
                 "synergy-runtime-root-test-{}-{}",
                 std::process::id(),
                 unique

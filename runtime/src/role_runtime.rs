@@ -16,7 +16,7 @@ use crate::consensus::consensus_fork;
 use crate::consensus::dao_governance::{DAOGovernance, SynergyOracle};
 use crate::consensus::dual_quorum::{EntropyBeacon, ValidatorRotation};
 use crate::consensus::self_realign::{
-    persisted_recovery_state, RealignmentState, EXPECTED_GENESIS_HASH,
+    expected_genesis_hash, persisted_recovery_state, RealignmentState,
 };
 use crate::consensus::synergy_score::SynergyScoreCalculator;
 use crate::consensus::testnet_v3_bootstrap::load_testnet_v3_genesis_bootstrap;
@@ -24,7 +24,7 @@ use crate::consensus::validator_keys::{
     load_local_validator_keypair_for_height, validator_public_key_with_declared_algorithm,
 };
 use crate::crypto::pqc::PQCManager;
-use crate::genesis::canonical_genesis;
+use crate::genesis::{canonical_genesis, GenesisDocument};
 use crate::logging::{init_logger, LogLevel};
 use crate::p2p;
 use crate::role_profiles::{resolve_configured_role, NodeRole, RoleProfile};
@@ -256,10 +256,11 @@ fn require_testnet_v3_operator_args(args: &[String]) -> Result<(), String> {
         ));
     }
     let genesis_hash = arg_value(args, "--genesis-hash")
-        .ok_or_else(|| format!("missing --genesis-hash {EXPECTED_GENESIS_HASH}"))?;
-    if !genesis_hash.eq_ignore_ascii_case(EXPECTED_GENESIS_HASH) {
+        .ok_or_else(|| format!("missing --genesis-hash {}", expected_genesis_hash()))?;
+    if !genesis_hash.eq_ignore_ascii_case(&expected_genesis_hash()) {
         return Err(format!(
-            "wrong genesis_hash {genesis_hash}; expected {EXPECTED_GENESIS_HASH}"
+            "wrong genesis_hash {genesis_hash}; expected {}",
+            expected_genesis_hash()
         ));
     }
     Ok(())
@@ -927,6 +928,62 @@ fn should_watch_for_validator_activation_consensus(
     !consensus_enabled && is_validator_profile(profile) && !config.node.bootstrap_only
 }
 
+fn ensure_node_config_matches_finalized_consensus_parameters(
+    config: &NodeConfig,
+    genesis: &GenesisDocument,
+) -> Result<(), String> {
+    let parameters = genesis.consensus_parameters().ok_or_else(|| {
+        "canonical Testnet-v3 Genesis has no finalized consensus parameter manifest".to_string()
+    })?;
+    let manifest = &parameters.manifest;
+    let epoch_length = manifest
+        .epoch_length_slots
+        .ok_or_else(|| "finalized consensus parameters have no epoch length".to_string())?;
+    let block_time_ms = config
+        .consensus
+        .block_time_secs
+        .checked_mul(1_000)
+        .ok_or_else(|| "node consensus block time overflows milliseconds".to_string())?;
+    let blockchain_block_time_ms = config
+        .blockchain
+        .block_time
+        .checked_mul(1_000)
+        .ok_or_else(|| "node blockchain block time overflows milliseconds".to_string())?;
+    if config.blockchain.chain_id != manifest.chain_id.0
+        || config.network.id != manifest.chain_id.0
+        || config.network.network_id != manifest.network_id.0
+    {
+        return Err(
+            "node chain or network configuration disagrees with finalized consensus parameters"
+                .to_string(),
+        );
+    }
+    if block_time_ms != manifest.target_block_time_ms
+        || blockchain_block_time_ms != manifest.target_block_time_ms
+    {
+        return Err(format!(
+            "node block-time configuration disagrees with finalized {} ms target",
+            manifest.target_block_time_ms
+        ));
+    }
+    if config.consensus.epoch_length != epoch_length
+        || config.consensus.vrf_seed_epoch_interval != epoch_length
+    {
+        return Err(format!(
+            "node epoch configuration disagrees with finalized {epoch_length}-slot epoch"
+        ));
+    }
+    if u64::try_from(config.consensus.validator_cluster_size).ok()
+        != Some(manifest.initial_cluster_validator_count)
+    {
+        return Err(format!(
+            "node validator cluster size disagrees with finalized initial cluster size {}",
+            manifest.initial_cluster_validator_count
+        ));
+    }
+    Ok(())
+}
+
 fn spawn_consensus_engine() -> Result<thread::JoinHandle<()>, String> {
     Err(
         "POSY_V2_2_OPERATIONAL_COORDINATOR_NOT_READY: the inherited ProofOfSynergy/DualQuorumConsensus loop is disabled; refusing validator signing until the typed HeightConsensusContext + VC/QC/TC + protected ETDAG coordinator is fully wired"
@@ -1131,7 +1188,7 @@ fn print_usage(binary_name: &str, expected_profile: Option<&RoleProfile>) {
     eprintln!("SNAPSHOT OPTIONS:");
     eprintln!(
         "    --chain-id 1266 --network-id synergy-testnet-v3 --genesis-hash {}",
-        EXPECTED_GENESIS_HASH
+        expected_genesis_hash()
     );
     eprintln!("    --source-workspace <PATH>  Source workspace for offline create/list/verify");
     eprintln!("    --source-node-majority-branch-proven");
@@ -1509,7 +1566,7 @@ mod launch_block1_tests {
             std::process::id(),
             now_ts()
         );
-        let path = std::env::temp_dir().join(unique);
+        let path = crate::utils::test_temp_root(unique);
         fs::create_dir_all(path.join("config")).unwrap();
         path
     }
@@ -1559,7 +1616,7 @@ mod launch_block1_tests {
                 "gas_price":1,
                 "gas_limit":21000,
                 "data":null,
-                "signature_algorithm":"fndsa"
+                "signature_algorithm":"mldsa87"
             }}"#
         )
     }
@@ -2102,6 +2159,13 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                 eprintln!("Failed to load canonical genesis: {}", error);
                 process::exit(1);
             });
+            ensure_node_config_matches_finalized_consensus_parameters(&config, genesis)
+                .unwrap_or_else(|error| {
+                    eprintln!(
+                        "Node configuration rejected by finalized consensus parameters: {error}"
+                    );
+                    process::exit(1);
+                });
             info!(
                 "main",
                 "Canonical genesis loaded",
@@ -2972,6 +3036,7 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
 mod tests {
     use super::*;
     use crate::config::NodeConfig;
+    use crate::genesis::load_genesis_from_path;
     use std::fs;
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -3010,7 +3075,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock should be after UNIX epoch")
             .as_nanos();
-        env::temp_dir().join(format!(
+        crate::utils::test_temp_root(format!(
             "synergy-role-runtime-{name}-{}-{nonce}",
             process::id()
         ))
@@ -3024,6 +3089,43 @@ mod tests {
         assert!(error.contains("inherited ProofOfSynergy/DualQuorumConsensus loop is disabled"));
     }
 
+    #[test]
+    fn node_config_must_match_the_genesis_bound_parameter_manifest() {
+        let genesis = load_genesis_from_path(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../genesis.testnet-v3.identity-assigned.json"),
+        )
+        .unwrap();
+        let config = NodeConfig::default();
+        ensure_node_config_matches_finalized_consensus_parameters(&config, &genesis).unwrap();
+
+        let mut wrong_epoch = config.clone();
+        wrong_epoch.consensus.epoch_length = 1_001;
+        assert!(
+            ensure_node_config_matches_finalized_consensus_parameters(&wrong_epoch, &genesis)
+                .unwrap_err()
+                .contains("epoch configuration")
+        );
+
+        let mut wrong_block_time = config.clone();
+        wrong_block_time.consensus.block_time_secs = 3;
+        assert!(ensure_node_config_matches_finalized_consensus_parameters(
+            &wrong_block_time,
+            &genesis
+        )
+        .unwrap_err()
+        .contains("block-time configuration"));
+
+        let mut wrong_cluster = config;
+        wrong_cluster.consensus.validator_cluster_size = 7;
+        assert!(ensure_node_config_matches_finalized_consensus_parameters(
+            &wrong_cluster,
+            &genesis
+        )
+        .unwrap_err()
+        .contains("cluster size"));
+    }
+
     fn snapshot_args(extra: &[&str]) -> Vec<String> {
         let mut args = vec![
             "synergy-testnet".to_string(),
@@ -3033,7 +3135,7 @@ mod tests {
             "--network-id".to_string(),
             "synergy-testnet-v3".to_string(),
             "--genesis-hash".to_string(),
-            EXPECTED_GENESIS_HASH.to_string(),
+            expected_genesis_hash(),
         ];
         args.extend(extra.iter().map(|arg| (*arg).to_string()));
         args
@@ -3048,7 +3150,7 @@ mod tests {
             "--network-id".to_string(),
             "synergy-testnet-v3".to_string(),
             "--genesis-hash".to_string(),
-            EXPECTED_GENESIS_HASH.to_string(),
+            expected_genesis_hash(),
         ];
         args.extend(extra.iter().map(|arg| (*arg).to_string()));
         args
@@ -3063,7 +3165,7 @@ mod tests {
             "--network-id".to_string(),
             "synergy-testnet-v3".to_string(),
             "--genesis-hash".to_string(),
-            EXPECTED_GENESIS_HASH.to_string(),
+            expected_genesis_hash(),
         ];
         args.extend(extra.iter().map(|arg| (*arg).to_string()));
         args
@@ -3103,7 +3205,7 @@ mod tests {
             "--network-id".to_string(),
             "synergy-testnet-v1".to_string(),
             "--genesis-hash".to_string(),
-            EXPECTED_GENESIS_HASH.to_string(),
+            expected_genesis_hash(),
         ];
         let error =
             require_testnet_v3_operator_args(&args).expect_err("wrong network must fail closed");
@@ -3124,7 +3226,9 @@ mod tests {
         ];
         let error =
             require_testnet_v3_operator_args(&args).expect_err("wrong genesis must fail closed");
-        assert!(error.contains("expected f79011f2"));
+        // Must name the CURRENT canonical genesis, never the retired v2 hash.
+        assert!(error.contains(&expected_genesis_hash()));
+        assert!(!error.contains("f79011f2"));
     }
 
     #[test]
@@ -3134,7 +3238,7 @@ mod tests {
             "create-snapshot".to_string(),
             "--chain-id=1266".to_string(),
             "--network-id=synergy-testnet-v3".to_string(),
-            format!("--genesis-hash={EXPECTED_GENESIS_HASH}"),
+            format!("--genesis-hash={}", expected_genesis_hash()),
         ];
         require_testnet_v3_operator_args(&args).expect("equals form should be accepted");
     }

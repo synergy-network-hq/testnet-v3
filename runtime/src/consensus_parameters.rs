@@ -3,14 +3,19 @@ use crate::synergy_types::{
     TESTNET_V3_CONSENSUS_SIGNATURE_ALGORITHM,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::Value;
+use sha2::Sha256;
 use sha3::{Digest, Sha3_512};
 use std::fmt;
 use std::fs;
 use std::path::Path;
 
-pub const CONSENSUS_PARAMETER_MANIFEST_SCHEMA_VERSION: u32 = 1;
+pub const CONSENSUS_PARAMETER_MANIFEST_SCHEMA_VERSION: u32 = 2;
 pub const CONSENSUS_PARAMETER_MANIFEST_RELEASE_ID: &str = "testnet-v3";
 pub const CONSENSUS_PARAMETER_MANIFEST_FINALIZED_STATUS: &str = "FINALIZED";
+pub const CONSENSUS_PARAMETER_ACTIVATION_BOUNDARY: &str = "genesis_or_declared_epoch_boundary";
+pub const CONSENSUS_PARAMETER_GENESIS_BINDING_SCHEMA_VERSION: u32 = 1;
+pub const CONSENSUS_PARAMETER_GENESIS_BINDING_STATUS: &str = "FINALIZED_AND_BOUND";
 pub const MAX_CONSENSUS_PARAMETER_MANIFEST_BYTES: usize = 64 * 1024;
 
 /// The workbook-mandated 512-bit root of the exact canonical parameter
@@ -87,6 +92,43 @@ impl<'de> Deserialize<'de> for ConsensusParameterRoot {
 /// finalized manifest must contain a non-zero approved value.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct HealthyNetworkPerformanceTargets {
+    pub healthy_proposal_target_ms: u64,
+    pub healthy_qc_target_ms: u64,
+    pub healthy_commit_target_ms: u64,
+    pub finality_p95_target_ms: u64,
+    pub finality_p99_target_ms: u64,
+}
+
+impl HealthyNetworkPerformanceTargets {
+    fn validate(&self) -> Result<(), String> {
+        for (name, value) in [
+            (
+                "healthy_proposal_target_ms",
+                self.healthy_proposal_target_ms,
+            ),
+            ("healthy_qc_target_ms", self.healthy_qc_target_ms),
+            ("healthy_commit_target_ms", self.healthy_commit_target_ms),
+            ("finality_p95_target_ms", self.finality_p95_target_ms),
+            ("finality_p99_target_ms", self.finality_p99_target_ms),
+        ] {
+            if value == 0 {
+                return Err(format!(
+                    "healthy-network performance target {name} must be non-zero"
+                ));
+            }
+        }
+        if self.finality_p95_target_ms > self.finality_p99_target_ms {
+            return Err(
+                "healthy-network finality p95 target cannot exceed the p99 target".to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ConsensusParameterManifest {
     pub schema_version: u32,
     pub release_id: String,
@@ -95,6 +137,7 @@ pub struct ConsensusParameterManifest {
     pub chain_id: ChainId,
     pub network_id: NetworkId,
     pub protocol_version: String,
+    pub activation_boundary: String,
     pub epoch_length_slots: Option<u64>,
     pub target_block_time_ms: u64,
     pub count_quorum_rule: String,
@@ -127,6 +170,7 @@ pub struct ConsensusParameterManifest {
     pub prevote_timeout_ms: u64,
     pub precommit_timeout_ms: u64,
     pub max_round_timeout_ms: u64,
+    pub healthy_network_performance_targets: HealthyNetworkPerformanceTargets,
 }
 
 impl ConsensusParameterManifest {
@@ -161,6 +205,11 @@ impl ConsensusParameterManifest {
             return Err(format!(
                 "wrong PoSy protocol version: expected {POSY_PROTOCOL_VERSION}, found {}",
                 self.protocol_version
+            ));
+        }
+        if self.activation_boundary != CONSENSUS_PARAMETER_ACTIVATION_BOUNDARY {
+            return Err(format!(
+                "consensus parameter activation boundary must be {CONSENSUS_PARAMETER_ACTIVATION_BOUNDARY}"
             ));
         }
         match self.epoch_length_slots {
@@ -242,6 +291,7 @@ impl ConsensusParameterManifest {
         if self.required_vote_match_rate_ppm > 1_000_000 {
             return Err("required_vote_match_rate_ppm exceeds 1,000,000".to_string());
         }
+        self.healthy_network_performance_targets.validate()?;
         Ok(())
     }
 
@@ -293,12 +343,42 @@ impl ConsensusParameterManifest {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadedConsensusParameterSource {
+    FinalizedManifest,
+    GenesisBinding,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedConsensusParameters {
     pub manifest: ConsensusParameterManifest,
     pub canonical_bytes: Vec<u8>,
     pub root: ConsensusParameterRoot,
     pub protocol_config: ProtocolConfig,
+    pub source: LoadedConsensusParameterSource,
+}
+
+impl LoadedConsensusParameters {
+    pub fn require_genesis_binding(&self) -> Result<(), String> {
+        if self.source != LoadedConsensusParameterSource::GenesisBinding {
+            return Err(
+                "consensus parameters were not loaded from a finalized Genesis binding".to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConsensusParameterGenesisBinding {
+    schema_version: u32,
+    status: String,
+    decision_id: String,
+    release_decision_sha256: String,
+    canonical_manifest_sha256: String,
+    parameter_root_sha3_512: ConsensusParameterRoot,
+    manifest: ConsensusParameterManifest,
 }
 
 pub fn load_finalized_consensus_parameters(
@@ -311,6 +391,12 @@ pub fn load_finalized_consensus_parameters(
             path.display()
         )
     })?;
+    load_finalized_consensus_parameters_from_bytes(&bytes)
+}
+
+pub fn load_finalized_consensus_parameters_from_bytes(
+    bytes: &[u8],
+) -> Result<LoadedConsensusParameters, String> {
     if bytes.is_empty() {
         return Err("consensus parameter manifest is empty".to_string());
     }
@@ -320,10 +406,10 @@ pub fn load_finalized_consensus_parameters(
             MAX_CONSENSUS_PARAMETER_MANIFEST_BYTES
         ));
     }
-    let manifest: ConsensusParameterManifest = serde_json::from_slice(&bytes)
+    let manifest: ConsensusParameterManifest = serde_json::from_slice(bytes)
         .map_err(|error| format!("invalid consensus parameter manifest JSON: {error}"))?;
     let canonical_bytes = manifest.canonical_bytes()?;
-    if bytes != canonical_bytes {
+    if bytes != canonical_bytes.as_slice() {
         return Err(
             "consensus parameter manifest bytes are not canonical; whitespace, field reordering, and trailing bytes are prohibited"
                 .to_string(),
@@ -336,12 +422,77 @@ pub fn load_finalized_consensus_parameters(
         canonical_bytes,
         root,
         protocol_config,
+        source: LoadedConsensusParameterSource::FinalizedManifest,
     })
+}
+
+/// Loads a consensus-parameter manifest embedded in finalized Genesis and
+/// verifies every public binding around it.
+///
+/// The canonical manifest file is validated before Genesis construction.
+/// Once embedded, JSON object key order is no longer security-relevant, so the
+/// typed manifest is re-encoded in its canonical declaration order and both
+/// the SHA-256 artifact digest and SHA3-512 consensus root are rechecked.
+pub fn load_genesis_bound_consensus_parameters(
+    value: &Value,
+) -> Result<LoadedConsensusParameters, String> {
+    let binding: ConsensusParameterGenesisBinding = serde_json::from_value(value.clone())
+        .map_err(|error| format!("invalid Genesis consensus parameter binding: {error}"))?;
+    if binding.schema_version != CONSENSUS_PARAMETER_GENESIS_BINDING_SCHEMA_VERSION {
+        return Err(format!(
+            "unsupported Genesis consensus parameter binding schema version: expected {}, found {}",
+            CONSENSUS_PARAMETER_GENESIS_BINDING_SCHEMA_VERSION, binding.schema_version
+        ));
+    }
+    if binding.status != CONSENSUS_PARAMETER_GENESIS_BINDING_STATUS {
+        return Err(format!(
+            "Genesis consensus parameter binding is not finalized: expected {}, found {}",
+            CONSENSUS_PARAMETER_GENESIS_BINDING_STATUS, binding.status
+        ));
+    }
+
+    let canonical_bytes = binding.manifest.canonical_bytes()?;
+    let mut loaded = load_finalized_consensus_parameters_from_bytes(&canonical_bytes)?;
+    let canonical_manifest_sha256 = hex::encode(Sha256::digest(&canonical_bytes));
+    if binding.canonical_manifest_sha256 != canonical_manifest_sha256 {
+        return Err(format!(
+            "Genesis consensus parameter manifest SHA-256 mismatch: expected {}, found {}",
+            canonical_manifest_sha256, binding.canonical_manifest_sha256
+        ));
+    }
+    if binding.parameter_root_sha3_512 != loaded.root {
+        return Err(format!(
+            "Genesis consensus parameter root mismatch: expected {}, found {}",
+            loaded.root.to_hex(),
+            binding.parameter_root_sha3_512.to_hex()
+        ));
+    }
+
+    if binding.decision_id != loaded.manifest.governance_approval_id {
+        return Err(format!(
+            "Genesis consensus parameter Decision ID mismatch: expected {}, found {}",
+            loaded.manifest.governance_approval_id, binding.decision_id
+        ));
+    }
+    if binding.release_decision_sha256.len() != 64
+        || !binding
+            .release_decision_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(
+            "Genesis consensus parameter release-decision SHA-256 is not canonical lowercase hex"
+                .to_string(),
+        );
+    }
+    loaded.source = LoadedConsensusParameterSource::GenesisBinding;
+    Ok(loaded)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest as Sha2Digest, Sha256};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn finalized_fixture() -> ConsensusParameterManifest {
@@ -353,7 +504,8 @@ mod tests {
             chain_id: ChainId::synergy_testnet_v3(),
             network_id: NetworkId::synergy_testnet_v3(),
             protocol_version: POSY_PROTOCOL_VERSION.to_string(),
-            epoch_length_slots: Some(7_200),
+            activation_boundary: CONSENSUS_PARAMETER_ACTIVATION_BOUNDARY.to_string(),
+            epoch_length_slots: Some(1_000),
             target_block_time_ms: 2_000,
             count_quorum_rule: "strict_more_than_two_thirds".to_string(),
             weight_quorum_rule: "strict_more_than_two_thirds".to_string(),
@@ -385,6 +537,13 @@ mod tests {
             prevote_timeout_ms: 1_500,
             precommit_timeout_ms: 1_500,
             max_round_timeout_ms: 10_000,
+            healthy_network_performance_targets: HealthyNetworkPerformanceTargets {
+                healthy_proposal_target_ms: 450,
+                healthy_qc_target_ms: 1_850,
+                healthy_commit_target_ms: 2_250,
+                finality_p95_target_ms: 2_500,
+                finality_p99_target_ms: 3_000,
+            },
         }
     }
 
@@ -393,7 +552,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        std::env::temp_dir().join(format!(
+        crate::utils::test_temp_root(format!(
             "synergy-testnet-v3-{label}-{}-{nonce}.json",
             std::process::id()
         ))
@@ -413,6 +572,7 @@ mod tests {
         assert_eq!(loaded.manifest, manifest);
         assert_eq!(loaded.canonical_bytes, bytes);
         assert_eq!(loaded.root, manifest.root().unwrap());
+        assert!(loaded.require_genesis_binding().is_err());
         assert_eq!(
             loaded.protocol_config.chain_id,
             ChainId::synergy_testnet_v3()
@@ -465,5 +625,104 @@ mod tests {
             .validate_finalized()
             .unwrap_err()
             .contains("n=6, q=5"));
+    }
+
+    #[test]
+    fn production_release_manifest_is_canonical_decision_bound_and_exact() {
+        let launch = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../launch");
+        let decision = fs::read(launch.join("TESTNET_V3_CONSENSUS_PARAMETER_RELEASE_DECISION.md"))
+            .expect("release decision record");
+        let manifest_path = launch.join("TESTNET_V3_CONSENSUS_PARAMETERS.json");
+        let loaded = load_finalized_consensus_parameters(&manifest_path)
+            .expect("canonical release manifest");
+        let decision_id = "TV3-POSY-PARAMS-2026-07-28-01";
+        assert!(decision
+            .windows(decision_id.len())
+            .any(|window| window == decision_id.as_bytes()));
+        assert_eq!(loaded.manifest.governance_approval_id, decision_id);
+        assert_eq!(loaded.manifest.epoch_length_slots, Some(1_000));
+        assert_eq!(loaded.manifest.target_block_time_ms, 2_000);
+        assert_eq!(loaded.manifest.proposal_timeout_ms, 1_500);
+        assert_eq!(loaded.manifest.prevote_timeout_ms, 1_500);
+        assert_eq!(loaded.manifest.precommit_timeout_ms, 1_500);
+        assert_eq!(loaded.manifest.max_round_timeout_ms, 10_000);
+        assert_eq!(
+            loaded.manifest.activation_boundary,
+            CONSENSUS_PARAMETER_ACTIVATION_BOUNDARY
+        );
+        assert_eq!(
+            loaded
+                .manifest
+                .healthy_network_performance_targets
+                .healthy_proposal_target_ms,
+            450
+        );
+        assert_eq!(
+            loaded
+                .manifest
+                .healthy_network_performance_targets
+                .healthy_qc_target_ms,
+            1_850
+        );
+        assert_eq!(
+            loaded
+                .manifest
+                .healthy_network_performance_targets
+                .healthy_commit_target_ms,
+            2_250
+        );
+        assert_eq!(
+            loaded
+                .manifest
+                .healthy_network_performance_targets
+                .finality_p95_target_ms,
+            2_500
+        );
+        assert_eq!(
+            loaded
+                .manifest
+                .healthy_network_performance_targets
+                .finality_p99_target_ms,
+            3_000
+        );
+        assert_eq!(
+            loaded.root.to_hex(),
+            "2e6760bed60c8f8e44b3b693254367f0da9a8aa9efae46c517856fb78be7402cf232c064083116b805278e95a952660f7a92e16ca9cd9349aa74467d577127cd"
+        );
+    }
+
+    #[test]
+    fn genesis_binding_rechecks_manifest_decision_digest_and_parameter_root() {
+        let manifest = finalized_fixture();
+        let decision_sha256 = "11".repeat(32);
+        let mut bound_manifest = manifest;
+        bound_manifest.governance_approval_id = "TV3-POSY-PARAMS-UNIT-TEST".to_string();
+        let canonical_bytes = bound_manifest.canonical_bytes().unwrap();
+        let root = bound_manifest.root().unwrap();
+        let binding = serde_json::json!({
+            "schema_version": CONSENSUS_PARAMETER_GENESIS_BINDING_SCHEMA_VERSION,
+            "status": CONSENSUS_PARAMETER_GENESIS_BINDING_STATUS,
+            "decision_id": "TV3-POSY-PARAMS-UNIT-TEST",
+            "release_decision_sha256": decision_sha256,
+            "canonical_manifest_sha256": hex::encode(Sha256::digest(&canonical_bytes)),
+            "parameter_root_sha3_512": root.to_hex(),
+            "manifest": bound_manifest,
+        });
+        let loaded = load_genesis_bound_consensus_parameters(&binding).unwrap();
+        loaded.require_genesis_binding().unwrap();
+        assert_eq!(loaded.canonical_bytes, canonical_bytes);
+        assert_eq!(loaded.root, root);
+
+        let mut tampered_root = binding.clone();
+        tampered_root["parameter_root_sha3_512"] = Value::String("22".repeat(64));
+        assert!(load_genesis_bound_consensus_parameters(&tampered_root)
+            .unwrap_err()
+            .contains("parameter root mismatch"));
+
+        let mut tampered_decision = binding;
+        tampered_decision["decision_id"] = Value::String("TV3-POSY-PARAMS-TAMPERED".to_string());
+        assert!(load_genesis_bound_consensus_parameters(&tampered_decision)
+            .unwrap_err()
+            .contains("Decision ID mismatch"));
     }
 }

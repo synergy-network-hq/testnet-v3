@@ -75,12 +75,12 @@ Stable infrastructure records must be DNS-only origin records. If any stable P2P
 
 | Validator | Public P2P endpoint | Validator address |
 | --- | --- | --- |
-| Val1 | `62.146.182.207:5622` | `synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs` |
-| Val2 | `62.146.182.208:5622` | `synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt` |
-| Val3 | `62.146.182.209:5622` | `synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re` |
-| Val4 | `73.79.66.255:5622` | `synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5` |
-| Val5 | `194.163.183.166:5622` | `synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f` |
-| Val6 | `157.173.192.45:5622` | `synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx` |
+| Val1 | `62.146.182.207:5622` | `synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t` |
+| Val2 | `62.146.182.208:5622` | `synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk` |
+| Val3 | `62.146.182.209:5622` | `synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj` |
+| Val4 | `73.79.66.255:5622` | `synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg` |
+| Val5 | `194.163.183.166:5622` | `synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu` |
+| Val6 | `157.173.192.45:5622` | `synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc` |
 
 The active six-validator set excludes archive and any unapproved future validator.
 
@@ -412,12 +412,12 @@ Common strict allowlist:
 ```toml
 strict_validator_allowlist = true
 allowed_validator_addresses = [
-  "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs",
-  "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt",
-  "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re",
-  "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5",
-  "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f",
-  "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx"
+  "synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t",
+  "synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk",
+  "synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj",
+  "synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg",
+  "synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu",
+  "synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc"
 ]
 ```
 

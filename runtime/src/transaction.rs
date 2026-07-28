@@ -115,15 +115,21 @@ impl Transaction {
         let message_bytes =
             hex::decode(&message).map_err(|e| format!("Failed to decode hash: {}", e))?;
 
-        let signature = match private_key.algorithm {
-            PQCAlgorithm::FNDSA => pqc_manager.sign(private_key, &message_bytes)?,
-            _ => {
-                return Err(
-                    "Unsupported signature algorithm; Synergy transactions use FN-DSA only"
+        // Testnet-v3 signature domains are strictly separated:
+        //   user / account transactions -> ML-DSA-87   (this path)
+        //   validator consensus         -> ML-DSA-65   (consensus/validator_keys.rs)
+        //   P2P identity                -> Ed25519
+        //   address derivation          -> SHA3-256 over FN-DSA-1024 material
+        // ML-DSA-65 is deliberately NOT accepted here: accepting it would let a
+        // consensus key sign a user transaction, collapsing the domain split.
+        let signature =
+            match private_key.algorithm {
+                PQCAlgorithm::MLDSA87 => pqc_manager.sign(private_key, &message_bytes)?,
+                _ => return Err(
+                    "Unsupported signature algorithm; Synergy user transactions require ML-DSA-87"
                         .to_string(),
-                )
-            }
-        };
+                ),
+            };
 
         self.signature = signature.signature_data;
         self.signature_algorithm = algorithm_name(&private_key.algorithm).to_string();
@@ -277,13 +283,21 @@ impl Transaction {
             };
         }
 
+        // Governed Testnet-v3 profile: user/account transactions are ML-DSA-87.
+        // ML-DSA-65 (consensus domain) and FN-DSA (address-derivation material)
+        // are rejected here by design — cross-domain reuse must fail closed.
         match self.signature_algorithm.as_str() {
-            "fndsa" => {}
+            "mldsa87" => {}
+            // Internal validator Aegis carrier: ML-DSA-65 is admissible ONLY for a
+            // transaction that is structurally an Aegis carrier envelope, which
+            // cannot be interpreted as a user transaction. Its signature is
+            // verified separately by validate_legacy_aegis_carrier_transaction.
+            "mldsa65" if crate::aegis_tx_tool::is_legacy_aegis_carrier_transaction(self) => {}
             _ => {
                 return TransactionValidationResult {
                     is_valid: false,
                     error_message: Some(format!(
-                        "Unsupported signature algorithm: {}",
+                        "Unsupported signature algorithm: {}; Synergy user transactions require ML-DSA-87",
                         self.signature_algorithm
                     )),
                 };
@@ -775,7 +789,7 @@ mod tests {
             100,
             21000,
             None,
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
 
         assert_eq!(tx.sender, "sender123");
@@ -785,7 +799,7 @@ mod tests {
         assert_eq!(tx.signature, vec![0x01, 0x02, 0x03]);
         assert_eq!(tx.gas_price, 100);
         assert_eq!(tx.gas_limit, 21000);
-        assert_eq!(tx.signature_algorithm, "fndsa");
+        assert_eq!(tx.signature_algorithm, "mldsa87");
     }
 
     #[test]
@@ -799,7 +813,7 @@ mod tests {
             100,
             21000,
             None,
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
 
         let tx2 = Transaction::new(
@@ -811,7 +825,7 @@ mod tests {
             100,
             21000,
             None,
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
 
         // Same transaction should have same hash
@@ -826,7 +840,7 @@ mod tests {
             100,
             21000,
             None,
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
 
         // Different transaction should have different hash
@@ -844,7 +858,7 @@ mod tests {
             100,
             21000,
             None,
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
 
         let result = valid_tx.validate();
@@ -860,7 +874,7 @@ mod tests {
             100,
             21000,
             None,
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
 
         let result = invalid_tx.validate();
@@ -872,7 +886,7 @@ mod tests {
     fn admission_requires_testnet_context_and_real_pqc_signature() {
         let mut manager = PQCManager::new();
         let (public_key, private_key) = manager
-            .generate_keypair(PQCAlgorithm::FNDSA)
+            .generate_keypair(PQCAlgorithm::MLDSA87)
             .expect("test keypair should generate");
         let sender = crate::address::generate_wallet_address(&hex::encode(&public_key.key_data));
         let mut tx = Transaction::new(
@@ -884,7 +898,7 @@ mod tests {
             100,
             21000,
             None,
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
         tx.sign_with_public_key(&public_key, &private_key, &mut manager)
             .expect("test transaction should sign");
@@ -917,7 +931,7 @@ mod tests {
     fn admission_allows_signed_zero_value_validator_activation() {
         let mut manager = PQCManager::new();
         let (public_key, private_key) = manager
-            .generate_keypair(PQCAlgorithm::FNDSA)
+            .generate_keypair(PQCAlgorithm::MLDSA87)
             .expect("test keypair should generate");
         let sender = crate::address::generate_class_based_address(&public_key.key_data, 1);
         let mut tx = Transaction::new(
@@ -933,7 +947,7 @@ mod tests {
                 sender,
                 hex::encode(&public_key.key_data)
             )),
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
         tx.sign_with_public_key(&public_key, &private_key, &mut manager)
             .expect("test transaction should sign");
@@ -951,7 +965,7 @@ mod tests {
     fn admission_allows_signed_zero_value_sts_payload() {
         let mut manager = PQCManager::new();
         let (public_key, private_key) = manager
-            .generate_keypair(PQCAlgorithm::FNDSA)
+            .generate_keypair(PQCAlgorithm::MLDSA87)
             .expect("test keypair should generate");
         let sender = crate::address::generate_wallet_address(&hex::encode(&public_key.key_data));
         let payload = crate::sts::StsSignedPayload::new(crate::sts::StsTx::CreateFungible(
@@ -986,7 +1000,7 @@ mod tests {
             100,
             150_000,
             Some(data),
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
         tx.sign_with_public_key(&public_key, &private_key, &mut manager)
             .expect("test transaction should sign");
@@ -1011,7 +1025,7 @@ mod tests {
             100,
             21000,
             None,
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
 
         let validation = tx.validate_for_admission();
@@ -1043,6 +1057,72 @@ mod tests {
     }
 
     #[test]
+    fn consensus_mldsa65_key_cannot_sign_a_user_transaction() {
+        let mut manager = PQCManager::new();
+        let (_public_key, private_key) = manager
+            .generate_keypair(PQCAlgorithm::MLDSA65)
+            .expect("consensus-domain keypair should generate");
+        let mut tx = Transaction::new(
+            "sender".to_string(),
+            "receiver".to_string(),
+            1000,
+            1,
+            Vec::new(),
+            100,
+            21000,
+            None,
+            "mldsa87".to_string(),
+        );
+        let error = tx
+            .sign(&private_key, &mut manager)
+            .expect_err("ML-DSA-65 consensus key must not sign a user transaction");
+        assert!(error.contains("ML-DSA-87"), "{error}");
+    }
+
+    #[test]
+    fn fndsa_address_material_cannot_sign_a_user_transaction() {
+        let mut manager = PQCManager::new();
+        let (_public_key, private_key) = manager
+            .generate_keypair(PQCAlgorithm::FNDSA)
+            .expect("address-domain keypair should generate");
+        let mut tx = Transaction::new(
+            "sender".to_string(),
+            "receiver".to_string(),
+            1000,
+            1,
+            Vec::new(),
+            100,
+            21000,
+            None,
+            "mldsa87".to_string(),
+        );
+        assert!(tx.sign(&private_key, &mut manager).is_err());
+    }
+
+    #[test]
+    fn admission_rejects_non_mldsa87_declared_algorithms() {
+        for label in ["mldsa65", "fndsa", "slhdsa", "ed25519", ""] {
+            let mut tx = Transaction::new(
+                "sender".to_string(),
+                "receiver".to_string(),
+                1000,
+                1,
+                vec![1, 2, 3],
+                100,
+                21000,
+                None,
+                label.to_string(),
+            );
+            tx.signer_public_key = vec![9u8; 32];
+            let result = tx.validate();
+            assert!(
+                !result.is_valid,
+                "declared algorithm '{label}' must be rejected for user transactions"
+            );
+        }
+    }
+
+    #[test]
     fn test_transaction_serialization() {
         let tx = Transaction::new(
             "sender123".to_string(),
@@ -1053,7 +1133,7 @@ mod tests {
             100,
             21000,
             None,
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
 
         let serialized = tx.serialize().unwrap();
@@ -1078,7 +1158,7 @@ mod tests {
             100,
             21000,
             None,
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
 
         let json = tx.to_json().unwrap();
@@ -1103,7 +1183,7 @@ mod tests {
             100,
             21000,
             None,
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
 
         assert_eq!(tx.get_fee(), 100 * 38500);
@@ -1121,7 +1201,7 @@ mod tests {
             100,
             50_000,
             None,
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
         let hundred_snrg = Transaction::new(
             "sender123".to_string(),
@@ -1132,7 +1212,7 @@ mod tests {
             100,
             50_000,
             None,
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
 
         assert_eq!(one_snrg.get_fee(), hundred_snrg.get_fee());
@@ -1164,7 +1244,7 @@ mod tests {
                 "token_transfer:{\"to\":\"receiver456\",\"token\":\"TEST\",\"amount\":500000000}"
                     .to_string(),
             ),
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
 
         let breakdown = tx.get_network_fee_breakdown().unwrap();

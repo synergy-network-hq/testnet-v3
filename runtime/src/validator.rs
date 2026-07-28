@@ -15,6 +15,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const EPOCH_VALIDATOR_SETS_ENV: &str = "SYNERGY_EPOCH_VALIDATOR_SETS_FILE";
 pub const DEFAULT_EPOCH_VALIDATOR_SETS_PATH: &str = "config/epoch-validator-sets.json";
+
+/// Serializes every test that reads or writes [`EPOCH_VALIDATOR_SETS_ENV`].
+///
+/// The variable is process-global, so a per-module mutex cannot protect it:
+/// `consensus_algorithm`, `dual_quorum`, `validator` and `rpc_server` each used
+/// to hold their own lock, which serialized each file's *writers* against
+/// themselves and against nothing else. A test that merely expects the default
+/// path would then intermittently resolve another test's temp snapshot and fail
+/// with "epoch validator set file ... does not exist". Every module now takes
+/// this one lock, so writers exclude both each other and readers.
+#[cfg(test)]
+pub(crate) fn epoch_validator_sets_env_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    &LOCK
+}
 pub const SUPPORTED_EPOCH_VALIDATOR_SET_FORMAT_VERSION: u64 = 1;
 
 const VERBOSE_VALIDATOR_LOGS: bool = false;
@@ -2454,12 +2469,10 @@ mod tests {
     };
     use base64::{engine::general_purpose, Engine as _};
     use std::collections::BTreeMap;
-    use std::sync::{Mutex, MutexGuard};
-
-    static VALIDATOR_TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
+    use std::sync::MutexGuard;
 
     fn validator_test_env_lock() -> MutexGuard<'static, ()> {
-        VALIDATOR_TEST_ENV_LOCK
+        super::epoch_validator_sets_env_lock()
             .lock()
             .expect("validator test env mutex should lock")
     }
@@ -2571,7 +2584,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("synergy-{slug}-{unique}"))
+        crate::utils::test_temp_root(format!("synergy-{slug}-{unique}"))
     }
 
     fn write_epoch_validator_sets(path: &Path, sets: serde_json::Value) {
@@ -2658,7 +2671,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let temp_dir = std::env::temp_dir().join(format!("synergy-validator-registry-{unique}"));
+        let temp_dir = crate::utils::test_temp_root(format!("synergy-validator-registry-{unique}"));
         let state_dir = temp_dir.join("state-store");
         let legacy_dir = temp_dir.join("data");
         std::fs::create_dir_all(&state_dir).unwrap();
@@ -2817,7 +2830,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let temp_dir = std::env::temp_dir().join(format!("synergy-validator-max-test-{unique}"));
+        let temp_dir = crate::utils::test_temp_root(format!("synergy-validator-max-test-{unique}"));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let config_path = temp_dir.join("node.toml");
         let mut config = crate::config::NodeConfig::default();
@@ -2842,7 +2855,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let temp_dir =
-            std::env::temp_dir().join(format!("synergy-validator-allowlist-test-{unique}"));
+            crate::utils::test_temp_root(format!("synergy-validator-allowlist-test-{unique}"));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let config_path = temp_dir.join("node.toml");
         let mut config = crate::config::NodeConfig::default();
@@ -2871,7 +2884,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let temp_dir = std::env::temp_dir().join(format!("synergy-epoch-validator-set-{unique}"));
+        let temp_dir =
+            crate::utils::test_temp_root(format!("synergy-epoch-validator-set-{unique}"));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let snapshot_path = temp_dir.join("epoch-validator-sets.json");
         std::fs::write(
@@ -3205,7 +3219,8 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let temp_dir = std::env::temp_dir().join(format!("synergy-validator-fork-test-{unique}"));
+        let temp_dir =
+            crate::utils::test_temp_root(format!("synergy-validator-fork-test-{unique}"));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let config_path = temp_dir.join("node.toml");
         let mut config = crate::config::NodeConfig::default();
@@ -3419,6 +3434,8 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
 
     #[test]
     fn service_activation_replay_promotes_effective_shadow_without_consensus_duties() {
+        // Same reason as the sequential-activation replay test below.
+        let _env_lock = validator_test_env_lock();
         let (token_manager, validator_address, activation_tx) =
             funded_activation_fixture("service-replay-public-key", vec![17, 18, 19]);
         let activation_height = 1;
@@ -3490,6 +3507,9 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
 
     #[test]
     fn service_replay_reconstructs_sequential_validator_7_through_10_activation() {
+        // Replay resolves the epoch validator set path, so it has to exclude
+        // the tests that override SYNERGY_EPOCH_VALIDATOR_SETS_FILE.
+        let _env_lock = validator_test_env_lock();
         let bonded_stake = TESTNET_MIN_VALIDATOR_STAKE_NWEI;
         let funding_source = funded_test_address(bonded_stake.saturating_mul(4));
         let token_manager = crate::token::TokenManager::new();
@@ -4417,7 +4437,7 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
                 (*cluster_id, members)
             })
             .collect::<HashMap<_, _>>();
-        let path = std::env::temp_dir().join(format!(
+        let path = crate::utils::test_temp_root(format!(
             "synergy-validator-registry-clusters-{}-{}.json",
             std::process::id(),
             Validator::current_timestamp()

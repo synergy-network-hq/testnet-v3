@@ -174,7 +174,7 @@ mod tests {
 
     fn with_temp_runtime_root(test: impl FnOnce()) {
         let _guard = env_lock().lock().unwrap();
-        let base = std::env::temp_dir().join(format!(
+        let base = crate::utils::test_temp_root(format!(
             "synergy-synid-test-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)

@@ -13,6 +13,6 @@ network_id = "synergy-testnet-v3"
 address_hrp = "tsynq"
 
 [security]
-signature_algorithm = "ML-DSA-65"
+signature_algorithm = "ML-DSA-87"
 deploy_domain = "SYNQ_CONTRACT_DEPLOY_V1"
 call_domain = "SYNQ_CONTRACT_CALL_V1"

@@ -101,12 +101,15 @@ version = "0.1.0"
 dependencies = [
  "aegis-pqsynq",
  "anyhow",
+ "bech32",
  "compiler",
+ "hex",
  "log",
  "quantumvm",
  "serde",
  "serde_json",
  "sha2",
+ "sha3",
  "wasmtime",
 ]
 

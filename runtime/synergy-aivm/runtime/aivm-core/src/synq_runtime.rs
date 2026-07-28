@@ -2684,7 +2684,7 @@ mod tests {
             "required_aivm_version": "0.1",
             "required_chain_id": 1266,
             "required_network_id": "synergy-testnet",
-            "required_signature_algorithm": "ML-DSA-65",
+            "required_signature_algorithm": "ML-DSA-87",
             "security_policy": "synq-testnet-1266-v1",
             "source_hash": "test-source",
             "storage_schema_hash": "test-storage"

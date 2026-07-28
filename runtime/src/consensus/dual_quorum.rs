@@ -1422,7 +1422,7 @@ impl DualQuorumConsensus {
 
         #[cfg(test)]
         {
-            return std::env::temp_dir().join(format!(
+            return crate::utils::test_temp_root(format!(
                 "synergy-test-committed-qcs-{}.json",
                 std::process::id()
             ));
@@ -2883,7 +2883,7 @@ impl DualQuorumConsensus {
                 }
             }
 
-            return std::env::temp_dir().join(format!(
+            return crate::utils::test_temp_root(format!(
                 "synergy-test-local-vote-locks-{}.json",
                 std::process::id()
             ));
@@ -3911,11 +3911,9 @@ mod tests {
     use base64::{engine::general_purpose, Engine as _};
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::OnceLock;
 
     fn epoch_set_env_test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        crate::validator::epoch_validator_sets_env_lock()
     }
 
     struct EnvVarGuard {
@@ -3946,7 +3944,7 @@ mod tests {
         for address in addresses {
             let mut pqc_manager = PQCManager::new();
             let (public_key, private_key) = pqc_manager
-                .generate_keypair(PQCAlgorithm::FNDSA)
+                .generate_keypair(PQCAlgorithm::MLDSA65)
                 .expect("test validator consensus key should generate");
             register_test_validator_signing_key(address, public_key.clone(), private_key);
             let encoded_public_key = format!(
@@ -4051,7 +4049,7 @@ mod tests {
         .expect("test proposer should sign block");
         block.proposer_public_key = public_key.key_data;
         block.block_signature = signature.signature_data;
-        block.block_signature_algorithm = "fndsa".to_string();
+        block.block_signature_algorithm = "ml-dsa-65".to_string();
         block
     }
 
@@ -4363,7 +4361,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let temp_dir = env::temp_dir().join(format!("synergy-qc-epoch-set-{unique}"));
+        let temp_dir = crate::utils::test_temp_root(format!("synergy-qc-epoch-set-{unique}"));
         fs::create_dir_all(&temp_dir).unwrap();
         let snapshot_path = temp_dir.join("epoch-validator-sets.json");
         fs::write(
@@ -4410,7 +4408,7 @@ mod tests {
         .expect("validator1 proposer key should sign test block");
         block.proposer_public_key = proposer_public_key.key_data;
         block.block_signature = proposer_signature.signature_data;
-        block.block_signature_algorithm = "fndsa".to_string();
+        block.block_signature_algorithm = "ml-dsa-65".to_string();
         let mut qc = test_qc(&block.hash);
         qc.votes = vec![Vote {
             validator_address: "validator7".to_string(),
@@ -4476,7 +4474,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let temp_dir = env::temp_dir().join(format!("synergy-membership-transition-{unique}"));
+        let temp_dir =
+            crate::utils::test_temp_root(format!("synergy-membership-transition-{unique}"));
         fs::create_dir_all(&temp_dir).unwrap();
         let snapshot_path = temp_dir.join("epoch-validator-sets.json");
         fs::write(
@@ -4542,7 +4541,7 @@ mod tests {
         .expect("validator1 proposer key should sign pre-transition block");
         before_boundary.proposer_public_key = proposer_public_key.key_data;
         before_boundary.block_signature = proposer_signature.signature_data;
-        before_boundary.block_signature_algorithm = "fndsa".to_string();
+        before_boundary.block_signature_algorithm = "ml-dsa-65".to_string();
 
         let vote_error = DualQuorumConsensus::create_vote_for_validator_with_manager(
             "validator7",
@@ -4631,7 +4630,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let temp_dir = env::temp_dir().join(format!("synergy-vote-epoch-compat-{unique}"));
+        let temp_dir = crate::utils::test_temp_root(format!("synergy-vote-epoch-compat-{unique}"));
         fs::create_dir_all(&temp_dir).unwrap();
         let snapshot_path = temp_dir.join("epoch-validator-sets.json");
         fs::write(
@@ -4990,14 +4989,14 @@ mod tests {
 
         let mut pqc_manager = PQCManager::new();
         let (public_key, private_key) = pqc_manager
-            .generate_keypair(PQCAlgorithm::FNDSA)
+            .generate_keypair(PQCAlgorithm::MLDSA65)
             .expect("FN-DSA key generation should succeed");
         let signature = pqc_manager
             .sign(&private_key, block.hash.as_bytes())
             .expect("block signing should succeed");
         block.proposer_public_key = public_key.key_data;
         block.block_signature = signature.signature_data;
-        block.block_signature_algorithm = "fndsa".to_string();
+        block.block_signature_algorithm = "ml-dsa-65".to_string();
         block
     }
 
@@ -5011,12 +5010,12 @@ mod tests {
             1,
             21_000,
             None,
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
         let mut pqc_manager = PQCManager::new();
         let (public_key, private_key) = pqc_manager
-            .generate_keypair(PQCAlgorithm::FNDSA)
-            .expect("FN-DSA transaction key generation should succeed");
+            .generate_keypair(PQCAlgorithm::MLDSA87)
+            .expect("ML-DSA-87 transaction key generation should succeed");
         tx.sign_with_public_key(&public_key, &private_key, &mut pqc_manager)
             .expect("transaction signing should succeed");
         tx
@@ -5031,7 +5030,7 @@ mod tests {
         block.hash = block.recompute_hash();
         let mut pqc_manager = PQCManager::new();
         let (public_key, private_key) = pqc_manager
-            .generate_keypair(PQCAlgorithm::FNDSA)
+            .generate_keypair(PQCAlgorithm::MLDSA65)
             .expect("FN-DSA block key generation should succeed");
         let signature = pqc_manager
             .sign(&private_key, block.hash.as_bytes())
@@ -5047,8 +5046,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system time should be valid")
             .as_nanos();
-        std::env::temp_dir()
-            .join(format!("synergy-{test_name}-{unique}"))
+        crate::utils::test_temp_root(format!("synergy-{test_name}-{unique}"))
             .join("data")
             .join("consensus_vote_locks.json")
     }
@@ -5680,7 +5678,7 @@ mod tests {
         let parent = signed_block(204_215, 1, "validator0");
         let mut pqc_manager = PQCManager::new();
         let (public_key, _) = pqc_manager
-            .generate_keypair(PQCAlgorithm::FNDSA)
+            .generate_keypair(PQCAlgorithm::MLDSA65)
             .expect("FN-DSA key generation should succeed");
         let fork = serde_json::json!({
             "fork_height": 204_216,

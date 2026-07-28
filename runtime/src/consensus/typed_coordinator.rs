@@ -187,7 +187,7 @@ pub struct TypedCoordinatorIngressMetrics {
 /// to the independently committed post-deployment Genesis state root.
 pub struct TypedPosyCoordinatorStartup {
     pub genesis_bootstrap: TestnetV3GenesisBootstrap,
-    pub protocol_config: crate::synergy_types::ProtocolConfig,
+    pub consensus_parameters: crate::consensus_parameters::LoadedConsensusParameters,
     pub signer: AegisPqvmSigner,
     pub local_validator_id: ValidatorId,
     pub genesis_anchor: Hash,
@@ -203,6 +203,21 @@ impl TypedPosyCoordinatorStartup {
     /// not a fallback: callers lacking the post-deployment state root or a
     /// final Genesis anchor cannot start a validator coordinator.
     pub fn build(self) -> Result<TypedPosyCoordinator, String> {
+        self.consensus_parameters
+            .require_genesis_binding()
+            .map_err(|error| format!("typed PoSy startup refuses unbound parameters: {error}"))?;
+        self.consensus_parameters.manifest.validate_finalized()?;
+        if self.consensus_parameters.root
+            != self
+                .consensus_parameters
+                .protocol_config
+                .consensus_parameter_root
+        {
+            return Err(
+                "typed PoSy startup parameter root disagrees with the loaded protocol configuration"
+                    .to_string(),
+            );
+        }
         if self.genesis_anchor.is_zero() || self.deployed_genesis_state_root.is_zero() {
             return Err(
                 "typed PoSy startup requires final non-zero Genesis anchor and deployed state root"
@@ -222,8 +237,9 @@ impl TypedPosyCoordinatorStartup {
                     .to_string(),
             );
         }
+        let protocol_config = self.consensus_parameters.protocol_config;
         let local_context = self.genesis_bootstrap.initial_local_consensus_context(
-            &self.protocol_config,
+            &protocol_config,
             self.genesis_anchor,
             self.deployed_genesis_state_root,
         )?;
@@ -231,7 +247,7 @@ impl TypedPosyCoordinatorStartup {
             &self.genesis_bootstrap.verifier,
             self.genesis_bootstrap.validator_set,
             self.genesis_bootstrap.cluster_map,
-            self.protocol_config,
+            protocol_config,
         );
         TypedPosyCoordinator::new(
             consensus,
@@ -1079,6 +1095,7 @@ pub fn reset_typed_coordinator_ingress_for_test() {
 mod tests {
     use super::*;
     use crate::consensus::posy::ProofOfSynergyBft;
+    use crate::consensus_parameters::load_genesis_bound_consensus_parameters;
     use crate::crypto::aegis_pqvm::AegisPqvmSigner;
     use crate::etdag::EtdagParameters;
     use crate::execution::ExecutionState;
@@ -1090,8 +1107,10 @@ mod tests {
         ValidatorSet, ValidatorStatus, Vote, VotePhase, POSY_PROTOCOL_VERSION,
     };
     use std::collections::BTreeSet;
-    use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static COORDINATOR_FIXTURE_SEQUENCE: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+    static INGRESS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn vote() -> TypedConsensusMessage {
         TypedConsensusMessage::Vote {
@@ -1122,6 +1141,7 @@ mod tests {
 
     #[test]
     fn typed_messages_fail_closed_without_a_running_coordinator() {
+        let _guard = INGRESS_TEST_LOCK.lock().unwrap();
         reset_typed_coordinator_ingress_for_test();
         let error = dispatch_typed_consensus_message("peer-a", None, vote()).unwrap_err();
         assert!(error.contains("coordinator is not running"));
@@ -1129,6 +1149,7 @@ mod tests {
 
     #[test]
     fn typed_messages_use_the_bounded_dedicated_mailbox() {
+        let _guard = INGRESS_TEST_LOCK.lock().unwrap();
         reset_typed_coordinator_ingress_for_test();
         let receiver = install_typed_coordinator_ingress(1).unwrap();
         dispatch_typed_consensus_message("peer-a", None, vote()).unwrap();
@@ -1222,13 +1243,10 @@ mod tests {
         };
         let verifier = signer.verifier();
         let consensus = ProofOfSynergyBft::new(&verifier, set, cluster, protocol);
-        let path = PathBuf::from(std::env::temp_dir()).join(format!(
+        let path = crate::utils::test_temp_root(format!(
             "synergy-typed-coordinator-{}-{}.json",
             std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            COORDINATOR_FIXTURE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         let store = TypedFinalityStore::at_path(path, anchor).unwrap();
         TypedPosyCoordinator::new(
@@ -1241,6 +1259,14 @@ mod tests {
             store,
         )
         .unwrap()
+    }
+
+    fn genesis_bound_parameters() -> crate::consensus_parameters::LoadedConsensusParameters {
+        let genesis_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../genesis.testnet-v3.identity-assigned.json");
+        let genesis: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(genesis_path).unwrap()).unwrap();
+        load_genesis_bound_consensus_parameters(&genesis["consensus_parameters"]).unwrap()
     }
 
     #[test]
@@ -1276,7 +1302,7 @@ mod tests {
         };
         let coordinator = TypedPosyCoordinatorStartup {
             genesis_bootstrap: bootstrap,
-            protocol_config: consensus.protocol_config,
+            consensus_parameters: genesis_bound_parameters(),
             signer,
             local_validator_id,
             genesis_anchor,
@@ -1327,7 +1353,7 @@ mod tests {
         };
         let result = TypedPosyCoordinatorStartup {
             genesis_bootstrap: bootstrap,
-            protocol_config: consensus.protocol_config,
+            consensus_parameters: genesis_bound_parameters(),
             signer,
             local_validator_id,
             genesis_anchor,

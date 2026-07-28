@@ -9,6 +9,10 @@ use crate::synq_execution::{
 use aivm_core::state::ContractState;
 use std::collections::{BTreeMap, BTreeSet};
 
+pub const TESTNET_V3_GENESIS_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+pub const TESTNET_V3_GENESIS_CHAIN_ID: u64 = 1266;
+pub const TESTNET_V3_GENESIS_RUNTIME_NETWORK_ID: &str = "synergy-testnet-v3";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionState {
     pub balances_nwei: BTreeMap<String, u128>,
@@ -71,6 +75,132 @@ impl ExecutionState {
             }
         }
         Ok(tx_id)
+    }
+}
+
+/// Deterministic, public, root-bearing execution state required to boot the
+/// finalized Testnet-v3 genesis.
+///
+/// Admission caches and diagnostic error maps are intentionally excluded:
+/// they are transient verification products and do not contribute to
+/// `compute_state_root_after`. Every field that does contribute to that root
+/// is included so a validator can reconstruct the exact post-ceremony state
+/// without access to any custody key.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GenesisArtifactSnapshot {
+    pub key: SynQArtifactKey,
+    pub artifact: SynQContractArtifact,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GenesisExecutionSnapshot {
+    pub schema_version: u32,
+    pub chain_id: u64,
+    pub runtime_network_id: String,
+    pub state_root: String,
+    pub aivm_state_root: String,
+    pub balances_nwei: BTreeMap<String, u128>,
+    pub sts_state: StsState,
+    pub fee_events: Vec<FeeChargedEvent>,
+    pub burn_events: Vec<BurnAddressTransferEvent>,
+    pub synq_artifacts: Vec<GenesisArtifactSnapshot>,
+    pub synq_contracts: BTreeMap<String, SynQDeploymentRecord>,
+    pub synq_aivm_state: ContractState,
+}
+
+impl GenesisExecutionSnapshot {
+    pub fn capture_testnet_v3(state: &ExecutionState) -> Result<Self, String> {
+        Ok(Self {
+            schema_version: TESTNET_V3_GENESIS_SNAPSHOT_SCHEMA_VERSION,
+            chain_id: TESTNET_V3_GENESIS_CHAIN_ID,
+            runtime_network_id: TESTNET_V3_GENESIS_RUNTIME_NETWORK_ID.to_string(),
+            state_root: compute_state_root_after(state)?.to_hex(),
+            aivm_state_root: hex::encode(state.synq_aivm_state.state_root()),
+            balances_nwei: state.balances_nwei.clone(),
+            sts_state: state.sts_state.clone(),
+            fee_events: state.fee_events.clone(),
+            burn_events: state.burn_events.clone(),
+            synq_artifacts: state
+                .synq_artifacts
+                .iter()
+                .map(|(key, artifact)| GenesisArtifactSnapshot {
+                    key: key.clone(),
+                    artifact: artifact.clone(),
+                })
+                .collect(),
+            synq_contracts: state.synq_contracts.clone(),
+            synq_aivm_state: state.synq_aivm_state.clone(),
+        })
+    }
+
+    pub fn restore_testnet_v3(&self) -> Result<ExecutionState, String> {
+        if self.schema_version != TESTNET_V3_GENESIS_SNAPSHOT_SCHEMA_VERSION {
+            return Err(format!(
+                "unsupported Testnet-v3 genesis execution snapshot schema {}",
+                self.schema_version
+            ));
+        }
+        if self.chain_id != TESTNET_V3_GENESIS_CHAIN_ID
+            || self.runtime_network_id != TESTNET_V3_GENESIS_RUNTIME_NETWORK_ID
+        {
+            return Err(format!(
+                "Testnet-v3 genesis execution snapshot chain/network mismatch: chain_id={} network={}",
+                self.chain_id, self.runtime_network_id
+            ));
+        }
+        let mut synq_artifacts = BTreeMap::new();
+        for entry in &self.synq_artifacts {
+            if entry.artifact.key() != entry.key {
+                return Err(
+                    "Testnet-v3 genesis execution snapshot artifact content does not match its key"
+                        .to_string(),
+                );
+            }
+            if synq_artifacts
+                .insert(entry.key.clone(), entry.artifact.clone())
+                .is_some()
+            {
+                return Err(
+                    "Testnet-v3 genesis execution snapshot contains a duplicate SynQ artifact key"
+                        .to_string(),
+                );
+            }
+        }
+        for deployment in self.synq_contracts.values() {
+            if !synq_artifacts.contains_key(&deployment.artifact_key) {
+                return Err(format!(
+                    "Testnet-v3 genesis execution snapshot contract {} references a missing artifact",
+                    deployment.contract_address
+                ));
+            }
+        }
+        let state = ExecutionState {
+            balances_nwei: self.balances_nwei.clone(),
+            sts_state: self.sts_state.clone(),
+            fee_events: self.fee_events.clone(),
+            burn_events: self.burn_events.clone(),
+            verified_authorizations: BTreeMap::new(),
+            synq_verifications: BTreeMap::new(),
+            synq_errors: BTreeMap::new(),
+            synq_artifacts,
+            synq_contracts: self.synq_contracts.clone(),
+            synq_aivm_state: self.synq_aivm_state.clone(),
+        };
+        let actual_state_root = compute_state_root_after(&state)?.to_hex();
+        if actual_state_root != self.state_root {
+            return Err(format!(
+                "Testnet-v3 genesis execution snapshot state root mismatch: declared {} computed {}",
+                self.state_root, actual_state_root
+            ));
+        }
+        let actual_aivm_state_root = hex::encode(state.synq_aivm_state.state_root());
+        if actual_aivm_state_root != self.aivm_state_root {
+            return Err(format!(
+                "Testnet-v3 genesis execution snapshot AIVM root mismatch: declared {} computed {}",
+                self.aivm_state_root, actual_aivm_state_root
+            ));
+        }
+        Ok(state)
     }
 }
 
@@ -1057,12 +1187,12 @@ mod tests {
 
     impl CounterSynQFixture {
         fn new() -> Option<Self> {
-            let signer = Sign::mldsa65();
-            let (public_key_bytes, private_key) = signer.keygen().expect("ML-DSA-65 keygen");
+            let signer = Sign::mldsa87();
+            let (public_key_bytes, private_key) = signer.keygen().expect("ML-DSA-87 keygen");
             let public_key = SynQPublicKey::new(public_key_bytes);
             let address = derive_synq_address(
                 &public_key,
-                AlgorithmId::MlDsa65,
+                AlgorithmId::MlDsa87,
                 &PqSynQNetworkId(
                     crate::synq_admission::SYNQ_CANONICAL_TESTNET_NETWORK_ID.to_string(),
                 ),
@@ -1211,7 +1341,7 @@ mod tests {
                     crate::synq_admission::SYNQ_CANONICAL_TESTNET_NETWORK_ID.to_string(),
                 ),
                 protocol_version: 1,
-                algorithm_id: AlgorithmId::MlDsa65,
+                algorithm_id: AlgorithmId::MlDsa87,
                 signature_purpose,
                 nonce,
                 not_before_unix: 0,
@@ -1223,7 +1353,7 @@ mod tests {
 
         fn sign_payload(&self, payload: &SynQSigningPayload) -> Vec<u8> {
             let canonical = canonicalize_signing_payload(payload).expect("canonical payload");
-            Sign::mldsa65()
+            Sign::mldsa87()
                 .detached_sign(&canonical, &self.private_key)
                 .expect("ML-DSA-65 sign")
         }
@@ -1359,8 +1489,8 @@ mod tests {
                 normalized_network_id: "synergy-testnet".to_string(),
                 node_network_id: crate::synergy_types::SYNERGY_TESTNET_V3_NETWORK_ID.to_string(),
                 domain: "SYNQ_CONTRACT_DEPLOY_V1".to_string(),
-                algorithm: "ML-DSA-65".to_string(),
-                signer: "tsynq1fixture".to_string(),
+                algorithm: "ML-DSA-87".to_string(),
+                signer: "syna1fixture".to_string(),
                 payload_hash: [7; 32],
                 bytecode_hash: Some([1; 32]),
                 manifest_hash: Some([2; 32]),
@@ -1406,7 +1536,7 @@ mod tests {
             .as_ref()
             .expect("receipt includes SynQ verification summary");
         assert_eq!(summary.domain, "SYNQ_CONTRACT_DEPLOY_V1");
-        assert_eq!(summary.algorithm, "ML-DSA-65");
+        assert_eq!(summary.algorithm, "ML-DSA-87");
         assert_eq!(summary.signer, carrier.signer);
         assert_eq!(summary.payload_hash, carrier.payload_hash);
         assert_eq!(summary.bytecode_hash, carrier.bytecode_hash);
@@ -1424,7 +1554,7 @@ mod tests {
         let contract_address_text = synergy_contract_address_from_pqsynq_address(&contract_address);
         assert_ne!(
             contract_address_text,
-            fixture.address.to_testnet_debug_string()
+            crate::address::derive_standard_account_address(&fixture.public_key.bytes)
         );
         let increment_payload = fixture.call_payload(
             contract_address,
@@ -1661,5 +1791,45 @@ mod tests {
         assert!(execute_block(&altered, &state).is_err());
         state.verified_authorizations.clear();
         assert!(execute_block(&altered, &state).is_err());
+    }
+
+    #[test]
+    fn testnet_v3_genesis_snapshot_round_trips_all_root_bearing_state() {
+        let mut state = ExecutionState::new()
+            .with_balance("genesis-account-a", 11)
+            .with_balance("genesis-account-b", 22);
+        let artifact = SynQContractArtifact::new(
+            vec![0x53, 0x59, 0x4e, 0x51],
+            "{}".to_string(),
+            "{}".to_string(),
+        );
+        state.synq_artifacts.insert(artifact.key(), artifact);
+        let expected_root = compute_state_root_after(&state).expect("state root");
+        let snapshot =
+            GenesisExecutionSnapshot::capture_testnet_v3(&state).expect("capture snapshot");
+        let encoded = serde_json::to_vec(&snapshot).expect("snapshot must be JSON serializable");
+        let decoded: GenesisExecutionSnapshot =
+            serde_json::from_slice(&encoded).expect("snapshot must decode from JSON");
+        let restored = decoded.restore_testnet_v3().expect("restore snapshot");
+
+        assert_eq!(
+            compute_state_root_after(&restored).expect("restored state root"),
+            expected_root
+        );
+        assert!(restored.verified_authorizations.is_empty());
+        assert!(restored.synq_verifications.is_empty());
+        assert!(restored.synq_errors.is_empty());
+    }
+
+    #[test]
+    fn testnet_v3_genesis_snapshot_rejects_root_bearing_tampering() {
+        let state = ExecutionState::new().with_balance("genesis-account", 11);
+        let mut snapshot =
+            GenesisExecutionSnapshot::capture_testnet_v3(&state).expect("capture snapshot");
+        snapshot
+            .balances_nwei
+            .insert("genesis-account".to_string(), 12);
+
+        assert!(snapshot.restore_testnet_v3().is_err());
     }
 }

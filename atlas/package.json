@@ -1,0 +1,9 @@
+{
+  "name": "@synergy-network/atlas-v3-operations",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "validate-network": "node scripts/validate-network-config.mjs"
+  }
+}

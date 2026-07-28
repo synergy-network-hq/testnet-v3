@@ -404,7 +404,13 @@ impl<'a> PreCommitGuard<'a> {
                 &local_consensus_context.height_context,
             )
             .map_err(|error| error.to_string())?;
-        if qc.block_id != block.block_id()? {
+        // A QC carries the CANDIDATE id (`posy.rs` builds votes with
+        // `block.candidate_id()`), which deliberately excludes the proposal
+        // envelope fields that change under TC-authorized carry-forward (round,
+        // proposer). Comparing it against `block.block_id()` — the full header
+        // digest — could never match for any block with a non-zero round or a
+        // set proposer, so this gate rejected every otherwise-valid QC.
+        if qc.block_id != block.candidate_id()? {
             return Err("QC block_id does not match exact block".to_string());
         }
         if qc.height != block.header.height
@@ -583,12 +589,12 @@ fn self_quarantine_path() -> PathBuf {
                 .chars()
                 .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
                 .collect::<String>();
-            return std::env::temp_dir().join(format!(
+            return crate::utils::test_temp_root(format!(
                 "synergy-test-validator-quarantine-{}-{sanitized}.json",
                 std::process::id()
             ));
         }
-        return std::env::temp_dir().join(format!(
+        return crate::utils::test_temp_root(format!(
             "synergy-test-validator-quarantine-{}.json",
             std::process::id()
         ));
@@ -969,7 +975,7 @@ mod tests {
 
     #[test]
     fn self_quarantine_record_persists_canonical_lock_conflict_evidence() {
-        let path = std::env::temp_dir().join(format!(
+        let path = crate::utils::test_temp_root(format!(
             "synergy-self-quarantine-test-{}-{}.json",
             std::process::id(),
             current_unix_secs()

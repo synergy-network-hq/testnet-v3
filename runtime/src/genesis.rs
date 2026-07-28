@@ -1,9 +1,14 @@
 use chrono::{DateTime, Utc};
 use lazy_static::lazy_static;
 use serde_json::{json, Value};
+use sha2::Digest as _;
 use std::fs;
 use std::path::PathBuf;
 
+use crate::consensus_parameters::{
+    load_genesis_bound_consensus_parameters, LoadedConsensusParameters,
+    CONSENSUS_PARAMETER_GENESIS_BINDING_SCHEMA_VERSION, CONSENSUS_PARAMETER_GENESIS_BINDING_STATUS,
+};
 use crate::utils::resolve_data_path;
 
 const ZERO_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -47,6 +52,7 @@ pub struct GenesisDocument {
     balances: Vec<GenesisBalance>,
     validators: Vec<InitialValidator>,
     token: GenesisTokenConfig,
+    consensus_parameters: Option<LoadedConsensusParameters>,
 }
 
 lazy_static! {
@@ -113,6 +119,10 @@ impl GenesisDocument {
     pub fn token(&self) -> &GenesisTokenConfig {
         &self.token
     }
+
+    pub fn consensus_parameters(&self) -> Option<&LoadedConsensusParameters> {
+        self.consensus_parameters.as_ref()
+    }
 }
 
 fn load_canonical_genesis_from_disk() -> Result<GenesisDocument, String> {
@@ -127,6 +137,7 @@ fn load_canonical_genesis_from_path(path: PathBuf) -> Result<GenesisDocument, St
         .map_err(|error| format!("parse canonical genesis {}: {error}", path.display()))?;
 
     validate_no_placeholders(&value)?;
+    reject_test_fixture_genesis(&value, &path)?;
 
     let timestamp = parse_timestamp(required(&value, &["header", "timestamp"])?)
         .map_err(|error| format!("header.timestamp: {error}"))?;
@@ -137,6 +148,7 @@ fn load_canonical_genesis_from_path(path: PathBuf) -> Result<GenesisDocument, St
     let balances = parse_balances(&value)?;
     let validators = parse_validators(&value)?;
     let token = parse_token_config(&value)?;
+    let consensus_parameters = load_candidate_consensus_parameters(&value)?;
 
     validate_integrity_hashes(&value)?;
 
@@ -153,7 +165,7 @@ fn load_canonical_genesis_from_path(path: PathBuf) -> Result<GenesisDocument, St
         return Err("p2p_identity.network_magic_bytes must not be empty".to_string());
     }
 
-    Ok(GenesisDocument {
+    let document = GenesisDocument {
         value,
         path,
         genesis_hash,
@@ -166,12 +178,29 @@ fn load_canonical_genesis_from_path(path: PathBuf) -> Result<GenesisDocument, St
         balances,
         validators,
         token,
-    })
+        consensus_parameters,
+    };
+    if document.value.get("genesis_deployment").is_some() {
+        crate::testnet_v3_execution_bootstrap::load_finalized_testnet_v3_genesis_execution_state(
+            &document,
+        )
+        .map_err(|error| format!("validate finalized Genesis execution state: {error}"))?;
+    }
+    Ok(document)
+}
+
+/// Loads and fully validates a genesis document from an explicit path.
+///
+/// Release tooling uses this entry point to validate a staged candidate before
+/// any canonical file is replaced. It performs the same checks as the runtime
+/// loader, including every integrity root and the derived network magic.
+pub fn load_genesis_from_path(path: impl Into<PathBuf>) -> Result<GenesisDocument, String> {
+    load_canonical_genesis_from_path(path.into())
 }
 
 #[cfg(test)]
 pub(crate) fn load_genesis_from_path_for_test(path: PathBuf) -> Result<GenesisDocument, String> {
-    load_canonical_genesis_from_path(path)
+    load_genesis_from_path(path)
 }
 
 fn genesis_path() -> PathBuf {
@@ -383,7 +412,162 @@ fn is_testnet_v3_candidate_schema(value: &Value) -> bool {
         == Some("deterministic_sorted_keys_no_insignificant_whitespace")
 }
 
+fn load_candidate_consensus_parameters(
+    value: &Value,
+) -> Result<Option<LoadedConsensusParameters>, String> {
+    let Some(binding) = value.get("consensus_parameters") else {
+        if value.get("genesis_deployment").is_some() {
+            return Err(
+                "finalized Testnet-v3 Genesis is missing its consensus parameter binding"
+                    .to_string(),
+            );
+        }
+        return Ok(None);
+    };
+    let loaded = load_genesis_bound_consensus_parameters(binding)?;
+    let manifest = &loaded.manifest;
+    if required_string(value, &["integrity", "consensus_parameter_decision_id"])?
+        != manifest.governance_approval_id
+    {
+        return Err(
+            "Genesis integrity Decision ID disagrees with finalized consensus parameters"
+                .to_string(),
+        );
+    }
+    if required_string(value, &["integrity", "consensus_parameter_manifest_sha256"])?
+        != required_string(binding, &["canonical_manifest_sha256"])?
+    {
+        return Err(
+            "Genesis integrity manifest digest disagrees with the consensus parameter binding"
+                .to_string(),
+        );
+    }
+    if required_string(value, &["integrity", "consensus_parameter_root_sha3_512"])?
+        != loaded.root.to_hex()
+    {
+        return Err(
+            "Genesis integrity parameter root disagrees with finalized consensus parameters"
+                .to_string(),
+        );
+    }
+    let hash_inputs = required_array(value, &["canonicalization", "genesis_hash_inputs"])?;
+    if !hash_inputs
+        .iter()
+        .any(|entry| entry.as_str() == Some("consensus_parameters"))
+    {
+        return Err(
+            "Genesis hash inputs do not include the finalized consensus parameters".to_string(),
+        );
+    }
+
+    if required_u64(value, &["network", "chain_id"])? != manifest.chain_id.0 {
+        return Err("Genesis chain ID disagrees with finalized consensus parameters".to_string());
+    }
+    if required_string(value, &["network", "network_slug"])? != manifest.network_id.0 {
+        return Err("Genesis network ID disagrees with finalized consensus parameters".to_string());
+    }
+    if required_string(value, &["network", "consensus_version"])? != manifest.protocol_version {
+        return Err(
+            "Genesis consensus version disagrees with finalized consensus parameters".to_string(),
+        );
+    }
+    if required_u64(value, &["consensus", "epoch", "length_blocks"])?
+        != manifest
+            .epoch_length_slots
+            .ok_or_else(|| "finalized epoch length is missing".to_string())?
+    {
+        return Err(
+            "Genesis epoch length disagrees with finalized consensus parameters".to_string(),
+        );
+    }
+    for (path, expected) in [
+        (
+            &["consensus", "target_block_time_ms"][..],
+            manifest.target_block_time_ms,
+        ),
+        (
+            &["consensus", "initial_active_validator_count"][..],
+            manifest.initial_cluster_validator_count,
+        ),
+        (
+            &["consensus", "min_validator_count"][..],
+            manifest.initial_cluster_validator_count,
+        ),
+        (
+            &["consensus", "min_quorum_threshold"][..],
+            manifest.initial_availability_quorum,
+        ),
+        (
+            &["consensus", "timeouts", "proposal_ms"][..],
+            manifest.proposal_timeout_ms,
+        ),
+        (
+            &["consensus", "timeouts", "prevote_ms"][..],
+            manifest.prevote_timeout_ms,
+        ),
+        (
+            &["consensus", "timeouts", "precommit_ms"][..],
+            manifest.precommit_timeout_ms,
+        ),
+        (
+            &["consensus", "timeouts", "max_round_ms"][..],
+            manifest.max_round_timeout_ms,
+        ),
+    ] {
+        if required_u64(value, path)? != expected {
+            return Err(format!(
+                "Genesis {} disagrees with finalized consensus parameters",
+                path.join(".")
+            ));
+        }
+    }
+    if required_string(value, &["consensus", "cluster_schedule_version"])?
+        != manifest.cluster_schedule_version
+    {
+        return Err(
+            "Genesis cluster schedule disagrees with finalized consensus parameters".to_string(),
+        );
+    }
+    if parse_u128(&required_string(value, &["consensus", "min_stake_nwei"])?)?
+        != manifest.required_validator_stake_nwei
+    {
+        return Err(
+            "Genesis minimum validator stake disagrees with finalized consensus parameters"
+                .to_string(),
+        );
+    }
+    let timeout_keys = required(value, &["consensus", "timeouts"])?
+        .as_object()
+        .ok_or_else(|| "consensus.timeouts is not an object".to_string())?
+        .keys()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    let canonical_timeout_keys = ["max_round_ms", "precommit_ms", "prevote_ms", "proposal_ms"]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    if timeout_keys != canonical_timeout_keys {
+        return Err(
+            "Genesis consensus.timeouts contains legacy or missing competing timeout fields"
+                .to_string(),
+        );
+    }
+    for validator in required_array(value, &["validators"])? {
+        if required_string(validator, &["consensus_key_type"])?
+            .to_ascii_lowercase()
+            .replace('-', "")
+            != manifest.consensus_signature_algorithm
+        {
+            return Err(
+                "Genesis validator consensus key algorithm disagrees with finalized consensus parameters"
+                    .to_string(),
+            );
+        }
+    }
+    Ok(Some(loaded))
+}
+
 fn validate_testnet_v3_candidate_integrity_hashes(value: &Value) -> Result<(), String> {
+    load_candidate_consensus_parameters(value)?;
     let empty_hash = hash_bytes(&[]);
     let allocation_hash = hash_json(required(value, &["allocations"])?);
     let validator_hash = hash_json(required(value, &["validators"])?);
@@ -397,20 +581,37 @@ fn validate_testnet_v3_candidate_integrity_hashes(value: &Value) -> Result<(), S
         ],
     )?);
     let contract_hash = hash_json(required(value, &["contracts"])?);
-    let state_root = hash_json(&json!({
-        "accounts": required(value, &["accounts"] )?,
-        "balances": required(value, &["balances"] )?,
-        "allocations": required(value, &["allocations"] )?,
-        "contracts": required(value, &["contracts"] )?,
-        "consensus": required(value, &["consensus"] )?,
-        "governance": required(value, &["governance"] )?,
-        "modules": required(value, &["modules"] )?,
-        "network": required(value, &["network"] )?,
-        "security": required(value, &["security"] )?,
-        "synergy_state": required(value, &["synergy_state"] )?,
-        "token": required(value, &["token"] )?,
-        "validators": required(value, &["validators"] )?,
-    }));
+    let mut state_components = serde_json::Map::new();
+    for key in [
+        "accounts",
+        "balances",
+        "allocations",
+        "contracts",
+        "consensus",
+        "governance",
+        "modules",
+        "network",
+        "security",
+        "synergy_state",
+        "token",
+        "validators",
+    ] {
+        state_components.insert(key.to_string(), required(value, &[key])?.clone());
+    }
+    if let Some(deployment) = value.get("genesis_deployment") {
+        state_components.insert(
+            "execution".to_string(),
+            required(value, &["execution"])?.clone(),
+        );
+        state_components.insert("genesis_deployment".to_string(), deployment.clone());
+    }
+    if let Some(migration) = value.get("contract_address_migration") {
+        state_components.insert("contract_address_migration".to_string(), migration.clone());
+    }
+    if let Some(parameters) = value.get("consensus_parameters") {
+        state_components.insert("consensus_parameters".to_string(), parameters.clone());
+    }
+    let state_root = hash_json(&Value::Object(state_components));
     let data_root = hash_json(&json!({
         "contracts": required(value, &["contracts"] )?,
         "modules": required(value, &["modules"] )?,
@@ -429,10 +630,15 @@ fn validate_testnet_v3_candidate_integrity_hashes(value: &Value) -> Result<(), S
         &empty_hash,
         "header.transactions_root",
     )?;
+    let expected_receipts_root = value
+        .get("genesis_deployment")
+        .and_then(|deployment| deployment.get("receipt_root"))
+        .and_then(Value::as_str)
+        .unwrap_or(&empty_hash);
     compare_hash(
         value,
         &["header", "receipts_root"],
-        &empty_hash,
+        expected_receipts_root,
         "header.receipts_root",
     )?;
     compare_hash(
@@ -505,6 +711,183 @@ fn validate_testnet_v3_candidate_integrity_hashes(value: &Value) -> Result<(), S
         "network_magic_bytes.value",
     )?;
     Ok(())
+}
+
+/// Recomputes every derived integrity value for the Testnet-v3 candidate
+/// schema in dependency order.
+///
+/// The pre-deployment candidate has no `genesis_deployment` block and retains
+/// the empty receipt root. A finalized candidate must bind its ceremony block
+/// into both the state root and the genesis hash, and its combined deployment
+/// receipt root becomes the header receipt root.
+pub fn recompute_testnet_v3_candidate_integrity(value: &mut Value) -> Result<(), String> {
+    if !is_testnet_v3_candidate_schema(value) {
+        return Err("not a canonical Testnet-v3 candidate schema".to_string());
+    }
+
+    let empty_hash = hash_bytes(&[]);
+    let allocation_hash = hash_json(required(value, &["allocations"])?);
+    let validator_hash = hash_json(required(value, &["validators"])?);
+    let validator_set_hash = hash_json(required(
+        value,
+        &[
+            "contracts",
+            "validator_registry",
+            "init_params",
+            "validators",
+        ],
+    )?);
+    let contract_hash = hash_json(required(value, &["contracts"])?);
+
+    let mut state_components = serde_json::Map::new();
+    for key in [
+        "accounts",
+        "balances",
+        "allocations",
+        "contracts",
+        "consensus",
+        "governance",
+        "modules",
+        "network",
+        "security",
+        "synergy_state",
+        "token",
+        "validators",
+    ] {
+        state_components.insert(key.to_string(), required(value, &[key])?.clone());
+    }
+    if let Some(deployment) = value.get("genesis_deployment") {
+        state_components.insert(
+            "execution".to_string(),
+            required(value, &["execution"])?.clone(),
+        );
+        state_components.insert("genesis_deployment".to_string(), deployment.clone());
+    }
+    if let Some(migration) = value.get("contract_address_migration") {
+        state_components.insert("contract_address_migration".to_string(), migration.clone());
+    }
+    if let Some(parameters) = value.get("consensus_parameters") {
+        state_components.insert("consensus_parameters".to_string(), parameters.clone());
+    }
+    let state_root = hash_json(&Value::Object(state_components));
+    let data_root = hash_json(&json!({
+        "contracts": required(value, &["contracts"] )?,
+        "modules": required(value, &["modules"] )?,
+        "precompiles": required(value, &["precompiles"] )?,
+    }));
+    let receipts_root = value
+        .get("genesis_deployment")
+        .and_then(|deployment| deployment.get("receipt_root"))
+        .and_then(Value::as_str)
+        .unwrap_or(&empty_hash)
+        .to_string();
+
+    value["header"]["parent_hash"] = Value::String(ZERO_HASH.to_string());
+    value["header"]["transactions_root"] = Value::String(empty_hash);
+    value["header"]["receipts_root"] = Value::String(receipts_root.clone());
+    value["header"]["state_root"] = Value::String(state_root.clone());
+    value["header"]["data_root"] = Value::String(data_root);
+    value["contracts"]["validator_registry"]["init_params"]["validator_set_hash"] =
+        Value::String(validator_set_hash.clone());
+    value["integrity"]["allocation_hash"] = Value::String(allocation_hash);
+    value["integrity"]["validator_hash"] = Value::String(validator_hash);
+    value["integrity"]["validator_set_hash"] = Value::String(validator_set_hash);
+    value["integrity"]["contract_hash"] = Value::String(contract_hash);
+    value["integrity"]["state_root"] = Value::String(state_root);
+    if value.get("genesis_deployment").is_some() {
+        value["integrity"]["receipt_root"] = Value::String(receipts_root);
+    }
+
+    // The header roots above are inputs to the final Genesis hash.
+    let genesis_hash = hash_json(&genesis_hash_payload(value));
+    value["integrity"]["genesis_hash"] = Value::String(genesis_hash.clone());
+    value["network_magic_bytes"]["value"] =
+        Value::String(network_magic_bytes_for("synergy:testnet-v3", &genesis_hash));
+
+    validate_testnet_v3_candidate_integrity_hashes(value)
+}
+
+/// Installs one finalized manifest into a pre-deployment or deployment-bound
+/// Testnet-v3 Genesis document and atomically recomputes all dependent roots.
+///
+/// Release tools must separately verify that `release_decision_sha256`
+/// identifies the operator-approved decision record. The runtime then binds
+/// that digest, the exact manifest SHA-256, and its SHA3-512 parameter root
+/// into Genesis.
+pub fn bind_testnet_v3_genesis_consensus_parameters(
+    value: &mut Value,
+    loaded: &LoadedConsensusParameters,
+    release_decision_sha256: &str,
+) -> Result<(), String> {
+    if !is_testnet_v3_candidate_schema(value) {
+        return Err("not a canonical Testnet-v3 candidate schema".to_string());
+    }
+    if release_decision_sha256.len() != 64
+        || !release_decision_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("release decision SHA-256 must be canonical lowercase hex".to_string());
+    }
+    let manifest = &loaded.manifest;
+    manifest.validate_finalized()?;
+    value["consensus"]["epoch"]["length_blocks"] = json!(manifest
+        .epoch_length_slots
+        .ok_or_else(|| "finalized epoch length is missing".to_string())?);
+    value["consensus"]["target_block_time_ms"] = json!(manifest.target_block_time_ms);
+    value["consensus"]["cluster_schedule_version"] =
+        Value::String(manifest.cluster_schedule_version.clone());
+    value["consensus"]["initial_active_validator_count"] =
+        json!(manifest.initial_cluster_validator_count);
+    value["consensus"]["min_validator_count"] = json!(manifest.initial_cluster_validator_count);
+    value["consensus"]["min_quorum_threshold"] = json!(manifest.initial_availability_quorum);
+    value["consensus"]["min_stake_nwei"] =
+        Value::String(manifest.required_validator_stake_nwei.to_string());
+    value["consensus"]["timeouts"] = json!({
+        "proposal_ms": manifest.proposal_timeout_ms,
+        "prevote_ms": manifest.prevote_timeout_ms,
+        "precommit_ms": manifest.precommit_timeout_ms,
+        "max_round_ms": manifest.max_round_timeout_ms,
+    });
+
+    let canonical_manifest_sha256 = hex::encode(sha2::Sha256::digest(&loaded.canonical_bytes));
+    let root = loaded.root.to_hex();
+    let decision_id = manifest.governance_approval_id.clone();
+    value["consensus_parameters"] = json!({
+        "schema_version": CONSENSUS_PARAMETER_GENESIS_BINDING_SCHEMA_VERSION,
+        "status": CONSENSUS_PARAMETER_GENESIS_BINDING_STATUS,
+        "decision_id": decision_id,
+        "release_decision_sha256": release_decision_sha256,
+        "canonical_manifest_sha256": canonical_manifest_sha256,
+        "parameter_root_sha3_512": root,
+        "manifest": manifest,
+    });
+    value["integrity"]["consensus_parameter_root_sha3_512"] = Value::String(loaded.root.to_hex());
+    value["integrity"]["consensus_parameter_manifest_sha256"] =
+        Value::String(canonical_manifest_sha256);
+    value["integrity"]["consensus_parameter_decision_id"] =
+        Value::String(manifest.governance_approval_id.clone());
+
+    let hash_inputs = value["canonicalization"]["genesis_hash_inputs"]
+        .as_array_mut()
+        .ok_or_else(|| "canonicalization.genesis_hash_inputs is not an array".to_string())?;
+    if !hash_inputs
+        .iter()
+        .any(|entry| entry.as_str() == Some("consensus_parameters"))
+    {
+        hash_inputs.push(Value::String("consensus_parameters".to_string()));
+    }
+    if value.get("genesis_deployment").is_none() {
+        value["schema_version"] = Value::String("v1.5-parameter-bound".to_string());
+        value["network"]["genesis_schema_version"] = Value::String("v1.5".to_string());
+        value["network"]["status"] =
+            Value::String("consensus_parameters_bound_pending_contract_deployment".to_string());
+        value["integrity"]["status"] =
+            Value::String("candidate_parameter_bound_pending_deployment".to_string());
+        value["testnet_v3_initialization"]["finalization_status"] =
+            Value::String("consensus_parameters_bound_pending_contract_deployment".to_string());
+    }
+    recompute_testnet_v3_candidate_integrity(value)
 }
 
 fn genesis_hash_payload(value: &Value) -> Value {
@@ -619,6 +1002,36 @@ fn find_placeholder_path(value: &Value, path: &str) -> Option<String> {
     }
 }
 
+/// A genesis document marked as a unit-test fixture must never be loadable by a
+/// production node. Test builds are permitted to load it; release builds refuse.
+fn reject_test_fixture_genesis(value: &Value, path: &std::path::Path) -> Result<(), String> {
+    let marked = value
+        .get("test_fixture")
+        .and_then(|entry| entry.get("is_test_fixture"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || value
+            .get("launch_status")
+            .and_then(Value::as_str)
+            .map(|status| status.contains("TEST_FIXTURE"))
+            .unwrap_or(false)
+        || value
+            .get("env")
+            .and_then(Value::as_str)
+            .map(|env| env.eq_ignore_ascii_case("test-fixture"))
+            .unwrap_or(false);
+    if !marked {
+        return Ok(());
+    }
+    if cfg!(test) {
+        return Ok(());
+    }
+    Err(format!(
+        "refusing to load test-fixture genesis {} in a production runtime",
+        path.display()
+    ))
+}
+
 fn parse_timestamp(value: &Value) -> Result<u64, String> {
     match value {
         Value::Number(number) => number
@@ -714,6 +1127,7 @@ fn canonical_json(value: &Value) -> String {
 mod tests {
     use super::*;
     use base64::Engine as _;
+    use sha2::{Digest, Sha256};
 
     fn testnet_v3_candidate() -> Value {
         serde_json::from_str(include_str!(
@@ -789,5 +1203,77 @@ mod tests {
         assert_eq!(document.network_id(), 1266);
         assert_eq!(document.validators().len(), 6);
         assert_eq!(document.network_magic_bytes(), expected_magic);
+    }
+
+    #[test]
+    fn approved_manifest_binding_replaces_legacy_genesis_timeouts_and_is_root_bound() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let parameters = crate::consensus_parameters::load_finalized_consensus_parameters(
+            root.join("launch/TESTNET_V3_CONSENSUS_PARAMETERS.json"),
+        )
+        .unwrap();
+        let decision =
+            fs::read(root.join("launch/TESTNET_V3_CONSENSUS_PARAMETER_RELEASE_DECISION.md"))
+                .unwrap();
+        let decision_sha256 = hex::encode(Sha256::digest(decision));
+        let mut candidate = testnet_v3_candidate();
+        bind_testnet_v3_genesis_consensus_parameters(&mut candidate, &parameters, &decision_sha256)
+            .unwrap();
+
+        assert_eq!(
+            candidate["consensus"]["epoch"]["length_blocks"].as_u64(),
+            Some(1_000)
+        );
+        assert_eq!(
+            candidate["consensus"]["timeouts"],
+            json!({
+                "proposal_ms": 1_500,
+                "prevote_ms": 1_500,
+                "precommit_ms": 1_500,
+                "max_round_ms": 10_000,
+            })
+        );
+        let expected_root = parameters.root.to_hex();
+        assert_eq!(
+            candidate["consensus_parameters"]["parameter_root_sha3_512"].as_str(),
+            Some(expected_root.as_str())
+        );
+        assert!(candidate["canonicalization"]["genesis_hash_inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry == "consensus_parameters"));
+        validate_integrity_hashes(&candidate).unwrap();
+
+        candidate["consensus"]["timeouts"]["proposal_ms"] = json!(1_499);
+        assert!(load_candidate_consensus_parameters(&candidate)
+            .unwrap_err()
+            .contains("proposal_ms disagrees"));
+    }
+
+    #[test]
+    fn production_source_and_explicit_test_fixture_share_the_exact_finalized_manifest() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let source_path = root.join("genesis.testnet-v3.identity-assigned.json");
+        let fixture_path = root.join("runtime/config/genesis.testnet-v3.test-fixture.json");
+        let source = load_genesis_from_path(&source_path).unwrap();
+        let fixture = load_genesis_from_path(&fixture_path).unwrap();
+        let source_parameters = source.consensus_parameters().unwrap();
+        let fixture_parameters = fixture.consensus_parameters().unwrap();
+        source_parameters.require_genesis_binding().unwrap();
+        fixture_parameters.require_genesis_binding().unwrap();
+        assert_eq!(source_parameters.root, fixture_parameters.root);
+        assert_eq!(source_parameters.manifest, fixture_parameters.manifest);
+        assert_eq!(
+            source_parameters.canonical_bytes,
+            fixture_parameters.canonical_bytes
+        );
+
+        let source_json: Value = serde_json::from_slice(&fs::read(source_path).unwrap()).unwrap();
+        let fixture_json: Value = serde_json::from_slice(&fs::read(fixture_path).unwrap()).unwrap();
+        assert_eq!(
+            source_json["integrity"]["genesis_hash"],
+            fixture_json["integrity"]["genesis_hash"]
+        );
     }
 }

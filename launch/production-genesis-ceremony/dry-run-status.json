@@ -1,0 +1,39 @@
+{
+  "address_mismatches": [],
+  "candidate_input_id": "6226cbebc7b4d7589f4a12c2b42fd052d7844194b1b0f1fd38e41d81b1f690bc",
+  "contract_addresses": {
+    "Governance": "sync12j7reatl4p09l4p63kyrxky5t89wp4a8mylg",
+    "Identity": "sync1tasz8xg3wyvxg8hfujndutgp967ekc25393w",
+    "RewardDistributor": "sync1gx6zkzqjhfymqz2rz868n8zqf06fe790wued",
+    "Slashing": "sync186smh2hyslf7yf5mwa2dq0dt52dpw0eufht3",
+    "Staking": "sync1qqd5u3v4wgqxvfhh49ax08s8pq7uf7kk23l5",
+    "SynergyOracle": "sync17yd3kddpn7g9mjeazhnw7ky9pmk5ujjl0rkn",
+    "TeamVesting": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+    "Treasury": "sync1puq5nz4wacn25de9suur53esyn99zp9j6jx8",
+    "ValidatorRegistry": "sync1q2s4w0h2q98e2hv9rjycf4th4zwu7r9wxtmz"
+  },
+  "deployment_manifest_hash": "a1a700d3bbb020360ddbd02ceb85f4d33bef78646ba3f0ac2bd56eb036bc9271",
+  "deployment_receipt_root": "1ddd5472813884fe71456bd3df736848820db8fb55a3f307792b2796027e828a",
+  "deployment_receipts": 9,
+  "execution_state_artifact_count": 9,
+  "execution_state_balance_count": 36,
+  "execution_state_contract_count": 9,
+  "execution_state_snapshot": "dry-run-execution-state.json",
+  "execution_state_snapshot_canonical_sha256": "76ea4eb2b7cb78aa7deb20eb6f883bac514c45e58f943988d1fd792be464803d",
+  "execution_state_snapshot_sha256": "ddcfcbd2cab4243bbd681beefd6163ab20d1dbdff141fa58dae45f202aab2e69",
+  "genesis_deployer_retirement": "PermanentlyRetired",
+  "initialization_receipts": 27,
+  "inputs": {
+    "authorities_file": "launch/TESTNET_V3_PRODUCTION_AUTHORITIES.json",
+    "authorities_file_sha256": "b566cd35386b6d139839a0c647747a530ddebc25f015db5b59f20c8fa574bffe",
+    "contracts_file": "launch/TESTNET_V3_PRODUCTION_CONTRACT_ADDRESSES.json",
+    "contracts_file_sha256": "0c27712c19f844ebaf7c365261f281b7f21dc874c6c963586860c4e5a679c7d3",
+    "mode": "dry-run",
+    "source_genesis_file": "/Volumes/xcode/Synergy-Network-Projects/network-components/01-Testnetv3/genesis.testnet-v3.identity-assigned.json",
+    "source_genesis_file_sha256": "72f025beb04702eb881fa3c5545c73ab04b9b1f362d532db1198edee3b25dfc4"
+  },
+  "mode": "dry-run",
+  "post_deployment_aivm_state_root": "6bb65e453b33a5a9bdbcf6446fc1bf5ad6bec487375def6e8cf74c3b2f0dc452",
+  "post_deployment_execution_state_root": "2902ef7dc3f6d49d30ced4b03274c4f5708b84c88bf368fd051ebee11ffb0c39",
+  "status": "DRY_RUN_PASSED"
+}

@@ -19,8 +19,23 @@ use std::io::{BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const EXPECTED_GENESIS_HASH: &str =
-    "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789";
+/// Canonical Testnet-v3 genesis hash, read from the loaded genesis.
+/// Previously a hardcoded Testnet-v2 literal, which let a v3 node assert a
+/// retired chain identity during recovery/realignment/diagnostics.
+pub fn expected_genesis_hash() -> String {
+    crate::genesis::canonical_genesis()
+        .map(|genesis| genesis.hash().to_string())
+        .unwrap_or_default()
+}
+/// Self-realignment baseline validator count.
+///
+/// NOTE (2026-07-27, unresolved): this is `5` while
+/// `crate::recovery::BASELINE_VALIDATOR_COUNT` is `6`, and the Testnet-v3
+/// genesis defines six active validators. Setting this to 6 regressed the suite
+/// from 24 to 69 failures, which indicates the two constants denote DIFFERENT
+/// concepts rather than one being simply stale. Resolving this needs the
+/// governing intent for the self-realignment baseline — see
+/// launch/evidence/toolchain-and-build/BASELINE_VALIDATOR_COUNT_DISCREPANCY.md
 pub const BASELINE_VALIDATOR_COUNT: usize = 5;
 pub const DEFAULT_SNAPSHOT_INTERVAL_BLOCKS: u64 = 5_000;
 pub const DEFAULT_SNAPSHOT_INTERVAL_SECS: u64 = 15 * 60;
@@ -495,7 +510,7 @@ impl Default for SnapshotVerificationPolicy {
         Self {
             expected_chain_id: SYNERGY_TESTNET_V3_CHAIN_ID,
             expected_network_id: SYNERGY_TESTNET_V3_NETWORK_ID.to_string(),
-            expected_genesis_hash: EXPECTED_GENESIS_HASH.to_string(),
+            expected_genesis_hash: expected_genesis_hash(),
             expected_snapshot_class: None,
             target_role: None,
             required_quorum: 0,
@@ -773,7 +788,7 @@ impl Default for SpeedSyncPolicy {
         Self {
             chain_id: SYNERGY_TESTNET_V3_CHAIN_ID,
             network_id: SYNERGY_TESTNET_V3_NETWORK_ID.to_string(),
-            genesis_hash: EXPECTED_GENESIS_HASH.to_string(),
+            genesis_hash: expected_genesis_hash(),
             reject_stale_peers: true,
             reject_quarantined_peers: true,
             verify_qc_aegis_pqc: true,
@@ -988,7 +1003,7 @@ pub fn evaluate_rejoin_eligibility(input: RejoinEligibilityInput) -> RejoinEligi
     }
     if !input
         .genesis_hash
-        .eq_ignore_ascii_case(EXPECTED_GENESIS_HASH)
+        .eq_ignore_ascii_case(&expected_genesis_hash())
     {
         blocked.push("wrong genesis_hash".to_string());
     }
@@ -1061,7 +1076,7 @@ pub fn fail_closed_mutation_response(
         evidence_path: evidence_path.into(),
         chain_id: SYNERGY_TESTNET_V3_CHAIN_ID,
         network_id: SYNERGY_TESTNET_V3_NETWORK_ID.to_string(),
-        genesis_hash: EXPECTED_GENESIS_HASH.to_string(),
+        genesis_hash: expected_genesis_hash(),
         validator_id: validator_id.into(),
         previous_state,
         new_state: RealignmentState::Quarantined,
@@ -1148,7 +1163,7 @@ pub fn create_snapshot_manifest(input: SnapshotBuildInput) -> Result<SnapshotMan
         chain_id: SYNERGY_TESTNET_V3_CHAIN_ID,
         chain_id_hex: "0x4f0".to_string(),
         network_id: SYNERGY_TESTNET_V3_NETWORK_ID.to_string(),
-        genesis_hash: EXPECTED_GENESIS_HASH.to_string(),
+        genesis_hash: expected_genesis_hash(),
         snapshot_class,
         allowed_restore_roles,
         snapshot_height: input.snapshot_height,
@@ -2015,7 +2030,7 @@ mod tests {
 
     fn temp_root(name: &str) -> PathBuf {
         let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let root = std::env::temp_dir().join(format!(
+        let root = crate::utils::test_temp_root(format!(
             "synergy-self-realign-{name}-{}-{id}",
             std::process::id()
         ));
@@ -3417,7 +3432,7 @@ mod tests {
             peer_id: "validator-2".to_string(),
             chain_id: SYNERGY_TESTNET_V3_CHAIN_ID,
             network_id: SYNERGY_TESTNET_V3_NETWORK_ID.to_string(),
-            genesis_hash: EXPECTED_GENESIS_HASH.to_string(),
+            genesis_hash: expected_genesis_hash(),
             height: 10,
             block_hash: "hash".to_string(),
             quarantined: false,
@@ -3439,7 +3454,7 @@ mod tests {
             quarantine_reason_cleared: true,
             chain_id: SYNERGY_TESTNET_V3_CHAIN_ID,
             network_id: SYNERGY_TESTNET_V3_NETWORK_ID.to_string(),
-            genesis_hash: EXPECTED_GENESIS_HASH.to_string(),
+            genesis_hash: expected_genesis_hash(),
             state_root_matches: true,
             own_validator_key_intact: true,
             keys_or_configs_copied: false,

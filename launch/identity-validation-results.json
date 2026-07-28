@@ -1,0 +1,357 @@
+{
+ "summary": {
+  "PASS": 54,
+  "BLOCKED": 4,
+  "FAIL": 0
+ },
+ "findings": [
+  {
+   "status": "PASS",
+   "category": "registry",
+   "check": "identity_count matches list length",
+   "detail": "64"
+  },
+  {
+   "status": "PASS",
+   "category": "registry",
+   "check": "registry network/chain binding",
+   "detail": "synergy-testnet-v3 / 1266"
+  },
+  {
+   "status": "PASS",
+   "category": "registry",
+   "check": "all registry public/encrypted file sha256 hashes match on-disk files",
+   "detail": "64 identities"
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "preconfigured validator count",
+   "detail": "21 == declared 21"
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "active validator count matches consensus config",
+   "detail": "6"
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "6 active validators byte-identical to their preconfigured records",
+   "detail": ""
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "validator-1: all identity/key/stake bindings match genesis",
+   "detail": "VNS-A02"
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "validator-2: all identity/key/stake bindings match genesis",
+   "detail": "VNS-A03"
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "validator-3: all identity/key/stake bindings match genesis",
+   "detail": "VNS-A04"
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "validator-4: all identity/key/stake bindings match genesis",
+   "detail": "VNS-A05"
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "validator-5: all identity/key/stake bindings match genesis",
+   "detail": "VNS-A06"
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "validator-6: all identity/key/stake bindings match genesis",
+   "detail": "VNS-A07"
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "validator-7: all identity/key/stake bindings match genesis",
+   "detail": "VNS-A08"
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "validator-8: all identity/key/stake bindings match genesis",
+   "detail": "VNS-A09"
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "validator-9: all identity/key/stake bindings match genesis",
+   "detail": "VNS-A10"
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "validator-10: all identity/key/stake bindings match genesis",
+   "detail": "VNS-A11"
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "validator-11: all identity/key/stake bindings match genesis",
+   "detail": "VNS-A12"
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "validator-12: all identity/key/stake bindings match genesis",
+   "detail": "VNS-A13"
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "validator-13: all identity/key/stake bindings match genesis",
+   "detail": "VNS-A14"
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "validator-14: all identity/key/stake bindings match genesis",
+   "detail": "VNS-A15"
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "validator-15: all identity/key/stake bindings match genesis",
+   "detail": "VNS-A16"
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "validator-16: all identity/key/stake bindings match genesis",
+   "detail": "VNS-A17"
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "validator-17: all identity/key/stake bindings match genesis",
+   "detail": "VNS-A18"
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "validator-18: all identity/key/stake bindings match genesis",
+   "detail": "VNS-A19"
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "validator-19: all identity/key/stake bindings match genesis",
+   "detail": "VNS-A20"
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "validator-20: all identity/key/stake bindings match genesis",
+   "detail": "VNS-A21"
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "validator-21: all identity/key/stake bindings match genesis",
+   "detail": "VNS-A22"
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "no duplicate operator_address across 21 validators",
+   "detail": ""
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "no duplicate consensus_public_key across 21 validators",
+   "detail": ""
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "no duplicate peer_id across 21 validators",
+   "detail": ""
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "no duplicate node_identity_key across 21 validators",
+   "detail": ""
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "no duplicate validator_id across 21 validators",
+   "detail": ""
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "all 6 initial validators active_at_genesis",
+   "detail": "['validator-1', 'validator-2', 'validator-3', 'validator-4', 'validator-5', 'validator-6']"
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "preconfigured active_at_genesis set == initial validator set",
+   "detail": ""
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "initial cluster membership: 6 active validators in cluster 0 per consensus config",
+   "detail": ""
+  },
+  {
+   "status": "PASS",
+   "category": "validators",
+   "check": "voting power recorded for all active validators",
+   "detail": "validator-1=100 (stake 50000000000000); validator-2=100 (stake 50000000000000); validator-3=100 (stake 50000000000000); validator-4=100 (stake 50000000000000); validator-5=100 (stake 50000000000000); validator-6=100 (stake 50000000000000)"
+  },
+  {
+   "status": "PASS",
+   "category": "wallets",
+   "check": "register/accounts/balances cardinality",
+   "detail": "36 each"
+  },
+  {
+   "status": "PASS",
+   "category": "wallets",
+   "check": "all 36 register entries match registry address/role/allocation; addresses are 41 chars",
+   "detail": ""
+  },
+  {
+   "status": "PASS",
+   "category": "wallets",
+   "check": "no two roles share an address",
+   "detail": ""
+  },
+  {
+   "status": "PASS",
+   "category": "wallets",
+   "check": "genesis balances equal register amounts for all mapped addresses",
+   "detail": ""
+  },
+  {
+   "status": "PASS",
+   "category": "wallets",
+   "check": "register total equals allocation_sum_check",
+   "detail": "computed 12000000000000000000; check block: {\"grand_total_nwei\": \"12000000000000000000\", \"matches_supply_cap\": true, \"funded_account_count\": 32, \"zero_balance_system_account_count\": 4, \"validator_bonded_total_nwei\": \"300000000000000\", \"preconfigured_validator_stake_reserve_nwei\": \"750000000000000\", \"faucet_operating_float_nwei\": \"100000000000"
+  },
+  {
+   "status": "PASS",
+   "category": "wallets",
+   "check": "fee_collector_address routes to SYS-01",
+   "detail": "synf1pnchsrnyral0u9r65xusjrexuctfh465h06l"
+  },
+  {
+   "status": "PASS",
+   "category": "wallets",
+   "check": "treasury_recovery_address routes to SYS-02",
+   "detail": "synq1fkv2x4arnmxldk35m4e2furg9lq7xp77agdc"
+  },
+  {
+   "status": "PASS",
+   "category": "wallets",
+   "check": "slashing_settlement_address routes to SYS-03",
+   "detail": "synq188dfee3r9qu7hyd2kvjp4025wg0s8mmrltfl"
+  },
+  {
+   "status": "PASS",
+   "category": "wallets",
+   "check": "burn address canonical all-zero sentinel",
+   "detail": "syn00000000000000000000000000000000000000"
+  },
+  {
+   "status": "PASS",
+   "category": "wallets",
+   "check": "no overlap between 55 v2 reference addresses and v3 assignments",
+   "detail": ""
+  },
+  {
+   "status": "PASS",
+   "category": "nodes",
+   "check": "all 34 node identities match registry/pub files; key lengths correct",
+   "detail": ""
+  },
+  {
+   "status": "BLOCKED",
+   "category": "contracts",
+   "check": "sale_claim: artifact binding pending (address assigned and registry-consistent)",
+   "detail": "status=identity_assigned_pending_deployment; SynQ artifact not yet compiled/bound for this contract"
+  },
+  {
+   "status": "BLOCKED",
+   "category": "contracts",
+   "check": "team_vesting: artifact binding pending (address assigned and registry-consistent)",
+   "detail": "status=identity_assigned_pending_deployment; SynQ artifact not yet compiled/bound for this contract"
+  },
+  {
+   "status": "PASS",
+   "category": "contracts",
+   "check": "contract name/address mapping unique",
+   "detail": "10 unique addresses"
+  },
+  {
+   "status": "PASS",
+   "category": "contracts",
+   "check": "all contract addresses, artifact hashes (bytecode/ABI/manifest), and chain bindings verified",
+   "detail": ""
+  },
+  {
+   "status": "BLOCKED",
+   "category": "contracts",
+   "check": "deterministic deployment execution + receipts + post-deployment AIVM state root",
+   "detail": "genesis status: address_assigned_artifact_bound_pending_genesis_approval \u2014 deterministic deployment has not been executed yet; existing addresses must be reproduced, not regenerated"
+  },
+  {
+   "status": "PASS",
+   "category": "secrets",
+   "check": "no private-key/mnemonic/passphrase fields in genesis, registry, or any identity.pub.json",
+   "detail": ""
+  },
+  {
+   "status": "PASS",
+   "category": "secrets",
+   "check": "no identity.enc.json is Git-tracked",
+   "detail": ".gitignore: '# Testnet-v3 identity directories are local operator material.\\n# Public manifests may be copied to approved release artifacts separately.\\n/*/'"
+  },
+  {
+   "status": "PASS",
+   "category": "secrets",
+   "check": "tracked .env files (v2 reference + runtime defaults) contain no secret values",
+   "detail": "7 files scanned, config/hostnames/ports only"
+  },
+  {
+   "status": "PASS",
+   "category": "secrets",
+   "check": "all identity files owner-only (0600/0700) as seen from this mount",
+   "detail": ""
+  },
+  {
+   "status": "BLOCKED",
+   "category": "secrets",
+   "check": "private-key <-> public-key correspondence proof",
+   "detail": "63 encrypted ML-KEM-1024 bundles present and hash-verified, but decryption requires the custody passphrases; correspondence must be proven by a signing ceremony on the secret-owning machine"
+  },
+  {
+   "status": "PASS",
+   "category": "network",
+   "check": "chain_id 1266 / network_id 1266 / slug synergy-testnet-v3",
+   "detail": ""
+  }
+ ]
+}

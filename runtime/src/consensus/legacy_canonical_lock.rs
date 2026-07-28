@@ -263,12 +263,12 @@ fn legacy_canonical_lock_path() -> PathBuf {
                 .chars()
                 .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
                 .collect::<String>();
-            return std::env::temp_dir().join(format!(
+            return crate::utils::test_temp_root(format!(
                 "synergy-test-canonical-locks-{}-{sanitized}.json",
                 std::process::id()
             ));
         }
-        return std::env::temp_dir().join(format!(
+        return crate::utils::test_temp_root(format!(
             "synergy-test-canonical-locks-{}.json",
             std::process::id()
         ));
@@ -370,7 +370,7 @@ mod tests {
 
     #[test]
     fn compact_chain_boundary_height_reads_first_pruned_block() {
-        let path = std::env::temp_dir().join(format!(
+        let path = crate::utils::test_temp_root(format!(
             "synergy-test-chain-boundary-{}-{}.json",
             std::process::id(),
             current_unix_secs()

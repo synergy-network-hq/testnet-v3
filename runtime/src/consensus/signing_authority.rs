@@ -457,7 +457,7 @@ mod tests {
     use super::*;
 
     fn temp_authority(label: &str) -> DurableConsensusSigningAuthority {
-        let path = std::env::temp_dir().join(format!(
+        let path = crate::utils::test_temp_root(format!(
             "synergy-signing-authority-{label}-{}-{}/journal.json",
             std::process::id(),
             current_unix_nanos()

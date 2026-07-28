@@ -1,0 +1,222 @@
+// DEFERRED_TO_MAINNET_BETA — NOT ACTIVE OR DEPLOYED ON TESTNET-V3
+//
+// Operator ruling 2026-07-27: SaleClaim is removed from Testnet-v3 genesis
+// scope. Real claims cannot begin until Mainnet-beta and Testnet-v3 tokens have
+// no redemption value, so the redemption architecture must not be frozen under
+// launch pressure. This source, launch/SALE_CLAIM_REQUIREMENTS.md and the
+// related research are preserved as deferred Mainnet-beta work.
+//
+// On Testnet-v3 there is deliberately NO claim endpoint, NO claim UI, NO
+// voucher redemption, NO Base-token migration, NO issuance from presale
+// evidence, NO placeholder attestor set, NO placeholder constructor inputs and
+// NO reserved deployment nonce. Do not compile this into the genesis contract
+// set, bind an artifact, or derive a contract-instance address for it.
+//
+// The four redemption lanes Mainnet-beta must eventually support: SAFT voucher
+// claims; Early Supporter locked-token claims from Base; unlocked Base SNRG
+// migration; current presale voucher claims.
+//
+// ---------------------------------------------------------------------------
+//
+// Testnet-v3 presale settlement (sale_claim) contract.
+//
+// Behavior source: launch/SALE_CLAIM_REQUIREMENTS.md, recovered from the
+// deployed Unified Presale Clearing Architecture
+// (synergy-website/docs/token-offering/UNIFIED_PRESALE_INFRASTRUCTURE_SPEC.md
+// and SNRGClaimVoucherSoulbound.sol). Canonical truth is the Ethereum
+// soulbound voucher; this contract settles ATTESTED ReceiptRedeemed records
+// against the SAL-A01 inventory (2,226,000,000 SNRG), honoring each
+// voucher's own vesting terms. Attestations are threshold-signed by a
+// DAO-governed attestor set; each voucher tokenId and each payment
+// fingerprint settles exactly once. No manual mint bypass exists.
+pragma synq ^1.0.0;
+
+contract SaleClaim {
+    admin: Address public;               // DAO-A01 authority
+    inventoryRemaining: UInt256 public;  // starts at 2_226_000_000 SNRG in nwei
+    attestorThreshold: UInt256 public;
+    attestorCount: UInt256 public;
+    paused: Bool public;
+    entitlementCount: UInt256 public;
+
+    isAttestor: mapping(Address => Bool) public;
+
+    // replay protection (spec §6, §8.1)
+    voucherSettled: mapping(UInt256 => Bool) public;       // Ethereum tokenId
+    fingerprintSettled: mapping(Bytes => Bool) public;     // payment fingerprint
+
+    // entitlement records, keyed by voucher tokenId
+    entitlementBeneficiary: mapping(UInt256 => Address) public;
+    entitlementTotal: mapping(UInt256 => UInt256) public;
+    entitlementClaimed: mapping(UInt256 => UInt256) public;
+    entitlementRevoked: mapping(UInt256 => Bool) public;   // refund/settlement
+    vestingStartOf: mapping(UInt256 => UInt256) public;
+    cliffSecondsOf: mapping(UInt256 => UInt256) public;
+    durationSecondsOf: mapping(UInt256 => UInt256) public;
+    initialUnlockBpsOf: mapping(UInt256 => UInt256) public;
+    keystoneVotingPower: mapping(UInt256 => UInt256) public; // metadata only
+
+    event AttestorSet(attestor: Address indexed, enabled: Bool);
+    event AttestorThresholdUpdated(oldThreshold: UInt256, newThreshold: UInt256);
+    event RedemptionRegistered(tokenId: UInt256 indexed, beneficiary: Address indexed, amount: UInt256, fingerprint: Bytes);
+    event EntitlementClaimed(tokenId: UInt256 indexed, beneficiary: Address indexed, amount: UInt256, totalClaimed: UInt256);
+    event EntitlementRefunded(tokenId: UInt256 indexed, amount: UInt256, reasonHash: Bytes);
+    event EntitlementSettled(tokenId: UInt256 indexed, target: Address indexed, amount: UInt256, reasonHash: Bytes);
+    event PauseStateUpdated(paused: Bool);
+
+    constructor(initialAdmin: Address, inventoryNwei: UInt256, initialThreshold: UInt256) {
+        require(initialAdmin != Address(0), "Invalid admin");
+        require(inventoryNwei > 0, "Empty inventory");
+        require(initialThreshold > 0, "Zero threshold");
+        admin = initialAdmin;
+        inventoryRemaining = inventoryNwei;
+        attestorThreshold = initialThreshold;
+        attestorCount = 0;
+        paused = false;
+        entitlementCount = 0;
+    }
+
+    @gas_cost(base: 40000)
+    @public function setAttestor(attestor: Address, enabled: Bool) {
+        require(msg.sender == admin, "Unauthorized");
+        require(attestor != Address(0), "Invalid attestor");
+        require(isAttestor[attestor] != enabled, "No change");
+        isAttestor[attestor] = enabled;
+        if (enabled) { attestorCount = attestorCount + 1; }
+        else {
+            attestorCount = attestorCount - 1;
+            require(attestorCount >= attestorThreshold, "Threshold unreachable");
+        }
+        emit AttestorSet(attestor, enabled);
+    }
+
+    @gas_cost(base: 30000)
+    @public function setAttestorThreshold(newThreshold: UInt256) {
+        require(msg.sender == admin, "Unauthorized");
+        require(newThreshold > 0 && newThreshold <= attestorCount, "Invalid threshold");
+        emit AttestorThresholdUpdated(attestorThreshold, newThreshold);
+        attestorThreshold = newThreshold;
+    }
+
+    @gas_cost(base: 25000)
+    @public function setPaused(newPaused: Bool) {
+        require(msg.sender == admin, "Unauthorized");
+        paused = newPaused;
+        emit PauseStateUpdated(newPaused);
+    }
+
+    // Registers an attested Ethereum ReceiptRedeemed record. The runtime host
+    // verifies `attestorSignatures` as `attestorThreshold` distinct valid
+    // ML-DSA-65 signatures from the enabled attestor set over the canonical
+    // attestation transcript (tokenId, fingerprint, beneficiary, amount,
+    // vesting terms, chain 1266, network synergy-testnet-v3).
+    @gas_cost(base: 120000)
+    @public function registerRedemption(
+        tokenId: UInt256,
+        fingerprint: Bytes,
+        beneficiary: Address,
+        amountNwei: UInt256,
+        vestingStart: UInt256,
+        cliffSeconds: UInt256,
+        durationSeconds: UInt256,
+        initialUnlockBps: UInt256,
+        votingPower: UInt256,
+        attestorSignatures: Bytes
+    ) {
+        require(!paused, "Paused");
+        require(beneficiary != Address(0), "Invalid beneficiary");
+        require(amountNwei > 0, "Zero amount");
+        require(initialUnlockBps <= 10000, "Invalid unlock bps");
+        require(!voucherSettled[tokenId], "Voucher already settled");
+        require(!fingerprintSettled[fingerprint], "Payment already settled");
+        require(amountNwei <= inventoryRemaining, "Inventory exhausted");
+        require(verifyAttestation(tokenId, fingerprint, beneficiary, amountNwei, attestorSignatures), "Attestation invalid");
+        voucherSettled[tokenId] = true;
+        fingerprintSettled[fingerprint] = true;
+        inventoryRemaining = inventoryRemaining - amountNwei;
+        entitlementBeneficiary[tokenId] = beneficiary;
+        entitlementTotal[tokenId] = amountNwei;
+        entitlementClaimed[tokenId] = 0;
+        entitlementRevoked[tokenId] = false;
+        vestingStartOf[tokenId] = vestingStart;
+        cliffSecondsOf[tokenId] = cliffSeconds;
+        durationSecondsOf[tokenId] = durationSeconds;
+        initialUnlockBpsOf[tokenId] = initialUnlockBps;
+        keystoneVotingPower[tokenId] = votingPower;
+        entitlementCount = entitlementCount + 1;
+        emit RedemptionRegistered(tokenId, beneficiary, amountNwei, fingerprint);
+    }
+
+    @gas_cost(base: 24000)
+    @view function unlockedAmount(tokenId: UInt256, atTime: UInt256) -> UInt256 {
+        require(entitlementTotal[tokenId] > 0, "Unknown entitlement");
+        let total: UInt256 = entitlementTotal[tokenId];
+        let start: UInt256 = vestingStartOf[tokenId];
+        if (atTime < start) { return 0; }
+        let initialPart: UInt256 = total * initialUnlockBpsOf[tokenId] / 10000;
+        let cliffEnd: UInt256 = start + cliffSecondsOf[tokenId];
+        if (atTime < cliffEnd) { return initialPart; }
+        let duration: UInt256 = durationSecondsOf[tokenId];
+        if (duration == 0 || atTime >= cliffEnd + duration) { return total; }
+        let residual: UInt256 = total - initialPart;
+        return initialPart + residual * (atTime - cliffEnd) / duration;
+    }
+
+    @gas_cost(base: 60000)
+    @public function claim(tokenId: UInt256, amount: UInt256) {
+        require(!paused, "Paused");
+        require(entitlementTotal[tokenId] > 0, "Unknown entitlement");
+        require(!entitlementRevoked[tokenId], "Entitlement revoked");
+        require(msg.sender == entitlementBeneficiary[tokenId], "Unauthorized claimant");
+        require(amount > 0, "Zero claim");
+        let unlocked: UInt256 = unlockedAmount(tokenId, block.timestamp);
+        let claimed: UInt256 = entitlementClaimed[tokenId];
+        require(unlocked > claimed && amount <= unlocked - claimed, "Amount exceeds unlocked");
+        entitlementClaimed[tokenId] = claimed + amount;
+        transfer(entitlementBeneficiary[tokenId], amount);
+        emit EntitlementClaimed(tokenId, entitlementBeneficiary[tokenId], amount, entitlementClaimed[tokenId]);
+    }
+
+    @gas_cost(base: 60000)
+    @public function refund(tokenId: UInt256, reasonHash: Bytes) {
+        require(msg.sender == admin, "Unauthorized");
+        require(entitlementTotal[tokenId] > 0, "Unknown entitlement");
+        require(!entitlementRevoked[tokenId], "Already revoked");
+        let residual: UInt256 = entitlementTotal[tokenId] - entitlementClaimed[tokenId];
+        entitlementRevoked[tokenId] = true;
+        inventoryRemaining = inventoryRemaining + residual;
+        emit EntitlementRefunded(tokenId, residual, reasonHash);
+    }
+
+    @gas_cost(base: 65000)
+    @public function settle(tokenId: UInt256, target: Address, reasonHash: Bytes) {
+        require(msg.sender == admin, "Unauthorized");
+        require(target != Address(0), "Invalid target");
+        require(entitlementTotal[tokenId] > 0, "Unknown entitlement");
+        require(!entitlementRevoked[tokenId], "Already revoked");
+        let residual: UInt256 = entitlementTotal[tokenId] - entitlementClaimed[tokenId];
+        entitlementRevoked[tokenId] = true;
+        transfer(target, residual);
+        emit EntitlementSettled(tokenId, target, residual, reasonHash);
+    }
+
+    @gas_cost(base: 90000)
+    function verifyAttestation(
+        tokenId: UInt256,
+        fingerprint: Bytes,
+        beneficiary: Address,
+        amountNwei: UInt256,
+        attestorSignatures: Bytes
+    ) internal -> Bool {
+        // Host capability: threshold verification of distinct enabled-attestor
+        // ML-DSA-65 signatures over the canonical attestation transcript.
+        // Declared in the contract manifest host-capability section; the AIVM
+        // host rejects any transcript not bound to chain 1266 /
+        // synergy-testnet-v3 or with fewer than attestorThreshold distinct
+        // valid signers.
+        return hostVerifyThresholdAttestation(
+            tokenId, fingerprint, beneficiary, amountNwei,
+            attestorThreshold, attestorSignatures
+        );
+    }
+}

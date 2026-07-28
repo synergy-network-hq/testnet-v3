@@ -160,3 +160,18 @@ topology. This is exercised in-process only. Final launch approval, SynQ
 deployment receipts, the live typed coordinator lifecycle and authenticated
 P2P binding, and the remaining security/performance evidence still need to be
 completed before any node is started.
+
+## 2026-07-26 — Inherited-binding removal and identity-binding session
+
+- `scripts/check-retired-v2-bindings.py` (new structural gate): PASS — 0
+  retired Testnet-v2 validator-address references in active runtime paths;
+  55 classified references remain only in quarantined v2 evidence, Rust
+  test regions, and retired v2 operational scripts.
+- `scripts/validate-identity-records.py`: 54 PASS / 4 BLOCKED / 0 FAIL
+  (unchanged record-level result after binding fixes).
+- `scripts/run-identity-correspondence-ceremony.py fixture-test`: PASS;
+  `prepare` generated 16 challenges (`launch/ceremony/challenges.json`).
+- Rust compile/test of the binding edits (networking.rs shim removal,
+  control-service constant updates): PENDING — no Rust toolchain was
+  available in this session's sandbox; must run `cargo check && cargo test`
+  before `inherited_identity_bindings_removed` may move to PASS.

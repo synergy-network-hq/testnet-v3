@@ -14,7 +14,19 @@ pub const SYNQ_MANIFEST_VERSION: &str = "0.1";
 pub const SYNQ_REQUIRED_AIVM_VERSION: &str = "0.1";
 pub const SYNQ_TESTNET_CHAIN_ID: u64 = 1266;
 pub const SYNQ_TESTNET_NETWORK_ID: &str = "synergy-testnet";
-pub const SYNQ_TESTNET_SIGNATURE_ALGORITHM: &str = "ML-DSA-65";
+/// The algorithm that must sign the **account-domain** envelope authorizing a
+/// deploy or call of this contract — i.e. the deployer's or caller's signature.
+///
+/// It is emitted as `required_signature_algorithm` in the manifest and as
+/// `security_requirements.signature_algorithm` in the ABI, and
+/// `synq_admission` binds the incoming envelope's algorithm to it.
+///
+/// This is **not**: the validator consensus algorithm (ML-DSA-65), the
+/// FN-DSA-1024 Synergy identity/address key, an SXCP relayer attestation key
+/// (FN-DSA-1024), the Ed25519 P2P node identity, or the ML-KEM-1024 ETDAG
+/// ingress key. It was ML-DSA-65 until 2026-07-27, which put the consensus
+/// algorithm in the account domain.
+pub const SYNQ_TESTNET_SIGNATURE_ALGORITHM: &str = "ML-DSA-87";
 pub const SYNQ_TESTNET_SECURITY_POLICY: &str = "synq-testnet-1266-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -243,7 +255,9 @@ fn build_abi(contract: &ContractDefinition) -> SynQAbiArtifact {
         security_requirements: SynQSecurityRequirements {
             call_domain: "SYNQ_CONTRACT_CALL_V1".to_string(),
             deploy_domain: "SYNQ_CONTRACT_DEPLOY_V1".to_string(),
-            signature_algorithm: "ML-DSA-65".to_string(),
+            // Same constant as the manifest: one spelling, one source, so the
+            // ABI and the manifest can never disagree about the domain.
+            signature_algorithm: SYNQ_TESTNET_SIGNATURE_ALGORITHM.to_string(),
         },
         state_schema,
     }
@@ -264,6 +278,7 @@ fn collect_host_functions(contract: &ContractDefinition) -> Vec<String> {
         "stakingVotingPower",
         "synidNameHash",
         "synidNormalize",
+        "verifyGovernanceAuthorization",
         "verifyMLDSASignature",
     ];
 

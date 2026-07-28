@@ -2657,11 +2657,26 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn testnet_v3_candidate_binds_generated_fee_and_reward_addresses() {
-        let candidate: Value = serde_json::from_str(include_str!(
+    fn testnet_v3_resolver_uses_deployed_reward_distributor_address() {
+        let mut candidate: Value = serde_json::from_str(include_str!(
             "../../genesis.testnet-v3.identity-assigned.json"
         ))
         .expect("Testnet-v3 candidate genesis must be valid JSON");
+        let frozen: Value = serde_json::from_str(include_str!(
+            "../../launch/TESTNET_V3_PRODUCTION_CONTRACT_ADDRESSES.json"
+        ))
+        .expect("production contract address record must be valid JSON");
+        let deployed_reward_distributor = frozen["contracts"]
+            .as_array()
+            .and_then(|entries| {
+                entries
+                    .iter()
+                    .find(|entry| entry["contract"] == "RewardDistributor")
+            })
+            .and_then(|entry| entry["contract_address"].as_str())
+            .expect("production RewardDistributor address");
+        candidate["contracts"]["reward_distributor"]["address"] =
+            Value::String(deployed_reward_distributor.to_string());
 
         let addresses = testnet_v3_system_addresses_from_genesis(&candidate)
             .expect("candidate must bind all protocol-controlled addresses");
@@ -2672,7 +2687,7 @@ mod tests {
         );
         assert_eq!(
             addresses.validator_rewards_pool,
-            "synq1lep2gks85cwlyumx89nxjdqwt5zvnmjcsjm8"
+            deployed_reward_distributor
         );
         assert_ne!(addresses.fee_collector, FEE_COLLECTOR_ADDRESS);
         assert_ne!(
@@ -2722,7 +2737,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         );
-        let root = std::env::temp_dir().join(unique);
+        let root = crate::utils::test_temp_root(unique);
         let network_dir = root.join("network");
         fs::create_dir_all(&network_dir).expect("create temp network dir");
         fs::write(
@@ -2872,7 +2887,7 @@ mod tests {
             2,
             10,
             None,
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
 
         manager
@@ -3026,7 +3041,7 @@ mod tests {
             2,
             10,
             None,
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
         let fee = tx.get_total_network_fee_u64().unwrap();
         seed_snrg_balance(&manager, &sender, 1_000 + fee);
@@ -3182,7 +3197,7 @@ mod tests {
             1,
             21_000,
             None,
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
         let hundred_snrg = Transaction::new(
             sender.clone(),
@@ -3193,7 +3208,7 @@ mod tests {
             1,
             21_000,
             None,
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
         let burn_snrg = Transaction::new(
             sender.clone(),
@@ -3204,7 +3219,7 @@ mod tests {
             1,
             21_000,
             Some(r#"burn:{"asset":"SNRG","amount":10000000000}"#.to_string()),
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
 
         let one_fee = one_snrg.get_total_network_fee_u64().unwrap();
@@ -3231,7 +3246,7 @@ mod tests {
             1,
             21_000,
             None,
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
         let failed = manager.process_transaction_in_block(&failed_tx, 103);
         assert_eq!(
@@ -3367,7 +3382,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         );
-        let path = std::env::temp_dir().join(unique);
+        let path = crate::utils::test_temp_root(unique);
         manager
             .save_state(path.to_str().expect("temp path utf8"))
             .expect("state should save");
@@ -3428,7 +3443,7 @@ mod tests {
                 "stake:{{\"validator\":\"{}\",\"token\":\"SNRG\",\"amount\":3000}}",
                 validator
             )),
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
         let fee = tx.get_total_network_fee_u64().unwrap();
         seed_snrg_balance(&manager, &staker, 10_000 + fee);
@@ -3459,7 +3474,7 @@ mod tests {
                 "stake:{{\"validator\":\"{}\",\"token\":\"SNRG\",\"amount\":50000}}",
                 validator
             )),
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         );
         let fee = tx
             .get_total_network_fee_u64()
@@ -3506,7 +3521,7 @@ mod tests {
     #[test]
     fn token_state_path_uses_configured_data_root() {
         let _lock = ENV_GUARD.lock().unwrap();
-        let root = std::env::temp_dir().join(format!(
+        let root = crate::utils::test_temp_root(format!(
             "synergy-token-state-root-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -3520,7 +3535,7 @@ mod tests {
 
     #[test]
     fn missing_token_state_is_not_reported_as_loaded() {
-        let path = std::env::temp_dir().join(format!(
+        let path = crate::utils::test_temp_root(format!(
             "synergy-missing-token-state-{}.json",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)

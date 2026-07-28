@@ -850,7 +850,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("synergy-archive-reseed-{label}-{unique}"));
+        let root = crate::utils::test_temp_root(format!("synergy-archive-reseed-{label}-{unique}"));
         std::fs::create_dir_all(&root).unwrap();
         for file_name in VALIDATOR_PRUNED_REQUIRED_STATE_FILES {
             let contents = match *file_name {

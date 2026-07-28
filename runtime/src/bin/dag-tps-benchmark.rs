@@ -124,7 +124,7 @@ fn benchmark_transaction(nonce: u64) -> Transaction {
         1_000,
         21_000,
         Some(format!("dag-benchmark-independent-{nonce}")),
-        "fndsa".to_string(),
+        "mldsa87".to_string(),
     );
     tx.signer_public_key = vec![0x5A; 1_793];
     tx.timestamp = 1_784_321_600 + nonce;
@@ -150,7 +150,7 @@ fn main() -> Result<(), String> {
             let batch_started = Instant::now();
             dag.create_proposal_vertex(
                 batch,
-                "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f",
+                "synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu",
                 (batch_index + 1) as u64,
             )
             .ok_or_else(|| format!("round {round} batch {batch_index} produced no DAG vertex"))?;

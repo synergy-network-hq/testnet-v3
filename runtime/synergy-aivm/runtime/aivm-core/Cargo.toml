@@ -17,3 +17,8 @@ sha2 = "0.10"
 quantumvm = { path = "../../../synq-language/vm", optional = true }
 synq-compiler = { package = "compiler", path = "../../../synq-language/compiler", optional = true }
 pqsynq = { package = "aegis-pqsynq", path = "../../../synq-language/aegis-pqsynq/pqsynq", default-features = false, features = ["std", "mldsa"], optional = true }
+
+[dev-dependencies]
+hex = "0.4"
+bech32 = "0.9"
+sha3 = "0.10"

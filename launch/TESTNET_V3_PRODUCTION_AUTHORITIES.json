@@ -1,0 +1,51 @@
+{
+  "version": 2,
+  "status": "FROZEN",
+  "network_id": "synergy-testnet-v3",
+  "chain_id": 1266,
+  "environment": "testnet-v3",
+  "test_fixture": false,
+  "algorithm": "ML-DSA-87",
+  "algorithm_code": "0x0103",
+  "authorities": [
+    {
+      "role_id": "SNRG-TESTNET-V3-GENESIS-DEPLOYER",
+      "standard_account_address": "syna197thhzye2pmw6lk3y47nsf6cluqgt07df9t0",
+      "public_key_fingerprint": "sha256:36d45035d2c92c71e601ec4619eb0c7ce81aad1f05dafe84c53cfacd1d4ad9db",
+      "bundle_dir": "testnet-v3-identity-files/SNRG-TESTNET-V3-GENESIS-DEPLOYER"
+    },
+    {
+      "role_id": "SNRG-TESTNET-V3-GOVERNANCE-AUTHORITY",
+      "standard_account_address": "syna1adxk7errymz8p8s0k5ysmka9pjv9ntf9jlml",
+      "public_key_fingerprint": "sha256:7f296c61ad8c636dd21eb8c3dd360e981ba720cdef1b2a7e84f3c1107f6eb200",
+      "bundle_dir": "testnet-v3-identity-files/SNRG-TESTNET-V3-GOVERNANCE-AUTHORITY"
+    },
+    {
+      "role_id": "SNRG-TESTNET-V3-EMERGENCY-SLASHING",
+      "standard_account_address": "syna1uyct5qxxexzcdqx2wdfd0jfwx5la69ke62yh",
+      "public_key_fingerprint": "sha256:dd95dfa0b8379cb294750c456a9854409970219aadbec6021077d735a2645a58",
+      "bundle_dir": "testnet-v3-identity-files/SNRG-TESTNET-V3-EMERGENCY-SLASHING"
+    },
+    {
+      "role_id": "SNRG-TESTNET-V3-VALIDATOR-REGISTRY-AUTHORITY",
+      "standard_account_address": "syna1rjtgmly6lhtscxaev57hna8p6wwmpq5dle7l",
+      "public_key_fingerprint": "sha256:9a4bc0b814e6a088b9d040967eae6f59ba82ec3ea2b2fa8492e668b34351b692",
+      "bundle_dir": "testnet-v3-identity-files/SNRG-TESTNET-V3-VALIDATOR-REGISTRY-AUTHORITY"
+    },
+    {
+      "role_id": "SNRG-TESTNET-V3-REWARD-DISTRIBUTOR-AUTHORITY",
+      "standard_account_address": "syna1lqg4qfk2w6esve5h6vgrf9snkl9zce4y6zg2",
+      "public_key_fingerprint": "sha256:5a4857ec6fda20299c34a7fc1d18335ff23e7b18f9613440b5bbd7d4355d0bd4",
+      "bundle_dir": "testnet-v3-identity-files/SNRG-TESTNET-V3-REWARD-DISTRIBUTOR-AUTHORITY"
+    },
+    {
+      "role_id": "SNRG-TESTNET-V3-EMERGENCY-PAUSE-AUTHORITY",
+      "standard_account_address": "syna12humnsg4tw5agu23z0zlf43jgga732wa06nn",
+      "public_key_fingerprint": "sha256:fda3f19354ab67bf23c8209c39ad42e086883b8871792a1f43c6dfd58dd0c86b",
+      "bundle_dir": "testnet-v3-identity-files/SNRG-TESTNET-V3-EMERGENCY-PAUSE-AUTHORITY"
+    }
+  ],
+  "note": "Public inputs only. No private key material. The active identity for every role is the canonical syna Standard Account address under the canonical Synergy address model.",
+  "canonical_synergy_address_model": true,
+  "active_address_field": "standard_account_address"
+}

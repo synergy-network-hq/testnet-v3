@@ -1923,7 +1923,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("synergy-supervisor-{label}-{unique}"));
+        let root = crate::utils::test_temp_root(format!("synergy-supervisor-{label}-{unique}"));
         fs::create_dir_all(root.join("supervisor")).unwrap();
         fs::write(
             root.join(VALIDATOR_SUPERVISOR_WORKSPACE_MARKER),

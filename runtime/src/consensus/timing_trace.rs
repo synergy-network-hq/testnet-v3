@@ -237,7 +237,7 @@ mod tests {
         let _guard = TEST_ENV_MUTEX.lock().expect("test env mutex");
         let previous_enabled = std::env::var(TRACE_ENABLED_ENV).ok();
         let previous_path = std::env::var(TRACE_PATH_ENV).ok();
-        let path = std::env::temp_dir().join(format!(
+        let path = crate::utils::test_temp_root(format!(
             "synergy-consensus-timing-trace-test-{}-{}.jsonl",
             std::process::id(),
             now_unix_ms()

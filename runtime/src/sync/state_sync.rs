@@ -1669,7 +1669,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("synergy-state-sync-{label}-{unique}"));
+        let root = crate::utils::test_temp_root(format!("synergy-state-sync-{label}-{unique}"));
         fs::create_dir_all(root.join("data")).unwrap();
         fs::write(root.join(STATE_SYNC_OFFLINE_WORKSPACE_MARKER), "fixture\n").unwrap();
         root

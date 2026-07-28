@@ -1,0 +1,121 @@
+{
+  "version": 2,
+  "status": "DERIVED_NOT_EXECUTED",
+  "network_id": "synergy-testnet-v3",
+  "chain_id": 1266,
+  "deployer_address": "syna197thhzye2pmw6lk3y47nsf6cluqgt07df9t0",
+  "deployer_address_format": "syna",
+  "canonical_synergy_address_model": true,
+  "reproduced_independently": true,
+  "supersedes": "v1 record derived with the unapproved tsynq signer address",
+  "contracts": [
+    {
+      "nonce": 0,
+      "contract": "Identity",
+      "deployer_address": "syna197thhzye2pmw6lk3y47nsf6cluqgt07df9t0",
+      "payload_hash": "b6f41cf562a8cf3cdc41b7adcdd7087d51809851252a4679385a858d0a721af5",
+      "constructor_args_hash": "c70787e2afeab3174d77c37d2505f28cfe21e02b18c9ad0da0ab9f4198cc2a35",
+      "bytecode_hash": "d35d3806ac57d41da5388380b24f3da0d22fa75960e7c14fb4f67dc47564392c",
+      "abi_hash": "d9965a8d237f6fa5d5cb13d79cb49aaa4eda5d436c92b8ade13e1adfbc7473e9",
+      "manifest_hash": "51727e80960d7a374c958b1f2dc773c12ce5268e52fc6daf4dfd83fc752ec64e",
+      "contract_address": "sync1tasz8xg3wyvxg8hfujndutgp967ekc25393w",
+      "synq_contract_address": "0104f2c0010a0724c23ac8df44285da5936b4a41aa33206b23cf7efbbe7bb407a57f0ff5496b4350a0"
+    },
+    {
+      "nonce": 1,
+      "contract": "ValidatorRegistry",
+      "deployer_address": "syna197thhzye2pmw6lk3y47nsf6cluqgt07df9t0",
+      "payload_hash": "bcaaafd9bc1156141c027a413b63fab9e1441106ca709bd709e0f14ad8aea5e0",
+      "constructor_args_hash": "07764cce31d9d3dbb07b5de3025d85ae006abc9190773f3ef3993a66cca3232c",
+      "bytecode_hash": "0648bf7e3c55fba3737d37739eb6bcb67c37dec709311ea2a3c1a6be56916643",
+      "abi_hash": "161782f8b82c879e600472dba06e812ddda684c3963662b587699aba16bcc2a0",
+      "manifest_hash": "dc0f5b7d5c64cf323389d229cbf5bf704798720b0a657c060abf7d4f649b9b20",
+      "contract_address": "sync1q2s4w0h2q98e2hv9rjycf4th4zwu7r9wxtmz",
+      "synq_contract_address": "0104f2c0017a8a6b437db85443ca7121886549929661ab32b3c9b2135198d1d9ab12b155ad8040f277"
+    },
+    {
+      "nonce": 2,
+      "contract": "Staking",
+      "deployer_address": "syna197thhzye2pmw6lk3y47nsf6cluqgt07df9t0",
+      "payload_hash": "be63056923dc241e5ec63021f9fdc5ba8a95a5ec0f0f99535b11e6cd7d807d8d",
+      "constructor_args_hash": "593b91e098ad0c838505e25e735884bb4bc6438649a7a75e320b0c38ebaa1dc8",
+      "bytecode_hash": "49a1a49e4b649bd6ab2a6ab99d32859a5942eee7669bae10cbccc3ff05a7c866",
+      "abi_hash": "0d445de6280d069d84b805a57f903041e7ce83db6094fec5e9bdd624f47b5763",
+      "manifest_hash": "cca957e5f1f4bfda4e265cfbbe86f0c3c03d28a4241b7896f9010e63e9ac4cb7",
+      "contract_address": "sync1qqd5u3v4wgqxvfhh49ax08s8pq7uf7kk23l5",
+      "synq_contract_address": "0104f2c0016fd6a4cb1a286308da585da6235eb2b2bdfffeac38c626acb4d33c4f790a04a83974c747"
+    },
+    {
+      "nonce": 3,
+      "contract": "Governance",
+      "deployer_address": "syna197thhzye2pmw6lk3y47nsf6cluqgt07df9t0",
+      "payload_hash": "224e8aa8f66ddf332d43d84b7bbb1d927a33f5d83d138a77b626d602c6eb6edb",
+      "constructor_args_hash": "b8d8672e0e0f8d1a6a914a6c6412b70af9a93404f6307a1d0fcc0b61329760bb",
+      "bytecode_hash": "b118a914c64c3454884022c5a9c160fc3de4241698c5fde332473e6276c6bf56",
+      "abi_hash": "562370918cd2907cdd65cf379e3ffa34f892ea24e1a5d843d421500f8eeaf52a",
+      "manifest_hash": "54f72bc98254394287d204e1a381558e805925a8546bce3dcccbecd7f387c60d",
+      "contract_address": "sync12j7reatl4p09l4p63kyrxky5t89wp4a8mylg",
+      "synq_contract_address": "0104f2c001c336dbedd90ea72924b93ee69e09a92abf16b9197e1ed255a6257f236b81bf8346418f1b"
+    },
+    {
+      "nonce": 4,
+      "contract": "Treasury",
+      "deployer_address": "syna197thhzye2pmw6lk3y47nsf6cluqgt07df9t0",
+      "payload_hash": "65d04ed8ead231647ce42e88f30b03bf68de1c9ad6afd85bb371ff412e5e2a8b",
+      "constructor_args_hash": "80cdbd271ae6d967a299615ce07862273e910d20af8439db855316c025b38e7d",
+      "bytecode_hash": "d35e7736eca4c3a61428809f109631ec4ab39d8a3904ef05a82eb23cdd364408",
+      "abi_hash": "1e5ac5b604a83339eccd3a245fbb46f0f5b0218650ba75e8419dbfee20af7f74",
+      "manifest_hash": "c19a29580b503224aed06cc9ca37381823b5d39fefefb0fb8e72c2389edb9ae2",
+      "contract_address": "sync1puq5nz4wacn25de9suur53esyn99zp9j6jx8",
+      "synq_contract_address": "0104f2c001959300da6a121cafd64adbf4cadb529d3f740a83fb4c2597e895613536a946c9903ea176"
+    },
+    {
+      "nonce": 5,
+      "contract": "Slashing",
+      "deployer_address": "syna197thhzye2pmw6lk3y47nsf6cluqgt07df9t0",
+      "payload_hash": "a6db6b2b6f54c98e624cd984e380703b7a9bf6803dade82a4b52fdd97e44df19",
+      "constructor_args_hash": "adb2b316f20859fbaa08bb49fd4ca4af55e7c3c53c9d059e6bbfe15191c0a0d0",
+      "bytecode_hash": "fe44ea53ddc1c626ef0d73884a317f7e30962df476ee3d5043ec528f738cb1b5",
+      "abi_hash": "7c2aa314689e5b16a7f0edf752a4dff52a13282312a4b41f5eadc5b970b102c5",
+      "manifest_hash": "bfd5dbdcb70244c7006c59df4c2c6df685f1f970aa604686acf65d304a47216a",
+      "contract_address": "sync186smh2hyslf7yf5mwa2dq0dt52dpw0eufht3",
+      "synq_contract_address": "0104f2c001b6f8ba4117282ca871875e7169a77089ba9d7eafd6ba97031b9bde2f343eeddd0db7631a"
+    },
+    {
+      "nonce": 6,
+      "contract": "RewardDistributor",
+      "deployer_address": "syna197thhzye2pmw6lk3y47nsf6cluqgt07df9t0",
+      "payload_hash": "b21f1f06f1b75545c6d5ff8dd538052adae98c7b45f7f13019ab6f18f0940ca8",
+      "constructor_args_hash": "f2e8f642c47577e90fd5c9869da733a0ed2065356ae9974605c696c4baf6698e",
+      "bytecode_hash": "1bddb527b9f9f401996fabea1dfced503f483b827ba77258576c255667208e92",
+      "abi_hash": "7f3122c10bcf0f625681915473e21df22a6c24536832345a54a1cd1ca002c596",
+      "manifest_hash": "b98a09e09a335f1242259f40869e417630f35aac9ab84521bc385d1d526295bc",
+      "contract_address": "sync1gx6zkzqjhfymqz2rz868n8zqf06fe790wued",
+      "synq_contract_address": "0104f2c001462082b5c4c7336d8ff27d2a20c5c116aceb0608ba7fa41b98b2a40c108301a02bb75867"
+    },
+    {
+      "nonce": 7,
+      "contract": "SynergyOracle",
+      "deployer_address": "syna197thhzye2pmw6lk3y47nsf6cluqgt07df9t0",
+      "payload_hash": "70c0cb69d6c887e745de57c6031706212f23be1aaa02b8b92e890e9607d79638",
+      "constructor_args_hash": "75daa95d9e7fa5a4f739d862971337e6f4a94dbc158b65b8a30ba441d5f81f0e",
+      "bytecode_hash": "f2d7c848d7b607754f83da9b18f4f85cb33a5fae2607780f75860d243fc6316a",
+      "abi_hash": "ff5c1d482464a961798523f00a2bccdf9b95a2f723505da34ae8b979dc54a53c",
+      "manifest_hash": "457089cd7572b58489aa9850af2c9523860427fcf1e8d2051666c5441ba3790f",
+      "contract_address": "sync17yd3kddpn7g9mjeazhnw7ky9pmk5ujjl0rkn",
+      "synq_contract_address": "0104f2c001eb309f88c15988335dcd9c3b109b12eace61d563d5e01cbdfb52aba21b46b6a3504a2df5"
+    },
+    {
+      "nonce": 8,
+      "contract": "TeamVesting",
+      "deployer_address": "syna197thhzye2pmw6lk3y47nsf6cluqgt07df9t0",
+      "payload_hash": "786ff2a41cf024111cc26056e0d5b71cbc98d686c7d8acfdd435cdd2e2cb353c",
+      "constructor_args_hash": "4d7beefc3bba967a0f5fc2c8824a2239961e4ca3e25f756a8079b78c7724f059",
+      "bytecode_hash": "6a4bf755a81615aed240c51f6842aa1bdc6ca8ef16ffa75ce7a510453f1b7f4c",
+      "abi_hash": "5f7df0c83f56283e9c1f78bfe84f9f8b494f1c300ae9cc412d87164027f00753",
+      "manifest_hash": "c340a5ced8204e5d6dad0e78d0c78bd4a7aaa0ed6f7c2ea9dde053d74ef89383",
+      "contract_address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "synq_contract_address": "0104f2c0018cfc7f57901020476d7d002d1bfb2c0180e9afa3911a2da5e52a273d4728e683b4914f74"
+    }
+  ]
+}

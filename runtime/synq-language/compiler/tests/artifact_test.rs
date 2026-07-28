@@ -31,7 +31,7 @@ fn counter_artifacts_are_deterministic_and_chain_bound() {
     assert_eq!(first.manifest.artifact_format, "synq-stateful-ir-v2");
     assert_eq!(first.manifest.required_chain_id, 1266);
     assert_eq!(first.manifest.required_network_id, "synergy-testnet");
-    assert_eq!(first.manifest.required_signature_algorithm, "ML-DSA-65");
+    assert_eq!(first.manifest.required_signature_algorithm, "ML-DSA-87");
     assert!(!first.hashes.bytecode_hash.is_empty());
     assert!(!first.hashes.abi_hash.is_empty());
     assert!(!first.hashes.manifest_hash.is_empty());
@@ -67,13 +67,17 @@ fn counter_artifacts_match_checked_in_canonical_fixtures() {
         bundle.hashes.bytecode_hash,
         "9fe99c76286d6fab0cab50911d398b08723068beac8503d146a122bae635516a"
     );
+    // ABI and manifest hashes changed on 2026-07-27 when the account-domain
+    // signature algorithm moved ML-DSA-65 -> ML-DSA-87. Both artifacts carry
+    // that label, so both digests move; `bytecode_hash` above is unchanged,
+    // which is the proof that codegen was not affected.
     assert_eq!(
         bundle.hashes.abi_hash,
-        "ea9c1f48cad5f0d39d299d854ba578f6909a8475093aa8c616b1ee186c599b26"
+        "262bdaa8ec4af640710eceb059776c3b2d204e8aeb7e72d88d4bb2f8272e3784"
     );
     assert_eq!(
         bundle.hashes.manifest_hash,
-        "42d2da3985343a9d9b678f10ed2b7e31acaaf78290ba268d131ea4947a078b62"
+        "7fd2d3b97ff6a0fc93221fcd99fd13fa066af558be44f851e2a8ac92aa03b3c3"
     );
 }
 
@@ -89,7 +93,7 @@ fn counter_manifest_references_generated_hashes_and_policy() {
     );
     assert_eq!(bundle.manifest.required_chain_id, 1266);
     assert_eq!(bundle.manifest.required_network_id, "synergy-testnet");
-    assert_eq!(bundle.manifest.required_signature_algorithm, "ML-DSA-65");
+    assert_eq!(bundle.manifest.required_signature_algorithm, "ML-DSA-87");
     assert_eq!(
         bundle.abi.security_requirements.deploy_domain,
         "SYNQ_CONTRACT_DEPLOY_V1"
@@ -114,7 +118,7 @@ fn manifest_generation_uses_explicit_artifact_config() {
 
     assert_eq!(bundle.manifest.required_chain_id, 1266);
     assert_eq!(bundle.manifest.required_network_id, "synergy-testnet-v3");
-    assert_eq!(bundle.manifest.required_signature_algorithm, "ML-DSA-65");
+    assert_eq!(bundle.manifest.required_signature_algorithm, "ML-DSA-87");
 }
 
 #[test]

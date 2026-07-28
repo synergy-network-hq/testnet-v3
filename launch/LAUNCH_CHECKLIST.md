@@ -6,7 +6,7 @@ Every item must be complete before any node joins Testnet-v3.
 
 - [ ] The approved ML-DSA-65 validator consensus profile is recorded with the final launch approval.
 - [ ] Every validator consensus public key matches the approved profile and is bound to the canonical Testnet-v3 genesis input.
-- [ ] Fresh node and P2P identities generated for every node.
+- [x] Fresh node and P2P identities generated for every node (validated against genesis 2026-07-26; see `launch/IDENTITY_VALIDATION_REPORT.md`).
 - [ ] Validator addresses replaced in `runtime/config/testnet/network-topology.toml`.
 - [ ] Canonical genesis configuration uses the final validator set and allocations.
 - [ ] Genesis timestamp matches the approved launch window.

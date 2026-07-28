@@ -1521,179 +1521,124 @@ fn configured_validator_public_address_map(
     config: &NodeConfig,
     active_validator_addresses: &HashSet<String>,
 ) -> HashMap<String, String> {
+    // Testnet-v3 peer identity model.
+    //
+    // A Synergy peer is identified ONLY by its `synv...` node address. A public
+    // IP, VPN IP or port is a ROUTE, never an identity. An endpoint therefore
+    // resolves to a node identity only through an EXPLICIT binding:
+    //   * a dial target that is itself a `synv...` address,
+    //   * `network.validator_vpn_transports` (validator_address <-> dial_address),
+    //   * transports learned from an authenticated session.
+    //
+    // Identity is never inferred from the ORDER of configured dial targets. On
+    // Testnet-v3 two distinct machines (Val4 and the archive validator) share the
+    // public endpoint 73.79.66.255:5622, so an endpoint can never by itself
+    // designate a node. Any endpoint claimed by more than one validator is
+    // dropped as ambiguous rather than resolved to an arbitrary one.
     let validators = configured_vote_target_validator_addresses(config, active_validator_addresses);
     if validators.is_empty() {
         return HashMap::new();
     }
-
     let active_filter = validators.iter().cloned().collect::<HashSet<_>>();
-    let mut stable_validator_targets = config
+
+    let mut map: HashMap<String, String> = HashMap::new();
+    let mut ambiguous: HashSet<String> = HashSet::new();
+
+    fn bind(
+        map: &mut HashMap<String, String>,
+        ambiguous: &mut HashSet<String>,
+        key: String,
+        validator: &str,
+    ) {
+        if key.trim().is_empty() {
+            return;
+        }
+        match map.get(&key) {
+            Some(existing) if existing != validator => {
+                // Two different node identities claim the same route: the route
+                // is ambiguous and must not identify either of them.
+                ambiguous.insert(key);
+            }
+            _ => {
+                map.insert(key, validator.to_string());
+            }
+        }
+    }
+
+    // 1. Dial targets that are themselves node identities.
+    for target in config
         .network
         .persistent_peers
         .iter()
         .chain(config.network.additional_dial_targets.iter())
-        .filter_map(|target| normalize_validator_address_target(target))
-        .filter(|validator| active_filter.contains(validator))
-        .map(|validator| (validator.clone(), validator))
-        .collect::<HashMap<_, _>>();
-    for transport in &config.network.validator_vpn_transports {
-        if let Some(validator) = normalize_validator_address_target(&transport.validator_address) {
+    {
+        if let Some(validator) = normalize_validator_address_target(target) {
             if active_filter.contains(&validator) {
-                stable_validator_targets
-                    .entry(validator.clone())
-                    .or_insert_with(|| validator);
+                bind(&mut map, &mut ambiguous, validator.clone(), &validator);
             }
         }
     }
-    for validator in current_validator_transports().into_keys() {
-        if active_filter.contains(&validator) {
-            stable_validator_targets
-                .entry(validator.clone())
-                .or_insert(validator);
-        }
-    }
-    if !stable_validator_targets.is_empty() {
-        return stable_validator_targets;
-    }
 
-    let dials = configured_validator_p2p_dials(config);
-    let configured_validators = config
-        .node
-        .allowed_validator_addresses
-        .iter()
-        .map(|address| address.trim().to_string())
-        .filter(|address| !address.is_empty())
-        .collect::<Vec<_>>();
-    let genesis_validators = canonical_genesis()
-        .ok()
-        .map(|genesis| {
-            genesis
-                .validators()
-                .iter()
-                .map(|validator| validator.operator_address.trim().to_string())
-                .filter(|address| !address.is_empty())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let mut ordered_validator_candidates = Vec::new();
-    if !configured_validators.is_empty() {
-        ordered_validator_candidates.push(configured_validators.clone());
-    }
-    if let Some(testnet_order) =
-        configured_testnet_validator_dial_order(&configured_validators, &dials)
-    {
-        if !ordered_validator_candidates
-            .iter()
-            .any(|candidate| candidate == &testnet_order)
-        {
-            ordered_validator_candidates.push(testnet_order);
-        }
-    }
-    if !genesis_validators.is_empty()
-        && !ordered_validator_candidates
-            .iter()
-            .any(|candidate| candidate == &genesis_validators)
-    {
-        ordered_validator_candidates.push(genesis_validators);
-    }
-
-    for ordered_validators in ordered_validator_candidates {
-        let ordered_mapped_pairs = if dials.len() == ordered_validators.len() {
-            dials
-                .iter()
-                .cloned()
-                .zip(ordered_validators.iter().cloned())
-                .filter(|(_, validator)| active_filter.contains(validator))
-                .collect::<Vec<_>>()
-        } else if dials.len() + 1 == ordered_validators.len() {
-            let local_validator = announced_validator_address(config)
-                .map(|address| address.trim().to_string())
-                .filter(|address| !address.is_empty())
-                .filter(|address| {
-                    ordered_validators
-                        .iter()
-                        .any(|validator| validator == address)
-                });
-            if let Some(local_validator) = local_validator {
-                let peer_validators = ordered_validators
-                    .iter()
-                    .filter(|validator| *validator != &local_validator)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if peer_validators.len() == dials.len() {
-                    dials
-                        .iter()
-                        .cloned()
-                        .zip(peer_validators)
-                        .filter(|(_, validator)| active_filter.contains(validator))
-                        .collect::<Vec<_>>()
-                } else {
-                    Vec::new()
-                }
-            } else {
-                Vec::new()
-            }
-        } else {
-            Vec::new()
+    // 2. Explicit endpoint <-> node-identity bindings from the topology config.
+    for transport in &config.network.validator_vpn_transports {
+        let Some(validator) = normalize_validator_address_target(&transport.validator_address)
+        else {
+            continue;
         };
-        if !ordered_mapped_pairs.is_empty() {
-            return ordered_mapped_pairs
-                .into_iter()
-                .flat_map(|(dial, validator)| {
-                    let mut entries = Vec::new();
-                    entries.push((dial.clone(), validator.clone()));
-                    let host = peer_socket_host(&dial);
-                    if !host.trim().is_empty() {
-                        entries.push((format!("{host}:{VALIDATOR_P2P_PORT}"), validator));
-                    }
-                    entries
-                })
-                .collect();
+        if !active_filter.contains(&validator) {
+            continue;
+        }
+        bind(&mut map, &mut ambiguous, validator.clone(), &validator);
+        let dial = transport.dial_address.trim();
+        if dial.is_empty() {
+            continue;
+        }
+        if let Some(parsed) = parse_bootnode_dial_address(dial) {
+            bind(&mut map, &mut ambiguous, parsed.clone(), &validator);
+            let host = peer_socket_host(&parsed);
+            if !host.trim().is_empty() {
+                bind(
+                    &mut map,
+                    &mut ambiguous,
+                    format!("{host}:{VALIDATOR_P2P_PORT}"),
+                    &validator,
+                );
+            }
+        } else {
+            bind(&mut map, &mut ambiguous, dial.to_string(), &validator);
         }
     }
 
-    let mapped_pairs = if dials.len() == validators.len() {
-        dials.into_iter().zip(validators).collect::<Vec<_>>()
-    } else if dials.len() + 1 == validators.len() {
-        let local_validator = announced_validator_address(config)
-            .map(|address| address.trim().to_string())
-            .filter(|address| !address.is_empty())
-            .filter(|address| validators.iter().any(|validator| validator == address));
-        if let Some(local_validator) = local_validator {
-            let peer_validators = validators
-                .into_iter()
-                .filter(|validator| validator != &local_validator)
-                .collect::<Vec<_>>();
-            if peer_validators.len() == dials.len() {
-                dials.into_iter().zip(peer_validators).collect::<Vec<_>>()
-            } else {
-                Vec::new()
+    // 3. Transports learned from authenticated sessions.
+    for (validator, transport) in current_validator_transports() {
+        if !active_filter.contains(&validator) {
+            continue;
+        }
+        bind(&mut map, &mut ambiguous, validator.clone(), &validator);
+        let dial = transport.trim();
+        if dial.is_empty() {
+            continue;
+        }
+        if let Some(parsed) = parse_bootnode_dial_address(dial) {
+            bind(&mut map, &mut ambiguous, parsed.clone(), &validator);
+            let host = peer_socket_host(&parsed);
+            if !host.trim().is_empty() {
+                bind(
+                    &mut map,
+                    &mut ambiguous,
+                    format!("{host}:{VALIDATOR_P2P_PORT}"),
+                    &validator,
+                );
             }
         } else {
-            Vec::new()
+            bind(&mut map, &mut ambiguous, dial.to_string(), &validator);
         }
-    } else if dials.len() > validators.len() {
-        dials[dials.len() - validators.len()..]
-            .iter()
-            .cloned()
-            .zip(validators)
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
+    }
 
-    mapped_pairs
-        .into_iter()
-        .flat_map(|(dial, validator)| {
-            let mut entries = Vec::new();
-            entries.push((dial.clone(), validator.clone()));
-            let host = peer_socket_host(&dial);
-            if !host.trim().is_empty() {
-                entries.push((format!("{host}:{VALIDATOR_P2P_PORT}"), validator));
-            }
-            entries
-        })
-        .collect()
+    for key in ambiguous {
+        map.remove(&key);
+    }
+    map
 }
 
 fn recover_peer_validator_address_for_vote_target(
@@ -6431,54 +6376,6 @@ fn send_direct_vote_to_configured_proposer(
     let _ = stream.shutdown(Shutdown::Write);
 
     Ok(())
-}
-
-fn configured_testnet_validator_dial_order(
-    configured_validators: &[String],
-    dials: &[String],
-) -> Option<Vec<String>> {
-    const TESTNET_VALIDATOR_ORDER: &[&str] = &[
-        "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs",
-        "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt",
-        "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re",
-        "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5",
-        "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f",
-        "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx",
-    ];
-    const TESTNET_VALIDATOR_DIALS: &[&str] = &[
-        "62.146.182.207:5622",
-        "62.146.182.208:5622",
-        "62.146.182.209:5622",
-        "73.79.66.255:5622",
-        "194.163.183.166:5622",
-        "157.173.192.45:5622",
-    ];
-
-    if configured_validators.is_empty() {
-        return None;
-    }
-    if configured_validators
-        .iter()
-        .any(|validator| !TESTNET_VALIDATOR_ORDER.contains(&validator.as_str()))
-    {
-        return None;
-    }
-
-    let dial_set = dials.iter().map(String::as_str).collect::<HashSet<_>>();
-    let known_dial_matches = TESTNET_VALIDATOR_DIALS
-        .iter()
-        .filter(|dial| dial_set.contains(**dial))
-        .count();
-    if known_dial_matches < 3 {
-        return None;
-    }
-
-    Some(
-        TESTNET_VALIDATOR_ORDER
-            .iter()
-            .map(|validator| (*validator).to_string())
-            .collect(),
-    )
 }
 
 fn configured_public_address_for_validator(
@@ -11373,7 +11270,8 @@ mod tests {
         block_sync_response_policy, build_local_handshake,
         build_local_handshake_with_extra_capabilities, build_local_status_message,
         bypasses_shared_message_queue, cache_peer_state, cache_pending_block,
-        canonical_genesis_hash, canonical_validator_public_address, chain_has_block_sync_overlap,
+        canonical_genesis_hash, canonical_validator_address_for_slot,
+        canonical_validator_public_address, chain_has_block_sync_overlap,
         chain_snapshot_clone_allowed, claim_status_rate_limit, collect_known_peer_addresses,
         configured_public_address_for_validator_in_set, configured_seed_server_dial_targets,
         configured_validator_p2p_dials, configured_validator_public_address_map,
@@ -11458,8 +11356,16 @@ mod tests {
     use std::time::{Duration, Instant};
 
     // Session and write-gate registries are process-global; serialize tests that exercise them.
+    /// One lock for all p2p shared-state tests.
+    ///
+    /// Peer sessions, write gates and the service-sync coordinator are a single
+    /// entangled global: ending a peer session releases that peer's service-sync
+    /// reservation. Guarding them with two independent mutexes let a
+    /// peer-session-only test run alongside a service-sync test and knock out
+    /// its reservation, which is why
+    /// `completed_service_apply_does_not_release_next_batch_slot` failed
+    /// intermittently on its very first request while passing 5/5 alone.
     static PEER_SESSION_TEST_LOCK: Mutex<()> = Mutex::new(());
-    static SERVICE_SYNC_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn peer_session_test_guard() -> MutexGuard<'static, ()> {
         PEER_SESSION_TEST_LOCK
@@ -11467,10 +11373,10 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// Takes the shared p2p lock and resets the coordinator state, so callers
+    /// must NOT also call [`peer_session_test_guard`] — that would deadlock.
     fn service_sync_test_guard() -> MutexGuard<'static, ()> {
-        let guard = SERVICE_SYNC_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let guard = peer_session_test_guard();
         reset_service_sync_coordinator_for_tests();
         BLOCK_SYNC_APPLY_ACTIVE
             .lock()
@@ -11540,10 +11446,17 @@ mod tests {
         peer
     }
 
+    /// Deterministic Testnet-v3 unit-test genesis (chain 1266, 6 validators).
+    /// This fixture is marked `TEST_FIXTURE_NOT_FOR_PRODUCTION` and is rejected
+    /// by the production loader, so unit tests never depend on the unsigned
+    /// production candidate or on the BLOCKED placeholder.
     fn configure_canonical_genesis_path_for_tests() {
         std::env::set_var(
             "SYNERGY_GENESIS_FILE",
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../config/genesis.json"),
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../config/genesis.testnet-v3.test-fixture.json"
+            ),
         );
     }
 
@@ -11991,7 +11904,7 @@ mod tests {
 
         let mut manager = PQCManager::new();
         let (public_key, private_key) = manager
-            .generate_keypair(PQCAlgorithm::FNDSA)
+            .generate_keypair(PQCAlgorithm::MLDSA65)
             .expect("test Aegis PQC validator key should generate");
         register_test_validator_signing_key(address, public_key.clone(), private_key);
         let encoded_public_key = format!(
@@ -12076,7 +11989,15 @@ mod tests {
             round_number: 1,
             aggregate_signature: vec![42],
             participant_bitmap: vec![0x0f],
-            cumulative_weight: votes.len() as f64,
+            // Production verifies cumulative_weight as the summed BONDED STAKE of
+            // the signers, not the signer count. Declaring the count here made
+            // every certified block fail with
+            // "QC cumulative_weight mismatch: computed bonded weight ..., declared N".
+            cumulative_weight: signer_addresses
+                .iter()
+                .filter_map(|address| validator_manager.get_validator(address))
+                .map(|validator| validator.stake_amount as f64)
+                .sum::<f64>(),
             validation_quorum_met: true,
             cooperation_quorum_met: true,
             timestamp: block.timestamp,
@@ -12896,6 +12817,24 @@ mod tests {
             "194.163.183.166:5622".to_string(),
             "157.173.192.45:5622".to_string(),
         ];
+        // Routes alone never identify a node; the topology supplies the explicit
+        // endpoint -> `synv...` bindings.
+        config.network.validator_vpn_transports = validators
+            .iter()
+            .cloned()
+            .zip([
+                "62.146.182.207:5622",
+                "62.146.182.208:5622",
+                "62.146.182.209:5622",
+                "73.79.66.255:5622",
+                "194.163.183.166:5622",
+                "157.173.192.45:5622",
+            ])
+            .map(|(validator_address, dial)| ValidatorVpnTransportConfig {
+                validator_address,
+                dial_address: dial.to_string(),
+            })
+            .collect();
 
         let address_map =
             configured_validator_public_address_map(&config, &active_validator_addresses);
@@ -12945,156 +12884,128 @@ mod tests {
         );
     }
 
+    /// Testnet-v3 peer identity: endpoints are ROUTES, `synv...` is IDENTITY.
+    ///
+    /// The retained production topology puts two distinct machines (Val4 and the
+    /// archive validator) behind the same public endpoint 73.79.66.255:5622, so
+    /// an endpoint may never designate a node on its own. A route resolves to an
+    /// identity only through an explicit authenticated binding.
     #[test]
-    fn vote_target_identity_maps_validator_dials_excluding_local_validator() {
-        let validators = vec![
-            "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs".to_string(),
-            "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt".to_string(),
-            "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re".to_string(),
-            "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5".to_string(),
-            "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f".to_string(),
-            "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx".to_string(),
-        ];
-        let active_validator_addresses = validators.iter().cloned().collect::<HashSet<_>>();
+    fn validator_routes_resolve_only_through_explicit_node_identity_bindings() {
+        let val1 = "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs".to_string();
+        let val4 = "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5".to_string();
+        let val6 = "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx".to_string();
+        let validators = vec![val1.clone(), val4.clone(), val6.clone()];
+        let active = validators.iter().cloned().collect::<HashSet<_>>();
+
         let mut config = NodeConfig::default();
         config.node.allowed_validator_addresses = validators;
-        config.node.validator_address = "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re".to_string();
-        config.p2p.public_address = "62.146.182.209:5622".to_string();
+        config.node.validator_address = val1.clone();
+        config.p2p.public_address = "62.146.182.207:5622".to_string();
+        // Routes only — these must NOT by themselves identify any node.
         config.network.persistent_peers = vec![
-            "62.146.182.207:5622".to_string(),
-            "62.146.182.208:5622".to_string(),
             "73.79.66.255:5622".to_string(),
-            "194.163.183.166:5622".to_string(),
             "157.173.192.45:5622".to_string(),
-            "relay1.synergynode.xyz:5622".to_string(),
-            "relay2.synergynode.xyz:5622".to_string(),
         ];
 
-        let address_map =
-            configured_validator_public_address_map(&config, &active_validator_addresses);
+        let unbound = configured_validator_public_address_map(&config, &active);
+        assert!(
+            !unbound.contains_key("73.79.66.255:5622"),
+            "a bare endpoint must never resolve to a node identity"
+        );
+        assert!(
+            !unbound.contains_key("157.173.192.45:5622"),
+            "a bare endpoint must never resolve to a node identity"
+        );
 
-        assert_eq!(
-            address_map.get("62.146.182.207:5622"),
-            Some(&"synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs".to_string())
-        );
-        assert_eq!(
-            address_map.get("62.146.182.208:5622"),
-            Some(&"synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt".to_string())
-        );
-        assert_eq!(
-            address_map.get("73.79.66.255:5622"),
-            Some(&"synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5".to_string())
-        );
-        assert_eq!(
-            address_map.get("194.163.183.166:5622"),
-            Some(&"synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f".to_string())
-        );
-        assert_eq!(
-            address_map.get("157.173.192.45:5622"),
-            Some(&"synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx".to_string())
-        );
-        assert!(!address_map.contains_key("62.146.182.209:5622"));
-
-        let active_without_val4_val5 = [
-            "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs",
-            "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt",
-            "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re",
-            "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx",
-        ]
-        .into_iter()
-        .map(str::to_string)
-        .collect::<HashSet<_>>();
-        let active_address_map =
-            configured_validator_public_address_map(&config, &active_without_val4_val5);
-        assert_eq!(
-            active_address_map.get("157.173.192.45:5622"),
-            Some(&"synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx".to_string())
-        );
-        assert!(!active_address_map.contains_key("73.79.66.255:5622"));
-        assert!(!active_address_map.contains_key("194.163.183.166:5622"));
-
-        let mut active_subset_config = NodeConfig::default();
-        active_subset_config.node.allowed_validator_addresses = vec![
-            "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs".to_string(),
-            "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt".to_string(),
-            "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re".to_string(),
-            "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx".to_string(),
+        // Explicit binding: route -> authenticated node identity.
+        config.network.validator_vpn_transports = vec![
+            ValidatorVpnTransportConfig {
+                validator_address: val4.clone(),
+                dial_address: "73.79.66.255:5622".to_string(),
+            },
+            ValidatorVpnTransportConfig {
+                validator_address: val6.clone(),
+                dial_address: "157.173.192.45:5622".to_string(),
+            },
         ];
-        active_subset_config.node.validator_address =
-            "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re".to_string();
-        active_subset_config.p2p.public_address = "62.146.182.209:5622".to_string();
-        active_subset_config.network.persistent_peers = config.network.persistent_peers.clone();
-        let active_subset_address_map = configured_validator_public_address_map(
-            &active_subset_config,
-            &active_without_val4_val5,
-        );
-        assert_eq!(
-            active_subset_address_map.get("157.173.192.45:5622"),
-            Some(&"synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx".to_string())
-        );
-        assert_eq!(
-            configured_public_address_for_validator_in_set(
-                &active_subset_config,
-                "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx",
-                &active_without_val4_val5,
-            ),
-            Some("157.173.192.45:5622".to_string())
-        );
-        assert_eq!(
-            configured_public_address_for_validator_in_set(
-                &active_subset_config,
-                "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5",
-                &active_without_val4_val5,
-            ),
-            None
-        );
-        assert!(!active_subset_address_map.contains_key("73.79.66.255:5622"));
-        assert!(!active_subset_address_map.contains_key("194.163.183.166:5622"));
+        let bound = configured_validator_public_address_map(&config, &active);
+        assert_eq!(bound.get("73.79.66.255:5622"), Some(&val4));
+        assert_eq!(bound.get("157.173.192.45:5622"), Some(&val6));
+        // The node identity itself always resolves to itself.
+        assert_eq!(bound.get(val4.as_str()), Some(&val4));
 
-        let peer = PeerConnection {
-            address: "73.79.66.255:5622".to_string(),
-            direction: ConnectionDirection::Outgoing,
-            public_address: None,
-            validator_address: None,
-            connected_at: 0,
-            last_seen: 0,
-            blocks_sent: 0,
-            blocks_received: 0,
-            txs_sent: 0,
-            txs_received: 0,
-            stream: None,
-            connected_endpoint: None,
-            node_id: None,
-            handshake_role: None,
-            version: None,
-            capabilities: Vec::new(),
-            last_known_height: 0,
-            best_block_hash: String::new(),
-            genesis_hash: String::new(),
-            status_received_at: None,
-            status_reported_at: None,
-            status_validator_address: None,
-            status_source_session_id: None,
-            active_validator_set_hash: None,
-            quarantined: false,
-            consensus_duties_disabled: false,
-            recovery_state: None,
-        };
-
-        assert_eq!(
-            recover_peer_validator_address_for_vote_target(
-                &config,
-                &peer,
-                &active_validator_addresses,
-            ),
-            Some("synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5".to_string())
+        // A route claimed by two different identities is ambiguous and must
+        // resolve to neither — this is the Val4 / archive-validator case.
+        let mut shared = config.clone();
+        shared
+            .network
+            .validator_vpn_transports
+            .push(ValidatorVpnTransportConfig {
+                validator_address: val1.clone(),
+                dial_address: "73.79.66.255:5622".to_string(),
+            });
+        let shared_map = configured_validator_public_address_map(&shared, &active);
+        assert!(
+            !shared_map.contains_key("73.79.66.255:5622"),
+            "an endpoint claimed by two identities must resolve to neither"
         );
+        assert_eq!(shared_map.get(val1.as_str()), Some(&val1));
+        assert_eq!(shared_map.get(val4.as_str()), Some(&val4));
+
+        // Endpoint changes do not change identity.
+        let mut moved = config.clone();
+        moved.network.validator_vpn_transports = vec![ValidatorVpnTransportConfig {
+            validator_address: val4.clone(),
+            dial_address: "203.0.113.77:5622".to_string(),
+        }];
+        let moved_map = configured_validator_public_address_map(&moved, &active);
+        assert_eq!(moved_map.get("203.0.113.77:5622"), Some(&val4));
+        assert_eq!(moved_map.get(val4.as_str()), Some(&val4));
+        assert!(!moved_map.contains_key("73.79.66.255:5622"));
+
+        // A validator outside the active set is never routable.
+        let narrowed = [val1.clone()].into_iter().collect::<HashSet<_>>();
+        let narrowed_map = configured_validator_public_address_map(&config, &narrowed);
+        assert!(!narrowed_map.values().any(|v| v == &val4));
+        assert!(!narrowed_map.contains_key("73.79.66.255:5622"));
+    }
+
+    /// The same public endpoint must never let one node impersonate another.
+    #[test]
+    fn shared_public_endpoint_cannot_impersonate_another_node_identity() {
+        let val4 = "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5".to_string();
+        let val5 = "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f".to_string();
+        let active = [val4.clone(), val5.clone()]
+            .into_iter()
+            .collect::<HashSet<_>>();
+
+        let mut config = NodeConfig::default();
+        config.node.allowed_validator_addresses = vec![val4.clone(), val5.clone()];
+        config.node.validator_address = val5.clone();
+        config.network.validator_vpn_transports = vec![ValidatorVpnTransportConfig {
+            validator_address: val4.clone(),
+            dial_address: "73.79.66.255:5622".to_string(),
+        }];
+
+        // Correct route, but the peer asserts a different node identity: the
+        // asserted identity wins and the route must not override it.
+        let map = configured_validator_public_address_map(&config, &active);
+        assert_eq!(map.get("73.79.66.255:5622"), Some(&val4));
+        assert_ne!(map.get("73.79.66.255:5622"), Some(&val5));
+
+        // Port reuse / ambiguity on the same host does not create identity.
+        assert!(!map.contains_key("73.79.66.255:5615"));
+        assert!(!map.contains_key("73.79.66.255"));
     }
 
     #[test]
     fn vote_target_identity_recovers_from_genesis_validator_node_id() {
         configure_canonical_genesis_path_for_tests();
-        let validator = "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f".to_string();
+        // `genesisval5` names genesis validator slot 5; the identity is taken
+        // from the canonical genesis, never from the peer's endpoint.
+        let validator = canonical_validator_address_for_slot(5)
+            .expect("test fixture genesis must define validator slot 5");
         let active_validator_addresses = [validator.clone()].into_iter().collect::<HashSet<_>>();
         let config = NodeConfig::default();
         let peer = PeerConnection {
@@ -13242,7 +13153,7 @@ mod tests {
 
     #[test]
     fn resolve_bootstrap_dial_targets_excludes_self_genesis_alias_but_keeps_other_validators() {
-        let temp = std::env::temp_dir().join(format!(
+        let temp = crate::utils::test_temp_root(format!(
             "synergy-networking-test-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -13885,7 +13796,6 @@ mod tests {
 
     #[test]
     fn service_statuses_admit_only_one_global_block_sync_request() {
-        let _peer_session_guard = peer_session_test_guard();
         let _service_sync_guard = service_sync_test_guard();
         let Some((client_a, mut server_a)) = service_sync_test_connection() else {
             return;
@@ -13969,7 +13879,6 @@ mod tests {
 
     #[test]
     fn service_sync_completion_immediately_requests_the_next_range() {
-        let _peer_session_guard = peer_session_test_guard();
         let _service_sync_guard = service_sync_test_guard();
         let Some((client_a, mut server_a)) = service_sync_test_connection() else {
             return;
@@ -14013,7 +13922,6 @@ mod tests {
 
     #[test]
     fn service_block_response_releases_apply_slot_after_ordered_apply() {
-        let _peer_session_guard = peer_session_test_guard();
         let _service_sync_guard = service_sync_test_guard();
         let Some((client_a, mut server_a)) = service_sync_test_connection() else {
             return;
@@ -14077,7 +13985,6 @@ mod tests {
 
     #[test]
     fn completed_service_apply_does_not_release_next_batch_slot() {
-        let _peer_session_guard = peer_session_test_guard();
         let _service_sync_guard = service_sync_test_guard();
         let Some((client_a, mut server_a)) = service_sync_test_connection() else {
             return;
@@ -14143,7 +14050,6 @@ mod tests {
 
     #[test]
     fn service_sync_timeout_releases_and_reassigns_the_source() {
-        let _peer_session_guard = peer_session_test_guard();
         let _service_sync_guard = service_sync_test_guard();
         let Some((client_a, mut server_a)) = service_sync_test_connection() else {
             return;
@@ -14204,7 +14110,6 @@ mod tests {
     fn service_sync_response_timeout_allows_qc_warmup_without_source_churn() {
         const OBSERVED_QC_WARMUP_SECS: u64 = 70;
 
-        let _peer_session_guard = peer_session_test_guard();
         let _service_sync_guard = service_sync_test_guard();
         let Some((client_a, mut server_a)) = service_sync_test_connection() else {
             return;
@@ -14285,7 +14190,6 @@ mod tests {
 
     #[test]
     fn validator_status_sync_keeps_independent_requests_and_consensus_role() {
-        let _peer_session_guard = peer_session_test_guard();
         let _service_sync_guard = service_sync_test_guard();
         let Some((client_a, mut server_a)) = service_sync_test_connection() else {
             return;
@@ -15828,7 +15732,6 @@ mod tests {
 
     #[test]
     fn status_handler_records_genesis_hash_and_requests_blocks_without_deadlocking() {
-        let _session_guard = peer_session_test_guard();
         let _service_sync_guard = service_sync_test_guard();
         let listener = match TcpListener::bind("127.0.0.1:0") {
             Ok(listener) => listener,
@@ -15982,7 +15885,6 @@ mod tests {
 
     #[test]
     fn status_handler_requests_blocks_from_duty_disabled_support_peer() {
-        let _session_guard = peer_session_test_guard();
         let _service_sync_guard = service_sync_test_guard();
         let listener = match TcpListener::bind("127.0.0.1:0") {
             Ok(listener) => listener,
@@ -16681,7 +16583,7 @@ mod tests {
     #[test]
     fn service_batch_write_failure_does_not_advance_tip() {
         let _guard = block_application_test_guard();
-        let root = std::env::temp_dir().join(format!(
+        let root = crate::utils::test_temp_root(format!(
             "synergy-service-batch-write-failure-{}",
             std::process::id()
         ));
@@ -17002,6 +16904,13 @@ mod tests {
             "194.163.183.166:5622".to_string(),
             "157.173.192.45:5622".to_string(),
         ];
+        // A bare endpoint no longer identifies a peer: identity comes from an
+        // explicit route -> `synv...` binding. Without this the dialed peer is
+        // (correctly) "unidentified" and would be pruned as stale.
+        config.network.validator_vpn_transports = vec![ValidatorVpnTransportConfig {
+            validator_address: "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5".to_string(),
+            dial_address: "73.79.66.255:5622".to_string(),
+        }];
         let now = current_timestamp();
         let peer = PeerConnection {
             address: "73.79.66.255:5622".to_string(),

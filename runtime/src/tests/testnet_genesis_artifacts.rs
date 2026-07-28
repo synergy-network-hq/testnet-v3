@@ -357,7 +357,7 @@ fn independent_temp_dir_hash_recompute_matches() {
         .unwrap()
         .to_string();
     for index in 0..3 {
-        let dir = std::env::temp_dir().join(format!(
+        let dir = crate::utils::test_temp_root(format!(
             "synergy-genesis-hash-test-{index}-{}",
             std::process::id()
         ));

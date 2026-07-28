@@ -635,7 +635,7 @@ mod tests {
             1,
             21_000,
             None,
-            "fndsa".to_string(),
+            "mldsa87".to_string(),
         )
     }
 

@@ -399,9 +399,13 @@ pub fn derive_synq_contract_address_from_deploy(
     push_u16(&mut material, deploy.signing_payload.protocol_version);
     push_u16(&mut material, deploy.signing_payload.algorithm_id.code());
     push_u64(&mut material, deploy.signing_payload.nonce);
-    push_bytes(
+    // Canonical Synergy account address of the deployer, not the internal
+    // 41-byte execution-signer binding. The deployer's public identity is what
+    // a contract address must attest to, and it is the same value the runtime
+    // presents as `msg.sender`.
+    push_string(
         &mut material,
-        deploy.signing_payload.signer_address.as_bytes(),
+        &crate::address::derive_standard_account_address(&deploy.public_key.bytes),
     );
     push_bytes(&mut material, &deploy.signing_payload.payload_hash);
     push_bytes(&mut material, &deploy.bytecode_hash);
@@ -577,7 +581,8 @@ fn aivm_context(
         pq_gas_limit: 300_000,
         security_policy: AivmSecurityPolicyRef {
             policy_id: "synq-testnet-1266-v1".to_string(),
-            required_signature_policy: "ml-dsa-65".to_string(),
+            required_signature_policy: aivm_core::execution::SYNQ_ACCOUNT_DOMAIN_SIGNATURE_POLICY
+                .to_string(),
         },
         sts_host: execution_context.sts_host.clone(),
         resolved_synq_contracts,

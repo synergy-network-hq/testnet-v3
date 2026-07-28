@@ -573,7 +573,7 @@ mod tests {
     #[test]
     fn corrupted_persisted_snapshot_fails_closed() {
         let (_signing_key, verifying_key) = keypair();
-        let path = std::env::temp_dir().join(format!(
+        let path = crate::utils::test_temp_root(format!(
             "synergy-validator-transport-corrupt-{}-{}.json",
             std::process::id(),
             std::thread::current().name().unwrap_or("test")

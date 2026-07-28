@@ -126,7 +126,7 @@ pub fn deploy_stateful_synq(
         state,
         overlay,
         meter,
-    );
+    )?;
     interpreter.deploy(calldata)
 }
 
@@ -151,7 +151,7 @@ pub fn call_stateful_synq(
         state,
         overlay,
         meter,
-    );
+    )?;
     interpreter.call(method_name, encoded_args)
 }
 
@@ -171,9 +171,175 @@ fn ensure_manifest_contract(
     Ok(())
 }
 
+/// Resolves the in-contract governance signature algorithm from the compiled
+/// manifest's `required_signature_algorithm`.
+///
+/// `verify_mldsa` used to hardcode `AlgorithmId::MlDsa65` — the *validator
+/// consensus* algorithm — while every Testnet-v3 manifest declares
+/// **ML-DSA-87**, the governed *account* domain. Any governance-signed contract
+/// call (`setSigner`, `setReservedName`, `setOracle`, `setSourceDomain`,
+/// `setAuthority`, `enableDelegation`, …) signed by an ML-DSA-87 governance
+/// authority therefore failed its `verifyMLDSASignature` check, because the
+/// host asked ML-DSA-65 to verify an ML-DSA-87 signature over an ML-DSA-87
+/// public key. That is the same cross-domain conflation removed from
+/// `SynQSecurityPolicy` and `signature.rs`, left behind in the VM host.
+///
+/// Binding the algorithm to the manifest — rather than to a constant here —
+/// means the host and the artifact can never disagree, which is the same
+/// property `SYNQ_TESTNET_SIGNATURE_ALGORITHM` gives the compiler. Unknown
+/// labels fail closed: a manifest is attacker-influenced input, so a permissive
+/// parse would let a consensus or identity key authorize a governance action.
+fn manifest_governance_signature_algorithm(
+    manifest: &SynQManifestArtifact,
+) -> RuntimeResult<AlgorithmId> {
+    match manifest.required_signature_algorithm.as_str() {
+        "ML-DSA-87" => Ok(AlgorithmId::MlDsa87),
+        "ML-DSA-65" => Ok(AlgorithmId::MlDsa65),
+        other => Err(StatefulSynQFailure::failed(
+            AivmErrorCode::Manifest,
+            format!(
+                "SynQ manifest required_signature_algorithm {other} is not an account-domain signature algorithm"
+            ),
+        )),
+    }
+}
+
+/// Reserved AIVM namespace holding each contract's monotonic governance nonce.
+///
+/// Kept out of contract storage on purpose: the nonce is replay state owned by
+/// the protocol, not by the contract, so no contract can under- or over-count
+/// it, and every governed contract gets identical semantics for free. It lives
+/// in `ContractState` and therefore participates in the AIVM state root.
+pub const GOVERNANCE_NONCE_NAMESPACE: &[u8] = b"__synergy_governance_nonce_v1";
+
+/// Domain separator for the canonical governance-action signing payload.
+pub const GOVERNANCE_ACTION_DOMAIN: &[u8] = b"SYNQ_GOVERNANCE_ACTION_V1";
+
+/// Number of trailing parameters every governed entry point must declare:
+/// `governanceNonce: UInt256`, `validUntilBlock: UInt256`,
+/// `signature: MLDSASignature`. They are the authorization tail and are
+/// excluded from `arguments_hash` — everything before them is signed over.
+pub const GOVERNANCE_AUTHORIZATION_TAIL_LEN: usize = 3;
+
+/// A governed action expressed exactly as the VM is executing it.
+///
+/// This is captured from the real invocation — the method actually resolved on
+/// the executable and the arguments actually decoded from calldata — so the
+/// signed payload is reconstructed from what is happening, never from values
+/// the caller asserts. That is the whole point: the previous scheme verified a
+/// caller-supplied `message: Bytes`, so one signature authorized any governed
+/// setter on any contract.
+#[derive(Debug, Clone)]
+struct GovernanceActionContext {
+    function_id: String,
+    arguments: Vec<SynQValue>,
+}
+
+/// Length-prefixed byte field. Prefixing is what removes concatenation
+/// ambiguity: without it, `("ab","c")` and `("a","bc")` would encode alike.
+fn gov_push_bytes(out: &mut Vec<u8>, value: &[u8]) {
+    out.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    out.extend_from_slice(value);
+}
+
+fn gov_push_u64(out: &mut Vec<u8>, value: u64) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
+fn gov_digest(bytes: &[u8]) -> [u8; 32] {
+    let mut out = [0_u8; 32];
+    out.copy_from_slice(&Sha256::digest(bytes));
+    out
+}
+
+/// Deterministic, unambiguous encoding of a governed action's arguments.
+///
+/// Every value is type-tagged and length-prefixed, so no two distinct argument
+/// lists can collide and no concatenation ambiguity exists.
+fn encode_governance_arguments(values: &[SynQValue], out: &mut Vec<u8>) {
+    gov_push_u64(out, values.len() as u64);
+    for value in values {
+        match value {
+            SynQValue::Uint(value) => {
+                out.push(0x01);
+                out.extend_from_slice(&value.to_be_bytes());
+            }
+            SynQValue::Int(value) => {
+                out.push(0x02);
+                out.extend_from_slice(&value.to_be_bytes());
+            }
+            SynQValue::Bool(value) => {
+                out.push(0x03);
+                out.push(u8::from(*value));
+            }
+            SynQValue::String(value) => {
+                out.push(0x04);
+                gov_push_bytes(out, value.as_bytes());
+            }
+            SynQValue::Bytes(value) => {
+                out.push(0x05);
+                gov_push_bytes(out, value);
+            }
+            SynQValue::Address(value) => {
+                out.push(0x06);
+                gov_push_bytes(out, value.as_bytes());
+            }
+            SynQValue::Array(values) => {
+                out.push(0x07);
+                encode_governance_arguments(values, out);
+            }
+            SynQValue::Null => out.push(0x00),
+        }
+    }
+}
+
+/// Builds the canonical governance-action signing payload.
+///
+/// Binds, in order: domain, chain, network, target contract, function,
+/// arguments, nonce, expiry, and the active governance key. Changing any one of
+/// them changes the digest, so a signature is valid for exactly one action, on
+/// exactly one contract, on exactly one chain, exactly once.
+#[allow(clippy::too_many_arguments)]
+pub fn governance_action_signing_payload(
+    chain_id: u64,
+    network_id: &str,
+    target_contract: &[u8],
+    function_id: &str,
+    arguments_hash: &[u8; 32],
+    governance_nonce: u128,
+    valid_until_block: u128,
+    governance_key_fingerprint: &[u8; 32],
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(GOVERNANCE_ACTION_DOMAIN);
+    gov_push_u64(&mut out, chain_id);
+    gov_push_bytes(&mut out, network_id.as_bytes());
+    gov_push_bytes(&mut out, target_contract);
+    gov_push_bytes(&mut out, function_id.as_bytes());
+    gov_push_bytes(&mut out, arguments_hash);
+    out.extend_from_slice(&governance_nonce.to_be_bytes());
+    out.extend_from_slice(&valid_until_block.to_be_bytes());
+    gov_push_bytes(&mut out, governance_key_fingerprint);
+    out
+}
+
+/// Fingerprint of the governance public key currently stored on the contract.
+///
+/// Binding this into the payload is what makes a signature die the instant the
+/// governance key is rotated, without needing to hunt down outstanding
+/// authorizations.
+pub fn governance_key_fingerprint(public_key: &[u8]) -> [u8; 32] {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"SYNQ_GOVERNANCE_KEY_FINGERPRINT_V1");
+    gov_push_bytes(&mut out, public_key);
+    gov_digest(&out)
+}
+
 struct Interpreter<'a> {
     contract: ContractDefinition,
     allowed_host_functions: BTreeSet<String>,
+    governance_signature_algorithm: AlgorithmId,
+    governance_action: Option<GovernanceActionContext>,
     context: &'a ExecutionContext,
     contract_id: &'a str,
     state: &'a ContractState,
@@ -194,10 +360,12 @@ impl<'a> Interpreter<'a> {
         state: &'a ContractState,
         overlay: &'a mut StateOverlay,
         meter: &'a mut AivmGasMeter,
-    ) -> Self {
-        Self {
+    ) -> RuntimeResult<Self> {
+        Ok(Self {
             contract,
             allowed_host_functions: manifest.host_functions.iter().cloned().collect(),
+            governance_signature_algorithm: manifest_governance_signature_algorithm(manifest)?,
+            governance_action: None,
             context,
             contract_id,
             state,
@@ -207,7 +375,7 @@ impl<'a> Interpreter<'a> {
             logs: Vec::new(),
             native_transfers: Vec::new(),
             call_depth: 0,
-        }
+        })
     }
 
     fn deploy(&mut self, calldata: &[u8]) -> RuntimeResult<StatefulSynQOutcome> {
@@ -265,6 +433,14 @@ impl<'a> Interpreter<'a> {
         }
         self.credit_call_value()?;
         let args = decode_arguments(encoded_args, &function.params)?;
+        // Captured from the resolved method and the decoded calldata, before
+        // any contract code runs. `verifyGovernanceAuthorization` reconstructs
+        // the signed payload from this, so the authorization is bound to the
+        // call the VM is actually making.
+        self.governance_action = Some(GovernanceActionContext {
+            function_id: method_name.to_string(),
+            arguments: args.clone(),
+        });
         let value = self.invoke_function(&function, args)?;
         self.outcome(value)
     }
@@ -627,6 +803,7 @@ impl<'a> Interpreter<'a> {
                     .unwrap_or_default(),
             )),
             "verifyMLDSASignature" => self.verify_mldsa(&values),
+            "verifyGovernanceAuthorization" => self.verify_governance_authorization(&values),
             "sendNative" => self.send_native(&values),
             "synidNormalize" => self.synid_normalize(&values),
             "synidNameHash" => self.synid_name_hash(&values),
@@ -859,8 +1036,137 @@ impl<'a> Interpreter<'a> {
         let message = value_bytes(&values[1])?;
         let signature = SynQSignature::new(value_bytes(&values[2])?);
         Ok(SynQValue::Bool(
-            verify_signature(AlgorithmId::MlDsa65, &message, &signature, &public_key).is_ok(),
+            verify_signature(
+                self.governance_signature_algorithm,
+                &message,
+                &signature,
+                &public_key,
+            )
+            .is_ok(),
         ))
+    }
+
+    /// Reads the protocol-owned governance nonce for the executing contract.
+    fn governance_nonce(&self) -> RuntimeResult<u128> {
+        let key = StateKey::new(GOVERNANCE_NONCE_NAMESPACE, self.contract_id.as_bytes());
+        match self.overlay.read(self.state, &key) {
+            None => Ok(0),
+            Some(bytes) => {
+                let bytes: [u8; 16] = bytes.try_into().map_err(|_| {
+                    StatefulSynQFailure::failed(
+                        AivmErrorCode::State,
+                        "stored governance nonce is malformed",
+                    )
+                })?;
+                Ok(u128::from_be_bytes(bytes))
+            }
+        }
+    }
+
+    /// `verifyGovernanceAuthorization(governanceKey, governanceNonce, validUntilBlock, signature)`
+    ///
+    /// Replaces the arbitrary-`message` scheme. The contract supplies only the
+    /// active governance key and the three authorization-tail values; every
+    /// other element of the signed payload — chain, network, target contract,
+    /// function, arguments — is reconstructed by the host from the invocation
+    /// in flight and cannot be influenced by the caller.
+    ///
+    /// Nonce discipline: the nonce is read and compared before any signature
+    /// work, and incremented only after the signature verifies. A rejected
+    /// signature therefore consumes nothing. A later `require` failure inside
+    /// the contract reverts the whole call, and the increment is discarded with
+    /// the overlay — so a failed action does not consume a nonce either.
+    fn verify_governance_authorization(
+        &mut self,
+        values: &[SynQValue],
+    ) -> RuntimeResult<SynQValue> {
+        self.require_host("verifyGovernanceAuthorization")?;
+        if values.len() != 4 {
+            return Err(argument_error(
+                "verifyGovernanceAuthorization",
+                4,
+                values.len(),
+            ));
+        }
+        self.meter
+            .charge_pq_gas(MLDSA_VERIFY_PQ_GAS)
+            .map_err(runtime_failure)?;
+
+        let public_key_bytes = value_bytes(&values[0])?;
+        let expected_nonce = values[1].as_uint()?;
+        let valid_until_block = values[2].as_uint()?;
+        let signature = SynQSignature::new(value_bytes(&values[3])?);
+
+        let action = self.governance_action.clone().ok_or_else(|| {
+            StatefulSynQFailure::failed(
+                AivmErrorCode::HostFunction,
+                "verifyGovernanceAuthorization is only callable from a public contract method",
+            )
+        })?;
+
+        // The authorization tail is excluded from the arguments hash: it is the
+        // authorization, not the action. Everything before it is signed over.
+        if action.arguments.len() < GOVERNANCE_AUTHORIZATION_TAIL_LEN {
+            return Err(StatefulSynQFailure::failed(
+                AivmErrorCode::Abi,
+                format!(
+                    "governed SynQ method {} must declare a governance authorization tail",
+                    action.function_id
+                ),
+            ));
+        }
+        let action_argument_count = action.arguments.len() - GOVERNANCE_AUTHORIZATION_TAIL_LEN;
+
+        // Nonce must match exactly. Neither replayed nor skipped values pass.
+        let stored_nonce = self.governance_nonce()?;
+        if expected_nonce != stored_nonce {
+            return Ok(SynQValue::Bool(false));
+        }
+
+        // `0` is the explicitly governed no-expiry value; any other value is a
+        // hard ceiling on the current block height.
+        if valid_until_block != 0 && u128::from(self.context.block_height) > valid_until_block {
+            return Ok(SynQValue::Bool(false));
+        }
+
+        let mut encoded_arguments = Vec::new();
+        encode_governance_arguments(
+            &action.arguments[..action_argument_count],
+            &mut encoded_arguments,
+        );
+        let arguments_hash = gov_digest(&encoded_arguments);
+
+        let payload = governance_action_signing_payload(
+            self.context.chain_id,
+            &self.context.network_id,
+            &self.context.contract_address,
+            &action.function_id,
+            &arguments_hash,
+            expected_nonce,
+            valid_until_block,
+            &governance_key_fingerprint(&public_key_bytes),
+        );
+
+        let public_key = SynQPublicKey::new(public_key_bytes);
+        if verify_signature(
+            self.governance_signature_algorithm,
+            &payload,
+            &signature,
+            &public_key,
+        )
+        .is_err()
+        {
+            return Ok(SynQValue::Bool(false));
+        }
+
+        let next_nonce = stored_nonce.checked_add(1).ok_or_else(|| {
+            StatefulSynQFailure::failed(AivmErrorCode::State, "governance nonce overflow")
+        })?;
+        self.overlay.write(
+            StateKey::new(GOVERNANCE_NONCE_NAMESPACE, self.contract_id.as_bytes()),
+            next_nonce.to_be_bytes().to_vec(),
+        );
+        Ok(SynQValue::Bool(true))
     }
 
     fn send_native(&mut self, values: &[SynQValue]) -> RuntimeResult<SynQValue> {
@@ -950,7 +1256,7 @@ impl<'a> Interpreter<'a> {
             self.state,
             self.overlay,
             self.meter,
-        );
+        )?;
         child.call_depth = self.call_depth;
         let outcome = child.call(&method_name, &encoded_args)?;
         drop(child);

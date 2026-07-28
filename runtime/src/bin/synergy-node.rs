@@ -1426,7 +1426,7 @@ fn recovery_build_input_from_args(
         chain_id,
         network_id,
         genesis_hash: arg_value(args, "--expected-genesis-hash")
-            .unwrap_or_else(|| synergy_testnet::recovery::EXPECTED_GENESIS_HASH.to_string()),
+            .unwrap_or_else(synergy_testnet::recovery::expected_genesis_hash),
         target_data_dir,
         source_state_dir,
         source_evidence_dirs,
