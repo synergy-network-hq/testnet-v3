@@ -71,6 +71,8 @@ import {
   Stethoscope,
   Terminal,
   Trash2,
+  TrendingDown,
+  TrendingUp,
   Trophy,
   TerminalSquare,
   Upload,
@@ -104,6 +106,22 @@ import {
 import { controlPanelBannerSrc, controlPanelIconSrc } from '../../lib/runtimeAssets';
 import { epochWindowForBlockHeight } from '../../lib/protocolPolicy';
 import { useControlPanel } from '../control-panel/ControlPanelProvider';
+import {
+  arcPath,
+  areaPathFrom,
+  axisTickIndices,
+  finiteNumber,
+  formatCompactNumber,
+  linePathFor,
+  niceScale,
+  polarPoint,
+  segmentCoordinates,
+  seriesDelta,
+  seriesStats,
+  useElementSize,
+  useMountedFlag,
+  usePointerIndex,
+} from './chartEngine';
 import {
   formatNumber,
   formatPercent,
@@ -1281,15 +1299,39 @@ function chartTime(value) {
   return terminalTime(value);
 }
 
-function chartDomain(values, fixedDomain) {
-  if (fixedDomain) return fixedDomain;
-  const minimum = Math.min(...values);
-  const maximum = Math.max(...values);
-  const range = maximum - minimum;
-  const padding = range > 0 ? range * 0.12 : Math.max(1, Math.abs(maximum) * 0.08);
-  return [Math.max(0, minimum - padding), maximum + padding || 1];
+const CPU_THRESHOLD_BANDS = [
+  { from: 75, to: 90, tone: 'warn' },
+  { from: 90, to: 100, tone: 'critical' },
+];
+const CHART_MAX_SAMPLES = 60;
+const CHART_PLOT_INSET = { left: 58, right: 20, top: 20, bottom: 30 };
+
+function chartAxisDomain(values, fixedDomain) {
+  if (Array.isArray(fixedDomain) && fixedDomain.length === 2) {
+    const [min, max] = fixedDomain;
+    const span = (max - min) || 1;
+    const step = span / 4;
+    return {
+      min,
+      max,
+      step,
+      ticks: [0, 1, 2, 3, 4].map((index) => min + index * step),
+    };
+  }
+  if (!values.length) return { min: 0, max: 1, step: 0.25, ticks: [0, 0.25, 0.5, 0.75, 1] };
+  return niceScale(Math.min(...values), Math.max(...values), 5);
 }
 
+function chartAxisLabel(value, formatValue) {
+  const label = String(formatValue(value));
+  return label.length > 8 ? formatCompactNumber(value) : label;
+}
+
+/**
+ * Primary telemetry visualization: smoothed area/line chart with a nice-number
+ * value axis, gap-aware segments, threshold bands, statistical reference lines
+ * and a pointer-tracking crosshair readout.
+ */
 function OperationalLineChart({
   title,
   points = [],
@@ -1301,78 +1343,267 @@ function OperationalLineChart({
   sampleLabel = 'samples',
   emptyText = 'No history returned for this metric.',
   className = '',
+  smooth = true,
+  compact = false,
+  thresholds = null,
+  showReferenceLines = true,
 }) {
+  const gradientId = useId().replace(/:/g, '');
+  const [plotRef, plotSize] = useElementSize(460, 200);
+  const drawn = useMountedFlag();
+
   const samples = points
     .map((point) => ({ ...point, value: finiteChartValue(point?.value) }))
     .filter((point) => point.at != null || point.value != null)
-    .slice(-48);
+    .slice(-CHART_MAX_SAMPLES);
   const values = samples.map((point) => point.value).filter((value) => value != null);
   const latest = [...samples].reverse().find((point) => point.value != null);
   const currentValue = finiteChartValue(current);
   const displayValue = currentValue ?? latest?.value ?? null;
-  const width = 420;
-  const height = 170;
-  const plot = { left: 54, right: 16, top: 14, bottom: 32 };
-  const domain = values.length ? chartDomain(values, fixedDomain) : [0, 1];
-  const range = domain[1] - domain[0] || 1;
-  const coordinates = samples.map((point, index) => point.value == null ? null : ({
-    x: plot.left + (index / Math.max(1, samples.length - 1)) * (width - plot.left - plot.right),
-    y: plot.top + (1 - ((point.value - domain[0]) / range)) * (height - plot.top - plot.bottom),
-  }));
-  const segments = [];
-  let segment = [];
-  coordinates.forEach((coordinate) => {
-    if (coordinate) {
-      segment.push(coordinate);
-    } else if (segment.length) {
-      segments.push(segment);
-      segment = [];
+
+  const width = Math.max(300, plotSize.width || 460);
+  const height = compact ? 158 : 200;
+  const plot = CHART_PLOT_INSET;
+  const innerWidth = width - plot.left - plot.right;
+  const innerHeight = height - plot.top - plot.bottom;
+  const baselineY = height - plot.bottom;
+
+  const domain = chartAxisDomain(values, fixedDomain);
+  const range = domain.max - domain.min || 1;
+  const toY = (value) => plot.top + (1 - ((value - domain.min) / range)) * innerHeight;
+  const toX = (index) => plot.left + (index / Math.max(1, samples.length - 1)) * innerWidth;
+
+  const coordinates = samples.map((point, index) => (
+    point.value == null ? null : { x: toX(index), y: toY(point.value), index, point }
+  ));
+  const segments = segmentCoordinates(coordinates);
+  const stats = seriesStats(values);
+  const delta = seriesDelta(values);
+  const lastCoordinate = [...coordinates].reverse().find(Boolean) || null;
+  const extremeCoordinates = stats && samples.length > 3 && !compact
+    ? {
+      max: coordinates.find((coordinate) => coordinate && coordinate.point.value === stats.max) || null,
+      min: coordinates.find((coordinate) => coordinate && coordinate.point.value === stats.min) || null,
     }
-  });
-  if (segment.length) segments.push(segment);
-  const lastCoordinate = coordinates.at(samples.length - 1) || [...coordinates].reverse().find(Boolean);
-  const directLabelY = lastCoordinate ? Math.max(plot.top + 12, Math.min(height - plot.bottom - 4, lastCoordinate.y - 9)) : 0;
-  const ticks = [0, 0.25, 0.5, 0.75, 1].map((position) => ({
-    position,
-    value: domain[1] - position * range,
-  }));
+    : { max: null, min: null };
+
+  const { activeIndex, surfaceRef, surfaceProps } = usePointerIndex(coordinates);
+  const activeCoordinate = activeIndex == null ? null : coordinates[activeIndex];
+
+  const timeTicks = axisTickIndices(samples.length, compact ? 3 : 5)
+    .map((index) => ({ index, x: toX(index), sample: samples[index] }))
+    .filter((tick) => tick.sample);
+
+  const directLabelY = lastCoordinate
+    ? Math.max(plot.top + 11, Math.min(baselineY - 6, lastCoordinate.y - 12))
+    : 0;
   const valueLabel = displayValue == null ? 'Unavailable' : `${formatValue(displayValue)}${unit ? ` ${unit}` : ''}`;
   const statusLabel = currentValue != null ? 'Current sample' : latest ? 'Latest history' : 'No sample';
+  const deltaLabel = delta && delta.direction !== 'flat'
+    ? `${delta.direction === 'up' ? '+' : '-'}${delta.percent == null
+      ? formatCompactNumber(Math.abs(delta.absolute))
+      : `${formatCompactNumber(Math.abs(delta.percent))}%`}`
+    : null;
 
   return (
-    <section className={cls('v18-operational-chart', `is-${tone}`, className)} aria-label={`${title} chart`}>
+    <section className={cls('v18-operational-chart', `is-${tone}`, compact && 'is-compact', className)} aria-label={`${title} chart`}>
       <header className="v18-operational-chart__header">
         <div>
           <span>{title}</span>
           <strong>{valueLabel}</strong>
         </div>
-        <small>{samples.length ? `${samples.length} ${sampleLabel}` : statusLabel}</small>
+        <div className="v18-operational-chart__meta">
+          {deltaLabel ? (
+            <span className={cls('v18-operational-chart__delta', `is-${delta.direction}`)} title="Change across the visible window">
+              {delta.direction === 'up' ? <TrendingUp size={12} /> : <TrendingDown size={12} />}
+              {deltaLabel}
+            </span>
+          ) : null}
+          <small>{samples.length ? `${samples.length} ${sampleLabel}` : statusLabel}</small>
+        </div>
       </header>
       {values.length ? (
-        <div className="v18-operational-chart__plot">
-          <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${title} over time`} preserveAspectRatio="none">
-            <g className="v18-operational-chart__grid" aria-hidden="true">
-              {ticks.map((tick) => {
-                const y = plot.top + tick.position * (height - plot.top - plot.bottom);
-                return <line key={tick.position} x1={plot.left} x2={width - plot.right} y1={y} y2={y} />;
-              })}
-            </g>
-            <line className="v18-operational-chart__axis" x1={plot.left} x2={plot.left} y1={plot.top} y2={height - plot.bottom} />
-            <g className="v18-operational-chart__axis-labels" aria-hidden="true">
-              {ticks.map((tick) => {
-                const y = plot.top + tick.position * (height - plot.top - plot.bottom);
-                return <text key={tick.position} x={plot.left - 8} y={y + 3} textAnchor="end">{formatValue(tick.value)}</text>;
-              })}
-            </g>
-            {segments.map((pointsSegment, index) => pointsSegment.length > 1 ? <polyline key={index} className="v18-operational-chart__line" points={pointsSegment.map((point) => `${point.x.toFixed(2)},${point.y.toFixed(2)}`).join(' ')} fill="none" /> : null)}
-            {lastCoordinate ? <circle className="v18-operational-chart__point" cx={lastCoordinate.x} cy={lastCoordinate.y} r="4" /> : null}
-            {latest && lastCoordinate ? <text className="v18-operational-chart__direct-label" x={width - plot.right} y={directLabelY} textAnchor="end">{formatValue(latest.value)}{unit ? ` ${unit}` : ''}</text> : null}
-            <g className="v18-operational-chart__time-labels" aria-hidden="true">
-              <text x={plot.left} y={height - 8}>{samples[0]?.label || chartTime(samples[0]?.at)}</text>
-              <text x={width - plot.right} y={height - 8} textAnchor="end">{latest?.label || chartTime(latest?.at)}</text>
-            </g>
-          </svg>
-        </div>
+        <>
+          <div className="v18-operational-chart__plot" ref={plotRef}>
+            <svg
+              ref={surfaceRef}
+              viewBox={`0 0 ${width} ${height}`}
+              width={width}
+              height={height}
+              role="img"
+              aria-label={`${title} over time`}
+              {...surfaceProps}
+            >
+              <defs>
+                <linearGradient id={`chart-fill-${gradientId}`} x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="currentColor" stopOpacity="0.34" />
+                  <stop offset="55%" stopColor="currentColor" stopOpacity="0.11" />
+                  <stop offset="100%" stopColor="currentColor" stopOpacity="0" />
+                </linearGradient>
+                <clipPath id={`chart-clip-${gradientId}`}>
+                  <rect x={plot.left} y={plot.top - 6} width={innerWidth} height={innerHeight + 6} />
+                </clipPath>
+              </defs>
+
+              {Array.isArray(thresholds) ? (
+                <g className="v18-operational-chart__bands" aria-hidden="true" clipPath={`url(#chart-clip-${gradientId})`}>
+                  {thresholds.map((band) => {
+                    const top = toY(Math.min(domain.max, Math.max(band.to, band.from)));
+                    const bottom = toY(Math.max(domain.min, Math.min(band.from, band.to)));
+                    return (
+                      <rect
+                        key={`${band.from}-${band.to}`}
+                        className={cls('v18-operational-chart__band', `is-${band.tone || 'warn'}`)}
+                        x={plot.left}
+                        y={Math.min(top, bottom)}
+                        width={innerWidth}
+                        height={Math.max(0, Math.abs(bottom - top))}
+                      />
+                    );
+                  })}
+                </g>
+              ) : null}
+
+              <g className="v18-operational-chart__grid" aria-hidden="true">
+                {domain.ticks.map((tick) => (
+                  <line key={`y-${tick}`} x1={plot.left} x2={width - plot.right} y1={toY(tick)} y2={toY(tick)} />
+                ))}
+              </g>
+              <g className="v18-operational-chart__grid-vertical" aria-hidden="true">
+                {timeTicks.map((tick) => (
+                  <line key={`x-${tick.index}`} x1={tick.x} x2={tick.x} y1={plot.top} y2={baselineY} />
+                ))}
+              </g>
+
+              <line className="v18-operational-chart__axis" x1={plot.left} x2={plot.left} y1={plot.top} y2={baselineY} />
+              <line className="v18-operational-chart__axis" x1={plot.left} x2={width - plot.right} y1={baselineY} y2={baselineY} />
+
+              <g className="v18-operational-chart__axis-labels" aria-hidden="true">
+                {domain.ticks.map((tick) => (
+                  <text key={`label-${tick}`} x={plot.left - 10} y={toY(tick) + 3.5} textAnchor="end">
+                    {chartAxisLabel(tick, formatValue)}
+                  </text>
+                ))}
+              </g>
+
+              {showReferenceLines && stats && stats.count > 3 ? (
+                <g className="v18-operational-chart__reference" aria-hidden="true">
+                  <line x1={plot.left} x2={width - plot.right} y1={toY(stats.average)} y2={toY(stats.average)} />
+                  <text x={width - plot.right} y={toY(stats.average) - 5} textAnchor="end">
+                    avg {chartAxisLabel(stats.average, formatValue)}
+                  </text>
+                </g>
+              ) : null}
+
+              <g clipPath={`url(#chart-clip-${gradientId})`}>
+                {segments.map((segment, index) => (
+                  segment.length > 1 ? (
+                    <path
+                      key={`area-${index}`}
+                      className="v18-operational-chart__area"
+                      d={areaPathFrom(linePathFor(segment, smooth), segment, baselineY)}
+                      fill={`url(#chart-fill-${gradientId})`}
+                    />
+                  ) : null
+                ))}
+              </g>
+
+              {segments.map((segment, index) => (
+                segment.length > 1 ? (
+                  <path
+                    key={`line-${index}`}
+                    className={cls('v18-operational-chart__line', drawn && 'is-drawn')}
+                    d={linePathFor(segment, smooth)}
+                    fill="none"
+                  />
+                ) : (
+                  <circle
+                    key={`dot-${index}`}
+                    className="v18-operational-chart__orphan"
+                    cx={segment[0].x}
+                    cy={segment[0].y}
+                    r="2.6"
+                  />
+                )
+              ))}
+
+              {extremeCoordinates.max && extremeCoordinates.max !== lastCoordinate ? (
+                <g className="v18-operational-chart__extreme is-max" aria-hidden="true">
+                  <circle cx={extremeCoordinates.max.x} cy={extremeCoordinates.max.y} r="2.8" />
+                  <text x={extremeCoordinates.max.x} y={extremeCoordinates.max.y - 8} textAnchor="middle">
+                    {chartAxisLabel(stats.max, formatValue)}
+                  </text>
+                </g>
+              ) : null}
+              {extremeCoordinates.min && extremeCoordinates.min !== lastCoordinate && stats.min !== stats.max ? (
+                <g className="v18-operational-chart__extreme is-min" aria-hidden="true">
+                  <circle cx={extremeCoordinates.min.x} cy={extremeCoordinates.min.y} r="2.8" />
+                  <text x={extremeCoordinates.min.x} y={extremeCoordinates.min.y + 13} textAnchor="middle">
+                    {chartAxisLabel(stats.min, formatValue)}
+                  </text>
+                </g>
+              ) : null}
+
+              {activeCoordinate ? (
+                <g className="v18-operational-chart__crosshair" aria-hidden="true">
+                  <line x1={activeCoordinate.x} x2={activeCoordinate.x} y1={plot.top} y2={baselineY} />
+                  <circle className="v18-operational-chart__crosshair-halo" cx={activeCoordinate.x} cy={activeCoordinate.y} r="7" />
+                  <circle className="v18-operational-chart__crosshair-dot" cx={activeCoordinate.x} cy={activeCoordinate.y} r="3.4" />
+                </g>
+              ) : null}
+
+              {lastCoordinate ? (
+                <g className="v18-operational-chart__latest">
+                  <circle className="v18-operational-chart__pulse" cx={lastCoordinate.x} cy={lastCoordinate.y} r="6.5" />
+                  <circle className="v18-operational-chart__point" cx={lastCoordinate.x} cy={lastCoordinate.y} r="4" />
+                </g>
+              ) : null}
+              {latest && lastCoordinate ? (
+                <text
+                  className="v18-operational-chart__direct-label"
+                  x={Math.min(width - plot.right, lastCoordinate.x + 8)}
+                  y={directLabelY}
+                  textAnchor="end"
+                >
+                  {formatValue(latest.value)}{unit ? ` ${unit}` : ''}
+                </text>
+              ) : null}
+
+              <g className="v18-operational-chart__time-labels" aria-hidden="true">
+                {timeTicks.map((tick, index) => (
+                  <text
+                    key={`time-${tick.index}`}
+                    x={tick.x}
+                    y={height - 9}
+                    textAnchor={index === 0 ? 'start' : index === timeTicks.length - 1 ? 'end' : 'middle'}
+                  >
+                    {tick.sample.label || chartTime(tick.sample.at)}
+                  </text>
+                ))}
+              </g>
+            </svg>
+            {activeCoordinate ? (
+              <div
+                className={cls(
+                  'v18-operational-chart__tooltip',
+                  activeCoordinate.x > width * 0.62 && 'is-flipped',
+                )}
+                style={{ left: `${(activeCoordinate.x / width) * 100}%`, top: `${(activeCoordinate.y / height) * 100}%` }}
+                role="status"
+              >
+                <strong>{formatValue(activeCoordinate.point.value)}{unit ? ` ${unit}` : ''}</strong>
+                <span>{activeCoordinate.point.label || chartTime(activeCoordinate.point.at)}</span>
+              </div>
+            ) : null}
+          </div>
+          {stats && !compact ? (
+            <footer className="v18-operational-chart__stats">
+              <span>Min<strong>{formatValue(stats.min)}{unit ? ` ${unit}` : ''}</strong></span>
+              <span>Avg<strong>{formatValue(stats.average)}{unit ? ` ${unit}` : ''}</strong></span>
+              <span>Max<strong>{formatValue(stats.max)}{unit ? ` ${unit}` : ''}</strong></span>
+            </footer>
+          ) : null}
+        </>
       ) : (
         <div className="v18-operational-chart__empty">
           <strong>{statusLabel}</strong>
@@ -1383,42 +1614,139 @@ function OperationalLineChart({
   );
 }
 
-function UsageGauge({ value, detail }) {
+const GAUGE_SWEEP = 252;
+const GAUGE_START = -(GAUGE_SWEEP / 2);
+
+function usageGaugeZone(value) {
+  if (value == null) return 'unknown';
+  if (value >= 90) return 'critical';
+  if (value >= 75) return 'warn';
+  return 'nominal';
+}
+
+/**
+ * Radial utilization gauge with a graduated tick ring and threshold arcs, so a
+ * dangerous reading is legible at a glance rather than requiring the number.
+ */
+function UsageGauge({ value, detail, label = 'Disk usage', caption = 'Workspace storage' }) {
   const numericValue = finiteChartValue(value);
   const numeric = numericValue == null ? null : Math.max(0, Math.min(100, numericValue));
+  const drawn = useMountedFlag();
+  const zone = usageGaugeZone(numeric);
+
+  const size = 200;
+  const center = size / 2;
+  const radius = 74;
+  const angleFor = (percent) => GAUGE_START + (percent / 100) * GAUGE_SWEEP;
+  const needle = numeric == null ? null : polarPoint(center, center, radius - 22, angleFor(numeric));
+  const ticks = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
+
   return (
-    <div className="v18-usage-gauge" aria-label="Disk usage">
-      <div className="v18-usage-gauge__readout">
-        <strong>{numeric == null ? 'Unavailable' : `${formatPercent(numeric, 0)}`}</strong>
-        <span>{numeric == null ? 'No disk metric returned' : detail}</span>
-      </div>
-      {numeric == null ? <div className="v18-usage-gauge__empty">Disk utilization will appear after a live process sample.</div> : (
-        <>
-          <div className="v18-usage-gauge__track"><span style={{ '--usage': `${numeric}%` }} /></div>
-          <div className="v18-usage-gauge__scale"><span>0%</span><span>50%</span><span>100%</span></div>
-        </>
+    <div className={cls('v18-usage-gauge', `is-${zone}`)} aria-label={label}>
+      {numeric == null ? (
+        <div className="v18-usage-gauge__empty">Disk utilization will appear after a live process sample.</div>
+      ) : (
+        <div className="v18-usage-gauge__dial">
+          <svg viewBox={`0 0 ${size} ${size * 0.78}`} role="img" aria-label={`${label} ${formatPercent(numeric, 0)}`}>
+            <path className="v18-usage-gauge__track-arc" d={arcPath(center, center, radius, GAUGE_START, GAUGE_START + GAUGE_SWEEP)} />
+            <path className="v18-usage-gauge__zone is-warn" d={arcPath(center, center, radius, angleFor(75), angleFor(90))} />
+            <path className="v18-usage-gauge__zone is-critical" d={arcPath(center, center, radius, angleFor(90), angleFor(100))} />
+            <path
+              className={cls('v18-usage-gauge__value-arc', drawn && 'is-drawn')}
+              d={arcPath(center, center, radius, GAUGE_START, angleFor(Math.max(numeric, 0.4)))}
+            />
+            <g className="v18-usage-gauge__ticks" aria-hidden="true">
+              {ticks.map((tick) => {
+                const outer = polarPoint(center, center, radius + 9, angleFor(tick));
+                const inner = polarPoint(center, center, radius + (tick % 50 === 0 ? 1 : 5), angleFor(tick));
+                return <line key={tick} x1={inner.x} y1={inner.y} x2={outer.x} y2={outer.y} className={tick % 50 === 0 ? 'is-major' : ''} />;
+              })}
+            </g>
+            <g className="v18-usage-gauge__scale-labels" aria-hidden="true">
+              {[0, 50, 100].map((tick) => {
+                const position = polarPoint(center, center, radius + 20, angleFor(tick));
+                return <text key={tick} x={position.x} y={position.y + 3} textAnchor="middle">{tick}%</text>;
+              })}
+            </g>
+            {needle ? (
+              <g className="v18-usage-gauge__needle">
+                <line x1={center} y1={center} x2={needle.x} y2={needle.y} />
+                <circle cx={center} cy={center} r="6" />
+              </g>
+            ) : null}
+          </svg>
+          <div className="v18-usage-gauge__readout">
+            <strong>{formatPercent(numeric, 0)}</strong>
+            <span>{detail || caption}</span>
+          </div>
+        </div>
       )}
     </div>
   );
 }
 
+/**
+ * Participation score donut: animated progress arc, graduated tick ring and a
+ * qualitative band so the number carries meaning without a legend.
+ */
 function PerformanceScoreDonut({ score, available, loading }) {
   const numeric = available ? clampPercent(score) : 0;
   const radius = 50;
   const circumference = 2 * Math.PI * radius;
   const dash = (numeric / 100) * circumference;
+  const drawn = useMountedFlag();
+  const band = !available ? 'unknown' : numeric >= 90 ? 'excellent' : numeric >= 70 ? 'healthy' : numeric >= 45 ? 'watch' : 'critical';
+  const bandLabel = { excellent: 'Excellent', healthy: 'Healthy', watch: 'Needs attention', critical: 'Critical', unknown: '' }[band];
+
   return (
-    <div className={cls('v18-score-donut', !available && 'is-unavailable')}>
+    <div className={cls('v18-score-donut', `is-${band}`, !available && 'is-unavailable')}>
       <svg viewBox="0 0 120 120" role="img" aria-label={available ? `Participation score ${formatPercent(numeric, 1)}` : 'Participation score unavailable'}>
+        <g className="v18-score-donut__ticks" aria-hidden="true">
+          {Array.from({ length: 60 }, (unused, index) => {
+            const angle = (index / 60) * 360;
+            const outer = polarPoint(60, 60, 58, angle);
+            const inner = polarPoint(60, 60, index % 5 === 0 ? 52 : 55, angle);
+            return <line key={index} x1={inner.x} y1={inner.y} x2={outer.x} y2={outer.y} className={index % 5 === 0 ? 'is-major' : ''} />;
+          })}
+        </g>
         <circle className="v18-score-donut__track" cx="60" cy="60" r={radius} />
-        {available ? <circle className="v18-score-donut__value" cx="60" cy="60" r={radius} strokeDasharray={`${dash} ${circumference - dash}`} /> : null}
+        {available ? (
+          <circle
+            className={cls('v18-score-donut__value', drawn && 'is-drawn')}
+            cx="60"
+            cy="60"
+            r={radius}
+            strokeDasharray={`${dash} ${circumference - dash}`}
+          />
+        ) : null}
       </svg>
       <div className="v18-score-donut__label">
         <span>Participation</span>
         <strong>{available ? formatPercent(numeric, 1) : '—'}</strong>
-        <small>{available ? 'out of 100' : loading ? 'Loading score' : 'Not reported'}</small>
+        <small>{available ? bandLabel : loading ? 'Loading score' : 'Not reported'}</small>
       </div>
     </div>
+  );
+}
+
+/** Inline sparkline for dense metric cards - trend shape without chart chrome. */
+function MetricSparkline({ points = [], tone = 'green' }) {
+  const values = points.map((point) => finiteNumber(point?.value)).filter((value) => value != null);
+  if (values.length < 3) return null;
+  const width = 96;
+  const height = 26;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+  const coordinates = values.map((value, index) => ({
+    x: (index / (values.length - 1)) * width,
+    y: height - 3 - ((value - min) / range) * (height - 6),
+  }));
+  return (
+    <svg className={cls('v18-sparkline', `is-${tone}`)} viewBox={`0 0 ${width} ${height}`} aria-hidden="true" preserveAspectRatio="none">
+      <path className="v18-sparkline__area" d={areaPathFrom(linePathFor(coordinates), coordinates, height)} />
+      <path className="v18-sparkline__line" d={linePathFor(coordinates)} fill="none" />
+    </svg>
   );
 }
 
@@ -1732,7 +2060,9 @@ function Card({ title, icon: Icon, children, className = '', action }) {
   );
 }
 
-function MetricCard({ icon: Icon, label, value, detail, tone = 'neutral', progress }) {
+function MetricCard({ icon: Icon, label, value, detail, tone = 'neutral', progress, spark = null }) {
+  const meterValue = progress == null ? null : Math.max(0, Math.min(100, Number(progress) || 0));
+  const meterZone = meterValue == null ? null : meterValue >= 90 ? 'critical' : meterValue >= 75 ? 'warn' : 'nominal';
   return (
     <section className={cls('v18-metric-card', `tone-${tone}`)}>
       <Icon size={28} />
@@ -1741,8 +2071,9 @@ function MetricCard({ icon: Icon, label, value, detail, tone = 'neutral', progre
         <strong>{value}</strong>
         <small>{detail}</small>
       </div>
-      {progress != null ? (
-        <div className="v18-meter" style={{ '--meter': `${Math.max(0, Math.min(100, Number(progress) || 0))}%` }}>
+      {spark && spark.length ? <MetricSparkline points={spark} tone={tone} /> : null}
+      {meterValue != null ? (
+        <div className={cls('v18-meter', meterZone && `is-${meterZone}`)} style={{ '--meter': `${meterValue}%` }}>
           <span />
         </div>
       ) : null}
@@ -2334,6 +2665,7 @@ function LiveTrendChart({ title, value, points, tone = 'green', formatValue = fo
       sampleLabel="live samples"
       emptyText="No current metric or polling history was returned."
       className="v18-live-trend"
+      compact
     />
   );
 }
@@ -5259,7 +5591,11 @@ function PerformancePage() {
             <div className="v18-performance-breakdown-mini">
               <div className="v18-performance-breakdown-mini__heading"><span>Score composition</span><small>{scoreAvailable ? scoreBreakdown.source : 'No score source returned'}</small></div>
               {scoreAvailable ? scoreItems.map((item) => (
-                <div key={item.id}><span><i /> {item.label}</span><strong>{item.weight ? `${formatNumber(item.weight)}%` : formatPercent(item.score, 0)}</strong></div>
+                <div key={item.id} style={{ '--share': `${clampPercent(item.score)}%` }}>
+                  <span><i /> {item.label}</span>
+                  <strong>{item.weight ? `${formatNumber(item.weight)}%` : formatPercent(item.score, 0)}</strong>
+                  <em aria-hidden="true" />
+                </div>
               )) : <p className="v18-muted">Participation inputs will appear when the staking or live telemetry endpoint reports them.</p>}
             </div>
           </div>
@@ -5420,12 +5756,12 @@ function MonitoringPage() {
   const peerCount = firstFiniteValue(live, ['local_peer_count']);
   const latencyMs = firstFiniteValue(live, ['rpc_latency_ms']);
   const metricCards = [
-    [Cpu, 'CPU', formatPercent(cpuPercent, 0), 'Live process metric', cpuPercent, 'blue'],
-    [Monitor, 'RAM', formatPercent(memoryPercent, 0), 'Live process metric', memoryPercent, 'purple'],
-    [HardDrive, 'Disk', formatPercent(diskPercent, 0), 'Workspace disk usage', diskPercent, 'gray'],
-    [Network, 'Network', latestNetworkRate == null ? 'Unavailable' : `${formatNumber(latestNetworkRate)} blocks/sample`, 'Derived from live history', latestNetworkRate, 'green'],
-    [Users, 'Peers', formatNumber(peerCount), live.sync_trending || 'Peer count', peerCount, 'purple'],
-    [Clock, 'Latency', latencyMs == null ? 'Unavailable' : `${formatNumber(latencyMs)} ms`, live.local_rpc_status || 'RPC latency', latencyMs, 'blue'],
+    [Cpu, 'CPU', formatPercent(cpuPercent, 0), 'Live process metric', cpuPercent, 'blue', trendPoints(history, 'cpuPercent')],
+    [Monitor, 'RAM', formatPercent(memoryPercent, 0), 'Live process metric', memoryPercent, 'purple', trendPoints(history, 'memoryPercent')],
+    [HardDrive, 'Disk', formatPercent(diskPercent, 0), 'Workspace disk usage', diskPercent, 'gray', trendPoints(history, 'diskPercent')],
+    [Network, 'Network', latestNetworkRate == null ? 'Unavailable' : `${formatNumber(latestNetworkRate)} blocks/sample`, 'Derived from live history', latestNetworkRate, 'green', trendPoints(history, 'blockHeight')],
+    [Users, 'Peers', formatNumber(peerCount), live.sync_trending || 'Peer count', peerCount, 'purple', trendPoints(history, 'localPeerCount')],
+    [Clock, 'Latency', latencyMs == null ? 'Unavailable' : `${formatNumber(latencyMs)} ms`, live.local_rpc_status || 'RPC latency', latencyMs, 'blue', trendPoints(history, 'rpcLatencyMs')],
   ];
   const readinessChecks = Array.isArray(readinessState.report?.checks)
     ? readinessState.report.checks
@@ -5451,12 +5787,12 @@ function MonitoringPage() {
     <>
       <PageHeader title="Synergy Node Control Panel" subtitle="Monitor your node performance, health, and activity in real time." />
       <div className="v18-monitor-metrics">
-        {metricCards.map(([Icon, label, value, detail, progress, tone]) => <MetricCard key={label} icon={Icon} label={label} value={value} detail={detail} tone={tone} progress={progress} />)}
+        {metricCards.map(([Icon, label, value, detail, progress, tone, spark]) => <MetricCard key={label} icon={Icon} label={label} value={value} detail={detail} tone={tone} progress={progress} spark={spark} />)}
       </div>
       <div className="v18-monitor-layout">
         <div className="v18-monitor-main">
           <div className="v18-two-column">
-            <ChartCard title="CPU Utilization" current={firstFiniteValue(live, ['cpu_percent'])} points={trendPoints(history, 'cpuPercent')} tone="green" formatValue={(value) => formatPercent(value, 0)} fixedDomain={[0, 100]} emptyText="No CPU history was returned for this node." />
+            <ChartCard title="CPU Utilization" current={firstFiniteValue(live, ['cpu_percent'])} points={trendPoints(history, 'cpuPercent')} tone="green" formatValue={(value) => formatPercent(value, 0)} fixedDomain={[0, 100]} thresholds={CPU_THRESHOLD_BANDS} emptyText="No CPU history was returned for this node." />
             <ChartCard title="Memory Working Set" current={firstFiniteValue(live, ['memory_mb'])} points={trendPoints(history, 'memoryMb')} tone="purple" unit="MB" emptyText="No memory history was returned for this node." />
           </div>
           <div className="v18-two-column">
@@ -5511,10 +5847,10 @@ function MonitoringPage() {
   );
 }
 
-function ChartCard({ title, current, points = [], tone = 'green', formatValue = formatNumber, unit = '', fixedDomain, emptyText }) {
+function ChartCard({ title, current, points = [], tone = 'green', formatValue = formatNumber, unit = '', fixedDomain, emptyText, thresholds = null }) {
   return (
     <Card title={title}>
-      <OperationalLineChart title={title} current={current} points={points} tone={tone} formatValue={formatValue} unit={unit} fixedDomain={fixedDomain} emptyText={emptyText} sampleLabel="polling samples" />
+      <OperationalLineChart title={title} current={current} points={points} tone={tone} formatValue={formatValue} unit={unit} fixedDomain={fixedDomain} emptyText={emptyText} thresholds={thresholds} sampleLabel="polling samples" />
     </Card>
   );
 }
