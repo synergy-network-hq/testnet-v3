@@ -23,7 +23,7 @@ function option(name, fallback = null) {
 }
 
 function usage() {
-  return "Usage: node scripts/release/build-validator-installers.mjs --identity-root <directory> --platform <mac|linux> [--output <directory>] [--from 1] [--to 21] [--skip-build-electron]";
+  return "Usage: node scripts/release/build-validator-installers.mjs --identity-root <directory> --vpn-onboarding-token-directory <protected directory> --platform <mac|linux> [--output <directory>] [--from 1] [--to 21] [--skip-build-electron]";
 }
 
 function run(command, args, env = process.env) {
@@ -81,6 +81,7 @@ async function newestMatchingFile(extension) {
 }
 
 const identityRoot = option("--identity-root");
+const vpnOnboardingTokenDirectory = option("--vpn-onboarding-token-directory");
 const platform = option("--platform");
 const from = Number(option("--from", "1"));
 const to = Number(option("--to", "21"));
@@ -88,6 +89,7 @@ const output = resolve(option("--output", join(APP_ROOT, "validator-installers",
 const skipBuildElectron = process.argv.includes("--skip-build-electron");
 if (
   !identityRoot
+  || !vpnOnboardingTokenDirectory
   || !["mac", "linux"].includes(platform)
   || !Number.isInteger(from)
   || !Number.isInteger(to)
@@ -115,12 +117,19 @@ if (
   const manifest = [];
   try {
     for (let validator = from; validator <= to; validator += 1) {
+      const id = String(validator).padStart(2, "0");
+      const onboardingTokenFile = join(
+        resolve(vpnOnboardingTokenDirectory),
+        `validator-${id}.token`,
+      );
       await run(process.execPath, [
         "scripts/release/stage-validator-package.mjs",
         "--identity-root",
         resolve(identityRoot),
         "--validator",
         String(validator),
+        "--vpn-onboarding-token-file",
+        onboardingTokenFile,
         "--staging",
         STAGING,
       ]);
@@ -134,7 +143,6 @@ if (
       });
       const extension = platform === "mac" ? ".dmg" : ".deb";
       const built = await newestMatchingFile(extension);
-      const id = String(validator).padStart(2, "0");
       const fileName = platform === "mac"
         ? `Synergy.Node.Control.Panel-${APP_VERSION}-Validator-${id}-arm64.dmg`
         : `synergy-node-control-panel_${APP_VERSION}_validator-${id}_amd64.deb`;
@@ -149,6 +157,8 @@ if (
         platform,
         "--validator",
         String(validator),
+        "--vpn-onboarding-token-file",
+        onboardingTokenFile,
       ]);
       manifest.push({
         validator,

@@ -16,9 +16,8 @@ test("validator installers bind exactly one complete Testnet-v3 assignment", () 
     "identity.enc.json",
     "identity.pub.json",
     "manifest.json",
-    "wireguard-private.key",
     "wireguard-public.key",
-    "sy-vpn.conf",
+    "wireguard-config.envelope.json",
     "vpn-binding.json",
   ]) {
     assert.match(staging, new RegExp(fileName.replaceAll(".", "\\.")));
@@ -30,7 +29,16 @@ test("validator installers bind exactly one complete Testnet-v3 assignment", () 
   assert.match(staging, /initial-six/);
   assert.match(staging, /gradual-activation/);
   assert.match(staging, /containsIdentityPassphrase: false/);
+  assert.match(staging, /containsWireguardPrivateKey: false/);
+  assert.match(staging, /encryptedWireguardConfigWithOnboardingToken: true/);
+  assert.match(staging, /onboardingTokenEmbedded: false/);
+  assert.match(staging, /AES-256-GCM/);
+  assert.match(staging, /HKDF-SHA-256/);
+  assert.match(staging, /vpn-onboarding-token-file/);
   assert.match(staging, /installerBoundToSingleValidator: true/);
+  assert.match(packageLoader, /VPN_ONBOARDING_TOKEN_REQUIRED/);
+  assert.match(packageLoader, /PACKAGED_WIREGUARD_UNLOCK_FAILED/);
+  assert.match(packageLoader, /wireguard-config\.envelope\.json/);
   assert.match(packageLoader, /VALIDATOR_PACKAGE_CHECKSUM_FAILED/);
   assert.match(packageLoader, /VALIDATOR_PACKAGE_BINDING_FAILED/);
 });
@@ -44,6 +52,8 @@ test("native release build produces 21 uniquely named DMGs or DEBs and clears st
   assert.match(builder, /APP_VERSION.*validator-\$\{id\}_amd64\.deb/s);
   assert.match(builder, /SHA256SUMS/);
   assert.match(builder, /manifest\.json/);
+  assert.match(builder, /vpn-onboarding-token-directory/);
+  assert.match(builder, /validator-\$\{id\}\.token/);
   assert.match(builder, /finally/);
   assert.match(builder, /\.gitkeep/);
   assert.match(electronBuilder, /from: build\/validator-package/);

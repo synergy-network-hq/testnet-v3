@@ -35,10 +35,15 @@ test("coordinator binds the one-time token to the installer assignment and a loc
   assert.match(client, /preconfigured_wireguard_public_key:/);
   assert.match(packaged, /VALIDATOR_PACKAGE_CHECKSUM_FAILED/);
   assert.match(packaged, /decryptValidatorPackage/);
+  assert.match(packaged, /wireguard-config\.envelope\.json/);
+  assert.match(packaged, /VPN_ONBOARDING_TOKEN_REQUIRED/);
+  assert.match(packaged, /PACKAGED_WIREGUARD_UNLOCK_FAILED/);
+  assert.match(packaged, /HKDF-SHA-256/);
   assert.match(ipc, /testnet_sign_packaged_validator_enrollment_proof/);
   assert.match(ipc, /packaged\.assignmentId/);
   assert.match(ipc, /install-packaged-validator-identity/);
   assert.match(ipc, /activatePackagedWireguardConfig/);
+  assert.match(ipc, /activationToken: onboardingToken/);
   assert.match(innernet, /install.*\/etc\/wireguard\/\$\{interfaceName\}\.conf/s);
   assert.match(innernet, /wg-quick@sy-vpn\.service/);
   assert.match(innernet, /canonicalPackagedWireguardPeers/);

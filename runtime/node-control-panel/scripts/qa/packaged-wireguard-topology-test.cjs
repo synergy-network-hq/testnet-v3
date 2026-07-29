@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const test = require('node:test');
 
 const {
@@ -6,6 +7,11 @@ const {
   canonicalPackagedWireguardPeers,
   validatePackagedWireguardConfig,
 } = require('../../electron/onboarding/innernet.cjs');
+const {
+  decryptPackagedWireguardConfig,
+  wireguardEnvelopeAad,
+  wireguardEnvelopeKey,
+} = require('../../electron/onboarding/validator-package.cjs');
 
 const LOCAL_IP = '10.70.10.1';
 
@@ -28,6 +34,49 @@ function packageData(peerIps) {
     ].join('\n'),
   };
 }
+
+function protectedWireguardEnvelope(metadata, token, payload) {
+  const salt = crypto.randomBytes(32);
+  const nonce = crypto.randomBytes(12);
+  const aad = wireguardEnvelopeAad(metadata);
+  const cipher = crypto.createCipheriv('aes-256-gcm', wireguardEnvelopeKey(token, salt, aad), nonce);
+  cipher.setAAD(aad);
+  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(payload)), cipher.final()]);
+  return {
+    schemaVersion: 1,
+    algorithm: 'AES-256-GCM',
+    kdf: 'HKDF-SHA-256',
+    salt: salt.toString('base64'),
+    nonce: nonce.toString('base64'),
+    authenticationTag: cipher.getAuthTag().toString('base64'),
+    ciphertext: ciphertext.toString('base64'),
+    aadSha256: crypto.createHash('sha256').update(aad).digest('hex'),
+  };
+}
+
+test('a packaged WireGuard configuration is unlocked only by its assignment-bound coordinator token', () => {
+  const token = 'sGqi_qqNokC1eziHw0rEN6VMcY25QyYbfwY-jYXAB7s';
+  const metadata = {
+    assignmentId: 'validator-01',
+    validatorAddress: 'synv1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq',
+    vpnIp: `${LOCAL_IP}/16`,
+    vpnConfigVersion: 22,
+  };
+  const payload = {
+    wireguardPrivateKey: 'test-private-key',
+    wireguardConfig: 'PrivateKey = test-private-key\n',
+  };
+  const envelope = protectedWireguardEnvelope(metadata, token, payload);
+  assert.deepEqual(decryptPackagedWireguardConfig(envelope, metadata, token), payload);
+  assert.throws(
+    () => decryptPackagedWireguardConfig(envelope, metadata, `${token}-wrong`),
+    (error) => error?.code === 'PACKAGED_WIREGUARD_UNLOCK_FAILED',
+  );
+  assert.throws(
+    () => decryptPackagedWireguardConfig(envelope, { ...metadata, assignmentId: 'validator-02' }, token),
+    (error) => error?.code === 'PACKAGED_WIREGUARD_ENVELOPE_INVALID',
+  );
+});
 
 test('a packaged validator configuration contains every other canonical Testnet-v3 participant', () => {
   const peers = canonicalPackagedWireguardPeers(LOCAL_IP);
