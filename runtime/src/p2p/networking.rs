@@ -23,6 +23,9 @@ use crate::crypto::aegis_pqvm::{
     AegisPqvmKeyRegistry, AegisPqvmSigner, AegisPqvmVerifier, SYNERGY_P2P_HANDSHAKE_V1,
 };
 use crate::crypto::pqc::{PQCAlgorithm, PQCPrivateKey, PQCPublicKey};
+use crate::etdag::{
+    dispatch_etdag_certified_input, CertifiedProtectedInputArtifact, EtdagAuthenticatedIngressPeer,
+};
 use crate::genesis::canonical_genesis;
 use crate::p2p::messages::{NetworkMessage, TypedConsensusMessage};
 #[cfg(not(test))]
@@ -3183,6 +3186,23 @@ fn typed_consensus_peer_for_session(
         .cloned()
 }
 
+/// Converts the P2P handshake identity into the narrower ETDAG ingress
+/// identity.  It is intentionally derived from the same session-scoped,
+/// Genesis-bound authentication record as typed consensus traffic rather than
+/// from a mutable peer address or a field in the ETDAG wire artifact.
+fn etdag_ingress_peer_for_session(
+    peer_address: &str,
+    session_id: u64,
+) -> Option<EtdagAuthenticatedIngressPeer> {
+    typed_consensus_peer_for_session(peer_address, session_id).map(|peer| {
+        EtdagAuthenticatedIngressPeer {
+            validator_id: peer.validator_id,
+            validator_uma_id: peer.validator_uma_id,
+            consensus_key_id: peer.consensus_key_id,
+        }
+    })
+}
+
 fn current_peer_session_id(peer_address: &str) -> Option<u64> {
     PEER_SESSION_IDS.lock().unwrap().get(peer_address).copied()
 }
@@ -5463,6 +5483,64 @@ impl P2PNetwork {
         Ok(sent)
     }
 
+    /// Relays one complete certified ETDAG input package only to currently
+    /// authenticated, consensus-eligible validator peers.  The receiver does
+    /// not trust this fanout: it rechecks the sender identity and every proof
+    /// against its own immutable height/finality authority before persistence.
+    pub fn broadcast_etdag_certified_input(
+        &self,
+        artifact: &CertifiedProtectedInputArtifact,
+    ) -> Result<usize, String> {
+        artifact.validate_wire_size()?;
+        let wire_message = NetworkMessage::EtdagCertifiedInput {
+            artifact: artifact.clone(),
+        };
+        let targets = {
+            let peers = self.connected_peers.lock().unwrap();
+            peers
+                .iter()
+                .filter_map(|(address, peer)| {
+                    if peer.stream.is_none()
+                        || !peer_is_active_consensus_validator(&self.config, peer)
+                    {
+                        return None;
+                    }
+                    current_peer_session_id(address).map(|session_id| (address.clone(), session_id))
+                })
+                .collect::<Vec<_>>()
+        };
+        let send_results = run_with_bounded_parallelism(
+            &targets,
+            targets.len(),
+            "certified ETDAG input fanout",
+            |(address, session_id)| {
+                send_peer_message_for_session(
+                    &self.connected_peers,
+                    &self.peer_state_cache,
+                    address,
+                    *session_id,
+                    &wire_message,
+                    Duration::from_millis(CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                    "etdag-certified-input",
+                )
+            },
+        );
+        let mut sent = 0usize;
+        for ((address, _session_id), result) in targets.into_iter().zip(send_results) {
+            match result {
+                Ok(true) => sent += 1,
+                Ok(false) => {}
+                Err(error) => warn!(
+                    "p2p",
+                    "Failed to send certified ETDAG input",
+                    "peer" => address,
+                    "error" => error
+                ),
+            }
+        }
+        Ok(sent)
+    }
+
     pub fn broadcast_vote_request(
         &self,
         block: &Block,
@@ -7523,6 +7601,7 @@ fn bypasses_shared_message_queue(message: &NetworkMessage) -> bool {
         NetworkMessage::VoteRequest { .. }
             | NetworkMessage::Vote { .. }
             | NetworkMessage::TypedConsensus { .. }
+            | NetworkMessage::EtdagCertifiedInput { .. }
             | NetworkMessage::Block { .. }
             | NetworkMessage::GetBlocks { .. }
             | NetworkMessage::Blocks { .. }
@@ -7589,6 +7668,20 @@ fn dispatch_peer_message(
                 warn!(
                     "p2p",
                     "Rejected typed consensus message",
+                    "peer" => peer_address.to_string(),
+                    "error" => error
+                );
+            }
+            Ok(())
+        }
+        NetworkMessage::EtdagCertifiedInput { artifact } => {
+            if let Err(error) = dispatch_etdag_certified_input(
+                etdag_ingress_peer_for_session(peer_address, session_id),
+                artifact,
+            ) {
+                warn!(
+                    "p2p",
+                    "Rejected certified ETDAG input",
                     "peer" => peer_address.to_string(),
                     "error" => error
                 );
@@ -8650,6 +8743,19 @@ fn handle_messages(
                             warn!(
                                 "p2p",
                                 "Rejected typed consensus message",
+                                "peer" => peer_address.clone(),
+                                "error" => error
+                            );
+                        }
+                    }
+                    NetworkMessage::EtdagCertifiedInput { artifact } => {
+                        if let Err(error) = dispatch_etdag_certified_input(
+                            etdag_ingress_peer_for_session(&peer_address, session_id),
+                            artifact,
+                        ) {
+                            warn!(
+                                "p2p",
+                                "Rejected certified ETDAG input",
                                 "peer" => peer_address.clone(),
                                 "error" => error
                             );

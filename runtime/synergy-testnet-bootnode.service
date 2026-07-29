@@ -7,6 +7,10 @@ Wants=network.target
 Type=simple
 User=devpup
 Group=synergydev
+# This file is produced for the exact approved release by
+# generate-testnet-v3-node-configs.py.  Do not make this optional: falling back
+# to config/genesis.json can attach a bootnode to the wrong network.
+EnvironmentFile=/etc/synergy/testnet-v3/node.env
 WorkingDirectory=/opt/synergy/synergy-testnet
 ExecStart=/opt/synergy/synergy-testnet/target/release/synergy-testnet start --config /opt/synergy/synergy-testnet/config/bootnode1.toml
 Restart=always

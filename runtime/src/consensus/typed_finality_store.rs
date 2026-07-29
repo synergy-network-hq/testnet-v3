@@ -97,6 +97,33 @@ impl TypedFinalityStore {
         Ok(self.load_state()?.epoch_transitions.into_iter().last())
     }
 
+    /// Returns the sole persisted, already-verified epoch transition bound to
+    /// one exact finalized typed block.  Callers must not select a transition
+    /// by epoch number or peer claim: the finalized height and block identity
+    /// are the restart-safe authority boundary.
+    pub fn epoch_transition_for_finality(
+        &self,
+        finality: &TypedFinalityRecord,
+    ) -> Result<Option<TypedEpochTransitionRecord>, String> {
+        let state = self.load_state()?;
+        let transition = state
+            .epoch_transitions
+            .into_iter()
+            .filter(|record| {
+                record.transition.finalized_height == finality.height
+                    && record.transition.finalized_block_id == finality.block_id
+            })
+            .collect::<Vec<_>>();
+        match transition.as_slice() {
+            [] => Ok(None),
+            [record] => Ok(Some(record.clone())),
+            _ => Err(
+                "typed PoSy finality store contains multiple epoch transitions for one finalized block"
+                    .to_string(),
+            ),
+        }
+    }
+
     /// Persists a typed block only after its QC has been verified and accepted
     /// by `ProofOfSynergyBft::commit_block`.
     ///

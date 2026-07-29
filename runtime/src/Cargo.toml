@@ -60,6 +60,14 @@ name = "synergy-testnet"
 path = "main.rs"
 
 [[bin]]
+name = "synergy-validator-node"
+path = "bin/synergy-validator-node.rs"
+
+[[bin]]
+name = "synergy-relayer-node"
+path = "bin/synergy-relayer-node.rs"
+
+[[bin]]
 name = "generate-node-keys"
 path = "../tools/generate_node_keys.rs"
 
@@ -114,6 +122,14 @@ path = "bin/derive-genesis-addresses.rs"
 [[bin]]
 name = "finalize-testnet-v3-genesis"
 path = "bin/finalize-testnet-v3-genesis.rs"
+
+[[bin]]
+name = "testnet-v3-genesis-release-approval"
+path = "bin/testnet-v3-genesis-release-approval.rs"
+
+[[bin]]
+name = "testnet-v3-etdag-admission"
+path = "bin/testnet-v3-etdag-admission.rs"
 
 [[bin]]
 name = "emit-testnet-v3-consensus-parameters"

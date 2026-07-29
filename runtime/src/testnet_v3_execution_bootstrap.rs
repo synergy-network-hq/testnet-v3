@@ -392,20 +392,21 @@ mod tests {
     use super::*;
     use crate::genesis::load_genesis_from_path_for_test;
 
-    fn identity_assigned_candidate() -> GenesisDocument {
+    fn archived_preapproval_identity_assigned_candidate() -> GenesisDocument {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join("genesis.testnet-v3.identity-assigned.json");
-        load_genesis_from_path_for_test(path).expect("identity-assigned candidate must validate")
+            .join("launch/production-genesis-ceremony/source-genesis.identity-assigned.json");
+        load_genesis_from_path_for_test(path)
+            .expect("archived pre-approval identity-assigned candidate must validate")
     }
 
     #[test]
-    fn retired_identity_assigned_candidate_rejects_migrated_artifacts() {
-        let error = prepare_testnet_v3_genesis_execution_state(&identity_assigned_candidate())
-            .expect_err(
-                "the retired ML-DSA-65 candidate must not accept the active ML-DSA-87 sources",
-            );
-        assert!(error.contains("hash does not match committed value"));
+    fn archived_preapproval_candidate_cannot_be_loaded_as_finalized_execution_state() {
+        let error = load_finalized_testnet_v3_genesis_execution_state(
+            &archived_preapproval_identity_assigned_candidate(),
+        )
+        .expect_err("an archived pre-approval candidate must not be accepted as finalized Genesis");
+        assert!(error.contains("missing genesis_deployment"));
     }
 
     #[test]

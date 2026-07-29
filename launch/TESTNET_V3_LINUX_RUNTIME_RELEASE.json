@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "release_id": "TESTNET_V3_LINUX_RUNTIME_PRELAUNCH_2026_07_29",
+  "network_id": "synergy-testnet-v3",
+  "chain_id": 1266,
+  "runtime_version": "20.0.0",
+  "runtime_binding_file": "launch/TESTNET_V3_RUNTIME_BINDING.json",
+  "runtime_binding_sha256": "f456838e2dc1b988aac82ab19fc50df424e1d3b0961f14e30787c816cb31b9f3",
+  "genesis_file_sha256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+  "genesis_hash": "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",
+  "release_config_generator_version": "testnet-v3-node-configs/v6",
+  "release_config_manifest_sha256": "3f6368eb76a280ba0bfe33290be831b870262bc2da54b57fcc8e420461eb6d37",
+  "artifacts": {
+    "validator": {
+      "local_path": "runtime/target/x86_64-unknown-linux-gnu/release/synergy-validator-node",
+      "sha256": "18a4c8053bb09fe5e6cc4f2928dbcb816cf561245896737ffc94731be19eb30e",
+      "linux_elf_machine": "x86_64",
+      "installed_path": "/opt/synergy/bin/synergy-validator",
+      "service_unit": "synergy-validator.service",
+      "role": "validator"
+    },
+    "relayer": {
+      "local_path": "runtime/target/x86_64-unknown-linux-gnu/release/synergy-relayer-node",
+      "sha256": "7eee7af3a4cdba2bd9aa2f8f806e7b4531345ae310353c4fb047cfb237e35090",
+      "linux_elf_machine": "x86_64",
+      "installed_path": "/opt/synergy/testnet/relayer/bin/synergy-testnet-linux-amd64",
+      "service_unit": "synergy-testnet-relayer.service",
+      "role": "relayer"
+    }
+  },
+  "build": {
+    "command": "cargo zigbuild --manifest-path runtime/Cargo.toml --release --target x86_64-unknown-linux-gnu --bin synergy-validator-node --bin synergy-relayer-node",
+    "role_entrypoints": [
+      "runtime/src/bin/synergy-validator-node.rs",
+      "runtime/src/bin/synergy-relayer-node.rs"
+    ],
+    "staging_only": true,
+    "starts_or_restarts_services": false
+  }
+}

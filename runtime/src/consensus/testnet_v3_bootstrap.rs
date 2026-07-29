@@ -25,6 +25,8 @@ const GENESIS_EPOCH_SEED_DOMAIN: &str = "SYNERGY_TESTNET_V3_GENESIS_EPOCH_SEED_V
 const GENESIS_TRANSITION_DOMAIN: &str = "SYNERGY_TESTNET_V3_GENESIS_TRANSITION_ROOT_V1";
 const GENESIS_CRYPTO_PROFILE_DOMAIN: &str = "SYNERGY_TESTNET_V3_GENESIS_CRYPTO_PROFILE_V1";
 const GENESIS_HEIGHT_SCHEDULE_DOMAIN: &str = "SYNERGY_TESTNET_V3_GENESIS_HEIGHT_SCHEDULE_V1";
+const TRANSITION_HEIGHT_SCHEDULE_DOMAIN: &str =
+    "SYNERGY_TESTNET_V3_FINALIZED_TRANSITION_HEIGHT_SCHEDULE_V1";
 
 /// Fully public, integrity-bound starting inputs for the typed PoSy runtime.
 #[derive(Debug, Clone)]
@@ -63,6 +65,30 @@ impl TestnetV3GenesisBootstrap {
         material.extend_from_slice(&self.genesis_transition_root.0);
         material.extend_from_slice(&height.to_be_bytes());
         Hash::from_domain_bytes(GENESIS_HEIGHT_SCHEDULE_DOMAIN, &material)
+    }
+
+    /// Returns the unique height schedule commitment after a verified epoch
+    /// transition.  Genesis keeps its historical domain separation; every
+    /// later epoch binds its height schedule to the signed transition root so
+    /// a peer cannot reuse a Genesis schedule under a changed topology.
+    pub fn assigned_height_schedule_root_from_transition(
+        &self,
+        transition_root: Hash,
+        height: u64,
+    ) -> Result<Hash, String> {
+        if transition_root.is_zero() {
+            return Err("verified epoch transition root is missing".to_string());
+        }
+        if height == 0 {
+            return Err("height schedule cannot target genesis height zero".to_string());
+        }
+        let mut material = Vec::with_capacity(40);
+        material.extend_from_slice(&transition_root.0);
+        material.extend_from_slice(&height.to_be_bytes());
+        Ok(Hash::from_domain_bytes(
+            TRANSITION_HEIGHT_SCHEDULE_DOMAIN,
+            &material,
+        ))
     }
 
     /// Derives the only valid immutable consensus authority for height one of

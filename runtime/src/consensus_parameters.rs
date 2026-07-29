@@ -1,6 +1,6 @@
 use crate::synergy_types::{
-    ChainId, NetworkId, ProtocolConfig, POSY_PROTOCOL_VERSION, TESTNET_V3_CLUSTER_SCHEDULE_VERSION,
-    TESTNET_V3_CONSENSUS_SIGNATURE_ALGORITHM,
+    ChainId, Epoch, NetworkId, ProtocolConfig, POSY_PROTOCOL_VERSION,
+    TESTNET_V3_CLUSTER_SCHEDULE_VERSION, TESTNET_V3_CONSENSUS_SIGNATURE_ALGORITHM,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
@@ -11,12 +11,21 @@ use std::fs;
 use std::path::Path;
 
 pub const CONSENSUS_PARAMETER_MANIFEST_SCHEMA_VERSION: u32 = 2;
+/// Schema version 3 is reserved for the first finalized manifest that may
+/// explicitly authorize ETDAG.  The applied Testnet-v3 Genesis is schema 2;
+/// its omission of an ETDAG activation record is intentionally a hard
+/// deferral, rather than implicit activation from the presence of ETDAG
+/// cryptographic parameters.
+pub const CONSENSUS_PARAMETER_MANIFEST_ETDAG_ACTIVATION_SCHEMA_VERSION: u32 = 3;
 pub const CONSENSUS_PARAMETER_MANIFEST_RELEASE_ID: &str = "testnet-v3";
 pub const CONSENSUS_PARAMETER_MANIFEST_FINALIZED_STATUS: &str = "FINALIZED";
 pub const CONSENSUS_PARAMETER_ACTIVATION_BOUNDARY: &str = "genesis_or_declared_epoch_boundary";
 pub const CONSENSUS_PARAMETER_GENESIS_BINDING_SCHEMA_VERSION: u32 = 1;
 pub const CONSENSUS_PARAMETER_GENESIS_BINDING_STATUS: &str = "FINALIZED_AND_BOUND";
 pub const MAX_CONSENSUS_PARAMETER_MANIFEST_BYTES: usize = 64 * 1024;
+pub const ERR_ETDAG_DEFERRED: &str = "ETDAG_DEFERRED_UNTIL_FINALIZED_EPOCH_MANIFEST";
+pub const ERR_ETDAG_PREMATURE_ACTIVATION: &str =
+    "ETDAG_PREMATURE_ACTIVATION_BEFORE_DECLARED_EPOCH_BOUNDARY";
 
 /// The workbook-mandated 512-bit root of the exact canonical parameter
 /// manifest bytes. This is deliberately not the runtime's general 256-bit
@@ -127,6 +136,46 @@ impl HealthyNetworkPerformanceTargets {
     }
 }
 
+/// An explicit, consensus-bound authorization for the encrypted transaction
+/// DAG.  ETDAG cryptographic parameters alone are deliberately not an
+/// activation signal: Testnet-v3 starts with ETDAG deferred.  A future
+/// finalized schema-v3 manifest may activate it only at a non-genesis epoch
+/// boundary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum EtdagActivation {
+    Deferred,
+    ActivateAtDeclaredEpoch { activation_epoch: u64 },
+}
+
+impl EtdagActivation {
+    fn validate(&self) -> Result<(), String> {
+        if let Self::ActivateAtDeclaredEpoch { activation_epoch } = self {
+            if *activation_epoch == 0 {
+                return Err("ETDAG activation epoch must be a future non-genesis epoch".to_string());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Capability required to install the process-wide ETDAG ingress.  Its
+/// constructor is private to this module, so production lifecycle wiring can
+/// obtain one only by validating an explicit finalized-manifest activation at
+/// the current epoch.
+#[derive(Debug)]
+pub(crate) struct EtdagActivationPermit(());
+
+#[cfg(test)]
+impl EtdagActivationPermit {
+    /// Unit tests for the cryptographic ETDAG verifier exercise proof
+    /// validation independently of Testnet-v3 lifecycle policy.  Production
+    /// code has no equivalent constructor.
+    pub(crate) fn test_only() -> Self {
+        Self(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConsensusParameterManifest {
@@ -171,14 +220,23 @@ pub struct ConsensusParameterManifest {
     pub precommit_timeout_ms: u64,
     pub max_round_timeout_ms: u64,
     pub healthy_network_performance_targets: HealthyNetworkPerformanceTargets,
+    /// Absent in the schema-v2 Genesis manifest and intentionally omitted from
+    /// canonical serialization when absent so the already-applied Genesis
+    /// parameter root remains byte-for-byte valid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub etdag_activation: Option<EtdagActivation>,
 }
 
 impl ConsensusParameterManifest {
     pub fn validate_finalized(&self) -> Result<(), String> {
-        if self.schema_version != CONSENSUS_PARAMETER_MANIFEST_SCHEMA_VERSION {
+        if self.schema_version != CONSENSUS_PARAMETER_MANIFEST_SCHEMA_VERSION
+            && self.schema_version != CONSENSUS_PARAMETER_MANIFEST_ETDAG_ACTIVATION_SCHEMA_VERSION
+        {
             return Err(format!(
-                "unsupported consensus parameter manifest schema version: expected {}, found {}",
-                CONSENSUS_PARAMETER_MANIFEST_SCHEMA_VERSION, self.schema_version
+                "unsupported consensus parameter manifest schema version: expected {} or {}, found {}",
+                CONSENSUS_PARAMETER_MANIFEST_SCHEMA_VERSION,
+                CONSENSUS_PARAMETER_MANIFEST_ETDAG_ACTIVATION_SCHEMA_VERSION,
+                self.schema_version
             ));
         }
         if self.release_id != CONSENSUS_PARAMETER_MANIFEST_RELEASE_ID {
@@ -288,6 +346,25 @@ impl ConsensusParameterManifest {
         if self.allow_quorum_reduction {
             return Err("Testnet-v3 quorum reduction must remain disabled".to_string());
         }
+        match (self.schema_version, self.etdag_activation.as_ref()) {
+            (CONSENSUS_PARAMETER_MANIFEST_SCHEMA_VERSION, None) => {}
+            (CONSENSUS_PARAMETER_MANIFEST_SCHEMA_VERSION, Some(_)) => {
+                return Err(
+                    "schema-v2 consensus manifests cannot activate ETDAG; issue a finalized schema-v3 epoch manifest"
+                        .to_string(),
+                );
+            }
+            (CONSENSUS_PARAMETER_MANIFEST_ETDAG_ACTIVATION_SCHEMA_VERSION, Some(activation)) => {
+                activation.validate()?;
+            }
+            (CONSENSUS_PARAMETER_MANIFEST_ETDAG_ACTIVATION_SCHEMA_VERSION, None) => {
+                return Err(
+                    "schema-v3 consensus manifests must explicitly declare ETDAG activation state"
+                        .to_string(),
+                );
+            }
+            _ => unreachable!("schema version was validated above"),
+        }
         if self.required_vote_match_rate_ppm > 1_000_000 {
             return Err("required_vote_match_rate_ppm exceeds 1,000,000".to_string());
         }
@@ -341,6 +418,29 @@ impl ConsensusParameterManifest {
         config.seal_runtime_binding()?;
         Ok(config)
     }
+
+    pub(crate) fn require_etdag_activation_at_epoch(
+        &self,
+        current_epoch: Epoch,
+    ) -> Result<EtdagActivationPermit, String> {
+        self.validate_finalized()?;
+        match self.etdag_activation.as_ref() {
+            None | Some(EtdagActivation::Deferred) => Err(format!(
+                "{ERR_ETDAG_DEFERRED}: ETDAG is unavailable until a new finalized schema-v3 manifest declares a future epoch boundary"
+            )),
+            Some(EtdagActivation::ActivateAtDeclaredEpoch { activation_epoch })
+                if current_epoch.0 < *activation_epoch =>
+            {
+                Err(format!(
+                    "{ERR_ETDAG_PREMATURE_ACTIVATION}: current epoch {} is before declared activation epoch {activation_epoch}",
+                    current_epoch.0
+                ))
+            }
+            Some(EtdagActivation::ActivateAtDeclaredEpoch { .. }) => {
+                Ok(EtdagActivationPermit(()))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -366,6 +466,14 @@ impl LoadedConsensusParameters {
             );
         }
         Ok(())
+    }
+
+    pub(crate) fn require_etdag_activation_at_epoch(
+        &self,
+        current_epoch: Epoch,
+    ) -> Result<EtdagActivationPermit, String> {
+        self.manifest
+            .require_etdag_activation_at_epoch(current_epoch)
     }
 }
 
@@ -544,6 +652,7 @@ mod tests {
                 finality_p95_target_ms: 2_500,
                 finality_p99_target_ms: 3_000,
             },
+            etdag_activation: None,
         }
     }
 
@@ -628,6 +737,44 @@ mod tests {
     }
 
     #[test]
+    fn etdag_is_deferred_by_the_genesis_schema_and_cannot_activate_early() {
+        let manifest = finalized_fixture();
+        assert_eq!(
+            manifest.schema_version,
+            CONSENSUS_PARAMETER_MANIFEST_SCHEMA_VERSION
+        );
+        assert_eq!(manifest.etdag_activation, None);
+        let deferred = manifest
+            .require_etdag_activation_at_epoch(Epoch(0))
+            .unwrap_err();
+        assert!(deferred.contains(ERR_ETDAG_DEFERRED));
+
+        let mut premature = finalized_fixture();
+        premature.schema_version = CONSENSUS_PARAMETER_MANIFEST_ETDAG_ACTIVATION_SCHEMA_VERSION;
+        premature.etdag_activation = Some(EtdagActivation::ActivateAtDeclaredEpoch {
+            activation_epoch: 2,
+        });
+        premature.validate_finalized().unwrap();
+        let error = premature
+            .require_etdag_activation_at_epoch(Epoch(1))
+            .unwrap_err();
+        assert!(error.contains(ERR_ETDAG_PREMATURE_ACTIVATION));
+        premature
+            .require_etdag_activation_at_epoch(Epoch(2))
+            .unwrap();
+
+        let mut invalid_genesis_activation = finalized_fixture();
+        invalid_genesis_activation.etdag_activation =
+            Some(EtdagActivation::ActivateAtDeclaredEpoch {
+                activation_epoch: 1,
+            });
+        assert!(invalid_genesis_activation
+            .validate_finalized()
+            .unwrap_err()
+            .contains("schema-v2"));
+    }
+
+    #[test]
     fn production_release_manifest_is_canonical_decision_bound_and_exact() {
         let launch = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../launch");
         let decision = fs::read(launch.join("TESTNET_V3_CONSENSUS_PARAMETER_RELEASE_DECISION.md"))
@@ -646,6 +793,11 @@ mod tests {
         assert_eq!(loaded.manifest.prevote_timeout_ms, 1_500);
         assert_eq!(loaded.manifest.precommit_timeout_ms, 1_500);
         assert_eq!(loaded.manifest.max_round_timeout_ms, 10_000);
+        assert_eq!(loaded.manifest.etdag_activation, None);
+        assert!(loaded
+            .require_etdag_activation_at_epoch(Epoch(0))
+            .unwrap_err()
+            .contains(ERR_ETDAG_DEFERRED));
         assert_eq!(
             loaded.manifest.activation_boundary,
             CONSENSUS_PARAMETER_ACTIVATION_BOUNDARY

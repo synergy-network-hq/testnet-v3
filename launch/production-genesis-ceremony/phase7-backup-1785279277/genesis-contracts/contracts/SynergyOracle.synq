@@ -1,0 +1,156 @@
+// Testnet-v3 quorum checkpoint oracle with replay protection.
+pragma synq ^1.0.0;
+
+contract SynergyOracle {
+    governanceKey: MLDSAPublicKey public;
+    paused: Bool public;
+    quorumThreshold: UInt256 public;
+    replayProtectionEnabled: Bool public;
+
+    isOracle: mapping(Address => Bool) public;
+    acceptedSourceDomain: mapping(String => Bool) public;
+    checkpointSourceDomain: mapping(Bytes => String) public;
+    checkpointPayloadHash: mapping(Bytes => Bytes) public;
+    checkpointMerkleRoot: mapping(Bytes => Bytes) public;
+    checkpointHeight: mapping(Bytes => UInt256) public;
+    checkpointNonce: mapping(Bytes => UInt256) public;
+    checkpointApprovals: mapping(Bytes => UInt256) public;
+    checkpointFinalized: mapping(Bytes => Bool) public;
+    approvedBy: mapping(Bytes => mapping(Address => Bool)) public;
+    usedReplayKey: mapping(Bytes => Bool) public;
+
+    event OracleSet(oracle: Address indexed, enabled: Bool);
+    event SourceDomainSet(domain: String, accepted: Bool);
+    event CheckpointProposed(checkpointId: Bytes indexed, sourceDomain: String, payloadHash: Bytes, merkleRoot: Bytes, checkpointHeight: UInt256, nonce: UInt256, proposer: Address);
+    event CheckpointApproved(checkpointId: Bytes indexed, oracle: Address indexed, approvals: UInt256);
+    event CheckpointFinalized(checkpointId: Bytes indexed);
+    event QuorumThresholdUpdated(quorumThreshold: UInt256);
+    event PauseStateUpdated(paused: Bool);
+
+    constructor(
+        initialGovernanceKey: MLDSAPublicKey,
+        initialQuorumThreshold: UInt256,
+        enableReplayProtection: Bool
+    ) {
+        require(initialQuorumThreshold > 0, "Quorum is zero");
+        governanceKey = initialGovernanceKey;
+        quorumThreshold = initialQuorumThreshold;
+        replayProtectionEnabled = enableReplayProtection;
+        paused = false;
+    }
+
+    @gas_cost(base: 120000)
+    @public function proposeCheckpoint(
+        checkpointId: Bytes,
+        sourceDomain: String,
+        payloadHash: Bytes,
+        merkleRoot: Bytes,
+        sourceHeight: UInt256,
+        nonce: UInt256
+    ) {
+        require(!paused, "Oracle paused");
+        require(isOracle[msg.sender], "Unauthorized oracle");
+        require(acceptedSourceDomain[sourceDomain], "Source domain not accepted");
+        require(!usedReplayKey[checkpointId], "Checkpoint replay");
+        require(checkpointApprovals[checkpointId] == 0, "Checkpoint exists");
+
+        checkpointSourceDomain[checkpointId] = sourceDomain;
+        checkpointPayloadHash[checkpointId] = payloadHash;
+        checkpointMerkleRoot[checkpointId] = merkleRoot;
+        checkpointHeight[checkpointId] = sourceHeight;
+        checkpointNonce[checkpointId] = nonce;
+        checkpointApprovals[checkpointId] = 1;
+        checkpointFinalized[checkpointId] = false;
+        approvedBy[checkpointId][msg.sender] = true;
+        if (replayProtectionEnabled) {
+            usedReplayKey[checkpointId] = true;
+        }
+
+        emit CheckpointProposed(checkpointId, sourceDomain, payloadHash, merkleRoot, sourceHeight, nonce, msg.sender);
+        emit CheckpointApproved(checkpointId, msg.sender, 1);
+        if (quorumThreshold <= 1) {
+            checkpointFinalized[checkpointId] = true;
+            emit CheckpointFinalized(checkpointId);
+        }
+    }
+
+    @gas_cost(base: 75000)
+    @public function approveCheckpoint(checkpointId: Bytes) {
+        require(!paused, "Oracle paused");
+        require(isOracle[msg.sender], "Unauthorized oracle");
+        require(checkpointApprovals[checkpointId] > 0, "Checkpoint not found");
+        require(!checkpointFinalized[checkpointId], "Checkpoint finalized");
+        require(!approvedBy[checkpointId][msg.sender], "Duplicate approval");
+        approvedBy[checkpointId][msg.sender] = true;
+        checkpointApprovals[checkpointId] = checkpointApprovals[checkpointId] + 1;
+        emit CheckpointApproved(checkpointId, msg.sender, checkpointApprovals[checkpointId]);
+        if (checkpointApprovals[checkpointId] >= quorumThreshold) {
+            checkpointFinalized[checkpointId] = true;
+            emit CheckpointFinalized(checkpointId);
+        }
+    }
+
+    @gas_cost(base: 25000)
+    @public function isFinalized(checkpointId: Bytes) -> Bool {
+        return checkpointFinalized[checkpointId];
+    }
+
+    @gas_cost(base: 95000, mldsa_verify: 35000)
+    @public function setOracle(
+        oracle: Address,
+        enabled: Bool,
+        governanceNonce: UInt256,
+        validUntilBlock: UInt256,
+        signature: MLDSASignature
+    ) {
+        require(oracle != Address(0), "Invalid oracle");
+        require_pqc {
+            let valid: Bool = verifyGovernanceAuthorization(governanceKey, governanceNonce, validUntilBlock, signature);
+            require(valid, "Invalid governance authorization");
+        } or revert("PQC verification failed");
+        isOracle[oracle] = enabled;
+        emit OracleSet(oracle, enabled);
+    }
+
+    @gas_cost(base: 95000, mldsa_verify: 35000)
+    @public function setSourceDomain(
+        domain: String,
+        accepted: Bool,
+        governanceNonce: UInt256,
+        validUntilBlock: UInt256,
+        signature: MLDSASignature
+    ) {
+        require_pqc {
+            let valid: Bool = verifyGovernanceAuthorization(governanceKey, governanceNonce, validUntilBlock, signature);
+            require(valid, "Invalid governance authorization");
+        } or revert("PQC verification failed");
+        acceptedSourceDomain[domain] = accepted;
+        emit SourceDomainSet(domain, accepted);
+    }
+
+    @gas_cost(base: 95000, mldsa_verify: 35000)
+    @public function setQuorumThreshold(
+        newThreshold: UInt256,
+        governanceNonce: UInt256,
+        validUntilBlock: UInt256,
+        signature: MLDSASignature
+    ) {
+        require(newThreshold > 0, "Quorum is zero");
+        require_pqc {
+            let valid: Bool = verifyGovernanceAuthorization(governanceKey, governanceNonce, validUntilBlock, signature);
+            require(valid, "Invalid governance authorization");
+        } or revert("PQC verification failed");
+        quorumThreshold = newThreshold;
+        emit QuorumThresholdUpdated(newThreshold);
+    }
+
+    @gas_cost(base: 90000, mldsa_verify: 35000)
+    @public function setPaused(newPaused: Bool, governanceNonce: UInt256, validUntilBlock: UInt256, signature: MLDSASignature) {
+        require_pqc {
+            let valid: Bool = verifyGovernanceAuthorization(governanceKey, governanceNonce, validUntilBlock, signature);
+            require(valid, "Invalid governance authorization");
+        } or revert("PQC verification failed");
+        paused = newPaused;
+        emit PauseStateUpdated(newPaused);
+    }
+}

@@ -19,6 +19,7 @@ fn run() -> Result<(), String> {
     let command = args.first().map(String::as_str).unwrap_or("help");
     match command {
         "--version" | "version" => print_version(),
+        "release-binding" => print_testnet_v3_release_binding(),
         "tx" => run_tx_command(&args)?,
         "dag" => run_dag_command(&args)?,
         "synq" => run_synq_command(&args)?,
@@ -2255,6 +2256,16 @@ fn parse_u64ish(value: &serde_json::Value) -> Option<u64> {
 
 fn print_version() {
     println!("synergy-node {}", env!("CARGO_PKG_VERSION"));
+}
+
+/// Prints the immutable Testnet-v3 release binding embedded at compile time.
+/// It intentionally contains no keys or mutable node configuration. Release
+/// tooling compares this exact payload to the executed canonical Genesis.
+fn print_testnet_v3_release_binding() {
+    print!(
+        "{}",
+        include_str!("../../../launch/TESTNET_V3_RUNTIME_BINDING.json")
+    );
 }
 
 fn wants_help(args: &[String]) -> bool {

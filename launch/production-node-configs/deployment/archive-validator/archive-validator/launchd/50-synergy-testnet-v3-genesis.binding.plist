@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>SYNERGY_CHAIN_ID</key>
+		<string>1266</string>
+		<key>SYNERGY_GENESIS_FILE</key>
+		<string>/Users/Shared/Synergy/archive-validator/workspace/config/testnet-v3-genesis.json</string>
+		<key>SYNERGY_GENESIS_HASH</key>
+		<string>c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d</string>
+		<key>SYNERGY_GENESIS_SHA256</key>
+		<string>ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf</string>
+		<key>SYNERGY_NETWORK_ID</key>
+		<string>synergy-testnet-v3</string>
+		<key>SYNERGY_RELEASE_ID</key>
+		<string>synergy-testnet-v3</string>
+	</dict>
+	<key>Label</key>
+	<string>network.synergy.archive-validator</string>
+</dict>
+</plist>

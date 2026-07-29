@@ -1,0 +1,106 @@
+{
+  "config_install_mode": "install_new_isolated_testnet_v3_config_only",
+  "config_payload": "bootnodes/bootnode3.toml",
+  "config_payload_sha256": "cb98fa13ba9656fa01f40fbf9e53f7a1fdd3f4d171a9fbbed089596cb3e40916",
+  "dedicated_install_map": {
+    "runtime_environment_example": {
+      "deploy_path": "/etc/synergy/testnet-v3/bootnode3/runtime.env",
+      "install_mode": "operator_create_filled_content_addressed_environment_file_mode_0600",
+      "payload": "deployment/bootnodes/bootnode3/dedicated-runtime/runtime.env.example"
+    },
+    "runtime_launch_guard": {
+      "deploy_path": "/opt/synergy/testnet-v3/bin/synergy-release-guard",
+      "install_mode": "copy_new_v3_guard_mode_0555",
+      "payload": "deployment/bootnodes/bootnode3/dedicated-runtime/synergy-release-guard"
+    },
+    "systemd_unit": {
+      "deploy_path": "/etc/systemd/system/synergy-testnet-v3-bootnode3.service",
+      "install_mode": "copy_new_v3_unit_do_not_enable_or_start",
+      "payload": "deployment/bootnodes/bootnode3/dedicated-systemd/synergy-testnet-v3-bootnode3.service"
+    }
+  },
+  "dedicated_payloads": {
+    "runtime_environment_example": "deployment/bootnodes/bootnode3/dedicated-runtime/runtime.env.example",
+    "runtime_launch_guard": "deployment/bootnodes/bootnode3/dedicated-runtime/synergy-release-guard",
+    "systemd_unit": "deployment/bootnodes/bootnode3/dedicated-systemd/synergy-testnet-v3-bootnode3.service"
+  },
+  "environment_install_mode": "reference_only_dedicated_unit_embeds_immutable_genesis_binding",
+  "environment_payload": "deployment/bootnodes/bootnode3/node.env",
+  "genesis_deploy_path": "/etc/synergy/testnet-v3/bootnode3/genesis.json",
+  "genesis_file_sha256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+  "genesis_payload": "canonical-genesis/genesis.json",
+  "manual_activation_required": true,
+  "manual_config_merge_required": false,
+  "manual_service_remediation_reason": null,
+  "manual_service_remediation_required": false,
+  "operator_preconditions": [
+    "A content-addressed Testnet-v3 runtime binary path and its SHA-256 must be supplied in the new dedicated runtime.env; no legacy/testbeta binary path is accepted.",
+    "The verified non-validator P2P/private-identity import contract is not present in this release package; map an approved V3 identity or explicitly prove that the runtime may create an isolated replacement identity before activation.",
+    "Prove all listed ports are unoccupied and match the approved host mapping before activation; do not copy a legacy port or listener configuration blindly."
+  ],
+  "port_preflight": [
+    {
+      "port": 5620,
+      "protocol": "tcp",
+      "purpose": "p2p"
+    },
+    {
+      "port": 5640,
+      "protocol": "tcp",
+      "purpose": "rpc"
+    },
+    {
+      "port": 5660,
+      "protocol": "tcp",
+      "purpose": "websocket"
+    },
+    {
+      "port": 5680,
+      "protocol": "tcp",
+      "purpose": "discovery"
+    },
+    {
+      "port": 6030,
+      "protocol": "tcp",
+      "purpose": "metrics"
+    }
+  ],
+  "prepare_only": true,
+  "reverify_service_contract_before_activation": true,
+  "runtime_environment": "SYNERGY_GENESIS_FILE",
+  "schema_version": 2,
+  "service_binding_install_mode": "install_new_dedicated_systemd_unit_only_never_replace_or_modify_legacy_unit",
+  "service_binding_payload": "deployment/bootnodes/bootnode3/dedicated-systemd/synergy-testnet-v3-bootnode3.service",
+  "service_contract": {
+    "config_install_mode": "install_new_isolated_testnet_v3_config_only",
+    "dedicated_config_root": "/etc/synergy/testnet-v3/bootnode3",
+    "dedicated_data_root": "/var/lib/synergy-testnet-v3-bootnode3",
+    "deployment_mode": "dedicated-testnet-v3-service",
+    "existing_config_path": "/etc/synergy/testnet-v3/bootnode3/node.toml",
+    "existing_environment_file_path": null,
+    "generated_config_compatible": true,
+    "genesis_deploy_path": "/etc/synergy/testnet-v3/bootnode3/genesis.json",
+    "legacy_service_contract_do_not_modify": {
+      "fragment_path": "/etc/systemd/system/synergy-testbeta-bootnode3.service",
+      "instruction": "Do not modify, unhold, enable, or reuse this testbeta unit.",
+      "service_unit": "synergy-testbeta-bootnode3.service",
+      "status": "testbeta-named-and-emergency-held"
+    },
+    "manual_activation_required": true,
+    "manual_config_merge_required": false,
+    "manual_service_remediation_reason": null,
+    "manual_service_remediation_required": false,
+    "operator_identity_mapping_required": true,
+    "operator_port_preflight_required": true,
+    "operator_runtime_binary_mapping_required": true,
+    "platform": "linux-systemd",
+    "runtime_environment_file": "/etc/synergy/testnet-v3/bootnode3/runtime.env",
+    "runtime_kind": "runtime",
+    "runtime_launch_guard_deploy_path": "/opt/synergy/testnet-v3/bin/synergy-release-guard",
+    "service_fragment_path": "/etc/systemd/system/synergy-testnet-v3-bootnode3.service",
+    "service_unit": "synergy-testnet-v3-bootnode3.service",
+    "service_user": "DynamicUser"
+  },
+  "starts_or_restarts_services": false,
+  "topology_audit_config_payload": null
+}

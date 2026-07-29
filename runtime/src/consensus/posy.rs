@@ -283,6 +283,218 @@ impl ProofOfSynergyBft {
         Ok(block)
     }
 
+    /// Constructs the only proposal permitted while ETDAG is deferred: an
+    /// authenticated, deterministic empty core block.  There is deliberately
+    /// no transaction argument here, so no caller can turn this lifecycle
+    /// path into a plaintext user-transaction fallback.
+    pub fn propose_core_block(
+        &mut self,
+        signer: &mut AegisPqvmSigner,
+        proposer: &ValidatorRecord,
+        context: &LocalConsensusContext,
+        state: &ExecutionState,
+    ) -> Result<Block, String> {
+        self.phase = ConsensusPhase::ProposingBlock;
+        self.ensure_testnet_context(context)?;
+        self.require_authorized_round(&context.height_context, context.round)?;
+        let scheduled = self.proposer_for(&context.height_context, context.round)?;
+        if scheduled.validator_id != proposer.validator_id {
+            return Err("wrong proposer for core height/round/cluster".to_string());
+        }
+        if proposer.status != ValidatorStatus::Active {
+            return Err("core proposal proposer is not ACTIVE".to_string());
+        }
+        if !signer.registry.key_is_active_for_epoch(
+            &proposer.validator_uma_id.0,
+            &proposer.consensus_public_key.key_id,
+            context.height_context.epoch,
+            AegisPqKeyRole::ConsensusProposer,
+        ) {
+            return Err("core proposal proposer key is not active".to_string());
+        }
+
+        let ordered_tx_ids = Vec::<crate::synergy_types::TxId>::new();
+        let tx_order_root = compute_tx_order_root(&ordered_tx_ids)?;
+        let mut block = Block {
+            header: BlockHeader {
+                version: 1,
+                chain_id: context.height_context.chain_id,
+                network_id: context.height_context.network_id.clone(),
+                protocol_version: context.height_context.protocol_version.clone(),
+                height: context.height_context.height,
+                round: context.round,
+                epoch: context.height_context.epoch,
+                cluster_id: context.height_context.assigned_cluster_id,
+                height_context_root: context.height_context.root()?,
+                parent_block_hash: context.latest_finalized_block_hash,
+                parent_state_root: context.latest_finalized_state_root,
+                last_finalized_qc_hash: context
+                    .height_context
+                    .prior_finalized_qc_or_transition_root,
+                proposer_validator_id: proposer.validator_id.clone(),
+                proposer_uma_id: proposer.validator_uma_id.clone(),
+                proposer_key_id: proposer.consensus_public_key.key_id.clone(),
+                active_validator_set_hash: context.height_context.active_validator_set_root,
+                eligible_validator_set_hash: context
+                    .height_context
+                    .assigned_cluster_membership_root,
+                validator_consensus_key_root: context.height_context.validator_consensus_key_root,
+                frozen_bonded_weight_root: context.height_context.frozen_bonded_weight_root,
+                cluster_schedule_version: context.height_context.cluster_schedule_version.clone(),
+                cluster_map_hash: context.height_context.cluster_map_root,
+                assigned_cluster_membership_root: context
+                    .height_context
+                    .assigned_cluster_membership_root,
+                assigned_cluster_validator_count: context
+                    .height_context
+                    .assigned_cluster_validator_count,
+                assigned_cluster_total_voting_weight: context
+                    .height_context
+                    .assigned_cluster_total_voting_weight,
+                proposer_schedule_hash: context.height_context.leader_schedule_root,
+                protocol_config_hash: context.height_context.consensus_parameter_root,
+                cryptographic_profile_root: context.height_context.cryptographic_profile_root,
+                dag_frontier_root: Self::core_only_dag_frontier(context)?,
+                tx_order_root,
+                tx_count: 0,
+                protected_batch: None,
+                evidence_root: context.evidence_root,
+                state_root_before: context.latest_finalized_state_root,
+                state_root_after: Hash::zero(),
+                receipt_root: Hash::zero(),
+                app_version: context.app_version,
+                execution_version: context.execution_version,
+                dag_version: context.dag_version,
+                aegis_pqvm_version: context.aegis_pqvm_version.clone(),
+                timestamp_ms_consensus_bounded: 0,
+            },
+            transactions: Vec::new(),
+            proposer_signature: AegisPqSignature {
+                algorithm: String::new(),
+                signature_bytes: Vec::new(),
+            },
+        };
+        let execution = execute_block(&block, state)?;
+        block.header.state_root_after = execution.state_root_after;
+        block.header.receipt_root = execution.receipt_root;
+        self.require_candidate_carry_forward(&context.height_context, context.round, &block)?;
+        self.authorize_proposal_before_signature(&block, proposer, &context.height_context)?;
+        block.proposer_signature = signer
+            .sign_domain(
+                SYNERGY_BLOCK_V1,
+                &block.header.canonical_bytes()?,
+                &proposer.consensus_public_key.key_id,
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(block)
+    }
+
+    /// Revalidates the core-only block shape before any vote can be emitted.
+    /// This check explicitly rejects all transaction payloads, protected
+    /// batches, and ETDAG frontier substitutions.
+    pub fn validate_core_proposal(
+        &mut self,
+        block: &Block,
+        context: &LocalConsensusContext,
+        state: &ExecutionState,
+    ) -> Result<(), String> {
+        self.phase = ConsensusPhase::ValidatingProposal;
+        self.ensure_testnet_context(context)?;
+        self.require_authorized_round(&context.height_context, block.header.round)?;
+        block.header.chain_id.require_testnet_v3()?;
+        block.header.network_id.require_testnet_v3()?;
+        if block.header.version != 1 {
+            return Err("core proposal requires block header version 1".to_string());
+        }
+        if !block.transactions.is_empty()
+            || block.header.tx_count != 0
+            || block.header.protected_batch.is_some()
+        {
+            return Err(
+                "core-only proposal must not contain user transactions or a protected batch"
+                    .to_string(),
+            );
+        }
+        let height_context = &context.height_context;
+        let expected_context_root = height_context.root()?;
+        if block.header.height != height_context.height
+            || block.header.parent_block_hash != context.latest_finalized_block_hash
+            || block.header.state_root_before != context.latest_finalized_state_root
+        {
+            return Err("core proposal parent/height/state context mismatch".to_string());
+        }
+        self.require_candidate_carry_forward(height_context, block.header.round, block)?;
+        if block.header.protocol_version != height_context.protocol_version
+            || block.header.epoch != height_context.epoch
+            || block.header.cluster_id != height_context.assigned_cluster_id
+            || block.header.height_context_root != expected_context_root
+            || block.header.active_validator_set_hash != height_context.active_validator_set_root
+            || block.header.eligible_validator_set_hash
+                != height_context.assigned_cluster_membership_root
+            || block.header.validator_consensus_key_root
+                != height_context.validator_consensus_key_root
+            || block.header.frozen_bonded_weight_root != height_context.frozen_bonded_weight_root
+            || block.header.cluster_schedule_version != height_context.cluster_schedule_version
+            || block.header.cluster_map_hash != height_context.cluster_map_root
+            || block.header.assigned_cluster_membership_root
+                != height_context.assigned_cluster_membership_root
+            || block.header.assigned_cluster_validator_count
+                != height_context.assigned_cluster_validator_count
+            || block.header.assigned_cluster_total_voting_weight
+                != height_context.assigned_cluster_total_voting_weight
+            || block.header.proposer_schedule_hash != height_context.leader_schedule_root
+            || block.header.protocol_config_hash != height_context.consensus_parameter_root
+            || block.header.cryptographic_profile_root != height_context.cryptographic_profile_root
+            || block.header.last_finalized_qc_hash
+                != height_context.prior_finalized_qc_or_transition_root
+        {
+            return Err("core proposal consensus context mismatch".to_string());
+        }
+        if block.header.tx_order_root != compute_tx_order_root(&[])?
+            || block.header.dag_frontier_root != Self::core_only_dag_frontier(context)?
+        {
+            return Err("core-only proposal has noncanonical empty-block commitments".to_string());
+        }
+        let proposer = self
+            .validator_set
+            .validators
+            .iter()
+            .find(|record| record.validator_id == block.header.proposer_validator_id)
+            .cloned()
+            .ok_or_else(|| "core proposal proposer not in validator set".to_string())?;
+        let scheduled = self.proposer_for(height_context, block.header.round)?;
+        if scheduled.validator_id != proposer.validator_id
+            || proposer.status != ValidatorStatus::Active
+            || !proposer.is_active_for_epoch(block.header.epoch)
+        {
+            return Err("core proposal proposer is not authorized".to_string());
+        }
+        let execution = execute_block(block, state)?;
+        if execution.state_root_after != block.header.state_root_after
+            || execution.receipt_root != block.header.receipt_root
+        {
+            return Err("core-only proposal execution roots mismatch".to_string());
+        }
+        self.verifier
+            .verify_domain_signature(
+                SYNERGY_BLOCK_V1,
+                &block.header.canonical_bytes()?,
+                &proposer.validator_uma_id.0,
+                &block.header.proposer_key_id,
+                block.header.epoch,
+                AegisPqKeyRole::ConsensusProposer,
+                &block.proposer_signature,
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    fn core_only_dag_frontier(context: &LocalConsensusContext) -> Result<Hash, String> {
+        Ok(Hash::from_domain_bytes(
+            "SYNERGY_TESTNET_V3_CORE_ONLY_DAG_FRONTIER_V1",
+            &context.height_context.root()?.0,
+        ))
+    }
+
     pub fn propose_protected_block(
         &mut self,
         signer: &mut AegisPqvmSigner,

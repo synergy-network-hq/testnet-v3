@@ -2286,7 +2286,11 @@ contract Caller {
         ];
         let constructors = [
             serde_json::json!(["00", "authority", "100", "6", "1"]),
-            serde_json::json!(["00", "registry", "1", "1000000", "1", "1000000", "10"]),
+            // Delegation is deliberately disabled at Testnet-v3 genesis.  The
+            // checked-in Staking constructor has the explicit flag plus zero
+            // delegation limits, so a stale seven-argument fixture cannot
+            // accidentally exercise the pre-delegation ABI.
+            serde_json::json!(["00", "registry", "1", "1000000", false, "0", "0", "10"]),
             serde_json::json!(["00", "distributor"]),
             serde_json::json!(["00", "staking", "2000", "5001", "3300", "1", "10", "5"]),
             serde_json::json!(["00", "governance", "1"]),

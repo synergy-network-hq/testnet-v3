@@ -1,0 +1,23 @@
+{
+  "aivm_state_root": "6bb65e453b33a5a9bdbcf6446fc1bf5ad6bec487375def6e8cf74c3b2f0dc452",
+  "artifact_directory": "genesis-contracts/contracts",
+  "artifact_file_count": 36,
+  "backup_directory": "launch/production-genesis-ceremony/phase7-backup-1785279277",
+  "consensus_parameter_decision_id": "TV3-POSY-PARAMS-2026-07-28-01",
+  "consensus_parameter_decision_sha256": "46cfd83b47d4a463f4954c6f0e1d94a824f94cc0e0c94582322c0c0de817bb1a",
+  "consensus_parameter_manifest_sha256": "5451f7084bfd97d136a1ab035d70b09ddc3262e6cc4e142b90091bac3a3ea854",
+  "consensus_parameter_root_sha3_512": "2e6760bed60c8f8e44b3b693254367f0da9a8aa9efae46c517856fb78be7402cf232c064083116b805278e95a952660f7a92e16ca9cd9349aa74467d577127cd",
+  "execution_state_root": "2902ef7dc3f6d49d30ced4b03274c4f5708b84c88bf368fd051ebee11ffb0c39",
+  "genesis_file": "genesis.testnet-v3.identity-assigned.json",
+  "genesis_file_sha256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+  "genesis_hash": "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",
+  "network_magic": "7661a387",
+  "receipt_root": "1ddd5472813884fe71456bd3df736848820db8fb55a3f307792b2796027e828a",
+  "release_approval_artifact": "/Volumes/xcode/Synergy-Network-Projects/network-components/01-Testnetv3/launch/production-genesis-ceremony/testnet-v3-genesis-release-approval.json",
+  "release_approval_artifact_sha256": "b55629e894a25032d4bb96ae3274ec1a39b5ea8de5d68adc84bd1d5f89d6c5a3",
+  "release_approval_governance_address": "syna1adxk7errymz8p8s0k5ysmka9pjv9ntf9jlml",
+  "release_approval_governance_role": "SNRG-TESTNET-V3-GOVERNANCE-AUTHORITY",
+  "schema_version": 1,
+  "status": "PHASE_7_8_APPLIED_PENDING_RELEASE_GATES",
+  "track_h_status": "APPLIED"
+}

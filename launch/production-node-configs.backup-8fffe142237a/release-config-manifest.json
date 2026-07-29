@@ -1,0 +1,40 @@
+{
+  "binding": {
+    "consensus_parameter_decision_id": "TV3-POSY-PARAMS-2026-07-28-01",
+    "consensus_parameter_root_sha3_512": "2e6760bed60c8f8e44b3b693254367f0da9a8aa9efae46c517856fb78be7402cf232c064083116b805278e95a952660f7a92e16ca9cd9349aa74467d577127cd",
+    "genesis_file_sha256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+    "genesis_hash": "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",
+    "phase7_release_integrity_sha256": "688676a29ad105871b7c785757b980401becc6c0f4e7a324bce0f404ed0c4b78",
+    "release_approval_artifact_sha256": "b55629e894a25032d4bb96ae3274ec1a39b5ea8de5d68adc84bd1d5f89d6c5a3",
+    "release_approval_governance_address": "syna1adxk7errymz8p8s0k5ysmka9pjv9ntf9jlml",
+    "release_approval_governance_role": "SNRG-TESTNET-V3-GOVERNANCE-AUTHORITY",
+    "topology_sha256": "a7410b7ef3425091fc61fcad139db85f08b7be9374390c732a027970f1d27968",
+    "vpn_registry_sha256": "13d7ba7f8a8dd9a552cf0ed798c4ab80084d49b5fe552afcf1295dc2e013a285"
+  },
+  "chain_id": 1266,
+  "config_files": {
+    "archive-validator/archive-validator.toml": "5141ad61dac28f4051da81d329fd1e22a920837c7e54a4eb6bf951ba5fba5a60",
+    "bootnodes/bootnode1.toml": "7763d0debf222160fe3c00182e9caae1451e708cdf72236bc21988474f5090e3",
+    "bootnodes/bootnode2.toml": "b21b4694f474cc7605bc15480cac255ef41270f6515da0cdfd49a010919cb969",
+    "bootnodes/bootnode3.toml": "34b068dae8231c17b54e5580e8707dc39de790dd8e9021db32e6066664faf378",
+    "explorer-indexer/explorer-indexer.toml": "ac60387cfe3bb839b34b7b2a77c126136f31426f1392aae535afb6830209a347",
+    "observer/observer.toml": "f0cba628f8f96d090083a27185d91daf75dcb4dcaa3376600185393882edc903",
+    "relayers/relay1.toml": "162ca9f510d3cb895951811b2fd253ddc210766f8e6bcf9f2b74a578428904e8",
+    "relayers/relay2.toml": "1f9054f94a9407ac89a15f79f474155cded6459a3f1ab286ccd0d2ce185bf591",
+    "relayers/relay3.toml": "ed05a6123934af8f1a775b93793292c1c8a50026295b954d4a54e38d14830e89",
+    "rpc-gateway/rpc-gateway.toml": "fb10a215ae00838f5746cb744c574b90c3379d36a2e2f0b99cef8fb975b67003",
+    "seed-servers/seed1.toml": "92e61169fbdd11601dc3fc120fc7a04d0c64f9ac0880cf80ad77cfca7d76d4ed",
+    "seed-servers/seed2.toml": "0d418408a078ec292d4912be7f51acf6147f279812d7c3dc1ca7f338a69e77d6",
+    "seed-servers/seed3.toml": "f1f7734dcf1bddf634a87a747e2a84b15153a51f125a7d056a80c681bc2ce13f",
+    "validators/val1.toml": "a8291d5b3000d162eba6686140ab01cbc1f7d4aa0968e247f9e3a4b87bb4119b",
+    "validators/val2.toml": "51b4256d021dc00d606670224ebe33d278b73eb97709c3c8582191d1ed15d373",
+    "validators/val3.toml": "27893227c083902b6813fb0e3a44ea9b8ac222d7fbe1599e16b11e959bc66e3d",
+    "validators/val4.toml": "a77a3f1f1faf8575c56d0f1918f684fb39649598d4927f032e2382e7859d75d4",
+    "validators/val5.toml": "cb47fc388dfa47d8bc2c37e6afc47c5c782935f28d88ebec16cf743a3fb8508b",
+    "validators/val6.toml": "61824c37ed0f1cd0dce017db220c419fc87134a33e9b14ebc82e002ccb660172"
+  },
+  "generator_version": "testnet-v3-node-configs/v1",
+  "network_id": "synergy-testnet-v3",
+  "schema_version": 1,
+  "signed_validator_transport_registry_required": true
+}

@@ -11,6 +11,7 @@
 *.tgz
 *.zst
 *.log
+__pycache__/
 target/
 node_modules/
 .release-cache/

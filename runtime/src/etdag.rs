@@ -6,13 +6,14 @@
 //! and ordering are certified under the immutable target-height context, and
 //! plaintext is released only after the BOC/VC reveal gate.
 
-use crate::consensus_parameters::ConsensusParameterRoot;
+use crate::consensus_parameters::{ConsensusParameterRoot, EtdagActivationPermit};
 use crate::crypto::aegis_pqvm::{AegisPqKeyLifecycleRecord, AegisPqvmSigner, AegisPqvmVerifier};
 use crate::synergy_types::{
     AegisPqKeyId, AegisPqKeyRole, AegisPqPublicKey, AegisPqSignature, CanonicalSerialize, ChainId,
     ClusterId, ClusterMap, Epoch, Hash, Height, HeightConsensusContext, NetworkId,
-    ProtectedBatchCommitment, ProtocolConfig, Round, Transaction, ValidatorId, ValidatorRecord,
-    ValidatorSet, POSY_PROTOCOL_VERSION, TESTNET_V3_CLUSTER_SCHEDULE_VERSION,
+    ProtectedBatchCommitment, ProtocolConfig, QuorumCertificate, Round, Transaction, UmaId,
+    ValidatorId, ValidatorRecord, ValidatorSet, ValidatorStatus, VotePhase, POSY_PROTOCOL_VERSION,
+    TESTNET_V3_CLUSTER_SCHEDULE_VERSION,
 };
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -35,6 +36,22 @@ pub const ETDAG_JOURNAL_FORMAT: &str = "synergy-etdag-safety-journal-v1";
 pub const ETDAG_JOURNAL_FILE: &str = "etdag_safety_journal.json";
 pub const ETDAG_ADMISSION_STORE_FORMAT: &str = "synergy-etdag-admission-package-store-v1";
 pub const ETDAG_ADMISSION_STORE_FILE: &str = "etdag_admission_packages.json";
+pub const ETDAG_PROTECTED_INPUT_STORE_FORMAT: &str =
+    "synergy-etdag-certified-protected-input-store-v1";
+pub const ETDAG_PROTECTED_INPUT_STORE_FILE: &str = "etdag_certified_protected_inputs.json";
+/// There can be at most four concurrently useful H+3 admission windows.  The
+/// store deliberately refuses unbounded historical accumulation; finalized
+/// inputs are consumed by the typed coordinator and need not remain here.
+pub const MAX_ETDAG_PROTECTED_INPUT_STORE_ENTRIES: usize = MAX_OUTSTANDING_NONCE_SLOTS as usize;
+/// This bound covers complete public proof packages, not just ciphertext.  It
+/// is intentionally independent of the RPC ingress-pool limit so a peer cannot
+/// turn certificate gossip into durable unbounded storage.
+pub const MAX_ETDAG_PROTECTED_INPUT_STORE_SERIALIZED_BYTES: usize = 64 * 1024 * 1024;
+/// Certified ETDAG artifacts travel over the existing bounded P2P frame.  Keep
+/// a margin below that framing limit for the NetworkMessage envelope and JSON
+/// representation, so a locally accepted proof package is never emitted as an
+/// oversized transport frame.
+pub const MAX_ETDAG_CERTIFIED_INPUT_WIRE_BYTES: usize = 60 * 1024 * 1024;
 pub const TARGET_ADMISSION_CONTEXT_VERSION: u32 = 1;
 pub const INGRESS_KEM_REGISTRY_VERSION: u32 = 1;
 pub const MAX_OUTSTANDING_NONCE_SLOTS: u64 = 4;
@@ -51,6 +68,12 @@ pub const DOMAIN_BATCH_FINALITY: &str = "PoSy/ETDAG/BatchFinality/v2";
 pub const DOMAIN_BATCH_TIMEOUT: &str = "PoSy/ETDAG/BatchTimeout/v2";
 pub const DOMAIN_DECRYPT_SHARE: &str = "PoSy/ETDAG/DecryptShare/v2";
 pub const DOMAIN_TARGET_ADMISSION: &str = "PoSy/ETDAG/TargetAdmission/v2";
+/// Commits the 512-bit canonical finalized-context digest into the 256-bit
+/// root field used by the target-admission context.  The domain prevents a
+/// raw 32-byte consensus hash from being substituted for the full ETDAG
+/// finality context.
+pub const DOMAIN_TARGET_ADMISSION_SOURCE_FINALITY: &str =
+    "PoSy/ETDAG/TargetAdmission/SourceFinality/v2";
 pub const DOMAIN_ORDER_SEED: &str = "PoSy/ETDAG/OrderSeed/v2";
 pub const DOMAIN_ORDER_KEY: &str = "PoSy/ETDAG/Order/v2";
 
@@ -104,6 +127,21 @@ impl EtdagDigest {
         self.validate("ETDAG digest")?;
         hex::decode(&self.0).map_err(|error| format!("decode ETDAG digest: {error}"))
     }
+}
+
+/// Derive the fixed-width source-finality commitment required by
+/// [`TargetAdmissionContext`].  The source digest itself is a SHA3-512
+/// `EtdagDigest`, while the context's frozen-root fields use `Hash` (256-bit).
+/// This conversion is therefore explicit and domain separated rather than an
+/// unchecked truncation or an operator-supplied substitute.
+pub fn target_admission_source_finality_root(
+    source_finality_context_digest: &EtdagDigest,
+) -> Result<Hash, String> {
+    let bytes = source_finality_context_digest.bytes()?;
+    Ok(Hash::from_domain_bytes(
+        DOMAIN_TARGET_ADMISSION_SOURCE_FINALITY,
+        &bytes,
+    ))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1582,7 +1620,11 @@ struct TargetAdmissionCertificateTranscript {
 }
 
 impl TargetAdmissionCertificate {
-    fn transcript_bytes(&self, context: &TargetAdmissionContext) -> Result<Vec<u8>, String> {
+    /// Returns the canonical pre-signature transcript for this exact target
+    /// admission certificate.  Offline custody tooling may request these
+    /// bytes, but signature acceptance remains exclusively in [`Self::verify`]
+    /// against the finalized runtime context and validator registry.
+    pub fn signing_bytes(&self, context: &TargetAdmissionContext) -> Result<Vec<u8>, String> {
         TargetAdmissionCertificateTranscript {
             domain: DOMAIN_TARGET_ADMISSION.to_string(),
             chain_id: context.chain_id,
@@ -1619,7 +1661,7 @@ impl TargetAdmissionCertificate {
         let members = validator_set
             .active_for_epoch(context.epoch)
             .active_for_cluster(context.assigned_cluster_id);
-        let transcript = self.transcript_bytes(context)?;
+        let transcript = self.signing_bytes(context)?;
         let mut prior: Option<&ValidatorId> = None;
         let mut seen = BTreeSet::new();
         let mut signed_weight = 0u64;
@@ -4132,6 +4174,763 @@ pub fn validate_protected_batch_commitment(
     Ok(())
 }
 
+/// Durable record of a fully verified ETDAG proposal input.
+///
+/// This is deliberately *not* a general ETDAG gossip cache.  A record can be
+/// created only after the complete public proof package has been verified
+/// against a certified H+3 admission package and the immutable consensus
+/// context for the target height.  In particular, this boundary never creates
+/// transactions, signatures, certificates, shares, or plaintext itself.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct EtdagProtectedInputStoreEntry {
+    target_admission_package_digest: EtdagDigest,
+    canonical_finality_context_digest: EtdagDigest,
+    protected_input: ProtectedBlockInput,
+    protected_input_digest: EtdagDigest,
+    serialized_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct EtdagProtectedInputStoreFile {
+    format: String,
+    entries: BTreeMap<Height, EtdagProtectedInputStoreEntry>,
+}
+
+impl Default for EtdagProtectedInputStoreFile {
+    fn default() -> Self {
+        Self {
+            format: ETDAG_PROTECTED_INPUT_STORE_FORMAT.to_string(),
+            entries: BTreeMap::new(),
+        }
+    }
+}
+
+static ETDAG_PROTECTED_INPUT_STORE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+/// Internal durable storage for verified public ETDAG proof packages.
+///
+/// The public API is [`EtdagProtectedInputCoordinator`].  Keeping the raw
+/// store private prevents a caller from treating persistence as verification.
+#[derive(Debug, Clone)]
+struct EtdagProtectedInputStore {
+    path: PathBuf,
+}
+
+impl EtdagProtectedInputStore {
+    fn process_wide() -> Self {
+        Self::at_path(crate::utils::resolve_data_path(&format!(
+            "data/{ETDAG_PROTECTED_INPUT_STORE_FILE}"
+        )))
+    }
+
+    fn at_path(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    fn install_verified(
+        &self,
+        target_admission_package_digest: EtdagDigest,
+        protected_input: &ProtectedBlockInput,
+        target_context: &TargetAdmissionContext,
+        height_context: &HeightConsensusContext,
+        expected_finality_context_digest: &EtdagDigest,
+        verifier: &AegisPqvmVerifier,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        parameters: &EtdagParameters,
+    ) -> Result<EtdagDigest, String> {
+        verify_certified_protected_input(
+            protected_input,
+            target_context,
+            height_context,
+            expected_finality_context_digest,
+            verifier,
+            validator_set,
+            cluster_map,
+            parameters,
+        )?;
+        target_admission_package_digest.validate("target admission package digest")?;
+        if target_admission_package_digest.is_zero() {
+            return Err("ETDAG_PROTECTED_INPUT_MISSING_ADMISSION_PACKAGE".to_string());
+        }
+        let protected_input_digest = protected_input_digest(protected_input)?;
+        let serialized_bytes = protected_input_serialized_bytes(protected_input)?;
+        if serialized_bytes > MAX_ETDAG_PROTECTED_INPUT_STORE_SERIALIZED_BYTES as u64 {
+            return Err("ETDAG_PROTECTED_INPUT_STORE_ENTRY_TOO_LARGE".to_string());
+        }
+        let height = height_context.height;
+        let entry = EtdagProtectedInputStoreEntry {
+            target_admission_package_digest,
+            canonical_finality_context_digest: expected_finality_context_digest.clone(),
+            protected_input: protected_input.clone(),
+            protected_input_digest: protected_input_digest.clone(),
+            serialized_bytes,
+        };
+
+        let _guard = ETDAG_PROTECTED_INPUT_STORE_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| "ETDAG protected-input store lock poisoned".to_string())?;
+        let mut store = self.load_unlocked()?;
+        if let Some(existing) = store.entries.get(&height) {
+            if existing == &entry {
+                return Ok(protected_input_digest);
+            }
+            return Err("ETDAG_PROTECTED_INPUT_CONFLICT".to_string());
+        }
+        if store.entries.len() >= MAX_ETDAG_PROTECTED_INPUT_STORE_ENTRIES {
+            return Err("ETDAG_PROTECTED_INPUT_STORE_FULL".to_string());
+        }
+        let current_bytes = store.entries.values().try_fold(0u64, |total, existing| {
+            total
+                .checked_add(existing.serialized_bytes)
+                .ok_or_else(|| "ETDAG protected-input store byte accounting overflow".to_string())
+        })?;
+        let next_bytes = current_bytes
+            .checked_add(serialized_bytes)
+            .ok_or_else(|| "ETDAG protected-input store byte accounting overflow".to_string())?;
+        if next_bytes > MAX_ETDAG_PROTECTED_INPUT_STORE_SERIALIZED_BYTES as u64 {
+            return Err("ETDAG_PROTECTED_INPUT_STORE_FULL".to_string());
+        }
+        store.entries.insert(height, entry);
+        self.persist_unlocked(&store)?;
+        Ok(protected_input_digest)
+    }
+
+    fn load_verified(
+        &self,
+        target_admission_package_digest: &EtdagDigest,
+        target_context: &TargetAdmissionContext,
+        height_context: &HeightConsensusContext,
+        expected_finality_context_digest: &EtdagDigest,
+        verifier: &AegisPqvmVerifier,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        parameters: &EtdagParameters,
+    ) -> Result<ProtectedBlockInput, String> {
+        let _guard = ETDAG_PROTECTED_INPUT_STORE_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| "ETDAG protected-input store lock poisoned".to_string())?;
+        let store = self.load_unlocked()?;
+        let entry = store.entries.get(&height_context.height).ok_or_else(|| {
+            "ETDAG_PROTECTED_INPUT_NOT_READY: no verified protected input for target height"
+                .to_string()
+        })?;
+        if &entry.target_admission_package_digest != target_admission_package_digest
+            || &entry.canonical_finality_context_digest != expected_finality_context_digest
+        {
+            return Err("ETDAG_PROTECTED_INPUT_CONTEXT_MISMATCH".to_string());
+        }
+        verify_protected_input_store_entry(height_context.height, entry)?;
+        verify_certified_protected_input(
+            &entry.protected_input,
+            target_context,
+            height_context,
+            expected_finality_context_digest,
+            verifier,
+            validator_set,
+            cluster_map,
+            parameters,
+        )?;
+        Ok(entry.protected_input.clone())
+    }
+
+    fn remove_finalized(&self, height: Height) -> Result<bool, String> {
+        let _guard = ETDAG_PROTECTED_INPUT_STORE_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| "ETDAG protected-input store lock poisoned".to_string())?;
+        let mut store = self.load_unlocked()?;
+        let removed = store.entries.remove(&height).is_some();
+        if removed {
+            self.persist_unlocked(&store)?;
+        }
+        Ok(removed)
+    }
+
+    fn load_unlocked(&self) -> Result<EtdagProtectedInputStoreFile, String> {
+        if !self.path.exists() {
+            return Ok(EtdagProtectedInputStoreFile::default());
+        }
+        let bytes = fs::read(&self.path).map_err(|error| {
+            format!(
+                "read ETDAG protected-input store {}: {error}",
+                self.path.display()
+            )
+        })?;
+        if bytes.len() > MAX_ETDAG_PROTECTED_INPUT_STORE_SERIALIZED_BYTES {
+            return Err("ETDAG protected-input store exceeds bounded size".to_string());
+        }
+        let store: EtdagProtectedInputStoreFile =
+            serde_json::from_slice(&bytes).map_err(|error| {
+                format!(
+                    "parse ETDAG protected-input store {}: {error}",
+                    self.path.display()
+                )
+            })?;
+        if store.format != ETDAG_PROTECTED_INPUT_STORE_FORMAT
+            || store.entries.len() > MAX_ETDAG_PROTECTED_INPUT_STORE_ENTRIES
+        {
+            return Err("unsupported or corrupt ETDAG protected-input store".to_string());
+        }
+        let mut bytes_accounted = 0u64;
+        for (height, entry) in &store.entries {
+            verify_protected_input_store_entry(*height, entry)?;
+            bytes_accounted = bytes_accounted
+                .checked_add(entry.serialized_bytes)
+                .ok_or_else(|| {
+                    "ETDAG protected-input store byte accounting overflow".to_string()
+                })?;
+        }
+        if bytes_accounted > MAX_ETDAG_PROTECTED_INPUT_STORE_SERIALIZED_BYTES as u64 {
+            return Err("ETDAG protected-input store exceeds bounded size".to_string());
+        }
+        Ok(store)
+    }
+
+    fn persist_unlocked(&self, store: &EtdagProtectedInputStoreFile) -> Result<(), String> {
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| "ETDAG protected-input store path has no parent".to_string())?;
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("create ETDAG protected-input directory: {error}"))?;
+        let file_name = self
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| "ETDAG protected-input store has no file name".to_string())?;
+        let temporary = parent.join(format!(".{file_name}.tmp"));
+        let bytes = serde_json::to_vec_pretty(store)
+            .map_err(|error| format!("serialize ETDAG protected-input store: {error}"))?;
+        if bytes.len() > MAX_ETDAG_PROTECTED_INPUT_STORE_SERIALIZED_BYTES {
+            return Err("ETDAG protected-input store exceeds bounded size".to_string());
+        }
+        {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&temporary)
+                .map_err(|error| format!("create ETDAG protected-input temp file: {error}"))?;
+            file.write_all(&bytes)
+                .map_err(|error| format!("write ETDAG protected-input store: {error}"))?;
+            file.sync_all()
+                .map_err(|error| format!("fsync ETDAG protected-input store: {error}"))?;
+        }
+        fs::rename(&temporary, &self.path)
+            .map_err(|error| format!("replace ETDAG protected-input store: {error}"))?;
+        #[cfg(unix)]
+        {
+            let directory = OpenOptions::new()
+                .read(true)
+                .open(parent)
+                .map_err(|error| format!("open ETDAG protected-input directory: {error}"))?;
+            directory
+                .sync_all()
+                .map_err(|error| format!("fsync ETDAG protected-input directory: {error}"))
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(())
+        }
+    }
+}
+
+fn protected_input_digest(protected_input: &ProtectedBlockInput) -> Result<EtdagDigest, String> {
+    EtdagDigest::from_canonical(
+        "PoSy/ETDAG/CertifiedProtectedBlockInput/v2",
+        protected_input,
+    )
+}
+
+fn protected_input_serialized_bytes(protected_input: &ProtectedBlockInput) -> Result<u64, String> {
+    u64::try_from(
+        serde_json::to_vec(protected_input)
+            .map_err(|error| format!("serialize ETDAG protected input for bounds: {error}"))?
+            .len(),
+    )
+    .map_err(|_| "ETDAG protected-input serialized length exceeds u64".to_string())
+}
+
+fn verify_protected_input_store_entry(
+    height: Height,
+    entry: &EtdagProtectedInputStoreEntry,
+) -> Result<(), String> {
+    entry
+        .target_admission_package_digest
+        .validate("target admission package digest")?;
+    entry
+        .canonical_finality_context_digest
+        .validate("canonical finality context digest")?;
+    if entry.target_admission_package_digest.is_zero()
+        || entry.canonical_finality_context_digest.is_zero()
+        || entry.protected_input_digest.is_zero()
+    {
+        return Err("ETDAG protected-input store has an empty proof binding".to_string());
+    }
+    entry
+        .protected_input_digest
+        .validate("protected input digest")?;
+    if entry.protected_input.boc.bvc.batch_candidate.target_height != height
+        || entry.protected_input.dcc.candidate.target_height != height
+        || entry.protected_input.reveal.target_height != height
+        || entry
+            .protected_input
+            .boc
+            .bvc
+            .batch_candidate
+            .canonical_finality_context_digest
+            != entry.canonical_finality_context_digest
+        || protected_input_digest(&entry.protected_input)? != entry.protected_input_digest
+        || protected_input_serialized_bytes(&entry.protected_input)? != entry.serialized_bytes
+    {
+        return Err("ETDAG protected-input store entry integrity mismatch".to_string());
+    }
+    if entry.serialized_bytes > MAX_ETDAG_PROTECTED_INPUT_STORE_SERIALIZED_BYTES as u64 {
+        return Err("ETDAG protected-input store entry exceeds bounded size".to_string());
+    }
+    Ok(())
+}
+
+fn verify_certified_protected_input(
+    protected_input: &ProtectedBlockInput,
+    target_context: &TargetAdmissionContext,
+    height_context: &HeightConsensusContext,
+    expected_finality_context_digest: &EtdagDigest,
+    verifier: &AegisPqvmVerifier,
+    validator_set: &ValidatorSet,
+    cluster_map: &ClusterMap,
+    parameters: &EtdagParameters,
+) -> Result<(), String> {
+    target_context.validate_height_context_compatibility(height_context)?;
+    expected_finality_context_digest.validate("expected canonical finality context digest")?;
+    if expected_finality_context_digest.is_zero() {
+        return Err("ETDAG_PROTECTED_INPUT_MISSING_FINALITY_CONTEXT".to_string());
+    }
+    if protected_input
+        .boc
+        .bvc
+        .batch_candidate
+        .canonical_finality_context_digest
+        != *expected_finality_context_digest
+    {
+        return Err("ETDAG_PROTECTED_INPUT_FINALITY_CONTEXT_MISMATCH".to_string());
+    }
+    protected_input
+        .verify_and_extract_transactions(
+            verifier,
+            target_context,
+            validator_set,
+            cluster_map,
+            parameters,
+        )
+        .map(|_| ())
+}
+
+/// Complete, public ETDAG proof material that may be relayed between
+/// authenticated Testnet-v3 validators.
+///
+/// The local node's height context and finalized-consensus digest are
+/// deliberately *not* wire fields.  A remote peer therefore cannot choose the
+/// consensus state under which its proof package is evaluated.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CertifiedProtectedInputArtifact {
+    pub admission_package: TargetAdmissionPackage,
+    pub protected_input: ProtectedBlockInput,
+}
+
+impl CertifiedProtectedInputArtifact {
+    pub fn validate_wire_size(&self) -> Result<(), String> {
+        let serialized = serde_json::to_vec(self)
+            .map_err(|error| format!("serialize certified ETDAG input artifact: {error}"))?;
+        if serialized.len() > MAX_ETDAG_CERTIFIED_INPUT_WIRE_BYTES {
+            return Err(format!(
+                "ETDAG_CERTIFIED_INPUT_WIRE_TOO_LARGE: {} bytes exceeds {} byte limit",
+                serialized.len(),
+                MAX_ETDAG_CERTIFIED_INPUT_WIRE_BYTES
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Validator identity supplied only after a Genesis-bound P2P handshake.
+/// Socket addresses are intentionally absent: network locations are mutable
+/// and cannot authorize durable ETDAG ingress.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EtdagAuthenticatedIngressPeer {
+    pub validator_id: ValidatorId,
+    pub validator_uma_id: UmaId,
+    pub consensus_key_id: AegisPqKeyId,
+}
+
+/// Immutable local authority used to validate one target-height's certified
+/// protected ETDAG input received from the network.
+///
+/// This is an ingress boundary, not a scheduler.  It accepts an artifact only
+/// from an authenticated active validator and always evaluates the artifact
+/// against the locally installed height context and finality digest.
+#[derive(Debug, Clone)]
+pub struct EtdagCertifiedInputIngress {
+    coordinator: EtdagProtectedInputCoordinator,
+    height_context: HeightConsensusContext,
+    expected_finality_context_digest: EtdagDigest,
+    verifier: AegisPqvmVerifier,
+    validator_set: ValidatorSet,
+    cluster_map: ClusterMap,
+    protocol_config: ProtocolConfig,
+    parameters: EtdagParameters,
+}
+
+impl EtdagCertifiedInputIngress {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        coordinator: EtdagProtectedInputCoordinator,
+        height_context: HeightConsensusContext,
+        expected_finality_context_digest: EtdagDigest,
+        verifier: AegisPqvmVerifier,
+        validator_set: ValidatorSet,
+        cluster_map: ClusterMap,
+        protocol_config: ProtocolConfig,
+        parameters: EtdagParameters,
+    ) -> Result<Self, String> {
+        height_context.validate_against(&validator_set, &cluster_map, &protocol_config)?;
+        expected_finality_context_digest.validate("ETDAG ingress finality context digest")?;
+        if expected_finality_context_digest.is_zero() {
+            return Err("ETDAG_PROTECTED_INPUT_MISSING_FINALITY_CONTEXT".to_string());
+        }
+        parameters.validate()?;
+        Ok(Self {
+            coordinator,
+            height_context,
+            expected_finality_context_digest,
+            verifier,
+            validator_set,
+            cluster_map,
+            protocol_config,
+            parameters,
+        })
+    }
+
+    fn authorize_peer(&self, peer: &EtdagAuthenticatedIngressPeer) -> Result<(), String> {
+        let validator = self
+            .validator_set
+            .validators
+            .iter()
+            .find(|validator| validator.validator_id == peer.validator_id)
+            .ok_or_else(|| "ETDAG_CERTIFIED_INPUT_UNTRUSTED_PEER".to_string())?;
+        if validator.status != ValidatorStatus::Active
+            || !validator.is_active_for_epoch(self.height_context.epoch)
+            || validator.validator_uma_id != peer.validator_uma_id
+            || validator.consensus_public_key.key_id != peer.consensus_key_id
+        {
+            return Err("ETDAG_CERTIFIED_INPUT_UNTRUSTED_PEER".to_string());
+        }
+        Ok(())
+    }
+
+    /// Validates and durably admits a complete certified ETDAG artifact.
+    ///
+    /// The artifact is checked before it reaches durable protected-input
+    /// storage.  The coordinator still cryptographically verifies every
+    /// certificate, encrypted/revealed transaction, and local context binding.
+    pub fn admit_from_authenticated_peer(
+        &self,
+        peer: &EtdagAuthenticatedIngressPeer,
+        artifact: &CertifiedProtectedInputArtifact,
+    ) -> Result<EtdagDigest, String> {
+        artifact.validate_wire_size()?;
+        self.authorize_peer(peer)?;
+        if artifact.admission_package.context.target_height != self.height_context.height {
+            return Err("ETDAG_PROTECTED_INPUT_TARGET_HEIGHT_MISMATCH".to_string());
+        }
+        artifact
+            .admission_package
+            .context
+            .validate_height_context_compatibility(&self.height_context)?;
+        self.coordinator.admit_certified_public_input(
+            &artifact.admission_package,
+            &artifact.protected_input,
+            &self.height_context,
+            &self.expected_finality_context_digest,
+            &self.verifier,
+            &self.validator_set,
+            &self.cluster_map,
+            &self.protocol_config,
+            &self.parameters,
+        )
+    }
+}
+
+static CERTIFIED_INPUT_INGRESS: OnceLock<Mutex<Option<EtdagCertifiedInputIngress>>> =
+    OnceLock::new();
+
+fn certified_input_ingress_slot() -> &'static Mutex<Option<EtdagCertifiedInputIngress>> {
+    CERTIFIED_INPUT_INGRESS.get_or_init(|| Mutex::new(None))
+}
+
+/// Installs the one local ETDAG certified-input ingress authority for the
+/// current validator lifecycle.  Replacing it is prohibited because that
+/// would permit a network package to be evaluated under two different local
+/// height/finality contexts.
+pub(crate) fn install_etdag_certified_input_ingress(
+    _activation_permit: EtdagActivationPermit,
+    ingress: EtdagCertifiedInputIngress,
+) -> Result<(), String> {
+    let mut slot = certified_input_ingress_slot()
+        .lock()
+        .map_err(|_| "ETDAG certified-input ingress lock is poisoned".to_string())?;
+    if slot.is_some() {
+        return Err("ETDAG certified-input ingress is already installed".to_string());
+    }
+    *slot = Some(ingress);
+    Ok(())
+}
+
+/// Atomically advance the local ETDAG ingress to the next immutable consensus
+/// height after the typed coordinator has verified and durably recorded its
+/// finality QC.  This function has no authority to verify or create that QC;
+/// it only prevents an old and successor local context from being live at the
+/// same time and rejects height skips or a reused finality root.
+pub fn rotate_etdag_certified_input_ingress(
+    successor: EtdagCertifiedInputIngress,
+) -> Result<(), String> {
+    let mut slot = certified_input_ingress_slot()
+        .lock()
+        .map_err(|_| "ETDAG certified-input ingress lock is poisoned".to_string())?;
+    let current = slot
+        .as_ref()
+        .ok_or_else(|| "ETDAG certified-input ingress is not installed".to_string())?;
+    let expected_height = current
+        .height_context
+        .height
+        .0
+        .checked_add(1)
+        .ok_or_else(|| "ETDAG certified-input ingress height overflows".to_string())?;
+    if successor.height_context.height.0 != expected_height {
+        return Err("ETDAG_CERTIFIED_INPUT_INGRESS_NON_SUCCESSOR_HEIGHT".to_string());
+    }
+    if successor
+        .height_context
+        .prior_finalized_qc_or_transition_root
+        == current.height_context.prior_finalized_qc_or_transition_root
+    {
+        return Err("ETDAG_CERTIFIED_INPUT_INGRESS_FINALITY_ROOT_NOT_ADVANCED".to_string());
+    }
+    *slot = Some(successor);
+    Ok(())
+}
+
+/// Removes the local ingress after validator duties stop.  This is not a P2P
+/// or RPC action; lifecycle wiring owns this operation.
+pub fn remove_etdag_certified_input_ingress() -> Result<(), String> {
+    let mut slot = certified_input_ingress_slot()
+        .lock()
+        .map_err(|_| "ETDAG certified-input ingress lock is poisoned".to_string())?;
+    *slot = None;
+    Ok(())
+}
+
+/// P2P dispatch entrypoint.  The sender identity must originate from a
+/// verified Genesis-bound handshake; absent local ingress, absent identity, or
+/// a failed proof package all reject without a legacy path.  Admission stays
+/// serialized under the ingress lock so concurrent sockets cannot race the
+/// bounded durable store's read/verify/write transition.
+pub fn dispatch_etdag_certified_input(
+    authenticated_peer: Option<EtdagAuthenticatedIngressPeer>,
+    artifact: CertifiedProtectedInputArtifact,
+) -> Result<EtdagDigest, String> {
+    let slot = certified_input_ingress_slot()
+        .lock()
+        .map_err(|_| "ETDAG certified-input ingress lock is poisoned".to_string())?;
+    let ingress = slot.as_ref().ok_or_else(|| {
+        "ETDAG certified-input ingress is not running; refusing protected input".to_string()
+    })?;
+    let peer = authenticated_peer.ok_or_else(|| {
+        "ETDAG_CERTIFIED_INPUT_UNAUTHENTICATED_PEER: refusing protected input".to_string()
+    })?;
+    ingress.admit_from_authenticated_peer(&peer, &artifact)
+}
+
+#[cfg(test)]
+pub fn reset_etdag_certified_input_ingress_for_test() {
+    let _ = remove_etdag_certified_input_ingress();
+}
+
+/// Production ingress boundary for public, already-certified ETDAG artifacts.
+///
+/// `expected_finality_context_digest` is intentionally supplied by the typed
+/// consensus scheduler.  This module has no authority to synthesize a
+/// finalized-QC/epoch-transition transcript; accepting a caller-provided
+/// expectation and checking it verbatim prevents an ETDAG proof package from
+/// being replayed under a different finalized-consensus state.
+#[derive(Debug, Clone)]
+pub struct EtdagProtectedInputCoordinator {
+    admission_store: EtdagAdmissionPackageStore,
+    protected_input_store: EtdagProtectedInputStore,
+}
+
+impl EtdagProtectedInputCoordinator {
+    pub fn process_wide() -> Self {
+        Self {
+            admission_store: EtdagAdmissionPackageStore::process_wide(),
+            protected_input_store: EtdagProtectedInputStore::process_wide(),
+        }
+    }
+
+    /// Construct a coordinator with explicit durable paths.  This is for node
+    /// bootstrap wiring and tests; it does not create either path until a
+    /// verified artifact is accepted.
+    pub fn at_paths(
+        admission_package_path: impl Into<PathBuf>,
+        protected_input_path: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            admission_store: EtdagAdmissionPackageStore::at_path(admission_package_path),
+            protected_input_store: EtdagProtectedInputStore::at_path(protected_input_path),
+        }
+    }
+
+    /// Verify and durably admit a complete public ETDAG proof package.
+    ///
+    /// A failed validation writes no protected input.  The independently
+    /// verified admission package may have been persisted first, which is safe:
+    /// it contains no released private transaction content and can never be
+    /// promoted to a proposal without a matching verified input below.
+    #[allow(clippy::too_many_arguments)]
+    pub fn admit_certified_public_input(
+        &self,
+        admission_package: &TargetAdmissionPackage,
+        protected_input: &ProtectedBlockInput,
+        height_context: &HeightConsensusContext,
+        expected_finality_context_digest: &EtdagDigest,
+        verifier: &AegisPqvmVerifier,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        protocol_config: &ProtocolConfig,
+        parameters: &EtdagParameters,
+    ) -> Result<EtdagDigest, String> {
+        let admission_digest = self.admission_store.install_verified(
+            admission_package,
+            verifier,
+            validator_set,
+            cluster_map,
+            protocol_config,
+        )?;
+        if admission_package.context.target_height != height_context.height {
+            return Err("ETDAG_PROTECTED_INPUT_TARGET_HEIGHT_MISMATCH".to_string());
+        }
+        self.protected_input_store.install_verified(
+            admission_digest,
+            protected_input,
+            &admission_package.context,
+            height_context,
+            expected_finality_context_digest,
+            verifier,
+            validator_set,
+            cluster_map,
+            parameters,
+        )
+    }
+
+    /// Load a proposal-ready protected input only after re-verifying the
+    /// durable proof package and its matching certified admission package.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_ready_protected_input(
+        &self,
+        height_context: &HeightConsensusContext,
+        expected_finality_context_digest: &EtdagDigest,
+        verifier: &AegisPqvmVerifier,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        protocol_config: &ProtocolConfig,
+        parameters: &EtdagParameters,
+    ) -> Result<ProtectedBlockInput, String> {
+        let admission_package = self
+            .admission_store
+            .get(height_context.height)?
+            .ok_or_else(|| {
+                "ETDAG_PROTECTED_INPUT_NOT_READY: no certified target-admission package for target height"
+                    .to_string()
+            })?;
+        admission_package.verify(verifier, validator_set, cluster_map, protocol_config)?;
+        admission_package
+            .context
+            .validate_height_context_compatibility(height_context)?;
+        let admission_digest = admission_package.package_digest()?;
+        self.protected_input_store.load_verified(
+            &admission_digest,
+            &admission_package.context,
+            height_context,
+            expected_finality_context_digest,
+            verifier,
+            validator_set,
+            cluster_map,
+            parameters,
+        )
+    }
+
+    /// Returns the immutable admission context paired with a target height
+    /// after verifying its certificate and every consensus binding.  The typed
+    /// scheduler uses this together with [`Self::load_ready_protected_input`]
+    /// so it never opens a second, potentially divergent admission-store
+    /// access path while preparing a proposal.
+    pub fn load_verified_target_admission_context(
+        &self,
+        height_context: &HeightConsensusContext,
+        verifier: &AegisPqvmVerifier,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        protocol_config: &ProtocolConfig,
+    ) -> Result<TargetAdmissionContext, String> {
+        let admission_package = self
+            .admission_store
+            .get(height_context.height)?
+            .ok_or_else(|| {
+                "ETDAG_PROTECTED_INPUT_NOT_READY: no certified target-admission package for target height"
+                    .to_string()
+            })?;
+        admission_package.verify(verifier, validator_set, cluster_map, protocol_config)?;
+        admission_package
+            .context
+            .validate_height_context_compatibility(height_context)?;
+        Ok(admission_package.context)
+    }
+
+    /// Remove the no-longer-needed input for an exactly finalized height.
+    ///
+    /// This is the only removal path, preserving the storage bound without
+    /// permitting a timer, RPC caller, or unauthenticated peer to erase a
+    /// proposal-ready input.  A valid finality QC proves that no further
+    /// proposal can legitimately be produced for this height.
+    pub fn prune_finalized_input(
+        &self,
+        finality_certificate: &QuorumCertificate,
+        finalized_height_context: &HeightConsensusContext,
+        verifier: &AegisPqvmVerifier,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+    ) -> Result<bool, String> {
+        if finality_certificate.phase != VotePhase::Finality
+            || finality_certificate.height != finalized_height_context.height
+        {
+            return Err("ETDAG_PROTECTED_INPUT_PRUNE_REQUIRES_EXACT_FINALITY_QC".to_string());
+        }
+        verifier
+            .verify_qc_checked(
+                finality_certificate,
+                validator_set,
+                cluster_map,
+                finalized_height_context,
+            )
+            .map_err(|error| error.to_string())?;
+        self.protected_input_store
+            .remove_finalized(finalized_height_context.height)
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -4289,6 +5088,18 @@ pub(crate) mod tests {
         )))
     }
 
+    fn temp_protected_input_coordinator(label: &str) -> EtdagProtectedInputCoordinator {
+        let root = crate::utils::test_temp_root(format!(
+            "synergy-etdag-protected-input-{label}-{}-{}",
+            std::process::id(),
+            current_unix_nanos()
+        ));
+        EtdagProtectedInputCoordinator::at_paths(
+            root.join("admission-packages.json"),
+            root.join("protected-inputs.json"),
+        )
+    }
+
     fn cluster_members(fixture: &Fixture) -> Vec<ValidatorRecord> {
         fixture
             .validator_set
@@ -4375,7 +5186,7 @@ pub(crate) mod tests {
             signed_weight: 0,
             votes: Vec::new(),
         };
-        let transcript = certificate.transcript_bytes(&context).unwrap();
+        let transcript = certificate.signing_bytes(&context).unwrap();
         let quorum = certificate_quorum(members.len()).unwrap();
         certificate.votes = members
             .iter()
@@ -5023,6 +5834,157 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn protected_input_coordinator_fails_closed_until_every_public_proof_is_verified() {
+        let mut fixture = fixture(6, None);
+        let coordinator = temp_protected_input_coordinator("fail-closed");
+        let protocol = ProtocolConfig::testnet_v3();
+        let verifier = fixture.signer.verifier();
+        let height_context = fixture.height_context.clone();
+        let context = fixture.context.clone();
+        let package = target_admission_package(&mut fixture, context);
+        let protected = complete_protected_input(&mut fixture);
+        let expected_finality_context = protected
+            .boc
+            .bvc
+            .batch_candidate
+            .canonical_finality_context_digest
+            .clone();
+
+        assert!(coordinator
+            .load_ready_protected_input(
+                &height_context,
+                &expected_finality_context,
+                &verifier,
+                &fixture.validator_set,
+                &fixture.cluster_map,
+                &protocol,
+                &EtdagParameters::default(),
+            )
+            .unwrap_err()
+            .contains("NOT_READY"));
+
+        let incorrect_finality_context =
+            EtdagDigest::from_domain_bytes("incorrect-finality-context", b"wrong");
+        assert!(coordinator
+            .admit_certified_public_input(
+                &package,
+                &protected,
+                &height_context,
+                &incorrect_finality_context,
+                &verifier,
+                &fixture.validator_set,
+                &fixture.cluster_map,
+                &protocol,
+                &EtdagParameters::default(),
+            )
+            .unwrap_err()
+            .contains("FINALITY_CONTEXT_MISMATCH"));
+
+        // Persisting a valid public admission package does not make a proposal
+        // eligible by itself: the matching protected input remains absent.
+        assert!(coordinator
+            .load_ready_protected_input(
+                &height_context,
+                &expected_finality_context,
+                &verifier,
+                &fixture.validator_set,
+                &fixture.cluster_map,
+                &protocol,
+                &EtdagParameters::default(),
+            )
+            .unwrap_err()
+            .contains("NOT_READY"));
+
+        let mut missing_reveal_evidence = protected.clone();
+        missing_reveal_evidence.decrypt_shares.clear();
+        assert!(coordinator
+            .admit_certified_public_input(
+                &package,
+                &missing_reveal_evidence,
+                &height_context,
+                &expected_finality_context,
+                &verifier,
+                &fixture.validator_set,
+                &fixture.cluster_map,
+                &protocol,
+                &EtdagParameters::default(),
+            )
+            .is_err());
+
+        assert!(coordinator
+            .load_ready_protected_input(
+                &height_context,
+                &expected_finality_context,
+                &verifier,
+                &fixture.validator_set,
+                &fixture.cluster_map,
+                &protocol,
+                &EtdagParameters::default(),
+            )
+            .unwrap_err()
+            .contains("NOT_READY"));
+    }
+
+    #[test]
+    fn protected_input_coordinator_reverifies_durable_input_before_proposal_use() {
+        let mut fixture = fixture(6, None);
+        let root = crate::utils::test_temp_root(format!(
+            "synergy-etdag-protected-input-restart-{}-{}",
+            std::process::id(),
+            current_unix_nanos()
+        ));
+        let admission_path = root.join("admission-packages.json");
+        let protected_path = root.join("protected-inputs.json");
+        let coordinator = EtdagProtectedInputCoordinator::at_paths(
+            admission_path.clone(),
+            protected_path.clone(),
+        );
+        let protocol = ProtocolConfig::testnet_v3();
+        let verifier = fixture.signer.verifier();
+        let height_context = fixture.height_context.clone();
+        let context = fixture.context.clone();
+        let package = target_admission_package(&mut fixture, context);
+        let protected = complete_protected_input(&mut fixture);
+        let expected_finality_context = protected
+            .boc
+            .bvc
+            .batch_candidate
+            .canonical_finality_context_digest
+            .clone();
+
+        let digest = coordinator
+            .admit_certified_public_input(
+                &package,
+                &protected,
+                &height_context,
+                &expected_finality_context,
+                &verifier,
+                &fixture.validator_set,
+                &fixture.cluster_map,
+                &protocol,
+                &EtdagParameters::default(),
+            )
+            .unwrap();
+        assert_eq!(digest, protected_input_digest(&protected).unwrap());
+
+        let restarted = EtdagProtectedInputCoordinator::at_paths(admission_path, protected_path);
+        assert_eq!(
+            restarted
+                .load_ready_protected_input(
+                    &height_context,
+                    &expected_finality_context,
+                    &verifier,
+                    &fixture.validator_set,
+                    &fixture.cluster_map,
+                    &protocol,
+                    &EtdagParameters::default(),
+                )
+                .unwrap(),
+            protected
+        );
+    }
+
+    #[test]
     fn strict_dual_quorum_rejects_four_of_six_wrong_phase_and_low_weight() {
         let mut base_fixture = fixture(6, None);
         let members = cluster_members(&base_fixture);
@@ -5549,5 +6511,108 @@ pub(crate) mod tests {
             )
             .unwrap_err()
             .contains("authenticated ciphertext plaintext"));
+    }
+
+    #[test]
+    fn certified_input_ingress_requires_local_context_authenticated_peer_and_untampered_proof() {
+        static INGRESS_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = INGRESS_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        reset_etdag_certified_input_ingress_for_test();
+
+        let mut fixture = fixture(6, None);
+        let protocol = ProtocolConfig::testnet_v3();
+        let verifier = fixture.signer.verifier();
+        let height_context = fixture.height_context.clone();
+        let target_context = fixture.context.clone();
+        let package = target_admission_package(&mut fixture, target_context);
+        let protected = complete_protected_input(&mut fixture);
+        let expected_finality_context = protected
+            .boc
+            .bvc
+            .batch_candidate
+            .canonical_finality_context_digest
+            .clone();
+        let artifact = CertifiedProtectedInputArtifact {
+            admission_package: package,
+            protected_input: protected.clone(),
+        };
+        let authenticated_peer = EtdagAuthenticatedIngressPeer {
+            validator_id: fixture.validator_set.validators[0].validator_id.clone(),
+            validator_uma_id: fixture.validator_set.validators[0].validator_uma_id.clone(),
+            consensus_key_id: fixture.validator_set.validators[0]
+                .consensus_public_key
+                .key_id
+                .clone(),
+        };
+
+        let missing_context =
+            dispatch_etdag_certified_input(Some(authenticated_peer.clone()), artifact.clone())
+                .unwrap_err();
+        assert!(missing_context.contains("ingress is not running"));
+
+        let ingress = EtdagCertifiedInputIngress::new(
+            temp_protected_input_coordinator("network-ingress"),
+            height_context.clone(),
+            expected_finality_context.clone(),
+            verifier.clone(),
+            fixture.validator_set.clone(),
+            fixture.cluster_map.clone(),
+            protocol.clone(),
+            EtdagParameters::default(),
+        )
+        .unwrap();
+        install_etdag_certified_input_ingress(EtdagActivationPermit::test_only(), ingress).unwrap();
+
+        let unauthenticated = dispatch_etdag_certified_input(None, artifact.clone()).unwrap_err();
+        assert!(unauthenticated.contains("UNAUTHENTICATED_PEER"));
+
+        let digest =
+            dispatch_etdag_certified_input(Some(authenticated_peer.clone()), artifact.clone())
+                .unwrap();
+        assert_eq!(digest, protected_input_digest(&protected).unwrap());
+        remove_etdag_certified_input_ingress().unwrap();
+
+        let untrusted_ingress = EtdagCertifiedInputIngress::new(
+            temp_protected_input_coordinator("network-ingress-untrusted"),
+            height_context.clone(),
+            expected_finality_context.clone(),
+            verifier.clone(),
+            fixture.validator_set.clone(),
+            fixture.cluster_map.clone(),
+            protocol.clone(),
+            EtdagParameters::default(),
+        )
+        .unwrap();
+        let untrusted_peer = EtdagAuthenticatedIngressPeer {
+            validator_id: ValidatorId("untrusted-validator".to_string()),
+            validator_uma_id: authenticated_peer.validator_uma_id.clone(),
+            consensus_key_id: authenticated_peer.consensus_key_id.clone(),
+        };
+        assert!(untrusted_ingress
+            .admit_from_authenticated_peer(&untrusted_peer, &artifact)
+            .unwrap_err()
+            .contains("UNTRUSTED_PEER"));
+
+        let tamper_ingress = EtdagCertifiedInputIngress::new(
+            temp_protected_input_coordinator("network-ingress-tamper"),
+            height_context,
+            expected_finality_context,
+            verifier,
+            fixture.validator_set,
+            fixture.cluster_map,
+            protocol,
+            EtdagParameters::default(),
+        )
+        .unwrap();
+        let mut tampered = artifact;
+        tampered.protected_input.reveal.ordered_transactions[0]
+            .transaction
+            .receiver_uma_or_account = "tampered-recipient".to_string();
+        assert!(tamper_ingress
+            .admit_from_authenticated_peer(&authenticated_peer, &tampered)
+            .is_err());
     }
 }

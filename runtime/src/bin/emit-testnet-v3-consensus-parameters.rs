@@ -108,6 +108,10 @@ fn release_manifest(approval_id: String) -> ConsensusParameterManifest {
             finality_p95_target_ms: 2_500,
             finality_p99_target_ms: 3_000,
         },
+        // The applied schema-v2 Genesis manifest deliberately leaves ETDAG
+        // deferred.  Its future activation requires a new schema-v3 manifest
+        // at a declared epoch boundary.
+        etdag_activation: None,
     }
 }
 

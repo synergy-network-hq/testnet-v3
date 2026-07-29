@@ -1,0 +1,143 @@
+// Testnet-v3 shared team and support vesting contract.
+//
+// Authoritative behavior source: canonical genesis `vesting[0]` block bound to
+// contract address synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl:
+//   - 9 beneficiaries in one shared contract (5 team @ 60,000,000 SNRG,
+//     4 support @ 10,000,000 SNRG; total 340,000,000 SNRG = 340e15 nwei).
+//   - 20% initially vested at start_time.
+//   - Team members' initial tranche is withdrawal-restricted for
+//     63,072,000 seconds (two years); support staff restriction is 0.
+//   - One-year cliff (31,536,000 seconds); the remaining 80% vests in 36
+//     equal monthly events after the cliff, remainder folded into the final
+//     event (deterministic integer arithmetic, no rounding loss).
+//   - Beneficiary revocation/replacement: NOT authorized by the genesis
+//     record and therefore not implemented; the admin may only bind each
+//     beneficiary's address once.
+pragma synq ^1.0.0;
+
+contract TeamVesting {
+    admin: Address public;
+    startTime: UInt256 public;
+    cliffSeconds: UInt256 public;
+    restrictionSeconds: UInt256 public;
+    monthlyEvents: UInt256 public;
+    monthSeconds: UInt256 public;
+    beneficiaryCount: UInt256 public;
+    totalAllocation: UInt256 public;
+    totalClaimed: UInt256 public;
+
+    beneficiaryAddress: mapping(UInt256 => Address) public;
+    addressToBeneficiary: mapping(Address => UInt256) public;
+    beneficiaryBound: mapping(UInt256 => Bool) public;
+    accountBound: mapping(Address => Bool) public;
+    allocationOf: mapping(UInt256 => UInt256) public;
+    isTeamClass: mapping(UInt256 => Bool) public;
+    claimedOf: mapping(UInt256 => UInt256) public;
+
+    event BeneficiaryBound(beneficiaryIndex: UInt256 indexed, account: Address indexed);
+    event TokensClaimed(beneficiaryIndex: UInt256 indexed, account: Address indexed, amount: UInt256, totalClaimedForBeneficiary: UInt256);
+
+    constructor(
+        initialAdmin: Address,
+        vestingStartTime: UInt256,
+        teamAllocationNwei: UInt256,
+        supportAllocationNwei: UInt256,
+        teamCount: UInt256,
+        supportCount: UInt256
+    ) {
+        require(initialAdmin != Address(0), "Invalid admin");
+        require(vestingStartTime > 0, "Invalid start time");
+        require(teamCount > 0, "No team beneficiaries");
+        admin = initialAdmin;
+        startTime = vestingStartTime;
+        cliffSeconds = 31536000;
+        restrictionSeconds = 63072000;
+        monthlyEvents = 36;
+        monthSeconds = 2628000;
+        beneficiaryCount = teamCount + supportCount;
+        totalAllocation = 0;
+        totalClaimed = 0;
+        for (i in 0..teamCount) {
+            allocationOf[i] = teamAllocationNwei;
+            isTeamClass[i] = true;
+            totalAllocation = totalAllocation + teamAllocationNwei;
+        }
+        for (j in teamCount..beneficiaryCount) {
+            allocationOf[j] = supportAllocationNwei;
+            isTeamClass[j] = false;
+            totalAllocation = totalAllocation + supportAllocationNwei;
+        }
+    }
+
+    @gas_cost(base: 45000)
+    @public function bindBeneficiary(beneficiaryIndex: UInt256, account: Address) {
+        require(msg.sender == admin, "Unauthorized");
+        require(beneficiaryIndex < beneficiaryCount, "Unknown beneficiary");
+        require(!beneficiaryBound[beneficiaryIndex], "Beneficiary already bound");
+        require(account != Address(0), "Invalid account");
+        require(!accountBound[account], "Account already bound");
+        accountBound[account] = true;
+        beneficiaryAddress[beneficiaryIndex] = account;
+        addressToBeneficiary[account] = beneficiaryIndex;
+        beneficiaryBound[beneficiaryIndex] = true;
+        emit BeneficiaryBound(beneficiaryIndex, account);
+    }
+
+    @gas_cost(base: 12000)
+    @view function initialVestedAmount(beneficiaryIndex: UInt256) -> UInt256 {
+        return allocationOf[beneficiaryIndex] * 20 / 100;
+    }
+
+    @gas_cost(base: 20000)
+    @view function vestedAmount(beneficiaryIndex: UInt256, atTime: UInt256) -> UInt256 {
+        require(beneficiaryIndex < beneficiaryCount, "Unknown beneficiary");
+        if (atTime < startTime) {
+            return 0;
+        }
+        let total: UInt256 = allocationOf[beneficiaryIndex];
+        let initialPart: UInt256 = total * 20 / 100;
+        let residual: UInt256 = total - initialPart;
+        let cliffEnd: UInt256 = startTime + cliffSeconds;
+        if (atTime < cliffEnd) {
+            return initialPart;
+        }
+        let elapsedMonths: UInt256 = (atTime - cliffEnd) / monthSeconds + 1;
+        if (elapsedMonths >= monthlyEvents) {
+            return total;
+        }
+        let perMonth: UInt256 = residual / monthlyEvents;
+        return initialPart + perMonth * elapsedMonths;
+    }
+
+    @gas_cost(base: 22000)
+    @view function withdrawableAmount(beneficiaryIndex: UInt256, atTime: UInt256) -> UInt256 {
+        let vested: UInt256 = vestedAmount(beneficiaryIndex, atTime);
+        if (isTeamClass[beneficiaryIndex] && atTime < startTime + restrictionSeconds) {
+            let initialPart: UInt256 = initialVestedAmount(beneficiaryIndex);
+            if (vested <= initialPart) {
+                return 0;
+            }
+            vested = vested - initialPart;
+        }
+        let claimed: UInt256 = claimedOf[beneficiaryIndex];
+        if (vested <= claimed) {
+            return 0;
+        }
+        return vested - claimed;
+    }
+
+    @gas_cost(base: 60000)
+    @public function claim(beneficiaryIndex: UInt256, amount: UInt256) {
+        require(beneficiaryIndex < beneficiaryCount, "Unknown beneficiary");
+        require(beneficiaryBound[beneficiaryIndex], "Beneficiary not bound");
+        require(msg.sender == beneficiaryAddress[beneficiaryIndex], "Unauthorized claimant");
+        require(amount > 0, "Zero claim");
+        let available: UInt256 = withdrawableAmount(beneficiaryIndex, block.timestamp);
+        require(amount <= available, "Amount exceeds withdrawable");
+        claimedOf[beneficiaryIndex] = claimedOf[beneficiaryIndex] + amount;
+        totalClaimed = totalClaimed + amount;
+        require(totalClaimed <= totalAllocation, "Allocation overrun");
+        transfer(beneficiaryAddress[beneficiaryIndex], amount);
+        emit TokensClaimed(beneficiaryIndex, beneficiaryAddress[beneficiaryIndex], amount, claimedOf[beneficiaryIndex]);
+    }
+}

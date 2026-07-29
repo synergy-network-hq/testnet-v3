@@ -1,0 +1,251 @@
+// Testnet-v3 canonical validator registry.
+// Status: 0=None, 1=Pending, 2=Active, 3=Jailed, 4=Exited, 5=Tombstoned.
+pragma synq ^1.0.0;
+
+contract ValidatorRegistry {
+    governanceKey: MLDSAPublicKey public;
+    authority: Address public;
+    paused: Bool public;
+    maxValidatorCount: UInt256 public;
+    minValidatorCount: UInt256 public;
+    minSelfStake: UInt256 public;
+    validatorCount: UInt256 public;
+
+    validatorStatus: mapping(Address => UInt8) public;
+    validatorIdHash: mapping(Address => Bytes) public;
+    validatorIdToAddress: mapping(Bytes => Address) public;
+    validatorRewardAddress: mapping(Address => Address) public;
+    validatorVotingPower: mapping(Address => UInt256) public;
+    validatorSelfStake: mapping(Address => UInt256) public;
+    validatorActivationHeight: mapping(Address => UInt256) public;
+    validatorDeactivationHeight: mapping(Address => UInt256) public;
+    validatorJailedUntil: mapping(Address => UInt256) public;
+    validatorMetadataHash: mapping(Address => Bytes) public;
+    validatorKeyBundleHash: mapping(Address => Bytes) public;
+    validators: Address[] public;
+
+    event AuthorityUpdated(oldAuthority: Address indexed, newAuthority: Address indexed);
+    event ValidatorRegistered(validator: Address indexed, idHash: Bytes indexed, rewardAddress: Address);
+    event ValidatorStatusUpdated(validator: Address indexed, oldStatus: UInt8, newStatus: UInt8);
+    event ValidatorPowerUpdated(validator: Address indexed, oldPower: UInt256, newPower: UInt256);
+    event ValidatorStakeUpdated(validator: Address indexed, oldStake: UInt256, newStake: UInt256);
+    event ValidatorRewardAddressUpdated(validator: Address indexed, oldAddress: Address, newAddress: Address);
+    event ValidatorMetadataUpdated(validator: Address indexed, metadataHash: Bytes);
+    event ValidatorKeyBundleUpdated(validator: Address indexed, keyBundleHash: Bytes);
+    event GovernanceKeyUpdated(newKey: MLDSAPublicKey);
+    event PauseStateUpdated(paused: Bool);
+
+    constructor(
+        initialGovernanceKey: MLDSAPublicKey,
+        initialAuthority: Address,
+        maximumValidators: UInt256,
+        minimumValidators: UInt256,
+        minimumSelfStake: UInt256
+    ) {
+        require(initialAuthority != Address(0), "Invalid authority");
+        require(minimumValidators > 0, "Minimum validator count is zero");
+        require(maximumValidators >= minimumValidators, "Invalid validator limits");
+        governanceKey = initialGovernanceKey;
+        authority = initialAuthority;
+        maxValidatorCount = maximumValidators;
+        minValidatorCount = minimumValidators;
+        minSelfStake = minimumSelfStake;
+        validatorCount = 0;
+        paused = false;
+    }
+
+    @gas_cost(base: 140000)
+    @public function registerValidator(
+        idHash: Bytes,
+        validator: Address,
+        rewardAddress: Address,
+        votingPower: UInt256,
+        selfStake: UInt256,
+        metadataHash: Bytes,
+        keyBundleHash: Bytes
+    ) {
+        require(!paused, "Registry paused");
+        require(msg.sender == authority, "Unauthorized");
+        require(validator != Address(0), "Invalid validator");
+        require(rewardAddress != Address(0), "Invalid reward address");
+        require(validatorStatus[validator] == 0, "Validator exists");
+        require(validatorIdToAddress[idHash] == Address(0), "Validator ID exists");
+        require(selfStake >= minSelfStake, "Self stake below minimum");
+        require(validatorCount < maxValidatorCount, "Validator limit reached");
+
+        validatorStatus[validator] = 1;
+        validatorIdHash[validator] = idHash;
+        validatorIdToAddress[idHash] = validator;
+        validatorRewardAddress[validator] = rewardAddress;
+        validatorVotingPower[validator] = votingPower;
+        validatorSelfStake[validator] = selfStake;
+        validatorMetadataHash[validator] = metadataHash;
+        validatorKeyBundleHash[validator] = keyBundleHash;
+        validators.push(validator);
+        validatorCount = validatorCount + 1;
+        emit ValidatorRegistered(validator, idHash, rewardAddress);
+    }
+
+    @gas_cost(base: 65000)
+    @public function activateValidator(validator: Address, activationHeight: UInt256) {
+        require(!paused, "Registry paused");
+        require(msg.sender == authority, "Unauthorized");
+        require(validatorStatus[validator] == 1, "Validator is not pending");
+        validatorStatus[validator] = 2;
+        validatorActivationHeight[validator] = activationHeight;
+        emit ValidatorStatusUpdated(validator, 1, 2);
+    }
+
+    @gas_cost(base: 65000)
+    @public function exitValidator(validator: Address, deactivationHeight: UInt256) {
+        require(!paused, "Registry paused");
+        require(msg.sender == authority, "Unauthorized");
+        let oldStatus: UInt8 = validatorStatus[validator];
+        if (oldStatus != 2) {
+            require(oldStatus == 3, "Validator cannot exit");
+        }
+        validatorStatus[validator] = 4;
+        validatorDeactivationHeight[validator] = deactivationHeight;
+        emit ValidatorStatusUpdated(validator, oldStatus, 4);
+    }
+
+    @gas_cost(base: 70000)
+    @public function jailValidator(validator: Address, untilHeight: UInt256) {
+        require(!paused, "Registry paused");
+        require(msg.sender == authority, "Unauthorized");
+        require(validatorStatus[validator] == 2, "Validator is not active");
+        validatorStatus[validator] = 3;
+        validatorJailedUntil[validator] = untilHeight;
+        emit ValidatorStatusUpdated(validator, 2, 3);
+    }
+
+    @gas_cost(base: 70000)
+    @public function unjailValidator(validator: Address) {
+        require(!paused, "Registry paused");
+        require(msg.sender == authority, "Unauthorized");
+        require(validatorStatus[validator] == 3, "Validator is not jailed");
+        require(block.number >= validatorJailedUntil[validator], "Jail period active");
+        validatorStatus[validator] = 2;
+        validatorJailedUntil[validator] = 0;
+        emit ValidatorStatusUpdated(validator, 3, 2);
+    }
+
+    @gas_cost(base: 70000)
+    @public function tombstoneValidator(validator: Address) {
+        require(!paused, "Registry paused");
+        require(msg.sender == authority, "Unauthorized");
+        let oldStatus: UInt8 = validatorStatus[validator];
+        require(oldStatus != 0, "Validator not found");
+        require(oldStatus != 5, "Validator already tombstoned");
+        validatorStatus[validator] = 5;
+        emit ValidatorStatusUpdated(validator, oldStatus, 5);
+    }
+
+    @gas_cost(base: 55000)
+    @public function updateVotingPower(validator: Address, newPower: UInt256) {
+        require(msg.sender == authority, "Unauthorized");
+        require(validatorStatus[validator] != 0, "Validator not found");
+        let oldPower: UInt256 = validatorVotingPower[validator];
+        validatorVotingPower[validator] = newPower;
+        emit ValidatorPowerUpdated(validator, oldPower, newPower);
+    }
+
+    @gas_cost(base: 55000)
+    @public function updateSelfStake(validator: Address, newStake: UInt256) {
+        require(msg.sender == authority, "Unauthorized");
+        require(validatorStatus[validator] != 0, "Validator not found");
+        let oldStake: UInt256 = validatorSelfStake[validator];
+        validatorSelfStake[validator] = newStake;
+        emit ValidatorStakeUpdated(validator, oldStake, newStake);
+    }
+
+    @gas_cost(base: 55000)
+    @public function reduceSelfStake(validator: Address, amount: UInt256) -> UInt256 {
+        require(msg.sender == authority, "Unauthorized");
+        let oldStake: UInt256 = validatorSelfStake[validator];
+        let actualSlashed: UInt256 = amount > oldStake ? oldStake : amount;
+        validatorSelfStake[validator] = oldStake - actualSlashed;
+        emit ValidatorStakeUpdated(validator, oldStake, validatorSelfStake[validator]);
+        return actualSlashed;
+    }
+
+    @gas_cost(base: 55000)
+    @public function updateRewardAddress(validator: Address, newRewardAddress: Address) {
+        require(msg.sender == authority, "Unauthorized");
+        require(newRewardAddress != Address(0), "Invalid reward address");
+        let oldAddress: Address = validatorRewardAddress[validator];
+        validatorRewardAddress[validator] = newRewardAddress;
+        emit ValidatorRewardAddressUpdated(validator, oldAddress, newRewardAddress);
+    }
+
+    @gas_cost(base: 55000)
+    @public function updateMetadataHash(validator: Address, metadataHash: Bytes) {
+        require(msg.sender == authority, "Unauthorized");
+        validatorMetadataHash[validator] = metadataHash;
+        emit ValidatorMetadataUpdated(validator, metadataHash);
+    }
+
+    @gas_cost(base: 55000)
+    @public function updateKeyBundleHash(validator: Address, keyBundleHash: Bytes) {
+        require(msg.sender == authority, "Unauthorized");
+        validatorKeyBundleHash[validator] = keyBundleHash;
+        emit ValidatorKeyBundleUpdated(validator, keyBundleHash);
+    }
+
+    @gas_cost(base: 25000)
+    @public function isActiveValidator(validator: Address) -> Bool {
+        return validatorStatus[validator] == 2;
+    }
+
+    @gas_cost(base: 25000)
+    @public function isKnownValidator(validator: Address) -> Bool {
+        return validatorStatus[validator] != 0;
+    }
+
+    @gas_cost(base: 90000, mldsa_verify: 35000)
+    @public function setAuthority(
+        newAuthority: Address,
+        governanceNonce: UInt256,
+        validUntilBlock: UInt256,
+        signature: MLDSASignature
+    ) {
+        require(newAuthority != Address(0), "Invalid authority");
+        require_pqc {
+            let valid: Bool = verifyGovernanceAuthorization(governanceKey, governanceNonce, validUntilBlock, signature);
+            require(valid, "Invalid governance authorization");
+        } or revert("PQC verification failed");
+        let oldAuthority: Address = authority;
+        authority = newAuthority;
+        emit AuthorityUpdated(oldAuthority, newAuthority);
+    }
+
+    @gas_cost(base: 90000, mldsa_verify: 35000)
+    @public function setPaused(
+        newPaused: Bool,
+        governanceNonce: UInt256,
+        validUntilBlock: UInt256,
+        signature: MLDSASignature
+    ) {
+        require_pqc {
+            let valid: Bool = verifyGovernanceAuthorization(governanceKey, governanceNonce, validUntilBlock, signature);
+            require(valid, "Invalid governance authorization");
+        } or revert("PQC verification failed");
+        paused = newPaused;
+        emit PauseStateUpdated(newPaused);
+    }
+
+    @gas_cost(base: 95000, mldsa_verify: 35000)
+    @public function updateGovernanceKey(
+        newKey: MLDSAPublicKey,
+        governanceNonce: UInt256,
+        validUntilBlock: UInt256,
+        signature: MLDSASignature
+    ) {
+        require_pqc {
+            let valid: Bool = verifyGovernanceAuthorization(governanceKey, governanceNonce, validUntilBlock, signature);
+            require(valid, "Invalid governance authorization");
+        } or revert("PQC verification failed");
+        governanceKey = newKey;
+        emit GovernanceKeyUpdated(newKey);
+    }
+}

@@ -10,9 +10,13 @@ use crate::consensus::testnet_v3_bootstrap::TestnetV3GenesisBootstrap;
 use crate::consensus::typed_finality_store::{
     TypedEpochTransitionRecord, TypedFinalityRecord, TypedFinalityStore,
 };
+use crate::consensus_parameters::EtdagActivationPermit;
 use crate::crypto::aegis_pqvm::{AegisPqKeyLifecycleRecord, AegisPqvmSigner, AegisPqvmVerifier};
 use crate::crypto::pqc::{PQCAlgorithm, PQCManager, PQCPrivateKey, PQCPublicKey};
-use crate::etdag::{EtdagParameters, ProtectedBlockInput, TargetAdmissionContext};
+use crate::etdag::{
+    EtdagDigest, EtdagParameters, EtdagProtectedInputCoordinator, ProtectedBlockInput,
+    TargetAdmissionContext,
+};
 use crate::execution::{compute_state_root_after, execute_block, ExecutionState};
 use crate::p2p::messages::{validate_typed_consensus_message_size, TypedConsensusMessage};
 use crate::synergy_types::{
@@ -23,8 +27,8 @@ use crate::synergy_types::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
-use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// Bounded inbound work item whose sender is authenticated by the P2P layer.
 #[derive(Debug, Clone)]
@@ -100,7 +104,8 @@ impl TypedConsensusPeerAuthorizer for FrozenTypedConsensusPeerAuthorizer {
     ) -> Result<(), String> {
         let validator = self.validator_for_peer(peer)?;
         match message {
-            TypedConsensusMessage::Proposal { block, .. } => {
+            TypedConsensusMessage::CoreProposal { block, .. }
+            | TypedConsensusMessage::Proposal { block, .. } => {
                 if block.header.proposer_validator_id != validator.validator_id
                     || block.header.proposer_uma_id != validator.validator_uma_id
                     || block.header.proposer_key_id != validator.consensus_public_key.key_id
@@ -144,8 +149,19 @@ pub struct TypedPosyCoordinator {
     local_context: LocalConsensusContext,
     execution_state: ExecutionState,
     etdag_parameters: EtdagParameters,
+    proposal_mode: TypedProposalMode,
     finality_store: TypedFinalityStore,
     accepted_proposals: BTreeMap<BlockId, Block>,
+}
+
+/// The finalized schema-v2 release runs the typed core without transaction
+/// admission.  A protected ETDAG proposal becomes available only after the
+/// role runtime presents the unforgeable activation permit derived from a
+/// future finalized manifest at its declared epoch boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TypedProposalMode {
+    CoreOnly,
+    EtdagActivated,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,6 +191,213 @@ pub enum TypedCoordinatorEvent {
 pub struct TypedCoordinatorIngressMetrics {
     pub accepted_messages: u64,
     pub rejected_messages: u64,
+}
+
+/// Authenticated outbound path for typed consensus artifacts.
+///
+/// The scheduler has no authority to turn a local state transition into a
+/// network action when the transport is unavailable.  Implementations must
+/// return an error for a failed fan-out and the driver treats an empty fan-out
+/// as a failure as well: signing into an isolated validator is not a valid
+/// Testnet-v3 consensus action.
+pub trait TypedConsensusEgress: Send {
+    fn broadcast(&mut self, message: &TypedConsensusMessage) -> Result<usize, String>;
+}
+
+/// P2P adapter for the only supported production egress path.  It deliberately
+/// wraps the existing typed P2P fan-out rather than opening a second socket or
+/// legacy-consensus path.  The underlying P2P API reports the number of
+/// authenticated eligible peers that accepted the send; zero is rejected by
+/// the driver.
+pub struct P2pTypedConsensusEgress {
+    network: Arc<crate::p2p::networking::P2PNetwork>,
+}
+
+impl P2pTypedConsensusEgress {
+    pub fn new(network: Arc<crate::p2p::networking::P2PNetwork>) -> Self {
+        Self { network }
+    }
+}
+
+impl TypedConsensusEgress for P2pTypedConsensusEgress {
+    fn broadcast(&mut self, message: &TypedConsensusMessage) -> Result<usize, String> {
+        self.network.broadcast_typed_consensus(message)
+    }
+}
+
+/// Supplies the exact digest to which ETDAG public proof packages are bound.
+///
+/// This is an intentionally injected, finalized-consensus boundary.  The
+/// scheduler must not invent a digest from a timer, local mempool state, or an
+/// unverified peer claim.  Production wiring must derive it from the
+/// finalized-QC/epoch-transition transcript that produced `local_context`.
+pub trait TypedFinalityContextDigestSource: Send {
+    fn expected_digest(&self, local_context: &LocalConsensusContext)
+        -> Result<EtdagDigest, String>;
+}
+
+/// An already persisted, finalized-chain authority for exactly one height
+/// after a durable typed QC.  A topology change carries the signed transition
+/// record plus the deterministic topology it commits to; it is never decoded
+/// from a P2P message at this boundary.
+#[derive(Debug, Clone)]
+pub enum TypedNextHeightAuthority {
+    UnchangedTopology {
+        context: LocalConsensusContext,
+    },
+    VerifiedEpochTransition {
+        transition: TypedEpochTransitionRecord,
+        next_validator_set: ValidatorSet,
+        next_cluster_map: ClusterMap,
+        context: LocalConsensusContext,
+    },
+}
+
+/// Supplies the next immutable height authority after durable finality.
+///
+/// The provider is intentionally separate from the scheduler: height and
+/// epoch authority belongs to the finalized-chain/epoch-transition layer, not
+/// to a timer.  The coordinator independently validates the returned authority
+/// before it becomes signing authority.  In particular, a persisted epoch
+/// transition is not permitted to degrade into an unchanged-topology advance.
+pub trait TypedNextHeightContextSource: Send {
+    fn next_authority(
+        &mut self,
+        finalized: &TypedFinalityRecord,
+        current: &LocalConsensusContext,
+    ) -> Result<TypedNextHeightAuthority, String>;
+}
+
+/// Immutable, verified state needed to validate certified ETDAG inputs for
+/// exactly one typed consensus height.  It is obtained only from the active
+/// typed coordinator after its Genesis/QC/epoch authority checks complete.
+///
+/// The values are public verification material.  In particular, this contains
+/// no private ML-KEM share or local consensus signer material.
+#[derive(Debug, Clone)]
+pub struct TypedEtdagIngressAuthority {
+    pub height_context: crate::synergy_types::HeightConsensusContext,
+    pub verifier: AegisPqvmVerifier,
+    pub validator_set: ValidatorSet,
+    pub cluster_map: ClusterMap,
+    pub protocol_config: crate::synergy_types::ProtocolConfig,
+    pub parameters: EtdagParameters,
+}
+
+/// Rotates the authenticated certified-ETDAG ingress in lockstep with the
+/// typed finality lifecycle.  The production implementation owns the global
+/// P2P ingress slot; test implementations may be no-ops, but a production
+/// role must install the initial authority before it starts typed ingress.
+///
+/// A successor is supplied only after the coordinator durably accepted its
+/// finality QC and installed the matching next local context.  The rotator
+/// must reject overlap or a non-successor authority rather than accepting a
+/// package under two height/finality contexts.
+pub trait TypedEtdagIngressRotator: Send {
+    fn install_initial(
+        &mut self,
+        protected_inputs: &EtdagProtectedInputCoordinator,
+        authority: &TypedEtdagIngressAuthority,
+        finality_context_digest: &EtdagDigest,
+    ) -> Result<(), String>;
+
+    fn rotate_successor(
+        &mut self,
+        protected_inputs: &EtdagProtectedInputCoordinator,
+        authority: &TypedEtdagIngressAuthority,
+        finality_context_digest: &EtdagDigest,
+    ) -> Result<(), String>;
+
+    fn remove(&mut self) -> Result<(), String>;
+}
+
+/// Test-only-in-effect default used by unit-level driver tests.  It deliberately
+/// never becomes a production lifecycle because the role runtime constructs a
+/// concrete rotator before exposing typed P2P ingress.
+#[derive(Debug, Default)]
+pub struct NoopTypedEtdagIngressRotator;
+
+impl TypedEtdagIngressRotator for NoopTypedEtdagIngressRotator {
+    fn install_initial(
+        &mut self,
+        _protected_inputs: &EtdagProtectedInputCoordinator,
+        _authority: &TypedEtdagIngressAuthority,
+        _finality_context_digest: &EtdagDigest,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn rotate_successor(
+        &mut self,
+        _protected_inputs: &EtdagProtectedInputCoordinator,
+        _authority: &TypedEtdagIngressAuthority,
+        _finality_context_digest: &EtdagDigest,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn remove(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TypedRoundStage {
+    Proposal,
+    Validation,
+    Finality,
+    WaitingForCertificate,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TypedCoordinatorDriverMetrics {
+    pub accepted_messages: u64,
+    pub rejected_messages: u64,
+    pub emitted_proposals: u64,
+    pub emitted_validation_votes: u64,
+    pub emitted_finality_votes: u64,
+    pub emitted_timeout_votes: u64,
+    pub emitted_validation_certificates: u64,
+    pub emitted_finality_certificates: u64,
+    pub emitted_timeout_certificates: u64,
+    pub finalized_blocks: u64,
+}
+
+/// Operational typed PoSy driver.  It is the only component that schedules
+/// proposal, vote, timeout, certificate, carry-forward, and next-height work.
+/// The coordinator still owns all cryptographic and state-transition checks;
+/// this layer only serializes those already-verified operations at the
+/// finalized 1,500 ms stage boundaries.
+pub struct TypedPosyDriver<E, D, H, R = NoopTypedEtdagIngressRotator>
+where
+    E: TypedConsensusEgress,
+    D: TypedFinalityContextDigestSource,
+    H: TypedNextHeightContextSource,
+    R: TypedEtdagIngressRotator,
+{
+    coordinator: TypedPosyCoordinator,
+    protected_inputs: EtdagProtectedInputCoordinator,
+    egress: E,
+    finality_digest_source: D,
+    next_height_source: H,
+    ingress_rotator: R,
+    round_started_at: Instant,
+    stage: TypedRoundStage,
+    emitted_validation_vote: bool,
+    emitted_finality_vote: bool,
+    emitted_timeout_vote: bool,
+    emitted_proposal: bool,
+    validation_votes: BTreeMap<BlockId, BTreeMap<ValidatorId, Vote>>,
+    finality_votes: BTreeMap<BlockId, BTreeMap<ValidatorId, Vote>>,
+    timeout_votes: BTreeMap<(BlockId, Option<Hash>), BTreeMap<ValidatorId, Vote>>,
+    observed_validation_votes: BTreeMap<ValidatorId, Vote>,
+    observed_finality_votes: BTreeMap<ValidatorId, Vote>,
+    observed_timeout_votes: BTreeMap<ValidatorId, Vote>,
+    prepared_certificate: Option<ValidationCertificate>,
+    finality_certificate: Option<QuorumCertificate>,
+    timeout_certificate: Option<TimeoutCertificate>,
+    proposal_material: BTreeMap<BlockId, (TargetAdmissionContext, ProtectedBlockInput)>,
+    metrics: TypedCoordinatorDriverMetrics,
 }
 
 /// Complete, finalized input set required to construct a Testnet-v3 typed
@@ -304,6 +527,23 @@ impl TypedPosyCoordinatorStartup {
     /// not a fallback: callers lacking the post-deployment state root or a
     /// final Genesis anchor cannot start a validator coordinator.
     pub fn build(self) -> Result<TypedPosyCoordinator, String> {
+        let local_context = self.genesis_bootstrap.initial_local_consensus_context(
+            &self.consensus_parameters.protocol_config,
+            self.genesis_anchor,
+            self.deployed_genesis_state_root,
+        )?;
+        self.build_with_finalized_context(local_context)
+    }
+
+    /// Builds the coordinator from a context deterministically recovered from
+    /// the finalized typed-QC store.  The supplied context is not a restart
+    /// override: `TypedPosyCoordinator::new` rebinds it to the exact frozen
+    /// topology, protocol configuration, execution root, and durable finality
+    /// sequence before any signing authority is returned.
+    pub fn build_with_finalized_context(
+        self,
+        local_context: LocalConsensusContext,
+    ) -> Result<TypedPosyCoordinator, String> {
         self.consensus_parameters
             .require_genesis_binding()
             .map_err(|error| format!("typed PoSy startup refuses unbound parameters: {error}"))?;
@@ -339,11 +579,6 @@ impl TypedPosyCoordinatorStartup {
             );
         }
         let protocol_config = self.consensus_parameters.protocol_config;
-        let local_context = self.genesis_bootstrap.initial_local_consensus_context(
-            &protocol_config,
-            self.genesis_anchor,
-            self.deployed_genesis_state_root,
-        )?;
         let consensus = ProofOfSynergyBft::new(
             &self.genesis_bootstrap.verifier,
             self.genesis_bootstrap.validator_set,
@@ -475,6 +710,7 @@ impl TypedPosyCoordinator {
             local_context,
             execution_state,
             etdag_parameters,
+            proposal_mode: TypedProposalMode::CoreOnly,
             finality_store,
             accepted_proposals: BTreeMap::new(),
         })
@@ -482,6 +718,17 @@ impl TypedPosyCoordinator {
 
     pub fn local_context(&self) -> &LocalConsensusContext {
         &self.local_context
+    }
+
+    fn etdag_ingress_authority(&self) -> TypedEtdagIngressAuthority {
+        TypedEtdagIngressAuthority {
+            height_context: self.local_context.height_context.clone(),
+            verifier: self.consensus.verifier.clone(),
+            validator_set: self.consensus.validator_set.clone(),
+            cluster_map: self.consensus.cluster_map.clone(),
+            protocol_config: self.consensus.protocol_config.clone(),
+            parameters: self.etdag_parameters.clone(),
+        }
     }
 
     /// Installs the locally derived authority for the height immediately after
@@ -660,9 +907,21 @@ impl TypedPosyCoordinator {
         // All transition and topology checks complete before the durable
         // append.  The store is the restart boundary; it is never written for
         // an invalid or partly-derived epoch.
-        let record = self
-            .finality_store
-            .append_verified_epoch_transition(transition)?;
+        // A startup recovery may already have the exact verified transition
+        // persisted with the finalized block.  Re-checking its signatures and
+        // topology above remains mandatory, but duplicating the durable
+        // record would turn a safe restart into a fork-like append failure.
+        let record =
+            match self.finality_store.epoch_transition_for_finality(&latest)? {
+                Some(existing) if existing.transition == *transition => existing,
+                Some(_) => return Err(
+                    "persisted epoch transition conflicts with the verified topology installation"
+                        .to_string(),
+                ),
+                None => self
+                    .finality_store
+                    .append_verified_epoch_transition(transition)?,
+            };
         self.consensus.install_verified_epoch_topology(
             next_verifier,
             next_validator_set,
@@ -690,12 +949,22 @@ impl TypedPosyCoordinator {
         message: TypedConsensusMessage,
     ) -> Result<TypedCoordinatorEvent, String> {
         match message {
+            TypedConsensusMessage::CoreProposal {
+                height_context,
+                block,
+            } => {
+                self.require_core_only_mode()?;
+                self.accept_core_proposal(height_context, block)
+            }
             TypedConsensusMessage::Proposal {
                 height_context,
                 target_context,
                 protected_block,
                 block,
-            } => self.accept_proposal(height_context, target_context, protected_block, block),
+            } => {
+                self.require_etdag_mode()?;
+                self.accept_proposal(height_context, target_context, protected_block, block)
+            }
             TypedConsensusMessage::Vote { vote } => self.accept_vote(vote),
             TypedConsensusMessage::ValidationCertificate { certificate } => {
                 self.accept_validation_certificate(certificate)
@@ -714,6 +983,7 @@ impl TypedPosyCoordinator {
         protected_block: &ProtectedBlockInput,
         target_context: &TargetAdmissionContext,
     ) -> Result<Block, String> {
+        self.require_etdag_mode()?;
         self.require_local_target_context(target_context)?;
         let proposer = self.local_validator()?.clone();
         let block = self.consensus.propose_protected_block(
@@ -724,6 +994,22 @@ impl TypedPosyCoordinator {
             &self.local_context,
             &self.execution_state,
             &self.etdag_parameters,
+        )?;
+        self.record_accepted_proposal(&block)?;
+        Ok(block)
+    }
+
+    /// Creates a deterministic empty core proposal while the finalized
+    /// manifest has not activated ETDAG.  This method deliberately exposes no
+    /// transaction input, so it cannot become a plaintext transaction path.
+    pub fn propose_core_block(&mut self) -> Result<Block, String> {
+        self.require_core_only_mode()?;
+        let proposer = self.local_validator()?.clone();
+        let block = self.consensus.propose_core_block(
+            &mut self.signer,
+            &proposer,
+            &self.local_context,
+            &self.execution_state,
         )?;
         self.record_accepted_proposal(&block)?;
         Ok(block)
@@ -792,6 +1078,28 @@ impl TypedPosyCoordinator {
             .form_tc(votes, &self.local_context.height_context)
     }
 
+    /// Re-signs the exact prepared candidate for the TC-authorized next round.
+    /// The underlying PoSy implementation verifies the VC, TC, scheduled
+    /// proposer, and stable candidate identity before releasing the signature.
+    pub fn carry_forward_prepared_block(
+        &mut self,
+        original: &Block,
+        certificate: &ValidationCertificate,
+        timeout_certificate: &TimeoutCertificate,
+    ) -> Result<Block, String> {
+        let proposer = self.local_validator()?.clone();
+        let block = self.consensus.carry_forward_prepared_candidate(
+            &mut self.signer,
+            original,
+            certificate,
+            timeout_certificate,
+            &proposer,
+            &self.local_context.height_context,
+        )?;
+        self.record_accepted_proposal(&block)?;
+        Ok(block)
+    }
+
     fn accept_proposal(
         &mut self,
         height_context: crate::synergy_types::HeightConsensusContext,
@@ -816,6 +1124,44 @@ impl TypedPosyCoordinator {
         )?;
         let candidate_id = self.record_accepted_proposal(&block)?;
         Ok(TypedCoordinatorEvent::ProposalAccepted { candidate_id })
+    }
+
+    fn accept_core_proposal(
+        &mut self,
+        height_context: crate::synergy_types::HeightConsensusContext,
+        block: Block,
+    ) -> Result<TypedCoordinatorEvent, String> {
+        if height_context != self.local_context.height_context {
+            return Err(
+                "typed core proposal height context does not equal the local immutable context"
+                    .to_string(),
+            );
+        }
+        self.consensus.validate_core_proposal(
+            &block,
+            &self.local_context,
+            &self.execution_state,
+        )?;
+        let candidate_id = self.record_accepted_proposal(&block)?;
+        Ok(TypedCoordinatorEvent::ProposalAccepted { candidate_id })
+    }
+
+    fn require_core_only_mode(&self) -> Result<(), String> {
+        if self.proposal_mode != TypedProposalMode::CoreOnly {
+            return Err(
+                "core-only typed proposals are unavailable after ETDAG activation".to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    fn require_etdag_mode(&self) -> Result<(), String> {
+        if self.proposal_mode != TypedProposalMode::EtdagActivated {
+            return Err(
+                "protected ETDAG proposals require a finalized activation permit".to_string(),
+            );
+        }
+        Ok(())
     }
 
     fn accept_vote(&mut self, vote: Vote) -> Result<TypedCoordinatorEvent, String> {
@@ -904,18 +1250,956 @@ impl TypedPosyCoordinator {
 
     fn record_accepted_proposal(&mut self, block: &Block) -> Result<BlockId, String> {
         let candidate_id = block.candidate_id()?;
+        for (existing_id, existing) in &self.accepted_proposals {
+            if existing.header.round == block.header.round && existing_id != &candidate_id {
+                return Err(format!(
+                    "TYPED_DRIVER_SOURCE_CONFLICT: two stable candidates were accepted for one height/round ({} versus {})",
+                    existing_id.0, candidate_id.0
+                ));
+            }
+        }
         if let Some(existing) = self.accepted_proposals.get(&candidate_id) {
-            if existing != block {
+            // `candidate_id` intentionally excludes only the three envelope
+            // fields that a verified TC carry-forward changes.  A verified
+            // proposal check has already authenticated those fields, so
+            // replacing the current envelope retains the stable candidate
+            // while allowing the next authorized proposer to carry it.
+            if existing.candidate_id()? != candidate_id {
                 return Err(
                     "typed proposal candidate ID maps to different block contents".to_string(),
                 );
             }
+            self.accepted_proposals
+                .insert(candidate_id.clone(), block.clone());
         } else {
             self.accepted_proposals
                 .insert(candidate_id.clone(), block.clone());
         }
         Ok(candidate_id)
     }
+}
+
+impl<E, D, H> TypedPosyDriver<E, D, H, NoopTypedEtdagIngressRotator>
+where
+    E: TypedConsensusEgress,
+    D: TypedFinalityContextDigestSource,
+    H: TypedNextHeightContextSource,
+{
+    pub fn new(
+        coordinator: TypedPosyCoordinator,
+        protected_inputs: EtdagProtectedInputCoordinator,
+        egress: E,
+        finality_digest_source: D,
+        next_height_source: H,
+    ) -> Result<Self, String> {
+        Self::new_with_ingress_rotator(
+            coordinator,
+            protected_inputs,
+            egress,
+            finality_digest_source,
+            next_height_source,
+            NoopTypedEtdagIngressRotator,
+        )
+    }
+}
+
+impl<E, D, H, R> TypedPosyDriver<E, D, H, R>
+where
+    E: TypedConsensusEgress,
+    D: TypedFinalityContextDigestSource,
+    H: TypedNextHeightContextSource,
+    R: TypedEtdagIngressRotator,
+{
+    pub fn new_with_ingress_rotator(
+        coordinator: TypedPosyCoordinator,
+        protected_inputs: EtdagProtectedInputCoordinator,
+        egress: E,
+        finality_digest_source: D,
+        next_height_source: H,
+        ingress_rotator: R,
+    ) -> Result<Self, String> {
+        validate_canonical_driver_timeouts(&coordinator.consensus.protocol_config)?;
+        Ok(Self {
+            coordinator,
+            protected_inputs,
+            egress,
+            finality_digest_source,
+            next_height_source,
+            ingress_rotator,
+            round_started_at: Instant::now(),
+            stage: TypedRoundStage::Proposal,
+            emitted_validation_vote: false,
+            emitted_finality_vote: false,
+            emitted_timeout_vote: false,
+            emitted_proposal: false,
+            validation_votes: BTreeMap::new(),
+            finality_votes: BTreeMap::new(),
+            timeout_votes: BTreeMap::new(),
+            observed_validation_votes: BTreeMap::new(),
+            observed_finality_votes: BTreeMap::new(),
+            observed_timeout_votes: BTreeMap::new(),
+            prepared_certificate: None,
+            finality_certificate: None,
+            timeout_certificate: None,
+            proposal_material: BTreeMap::new(),
+            metrics: TypedCoordinatorDriverMetrics::default(),
+        })
+    }
+
+    pub fn coordinator(&self) -> &TypedPosyCoordinator {
+        &self.coordinator
+    }
+
+    pub fn metrics(&self) -> TypedCoordinatorDriverMetrics {
+        self.metrics
+    }
+
+    /// Enables protected ETDAG proposal handling only after the role runtime
+    /// has obtained an activation capability from the finalized manifest.
+    ///
+    /// The capability is deliberately borrowed: the role runtime consumes the
+    /// same one to install the process-wide certified-input ingress.  This
+    /// keeps the two activation boundaries coupled without duplicating a
+    /// constructible boolean authority.  Configuration is forbidden once a
+    /// proposal has been scheduled, so a running height cannot switch between
+    /// core and ETDAG proposal semantics.
+    pub(crate) fn configure_etdag_activation(
+        &mut self,
+        _activation_permit: &EtdagActivationPermit,
+    ) -> Result<(), String> {
+        if self.emitted_proposal
+            || !self.coordinator.accepted_proposals.is_empty()
+            || self.stage != TypedRoundStage::Proposal
+        {
+            return Err(
+                "cannot activate ETDAG after typed proposal scheduling has begun".to_string(),
+            );
+        }
+        self.coordinator.proposal_mode = TypedProposalMode::EtdagActivated;
+        Ok(())
+    }
+
+    /// Reports whether this driver is permitted to construct or accept a
+    /// protected ETDAG proposal at the current immutable height context.
+    pub fn etdag_is_active(&self) -> bool {
+        self.coordinator.proposal_mode == TypedProposalMode::EtdagActivated
+    }
+
+    /// Installs the immutable certified-ETDAG ingress authority for the
+    /// current recovered Genesis/QC height.  Role startup calls this before it
+    /// exposes typed P2P ingress; errors leave the driver unscheduled and no
+    /// synthetic protected input is produced.
+    pub fn install_certified_etdag_ingress(&mut self) -> Result<(), String> {
+        if !self.etdag_is_active() {
+            return Err(
+                "ETDAG certified-input ingress requires a finalized activation permit".to_string(),
+            );
+        }
+        let local_context = self.coordinator.local_context().clone();
+        let finality_context_digest = self
+            .finality_digest_source
+            .expected_digest(&local_context)?;
+        let authority = self.coordinator.etdag_ingress_authority();
+        self.ingress_rotator.install_initial(
+            &self.protected_inputs,
+            &authority,
+            &finality_context_digest,
+        )
+    }
+
+    /// Removes the process-local ETDAG ingress once the typed worker has
+    /// stopped.  This is exposed only for the role-runtime lifecycle owner;
+    /// P2P and RPC handlers have no route to remove or replace it.
+    pub fn remove_certified_etdag_ingress(&mut self) -> Result<(), String> {
+        self.ingress_rotator.remove()
+    }
+
+    /// Advances the local stage machine at a supplied monotonic instant.  This
+    /// separate time input makes the exact deadline behavior testable without
+    /// a wall-clock dependency.
+    pub fn tick_at(&mut self, now: Instant) -> Result<(), String> {
+        let elapsed = now
+            .checked_duration_since(self.round_started_at)
+            .ok_or_else(|| "typed PoSy driver monotonic clock moved backwards".to_string())?;
+        let config = &self.coordinator.consensus.protocol_config;
+        let proposal_deadline = Duration::from_millis(config.proposal_timeout_ms);
+        let validation_deadline = proposal_deadline
+            .checked_add(Duration::from_millis(config.prevote_timeout_ms))
+            .ok_or_else(|| "typed PoSy validation deadline overflow".to_string())?;
+        let finality_deadline = validation_deadline
+            .checked_add(Duration::from_millis(config.precommit_timeout_ms))
+            .ok_or_else(|| "typed PoSy finality deadline overflow".to_string())?;
+        let round_cap = Duration::from_millis(config.max_round_timeout_ms);
+
+        if !self.emitted_proposal {
+            self.try_emit_scheduled_proposal()?;
+            self.emitted_proposal = true;
+        }
+
+        if elapsed >= round_cap && !self.emitted_timeout_vote {
+            self.emit_timeout_vote()?;
+            self.stage = TypedRoundStage::WaitingForCertificate;
+            return Ok(());
+        }
+
+        if self.stage == TypedRoundStage::Proposal && elapsed >= proposal_deadline {
+            if let Some(block) = self.current_round_proposal().cloned() {
+                self.emit_validation_vote(&block)?;
+                self.stage = TypedRoundStage::Validation;
+            } else {
+                self.emit_timeout_vote()?;
+                self.stage = TypedRoundStage::WaitingForCertificate;
+            }
+        }
+
+        if self.stage == TypedRoundStage::Validation && elapsed >= validation_deadline {
+            if let (Some(block), Some(certificate)) = (
+                self.current_round_proposal().cloned(),
+                self.prepared_certificate.clone(),
+            ) {
+                self.emit_finality_vote(&block, &certificate)?;
+                self.stage = TypedRoundStage::Finality;
+            } else {
+                self.emit_timeout_vote()?;
+                self.stage = TypedRoundStage::WaitingForCertificate;
+            }
+        }
+
+        if self.stage == TypedRoundStage::Finality && elapsed >= finality_deadline {
+            if self.finality_certificate.is_none() {
+                self.emit_timeout_vote()?;
+                self.stage = TypedRoundStage::WaitingForCertificate;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn tick(&mut self) -> Result<(), String> {
+        self.tick_at(Instant::now())
+    }
+
+    /// Handles one authenticated inbound message and reacts with only the
+    /// stage-authorized local actions.  Invalid peer input remains rejectable
+    /// by the caller; an internally conflicting certified source is returned
+    /// as a fatal `TYPED_DRIVER_SOURCE_CONFLICT` error.
+    pub fn handle_envelope(
+        &mut self,
+        envelope: TypedConsensusEnvelope,
+        peer_authorizer: &dyn TypedConsensusPeerAuthorizer,
+    ) -> Result<TypedCoordinatorEvent, String> {
+        validate_typed_consensus_message_size(&envelope.message)?;
+        let message = envelope.message.clone();
+        let finalized_context = self.coordinator.local_context.height_context.clone();
+        let event = self
+            .coordinator
+            .handle_envelope(envelope, peer_authorizer)?;
+        match (message, &event) {
+            (
+                TypedConsensusMessage::CoreProposal { block, .. },
+                TypedCoordinatorEvent::ProposalAccepted { candidate_id },
+            ) => {
+                if block.candidate_id()? != *candidate_id {
+                    return Err(
+                        "typed core proposal accepted under a different candidate ID".to_string(),
+                    );
+                }
+            }
+            (
+                TypedConsensusMessage::Proposal {
+                    target_context,
+                    protected_block,
+                    block,
+                    ..
+                },
+                TypedCoordinatorEvent::ProposalAccepted { candidate_id },
+            ) => self.record_proposal_material(
+                candidate_id,
+                target_context,
+                protected_block,
+                &block,
+            )?,
+            (TypedConsensusMessage::Vote { vote }, TypedCoordinatorEvent::VoteAccepted { .. }) => {
+                self.record_verified_vote(vote)?;
+            }
+            (
+                TypedConsensusMessage::ValidationCertificate { certificate },
+                TypedCoordinatorEvent::ValidationCertificateAccepted { .. },
+            ) => self.record_validation_certificate(certificate)?,
+            (
+                TypedConsensusMessage::QuorumCertificate { certificate },
+                TypedCoordinatorEvent::Finalized { record },
+            ) => self.finalize_after_verified_qc(certificate, finalized_context, record.clone())?,
+            (
+                TypedConsensusMessage::TimeoutCertificate { certificate },
+                TypedCoordinatorEvent::TimeoutCertificateAccepted { .. },
+            ) => self.install_verified_timeout_certificate(certificate)?,
+            _ => {
+                return Err(
+                    "typed coordinator event does not match its authenticated message".to_string(),
+                )
+            }
+        }
+        self.metrics.accepted_messages = self.metrics.accepted_messages.saturating_add(1);
+        Ok(event)
+    }
+
+    fn try_emit_scheduled_proposal(&mut self) -> Result<(), String> {
+        let scheduled = self.coordinator.consensus.proposer_for(
+            &self.coordinator.local_context.height_context,
+            self.coordinator.local_context.round,
+        )?;
+        if scheduled.validator_id != self.coordinator.local_validator_id {
+            return Ok(());
+        }
+
+        if let Some(timeout_certificate) = self.timeout_certificate.clone() {
+            if let Some(candidate_id) = timeout_certificate.carry_forward_candidate_id.clone() {
+                let certificate = self.prepared_certificate.clone().ok_or_else(|| {
+                    "TYPED_DRIVER_SOURCE_CONFLICT: timeout certificate requests carry-forward without a prepared VC"
+                        .to_string()
+                })?;
+                if certificate.candidate_id != candidate_id {
+                    return Err(
+                        "TYPED_DRIVER_SOURCE_CONFLICT: timeout certificate and prepared VC disagree on carry-forward candidate"
+                            .to_string(),
+                    );
+                }
+                let original = self
+                    .coordinator
+                    .accepted_proposals
+                    .get(&candidate_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        "TYPED_DRIVER_SOURCE_CONFLICT: prepared carry-forward candidate has no locally validated proposal"
+                            .to_string()
+                    })?;
+                let carried = self.coordinator.carry_forward_prepared_block(
+                    &original,
+                    &certificate,
+                    &timeout_certificate,
+                )?;
+                if self.etdag_is_active() {
+                    let (target_context, protected_block) = self
+                        .proposal_material
+                        .get(&candidate_id)
+                        .cloned()
+                        .ok_or_else(|| {
+                            "TYPED_DRIVER_SOURCE_CONFLICT: prepared carry-forward candidate has no verified ETDAG material"
+                                .to_string()
+                        })?;
+                    self.broadcast_proposal(target_context, protected_block, carried)?;
+                } else {
+                    self.broadcast_core_proposal(carried)?;
+                }
+                return Ok(());
+            }
+        }
+
+        if !self.etdag_is_active() {
+            let block = self.coordinator.propose_core_block()?;
+            return self.broadcast_core_proposal(block);
+        }
+
+        let height_context = self.coordinator.local_context.height_context.clone();
+        let expected_finality_context = self
+            .finality_digest_source
+            .expected_digest(&self.coordinator.local_context)?;
+        expected_finality_context.validate("typed scheduler finality context digest")?;
+        if expected_finality_context.is_zero() {
+            return Err("typed scheduler finality context digest is empty".to_string());
+        }
+        let target_context = self
+            .protected_inputs
+            .load_verified_target_admission_context(
+                &height_context,
+                &self.coordinator.consensus.verifier,
+                &self.coordinator.consensus.validator_set,
+                &self.coordinator.consensus.cluster_map,
+                &self.coordinator.consensus.protocol_config,
+            )?;
+        let protected_block = self.protected_inputs.load_ready_protected_input(
+            &height_context,
+            &expected_finality_context,
+            &self.coordinator.consensus.verifier,
+            &self.coordinator.consensus.validator_set,
+            &self.coordinator.consensus.cluster_map,
+            &self.coordinator.consensus.protocol_config,
+            &self.coordinator.etdag_parameters,
+        )?;
+        let block = self
+            .coordinator
+            .propose_protected_block(&protected_block, &target_context)?;
+        self.broadcast_proposal(target_context, protected_block, block)
+    }
+
+    fn broadcast_core_proposal(&mut self, block: Block) -> Result<(), String> {
+        if !block.transactions.is_empty()
+            || block.header.tx_count != 0
+            || block.header.protected_batch.is_some()
+        {
+            return Err("refusing to broadcast a non-empty core-only typed proposal".to_string());
+        }
+        self.broadcast(TypedConsensusMessage::CoreProposal {
+            height_context: self.coordinator.local_context.height_context.clone(),
+            block,
+        })?;
+        self.metrics.emitted_proposals = self.metrics.emitted_proposals.saturating_add(1);
+        Ok(())
+    }
+
+    fn broadcast_proposal(
+        &mut self,
+        target_context: TargetAdmissionContext,
+        protected_block: ProtectedBlockInput,
+        block: Block,
+    ) -> Result<(), String> {
+        let candidate_id = block.candidate_id()?;
+        self.record_proposal_material(
+            &candidate_id,
+            target_context.clone(),
+            protected_block.clone(),
+            &block,
+        )?;
+        self.broadcast(TypedConsensusMessage::Proposal {
+            height_context: self.coordinator.local_context.height_context.clone(),
+            target_context,
+            protected_block,
+            block,
+        })?;
+        self.metrics.emitted_proposals = self.metrics.emitted_proposals.saturating_add(1);
+        Ok(())
+    }
+
+    fn emit_validation_vote(&mut self, block: &Block) -> Result<(), String> {
+        if self.emitted_validation_vote {
+            return Ok(());
+        }
+        let vote = self.coordinator.validation_vote_for(block)?;
+        self.broadcast(TypedConsensusMessage::Vote { vote: vote.clone() })?;
+        self.emitted_validation_vote = true;
+        self.metrics.emitted_validation_votes =
+            self.metrics.emitted_validation_votes.saturating_add(1);
+        self.record_verified_vote(vote)
+    }
+
+    fn emit_finality_vote(
+        &mut self,
+        block: &Block,
+        certificate: &ValidationCertificate,
+    ) -> Result<(), String> {
+        if self.emitted_finality_vote {
+            return Ok(());
+        }
+        let vote = self.coordinator.finality_vote_for(block, certificate)?;
+        self.broadcast(TypedConsensusMessage::Vote { vote: vote.clone() })?;
+        self.emitted_finality_vote = true;
+        self.metrics.emitted_finality_votes = self.metrics.emitted_finality_votes.saturating_add(1);
+        self.record_verified_vote(vote)
+    }
+
+    fn emit_timeout_vote(&mut self) -> Result<(), String> {
+        if self.emitted_timeout_vote {
+            return Ok(());
+        }
+        let vote = self
+            .coordinator
+            .timeout_vote(self.prepared_certificate.as_ref())?;
+        self.broadcast(TypedConsensusMessage::Vote { vote: vote.clone() })?;
+        self.emitted_timeout_vote = true;
+        self.metrics.emitted_timeout_votes = self.metrics.emitted_timeout_votes.saturating_add(1);
+        self.record_verified_vote(vote)
+    }
+
+    fn broadcast(&mut self, message: TypedConsensusMessage) -> Result<(), String> {
+        let delivered = self.egress.broadcast(&message)?;
+        if delivered == 0 {
+            return Err(
+                "typed PoSy transport delivered to zero authenticated validator peers".to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+impl<E, D, H, R> TypedPosyDriver<E, D, H, R>
+where
+    E: TypedConsensusEgress,
+    D: TypedFinalityContextDigestSource,
+    H: TypedNextHeightContextSource,
+    R: TypedEtdagIngressRotator,
+{
+    fn current_round_proposal(&self) -> Option<&Block> {
+        self.coordinator
+            .accepted_proposals
+            .values()
+            .find(|block| block.header.round == self.coordinator.local_context.round)
+    }
+
+    fn record_proposal_material(
+        &mut self,
+        candidate_id: &BlockId,
+        target_context: TargetAdmissionContext,
+        protected_block: ProtectedBlockInput,
+        block: &Block,
+    ) -> Result<(), String> {
+        if block.candidate_id()? != *candidate_id {
+            return Err("typed proposal material does not match its candidate ID".to_string());
+        }
+        if let Some((existing_context, existing_protected)) =
+            self.proposal_material.get(candidate_id)
+        {
+            if existing_context != &target_context || existing_protected != &protected_block {
+                return Err(
+                    "TYPED_DRIVER_SOURCE_CONFLICT: stable candidate maps to conflicting verified ETDAG material"
+                        .to_string(),
+                );
+            }
+            return Ok(());
+        }
+        self.proposal_material
+            .insert(candidate_id.clone(), (target_context, protected_block));
+        Ok(())
+    }
+
+    fn record_verified_vote(&mut self, vote: Vote) -> Result<(), String> {
+        let context = &self.coordinator.local_context.height_context;
+        if vote.height != context.height
+            || vote.round != self.coordinator.local_context.round
+            || vote.epoch != context.epoch
+            || vote.cluster_id != context.assigned_cluster_id
+            || vote.height_context_root != context.root()?
+        {
+            return Err("typed vote is not for the current local height/round context".to_string());
+        }
+        let phase = vote.phase.clone();
+        let observations = match phase {
+            VotePhase::Validate => &mut self.observed_validation_votes,
+            VotePhase::Finality => &mut self.observed_finality_votes,
+            VotePhase::Timeout => &mut self.observed_timeout_votes,
+        };
+        if let Some(existing) = observations.get(&vote.validator_id) {
+            if existing != &vote {
+                return Err(
+                    "TYPED_DRIVER_SOURCE_CONFLICT: validator supplied conflicting votes for one height/round/phase"
+                        .to_string(),
+                );
+            }
+            return Ok(());
+        }
+        observations.insert(vote.validator_id.clone(), vote.clone());
+
+        match phase {
+            VotePhase::Validate => {
+                if !self
+                    .coordinator
+                    .accepted_proposals
+                    .contains_key(&vote.block_id)
+                {
+                    return Err(
+                        "typed validation vote has no locally validated proposal".to_string()
+                    );
+                }
+                insert_distinct_vote(
+                    self.validation_votes
+                        .entry(vote.block_id.clone())
+                        .or_default(),
+                    vote.clone(),
+                )?;
+                self.maybe_form_validation_certificate(&vote.block_id)
+            }
+            VotePhase::Finality => {
+                if !self
+                    .coordinator
+                    .accepted_proposals
+                    .contains_key(&vote.block_id)
+                {
+                    return Err("typed finality vote has no locally validated proposal".to_string());
+                }
+                let prepared = self.prepared_certificate.as_ref().ok_or_else(|| {
+                    "typed finality vote arrived before a matching validation certificate"
+                        .to_string()
+                })?;
+                if prepared.candidate_id != vote.block_id {
+                    return Err(
+                        "TYPED_DRIVER_SOURCE_CONFLICT: finality vote conflicts with the prepared candidate"
+                            .to_string(),
+                    );
+                }
+                insert_distinct_vote(
+                    self.finality_votes
+                        .entry(vote.block_id.clone())
+                        .or_default(),
+                    vote.clone(),
+                )?;
+                self.maybe_form_finality_certificate(&vote.block_id)
+            }
+            VotePhase::Timeout => {
+                let key = (vote.block_id.clone(), vote.highest_prepared_vc_root);
+                insert_distinct_vote(self.timeout_votes.entry(key.clone()).or_default(), vote)?;
+                self.maybe_form_timeout_certificate(&key)
+            }
+        }
+    }
+
+    fn maybe_form_validation_certificate(&mut self, candidate_id: &BlockId) -> Result<(), String> {
+        let votes = self
+            .validation_votes
+            .get(candidate_id)
+            .ok_or_else(|| "typed validation vote collector disappeared".to_string())?
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        if !self.has_exact_quorum(&votes)? {
+            return Ok(());
+        }
+        let certificate = self.coordinator.form_validation_certificate(&votes)?;
+        self.broadcast(TypedConsensusMessage::ValidationCertificate {
+            certificate: certificate.clone(),
+        })?;
+        self.metrics.emitted_validation_certificates = self
+            .metrics
+            .emitted_validation_certificates
+            .saturating_add(1);
+        self.record_validation_certificate(certificate)
+    }
+
+    fn maybe_form_finality_certificate(&mut self, candidate_id: &BlockId) -> Result<(), String> {
+        if self.finality_certificate.is_some() {
+            return Ok(());
+        }
+        let votes = self
+            .finality_votes
+            .get(candidate_id)
+            .ok_or_else(|| "typed finality vote collector disappeared".to_string())?
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        if !self.has_exact_quorum(&votes)? {
+            return Ok(());
+        }
+        let certificate = self.coordinator.form_finality_certificate(&votes)?;
+        let finalized_context = self.coordinator.local_context.height_context.clone();
+        self.broadcast(TypedConsensusMessage::QuorumCertificate {
+            certificate: certificate.clone(),
+        })?;
+        self.metrics.emitted_finality_certificates =
+            self.metrics.emitted_finality_certificates.saturating_add(1);
+        let record = match self
+            .coordinator
+            .accept_finality_certificate(certificate.clone())?
+        {
+            TypedCoordinatorEvent::Finalized { record } => record,
+            _ => return Err("local finality QC did not produce typed finality".to_string()),
+        };
+        self.finalize_after_verified_qc(certificate, finalized_context, record)
+    }
+
+    fn maybe_form_timeout_certificate(
+        &mut self,
+        key: &(BlockId, Option<Hash>),
+    ) -> Result<(), String> {
+        let votes = self
+            .timeout_votes
+            .get(key)
+            .ok_or_else(|| "typed timeout vote collector disappeared".to_string())?
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        if !self.has_exact_quorum(&votes)? {
+            return Ok(());
+        }
+        let certificate = self.coordinator.form_timeout_certificate(&votes)?;
+        self.broadcast(TypedConsensusMessage::TimeoutCertificate {
+            certificate: certificate.clone(),
+        })?;
+        self.metrics.emitted_timeout_certificates =
+            self.metrics.emitted_timeout_certificates.saturating_add(1);
+        match self
+            .coordinator
+            .accept_timeout_certificate(certificate.clone())?
+        {
+            TypedCoordinatorEvent::TimeoutCertificateAccepted { .. } => {
+                self.install_verified_timeout_certificate(certificate)
+            }
+            _ => Err("local timeout certificate did not advance the typed round".to_string()),
+        }
+    }
+
+    fn has_exact_quorum(&self, votes: &[Vote]) -> Result<bool, String> {
+        let context = &self.coordinator.local_context.height_context;
+        if (votes.len() as u64) < context.strict_count_quorum()? {
+            return Ok(false);
+        }
+        let signed_weight = votes.iter().try_fold(0u64, |total, vote| {
+            let validator = self
+                .coordinator
+                .consensus
+                .validator_set
+                .validators
+                .iter()
+                .find(|validator| validator.validator_id == vote.validator_id)
+                .ok_or_else(|| {
+                    "verified vote signer disappeared from frozen validator set".to_string()
+                })?;
+            total
+                .checked_add(validator.voting_weight)
+                .ok_or_else(|| "typed vote signed-weight overflow".to_string())
+        })?;
+        Ok(signed_weight >= context.strict_weight_quorum()?)
+    }
+
+    fn record_validation_certificate(
+        &mut self,
+        certificate: ValidationCertificate,
+    ) -> Result<(), String> {
+        if !self
+            .coordinator
+            .accepted_proposals
+            .contains_key(&certificate.candidate_id)
+        {
+            return Err(
+                "typed validation certificate has no locally validated proposal".to_string(),
+            );
+        }
+        if let Some(existing) = &self.prepared_certificate {
+            if existing.root()? != certificate.root()? {
+                return Err(
+                    "TYPED_DRIVER_SOURCE_CONFLICT: distinct valid validation certificates observed for one height"
+                        .to_string(),
+                );
+            }
+            return Ok(());
+        }
+        self.prepared_certificate = Some(certificate);
+        Ok(())
+    }
+
+    fn finalize_after_verified_qc(
+        &mut self,
+        certificate: QuorumCertificate,
+        finalized_context: crate::synergy_types::HeightConsensusContext,
+        record: TypedFinalityRecord,
+    ) -> Result<(), String> {
+        if let Some(existing) = &self.finality_certificate {
+            if existing.root()? != certificate.root()? {
+                return Err(
+                    "TYPED_DRIVER_SOURCE_CONFLICT: distinct valid finality certificates observed for one height"
+                        .to_string(),
+                );
+            }
+        }
+        self.finality_certificate = Some(certificate.clone());
+        self.protected_inputs.prune_finalized_input(
+            &certificate,
+            &finalized_context,
+            &self.coordinator.consensus.verifier,
+            &self.coordinator.consensus.validator_set,
+            &self.coordinator.consensus.cluster_map,
+        )?;
+        let next_authority = self
+            .next_height_source
+            .next_authority(&record, &self.coordinator.local_context)?;
+        match next_authority {
+            TypedNextHeightAuthority::UnchangedTopology { context } => {
+                if self
+                    .coordinator
+                    .finality_store
+                    .epoch_transition_for_finality(&record)?
+                    .is_some()
+                {
+                    return Err(
+                        "TYPED_DRIVER_SOURCE_CONFLICT: persisted epoch transition requires a verified topology installation payload"
+                            .to_string(),
+                    );
+                }
+                self.coordinator.advance_to_next_height(context)?;
+            }
+            TypedNextHeightAuthority::VerifiedEpochTransition {
+                transition,
+                next_validator_set,
+                next_cluster_map,
+                context,
+            } => {
+                let persisted = self
+                    .coordinator
+                    .finality_store
+                    .epoch_transition_for_finality(&record)?
+                    .ok_or_else(|| {
+                        "TYPED_DRIVER_SOURCE_CONFLICT: epoch topology installation lacks a persisted verified transition"
+                            .to_string()
+                    })?;
+                if persisted != transition {
+                    return Err(
+                        "TYPED_DRIVER_SOURCE_CONFLICT: epoch topology installation does not match the persisted verified transition"
+                            .to_string(),
+                    );
+                }
+                self.coordinator.apply_verified_epoch_transition(
+                    &transition.transition,
+                    next_validator_set,
+                    next_cluster_map,
+                    context,
+                )?;
+            }
+        }
+        // The coordinator has now durably accepted the QC and installed the
+        // exact successor authority.  Only at this point may P2P certified
+        // ETDAG input move to the successor context.  A rotator failure is
+        // fatal to the driver, preventing a validator from signing a new
+        // height while network ingress remains bound to the old one.
+        let successor_context = self.coordinator.local_context().clone();
+        let successor_finality_digest = self
+            .finality_digest_source
+            .expected_digest(&successor_context)?;
+        let successor_authority = self.coordinator.etdag_ingress_authority();
+        self.ingress_rotator.rotate_successor(
+            &self.protected_inputs,
+            &successor_authority,
+            &successor_finality_digest,
+        )?;
+        self.metrics.finalized_blocks = self.metrics.finalized_blocks.saturating_add(1);
+        self.reset_for_new_height();
+        Ok(())
+    }
+
+    fn install_verified_timeout_certificate(
+        &mut self,
+        certificate: TimeoutCertificate,
+    ) -> Result<(), String> {
+        if let Some(existing) = &self.timeout_certificate {
+            if existing.root()? != certificate.root()? {
+                return Err(
+                    "TYPED_DRIVER_SOURCE_CONFLICT: distinct valid timeout certificates observed for one round"
+                        .to_string(),
+                );
+            }
+            return Ok(());
+        }
+        self.timeout_certificate = Some(certificate);
+        self.validation_votes.clear();
+        self.finality_votes.clear();
+        self.timeout_votes.clear();
+        self.observed_validation_votes.clear();
+        self.observed_finality_votes.clear();
+        self.observed_timeout_votes.clear();
+        self.round_started_at = Instant::now();
+        self.stage = TypedRoundStage::Proposal;
+        self.emitted_proposal = false;
+        self.emitted_validation_vote = false;
+        self.emitted_finality_vote = false;
+        self.emitted_timeout_vote = false;
+        Ok(())
+    }
+
+    fn reset_for_new_height(&mut self) {
+        self.round_started_at = Instant::now();
+        self.stage = TypedRoundStage::Proposal;
+        self.emitted_proposal = false;
+        self.emitted_validation_vote = false;
+        self.emitted_finality_vote = false;
+        self.emitted_timeout_vote = false;
+        self.validation_votes.clear();
+        self.finality_votes.clear();
+        self.timeout_votes.clear();
+        self.observed_validation_votes.clear();
+        self.observed_finality_votes.clear();
+        self.observed_timeout_votes.clear();
+        self.prepared_certificate = None;
+        self.finality_certificate = None;
+        self.timeout_certificate = None;
+        self.proposal_material.clear();
+    }
+
+    fn note_rejected_message(&mut self) {
+        self.metrics.rejected_messages = self.metrics.rejected_messages.saturating_add(1);
+    }
+}
+
+fn insert_distinct_vote(votes: &mut BTreeMap<ValidatorId, Vote>, vote: Vote) -> Result<(), String> {
+    if let Some(existing) = votes.get(&vote.validator_id) {
+        if existing != &vote {
+            return Err(
+                "TYPED_DRIVER_SOURCE_CONFLICT: validator supplied conflicting votes for one consensus phase"
+                    .to_string(),
+            );
+        }
+        return Ok(());
+    }
+    votes.insert(vote.validator_id.clone(), vote);
+    Ok(())
+}
+
+fn validate_canonical_driver_timeouts(
+    config: &crate::synergy_types::ProtocolConfig,
+) -> Result<(), String> {
+    if config.proposal_timeout_ms != 1_500
+        || config.prevote_timeout_ms != 1_500
+        || config.precommit_timeout_ms != 1_500
+        || config.max_round_timeout_ms != 10_000
+    {
+        return Err(
+            "typed PoSy driver refuses non-finalized timeout values; Testnet-v3 requires 1500/1500/1500/10000 ms"
+                .to_string(),
+        );
+    }
+    let staged = config
+        .proposal_timeout_ms
+        .checked_add(config.prevote_timeout_ms)
+        .and_then(|value| value.checked_add(config.precommit_timeout_ms))
+        .ok_or_else(|| "typed PoSy stage-timeout total overflows".to_string())?;
+    if staged > config.max_round_timeout_ms {
+        return Err("typed PoSy stage windows exceed the finalized round cap".to_string());
+    }
+    Ok(())
+}
+
+/// Runs the only operational typed-consensus mailbox consumer.  It evaluates
+/// the scheduler before waiting for ingress and at bounded intervals
+/// thereafter, so a missing protected input, conflicting certified source, or
+/// outbound transport failure halts validator signing instead of degrading to
+/// legacy consensus or an unscheduled local loop.
+pub fn run_typed_posy_driver<E, D, H, R>(
+    driver: &mut TypedPosyDriver<E, D, H, R>,
+    receiver: &Receiver<TypedConsensusEnvelope>,
+    running: &AtomicBool,
+) -> Result<TypedCoordinatorDriverMetrics, String>
+where
+    E: TypedConsensusEgress,
+    D: TypedFinalityContextDigestSource,
+    H: TypedNextHeightContextSource,
+    R: TypedEtdagIngressRotator,
+{
+    let authorizer = FrozenTypedConsensusPeerAuthorizer::new(
+        driver.coordinator.consensus.validator_set.clone(),
+    )?;
+    while running.load(Ordering::Acquire) {
+        driver.tick()?;
+        match receiver.recv_timeout(COORDINATOR_INGRESS_POLL_INTERVAL) {
+            Ok(envelope) => {
+                release_typed_vote_queue_slot(&envelope);
+                match driver.handle_envelope(envelope, &authorizer) {
+                    Ok(_) => {}
+                    Err(error) if driver_error_is_fatal(&error) => return Err(error),
+                    Err(_) => driver.note_rejected_message(),
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) if !running.load(Ordering::Acquire) => break,
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(
+                    "typed PoSy driver ingress disconnected while validator runtime is live"
+                        .to_string(),
+                )
+            }
+        }
+    }
+    Ok(driver.metrics())
+}
+
+fn driver_error_is_fatal(error: &str) -> bool {
+    error.contains("TYPED_DRIVER_SOURCE_CONFLICT")
+        || error.contains("typed PoSy transport")
+        || error.contains("typed coordinator event does not match")
 }
 
 fn execute_finalized_block(
@@ -1283,10 +2567,16 @@ pub fn reset_typed_coordinator_ingress_for_test() {
 mod tests {
     use super::*;
     use crate::consensus::posy::ProofOfSynergyBft;
-    use crate::consensus_parameters::load_genesis_bound_consensus_parameters;
+    use crate::consensus::testnet_v3_bootstrap::load_testnet_v3_genesis_bootstrap;
+    use crate::consensus::testnet_v3_finality_context::FinalizedTypedContextProvider;
+    use crate::consensus_parameters::{
+        load_genesis_bound_consensus_parameters, EtdagActivationPermit,
+    };
     use crate::crypto::aegis_pqvm::AegisPqvmSigner;
     use crate::etdag::EtdagParameters;
     use crate::execution::ExecutionState;
+    use crate::genesis::load_genesis_from_path_for_test;
+    use crate::p2p::messages::NetworkMessage;
     use crate::synergy_types::{
         deterministic_test_height_context, AegisPqKeyId, AegisPqKeyRole, AegisPqSignature,
         BlockHeader, BlockId, ChainId, ClusterAssignment, ClusterId, ClusterMap, Epoch,
@@ -1295,6 +2585,7 @@ mod tests {
         ValidatorSet, ValidatorStatus, Vote, VotePhase, POSY_PROTOCOL_VERSION,
     };
     use std::collections::BTreeSet;
+    use std::path::PathBuf;
 
     static COORDINATOR_FIXTURE_SEQUENCE: std::sync::atomic::AtomicU64 =
         std::sync::atomic::AtomicU64::new(0);
@@ -1554,11 +2845,368 @@ mod tests {
     }
 
     fn genesis_bound_parameters() -> crate::consensus_parameters::LoadedConsensusParameters {
-        let genesis_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../genesis.testnet-v3.identity-assigned.json");
+        let genesis_path = identity_assigned_genesis_path();
         let genesis: serde_json::Value =
             serde_json::from_slice(&std::fs::read(genesis_path).unwrap()).unwrap();
         load_genesis_bound_consensus_parameters(&genesis["consensus_parameters"]).unwrap()
+    }
+
+    fn identity_assigned_genesis_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../genesis.testnet-v3.identity-assigned.json")
+    }
+
+    fn canonical_release_bootstrap() -> TestnetV3GenesisBootstrap {
+        let genesis = load_genesis_from_path_for_test(identity_assigned_genesis_path())
+            .expect("load canonical Testnet-v3 Genesis");
+        load_testnet_v3_genesis_bootstrap(&genesis)
+            .expect("derive canonical Testnet-v3 Genesis bootstrap")
+    }
+
+    fn six_validator_startup_fixture(
+        parameters: crate::consensus_parameters::LoadedConsensusParameters,
+    ) -> (
+        TestnetV3GenesisBootstrap,
+        Hash,
+        Hash,
+        Vec<TypedPosyCoordinator>,
+        Vec<PathBuf>,
+    ) {
+        let mut genesis_signer = AegisPqvmSigner::initialize_required().expect("Aegis signer");
+        let mut validators = Vec::new();
+        let mut local_key_material = Vec::new();
+        for index in 0..6 {
+            let uma = format!("e2e-uma-{index}");
+            let key_id = genesis_signer
+                .generate_and_register_key(
+                    &uma,
+                    vec![
+                        AegisPqKeyRole::ConsensusVote,
+                        AegisPqKeyRole::ConsensusProposer,
+                        AegisPqKeyRole::EpochTransition,
+                    ],
+                    Epoch(0),
+                )
+                .expect("generate isolated validator key");
+            let public_record = genesis_signer
+                .public_key_record(&key_id)
+                .expect("public validator record");
+            let public_key = genesis_signer
+                .registry
+                .public_key(&key_id)
+                .expect("registered public key")
+                .clone();
+            let private_key = genesis_signer
+                .registry
+                .private_key(&key_id)
+                .expect("registered private key")
+                .clone();
+            let validator_id = ValidatorId(format!("e2e-validator-{index}"));
+            validators.push(ValidatorRecord {
+                validator_id: validator_id.clone(),
+                validator_uma_id: UmaId(uma.clone()),
+                consensus_public_key: public_record.clone(),
+                peer_public_key: public_record.clone(),
+                operator_public_key: public_record,
+                voting_weight: 1,
+                status: ValidatorStatus::Active,
+                cluster_id: ClusterId(0),
+                activation_epoch: Epoch(0),
+            });
+            local_key_material.push((uma, validator_id, public_key, private_key));
+        }
+
+        let finalized_epoch_seed_root =
+            Hash::from_domain_bytes("typed-consensus-e2e", b"finalized-epoch-seed");
+        let mut validator_set = ValidatorSet {
+            epoch: Epoch(0),
+            validators,
+        };
+        let cluster_map =
+            ClusterMap::derive_from_finalized_epoch_seed(&validator_set, finalized_epoch_seed_root)
+                .expect("derive six-validator cluster map");
+        for validator in &mut validator_set.validators {
+            validator.cluster_id = cluster_map
+                .assignments
+                .iter()
+                .find(|assignment| assignment.validator_id == validator.validator_id)
+                .expect("each validator receives a cluster assignment")
+                .cluster_id;
+        }
+        let cluster_map =
+            ClusterMap::derive_from_finalized_epoch_seed(&validator_set, finalized_epoch_seed_root)
+                .expect("rederive canonical six-validator cluster map");
+        let bootstrap = TestnetV3GenesisBootstrap {
+            validator_set,
+            cluster_map,
+            verifier: genesis_signer.verifier(),
+            finalized_epoch_seed_root,
+            genesis_transition_root: Hash::from_domain_bytes(
+                "typed-consensus-e2e",
+                b"genesis-transition",
+            ),
+            cryptographic_profile_root: Hash::from_domain_bytes(
+                "typed-consensus-e2e",
+                b"cryptographic-profile",
+            ),
+        };
+        let execution_state = ExecutionState::new();
+        let deployed_genesis_state_root =
+            compute_state_root_after(&execution_state).expect("empty execution root");
+        let genesis_anchor = Hash::from_domain_bytes("typed-consensus-e2e", b"genesis-anchor");
+        let mut coordinators = Vec::new();
+        let mut store_paths = Vec::new();
+        for (index, (uma, _validator_id, public_key, private_key)) in
+            local_key_material.into_iter().enumerate()
+        {
+            let (signer, local_validator_id) =
+                import_local_genesis_bound_typed_signer(&bootstrap, &uma, public_key, private_key)
+                    .expect("import exactly one canonical local consensus key");
+            let store_path = crate::utils::test_temp_root(format!(
+                "typed-consensus-e2e-finality-{}-{}.json",
+                std::process::id(),
+                COORDINATOR_FIXTURE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            let store = TypedFinalityStore::at_path(store_path.clone(), genesis_anchor)
+                .expect("create isolated finality store");
+            let coordinator = TypedPosyCoordinatorStartup {
+                genesis_bootstrap: bootstrap.clone(),
+                consensus_parameters: parameters.clone(),
+                signer,
+                local_validator_id,
+                genesis_anchor,
+                deployed_genesis_state_root,
+                execution_state: ExecutionState::new(),
+                etdag_parameters: EtdagParameters::default(),
+                finality_store: store,
+            }
+            .build()
+            .unwrap_or_else(|error| panic!("node {index} startup must be Genesis-bound: {error}"));
+            coordinators.push(coordinator);
+            store_paths.push(store_path);
+        }
+        (
+            bootstrap,
+            genesis_anchor,
+            deployed_genesis_state_root,
+            coordinators,
+            store_paths,
+        )
+    }
+
+    #[test]
+    fn six_validator_release_gate_requires_genesis_bound_manifest_exact_quorum_and_recovery() {
+        let _ingress_guard = INGRESS_TEST_LOCK.lock().unwrap();
+        reset_typed_coordinator_ingress_for_test();
+
+        let parameters = genesis_bound_parameters();
+        parameters
+            .require_genesis_binding()
+            .expect("release parameters must be bound in Genesis");
+        parameters
+            .manifest
+            .validate_finalized()
+            .expect("release parameter manifest must be finalized");
+        let canonical_bootstrap = canonical_release_bootstrap();
+        let canonical_active = canonical_bootstrap.validator_set.active_for_epoch(Epoch(0));
+        canonical_bootstrap
+            .cluster_map
+            .validate_complete_balanced_assignment(&canonical_active)
+            .expect("canonical Genesis cluster map");
+        assert_eq!(
+            canonical_active.validators.len() as u64,
+            parameters.manifest.initial_cluster_validator_count,
+            "the finalized release must start with its six canonical validators"
+        );
+        assert_eq!(parameters.manifest.initial_availability_quorum, 5);
+
+        let (bootstrap, genesis_anchor, deployed_genesis_state_root, mut coordinators, store_paths) =
+            six_validator_startup_fixture(parameters.clone());
+        let height_context = coordinators[0].local_context().height_context.clone();
+        assert_eq!(height_context.assigned_cluster_validator_count, 6);
+        assert_eq!(height_context.strict_count_quorum().unwrap(), 5);
+        assert_eq!(height_context.strict_weight_quorum().unwrap(), 5);
+
+        let proposer_index = coordinators
+            .iter()
+            .position(|coordinator| {
+                coordinator
+                    .consensus
+                    .proposer_for(&height_context, Round(0))
+                    .expect("scheduled proposer")
+                    .validator_id
+                    == coordinator.local_validator_id
+            })
+            .expect("one of six coordinators is the height-one proposer");
+        let block = {
+            let proposer_coordinator = &mut coordinators[proposer_index];
+            let local_context = proposer_coordinator.local_context.clone();
+            let proposer = proposer_coordinator
+                .consensus
+                .proposer_for(&local_context.height_context, local_context.round)
+                .expect("scheduled proposer record");
+            proposer_coordinator
+                .consensus
+                .propose_block(
+                    &mut proposer_coordinator.signer,
+                    &proposer,
+                    Vec::new(),
+                    &local_context,
+                    &proposer_coordinator.execution_state,
+                    Hash::from_domain_bytes("typed-consensus-e2e", b"dag-frontier"),
+                )
+                .expect("scheduled node must sign the height-one proposal")
+        };
+
+        let validation_votes = coordinators
+            .iter_mut()
+            .map(|coordinator| {
+                coordinator
+                    .validation_vote_for(&block)
+                    .expect("each independently imported validator signs its own validation vote")
+            })
+            .collect::<Vec<_>>();
+
+        let inbound_vote = validation_votes[1].clone();
+        let peer_record = coordinators[1]
+            .consensus
+            .validator_set
+            .validators
+            .iter()
+            .find(|validator| validator.validator_id == inbound_vote.validator_id)
+            .expect("inbound signer remains in frozen validator set");
+        let authenticated_peer = AuthenticatedTypedConsensusPeer {
+            validator_id: peer_record.validator_id.clone(),
+            validator_uma_id: peer_record.validator_uma_id.clone(),
+            consensus_key_id: peer_record.consensus_public_key.key_id.clone(),
+        };
+        let wire = serde_json::to_vec(&NetworkMessage::TypedConsensus {
+            message: TypedConsensusMessage::Vote {
+                vote: inbound_vote.clone(),
+            },
+        })
+        .expect("serialize exact typed P2P message");
+        let decoded: NetworkMessage =
+            serde_json::from_slice(&wire).expect("decode exact typed P2P message");
+        let NetworkMessage::TypedConsensus { message } = decoded else {
+            panic!("typed consensus artifact must not be decoded as legacy traffic");
+        };
+        let receiver = install_typed_coordinator_ingress(1).expect("install bounded ingress");
+        dispatch_typed_consensus_message("six-validator-p2p", Some(authenticated_peer), message)
+            .expect("authenticated typed P2P vote reaches the dedicated mailbox");
+        let envelope = receiver.recv().expect("typed mailbox delivery");
+        release_typed_vote_queue_slot(&envelope);
+        let authorizer = FrozenTypedConsensusPeerAuthorizer::new(
+            coordinators[proposer_index].consensus.validator_set.clone(),
+        )
+        .expect("freeze P2P validator identity authority");
+        assert!(matches!(
+            coordinators[proposer_index]
+                .handle_envelope(envelope, &authorizer)
+                .expect("authenticated typed P2P vote is verified"),
+            TypedCoordinatorEvent::VoteAccepted {
+                phase: VotePhase::Validate,
+                ..
+            }
+        ));
+        remove_typed_coordinator_ingress().expect("remove test-only ingress");
+
+        let proposer_coordinator = &mut coordinators[proposer_index];
+        let four_validation_error = proposer_coordinator
+            .form_validation_certificate(&validation_votes[..4])
+            .expect_err("four of six validators must never form a validation certificate");
+        assert!(four_validation_error.contains("strict distinct-signer quorum failed"));
+        let validation_certificate = proposer_coordinator
+            .form_validation_certificate(&validation_votes[..5])
+            .expect("exactly five of six validation votes form a certificate");
+        assert_eq!(validation_certificate.signed_weight, 5);
+
+        let finality_votes = coordinators
+            .iter_mut()
+            .map(|coordinator| {
+                coordinator
+                    .finality_vote_for(&block, &validation_certificate)
+                    .expect("each independently imported validator signs its finality vote")
+            })
+            .collect::<Vec<_>>();
+        let proposer_coordinator = &mut coordinators[proposer_index];
+        let four_finality_error = proposer_coordinator
+            .form_finality_certificate(&finality_votes[..4])
+            .expect_err("four of six validators must never form a finality QC");
+        assert!(four_finality_error.contains("strict distinct-signer quorum failed"));
+        let finality_qc = proposer_coordinator
+            .form_finality_certificate(&finality_votes[..5])
+            .expect("exactly five of six finality votes form a QC");
+        assert_eq!(finality_qc.threshold_weight_required, 5);
+        assert_eq!(finality_qc.signed_weight, 5);
+        proposer_coordinator
+            .consensus
+            .commit_block(&block, &finality_qc, &height_context)
+            .expect("five-of-six QC commits only its exact candidate");
+        let finality_store = proposer_coordinator.finality_store.clone();
+        let record = finality_store
+            .append_verified_finality(&block, &finality_qc)
+            .expect("persist verified five-of-six finality evidence");
+
+        let first_provider = FinalizedTypedContextProvider::new(
+            bootstrap.clone(),
+            parameters.protocol_config.clone(),
+            finality_store.clone(),
+            deployed_genesis_state_root,
+        )
+        .expect("construct finalized context provider");
+        let recovered = first_provider
+            .recover_next_context()
+            .expect("recover successor context from durable five-of-six QC");
+        assert_eq!(recovered.latest_finalized_height, record.height);
+        let restarted_provider = FinalizedTypedContextProvider::new(
+            bootstrap.clone(),
+            parameters.protocol_config.clone(),
+            finality_store.clone(),
+            deployed_genesis_state_root,
+        )
+        .expect("restart finalized context provider");
+        assert_eq!(
+            restarted_provider
+                .recover_next_context()
+                .expect("restart must rebuild the same durable successor context")
+                .height_context,
+            recovered.height_context
+        );
+
+        let mut mismatched_recovery = recovered.clone();
+        mismatched_recovery.latest_finalized_state_root =
+            Hash::from_domain_bytes("typed-consensus-e2e", b"mismatched-recovery-state");
+        let mismatch_node = coordinators
+            .pop()
+            .expect("retain a node signer for fail-closed restart");
+        let TypedPosyCoordinator {
+            signer,
+            local_validator_id,
+            ..
+        } = mismatch_node;
+        let mismatch = match (TypedPosyCoordinatorStartup {
+            genesis_bootstrap: bootstrap.clone(),
+            consensus_parameters: parameters.clone(),
+            signer,
+            local_validator_id,
+            genesis_anchor,
+            deployed_genesis_state_root,
+            execution_state: ExecutionState::new(),
+            etdag_parameters: EtdagParameters::default(),
+            finality_store: finality_store.clone(),
+        }
+        .build_with_finalized_context(mismatched_recovery))
+        {
+            Ok(_) => panic!("restart must reject a context that disagrees with durable finality"),
+            Err(error) => error,
+        };
+        assert!(mismatch.contains("does not match recovered typed finality"));
+
+        drop(coordinators);
+        for path in store_paths {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     #[test]
@@ -2036,5 +3684,201 @@ mod tests {
             1
         );
         let _ = std::fs::remove_file(coordinator.finality_store.path());
+    }
+
+    #[derive(Default)]
+    struct RecordingEgress {
+        deliveries: usize,
+        messages: Vec<TypedConsensusMessage>,
+    }
+
+    impl TypedConsensusEgress for RecordingEgress {
+        fn broadcast(&mut self, message: &TypedConsensusMessage) -> Result<usize, String> {
+            self.messages.push(message.clone());
+            Ok(self.deliveries)
+        }
+    }
+
+    struct FixedFinalityDigest;
+
+    impl TypedFinalityContextDigestSource for FixedFinalityDigest {
+        fn expected_digest(
+            &self,
+            _local_context: &LocalConsensusContext,
+        ) -> Result<crate::etdag::EtdagDigest, String> {
+            Ok(crate::etdag::EtdagDigest::from_domain_bytes(
+                "typed-driver-test-finality-context",
+                b"finalized",
+            ))
+        }
+    }
+
+    struct NoNextHeight;
+
+    impl TypedNextHeightContextSource for NoNextHeight {
+        fn next_authority(
+            &mut self,
+            _finalized: &TypedFinalityRecord,
+            _current: &LocalConsensusContext,
+        ) -> Result<TypedNextHeightAuthority, String> {
+            Err("test next-height source must not be used".to_string())
+        }
+    }
+
+    fn driver_with(
+        coordinator: TypedPosyCoordinator,
+        deliveries: usize,
+    ) -> TypedPosyDriver<RecordingEgress, FixedFinalityDigest, NoNextHeight> {
+        let root = crate::utils::test_temp_root(format!(
+            "synergy-typed-driver-{}-{}",
+            std::process::id(),
+            COORDINATOR_FIXTURE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        TypedPosyDriver::new(
+            coordinator,
+            EtdagProtectedInputCoordinator::at_paths(
+                root.join("admission.json"),
+                root.join("protected.json"),
+            ),
+            RecordingEgress {
+                deliveries,
+                messages: Vec::new(),
+            },
+            FixedFinalityDigest,
+            NoNextHeight,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn driver_refuses_any_noncanonical_timeout_projection() {
+        let mut coordinator = coordinator_fixture();
+        coordinator.consensus.protocol_config.precommit_timeout_ms = 1_501;
+        let result = TypedPosyDriver::new(
+            coordinator,
+            EtdagProtectedInputCoordinator::at_paths(
+                crate::utils::test_temp_root("typed-driver-timeout-admission"),
+                crate::utils::test_temp_root("typed-driver-timeout-protected"),
+            ),
+            RecordingEgress::default(),
+            FixedFinalityDigest,
+            NoNextHeight,
+        );
+        let error = match result {
+            Ok(_) => panic!("driver must reject a noncanonical timeout projection"),
+            Err(error) => error,
+        };
+        assert!(error.contains("1500/1500/1500/10000"));
+    }
+
+    #[test]
+    fn driver_etdag_path_requires_activation_permit_and_ready_certified_input() {
+        let mut coordinator = coordinator_fixture();
+        let scheduled = coordinator
+            .consensus
+            .proposer_for(
+                &coordinator.local_context.height_context,
+                coordinator.local_context.round,
+            )
+            .unwrap();
+        coordinator.local_validator_id = scheduled.validator_id;
+        let mut driver = driver_with(coordinator, 1);
+        assert!(!driver.etdag_is_active());
+        driver
+            .configure_etdag_activation(&EtdagActivationPermit::test_only())
+            .expect("a test-only activation permit enables the protected path");
+        assert!(driver.etdag_is_active());
+        let error = driver.tick().unwrap_err();
+        assert!(error.contains("ETDAG_PROTECTED_INPUT_NOT_READY"));
+    }
+
+    #[test]
+    fn driver_scheduled_proposer_egresses_deterministic_empty_core_proposal_when_etdag_inactive() {
+        let mut coordinator = coordinator_fixture();
+        let scheduled = coordinator
+            .consensus
+            .proposer_for(
+                &coordinator.local_context.height_context,
+                coordinator.local_context.round,
+            )
+            .unwrap();
+        coordinator.local_validator_id = scheduled.validator_id;
+        let mut driver = driver_with(coordinator, 1);
+
+        driver
+            .tick()
+            .expect("deferred ETDAG must not halt core liveness");
+        assert!(!driver.etdag_is_active());
+        assert_eq!(driver.metrics().emitted_proposals, 1);
+        let (height_context, block) = match driver.egress.messages.last().cloned() {
+            Some(TypedConsensusMessage::CoreProposal {
+                height_context,
+                block,
+            }) => (height_context, block),
+            _ => panic!("deferred ETDAG scheduler must emit the core-only wire variant"),
+        };
+        assert_eq!(block.header.version, 1);
+        assert!(block.transactions.is_empty());
+        assert_eq!(block.header.tx_count, 0);
+        assert!(block.header.protected_batch.is_none());
+
+        let proposal_deadline = driver.round_started_at + Duration::from_millis(1_500);
+        driver
+            .tick_at(proposal_deadline)
+            .expect("core-only proposal must advance into the validation stage");
+        assert_eq!(driver.metrics().emitted_validation_votes, 1);
+        assert!(matches!(
+            driver.egress.messages.last(),
+            Some(TypedConsensusMessage::Vote { vote }) if vote.phase == VotePhase::Validate
+        ));
+
+        let mut stale_context = height_context.clone();
+        stale_context.height = Height(height_context.height.0.saturating_add(1));
+        let stale_error = driver
+            .coordinator
+            .handle_message(TypedConsensusMessage::CoreProposal {
+                height_context: stale_context,
+                block: block.clone(),
+            })
+            .expect_err("a prior-height core proposal must not replay into the current context");
+        assert!(stale_error.contains("height context"));
+
+        let mut payload_attempt = block;
+        payload_attempt.header.tx_count = 1;
+        let payload_error = driver
+            .coordinator
+            .handle_message(TypedConsensusMessage::CoreProposal {
+                height_context,
+                block: payload_attempt,
+            })
+            .expect_err("core-only wire path must reject any transaction payload marker");
+        assert!(payload_error.contains("must not contain user transactions"));
+    }
+
+    #[test]
+    fn driver_timeout_vote_fails_closed_when_p2p_fanout_is_empty() {
+        let mut coordinator = coordinator_fixture();
+        let scheduled = coordinator
+            .consensus
+            .proposer_for(
+                &coordinator.local_context.height_context,
+                coordinator.local_context.round,
+            )
+            .unwrap()
+            .validator_id;
+        let local = coordinator
+            .consensus
+            .validator_set
+            .validators
+            .iter()
+            .find(|validator| validator.validator_id != scheduled)
+            .unwrap()
+            .validator_id
+            .clone();
+        coordinator.local_validator_id = local;
+        let mut driver = driver_with(coordinator, 0);
+        let now = driver.round_started_at + Duration::from_millis(1_500);
+        let error = driver.tick_at(now).unwrap_err();
+        assert!(error.contains("transport delivered to zero"));
     }
 }

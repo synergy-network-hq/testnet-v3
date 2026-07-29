@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::block::{Block, BlockHeader};
 use crate::consensus::dual_quorum::{QuorumCertificate, Vote};
-use crate::etdag::{ProtectedBlockInput, TargetAdmissionContext};
+use crate::etdag::{CertifiedProtectedInputArtifact, ProtectedBlockInput, TargetAdmissionContext};
 use crate::synergy_types::AegisPqSignature;
 use crate::synergy_types::{
     Block as TypedBlock, HeightConsensusContext, QuorumCertificate as TypedQuorumCertificate,
@@ -18,6 +18,10 @@ use crate::transaction::Transaction;
 /// sends rather than to a partial in-memory field.
 pub const MAX_TYPED_CONSENSUS_CERTIFICATE_FRAME_BYTES: usize = 128 * 1024;
 pub const MAX_TYPED_CONSENSUS_PROPOSAL_FRAME_BYTES: usize = 8 * 1024 * 1024;
+/// Core-only proposals are deterministic empty blocks while ETDAG is deferred,
+/// so they receive the tighter certificate-sized transport budget rather than
+/// the ETDAG package allowance.
+pub const MAX_TYPED_CONSENSUS_CORE_PROPOSAL_FRAME_BYTES: usize = 128 * 1024;
 
 /// The only wire representation for the typed PoSy v2.2 state machine.
 ///
@@ -27,6 +31,13 @@ pub const MAX_TYPED_CONSENSUS_PROPOSAL_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// it will be checked against before any vote or finality action.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TypedConsensusMessage {
+    /// The only typed proposal accepted before ETDAG activation.  The block
+    /// itself must be a deterministic empty core block; coordinator validation
+    /// rejects any transaction payload, protected batch, or ETDAG commitment.
+    CoreProposal {
+        height_context: HeightConsensusContext,
+        block: TypedBlock,
+    },
     Proposal {
         height_context: HeightConsensusContext,
         target_context: TargetAdmissionContext,
@@ -57,6 +68,10 @@ pub fn validate_typed_consensus_message_size(
     message: &TypedConsensusMessage,
 ) -> Result<(), String> {
     let (kind, maximum) = match message {
+        TypedConsensusMessage::CoreProposal { .. } => (
+            "typed consensus core-only proposal",
+            MAX_TYPED_CONSENSUS_CORE_PROPOSAL_FRAME_BYTES,
+        ),
         TypedConsensusMessage::Proposal { .. } => (
             "typed consensus proposal",
             MAX_TYPED_CONSENSUS_PROPOSAL_FRAME_BYTES,
@@ -157,6 +172,12 @@ pub enum NetworkMessage {
     /// coordinator mailbox and never through inherited consensus handlers.
     TypedConsensus {
         message: TypedConsensusMessage,
+    },
+    /// A complete, already-certified ETDAG proof package. The P2P receiver
+    /// binds it to local height/finality authority before durable admission;
+    /// no consensus context is accepted from this wire message.
+    EtdagCertifiedInput {
+        artifact: CertifiedProtectedInputArtifact,
     },
     Transaction {
         transaction_data: Transaction,
