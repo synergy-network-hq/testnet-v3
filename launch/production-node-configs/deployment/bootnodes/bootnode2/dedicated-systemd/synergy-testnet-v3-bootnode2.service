@@ -3,8 +3,8 @@
 Description=Synergy Testnet-v3 dedicated bootnode2
 After=network-online.target
 Wants=network-online.target
-ConditionPathIsRegular=/etc/synergy/testnet-v3/bootnode2/genesis.json
-ConditionPathIsRegular=/etc/synergy/testnet-v3/bootnode2/node.toml
+ConditionPathExists=/etc/synergy/testnet-v3/bootnode2/genesis.json
+ConditionPathExists=/etc/synergy/testnet-v3/bootnode2/node.toml
 
 [Service]
 Type=simple

@@ -3,8 +3,8 @@
 Description=Synergy Testnet-v3 dedicated seed1
 After=network-online.target
 Wants=network-online.target
-ConditionPathIsRegular=/etc/synergy/testnet-v3/seed-services/seed1.genesis.json
-ConditionPathIsRegular=/etc/synergy/testnet-v3/seed-services/seed1.json
+ConditionPathExists=/etc/synergy/testnet-v3/seed-services/seed1.genesis.json
+ConditionPathExists=/etc/synergy/testnet-v3/seed-services/seed1.json
 
 [Service]
 Type=simple
