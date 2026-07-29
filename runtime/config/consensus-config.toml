@@ -1,8 +1,10 @@
 # Compatibility projection only. The production runtime loads the finalized
-# Genesis-bound JSON manifest; this file is rejected as an override source.
+# Genesis-bound JSON manifest and rejects this file as an override source.
+# These labels are descriptive mirrors only; the Genesis parameter root is the
+# sole consensus authority.
 # Decision ID: TV3-POSY-PARAMS-2026-07-28-01
 [consensus]
-algorithm = "Proof-of-Synergy"
+algorithm = "posy/2.2"
 block_time = 2
 stake_required = "50000 SNRG"
 validators = 6
@@ -15,11 +17,12 @@ minimum_stake_period = "24 hours"
 cluster_size = 6
 clusters = 1
 epoch_length = 1000
+activation_boundary = "genesis_or_declared_epoch_boundary"
 rotation_interval = 1000
 checkpoint_interval = 50
 count_quorum_rule = "strict_more_than_two_thirds"
 weight_quorum_rule = "strict_more_than_two_thirds"
-proposer_selection = "synergy_score_weighted"
+proposer_selection = "full_cluster_deterministic_ranked_rotation"
 initial_availability_quorum = 5
 initial_decryption_threshold = 2
 proposal_timeout_ms = 1500
@@ -30,7 +33,7 @@ max_round_timeout_ms = 10000
 [consensus.security]
 sybil_resistance = true
 validator_rotation = true
-rotation_randomness = "ml-kem"
+rotation_randomness = "finalized_qc_derived_epoch_seed"
 min_uptime_threshold = 0.85
 slashing_tiers = "light, moderate, severe"
 cartel_detection_enabled = true
