@@ -1,0 +1,229 @@
+// Testnet-v3 stake-weighted governance.
+// Proposal state: 0=None, 1=Active, 2=Defeated, 3=Succeeded,
+// 4=Queued, 5=Executed, 6=Cancelled, 7=Vetoed.
+// Vote type: 0=Against, 1=For, 2=Abstain, 3=Veto.
+pragma synq ^1.0.0;
+
+contract Governance {
+    governanceKey: MLDSAPublicKey public;
+    votesProvider: Address public;
+    paused: Bool public;
+    quorumPctBps: UInt256 public;
+    approvalPctBps: UInt256 public;
+    vetoPctBps: UInt256 public;
+    minDeposit: UInt256 public;
+    votingDuration: UInt256 public;
+    timelockDelay: UInt256 public;
+    proposalCount: UInt256 public;
+
+    proposerOf: mapping(UInt256 => Address) public;
+    proposalTarget: mapping(UInt256 => Address) public;
+    proposalValue: mapping(UInt256 => UInt256) public;
+    proposalData: mapping(UInt256 => Bytes) public;
+    proposalDescriptionHash: mapping(UInt256 => Bytes) public;
+    proposalDeposit: mapping(UInt256 => UInt256) public;
+    proposalStart: mapping(UInt256 => UInt256) public;
+    proposalEnd: mapping(UInt256 => UInt256) public;
+    proposalEta: mapping(UInt256 => UInt256) public;
+    forVotes: mapping(UInt256 => UInt256) public;
+    againstVotes: mapping(UInt256 => UInt256) public;
+    abstainVotes: mapping(UInt256 => UInt256) public;
+    vetoVotes: mapping(UInt256 => UInt256) public;
+    proposalQueued: mapping(UInt256 => Bool) public;
+    proposalExecuted: mapping(UInt256 => Bool) public;
+    proposalCancelled: mapping(UInt256 => Bool) public;
+    hasVoted: mapping(UInt256 => mapping(Address => Bool)) public;
+
+    event ProposalCreated(proposalId: UInt256 indexed, proposer: Address indexed, target: Address indexed, value: UInt256, descriptionHash: Bytes);
+    event VoteCast(proposalId: UInt256 indexed, voter: Address indexed, voteType: UInt8, weight: UInt256);
+    event ProposalQueued(proposalId: UInt256 indexed, eta: UInt256);
+    event ProposalExecuted(proposalId: UInt256 indexed);
+    event ProposalCancelled(proposalId: UInt256 indexed);
+    event ProposalVetoed(proposalId: UInt256 indexed);
+    event PauseStateUpdated(paused: Bool);
+
+    constructor(
+        initialGovernanceKey: MLDSAPublicKey,
+        stakingVotesProvider: Address,
+        quorumBps: UInt256,
+        approvalBps: UInt256,
+        vetoBps: UInt256,
+        minimumDeposit: UInt256,
+        votingBlocks: UInt256,
+        timelockBlocks: UInt256
+    ) {
+        require(stakingVotesProvider != Address(0), "Invalid votes provider");
+        require(quorumBps <= 10000, "Invalid quorum");
+        require(approvalBps <= 10000, "Invalid approval threshold");
+        require(vetoBps <= 10000, "Invalid veto threshold");
+        require(votingBlocks > 0, "Voting duration is zero");
+        governanceKey = initialGovernanceKey;
+        votesProvider = stakingVotesProvider;
+        quorumPctBps = quorumBps;
+        approvalPctBps = approvalBps;
+        vetoPctBps = vetoBps;
+        minDeposit = minimumDeposit;
+        votingDuration = votingBlocks;
+        timelockDelay = timelockBlocks;
+        paused = false;
+        proposalCount = 0;
+    }
+
+    @gas_cost(base: 120000)
+    @public function propose(
+        target: Address,
+        value: UInt256,
+        data: Bytes,
+        descriptionHash: Bytes
+    ) -> UInt256 {
+        require(!paused, "Governance paused");
+        require(msg.value >= minDeposit, "Deposit below minimum");
+        require(target != Address(0), "Invalid target");
+        let proposalId: UInt256 = proposalCount + 1;
+        proposalCount = proposalId;
+        proposerOf[proposalId] = msg.sender;
+        proposalTarget[proposalId] = target;
+        proposalValue[proposalId] = value;
+        proposalData[proposalId] = data;
+        proposalDescriptionHash[proposalId] = descriptionHash;
+        proposalDeposit[proposalId] = msg.value;
+        proposalStart[proposalId] = block.number;
+        proposalEnd[proposalId] = block.number + votingDuration;
+        emit ProposalCreated(proposalId, msg.sender, target, value, descriptionHash);
+        return proposalId;
+    }
+
+    @gas_cost(base: 90000)
+    @public function castVote(proposalId: UInt256, voteType: UInt8) {
+        require(!paused, "Governance paused");
+        require(proposerOf[proposalId] != Address(0), "Proposal not found");
+        require(block.number >= proposalStart[proposalId], "Voting not started");
+        require(block.number <= proposalEnd[proposalId], "Voting ended");
+        require(!hasVoted[proposalId][msg.sender], "Already voted");
+        require(voteType <= 3, "Invalid vote type");
+        let weight: UInt256 = stakingVotingPower(votesProvider, msg.sender);
+        require(weight > 0, "No voting power");
+        hasVoted[proposalId][msg.sender] = true;
+
+        if (voteType == 1) {
+            forVotes[proposalId] = forVotes[proposalId] + weight;
+        } else {
+            if (voteType == 0) {
+                againstVotes[proposalId] = againstVotes[proposalId] + weight;
+            } else {
+                if (voteType == 2) {
+                    abstainVotes[proposalId] = abstainVotes[proposalId] + weight;
+                } else {
+                    vetoVotes[proposalId] = vetoVotes[proposalId] + weight;
+                }
+            }
+        }
+        emit VoteCast(proposalId, msg.sender, voteType, weight);
+    }
+
+    @gas_cost(base: 45000)
+    @public function state(proposalId: UInt256) -> UInt8 {
+        if (proposerOf[proposalId] == Address(0)) {
+            return 0;
+        }
+        if (proposalCancelled[proposalId]) {
+            return 6;
+        }
+        if (proposalExecuted[proposalId]) {
+            return 5;
+        }
+        if (block.number <= proposalEnd[proposalId]) {
+            return 1;
+        }
+
+        let totalPower: UInt256 = stakingTotalVotingPower(votesProvider);
+        if (totalPower == 0) {
+            return 2;
+        }
+        let participating: UInt256 = forVotes[proposalId] + againstVotes[proposalId] + abstainVotes[proposalId] + vetoVotes[proposalId];
+        let quorumRequired: UInt256 = totalPower * quorumPctBps / 10000;
+        if (participating < quorumRequired) {
+            return 2;
+        }
+        let vetoRequired: UInt256 = participating * vetoPctBps / 10000;
+        if (vetoRequired > 0) {
+            if (vetoVotes[proposalId] >= vetoRequired) {
+                return 7;
+            }
+        }
+        let decisive: UInt256 = forVotes[proposalId] + againstVotes[proposalId];
+        if (decisive == 0) {
+            return 2;
+        }
+        let approvalRequired: UInt256 = decisive * approvalPctBps / 10000;
+        if (forVotes[proposalId] < approvalRequired) {
+            return 2;
+        }
+        if (proposalQueued[proposalId]) {
+            return 4;
+        }
+        return 3;
+    }
+
+    @gas_cost(base: 65000)
+    @public function queue(proposalId: UInt256) {
+        require(!paused, "Governance paused");
+        let proposalState: UInt8 = state(proposalId);
+        if (proposalState == 7) {
+            emit ProposalVetoed(proposalId);
+            revert("Proposal vetoed");
+        }
+        require(proposalState == 3, "Proposal did not succeed");
+        proposalQueued[proposalId] = true;
+        proposalEta[proposalId] = block.number + timelockDelay;
+        emit ProposalQueued(proposalId, proposalEta[proposalId]);
+    }
+
+    @gas_cost(base: 150000)
+    @public function execute(proposalId: UInt256) {
+        require(!paused, "Governance paused");
+        require(state(proposalId) == 4, "Proposal is not queued");
+        require(block.number >= proposalEta[proposalId], "Timelock active");
+        proposalExecuted[proposalId] = true;
+        callContract(proposalTarget[proposalId], proposalValue[proposalId], proposalData[proposalId]);
+        sendNative(proposerOf[proposalId], proposalDeposit[proposalId]);
+        emit ProposalExecuted(proposalId);
+    }
+
+    @gas_cost(base: 70000)
+    @public function cancel(proposalId: UInt256) {
+        require(proposerOf[proposalId] == msg.sender, "Only proposer may cancel");
+        require(!proposalExecuted[proposalId], "Proposal executed");
+        require(!proposalCancelled[proposalId], "Proposal cancelled");
+        proposalCancelled[proposalId] = true;
+        sendNative(proposerOf[proposalId], proposalDeposit[proposalId]);
+        emit ProposalCancelled(proposalId);
+    }
+
+    @gas_cost(base: 95000, mldsa_verify: 35000)
+    @public function governanceCancel(
+        proposalId: UInt256,
+        governanceNonce: UInt256,
+        validUntilBlock: UInt256,
+        signature: MLDSASignature
+    ) {
+        require(!proposalExecuted[proposalId], "Proposal executed");
+        require_pqc {
+            let valid: Bool = verifyGovernanceAuthorization(governanceKey, governanceNonce, validUntilBlock, signature);
+            require(valid, "Invalid governance authorization");
+        } or revert("PQC verification failed");
+        proposalCancelled[proposalId] = true;
+        sendNative(proposerOf[proposalId], proposalDeposit[proposalId]);
+        emit ProposalCancelled(proposalId);
+    }
+
+    @gas_cost(base: 90000, mldsa_verify: 35000)
+    @public function setPaused(newPaused: Bool, governanceNonce: UInt256, validUntilBlock: UInt256, signature: MLDSASignature) {
+        require_pqc {
+            let valid: Bool = verifyGovernanceAuthorization(governanceKey, governanceNonce, validUntilBlock, signature);
+            require(valid, "Invalid governance authorization");
+        } or revert("PQC verification failed");
+        paused = newPaused;
+        emit PauseStateUpdated(newPaused);
+    }
+}

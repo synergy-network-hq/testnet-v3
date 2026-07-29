@@ -1,301 +1,302 @@
 {
- "schema_version": 2,
- "network_id": "synergy-testnet-v3",
- "chain_id": 1266,
- "source_model": "canonical Testnet-v3 genesis address_assignment_register (SN-TNV3-GEN-TOK-001 v1.3)",
- "generated_from": "genesis.testnet-v3.identity-assigned.json",
- "allocation_hash": "ce613f893fd51fb5381fcdc55bb3c8e3f2d658f7fd694e9ea18c3084af8c2af5",
- "nwei_per_snrg": "1000000000",
- "total_supply_cap_nwei": "12000000000000000000",
- "grand_total_nwei": "12000000000000000000",
- "allocations": [
-  {
-   "account_id": "VNS-A01",
-   "address": "synl1g8hgegyaezgqwq755zjrglwr7wrvz3jj6dvr",
-   "amount_nwei": "2638950000000000000",
-   "name": "Validator Security Reserve",
-   "alias": "tnv3-val-security-reserve",
-   "control_reference": "shared custody policy VNS / 4-of-5"
-  },
-  {
-   "account_id": "VNS-A02",
-   "address": "synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t",
-   "amount_nwei": "50000000000000",
-   "name": "Validator 1 Bonded Stake",
-   "alias": "tnv3-val-stake-01",
-   "control_reference": "validator-1 full encrypted key bundle"
-  },
-  {
-   "account_id": "VNS-A03",
-   "address": "synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk",
-   "amount_nwei": "50000000000000",
-   "name": "Validator 2 Bonded Stake",
-   "alias": "tnv3-val-stake-02",
-   "control_reference": "validator-2 full encrypted key bundle"
-  },
-  {
-   "account_id": "VNS-A04",
-   "address": "synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj",
-   "amount_nwei": "50000000000000",
-   "name": "Validator 3 Bonded Stake",
-   "alias": "tnv3-val-stake-03",
-   "control_reference": "validator-3 full encrypted key bundle"
-  },
-  {
-   "account_id": "VNS-A05",
-   "address": "synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg",
-   "amount_nwei": "50000000000000",
-   "name": "Validator 4 Bonded Stake",
-   "alias": "tnv3-val-stake-04",
-   "control_reference": "validator-4 full encrypted key bundle"
-  },
-  {
-   "account_id": "VNS-A06",
-   "address": "synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu",
-   "amount_nwei": "50000000000000",
-   "name": "Validator 5 Bonded Stake",
-   "alias": "tnv3-val-stake-05",
-   "control_reference": "validator-5 full encrypted key bundle"
-  },
-  {
-   "account_id": "VNS-A07",
-   "address": "synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc",
-   "amount_nwei": "50000000000000",
-   "name": "Validator 6 Bonded Stake",
-   "alias": "tnv3-val-stake-06",
-   "control_reference": "validator-6 full encrypted key bundle"
-  },
-  {
-   "account_id": "VNS-A08",
-   "address": "synv11lgxgqj3juusy9rdfc6r0z4p0sf2ext4f48g",
-   "amount_nwei": "50000000000000",
-   "name": "Validator 7 Bonded Stake",
-   "alias": "tnv3-val-stake-07",
-   "control_reference": "validator-7 full encrypted key bundle"
-  },
-  {
-   "account_id": "VNS-A09",
-   "address": "synv11nqlh9w5nrqsg0y0lq6lljtgxnm0d5ep30l5",
-   "amount_nwei": "50000000000000",
-   "name": "Validator 8 Bonded Stake",
-   "alias": "tnv3-val-stake-08",
-   "control_reference": "validator-8 full encrypted key bundle"
-  },
-  {
-   "account_id": "VNS-A10",
-   "address": "synv11tcpv98np8eexpua5fq5wc4kvj4ul7e5x3k7",
-   "amount_nwei": "50000000000000",
-   "name": "Validator 9 Bonded Stake",
-   "alias": "tnv3-val-stake-09",
-   "control_reference": "validator-9 full encrypted key bundle"
-  },
-  {
-   "account_id": "VNS-A11",
-   "address": "synv11dm930g9e0l96rxfg65fn8z4y2vm7qz3yfn3",
-   "amount_nwei": "50000000000000",
-   "name": "Validator 10 Bonded Stake",
-   "alias": "tnv3-val-stake-10",
-   "control_reference": "validator-10 full encrypted key bundle"
-  },
-  {
-   "account_id": "VNS-A12",
-   "address": "synv112ggx4l8st0uq3gvy6hqvaa4d90w5uanaqjz",
-   "amount_nwei": "50000000000000",
-   "name": "Validator 11 Bonded Stake",
-   "alias": "tnv3-val-stake-11",
-   "control_reference": "validator-11 full encrypted key bundle"
-  },
-  {
-   "account_id": "VNS-A13",
-   "address": "synv11tf8hc6fsrdg0jpcqy8xay0awack2k69a36l",
-   "amount_nwei": "50000000000000",
-   "name": "Validator 12 Bonded Stake",
-   "alias": "tnv3-val-stake-12",
-   "control_reference": "validator-12 full encrypted key bundle"
-  },
-  {
-   "account_id": "VNS-A14",
-   "address": "synv11p8ej4mxf3uuepqxvnlnus67aut8vtman47g",
-   "amount_nwei": "50000000000000",
-   "name": "Validator 13 Bonded Stake",
-   "alias": "tnv3-val-stake-13",
-   "control_reference": "validator-13 full encrypted key bundle"
-  },
-  {
-   "account_id": "VNS-A15",
-   "address": "synv11sadw92489zclv0v0p56fmjhwqze56ud0wm2",
-   "amount_nwei": "50000000000000",
-   "name": "Validator 14 Bonded Stake",
-   "alias": "tnv3-val-stake-14",
-   "control_reference": "validator-14 full encrypted key bundle"
-  },
-  {
-   "account_id": "VNS-A16",
-   "address": "synv11t2u2xh3elek5q682lqprclauyatn5xjq4pq",
-   "amount_nwei": "50000000000000",
-   "name": "Validator 15 Bonded Stake",
-   "alias": "tnv3-val-stake-15",
-   "control_reference": "validator-15 full encrypted key bundle"
-  },
-  {
-   "account_id": "VNS-A17",
-   "address": "synv11t4hhy3k4dh9xlnn5fus82e3t70d3q8ur8fa",
-   "amount_nwei": "50000000000000",
-   "name": "Validator 16 Bonded Stake",
-   "alias": "tnv3-val-stake-16",
-   "control_reference": "validator-16 full encrypted key bundle"
-  },
-  {
-   "account_id": "VNS-A18",
-   "address": "synv11x3pzwp2xvd4jxs6fq5hvahrrglcytahtz7w",
-   "amount_nwei": "50000000000000",
-   "name": "Validator 17 Bonded Stake",
-   "alias": "tnv3-val-stake-17",
-   "control_reference": "validator-17 full encrypted key bundle"
-  },
-  {
-   "account_id": "VNS-A19",
-   "address": "synv11daswzvvaklsl2e0hxmtz39de62w9qum6c9k",
-   "amount_nwei": "50000000000000",
-   "name": "Validator 18 Bonded Stake",
-   "alias": "tnv3-val-stake-18",
-   "control_reference": "validator-18 full encrypted key bundle"
-  },
-  {
-   "account_id": "VNS-A20",
-   "address": "synv11p5emxjn9a0y4u8jsq6qupcuwsgwedxnl0p5",
-   "amount_nwei": "50000000000000",
-   "name": "Validator 19 Bonded Stake",
-   "alias": "tnv3-val-stake-19",
-   "control_reference": "validator-19 full encrypted key bundle"
-  },
-  {
-   "account_id": "VNS-A21",
-   "address": "synv11gvzqyvuqrtpjck8jdefsfefqz4rjfytw44h",
-   "amount_nwei": "50000000000000",
-   "name": "Validator 20 Bonded Stake",
-   "alias": "tnv3-val-stake-20",
-   "control_reference": "validator-20 full encrypted key bundle"
-  },
-  {
-   "account_id": "VNS-A22",
-   "address": "synv119uv7nqfvypqtm7fgpmsjju5y4yz73apw4hx",
-   "amount_nwei": "50000000000000",
-   "name": "Validator 21 Bonded Stake",
-   "alias": "tnv3-val-stake-21",
-   "control_reference": "validator-21 full encrypted key bundle"
-  },
-  {
-   "account_id": "SAL-A01",
-   "address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
-   "amount_nwei": "2226000000000000000",
-   "name": "Token Sales Reserve",
-   "alias": "tnv3-sale-reserve",
-   "control_reference": "sale claim contract identity / admin binding required"
-  },
-  {
-   "account_id": "ECO-A01",
-   "address": "synm16uf39wtwzlqkyfteme5uqpythp9lx635mfcm",
-   "amount_nwei": "1559000000000000000",
-   "name": "Ecosystem / Developer Reserve",
-   "alias": "tnv3-eco-reserve",
-   "control_reference": "shared custody policy ECO / 4-of-5"
-  },
-  {
-   "account_id": "ECO-A02",
-   "address": "syns10a8prj2pvm3lwtd2zf8ke54zhq8ux3804kl2",
-   "amount_nwei": "1000000000000000",
-   "name": "Testnet Faucet Operating Wallet",
-   "alias": "tnv3-eco-faucet",
-   "control_reference": "faucet service key / rate limits and rotation required"
-  },
-  {
-   "account_id": "LIQ-A01",
-   "address": "synm1k8p8ket4tp4hyvpa0whv9cfhetd0hwzgp07v",
-   "amount_nwei": "1440000000000000000",
-   "name": "Liquidity & Market Infrastructure Reserve",
-   "alias": "tnv3-liq-reserve",
-   "control_reference": "shared custody policy LIQ / 4-of-5"
-  },
-  {
-   "account_id": "MKT-A01",
-   "address": "synm16gqdhdfq5au7zhxrpedh8k7y5ks7ajl34hj6",
-   "amount_nwei": "1260000000000000000",
-   "name": "Marketing & Growth Reserve",
-   "alias": "tnv3-mkt-reserve",
-   "control_reference": "shared custody policy MKT / 4-of-5"
-  },
-  {
-   "account_id": "PAR-A01",
-   "address": "synm1yps0r6977nxdsuqmvmep9h045k8yg5mrmlur",
-   "amount_nwei": "894000000000000000",
-   "name": "Strategic Partnerships / Integrations Reserve",
-   "alias": "tnv3-partner-reserve",
-   "control_reference": "shared custody policy PAR / 4-of-5"
-  },
-  {
-   "account_id": "DAO-A01",
-   "address": "synu18tmdavp9yskftz4lldshrxvzwyg0tpnu23n9",
-   "amount_nwei": "720000000000000000",
-   "name": "DAO / Governance Reserve",
-   "alias": "tnv3-dao-reserve",
-   "control_reference": "shared custody policy DAO / 4-of-5"
-  },
-  {
-   "account_id": "TRE-A01",
-   "address": "synu134gwnzuwzrg698rpnk85qdc7r6u2fll34nmp",
-   "amount_nwei": "720000000000000000",
-   "name": "Foundation / Treasury Reserve",
-   "alias": "tnv3-treasury-reserve",
-   "control_reference": "shared custody policy TRE / 4-of-5"
-  },
-  {
-   "account_id": "TEM-A01",
-   "address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
-   "amount_nwei": "340000000000000000",
-   "name": "Shared Team & Support Vesting Contract",
-   "alias": "tnv3-team-vesting",
-   "control_reference": "shared vesting contract identity / deployment binding required"
-  },
-  {
-   "account_id": "TEM-A02",
-   "address": "synm1qz58et37qrxza8qv58lw93cf3nc4y4g5mlh8",
-   "amount_nwei": "200000000000000000",
-   "name": "Unassigned Team & Support Reserve",
-   "alias": "tnv3-team-unassigned-reserve",
-   "control_reference": "shared custody policy TEM / 4-of-5"
-  },
-  {
-   "account_id": "SYS-01",
-   "address": "synf1pnchsrnyral0u9r65xusjrexuctfh465h06l",
-   "amount_nwei": "0",
-   "name": "Network Fee Collector",
-   "alias": "tnv3-system-fee-collector",
-   "control_reference": "protocol fee-collector control"
-  },
-  {
-   "account_id": "SYS-02",
-   "address": "synq1fkv2x4arnmxldk35m4e2furg9lq7xp77agdc",
-   "amount_nwei": "0",
-   "name": "Treasury Recovery Account",
-   "alias": "tnv3-system-treasury-recovery",
-   "control_reference": "governance recovery contract identity"
-  },
-  {
-   "account_id": "SYS-03",
-   "address": "synq188dfee3r9qu7hyd2kvjp4025wg0s8mmrltfl",
-   "amount_nwei": "0",
-   "name": "Slashing Settlement Account",
-   "alias": "tnv3-system-slashing-settlement",
-   "control_reference": "protocol slashing settlement contract identity"
-  },
-  {
-   "account_id": "SYS-04",
-   "address": "syn00000000000000000000000000000000000000",
-   "amount_nwei": "0",
-   "name": "Canonical Burn Address",
-   "alias": "tnv3-system-burn",
-   "control_reference": "consensus-reserved / no private key"
-  }
- ]
+  "address_migration_status": "APPLIED",
+  "allocation_hash": "7736e8714a8c6e6f2f6e47297762c791d08b8994af9a844d4871a51fabfe8ff3",
+  "allocations": [
+    {
+      "account_id": "VNS-A01",
+      "address": "synl1g8hgegyaezgqwq755zjrglwr7wrvz3jj6dvr",
+      "alias": "tnv3-val-security-reserve",
+      "amount_nwei": "2638950000000000000",
+      "control_reference": "shared custody policy VNS / 4-of-5",
+      "name": "Validator Security Reserve"
+    },
+    {
+      "account_id": "VNS-A02",
+      "address": "synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t",
+      "alias": "tnv3-val-stake-01",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-1 full encrypted key bundle",
+      "name": "Validator 1 Bonded Stake"
+    },
+    {
+      "account_id": "VNS-A03",
+      "address": "synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk",
+      "alias": "tnv3-val-stake-02",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-2 full encrypted key bundle",
+      "name": "Validator 2 Bonded Stake"
+    },
+    {
+      "account_id": "VNS-A04",
+      "address": "synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj",
+      "alias": "tnv3-val-stake-03",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-3 full encrypted key bundle",
+      "name": "Validator 3 Bonded Stake"
+    },
+    {
+      "account_id": "VNS-A05",
+      "address": "synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg",
+      "alias": "tnv3-val-stake-04",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-4 full encrypted key bundle",
+      "name": "Validator 4 Bonded Stake"
+    },
+    {
+      "account_id": "VNS-A06",
+      "address": "synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu",
+      "alias": "tnv3-val-stake-05",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-5 full encrypted key bundle",
+      "name": "Validator 5 Bonded Stake"
+    },
+    {
+      "account_id": "VNS-A07",
+      "address": "synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc",
+      "alias": "tnv3-val-stake-06",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-6 full encrypted key bundle",
+      "name": "Validator 6 Bonded Stake"
+    },
+    {
+      "account_id": "VNS-A08",
+      "address": "synv11lgxgqj3juusy9rdfc6r0z4p0sf2ext4f48g",
+      "alias": "tnv3-val-stake-07",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-7 full encrypted key bundle",
+      "name": "Validator 7 Bonded Stake"
+    },
+    {
+      "account_id": "VNS-A09",
+      "address": "synv11nqlh9w5nrqsg0y0lq6lljtgxnm0d5ep30l5",
+      "alias": "tnv3-val-stake-08",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-8 full encrypted key bundle",
+      "name": "Validator 8 Bonded Stake"
+    },
+    {
+      "account_id": "VNS-A10",
+      "address": "synv11tcpv98np8eexpua5fq5wc4kvj4ul7e5x3k7",
+      "alias": "tnv3-val-stake-09",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-9 full encrypted key bundle",
+      "name": "Validator 9 Bonded Stake"
+    },
+    {
+      "account_id": "VNS-A11",
+      "address": "synv11dm930g9e0l96rxfg65fn8z4y2vm7qz3yfn3",
+      "alias": "tnv3-val-stake-10",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-10 full encrypted key bundle",
+      "name": "Validator 10 Bonded Stake"
+    },
+    {
+      "account_id": "VNS-A12",
+      "address": "synv112ggx4l8st0uq3gvy6hqvaa4d90w5uanaqjz",
+      "alias": "tnv3-val-stake-11",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-11 full encrypted key bundle",
+      "name": "Validator 11 Bonded Stake"
+    },
+    {
+      "account_id": "VNS-A13",
+      "address": "synv11tf8hc6fsrdg0jpcqy8xay0awack2k69a36l",
+      "alias": "tnv3-val-stake-12",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-12 full encrypted key bundle",
+      "name": "Validator 12 Bonded Stake"
+    },
+    {
+      "account_id": "VNS-A14",
+      "address": "synv11p8ej4mxf3uuepqxvnlnus67aut8vtman47g",
+      "alias": "tnv3-val-stake-13",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-13 full encrypted key bundle",
+      "name": "Validator 13 Bonded Stake"
+    },
+    {
+      "account_id": "VNS-A15",
+      "address": "synv11sadw92489zclv0v0p56fmjhwqze56ud0wm2",
+      "alias": "tnv3-val-stake-14",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-14 full encrypted key bundle",
+      "name": "Validator 14 Bonded Stake"
+    },
+    {
+      "account_id": "VNS-A16",
+      "address": "synv11t2u2xh3elek5q682lqprclauyatn5xjq4pq",
+      "alias": "tnv3-val-stake-15",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-15 full encrypted key bundle",
+      "name": "Validator 15 Bonded Stake"
+    },
+    {
+      "account_id": "VNS-A17",
+      "address": "synv11t4hhy3k4dh9xlnn5fus82e3t70d3q8ur8fa",
+      "alias": "tnv3-val-stake-16",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-16 full encrypted key bundle",
+      "name": "Validator 16 Bonded Stake"
+    },
+    {
+      "account_id": "VNS-A18",
+      "address": "synv11x3pzwp2xvd4jxs6fq5hvahrrglcytahtz7w",
+      "alias": "tnv3-val-stake-17",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-17 full encrypted key bundle",
+      "name": "Validator 17 Bonded Stake"
+    },
+    {
+      "account_id": "VNS-A19",
+      "address": "synv11daswzvvaklsl2e0hxmtz39de62w9qum6c9k",
+      "alias": "tnv3-val-stake-18",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-18 full encrypted key bundle",
+      "name": "Validator 18 Bonded Stake"
+    },
+    {
+      "account_id": "VNS-A20",
+      "address": "synv11p5emxjn9a0y4u8jsq6qupcuwsgwedxnl0p5",
+      "alias": "tnv3-val-stake-19",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-19 full encrypted key bundle",
+      "name": "Validator 19 Bonded Stake"
+    },
+    {
+      "account_id": "VNS-A21",
+      "address": "synv11gvzqyvuqrtpjck8jdefsfefqz4rjfytw44h",
+      "alias": "tnv3-val-stake-20",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-20 full encrypted key bundle",
+      "name": "Validator 20 Bonded Stake"
+    },
+    {
+      "account_id": "VNS-A22",
+      "address": "synv119uv7nqfvypqtm7fgpmsjju5y4yz73apw4hx",
+      "alias": "tnv3-val-stake-21",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-21 full encrypted key bundle",
+      "name": "Validator 21 Bonded Stake"
+    },
+    {
+      "account_id": "SAL-A01",
+      "address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "alias": "tnv3-sale-reserve",
+      "amount_nwei": "2226000000000000000",
+      "control_reference": "sale reserve custody identity; SaleClaim not deployed on Testnet-v3",
+      "name": "Token Sales Reserve"
+    },
+    {
+      "account_id": "ECO-A01",
+      "address": "synm16uf39wtwzlqkyfteme5uqpythp9lx635mfcm",
+      "alias": "tnv3-eco-reserve",
+      "amount_nwei": "1559000000000000000",
+      "control_reference": "shared custody policy ECO / 4-of-5",
+      "name": "Ecosystem / Developer Reserve"
+    },
+    {
+      "account_id": "ECO-A02",
+      "address": "syns10a8prj2pvm3lwtd2zf8ke54zhq8ux3804kl2",
+      "alias": "tnv3-eco-faucet",
+      "amount_nwei": "1000000000000000",
+      "control_reference": "faucet service key / rate limits and rotation required",
+      "name": "Testnet Faucet Operating Wallet"
+    },
+    {
+      "account_id": "LIQ-A01",
+      "address": "synm1k8p8ket4tp4hyvpa0whv9cfhetd0hwzgp07v",
+      "alias": "tnv3-liq-reserve",
+      "amount_nwei": "1440000000000000000",
+      "control_reference": "shared custody policy LIQ / 4-of-5",
+      "name": "Liquidity & Market Infrastructure Reserve"
+    },
+    {
+      "account_id": "MKT-A01",
+      "address": "synm16gqdhdfq5au7zhxrpedh8k7y5ks7ajl34hj6",
+      "alias": "tnv3-mkt-reserve",
+      "amount_nwei": "1260000000000000000",
+      "control_reference": "shared custody policy MKT / 4-of-5",
+      "name": "Marketing & Growth Reserve"
+    },
+    {
+      "account_id": "PAR-A01",
+      "address": "synm1yps0r6977nxdsuqmvmep9h045k8yg5mrmlur",
+      "alias": "tnv3-partner-reserve",
+      "amount_nwei": "894000000000000000",
+      "control_reference": "shared custody policy PAR / 4-of-5",
+      "name": "Strategic Partnerships / Integrations Reserve"
+    },
+    {
+      "account_id": "DAO-A01",
+      "address": "synu18tmdavp9yskftz4lldshrxvzwyg0tpnu23n9",
+      "alias": "tnv3-dao-reserve",
+      "amount_nwei": "720000000000000000",
+      "control_reference": "shared custody policy DAO / 4-of-5",
+      "name": "DAO / Governance Reserve"
+    },
+    {
+      "account_id": "TRE-A01",
+      "address": "synu134gwnzuwzrg698rpnk85qdc7r6u2fll34nmp",
+      "alias": "tnv3-treasury-reserve",
+      "amount_nwei": "720000000000000000",
+      "control_reference": "shared custody policy TRE / 4-of-5",
+      "name": "Foundation / Treasury Reserve"
+    },
+    {
+      "account_id": "TEM-A01",
+      "address": "sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40",
+      "alias": "tnv3-team-vesting",
+      "amount_nwei": "340000000000000000",
+      "control_reference": "deployed TeamVesting contract instance",
+      "name": "Shared Team & Support Vesting Contract"
+    },
+    {
+      "account_id": "TEM-A02",
+      "address": "synm1qz58et37qrxza8qv58lw93cf3nc4y4g5mlh8",
+      "alias": "tnv3-team-unassigned-reserve",
+      "amount_nwei": "200000000000000000",
+      "control_reference": "shared custody policy TEM / 4-of-5",
+      "name": "Unassigned Team & Support Reserve"
+    },
+    {
+      "account_id": "SYS-01",
+      "address": "synf1pnchsrnyral0u9r65xusjrexuctfh465h06l",
+      "alias": "tnv3-system-fee-collector",
+      "amount_nwei": "0",
+      "control_reference": "protocol fee-collector control",
+      "name": "Network Fee Collector"
+    },
+    {
+      "account_id": "SYS-02",
+      "address": "synq1fkv2x4arnmxldk35m4e2furg9lq7xp77agdc",
+      "alias": "tnv3-system-treasury-recovery",
+      "amount_nwei": "0",
+      "control_reference": "governance recovery contract identity",
+      "name": "Treasury Recovery Account"
+    },
+    {
+      "account_id": "SYS-03",
+      "address": "synq188dfee3r9qu7hyd2kvjp4025wg0s8mmrltfl",
+      "alias": "tnv3-system-slashing-settlement",
+      "amount_nwei": "0",
+      "control_reference": "protocol slashing settlement contract identity",
+      "name": "Slashing Settlement Account"
+    },
+    {
+      "account_id": "SYS-04",
+      "address": "syn00000000000000000000000000000000000000",
+      "alias": "tnv3-system-burn",
+      "amount_nwei": "0",
+      "control_reference": "consensus-reserved / no private key",
+      "name": "Canonical Burn Address"
+    }
+  ],
+  "chain_id": 1266,
+  "generated_from": "genesis.testnet-v3.identity-assigned.json",
+  "grand_total_nwei": "12000000000000000000",
+  "network_id": "synergy-testnet-v3",
+  "nwei_per_snrg": "1000000000",
+  "schema_version": 3,
+  "source_model": "final deployment-bound Testnet-v3 genesis with Track-H address migration",
+  "total_supply_cap_nwei": "12000000000000000000"
 }

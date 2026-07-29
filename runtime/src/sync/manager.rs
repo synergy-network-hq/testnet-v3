@@ -1153,7 +1153,10 @@ mod tests {
     fn sync_peer_selection_uses_canonical_genesis_for_compact_chain() {
         std::env::set_var(
             "SYNERGY_GENESIS_FILE",
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../config/genesis.json"),
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../config/genesis.testnet-v3.test-fixture.json"
+            ),
         );
         let canonical_hash = canonical_genesis()
             .expect("canonical genesis should load")

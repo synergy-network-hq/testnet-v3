@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createPrivateKey, createPublicKey } from "node:crypto";
 import { spawn } from "node:child_process";
 import {
   mkdtemp,
@@ -18,9 +19,8 @@ const PACKAGE_FILES = new Set([
   "identity.enc.json",
   "identity.pub.json",
   "manifest.json",
-  "wireguard-private.key",
   "wireguard-public.key",
-  "sy-vpn.conf",
+  "wireguard-config.envelope.json",
   "vpn-binding.json",
 ]);
 
@@ -30,7 +30,7 @@ function option(name, fallback = null) {
 }
 
 function usage() {
-  return "Usage: node scripts/release/verify-validator-installer.mjs --installer <file> --platform <mac|linux> --validator <1-21>";
+  return "Usage: node scripts/release/verify-validator-installer.mjs --installer <file> --platform <mac|linux> --validator <1-21> --vpn-onboarding-token-file <protected file>";
 }
 
 function run(command, args) {
@@ -64,7 +64,32 @@ async function findMacApp(root) {
   return apps[0];
 }
 
-export async function verifyPackageRoot(packageRoot, validator) {
+async function readOnboardingToken(filePath) {
+  let token;
+  try {
+    token = (await readFile(filePath, "utf8")).trim();
+  } catch {
+    throw new Error("The protected validator VPN onboarding-token file could not be read.");
+  }
+  if (!/^[A-Za-z0-9_-]{32,}$/.test(token)) {
+    throw new Error("The protected validator VPN onboarding-token file does not contain a valid one-time token.");
+  }
+  return token;
+}
+
+function wireguardPublicKey(privateKey) {
+  const privateKeyBytes = Buffer.from(String(privateKey).trim(), "base64");
+  if (privateKeyBytes.length !== 32) return null;
+  const privateKeyDer = Buffer.concat([
+    Buffer.from("302e020100300506032b656e04220420", "hex"),
+    privateKeyBytes,
+  ]);
+  return createPublicKey(
+    createPrivateKey({ key: privateKeyDer, format: "der", type: "pkcs8" }),
+  ).export({ format: "der", type: "spki" }).subarray(-32).toString("base64");
+}
+
+export async function verifyPackageRoot(packageRoot, validator, onboardingToken) {
   const entries = (await readdir(packageRoot))
     .filter((entry) => entry !== ".DS_Store");
   const unexpected = entries.filter((entry) => !PACKAGE_FILES.has(entry));
@@ -79,7 +104,7 @@ export async function verifyPackageRoot(packageRoot, validator) {
   process.env.SYNERGY_VALIDATOR_PACKAGE_DIR = packageRoot;
   let packageData;
   try {
-    packageData = await loadValidatorPackage();
+    packageData = await loadValidatorPackage({ includeSecrets: true, activationToken: onboardingToken });
   } finally {
     if (previousRoot === undefined) delete process.env.SYNERGY_VALIDATOR_PACKAGE_DIR;
     else process.env.SYNERGY_VALIDATOR_PACKAGE_DIR = previousRoot;
@@ -102,22 +127,26 @@ export async function verifyPackageRoot(packageRoot, validator) {
     assignment.cohort !== expectedCohort
     || assignment?.security?.encryptedIdentity !== true
     || assignment?.security?.containsIdentityPassphrase !== false
-    || assignment?.security?.containsWireguardPrivateKey !== true
+    || assignment?.security?.containsWireguardPrivateKey !== false
+    || assignment?.security?.encryptedWireguardConfigWithOnboardingToken !== true
+    || assignment?.security?.onboardingTokenEmbedded !== false
     || assignment?.security?.installerBoundToSingleValidator !== true
   ) {
     throw new Error(`${assignmentId} has invalid cohort or custody metadata.`);
   }
 
-  const wireguardConfig = await readFile(join(packageRoot, "sy-vpn.conf"), "utf8");
+  const wireguardConfig = packageData.wireguardConfig;
+  const configuredPrivateKey = wireguardConfig.match(/^PrivateKey\s*=\s*(\S+)\s*$/m)?.[1];
   if (
     (wireguardConfig.match(/^\[Peer\]$/gm) || []).length !== 24
-    || !/^PrivateKey\s*=\s*[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$/m.test(wireguardConfig)
+    || configuredPrivateKey !== packageData.wireguardPrivateKey
+    || wireguardPublicKey(packageData.wireguardPrivateKey) !== packageData.wireguardPublicKey
   ) {
-    throw new Error(`${assignmentId} does not contain its complete, activated WireGuard configuration.`);
+    throw new Error(`${assignmentId} does not contain its complete protected WireGuard configuration.`);
   }
 }
 
-async function verifyExtractedInstaller(root, validator) {
+async function verifyExtractedInstaller(root, validator, onboardingToken) {
   const resolvedRoots = [];
   for (const path of await findNamedDirectories(root, "validator-package")) {
     if ((await readdir(path)).includes("assignment.json")) resolvedRoots.push(path);
@@ -125,10 +154,10 @@ async function verifyExtractedInstaller(root, validator) {
   if (resolvedRoots.length !== 1) {
     throw new Error(`Expected exactly one embedded validator package; found ${resolvedRoots.length}.`);
   }
-  await verifyPackageRoot(resolvedRoots[0], validator);
+  await verifyPackageRoot(resolvedRoots[0], validator, onboardingToken);
 }
 
-async function verifyMac(installer, validator) {
+async function verifyMac(installer, validator, onboardingToken) {
   const mount = await mkdtemp(join(tmpdir(), "synergy-validator-dmg-"));
   try {
     await run("hdiutil", ["attach", installer, "-nobrowse", "-readonly", "-mountpoint", mount]);
@@ -137,19 +166,19 @@ async function verifyMac(installer, validator) {
     await run("xcrun", ["stapler", "validate", app]);
     await run("xcrun", ["stapler", "validate", installer]);
     await run("spctl", ["--assess", "--type", "execute", "--verbose=4", app]);
-    await verifyExtractedInstaller(app, validator);
+    await verifyExtractedInstaller(app, validator, onboardingToken);
   } finally {
     await run("hdiutil", ["detach", mount, "-quiet"]).catch(() => {});
     await rm(mount, { recursive: true, force: true });
   }
 }
 
-async function verifyLinux(installer, validator) {
+async function verifyLinux(installer, validator, onboardingToken) {
   const extract = await mkdtemp(join(tmpdir(), "synergy-validator-deb-"));
   try {
     await run("dpkg-deb", ["--info", installer]);
     await run("dpkg-deb", ["--extract", installer, extract]);
-    await verifyExtractedInstaller(extract, validator);
+    await verifyExtractedInstaller(extract, validator, onboardingToken);
   } finally {
     await rm(extract, { recursive: true, force: true });
   }
@@ -159,8 +188,10 @@ async function main() {
   const installer = option("--installer");
   const platform = option("--platform");
   const validator = Number(option("--validator"));
+  const onboardingTokenFile = option("--vpn-onboarding-token-file");
   if (
     !installer
+    || !onboardingTokenFile
     || !["mac", "linux"].includes(platform)
     || !Number.isInteger(validator)
     || validator < 1
@@ -171,14 +202,15 @@ async function main() {
     return;
   }
   const resolvedInstaller = resolve(installer);
+  const onboardingToken = await readOnboardingToken(resolve(onboardingTokenFile));
   if (platform === "mac" && !basename(resolvedInstaller).endsWith(".dmg")) {
     throw new Error("The macOS validator installer must be a DMG.");
   }
   if (platform === "linux" && !basename(resolvedInstaller).endsWith(".deb")) {
     throw new Error("The Linux validator installer must be a DEB.");
   }
-  if (platform === "mac") await verifyMac(resolvedInstaller, validator);
-  else await verifyLinux(resolvedInstaller, validator);
+  if (platform === "mac") await verifyMac(resolvedInstaller, validator, onboardingToken);
+  else await verifyLinux(resolvedInstaller, validator, onboardingToken);
   console.log(`Verified Validator ${String(validator).padStart(2, "0")} ${platform} installer.`);
 }
 

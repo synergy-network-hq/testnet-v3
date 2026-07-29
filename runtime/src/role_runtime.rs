@@ -20,15 +20,23 @@ use crate::consensus::self_realign::{
 };
 use crate::consensus::synergy_score::SynergyScoreCalculator;
 use crate::consensus::testnet_v3_bootstrap::load_testnet_v3_genesis_bootstrap;
+use crate::consensus::testnet_v3_finality_context::FinalizedTypedContextProvider;
 use crate::consensus::typed_coordinator::{
-    import_local_genesis_bound_typed_signer, TypedPosyCoordinator, TypedPosyCoordinatorStartup,
+    import_local_genesis_bound_typed_signer, install_typed_coordinator_ingress,
+    remove_typed_coordinator_ingress, run_typed_posy_driver, P2pTypedConsensusEgress,
+    TypedFinalityContextDigestSource, TypedNextHeightContextSource, TypedPosyCoordinator,
+    TypedPosyCoordinatorStartup, TypedPosyDriver,
 };
 use crate::consensus::typed_finality_store::TypedFinalityStore;
 use crate::consensus::validator_keys::{
     load_local_validator_keypair_for_height, validator_public_key_with_declared_algorithm,
 };
+use crate::consensus_parameters::EtdagActivationPermit;
 use crate::crypto::pqc::PQCManager;
-use crate::etdag::EtdagParameters;
+use crate::etdag::{
+    install_etdag_certified_input_ingress, remove_etdag_certified_input_ingress,
+    EtdagCertifiedInputIngress, EtdagParameters, EtdagProtectedInputCoordinator,
+};
 use crate::genesis::{canonical_genesis, GenesisDocument};
 use crate::logging::{init_logger, LogLevel};
 use crate::p2p;
@@ -37,7 +45,9 @@ use crate::rpc;
 use crate::rpc::rpc_server::{SHARED_CHAIN, SYNC_MANAGER, TX_POOL};
 use crate::sxcp;
 use crate::sync::SyncManager;
-use crate::synergy_types::{Hash, SYNERGY_TESTNET_V3_CHAIN_ID, SYNERGY_TESTNET_V3_NETWORK_ID};
+use crate::synergy_types::{
+    Hash, POSY_PROTOCOL_VERSION, SYNERGY_TESTNET_V3_CHAIN_ID, SYNERGY_TESTNET_V3_NETWORK_ID,
+};
 use crate::telemetry;
 use crate::testnet_v3_execution_bootstrap::load_finalized_testnet_v3_genesis_execution_state;
 use crate::token::TOKEN_MANAGER;
@@ -50,9 +60,33 @@ use serde::Deserialize;
 use serde_json::json;
 
 const OFFLINE_SNAPSHOT_COMMAND_STACK_BYTES: usize = 64 * 1024 * 1024;
+/// Network input is untrusted even after the P2P handshake.  Keep typed
+/// consensus work bounded independently from the general P2P queue so a peer
+/// cannot turn a delayed validator round into unbounded memory consumption.
+const TYPED_POSY_INGRESS_CAPACITY: usize = 512;
 
 struct RoleProcessGuard {
     child: Mutex<Child>,
+}
+
+/// Owns the only typed PoSy worker started by a role runtime.  A driver error
+/// is captured for the main thread rather than ignored in a detached worker:
+/// if the typed scheduling, authenticated ingress, or P2P egress fails, the
+/// validator process must stop rather than remain alive with signing disabled
+/// or silently fall back to inherited consensus.
+struct TypedPosyWorker {
+    handle: thread::JoinHandle<()>,
+    fatal_error: Arc<Mutex<Option<String>>>,
+}
+
+impl TypedPosyWorker {
+    fn fatal_error(&self) -> Option<String> {
+        self.fatal_error.lock().ok().and_then(|error| error.clone())
+    }
+
+    fn join(self) {
+        let _ = self.handle.join();
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -858,6 +892,44 @@ fn should_start_consensus(config: &NodeConfig, profile: Option<&RoleProfile>) ->
     }
 }
 
+/// The only production consensus-worker selection for Testnet-v3.  Keeping
+/// this decision independent from worker construction makes the two required
+/// authorities explicit: an authorized validator needs both a live P2P
+/// transport and a successful finalized-Genesis/key/finality preflight before
+/// it can reach the typed driver.  There is intentionally no legacy variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FinalizedTypedDriverStartup {
+    Disabled,
+    SpawnFinalizedTypedDriver,
+}
+
+fn select_finalized_typed_driver_startup(
+    consensus_enabled: bool,
+    p2p_available: bool,
+    finalized_input_validation: Option<Result<(), String>>,
+) -> Result<FinalizedTypedDriverStartup, String> {
+    if !consensus_enabled {
+        return Ok(FinalizedTypedDriverStartup::Disabled);
+    }
+    if !p2p_available {
+        return Err(
+            "finalized typed PoSy requires an active P2P network; refusing consensus startup"
+                .to_string(),
+        );
+    }
+
+    match finalized_input_validation {
+        Some(Ok(())) => Ok(FinalizedTypedDriverStartup::SpawnFinalizedTypedDriver),
+        Some(Err(error)) => Err(format!(
+            "finalized typed PoSy inputs are unavailable; refusing consensus startup: {error}"
+        )),
+        None => Err(
+            "finalized typed PoSy inputs were not validated; refusing consensus startup"
+                .to_string(),
+        ),
+    }
+}
+
 fn should_require_state_sync_before_join(
     config: &NodeConfig,
     profile: Option<&RoleProfile>,
@@ -964,8 +1036,17 @@ fn ensure_node_config_matches_finalized_consensus_parameters(
                 .to_string(),
         );
     }
+    if config.consensus.algorithm.trim() != manifest.protocol_version
+        || config.consensus.algorithm.trim() != POSY_PROTOCOL_VERSION
+    {
+        return Err(
+            "node consensus protocol identifier disagrees with finalized consensus parameters"
+                .to_string(),
+        );
+    }
     if block_time_ms != manifest.target_block_time_ms
         || blockchain_block_time_ms != manifest.target_block_time_ms
+        || config.consensus.target_block_time_ms != manifest.target_block_time_ms
     {
         return Err(format!(
             "node block-time configuration disagrees with finalized {} ms target",
@@ -981,18 +1062,145 @@ fn ensure_node_config_matches_finalized_consensus_parameters(
     }
     if u64::try_from(config.consensus.validator_cluster_size).ok()
         != Some(manifest.initial_cluster_validator_count)
+        || u64::try_from(config.consensus.min_validators).ok()
+            != Some(manifest.initial_cluster_validator_count)
+        || u64::try_from(config.consensus.validator_vote_threshold).ok()
+            != Some(manifest.initial_availability_quorum)
     {
         return Err(format!(
             "node validator cluster size disagrees with finalized initial cluster size {}",
             manifest.initial_cluster_validator_count
         ));
     }
+    let configured_stage_timeouts = (
+        config.consensus.proposal_timeout_ms,
+        config.consensus.prevote_timeout_ms,
+        config.consensus.precommit_timeout_ms,
+        config.consensus.max_round_timeout_ms,
+    );
+    let finalized_stage_timeouts = (
+        manifest.proposal_timeout_ms,
+        manifest.prevote_timeout_ms,
+        manifest.precommit_timeout_ms,
+        manifest.max_round_timeout_ms,
+    );
+    if configured_stage_timeouts != finalized_stage_timeouts {
+        return Err(
+            "node stage-timeout configuration disagrees with finalized consensus parameters"
+                .to_string(),
+        );
+    }
     Ok(())
 }
 
-fn spawn_consensus_engine() -> Result<thread::JoinHandle<()>, String> {
+/// Starts the sole Testnet-v3 consensus worker after all of its immutable
+/// authorities have been constructed from finalized Genesis.  The generic
+/// context sources are intentionally supplied by the finalized-chain layer;
+/// this role runtime never creates a finality digest, synthesizes an epoch
+/// transition, or accepts a candidate Genesis input.
+///
+/// Installation is transactional from the node's perspective.  If either
+/// process-global P2P ingress cannot be installed, no worker is spawned and
+/// any ingress already installed by this call is removed.  On normal shutdown
+/// or any worker failure both global dispatch points are removed before the
+/// worker returns, so later P2P messages cannot be queued for an old signer.
+fn spawn_typed_posy_driver<D, H>(
+    coordinator: TypedPosyCoordinator,
+    protected_inputs: EtdagProtectedInputCoordinator,
+    finality_digest_source: D,
+    next_height_source: H,
+    etdag_activation_permit: Option<EtdagActivationPermit>,
+    etdag_ingress: Option<EtdagCertifiedInputIngress>,
+    network: Arc<p2p::networking::P2PNetwork>,
+    running: Arc<AtomicBool>,
+) -> Result<TypedPosyWorker, String>
+where
+    D: TypedFinalityContextDigestSource + 'static,
+    H: TypedNextHeightContextSource + 'static,
+{
+    // Build the driver before exposing either P2P ingress.  A failure here
+    // must not leave an inbound path pointing at a partially initialized
+    // signer.
+    let mut driver = TypedPosyDriver::new(
+        coordinator,
+        protected_inputs,
+        P2pTypedConsensusEgress::new(network),
+        finality_digest_source,
+        next_height_source,
+    )
+    .map_err(|error| format!("typed PoSy driver construction failed: {error}"))?;
+
+    if let Some(permit) = etdag_activation_permit.as_ref() {
+        driver
+            .configure_etdag_activation(permit)
+            .map_err(|error| format!("configure typed PoSy ETDAG activation: {error}"))?;
+    }
+
+    match (etdag_activation_permit, etdag_ingress) {
+        (Some(permit), Some(ingress)) => install_etdag_certified_input_ingress(permit, ingress)
+            .map_err(|error| format!("install ETDAG certified-input ingress: {error}"))?,
+        (None, None) => {}
+        _ => {
+            return Err(
+                "typed PoSy runtime received an incomplete ETDAG activation capability".to_string(),
+            )
+        }
+    }
+    let receiver = match install_typed_coordinator_ingress(TYPED_POSY_INGRESS_CAPACITY) {
+        Ok(receiver) => receiver,
+        Err(error) => {
+            let _ = remove_etdag_certified_input_ingress();
+            return Err(format!("install typed PoSy ingress: {error}"));
+        }
+    };
+
+    let fatal_error = Arc::new(Mutex::new(None));
+    let worker_error = Arc::clone(&fatal_error);
+    let worker_running = Arc::clone(&running);
+    let handle = match thread::Builder::new()
+        .name("typed-posy-driver".to_string())
+        .spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_typed_posy_driver(&mut driver, &receiver, &worker_running)
+            }));
+            let failure = match result {
+                Ok(Ok(_)) => None,
+                Ok(Err(error)) => Some(error),
+                Err(_) => Some("typed PoSy driver worker panicked".to_string()),
+            };
+            if let Some(error) = failure {
+                if let Ok(mut slot) = worker_error.lock() {
+                    *slot = Some(error);
+                }
+                // The main role loop observes this and exits non-zero.  Do
+                // not leave any worker alive to sign after a fatal consensus
+                // source or transport failure.
+                worker_running.store(false, Ordering::Release);
+            }
+            let _ = remove_typed_coordinator_ingress();
+            let _ = remove_etdag_certified_input_ingress();
+        }) {
+        Ok(handle) => handle,
+        Err(error) => {
+            let _ = remove_typed_coordinator_ingress();
+            let _ = remove_etdag_certified_input_ingress();
+            return Err(format!("spawn typed PoSy driver worker: {error}"));
+        }
+    };
+
+    Ok(TypedPosyWorker {
+        handle,
+        fatal_error,
+    })
+}
+
+// The inherited ProofOfSynergy/DualQuorum loop deliberately has no production
+// entry point.  Keep the assertion helper test-only: production validator
+// startup below owns only `spawn_finalized_typed_posy_driver`.
+#[cfg(test)]
+fn attempt_inherited_consensus_engine() -> Result<(), String> {
     Err(
-        "POSY_V2_2_OPERATIONAL_COORDINATOR_NOT_READY: the inherited ProofOfSynergy/DualQuorumConsensus loop is disabled; refusing validator signing until the typed HeightConsensusContext + VC/QC/TC + protected ETDAG coordinator is fully wired"
+        "POSY_V2_2_OPERATIONAL_COORDINATOR_NOT_READY: the inherited ProofOfSynergy/DualQuorumConsensus loop is disabled; refusing validator signing until the finalized typed driver lifecycle is installed"
             .to_string(),
     )
 }
@@ -1063,6 +1271,18 @@ fn build_finalized_typed_posy_coordinator(
     .map_err(|error| format!("typed PoSy startup rejects local signer: {error}"))?;
     let finality_store = TypedFinalityStore::for_genesis_anchor(genesis_anchor)
         .map_err(|error| format!("typed PoSy finality store initialization failed: {error}"))?;
+    // A restart may only resume at the deterministic successor of the durable
+    // typed-QC tip.  The provider rejects a store from another Genesis,
+    // malformed continuations, and epoch-transition state that lacks its
+    // separate verified topology-installation payload.
+    let recovered_context = FinalizedTypedContextProvider::new(
+        genesis_bootstrap.clone(),
+        consensus_parameters.protocol_config.clone(),
+        finality_store.clone(),
+        deployed_genesis_state_root,
+    )
+    .and_then(|provider| provider.recover_next_context())
+    .map_err(|error| format!("typed PoSy finalized-context recovery rejected startup: {error}"))?;
 
     TypedPosyCoordinatorStartup {
         genesis_bootstrap,
@@ -1075,8 +1295,151 @@ fn build_finalized_typed_posy_coordinator(
         etdag_parameters: EtdagParameters::default(),
         finality_store,
     }
-    .build()
+    .build_with_finalized_context(recovered_context)
     .map_err(|error| format!("typed PoSy finalized coordinator startup rejected: {error}"))
+}
+
+/// Public, finalized-only inputs for the operational driver.  This stays
+/// private to the role runtime so no RPC, P2P, or legacy consensus caller can
+/// obtain a signer or override the recovered finality context.
+struct FinalizedTypedPosyRuntimeInputs {
+    coordinator: TypedPosyCoordinator,
+    protected_inputs: EtdagProtectedInputCoordinator,
+    finality_digest_source: FinalizedTypedContextProvider,
+    next_height_source: FinalizedTypedContextProvider,
+    etdag_activation_permit: Option<EtdagActivationPermit>,
+    etdag_ingress: Option<EtdagCertifiedInputIngress>,
+}
+
+fn resolve_finalized_etdag_startup_activation(
+    consensus_parameters: &crate::consensus_parameters::LoadedConsensusParameters,
+    epoch: crate::synergy_types::Epoch,
+) -> Result<Option<EtdagActivationPermit>, String> {
+    match consensus_parameters.require_etdag_activation_at_epoch(epoch) {
+        Ok(permit) => Ok(Some(permit)),
+        Err(error)
+            if error.contains(crate::consensus_parameters::ERR_ETDAG_DEFERRED)
+                || error.contains(crate::consensus_parameters::ERR_ETDAG_PREMATURE_ACTIVATION) =>
+        {
+            // ETDAG is intentionally inactive.  The typed core consensus
+            // driver remains operational on its deterministic empty-block
+            // path; no plaintext transaction path is enabled here.
+            Ok(None)
+        }
+        Err(error) => Err(format!("typed PoSy ETDAG activation is invalid: {error}")),
+    }
+}
+
+fn build_finalized_typed_posy_runtime_inputs(
+    config: &NodeConfig,
+) -> Result<FinalizedTypedPosyRuntimeInputs, String> {
+    let coordinator = build_finalized_typed_posy_coordinator(config)?;
+    let genesis = canonical_genesis().map_err(|error| {
+        format!("typed PoSy driver cannot reload canonical finalized Genesis: {error}")
+    })?;
+    let bootstrap = load_testnet_v3_genesis_bootstrap(genesis).map_err(|error| {
+        format!("typed PoSy driver cannot derive finalized Genesis bootstrap: {error}")
+    })?;
+    let consensus_parameters = genesis.consensus_parameters().cloned().ok_or_else(|| {
+        "typed PoSy driver requires a finalized consensus parameter binding in canonical Genesis"
+            .to_string()
+    })?;
+    consensus_parameters
+        .require_genesis_binding()
+        .map_err(|error| {
+            format!("typed PoSy driver rejects a non-Genesis-bound parameter manifest: {error}")
+        })?;
+    let deployed_genesis_state_root = genesis
+        .value()
+        .get("execution")
+        .and_then(|execution| execution.get("genesis_execution_state_root"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "finalized Genesis omits execution.genesis_execution_state_root".to_string())
+        .and_then(|root| {
+            Hash::from_hex(root).map_err(|error| {
+                format!("finalized Genesis execution state root is not canonical: {error}")
+            })
+        })?;
+    let genesis_anchor = Hash::from_hex(genesis.hash())
+        .map_err(|error| format!("canonical Genesis hash is not a typed anchor: {error}"))?;
+    let finality_store = TypedFinalityStore::for_genesis_anchor(genesis_anchor)
+        .map_err(|error| format!("typed PoSy finality store initialization failed: {error}"))?;
+    let local_context = coordinator.local_context().clone();
+    let protocol_config = consensus_parameters.protocol_config.clone();
+    // ETDAG preparation artifacts are intentionally not an activation
+    // authority.  The applied schema-v2 Genesis has no ETDAG activation
+    // record, so ETDAG P2P ingress remains absent while the typed core
+    // consensus driver starts on its deterministic empty-block path.  A
+    // future schema-v3 finalized manifest may issue the permit only at its
+    // declared non-genesis epoch boundary.
+    let etdag_activation_permit = resolve_finalized_etdag_startup_activation(
+        &consensus_parameters,
+        local_context.height_context.epoch,
+    )?;
+
+    // Construct independent provider values for the read-only ETDAG digest
+    // source, the stateful next-height source, and the startup ingress.  Each
+    // has identical canonical inputs and independently validates the durable
+    // typed finality sequence; none can borrow or mutate the coordinator.
+    let provider = || {
+        FinalizedTypedContextProvider::new(
+            bootstrap.clone(),
+            protocol_config.clone(),
+            finality_store.clone(),
+            deployed_genesis_state_root,
+        )
+        .map_err(|error| format!("typed PoSy finalized-context provider rejected startup: {error}"))
+    };
+    let protected_inputs = EtdagProtectedInputCoordinator::process_wide();
+    let etdag_ingress = if etdag_activation_permit.is_some() {
+        let ingress_digest = provider()?
+            .canonical_finality_context_digest(&local_context)
+            .map_err(|error| {
+                format!("typed PoSy ETDAG ingress context rejected startup: {error}")
+            })?;
+        Some(
+            EtdagCertifiedInputIngress::new(
+                protected_inputs.clone(),
+                local_context.height_context.clone(),
+                ingress_digest,
+                bootstrap.verifier.clone(),
+                bootstrap.validator_set.clone(),
+                bootstrap.cluster_map.clone(),
+                protocol_config.clone(),
+                EtdagParameters::default(),
+            )
+            .map_err(|error| format!("typed PoSy ETDAG ingress rejected startup: {error}"))?,
+        )
+    } else {
+        None
+    };
+
+    Ok(FinalizedTypedPosyRuntimeInputs {
+        coordinator,
+        protected_inputs,
+        finality_digest_source: provider()?,
+        next_height_source: provider()?,
+        etdag_activation_permit,
+        etdag_ingress,
+    })
+}
+
+fn spawn_finalized_typed_posy_driver(
+    config: &NodeConfig,
+    network: Arc<p2p::networking::P2PNetwork>,
+    running: Arc<AtomicBool>,
+) -> Result<TypedPosyWorker, String> {
+    let inputs = build_finalized_typed_posy_runtime_inputs(config)?;
+    spawn_typed_posy_driver(
+        inputs.coordinator,
+        inputs.protected_inputs,
+        inputs.finality_digest_source,
+        inputs.next_height_source,
+        inputs.etdag_activation_permit,
+        inputs.etdag_ingress,
+        network,
+        running,
+    )
 }
 
 fn ensure_consensus_pqc_runtime_ready(config: &NodeConfig) -> Result<(), String> {
@@ -2571,31 +2934,53 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                 );
             }
 
-            let mut consensus_handle = if !consensus_enabled {
-                info!(
-                    "main",
-                    "Consensus engine disabled for this node profile",
-                    "bootstrap_only" => config.node.bootstrap_only,
-                    "role" => config.identity.role.clone(),
-                    "validator_address" => resolve_local_validator_address(&config)
-                );
-                None
-            } else {
-                if let Err(error) = ensure_consensus_pqc_runtime_ready(&config) {
+            // The typed worker and every role-local worker share this one
+            // shutdown signal.  A typed-driver failure clears it before any
+            // legacy path could be considered, and the role loop exits.
+            let running = Arc::new(AtomicBool::new(true));
+            let initial_consensus_startup = select_finalized_typed_driver_startup(
+                consensus_enabled,
+                p2p_network.is_some(),
+                consensus_enabled.then(|| ensure_consensus_pqc_runtime_ready(&config)),
+            );
+            let mut typed_posy_worker = match initial_consensus_startup {
+                Ok(FinalizedTypedDriverStartup::Disabled) => {
+                    info!(
+                        "main",
+                        "Consensus engine disabled for this node profile",
+                        "bootstrap_only" => config.node.bootstrap_only,
+                        "role" => config.identity.role.clone(),
+                        "validator_address" => resolve_local_validator_address(&config)
+                    );
+                    None
+                }
+                Ok(FinalizedTypedDriverStartup::SpawnFinalizedTypedDriver) => {
+                    info!(
+                        "main",
+                        "Starting finalized typed PoSy consensus worker",
+                        "algorithm" => config.consensus.algorithm.clone()
+                    );
+                    let network = match p2p_network.as_ref().cloned() {
+                        Some(network) => network,
+                        None => {
+                            eprintln!(
+                                "Consensus startup failed closed: finalized typed PoSy requires an active P2P network"
+                            );
+                            process::exit(1);
+                        }
+                    };
+                    match spawn_finalized_typed_posy_driver(&config, network, Arc::clone(&running))
+                    {
+                        Ok(worker) => Some(worker),
+                        Err(error) => {
+                            eprintln!("Consensus startup failed closed: {error}");
+                            process::exit(1);
+                        }
+                    }
+                }
+                Err(error) => {
                     eprintln!("Consensus startup failed closed: {error}");
                     process::exit(1);
-                }
-                info!(
-                    "main",
-                    "Starting consensus engine",
-                    "algorithm" => config.consensus.algorithm.clone()
-                );
-                match spawn_consensus_engine() {
-                    Ok(handle) => Some(handle),
-                    Err(error) => {
-                        eprintln!("Consensus startup failed closed: {error}");
-                        process::exit(1);
-                    }
                 }
             };
             let watch_for_activation_consensus = should_watch_for_validator_activation_consensus(
@@ -2604,7 +2989,6 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                 consensus_enabled,
             );
 
-            let running = Arc::new(AtomicBool::new(true));
             let role_services = start_role_local_services(role_profile, &config, &running);
             write_role_runtime_report(
                 binary_name,
@@ -2627,26 +3011,60 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
 
             while running.load(Ordering::SeqCst) {
                 refresh_sync_source_policy(&config, role_profile);
-                if consensus_handle.is_none()
+                if let Some(worker) = typed_posy_worker.as_ref() {
+                    if let Some(error) = worker.fatal_error() {
+                        eprintln!("Finalized typed PoSy worker failed closed: {error}");
+                        running.store(false, Ordering::SeqCst);
+                        continue;
+                    }
+                }
+                if typed_posy_worker.is_none()
                     && watch_for_activation_consensus
                     && local_validator_is_consensus_authorized(&config)
                 {
                     info!(
                         "main",
-                        "Validator activation observed; starting consensus engine",
+                        "Validator activation observed; starting finalized typed PoSy worker",
                         "validator_address" => resolve_local_validator_address(&config)
                     );
-                    if let Err(error) = ensure_consensus_pqc_runtime_ready(&config) {
-                        eprintln!("Consensus activation failed closed: {error}");
-                        process::exit(1);
-                    }
-                    consensus_handle = match spawn_consensus_engine() {
-                        Ok(handle) => Some(handle),
+                    match select_finalized_typed_driver_startup(
+                        true,
+                        p2p_network.is_some(),
+                        Some(ensure_consensus_pqc_runtime_ready(&config)),
+                    ) {
+                        Ok(FinalizedTypedDriverStartup::SpawnFinalizedTypedDriver) => {
+                            let network = match p2p_network.as_ref().cloned() {
+                                Some(network) => network,
+                                None => {
+                                    eprintln!(
+                                        "Consensus activation failed closed: finalized typed PoSy requires an active P2P network"
+                                    );
+                                    process::exit(1);
+                                }
+                            };
+                            typed_posy_worker = match spawn_finalized_typed_posy_driver(
+                                &config,
+                                network,
+                                Arc::clone(&running),
+                            ) {
+                                Ok(worker) => Some(worker),
+                                Err(error) => {
+                                    eprintln!("Consensus activation failed closed: {error}");
+                                    process::exit(1);
+                                }
+                            };
+                        }
+                        Ok(FinalizedTypedDriverStartup::Disabled) => {
+                            eprintln!(
+                                "Consensus activation failed closed: authorized validator did not select the finalized typed driver"
+                            );
+                            process::exit(1);
+                        }
                         Err(error) => {
                             eprintln!("Consensus activation failed closed: {error}");
                             process::exit(1);
                         }
-                    };
+                    }
                     refresh_sync_source_policy(&config, role_profile);
                     write_role_runtime_report(
                         binary_name,
@@ -2668,8 +3086,8 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                 let _ = handle.join();
             }
 
-            if let Some(consensus_handle) = consensus_handle {
-                consensus_handle.join().ok();
+            if let Some(typed_posy_worker) = typed_posy_worker {
+                typed_posy_worker.join();
             }
         }
         "keygen" | "generate-keypair" => {
@@ -3177,10 +3595,80 @@ mod tests {
 
     #[test]
     fn production_role_runtime_cannot_start_inherited_consensus_loop() {
-        let error = spawn_consensus_engine()
+        let error = attempt_inherited_consensus_engine()
             .expect_err("legacy consensus must remain unreachable in production role runtime");
         assert!(error.contains("POSY_V2_2_OPERATIONAL_COORDINATOR_NOT_READY"));
         assert!(error.contains("inherited ProofOfSynergy/DualQuorumConsensus loop is disabled"));
+    }
+
+    #[test]
+    fn production_role_runtime_has_no_inherited_consensus_constructor() {
+        let source = include_str!("role_runtime.rs");
+        let inherited_dual_quorum_constructor = ["DualQuorumConsensus", "::"].concat();
+        let inherited_posy_constructor = ["ProofOfSynergy", "::new"].concat();
+        let inherited_role_startup = ["spawn_consensus_engine", "("].concat();
+
+        assert!(
+            !source.contains(&inherited_dual_quorum_constructor),
+            "the production role runtime must not construct the inherited DualQuorum engine"
+        );
+        assert!(
+            !source.contains(&inherited_posy_constructor),
+            "the production role runtime must not construct an inherited PoSy loop"
+        );
+        assert!(
+            !source.contains(&inherited_role_startup),
+            "the production role runtime must not retain the legacy consensus startup path"
+        );
+        assert!(
+            source.contains("spawn_finalized_typed_posy_driver("),
+            "the production role runtime must retain the finalized typed-driver entry point"
+        );
+    }
+
+    #[test]
+    fn authorized_validator_with_p2p_selects_finalized_typed_driver() {
+        let address = "synv1typeddriverstarttest";
+        let _ = VALIDATOR_MANAGER.register_validator(ValidatorRegistration {
+            address: address.to_string(),
+            public_key: "test-typed-driver-start-key".to_string(),
+            name: "typed driver startup gate".to_string(),
+            stake_amount: 50_000_000_000_000,
+            submitted_at: now_ts(),
+            registration_tx_hash: "test-typed-driver-start".to_string(),
+        });
+        let _ = VALIDATOR_MANAGER.approve_validator(address);
+        VALIDATOR_MANAGER.update_validator_stake(address, 50_000_000_000_000);
+
+        let mut config = NodeConfig::default();
+        config.node.validator_address = address.to_string();
+
+        let consensus_enabled =
+            should_start_consensus(&config, Some(NodeRole::Validator.profile()));
+        let startup = select_finalized_typed_driver_startup(consensus_enabled, true, Some(Ok(())))
+            .expect(
+                "an authorized validator with P2P and finalized inputs must select typed startup",
+            );
+
+        assert_eq!(
+            startup,
+            FinalizedTypedDriverStartup::SpawnFinalizedTypedDriver
+        );
+    }
+
+    #[test]
+    fn finalized_typed_driver_startup_fails_closed_without_p2p_or_finalized_inputs() {
+        let no_p2p = select_finalized_typed_driver_startup(true, false, Some(Ok(())))
+            .expect_err("consensus startup without P2P must fail closed");
+        assert!(no_p2p.contains("active P2P network"));
+
+        let invalid_finalized_inputs = select_finalized_typed_driver_startup(
+            true,
+            true,
+            Some(Err("missing canonical finality context".to_string())),
+        )
+        .expect_err("consensus startup with invalid finalized inputs must fail closed");
+        assert!(invalid_finalized_inputs.contains("missing canonical finality context"));
     }
 
     #[test]
@@ -3210,6 +3698,24 @@ mod tests {
         .unwrap_err()
         .contains("block-time configuration"));
 
+        let mut wrong_protocol = config.clone();
+        wrong_protocol.consensus.algorithm = "ProofOfSynergy".to_string();
+        assert!(ensure_node_config_matches_finalized_consensus_parameters(
+            &wrong_protocol,
+            &genesis
+        )
+        .unwrap_err()
+        .contains("protocol identifier"));
+
+        let mut wrong_stage_timeout = config.clone();
+        wrong_stage_timeout.consensus.precommit_timeout_ms = 1_501;
+        assert!(ensure_node_config_matches_finalized_consensus_parameters(
+            &wrong_stage_timeout,
+            &genesis
+        )
+        .unwrap_err()
+        .contains("stage-timeout configuration"));
+
         let mut wrong_cluster = config;
         wrong_cluster.consensus.validator_cluster_size = 7;
         assert!(ensure_node_config_matches_finalized_consensus_parameters(
@@ -3218,6 +3724,24 @@ mod tests {
         )
         .unwrap_err()
         .contains("cluster size"));
+    }
+
+    #[test]
+    fn applied_genesis_selects_core_only_driver_with_etdag_inactive() {
+        let genesis = load_genesis_from_path(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../genesis.testnet-v3.identity-assigned.json"),
+        )
+        .unwrap();
+        let parameters = genesis
+            .consensus_parameters()
+            .expect("applied Genesis must retain its consensus parameter binding");
+        assert!(resolve_finalized_etdag_startup_activation(
+            parameters,
+            crate::synergy_types::Epoch(0),
+        )
+        .unwrap()
+        .is_none());
     }
 
     fn snapshot_args(extra: &[&str]) -> Vec<String> {

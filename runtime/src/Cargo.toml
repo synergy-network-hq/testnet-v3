@@ -1,6 +1,6 @@
 [package]
 name = "synergy-testnet"
-version = "19.0.50"
+version = "20.0.0"
 edition = "2021"
 
 [dependencies]
@@ -33,9 +33,9 @@ libc = "0.2"
 
 # Post-Quantum Cryptography
 aegis-pqvm = { path = "../aegis-pqvm", default-features = false, features = ["mlkem", "mldsa", "fndsa", "security"] }
-pqsynq = { package = "aegis-pqsynq", path = "../synq-language/aegis-pqsynq/pqsynq", default-features = false, features = ["std", "mldsa"] }
+pqsynq = { package = "aegis-pqsynq", path = "../../../synq-language/aegis-pqsynq/pqsynq", default-features = false, features = ["std", "mldsa"] }
 pqcrypto-traits = { workspace = true }
-pqrust-traits = { path = "../synq-language/pqrust/pqrust-traits" }
+pqrust-traits = { path = "../../../synq-language/pqrust/pqrust-traits" }
 pqcrypto-falcon = "0.3"
 pqcrypto-hqc = "0.2.2"
 pqcrypto-mlkem = { workspace = true }
@@ -58,6 +58,14 @@ path = "lib.rs"
 [[bin]]
 name = "synergy-testnet"
 path = "main.rs"
+
+[[bin]]
+name = "synergy-validator-node"
+path = "bin/synergy-validator-node.rs"
+
+[[bin]]
+name = "synergy-relayer-node"
+path = "bin/synergy-relayer-node.rs"
 
 [[bin]]
 name = "generate-node-keys"
@@ -114,6 +122,14 @@ path = "bin/derive-genesis-addresses.rs"
 [[bin]]
 name = "finalize-testnet-v3-genesis"
 path = "bin/finalize-testnet-v3-genesis.rs"
+
+[[bin]]
+name = "testnet-v3-genesis-release-approval"
+path = "bin/testnet-v3-genesis-release-approval.rs"
+
+[[bin]]
+name = "testnet-v3-etdag-admission"
+path = "bin/testnet-v3-etdag-admission.rs"
 
 [[bin]]
 name = "emit-testnet-v3-consensus-parameters"

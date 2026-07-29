@@ -147,8 +147,14 @@ function setupOnboardingIpc(ipcMain, {
         };
       }
     }
-    const invite = await requestInvite({
-      onboardingToken: requireString(input, 'onboardingToken', 'ONBOARDING_TOKEN_REQUIRED', 'Enter the secure-network onboarding token.'),
+    const onboardingToken = requireString(
+      input,
+      'onboardingToken',
+      'ONBOARDING_TOKEN_REQUIRED',
+      'Enter the secure-network onboarding token.',
+    );
+    const coordinatorInvite = await requestInvite({
+      onboardingToken,
       peerType: requireString(input, 'peerType', 'PEER_TYPE_REQUIRED', 'A peer type is required before requesting a secure-network invite.'),
       peerName: requireString(input, 'peerName', 'PEER_NAME_REQUIRED', 'A validator nickname is required before requesting a secure-network invite.'),
       nodeId: input.nodeId,
@@ -168,6 +174,12 @@ function setupOnboardingIpc(ipcMain, {
       preconfiguredWireguardPublicKey: validatorFields.preconfiguredWireguardPublicKey,
       preconfiguredConfigVersion: validatorFields.preconfiguredConfigVersion,
     });
+    // The activation token is kept only in Electron safe-storage until this
+    // preconfigured package is activated. It is never returned to the renderer
+    // or written into an installer.
+    const invite = coordinatorInvite.preconfigured
+      ? { ...coordinatorInvite, activationToken: onboardingToken }
+      : coordinatorInvite;
     pendingInvitesByTarget.set(id, invite);
     await pendingInviteStore.save(pendingInvitesByTarget);
     return {
@@ -194,7 +206,7 @@ function setupOnboardingIpc(ipcMain, {
         const mesh = invite.preconfigured
           ? await activatePackagedWireguardConfig(
             executor,
-            await loadValidatorPackage({ includeSecrets: true }),
+            await loadValidatorPackage({ includeSecrets: true, activationToken: invite.activationToken }),
             (progress) => emitProgress(event, { targetId: id, ...progress }),
           )
           : await redeemInviteFn(

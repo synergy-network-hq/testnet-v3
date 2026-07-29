@@ -1,0 +1,1110 @@
+{
+  "binding": {
+    "consensus_parameter_decision_id": "TV3-POSY-PARAMS-2026-07-28-01",
+    "consensus_parameter_root_sha3_512": "2e6760bed60c8f8e44b3b693254367f0da9a8aa9efae46c517856fb78be7402cf232c064083116b805278e95a952660f7a92e16ca9cd9349aa74467d577127cd",
+    "genesis_file_sha256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+    "genesis_hash": "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",
+    "phase7_release_integrity_sha256": "688676a29ad105871b7c785757b980401becc6c0f4e7a324bce0f404ed0c4b78",
+    "release_approval_artifact_sha256": "b55629e894a25032d4bb96ae3274ec1a39b5ea8de5d68adc84bd1d5f89d6c5a3",
+    "release_approval_governance_address": "syna1adxk7errymz8p8s0k5ysmka9pjv9ntf9jlml",
+    "release_approval_governance_role": "SNRG-TESTNET-V3-GOVERNANCE-AUTHORITY",
+    "topology_sha256": "a7410b7ef3425091fc61fcad139db85f08b7be9374390c732a027970f1d27968",
+    "vpn_registry_sha256": "3a890fb78186ebc5263171e27925a48f08f70083728438734cf2db79ed3b622f"
+  },
+  "chain_id": 1266,
+  "config_files": {
+    "archive-validator/archive-validator.toml": "146f9a4011e19cdab6a63c6407758362bf7685d6ffcb3e8a7926928ab69c4f76",
+    "bootnodes/bootnode1.toml": "6bac76f50adb15b5f93cfc732ff442bde9a63154fab6d1b8511ee7fd9bec2d3a",
+    "bootnodes/bootnode2.toml": "39495a7893aa3c4655eb571ab51fece2db4072d4d54c10188eb8ab1a95f3f52b",
+    "bootnodes/bootnode3.toml": "0dd90b81f2d8bc0b4817457e04340170b43016baa5629d4c7eb517ac33c52705",
+    "explorer-indexer/explorer-indexer.toml": "e4552a52dab8bf791818acb24f65f2717f3e74b2770e50c70b6af257f41449b5",
+    "observer/observer.toml": "bdfe6876b405190f6b9179605e9c95114d42db4fd76a3b475e3193912731c994",
+    "relayers/relay1.toml": "4d94c89d88e38db3e38b80f718cb0a6f256f4096fd8e235c89142ae0ea6b90b0",
+    "relayers/relay2.toml": "ae42b5f59606e248716ea023421ca9f15a1f1340671208fa8944879ba8d37565",
+    "relayers/relay3.toml": "7dbe25ef9352e9b4bb61c82beffb15b0995c1a37dd232457c5ca11ed0ce3af7d",
+    "rpc-gateway/rpc-gateway.toml": "9f009d162e177cc91742eec1bc307babc0bf79c0db1fbe00a083aa611423aaea",
+    "seed-servers/seed1.toml": "439e342834a9615bdc72b114a65e8226fd48aead2c150737d54846e37c24a32e",
+    "seed-servers/seed2.toml": "3baf507f9fc5c7d0e7af742f523286d9160405fcd0c0753a3a134a06a81b6fe4",
+    "seed-servers/seed3.toml": "f8540bdf1ab7b530c53f7be7d343c1a48c5c2d63288033c7317fc2100715bb84",
+    "validators/val1.toml": "d2b57d938158864ca23c6f1344cd96f57305d44c7c3c736bc6f0a168cb70c8bc",
+    "validators/val2.toml": "9f7748287ef49b71fab865d6f0d90e238c405e9eeb4ba9a7b53f3e788ad67499",
+    "validators/val3.toml": "6ff5dc65c745d98d53d5a80580c8f9e9c117c8aa5dd7b9ef7dc4b7f3852cd645",
+    "validators/val4.toml": "17b7a353da956e82a07e255404f54d48da803d9898ccfaf4af16dffd9451002a",
+    "validators/val5.toml": "5e68133d4d5560a99882015748fe0f979ce13030b9ee63f03a96250213904fa3",
+    "validators/val6.toml": "eccf76d5002d03df305dfe8d7fea4c236ba6363961f7977e442e76e6cad21c8d"
+  },
+  "deployment": {
+    "canonical_genesis": {
+      "content_addressed": true,
+      "deploy_mode": "0444",
+      "deploy_paths": [
+        "/Users/Shared/Synergy/archive-validator/workspace/config/testnet-v3-genesis.json",
+        "/etc/synergy/testnet-v3/bootnode2/genesis.json",
+        "/etc/synergy/testnet-v3/bootnode3/genesis.json",
+        "/etc/synergy/testnet-v3/explorer-indexer/genesis.json",
+        "/etc/synergy/testnet-v3/genesis.json",
+        "/etc/synergy/testnet-v3/seed-services/seed1.genesis.json",
+        "/etc/synergy/testnet-v3/seed-services/seed2.genesis.json",
+        "/etc/synergy/testnet-v3/seed-services/seed3.genesis.json"
+      ],
+      "payload": "canonical-genesis/genesis.json",
+      "payload_sha256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+      "runtime_environment": "SYNERGY_GENESIS_FILE"
+    },
+    "deployment_files": {
+      "canonical-genesis/genesis.json": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+      "canonical-genesis/genesis.json.sha256": "8a1d0390da6330606405acbcde709913653d00b211ff7ad6514c5eb4907c1fc8",
+      "deployment/archive-validator/archive-validator/activation-plan.json": "181d2abf8d312e3d5c9ea7085e6347f110191526393110bc0efd22ec2a2649fb",
+      "deployment/archive-validator/archive-validator/launchd/50-synergy-testnet-v3-genesis.binding.plist": "9b822678ba550175a50c85015abefa1654e69a8fb561a05adbf5610cc44ee557",
+      "deployment/archive-validator/archive-validator/node.env": "9b46ba9b9f991e2b1619fabf0db5b5d66a87779995698d3a55abe00572309ffc",
+      "deployment/bootnodes/bootnode1/activation-plan.json": "ffeecea092c6141d79db852700253cf48df563eae83c768c8157aaa6387388f3",
+      "deployment/bootnodes/bootnode1/node.env": "311aa5c31fcc4ff8e031b4327de23ee1fabbcd2d49345048ce07d933e27e3576",
+      "deployment/bootnodes/bootnode1/systemd/synergy-testnet-bootnode1.service.d/50-synergy-testnet-v3-genesis.conf": "4eb4987444650fc5ff379fa86ea3e9697659ebb5d3c59ea0c235c70d84c3ff43",
+      "deployment/bootnodes/bootnode2/activation-plan.json": "dbe7666a8b4df5445b774b380c91758c2f916cf48a9eb070a1a474a043545884",
+      "deployment/bootnodes/bootnode2/dedicated-runtime/runtime.env.example": "154d40eefc809ff732f0dae5607a6566cd4dd01dc8a5827db5f1df5316547511",
+      "deployment/bootnodes/bootnode2/dedicated-runtime/synergy-release-guard": "8f0976a5387bd6f14d1431c9d8f67886aaa98e945c1b4071042bc1a9f05c4604",
+      "deployment/bootnodes/bootnode2/dedicated-systemd/synergy-testnet-v3-bootnode2.service": "df53a02f21ee824ee46e030761ce579beecff270798ca3c03a4158943b43f727",
+      "deployment/bootnodes/bootnode2/node.env": "6dbba75e67c9961b911b63a30a469813b63cd6316b45f2073d9d8d036e0d3d61",
+      "deployment/bootnodes/bootnode3/activation-plan.json": "b114d46fe43370a11717bd73167ce1b9cc9c26db35e752db10b02492adf07e50",
+      "deployment/bootnodes/bootnode3/dedicated-runtime/runtime.env.example": "154d40eefc809ff732f0dae5607a6566cd4dd01dc8a5827db5f1df5316547511",
+      "deployment/bootnodes/bootnode3/dedicated-runtime/synergy-release-guard": "8f0976a5387bd6f14d1431c9d8f67886aaa98e945c1b4071042bc1a9f05c4604",
+      "deployment/bootnodes/bootnode3/dedicated-systemd/synergy-testnet-v3-bootnode3.service": "4604897c33fba23aae1ce21a85f4e3fdad87ba45271e6f892aefd2c6d4cf6db3",
+      "deployment/bootnodes/bootnode3/node.env": "8dd75a7b1d82a8859ff727c4c24c3f714440d60cddf2bb3f845e4dd848aab2ba",
+      "deployment/explorer-indexer/explorer-indexer/activation-plan.json": "b80743ad76b4ccb5f6a275c6fa47a094794302ac2c30ec47faa25edf724ac2e4",
+      "deployment/explorer-indexer/explorer-indexer/dedicated-runtime/runtime.env.example": "154d40eefc809ff732f0dae5607a6566cd4dd01dc8a5827db5f1df5316547511",
+      "deployment/explorer-indexer/explorer-indexer/dedicated-runtime/synergy-release-guard": "8f0976a5387bd6f14d1431c9d8f67886aaa98e945c1b4071042bc1a9f05c4604",
+      "deployment/explorer-indexer/explorer-indexer/dedicated-systemd/synergy-testnet-v3-explorer-indexer.service": "579bd64d39da1a4965da885dfd885ba5f8b23c37abd7f47f01e9c0b1c5b49daf",
+      "deployment/explorer-indexer/explorer-indexer/node.env": "19bf768d3130e8185f26a7012a073da4c7cde0392b180d0b1ead61dfbe5f0f89",
+      "deployment/observer/observer/activation-plan.json": "b9fb8258c08485b8af8bd88cac6b5c75748b66266688e35f70390cfcab7ad214",
+      "deployment/observer/observer/node.env": "f4c3a908edb0d51cafe63dd26df70d2c27a05aa12e1b3d88fa08fc746d6c1a6d",
+      "deployment/observer/observer/systemd/synergy-observer.service.d/50-synergy-testnet-v3-genesis.conf": "4eb4987444650fc5ff379fa86ea3e9697659ebb5d3c59ea0c235c70d84c3ff43",
+      "deployment/relayers/relay1/activation-plan.json": "31537e4167cc6a1efcf061043b7aa250034080bb1c4b516d5a1fd4ad797bc192",
+      "deployment/relayers/relay1/node.env": "da16d356f2b324207a01a681011e107f3162cb41802ca5434c989afbb093ddad",
+      "deployment/relayers/relay1/systemd/synergy-testnet-relayer.service.d/50-synergy-testnet-v3-genesis.conf": "4eb4987444650fc5ff379fa86ea3e9697659ebb5d3c59ea0c235c70d84c3ff43",
+      "deployment/relayers/relay2/activation-plan.json": "0dfc344c9fb304e54caa84000778f231220017bf8357334d335c6d03dc08614b",
+      "deployment/relayers/relay2/node.env": "da16d356f2b324207a01a681011e107f3162cb41802ca5434c989afbb093ddad",
+      "deployment/relayers/relay2/systemd/synergy-testnet-relayer.service.d/50-synergy-testnet-v3-genesis.conf": "4eb4987444650fc5ff379fa86ea3e9697659ebb5d3c59ea0c235c70d84c3ff43",
+      "deployment/relayers/relay3/activation-plan.json": "f45e78bfe3d5f0fd0d1e3fee832cb76670392e4017bf9cc0737242dcd5fd1788",
+      "deployment/relayers/relay3/node.env": "da16d356f2b324207a01a681011e107f3162cb41802ca5434c989afbb093ddad",
+      "deployment/relayers/relay3/systemd/synergy-testnet-relayer.service.d/50-synergy-testnet-v3-genesis.conf": "4eb4987444650fc5ff379fa86ea3e9697659ebb5d3c59ea0c235c70d84c3ff43",
+      "deployment/rpc-gateway/rpc-gateway/activation-plan.json": "7ae08d50334b42a12f054a9b3d7dfc7dc3acf428f317df17b3e1c6079cb7a931",
+      "deployment/rpc-gateway/rpc-gateway/node.env": "9c58d5bc5f09733b94a3a6e279cecf612946a20189eeae90f48f7b47b22539c1",
+      "deployment/rpc-gateway/rpc-gateway/systemd/synergy-rpc-gateway.service.d/50-synergy-testnet-v3-genesis.conf": "4eb4987444650fc5ff379fa86ea3e9697659ebb5d3c59ea0c235c70d84c3ff43",
+      "deployment/seed-servers/seed1/activation-plan.json": "fdd04d05e60a69bcbba0e23e79f59ce6c99e4161c0b4527af118d2a9fd3b1286",
+      "deployment/seed-servers/seed1/dedicated-seed/seed-service.json": "7ed05121975d496d519e09857303d07067816fa89fb59b67b5a4c9d7fcab0f5e",
+      "deployment/seed-servers/seed1/dedicated-seed/seed_service.py": "8a88c3e2e1198100694cb3981f86d0c34f79aad3e1c255394690ac9862b8b7f9",
+      "deployment/seed-servers/seed1/dedicated-seed/synergy-seed-release-guard": "0deaca06f82effca38d1235bd25f00e4be54ada663cbf10ef7efb0ace8655725",
+      "deployment/seed-servers/seed1/dedicated-systemd/synergy-testnet-v3-seed@.service": "16b0699af5fad4affdaef3708aa0b993e5810c56b8c1151d5195a82c107692a6",
+      "deployment/seed-servers/seed1/node.env": "10034b2644b4b06cf33d88bb3eb7410852e4369188d82acd887c926043486ae1",
+      "deployment/seed-servers/seed2/activation-plan.json": "562519b873428d960fc61101d4c9827fc830efbb8ab771f198ca8e67c6eb3c64",
+      "deployment/seed-servers/seed2/dedicated-seed/seed-service.json": "0d5ff9b9d2792566d56cf3825c51d3b144ffbadf9ef4f4c2a2aed4122232835c",
+      "deployment/seed-servers/seed2/dedicated-seed/seed_service.py": "8a88c3e2e1198100694cb3981f86d0c34f79aad3e1c255394690ac9862b8b7f9",
+      "deployment/seed-servers/seed2/dedicated-seed/synergy-seed-release-guard": "0deaca06f82effca38d1235bd25f00e4be54ada663cbf10ef7efb0ace8655725",
+      "deployment/seed-servers/seed2/dedicated-systemd/synergy-testnet-v3-seed@.service": "5b573892b1c596c6b5ed78d28ee38e54ad0535b229125f08502d0d4cf15f9971",
+      "deployment/seed-servers/seed2/node.env": "67659706840ad946cedb24e779bb60ccad2df25b58d5a13c0c64f2c319982e31",
+      "deployment/seed-servers/seed3/activation-plan.json": "684c9809b9f99f23ecaf44e45d5b585f1532fe4e816a92f328c342cd6f0edcbb",
+      "deployment/seed-servers/seed3/dedicated-seed/seed-service.json": "2afa703e111abc5907160b0e0a8ec2b27eba2ae108e9da2b52671bcb3ebb774f",
+      "deployment/seed-servers/seed3/dedicated-seed/seed_service.py": "8a88c3e2e1198100694cb3981f86d0c34f79aad3e1c255394690ac9862b8b7f9",
+      "deployment/seed-servers/seed3/dedicated-seed/synergy-seed-release-guard": "0deaca06f82effca38d1235bd25f00e4be54ada663cbf10ef7efb0ace8655725",
+      "deployment/seed-servers/seed3/dedicated-systemd/synergy-testnet-v3-seed@.service": "e5d7d980da890a9341fba9946175f0c3f22616ef0a4c2186287b0639f4cd6821",
+      "deployment/seed-servers/seed3/node.env": "f0dff12bd092e032502eeb9405d7fca05a0555c38e236591dee73f7bd18d4faa",
+      "deployment/validators/val1/activation-plan.json": "cf3786e1d8b02a68dc457a2af4c89869947767f89a798bb0f3f92d5fe5c75917",
+      "deployment/validators/val1/node.env": "2629b5f6711811666e36e228e3fa20a8245a2ba5eedff67217964651dd1af9ef",
+      "deployment/validators/val1/systemd/synergy-validator.service.d/50-synergy-testnet-v3-genesis.conf": "4eb4987444650fc5ff379fa86ea3e9697659ebb5d3c59ea0c235c70d84c3ff43",
+      "deployment/validators/val2/activation-plan.json": "d3d433fd877eae2cb1ba963bd356500015f5b367da15f456dfa52c06c949182d",
+      "deployment/validators/val2/node.env": "2629b5f6711811666e36e228e3fa20a8245a2ba5eedff67217964651dd1af9ef",
+      "deployment/validators/val2/systemd/synergy-validator.service.d/50-synergy-testnet-v3-genesis.conf": "4eb4987444650fc5ff379fa86ea3e9697659ebb5d3c59ea0c235c70d84c3ff43",
+      "deployment/validators/val3/activation-plan.json": "6b1cfd1e210e2ac085b3a1de0d35a23b9b9ed9bc026bc3248a9010bce2653d60",
+      "deployment/validators/val3/node.env": "2629b5f6711811666e36e228e3fa20a8245a2ba5eedff67217964651dd1af9ef",
+      "deployment/validators/val3/systemd/synergy-validator.service.d/50-synergy-testnet-v3-genesis.conf": "4eb4987444650fc5ff379fa86ea3e9697659ebb5d3c59ea0c235c70d84c3ff43",
+      "deployment/validators/val4/activation-plan.json": "72d8e8336cac9b474f44dcc8190f5be902a7f8847165ed864f6b4eedfe6fa15e",
+      "deployment/validators/val4/node.env": "2629b5f6711811666e36e228e3fa20a8245a2ba5eedff67217964651dd1af9ef",
+      "deployment/validators/val4/systemd/synergy-validator.service.d/50-synergy-testnet-v3-genesis.conf": "4eb4987444650fc5ff379fa86ea3e9697659ebb5d3c59ea0c235c70d84c3ff43",
+      "deployment/validators/val5/activation-plan.json": "659f4bd9645bcb92f028b07fe0391307d0d4542ca2b50bc7c971a66496d38579",
+      "deployment/validators/val5/node.env": "2629b5f6711811666e36e228e3fa20a8245a2ba5eedff67217964651dd1af9ef",
+      "deployment/validators/val5/systemd/synergy-validator.service.d/50-synergy-testnet-v3-genesis.conf": "4eb4987444650fc5ff379fa86ea3e9697659ebb5d3c59ea0c235c70d84c3ff43",
+      "deployment/validators/val6/activation-plan.json": "3237bdf9145d4e53db1ddd1edd6a8920644d476ef0346658606616290f0d904e",
+      "deployment/validators/val6/node.env": "2629b5f6711811666e36e228e3fa20a8245a2ba5eedff67217964651dd1af9ef",
+      "deployment/validators/val6/systemd/synergy-validator.service.d/50-synergy-testnet-v3-genesis.conf": "4eb4987444650fc5ff379fa86ea3e9697659ebb5d3c59ea0c235c70d84c3ff43",
+      "support-service-activation-sequence.json": "63186198ae42bd18637070a791977e41525a765bc02f8448fdb8b4a302bdcfa1"
+    },
+    "manual_service_remediation_required": [],
+    "nodes": {
+      "archive-validator/archive-validator.toml": {
+        "activation_plan_payload": "deployment/archive-validator/archive-validator/activation-plan.json",
+        "config_deploy_path": "/Users/Shared/Synergy/archive-validator/workspace/config/node.toml",
+        "config_install_mode": "manual_merge_only_preserve_existing_identity_key_port_and_endpoint_settings",
+        "config_payload": "archive-validator/archive-validator.toml",
+        "config_payload_sha256": "146f9a4011e19cdab6a63c6407758362bf7685d6ffcb3e8a7926928ab69c4f76",
+        "dedicated_install_map": {},
+        "dedicated_payloads": {},
+        "environment_install_mode": "merge_release_binding_only_never_replace_existing_environment_file",
+        "environment_payload": "deployment/archive-validator/archive-validator/node.env",
+        "genesis_deploy_path": "/Users/Shared/Synergy/archive-validator/workspace/config/testnet-v3-genesis.json",
+        "genesis_file_sha256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+        "service_binding_payload": "deployment/archive-validator/archive-validator/launchd/50-synergy-testnet-v3-genesis.binding.plist",
+        "service_contract": {
+          "existing_config_path": "/Users/Shared/Synergy/archive-validator/workspace/config/node.toml",
+          "existing_environment_file_path": null,
+          "generated_config_compatible": true,
+          "genesis_deploy_path": "/Users/Shared/Synergy/archive-validator/workspace/config/testnet-v3-genesis.json",
+          "manual_activation_required": true,
+          "manual_config_merge_required": true,
+          "manual_service_remediation_reason": null,
+          "manual_service_remediation_required": false,
+          "platform": "macos-launchd",
+          "service_exec_start": "/usr/local/synergy/bin/synergy-archive-validator-node start --config /Users/Shared/Synergy/archive-validator/workspace/config/node.toml",
+          "service_label": "network.synergy.archive-validator",
+          "service_plist_path": "/Library/LaunchDaemons/network.synergy.archive-validator.plist",
+          "service_user": "synergynode"
+        },
+        "support_service_activation_sequence": null,
+        "topology_audit_config_payload": null
+      },
+      "bootnodes/bootnode1.toml": {
+        "activation_plan_payload": "deployment/bootnodes/bootnode1/activation-plan.json",
+        "config_deploy_path": "/opt/synergy/testnet/bootnode1/config/node.toml",
+        "config_install_mode": "manual_merge_only_preserve_existing_identity_key_port_and_endpoint_settings",
+        "config_payload": "bootnodes/bootnode1.toml",
+        "config_payload_sha256": "6bac76f50adb15b5f93cfc732ff442bde9a63154fab6d1b8511ee7fd9bec2d3a",
+        "dedicated_install_map": {},
+        "dedicated_payloads": {},
+        "environment_install_mode": "merge_release_binding_only_never_replace_existing_environment_file",
+        "environment_payload": "deployment/bootnodes/bootnode1/node.env",
+        "genesis_deploy_path": "/etc/synergy/testnet-v3/genesis.json",
+        "genesis_file_sha256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+        "service_binding_payload": "deployment/bootnodes/bootnode1/systemd/synergy-testnet-bootnode1.service.d/50-synergy-testnet-v3-genesis.conf",
+        "service_contract": {
+          "config_install_mode": "manual_merge_only_preserve_existing_identity_key_port_and_endpoint_settings",
+          "existing_config_path": "/opt/synergy/testnet/bootnode1/config/node.toml",
+          "existing_environment_file_path": null,
+          "generated_config_compatible": true,
+          "genesis_deploy_path": "/etc/synergy/testnet-v3/genesis.json",
+          "manual_activation_required": true,
+          "manual_config_merge_required": true,
+          "manual_service_remediation_reason": null,
+          "manual_service_remediation_required": false,
+          "platform": "linux-systemd",
+          "service_exec_start": "/opt/synergy/testnet/bootnode1/bin/synergy-testnet-linux-amd64 start --config /opt/synergy/testnet/bootnode1/config/node.toml",
+          "service_fragment_path": "/etc/systemd/system/synergy-testnet-bootnode1.service",
+          "service_unit": "synergy-testnet-bootnode1.service",
+          "service_user": "root"
+        },
+        "support_service_activation_sequence": {
+          "activation_stage": "boot_and_seed",
+          "activation_stage_order": 1,
+          "offline_contract_only": true,
+          "requires_completed_live_readiness_stages": [],
+          "sequence_payload": "support-service-activation-sequence.json"
+        },
+        "topology_audit_config_payload": null
+      },
+      "bootnodes/bootnode2.toml": {
+        "activation_plan_payload": "deployment/bootnodes/bootnode2/activation-plan.json",
+        "config_deploy_path": "/etc/synergy/testnet-v3/bootnode2/node.toml",
+        "config_install_mode": "install_new_isolated_testnet_v3_config_only",
+        "config_payload": "bootnodes/bootnode2.toml",
+        "config_payload_sha256": "39495a7893aa3c4655eb571ab51fece2db4072d4d54c10188eb8ab1a95f3f52b",
+        "dedicated_install_map": {
+          "runtime_environment_example": {
+            "deploy_path": "/etc/synergy/testnet-v3/bootnode2/runtime.env",
+            "install_mode": "operator_create_filled_content_addressed_environment_file_mode_0600",
+            "payload": "deployment/bootnodes/bootnode2/dedicated-runtime/runtime.env.example"
+          },
+          "runtime_launch_guard": {
+            "deploy_path": "/opt/synergy/testnet-v3/bin/synergy-release-guard",
+            "install_mode": "copy_new_v3_guard_mode_0555",
+            "payload": "deployment/bootnodes/bootnode2/dedicated-runtime/synergy-release-guard"
+          },
+          "systemd_unit": {
+            "deploy_path": "/etc/systemd/system/synergy-testnet-v3-bootnode2.service",
+            "install_mode": "copy_new_v3_unit_do_not_enable_or_start",
+            "payload": "deployment/bootnodes/bootnode2/dedicated-systemd/synergy-testnet-v3-bootnode2.service"
+          }
+        },
+        "dedicated_payloads": {
+          "runtime_environment_example": "deployment/bootnodes/bootnode2/dedicated-runtime/runtime.env.example",
+          "runtime_launch_guard": "deployment/bootnodes/bootnode2/dedicated-runtime/synergy-release-guard",
+          "systemd_unit": "deployment/bootnodes/bootnode2/dedicated-systemd/synergy-testnet-v3-bootnode2.service"
+        },
+        "environment_install_mode": "reference_only_dedicated_unit_embeds_immutable_genesis_binding",
+        "environment_payload": "deployment/bootnodes/bootnode2/node.env",
+        "genesis_deploy_path": "/etc/synergy/testnet-v3/bootnode2/genesis.json",
+        "genesis_file_sha256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+        "service_binding_payload": "deployment/bootnodes/bootnode2/dedicated-systemd/synergy-testnet-v3-bootnode2.service",
+        "service_contract": {
+          "config_install_mode": "install_new_isolated_testnet_v3_config_only",
+          "dedicated_config_root": "/etc/synergy/testnet-v3/bootnode2",
+          "dedicated_data_root": "/var/lib/synergy-testnet-v3-bootnode2",
+          "deployment_mode": "dedicated-testnet-v3-service",
+          "existing_config_path": "/etc/synergy/testnet-v3/bootnode2/node.toml",
+          "existing_environment_file_path": null,
+          "generated_config_compatible": true,
+          "genesis_deploy_path": "/etc/synergy/testnet-v3/bootnode2/genesis.json",
+          "legacy_service_contract_do_not_modify": {
+            "fragment_path": "/etc/systemd/system/synergy-testnet-bootnode2.service",
+            "instruction": "Do not modify, unhold, enable, or reuse this legacy unit.",
+            "service_unit": "synergy-testnet-bootnode2.service",
+            "status": "emergency-held"
+          },
+          "manual_activation_required": true,
+          "manual_config_merge_required": false,
+          "manual_service_remediation_reason": null,
+          "manual_service_remediation_required": false,
+          "operator_identity_mapping_required": true,
+          "operator_port_preflight_required": true,
+          "operator_runtime_binary_mapping_required": true,
+          "platform": "linux-systemd",
+          "runtime_environment_file": "/etc/synergy/testnet-v3/bootnode2/runtime.env",
+          "runtime_kind": "runtime",
+          "runtime_launch_guard_deploy_path": "/opt/synergy/testnet-v3/bin/synergy-release-guard",
+          "service_fragment_path": "/etc/systemd/system/synergy-testnet-v3-bootnode2.service",
+          "service_unit": "synergy-testnet-v3-bootnode2.service",
+          "service_user": "DynamicUser"
+        },
+        "support_service_activation_sequence": {
+          "activation_stage": "boot_and_seed",
+          "activation_stage_order": 1,
+          "offline_contract_only": true,
+          "requires_completed_live_readiness_stages": [],
+          "sequence_payload": "support-service-activation-sequence.json"
+        },
+        "topology_audit_config_payload": null
+      },
+      "bootnodes/bootnode3.toml": {
+        "activation_plan_payload": "deployment/bootnodes/bootnode3/activation-plan.json",
+        "config_deploy_path": "/etc/synergy/testnet-v3/bootnode3/node.toml",
+        "config_install_mode": "install_new_isolated_testnet_v3_config_only",
+        "config_payload": "bootnodes/bootnode3.toml",
+        "config_payload_sha256": "0dd90b81f2d8bc0b4817457e04340170b43016baa5629d4c7eb517ac33c52705",
+        "dedicated_install_map": {
+          "runtime_environment_example": {
+            "deploy_path": "/etc/synergy/testnet-v3/bootnode3/runtime.env",
+            "install_mode": "operator_create_filled_content_addressed_environment_file_mode_0600",
+            "payload": "deployment/bootnodes/bootnode3/dedicated-runtime/runtime.env.example"
+          },
+          "runtime_launch_guard": {
+            "deploy_path": "/opt/synergy/testnet-v3/bin/synergy-release-guard",
+            "install_mode": "copy_new_v3_guard_mode_0555",
+            "payload": "deployment/bootnodes/bootnode3/dedicated-runtime/synergy-release-guard"
+          },
+          "systemd_unit": {
+            "deploy_path": "/etc/systemd/system/synergy-testnet-v3-bootnode3.service",
+            "install_mode": "copy_new_v3_unit_do_not_enable_or_start",
+            "payload": "deployment/bootnodes/bootnode3/dedicated-systemd/synergy-testnet-v3-bootnode3.service"
+          }
+        },
+        "dedicated_payloads": {
+          "runtime_environment_example": "deployment/bootnodes/bootnode3/dedicated-runtime/runtime.env.example",
+          "runtime_launch_guard": "deployment/bootnodes/bootnode3/dedicated-runtime/synergy-release-guard",
+          "systemd_unit": "deployment/bootnodes/bootnode3/dedicated-systemd/synergy-testnet-v3-bootnode3.service"
+        },
+        "environment_install_mode": "reference_only_dedicated_unit_embeds_immutable_genesis_binding",
+        "environment_payload": "deployment/bootnodes/bootnode3/node.env",
+        "genesis_deploy_path": "/etc/synergy/testnet-v3/bootnode3/genesis.json",
+        "genesis_file_sha256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+        "service_binding_payload": "deployment/bootnodes/bootnode3/dedicated-systemd/synergy-testnet-v3-bootnode3.service",
+        "service_contract": {
+          "config_install_mode": "install_new_isolated_testnet_v3_config_only",
+          "dedicated_config_root": "/etc/synergy/testnet-v3/bootnode3",
+          "dedicated_data_root": "/var/lib/synergy-testnet-v3-bootnode3",
+          "deployment_mode": "dedicated-testnet-v3-service",
+          "existing_config_path": "/etc/synergy/testnet-v3/bootnode3/node.toml",
+          "existing_environment_file_path": null,
+          "generated_config_compatible": true,
+          "genesis_deploy_path": "/etc/synergy/testnet-v3/bootnode3/genesis.json",
+          "legacy_service_contract_do_not_modify": {
+            "fragment_path": "/etc/systemd/system/synergy-testbeta-bootnode3.service",
+            "instruction": "Do not modify, unhold, enable, or reuse this testbeta unit.",
+            "service_unit": "synergy-testbeta-bootnode3.service",
+            "status": "testbeta-named-and-emergency-held"
+          },
+          "manual_activation_required": true,
+          "manual_config_merge_required": false,
+          "manual_service_remediation_reason": null,
+          "manual_service_remediation_required": false,
+          "operator_identity_mapping_required": true,
+          "operator_port_preflight_required": true,
+          "operator_runtime_binary_mapping_required": true,
+          "platform": "linux-systemd",
+          "runtime_environment_file": "/etc/synergy/testnet-v3/bootnode3/runtime.env",
+          "runtime_kind": "runtime",
+          "runtime_launch_guard_deploy_path": "/opt/synergy/testnet-v3/bin/synergy-release-guard",
+          "service_fragment_path": "/etc/systemd/system/synergy-testnet-v3-bootnode3.service",
+          "service_unit": "synergy-testnet-v3-bootnode3.service",
+          "service_user": "DynamicUser"
+        },
+        "support_service_activation_sequence": {
+          "activation_stage": "boot_and_seed",
+          "activation_stage_order": 1,
+          "offline_contract_only": true,
+          "requires_completed_live_readiness_stages": [],
+          "sequence_payload": "support-service-activation-sequence.json"
+        },
+        "topology_audit_config_payload": null
+      },
+      "explorer-indexer/explorer-indexer.toml": {
+        "activation_plan_payload": "deployment/explorer-indexer/explorer-indexer/activation-plan.json",
+        "config_deploy_path": "/etc/synergy/testnet-v3/explorer-indexer/node.toml",
+        "config_install_mode": "install_new_isolated_testnet_v3_config_only",
+        "config_payload": "explorer-indexer/explorer-indexer.toml",
+        "config_payload_sha256": "e4552a52dab8bf791818acb24f65f2717f3e74b2770e50c70b6af257f41449b5",
+        "dedicated_install_map": {
+          "runtime_environment_example": {
+            "deploy_path": "/etc/synergy/testnet-v3/explorer-indexer/runtime.env",
+            "install_mode": "operator_create_filled_content_addressed_environment_file_mode_0600",
+            "payload": "deployment/explorer-indexer/explorer-indexer/dedicated-runtime/runtime.env.example"
+          },
+          "runtime_launch_guard": {
+            "deploy_path": "/opt/synergy/testnet-v3/bin/synergy-release-guard",
+            "install_mode": "copy_new_v3_guard_mode_0555",
+            "payload": "deployment/explorer-indexer/explorer-indexer/dedicated-runtime/synergy-release-guard"
+          },
+          "systemd_unit": {
+            "deploy_path": "/etc/systemd/system/synergy-testnet-v3-explorer-indexer.service",
+            "install_mode": "copy_new_v3_unit_do_not_enable_or_start",
+            "payload": "deployment/explorer-indexer/explorer-indexer/dedicated-systemd/synergy-testnet-v3-explorer-indexer.service"
+          }
+        },
+        "dedicated_payloads": {
+          "runtime_environment_example": "deployment/explorer-indexer/explorer-indexer/dedicated-runtime/runtime.env.example",
+          "runtime_launch_guard": "deployment/explorer-indexer/explorer-indexer/dedicated-runtime/synergy-release-guard",
+          "systemd_unit": "deployment/explorer-indexer/explorer-indexer/dedicated-systemd/synergy-testnet-v3-explorer-indexer.service"
+        },
+        "environment_install_mode": "reference_only_dedicated_unit_embeds_immutable_genesis_binding",
+        "environment_payload": "deployment/explorer-indexer/explorer-indexer/node.env",
+        "genesis_deploy_path": "/etc/synergy/testnet-v3/explorer-indexer/genesis.json",
+        "genesis_file_sha256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+        "service_binding_payload": "deployment/explorer-indexer/explorer-indexer/dedicated-systemd/synergy-testnet-v3-explorer-indexer.service",
+        "service_contract": {
+          "config_install_mode": "install_new_isolated_testnet_v3_config_only",
+          "dedicated_config_root": "/etc/synergy/testnet-v3/explorer-indexer",
+          "dedicated_data_root": "/var/lib/synergy-testnet-v3-explorer-indexer",
+          "deployment_mode": "dedicated-testnet-v3-service",
+          "existing_config_path": "/etc/synergy/testnet-v3/explorer-indexer/node.toml",
+          "existing_environment_file_path": null,
+          "generated_config_compatible": true,
+          "genesis_deploy_path": "/etc/synergy/testnet-v3/explorer-indexer/genesis.json",
+          "legacy_service_contract_do_not_modify": {
+            "fragment_path": "/etc/systemd/system/synergy-node-exp.service",
+            "instruction": "Do not modify, enable, or reuse this legacy unit.",
+            "service_unit": "synergy-node-exp.service",
+            "status": "referenced-config-and-environment-absent-with-oom-guard"
+          },
+          "manual_activation_required": true,
+          "manual_config_merge_required": false,
+          "manual_service_remediation_reason": null,
+          "manual_service_remediation_required": false,
+          "operator_identity_mapping_required": true,
+          "operator_port_preflight_required": true,
+          "operator_runtime_binary_mapping_required": true,
+          "platform": "linux-systemd",
+          "runtime_environment_file": "/etc/synergy/testnet-v3/explorer-indexer/runtime.env",
+          "runtime_kind": "indexer",
+          "runtime_launch_guard_deploy_path": "/opt/synergy/testnet-v3/bin/synergy-release-guard",
+          "service_fragment_path": "/etc/systemd/system/synergy-testnet-v3-explorer-indexer.service",
+          "service_unit": "synergy-testnet-v3-explorer-indexer.service",
+          "service_user": "DynamicUser"
+        },
+        "support_service_activation_sequence": {
+          "activation_stage": "atlas_explorer_indexer",
+          "activation_stage_order": 4,
+          "offline_contract_only": true,
+          "requires_completed_live_readiness_stages": [
+            "boot_and_seed",
+            "relayers",
+            "rpc_gateway"
+          ],
+          "sequence_payload": "support-service-activation-sequence.json"
+        },
+        "topology_audit_config_payload": null
+      },
+      "observer/observer.toml": {
+        "activation_plan_payload": "deployment/observer/observer/activation-plan.json",
+        "config_deploy_path": "/etc/synergy/observer/node.toml",
+        "config_install_mode": "manual_merge_only_preserve_existing_identity_key_port_and_endpoint_settings",
+        "config_payload": "observer/observer.toml",
+        "config_payload_sha256": "bdfe6876b405190f6b9179605e9c95114d42db4fd76a3b475e3193912731c994",
+        "dedicated_install_map": {},
+        "dedicated_payloads": {},
+        "environment_install_mode": "merge_release_binding_only_never_replace_existing_environment_file",
+        "environment_payload": "deployment/observer/observer/node.env",
+        "genesis_deploy_path": "/etc/synergy/testnet-v3/genesis.json",
+        "genesis_file_sha256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+        "service_binding_payload": "deployment/observer/observer/systemd/synergy-observer.service.d/50-synergy-testnet-v3-genesis.conf",
+        "service_contract": {
+          "config_install_mode": "manual_merge_only_preserve_existing_identity_key_port_and_endpoint_settings",
+          "existing_config_path": "/etc/synergy/observer/node.toml",
+          "existing_environment_file_path": "/etc/synergy/observer/node.env",
+          "generated_config_compatible": true,
+          "genesis_deploy_path": "/etc/synergy/testnet-v3/genesis.json",
+          "manual_activation_required": true,
+          "manual_config_merge_required": true,
+          "manual_service_remediation_reason": null,
+          "manual_service_remediation_required": false,
+          "platform": "linux-systemd",
+          "service_exec_start": "/opt/synergy/bin/synergy-observer start --config /etc/synergy/observer/node.toml",
+          "service_fragment_path": "/etc/systemd/system/synergy-observer.service",
+          "service_unit": "synergy-observer.service",
+          "service_user": "node"
+        },
+        "support_service_activation_sequence": null,
+        "topology_audit_config_payload": null
+      },
+      "relayers/relay1.toml": {
+        "activation_plan_payload": "deployment/relayers/relay1/activation-plan.json",
+        "config_deploy_path": "config/node.toml",
+        "config_install_mode": "replace_with_checksum_bound_canonical_testnet_v3_config_after_backup_and_inactive_service_preflight",
+        "config_payload": "relayers/relay1.toml",
+        "config_payload_sha256": "4d94c89d88e38db3e38b80f718cb0a6f256f4096fd8e235c89142ae0ea6b90b0",
+        "dedicated_install_map": {},
+        "dedicated_payloads": {},
+        "environment_install_mode": "merge_release_binding_only_never_replace_existing_environment_file",
+        "environment_payload": "deployment/relayers/relay1/node.env",
+        "genesis_deploy_path": "/etc/synergy/testnet-v3/genesis.json",
+        "genesis_file_sha256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+        "service_binding_payload": "deployment/relayers/relay1/systemd/synergy-testnet-relayer.service.d/50-synergy-testnet-v3-genesis.conf",
+        "service_contract": {
+          "config_install_mode": "replace_with_checksum_bound_canonical_testnet_v3_config_after_backup_and_inactive_service_preflight",
+          "existing_config_path": "config/node.toml",
+          "existing_environment_file_path": null,
+          "generated_config_compatible": true,
+          "genesis_deploy_path": "/etc/synergy/testnet-v3/genesis.json",
+          "manual_activation_required": true,
+          "manual_config_merge_required": false,
+          "manual_service_remediation_reason": null,
+          "manual_service_remediation_required": false,
+          "platform": "linux-systemd",
+          "service_exec_start": "./bin/synergy-testnet-linux-amd64 start --config config/node.toml",
+          "service_fragment_path": "/etc/systemd/system/synergy-testnet-relayer.service",
+          "service_unit": "synergy-testnet-relayer.service",
+          "service_user": "root"
+        },
+        "support_service_activation_sequence": {
+          "activation_stage": "relayers",
+          "activation_stage_order": 2,
+          "offline_contract_only": true,
+          "requires_completed_live_readiness_stages": [
+            "boot_and_seed"
+          ],
+          "sequence_payload": "support-service-activation-sequence.json"
+        },
+        "topology_audit_config_payload": null
+      },
+      "relayers/relay2.toml": {
+        "activation_plan_payload": "deployment/relayers/relay2/activation-plan.json",
+        "config_deploy_path": "config/node.toml",
+        "config_install_mode": "replace_with_checksum_bound_canonical_testnet_v3_config_after_backup_and_inactive_service_preflight",
+        "config_payload": "relayers/relay2.toml",
+        "config_payload_sha256": "ae42b5f59606e248716ea023421ca9f15a1f1340671208fa8944879ba8d37565",
+        "dedicated_install_map": {},
+        "dedicated_payloads": {},
+        "environment_install_mode": "merge_release_binding_only_never_replace_existing_environment_file",
+        "environment_payload": "deployment/relayers/relay2/node.env",
+        "genesis_deploy_path": "/etc/synergy/testnet-v3/genesis.json",
+        "genesis_file_sha256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+        "service_binding_payload": "deployment/relayers/relay2/systemd/synergy-testnet-relayer.service.d/50-synergy-testnet-v3-genesis.conf",
+        "service_contract": {
+          "config_install_mode": "replace_with_checksum_bound_canonical_testnet_v3_config_after_backup_and_inactive_service_preflight",
+          "existing_config_path": "config/node.toml",
+          "existing_environment_file_path": null,
+          "generated_config_compatible": true,
+          "genesis_deploy_path": "/etc/synergy/testnet-v3/genesis.json",
+          "manual_activation_required": true,
+          "manual_config_merge_required": false,
+          "manual_service_remediation_reason": null,
+          "manual_service_remediation_required": false,
+          "platform": "linux-systemd",
+          "service_exec_start": "./bin/synergy-testnet-linux-amd64 start --config config/node.toml",
+          "service_fragment_path": "/etc/systemd/system/synergy-testnet-relayer.service",
+          "service_unit": "synergy-testnet-relayer.service",
+          "service_user": "root"
+        },
+        "support_service_activation_sequence": {
+          "activation_stage": "relayers",
+          "activation_stage_order": 2,
+          "offline_contract_only": true,
+          "requires_completed_live_readiness_stages": [
+            "boot_and_seed"
+          ],
+          "sequence_payload": "support-service-activation-sequence.json"
+        },
+        "topology_audit_config_payload": null
+      },
+      "relayers/relay3.toml": {
+        "activation_plan_payload": "deployment/relayers/relay3/activation-plan.json",
+        "config_deploy_path": "config/node.toml",
+        "config_install_mode": "replace_with_checksum_bound_canonical_testnet_v3_config_after_backup_and_inactive_service_preflight",
+        "config_payload": "relayers/relay3.toml",
+        "config_payload_sha256": "7dbe25ef9352e9b4bb61c82beffb15b0995c1a37dd232457c5ca11ed0ce3af7d",
+        "dedicated_install_map": {},
+        "dedicated_payloads": {},
+        "environment_install_mode": "merge_release_binding_only_never_replace_existing_environment_file",
+        "environment_payload": "deployment/relayers/relay3/node.env",
+        "genesis_deploy_path": "/etc/synergy/testnet-v3/genesis.json",
+        "genesis_file_sha256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+        "service_binding_payload": "deployment/relayers/relay3/systemd/synergy-testnet-relayer.service.d/50-synergy-testnet-v3-genesis.conf",
+        "service_contract": {
+          "config_install_mode": "replace_with_checksum_bound_canonical_testnet_v3_config_after_backup_and_inactive_service_preflight",
+          "existing_config_path": "config/node.toml",
+          "existing_environment_file_path": null,
+          "generated_config_compatible": true,
+          "genesis_deploy_path": "/etc/synergy/testnet-v3/genesis.json",
+          "manual_activation_required": true,
+          "manual_config_merge_required": false,
+          "manual_service_remediation_reason": null,
+          "manual_service_remediation_required": false,
+          "platform": "linux-systemd",
+          "service_exec_start": "./bin/synergy-testnet-linux-amd64 start --config config/node.toml",
+          "service_fragment_path": "/etc/systemd/system/synergy-testnet-relayer.service",
+          "service_unit": "synergy-testnet-relayer.service",
+          "service_user": "root"
+        },
+        "support_service_activation_sequence": {
+          "activation_stage": "relayers",
+          "activation_stage_order": 2,
+          "offline_contract_only": true,
+          "requires_completed_live_readiness_stages": [
+            "boot_and_seed"
+          ],
+          "sequence_payload": "support-service-activation-sequence.json"
+        },
+        "topology_audit_config_payload": null
+      },
+      "rpc-gateway/rpc-gateway.toml": {
+        "activation_plan_payload": "deployment/rpc-gateway/rpc-gateway/activation-plan.json",
+        "config_deploy_path": "/etc/synergy/rpc-gateway/node.toml",
+        "config_install_mode": "manual_merge_only_preserve_existing_identity_key_port_and_endpoint_settings",
+        "config_payload": "rpc-gateway/rpc-gateway.toml",
+        "config_payload_sha256": "9f009d162e177cc91742eec1bc307babc0bf79c0db1fbe00a083aa611423aaea",
+        "dedicated_install_map": {},
+        "dedicated_payloads": {},
+        "environment_install_mode": "merge_release_binding_only_never_replace_existing_environment_file",
+        "environment_payload": "deployment/rpc-gateway/rpc-gateway/node.env",
+        "genesis_deploy_path": "/etc/synergy/testnet-v3/genesis.json",
+        "genesis_file_sha256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+        "service_binding_payload": "deployment/rpc-gateway/rpc-gateway/systemd/synergy-rpc-gateway.service.d/50-synergy-testnet-v3-genesis.conf",
+        "service_contract": {
+          "config_install_mode": "manual_merge_only_preserve_existing_identity_key_port_and_endpoint_settings",
+          "existing_config_path": "/etc/synergy/rpc-gateway/node.toml",
+          "existing_environment_file_path": "/etc/synergy/rpc-gateway/node.env",
+          "generated_config_compatible": true,
+          "genesis_deploy_path": "/etc/synergy/testnet-v3/genesis.json",
+          "manual_activation_required": true,
+          "manual_config_merge_required": true,
+          "manual_service_remediation_reason": null,
+          "manual_service_remediation_required": false,
+          "platform": "linux-systemd",
+          "service_exec_start": "/opt/synergy/bin/synergy-rpc-gateway start --config /etc/synergy/rpc-gateway/node.toml",
+          "service_fragment_path": "/etc/systemd/system/synergy-rpc-gateway.service",
+          "service_unit": "synergy-rpc-gateway.service",
+          "service_user": "node"
+        },
+        "support_service_activation_sequence": {
+          "activation_stage": "rpc_gateway",
+          "activation_stage_order": 3,
+          "offline_contract_only": true,
+          "requires_completed_live_readiness_stages": [
+            "boot_and_seed",
+            "relayers"
+          ],
+          "sequence_payload": "support-service-activation-sequence.json"
+        },
+        "topology_audit_config_payload": null
+      },
+      "seed-servers/seed1.toml": {
+        "activation_plan_payload": "deployment/seed-servers/seed1/activation-plan.json",
+        "config_deploy_path": "/etc/synergy/testnet-v3/seed-services/seed1.json",
+        "config_install_mode": "install_new_isolated_testnet_v3_config_only",
+        "config_payload": "deployment/seed-servers/seed1/dedicated-seed/seed-service.json",
+        "config_payload_sha256": "7ed05121975d496d519e09857303d07067816fa89fb59b67b5a4c9d7fcab0f5e",
+        "dedicated_install_map": {
+          "seed_launch_guard": {
+            "deploy_path": "/opt/synergy/testnet-v3/bin/synergy-seed-release-guard",
+            "install_mode": "copy_new_v3_guard_mode_0555",
+            "payload": "deployment/seed-servers/seed1/dedicated-seed/synergy-seed-release-guard"
+          },
+          "seed_service_source": {
+            "deploy_path": "/opt/synergy/testnet-v3/seed-service/seed_service.py",
+            "install_mode": "copy_new_v3_source_mode_0555",
+            "payload": "deployment/seed-servers/seed1/dedicated-seed/seed_service.py"
+          },
+          "systemd_unit": {
+            "deploy_path": "/etc/systemd/system/synergy-testnet-v3-seed@.service",
+            "install_mode": "copy_new_v3_template_unit_do_not_enable_or_start",
+            "payload": "deployment/seed-servers/seed1/dedicated-systemd/synergy-testnet-v3-seed@.service"
+          }
+        },
+        "dedicated_payloads": {
+          "seed_launch_guard": "deployment/seed-servers/seed1/dedicated-seed/synergy-seed-release-guard",
+          "seed_service_config": "deployment/seed-servers/seed1/dedicated-seed/seed-service.json",
+          "seed_service_source": "deployment/seed-servers/seed1/dedicated-seed/seed_service.py",
+          "systemd_unit": "deployment/seed-servers/seed1/dedicated-systemd/synergy-testnet-v3-seed@.service"
+        },
+        "environment_install_mode": "reference_only_dedicated_unit_embeds_immutable_genesis_binding",
+        "environment_payload": "deployment/seed-servers/seed1/node.env",
+        "genesis_deploy_path": "/etc/synergy/testnet-v3/seed-services/seed1.genesis.json",
+        "genesis_file_sha256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+        "service_binding_payload": "deployment/seed-servers/seed1/dedicated-systemd/synergy-testnet-v3-seed@.service",
+        "service_contract": {
+          "config_install_mode": "install_new_isolated_testnet_v3_config_only",
+          "dedicated_config_root": "/etc/synergy/testnet-v3/seed-services",
+          "dedicated_data_root": "/var/lib/synergy-testnet-v3-seed-seed1",
+          "deployment_mode": "dedicated-testnet-v3-service",
+          "existing_config_path": "/etc/synergy/testnet-v3/seed-services/seed1.json",
+          "existing_environment_file_path": null,
+          "generated_config_compatible": false,
+          "genesis_deploy_path": "/etc/synergy/testnet-v3/seed-services/seed1.genesis.json",
+          "legacy_service_contract_do_not_modify": {
+            "fragment_path": "/etc/systemd/system/synergy-seed-service@.service",
+            "instruction": "Do not modify, enable, or reuse this legacy seed instance.",
+            "service_unit": "synergy-seed-service@seed1.service",
+            "status": "legacy-json-config"
+          },
+          "manual_activation_required": true,
+          "manual_config_merge_required": false,
+          "manual_service_remediation_reason": null,
+          "manual_service_remediation_required": false,
+          "operator_identity_mapping_required": false,
+          "operator_port_preflight_required": true,
+          "operator_runtime_binary_mapping_required": false,
+          "platform": "linux-systemd",
+          "runtime_kind": "seed",
+          "seed_launch_guard_deploy_path": "/opt/synergy/testnet-v3/bin/synergy-seed-release-guard",
+          "seed_service_script_deploy_path": "/opt/synergy/testnet-v3/seed-service/seed_service.py",
+          "seed_state_file": "/var/lib/synergy-testnet-v3-seed-seed1/peers.json",
+          "service_fragment_path": "/etc/systemd/system/synergy-testnet-v3-seed@.service",
+          "service_instance": "seed1",
+          "service_unit": "synergy-testnet-v3-seed@seed1.service",
+          "service_unit_template": "synergy-testnet-v3-seed@.service",
+          "service_user": "DynamicUser"
+        },
+        "support_service_activation_sequence": {
+          "activation_stage": "boot_and_seed",
+          "activation_stage_order": 1,
+          "offline_contract_only": true,
+          "requires_completed_live_readiness_stages": [],
+          "sequence_payload": "support-service-activation-sequence.json"
+        },
+        "topology_audit_config_payload": "seed-servers/seed1.toml"
+      },
+      "seed-servers/seed2.toml": {
+        "activation_plan_payload": "deployment/seed-servers/seed2/activation-plan.json",
+        "config_deploy_path": "/etc/synergy/testnet-v3/seed-services/seed2.json",
+        "config_install_mode": "install_new_isolated_testnet_v3_config_only",
+        "config_payload": "deployment/seed-servers/seed2/dedicated-seed/seed-service.json",
+        "config_payload_sha256": "0d5ff9b9d2792566d56cf3825c51d3b144ffbadf9ef4f4c2a2aed4122232835c",
+        "dedicated_install_map": {
+          "seed_launch_guard": {
+            "deploy_path": "/opt/synergy/testnet-v3/bin/synergy-seed-release-guard",
+            "install_mode": "copy_new_v3_guard_mode_0555",
+            "payload": "deployment/seed-servers/seed2/dedicated-seed/synergy-seed-release-guard"
+          },
+          "seed_service_source": {
+            "deploy_path": "/opt/synergy/testnet-v3/seed-service/seed_service.py",
+            "install_mode": "copy_new_v3_source_mode_0555",
+            "payload": "deployment/seed-servers/seed2/dedicated-seed/seed_service.py"
+          },
+          "systemd_unit": {
+            "deploy_path": "/etc/systemd/system/synergy-testnet-v3-seed@.service",
+            "install_mode": "copy_new_v3_template_unit_do_not_enable_or_start",
+            "payload": "deployment/seed-servers/seed2/dedicated-systemd/synergy-testnet-v3-seed@.service"
+          }
+        },
+        "dedicated_payloads": {
+          "seed_launch_guard": "deployment/seed-servers/seed2/dedicated-seed/synergy-seed-release-guard",
+          "seed_service_config": "deployment/seed-servers/seed2/dedicated-seed/seed-service.json",
+          "seed_service_source": "deployment/seed-servers/seed2/dedicated-seed/seed_service.py",
+          "systemd_unit": "deployment/seed-servers/seed2/dedicated-systemd/synergy-testnet-v3-seed@.service"
+        },
+        "environment_install_mode": "reference_only_dedicated_unit_embeds_immutable_genesis_binding",
+        "environment_payload": "deployment/seed-servers/seed2/node.env",
+        "genesis_deploy_path": "/etc/synergy/testnet-v3/seed-services/seed2.genesis.json",
+        "genesis_file_sha256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+        "service_binding_payload": "deployment/seed-servers/seed2/dedicated-systemd/synergy-testnet-v3-seed@.service",
+        "service_contract": {
+          "config_install_mode": "install_new_isolated_testnet_v3_config_only",
+          "dedicated_config_root": "/etc/synergy/testnet-v3/seed-services",
+          "dedicated_data_root": "/var/lib/synergy-testnet-v3-seed-seed2",
+          "deployment_mode": "dedicated-testnet-v3-service",
+          "existing_config_path": "/etc/synergy/testnet-v3/seed-services/seed2.json",
+          "existing_environment_file_path": null,
+          "generated_config_compatible": false,
+          "genesis_deploy_path": "/etc/synergy/testnet-v3/seed-services/seed2.genesis.json",
+          "legacy_service_contract_do_not_modify": {
+            "fragment_path": "/etc/systemd/system/synergy-seed-service@.service",
+            "instruction": "Do not modify, enable, or reuse this legacy seed instance.",
+            "service_unit": "synergy-seed-service@seed2.service",
+            "status": "legacy-json-config"
+          },
+          "manual_activation_required": true,
+          "manual_config_merge_required": false,
+          "manual_service_remediation_reason": null,
+          "manual_service_remediation_required": false,
+          "operator_identity_mapping_required": false,
+          "operator_port_preflight_required": true,
+          "operator_runtime_binary_mapping_required": false,
+          "platform": "linux-systemd",
+          "runtime_kind": "seed",
+          "seed_launch_guard_deploy_path": "/opt/synergy/testnet-v3/bin/synergy-seed-release-guard",
+          "seed_service_script_deploy_path": "/opt/synergy/testnet-v3/seed-service/seed_service.py",
+          "seed_state_file": "/var/lib/synergy-testnet-v3-seed-seed2/peers.json",
+          "service_fragment_path": "/etc/systemd/system/synergy-testnet-v3-seed@.service",
+          "service_instance": "seed2",
+          "service_unit": "synergy-testnet-v3-seed@seed2.service",
+          "service_unit_template": "synergy-testnet-v3-seed@.service",
+          "service_user": "DynamicUser"
+        },
+        "support_service_activation_sequence": {
+          "activation_stage": "boot_and_seed",
+          "activation_stage_order": 1,
+          "offline_contract_only": true,
+          "requires_completed_live_readiness_stages": [],
+          "sequence_payload": "support-service-activation-sequence.json"
+        },
+        "topology_audit_config_payload": "seed-servers/seed2.toml"
+      },
+      "seed-servers/seed3.toml": {
+        "activation_plan_payload": "deployment/seed-servers/seed3/activation-plan.json",
+        "config_deploy_path": "/etc/synergy/testnet-v3/seed-services/seed3.json",
+        "config_install_mode": "install_new_isolated_testnet_v3_config_only",
+        "config_payload": "deployment/seed-servers/seed3/dedicated-seed/seed-service.json",
+        "config_payload_sha256": "2afa703e111abc5907160b0e0a8ec2b27eba2ae108e9da2b52671bcb3ebb774f",
+        "dedicated_install_map": {
+          "seed_launch_guard": {
+            "deploy_path": "/opt/synergy/testnet-v3/bin/synergy-seed-release-guard",
+            "install_mode": "copy_new_v3_guard_mode_0555",
+            "payload": "deployment/seed-servers/seed3/dedicated-seed/synergy-seed-release-guard"
+          },
+          "seed_service_source": {
+            "deploy_path": "/opt/synergy/testnet-v3/seed-service/seed_service.py",
+            "install_mode": "copy_new_v3_source_mode_0555",
+            "payload": "deployment/seed-servers/seed3/dedicated-seed/seed_service.py"
+          },
+          "systemd_unit": {
+            "deploy_path": "/etc/systemd/system/synergy-testnet-v3-seed@.service",
+            "install_mode": "copy_new_v3_template_unit_do_not_enable_or_start",
+            "payload": "deployment/seed-servers/seed3/dedicated-systemd/synergy-testnet-v3-seed@.service"
+          }
+        },
+        "dedicated_payloads": {
+          "seed_launch_guard": "deployment/seed-servers/seed3/dedicated-seed/synergy-seed-release-guard",
+          "seed_service_config": "deployment/seed-servers/seed3/dedicated-seed/seed-service.json",
+          "seed_service_source": "deployment/seed-servers/seed3/dedicated-seed/seed_service.py",
+          "systemd_unit": "deployment/seed-servers/seed3/dedicated-systemd/synergy-testnet-v3-seed@.service"
+        },
+        "environment_install_mode": "reference_only_dedicated_unit_embeds_immutable_genesis_binding",
+        "environment_payload": "deployment/seed-servers/seed3/node.env",
+        "genesis_deploy_path": "/etc/synergy/testnet-v3/seed-services/seed3.genesis.json",
+        "genesis_file_sha256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+        "service_binding_payload": "deployment/seed-servers/seed3/dedicated-systemd/synergy-testnet-v3-seed@.service",
+        "service_contract": {
+          "config_install_mode": "install_new_isolated_testnet_v3_config_only",
+          "dedicated_config_root": "/etc/synergy/testnet-v3/seed-services",
+          "dedicated_data_root": "/var/lib/synergy-testnet-v3-seed-seed3",
+          "deployment_mode": "dedicated-testnet-v3-service",
+          "existing_config_path": "/etc/synergy/testnet-v3/seed-services/seed3.json",
+          "existing_environment_file_path": null,
+          "generated_config_compatible": false,
+          "genesis_deploy_path": "/etc/synergy/testnet-v3/seed-services/seed3.genesis.json",
+          "legacy_service_contract_do_not_modify": {
+            "fragment_path": "/etc/systemd/system/synergy-seed-service@.service",
+            "instruction": "Do not modify, enable, or reuse this legacy seed instance.",
+            "service_unit": "synergy-seed-service@seed3.service",
+            "status": "legacy-json-config"
+          },
+          "manual_activation_required": true,
+          "manual_config_merge_required": false,
+          "manual_service_remediation_reason": null,
+          "manual_service_remediation_required": false,
+          "operator_identity_mapping_required": false,
+          "operator_port_preflight_required": true,
+          "operator_runtime_binary_mapping_required": false,
+          "platform": "linux-systemd",
+          "runtime_kind": "seed",
+          "seed_launch_guard_deploy_path": "/opt/synergy/testnet-v3/bin/synergy-seed-release-guard",
+          "seed_service_script_deploy_path": "/opt/synergy/testnet-v3/seed-service/seed_service.py",
+          "seed_state_file": "/var/lib/synergy-testnet-v3-seed-seed3/peers.json",
+          "service_fragment_path": "/etc/systemd/system/synergy-testnet-v3-seed@.service",
+          "service_instance": "seed3",
+          "service_unit": "synergy-testnet-v3-seed@seed3.service",
+          "service_unit_template": "synergy-testnet-v3-seed@.service",
+          "service_user": "DynamicUser"
+        },
+        "support_service_activation_sequence": {
+          "activation_stage": "boot_and_seed",
+          "activation_stage_order": 1,
+          "offline_contract_only": true,
+          "requires_completed_live_readiness_stages": [],
+          "sequence_payload": "support-service-activation-sequence.json"
+        },
+        "topology_audit_config_payload": "seed-servers/seed3.toml"
+      },
+      "validators/val1.toml": {
+        "activation_plan_payload": "deployment/validators/val1/activation-plan.json",
+        "config_deploy_path": "/etc/synergy/validator/config.toml",
+        "config_install_mode": "replace_with_checksum_bound_canonical_testnet_v3_config_after_backup_and_inactive_service_preflight",
+        "config_payload": "validators/val1.toml",
+        "config_payload_sha256": "d2b57d938158864ca23c6f1344cd96f57305d44c7c3c736bc6f0a168cb70c8bc",
+        "dedicated_install_map": {},
+        "dedicated_payloads": {},
+        "environment_install_mode": "merge_release_binding_only_never_replace_existing_environment_file",
+        "environment_payload": "deployment/validators/val1/node.env",
+        "genesis_deploy_path": "/etc/synergy/testnet-v3/genesis.json",
+        "genesis_file_sha256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+        "service_binding_payload": "deployment/validators/val1/systemd/synergy-validator.service.d/50-synergy-testnet-v3-genesis.conf",
+        "service_contract": {
+          "config_install_mode": "replace_with_checksum_bound_canonical_testnet_v3_config_after_backup_and_inactive_service_preflight",
+          "existing_config_path": "/etc/synergy/validator/config.toml",
+          "existing_environment_file_path": null,
+          "generated_config_compatible": true,
+          "genesis_deploy_path": "/etc/synergy/testnet-v3/genesis.json",
+          "manual_activation_required": true,
+          "manual_config_merge_required": false,
+          "manual_service_remediation_reason": null,
+          "manual_service_remediation_required": false,
+          "platform": "linux-systemd",
+          "service_exec_start": "/opt/synergy/bin/synergy-validator start --config /etc/synergy/validator/config.toml",
+          "service_fragment_path": "/etc/systemd/system/synergy-validator.service",
+          "service_unit": "synergy-validator.service",
+          "service_user": "root"
+        },
+        "support_service_activation_sequence": {
+          "activation_stage": "validator_start_gate",
+          "activation_stage_order": 5,
+          "offline_contract_only": true,
+          "requires_completed_live_readiness_stages": [
+            "boot_and_seed",
+            "relayers",
+            "rpc_gateway",
+            "atlas_explorer_indexer"
+          ],
+          "sequence_payload": "support-service-activation-sequence.json"
+        },
+        "topology_audit_config_payload": null
+      },
+      "validators/val2.toml": {
+        "activation_plan_payload": "deployment/validators/val2/activation-plan.json",
+        "config_deploy_path": "/etc/synergy/validator/config.toml",
+        "config_install_mode": "replace_with_checksum_bound_canonical_testnet_v3_config_after_backup_and_inactive_service_preflight",
+        "config_payload": "validators/val2.toml",
+        "config_payload_sha256": "9f7748287ef49b71fab865d6f0d90e238c405e9eeb4ba9a7b53f3e788ad67499",
+        "dedicated_install_map": {},
+        "dedicated_payloads": {},
+        "environment_install_mode": "merge_release_binding_only_never_replace_existing_environment_file",
+        "environment_payload": "deployment/validators/val2/node.env",
+        "genesis_deploy_path": "/etc/synergy/testnet-v3/genesis.json",
+        "genesis_file_sha256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+        "service_binding_payload": "deployment/validators/val2/systemd/synergy-validator.service.d/50-synergy-testnet-v3-genesis.conf",
+        "service_contract": {
+          "config_install_mode": "replace_with_checksum_bound_canonical_testnet_v3_config_after_backup_and_inactive_service_preflight",
+          "existing_config_path": "/etc/synergy/validator/config.toml",
+          "existing_environment_file_path": null,
+          "generated_config_compatible": true,
+          "genesis_deploy_path": "/etc/synergy/testnet-v3/genesis.json",
+          "manual_activation_required": true,
+          "manual_config_merge_required": false,
+          "manual_service_remediation_reason": null,
+          "manual_service_remediation_required": false,
+          "platform": "linux-systemd",
+          "service_exec_start": "/opt/synergy/bin/synergy-validator start --config /etc/synergy/validator/config.toml",
+          "service_fragment_path": "/etc/systemd/system/synergy-validator.service",
+          "service_unit": "synergy-validator.service",
+          "service_user": "root"
+        },
+        "support_service_activation_sequence": {
+          "activation_stage": "validator_start_gate",
+          "activation_stage_order": 5,
+          "offline_contract_only": true,
+          "requires_completed_live_readiness_stages": [
+            "boot_and_seed",
+            "relayers",
+            "rpc_gateway",
+            "atlas_explorer_indexer"
+          ],
+          "sequence_payload": "support-service-activation-sequence.json"
+        },
+        "topology_audit_config_payload": null
+      },
+      "validators/val3.toml": {
+        "activation_plan_payload": "deployment/validators/val3/activation-plan.json",
+        "config_deploy_path": "/etc/synergy/validator/config.toml",
+        "config_install_mode": "replace_with_checksum_bound_canonical_testnet_v3_config_after_backup_and_inactive_service_preflight",
+        "config_payload": "validators/val3.toml",
+        "config_payload_sha256": "6ff5dc65c745d98d53d5a80580c8f9e9c117c8aa5dd7b9ef7dc4b7f3852cd645",
+        "dedicated_install_map": {},
+        "dedicated_payloads": {},
+        "environment_install_mode": "merge_release_binding_only_never_replace_existing_environment_file",
+        "environment_payload": "deployment/validators/val3/node.env",
+        "genesis_deploy_path": "/etc/synergy/testnet-v3/genesis.json",
+        "genesis_file_sha256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+        "service_binding_payload": "deployment/validators/val3/systemd/synergy-validator.service.d/50-synergy-testnet-v3-genesis.conf",
+        "service_contract": {
+          "config_install_mode": "replace_with_checksum_bound_canonical_testnet_v3_config_after_backup_and_inactive_service_preflight",
+          "existing_config_path": "/etc/synergy/validator/config.toml",
+          "existing_environment_file_path": null,
+          "generated_config_compatible": true,
+          "genesis_deploy_path": "/etc/synergy/testnet-v3/genesis.json",
+          "manual_activation_required": true,
+          "manual_config_merge_required": false,
+          "manual_service_remediation_reason": null,
+          "manual_service_remediation_required": false,
+          "platform": "linux-systemd",
+          "service_exec_start": "/opt/synergy/bin/synergy-validator start --config /etc/synergy/validator/config.toml",
+          "service_fragment_path": "/etc/systemd/system/synergy-validator.service",
+          "service_unit": "synergy-validator.service",
+          "service_user": "root"
+        },
+        "support_service_activation_sequence": {
+          "activation_stage": "validator_start_gate",
+          "activation_stage_order": 5,
+          "offline_contract_only": true,
+          "requires_completed_live_readiness_stages": [
+            "boot_and_seed",
+            "relayers",
+            "rpc_gateway",
+            "atlas_explorer_indexer"
+          ],
+          "sequence_payload": "support-service-activation-sequence.json"
+        },
+        "topology_audit_config_payload": null
+      },
+      "validators/val4.toml": {
+        "activation_plan_payload": "deployment/validators/val4/activation-plan.json",
+        "config_deploy_path": "/etc/synergy/validator/config.toml",
+        "config_install_mode": "replace_with_checksum_bound_canonical_testnet_v3_config_after_backup_and_inactive_service_preflight",
+        "config_payload": "validators/val4.toml",
+        "config_payload_sha256": "17b7a353da956e82a07e255404f54d48da803d9898ccfaf4af16dffd9451002a",
+        "dedicated_install_map": {},
+        "dedicated_payloads": {},
+        "environment_install_mode": "merge_release_binding_only_never_replace_existing_environment_file",
+        "environment_payload": "deployment/validators/val4/node.env",
+        "genesis_deploy_path": "/etc/synergy/testnet-v3/genesis.json",
+        "genesis_file_sha256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+        "service_binding_payload": "deployment/validators/val4/systemd/synergy-validator.service.d/50-synergy-testnet-v3-genesis.conf",
+        "service_contract": {
+          "config_install_mode": "replace_with_checksum_bound_canonical_testnet_v3_config_after_backup_and_inactive_service_preflight",
+          "existing_config_path": "/etc/synergy/validator/config.toml",
+          "existing_environment_file_path": null,
+          "generated_config_compatible": true,
+          "genesis_deploy_path": "/etc/synergy/testnet-v3/genesis.json",
+          "manual_activation_required": true,
+          "manual_config_merge_required": false,
+          "manual_service_remediation_reason": null,
+          "manual_service_remediation_required": false,
+          "platform": "linux-systemd",
+          "service_exec_start": "/opt/synergy/bin/synergy-validator start --config /etc/synergy/validator/config.toml",
+          "service_fragment_path": "/etc/systemd/system/synergy-validator.service",
+          "service_unit": "synergy-validator.service",
+          "service_user": "root"
+        },
+        "support_service_activation_sequence": {
+          "activation_stage": "validator_start_gate",
+          "activation_stage_order": 5,
+          "offline_contract_only": true,
+          "requires_completed_live_readiness_stages": [
+            "boot_and_seed",
+            "relayers",
+            "rpc_gateway",
+            "atlas_explorer_indexer"
+          ],
+          "sequence_payload": "support-service-activation-sequence.json"
+        },
+        "topology_audit_config_payload": null
+      },
+      "validators/val5.toml": {
+        "activation_plan_payload": "deployment/validators/val5/activation-plan.json",
+        "config_deploy_path": "/etc/synergy/validator/config.toml",
+        "config_install_mode": "replace_with_checksum_bound_canonical_testnet_v3_config_after_backup_and_inactive_service_preflight",
+        "config_payload": "validators/val5.toml",
+        "config_payload_sha256": "5e68133d4d5560a99882015748fe0f979ce13030b9ee63f03a96250213904fa3",
+        "dedicated_install_map": {},
+        "dedicated_payloads": {},
+        "environment_install_mode": "merge_release_binding_only_never_replace_existing_environment_file",
+        "environment_payload": "deployment/validators/val5/node.env",
+        "genesis_deploy_path": "/etc/synergy/testnet-v3/genesis.json",
+        "genesis_file_sha256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+        "service_binding_payload": "deployment/validators/val5/systemd/synergy-validator.service.d/50-synergy-testnet-v3-genesis.conf",
+        "service_contract": {
+          "config_install_mode": "replace_with_checksum_bound_canonical_testnet_v3_config_after_backup_and_inactive_service_preflight",
+          "existing_config_path": "/etc/synergy/validator/config.toml",
+          "existing_environment_file_path": null,
+          "generated_config_compatible": true,
+          "genesis_deploy_path": "/etc/synergy/testnet-v3/genesis.json",
+          "manual_activation_required": true,
+          "manual_config_merge_required": false,
+          "manual_service_remediation_reason": null,
+          "manual_service_remediation_required": false,
+          "platform": "linux-systemd",
+          "service_exec_start": "/opt/synergy/bin/synergy-validator start --config /etc/synergy/validator/config.toml",
+          "service_fragment_path": "/etc/systemd/system/synergy-validator.service",
+          "service_unit": "synergy-validator.service",
+          "service_user": "root"
+        },
+        "support_service_activation_sequence": {
+          "activation_stage": "validator_start_gate",
+          "activation_stage_order": 5,
+          "offline_contract_only": true,
+          "requires_completed_live_readiness_stages": [
+            "boot_and_seed",
+            "relayers",
+            "rpc_gateway",
+            "atlas_explorer_indexer"
+          ],
+          "sequence_payload": "support-service-activation-sequence.json"
+        },
+        "topology_audit_config_payload": null
+      },
+      "validators/val6.toml": {
+        "activation_plan_payload": "deployment/validators/val6/activation-plan.json",
+        "config_deploy_path": "/etc/synergy/validator/config.toml",
+        "config_install_mode": "replace_with_checksum_bound_canonical_testnet_v3_config_after_backup_and_inactive_service_preflight",
+        "config_payload": "validators/val6.toml",
+        "config_payload_sha256": "eccf76d5002d03df305dfe8d7fea4c236ba6363961f7977e442e76e6cad21c8d",
+        "dedicated_install_map": {},
+        "dedicated_payloads": {},
+        "environment_install_mode": "merge_release_binding_only_never_replace_existing_environment_file",
+        "environment_payload": "deployment/validators/val6/node.env",
+        "genesis_deploy_path": "/etc/synergy/testnet-v3/genesis.json",
+        "genesis_file_sha256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+        "service_binding_payload": "deployment/validators/val6/systemd/synergy-validator.service.d/50-synergy-testnet-v3-genesis.conf",
+        "service_contract": {
+          "config_install_mode": "replace_with_checksum_bound_canonical_testnet_v3_config_after_backup_and_inactive_service_preflight",
+          "existing_config_path": "/etc/synergy/validator/config.toml",
+          "existing_environment_file_path": null,
+          "generated_config_compatible": true,
+          "genesis_deploy_path": "/etc/synergy/testnet-v3/genesis.json",
+          "manual_activation_required": true,
+          "manual_config_merge_required": false,
+          "manual_service_remediation_reason": null,
+          "manual_service_remediation_required": false,
+          "platform": "linux-systemd",
+          "service_exec_start": "/opt/synergy/bin/synergy-validator start --config /etc/synergy/validator/config.toml",
+          "service_fragment_path": "/etc/systemd/system/synergy-validator.service",
+          "service_unit": "synergy-validator.service",
+          "service_user": "root"
+        },
+        "support_service_activation_sequence": {
+          "activation_stage": "validator_start_gate",
+          "activation_stage_order": 5,
+          "offline_contract_only": true,
+          "requires_completed_live_readiness_stages": [
+            "boot_and_seed",
+            "relayers",
+            "rpc_gateway",
+            "atlas_explorer_indexer"
+          ],
+          "sequence_payload": "support-service-activation-sequence.json"
+        },
+        "topology_audit_config_payload": null
+      }
+    },
+    "prepare_only": true,
+    "schema_version": 2,
+    "starts_or_restarts_services": false
+  },
+  "generator_version": "testnet-v3-node-configs/v6",
+  "network_id": "synergy-testnet-v3",
+  "schema_version": 2,
+  "signed_validator_transport_registry_required": true
+}

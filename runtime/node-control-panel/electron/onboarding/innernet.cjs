@@ -471,6 +471,23 @@ set -eu
   }
 }
 
+function canonicalPackagedWireguardPeers(assignedIp) {
+  const local = normaliseIp(assignedIp);
+  const participants = [
+    '10.70.0.1',
+    ...Array.from({ length: 21 }, (_, index) => `10.70.10.${index + 1}`),
+    ...Array.from({ length: 3 }, (_, index) => `10.70.20.${index + 1}`),
+  ];
+  return participants.filter((address) => address !== local).sort();
+}
+
+function packagedWireguardPeerIps(config) {
+  return String(config).split(/^\[Peer\]\s*$/m).slice(1).flatMap((peer) => {
+    const allowed = peer.match(/^AllowedIPs\s*=\s*([^\r\n]+)/m)?.[1] || '';
+    return allowed.split(',').map((value) => normaliseIp(value)).filter(Boolean);
+  });
+}
+
 function validatePackagedWireguardConfig(packageData) {
   if (!packageData?.available || !packageData?.wireguardConfig || !packageData?.wireguardPrivateKey) {
     throw meshError('PACKAGED_WIREGUARD_REQUIRED', 'This installer does not contain its assigned WireGuard configuration.');
@@ -479,14 +496,37 @@ function validatePackagedWireguardConfig(packageData) {
   const address = config.match(/^Address\s*=\s*([^\s,]+)/m)?.[1]?.split('/')[0];
   const privateKey = config.match(/^PrivateKey\s*=\s*(\S+)/m)?.[1];
   const peerCount = (config.match(/^\[Peer\]$/gm) || []).length;
+  const expectedPeers = canonicalPackagedWireguardPeers(address);
+  const actualPeers = packagedWireguardPeerIps(config).sort();
+  const topologyMatches = actualPeers.length === expectedPeers.length
+    && actualPeers.every((peer, index) => peer === expectedPeers[index]);
   if (
     address !== normaliseIp(packageData.vpnIp)
     || privateKey !== packageData.wireguardPrivateKey
-    || peerCount < 20
+    || peerCount !== expectedPeers.length
+    || !topologyMatches
     || !/^\[Interface\]$/m.test(config)
   ) {
-    throw meshError('PACKAGED_WIREGUARD_INVALID', 'The packaged WireGuard configuration does not match its validator assignment.');
+    throw meshError('PACKAGED_WIREGUARD_INVALID', 'The packaged WireGuard configuration does not contain the complete canonical Testnet-v3 mesh.');
   }
+}
+
+async function retireInnernetForPackagedWireguard(executor) {
+  if (requiresLaunchdPersistence(executor)) {
+    await executor.runElevated('/bin/sh', ['-ceu', `
+/bin/launchctl bootout system/network.synergy.innernet >/dev/null 2>&1 || true
+/bin/rm -f /Library/LaunchDaemons/network.synergy.innernet.plist
+`], { timeoutMs: 90_000 });
+    return;
+  }
+  if (!requiresSystemdPersistence(executor)) return;
+  await executor.runElevated('/bin/sh', ['-ceu', `
+systemctl disable --now synergy-innernet-refresh.timer >/dev/null 2>&1 || true
+systemctl stop synergy-innernet-refresh.service >/dev/null 2>&1 || true
+systemctl disable --now synergy-innernet.service >/dev/null 2>&1 || true
+systemctl reset-failed synergy-innernet-refresh.service >/dev/null 2>&1 || true
+systemctl daemon-reload
+`], { timeoutMs: 90_000 });
 }
 
 async function activatePackagedWireguardConfig(executor, packageData, emitProgress) {
@@ -505,6 +545,8 @@ async function activatePackagedWireguardConfig(executor, packageData, emitProgre
     if (derivedPublicKey !== packageData.wireguardPublicKey) {
       throw meshError('PACKAGED_WIREGUARD_KEY_MISMATCH', 'The packaged WireGuard private and public keys do not match.');
     }
+    emitProgress?.({ step: 'retiring_innernet_client' });
+    await retireInnernetForPackagedWireguard(executor);
     await executor.runElevated('mkdir', ['-p', '/etc/wireguard']);
     await executor.runElevated('install', ['-m', '0600', temporaryPath, `/etc/wireguard/${interfaceName}.conf`]);
     await executor.runElevated(wgQuickCommand, ['down', interfaceName], { timeoutMs: 90_000 }).catch((error) => {
@@ -967,6 +1009,7 @@ async function redeemInvite(executor, inviteOrPayload, optionsOrEmit, maybeEmit)
 
 module.exports = {
   activatePackagedWireguardConfig,
+  canonicalPackagedWireguardPeers,
   getMeshHealth,
   hasExistingInterfaceConfig,
   innernetPlatformKey,
@@ -982,5 +1025,6 @@ module.exports = {
   resolveInnernetClientBinary,
   resolveRemoteInnernetPlatform,
   stimulateMeshHandshake,
+  validatePackagedWireguardConfig,
   waitForMeshHandshake,
 };

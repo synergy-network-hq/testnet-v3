@@ -1,0 +1,48 @@
+#!/bin/sh
+# Generated Testnet-v3 dedicated-seed guard. Do not hand-edit.
+set -eu
+
+required() {
+    eval "value=\${$1-}"
+    if [ -z "$value" ]; then
+        echo "missing required environment: $1" >&2
+        exit 64
+    fi
+}
+
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        echo "no SHA-256 utility is available" >&2
+        exit 69
+    fi
+}
+
+required SYNERGY_SEED_SERVICE_SCRIPT
+required SYNERGY_SEED_SERVICE_SCRIPT_SHA256
+required SYNERGY_SEED_CONFIG_FILE
+required SYNERGY_SEED_CONFIG_SHA256
+required SYNERGY_GENESIS_FILE
+required SYNERGY_GENESIS_SHA256
+case "$SYNERGY_SEED_SERVICE_SCRIPT" in
+  /opt/synergy/testnet-v3/*) ;;
+  *) echo "seed service source is outside the dedicated Testnet-v3 root" >&2; exit 65 ;;
+esac
+case "$SYNERGY_SEED_CONFIG_FILE" in
+  /etc/synergy/testnet-v3/*) ;;
+  *) echo "seed config is outside the dedicated Testnet-v3 root" >&2; exit 65 ;;
+esac
+case "$SYNERGY_GENESIS_FILE" in
+  /etc/synergy/testnet-v3/*) ;;
+  *) echo "genesis is outside the dedicated Testnet-v3 root" >&2; exit 65 ;;
+esac
+[ -r "$SYNERGY_SEED_SERVICE_SCRIPT" ] || { echo "seed service source is unreadable" >&2; exit 66; }
+[ -r "$SYNERGY_SEED_CONFIG_FILE" ] || { echo "seed config is unreadable" >&2; exit 66; }
+[ -r "$SYNERGY_GENESIS_FILE" ] || { echo "genesis is unreadable" >&2; exit 66; }
+[ "$(sha256_file "$SYNERGY_SEED_SERVICE_SCRIPT")" = "$SYNERGY_SEED_SERVICE_SCRIPT_SHA256" ] || { echo "seed source SHA-256 mismatch" >&2; exit 67; }
+[ "$(sha256_file "$SYNERGY_SEED_CONFIG_FILE")" = "$SYNERGY_SEED_CONFIG_SHA256" ] || { echo "seed config SHA-256 mismatch" >&2; exit 67; }
+[ "$(sha256_file "$SYNERGY_GENESIS_FILE")" = "$SYNERGY_GENESIS_SHA256" ] || { echo "genesis SHA-256 mismatch" >&2; exit 67; }
+exec /usr/bin/python3 "$SYNERGY_SEED_SERVICE_SCRIPT" --config "$SYNERGY_SEED_CONFIG_FILE"

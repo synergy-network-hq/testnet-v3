@@ -1,0 +1,104 @@
+{
+  "artifact_type": "testnet-v3-support-service-activation-sequence",
+  "canonical_binding": {
+    "consensus_parameter_decision_id": "TV3-POSY-PARAMS-2026-07-28-01",
+    "consensus_parameter_root_sha3_512": "2e6760bed60c8f8e44b3b693254367f0da9a8aa9efae46c517856fb78be7402cf232c064083116b805278e95a952660f7a92e16ca9cd9349aa74467d577127cd",
+    "genesis_file_sha256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+    "genesis_hash": "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d"
+  },
+  "chain_id": 1266,
+  "contacts_live_hosts": false,
+  "network_id": "synergy-testnet-v3",
+  "offline_contract_only": true,
+  "prepare_only": true,
+  "schema_version": 1,
+  "stages": [
+    {
+      "activation_plan_payloads": [
+        "deployment/bootnodes/bootnode1/activation-plan.json",
+        "deployment/bootnodes/bootnode2/activation-plan.json",
+        "deployment/bootnodes/bootnode3/activation-plan.json",
+        "deployment/seed-servers/seed1/activation-plan.json",
+        "deployment/seed-servers/seed2/activation-plan.json",
+        "deployment/seed-servers/seed3/activation-plan.json"
+      ],
+      "id": "boot_and_seed",
+      "order": 1,
+      "required_live_readiness_evidence": [
+        "Every listed bootnode or seed service is explicitly activated only after its local service-contract, port, identity, runtime, and immutable Genesis checks pass.",
+        "Independent host evidence records an active service and a listener bound to the approved Testnet-v3 endpoint.",
+        "Each service reports or is inspected for chain 1266, network synergy-testnet-v3, and the exact canonical Genesis SHA-256 before the relayer stage is considered."
+      ],
+      "requires_completed_live_readiness_stages": []
+    },
+    {
+      "activation_plan_payloads": [
+        "deployment/relayers/relay1/activation-plan.json",
+        "deployment/relayers/relay2/activation-plan.json",
+        "deployment/relayers/relay3/activation-plan.json"
+      ],
+      "id": "relayers",
+      "order": 2,
+      "required_live_readiness_evidence": [
+        "The complete boot-and-seed readiness evidence is accepted first.",
+        "Each relayer has an active service, its V3 Genesis binding, and successful approved bootstrap connectivity without a legacy/Testnet-v2 fallback.",
+        "The three relayers present mutually consistent chain, network, Genesis SHA-256, and consensus-parameter-root observations."
+      ],
+      "requires_completed_live_readiness_stages": [
+        "boot_and_seed"
+      ]
+    },
+    {
+      "activation_plan_payloads": [
+        "deployment/rpc-gateway/rpc-gateway/activation-plan.json"
+      ],
+      "id": "rpc_gateway",
+      "order": 3,
+      "required_live_readiness_evidence": [
+        "The complete relayer readiness evidence is accepted first.",
+        "The RPC gateway has an active service and exposes a health/identity response bound to chain 1266, network synergy-testnet-v3, and the exact canonical Genesis SHA-256.",
+        "The RPC endpoint is observed through the approved relayer-backed path; a process-list or open-port observation alone is insufficient."
+      ],
+      "requires_completed_live_readiness_stages": [
+        "boot_and_seed",
+        "relayers"
+      ]
+    },
+    {
+      "activation_plan_payloads": [
+        "deployment/explorer-indexer/explorer-indexer/activation-plan.json"
+      ],
+      "id": "atlas_explorer_indexer",
+      "order": 4,
+      "required_live_readiness_evidence": [
+        "The complete RPC-gateway readiness evidence is accepted first.",
+        "Atlas explorer indexer has an active service, is configured only for the approved V3 RPC source, and reports chain 1266, network synergy-testnet-v3, and the exact canonical Genesis SHA-256.",
+        "Indexer startup evidence includes a successful canonical RPC read and an indexed-height/lag observation; neither is asserted by this offline artifact."
+      ],
+      "requires_completed_live_readiness_stages": [
+        "boot_and_seed",
+        "relayers",
+        "rpc_gateway"
+      ]
+    }
+  ],
+  "starts_or_restarts_services": false,
+  "validator_start_gate": {
+    "activation_plan_payloads": [
+      "deployment/validators/val1/activation-plan.json",
+      "deployment/validators/val2/activation-plan.json",
+      "deployment/validators/val3/activation-plan.json",
+      "deployment/validators/val4/activation-plan.json",
+      "deployment/validators/val5/activation-plan.json",
+      "deployment/validators/val6/activation-plan.json"
+    ],
+    "offline_contract_does_not_assert_live_readiness": true,
+    "require_external_evidence_record": true,
+    "requires_completed_live_readiness_stages": [
+      "boot_and_seed",
+      "relayers",
+      "rpc_gateway",
+      "atlas_explorer_indexer"
+    ]
+  }
+}

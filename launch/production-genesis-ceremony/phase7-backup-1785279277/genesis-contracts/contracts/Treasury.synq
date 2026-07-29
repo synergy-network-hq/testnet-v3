@@ -1,0 +1,190 @@
+// Testnet-v3 quantum-safe multisignature treasury.
+pragma synq ^1.0.0;
+
+contract Treasury {
+    governanceKey: MLDSAPublicKey public;
+    governanceContract: Address public;
+    paused: Bool public;
+    requiredSigners: UInt256 public;
+    signerCount: UInt256 public;
+    txCount: UInt256 public;
+
+    isSigner: mapping(Address => Bool) public;
+    signers: Address[] public;
+    transactionTarget: mapping(UInt256 => Address) public;
+    transactionValue: mapping(UInt256 => UInt256) public;
+    transactionData: mapping(UInt256 => Bytes) public;
+    transactionDescriptionHash: mapping(UInt256 => Bytes) public;
+    transactionApprovals: mapping(UInt256 => UInt256) public;
+    transactionExecuted: mapping(UInt256 => Bool) public;
+    approvedBy: mapping(UInt256 => mapping(Address => Bool)) public;
+
+    event SignerSet(signer: Address indexed, enabled: Bool);
+    event RequiredSignersUpdated(oldRequired: UInt256, newRequired: UInt256);
+    event TransactionSubmitted(txId: UInt256 indexed, submitter: Address indexed, target: Address indexed, value: UInt256, descriptionHash: Bytes);
+    event TransactionApproved(txId: UInt256 indexed, signer: Address indexed, approvals: UInt256);
+    event TransactionRevoked(txId: UInt256 indexed, signer: Address indexed, approvals: UInt256);
+    event TransactionExecuted(txId: UInt256 indexed);
+    event GovernanceContractUpdated(governanceContract: Address indexed);
+    event PauseStateUpdated(paused: Bool);
+
+    constructor(
+        initialGovernanceKey: MLDSAPublicKey,
+        initialGovernanceContract: Address,
+        initialRequiredSigners: UInt256
+    ) {
+        require(initialGovernanceContract != Address(0), "Invalid governance contract");
+        require(initialRequiredSigners > 0, "Required signer count is zero");
+        governanceKey = initialGovernanceKey;
+        governanceContract = initialGovernanceContract;
+        requiredSigners = initialRequiredSigners;
+        signerCount = 0;
+        txCount = 0;
+        paused = false;
+    }
+
+    @gas_cost(base: 85000)
+    @public function queueGovernanceTransaction(
+        target: Address,
+        value: UInt256,
+        data: Bytes,
+        descriptionHash: Bytes
+    ) -> UInt256 {
+        require(msg.sender == governanceContract, "Unauthorized governance caller");
+        return submit(target, value, data, descriptionHash);
+    }
+
+    @gas_cost(base: 85000)
+    @public function submitTransaction(
+        target: Address,
+        value: UInt256,
+        data: Bytes,
+        descriptionHash: Bytes
+    ) -> UInt256 {
+        require(!paused, "Treasury paused");
+        require(isSigner[msg.sender], "Not a treasury signer");
+        return submit(target, value, data, descriptionHash);
+    }
+
+    @gas_cost(base: 65000)
+    function submit(target: Address, value: UInt256, data: Bytes, descriptionHash: Bytes) internal -> UInt256 {
+        require(target != Address(0), "Invalid transaction target");
+        let txId: UInt256 = txCount + 1;
+        txCount = txId;
+        transactionTarget[txId] = target;
+        transactionValue[txId] = value;
+        transactionData[txId] = data;
+        transactionDescriptionHash[txId] = descriptionHash;
+        transactionApprovals[txId] = 0;
+        transactionExecuted[txId] = false;
+        emit TransactionSubmitted(txId, msg.sender, target, value, descriptionHash);
+        return txId;
+    }
+
+    @gas_cost(base: 60000)
+    @public function approveTransaction(txId: UInt256) {
+        require(!paused, "Treasury paused");
+        require(isSigner[msg.sender], "Not a treasury signer");
+        require(transactionTarget[txId] != Address(0), "Transaction not found");
+        require(!transactionExecuted[txId], "Transaction executed");
+        require(!approvedBy[txId][msg.sender], "Already approved");
+        approvedBy[txId][msg.sender] = true;
+        transactionApprovals[txId] = transactionApprovals[txId] + 1;
+        emit TransactionApproved(txId, msg.sender, transactionApprovals[txId]);
+    }
+
+    @gas_cost(base: 60000)
+    @public function revokeApproval(txId: UInt256) {
+        require(!paused, "Treasury paused");
+        require(isSigner[msg.sender], "Not a treasury signer");
+        require(!transactionExecuted[txId], "Transaction executed");
+        require(approvedBy[txId][msg.sender], "Approval not found");
+        approvedBy[txId][msg.sender] = false;
+        transactionApprovals[txId] = transactionApprovals[txId] - 1;
+        emit TransactionRevoked(txId, msg.sender, transactionApprovals[txId]);
+    }
+
+    @gas_cost(base: 140000)
+    @public function executeTransaction(txId: UInt256) {
+        require(!paused, "Treasury paused");
+        require(isSigner[msg.sender], "Not a treasury signer");
+        require(transactionTarget[txId] != Address(0), "Transaction not found");
+        require(!transactionExecuted[txId], "Transaction executed");
+        require(transactionApprovals[txId] >= requiredSigners, "Insufficient approvals");
+        transactionExecuted[txId] = true;
+        callContract(transactionTarget[txId], transactionValue[txId], transactionData[txId]);
+        emit TransactionExecuted(txId);
+    }
+
+    @gas_cost(base: 100000, mldsa_verify: 35000)
+    @public function setSigner(
+        signer: Address,
+        enabled: Bool,
+        governanceNonce: UInt256,
+        validUntilBlock: UInt256,
+        signature: MLDSASignature
+    ) {
+        require(signer != Address(0), "Invalid signer");
+        require_pqc {
+            let valid: Bool = verifyGovernanceAuthorization(governanceKey, governanceNonce, validUntilBlock, signature);
+            require(valid, "Invalid governance authorization");
+        } or revert("PQC verification failed");
+
+        if (enabled) {
+            require(!isSigner[signer], "Signer exists");
+            isSigner[signer] = true;
+            signers.push(signer);
+            signerCount = signerCount + 1;
+        } else {
+            require(isSigner[signer], "Signer not found");
+            require(signerCount > requiredSigners, "Cannot drop below threshold");
+            isSigner[signer] = false;
+            signerCount = signerCount - 1;
+        }
+        emit SignerSet(signer, enabled);
+    }
+
+    @gas_cost(base: 95000, mldsa_verify: 35000)
+    @public function setRequiredSigners(
+        newRequired: UInt256,
+        governanceNonce: UInt256,
+        validUntilBlock: UInt256,
+        signature: MLDSASignature
+    ) {
+        require(newRequired > 0, "Required signer count is zero");
+        require(newRequired <= signerCount, "Threshold exceeds signer count");
+        require_pqc {
+            let valid: Bool = verifyGovernanceAuthorization(governanceKey, governanceNonce, validUntilBlock, signature);
+            require(valid, "Invalid governance authorization");
+        } or revert("PQC verification failed");
+        let oldRequired: UInt256 = requiredSigners;
+        requiredSigners = newRequired;
+        emit RequiredSignersUpdated(oldRequired, newRequired);
+    }
+
+    @gas_cost(base: 95000, mldsa_verify: 35000)
+    @public function setGovernanceContract(
+        newGovernanceContract: Address,
+        governanceNonce: UInt256,
+        validUntilBlock: UInt256,
+        signature: MLDSASignature
+    ) {
+        require(newGovernanceContract != Address(0), "Invalid governance contract");
+        require_pqc {
+            let valid: Bool = verifyGovernanceAuthorization(governanceKey, governanceNonce, validUntilBlock, signature);
+            require(valid, "Invalid governance authorization");
+        } or revert("PQC verification failed");
+        governanceContract = newGovernanceContract;
+        emit GovernanceContractUpdated(newGovernanceContract);
+    }
+
+    @gas_cost(base: 90000, mldsa_verify: 35000)
+    @public function setPaused(newPaused: Bool, governanceNonce: UInt256, validUntilBlock: UInt256, signature: MLDSASignature) {
+        require_pqc {
+            let valid: Bool = verifyGovernanceAuthorization(governanceKey, governanceNonce, validUntilBlock, signature);
+            require(valid, "Invalid governance authorization");
+        } or revert("PQC verification failed");
+        paused = newPaused;
+        emit PauseStateUpdated(newPaused);
+    }
+}

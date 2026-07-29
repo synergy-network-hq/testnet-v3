@@ -1,0 +1,95 @@
+{
+  "config_install_mode": "install_new_isolated_testnet_v3_config_only",
+  "config_payload": "deployment/seed-servers/seed2/dedicated-seed/seed-service.json",
+  "config_payload_sha256": "0d5ff9b9d2792566d56cf3825c51d3b144ffbadf9ef4f4c2a2aed4122232835c",
+  "dedicated_install_map": {
+    "seed_launch_guard": {
+      "deploy_path": "/opt/synergy/testnet-v3/bin/synergy-seed-release-guard",
+      "install_mode": "copy_new_v3_guard_mode_0555",
+      "payload": "deployment/seed-servers/seed2/dedicated-seed/synergy-seed-release-guard"
+    },
+    "seed_service_source": {
+      "deploy_path": "/opt/synergy/testnet-v3/seed-service/seed_service.py",
+      "install_mode": "copy_new_v3_source_mode_0555",
+      "payload": "deployment/seed-servers/seed2/dedicated-seed/seed_service.py"
+    },
+    "systemd_unit": {
+      "deploy_path": "/etc/systemd/system/synergy-testnet-v3-seed@.service",
+      "install_mode": "copy_new_v3_template_unit_do_not_enable_or_start",
+      "payload": "deployment/seed-servers/seed2/dedicated-systemd/synergy-testnet-v3-seed@.service"
+    }
+  },
+  "dedicated_payloads": {
+    "seed_launch_guard": "deployment/seed-servers/seed2/dedicated-seed/synergy-seed-release-guard",
+    "seed_service_config": "deployment/seed-servers/seed2/dedicated-seed/seed-service.json",
+    "seed_service_source": "deployment/seed-servers/seed2/dedicated-seed/seed_service.py",
+    "systemd_unit": "deployment/seed-servers/seed2/dedicated-systemd/synergy-testnet-v3-seed@.service"
+  },
+  "environment_install_mode": "reference_only_dedicated_unit_embeds_immutable_genesis_binding",
+  "environment_payload": "deployment/seed-servers/seed2/node.env",
+  "genesis_deploy_path": "/etc/synergy/testnet-v3/seed-services/seed2.genesis.json",
+  "genesis_file_sha256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+  "genesis_payload": "canonical-genesis/genesis.json",
+  "manual_activation_required": true,
+  "manual_config_merge_required": false,
+  "manual_service_remediation_reason": null,
+  "manual_service_remediation_required": false,
+  "operator_preconditions": [
+    "Prove all listed ports are unoccupied and match the approved host mapping before activation; do not copy a legacy port or listener configuration blindly."
+  ],
+  "port_preflight": [
+    {
+      "port": 5621,
+      "protocol": "tcp",
+      "purpose": "seed_http"
+    }
+  ],
+  "prepare_only": true,
+  "reverify_service_contract_before_activation": true,
+  "runtime_environment": "SYNERGY_GENESIS_FILE",
+  "schema_version": 2,
+  "service_binding_install_mode": "install_new_dedicated_systemd_unit_only_never_replace_or_modify_legacy_unit",
+  "service_binding_payload": "deployment/seed-servers/seed2/dedicated-systemd/synergy-testnet-v3-seed@.service",
+  "service_contract": {
+    "config_install_mode": "install_new_isolated_testnet_v3_config_only",
+    "dedicated_config_root": "/etc/synergy/testnet-v3/seed-services",
+    "dedicated_data_root": "/var/lib/synergy-testnet-v3-seed-seed2",
+    "deployment_mode": "dedicated-testnet-v3-service",
+    "existing_config_path": "/etc/synergy/testnet-v3/seed-services/seed2.json",
+    "existing_environment_file_path": null,
+    "generated_config_compatible": false,
+    "genesis_deploy_path": "/etc/synergy/testnet-v3/seed-services/seed2.genesis.json",
+    "legacy_service_contract_do_not_modify": {
+      "fragment_path": "/etc/systemd/system/synergy-seed-service@.service",
+      "instruction": "Do not modify, enable, or reuse this legacy seed instance.",
+      "service_unit": "synergy-seed-service@seed2.service",
+      "status": "legacy-json-config"
+    },
+    "manual_activation_required": true,
+    "manual_config_merge_required": false,
+    "manual_service_remediation_reason": null,
+    "manual_service_remediation_required": false,
+    "operator_identity_mapping_required": false,
+    "operator_port_preflight_required": true,
+    "operator_runtime_binary_mapping_required": false,
+    "platform": "linux-systemd",
+    "runtime_kind": "seed",
+    "seed_launch_guard_deploy_path": "/opt/synergy/testnet-v3/bin/synergy-seed-release-guard",
+    "seed_service_script_deploy_path": "/opt/synergy/testnet-v3/seed-service/seed_service.py",
+    "seed_state_file": "/var/lib/synergy-testnet-v3-seed-seed2/peers.json",
+    "service_fragment_path": "/etc/systemd/system/synergy-testnet-v3-seed@.service",
+    "service_instance": "seed2",
+    "service_unit": "synergy-testnet-v3-seed@seed2.service",
+    "service_unit_template": "synergy-testnet-v3-seed@.service",
+    "service_user": "DynamicUser"
+  },
+  "starts_or_restarts_services": false,
+  "support_service_activation_sequence": {
+    "activation_stage": "boot_and_seed",
+    "activation_stage_order": 1,
+    "offline_contract_only": true,
+    "requires_completed_live_readiness_stages": [],
+    "sequence_payload": "support-service-activation-sequence.json"
+  },
+  "topology_audit_config_payload": "seed-servers/seed2.toml"
+}

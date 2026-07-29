@@ -1,0 +1,48 @@
+#!/bin/sh
+# Generated Testnet-v3 dedicated-runtime guard. Do not hand-edit.
+set -eu
+
+required() {
+    eval "value=\${$1-}"
+    if [ -z "$value" ]; then
+        echo "missing required environment: $1" >&2
+        exit 64
+    fi
+}
+
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        echo "no SHA-256 utility is available" >&2
+        exit 69
+    fi
+}
+
+required SYNERGY_RELEASE_RUNTIME_BINARY
+required SYNERGY_RELEASE_RUNTIME_SHA256
+required SYNERGY_CONFIG_FILE
+required SYNERGY_CONFIG_SHA256
+required SYNERGY_GENESIS_FILE
+required SYNERGY_GENESIS_SHA256
+case "$SYNERGY_RELEASE_RUNTIME_BINARY" in
+  /opt/synergy/testnet-v3/*) ;;
+  *) echo "runtime binary is outside the dedicated Testnet-v3 root" >&2; exit 65 ;;
+esac
+case "$SYNERGY_CONFIG_FILE" in
+  /etc/synergy/testnet-v3/*) ;;
+  *) echo "config is outside the dedicated Testnet-v3 root" >&2; exit 65 ;;
+esac
+case "$SYNERGY_GENESIS_FILE" in
+  /etc/synergy/testnet-v3/*) ;;
+  *) echo "genesis is outside the dedicated Testnet-v3 root" >&2; exit 65 ;;
+esac
+[ -x "$SYNERGY_RELEASE_RUNTIME_BINARY" ] || { echo "runtime binary is not executable" >&2; exit 66; }
+[ -r "$SYNERGY_CONFIG_FILE" ] || { echo "config is unreadable" >&2; exit 66; }
+[ -r "$SYNERGY_GENESIS_FILE" ] || { echo "genesis is unreadable" >&2; exit 66; }
+[ "$(sha256_file "$SYNERGY_RELEASE_RUNTIME_BINARY")" = "$SYNERGY_RELEASE_RUNTIME_SHA256" ] || { echo "runtime binary SHA-256 mismatch" >&2; exit 67; }
+[ "$(sha256_file "$SYNERGY_CONFIG_FILE")" = "$SYNERGY_CONFIG_SHA256" ] || { echo "runtime config SHA-256 mismatch" >&2; exit 67; }
+[ "$(sha256_file "$SYNERGY_GENESIS_FILE")" = "$SYNERGY_GENESIS_SHA256" ] || { echo "genesis SHA-256 mismatch" >&2; exit 67; }
+exec "$SYNERGY_RELEASE_RUNTIME_BINARY" start --config "$SYNERGY_CONFIG_FILE"

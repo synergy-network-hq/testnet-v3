@@ -482,6 +482,32 @@ struct InnernetTransportRefreshRequest {
     receipt: innernet::InnernetMembershipReceipt,
 }
 
+/// Narrow Testnet-v3 release action. This is deliberately separate from
+/// transport refresh: it cannot alter membership, routes, signer material, or
+/// migration state; it can only raise the signed registry generation after the
+/// exact fresh nine-peer bootstrap has been verified by the coordinator.
+#[derive(Debug, Deserialize)]
+struct BootstrapTransportReleaseGenerationRequest {
+    requested_minimum_generation: u64,
+    actor: String,
+    reason: String,
+}
+
+/// One-time Testnet-v3 recovery action for a coordinator that has completed a
+/// fresh nine-peer bootstrap but signed its public registry with stale
+/// validator-address bindings.  The request deliberately carries no peer,
+/// address, WireGuard, or route values: the service accepts only the compiled
+/// V3 Genesis anchors and derives all six replacements itself.
+#[derive(Debug, Deserialize)]
+struct BootstrapCanonicalValidatorAddressBindingCorrectionRequest {
+    applied_genesis_sha256: String,
+    applied_genesis_hash: String,
+    canonical_validator_bindings_sha256: String,
+    prior_snapshot_sha256: String,
+    actor: String,
+    reason: String,
+}
+
 #[derive(Debug, Serialize)]
 struct BootstrapInnernetInviteResponse {
     node_id: String,
@@ -573,6 +599,14 @@ pub async fn serve(port: u16, token: String, app_context: AppContext) -> Result<
         .route(
             "/v1/migration/bootstrap/transports",
             get(bootstrap_innernet_transport_snapshot_handler),
+        )
+        .route(
+            "/v1/migration/bootstrap/transport-release-generation",
+            post(bootstrap_transport_release_generation_handler),
+        )
+        .route(
+            "/v1/migration/bootstrap/correct-canonical-validator-address-bindings",
+            post(bootstrap_canonical_validator_address_binding_correction_handler),
         )
         .route("/v1/mesh/confirm", post(innernet_confirm_handler))
         .route("/v1/mesh/status", get(mesh_status_handler))
@@ -726,14 +760,30 @@ async fn mesh_transport_snapshot_handler(
 
 /// Public read-only transport discovery endpoint. The payload is safe to
 /// publish because `validator_transport_snapshot` signs it with the
-/// coordinator key; callers must verify that signature against their pinned
-/// Ed25519 public key.
+/// coordinator key. It remains unavailable until the coordinator has
+/// durably recorded the Testnet-v3 post-bootstrap release generation; callers
+/// must verify the resulting signature against their pinned Ed25519 public key.
 async fn mesh_transport_snapshot_current_handler(
     State(state): State<ControlServiceState>,
 ) -> impl IntoResponse {
-    match innernet::validator_transport_snapshot(&state.app_context) {
+    public_transport_snapshot_response(innernet::public_validator_transport_snapshot(
+        &state.app_context,
+    ))
+}
+
+fn public_transport_snapshot_response(
+    result: Result<innernet::InnernetValidatorTransportSnapshot, String>,
+) -> axum::response::Response {
+    match result {
         Ok(payload) => (StatusCode::OK, Json(payload)).into_response(),
-        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        Err(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": "testnet_v3_transport_release_not_published",
+                "detail": error,
+            })),
+        )
+            .into_response(),
     }
 }
 
@@ -954,6 +1004,81 @@ async fn bootstrap_innernet_transport_snapshot_handler(
             .into_response();
     }
     match innernet::validator_transport_snapshot(&state.app_context) {
+        Ok(payload) => (StatusCode::OK, Json(payload)).into_response(),
+        Err(error) => validator_vpn_error(error),
+    }
+}
+
+/// Advance the public signed transport registry only after the fresh V3
+/// bootstrap is complete. The coordinator token remains mandatory even though
+/// the resulting signed snapshot is intentionally public.
+async fn bootstrap_transport_release_generation_handler(
+    State(state): State<ControlServiceState>,
+    headers: HeaderMap,
+    Json(input): Json<BootstrapTransportReleaseGenerationRequest>,
+) -> impl IntoResponse {
+    let Some(admin_key) = headers
+        .get("X-Admin-Key")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    };
+    if admin_key != state.token.as_str() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    }
+    match innernet::advance_transport_release_generation(
+        &state.app_context,
+        input.requested_minimum_generation,
+        &input.actor,
+        &input.reason,
+    ) {
+        Ok(payload) => (StatusCode::OK, Json(payload)).into_response(),
+        Err(error) => validator_vpn_error(error),
+    }
+}
+
+/// Repair the canonical six-validator address binding after an authenticated,
+/// complete V3 bootstrap.  Authentication and all state checks remain inside
+/// the coordinator; this handler never accepts mutable peer/key material.
+async fn bootstrap_canonical_validator_address_binding_correction_handler(
+    State(state): State<ControlServiceState>,
+    headers: HeaderMap,
+    Json(input): Json<BootstrapCanonicalValidatorAddressBindingCorrectionRequest>,
+) -> impl IntoResponse {
+    let Some(admin_key) = headers
+        .get("X-Admin-Key")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    };
+    if admin_key != state.token.as_str() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    }
+    match innernet::correct_canonical_validator_address_bindings(
+        &state.app_context,
+        &input.applied_genesis_sha256,
+        &input.applied_genesis_hash,
+        &input.canonical_validator_bindings_sha256,
+        &input.prior_snapshot_sha256,
+        &input.actor,
+        &input.reason,
+    ) {
         Ok(payload) => (StatusCode::OK, Json(payload)).into_response(),
         Err(error) => validator_vpn_error(error),
     }
@@ -1253,6 +1378,12 @@ async fn invite_handler(
                 .to_string(),
         ),
     };
+    if input.peer_type == ValidatorVpnRole::Validator && !preconfigured {
+        return validator_vpn_error(
+            "Testnet-v3 validator VPN activation requires the assignment-bound preconfigured static mesh package."
+                .to_string(),
+        );
+    }
     let coordinator_readiness = if preconfigured {
         innernet::require_coordinator_ready()
     } else {
@@ -2222,5 +2353,47 @@ mod tests {
             STATIC_VALIDATOR_VPN_RETIRED_ERROR,
             "static_validator_vpn_retired"
         );
+    }
+
+    #[test]
+    fn public_transport_route_returns_clear_503_before_release_and_21_after_release() {
+        let runtime = tokio::runtime::Runtime::new().expect("test runtime");
+        let denied = public_transport_snapshot_response(Err(
+            "Testnet-v3 public validator transport registry is not released".to_string(),
+        ));
+        assert_eq!(denied.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let denied_body = runtime
+            .block_on(axum::body::to_bytes(denied.into_body(), usize::MAX))
+            .expect("503 response body");
+        let denied_json: Value = serde_json::from_slice(&denied_body).expect("503 JSON body");
+        assert_eq!(
+            denied_json["error"],
+            "testnet_v3_transport_release_not_published"
+        );
+        assert!(denied_json["detail"]
+            .as_str()
+            .expect("503 detail")
+            .contains("not released"));
+
+        let released =
+            public_transport_snapshot_response(Ok(innernet::InnernetValidatorTransportSnapshot {
+                version: 1,
+                network: "synergy-innernet-membership-v1".to_string(),
+                migration_id: "testnet-v3-fresh-nine-peer-bootstrap".to_string(),
+                configuration_version: 21,
+                transports: vec![innernet::InnernetValidatorTransport {
+                    validator_address: "synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t".to_string(),
+                    dial_address: "10.70.10.1:5622".to_string(),
+                }],
+                signature: "ed25519:test-signed-payload".to_string(),
+            }));
+        assert_eq!(released.status(), StatusCode::OK);
+        let released_body = runtime
+            .block_on(axum::body::to_bytes(released.into_body(), usize::MAX))
+            .expect("200 response body");
+        let released_json: Value =
+            serde_json::from_slice(&released_body).expect("released snapshot JSON");
+        assert_eq!(released_json["configuration_version"], 21);
+        assert_eq!(released_json["signature"], "ed25519:test-signed-payload");
     }
 }

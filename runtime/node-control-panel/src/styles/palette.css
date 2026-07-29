@@ -276,9 +276,11 @@
     --snrg-animation-duration-pulse: 2s;
     --snrg-animation-duration-cycle: 8s;
   
-    /* === ANIMATION DEFINITIONS === */
-    /* Comic-style glow cycling through all four primaries */
-    @keyframes snrg-comic-glow {
+}
+
+/* === ANIMATION DEFINITIONS === */
+/* Comic-style glow cycling through all four primaries */
+@keyframes snrg-comic-glow {
   
       0%,
       100% {
@@ -298,7 +300,7 @@
       }
     }
   
-    @keyframes snrg-gradient-shift {
+@keyframes snrg-gradient-shift {
       0% {
         background-position: 0% 50%;
       }
@@ -312,7 +314,7 @@
       }
     }
   
-    @keyframes snrg-pulse-quad {
+@keyframes snrg-pulse-quad {
   
       0%,
       100% {
@@ -332,18 +334,17 @@
       }
     }
   
-    /* === UTILITY CLASSES === */
-    .snrg-comic-glow {
+/* === UTILITY CLASSES === */
+.snrg-comic-glow {
       animation: snrg-comic-glow var(--snrg-animation-duration-cycle) ease-in-out infinite;
     }
   
-    .snrg-gradient-animated {
+.snrg-gradient-animated {
       background: var(--snrg-primary-gradient-horizontal);
       background-size: 200% 200%;
       animation: snrg-gradient-shift var(--snrg-animation-duration-cycle) ease infinite;
     }
   
-    .snrg-pulse-quad {
+.snrg-pulse-quad {
       animation: snrg-pulse-quad var(--snrg-animation-duration-cycle) ease-in-out infinite;
     }
-  }

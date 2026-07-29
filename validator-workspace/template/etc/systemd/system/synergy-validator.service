@@ -8,6 +8,10 @@ Type=simple
 User=node
 Group=node
 EnvironmentFile=/etc/synergy/validator/node.env
+# The production release payload installs this file with the applied Genesis
+# path and digest.  Keep the runtime loader on that immutable file, never its
+# working-directory fallback.
+EnvironmentFile=/etc/synergy/testnet-v3/node.env
 WorkingDirectory=/var/lib/synergy/validator
 ExecStart=/opt/synergy/bin/synergy-validator start --config /etc/synergy/validator/config.toml
 Restart=on-failure

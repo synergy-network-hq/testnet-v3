@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
+use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -17,6 +18,28 @@ const STATE_RELATIVE_PATH: &str = "testnet/runtime/innernet/enrollment-state.jso
 const RECEIPT_DOMAIN: &str = "synergy-innernet-membership-v1";
 const DEFAULT_INNERNET_INVITE_EXPIRY: &str = "30m";
 const SERVER_HANDSHAKE_MAX_AGE_SECONDS: i64 = 300;
+/// The Testnet-v3 release verifier rejects all earlier transport registry
+/// generations. A fresh nine-peer bootstrap naturally reaches generation 9,
+/// so its public release must be explicitly and audibly advanced once the
+/// whole canonical mesh is server-confirmed.
+pub const TESTNET_V3_MIN_TRANSPORT_RELEASE_GENERATION: u64 = 21;
+/// SHA-256 of the immutable, governance-approved Testnet-v3 Genesis document.
+///
+/// The coordinator intentionally keeps this anchor compiled into the release
+/// rather than accepting a caller-provided validator set.  A transport release
+/// must never become an alternate source of consensus identity truth.
+pub const TESTNET_V3_APPLIED_GENESIS_SHA256: &str =
+    "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf";
+/// The `header.genesis_hash` committed by that same immutable Genesis document.
+pub const TESTNET_V3_APPLIED_GENESIS_HASH: &str =
+    "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d";
+/// SHA-256 of the newline-separated, slot-ordered
+/// `validator-N=<Genesis synv address>` bindings in
+/// `CANONICAL_BOOTSTRAP_VALIDATORS`.  This gives the narrow emergency repair
+/// path an independently auditable, immutable binding anchor in addition to
+/// the applied Genesis digest above.
+pub const TESTNET_V3_CANONICAL_VALIDATOR_BINDINGS_SHA256: &str =
+    "602abed04b0e17cfbe3d9720737b851d9cf9d5235393285a7271b2f7e8ecc80e";
 // A temporary invitation key that has completed a handshake may belong to a
 // client which is still redeeming. Recovery must wait longer than the normal
 // confirmation freshness window before it can invalidate that key.
@@ -137,14 +160,86 @@ pub struct InnernetMeshStatus {
     pub bootstrap_complete: bool,
 }
 
+/// Result of the narrow coordinator-admin generation advancement operation.
+/// This deliberately contains no peer material or signing material.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct TransportReleaseGenerationAdvance {
+    pub requested_minimum_generation: u64,
+    pub previous_generation: u64,
+    pub effective_generation: u64,
+    pub advanced: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit_recorded_at: Option<String>,
+}
+
+/// Result of the one-time Testnet-v3 canonical validator-address repair.
+/// No WireGuard or Innernet peer material is exposed or changed by this
+/// operation; the response records only public consensus addresses and the
+/// monotonic signed-registry generation it caused.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CanonicalValidatorAddressBindingCorrection {
+    pub applied_genesis_sha256: String,
+    pub applied_genesis_hash: String,
+    pub canonical_validator_bindings_sha256: String,
+    pub prior_snapshot_sha256: String,
+    pub previous_generation: u64,
+    pub effective_generation: u64,
+    pub corrected_bindings: Vec<CanonicalValidatorAddressBindingChange>,
+    pub audit_recorded_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CanonicalValidatorAddressBindingChange {
+    pub peer_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_validator_address: Option<String>,
+    pub canonical_validator_address: String,
+}
+
+/// Immutable-in-practice audit data written together with the state change.
+/// State mutations in this module only ever append these records; the record
+/// is purposefully free of invitations, WireGuard keys, and admin secrets.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct TransportReleaseGenerationAuditRecord {
+    requested_minimum_generation: u64,
+    previous_generation: u64,
+    effective_generation: u64,
+    actor: String,
+    reason: String,
+    recorded_at: String,
+}
+
+/// Append-only evidence for the deliberately narrow V3 binding repair.  The
+/// audit contains no enrollment secrets, WireGuard public keys, or endpoint
+/// material.  It binds the change to both the applied Genesis hash and the
+/// compiled canonical six-validator mapping.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct CanonicalValidatorAddressBindingCorrectionAuditRecord {
+    applied_genesis_sha256: String,
+    applied_genesis_hash: String,
+    canonical_validator_bindings_sha256: String,
+    prior_snapshot_sha256: String,
+    previous_generation: u64,
+    effective_generation: u64,
+    actor: String,
+    reason: String,
+    corrected_bindings: Vec<CanonicalValidatorAddressBindingChange>,
+    recorded_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct InnernetEnrollmentState {
     version: u32,
     latest_generation: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    transport_release_generation_audit: Vec<TransportReleaseGenerationAuditRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    canonical_validator_address_binding_correction_audit:
+        Vec<CanonicalValidatorAddressBindingCorrectionAuditRecord>,
     enrollments: Vec<InnernetEnrollment>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct InnernetEnrollment {
     id: String,
     node_id: String,
@@ -1552,8 +1647,119 @@ pub fn validator_transport_snapshot(
 ) -> Result<InnernetValidatorTransportSnapshot, String> {
     require_coordinator_ready()?;
     let state = load_state(&state_path(app_context)?)?;
+    signed_validator_transport_snapshot_from_state(&state)
+}
+
+/// Return the public Testnet-v3 transport document only after the coordinator
+/// has durably recorded its explicit post-bootstrap release decision. Internal
+/// enrollment and bootstrap inspection may still use `validator_transport_snapshot`
+/// before this point; the unauthenticated discovery endpoint must not expose a
+/// generation that the Testnet-v3 release verifier will reject.
+pub fn public_validator_transport_snapshot(
+    app_context: &AppContext,
+) -> Result<InnernetValidatorTransportSnapshot, String> {
+    require_coordinator_ready()?;
+    let state = load_state(&state_path(app_context)?)?;
+    require_published_transport_release_generation(&state)?;
+    signed_validator_transport_snapshot_from_state(&state)
+}
+
+/// Advance the signed public transport registry to an explicitly requested
+/// Testnet-v3 release generation. This is intentionally not a generic state
+/// editor: it only raises the generation, it refuses incomplete or noncanonical
+/// bootstrap state, and it records who made the release decision and why in
+/// the same atomically-replaced state document.
+///
+/// The operation is idempotent. Repeating a successful request with the same
+/// (or lower) minimum leaves state untouched and returns the already-effective
+/// generation. It never changes peer membership, transport addresses, the
+/// coordinator signer, or migration configuration.
+pub fn advance_transport_release_generation(
+    app_context: &AppContext,
+    requested_minimum_generation: u64,
+    actor: &str,
+    reason: &str,
+) -> Result<TransportReleaseGenerationAdvance, String> {
+    require_coordinator_ready()?;
+    validate_transport_release_audit_text(actor, "Transport release actor", 128)?;
+    validate_transport_release_audit_text(reason, "Transport release reason", 512)?;
+    if requested_minimum_generation < TESTNET_V3_MIN_TRANSPORT_RELEASE_GENERATION {
+        return Err(format!(
+            "Testnet-v3 transport release generation must be at least {TESTNET_V3_MIN_TRANSPORT_RELEASE_GENERATION}."
+        ));
+    }
+
+    let path = state_path(app_context)?;
+    let _guard = state_lock()
+        .lock()
+        .map_err(|_| "Innernet enrollment state lock is poisoned".to_string())?;
+    let mut state = load_state(&path)?;
+    let outcome = advance_transport_release_generation_in_state(
+        &mut state,
+        requested_minimum_generation,
+        actor,
+        reason,
+        Utc::now(),
+    )?;
+    if outcome.advanced {
+        save_state(&path, &state)?;
+    }
+    Ok(outcome)
+}
+
+/// Correct only the six current bootstrap validator-address bindings after a
+/// completed fresh-mesh release has been proven to have published an older,
+/// wrong address set.  This is *not* a membership editor: it cannot create,
+/// delete, rekey, re-enroll, rename, route, or otherwise alter a peer.
+///
+/// The caller supplies the two immutable release anchors so an operator cannot
+/// accidentally use this exceptional operation against another network.  Both
+/// values must match the compiled V3 values, and the compiled mapping is
+/// rehashed before state is touched.  The state mutation is atomic and always
+/// advances the signed snapshot generation by exactly one.
+pub fn correct_canonical_validator_address_bindings(
+    app_context: &AppContext,
+    applied_genesis_sha256: &str,
+    applied_genesis_hash: &str,
+    canonical_validator_bindings_sha256: &str,
+    prior_snapshot_sha256: &str,
+    actor: &str,
+    reason: &str,
+) -> Result<CanonicalValidatorAddressBindingCorrection, String> {
+    require_coordinator_ready()?;
+    validate_transport_release_audit_text(actor, "Binding correction actor", 128)?;
+    validate_transport_release_audit_text(reason, "Binding correction reason", 512)?;
+    require_canonical_validator_binding_anchors(
+        applied_genesis_sha256,
+        applied_genesis_hash,
+        canonical_validator_bindings_sha256,
+    )?;
+    validate_sha256(
+        prior_snapshot_sha256,
+        "Prior signed transport snapshot SHA-256",
+    )?;
+
+    let path = state_path(app_context)?;
+    let _guard = state_lock()
+        .lock()
+        .map_err(|_| "Innernet enrollment state lock is poisoned".to_string())?;
+    let mut state = load_state(&path)?;
+    let outcome = correct_canonical_validator_address_bindings_in_state(
+        &mut state,
+        prior_snapshot_sha256,
+        actor,
+        reason,
+        Utc::now(),
+    )?;
+    save_state(&path, &state)?;
+    Ok(outcome)
+}
+
+fn signed_validator_transport_snapshot_from_state(
+    state: &InnernetEnrollmentState,
+) -> Result<InnernetValidatorTransportSnapshot, String> {
     let transports = validator_transports_from_current_enrollments(
-        current_enrollments_by_member(&state).into_values(),
+        current_enrollments_by_member(state).into_values(),
     )?;
     if transports.is_empty() {
         return Err(
@@ -1575,6 +1781,350 @@ pub fn validator_transport_snapshot(
         general_purpose::STANDARD.encode(signature.to_bytes())
     );
     Ok(snapshot)
+}
+
+fn advance_transport_release_generation_in_state(
+    state: &mut InnernetEnrollmentState,
+    requested_minimum_generation: u64,
+    actor: &str,
+    reason: &str,
+    now: DateTime<Utc>,
+) -> Result<TransportReleaseGenerationAdvance, String> {
+    if requested_minimum_generation < TESTNET_V3_MIN_TRANSPORT_RELEASE_GENERATION {
+        return Err(format!(
+            "Testnet-v3 transport release generation must be at least {TESTNET_V3_MIN_TRANSPORT_RELEASE_GENERATION}."
+        ));
+    }
+    validate_transport_release_audit_text(actor, "Transport release actor", 128)?;
+    validate_transport_release_audit_text(reason, "Transport release reason", 512)?;
+    require_exact_canonical_bootstrap_for_transport_release(state)?;
+    require_exact_current_canonical_validator_transports(state)?;
+
+    let previous_generation = state.latest_generation;
+    if previous_generation >= requested_minimum_generation {
+        return Ok(TransportReleaseGenerationAdvance {
+            requested_minimum_generation,
+            previous_generation,
+            effective_generation: previous_generation,
+            advanced: false,
+            audit_recorded_at: None,
+        });
+    }
+
+    let recorded_at = now.to_rfc3339();
+    state.latest_generation = requested_minimum_generation;
+    state
+        .transport_release_generation_audit
+        .push(TransportReleaseGenerationAuditRecord {
+            requested_minimum_generation,
+            previous_generation,
+            effective_generation: requested_minimum_generation,
+            actor: actor.trim().to_string(),
+            reason: reason.trim().to_string(),
+            recorded_at: recorded_at.clone(),
+        });
+    Ok(TransportReleaseGenerationAdvance {
+        requested_minimum_generation,
+        previous_generation,
+        effective_generation: requested_minimum_generation,
+        advanced: true,
+        audit_recorded_at: Some(recorded_at),
+    })
+}
+
+fn correct_canonical_validator_address_bindings_in_state(
+    state: &mut InnernetEnrollmentState,
+    prior_snapshot_sha256: &str,
+    actor: &str,
+    reason: &str,
+    now: DateTime<Utc>,
+) -> Result<CanonicalValidatorAddressBindingCorrection, String> {
+    validate_transport_release_audit_text(actor, "Binding correction actor", 128)?;
+    validate_transport_release_audit_text(reason, "Binding correction reason", 512)?;
+    require_canonical_validator_binding_anchors(
+        TESTNET_V3_APPLIED_GENESIS_SHA256,
+        TESTNET_V3_APPLIED_GENESIS_HASH,
+        TESTNET_V3_CANONICAL_VALIDATOR_BINDINGS_SHA256,
+    )?;
+    require_published_transport_release_generation(state)?;
+    require_exact_canonical_bootstrap_for_transport_release(state)?;
+    if state.latest_generation != TESTNET_V3_MIN_TRANSPORT_RELEASE_GENERATION {
+        return Err(format!(
+            "Testnet-v3 canonical validator-address correction is permitted only for signed transport generation {TESTNET_V3_MIN_TRANSPORT_RELEASE_GENERATION}; current generation is {}.",
+            state.latest_generation
+        ));
+    }
+    if !state
+        .canonical_validator_address_binding_correction_audit
+        .is_empty()
+    {
+        return Err(
+            "Testnet-v3 canonical validator-address bindings have already been corrected; a second rebinding is forbidden."
+                .to_string(),
+        );
+    }
+
+    let computed_prior_snapshot_sha256 = signed_snapshot_sha256(state)?;
+    if computed_prior_snapshot_sha256 != prior_snapshot_sha256.trim() {
+        return Err(
+            "Testnet-v3 canonical validator-address correction prior snapshot SHA-256 does not match the coordinator's current signed generation-21 snapshot."
+                .to_string(),
+        );
+    }
+
+    let current_indices = current_enrollment_indices_by_member(state);
+    let mut corrected_bindings = Vec::new();
+    for (peer_name, canonical_validator_address) in CANONICAL_BOOTSTRAP_VALIDATORS {
+        let node_id = format!("bootstrap-{peer_name}");
+        let index = current_indices.get(node_id.as_str()).copied().ok_or_else(|| {
+            format!(
+                "Testnet-v3 canonical validator-address correction is missing current bootstrap enrollment {node_id}."
+            )
+        })?;
+        let enrollment = state.enrollments.get_mut(index).ok_or_else(|| {
+            "Testnet-v3 canonical validator-address correction found an invalid enrollment index."
+                .to_string()
+        })?;
+        if !enrollment.bootstrap
+            || enrollment.node_id != node_id
+            || enrollment.peer_name != peer_name
+            || enrollment.peer_type != "validator"
+            || enrollment.confirmed_at.is_none()
+            || enrollment.handshake_verified_at.is_none()
+        {
+            return Err(format!(
+                "Testnet-v3 canonical validator-address correction found a noncanonical or unverified bootstrap record for {peer_name}."
+            ));
+        }
+        if enrollment.validator_address.as_deref() != Some(canonical_validator_address) {
+            corrected_bindings.push(CanonicalValidatorAddressBindingChange {
+                peer_name: peer_name.to_string(),
+                previous_validator_address: enrollment.validator_address.clone(),
+                canonical_validator_address: canonical_validator_address.to_string(),
+            });
+            // This is intentionally the only mutable field in this repair.
+            enrollment.validator_address = Some(canonical_validator_address.to_string());
+        }
+    }
+    if corrected_bindings.is_empty() {
+        return Err(
+            "Testnet-v3 canonical validator-address correction is not needed; refusing to advance a signed registry without a binding change."
+                .to_string(),
+        );
+    }
+
+    require_exact_current_canonical_validator_transports(state)?;
+    let previous_generation = state.latest_generation;
+    let effective_generation = TESTNET_V3_MIN_TRANSPORT_RELEASE_GENERATION
+        .checked_add(1)
+        .expect("Testnet-v3 fixed correction generation does not overflow");
+    let recorded_at = now.to_rfc3339();
+    state.latest_generation = effective_generation;
+    state
+        .canonical_validator_address_binding_correction_audit
+        .push(CanonicalValidatorAddressBindingCorrectionAuditRecord {
+            applied_genesis_sha256: TESTNET_V3_APPLIED_GENESIS_SHA256.to_string(),
+            applied_genesis_hash: TESTNET_V3_APPLIED_GENESIS_HASH.to_string(),
+            canonical_validator_bindings_sha256: TESTNET_V3_CANONICAL_VALIDATOR_BINDINGS_SHA256
+                .to_string(),
+            prior_snapshot_sha256: computed_prior_snapshot_sha256.clone(),
+            previous_generation,
+            effective_generation,
+            actor: actor.trim().to_string(),
+            reason: reason.trim().to_string(),
+            corrected_bindings: corrected_bindings.clone(),
+            recorded_at: recorded_at.clone(),
+        });
+    Ok(CanonicalValidatorAddressBindingCorrection {
+        applied_genesis_sha256: TESTNET_V3_APPLIED_GENESIS_SHA256.to_string(),
+        applied_genesis_hash: TESTNET_V3_APPLIED_GENESIS_HASH.to_string(),
+        canonical_validator_bindings_sha256: TESTNET_V3_CANONICAL_VALIDATOR_BINDINGS_SHA256
+            .to_string(),
+        prior_snapshot_sha256: computed_prior_snapshot_sha256,
+        previous_generation,
+        effective_generation,
+        corrected_bindings,
+        audit_recorded_at: recorded_at,
+    })
+}
+
+fn require_canonical_validator_binding_anchors(
+    applied_genesis_sha256: &str,
+    applied_genesis_hash: &str,
+    canonical_validator_bindings_sha256: &str,
+) -> Result<(), String> {
+    if applied_genesis_sha256.trim() != TESTNET_V3_APPLIED_GENESIS_SHA256 {
+        return Err(
+            "Testnet-v3 canonical validator-address correction requires the exact applied Genesis SHA-256 anchor."
+                .to_string(),
+        );
+    }
+    if applied_genesis_hash.trim() != TESTNET_V3_APPLIED_GENESIS_HASH {
+        return Err(
+            "Testnet-v3 canonical validator-address correction requires the exact applied Genesis hash anchor."
+                .to_string(),
+        );
+    }
+    let compiled_bindings_sha256 = canonical_validator_bindings_digest()?;
+    if compiled_bindings_sha256 != TESTNET_V3_CANONICAL_VALIDATOR_BINDINGS_SHA256 {
+        return Err(
+            "The compiled Testnet-v3 canonical validator binding map does not match its immutable SHA-256 anchor."
+                .to_string(),
+        );
+    }
+    if canonical_validator_bindings_sha256.trim() != TESTNET_V3_CANONICAL_VALIDATOR_BINDINGS_SHA256
+    {
+        return Err(
+            "Testnet-v3 canonical validator-address correction requires the exact canonical validator-binding SHA-256 anchor."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_sha256(value: &str, label: &str) -> Result<(), String> {
+    let value = value.trim();
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!(
+            "{label} must be a 64-character hexadecimal digest."
+        ));
+    }
+    Ok(())
+}
+
+fn signed_snapshot_sha256(state: &InnernetEnrollmentState) -> Result<String, String> {
+    let snapshot = signed_validator_transport_snapshot_from_state(state)?;
+    let encoded = serde_json::to_vec(&snapshot)
+        .map_err(|error| format!("Failed to encode signed transport snapshot: {error}"))?;
+    Ok(Sha256::digest(encoded)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+fn canonical_validator_bindings_digest() -> Result<String, String> {
+    let mut payload = String::new();
+    for (index, (peer_name, validator_address)) in CANONICAL_BOOTSTRAP_VALIDATORS.iter().enumerate()
+    {
+        if !is_validator_address(validator_address) {
+            return Err(
+                "The compiled Testnet-v3 canonical validator binding map contains an invalid address."
+                    .to_string(),
+            );
+        }
+        if index > 0 {
+            payload.push('\n');
+        }
+        payload.push_str(peer_name);
+        payload.push('=');
+        payload.push_str(validator_address);
+    }
+    Ok(Sha256::digest(payload.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+fn require_exact_current_canonical_validator_transports(
+    state: &InnernetEnrollmentState,
+) -> Result<(), String> {
+    let transports = validator_transports_from_current_enrollments(
+        current_enrollments_by_member(state).into_values(),
+    )?;
+    if transports.len() != CANONICAL_BOOTSTRAP_VALIDATORS.len() {
+        return Err(
+            "Testnet-v3 canonical validator-address correction did not produce exactly six validator transports."
+                .to_string(),
+        );
+    }
+    for (peer_name, canonical_validator_address) in CANONICAL_BOOTSTRAP_VALIDATORS {
+        let expected_ip = admin_bootstrap_assignment(peer_name)?
+            .assigned_ip
+            .split('/')
+            .next()
+            .expect("canonical assignment contains an IP address")
+            .to_string();
+        let expected_dial_address = format!("{expected_ip}:5622");
+        let actual = transports.get(canonical_validator_address).ok_or_else(|| {
+            format!(
+                "Testnet-v3 canonical validator-address correction is missing transport for {peer_name}."
+            )
+        })?;
+        if actual.dial_address != expected_dial_address {
+            return Err(format!(
+                "Testnet-v3 canonical validator-address correction produced an unexpected dial address for {peer_name}."
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn require_exact_canonical_bootstrap_for_transport_release(
+    state: &InnernetEnrollmentState,
+) -> Result<(), String> {
+    let bootstrap = bootstrap_status(state)?;
+    if !bootstrap.complete {
+        return Err(
+            "Testnet-v3 transport release generation requires all nine canonical bootstrap peers to be confirmed with a server-verified handshake."
+                .to_string(),
+        );
+    }
+    let expected: BTreeMap<String, ()> = CANONICAL_BOOTSTRAP_PEERS
+        .iter()
+        .map(|peer_name| (format!("bootstrap-{peer_name}"), ()))
+        .collect();
+    let current = current_enrollments_by_member(state);
+    let actual: BTreeMap<String, ()> = current
+        .keys()
+        .map(|node_id| ((*node_id).to_string(), ()))
+        .collect();
+    if actual != expected {
+        return Err(
+            "Testnet-v3 transport release generation requires exactly the nine canonical bootstrap peers; current membership contains a different peer set."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_transport_release_audit_text(
+    value: &str,
+    label: &str,
+    maximum_bytes: usize,
+) -> Result<(), String> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.len() > maximum_bytes
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+    {
+        return Err(format!(
+            "{label} must be non-empty printable text no longer than {maximum_bytes} bytes."
+        ));
+    }
+    Ok(())
+}
+
+fn require_published_transport_release_generation(
+    state: &InnernetEnrollmentState,
+) -> Result<(), String> {
+    let published = state.latest_generation >= TESTNET_V3_MIN_TRANSPORT_RELEASE_GENERATION
+        && state
+            .transport_release_generation_audit
+            .iter()
+            .any(|record| {
+                record.requested_minimum_generation >= TESTNET_V3_MIN_TRANSPORT_RELEASE_GENERATION
+                    && record.effective_generation >= TESTNET_V3_MIN_TRANSPORT_RELEASE_GENERATION
+                    && record.effective_generation > record.previous_generation
+                    && record.effective_generation <= state.latest_generation
+            });
+    if !published {
+        return Err(format!(
+            "Testnet-v3 public validator transport registry is not released: the coordinator needs a persisted release-generation audit proving an advance to generation {TESTNET_V3_MIN_TRANSPORT_RELEASE_GENERATION} or later."
+        ));
+    }
+    Ok(())
 }
 
 fn validator_transports_from_current_enrollments<'a>(
@@ -1854,6 +2404,27 @@ fn current_enrollments_by_member<'a>(
     current
 }
 
+/// Match `current_enrollments_by_member` exactly, but retain the mutable index
+/// for the narrow canonical-address correction.  In particular, equal
+/// configuration versions intentionally use the later record just as the
+/// read-only selector above does.
+fn current_enrollment_indices_by_member(
+    state: &InnernetEnrollmentState,
+) -> BTreeMap<String, usize> {
+    let mut current: BTreeMap<String, usize> = BTreeMap::new();
+    for (index, enrollment) in state.enrollments.iter().enumerate() {
+        match current.get(enrollment.node_id.as_str()) {
+            Some(existing_index)
+                if state.enrollments[*existing_index].configuration_version
+                    > enrollment.configuration_version => {}
+            _ => {
+                current.insert(enrollment.node_id.clone(), index);
+            }
+        }
+    }
+    current
+}
+
 #[derive(Debug)]
 struct ParsedInvitation {
     interface_name: String,
@@ -1898,6 +2469,8 @@ fn load_state(path: &Path) -> Result<InnernetEnrollmentState, String> {
         return Ok(InnernetEnrollmentState {
             version: 1,
             latest_generation: 0,
+            transport_release_generation_audit: Vec::new(),
+            canonical_validator_address_binding_correction_audit: Vec::new(),
             enrollments: Vec::new(),
         });
     }
@@ -1916,10 +2489,21 @@ fn save_state(path: &Path, state: &InnernetEnrollmentState) -> Result<(), String
     let payload = serde_json::to_vec_pretty(state)
         .map_err(|error| format!("Failed to encode Innernet enrollment state: {error}"))?;
     let temporary = path.with_extension(format!("{}.tmp", Uuid::new_v4()));
-    fs::write(&temporary, payload)
+    let mut file = fs::File::create(&temporary)
+        .map_err(|error| format!("Failed to create {}: {error}", temporary.display()))?;
+    file.write_all(&payload)
         .map_err(|error| format!("Failed to write {}: {error}", temporary.display()))?;
+    file.sync_all()
+        .map_err(|error| format!("Failed to sync {}: {error}", temporary.display()))?;
+    drop(file);
     fs::rename(&temporary, path)
-        .map_err(|error| format!("Failed to replace {}: {error}", path.display()))
+        .map_err(|error| format!("Failed to replace {}: {error}", path.display()))?;
+    // Durably commit the atomic rename before reporting success. This matters
+    // for a release-generation advance because publishing a signed snapshot
+    // must never outrun the locally durable coordinator state.
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("Failed to sync {}: {error}", parent.display()))
 }
 
 fn state_lock() -> &'static Mutex<()> {
@@ -2040,16 +2624,28 @@ fn validate_identifier(value: &str, label: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        admin_bootstrap_assignment, authoritative_assigned_ips, bootstrap_status,
-        canonical_bootstrap_validator_address, constrained_expiry, has_fresh_server_handshake,
+        admin_bootstrap_assignment, advance_transport_release_generation_in_state,
+        authoritative_assigned_ips, bootstrap_status, canonical_bootstrap_validator_address,
+        canonical_validator_bindings_digest, constrained_expiry,
+        correct_canonical_validator_address_bindings_in_state, has_fresh_server_handshake,
         is_validator_address, legacy_bootstrap_verification_candidates,
         membership_receipt_matches_enrollment, mesh_status_from_state, parse_innernet_address_plan,
-        parse_innernet_duration, parse_invitation, receipt_payload, sanitized_command_error,
-        server_handshake_age_seconds, server_handshake_timestamp, validate_identifier,
-        validator_transports_from_current_enrollments, InnernetEnrollment, InnernetEnrollmentState,
-        InnernetMembershipReceipt, CANONICAL_BOOTSTRAP_PEERS,
-        STALE_UNREDEEMED_HANDSHAKE_RECOVERY_MIN_AGE_SECONDS,
+        parse_innernet_duration, parse_invitation, receipt_payload,
+        require_canonical_validator_binding_anchors,
+        require_published_transport_release_generation, sanitized_command_error,
+        server_handshake_age_seconds, server_handshake_timestamp, signed_snapshot_sha256,
+        signed_validator_transport_snapshot_from_state, validate_identifier,
+        validator_transports_from_current_enrollments, verify_validator_transport_snapshot,
+        InnernetEnrollment, InnernetEnrollmentState, InnernetMembershipReceipt,
+        TransportReleaseGenerationAuditRecord, CANONICAL_BOOTSTRAP_PEERS,
+        STALE_UNREDEEMED_HANDSHAKE_RECOVERY_MIN_AGE_SECONDS, TESTNET_V3_APPLIED_GENESIS_HASH,
+        TESTNET_V3_APPLIED_GENESIS_SHA256, TESTNET_V3_CANONICAL_VALIDATOR_BINDINGS_SHA256,
+        TESTNET_V3_MIN_TRANSPORT_RELEASE_GENERATION,
     };
+    use base64::{engine::general_purpose, Engine as _};
+    use chrono::{TimeZone, Utc};
+    use ed25519_dalek::SigningKey;
+    use std::ffi::OsString;
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
     fn test_environment_lock() -> MutexGuard<'static, ()> {
@@ -2057,6 +2653,50 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|error| error.into_inner())
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: String) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    fn snapshot_signing_environment() -> Vec<EnvVarGuard> {
+        let signing_key = SigningKey::from_bytes(&[7u8; 32]);
+        vec![
+            EnvVarGuard::set(
+                "SYNERGY_INNERNET_COORDINATOR_SIGNING_KEY",
+                format!(
+                    "ed25519:{}",
+                    general_purpose::STANDARD.encode(signing_key.to_bytes())
+                ),
+            ),
+            EnvVarGuard::set(
+                "SYNERGY_INNERNET_COORDINATOR_PUBLIC_KEY",
+                general_purpose::STANDARD.encode(signing_key.verifying_key().to_bytes()),
+            ),
+            EnvVarGuard::set(
+                "SYNERGY_INNERNET_MIGRATION_ID",
+                "test-migration".to_string(),
+            ),
+        ]
     }
 
     fn enrollment(
@@ -2118,6 +2758,29 @@ mod tests {
             bootstrap: true,
             handshake_verified_at: Some("2026-07-10T00:00:00Z".to_string()),
             preconfigured_wireguard_public_key: None,
+        }
+    }
+
+    fn released_canonical_bootstrap_state() -> InnernetEnrollmentState {
+        InnernetEnrollmentState {
+            version: 1,
+            latest_generation: TESTNET_V3_MIN_TRANSPORT_RELEASE_GENERATION,
+            transport_release_generation_audit: vec![TransportReleaseGenerationAuditRecord {
+                requested_minimum_generation: TESTNET_V3_MIN_TRANSPORT_RELEASE_GENERATION,
+                previous_generation: 9,
+                effective_generation: TESTNET_V3_MIN_TRANSPORT_RELEASE_GENERATION,
+                actor: "release-operator".to_string(),
+                reason: "publish verified fresh Testnet-v3 mesh".to_string(),
+                recorded_at: "2026-07-29T00:00:00Z".to_string(),
+            }],
+            canonical_validator_address_binding_correction_audit: Vec::new(),
+            enrollments: CANONICAL_BOOTSTRAP_PEERS
+                .iter()
+                .enumerate()
+                .map(|(index, peer_name)| {
+                    confirmed_bootstrap_enrollment(peer_name, index as u64 + 1)
+                })
+                .collect(),
         }
     }
 
@@ -2371,6 +3034,8 @@ mod tests {
         let state = InnernetEnrollmentState {
             version: 1,
             latest_generation: 9,
+            transport_release_generation_audit: Vec::new(),
+            canonical_validator_address_binding_correction_audit: Vec::new(),
             enrollments: CANONICAL_BOOTSTRAP_PEERS
                 .iter()
                 .enumerate()
@@ -2394,12 +3059,357 @@ mod tests {
     }
 
     #[test]
+    fn transport_release_generation_rejects_incomplete_fresh_bootstrap() {
+        let _environment_lock = test_environment_lock();
+        set_innernet_address_plans();
+        let mut state = InnernetEnrollmentState {
+            version: 1,
+            latest_generation: 9,
+            transport_release_generation_audit: Vec::new(),
+            canonical_validator_address_binding_correction_audit: Vec::new(),
+            enrollments: CANONICAL_BOOTSTRAP_PEERS
+                .iter()
+                .enumerate()
+                .map(|(index, peer_name)| {
+                    confirmed_bootstrap_enrollment(peer_name, index as u64 + 1)
+                })
+                .collect(),
+        };
+        state.enrollments.pop();
+
+        let error = advance_transport_release_generation_in_state(
+            &mut state,
+            TESTNET_V3_MIN_TRANSPORT_RELEASE_GENERATION,
+            "release-operator",
+            "publish Testnet-v3 fresh mesh",
+            Utc.with_ymd_and_hms(2026, 7, 28, 12, 0, 0)
+                .single()
+                .expect("valid timestamp"),
+        )
+        .expect_err("partial bootstrap must not advance the public registry");
+        assert!(error.contains("all nine canonical bootstrap peers"));
+        assert_eq!(state.latest_generation, 9);
+        assert!(state.transport_release_generation_audit.is_empty());
+    }
+
+    #[test]
+    fn transport_release_generation_advances_9_to_21_and_signs_snapshot() {
+        let _environment_lock = test_environment_lock();
+        set_innernet_address_plans();
+        let _signing_environment = snapshot_signing_environment();
+        let mut state = InnernetEnrollmentState {
+            version: 1,
+            latest_generation: 9,
+            transport_release_generation_audit: Vec::new(),
+            canonical_validator_address_binding_correction_audit: Vec::new(),
+            enrollments: CANONICAL_BOOTSTRAP_PEERS
+                .iter()
+                .enumerate()
+                .map(|(index, peer_name)| {
+                    confirmed_bootstrap_enrollment(peer_name, index as u64 + 1)
+                })
+                .collect(),
+        };
+        let before = signed_validator_transport_snapshot_from_state(&state)
+            .expect("fresh bootstrap snapshot should sign");
+        verify_validator_transport_snapshot(&before).expect("initial snapshot signature");
+        assert_eq!(before.configuration_version, 9);
+        assert_eq!(before.transports.len(), 6);
+        let error = require_published_transport_release_generation(&state)
+            .expect_err("public discovery must be gated before the explicit release advance");
+        assert!(error.contains("not released"));
+
+        let outcome = advance_transport_release_generation_in_state(
+            &mut state,
+            TESTNET_V3_MIN_TRANSPORT_RELEASE_GENERATION,
+            "release-operator",
+            "publish Testnet-v3 fresh mesh",
+            Utc.with_ymd_and_hms(2026, 7, 28, 12, 0, 0)
+                .single()
+                .expect("valid timestamp"),
+        )
+        .expect("complete canonical bootstrap should advance registry");
+        assert!(outcome.advanced);
+        assert_eq!(outcome.previous_generation, 9);
+        assert_eq!(
+            outcome.effective_generation,
+            TESTNET_V3_MIN_TRANSPORT_RELEASE_GENERATION
+        );
+        assert_eq!(state.transport_release_generation_audit.len(), 1);
+        assert_eq!(
+            state.transport_release_generation_audit[0].reason,
+            "publish Testnet-v3 fresh mesh"
+        );
+        require_published_transport_release_generation(&state)
+            .expect("persisted generation audit should publish public discovery");
+
+        let after = signed_validator_transport_snapshot_from_state(&state)
+            .expect("advanced bootstrap snapshot should sign");
+        verify_validator_transport_snapshot(&after).expect("advanced snapshot signature");
+        assert_eq!(
+            after.configuration_version,
+            TESTNET_V3_MIN_TRANSPORT_RELEASE_GENERATION
+        );
+        assert_eq!(after.transports, before.transports);
+        assert_ne!(after.signature, before.signature);
+    }
+
+    #[test]
+    fn transport_release_generation_is_idempotent_and_never_downgrades() {
+        let _environment_lock = test_environment_lock();
+        set_innernet_address_plans();
+        let mut state = InnernetEnrollmentState {
+            version: 1,
+            latest_generation: TESTNET_V3_MIN_TRANSPORT_RELEASE_GENERATION,
+            transport_release_generation_audit: Vec::new(),
+            canonical_validator_address_binding_correction_audit: Vec::new(),
+            enrollments: CANONICAL_BOOTSTRAP_PEERS
+                .iter()
+                .enumerate()
+                .map(|(index, peer_name)| {
+                    confirmed_bootstrap_enrollment(peer_name, index as u64 + 1)
+                })
+                .collect(),
+        };
+
+        let idempotent = advance_transport_release_generation_in_state(
+            &mut state,
+            TESTNET_V3_MIN_TRANSPORT_RELEASE_GENERATION,
+            "release-operator",
+            "repeat exact release request",
+            Utc::now(),
+        )
+        .expect("same minimum should be idempotent");
+        assert!(!idempotent.advanced);
+        assert_eq!(idempotent.effective_generation, 21);
+        assert!(state.transport_release_generation_audit.is_empty());
+
+        state.latest_generation = 25;
+        let no_downgrade = advance_transport_release_generation_in_state(
+            &mut state,
+            TESTNET_V3_MIN_TRANSPORT_RELEASE_GENERATION,
+            "release-operator",
+            "do not lower a newer registry",
+            Utc::now(),
+        )
+        .expect("lower requested minimum must leave newer registry intact");
+        assert!(!no_downgrade.advanced);
+        assert_eq!(no_downgrade.previous_generation, 25);
+        assert_eq!(no_downgrade.effective_generation, 25);
+        assert_eq!(state.latest_generation, 25);
+        assert!(state.transport_release_generation_audit.is_empty());
+    }
+
+    #[test]
+    fn canonical_binding_correction_rebinds_only_current_validator_addresses_and_advances_21_to_22()
+    {
+        let _environment_lock = test_environment_lock();
+        set_innernet_address_plans();
+        let _signing_environment = snapshot_signing_environment();
+        let mut state = released_canonical_bootstrap_state();
+        for enrollment in state
+            .enrollments
+            .iter_mut()
+            .filter(|enrollment| enrollment.peer_type == "validator")
+        {
+            enrollment.validator_address = Some(format!(
+                "synv1legacybinding{}",
+                enrollment.peer_name.replace('-', "")
+            ));
+            enrollment.preconfigured_wireguard_public_key =
+                Some(format!("unchanged-wireguard-key-{}", enrollment.peer_name));
+        }
+        let before_enrollments = state.enrollments.clone();
+        let prior_snapshot_sha256 = signed_snapshot_sha256(&state)
+            .expect("the old signed generation-21 snapshot should serialize");
+        let outcome = correct_canonical_validator_address_bindings_in_state(
+            &mut state,
+            &prior_snapshot_sha256,
+            "release-operator",
+            "correct stale v19.0.53 validator bindings against applied Testnet-v3 Genesis",
+            Utc.with_ymd_and_hms(2026, 7, 29, 1, 0, 0)
+                .single()
+                .expect("valid timestamp"),
+        )
+        .expect("one-time correction must accept the exact released nine-peer state");
+
+        assert_eq!(outcome.previous_generation, 21);
+        assert_eq!(outcome.effective_generation, 22);
+        assert_eq!(outcome.corrected_bindings.len(), 6);
+        assert_eq!(
+            outcome.applied_genesis_sha256,
+            TESTNET_V3_APPLIED_GENESIS_SHA256
+        );
+        assert_eq!(
+            outcome.applied_genesis_hash,
+            TESTNET_V3_APPLIED_GENESIS_HASH
+        );
+        assert_eq!(
+            outcome.canonical_validator_bindings_sha256,
+            TESTNET_V3_CANONICAL_VALIDATOR_BINDINGS_SHA256
+        );
+        assert_eq!(outcome.prior_snapshot_sha256, prior_snapshot_sha256);
+        assert_eq!(state.latest_generation, 22);
+        assert_eq!(
+            state
+                .canonical_validator_address_binding_correction_audit
+                .len(),
+            1
+        );
+        assert_eq!(
+            state.canonical_validator_address_binding_correction_audit[0].prior_snapshot_sha256,
+            prior_snapshot_sha256
+        );
+
+        for (before, after) in before_enrollments.iter().zip(&state.enrollments) {
+            let mut expected = before.clone();
+            if expected.peer_type == "validator" {
+                expected.validator_address =
+                    canonical_bootstrap_validator_address(&expected.peer_name).map(str::to_string);
+            }
+            assert_eq!(after, &expected, "only validator_address may change");
+        }
+        let snapshot = signed_validator_transport_snapshot_from_state(&state)
+            .expect("corrected generation-22 snapshot should sign");
+        verify_validator_transport_snapshot(&snapshot)
+            .expect("corrected generation-22 snapshot signature should verify");
+        assert_eq!(snapshot.configuration_version, 22);
+        assert_eq!(snapshot.transports.len(), 6);
+        for (peer_name, validator_address) in super::CANONICAL_BOOTSTRAP_VALIDATORS {
+            let expected_ip = admin_bootstrap_assignment(peer_name)
+                .expect("canonical assignment")
+                .assigned_ip
+                .split('/')
+                .next()
+                .expect("assigned IP")
+                .to_string();
+            let transport = snapshot
+                .transports
+                .iter()
+                .find(|transport| transport.validator_address == validator_address)
+                .expect("every canonical validator must be present");
+            assert_eq!(transport.dial_address, format!("{expected_ip}:5622"));
+        }
+        assert!(correct_canonical_validator_address_bindings_in_state(
+            &mut state,
+            &prior_snapshot_sha256,
+            "release-operator",
+            "a second binding correction must be rejected",
+            Utc::now(),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn canonical_binding_correction_rejects_wrong_anchor_or_prior_snapshot() {
+        let _environment_lock = test_environment_lock();
+        set_innernet_address_plans();
+        let _signing_environment = snapshot_signing_environment();
+        assert!(require_canonical_validator_binding_anchors(
+            "not-the-applied-genesis",
+            TESTNET_V3_APPLIED_GENESIS_HASH,
+            TESTNET_V3_CANONICAL_VALIDATOR_BINDINGS_SHA256,
+        )
+        .is_err());
+        assert!(require_canonical_validator_binding_anchors(
+            TESTNET_V3_APPLIED_GENESIS_SHA256,
+            "not-the-applied-genesis-hash",
+            TESTNET_V3_CANONICAL_VALIDATOR_BINDINGS_SHA256,
+        )
+        .is_err());
+        assert_eq!(
+            canonical_validator_bindings_digest().expect("compiled binding digest"),
+            TESTNET_V3_CANONICAL_VALIDATOR_BINDINGS_SHA256
+        );
+
+        let mut state = released_canonical_bootstrap_state();
+        state.enrollments[3].validator_address = Some("synv1legacywrongaddress".to_string());
+        let before = state.clone();
+        let error = correct_canonical_validator_address_bindings_in_state(
+            &mut state,
+            "00",
+            "release-operator",
+            "reject a digest that does not prove the live signed generation-21 snapshot",
+            Utc::now(),
+        )
+        .expect_err("a mismatched prior snapshot digest must fail before mutation");
+        assert!(error.contains("prior snapshot SHA-256"));
+        assert_eq!(state.latest_generation, before.latest_generation);
+        assert_eq!(state.enrollments, before.enrollments);
+        assert!(state
+            .canonical_validator_address_binding_correction_audit
+            .is_empty());
+    }
+
+    #[test]
+    fn release_advance_and_binding_correction_fail_closed_on_stale_validator_bindings_or_handshakes(
+    ) {
+        let _environment_lock = test_environment_lock();
+        set_innernet_address_plans();
+        let _signing_environment = snapshot_signing_environment();
+
+        let mut unreleased = released_canonical_bootstrap_state();
+        unreleased.latest_generation = 9;
+        unreleased.transport_release_generation_audit.clear();
+        unreleased.enrollments[3].validator_address = Some("synv1legacywrongaddress".to_string());
+        let advance_error = advance_transport_release_generation_in_state(
+            &mut unreleased,
+            TESTNET_V3_MIN_TRANSPORT_RELEASE_GENERATION,
+            "release-operator",
+            "must reject a stale address map before any future public release",
+            Utc::now(),
+        )
+        .expect_err("release advancement must not sign a stale validator map");
+        assert!(
+            advance_error.contains("missing transport") || advance_error.contains("exactly six")
+        );
+        assert_eq!(unreleased.latest_generation, 9);
+
+        let mut unverified = released_canonical_bootstrap_state();
+        unverified.enrollments[3].validator_address = Some("synv1legacywrongaddress".to_string());
+        unverified.enrollments[3].handshake_verified_at = None;
+        let prior_snapshot_sha256 = signed_snapshot_sha256(&unverified)
+            .expect("test snapshot should serialize before the handshake gate");
+        let correction_error = correct_canonical_validator_address_bindings_in_state(
+            &mut unverified,
+            &prior_snapshot_sha256,
+            "release-operator",
+            "must reject a correction when an exact bootstrap handshake is absent",
+            Utc::now(),
+        )
+        .expect_err("correction must require all nine server-verified handshakes");
+        assert!(correction_error.contains("all nine canonical bootstrap peers"));
+        assert_eq!(unverified.latest_generation, 21);
+        assert!(unverified
+            .canonical_validator_address_binding_correction_audit
+            .is_empty());
+    }
+
+    #[test]
+    fn legacy_enrollment_state_without_release_audit_deserializes_but_stays_publicly_gated() {
+        let state: InnernetEnrollmentState = serde_json::from_str(
+            r#"{
+                "version": 1,
+                "latest_generation": 21,
+                "enrollments": []
+            }"#,
+        )
+        .expect("old coordinator state must remain readable after adding the audit field");
+        assert!(state.transport_release_generation_audit.is_empty());
+        let error = require_published_transport_release_generation(&state)
+            .expect_err("an old state cannot publish without release evidence");
+        assert!(error.contains("persisted release-generation audit"));
+    }
+
+    #[test]
     fn legacy_bootstrap_reconciliation_requires_all_nine_exact_confirmed_members() {
         let _environment_lock = test_environment_lock();
         set_innernet_address_plans();
         let mut state = InnernetEnrollmentState {
             version: 1,
             latest_generation: 9,
+            transport_release_generation_audit: Vec::new(),
+            canonical_validator_address_binding_correction_audit: Vec::new(),
             enrollments: CANONICAL_BOOTSTRAP_PEERS
                 .iter()
                 .enumerate()
@@ -2466,6 +3476,8 @@ mod tests {
         let state = InnernetEnrollmentState {
             version: 1,
             latest_generation: 1,
+            transport_release_generation_audit: Vec::new(),
+            canonical_validator_address_binding_correction_audit: Vec::new(),
             enrollments: vec![enrollment(
                 "enrollment-1",
                 "node-1",
@@ -2489,6 +3501,8 @@ mod tests {
         let state = InnernetEnrollmentState {
             version: 1,
             latest_generation: 2,
+            transport_release_generation_audit: Vec::new(),
+            canonical_validator_address_binding_correction_audit: Vec::new(),
             enrollments: vec![
                 enrollment("enrollment-1", "node-1", 1, Some("2026-07-10T00:00:00Z"), 1),
                 enrollment("enrollment-2", "node-1", 2, Some("2026-07-10T00:05:00Z"), 2),
@@ -2510,6 +3524,8 @@ mod tests {
         let state = InnernetEnrollmentState {
             version: 1,
             latest_generation: 2,
+            transport_release_generation_audit: Vec::new(),
+            canonical_validator_address_binding_correction_audit: Vec::new(),
             enrollments: vec![
                 enrollment("enrollment-1", "node-1", 1, Some("2026-07-10T00:00:00Z"), 1),
                 enrollment("enrollment-2", "node-1", 2, None, 0),

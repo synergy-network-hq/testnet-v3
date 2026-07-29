@@ -1,0 +1,30 @@
+# Generated dedicated Testnet-v3 service. Prepare-only; no legacy unit is modified.
+[Unit]
+Description=Synergy Testnet-v3 dedicated seed3
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/synergy/testnet-v3/seed-services/seed3.genesis.json
+ConditionPathExists=/etc/synergy/testnet-v3/seed-services/seed3.json
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=synergy-testnet-v3-seed-seed3
+WorkingDirectory=/var/lib/synergy-testnet-v3-seed-seed3
+Environment=SYNERGY_RELEASE_ID=synergy-testnet-v3
+Environment=SYNERGY_CHAIN_ID=1266
+Environment=SYNERGY_NETWORK_ID=synergy-testnet-v3
+Environment=SYNERGY_GENESIS_FILE=/etc/synergy/testnet-v3/seed-services/seed3.genesis.json
+Environment=SYNERGY_GENESIS_SHA256=ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf
+Environment=SYNERGY_GENESIS_HASH=c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+Restart=on-failure
+RestartSec=5
+Environment=SYNERGY_SEED_SERVICE_SCRIPT=/opt/synergy/testnet-v3/seed-service/seed_service.py
+Environment=SYNERGY_SEED_SERVICE_SCRIPT_SHA256=8a88c3e2e1198100694cb3981f86d0c34f79aad3e1c255394690ac9862b8b7f9
+Environment=SYNERGY_SEED_CONFIG_FILE=/etc/synergy/testnet-v3/seed-services/seed3.json
+Environment=SYNERGY_SEED_CONFIG_SHA256=2afa703e111abc5907160b0e0a8ec2b27eba2ae108e9da2b52671bcb3ebb774f
+ExecStart=/opt/synergy/testnet-v3/bin/synergy-seed-release-guard

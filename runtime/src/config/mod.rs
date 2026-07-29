@@ -6,6 +6,8 @@ use std::fs;
 use std::path::Path;
 use toml;
 
+use crate::synergy_types::POSY_PROTOCOL_VERSION;
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct NodeConfig {
     pub network: NetworkConfig,
@@ -66,9 +68,20 @@ pub struct BlockchainConfig {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ConsensusConfig {
+    #[serde(default = "default_consensus_protocol_version")]
     pub algorithm: String,
     pub block_time_secs: u64,
     pub epoch_length: u64,
+    #[serde(default = "default_target_block_time_ms")]
+    pub target_block_time_ms: u64,
+    #[serde(default = "default_proposal_timeout_ms")]
+    pub proposal_timeout_ms: u64,
+    #[serde(default = "default_prevote_timeout_ms")]
+    pub prevote_timeout_ms: u64,
+    #[serde(default = "default_precommit_timeout_ms")]
+    pub precommit_timeout_ms: u64,
+    #[serde(default = "default_max_round_timeout_ms")]
+    pub max_round_timeout_ms: u64,
     #[serde(default = "default_emergency_stable_committee_mode")]
     pub emergency_stable_committee_mode: bool,
     #[serde(default = "default_freeze_validator_set")]
@@ -112,8 +125,32 @@ pub struct ConsensusConfig {
     pub reward_weighting: RewardWeighting,
 }
 
+fn default_consensus_protocol_version() -> String {
+    POSY_PROTOCOL_VERSION.to_string()
+}
+
+fn default_target_block_time_ms() -> u64 {
+    2_000
+}
+
+fn default_proposal_timeout_ms() -> u64 {
+    1_500
+}
+
+fn default_prevote_timeout_ms() -> u64 {
+    1_500
+}
+
+fn default_precommit_timeout_ms() -> u64 {
+    1_500
+}
+
+fn default_max_round_timeout_ms() -> u64 {
+    10_000
+}
+
 fn default_min_validators() -> usize {
-    4
+    6
 }
 
 fn default_emergency_stable_committee_mode() -> bool {
@@ -137,7 +174,7 @@ fn default_vote_only_probation_blocks() -> u64 {
 }
 
 fn default_validator_vote_threshold() -> usize {
-    0
+    5
 }
 
 fn default_max_validators() -> usize {
@@ -347,9 +384,14 @@ impl Default for NodeConfig {
                 chain_id: 1266,
             },
             consensus: ConsensusConfig {
-                algorithm: "Proof of Synergy".to_string(),
+                algorithm: default_consensus_protocol_version(),
                 block_time_secs: 2,
                 epoch_length: 1000,
+                target_block_time_ms: default_target_block_time_ms(),
+                proposal_timeout_ms: default_proposal_timeout_ms(),
+                prevote_timeout_ms: default_prevote_timeout_ms(),
+                precommit_timeout_ms: default_precommit_timeout_ms(),
+                max_round_timeout_ms: default_max_round_timeout_ms(),
                 emergency_stable_committee_mode: default_emergency_stable_committee_mode(),
                 freeze_validator_set: default_freeze_validator_set(),
                 freeze_score_weighted_proposer_order: default_freeze_score_weighted_proposer_order(
@@ -1471,22 +1513,29 @@ metrics_bind = "0.0.0.0:6030"
 [network]
 id = 1266
 name = "synergy-testnet"
+network_id = "synergy-testnet-v3"
 p2p_port = 5622
 rpc_port = 5640
 ws_port = 5660
 bootnodes = ["bootnode1.synergy-network.io:5620"]
 
 [blockchain]
-block_time = 5
+block_time = 2
 max_gas_limit = "0x2fefd8"
 chain_id = 1266
 
 [consensus]
-algorithm = "Proof of Synergy"
-block_time_secs = 5
+algorithm = "posy/2.2"
+block_time_secs = 2
 epoch_length = 1000
+target_block_time_ms = 2000
+proposal_timeout_ms = 1500
+prevote_timeout_ms = 1500
+precommit_timeout_ms = 1500
+max_round_timeout_ms = 10000
+min_validators = 6
 validator_cluster_size = 6
-validator_vote_threshold = 0
+validator_vote_threshold = 5
 max_validators = 0
 synergy_score_decay_rate = 0.05
 vrf_enabled = true
@@ -1549,6 +1598,19 @@ additional_dial_targets = ["62.146.182.208:39638"]
         let content = fs::read_to_string(&node_path).expect("node.toml should be readable");
         let config =
             parse_node_config_content(&content, Some(&node_path)).expect("config should parse");
+
+        assert_eq!(config.network.network_id, "synergy-testnet-v3");
+        assert_eq!(config.blockchain.block_time, 2);
+        assert_eq!(config.consensus.algorithm, POSY_PROTOCOL_VERSION);
+        assert_eq!(config.consensus.block_time_secs, 2);
+        assert_eq!(config.consensus.epoch_length, 1_000);
+        assert_eq!(config.consensus.target_block_time_ms, 2_000);
+        assert_eq!(config.consensus.proposal_timeout_ms, 1_500);
+        assert_eq!(config.consensus.prevote_timeout_ms, 1_500);
+        assert_eq!(config.consensus.precommit_timeout_ms, 1_500);
+        assert_eq!(config.consensus.max_round_timeout_ms, 10_000);
+        assert_eq!(config.consensus.min_validators, 6);
+        assert_eq!(config.consensus.validator_vote_threshold, 5);
 
         assert_eq!(config.network.bootnodes.len(), 2);
         assert!(config
@@ -1888,22 +1950,29 @@ state_sync_before_join = true
 [network]
 id = 1266
 name = "synergy-testnet"
+network_id = "synergy-testnet-v3"
 p2p_port = 5622
 rpc_port = 5640
 ws_port = 5660
 max_peers = 32
 
 [blockchain]
-block_time = 5
+block_time = 2
 max_gas_limit = "0x2fefd8"
 chain_id = 1266
 
 [consensus]
-algorithm = "Proof of Synergy"
-block_time_secs = 5
+algorithm = "posy/2.2"
+block_time_secs = 2
 epoch_length = 1000
+target_block_time_ms = 2000
+proposal_timeout_ms = 1500
+prevote_timeout_ms = 1500
+precommit_timeout_ms = 1500
+max_round_timeout_ms = 10000
+min_validators = 6
 validator_cluster_size = 6
-validator_vote_threshold = 0
+validator_vote_threshold = 5
 max_validators = 0
 synergy_score_decay_rate = 0.05
 vrf_enabled = true
@@ -1953,6 +2022,21 @@ validator_address = "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5"
 "#,
         )
         .expect("config should write");
+        let content = fs::read_to_string(&config_path).expect("config should be readable");
+        let parsed = parse_node_config_content(&content, Some(&config_path))
+            .expect("canonical Testnet-v3 fixture should parse");
+        assert_eq!(parsed.network.network_id, "synergy-testnet-v3");
+        assert_eq!(parsed.blockchain.block_time, 2);
+        assert_eq!(parsed.consensus.algorithm, POSY_PROTOCOL_VERSION);
+        assert_eq!(parsed.consensus.block_time_secs, 2);
+        assert_eq!(parsed.consensus.epoch_length, 1_000);
+        assert_eq!(parsed.consensus.target_block_time_ms, 2_000);
+        assert_eq!(parsed.consensus.proposal_timeout_ms, 1_500);
+        assert_eq!(parsed.consensus.prevote_timeout_ms, 1_500);
+        assert_eq!(parsed.consensus.precommit_timeout_ms, 1_500);
+        assert_eq!(parsed.consensus.max_round_timeout_ms, 10_000);
+        assert_eq!(parsed.consensus.min_validators, 6);
+        assert_eq!(parsed.consensus.validator_vote_threshold, 5);
         let _config_path = EnvVarGuard::set(
             "SYNERGY_CONFIG_PATH",
             config_path.to_str().expect("config path should be utf-8"),

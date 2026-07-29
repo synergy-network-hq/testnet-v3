@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+#[cfg(not(test))]
 use lazy_static::lazy_static;
 use serde_json::{json, Value};
 use sha2::Digest as _;
@@ -55,16 +56,33 @@ pub struct GenesisDocument {
     consensus_parameters: Option<LoadedConsensusParameters>,
 }
 
+#[cfg(not(test))]
 lazy_static! {
     static ref CANONICAL_GENESIS: Result<GenesisDocument, String> =
         load_canonical_genesis_from_disk();
 }
 
+#[cfg(not(test))]
 pub fn canonical_genesis() -> Result<&'static GenesisDocument, String> {
     match &*CANONICAL_GENESIS {
         Ok(document) => Ok(document),
         Err(error) => Err(error.clone()),
     }
+}
+
+#[cfg(test)]
+pub fn canonical_genesis() -> Result<&'static GenesisDocument, String> {
+    // Test modules deliberately switch `SYNERGY_GENESIS_FILE` to isolated,
+    // signed fixtures. A process-global Lazy result makes whichever test runs
+    // first silently control every later test. Keep the immutable production
+    // cache above, but load an independent document for each test access.
+    // Leaking this small test-only object is intentional: callers keep the
+    // established `&'static GenesisDocument` interface and the test process
+    // exits immediately after the suite.
+    load_canonical_genesis_from_disk().map(|document| {
+        let leaked: &'static GenesisDocument = Box::leak(Box::new(document));
+        leaked
+    })
 }
 
 pub(crate) fn load_canonical_genesis_for_runtime() -> Result<GenesisDocument, String> {
@@ -203,12 +221,39 @@ pub(crate) fn load_genesis_from_path_for_test(path: PathBuf) -> Result<GenesisDo
     load_genesis_from_path(path)
 }
 
+#[cfg(not(test))]
 fn genesis_path() -> PathBuf {
     let configured = std::env::var("SYNERGY_GENESIS_FILE")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "config/genesis.json".to_string());
     resolve_data_path(&configured)
+}
+
+#[cfg(test)]
+fn genesis_path() -> PathBuf {
+    if let Some(configured) = std::env::var("SYNERGY_GENESIS_FILE")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return resolve_data_path(&configured);
+    }
+
+    // Test cases that construct an isolated runtime root install their own
+    // complete `config/genesis.json`; preserve that behavior. The checked-in
+    // root file is a historical blocked stub, so test runs from the repository
+    // instead use the deterministic V3 fixture.
+    let local = resolve_data_path("config/genesis.json");
+    let has_header = fs::read(&local)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|value| value.get("header").cloned())
+        .is_some();
+    if has_header {
+        local
+    } else {
+        resolve_data_path("config/genesis.testnet-v3.test-fixture.json")
+    }
 }
 
 fn parse_balances(value: &Value) -> Result<Vec<GenesisBalance>, String> {
@@ -1312,7 +1357,8 @@ mod tests {
     }
 
     #[test]
-    fn production_source_and_explicit_test_fixture_share_the_exact_finalized_manifest() {
+    fn production_source_and_explicit_test_fixture_share_the_exact_finalized_manifest_and_bind_the_applied_genesis(
+    ) {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let source_path = root.join("genesis.testnet-v3.identity-assigned.json");
         let fixture_path = root.join("runtime/config/genesis.testnet-v3.test-fixture.json");
@@ -1329,11 +1375,25 @@ mod tests {
             fixture_parameters.canonical_bytes
         );
 
-        let source_json: Value = serde_json::from_slice(&fs::read(source_path).unwrap()).unwrap();
+        let source_bytes = fs::read(source_path).unwrap();
+        let source_json: Value = serde_json::from_slice(&source_bytes).unwrap();
         let fixture_json: Value = serde_json::from_slice(&fs::read(fixture_path).unwrap()).unwrap();
         assert_eq!(
+            fixture_json["test_fixture"]["applied_canonical_genesis_hash"],
+            source_json["integrity"]["genesis_hash"]
+        );
+        assert_eq!(
+            fixture_json["test_fixture"]["applied_canonical_genesis_sha256"],
+            hex::encode(Sha256::digest(&source_bytes))
+        );
+        assert_eq!(
+            fixture_json["test_fixture"]["applied_canonical_genesis_source"],
+            "genesis.testnet-v3.identity-assigned.json"
+        );
+        assert_ne!(
             source_json["integrity"]["genesis_hash"],
-            fixture_json["integrity"]["genesis_hash"]
+            fixture_json["integrity"]["genesis_hash"],
+            "the explicit test fixture keeps its independently derived pre-deployment integrity hash"
         );
     }
 }

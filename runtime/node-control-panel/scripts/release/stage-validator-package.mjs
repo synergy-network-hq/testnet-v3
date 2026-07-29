@@ -1,5 +1,12 @@
 #!/usr/bin/env node
-import { createHash, createPrivateKey, createPublicKey } from "node:crypto";
+import {
+  createCipheriv,
+  createHash,
+  createPrivateKey,
+  createPublicKey,
+  hkdfSync,
+  randomBytes,
+} from "node:crypto";
 import {
   chmod,
   copyFile,
@@ -21,7 +28,7 @@ function option(name, fallback = null) {
 }
 
 function usage() {
-  return "Usage: node scripts/release/stage-validator-package.mjs --identity-root <testnet-v3-identity-files> --validator <1-21> [--staging <directory>]";
+  return "Usage: node scripts/release/stage-validator-package.mjs --identity-root <testnet-v3-identity-files> --validator <1-21> --vpn-onboarding-token-file <protected file> [--staging <directory>]";
 }
 
 async function sha256(filePath) {
@@ -58,14 +65,67 @@ async function findValidatorSource(identityRoot, validator) {
   return candidates[0];
 }
 
+async function readOnboardingToken(filePath) {
+  let token;
+  try {
+    token = (await readFile(filePath, "utf8")).trim();
+  } catch {
+    throw new Error("The protected validator VPN onboarding-token file could not be read.");
+  }
+  if (!/^[A-Za-z0-9_-]{32,}$/.test(token)) {
+    throw new Error("The protected validator VPN onboarding-token file does not contain a valid one-time token.");
+  }
+  return token;
+}
+
+function wireguardEnvelopeAad({ assignmentId, validatorAddress, vpnIp, vpnConfigVersion }) {
+  return Buffer.from(JSON.stringify({
+    assignmentId,
+    validatorAddress,
+    vpnIp,
+    vpnConfigVersion: String(vpnConfigVersion),
+    networkId: "synergy-testnet-v3",
+    chainId: 1266,
+  }));
+}
+
+function encryptWireguardConfig({ token, packageMetadata, wireguardPrivateKey, wireguardConfig }) {
+  const salt = randomBytes(32);
+  const nonce = randomBytes(12);
+  const aad = wireguardEnvelopeAad(packageMetadata);
+  const key = Buffer.from(hkdfSync("sha256", Buffer.from(token), salt, aad, 32));
+  const cipher = createCipheriv("aes-256-gcm", key, nonce);
+  cipher.setAAD(aad);
+  const plaintext = Buffer.from(JSON.stringify({ wireguardPrivateKey, wireguardConfig }));
+  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  return {
+    schemaVersion: 1,
+    algorithm: "AES-256-GCM",
+    kdf: "HKDF-SHA-256",
+    salt: salt.toString("base64"),
+    nonce: nonce.toString("base64"),
+    authenticationTag: cipher.getAuthTag().toString("base64"),
+    ciphertext: ciphertext.toString("base64"),
+    aadSha256: createHash("sha256").update(aad).digest("hex"),
+  };
+}
+
 const identityRootOption = option("--identity-root");
 const validator = Number(option("--validator"));
+const vpnOnboardingTokenFile = option("--vpn-onboarding-token-file");
 const staging = resolve(option("--staging", DEFAULT_STAGING));
-if (!identityRootOption || !Number.isInteger(validator) || validator < 1 || validator > 21) {
+if (
+  !identityRootOption
+  || !vpnOnboardingTokenFile
+  || !Number.isInteger(validator)
+  || validator < 1
+  || validator > 21
+) {
   console.error(usage());
   process.exitCode = 2;
 } else {
   const identityRoot = resolve(identityRootOption);
+  const onboardingToken = await readOnboardingToken(resolve(vpnOnboardingTokenFile));
   const { source, binding } = await findValidatorSource(identityRoot, validator);
   const [identityPublic, identityManifest] = await Promise.all([
     json(join(source, "identity.pub.json")),
@@ -114,13 +174,25 @@ if (!identityRootOption || !Number.isInteger(validator) || validator < 1 || vali
     `PrivateKey = ${wireguardPrivateKey.trim()}`,
   );
 
+  const assignmentId = `validator-${String(validator).padStart(2, "0")}`;
+  const packageMetadata = {
+    assignmentId,
+    validatorAddress: identityPublic.address,
+    vpnIp: binding.route?.vpn_ip,
+    vpnConfigVersion: binding.config_version,
+  };
+  const wireguardEnvelope = encryptWireguardConfig({
+    token: onboardingToken,
+    packageMetadata,
+    wireguardPrivateKey: wireguardPrivateKey.trim(),
+    wireguardConfig,
+  });
+
   const files = new Map([
     ["identity.enc.json", join(source, "identity.enc.json")],
     ["identity.pub.json", join(source, "identity.pub.json")],
     ["manifest.json", join(source, "manifest.json")],
-    ["wireguard-private.key", join(source, "wireguard", "wireguard-private.key")],
     ["wireguard-public.key", join(source, "wireguard", "wireguard-public.key")],
-    ["sy-vpn.conf", join(source, "wireguard", "sy-vpn.conf")],
     ["vpn-binding.json", join(source, "wireguard", "vpn-binding.json")],
   ]);
 
@@ -129,21 +201,15 @@ if (!identityRootOption || !Number.isInteger(validator) || validator < 1 || vali
   const checksums = {};
   for (const [fileName, sourcePath] of files) {
     const targetPath = join(staging, fileName);
-    if (fileName === "sy-vpn.conf") {
-      await writeFile(targetPath, wireguardConfig, { mode: 0o600 });
-    } else {
-      await copyFile(sourcePath, targetPath);
-    }
-    await chmod(
-      targetPath,
-      ["wireguard-private.key", "identity.enc.json", "sy-vpn.conf"].includes(fileName)
-        ? 0o600
-        : 0o644,
-    );
+    await copyFile(sourcePath, targetPath);
+    await chmod(targetPath, fileName === "identity.enc.json" ? 0o600 : 0o644);
     checksums[fileName] = await sha256(targetPath);
   }
+  const envelopePath = join(staging, "wireguard-config.envelope.json");
+  await writeFile(envelopePath, `${JSON.stringify(wireguardEnvelope, null, 2)}\n`, { mode: 0o600 });
+  await chmod(envelopePath, 0o600);
+  checksums["wireguard-config.envelope.json"] = await sha256(envelopePath);
 
-  const assignmentId = `validator-${String(validator).padStart(2, "0")}`;
   const assignment = {
     schemaVersion: 1,
     assignmentId,
@@ -159,7 +225,9 @@ if (!identityRootOption || !Number.isInteger(validator) || validator < 1 || vali
     security: {
       encryptedIdentity: true,
       containsIdentityPassphrase: false,
-      containsWireguardPrivateKey: true,
+      containsWireguardPrivateKey: false,
+      encryptedWireguardConfigWithOnboardingToken: true,
+      onboardingTokenEmbedded: false,
       installerBoundToSingleValidator: true,
     },
   };

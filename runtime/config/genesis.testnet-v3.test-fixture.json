@@ -4087,6 +4087,9 @@
     ]
   },
   "test_fixture": {
+    "applied_canonical_genesis_hash": "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",
+    "applied_canonical_genesis_sha256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+    "applied_canonical_genesis_source": "genesis.testnet-v3.identity-assigned.json",
     "is_test_fixture": true,
     "never_load_in_production": true,
     "purpose": "Deterministic Testnet-v3 unit-test genesis. Production loaders MUST refuse this file."

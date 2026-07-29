@@ -1,0 +1,67 @@
+{
+  "config_install_mode": "manual_merge_only_preserve_existing_identity_key_port_and_endpoint_settings",
+  "config_payload": "relayers/relay3.toml",
+  "config_payload_sha256": "c5bdaba104e2d86caa9ac42d48dc496fbc593a0dd3938385a50c31b6971e44ff",
+  "dedicated_install_map": {},
+  "dedicated_payloads": {},
+  "environment_install_mode": "merge_release_binding_only_never_replace_existing_environment_file",
+  "environment_payload": "deployment/relayers/relay3/node.env",
+  "genesis_deploy_path": "/etc/synergy/testnet-v3/genesis.json",
+  "genesis_file_sha256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+  "genesis_payload": "canonical-genesis/genesis.json",
+  "manual_activation_required": true,
+  "manual_config_merge_required": true,
+  "manual_service_remediation_reason": null,
+  "manual_service_remediation_required": false,
+  "operator_preconditions": [],
+  "port_preflight": [
+    {
+      "port": 5622,
+      "protocol": "tcp",
+      "purpose": "p2p"
+    },
+    {
+      "port": 5640,
+      "protocol": "tcp",
+      "purpose": "rpc"
+    },
+    {
+      "port": 5660,
+      "protocol": "tcp",
+      "purpose": "websocket"
+    },
+    {
+      "port": 5680,
+      "protocol": "tcp",
+      "purpose": "discovery"
+    },
+    {
+      "port": 6030,
+      "protocol": "tcp",
+      "purpose": "metrics"
+    }
+  ],
+  "prepare_only": true,
+  "reverify_service_contract_before_activation": true,
+  "runtime_environment": "SYNERGY_GENESIS_FILE",
+  "schema_version": 2,
+  "service_binding_install_mode": "write_new_systemd_dropin_only",
+  "service_binding_payload": "deployment/relayers/relay3/systemd/synergy-testnet-relayer.service.d/50-synergy-testnet-v3-genesis.conf",
+  "service_contract": {
+    "existing_config_path": "config/node.toml",
+    "existing_environment_file_path": null,
+    "generated_config_compatible": true,
+    "genesis_deploy_path": "/etc/synergy/testnet-v3/genesis.json",
+    "manual_activation_required": true,
+    "manual_config_merge_required": true,
+    "manual_service_remediation_reason": null,
+    "manual_service_remediation_required": false,
+    "platform": "linux-systemd",
+    "service_exec_start": "./bin/synergy-testnet-linux-amd64 start --config config/node.toml",
+    "service_fragment_path": "/etc/systemd/system/synergy-testnet-relayer.service",
+    "service_unit": "synergy-testnet-relayer.service",
+    "service_user": "root"
+  },
+  "starts_or_restarts_services": false,
+  "topology_audit_config_payload": null
+}

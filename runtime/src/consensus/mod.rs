@@ -17,6 +17,7 @@ pub mod self_realign;
 pub mod signing_authority;
 pub mod synergy_score;
 pub mod testnet_v3_bootstrap;
+pub mod testnet_v3_finality_context;
 #[cfg(test)]
 pub mod tests;
 pub mod timing_trace;

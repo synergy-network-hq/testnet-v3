@@ -10,11 +10,14 @@ const PACKAGE_FILE_NAMES = Object.freeze([
   'identity.enc.json',
   'identity.pub.json',
   'manifest.json',
-  'wireguard-private.key',
   'wireguard-public.key',
-  'sy-vpn.conf',
+  'wireguard-config.envelope.json',
   'vpn-binding.json',
 ]);
+
+const WIREGUARD_CONFIG_ENVELOPE_VERSION = 1;
+const WIREGUARD_CONFIG_ENVELOPE_ALGORITHM = 'AES-256-GCM';
+const WIREGUARD_CONFIG_ENVELOPE_KDF = 'HKDF-SHA-256';
 
 function packageError(code, message) {
   const error = new Error(message);
@@ -45,6 +48,81 @@ async function readJson(filePath, label) {
   }
 }
 
+function activationToken(value) {
+  const token = String(value || '').trim();
+  if (!/^[A-Za-z0-9_-]{32,}$/.test(token)) {
+    throw packageError(
+      'VPN_ONBOARDING_TOKEN_REQUIRED',
+      'Enter the coordinator-issued one-time VPN token before decrypting the packaged VPN configuration.',
+    );
+  }
+  return token;
+}
+
+function wireguardEnvelopeAad({ assignmentId, validatorAddress, vpnIp, vpnConfigVersion }) {
+  return Buffer.from(JSON.stringify({
+    assignmentId,
+    validatorAddress,
+    vpnIp,
+    vpnConfigVersion: String(vpnConfigVersion),
+    networkId: 'synergy-testnet-v3',
+    chainId: 1266,
+  }));
+}
+
+function wireguardEnvelopeKey(token, salt, aad) {
+  return Buffer.from(crypto.hkdfSync('sha256', Buffer.from(token), salt, aad, 32));
+}
+
+function decodeEnvelopeField(envelope, name, expectedBytes = null) {
+  const value = String(envelope?.[name] || '');
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(value)) {
+    throw packageError('PACKAGED_WIREGUARD_ENVELOPE_INVALID', `The packaged VPN ${name} is invalid.`);
+  }
+  const bytes = Buffer.from(value, 'base64');
+  if (!bytes.length || (expectedBytes != null && bytes.length !== expectedBytes)) {
+    throw packageError('PACKAGED_WIREGUARD_ENVELOPE_INVALID', `The packaged VPN ${name} has an invalid length.`);
+  }
+  return bytes;
+}
+
+function decryptPackagedWireguardConfig(envelope, packageMetadata, tokenValue) {
+  if (
+    envelope?.schemaVersion !== WIREGUARD_CONFIG_ENVELOPE_VERSION
+    || envelope?.algorithm !== WIREGUARD_CONFIG_ENVELOPE_ALGORITHM
+    || envelope?.kdf !== WIREGUARD_CONFIG_ENVELOPE_KDF
+  ) {
+    throw packageError('PACKAGED_WIREGUARD_ENVELOPE_INVALID', 'The packaged VPN configuration uses an unsupported envelope.');
+  }
+  const token = activationToken(tokenValue);
+  const aad = wireguardEnvelopeAad(packageMetadata);
+  const expectedAadSha256 = crypto.createHash('sha256').update(aad).digest('hex');
+  if (envelope.aadSha256 !== expectedAadSha256) {
+    throw packageError('PACKAGED_WIREGUARD_ENVELOPE_INVALID', 'The packaged VPN configuration is not bound to this validator assignment.');
+  }
+  const salt = decodeEnvelopeField(envelope, 'salt', 32);
+  const nonce = decodeEnvelopeField(envelope, 'nonce', 12);
+  const authenticationTag = decodeEnvelopeField(envelope, 'authenticationTag', 16);
+  const ciphertext = decodeEnvelopeField(envelope, 'ciphertext');
+  try {
+    const decipher = crypto.createDecipheriv(
+      'aes-256-gcm',
+      wireguardEnvelopeKey(token, salt, aad),
+      nonce,
+    );
+    decipher.setAAD(aad);
+    decipher.setAuthTag(authenticationTag);
+    const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+    const payload = JSON.parse(plaintext.toString('utf8'));
+    const privateKey = String(payload?.wireguardPrivateKey || '').trim();
+    const config = String(payload?.wireguardConfig || '');
+    if (!privateKey || !config) throw new Error('missing protected configuration');
+    return { wireguardPrivateKey: privateKey, wireguardConfig: config };
+  } catch {
+    throw packageError('PACKAGED_WIREGUARD_UNLOCK_FAILED', 'The one-time VPN token does not unlock this validator package.');
+  }
+}
+
 function assertValidatorAssignment(assignment) {
   const assignmentId = String(assignment?.assignmentId || '').trim();
   const validator = Number(assignment?.validator);
@@ -61,7 +139,7 @@ function assertValidatorAssignment(assignment) {
   }
 }
 
-async function loadValidatorPackage({ includeSecrets = false } = {}) {
+async function loadValidatorPackage({ includeSecrets = false, activationToken = null } = {}) {
   const root = validatorPackageRoot();
   const assignmentPath = path.join(root, 'assignment.json');
   try {
@@ -120,6 +198,15 @@ async function loadValidatorPackage({ includeSecrets = false } = {}) {
     networkId: 'synergy-testnet-v3',
   };
   if (!includeSecrets) return publicPackage;
+  const wireguardEnvelope = await readJson(
+    path.join(root, 'wireguard-config.envelope.json'),
+    'Protected validator VPN configuration',
+  );
+  const protectedWireguardConfig = decryptPackagedWireguardConfig(
+    wireguardEnvelope,
+    publicPackage,
+    activationToken,
+  );
   return {
     ...publicPackage,
     root,
@@ -128,9 +215,9 @@ async function loadValidatorPackage({ includeSecrets = false } = {}) {
     identityManifest,
     vpnBinding,
     encryptedIdentity: await fs.readFile(path.join(root, 'identity.enc.json'), 'utf8'),
-    wireguardPrivateKey: (await fs.readFile(path.join(root, 'wireguard-private.key'), 'utf8')).trim(),
+    ...protectedWireguardConfig,
     wireguardPublicKey: (await fs.readFile(path.join(root, 'wireguard-public.key'), 'utf8')).trim(),
-    wireguardConfig: await fs.readFile(path.join(root, 'sy-vpn.conf'), 'utf8'),
+    wireguardEnvelope,
   };
 }
 
@@ -182,7 +269,8 @@ async function decryptValidatorPackage(passphrase) {
   if (String(passphrase || '').length < 8) {
     throw packageError('VALIDATOR_PASSPHRASE_REQUIRED', 'Enter the validator identity passphrase.');
   }
-  const packageData = await loadValidatorPackage({ includeSecrets: true });
+  const packageData = await loadValidatorPackage();
+  const root = validatorPackageRoot();
   if (!packageData.available) {
     throw packageError('VALIDATOR_PACKAGE_REQUIRED', 'This is a generic installer and does not contain a validator assignment.');
   }
@@ -191,7 +279,7 @@ async function decryptValidatorPackage(passphrase) {
   try {
     await runKeygenDecrypt(
       keygenBinaryPath(),
-      path.join(packageData.root, 'identity.enc.json'),
+      path.join(root, 'identity.enc.json'),
       decryptedPath,
       String(passphrase),
     );
@@ -240,6 +328,9 @@ async function decryptValidatorPackage(passphrase) {
 
 module.exports = {
   decryptValidatorPackage,
+  decryptPackagedWireguardConfig,
   loadValidatorPackage,
   validatorPackageRoot,
+  wireguardEnvelopeAad,
+  wireguardEnvelopeKey,
 };

@@ -29,6 +29,9 @@ use synergy_testnet::genesis_deployment::{
     GenesisValidator,
 };
 use synergy_testnet::synq_execution::{SynQAivmReceiptSummary, SynQContractArtifact};
+use synergy_testnet::testnet_v3_release_approval::{
+    verify_release_approval_file, TestnetV3GenesisReleaseApprovalRequest,
+};
 
 const EXECUTION_STATUS: &str = "launch/production-genesis-ceremony/execution-status.json";
 const DEPLOYMENT_RECEIPTS: &str = "launch/production-genesis-ceremony/deployment-receipts.json";
@@ -45,6 +48,8 @@ const SOURCE_GENESIS_ARCHIVE: &str =
     "launch/production-genesis-ceremony/source-genesis.identity-assigned.json";
 const DEFAULT_OUTPUT: &str =
     "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json";
+const DEFAULT_RELEASE_APPROVAL: &str =
+    "launch/production-genesis-ceremony/testnet-v3-genesis-release-approval.json";
 
 fn fail(message: impl AsRef<str>) -> ! {
     eprintln!("finalize-testnet-v3-genesis: {}", message.as_ref());
@@ -909,18 +914,58 @@ fn finalized_allocation_manifest(root: &Path, candidate: &Value) -> Value {
         .iter()
         .map(|entry| (require_string(entry, "account_id"), entry))
         .collect::<BTreeMap<_, _>>();
+    let accounts = candidate["accounts"]
+        .as_array()
+        .unwrap_or_else(|| fail("final candidate accounts must be an array"))
+        .iter()
+        .map(|entry| (require_string(entry, "account_id"), entry))
+        .collect::<BTreeMap<_, _>>();
+    let balances = candidate["balances"]
+        .as_array()
+        .unwrap_or_else(|| fail("final candidate balances must be an array"))
+        .iter()
+        .map(|entry| (require_string(entry, "account_id"), entry))
+        .collect::<BTreeMap<_, _>>();
     for entry in manifest["allocations"]
         .as_array_mut()
         .unwrap_or_else(|| fail("allocation manifest allocations must be an array"))
     {
         let account_id = require_string(entry, "account_id").to_string();
-        let finalized = by_id.get(account_id.as_str()).unwrap_or_else(|| {
+        if let Some(finalized) = by_id.get(account_id.as_str()) {
+            entry["address"] = finalized["address"].clone();
+            entry["amount_nwei"] = finalized["amount_nwei"].clone();
+        } else if matches!(
+            account_id.as_str(),
+            "SYS-01" | "SYS-02" | "SYS-03" | "SYS-04"
+        ) {
+            // System accounts are declared in the canonical genesis account
+            // and balance tables but intentionally have no token-allocation
+            // entry.  They are zero-balance protocol destinations, not an
+            // omitted supply allocation.  Preserve that distinction while
+            // deriving the human release manifest from canonical records.
+            let account = accounts.get(account_id.as_str()).unwrap_or_else(|| {
+                fail(format!(
+                    "final candidate is missing system account {account_id}"
+                ))
+            });
+            let balance = balances.get(account_id.as_str()).unwrap_or_else(|| {
+                fail(format!(
+                    "final candidate is missing system balance {account_id}"
+                ))
+            });
+            if require_string(balance, "balance_nwei") != "0"
+                || require_string(entry, "amount_nwei") != "0"
+            {
+                fail(format!(
+                    "system account {account_id} must remain a zero-balance non-allocation"
+                ));
+            }
+            entry["address"] = account["address"].clone();
+        } else {
             fail(format!(
                 "final candidate is missing allocation {account_id}"
-            ))
-        });
-        entry["address"] = finalized["address"].clone();
-        entry["amount_nwei"] = finalized["amount_nwei"].clone();
+            ));
+        }
         if account_id == "SAL-A01" {
             entry["control_reference"] = Value::String(
                 "sale reserve custody identity; SaleClaim not deployed on Testnet-v3".to_string(),
@@ -981,7 +1026,14 @@ fn copy_with_parent(source: &Path, destination: &Path) -> Result<(), String> {
     })
 }
 
-fn apply_finalized_release(root: &Path, candidate: &Value, candidate_bytes: &[u8]) {
+fn apply_finalized_release(
+    root: &Path,
+    candidate: &Value,
+    candidate_bytes: &[u8],
+    approval_path: &Path,
+    approval_sha256: &str,
+    approval: &TestnetV3GenesisReleaseApprovalRequest,
+) {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_else(|error| fail(format!("system clock before epoch: {error}")))
@@ -1037,6 +1089,10 @@ fn apply_finalized_release(root: &Path, candidate: &Value, candidate_bytes: &[u8
         "consensus_parameter_decision_id": candidate["consensus_parameters"]["decision_id"],
         "consensus_parameter_manifest_sha256": candidate["consensus_parameters"]["canonical_manifest_sha256"],
         "consensus_parameter_root_sha3_512": candidate["consensus_parameters"]["parameter_root_sha3_512"],
+        "release_approval_artifact": approval_path.strip_prefix(root).unwrap_or(approval_path).display().to_string(),
+        "release_approval_artifact_sha256": approval_sha256,
+        "release_approval_governance_role": approval.governance_authority_role,
+        "release_approval_governance_address": approval.governance_standard_account_address,
         "replacement_count": replacements.len()
     });
     let journal_path = ceremony_dir.join("phase7-apply-journal.json");
@@ -1109,6 +1165,10 @@ fn apply_finalized_release(root: &Path, candidate: &Value, candidate_bytes: &[u8
         "consensus_parameter_decision_sha256": candidate["consensus_parameters"]["release_decision_sha256"],
         "consensus_parameter_manifest_sha256": candidate["consensus_parameters"]["canonical_manifest_sha256"],
         "consensus_parameter_root_sha3_512": candidate["consensus_parameters"]["parameter_root_sha3_512"],
+        "release_approval_artifact": approval_path.strip_prefix(root).unwrap_or(approval_path).display().to_string(),
+        "release_approval_artifact_sha256": approval_sha256,
+        "release_approval_governance_role": approval.governance_authority_role,
+        "release_approval_governance_address": approval.governance_standard_account_address,
         "artifact_directory": "genesis-contracts/contracts",
         "artifact_file_count": 36,
         "track_h_status": "APPLIED",
@@ -1132,6 +1192,7 @@ fn apply_finalized_release(root: &Path, candidate: &Value, candidate_bytes: &[u8
 fn main() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let mut output = repo().join(DEFAULT_OUTPUT);
+    let mut approval_path = repo().join(DEFAULT_RELEASE_APPROVAL);
     let mut apply = false;
     let mut index = 0;
     while index < args.len() {
@@ -1144,12 +1205,19 @@ fn main() {
                 index += 2;
             }
             "--prepare" => index += 1,
+            "--approval" => {
+                approval_path = PathBuf::from(
+                    args.get(index + 1)
+                        .unwrap_or_else(|| fail("--approval requires a path")),
+                );
+                index += 2;
+            }
             "--apply" => {
                 apply = true;
                 index += 1;
             }
             flag => fail(format!(
-                "unknown argument {flag}; use --prepare|--apply [--output PATH]"
+                "unknown argument {flag}; use --prepare|--apply [--output PATH] [--approval PATH]"
             )),
         }
     }
@@ -1213,6 +1281,21 @@ fn main() {
             .unwrap()
     );
     if apply {
-        apply_finalized_release(&root, &candidate, &bytes);
+        let approval = verify_release_approval_file(
+            &root,
+            &output,
+            &root.join(AUTHORITIES_FILE),
+            &approval_path,
+        )
+        .unwrap_or_else(|error| fail(format!("release approval gate rejected apply: {error}")));
+        let approval_sha256 = sha256_file(&approval_path);
+        apply_finalized_release(
+            &root,
+            &candidate,
+            &bytes,
+            &approval_path,
+            &approval_sha256,
+            &approval,
+        );
     }
 }

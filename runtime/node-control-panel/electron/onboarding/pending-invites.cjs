@@ -33,9 +33,14 @@ class PendingInviteStore {
       const records = JSON.parse(this.storage.decryptString(encrypted));
       const now = Date.now();
       return new Map((Array.isArray(records) ? records : []).filter(([targetId, invite]) => {
+        const recoverablePreconfiguredInvite = invite?.preconfigured === true
+          && typeof invite?.enrollmentId === 'string' && invite.enrollmentId.length > 0
+          && typeof invite?.confirmationToken === 'string' && invite.confirmationToken.length > 0
+          && typeof invite?.activationToken === 'string' && invite.activationToken.length > 0;
         return typeof targetId === 'string'
           && ((typeof invite?.invite === 'string' && invite.invite.length > 0)
-            || invite?.resumeExisting === true)
+            || invite?.resumeExisting === true
+            || recoverablePreconfiguredInvite)
           && isPendingInviteRecoverable(invite, now);
       }));
     } catch {
