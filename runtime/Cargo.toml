@@ -23,12 +23,12 @@ lazy_static = "1.4"
 pqcrypto = "0.18"
 pqcrypto-traits = "0.3"
 pqcrypto-mlkem = "0.1.1"
-pqrust-traits = { path = "synq-language/pqrust/pqrust-traits", default-features = false, features = ["std"] }
-pqrust-internals = { path = "synq-language/pqrust/pqrust-internals" }
-pqrust-mlkem = { path = "synq-language/pqrust/pqrust-mlkem" }
-pqrust-mldsa = { path = "synq-language/pqrust/pqrust-mldsa" }
-pqrust-fndsa = { path = "synq-language/pqrust/pqrust-fndsa" }
-pqrust-hqckem = { path = "synq-language/pqrust/pqrust-hqckem" }
+pqrust-traits = { path = "../../synq-language/pqrust/pqrust-traits", default-features = false, features = ["std"] }
+pqrust-internals = { path = "../../synq-language/pqrust/pqrust-internals" }
+pqrust-mlkem = { path = "../../synq-language/pqrust/pqrust-mlkem" }
+pqrust-mldsa = { path = "../../synq-language/pqrust/pqrust-mldsa" }
+pqrust-fndsa = { path = "../../synq-language/pqrust/pqrust-fndsa" }
+pqrust-hqckem = { path = "../../synq-language/pqrust/pqrust-hqckem" }
 
 # Random number generation for fallback keypair generation
 rand = "0.8"

@@ -14,9 +14,9 @@ wasmtime = "45.0.2"
 log = "0.4"
 anyhow = "1.0"
 sha2 = "0.10"
-quantumvm = { path = "../../../synq-language/vm", optional = true }
-synq-compiler = { package = "compiler", path = "../../../synq-language/compiler", optional = true }
-pqsynq = { package = "aegis-pqsynq", path = "../../../synq-language/aegis-pqsynq/pqsynq", default-features = false, features = ["std", "mldsa"], optional = true }
+quantumvm = { path = "../../../../../synq-language/vm", optional = true }
+synq-compiler = { package = "compiler", path = "../../../../../synq-language/compiler", optional = true }
+pqsynq = { package = "aegis-pqsynq", path = "../../../../../synq-language/aegis-pqsynq/pqsynq", default-features = false, features = ["std", "mldsa"], optional = true }
 
 [dev-dependencies]
 hex = "0.4"

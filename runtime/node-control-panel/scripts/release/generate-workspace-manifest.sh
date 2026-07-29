@@ -17,13 +17,14 @@ manifest_path = pathlib.Path(sys.argv[2])
 app_version = sys.argv[3]
 
 # Only the macOS and Linux platform binaries are currently bundled into the Electron app.
+# Windows packaging is deliberately disabled, so requiring a Windows binary here
+# would make a valid macOS/Linux release depend on an unbuilt artifact.
 # Runtime configs are validated separately; ignored key/setup-package material
 # must not drive the digest.
 platform_binaries = [
     "binaries/synergy-testnet-darwin-arm64",
     "binaries/synergy-testnet-macos-arm64",
     "binaries/synergy-testnet-linux-amd64",
-    "binaries/synergy-testnet-windows-amd64.exe",
 ]
 
 def sha256_file(path: pathlib.Path) -> str:

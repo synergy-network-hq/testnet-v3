@@ -1,21 +1,18 @@
-name: Electron Release Build
+name: Testnet-v3 Node Control Panel Release
 
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
-    inputs:
-      testnet_runtime_ref:
-        description: 'Trusted synergy-network-hq/testnet release/tag/branch to bundle, or bundled to use committed binaries'
-        required: false
-        default: ''
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   AEGIS_PQVM_SOURCE_REPOSITORY: ${{ vars.AEGIS_PQVM_SOURCE_REPOSITORY || 'synergy-network-hq/aegis-pqvm' }}
   AEGIS_PQVM_SOURCE_REV: ${{ vars.AEGIS_PQVM_SOURCE_REV || '6756777e43cf7ed772fb0535055e0447b3c031db' }}
-  TESTNET_SOURCE_REPOSITORY: ${{ vars.TESTNET_SOURCE_REPOSITORY || 'synergy-network-hq/testnet-v3' }}
+  TESTNET_V3_SOURCE_REPOSITORY: synergy-network-hq/testnet-v3
+  SYNQ_LANGUAGE_SOURCE_REPOSITORY: ${{ vars.SYNQ_LANGUAGE_SOURCE_REPOSITORY || 'synergy-network-hq/synq-language' }}
+  SYNQ_LANGUAGE_SOURCE_REV: ${{ vars.SYNQ_LANGUAGE_SOURCE_REV || '166b9e9468cfcbfbf3efa0b17408885df42d2489' }}
   ADDRESS_ENGINE_SOURCE_REPOSITORY: ${{ vars.ADDRESS_ENGINE_SOURCE_REPOSITORY || 'synergy-network-hq/synergy-address-engine' }}
   ADDRESS_ENGINE_SOURCE_REV: ${{ vars.ADDRESS_ENGINE_SOURCE_REV || '94422c42a3a9ba1e5aa300a37a488b9edc174869' }}
   INNERNET_SOURCE_REPOSITORY: ${{ vars.INNERNET_SOURCE_REPOSITORY || 'tonarino/innernet' }}
@@ -53,6 +50,7 @@ jobs:
           package_lock_version="$(node -p "require('./package-lock.json').version")"
           package_lock_root_version="$(node -p "require('./package-lock.json').packages[''].version")"
           cargo_version="$(awk -F' = ' '/^version = / { gsub(/"/, "", $2); print $2; exit }' control-service/Cargo.toml)"
+          runtime_version="$(awk -F'"' '/^version = / { print $2; exit }' "$GITHUB_WORKSPACE/runtime/src/Cargo.toml")"
           [[ -n "$package_version" ]] || { echo "package.json version is empty" >&2; exit 1; }
           [[ "$package_lock_version" == "$package_version" ]] || {
             echo "package-lock.json version ($package_lock_version) does not match package.json ($package_version)" >&2
@@ -64,6 +62,10 @@ jobs:
           }
           [[ "$cargo_version" == "$package_version" ]] || {
             echo "control-service version ($cargo_version) does not match package.json ($package_version)" >&2
+            exit 1
+          }
+          [[ "$runtime_version" == "$package_version" ]] || {
+            echo "Testnet-v3 runtime version ($runtime_version) does not match package.json ($package_version)" >&2
             exit 1
           }
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
@@ -167,11 +169,137 @@ jobs:
             runtime/node-control-panel/binaries/synergy-control-linux-amd64
             runtime/node-control-panel/binaries/synergy-testnet-agent-linux-amd64
 
+  build-testnet-v3-runtime:
+    name: Build Testnet-v3 runtime (${{ matrix.platform }})
+    needs:
+      - verify-release-identity
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux-amd64
+            output_name: synergy-testnet-linux-amd64
+          - os: macos-26
+            platform: macos-arm64
+            output_name: synergy-testnet-darwin-arm64
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout tagged Testnet-v3 source
+        uses: actions/checkout@v4
+
+      - name: Verify canonical Testnet-v3 source repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REPOSITORY}" == "${TESTNET_V3_SOURCE_REPOSITORY}" ]] || {
+            echo "Control Panel release builds must run from ${TESTNET_V3_SOURCE_REPOSITORY}; got ${GITHUB_REPOSITORY}." >&2
+            exit 1
+          }
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Checkout pinned canonical SynQ dependency
+        shell: bash
+        env:
+          SYNQ_REPO_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ "$SYNQ_LANGUAGE_SOURCE_REV" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "SYNQ_LANGUAGE_SOURCE_REV must be a full immutable commit SHA." >&2
+            exit 1
+          }
+          synq_root="${GITHUB_WORKSPACE}/../synq-language"
+          git init --quiet "$synq_root"
+          git -C "$synq_root" remote add origin "https://github.com/${SYNQ_LANGUAGE_SOURCE_REPOSITORY}.git"
+          if [[ -n "${SYNQ_REPO_TOKEN:-}" ]]; then
+            auth_header="$(printf 'x-access-token:%s' "$SYNQ_REPO_TOKEN" | base64 | tr -d '\n')"
+            git -C "$synq_root" -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth_header}" fetch --depth 1 origin "$SYNQ_LANGUAGE_SOURCE_REV"
+          else
+            git -C "$synq_root" fetch --depth 1 origin "$SYNQ_LANGUAGE_SOURCE_REV"
+          fi
+          git -C "$synq_root" checkout --detach --quiet FETCH_HEAD
+          [[ "$(git -C "$synq_root" rev-parse HEAD)" == "$SYNQ_LANGUAGE_SOURCE_REV" ]]
+          git -C "$synq_root" submodule update --init --recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux runtime build dependencies
+        if: matrix.platform == 'linux-amd64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang cmake pkg-config libssl-dev
+
+      - name: Build tagged Testnet-v3 runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          panel_version="$(node -p "require('./package.json').version")"
+          runtime_version="$(awk -F '"' '/^version = / { print $2; exit }' "$GITHUB_WORKSPACE/runtime/src/Cargo.toml")"
+          [[ "$runtime_version" == "$panel_version" ]] || {
+            echo "Testnet-v3 runtime version $runtime_version does not match Control Panel $panel_version." >&2
+            exit 1
+          }
+          cargo build --manifest-path "$GITHUB_WORKSPACE/runtime/Cargo.toml" \
+            --package synergy-testnet --bin synergy-testnet --release
+          source_binary="$GITHUB_WORKSPACE/runtime/target/release/synergy-testnet"
+          test -x "$source_binary"
+          mkdir -p .release-runtime
+          install -m 0755 "$source_binary" ".release-runtime/${{ matrix.output_name }}"
+          reported_version="$(".release-runtime/${{ matrix.output_name }}" --version | head -n 1)"
+          [[ "$reported_version" == "Synergy Testnet Node v$panel_version" ]] || {
+            echo "Built runtime reported '$reported_version', expected v$panel_version." >&2
+            exit 1
+          }
+          node <<'NODE'
+          const crypto = require('node:crypto');
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const platform = process.env.RUNTIME_PLATFORM;
+          const outputName = process.env.RUNTIME_OUTPUT_NAME;
+          const binaryPath = path.join('.release-runtime', outputName);
+          const sha256 = crypto.createHash('sha256').update(fs.readFileSync(binaryPath)).digest('hex');
+          const version = require('./package.json').version;
+          fs.writeFileSync(
+            path.join('.release-runtime', `testnet-v3-runtime-${platform}.json`),
+            `${JSON.stringify({
+              schema_version: 1,
+              network_id: 'synergy-testnet-v3',
+              source_repository: process.env.GITHUB_REPOSITORY,
+              source_revision: process.env.GITHUB_SHA,
+              version: `v${version}`,
+              platform,
+              binary: { name: 'synergy-testnet', file: outputName, sha256 },
+            }, null, 2)}\n`,
+          );
+          NODE
+        env:
+          RUNTIME_PLATFORM: ${{ matrix.platform }}
+          RUNTIME_OUTPUT_NAME: ${{ matrix.output_name }}
+
+      - name: Upload Testnet-v3 runtime artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: testnet-v3-runtime-${{ matrix.platform }}
+          if-no-files-found: error
+          retention-days: 1
+          path: runtime/node-control-panel/.release-runtime
+
   build:
     needs:
       - verify-release-identity
       - verify-archive-readiness
       - build-linux-onboarding-sidecars
+      - build-testnet-v3-runtime
     strategy:
       fail-fast: false
       matrix:
@@ -195,7 +323,7 @@ jobs:
               runtime/node-control-panel/electron-dist/*.yaml
               runtime/node-control-panel/electron-dist/*.blockmap
           # Windows installer builds are intentionally disabled while Windows support is paused.
-          # Re-enable this matrix entry with the Windows binary download/copy/release steps below.
+          # Re-enable this matrix entry together with a native Windows Testnet-v3 runtime build.
           # - os: windows-latest
           #   artifact_name: windows
           #   build_cmd: npx electron-builder --config electron-builder.yml --win nsis --publish never
@@ -209,10 +337,6 @@ jobs:
     permissions:
       contents: write
     env:
-      # Derive the immutable Testnet tag from package.json through the verified
-      # job output. Manual dispatch may override it only explicitly.
-      TESTNET_RUNTIME_REF: ${{ github.event.inputs.testnet_runtime_ref || format('v{0}', needs.verify-release-identity.outputs.version) }}
-      TESTNET_SOURCE_REF: ${{ github.event.inputs.testnet_runtime_ref || format('v{0}', needs.verify-release-identity.outputs.version) }}
       CSC_LINK: ${{ secrets.CSC_LINK }}
       CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
       APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -222,40 +346,6 @@ jobs:
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
-
-      - name: Checkout Testnet node source
-        shell: bash
-        env:
-          TESTNET_REPO_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          TESTNET_SOURCE_REPOSITORY="${TESTNET_SOURCE_REPOSITORY:-synergy-network-hq/testnet-v3}"
-          TESTNET_RUNTIME_REF="${TESTNET_RUNTIME_REF:?Set TESTNET_RUNTIME_REF to the trusted Testnet runtime release/tag/branch.}"
-          TESTNET_SOURCE_REF="${TESTNET_SOURCE_REF:-main}"
-          if [[ "${TESTNET_RUNTIME_REF}" == "bundled" || "${TESTNET_RUNTIME_REF}" == "committed" ]]; then
-            echo "Using committed Testnet runtime binaries; validating source identity with ${TESTNET_SOURCE_REPOSITORY}@${TESTNET_SOURCE_REF}"
-          else
-            echo "Bundling Testnet runtime source ${TESTNET_SOURCE_REPOSITORY}@${TESTNET_SOURCE_REF}"
-          fi
-
-          if [[ -n "${TESTNET_REPO_TOKEN:-}" ]]; then
-            auth_header="$(printf 'x-access-token:%s' "$TESTNET_REPO_TOKEN" | base64 | tr -d '\n')"
-            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth_header}" clone \
-              --depth 1 \
-              --branch "${TESTNET_SOURCE_REF}" \
-              --single-branch \
-              "https://github.com/${TESTNET_SOURCE_REPOSITORY}.git" \
-              testnet-source
-
-          else
-            git clone \
-              --depth 1 \
-              --branch "${TESTNET_SOURCE_REF}" \
-              --single-branch \
-              "https://github.com/${TESTNET_SOURCE_REPOSITORY}.git" \
-              testnet-source
-          fi
 
       - name: Checkout canonical Aegis-PQVM source
         shell: bash
@@ -443,12 +533,19 @@ jobs:
 
       - name: Validate Testnet genesis alignment
         shell: bash
+        env:
+          TESTNET_V3_SOURCE_ROOT: ${{ github.workspace }}
         run: |
           set -euo pipefail
           node <<'NODE'
           const fs = require('node:fs');
+          const path = require('node:path');
 
           (async () => {
+            const sourceRoot = process.env.TESTNET_V3_SOURCE_ROOT;
+            if (!sourceRoot) {
+              throw new Error('TESTNET_V3_SOURCE_ROOT is required');
+            }
             const readJson = (filePath) => JSON.parse(fs.readFileSync(filePath, 'utf8'));
             const firstExisting = (...filePaths) => {
               const filePath = filePaths.find((candidate) => fs.existsSync(candidate));
@@ -488,8 +585,8 @@ jobs:
             };
 
             const sourceGenesisPath = firstExisting(
-              'testnet-source/runtime/config/genesis.json',
-              'testnet-source/config/genesis.json',
+              path.join(sourceRoot, 'runtime/config/genesis.json'),
+              path.join(sourceRoot, 'config/genesis.json'),
             );
             const source = readGenesisIdentity(sourceGenesisPath);
             const bundled = readGenesisIdentity('testnet/runtime/configs/genesis/genesis.json');
@@ -513,9 +610,9 @@ jobs:
             }
 
             const identifiersPath = firstExisting(
-              'testnet-source/network-identifiers.testnet-v3.json',
-              'testnet-source/network-identifiers.testnet-v3.identity-assigned.json',
-              'testnet-source/runtime/network-identifiers.testnet.json',
+              path.join(sourceRoot, 'network-identifiers.testnet-v3.json'),
+              path.join(sourceRoot, 'network-identifiers.testnet-v3.identity-assigned.json'),
+              path.join(sourceRoot, 'runtime/network-identifiers.testnet.json'),
             );
             const identifiers = readJson(identifiersPath);
             const identifierHash = String(identifiers?.cryptographic_identity?.genesis_hash || '').trim().toLowerCase();
@@ -586,104 +683,64 @@ jobs:
           "binaries/${verifier_name}" --version
           bash scripts/qa/aegis-snapshot-verifier-test.sh "binaries/${verifier_name}"
 
-      - name: Download trusted Testnet node release binaries
+      - name: Download tagged Testnet-v3 runtime artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: testnet-v3-runtime-linux-amd64
+          path: runtime/node-control-panel/.release-runtime/linux-amd64
+
+      - name: Download tagged Testnet-v3 macOS runtime artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: testnet-v3-runtime-macos-arm64
+          path: runtime/node-control-panel/.release-runtime/macos-arm64
+
+      - name: Stage exact Testnet-v3 runtime binaries
         shell: bash
         run: |
           set -euo pipefail
-
-          TESTNET_SOURCE_REPOSITORY="${TESTNET_SOURCE_REPOSITORY:-synergy-network-hq/testnet-v3}"
-          TESTNET_RUNTIME_REF="${TESTNET_RUNTIME_REF:?Set TESTNET_RUNTIME_REF to the trusted Testnet runtime release.}"
-
-          if [[ "${TESTNET_RUNTIME_REF}" == "bundled" || "${TESTNET_RUNTIME_REF}" == "committed" ]]; then
-            echo "Using committed Testnet runtime binaries from this control-panel checkout."
-            test -f binaries/synergy-testnet-linux-amd64
-            test -f binaries/synergy-testnet-darwin-arm64
-            test -f binaries/synergy-testnet-windows-amd64.exe
-            chmod +x \
-              binaries/synergy-testnet-linux-amd64 \
-              binaries/synergy-testnet-darwin-arm64 \
-              binaries/synergy-testnet-macos-arm64 \
-              2>/dev/null || true
-            rg --fixed-strings "old_consensus_algorithm must resolve to FN-DSA" \
-              binaries/synergy-testnet-linux-amd64 \
-              binaries/synergy-testnet-darwin-arm64
-            exit 0
-          fi
-
-          release_base="https://github.com/${TESTNET_SOURCE_REPOSITORY}/releases/download/${TESTNET_RUNTIME_REF}"
-          echo "Downloading trusted Testnet runtime binaries from ${release_base}"
           mkdir -p binaries
-
-          if ! curl --fail --location --retry 5 --retry-delay 2 \
-            --output testnet-latest.json \
-            "${release_base}/latest.json"; then
-            echo "latest.json was not available; falling back to platform manifests."
-            curl --fail --location --retry 5 --retry-delay 2 \
-              --output testnet-latest-linux-amd64.json \
-              "${release_base}/latest-linux-amd64.json"
-            curl --fail --location --retry 5 --retry-delay 2 \
-              --output testnet-latest-macos-arm64.json \
-              "${release_base}/latest-macos-arm64.json"
-            node -e '
-              const fs = require("node:fs");
-              const merged = { version: process.env.TESTNET_RUNTIME_REF, binaries: {} };
-              for (const filePath of ["testnet-latest-linux-amd64.json", "testnet-latest-macos-arm64.json"]) {
-                const manifest = JSON.parse(fs.readFileSync(filePath, "utf8"));
-                Object.assign(merged.binaries, manifest.binaries || {});
-              }
-              fs.writeFileSync("testnet-latest.json", `${JSON.stringify(merged, null, 2)}\n`);
-            '
-          fi
-
-          sha256_file() {
-            node -e 'const crypto = require("node:crypto"); const fs = require("node:fs"); process.stdout.write(crypto.createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex"));' "$1"
+          linux_binary="$(find .release-runtime/linux-amd64 -type f -name synergy-testnet-linux-amd64 -print -quit)"
+          macos_binary="$(find .release-runtime/macos-arm64 -type f -name synergy-testnet-darwin-arm64 -print -quit)"
+          [[ -n "$linux_binary" && -n "$macos_binary" ]] || {
+            echo "The tagged Testnet-v3 Linux and macOS runtime artifacts are both required." >&2
+            find .release-runtime -maxdepth 4 -type f -print >&2 || true
+            exit 1
           }
-
-          release_field() {
-            local platform="$1"
-            local binary="$2"
-            local field="$3"
-            node -e '
-              const fs = require("node:fs");
-              const [platform, binary, field] = process.argv.slice(1);
-              const manifest = JSON.parse(fs.readFileSync("testnet-latest.json", "utf8"));
-              const value = manifest?.binaries?.[platform]?.[binary]?.[field];
-              if (!value) {
-                throw new Error("Missing " + platform + "/" + binary + "/" + field + " in Testnet latest.json");
-              }
-              process.stdout.write(value);
-            ' "$platform" "$binary" "$field"
-          }
-
-          download_binary() {
-            local platform="$1"
-            local binary="$2"
-            local output_path="$3"
-            local url expected actual
-
-            url="$(release_field "$platform" "$binary" url)"
-            expected="$(release_field "$platform" "$binary" sha256)"
-            if [[ "$url" != http://* && "$url" != https://* ]]; then
-              url="${release_base}/${url}"
-            fi
-            curl --fail --location --retry 5 --retry-delay 2 --output "$output_path" "$url"
-            actual="$(sha256_file "$output_path")"
-            if [[ "$actual" != "$expected" ]]; then
-              echo "Checksum mismatch for $output_path from $url" >&2
-              echo "expected=$expected actual=$actual" >&2
-              exit 1
-            fi
-            printf "%s  %s\n" "$actual" "$(basename "$output_path")" > "${output_path}.sha256"
-          }
-
-          download_binary linux-amd64 synergy-testnet binaries/synergy-testnet-linux-amd64
-          download_binary macos-arm64 synergy-testnet binaries/synergy-testnet-darwin-arm64
+          install -m 0755 "$linux_binary" binaries/synergy-testnet-linux-amd64
+          install -m 0755 "$macos_binary" binaries/synergy-testnet-darwin-arm64
           cp binaries/synergy-testnet-darwin-arm64 binaries/synergy-testnet-macos-arm64
-          printf "%s  %s\n" "$(sha256_file binaries/synergy-testnet-macos-arm64)" "synergy-testnet-macos-arm64" > binaries/synergy-testnet-macos-arm64.sha256
-          # Keep every bundled runtime aligned even while Windows installer publication is paused.
-          download_binary windows-amd64 synergy-testnet binaries/synergy-testnet-windows-amd64.exe
-
           chmod +x binaries/synergy-testnet-linux-amd64 binaries/synergy-testnet-darwin-arm64 binaries/synergy-testnet-macos-arm64
+          node <<'NODE'
+          const crypto = require('node:crypto');
+          const fs = require('node:fs');
+          const sha256 = (filePath) => crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+          const version = require('./package.json').version;
+          const sourceRepository = process.env.GITHUB_REPOSITORY;
+          const sourceRevision = process.env.GITHUB_SHA;
+          const manifest = {
+            schema_version: 1,
+            network_id: 'synergy-testnet-v3',
+            source_repository: sourceRepository,
+            source_revision: sourceRevision,
+            version: `v${version}`,
+            binaries: {
+              'linux-amd64': {
+                'synergy-testnet': {
+                  file: 'synergy-testnet-linux-amd64',
+                  sha256: sha256('binaries/synergy-testnet-linux-amd64'),
+                },
+              },
+              'macos-arm64': {
+                'synergy-testnet': {
+                  file: 'synergy-testnet-darwin-arm64',
+                  sha256: sha256('binaries/synergy-testnet-darwin-arm64'),
+                },
+              },
+            },
+          };
+          fs.writeFileSync('testnet-latest.json', `${JSON.stringify(manifest, null, 2)}\n`);
+          NODE
 
       - name: Verify Control Panel and Testnet runtime version alignment
         shell: bash
@@ -692,16 +749,7 @@ jobs:
 
           control_panel_version="$(node -p "require('./package.json').version")"
           expected_runtime_ref="v${control_panel_version}"
-          if [[ "${TESTNET_RUNTIME_REF}" != "${expected_runtime_ref}" ]]; then
-            echo "Control Panel ${control_panel_version} must bundle Testnet ${expected_runtime_ref}; got ${TESTNET_RUNTIME_REF}" >&2
-            exit 1
-          fi
-          if [[ "${TESTNET_SOURCE_REF}" != "${expected_runtime_ref}" ]]; then
-            echo "Control Panel ${control_panel_version} must build against Testnet source ${expected_runtime_ref}; got ${TESTNET_SOURCE_REF}" >&2
-            exit 1
-          fi
-
-          source_version="$(awk -F '"' '/^version = "/ { print $2; exit }' testnet-source/runtime/src/Cargo.toml)"
+          source_version="$(awk -F '"' '/^version = "/ { print $2; exit }' "$GITHUB_WORKSPACE/runtime/src/Cargo.toml")"
           if [[ "${source_version}" != "${control_panel_version}" ]]; then
             echo "Testnet source package version ${source_version} does not match Control Panel ${control_panel_version}" >&2
             exit 1
@@ -712,11 +760,21 @@ jobs:
             echo "Testnet manifest version ${manifest_version} does not match ${expected_runtime_ref}" >&2
             exit 1
           fi
+          manifest_repository="$(node -p "require('./testnet-latest.json').source_repository")"
+          manifest_revision="$(node -p "require('./testnet-latest.json').source_revision")"
+          [[ "${manifest_repository}" == "${TESTNET_V3_SOURCE_REPOSITORY}" ]] || {
+            echo "Runtime manifest source ${manifest_repository} is not ${TESTNET_V3_SOURCE_REPOSITORY}" >&2
+            exit 1
+          }
+          [[ "${manifest_revision}" == "${GITHUB_SHA}" ]] || {
+            echo "Runtime manifest source revision ${manifest_revision} does not match ${GITHUB_SHA}" >&2
+            exit 1
+          }
 
           SYNERGY_SKIP_WORKSPACE_MANIFEST_CHECK=1 node scripts/qa/runtime-version-alignment-test.mjs
           echo "Version alignment verified: Control Panel ${control_panel_version}, Testnet ${control_panel_version}"
 
-      - name: Sync trusted Testnet binaries into runtime installers
+      - name: Sync Testnet-v3 binaries into runtime installers
         shell: bash
         run: |
           set -euo pipefail
@@ -741,11 +799,6 @@ jobs:
           Path: ./bin/synergy-testnet-darwin-arm64
           SHA-256: $(sha256_file "${installer_dir}/bin/synergy-testnet-darwin-arm64")
 
-          Windows Binary
-          --------------
-          Path: ./bin/synergy-testnet-windows-amd64.exe
-          SHA-256: $(sha256_file "${installer_dir}/bin/synergy-testnet-windows-amd64.exe")
-
           Interpretation
           --------------
           - These checksums reflect the exact bundled binaries shipped in this installer.
@@ -763,7 +816,6 @@ jobs:
             mkdir -p "$installer_dir/bin"
             cp binaries/synergy-testnet-linux-amd64 "$installer_dir/bin/synergy-testnet-linux-amd64"
             cp binaries/synergy-testnet-darwin-arm64 "$installer_dir/bin/synergy-testnet-darwin-arm64"
-            cp binaries/synergy-testnet-windows-amd64.exe "$installer_dir/bin/synergy-testnet-windows-amd64.exe"
             chmod +x "$installer_dir/bin/synergy-testnet-linux-amd64" "$installer_dir/bin/synergy-testnet-darwin-arm64"
             write_binary_status "$installer_dir"
           done

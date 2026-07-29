@@ -22,14 +22,20 @@ const handler = source.match(
 assert.ok(handler, 'the public current transport handler must exist');
 assert.match(
   handler,
-  /innernet::validator_transport_snapshot\(&state\.app_context\)/,
-  'the public route must use the coordinator-signed snapshot provider',
+  /innernet::public_validator_transport_snapshot\(\s*&state\.app_context,?\s*\)/s,
+  'the public route must use the released coordinator-signed snapshot provider',
 );
+assert.match(handler, /public_transport_snapshot_response\(/);
 assert.match(handler, /StatusCode::OK, Json\(payload\)/);
 assert.match(
   handler,
-  /Err\(_\)\s*=>\s*StatusCode::SERVICE_UNAVAILABLE\.into_response\(\)/s,
+  /StatusCode::SERVICE_UNAVAILABLE/s,
   'snapshot failures must not expose unsigned or secret state',
+);
+assert.match(
+  handler,
+  /testnet_v3_transport_release_not_published/,
+  'a pre-release public request must receive a bounded, non-secret refusal',
 );
 assert.doesNotMatch(
   handler,
@@ -38,7 +44,7 @@ assert.doesNotMatch(
 );
 assert.doesNotMatch(
   handler,
-  /mesh_status|Json\(json!|validator_vpn_error/,
+  /mesh_status|validator_vpn_error/,
   'the public route must not return unsigned mesh or diagnostic state',
 );
 
