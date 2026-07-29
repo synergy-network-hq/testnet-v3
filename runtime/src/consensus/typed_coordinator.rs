@@ -14,7 +14,7 @@ use crate::crypto::aegis_pqvm::{AegisPqKeyLifecycleRecord, AegisPqvmSigner, Aegi
 use crate::crypto::pqc::{PQCAlgorithm, PQCManager, PQCPrivateKey, PQCPublicKey};
 use crate::etdag::{EtdagParameters, ProtectedBlockInput, TargetAdmissionContext};
 use crate::execution::{compute_state_root_after, execute_block, ExecutionState};
-use crate::p2p::messages::TypedConsensusMessage;
+use crate::p2p::messages::{validate_typed_consensus_message_size, TypedConsensusMessage};
 use crate::synergy_types::{
     AegisPqKeyRole, Block, BlockId, ClusterMap, EpochTransition, Hash, QuorumCertificate,
     TimeoutCertificate, UmaId, ValidationCertificate, ValidatorId, ValidatorSet, ValidatorStatus,
@@ -363,6 +363,7 @@ impl TypedPosyCoordinatorStartup {
 }
 
 const COORDINATOR_INGRESS_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const MAX_QUEUED_TYPED_VOTES_PER_PEER_CONTEXT: usize = 64;
 
 /// Runs the sole typed-consensus mailbox consumer for a validator process.
 ///
@@ -382,10 +383,17 @@ pub fn run_typed_coordinator_ingress(
     let mut metrics = TypedCoordinatorIngressMetrics::default();
     while running.load(Ordering::Acquire) {
         match receiver.recv_timeout(COORDINATOR_INGRESS_POLL_INTERVAL) {
-            Ok(envelope) => match coordinator.handle_envelope(envelope, &authorizer) {
-                Ok(_) => metrics.accepted_messages = metrics.accepted_messages.saturating_add(1),
-                Err(_) => metrics.rejected_messages = metrics.rejected_messages.saturating_add(1),
-            },
+            Ok(envelope) => {
+                release_typed_vote_queue_slot(&envelope);
+                match coordinator.handle_envelope(envelope, &authorizer) {
+                    Ok(_) => {
+                        metrics.accepted_messages = metrics.accepted_messages.saturating_add(1)
+                    }
+                    Err(_) => {
+                        metrics.rejected_messages = metrics.rejected_messages.saturating_add(1)
+                    }
+                }
+            }
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) if !running.load(Ordering::Acquire) => break,
             Err(RecvTimeoutError::Disconnected) => {
@@ -1116,9 +1124,74 @@ fn verifier_for_verified_epoch_transition(
 
 static COORDINATOR_INGRESS: OnceLock<Mutex<Option<SyncSender<TypedConsensusEnvelope>>>> =
     OnceLock::new();
+type TypedVoteQueueKey = (ValidatorId, Hash);
+static TYPED_VOTE_QUEUE_DEPTHS: OnceLock<Mutex<BTreeMap<TypedVoteQueueKey, usize>>> =
+    OnceLock::new();
 
 fn ingress_slot() -> &'static Mutex<Option<SyncSender<TypedConsensusEnvelope>>> {
     COORDINATOR_INGRESS.get_or_init(|| Mutex::new(None))
+}
+
+fn typed_vote_queue_depths() -> &'static Mutex<BTreeMap<TypedVoteQueueKey, usize>> {
+    TYPED_VOTE_QUEUE_DEPTHS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+fn typed_vote_queue_key(
+    authenticated_peer: Option<&AuthenticatedTypedConsensusPeer>,
+    message: &TypedConsensusMessage,
+) -> Option<TypedVoteQueueKey> {
+    let (authenticated_peer, TypedConsensusMessage::Vote { vote }) = (authenticated_peer?, message)
+    else {
+        return None;
+    };
+    Some((
+        authenticated_peer.validator_id.clone(),
+        vote.height_context_root,
+    ))
+}
+
+fn reserve_typed_vote_queue_slot(
+    authenticated_peer: Option<&AuthenticatedTypedConsensusPeer>,
+    message: &TypedConsensusMessage,
+) -> Result<bool, String> {
+    let Some(key) = typed_vote_queue_key(authenticated_peer, message) else {
+        return Ok(false);
+    };
+    let mut depths = typed_vote_queue_depths()
+        .lock()
+        .map_err(|_| "typed vote queue depth lock is poisoned".to_string())?;
+    let depth = depths.entry(key).or_default();
+    if *depth >= MAX_QUEUED_TYPED_VOTES_PER_PEER_CONTEXT {
+        return Err(format!(
+            "typed vote queue has reached the Testnet-v3 per-peer-per-context limit of {MAX_QUEUED_TYPED_VOTES_PER_PEER_CONTEXT}"
+        ));
+    }
+    *depth += 1;
+    Ok(true)
+}
+
+fn release_typed_vote_queue_slot(envelope: &TypedConsensusEnvelope) {
+    let Some(key) = typed_vote_queue_key(envelope.authenticated_peer.as_ref(), &envelope.message)
+    else {
+        return;
+    };
+    let Ok(mut depths) = typed_vote_queue_depths().lock() else {
+        return;
+    };
+    let Some(depth) = depths.get_mut(&key) else {
+        return;
+    };
+    if *depth <= 1 {
+        depths.remove(&key);
+    } else {
+        *depth -= 1;
+    }
+}
+
+fn clear_typed_vote_queue_slots() {
+    if let Ok(mut depths) = typed_vote_queue_depths().lock() {
+        depths.clear();
+    }
 }
 
 /// Installs the sole typed coordinator mailbox for this process.
@@ -1139,6 +1212,7 @@ pub fn install_typed_coordinator_ingress(
     if slot.is_some() {
         return Err("typed coordinator ingress is already installed".to_string());
     }
+    clear_typed_vote_queue_slots();
     *slot = Some(sender);
     Ok(receiver)
 }
@@ -1152,6 +1226,7 @@ pub fn remove_typed_coordinator_ingress() -> Result<(), String> {
         .lock()
         .map_err(|_| "typed coordinator ingress lock is poisoned".to_string())?;
     *slot = None;
+    clear_typed_vote_queue_slots();
     Ok(())
 }
 
@@ -1162,6 +1237,7 @@ pub fn dispatch_typed_consensus_message(
     authenticated_peer: Option<AuthenticatedTypedConsensusPeer>,
     message: TypedConsensusMessage,
 ) -> Result<(), String> {
+    validate_typed_consensus_message_size(&message)?;
     let sender = ingress_slot()
         .lock()
         .map_err(|_| "typed coordinator ingress lock is poisoned".to_string())?
@@ -1169,22 +1245,33 @@ pub fn dispatch_typed_consensus_message(
         .ok_or_else(|| {
             "typed PoSy coordinator is not running; refusing consensus message".to_string()
         })?;
-    sender
-        .try_send(TypedConsensusEnvelope {
-            peer_address: peer_address.to_string(),
-            authenticated_peer,
-            message,
-        })
-        .map_err(|error| match error {
-            TrySendError::Full(_) => {
-                "typed PoSy coordinator ingress is saturated; refusing consensus message"
-                    .to_string()
+    let vote_slot_reserved = reserve_typed_vote_queue_slot(authenticated_peer.as_ref(), &message)?;
+    let send_result = sender.try_send(TypedConsensusEnvelope {
+        peer_address: peer_address.to_string(),
+        authenticated_peer,
+        message,
+    });
+    match send_result {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            if vote_slot_reserved {
+                let envelope = match &error {
+                    TrySendError::Full(envelope) | TrySendError::Disconnected(envelope) => envelope,
+                };
+                release_typed_vote_queue_slot(envelope);
             }
-            TrySendError::Disconnected(_) => {
-                "typed PoSy coordinator ingress is disconnected; refusing consensus message"
-                    .to_string()
-            }
-        })
+            Err(match error {
+                TrySendError::Full(_) => {
+                    "typed PoSy coordinator ingress is saturated; refusing consensus message"
+                        .to_string()
+                }
+                TrySendError::Disconnected(_) => {
+                    "typed PoSy coordinator ingress is disconnected; refusing consensus message"
+                        .to_string()
+                }
+            })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1260,6 +1347,32 @@ mod tests {
             envelope.message,
             TypedConsensusMessage::Vote { .. }
         ));
+        remove_typed_coordinator_ingress().unwrap();
+    }
+
+    #[test]
+    fn typed_vote_queue_is_capped_per_authenticated_peer_and_height_context() {
+        let _guard = INGRESS_TEST_LOCK.lock().unwrap();
+        reset_typed_coordinator_ingress_for_test();
+        let receiver =
+            install_typed_coordinator_ingress(MAX_QUEUED_TYPED_VOTES_PER_PEER_CONTEXT + 1).unwrap();
+        let peer = AuthenticatedTypedConsensusPeer {
+            validator_id: ValidatorId("validator-1".to_string()),
+            validator_uma_id: UmaId("uma-1".to_string()),
+            consensus_key_id: AegisPqKeyId("key-1".to_string()),
+        };
+
+        for _ in 0..MAX_QUEUED_TYPED_VOTES_PER_PEER_CONTEXT {
+            dispatch_typed_consensus_message("peer-a", Some(peer.clone()), vote()).unwrap();
+        }
+        let error = dispatch_typed_consensus_message("peer-a", Some(peer.clone()), vote())
+            .expect_err("the 65th queued vote for one authenticated peer/context must fail");
+        assert!(error.contains("per-peer-per-context limit of 64"));
+
+        let dequeued = receiver.try_recv().unwrap();
+        release_typed_vote_queue_slot(&dequeued);
+        dispatch_typed_consensus_message("peer-a", Some(peer), vote())
+            .expect("dequeueing a vote must free its per-peer/context slot");
         remove_typed_coordinator_ingress().unwrap();
     }
 

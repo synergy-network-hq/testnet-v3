@@ -10,6 +10,15 @@ use crate::synergy_types::{
 };
 use crate::transaction::Transaction;
 
+/// Testnet-v3 bounds for a complete canonical typed-consensus P2P frame.
+///
+/// These are transport and verification budgets, not PoSy timeouts or Genesis
+/// consensus parameters.  The frame calculation includes the typed envelope
+/// and four-byte P2P length prefix, so the caps apply to exactly what a peer
+/// sends rather than to a partial in-memory field.
+pub const MAX_TYPED_CONSENSUS_CERTIFICATE_FRAME_BYTES: usize = 128 * 1024;
+pub const MAX_TYPED_CONSENSUS_PROPOSAL_FRAME_BYTES: usize = 8 * 1024 * 1024;
+
 /// The only wire representation for the typed PoSy v2.2 state machine.
 ///
 /// This is deliberately separate from the inherited `Block`/`Vote` variants
@@ -36,6 +45,52 @@ pub enum TypedConsensusMessage {
     TimeoutCertificate {
         certificate: TimeoutCertificate,
     },
+}
+
+/// Rejects typed consensus wire artifacts that exceed the Testnet-v3 resource
+/// budget before they reach the coordinator mailbox or are fanned out to peers.
+///
+/// Certificates are independently bounded because an authenticated relay is
+/// allowed to forward them; proposals receive the larger cap because their
+/// protected ETDAG payload is part of the same canonical P2P frame.
+pub fn validate_typed_consensus_message_size(
+    message: &TypedConsensusMessage,
+) -> Result<(), String> {
+    let (kind, maximum) = match message {
+        TypedConsensusMessage::Proposal { .. } => (
+            "typed consensus proposal",
+            MAX_TYPED_CONSENSUS_PROPOSAL_FRAME_BYTES,
+        ),
+        TypedConsensusMessage::ValidationCertificate { .. }
+        | TypedConsensusMessage::QuorumCertificate { .. }
+        | TypedConsensusMessage::TimeoutCertificate { .. } => (
+            "typed consensus certificate",
+            MAX_TYPED_CONSENSUS_CERTIFICATE_FRAME_BYTES,
+        ),
+        TypedConsensusMessage::Vote { .. } => return Ok(()),
+    };
+    let encoded = NetworkMessage::TypedConsensus {
+        message: message.clone(),
+    };
+    let frame_bytes = serde_json::to_vec(&encoded)
+        .map_err(|error| format!("serialize {kind} frame: {error}"))?
+        .len()
+        .checked_add(4)
+        .ok_or_else(|| format!("{kind} frame length overflow"))?;
+    validate_typed_consensus_frame_length(kind, frame_bytes, maximum)
+}
+
+fn validate_typed_consensus_frame_length(
+    kind: &str,
+    actual: usize,
+    maximum: usize,
+) -> Result<(), String> {
+    if actual > maximum {
+        return Err(format!(
+            "{kind} frame is {actual} bytes, exceeding Testnet-v3 limit {maximum} bytes"
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,8 +220,8 @@ pub enum NetworkMessage {
 mod tests {
     use super::*;
     use crate::synergy_types::{
-        AegisPqKeyId, BlockId, ChainId, ClusterId, Epoch, Hash, Height, NetworkId, Round, UmaId,
-        ValidatorId, VotePhase,
+        AegisPqKeyId, AegisPqSignature, BlockId, ChainId, ClusterId, Epoch, Hash, Height,
+        NetworkId, Round, UmaId, ValidatorId, VotePhase,
     };
 
     #[test]
@@ -207,5 +262,60 @@ mod tests {
                 message: TypedConsensusMessage::Vote { .. }
             }
         ));
+    }
+
+    #[test]
+    fn oversized_typed_certificate_is_rejected_before_coordinator_delivery() {
+        let certificate = TypedQuorumCertificate {
+            qc_version: 1,
+            chain_id: ChainId::synergy_testnet_v3(),
+            network_id: NetworkId::synergy_testnet_v3(),
+            protocol_version: "posy/2.2".to_string(),
+            height: Height(1),
+            round: Round(0),
+            epoch: Epoch(0),
+            cluster_id: ClusterId(0),
+            height_context_root: Hash::from_domain_bytes("test", b"context"),
+            phase: VotePhase::Finality,
+            block_id: BlockId("candidate".to_string()),
+            highest_prepared_vc_root: None,
+            active_validator_set_hash: Hash::from_domain_bytes("test", b"set"),
+            cluster_map_hash: Hash::from_domain_bytes("test", b"cluster"),
+            threshold_weight_required: 5,
+            signed_weight: 5,
+            signer_bitmap: vec![0b00_0111_11],
+            aegis_pq_signatures: vec![AegisPqSignature {
+                algorithm: "mldsa65".to_string(),
+                signature_bytes: vec![0; MAX_TYPED_CONSENSUS_CERTIFICATE_FRAME_BYTES],
+            }],
+            aegis_pq_key_ids: vec![AegisPqKeyId("key-1".to_string())],
+        };
+
+        let error =
+            validate_typed_consensus_message_size(&TypedConsensusMessage::QuorumCertificate {
+                certificate,
+            })
+            .expect_err("certificate frame above the 128 KiB cap must fail closed");
+
+        assert!(error.contains("typed consensus certificate frame"));
+        assert!(error.contains("131072"));
+    }
+
+    #[test]
+    fn proposal_frame_limit_is_exactly_eight_mebibytes() {
+        validate_typed_consensus_frame_length(
+            "typed consensus proposal",
+            MAX_TYPED_CONSENSUS_PROPOSAL_FRAME_BYTES,
+            MAX_TYPED_CONSENSUS_PROPOSAL_FRAME_BYTES,
+        )
+        .expect("the exact proposal cap is accepted");
+        let error = validate_typed_consensus_frame_length(
+            "typed consensus proposal",
+            MAX_TYPED_CONSENSUS_PROPOSAL_FRAME_BYTES + 1,
+            MAX_TYPED_CONSENSUS_PROPOSAL_FRAME_BYTES,
+        )
+        .expect_err("proposal frame above the 8 MiB cap must fail closed");
+
+        assert!(error.contains("8388608"));
     }
 }

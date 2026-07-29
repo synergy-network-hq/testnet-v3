@@ -5409,7 +5409,11 @@ impl P2PNetwork {
     /// consensus-eligible validator peers. The coordinator remains
     /// responsible for verifying every inbound context/certificate; this
     /// method only supplies the bounded authenticated transport fanout.
-    pub fn broadcast_typed_consensus(&self, message: &TypedConsensusMessage) -> usize {
+    pub fn broadcast_typed_consensus(
+        &self,
+        message: &TypedConsensusMessage,
+    ) -> Result<usize, String> {
+        crate::p2p::messages::validate_typed_consensus_message_size(message)?;
         let wire_message = NetworkMessage::TypedConsensus {
             message: message.clone(),
         };
@@ -5456,7 +5460,7 @@ impl P2PNetwork {
                 ),
             }
         }
-        sent
+        Ok(sent)
     }
 
     pub fn broadcast_vote_request(
