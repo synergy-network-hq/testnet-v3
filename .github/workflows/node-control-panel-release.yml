@@ -97,8 +97,9 @@ jobs:
             echo "AEGIS_PQVM_SOURCE_REV must be a full immutable commit SHA" >&2
             exit 1
           }
-          mkdir aegis-pqvm-source
-          pushd aegis-pqvm-source >/dev/null
+          aegis_root="$GITHUB_WORKSPACE/aegis-pqvm-source"
+          mkdir -p "$aegis_root"
+          pushd "$aegis_root" >/dev/null
           git init --quiet
           git remote add origin "https://github.com/${AEGIS_PQVM_SOURCE_REPOSITORY}.git"
           if [[ -n "${AEGIS_PQVM_REPO_TOKEN:-}" ]]; then
@@ -361,8 +362,9 @@ jobs:
             exit 1
           }
 
-          mkdir aegis-pqvm-source
-          pushd aegis-pqvm-source >/dev/null
+          aegis_root="$GITHUB_WORKSPACE/aegis-pqvm-source"
+          mkdir -p "$aegis_root"
+          pushd "$aegis_root" >/dev/null
           git init --quiet
           git remote add origin "https://github.com/${AEGIS_PQVM_SOURCE_REPOSITORY}.git"
           if [[ -n "${AEGIS_PQVM_REPO_TOKEN:-}" ]]; then
@@ -388,8 +390,9 @@ jobs:
             echo "ADDRESS_ENGINE_SOURCE_REV must be a full immutable commit SHA" >&2
             exit 1
           }
-          mkdir address-engine-source
-          pushd address-engine-source >/dev/null
+          address_engine_root="$GITHUB_WORKSPACE/address-engine-source"
+          mkdir -p "$address_engine_root"
+          pushd "$address_engine_root" >/dev/null
           git init --quiet
           git remote add origin "https://github.com/${ADDRESS_ENGINE_SOURCE_REPOSITORY}.git"
           if [[ -n "${ADDRESS_ENGINE_REPO_TOKEN:-}" ]]; then
