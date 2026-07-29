@@ -1378,6 +1378,12 @@ async fn invite_handler(
                 .to_string(),
         ),
     };
+    if input.peer_type == ValidatorVpnRole::Validator && !preconfigured {
+        return validator_vpn_error(
+            "Testnet-v3 validator VPN activation requires the assignment-bound preconfigured static mesh package."
+                .to_string(),
+        );
+    }
     let coordinator_readiness = if preconfigured {
         innernet::require_coordinator_ready()
     } else {

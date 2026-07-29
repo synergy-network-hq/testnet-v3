@@ -28,6 +28,7 @@ test("coordinator binds the one-time token to the installer assignment and a loc
   assert.match(vpn, /record\.used_at = Some/);
   assert.match(service, /assignment_id: Option<String>/);
   assert.match(service, /identity_proof: Option<String>/);
+  assert.match(service, /Testnet-v3 validator VPN activation requires the assignment-bound preconfigured static mesh package/);
   assert.match(client, /assignment_id:/);
   assert.match(client, /identity_proof:/);
   assert.match(client, /preconfigured_vpn_ip:/);
