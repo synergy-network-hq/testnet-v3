@@ -40,6 +40,8 @@ test("coordinator binds the one-time token to the installer assignment and a loc
   assert.match(ipc, /activatePackagedWireguardConfig/);
   assert.match(innernet, /install.*\/etc\/wireguard\/\$\{interfaceName\}\.conf/s);
   assert.match(innernet, /wg-quick@sy-vpn\.service/);
+  assert.match(innernet, /canonicalPackagedWireguardPeers/);
+  assert.match(innernet, /retireInnernetForPackagedWireguard/);
   assert.match(innernet, /PACKAGED_WIREGUARD_KEY_MISMATCH/);
   assert.match(service, /create_preconfigured_enrollment/);
   assert.match(ui, /Validator package assignment ID/);
