@@ -90,8 +90,14 @@ while read -r expected recorded_path; do
   name=${recorded_path##*/}
   case "$role:$name" in
     rpc-gateway:synergy-node-linux-amd64|\
-      explorer-indexer:synergy-node-linux-amd64|\
+      rpc-gateway:synergy-validator-node-linux-amd64|\
+      rpc-gateway:synergy-relayer-node-linux-amd64|\
+      rpc-gateway:release-config-manifest.json|\
       rpc-gateway:TESTNET_SOURCE_REVISION|\
+      explorer-indexer:synergy-node-linux-amd64|\
+      explorer-indexer:synergy-validator-node-linux-amd64|\
+      explorer-indexer:synergy-relayer-node-linux-amd64|\
+      explorer-indexer:release-config-manifest.json|\
       explorer-indexer:TESTNET_SOURCE_REVISION)
       ;;
     relayer:synergy-node-linux-amd64|\
