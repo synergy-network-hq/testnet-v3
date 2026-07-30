@@ -227,7 +227,13 @@ jobs:
           fi
           git -C "$synq_root" checkout --detach --quiet FETCH_HEAD
           [[ "$(git -C "$synq_root" rev-parse HEAD)" == "$SYNQ_LANGUAGE_SOURCE_REV" ]]
-          git -C "$synq_root" submodule update --init --recursive
+          if [[ -n "${SYNQ_REPO_TOKEN:-}" ]]; then
+            git -C "$synq_root" \
+              -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth_header}" \
+              submodule update --init --recursive
+          else
+            git -C "$synq_root" submodule update --init --recursive
+          fi
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
