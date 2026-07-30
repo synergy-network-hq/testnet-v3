@@ -2087,13 +2087,28 @@ where
         certificate: TimeoutCertificate,
     ) -> Result<(), String> {
         if let Some(existing) = &self.timeout_certificate {
-            if !same_timeout_certificate_subject(existing, &certificate) {
+            if certificate.closing_round == existing.closing_round {
+                if !same_timeout_certificate_subject(existing, &certificate) {
+                    return Err(
+                        "TYPED_DRIVER_SOURCE_CONFLICT: timeout certificates disagree on round or carry-forward source"
+                            .to_string(),
+                    );
+                }
+                return Ok(());
+            }
+            if certificate.closing_round.0 < existing.closing_round.0 {
+                // The coordinator already cryptographically accepted this
+                // delayed prior-round proof before the driver reaches this
+                // point.  It can no longer authorize the current round, so it
+                // must not overwrite the newer transition state.
+                return Ok(());
+            }
+            if existing.next_round != certificate.closing_round {
                 return Err(
-                    "TYPED_DRIVER_SOURCE_CONFLICT: timeout certificates disagree on round or carry-forward source"
+                    "TYPED_DRIVER_SOURCE_CONFLICT: timeout certificates skip a round transition"
                         .to_string(),
                 );
             }
-            return Ok(());
         }
         self.timeout_certificate = Some(certificate);
         self.validation_votes.clear();
@@ -3812,6 +3827,116 @@ mod tests {
         .unwrap()
     }
 
+    type ReleaseDriver = TypedPosyDriver<
+        RecordingEgress,
+        FinalizedTypedContextProvider,
+        FinalizedTypedContextProvider,
+    >;
+
+    fn release_driver_with(
+        coordinator: TypedPosyCoordinator,
+        bootstrap: TestnetV3GenesisBootstrap,
+        protocol_config: ProtocolConfig,
+        deployed_genesis_state_root: Hash,
+    ) -> ReleaseDriver {
+        let finality_store = coordinator.finality_store.clone();
+        let finality_digest_source = FinalizedTypedContextProvider::new(
+            bootstrap.clone(),
+            protocol_config.clone(),
+            finality_store.clone(),
+            deployed_genesis_state_root,
+        )
+        .expect("release driver needs a Genesis-bound finalized-context digest source");
+        let next_height_source = FinalizedTypedContextProvider::new(
+            bootstrap,
+            protocol_config,
+            finality_store,
+            deployed_genesis_state_root,
+        )
+        .expect("release driver needs a Genesis-bound next-height authority source");
+        let root = crate::utils::test_temp_root(format!(
+            "synergy-release-driver-{}-{}",
+            std::process::id(),
+            COORDINATOR_FIXTURE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        TypedPosyDriver::new(
+            coordinator,
+            EtdagProtectedInputCoordinator::at_paths(
+                root.join("admission.json"),
+                root.join("protected.json"),
+            ),
+            RecordingEgress {
+                deliveries: 1,
+                messages: Vec::new(),
+            },
+            finality_digest_source,
+            next_height_source,
+        )
+        .expect("release driver must accept the finalized Genesis authority")
+    }
+
+    fn authenticated_peer_for_release_driver(
+        driver: &ReleaseDriver,
+    ) -> AuthenticatedTypedConsensusPeer {
+        let validator = driver
+            .coordinator
+            .consensus
+            .validator_set
+            .validators
+            .iter()
+            .find(|validator| validator.validator_id == driver.coordinator.local_validator_id)
+            .expect("release driver local signer remains in frozen Genesis validator set");
+        AuthenticatedTypedConsensusPeer {
+            validator_id: validator.validator_id.clone(),
+            validator_uma_id: validator.validator_uma_id.clone(),
+            consensus_key_id: validator.consensus_public_key.key_id.clone(),
+        }
+    }
+
+    fn relay_release_messages(
+        drivers: &mut [ReleaseDriver],
+        authorizer: &FrozenTypedConsensusPeerAuthorizer,
+        include: impl Fn(&TypedConsensusMessage) -> bool,
+    ) -> Vec<String> {
+        let mut rejected = Vec::new();
+        loop {
+            let mut outbound = Vec::new();
+            for (sender_index, driver) in drivers.iter_mut().enumerate() {
+                for message in std::mem::take(&mut driver.egress.messages) {
+                    if include(&message) {
+                        outbound.push((sender_index, message));
+                    }
+                }
+            }
+            if outbound.is_empty() {
+                return rejected;
+            }
+            for (sender_index, message) in outbound {
+                let authenticated_peer =
+                    authenticated_peer_for_release_driver(&drivers[sender_index]);
+                for (recipient_index, recipient) in drivers.iter_mut().enumerate() {
+                    if recipient_index == sender_index {
+                        continue;
+                    }
+                    if let Err(error) = recipient.handle_envelope(
+                        TypedConsensusEnvelope {
+                            peer_address: format!("release-driver-{sender_index}"),
+                            authenticated_peer: Some(authenticated_peer.clone()),
+                            message: message.clone(),
+                        },
+                        authorizer,
+                    ) {
+                        assert!(
+                            !driver_error_is_fatal(&error),
+                            "release replica {recipient_index} rejected a fatal message from {sender_index}: {error}"
+                        );
+                        rejected.push(error);
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn driver_refuses_any_noncanonical_timeout_projection() {
         let mut coordinator = coordinator_fixture();
@@ -3983,6 +4108,163 @@ mod tests {
         driver
             .install_verified_timeout_certificate(full_quorum_certificate)
             .expect("equivalent strict-quorum evidence must not halt liveness");
+
+        // A timeout certificate authorizes its immediate successor round.  It
+        // must be replaced, rather than treated as a conflicting source, when
+        // the next verified timeout certificate closes that successor round.
+        driver.coordinator.local_context.round = Round(1);
+        let next_round_votes = {
+            let (consensus, signer) = (
+                &mut driver.coordinator.consensus,
+                &mut driver.coordinator.signer,
+            );
+            validators
+                .iter()
+                .map(|validator| {
+                    consensus.timeout_vote(signer, validator, &height_context, Round(1), None)
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .expect("fixture validators must form the successor-round timeout votes")
+        };
+        let successor_round_certificate = driver
+            .coordinator
+            .form_timeout_certificate(&next_round_votes[..5])
+            .expect("a verified successor-round timeout certificate must form");
+        driver
+            .install_verified_timeout_certificate(successor_round_certificate.clone())
+            .expect("the next sequential timeout certificate must replace the prior-round authorization");
+        assert_eq!(
+            driver
+                .timeout_certificate
+                .as_ref()
+                .expect("new timeout authorization must remain installed")
+                .closing_round,
+            Round(1)
+        );
+    }
+
+    #[test]
+    fn six_validator_driver_survives_startup_loss_two_timeout_rounds_and_first_finality() {
+        let parameters = genesis_bound_parameters();
+        let (bootstrap, _genesis_anchor, deployed_genesis_state_root, coordinators, store_paths) =
+            six_validator_startup_fixture(parameters.clone());
+        let authorizer = FrozenTypedConsensusPeerAuthorizer::new(bootstrap.validator_set.clone())
+            .expect("freeze the six Genesis-bound P2P identities");
+        let mut drivers = coordinators
+            .into_iter()
+            .map(|coordinator| {
+                release_driver_with(
+                    coordinator,
+                    bootstrap.clone(),
+                    parameters.protocol_config.clone(),
+                    deployed_genesis_state_root,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        // Model the actual startup race: the scheduled height-one proposal is
+        // emitted before any remote typed mailbox is ready, so every initial
+        // proposal delivery is lost.  No live node is involved in this test.
+        for driver in &mut drivers {
+            let now = driver.round_started_at;
+            driver
+                .tick_at(now)
+                .expect("initial scheduler tick must be safe");
+        }
+        for driver in &mut drivers {
+            driver.egress.messages.clear();
+        }
+
+        // Exercise two complete no-proposal timeout transitions.  Relay only
+        // timeout evidence so the test proves that sequential certificates
+        // replace their predecessor authorization and that distinct valid
+        // signer subsets never create a fatal driver source conflict.
+        for expected_round in [Round(1), Round(2)] {
+            for driver in &mut drivers {
+                let round_cap = Duration::from_millis(
+                    driver
+                        .coordinator
+                        .consensus
+                        .protocol_config
+                        .max_round_timeout_ms,
+                );
+                driver
+                    .tick_at(driver.round_started_at + round_cap)
+                    .expect("timeout scheduling must emit a vote without halting");
+            }
+            let _ = relay_release_messages(&mut drivers, &authorizer, |message| {
+                matches!(
+                    message,
+                    TypedConsensusMessage::Vote { vote } if vote.phase == VotePhase::Timeout
+                ) || matches!(message, TypedConsensusMessage::TimeoutCertificate { .. })
+            });
+            for driver in &drivers {
+                assert_eq!(driver.coordinator.local_context.round, expected_round);
+                assert_eq!(
+                    driver
+                        .timeout_certificate
+                        .as_ref()
+                        .expect("the sequential timeout authorization remains available")
+                        .next_round,
+                    expected_round
+                );
+            }
+        }
+
+        // Restore delivery at round two and prove the exact driver path can
+        // form the height-one validation certificate, finality QC, persist
+        // finality, and derive the next Genesis-bound height authority.
+        for driver in &mut drivers {
+            let now = driver.round_started_at;
+            driver
+                .tick_at(now)
+                .expect("round-two scheduled proposal must be emitted");
+        }
+        let mut relay_errors = relay_release_messages(&mut drivers, &authorizer, |_| true);
+        for driver in &mut drivers {
+            driver
+                .tick_at(driver.round_started_at + Duration::from_millis(1_500))
+                .expect("validated proposal must emit its local validation vote");
+        }
+        relay_errors.extend(relay_release_messages(&mut drivers, &authorizer, |_| true));
+        for driver in &mut drivers {
+            driver
+                .tick_at(driver.round_started_at + Duration::from_millis(3_000))
+                .expect("prepared proposal must emit its local finality vote");
+        }
+        relay_errors.extend(relay_release_messages(&mut drivers, &authorizer, |_| true));
+
+        for (replica_index, driver) in drivers.iter().enumerate() {
+            assert_eq!(
+                driver.metrics().finalized_blocks,
+                1,
+                "replica {replica_index} did not finalize after startup loss recovery: metrics={:?}, round={:?}, stage={:?}, prepared={}, finality={}, relay_errors={:?}",
+                driver.metrics(),
+                driver.coordinator.local_context.round,
+                driver.stage,
+                driver.prepared_certificate.is_some(),
+                driver.finality_certificate.is_some(),
+                relay_errors,
+            );
+            assert_eq!(
+                driver.coordinator.local_context.height_context.height,
+                Height(2)
+            );
+            assert_eq!(
+                driver
+                    .coordinator
+                    .finality_store
+                    .latest()
+                    .expect("read durable typed finality")
+                    .expect("first block must be durable")
+                    .height,
+                Height(1)
+            );
+        }
+        drop(drivers);
+        for path in store_paths {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     #[test]
