@@ -1559,6 +1559,39 @@ fn ensure_local_validator_record_available(validator_address: &str) -> Result<()
     Ok(())
 }
 
+fn ensure_genesis_validator_membership_available() -> Result<usize, String> {
+    let genesis = canonical_genesis().map_err(|error| {
+        format!("failed to load canonical genesis for validator membership preflight: {error}")
+    })?;
+    let validator_addresses = genesis
+        .validators()
+        .iter()
+        .map(|validator| validator.operator_address.clone())
+        .collect::<Vec<_>>();
+    if validator_addresses.is_empty() {
+        return Err("canonical Testnet genesis contains no validators".to_string());
+    }
+
+    for validator_address in &validator_addresses {
+        ensure_local_validator_record_available(validator_address)?;
+    }
+
+    let active_validators =
+        consensus_membership_validators(VALIDATOR_MANAGER.get_active_validators());
+    for validator_address in &validator_addresses {
+        if !active_validators
+            .iter()
+            .any(|validator| validator.address == *validator_address)
+        {
+            return Err(format!(
+                "canonical Genesis validator {validator_address} is not ACTIVE after membership preload"
+            ));
+        }
+    }
+
+    Ok(validator_addresses.len())
+}
+
 fn normalize_expected_profile(
     config: &mut NodeConfig,
     expected_profile: Option<&'static RoleProfile>,
@@ -2634,16 +2667,16 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
             // state sync from peers it cannot authenticate.
             if is_validator_profile(role_profile) && !config.node.bootstrap_only {
                 let validator_address = resolve_local_validator_address(&config);
-                ensure_local_validator_record_available(&validator_address).unwrap_or_else(
-                    |error| {
+                let active_validator_count = ensure_genesis_validator_membership_available()
+                    .unwrap_or_else(|error| {
                         eprintln!("Validator Genesis membership preflight failed closed: {error}");
                         process::exit(1);
-                    },
-                );
+                    });
                 info!(
                     "main",
                     "Canonical Genesis validator membership loaded before P2P",
-                    "validator_address" => validator_address
+                    "validator_address" => validator_address,
+                    "active_validator_count" => active_validator_count as u64
                 );
             }
             info!(
