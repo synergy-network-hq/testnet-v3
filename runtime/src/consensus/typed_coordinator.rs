@@ -1224,6 +1224,10 @@ impl TypedPosyCoordinator {
             &self.local_context,
             &self.execution_state,
         )?;
+        // The verified QC is also the durable authority for the block's
+        // finalized round. Align the post-commit context with that round so
+        // the next-height provider can prove the exact predecessor context.
+        self.local_context.round = block.header.round;
         let candidate_id = self.record_accepted_proposal(&block)?;
         Ok(TypedCoordinatorEvent::ProposalAccepted { candidate_id })
     }
@@ -1934,10 +1938,10 @@ where
                 );
             }
             let finalized_context = self.coordinator.local_context.height_context.clone();
-            match self
-                .coordinator
-                .accept_core_proposal(finalized_context.clone(), supplied.block.clone())?
-            {
+            match self.coordinator.accept_finalized_core_proposal(
+                supplied.block.clone(),
+                &supplied.quorum_certificate,
+            )? {
                 TypedCoordinatorEvent::ProposalAccepted { .. } => {}
                 _ => {
                     return Err(
@@ -5541,64 +5545,104 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        // Validator zero receives the proposal and validation phase, then
-        // misses every finality vote/QC for height one. The other five still
-        // form the exact strict quorum, reproducing the launch failure where
-        // one typed mailbox came online too late for the certificate stream.
-        for driver in &mut drivers {
+        // Validator zero misses two entire timeout transitions while the
+        // other five form the exact strict quorum and finalize in round two.
+        // This reproduces a restarted replica holding only an older local
+        // round while its peers have durable finality from a much later round.
+        for driver in &mut drivers[1..] {
             let now = driver.round_started_at;
-            driver.tick_at(now).expect("height-one proposal scheduling");
+            driver
+                .tick_at(now)
+                .expect("initial proposal scheduling remains local");
         }
-        let mut relay_errors = relay_release_messages_with_delivery(
+        for driver in &mut drivers {
+            driver.egress.messages.clear();
+        }
+        let mut relay_errors = Vec::new();
+        let mut final_round = Round(0);
+        loop {
+            final_round = Round(final_round.0.saturating_add(1));
+            for driver in &mut drivers[1..] {
+                let round_cap = Duration::from_millis(
+                    driver
+                        .coordinator
+                        .consensus
+                        .protocol_config
+                        .max_round_timeout_ms,
+                );
+                driver
+                    .tick_at(driver.round_started_at + round_cap)
+                    .expect("caught-up replicas emit timeout votes");
+            }
+            relay_errors.extend(relay_release_messages_with_delivery(
+                &mut drivers,
+                &authorizer,
+                |message| {
+                    matches!(
+                        message,
+                        TypedConsensusMessage::Vote { vote } if vote.phase == VotePhase::Timeout
+                    ) || matches!(message, TypedConsensusMessage::TimeoutCertificate { .. })
+                },
+                |_, recipient, _| recipient != 0,
+            ));
+            assert_eq!(drivers[0].coordinator.local_context.round, Round(0));
+            for driver in &drivers[1..] {
+                assert_eq!(driver.coordinator.local_context.round, final_round);
+            }
+            let scheduled = drivers[1]
+                .coordinator
+                .consensus
+                .proposer_for(
+                    &drivers[1].coordinator.local_context.height_context,
+                    final_round,
+                )
+                .expect("finalized-round proposer");
+            if final_round.0 >= 2
+                && scheduled.validator_id != drivers[0].coordinator.local_validator_id
+            {
+                break;
+            }
+            assert!(
+                final_round.0 < 6,
+                "fixture must schedule a caught-up proposer"
+            );
+        }
+
+        for driver in &mut drivers[1..] {
+            let now = driver.round_started_at;
+            driver
+                .tick_at(now)
+                .expect("round-two scheduled proposal is emitted");
+        }
+        relay_errors.extend(relay_release_messages_with_delivery(
             &mut drivers,
             &authorizer,
             |_| true,
-            |_, recipient, message| {
-                recipient != 0
-                    || !matches!(
-                        message,
-                        TypedConsensusMessage::Vote { vote } if vote.phase == VotePhase::Finality
-                    ) && !matches!(message, TypedConsensusMessage::QuorumCertificate { .. })
-            },
-        );
-        for driver in &mut drivers {
+            |_, recipient, _| recipient != 0,
+        ));
+        for driver in &mut drivers[1..] {
             driver
                 .tick_at(driver.round_started_at + Duration::from_millis(1_500))
-                .expect("height-one validation vote");
+                .expect("round-two validation vote");
         }
         relay_errors.extend(relay_release_messages_with_delivery(
             &mut drivers,
             &authorizer,
             |_| true,
-            |_, recipient, message| {
-                recipient != 0
-                    || !matches!(
-                        message,
-                        TypedConsensusMessage::Vote { vote } if vote.phase == VotePhase::Finality
-                    ) && !matches!(message, TypedConsensusMessage::QuorumCertificate { .. })
-            },
+            |_, recipient, _| recipient != 0,
         ));
-        for driver in &mut drivers {
+        for driver in &mut drivers[1..] {
             driver
                 .tick_at(driver.round_started_at + Duration::from_millis(3_000))
-                .expect("height-one finality vote");
+                .expect("round-two finality vote");
         }
         relay_errors.extend(relay_release_messages_with_delivery(
             &mut drivers,
             &authorizer,
             |_| true,
-            |_, recipient, message| {
-                recipient != 0
-                    || !matches!(
-                        message,
-                        TypedConsensusMessage::Vote { vote } if vote.phase == VotePhase::Finality
-                    ) && !matches!(message, TypedConsensusMessage::QuorumCertificate { .. })
-            },
+            |_, recipient, _| recipient != 0,
         ));
-        // Once a five-of-six replica has finalized, late same-height votes
-        // and QCs from peers that have not yet observed it are correctly
-        // rejected as stale. The relay helper already asserts that none of
-        // these non-fatal rejections is a source conflict.
+
         assert_eq!(
             drivers[0].coordinator.local_context.latest_finalized_height,
             Height(0)
@@ -5642,6 +5686,12 @@ mod tests {
             .find(|message| matches!(message, TypedConsensusMessage::FinalityCheckpoint { records } if records.len() == 1 && records[0].height == Height(1)))
             .cloned()
             .expect("caught-up validator returns only the requested certified record");
+        assert!(matches!(
+            &checkpoint,
+            TypedConsensusMessage::FinalityCheckpoint { records }
+                if records[0].block.header.round == final_round
+                    && records[0].quorum_certificate.round == final_round
+        ));
         let checkpoint_replay = checkpoint.clone();
         let caught_up_peer = authenticated_peer_for_release_driver(&drivers[1]);
         drivers[0]
