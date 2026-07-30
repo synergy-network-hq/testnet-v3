@@ -63,29 +63,47 @@ case "$role:$host" in
     ;;
 esac
 
-for required in \
-  "$artifact_dir/SHA256SUMS" \
-  "$artifact_dir/TESTNET_SOURCE_REVISION" \
-  "$artifact_dir/release-config-manifest.json" \
-  "$artifact_dir/$artifact_name"; do
+required_payloads=(
+  "$artifact_dir/SHA256SUMS"
+  "$artifact_dir/TESTNET_SOURCE_REVISION"
+  "$artifact_dir/$artifact_name"
+)
+# The non-signing generic runtime is built and released independently of the
+# validator and relayer packages.  It must still checksum-bind both its
+# executable and immutable source revision, but it does not carry those
+# roles' configuration manifest.
+if [[ $role == relayer || $role == validator ]]; then
+  required_payloads+=("$artifact_dir/release-config-manifest.json")
+fi
+for required in "${required_payloads[@]}"; do
   [[ -f $required ]] || fail "required artifact payload is missing: $required"
 done
 
 source_revision=$(tr -d '[:space:]' < "$artifact_dir/TESTNET_SOURCE_REVISION")
 [[ $source_revision =~ ^[0-9a-f]{40}$ ]] || fail 'artifact source revision is invalid'
-[[ $source_revision == f19a2e373ec3cf2ef31c75fe299d62a36d62531a ]] ||
+[[ $source_revision == 6de99e5992735d04a6a5c29c6ffb26de1984e6f3 ]] ||
   fail "artifact is not bound to the authorized Testnet-v3 source revision: $source_revision"
 
 checksum_entries=0
 while read -r expected recorded_path; do
   [[ $expected =~ ^[0-9a-f]{64}$ ]] || fail 'artifact checksum manifest contains an invalid digest'
   name=${recorded_path##*/}
-  case "$name" in
-    synergy-node-linux-amd64|\
-      synergy-validator-node-linux-amd64|\
-      synergy-relayer-node-linux-amd64|\
-      release-config-manifest.json|\
-      TESTNET_SOURCE_REVISION)
+  case "$role:$name" in
+    rpc-gateway:synergy-node-linux-amd64|\
+      explorer-indexer:synergy-node-linux-amd64|\
+      rpc-gateway:TESTNET_SOURCE_REVISION|\
+      explorer-indexer:TESTNET_SOURCE_REVISION)
+      ;;
+    relayer:synergy-node-linux-amd64|\
+      relayer:synergy-validator-node-linux-amd64|\
+      relayer:synergy-relayer-node-linux-amd64|\
+      relayer:release-config-manifest.json|\
+      relayer:TESTNET_SOURCE_REVISION|\
+      validator:synergy-node-linux-amd64|\
+      validator:synergy-validator-node-linux-amd64|\
+      validator:synergy-relayer-node-linux-amd64|\
+      validator:release-config-manifest.json|\
+      validator:TESTNET_SOURCE_REVISION)
       ;;
     *)
       fail "artifact checksum manifest contains an unexpected path: $recorded_path"
@@ -96,7 +114,12 @@ while read -r expected recorded_path; do
     fail "artifact checksum mismatch: $name"
   checksum_entries=$((checksum_entries + 1))
 done < "$artifact_dir/SHA256SUMS"
-[[ $checksum_entries -eq 5 ]] || fail 'artifact checksum manifest must contain exactly five entries'
+expected_checksum_entries=5
+if [[ $role == rpc-gateway || $role == explorer-indexer ]]; then
+  expected_checksum_entries=2
+fi
+[[ $checksum_entries -eq $expected_checksum_entries ]] ||
+  fail "artifact checksum manifest must contain exactly $expected_checksum_entries entries for $role"
 
 binary="$artifact_dir/$artifact_name"
 binary_sha256=$(sha256 "$binary")
