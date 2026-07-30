@@ -121,9 +121,6 @@ while read -r expected recorded_path; do
   checksum_entries=$((checksum_entries + 1))
 done < "$artifact_dir/SHA256SUMS"
 expected_checksum_entries=5
-if [[ $role == rpc-gateway || $role == explorer-indexer ]]; then
-  expected_checksum_entries=2
-fi
 [[ $checksum_entries -eq $expected_checksum_entries ]] ||
   fail "artifact checksum manifest must contain exactly $expected_checksum_entries entries for $role"
 
