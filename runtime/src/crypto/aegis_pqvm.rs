@@ -799,16 +799,20 @@ impl AegisPqvmVerifier {
                     ));
                 }
                 if let Some(root) = subject.highest_prepared_vc_root {
-                    let current = (subject.block_id.clone(), root);
-                    if prepared_subject
-                        .as_ref()
-                        .is_some_and(|existing| existing != &current)
-                    {
-                        return Err(AegisPqvmError(
-                            "TC contains conflicting prepared subjects".to_string(),
-                        ));
+                    match prepared_subject.as_mut() {
+                        None => {
+                            prepared_subject = Some((subject.block_id.clone(), root));
+                        }
+                        Some((candidate, _)) if candidate != &subject.block_id => {
+                            return Err(AegisPqvmError(
+                                "TC contains conflicting prepared candidates".to_string(),
+                            ));
+                        }
+                        Some((_, selected_root)) if root < *selected_root => {
+                            *selected_root = root;
+                        }
+                        Some(_) => {}
                     }
-                    prepared_subject = Some(current);
                 }
             }
             let declared = certificate

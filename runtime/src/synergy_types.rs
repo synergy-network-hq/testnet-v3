@@ -1157,7 +1157,8 @@ pub struct TimeoutCertificate {
     /// different local prepared knowledge.  Version-1 certificates omitted
     /// this vector and therefore supported only a homogeneous timeout
     /// subject.  Version-2 certificates retain every signed subject while the
-    /// certificate-level fields select the sole non-empty prepared subject,
+    /// certificate-level fields select the sole prepared candidate and the
+    /// lexicographically smallest valid proof root reported for that candidate,
     /// if one exists.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub timeout_vote_subjects: Vec<TimeoutVoteSubject>,

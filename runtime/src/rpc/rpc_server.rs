@@ -1181,6 +1181,7 @@ fn canonical_cluster_status(
 fn recent_active_validator_addresses(
     chain: &BlockChain,
     total_known_validators: usize,
+    validator_id_to_address: &HashMap<String, String>,
 ) -> HashSet<String> {
     let window = total_known_validators.max(10).saturating_mul(12);
     chain
@@ -1189,7 +1190,12 @@ fn recent_active_validator_addresses(
         .rev()
         .filter(|block| block.block_index > 0 && block.validator_id != "genesis")
         .take(window)
-        .map(|block| block.validator_id.clone())
+        .map(|block| {
+            validator_id_to_address
+                .get(&block.validator_id)
+                .cloned()
+                .unwrap_or_else(|| block.validator_id.clone())
+        })
         .collect()
 }
 
@@ -1224,11 +1230,13 @@ fn network_validator_snapshot(
         .map(|genesis| genesis.timestamp())
         .unwrap_or(0);
     let configured_addresses = configured_validator_addresses();
+    let mut validator_id_to_address = HashMap::new();
 
     if let Ok(genesis) = canonical_genesis() {
         let configured_validator_count = configured_addresses.len().max(genesis.validators().len());
         for (index, entry) in genesis.validators().iter().enumerate() {
             let address = entry.operator_address.clone();
+            validator_id_to_address.insert(entry.validator_id.clone(), address.clone());
             let validator = validators.entry(address.clone()).or_insert_with(|| {
                 synthesize_validator(
                     address.clone(),
@@ -1276,10 +1284,14 @@ fn network_validator_snapshot(
         .iter()
         .filter(|block| block.block_index > 0)
         .count() as u64;
-    let recent_active = recent_active_validator_addresses(chain, validators.len());
+    let recent_active =
+        recent_active_validator_addresses(chain, validators.len(), &validator_id_to_address);
 
     for block in chain.chain.iter().filter(|block| block.block_index > 0) {
-        let address = block.validator_id.clone();
+        let address = validator_id_to_address
+            .get(&block.validator_id)
+            .cloned()
+            .unwrap_or_else(|| block.validator_id.clone());
         let validator = validators.entry(address.clone()).or_insert_with(|| {
             synthesize_validator(
                 address.clone(),
@@ -12468,7 +12480,7 @@ mod tests {
             1,
             Vec::new(),
             chain.last().unwrap().hash.clone(),
-            first_validator.operator_address.clone(),
+            first_validator.validator_id.clone(),
             1,
             genesis.timestamp().saturating_add(2),
         ));
@@ -12476,7 +12488,7 @@ mod tests {
         let validator_manager = ValidatorManager::new();
         let validators = network_validator_snapshot(&chain, &validator_manager);
         let matched = validators
-            .into_iter()
+            .iter()
             .find(|validator| validator.address == first_validator.operator_address)
             .expect("canonical validator should be present in synthesized snapshot");
 
@@ -12484,6 +12496,13 @@ mod tests {
         assert_eq!(matched.stake_amount, first_validator.stake_nwei);
         assert_eq!(matched.status, ValidatorStatus::Active);
         assert_eq!(matched.total_blocks_produced, 1);
+        assert_eq!(matched.last_active, genesis.timestamp().saturating_add(2));
+        assert!(
+            validators
+                .iter()
+                .all(|validator| validator.address != first_validator.validator_id),
+            "genesis validator IDs must not create duplicate alias rows"
+        );
     }
 
     #[test]

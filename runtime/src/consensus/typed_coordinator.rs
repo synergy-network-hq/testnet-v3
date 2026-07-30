@@ -5035,6 +5035,82 @@ mod tests {
     }
 
     #[test]
+    fn timeout_certificate_canonicalizes_vc_roots_for_one_prepared_candidate() {
+        let mut coordinator = coordinator_fixture();
+        let scheduled = coordinator
+            .consensus
+            .proposer_for(&coordinator.local_context.height_context, Round(0))
+            .expect("round-zero proposer");
+        coordinator.local_validator_id = scheduled.validator_id;
+        let mut driver = driver_with(coordinator, 1);
+        driver.tick().expect("emit deterministic core proposal");
+        let block = driver
+            .current_round_proposal()
+            .expect("local proposal is accepted")
+            .clone();
+        let validators = driver
+            .coordinator
+            .consensus
+            .validator_set
+            .validators
+            .clone();
+        let height_context = driver.coordinator.local_context.height_context.clone();
+        let validation_votes = validators
+            .iter()
+            .map(|validator| {
+                driver.coordinator.consensus.validation_vote(
+                    &mut driver.coordinator.signer,
+                    validator,
+                    &block,
+                    &height_context,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .expect("fixture validation votes");
+        let prepared_a = driver
+            .coordinator
+            .form_validation_certificate(&validation_votes[..5])
+            .expect("first strict-quorum VC");
+        let prepared_b = driver
+            .coordinator
+            .form_validation_certificate(&validation_votes[1..])
+            .expect("second strict-quorum VC");
+        let root_a = prepared_a.root().expect("first VC root");
+        let root_b = prepared_b.root().expect("second VC root");
+        assert_ne!(root_a, root_b);
+        assert_eq!(prepared_a.candidate_id, prepared_b.candidate_id);
+
+        let timeout_votes = validators
+            .iter()
+            .enumerate()
+            .map(|(index, validator)| {
+                driver.coordinator.consensus.timeout_vote(
+                    &mut driver.coordinator.signer,
+                    validator,
+                    &height_context,
+                    Round(0),
+                    Some(if index < 3 { &prepared_a } else { &prepared_b }),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .expect("same-candidate timeout votes remain individually valid");
+        let certificate = driver
+            .coordinator
+            .form_timeout_certificate(&timeout_votes[..5])
+            .expect("different VC roots for one candidate form a TC");
+
+        assert_eq!(
+            certificate.carry_forward_candidate_id.as_ref(),
+            Some(&prepared_a.candidate_id)
+        );
+        assert_eq!(
+            certificate.highest_prepared_vc_root,
+            Some(std::cmp::min(root_a, root_b))
+        );
+        assert_eq!(certificate.timeout_vote_subjects.len(), 5);
+    }
+
+    #[test]
     fn different_valid_vc_root_for_same_candidate_requests_exact_recovery() {
         let mut coordinator = coordinator_fixture();
         let scheduled = coordinator

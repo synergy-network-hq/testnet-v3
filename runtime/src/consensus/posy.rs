@@ -1248,7 +1248,7 @@ impl ProofOfSynergyBft {
             }
             _ => {}
         }
-        let mut timeout_prepared_subject = None;
+        let mut timeout_prepared_subject: Option<(BlockId, Hash)> = None;
         if first.phase == VotePhase::Timeout {
             for vote in &verified {
                 if vote.highest_prepared_vc_root.is_some() != !vote.block_id.0.is_empty() {
@@ -1258,16 +1258,25 @@ impl ProofOfSynergyBft {
                     );
                 }
                 if let Some(root) = vote.highest_prepared_vc_root {
-                    let current = (vote.block_id.clone(), root);
-                    if timeout_prepared_subject
-                        .as_ref()
-                        .is_some_and(|existing| existing != &current)
-                    {
-                        return Err(
-                            "timeout votes report conflicting prepared candidates".to_string()
-                        );
+                    match timeout_prepared_subject.as_mut() {
+                        None => {
+                            timeout_prepared_subject = Some((vote.block_id.clone(), root));
+                        }
+                        Some((candidate, _)) if candidate != &vote.block_id => {
+                            return Err(
+                                "timeout votes report conflicting prepared candidates".to_string()
+                            );
+                        }
+                        Some((_, selected_root)) if root < *selected_root => {
+                            // A single prepared candidate may have multiple valid VCs
+                            // assembled from different strict-quorum signer subsets.
+                            // Select one proof root deterministically; replicas that
+                            // hold another valid proof for the same candidate recover
+                            // the selected proof before carrying the candidate forward.
+                            *selected_root = root;
+                        }
+                        Some(_) => {}
                     }
-                    timeout_prepared_subject = Some(current);
                 }
             }
         }
