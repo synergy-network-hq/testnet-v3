@@ -4312,9 +4312,60 @@ fn peer_endpoint_matches_configured_list(
     };
     configured_addresses.into_iter().any(|address| {
         parse_bootnode_dial_address(address.as_ref()).is_some_and(|configured| {
-            connected_endpoint_matches_configured_address(&endpoint, &configured)
+            match peer.direction {
+                // A locally initiated connection must terminate at the exact
+                // configured listener.  This keeps the ordinary dial path
+                // strict, including its port.
+                ConnectionDirection::Outgoing => {
+                    connected_endpoint_matches_configured_address(&endpoint, &configured)
+                }
+                // On a remotely initiated TCP connection, the peer's source
+                // port is intentionally ephemeral.  Accept it only when the
+                // observed source *host* is the configured host and the
+                // authenticated handshake commits to that exact configured
+                // advertised listener.  A claimed public address alone is
+                // never sufficient, and neither is a source-host match alone.
+                ConnectionDirection::Incoming => {
+                    connected_endpoint_host_matches_configured_address(&endpoint, &configured)
+                        && peer
+                            .public_address
+                            .as_deref()
+                            .and_then(parse_bootnode_dial_address)
+                            .is_some_and(|advertised| advertised == configured)
+                }
+            }
         })
     })
+}
+
+fn connected_endpoint_host_matches_configured_address(
+    connected_address: &str,
+    configured_address: &str,
+) -> bool {
+    let Some((connected_host, _connected_port)) = endpoint_host_port(connected_address) else {
+        return false;
+    };
+    let Some((configured_host, _configured_port)) = endpoint_host_port(configured_address) else {
+        return false;
+    };
+
+    let Some(connected_ip) = connected_host.parse::<std::net::IpAddr>().ok() else {
+        // The observed socket endpoint must be numeric.  A self-reported
+        // hostname is not transport evidence.
+        return false;
+    };
+    if let Some(configured_ip) = configured_host.parse::<std::net::IpAddr>().ok() {
+        return connected_ip == configured_ip;
+    }
+
+    configured_host
+        .to_socket_addrs()
+        .map(|addresses| {
+            addresses
+                .into_iter()
+                .any(|address| address.ip() == connected_ip)
+        })
+        .unwrap_or(false)
 }
 
 fn connected_endpoint_matches_configured_address(
@@ -4472,7 +4523,21 @@ fn peer_is_validator_vpn_relayer(peer: &PeerConnection) -> bool {
         .unwrap_or(false)
         && peer_connected_endpoint(peer)
             .as_deref()
-            .is_some_and(is_validator_vpn_relayer_dial_address)
+            .is_some_and(|endpoint| match peer.direction {
+                ConnectionDirection::Outgoing => is_validator_vpn_relayer_dial_address(endpoint),
+                // A relayer may also connect into a validator.  TCP assigns
+                // that connection an ephemeral source port, so retain the
+                // signed relayer role and verify only the canonical VPN host
+                // range on this inbound path.
+                ConnectionDirection::Incoming => validator_vpn_dial_octets(endpoint)
+                    .map(|octets| {
+                        octets[0] == 10
+                            && octets[1] == 70
+                            && octets[2] == 20
+                            && (1..=254).contains(&octets[3])
+                    })
+                    .unwrap_or(false),
+            })
 }
 
 fn local_is_typed_finality_relayer(config: &NodeConfig) -> bool {
@@ -11903,6 +11968,15 @@ mod tests {
         vpn_relayer.connected_endpoint = Some("10.70.20.1:5622".to_string());
         assert!(peer_is_validator_vpn_relayer(&vpn_relayer));
 
+        let mut inbound_vpn_relayer = test_peer_with_validator_address(None);
+        inbound_vpn_relayer.handshake_role = Some("relayer".to_string());
+        inbound_vpn_relayer.direction = ConnectionDirection::Incoming;
+        inbound_vpn_relayer.connected_endpoint = Some("10.70.20.1:49152".to_string());
+        assert!(
+            peer_is_validator_vpn_relayer(&inbound_vpn_relayer),
+            "a signed relayer arriving from its canonical VPN host may use an ephemeral TCP source port"
+        );
+
         let mut public_relayer = vpn_relayer;
         public_relayer.connected_endpoint = Some("73.79.66.255:5622".to_string());
         assert!(
@@ -11918,9 +11992,22 @@ mod tests {
         let mut canonical_indexer = test_peer_with_validator_address(None);
         canonical_indexer.handshake_role = Some("indexer_explorer".to_string());
         canonical_indexer.connected_endpoint = Some("74.208.227.23:5622".to_string());
+        canonical_indexer.public_address = Some("74.208.227.23:5622".to_string());
         assert!(
             peer_is_designated_support_sync_source(&config, &canonical_indexer),
             "the canonical Atlas indexer must be allowed to pull only verified relayer finality"
+        );
+
+        canonical_indexer.connected_endpoint = Some("74.208.227.23:49152".to_string());
+        assert!(
+            peer_is_designated_support_sync_source(&config, &canonical_indexer),
+            "a signed canonical support endpoint may use an ephemeral TCP source port on an inbound connection"
+        );
+
+        canonical_indexer.public_address = Some("74.208.227.23:5623".to_string());
+        assert!(
+            !peer_is_designated_support_sync_source(&config, &canonical_indexer),
+            "a source-host match without the signed canonical listener must fail closed"
         );
 
         config.identity.role = "rpc_gateway".to_string();
