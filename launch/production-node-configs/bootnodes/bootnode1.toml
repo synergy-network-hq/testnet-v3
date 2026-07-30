@@ -3,14 +3,14 @@
 
 [identity]
 node_id = "bootnode1"
-role = "bootnode"
-role_display = "bootnode"
+role = "observer_light"
+role_display = "observer_light"
 address = "synv51tcac0y8u8vyecnrwhnfe77rpcg232pp78az"
 label = "bootnode1"
 
 [role]
-compiled_profile = ""
-services = []
+compiled_profile = "observer_light_node"
+services = ["observer"]
 
 [network]
 id = 1266

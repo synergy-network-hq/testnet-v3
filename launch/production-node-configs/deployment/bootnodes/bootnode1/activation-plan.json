@@ -1,7 +1,7 @@
 {
   "config_install_mode": "manual_merge_only_preserve_existing_identity_key_port_and_endpoint_settings",
   "config_payload": "bootnodes/bootnode1.toml",
-  "config_payload_sha256": "6bac76f50adb15b5f93cfc732ff442bde9a63154fab6d1b8511ee7fd9bec2d3a",
+  "config_payload_sha256": "6d1ce089f53e29c02e7725a1aec28cc0eb84e066cf65a2c2b028d9aa5de244d8",
   "dedicated_install_map": {},
   "dedicated_payloads": {},
   "environment_install_mode": "merge_release_binding_only_never_replace_existing_environment_file",

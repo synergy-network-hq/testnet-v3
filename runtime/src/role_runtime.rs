@@ -2623,6 +2623,29 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                     );
                     process::exit(1);
                 });
+            // Genesis validators must be present in the in-memory canonical
+            // registry before P2P constructs its typed PoSy handshake.  The
+            // handshake proves possession of the Genesis-assigned ML-DSA-65
+            // key and therefore cannot bootstrap registration itself.
+            //
+            // Without this ordering, every Genesis validator starts with an
+            // empty process-local registry, rejects every peer as
+            // "validator ... is not registered", and then waits forever for
+            // state sync from peers it cannot authenticate.
+            if is_validator_profile(role_profile) && !config.node.bootstrap_only {
+                let validator_address = resolve_local_validator_address(&config);
+                ensure_local_validator_record_available(&validator_address).unwrap_or_else(
+                    |error| {
+                        eprintln!("Validator Genesis membership preflight failed closed: {error}");
+                        process::exit(1);
+                    },
+                );
+                info!(
+                    "main",
+                    "Canonical Genesis validator membership loaded before P2P",
+                    "validator_address" => validator_address
+                );
+            }
             info!(
                 "main",
                 "Canonical genesis loaded",

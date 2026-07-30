@@ -24,6 +24,9 @@ ProtectSystem=strict
 Restart=on-failure
 RestartSec=5
 EnvironmentFile=/etc/synergy/testnet-v3/bootnode2/runtime.env
+Environment=SYNERGY_PROJECT_ROOT=/var/lib/synergy-testnet-v3-bootnode2
+Environment=SYNERGY_CONFIG_PATH=/etc/synergy/testnet-v3/bootnode2/node.toml
 Environment=SYNERGY_CONFIG_FILE=/etc/synergy/testnet-v3/bootnode2/node.toml
-Environment=SYNERGY_CONFIG_SHA256=39495a7893aa3c4655eb571ab51fece2db4072d4d54c10188eb8ab1a95f3f52b
+Environment=SYNERGY_CONFIG_SHA256=7a9ede778c4ea2b9e84a6548842d9a6e0311485fc5796d095c405a1ae624f0a9
+ExecStartPre=/usr/bin/mkdir -p /var/lib/synergy-testnet-v3-bootnode2/config
 ExecStart=/opt/synergy/testnet-v3/bin/synergy-release-guard

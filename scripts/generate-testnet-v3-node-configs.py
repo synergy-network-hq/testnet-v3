@@ -684,7 +684,10 @@ def output_path(group: str, entry: dict[str, Any]) -> Path:
 
 def role_fields(group: str) -> tuple[str, str, list[str]]:
     return {
-        "bootnodes": ("bootnode", "", []),
+        # The runtime uses the observer/light profile for non-consensus
+        # bootstrap peers. `bootstrap_only = true` below still suppresses
+        # sync, RPC, and consensus while keeping the P2P bootstrap surface.
+        "bootnodes": ("observer_light", "observer_light_node", ["observer"]),
         "seed_servers": ("seed_server", "", []),
         "relayers": ("relayer", "relayer_node", ["relayer"]),
         "validators": ("validator", "validator_node", ["consensus"]),
@@ -1228,8 +1231,11 @@ def dedicated_systemd_unit(
             fail("dedicated runtime unit requires a config SHA-256 value")
         common.extend([
             f"EnvironmentFile={runtime_environment}",
+            f"Environment=SYNERGY_PROJECT_ROOT={data_root}",
+            f"Environment=SYNERGY_CONFIG_PATH={config_path}",
             f"Environment=SYNERGY_CONFIG_FILE={config_path}",
             f"Environment=SYNERGY_CONFIG_SHA256={runtime_config_sha256}",
+            f"ExecStartPre=/usr/bin/mkdir -p {data_root}/config",
             f"ExecStart={guard_path}",
         ])
     rendered = ("\n".join(common) + "\n").encode()

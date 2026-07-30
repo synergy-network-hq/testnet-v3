@@ -24,6 +24,9 @@ ProtectSystem=strict
 Restart=on-failure
 RestartSec=5
 EnvironmentFile=/etc/synergy/testnet-v3/explorer-indexer/runtime.env
+Environment=SYNERGY_PROJECT_ROOT=/var/lib/synergy-testnet-v3-explorer-indexer
+Environment=SYNERGY_CONFIG_PATH=/etc/synergy/testnet-v3/explorer-indexer/node.toml
 Environment=SYNERGY_CONFIG_FILE=/etc/synergy/testnet-v3/explorer-indexer/node.toml
 Environment=SYNERGY_CONFIG_SHA256=e4552a52dab8bf791818acb24f65f2717f3e74b2770e50c70b6af257f41449b5
+ExecStartPre=/usr/bin/mkdir -p /var/lib/synergy-testnet-v3-explorer-indexer/config
 ExecStart=/opt/synergy/testnet-v3/bin/synergy-release-guard

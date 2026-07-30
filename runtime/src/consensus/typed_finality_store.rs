@@ -274,6 +274,14 @@ fn default_typed_finality_path() -> PathBuf {
         .unwrap_or_else(|| crate::utils::resolve_data_path(TYPED_FINALITY_FILE))
 }
 
+/// Returns the exact configured typed-finality path without opening or
+/// creating it. Read-only surfaces use this to distinguish a node that has
+/// not entered typed finality yet from a present store that must be validated
+/// and treated as authoritative.
+pub(crate) fn configured_typed_finality_path() -> PathBuf {
+    default_typed_finality_path()
+}
+
 fn sync_parent_directory(parent: Option<&Path>) -> Result<(), String> {
     let Some(parent) = parent else {
         return Ok(());
