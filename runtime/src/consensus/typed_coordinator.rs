@@ -2186,7 +2186,7 @@ where
             VotePhase::Timeout => &mut self.observed_timeout_votes,
         };
         if let Some(existing) = observations.get(&vote.validator_id) {
-            if existing != &vote {
+            if existing.signing_bytes()? != vote.signing_bytes()? {
                 return Err(
                     "TYPED_DRIVER_SOURCE_CONFLICT: validator supplied conflicting votes for one height/round/phase"
                         .to_string(),
@@ -2660,7 +2660,7 @@ where
 
 fn insert_distinct_vote(votes: &mut BTreeMap<ValidatorId, Vote>, vote: Vote) -> Result<(), String> {
     if let Some(existing) = votes.get(&vote.validator_id) {
-        if existing != &vote {
+        if existing.signing_bytes()? != vote.signing_bytes()? {
             return Err(
                 "TYPED_DRIVER_SOURCE_CONFLICT: validator supplied conflicting votes for one consensus phase"
                     .to_string(),
@@ -3222,6 +3222,27 @@ mod tests {
         reset_typed_coordinator_ingress_for_test();
         let error = dispatch_typed_consensus_message("peer-a", None, vote()).unwrap_err();
         assert!(error.contains("coordinator is not running"));
+    }
+
+    #[test]
+    fn randomized_signature_replay_keeps_one_vote_subject() {
+        let TypedConsensusMessage::Vote { vote: first } = vote() else {
+            unreachable!("vote fixture")
+        };
+        let mut votes = BTreeMap::new();
+        insert_distinct_vote(&mut votes, first.clone()).expect("first verified vote");
+
+        let mut randomized_replay = first.clone();
+        randomized_replay.aegis_pq_signature.signature_bytes = vec![2, 3, 4];
+        insert_distinct_vote(&mut votes, randomized_replay)
+            .expect("a randomized signature over the same payload is idempotent");
+        assert_eq!(votes.len(), 1);
+
+        let mut conflict = first;
+        conflict.block_id = BlockId("conflicting-candidate".to_string());
+        assert!(insert_distinct_vote(&mut votes, conflict)
+            .unwrap_err()
+            .contains("TYPED_DRIVER_SOURCE_CONFLICT"));
     }
 
     #[test]

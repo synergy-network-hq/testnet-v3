@@ -65,6 +65,12 @@ impl ConsensusSigningAuthorization {
                         "validate/finality authorization requires a candidate id".to_string()
                     );
                 }
+                if self.highest_prepared_vc_root.is_some() {
+                    return Err(
+                        "proposal/validate/finality authorization cannot carry a prepared VC root"
+                            .to_string(),
+                    );
+                }
             }
             ConsensusSigningPhase::Timeout => {}
         }
@@ -81,12 +87,7 @@ impl ConsensusSigningAuthorization {
             protocol_version: self.protocol_version.clone(),
             epoch: self.epoch,
             height: self.height,
-            round: match self.phase {
-                ConsensusSigningPhase::Finality => None,
-                ConsensusSigningPhase::Proposal
-                | ConsensusSigningPhase::Validate
-                | ConsensusSigningPhase::Timeout => Some(self.round),
-            },
+            round: Some(self.round),
             height_context_root: self.height_context_root,
             validator_id: self.validator_id.clone(),
             key_id: self.key_id.clone(),
@@ -242,6 +243,27 @@ impl DurableConsensusSigningAuthority {
             ));
         }
         let slot = authorization.slot_key();
+        if authorization.phase == ConsensusSigningPhase::Finality {
+            let conflicting_candidate = journal.records.iter().find(|record| {
+                let existing = &record.authorization;
+                existing.phase == ConsensusSigningPhase::Finality
+                    && existing.chain_id == authorization.chain_id
+                    && existing.network_id == authorization.network_id
+                    && existing.protocol_version == authorization.protocol_version
+                    && existing.epoch == authorization.epoch
+                    && existing.height == authorization.height
+                    && existing.height_context_root == authorization.height_context_root
+                    && existing.validator_id == authorization.validator_id
+                    && existing.key_id == authorization.key_id
+                    && existing.candidate_id != authorization.candidate_id
+            });
+            if let Some(existing) = conflicting_candidate {
+                return Err(format!(
+                    "CONSENSUS_SIGNING_CONFLICT: Finality height already authorizes candidate {:?}",
+                    existing.authorization.candidate_id
+                ));
+            }
+        }
         if let Some(existing) = journal.records.iter().find(|record| record.slot == slot) {
             if existing.authorization == *authorization
                 && existing.authorization_root == authorization_root
@@ -542,6 +564,11 @@ mod tests {
         authority.authorize_before_signature(&first).unwrap();
 
         let restarted = DurableConsensusSigningAuthority::at_path(authority.path().to_path_buf());
+        let carried = authorization(ConsensusSigningPhase::Finality, 4, "candidate-a");
+        assert!(
+            restarted.authorize_before_signature(&carried).is_ok(),
+            "the exact stable candidate may be finalized again in a TC-authorized later round"
+        );
         let conflicting = authorization(ConsensusSigningPhase::Finality, 4, "candidate-b");
         assert!(restarted
             .authorize_before_signature(&conflicting)
