@@ -263,6 +263,40 @@ impl DurableConsensusSigningAuthority {
         Ok(authorization_root)
     }
 
+    /// Returns the authorization already durably recorded for the same signing
+    /// slot, if one exists.
+    ///
+    /// The slot key deliberately excludes `candidate_id`, so a slot can only
+    /// ever be authorized once. A `Timeout` authorization nevertheless commits
+    /// to the highest prepared candidate, and the `ValidationCertificate` that
+    /// determines it is in-memory only. After a restart the node cannot
+    /// recompute that value, so if it derives a fresh authorization it produces
+    /// a *different* one for a slot it has already used;
+    /// [`Self::authorize_before_signature`] then correctly refuses with
+    /// `CONSENSUS_SIGNING_CONFLICT` and the node can never make progress again.
+    ///
+    /// Callers use this to re-emit exactly what they already committed to,
+    /// which is the safest available choice: it reproduces the durable record
+    /// byte-for-byte and takes the idempotent path. This never authorizes
+    /// anything new and never relaxes the conflict check.
+    pub fn recorded_authorization_for_slot(
+        &self,
+        probe: &ConsensusSigningAuthorization,
+    ) -> Result<Option<ConsensusSigningAuthorization>, String> {
+        probe.validate()?;
+        let lock = PROCESS_WIDE_SIGNING_LOCK.get_or_init(|| Mutex::new(()));
+        let _guard = lock
+            .lock()
+            .map_err(|_| "consensus signing authority lock poisoned".to_string())?;
+        let slot = probe.slot_key();
+        Ok(self
+            .load_unlocked()?
+            .records
+            .into_iter()
+            .find(|record| record.slot == slot)
+            .map(|record| record.authorization))
+    }
+
     pub fn contains_exact(
         &self,
         authorization: &ConsensusSigningAuthorization,
@@ -514,6 +548,63 @@ mod tests {
             .unwrap_err()
             .contains("CONSENSUS_SIGNING_CONFLICT"));
         assert!(restarted.contains_exact(&first).unwrap());
+    }
+
+    #[test]
+    fn recorded_timeout_slot_is_recoverable_after_losing_in_memory_prepared_state() {
+        // Regression for the Testnet-v3 height-91 deadlock: a Timeout
+        // authorization commits to the highest prepared candidate, but the
+        // ValidationCertificate that determines it is in-memory only. A restart
+        // therefore derived a *different* authorization for an already-used slot,
+        // authorize_before_signature correctly refused with
+        // CONSENSUS_SIGNING_CONFLICT, the typed worker failed closed, and systemd
+        // replayed the identical failure forever.
+        let authority = temp_authority("timeout-slot-recovery");
+        let mut committed = authorization(ConsensusSigningPhase::Timeout, 0, "prepared-candidate");
+        committed.highest_prepared_vc_root = Some(Hash::from_domain_bytes("vc", b"prepared"));
+        let committed_root = authority
+            .authorize_before_signature(&committed)
+            .expect("first timeout authorization");
+
+        // Exactly what a restarted process derives with no prepared VC in memory.
+        let mut rederived = authorization(ConsensusSigningPhase::Timeout, 0, "prepared-candidate");
+        rederived.candidate_id = None;
+        rederived.highest_prepared_vc_root = None;
+
+        let restarted = DurableConsensusSigningAuthority::at_path(authority.path().to_path_buf());
+        let error = restarted
+            .authorize_before_signature(&rederived)
+            .expect_err("a different candidate must still be refused");
+        assert!(
+            error.contains("CONSENSUS_SIGNING_CONFLICT"),
+            "unexpected error: {error}"
+        );
+
+        // The recovery path returns exactly what was committed, so the caller can
+        // re-emit it and take the idempotent branch instead of deadlocking.
+        let recovered = restarted
+            .recorded_authorization_for_slot(&rederived)
+            .expect("slot lookup")
+            .expect("the slot is already recorded");
+        assert_eq!(recovered, committed);
+        assert_eq!(
+            restarted.authorize_before_signature(&recovered),
+            Ok(committed_root),
+            "re-emitting the recorded authorization must be idempotent"
+        );
+    }
+
+    #[test]
+    fn unused_timeout_slot_has_no_recorded_authorization() {
+        let authority = temp_authority("timeout-slot-absent");
+        let mut probe = authorization(ConsensusSigningPhase::Timeout, 0, "unused");
+        probe.candidate_id = None;
+        assert_eq!(
+            authority
+                .recorded_authorization_for_slot(&probe)
+                .expect("slot lookup"),
+            None
+        );
     }
 
     #[test]

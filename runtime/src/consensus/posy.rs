@@ -1091,15 +1091,52 @@ impl ProofOfSynergyBft {
         {
             return Err("validator is not eligible to sign timeout".to_string());
         }
-        let (candidate_id, highest_prepared_vc_root) = if let Some(vc) = highest_prepared_vc {
-            self.verify_vc(vc, height_context)?;
-            if vc.round.0 > closing_round.0 {
-                return Err("highest prepared VC is from a future round".to_string());
-            }
-            (vc.candidate_id.clone(), Some(vc.root()?))
-        } else {
-            (BlockId(String::new()), None)
-        };
+        let (mut candidate_id, mut highest_prepared_vc_root) =
+            if let Some(vc) = highest_prepared_vc {
+                self.verify_vc(vc, height_context)?;
+                if vc.round.0 > closing_round.0 {
+                    return Err("highest prepared VC is from a future round".to_string());
+                }
+                (vc.candidate_id.clone(), Some(vc.root()?))
+            } else {
+                (BlockId(String::new()), None)
+            };
+
+        // This timeout slot may already be durably authorized by a previous
+        // process. The prepared `ValidationCertificate` that determined the
+        // recorded candidate is in-memory only, so after a restart the value
+        // above is derived from state this process no longer has, and would be a
+        // second, different authorization for a slot that can only be authorized
+        // once. `authorize_before_signature` would correctly reject it with
+        // `CONSENSUS_SIGNING_CONFLICT`, the typed worker would fail closed, and
+        // systemd would replay the identical failure forever — a deterministic
+        // liveness deadlock with no equivocation and no safety halt.
+        //
+        // Re-emit exactly what this validator already committed to. That is the
+        // safest available value: it reproduces the durable record byte-for-byte
+        // and takes the idempotent path in the signing authority.
+        let recorded = self
+            .signing_authority
+            .recorded_authorization_for_slot(&ConsensusSigningAuthorization {
+                chain_id: height_context.chain_id,
+                network_id: height_context.network_id.clone(),
+                protocol_version: height_context.protocol_version.clone(),
+                epoch: height_context.epoch,
+                height: height_context.height,
+                round: closing_round,
+                height_context_root: height_context.root()?,
+                validator_id: validator.validator_id.clone(),
+                key_id: validator.consensus_public_key.key_id.clone(),
+                phase: ConsensusSigningPhase::Timeout,
+                candidate_id: None,
+                highest_prepared_vc_root: None,
+            })?;
+        if let Some(recorded) = recorded {
+            candidate_id = recorded
+                .candidate_id
+                .unwrap_or_else(|| BlockId(String::new()));
+            highest_prepared_vc_root = recorded.highest_prepared_vc_root;
+        }
         let mut vote = Vote {
             chain_id: height_context.chain_id,
             network_id: height_context.network_id.clone(),
