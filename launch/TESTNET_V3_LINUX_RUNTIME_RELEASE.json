@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "release_id": "TESTNET_V3_LINUX_RUNTIME_OBSERVER_FIX_2026_07_30",
+  "release_id": "TESTNET_V3_LINUX_RUNTIME_TIMEOUT_SLOT_RECOVERY_2026_07_30",
   "network_id": "synergy-testnet-v3",
   "chain_id": 1266,
   "runtime_version": "20.0.0",
@@ -12,17 +12,18 @@
   "release_config_manifest_sha256": "1480ba65e166dde69e899831d9986f0f6512d413314df54111efa6cab409b703",
   "source": {
     "repository": "synergy-network-hq/testnet-v3",
-    "revision": "c17f81046c3afcef5b0297ed85fcd91cc3ffb231",
-    "supersedes_revision": "791a61e146fd55e44f0460c9ec8e00bdcb31d13f",
+    "revision": "1b92a065fbe7ab5e9b87c2b2298e8a7898d0d503",
+    "supersedes_revision": "c17f81046c3afcef5b0297ed85fcd91cc3ffb231",
     "contains": [
       "typed finality observer round-greater-than-zero durable recovery (RoundAuthoritySource)",
       "incoming DNS-named support-role endpoint resolution fix",
-      "runtime-switch verifier waits for the guarded runtime exec"
+      "runtime-switch verifier waits for the guarded runtime exec",
+      "durable timeout-slot recovery after losing in-memory prepared state"
     ]
   },
   "provenance": {
     "control_panel_repository": "synergy-network-hq/synergy-node-control-panel",
-    "workflow_run_id": "30546509965",
+    "workflow_run_id": "30548951942",
     "workflow_job": "build-linux-runtime-hotfix",
     "artifact_name": "testnet-v3-linux-runtime-hotfix",
     "built_from_immutable_source": true,
@@ -33,9 +34,9 @@
   "artifacts": {
     "generic": {
       "artifact_file": "synergy-node-linux-amd64",
-      "sha256": "a2f4b63df7877176cb61ab8f0f1d6b9b0db772e47eae11ed24ba9109b2cea116",
+      "sha256": "c9212ad9aafbdf6d9605fa53e495105031e4f33e95acf197a4f8e8fe87007382",
       "linux_elf_machine": "x86_64",
-      "installed_path": "/opt/synergy/testnet-v3/bin/synergy-node-v20.0.0-a2f4b63df7877176cb61ab8f0f1d6b9b0db772e47eae11ed24ba9109b2cea116",
+      "installed_path": "/opt/synergy/testnet-v3/bin/synergy-node-v20.0.0-c9212ad9aafbdf6d9605fa53e495105031e4f33e95acf197a4f8e8fe87007382",
       "service_units": [
         "synergy-testnet-v3-rpc-gateway.service",
         "synergy-testnet-v3-explorer-indexer.service"
@@ -47,29 +48,29 @@
     },
     "relayer": {
       "artifact_file": "synergy-relayer-node-linux-amd64",
-      "sha256": "94c1228a78a37db0d32409777eecace710618395f610860b19f7c267a39c0f6a",
+      "sha256": "c94a090efe9a9e2b6d9473caf01264ba08b0116dc75b5057113393b8f347562f",
       "linux_elf_machine": "x86_64",
-      "installed_path": "/opt/synergy/testnet-v3/relayer/synergy-relayer-node-v20.0.0-94c1228a78a37db0d32409777eecace710618395f610860b19f7c267a39c0f6a",
+      "installed_path": "/opt/synergy/testnet-v3/relayer/synergy-relayer-node-v20.0.0-c94a090efe9a9e2b6d9473caf01264ba08b0116dc75b5057113393b8f347562f",
       "service_unit": "synergy-testnet-v3-relayer.service",
       "retired_service_unit": "synergy-testnet-relayer.service",
       "role": "relayer"
     },
     "validator": {
       "artifact_file": "synergy-validator-node-linux-amd64",
-      "sha256": "e2870307b32a364b644f18110b270eb454263e1b82c588617345e52193bbce98",
+      "sha256": "5c07a554fba814995edbf2ba6a146065f348c596c97408d3dc45e07587e56b13",
       "linux_elf_machine": "x86_64",
       "installed_path": "/opt/synergy/bin/synergy-validator",
       "service_unit": "synergy-validator.service",
       "role": "validator",
-      "deployment_note": "Not required for the observer fix: the durable TypedFinalityRecord format is unchanged, so the validator tier needs no coordinated cutover for this release."
+      "deployment_note": "Required for this release: fixes the height-91 timeout-slot deadlock. Deploy through a coordinated stop/stage/start barrier with no data or journal deletion."
     }
   },
   "superseded_artifact_sha256": {
-    "generic": "dc5eea12132e1f5445e3cf061e930d84ddf4bd5f3a4de2ed88ced57cb3f203b4",
-    "relayer": "6b7d5cdb065e7c9a1e76b37d7df461c2fc7ec0e22891040d7d941c1140eaafc4",
-    "validator": "0a1b295a38171a5657974172d3044af2f8e7f0ca072569ce7cc10bca4e069823",
-    "source_revision": "791a61e146fd55e44f0460c9ec8e00bdcb31d13f",
-    "workflow_run_id": "30536627486"
+    "generic": "a2f4b63df7877176cb61ab8f0f1d6b9b0db772e47eae11ed24ba9109b2cea116",
+    "relayer": "94c1228a78a37db0d32409777eecace710618395f610860b19f7c267a39c0f6a",
+    "validator": "e2870307b32a364b644f18110b270eb454263e1b82c588617345e52193bbce98",
+    "source_revision": "c17f81046c3afcef5b0297ed85fcd91cc3ffb231",
+    "workflow_run_id": "30546509965"
   },
   "build": {
     "command": "cargo build --manifest-path testnet-source/runtime/Cargo.toml --locked --release --bin synergy-testnet --bin synergy-validator-node --bin synergy-relayer-node",
@@ -82,7 +83,6 @@
     "starts_or_restarts_services": false
   },
   "open_launch_conditions": [
-    "Validator tier is crash-looping on CONSENSUS_SIGNING_CONFLICT at height 90 since 2026-07-30T11:56:58Z; the chain is not advancing and this release does not address it.",
     "Cloudflare Authenticated Origin Pulls remain disabled while Nginx requires a client certificate.",
     "Boot persistence for the Testnet-v3 service set is not yet enabled."
   ]

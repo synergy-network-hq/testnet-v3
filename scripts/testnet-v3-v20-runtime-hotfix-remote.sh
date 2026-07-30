@@ -45,7 +45,7 @@ done
 [[ $expected_binary_sha256 =~ ^[0-9a-f]{64}$ ]] || fail 'binary SHA-256 is invalid'
 [[ $expected_genesis_sha256 =~ ^[0-9a-f]{64}$ ]] || fail 'Genesis SHA-256 is invalid'
 [[ $source_revision =~ ^[0-9a-f]{40}$ ]] || fail 'source revision is invalid'
-[[ $source_revision == c17f81046c3afcef5b0297ed85fcd91cc3ffb231 ]] ||
+[[ $source_revision == 1b92a065fbe7ab5e9b87c2b2298e8a7898d0d503 ]] ||
   fail 'source revision is not the authorized Testnet-v3 release'
 
 staged_binary="$stage_dir/runtime.bin"
