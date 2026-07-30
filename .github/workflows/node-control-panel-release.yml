@@ -299,6 +299,7 @@ jobs:
           name: testnet-v3-runtime-${{ matrix.platform }}
           if-no-files-found: error
           retention-days: 1
+          include-hidden-files: true
           path: runtime/node-control-panel/.release-runtime
 
   build:
