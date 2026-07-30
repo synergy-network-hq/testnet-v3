@@ -387,8 +387,9 @@ pub struct TypedCoordinatorDriverMetrics {
 /// Operational typed PoSy driver.  It is the only component that schedules
 /// proposal, vote, timeout, certificate, carry-forward, and next-height work.
 /// The coordinator still owns all cryptographic and state-transition checks;
-/// this layer only serializes those already-verified operations at the
-/// finalized 1,500 ms stage boundaries.
+/// this layer serializes already-verified operations immediately on the
+/// healthy path. The finalized 1,500 ms stage values remain failure
+/// deadlines; they are never mandatory sleeps before a valid vote.
 pub struct TypedPosyDriver<E, D, H, R = NoopTypedEtdagIngressRotator>
 where
     E: TypedConsensusEgress,
@@ -404,8 +405,7 @@ where
     ingress_rotator: R,
     round_started_at: Instant,
     last_proposal_broadcast_at: Option<Instant>,
-    last_vote_broadcast_at: Option<Instant>,
-    last_emitted_vote: Option<Vote>,
+    local_vote_rebroadcasts: Vec<(Vote, Instant)>,
     stage: TypedRoundStage,
     emitted_validation_vote: bool,
     emitted_finality_vote: bool,
@@ -1490,8 +1490,7 @@ where
             ingress_rotator,
             round_started_at: Instant::now(),
             last_proposal_broadcast_at: None,
-            last_vote_broadcast_at: None,
-            last_emitted_vote: None,
+            local_vote_rebroadcasts: Vec::new(),
             stage: TypedRoundStage::Proposal,
             emitted_validation_vote: false,
             emitted_finality_vote: false,
@@ -1615,7 +1614,8 @@ where
                 .map(|elapsed| elapsed >= PROPOSAL_REBROADCAST_INTERVAL)
                 .unwrap_or(false)
         });
-        if self.stage == TypedRoundStage::Proposal
+        if self.stage != TypedRoundStage::WaitingForCertificate
+            && elapsed < proposal_deadline
             && (!self.emitted_proposal || proposal_rebroadcast_due)
         {
             self.try_emit_scheduled_proposal()?;
@@ -1630,35 +1630,18 @@ where
             return Ok(());
         }
 
+        // Authenticated proposal and certificate arrival drives the healthy
+        // path. Governed timeout values below are failure deadlines only.
+        self.advance_healthy_path(now)?;
+
         if self.stage == TypedRoundStage::Proposal && elapsed >= proposal_deadline {
-            if let Some(block) = self.current_round_proposal().cloned() {
-                self.emit_validation_vote(&block, now)?;
-                self.stage = TypedRoundStage::Validation;
-            } else {
-                self.emit_timeout_vote(now)?;
-                self.stage = TypedRoundStage::WaitingForCertificate;
-            }
+            self.emit_timeout_vote(now)?;
+            self.stage = TypedRoundStage::WaitingForCertificate;
         }
 
         if self.stage == TypedRoundStage::Validation && elapsed >= validation_deadline {
-            let prepared = self.prepared_certificate.clone();
-            let prepared_block = prepared.as_ref().and_then(|certificate| {
-                self.coordinator
-                    .accepted_proposals
-                    .get(&certificate.candidate_id)
-                    .filter(|block| {
-                        block.header.round == self.coordinator.local_context.round
-                            && certificate.round.0 <= block.header.round.0
-                    })
-                    .cloned()
-            });
-            if let (Some(block), Some(certificate)) = (prepared_block, prepared) {
-                self.emit_finality_vote(&block, &certificate, now)?;
-                self.stage = TypedRoundStage::Finality;
-            } else {
-                self.emit_timeout_vote(now)?;
-                self.stage = TypedRoundStage::WaitingForCertificate;
-            }
+            self.emit_timeout_vote(now)?;
+            self.stage = TypedRoundStage::WaitingForCertificate;
         }
 
         if self.stage == TypedRoundStage::Finality && elapsed >= finality_deadline {
@@ -1791,6 +1774,7 @@ where
                 )
             }
         }
+        self.advance_healthy_path(Instant::now())?;
         self.metrics.accepted_messages = self.metrics.accepted_messages.saturating_add(1);
         Ok(event)
     }
@@ -1985,6 +1969,43 @@ where
         Ok(imported)
     }
 
+    fn advance_healthy_path(&mut self, now: Instant) -> Result<(), String> {
+        if self.stage == TypedRoundStage::Proposal {
+            if let Some(block) = self.current_round_proposal().cloned() {
+                self.emit_validation_vote(&block, now)?;
+                self.stage = TypedRoundStage::Validation;
+            }
+        }
+
+        if self.stage == TypedRoundStage::Validation {
+            let prepared = self.prepared_certificate.clone();
+            let prepared_block = prepared.as_ref().and_then(|certificate| {
+                self.coordinator
+                    .accepted_proposals
+                    .get(&certificate.candidate_id)
+                    .filter(|block| {
+                        block.header.round == self.coordinator.local_context.round
+                            && certificate.round.0 <= block.header.round.0
+                    })
+                    .cloned()
+            });
+            if let (Some(block), Some(certificate)) = (prepared_block, prepared) {
+                let height = self.coordinator.local_context.height_context.height;
+                let round = self.coordinator.local_context.round;
+                self.emit_finality_vote(&block, &certificate, now)?;
+                // The local vote can itself complete the QC and reset the
+                // driver for the successor height. Do not overwrite that
+                // reset with the prior height's Finality stage.
+                if self.coordinator.local_context.height_context.height == height
+                    && self.coordinator.local_context.round == round
+                {
+                    self.stage = TypedRoundStage::Finality;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn try_emit_scheduled_proposal(&mut self) -> Result<(), String> {
         let scheduled = self.coordinator.consensus.proposer_for(
             &self.coordinator.local_context.height_context,
@@ -1992,6 +2013,26 @@ where
         )?;
         if scheduled.validator_id != self.coordinator.local_validator_id {
             return Ok(());
+        }
+
+        // Re-broadcast the exact proposal already accepted for this
+        // height/round. This remains necessary after the local node advances
+        // to Validation or Finality because a remote mailbox can come online
+        // after the first healthy-path broadcast.
+        if let Some(block) = self.current_round_proposal().cloned() {
+            if self.etdag_is_active() {
+                let candidate_id = block.candidate_id()?;
+                let (target_context, protected_block) = self
+                    .proposal_material
+                    .get(&candidate_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        "typed protected proposal has no retained certified input material"
+                            .to_string()
+                    })?;
+                return self.broadcast_proposal(target_context, protected_block, block);
+            }
+            return self.broadcast_core_proposal(block);
         }
 
         if let Some(timeout_certificate) = self.timeout_certificate.clone() {
@@ -2148,8 +2189,7 @@ where
         }
         let vote = self.coordinator.validation_vote_for(block)?;
         self.broadcast(TypedConsensusMessage::Vote { vote: vote.clone() })?;
-        self.last_vote_broadcast_at = Some(now);
-        self.last_emitted_vote = Some(vote.clone());
+        self.local_vote_rebroadcasts.push((vote.clone(), now));
         self.emitted_validation_vote = true;
         self.metrics.emitted_validation_votes =
             self.metrics.emitted_validation_votes.saturating_add(1);
@@ -2167,8 +2207,7 @@ where
         }
         let vote = self.coordinator.finality_vote_for(block, certificate)?;
         self.broadcast(TypedConsensusMessage::Vote { vote: vote.clone() })?;
-        self.last_vote_broadcast_at = Some(now);
-        self.last_emitted_vote = Some(vote.clone());
+        self.local_vote_rebroadcasts.push((vote.clone(), now));
         self.emitted_finality_vote = true;
         self.metrics.emitted_finality_votes = self.metrics.emitted_finality_votes.saturating_add(1);
         self.record_verified_vote(vote)
@@ -2182,29 +2221,28 @@ where
             .coordinator
             .timeout_vote(self.prepared_certificate.as_ref())?;
         self.broadcast(TypedConsensusMessage::Vote { vote: vote.clone() })?;
-        self.last_vote_broadcast_at = Some(now);
-        self.last_emitted_vote = Some(vote.clone());
+        self.local_vote_rebroadcasts.push((vote.clone(), now));
         self.emitted_timeout_vote = true;
         self.metrics.emitted_timeout_votes = self.metrics.emitted_timeout_votes.saturating_add(1);
         self.record_verified_vote(vote)
     }
 
     fn rebroadcast_local_vote_if_due(&mut self, now: Instant) -> Result<(), String> {
-        let Some(last_broadcast) = self.last_vote_broadcast_at else {
-            return Ok(());
-        };
-        let Some(vote) = self.last_emitted_vote.clone() else {
-            return Ok(());
-        };
-        let due = now
-            .checked_duration_since(last_broadcast)
-            .map(|elapsed| elapsed >= VOTE_REBROADCAST_INTERVAL)
-            .unwrap_or(false);
-        if !due {
-            return Ok(());
+        let due = self
+            .local_vote_rebroadcasts
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (_, last_broadcast))| {
+                now.checked_duration_since(*last_broadcast)
+                    .filter(|elapsed| *elapsed >= VOTE_REBROADCAST_INTERVAL)
+                    .map(|_| index)
+            })
+            .collect::<Vec<_>>();
+        for index in due {
+            let vote = self.local_vote_rebroadcasts[index].0.clone();
+            self.broadcast(TypedConsensusMessage::Vote { vote })?;
+            self.local_vote_rebroadcasts[index].1 = now;
         }
-        self.broadcast(TypedConsensusMessage::Vote { vote })?;
-        self.last_vote_broadcast_at = Some(now);
         Ok(())
     }
 
@@ -2645,8 +2683,7 @@ where
         };
         self.round_started_at = Instant::now();
         self.last_proposal_broadcast_at = None;
-        self.last_vote_broadcast_at = None;
-        self.last_emitted_vote = None;
+        self.local_vote_rebroadcasts.clear();
         self.emitted_proposal = false;
         self.emitted_validation_vote = false;
         self.emitted_finality_vote = false;
@@ -2819,8 +2856,7 @@ where
         self.observed_timeout_votes.clear();
         self.round_started_at = Instant::now();
         self.last_proposal_broadcast_at = None;
-        self.last_vote_broadcast_at = None;
-        self.last_emitted_vote = None;
+        self.local_vote_rebroadcasts.clear();
         self.stage = TypedRoundStage::Proposal;
         self.emitted_proposal = false;
         self.emitted_validation_vote = false;
@@ -2847,8 +2883,7 @@ where
     fn reset_for_new_height(&mut self) {
         self.round_started_at = Instant::now();
         self.last_proposal_broadcast_at = None;
-        self.last_vote_broadcast_at = None;
-        self.last_emitted_vote = None;
+        self.local_vote_rebroadcasts.clear();
         self.stage = TypedRoundStage::Proposal;
         self.emitted_proposal = false;
         self.emitted_validation_vote = false;
@@ -4819,17 +4854,27 @@ mod tests {
             .expect("deferred ETDAG must not halt core liveness");
         assert!(!driver.etdag_is_active());
         assert_eq!(driver.metrics().emitted_proposals, 1);
-        let (height_context, block) = match driver.egress.messages.last().cloned() {
-            Some(TypedConsensusMessage::CoreProposal {
-                height_context,
-                block,
-            }) => (height_context, block),
-            _ => panic!("deferred ETDAG scheduler must emit the core-only wire variant"),
-        };
+        let (height_context, block) = driver
+            .egress
+            .messages
+            .iter()
+            .find_map(|message| match message {
+                TypedConsensusMessage::CoreProposal {
+                    height_context,
+                    block,
+                } => Some((height_context.clone(), block.clone())),
+                _ => None,
+            })
+            .expect("deferred ETDAG scheduler must emit the core-only wire variant");
         assert_eq!(block.header.version, 1);
         assert!(block.transactions.is_empty());
         assert_eq!(block.header.tx_count, 0);
         assert!(block.header.protected_batch.is_none());
+        assert_eq!(
+            driver.metrics().emitted_validation_votes,
+            1,
+            "the proposer must validate immediately instead of sleeping until its timeout"
+        );
 
         // The first wire delivery can race a remote node's typed-mailbox
         // installation.  A scheduled proposer must retransmit the exact same
@@ -4842,17 +4887,23 @@ mod tests {
             .tick_at(rebroadcast_at)
             .expect("the exact core proposal must be safe to retransmit");
         assert_eq!(driver.metrics().emitted_proposals, 2);
-        let retransmitted = match driver.egress.messages.last().cloned() {
-            Some(TypedConsensusMessage::CoreProposal { block, .. }) => block,
-            _ => panic!("proposal retransmission must retain the core-only wire variant"),
-        };
+        let retransmitted = driver
+            .egress
+            .messages
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                TypedConsensusMessage::CoreProposal { block, .. } => Some(block.clone()),
+                _ => None,
+            })
+            .expect("proposal retransmission must retain the core-only wire variant");
         assert_eq!(retransmitted.candidate_id(), block.candidate_id());
         assert_eq!(retransmitted, block);
 
         let proposal_deadline = driver.round_started_at + Duration::from_millis(1_500);
         driver
             .tick_at(proposal_deadline)
-            .expect("core-only proposal must advance into the validation stage");
+            .expect("the proposal deadline remains a fallback after the healthy-path vote");
         assert_eq!(driver.metrics().emitted_validation_votes, 1);
         assert!(matches!(
             driver.egress.messages.last(),
@@ -4880,6 +4931,51 @@ mod tests {
             })
             .expect_err("core-only wire path must reject any transaction payload marker");
         assert!(payload_error.contains("must not contain user transactions"));
+    }
+
+    #[test]
+    fn six_validator_driver_finalizes_healthy_round_without_waiting_for_deadlines() {
+        let parameters = genesis_bound_parameters();
+        let (bootstrap, _genesis_anchor, deployed_genesis_state_root, coordinators, store_paths) =
+            six_validator_startup_fixture(parameters.clone());
+        let authorizer = FrozenTypedConsensusPeerAuthorizer::new(bootstrap.validator_set.clone())
+            .expect("freeze the six Genesis-bound P2P identities");
+        let mut drivers = coordinators
+            .into_iter()
+            .map(|coordinator| {
+                release_driver_with(
+                    coordinator,
+                    bootstrap.clone(),
+                    parameters.protocol_config.clone(),
+                    deployed_genesis_state_root,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        for driver in &mut drivers {
+            let now = driver.round_started_at;
+            driver
+                .tick_at(now)
+                .expect("healthy-path scheduling must not require elapsed time");
+        }
+        let relay_errors = relay_release_messages(&mut drivers, &authorizer, |_| true);
+
+        for (index, driver) in drivers.iter().enumerate() {
+            assert_eq!(
+                driver.coordinator.local_context.height_context.height,
+                Height(2),
+                "replica {index} did not finalize before any stage deadline: {relay_errors:?}"
+            );
+            assert_eq!(driver.metrics().finalized_blocks, 1);
+            assert_eq!(driver.metrics().emitted_validation_votes, 1);
+            assert_eq!(driver.metrics().emitted_finality_votes, 1);
+            assert_eq!(driver.metrics().emitted_timeout_votes, 0);
+        }
+
+        drop(drivers);
+        for path in store_paths {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     #[test]
@@ -5885,26 +5981,18 @@ mod tests {
         let _ = relay_release_messages_with_delivery(
             &mut drivers,
             &authorizer,
-            |message| matches!(message, TypedConsensusMessage::CoreProposal { .. }),
-            |_, recipient, _| recipient != missing_index,
-        );
-
-        for driver in &mut drivers {
-            driver
-                .tick_at(driver.round_started_at + Duration::from_millis(1_500))
-                .expect("round-zero validation deadline");
-        }
-        let _ = relay_release_messages_with_delivery(
-            &mut drivers,
-            &authorizer,
             |message| {
-                matches!(
-                    message,
-                    TypedConsensusMessage::Vote { vote } if vote.phase == VotePhase::Validate
-                ) || matches!(message, TypedConsensusMessage::ValidationCertificate { .. })
+                matches!(message, TypedConsensusMessage::CoreProposal { .. })
+                    || matches!(
+                        message,
+                        TypedConsensusMessage::Vote { vote }
+                            if vote.phase == VotePhase::Validate
+                    )
+                    || matches!(message, TypedConsensusMessage::ValidationCertificate { .. })
             },
             |_, recipient, _| recipient != missing_index,
         );
+
         assert!(drivers[missing_index].prepared_certificate.is_none());
         assert_eq!(
             drivers
@@ -6089,28 +6177,6 @@ mod tests {
             |_| true,
             |_, recipient, _| recipient != 0,
         ));
-        for driver in &mut drivers[1..] {
-            driver
-                .tick_at(driver.round_started_at + Duration::from_millis(1_500))
-                .expect("round-two validation vote");
-        }
-        relay_errors.extend(relay_release_messages_with_delivery(
-            &mut drivers,
-            &authorizer,
-            |_| true,
-            |_, recipient, _| recipient != 0,
-        ));
-        for driver in &mut drivers[1..] {
-            driver
-                .tick_at(driver.round_started_at + Duration::from_millis(3_000))
-                .expect("round-two finality vote");
-        }
-        relay_errors.extend(relay_release_messages_with_delivery(
-            &mut drivers,
-            &authorizer,
-            |_| true,
-            |_, recipient, _| recipient != 0,
-        ));
 
         assert_eq!(
             drivers[0].coordinator.local_context.latest_finalized_height,
@@ -6210,7 +6276,19 @@ mod tests {
                 driver.coordinator.local_context.height_context.height,
                 Height(2)
             );
+            assert_eq!(
+                driver.coordinator.local_context.round,
+                Round(0),
+                "recovered and directly finalized replicas must all enter successor round zero"
+            );
         }
+        // RecordingEgress retains already-delivered height-one traffic,
+        // unlike the live transport. Do not replay that stale test-fixture
+        // backlog into the height-two healthy-path assertion.
+        for driver in &mut drivers {
+            driver.egress.messages.clear();
+        }
+        relay_errors.clear();
 
         // All six then participate in the next height. This is the release
         // gate: delayed worker recovery must restore six-validator liveness,
@@ -6220,28 +6298,22 @@ mod tests {
             driver.tick_at(now).expect("height-two proposal scheduling");
         }
         relay_errors.extend(relay_release_messages(&mut drivers, &authorizer, |_| true));
-        for driver in &mut drivers {
-            driver
-                .tick_at(driver.round_started_at + Duration::from_millis(1_500))
-                .expect("height-two validation vote");
-        }
-        relay_errors.extend(relay_release_messages(&mut drivers, &authorizer, |_| true));
-        for driver in &mut drivers {
-            driver
-                .tick_at(driver.round_started_at + Duration::from_millis(3_000))
-                .expect("height-two finality vote");
-        }
-        relay_errors.extend(relay_release_messages(&mut drivers, &authorizer, |_| true));
         assert!(
             !relay_errors
                 .iter()
                 .any(|error| driver_error_is_fatal(error)),
             "recovery replay must not emit a fatal source conflict: {relay_errors:?}"
         );
-        for driver in &drivers {
+        for (index, driver) in drivers.iter().enumerate() {
             assert_eq!(
                 driver.coordinator.local_context.latest_finalized_height,
-                Height(2)
+                Height(2),
+                "replica {index} did not finalize height two: stage={:?}, round={:?}, metrics={:?}, prepared={}, qc={}, relay_errors={relay_errors:?}",
+                driver.stage,
+                driver.coordinator.local_context.round,
+                driver.metrics(),
+                driver.prepared_certificate.is_some(),
+                driver.finality_certificate.is_some(),
             );
             assert_eq!(
                 driver.coordinator.local_context.height_context.height,

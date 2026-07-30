@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "release_id": "TESTNET_V3_LINUX_RUNTIME_PREPARED_RECOVERY_FIX_2026_07_30",
+  "release_id": "TESTNET_V3_LINUX_RUNTIME_VOTE_REBROADCAST_2026_07_30",
   "network_id": "synergy-testnet-v3",
   "chain_id": 1266,
   "runtime_version": "20.0.0",
@@ -12,8 +12,8 @@
   "release_config_manifest_sha256": "1480ba65e166dde69e899831d9986f0f6512d413314df54111efa6cab409b703",
   "source": {
     "repository": "synergy-network-hq/testnet-v3",
-    "revision": "22bb19a06ee6bf83945aaac4f3490385b182b184",
-    "supersedes_revision": "24c274facb7c85d9eb9032d49c6468daa9117c6d",
+    "revision": "606ec51f303b0cf19843f9da257d15ef38186681",
+    "supersedes_revision": "d76dbf3ef315beca3a31974f7785d76b14e6e71c",
     "contains": [
       "typed finality observer round-greater-than-zero durable recovery (RoundAuthoritySource)",
       "incoming DNS-named support-role endpoint resolution fix",
@@ -22,12 +22,15 @@
       "typed PoSy driver accepts ordinary round changes (highest-round prepared VC; non-fatal carry-forward gaps)",
       "crash-safe prepared block, validation certificate, and timeout-certificate persistence",
       "authenticated bounded prepared-certificate peer recovery for a missing next-round proposer",
-      "direct restart re-entry at the successor of a verified later-round timeout certificate"
+      "direct restart re-entry at the successor of a verified later-round timeout certificate",
+      "same-round strict-quorum timeout certificates merge stronger prepared-candidate evidence without a false source conflict",
+      "signed validation, finality, and timeout votes rebroadcast until the round advances, closing the remote-mailbox startup-loss liveness gap",
+      "RPC validator activity is derived from authoritative typed finality rather than the inherited legacy chain snapshot"
     ]
   },
   "provenance": {
     "control_panel_repository": "synergy-network-hq/synergy-node-control-panel",
-    "workflow_run_id": "30556543773",
+    "workflow_run_id": "30580144756",
     "workflow_job": "build-linux-runtime-hotfix",
     "artifact_name": "testnet-v3-linux-runtime-hotfix",
     "built_from_immutable_source": true,
@@ -38,9 +41,9 @@
   "artifacts": {
     "generic": {
       "artifact_file": "synergy-node-linux-amd64",
-      "sha256": "9a08bc97ba52c9c928c2e33cc2d815f7052bc56b6a6509bf1c591d5b07f11e73",
+      "sha256": "87121f473c43e166a27ac31150e4f4186d771492b4057e44fb0531bdd42e7f39",
       "linux_elf_machine": "x86_64",
-      "installed_path": "/opt/synergy/testnet-v3/bin/synergy-node-v20.0.0-9a08bc97ba52c9c928c2e33cc2d815f7052bc56b6a6509bf1c591d5b07f11e73",
+      "installed_path": "/opt/synergy/testnet-v3/bin/synergy-node-v20.0.0-87121f473c43e166a27ac31150e4f4186d771492b4057e44fb0531bdd42e7f39",
       "service_units": [
         "synergy-testnet-v3-rpc-gateway.service",
         "synergy-testnet-v3-explorer-indexer.service"
@@ -52,29 +55,29 @@
     },
     "relayer": {
       "artifact_file": "synergy-relayer-node-linux-amd64",
-      "sha256": "be083f75102ad8f310c15bc38e62f557c7e127660d877ea3d589e7506ce83429",
+      "sha256": "59db301cd3ae3dd039795e502eea1e0661bda39baa468fa96303ba3ad462cd85",
       "linux_elf_machine": "x86_64",
-      "installed_path": "/opt/synergy/testnet-v3/relayer/synergy-relayer-node-v20.0.0-be083f75102ad8f310c15bc38e62f557c7e127660d877ea3d589e7506ce83429",
+      "installed_path": "/opt/synergy/testnet-v3/relayer/synergy-relayer-node-v20.0.0-59db301cd3ae3dd039795e502eea1e0661bda39baa468fa96303ba3ad462cd85",
       "service_unit": "synergy-testnet-v3-relayer.service",
       "retired_service_unit": "synergy-testnet-relayer.service",
       "role": "relayer"
     },
     "validator": {
       "artifact_file": "synergy-validator-node-linux-amd64",
-      "sha256": "28d3cd7109180b2e145dff02582cea3ae5e11d4ef385b48655131511318f8ac2",
+      "sha256": "5c9c115c1288d110d77d9da25712367c67f1d6bd6c99ec88494c2790575572fb",
       "linux_elf_machine": "x86_64",
       "installed_path": "/opt/synergy/bin/synergy-validator",
       "service_unit": "synergy-validator.service",
       "role": "validator",
-      "deployment_note": "Required: fixes the round-change driver conflicts that stalled the chain. Coordinated stop/stage/start barrier, no data or journal deletion."
+      "deployment_note": "Applied after an explicitly authorized fresh-Genesis reset. Boot/seeds and the complete observer/public tier were active before the coordinated six-validator start."
     }
   },
   "superseded_artifact_sha256": {
-    "generic": "cd5dd34a27fff8433974ea0ab1740b2cf4e12886c59c1b2b258e4ac28d488e61",
-    "relayer": "82ff699fa6a6a662d388391f61d2176e0033ab056b01d3a7df1765f9b1fd0365",
-    "validator": "93388ed6f467f17979e0ac4a4a654a327cb377ca917e270d42f1e925b34873f6",
-    "source_revision": "24c274facb7c85d9eb9032d49c6468daa9117c6d",
-    "workflow_run_id": "30552010319"
+    "generic": "345abdb7f044abfa65410a457076b567153ec2ae5cec2eaa7422eb5ffaf8acb1",
+    "relayer": "b30eaad3d7ba60e9c24e975510d5b1262b0cb993e08cc2f4e0591fc0df737fee",
+    "validator": "bcd679705399ba2fb48c9f95e9910c62e65130043979e283ad0a6559155a472e",
+    "source_revision": "d76dbf3ef315beca3a31974f7785d76b14e6e71c",
+    "workflow_run_id": "30578779268"
   },
   "build": {
     "command": "cargo build --manifest-path testnet-source/runtime/Cargo.toml --locked --release --bin synergy-testnet --bin synergy-validator-node --bin synergy-relayer-node",
@@ -85,6 +88,32 @@
     "built_in_github_actions": true,
     "staging_only": true,
     "starts_or_restarts_services": false
+  },
+  "deployment_evidence": {
+    "observed_at_utc": "2026-07-30T20:55:23Z",
+    "reset_mode": "fresh_genesis",
+    "reset_scope": [
+      "validator-1 through validator-6",
+      "relayer-1 through relayer-3",
+      "RPC Gateway",
+      "Explorer Indexer",
+      "Atlas chain-derived PostgreSQL tables",
+      "bootnode-1 through bootnode-3"
+    ],
+    "support_tier_started_before_validators": true,
+    "validator_count": 6,
+    "validator_tip_height": 68,
+    "validator_tip_block_id": "c01c919be9d30507ef4fa8543db34211aa4b95f5c92ea5994976de0942a939ea",
+    "nonzero_round_finalized_records": 5,
+    "maximum_finalized_round": 4,
+    "validator_restarts": 0,
+    "fatal_consensus_or_signing_conflicts": 0,
+    "rpc_height": 66,
+    "atlas_indexed_height": 66,
+    "atlas_lag_blocks": 0,
+    "atlas_ready": true,
+    "atlas_active_validators": 6,
+    "atlas_validators_with_zero_produced_blocks": 0
   },
   "open_launch_conditions": [
     "Cloudflare Authenticated Origin Pulls remain disabled while Nginx requires a client certificate.",
