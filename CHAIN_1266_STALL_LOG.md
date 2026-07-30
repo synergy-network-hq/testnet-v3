@@ -483,6 +483,27 @@ both implausibly small readings such as 0.02 seconds and exaggerated gaps.
    `012f9081da22ef4887e83f4db8717bcede79d40848fd6826fe05d24ab51772a5`.
    All five local RPC endpoints return Chain 1266 and canonical Genesis.
    Validator services and chain state remain unchanged.
+10. **Stopped all six validators at their identical height-326 block
+    `3ac974e616171f5cfdfd009ffe40a3d2c98f655e5de58e08694afaf1a94cc879`,
+    staged runtime SHA-256 `df5333ac…` on every inactive host, and started all
+    six together. Measured durable finality-signing times through height 330.**  
+    **Outcome:** all validators remained converged with zero restarts and zero
+    fatal signing/consensus conflicts, but performance was not resolved.
+    Heights 328–330 finalized in rounds 5, 4, and 2 at approximately 18–30
+    second intervals; validator CPU returned to approximately 91–107% of one
+    core. No chain data was removed.
+11. **Traced the complete certificate formation and verification path using
+    the live phase timestamps and source, rather than applying another timer
+    change.**  
+    **Outcome:** every incoming vote is fully ML-DSA-65 verified once, but each
+    replica then verifies the same five cached votes again while assembling a
+    certificate and verifies those same five signatures a third time through
+    the completed certificate. Every replica independently repeats this for
+    validation, finality, and timeout certificates, and received certificates
+    repeat the verification again. The local validation-certificate work alone
+    took approximately two seconds in live evidence, exceeding the 1,500 ms
+    failure deadline. Exact retry deduplication cannot solve this mandatory
+    repeated-cryptography path.
 
 ### Final outcome
 

@@ -1623,7 +1623,9 @@ where
             && !self
                 .prepared_certificate
                 .as_ref()
-                .is_some_and(|certificate| certificate.round == self.coordinator.local_context.round)
+                .is_some_and(|certificate| {
+                    certificate.round == self.coordinator.local_context.round
+                })
             && (!self.emitted_proposal || proposal_rebroadcast_due)
         {
             self.try_emit_scheduled_proposal()?;

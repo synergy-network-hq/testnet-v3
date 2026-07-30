@@ -9,8 +9,8 @@ use crate::synergy_types::{
     ValidatorStatus, Vote, VotePhase,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::OnceLock;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::{Arc, Mutex, OnceLock};
 
 pub const SYNERGY_TX_V1: &str = "SYNERGY_TX_V1";
 pub const SYNERGY_BLOCK_V1: &str = "SYNERGY_BLOCK_V1";
@@ -420,6 +420,7 @@ impl AegisPqvmSigner {
         AegisPqvmVerifier {
             registry: self.registry.clone(),
             initialized: self.initialized,
+            verified_signature_cache: Arc::new(Mutex::new(VerifiedSignatureCache::default())),
         }
     }
 
@@ -553,6 +554,47 @@ impl AegisPqvmSigner {
 pub struct AegisPqvmVerifier {
     pub registry: AegisPqvmKeyRegistry,
     initialized: bool,
+    verified_signature_cache: Arc<Mutex<VerifiedSignatureCache>>,
+}
+
+const VERIFIED_SIGNATURE_CACHE_CAPACITY: usize = 4_096;
+
+/// A bounded positive-result cache for exact domain-signature transcripts.
+///
+/// Typed consensus first verifies each individual ML-DSA vote and then embeds
+/// those exact signatures in validation, finality, and timeout certificates.
+/// Re-running the same post-quantum primitive for certificate assembly and
+/// verification consumed the entire healthy-path deadline. The cache key
+/// commits to every verification input, including the public key bytes, and
+/// lifecycle/role checks still run before every lookup. Invalid or altered
+/// signatures are never inserted.
+#[derive(Debug, Default)]
+struct VerifiedSignatureCache {
+    entries: BTreeSet<Hash>,
+    insertion_order: VecDeque<Hash>,
+    hits: u64,
+}
+
+impl VerifiedSignatureCache {
+    fn contains(&mut self, key: &Hash) -> bool {
+        let present = self.entries.contains(key);
+        if present {
+            self.hits = self.hits.saturating_add(1);
+        }
+        present
+    }
+
+    fn insert(&mut self, key: Hash) {
+        if !self.entries.insert(key) {
+            return;
+        }
+        self.insertion_order.push_back(key);
+        while self.entries.len() > VERIFIED_SIGNATURE_CACHE_CAPACITY {
+            if let Some(expired) = self.insertion_order.pop_front() {
+                self.entries.remove(&expired);
+            }
+        }
+    }
 }
 
 impl AegisPqvmVerifier {
@@ -565,6 +607,7 @@ impl AegisPqvmVerifier {
         Ok(Self {
             registry,
             initialized: true,
+            verified_signature_cache: Arc::new(Mutex::new(VerifiedSignatureCache::default())),
         })
     }
 
@@ -572,6 +615,7 @@ impl AegisPqvmVerifier {
         Self {
             registry: AegisPqvmKeyRegistry::default(),
             initialized: false,
+            verified_signature_cache: Arc::new(Mutex::new(VerifiedSignatureCache::default())),
         }
     }
 
@@ -1157,6 +1201,25 @@ impl AegisPqvmVerifier {
                 "Testnet-v3 consensus domain {domain} requires ML-DSA-65"
             )));
         }
+        let cache_key = verified_signature_cache_key(
+            domain,
+            payload,
+            uma_id,
+            key_id,
+            epoch,
+            &role,
+            signature,
+            &public_key.key_data,
+        )?;
+        {
+            let mut cache = self
+                .verified_signature_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if cache.contains(&cache_key) {
+                return Ok(());
+            }
+        }
         let pqc_signature = PQCSignature {
             algorithm,
             signature_data: signature.signature_bytes.clone(),
@@ -1169,6 +1232,10 @@ impl AegisPqvmVerifier {
             .verify(public_key, &pqc_signature, &domain_payload(domain, payload))
             .map_err(|error| AegisPqvmError(format!("aegis-pqvm verification failed: {error}")))?;
         if verified {
+            self.verified_signature_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(cache_key);
             Ok(())
         } else {
             Err(AegisPqvmError(
@@ -1186,6 +1253,58 @@ impl AegisPqvmVerifier {
             ))
         }
     }
+
+    #[cfg(test)]
+    fn verified_signature_cache_snapshot(&self) -> (usize, u64) {
+        let cache = self
+            .verified_signature_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (cache.entries.len(), cache.hits)
+    }
+}
+
+fn verified_signature_cache_key(
+    domain: &str,
+    payload: &[u8],
+    uma_id: &str,
+    key_id: &AegisPqKeyId,
+    epoch: Epoch,
+    role: &AegisPqKeyRole,
+    signature: &AegisPqSignature,
+    public_key_bytes: &[u8],
+) -> Result<Hash, AegisPqvmError> {
+    fn push_component(material: &mut Vec<u8>, component: &[u8]) {
+        material.extend_from_slice(&(component.len() as u64).to_be_bytes());
+        material.extend_from_slice(component);
+    }
+
+    let role_bytes = serde_json::to_vec(role)
+        .map_err(|error| AegisPqvmError(format!("cache key role serialize failed: {error}")))?;
+    let mut material = Vec::with_capacity(
+        domain.len()
+            + payload.len()
+            + uma_id.len()
+            + key_id.0.len()
+            + signature.algorithm.len()
+            + signature.signature_bytes.len()
+            + public_key_bytes.len()
+            + role_bytes.len()
+            + 72,
+    );
+    push_component(&mut material, domain.as_bytes());
+    push_component(&mut material, payload);
+    push_component(&mut material, uma_id.as_bytes());
+    push_component(&mut material, key_id.0.as_bytes());
+    push_component(&mut material, &epoch.0.to_be_bytes());
+    push_component(&mut material, &role_bytes);
+    push_component(&mut material, signature.algorithm.as_bytes());
+    push_component(&mut material, &signature.signature_bytes);
+    push_component(&mut material, public_key_bytes);
+    Ok(Hash::from_domain_bytes(
+        "AEGIS_PQVM_VERIFIED_SIGNATURE_CACHE_V1",
+        &material,
+    ))
 }
 
 pub struct AegisPqvmPeerAuthenticator {
@@ -1385,6 +1504,18 @@ mod tests {
         );
         let verifier = signer.verifier();
         assert!(verifier.verify_vote_signature(&vote, &record, vote.height_context_root));
+        assert_eq!(verifier.verified_signature_cache_snapshot(), (1, 0));
+
+        let cloned_verifier = verifier.clone();
+        assert!(
+            cloned_verifier.verify_vote_signature(&vote, &record, vote.height_context_root),
+            "the exact previously verified transcript remains valid"
+        );
+        assert_eq!(
+            verifier.verified_signature_cache_snapshot(),
+            (1, 1),
+            "verifier clones must share one bounded positive-result cache"
+        );
 
         let mut altered = vote.clone();
         altered.block_id = BlockId::from("block-b");
@@ -1393,6 +1524,11 @@ mod tests {
         let mut altered_sig = vote.clone();
         altered_sig.aegis_pq_signature.signature_bytes[0] ^= 0x01;
         assert!(!verifier.verify_vote_signature(&altered_sig, &record, vote.height_context_root));
+        assert_eq!(
+            verifier.verified_signature_cache_snapshot(),
+            (1, 1),
+            "changed payloads and signatures must never enter or hit the cache"
+        );
     }
 
     #[test]
