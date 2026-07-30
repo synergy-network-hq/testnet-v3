@@ -412,6 +412,7 @@ where
     observed_finality_votes: BTreeMap<ValidatorId, Vote>,
     observed_timeout_votes: BTreeMap<ValidatorId, Vote>,
     prepared_certificate: Option<ValidationCertificate>,
+    pending_validation_certificates: BTreeMap<BlockId, ValidationCertificate>,
     finality_certificate: Option<QuorumCertificate>,
     timeout_certificate: Option<TimeoutCertificate>,
     proposal_material: BTreeMap<BlockId, (TargetAdmissionContext, ProtectedBlockInput)>,
@@ -1446,6 +1447,7 @@ where
             observed_finality_votes: BTreeMap::new(),
             observed_timeout_votes: BTreeMap::new(),
             prepared_certificate: None,
+            pending_validation_certificates: BTreeMap::new(),
             finality_certificate: None,
             timeout_certificate: None,
             proposal_material: BTreeMap::new(),
@@ -1581,10 +1583,18 @@ where
         }
 
         if self.stage == TypedRoundStage::Validation && elapsed >= validation_deadline {
-            if let (Some(block), Some(certificate)) = (
-                self.current_round_proposal().cloned(),
-                self.prepared_certificate.clone(),
-            ) {
+            let prepared = self.prepared_certificate.clone();
+            let prepared_block = prepared.as_ref().and_then(|certificate| {
+                self.coordinator
+                    .accepted_proposals
+                    .get(&certificate.candidate_id)
+                    .filter(|block| {
+                        block.header.round == self.coordinator.local_context.round
+                            && certificate.round.0 <= block.header.round.0
+                    })
+                    .cloned()
+            });
+            if let (Some(block), Some(certificate)) = (prepared_block, prepared) {
                 self.emit_finality_vote(&block, &certificate)?;
                 self.stage = TypedRoundStage::Finality;
             } else {
@@ -1682,6 +1692,7 @@ where
                         "typed core proposal accepted under a different candidate ID".to_string(),
                     );
                 }
+                self.install_pending_validation_certificate(candidate_id, block.header.round)?;
                 self.persist_prepared_if_complete()?;
             }
             (
@@ -1692,12 +1703,15 @@ where
                     ..
                 },
                 TypedCoordinatorEvent::ProposalAccepted { candidate_id },
-            ) => self.record_proposal_material(
-                candidate_id,
-                target_context,
-                protected_block,
-                &block,
-            )?,
+            ) => {
+                self.record_proposal_material(
+                    candidate_id,
+                    target_context,
+                    protected_block,
+                    &block,
+                )?;
+                self.install_pending_validation_certificate(candidate_id, block.header.round)?;
+            }
             (TypedConsensusMessage::Vote { vote }, TypedCoordinatorEvent::VoteAccepted { .. }) => {
                 self.record_verified_vote(vote)?;
             }
@@ -2350,14 +2364,39 @@ where
         &mut self,
         certificate: ValidationCertificate,
     ) -> Result<(), String> {
-        if !self
+        let Some(accepted_proposal) = self
             .coordinator
             .accepted_proposals
-            .contains_key(&certificate.candidate_id)
-        {
+            .get(&certificate.candidate_id)
+        else {
             return Err(
                 "typed validation certificate has no locally validated proposal".to_string(),
             );
+        };
+        if certificate.round.0 > accepted_proposal.header.round.0 {
+            if let Some(existing) = self
+                .pending_validation_certificates
+                .get(&certificate.candidate_id)
+            {
+                if certificate.round == existing.round {
+                    if !same_validation_certificate_subject(existing, &certificate) {
+                        return Err(
+                            "TYPED_DRIVER_SOURCE_CONFLICT: pending validation certificates disagree on the certified candidate"
+                                .to_string(),
+                        );
+                    }
+                    return Ok(());
+                }
+                if certificate.round.0 < existing.round.0 {
+                    return Ok(());
+                }
+            }
+            // Authenticated P2P delivery can place a verified VC ahead of its
+            // matching carried proposal envelope. Keep the highest verified
+            // certificate pending instead of pairing it with an older round.
+            self.pending_validation_certificates
+                .insert(certificate.candidate_id.clone(), certificate);
+            return Ok(());
         }
         // The prepared certificate is intentionally retained across a round
         // change by `install_verified_timeout_certificate`, because carry-forward
@@ -2394,6 +2433,23 @@ where
         self.prepared_certificate = Some(certificate);
         self.persist_prepared_if_complete()?;
         Ok(())
+    }
+
+    fn install_pending_validation_certificate(
+        &mut self,
+        candidate_id: &BlockId,
+        proposal_round: crate::synergy_types::Round,
+    ) -> Result<(), String> {
+        let Some(certificate) = self
+            .pending_validation_certificates
+            .get(candidate_id)
+            .filter(|certificate| certificate.round.0 <= proposal_round.0)
+            .cloned()
+        else {
+            return Ok(());
+        };
+        self.pending_validation_certificates.remove(candidate_id);
+        self.record_validation_certificate(certificate)
     }
 
     fn persist_prepared_if_complete(&mut self) -> Result<(), String> {
@@ -2655,6 +2711,7 @@ where
         self.observed_finality_votes.clear();
         self.observed_timeout_votes.clear();
         self.prepared_certificate = None;
+        self.pending_validation_certificates.clear();
         self.finality_certificate = None;
         self.timeout_certificate = None;
         self.proposal_material.clear();
@@ -2711,7 +2768,9 @@ fn same_typed_finality_record_subject(
 ) -> Result<bool, String> {
     Ok(left.height == right.height
         && left.block_id == right.block_id
-        && left.block == right.block
+        && left.block.header == right.block.header
+        && left.block.transactions == right.block.transactions
+        && left.block.proposer_signature.algorithm == right.block.proposer_signature.algorithm
         && left.quorum_certificate.finality_context_root()?
             == right.quorum_certificate.finality_context_root()?)
 }
@@ -4868,6 +4927,132 @@ mod tests {
     }
 
     #[test]
+    fn future_round_validation_certificate_waits_for_its_proposal_envelope() {
+        let mut coordinator = coordinator_fixture();
+        let scheduled = coordinator
+            .consensus
+            .proposer_for(&coordinator.local_context.height_context, Round(0))
+            .expect("round-zero proposer");
+        coordinator.local_validator_id = scheduled.validator_id;
+        let mut driver = driver_with(coordinator, 1);
+        driver.tick().expect("emit deterministic core proposal");
+        let current_block = driver
+            .current_round_proposal()
+            .expect("local proposal is accepted")
+            .clone();
+        let validators = driver
+            .coordinator
+            .consensus
+            .validator_set
+            .validators
+            .clone();
+        let height_context = driver.coordinator.local_context.height_context.clone();
+        let round_zero_votes = validators
+            .iter()
+            .map(|validator| {
+                driver.coordinator.consensus.validation_vote(
+                    &mut driver.coordinator.signer,
+                    validator,
+                    &current_block,
+                    &height_context,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .expect("fixture round-zero validation votes");
+        let round_zero_certificate = driver
+            .coordinator
+            .form_validation_certificate(&round_zero_votes[..5])
+            .expect("round-zero strict-quorum VC");
+        let timeout_votes = validators
+            .iter()
+            .map(|validator| {
+                driver.coordinator.consensus.timeout_vote(
+                    &mut driver.coordinator.signer,
+                    validator,
+                    &height_context,
+                    Round(0),
+                    Some(&round_zero_certificate),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .expect("fixture round-zero timeout votes");
+        let timeout_certificate = driver
+            .coordinator
+            .form_timeout_certificate(&timeout_votes[..5])
+            .expect("strict-quorum TC authorizes round one");
+        driver
+            .coordinator
+            .accept_timeout_certificate(timeout_certificate.clone())
+            .expect("advance the verified fixture to round one");
+        let round_one_proposer = driver
+            .coordinator
+            .consensus
+            .proposer_for(&height_context, Round(1))
+            .expect("round-one proposer");
+        driver.coordinator.local_validator_id = round_one_proposer.validator_id;
+        let future_block = driver
+            .coordinator
+            .carry_forward_prepared_block(
+                &current_block,
+                &round_zero_certificate,
+                &timeout_certificate,
+            )
+            .expect("construct the verified round-one carried envelope");
+        let candidate_id = future_block.candidate_id().expect("future candidate ID");
+        assert_eq!(
+            candidate_id,
+            current_block.candidate_id().expect("current candidate ID")
+        );
+
+        let validation_votes = validators
+            .iter()
+            .map(|validator| {
+                driver.coordinator.consensus.validation_vote(
+                    &mut driver.coordinator.signer,
+                    validator,
+                    &future_block,
+                    &height_context,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .expect("fixture future-round validation votes");
+        let future_certificate = driver
+            .coordinator
+            .form_validation_certificate(&validation_votes[..5])
+            .expect("future-round strict-quorum VC");
+
+        // Reproduce authenticated delivery ordering: the future VC reaches
+        // this replica before the matching carried proposal envelope.
+        driver
+            .coordinator
+            .accepted_proposals
+            .insert(candidate_id.clone(), current_block);
+        driver
+            .record_validation_certificate(future_certificate.clone())
+            .expect("verified future VC is retained pending its proposal");
+        assert!(driver.prepared_certificate.is_none());
+        assert_eq!(
+            driver.pending_validation_certificates.get(&candidate_id),
+            Some(&future_certificate)
+        );
+
+        driver
+            .coordinator
+            .record_accepted_proposal(&future_block)
+            .expect("matching future proposal replaces the older envelope");
+        driver
+            .install_pending_validation_certificate(&candidate_id, Round(1))
+            .expect("matching proposal installs the pending VC");
+        assert_eq!(
+            driver.prepared_certificate.as_ref(),
+            Some(&future_certificate)
+        );
+        assert!(!driver
+            .pending_validation_certificates
+            .contains_key(&candidate_id));
+    }
+
+    #[test]
     fn prepared_candidate_and_round_authority_survive_driver_restart() {
         let mut coordinator = coordinator_fixture();
         let scheduled = coordinator
@@ -5383,6 +5568,7 @@ mod tests {
             .find(|message| matches!(message, TypedConsensusMessage::FinalityCheckpoint { records } if records.len() == 1 && records[0].height == Height(1)))
             .cloned()
             .expect("caught-up validator returns only the requested certified record");
+        let checkpoint_replay = checkpoint.clone();
         let caught_up_peer = authenticated_peer_for_release_driver(&drivers[1]);
         drivers[0]
             .handle_envelope(
@@ -5394,6 +5580,34 @@ mod tests {
                 &authorizer,
             )
             .expect("lagging validator replays the checkpoint through normal QC verification");
+
+        // ML-DSA proposal signatures are randomized. Two validators can
+        // durably retain different valid signature bytes for the identical
+        // header and transaction payload. A redundant checkpoint prefix must
+        // compare the certified block subject, not raw randomized bytes.
+        let mut randomized_checkpoint = checkpoint_replay;
+        let TypedConsensusMessage::FinalityCheckpoint { records } = &mut randomized_checkpoint
+        else {
+            unreachable!("the cloned message is the checkpoint selected above");
+        };
+        records[0].block.proposer_signature.signature_bytes[0] ^= 0x01;
+        let replay_peer = authenticated_peer_for_release_driver(&drivers[1]);
+        let replay_event = drivers[0]
+            .handle_envelope(
+                TypedConsensusEnvelope {
+                    peer_address: "caught-up-validator".to_string(),
+                    authenticated_peer: Some(replay_peer),
+                    message: randomized_checkpoint,
+                },
+                &authorizer,
+            )
+            .expect("randomized signature replay is an idempotent checkpoint prefix");
+        assert!(matches!(
+            replay_event,
+            TypedCoordinatorEvent::FinalityCheckpointApplied {
+                imported_records: 0
+            }
+        ));
         for driver in &drivers {
             assert_eq!(
                 driver.coordinator.local_context.latest_finalized_height,
