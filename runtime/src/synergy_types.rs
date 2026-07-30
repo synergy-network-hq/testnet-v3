@@ -1021,6 +1021,59 @@ impl QuorumCertificate {
             &self.canonical_bytes()?,
         ))
     }
+
+    /// The deterministic finalized-authority binding for the next height.
+    ///
+    /// A QC's full evidence root intentionally includes its signer bitmap and
+    /// ML-DSA signatures, so two valid strict-quorum certificates for the
+    /// same finalized subject can have distinct roots. That evidence remains
+    /// durable and auditable through [`Self::root`], but it must never choose
+    /// a different successor height context based on message timing. This
+    /// root commits only to the certificate subject and immutable verifier
+    /// context shared by every valid QC for that subject.
+    pub fn finality_context_root(&self) -> Result<Hash, String> {
+        #[derive(Serialize)]
+        struct FinalityContextSubject<'a> {
+            qc_version: u32,
+            chain_id: ChainId,
+            network_id: &'a NetworkId,
+            protocol_version: &'a str,
+            height: Height,
+            round: Round,
+            epoch: Epoch,
+            cluster_id: ClusterId,
+            height_context_root: Hash,
+            phase: &'a VotePhase,
+            block_id: &'a BlockId,
+            highest_prepared_vc_root: Option<Hash>,
+            active_validator_set_hash: Hash,
+            cluster_map_hash: Hash,
+            threshold_weight_required: u64,
+        }
+        let subject = FinalityContextSubject {
+            qc_version: self.qc_version,
+            chain_id: self.chain_id,
+            network_id: &self.network_id,
+            protocol_version: &self.protocol_version,
+            height: self.height,
+            round: self.round,
+            epoch: self.epoch,
+            cluster_id: self.cluster_id,
+            height_context_root: self.height_context_root,
+            phase: &self.phase,
+            block_id: &self.block_id,
+            highest_prepared_vc_root: self.highest_prepared_vc_root,
+            active_validator_set_hash: self.active_validator_set_hash,
+            cluster_map_hash: self.cluster_map_hash,
+            threshold_weight_required: self.threshold_weight_required,
+        };
+        let bytes = serde_json::to_vec(&subject)
+            .map_err(|error| format!("canonicalize finality context subject: {error}"))?;
+        Ok(Hash::from_domain_bytes(
+            "SYNERGY_FINALITY_CONTEXT_SUBJECT_V1",
+            &bytes,
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1901,6 +1954,48 @@ mod tests {
             algorithm: "fndsa".to_string(),
             signature_bytes: vec![1, 2, 3],
         }
+    }
+
+    #[test]
+    fn finality_context_root_excludes_valid_qc_signer_subset_evidence() {
+        let certificate = QuorumCertificate {
+            qc_version: 1,
+            chain_id: ChainId::synergy_testnet_v3(),
+            network_id: NetworkId::synergy_testnet_v3(),
+            protocol_version: POSY_PROTOCOL_VERSION.to_string(),
+            height: Height(9),
+            round: Round(2),
+            epoch: Epoch(0),
+            cluster_id: ClusterId(0),
+            height_context_root: root("context"),
+            phase: VotePhase::Finality,
+            block_id: BlockId("block-9".to_string()),
+            highest_prepared_vc_root: None,
+            active_validator_set_hash: root("validators"),
+            cluster_map_hash: root("clusters"),
+            threshold_weight_required: 5,
+            signed_weight: 5,
+            signer_bitmap: vec![0b0001_1111],
+            aegis_pq_signatures: vec![test_sig(); 5],
+            aegis_pq_key_ids: (1..=5)
+                .map(|index| AegisPqKeyId(format!("key-{index}")))
+                .collect(),
+        };
+        let mut alternate_evidence = certificate.clone();
+        alternate_evidence.signer_bitmap = vec![0b0010_1111];
+        alternate_evidence.aegis_pq_key_ids[4] = AegisPqKeyId("key-6".to_string());
+        alternate_evidence.aegis_pq_signatures[4] = AegisPqSignature {
+            algorithm: "mldsa65".to_string(),
+            signature_bytes: vec![9, 8, 7],
+        };
+        assert_ne!(
+            certificate.root().unwrap(),
+            alternate_evidence.root().unwrap()
+        );
+        assert_eq!(
+            certificate.finality_context_root().unwrap(),
+            alternate_evidence.finality_context_root().unwrap()
+        );
     }
 
     #[test]

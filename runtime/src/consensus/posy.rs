@@ -1141,7 +1141,15 @@ impl ProofOfSynergyBft {
                 required_count
             ));
         }
-        let validators = self.validator_set.canonicalized().validators;
+        // QC bitmap positions are defined by the canonical *active* validator
+        // set for the certificate epoch.  Pre-provisioned validators that are
+        // inactive at genesis must not shift a live signer's bitmap position:
+        // verification uses this same active set.
+        let validators = self
+            .validator_set
+            .active_for_epoch(height_context.epoch)
+            .canonicalized()
+            .validators;
         let mut signer_bitmap = vec![0u8; (validators.len() + 7) / 8];
         let mut signatures = Vec::new();
         let mut key_ids = Vec::new();
@@ -1726,6 +1734,69 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(consensus.form_qc(&few_votes, &ctx.height_context).is_err());
+    }
+
+    #[test]
+    fn certificate_bitmap_excludes_inactive_preprovisioned_validators() {
+        let (mut signer, mut set, cluster, protocol) = setup_validators();
+        let verifier = signer.verifier();
+        let inactive_key = signer
+            .generate_and_register_key(
+                "preprovisioned-validator",
+                vec![
+                    AegisPqKeyRole::ConsensusVote,
+                    AegisPqKeyRole::ConsensusProposer,
+                ],
+                Epoch(1),
+            )
+            .expect("inactive validator key");
+        let inactive_public = signer.public_key_record(&inactive_key).expect("public key");
+        set.validators.push(ValidatorRecord {
+            // Sort before the active validator ids so a full-set bitmap would
+            // expose the off-by-one encoding immediately.
+            validator_id: ValidatorId("preprovisioned-validator".to_string()),
+            validator_uma_id: UmaId("preprovisioned-validator".to_string()),
+            consensus_public_key: inactive_public.clone(),
+            peer_public_key: inactive_public.clone(),
+            operator_public_key: inactive_public,
+            voting_weight: 1,
+            status: ValidatorStatus::Registered,
+            cluster_id: ClusterId(0),
+            activation_epoch: Epoch(1),
+        });
+        let mut consensus =
+            ProofOfSynergyBft::new(&verifier, set.clone(), cluster.clone(), protocol.clone());
+        let active_set = set.active_for_epoch(Epoch(0));
+        let ctx = context(&active_set, &cluster, &protocol);
+        let proposer = consensus
+            .proposer_for(&ctx.height_context, Round(0))
+            .expect("active proposer");
+        let block = consensus
+            .propose_block(
+                &mut signer,
+                &proposer,
+                Vec::new(),
+                &ctx,
+                &empty_state(),
+                Hash::zero(),
+            )
+            .expect("proposal");
+        let votes = active_set.validators[0..5]
+            .iter()
+            .map(|validator| {
+                consensus
+                    .validation_vote(&mut signer, validator, &block, &ctx.height_context)
+                    .expect("active validator vote")
+            })
+            .collect::<Vec<_>>();
+        let vc = consensus
+            .form_vc(&votes, &ctx.height_context)
+            .expect("active-only certificate");
+
+        assert_eq!(vc.signer_bitmap, vec![0b0001_1111]);
+        consensus
+            .verify_vc(&vc, &ctx.height_context)
+            .expect("certificate verifies against active-set bitmap");
     }
 
     #[test]

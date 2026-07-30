@@ -148,7 +148,7 @@ impl FinalizedTypedContextProvider {
                     |error| format!("persisted typed finality block ID is not a hash: {error}"),
                 )?,
                 source_finalized_state_root: record.block.header.state_root_after,
-                source_finality_qc_root: record.quorum_certificate_root,
+                source_finality_qc_root: record.quorum_certificate.finality_context_root()?,
                 source_height_context_root: record.block.header.height_context_root,
                 source_epoch: record.block.header.epoch,
                 source_active_validator_set_root: record.block.header.active_validator_set_hash,
@@ -250,7 +250,9 @@ impl FinalizedTypedContextProvider {
                     .bootstrap
                     .assigned_height_schedule_root(next_height.0),
                 cryptographic_profile_root: self.bootstrap.cryptographic_profile_root,
-                prior_finalized_qc_or_transition_root: record.quorum_certificate_root,
+                prior_finalized_qc_or_transition_root: record
+                    .quorum_certificate
+                    .finality_context_root()?,
             },
             &self.bootstrap.validator_set,
             &self.bootstrap.cluster_map,
@@ -264,7 +266,7 @@ impl FinalizedTypedContextProvider {
             latest_finalized_block_hash: block_hash,
             latest_finalized_state_root: record.block.header.state_root_after,
             round: Round(0),
-            evidence_root: record.quorum_certificate_root,
+            evidence_root: record.quorum_certificate.finality_context_root()?,
             app_version: 1,
             execution_version: 1,
             dag_version: 1,
@@ -294,9 +296,9 @@ impl TypedNextHeightContextSource for FinalizedTypedContextProvider {
             );
         }
         let expected_current = self.context_before_finality(&latest)?;
-        if !same_local_context(current, &expected_current) {
+        if !same_post_finality_context(current, &expected_current, &latest)? {
             return Err(
-                "typed next-height authority current context does not match the finalized predecessor"
+                "typed next-height authority current context does not match the durable finalized tip"
                     .to_string(),
             );
         }
@@ -316,6 +318,29 @@ fn same_local_context(left: &LocalConsensusContext, right: &LocalConsensusContex
         && left.execution_version == right.execution_version
         && left.dag_version == right.dag_version
         && left.aegis_pqvm_version == right.aegis_pqvm_version
+}
+
+/// The coordinator calls `next_authority` only after it has committed and
+/// durably appended the QC.  Its immutable height authority and prior
+/// evidence must therefore still match the predecessor context, while its
+/// finalized-chain fields and round must match the just-persisted block.
+fn same_post_finality_context(
+    current: &LocalConsensusContext,
+    predecessor: &LocalConsensusContext,
+    finalized: &TypedFinalityRecord,
+) -> Result<bool, String> {
+    let finalized_block_hash = Hash::from_hex(&finalized.block_id.0)
+        .map_err(|error| format!("persisted typed finality block ID is not a hash: {error}"))?;
+    Ok(current.height_context == predecessor.height_context
+        && current.latest_finalized_height == finalized.height
+        && current.latest_finalized_block_hash == finalized_block_hash
+        && current.latest_finalized_state_root == finalized.block.header.state_root_after
+        && current.round == finalized.block.header.round
+        && current.evidence_root == predecessor.evidence_root
+        && current.app_version == predecessor.app_version
+        && current.execution_version == predecessor.execution_version
+        && current.dag_version == predecessor.dag_version
+        && current.aegis_pqvm_version == predecessor.aegis_pqvm_version)
 }
 
 #[cfg(test)]
@@ -500,9 +525,15 @@ mod tests {
         let (bootstrap, protocol, store, initial, deployed_root, store_path) = fixture();
         let mut provider = provider(&bootstrap, &protocol, &store, deployed_root);
         let record = append_height_one(&store, &initial);
+        let mut post_finality = initial.clone();
+        post_finality.latest_finalized_height = record.height;
+        post_finality.latest_finalized_block_hash =
+            Hash::from_hex(&record.block_id.0).expect("finalized fixture block ID is a hash");
+        post_finality.latest_finalized_state_root = record.block.header.state_root_after;
+        post_finality.round = record.block.header.round;
         let authority = provider
-            .next_authority(&record, &initial)
-            .expect("same-topology next authority");
+            .next_authority(&record, &post_finality)
+            .expect("same-topology post-finality next authority");
         let TypedNextHeightAuthority::UnchangedTopology { context } = authority else {
             panic!("Genesis topology must retain unchanged authority");
         };
@@ -510,7 +541,7 @@ mod tests {
         assert_eq!(context.latest_finalized_height, Height(1));
         assert_eq!(
             context.height_context.prior_finalized_qc_or_transition_root,
-            record.quorum_certificate_root
+            record.quorum_certificate.finality_context_root().unwrap()
         );
         let _ = std::fs::remove_file(store_path);
     }

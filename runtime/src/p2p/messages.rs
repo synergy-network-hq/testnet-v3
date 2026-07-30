@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::block::{Block, BlockHeader};
 use crate::consensus::dual_quorum::{QuorumCertificate, Vote};
+use crate::consensus::typed_finality_store::TypedFinalityRecord;
 use crate::etdag::{CertifiedProtectedInputArtifact, ProtectedBlockInput, TargetAdmissionContext};
 use crate::synergy_types::AegisPqSignature;
 use crate::synergy_types::{
@@ -18,6 +19,9 @@ use crate::transaction::Transaction;
 /// sends rather than to a partial in-memory field.
 pub const MAX_TYPED_CONSENSUS_CERTIFICATE_FRAME_BYTES: usize = 128 * 1024;
 pub const MAX_TYPED_CONSENSUS_PROPOSAL_FRAME_BYTES: usize = 8 * 1024 * 1024;
+/// Bounded replay of already-verified typed finality. Recipients replay each
+/// record through normal core-proposal and QC verification before persistence.
+pub const MAX_TYPED_FINALITY_CHECKPOINT_FRAME_BYTES: usize = 4 * 1024 * 1024;
 /// Core-only proposals are deterministic empty blocks while ETDAG is deferred,
 /// so they receive the tighter certificate-sized transport budget rather than
 /// the ETDAG package allowance.
@@ -56,6 +60,29 @@ pub enum TypedConsensusMessage {
     TimeoutCertificate {
         certificate: TimeoutCertificate,
     },
+    /// Requests a bounded segment beginning at the caller's next missing
+    /// height. Only authenticated finalized-Genesis validators may request it.
+    FinalityCheckpointRequest {
+        next_height: crate::synergy_types::Height,
+    },
+    /// A bounded sequence of certified core-only finality records.
+    FinalityCheckpoint {
+        records: Vec<TypedFinalityRecord>,
+    },
+}
+
+/// Non-signing, finalized-only typed-finality replication for relayers and
+/// public service observers. This is deliberately a separate wire protocol
+/// from [`TypedConsensusMessage`]: it never carries a proposal, vote, timeout,
+/// or authority to participate in validator consensus.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TypedFinalityObserverMessage {
+    /// Requests the first bounded certified segment at `next_height`.
+    Request {
+        next_height: crate::synergy_types::Height,
+    },
+    /// A bounded consecutive sequence of finalized typed records.
+    Records { records: Vec<TypedFinalityRecord> },
 }
 
 /// Rejects typed consensus wire artifacts that exceed the Testnet-v3 resource
@@ -82,6 +109,11 @@ pub fn validate_typed_consensus_message_size(
             "typed consensus certificate",
             MAX_TYPED_CONSENSUS_CERTIFICATE_FRAME_BYTES,
         ),
+        TypedConsensusMessage::FinalityCheckpointRequest { .. } => return Ok(()),
+        TypedConsensusMessage::FinalityCheckpoint { .. } => (
+            "typed finality checkpoint",
+            MAX_TYPED_FINALITY_CHECKPOINT_FRAME_BYTES,
+        ),
         TypedConsensusMessage::Vote { .. } => return Ok(()),
     };
     let encoded = NetworkMessage::TypedConsensus {
@@ -93,6 +125,33 @@ pub fn validate_typed_consensus_message_size(
         .checked_add(4)
         .ok_or_else(|| format!("{kind} frame length overflow"))?;
     validate_typed_consensus_frame_length(kind, frame_bytes, maximum)
+}
+
+/// Applies the same bounded-frame policy to finalized-only observer traffic.
+/// The recipient must still independently replay every record before durable
+/// persistence; this guard only limits untrusted transport work.
+pub fn validate_typed_finality_observer_message_size(
+    message: &TypedFinalityObserverMessage,
+) -> Result<(), String> {
+    let TypedFinalityObserverMessage::Records { records } = message else {
+        return Ok(());
+    };
+    if records.is_empty() {
+        return Err("typed finality observer record segment cannot be empty".to_string());
+    }
+    let encoded = NetworkMessage::TypedFinalityObserver {
+        message: message.clone(),
+    };
+    let frame_bytes = serde_json::to_vec(&encoded)
+        .map_err(|error| format!("serialize typed finality observer frame: {error}"))?
+        .len()
+        .checked_add(4)
+        .ok_or_else(|| "typed finality observer frame length overflow".to_string())?;
+    validate_typed_consensus_frame_length(
+        "typed finality observer record segment",
+        frame_bytes,
+        MAX_TYPED_FINALITY_CHECKPOINT_FRAME_BYTES,
+    )
 }
 
 fn validate_typed_consensus_frame_length(
@@ -172,6 +231,11 @@ pub enum NetworkMessage {
     /// coordinator mailbox and never through inherited consensus handlers.
     TypedConsensus {
         message: TypedConsensusMessage,
+    },
+    /// Verified, non-signing finalized-chain replication between the
+    /// validator-VPN relayer tier and public RPC/indexer observer roles.
+    TypedFinalityObserver {
+        message: TypedFinalityObserverMessage,
     },
     /// A complete, already-certified ETDAG proof package. The P2P receiver
     /// binds it to local height/finality authority before durable admission;

@@ -6,7 +6,7 @@ use std::process::{self, Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::config::{
     list_available_templates, load_node_config, load_node_config_from_template, NodeConfig,
@@ -26,6 +26,9 @@ use crate::consensus::typed_coordinator::{
     remove_typed_coordinator_ingress, run_typed_posy_driver, P2pTypedConsensusEgress,
     TypedFinalityContextDigestSource, TypedNextHeightContextSource, TypedPosyCoordinator,
     TypedPosyCoordinatorStartup, TypedPosyDriver,
+};
+use crate::consensus::typed_finality_observer::{
+    install_typed_finality_observer, remove_typed_finality_observer, TypedFinalityObserver,
 };
 use crate::consensus::typed_finality_store::TypedFinalityStore;
 use crate::consensus::validator_keys::{
@@ -870,6 +873,31 @@ fn is_validator_profile(profile: Option<&RoleProfile>) -> bool {
     matches!(profile.map(|value| value.role), Some(NodeRole::Validator))
 }
 
+/// Waits until every other finalized Genesis validator has a fresh,
+/// authenticated status session before starting the first typed round.  The
+/// worker treats an empty fanout as fatal, so starting it while P2P is still
+/// converging would create a deterministic startup race rather than a safe
+/// consensus failure.
+fn wait_for_finalized_typed_peer_readiness(
+    network: &p2p::networking::P2PNetwork,
+    required_remote_validators: usize,
+) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(45);
+    loop {
+        let ready = network.get_status_ready_validator_addresses();
+        if ready.len() >= required_remote_validators {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for finalized typed PoSy peer readiness: required {required_remote_validators} remote validators, observed {}",
+                ready.len()
+            ));
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
 fn local_validator_is_consensus_authorized(config: &NodeConfig) -> bool {
     let validator_address = resolve_local_validator_address(config);
     consensus_membership_validators(VALIDATOR_MANAGER.get_active_validators())
@@ -890,6 +918,22 @@ fn should_start_consensus(config: &NodeConfig, profile: Option<&RoleProfile>) ->
         Some(profile) => profile.service_surface.contains(&"consensus"),
         None => true,
     }
+}
+
+/// Public service roles replicate only independently verified finality; they
+/// do not start the signing coordinator or load validator custody material.
+/// Relayers are the narrow bridge from the validator VPN to the public
+/// gateway/indexer tier, while the gateway and indexer remain read-only
+/// observers.
+fn should_start_typed_finality_observer(
+    config: &NodeConfig,
+    profile: Option<&RoleProfile>,
+) -> bool {
+    !config.node.bootstrap_only
+        && matches!(
+            profile.map(|value| value.role),
+            Some(NodeRole::Relayer | NodeRole::RpcGateway | NodeRole::IndexerExplorer)
+        )
 }
 
 /// The only production consensus-worker selection for Testnet-v3.  Keeping
@@ -1169,6 +1213,7 @@ where
                 Err(_) => Some("typed PoSy driver worker panicked".to_string()),
             };
             if let Some(error) = failure {
+                eprintln!("Finalized typed PoSy worker failed closed: {error}");
                 if let Ok(mut slot) = worker_error.lock() {
                     *slot = Some(error);
                 }
@@ -1557,6 +1602,39 @@ fn ensure_local_validator_record_available(validator_address: &str) -> Result<()
         })?;
     VALIDATOR_MANAGER.update_validator_stake(validator_address, initial_validator.stake_nwei);
     Ok(())
+}
+
+fn ensure_genesis_validator_membership_available() -> Result<usize, String> {
+    let genesis = canonical_genesis().map_err(|error| {
+        format!("failed to load canonical genesis for validator membership preflight: {error}")
+    })?;
+    let validator_addresses = genesis
+        .validators()
+        .iter()
+        .map(|validator| validator.operator_address.clone())
+        .collect::<Vec<_>>();
+    if validator_addresses.is_empty() {
+        return Err("canonical Testnet genesis contains no validators".to_string());
+    }
+
+    for validator_address in &validator_addresses {
+        ensure_local_validator_record_available(validator_address)?;
+    }
+
+    let active_validators =
+        consensus_membership_validators(VALIDATOR_MANAGER.get_active_validators());
+    for validator_address in &validator_addresses {
+        if !active_validators
+            .iter()
+            .any(|validator| validator.address == *validator_address)
+        {
+            return Err(format!(
+                "canonical Genesis validator {validator_address} is not ACTIVE after membership preload"
+            ));
+        }
+    }
+
+    Ok(validator_addresses.len())
 }
 
 fn normalize_expected_profile(
@@ -2623,6 +2701,29 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                     );
                     process::exit(1);
                 });
+            // Genesis validators must be present in the in-memory canonical
+            // registry before P2P constructs its typed PoSy handshake.  The
+            // handshake proves possession of the Genesis-assigned ML-DSA-65
+            // key and therefore cannot bootstrap registration itself.
+            //
+            // Without this ordering, every Genesis validator starts with an
+            // empty process-local registry, rejects every peer as
+            // "validator ... is not registered", and then waits forever for
+            // state sync from peers it cannot authenticate.
+            if is_validator_profile(role_profile) && !config.node.bootstrap_only {
+                let validator_address = resolve_local_validator_address(&config);
+                let active_validator_count = ensure_genesis_validator_membership_available()
+                    .unwrap_or_else(|error| {
+                        eprintln!("Validator Genesis membership preflight failed closed: {error}");
+                        process::exit(1);
+                    });
+                info!(
+                    "main",
+                    "Canonical Genesis validator membership loaded before P2P",
+                    "validator_address" => validator_address,
+                    "active_validator_count" => active_validator_count as u64
+                );
+            }
             info!(
                 "main",
                 "Canonical genesis loaded",
@@ -2711,6 +2812,29 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
             let process_start_time = SystemTime::now();
 
             let p2p_enabled = should_start_p2p(&config, role_profile);
+            let typed_finality_observer_enabled =
+                should_start_typed_finality_observer(&config, role_profile);
+            if typed_finality_observer_enabled && !p2p_enabled {
+                eprintln!(
+                    "Service startup failed closed: typed finality observer roles require active P2P"
+                );
+                process::exit(1);
+            }
+            if typed_finality_observer_enabled {
+                let observer = TypedFinalityObserver::from_canonical_finalized_genesis()
+                    .unwrap_or_else(|error| {
+                        eprintln!(
+                            "Service startup failed closed: cannot initialize verified typed finality observer: {error}"
+                        );
+                        process::exit(1);
+                    });
+                install_typed_finality_observer(observer).unwrap_or_else(|error| {
+                    eprintln!(
+                        "Service startup failed closed: cannot install typed finality observer ingress: {error}"
+                    );
+                    process::exit(1);
+                });
+            }
             let p2p_network = if p2p_enabled {
                 let network = p2p::start_p2p_network(
                     Arc::clone(&blockchain),
@@ -2938,6 +3062,26 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
             // shutdown signal.  A typed-driver failure clears it before any
             // legacy path could be considered, and the role loop exits.
             let running = Arc::new(AtomicBool::new(true));
+            if consensus_enabled && is_validator_profile(role_profile) {
+                let required_remote_validators =
+                    genesis.validators().len().checked_sub(1).unwrap_or(0);
+                let network = p2p_network.as_ref().unwrap_or_else(|| {
+                    eprintln!(
+                        "Consensus startup failed closed: finalized typed PoSy requires an active P2P network"
+                    );
+                    process::exit(1);
+                });
+                info!(
+                    "main",
+                    "Waiting for finalized typed PoSy peer readiness",
+                    "required_remote_validators" => required_remote_validators as u64
+                );
+                wait_for_finalized_typed_peer_readiness(network, required_remote_validators)
+                    .unwrap_or_else(|error| {
+                        eprintln!("Consensus startup failed closed: {error}");
+                        process::exit(1);
+                    });
+            }
             let initial_consensus_startup = select_finalized_typed_driver_startup(
                 consensus_enabled,
                 p2p_network.is_some(),
@@ -3079,16 +3223,31 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                 std::thread::sleep(Duration::from_secs(1));
             }
 
-            info!("main", "Node shutdown gracefully");
-            fs::remove_file("data/synergy-testnet.pid").ok();
-
             for handle in role_services.worker_threads {
                 let _ = handle.join();
             }
 
+            let typed_worker_failure = typed_posy_worker
+                .as_ref()
+                .and_then(TypedPosyWorker::fatal_error);
             if let Some(typed_posy_worker) = typed_posy_worker {
                 typed_posy_worker.join();
             }
+            if typed_finality_observer_enabled {
+                if let Err(error) = remove_typed_finality_observer() {
+                    warn!(
+                        "main",
+                        "Could not remove typed finality observer ingress during shutdown",
+                        "error" => error
+                    );
+                }
+            }
+            fs::remove_file("data/synergy-testnet.pid").ok();
+            if let Some(error) = typed_worker_failure {
+                eprintln!("Finalized typed PoSy worker failed closed: {error}");
+                process::exit(1);
+            }
+            info!("main", "Node shutdown gracefully");
         }
         "keygen" | "generate-keypair" => {
             use crate::address::generate_class_based_address;
@@ -3624,6 +3783,31 @@ mod tests {
             source.contains("spawn_finalized_typed_posy_driver("),
             "the production role runtime must retain the finalized typed-driver entry point"
         );
+    }
+
+    #[test]
+    fn only_relayer_gateway_and_indexer_start_non_signing_typed_finality_observer() {
+        let config = NodeConfig::default();
+        assert!(should_start_typed_finality_observer(
+            &config,
+            Some(NodeRole::Relayer.profile())
+        ));
+        assert!(should_start_typed_finality_observer(
+            &config,
+            Some(NodeRole::RpcGateway.profile())
+        ));
+        assert!(should_start_typed_finality_observer(
+            &config,
+            Some(NodeRole::IndexerExplorer.profile())
+        ));
+        assert!(!should_start_typed_finality_observer(
+            &config,
+            Some(NodeRole::Validator.profile())
+        ));
+        assert!(!should_start_typed_finality_observer(
+            &config,
+            Some(NodeRole::ArchiveValidator.profile())
+        ));
     }
 
     #[test]

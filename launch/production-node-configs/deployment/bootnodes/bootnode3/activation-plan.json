@@ -1,7 +1,7 @@
 {
   "config_install_mode": "install_new_isolated_testnet_v3_config_only",
   "config_payload": "bootnodes/bootnode3.toml",
-  "config_payload_sha256": "0dd90b81f2d8bc0b4817457e04340170b43016baa5629d4c7eb517ac33c52705",
+  "config_payload_sha256": "a0692704e424623c31541e0193b980143685b5ed19ac61f94939a30974df2af1",
   "dedicated_install_map": {
     "runtime_environment_example": {
       "deploy_path": "/etc/synergy/testnet-v3/bootnode3/runtime.env",
