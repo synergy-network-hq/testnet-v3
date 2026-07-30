@@ -1760,39 +1760,48 @@ where
 
         if let Some(timeout_certificate) = self.timeout_certificate.clone() {
             if let Some(candidate_id) = timeout_certificate.carry_forward_candidate_id.clone() {
-                let certificate = self.prepared_certificate.clone().ok_or_else(|| {
-                    "TYPED_DRIVER_SOURCE_CONFLICT: timeout certificate requests carry-forward without a prepared VC"
-                        .to_string()
-                })?;
+                // A timeout certificate carries forward the highest prepared
+                // candidate across the whole timeout quorum. This node may
+                // legitimately be unable to reconstruct that candidate: it may
+                // never have observed that validation certificate, it may have
+                // prepared a different candidate in the same round, it may not
+                // hold the proposal body, or it may have lost in-memory prepared
+                // state across a restart. None of those is evidence of a fault.
+                //
+                // The carry-forward rule forbids proposing anything other than
+                // the carried candidate, so the only correct action is to not
+                // propose this round and let it time out; another scheduled
+                // proposer that does hold the material will carry it forward.
+                // Treating these gaps as TYPED_DRIVER_SOURCE_CONFLICT killed the
+                // process on an ordinary liveness gap and stalled the chain.
+                let Some(certificate) = self.prepared_certificate.clone() else {
+                    return Ok(());
+                };
                 if certificate.candidate_id != candidate_id {
-                    return Err(
-                        "TYPED_DRIVER_SOURCE_CONFLICT: timeout certificate and prepared VC disagree on carry-forward candidate"
-                            .to_string(),
-                    );
+                    return Ok(());
                 }
-                let original = self
+                let Some(original) = self
                     .coordinator
                     .accepted_proposals
                     .get(&candidate_id)
                     .cloned()
-                    .ok_or_else(|| {
-                        "TYPED_DRIVER_SOURCE_CONFLICT: prepared carry-forward candidate has no locally validated proposal"
-                            .to_string()
-                    })?;
+                else {
+                    return Ok(());
+                };
                 let carried = self.coordinator.carry_forward_prepared_block(
                     &original,
                     &certificate,
                     &timeout_certificate,
                 )?;
                 if self.etdag_is_active() {
-                    let (target_context, protected_block) = self
-                        .proposal_material
-                        .get(&candidate_id)
-                        .cloned()
-                        .ok_or_else(|| {
-                            "TYPED_DRIVER_SOURCE_CONFLICT: prepared carry-forward candidate has no verified ETDAG material"
-                                .to_string()
-                        })?;
+                    // Same liveness gap as above: missing local ETDAG material
+                    // means this node cannot propose the carried candidate, not
+                    // that the network is faulty.
+                    let Some((target_context, protected_block)) =
+                        self.proposal_material.get(&candidate_id).cloned()
+                    else {
+                        return Ok(());
+                    };
                     self.broadcast_proposal(target_context, protected_block, carried)?;
                 } else {
                     self.broadcast_core_proposal(carried)?;
@@ -2175,14 +2184,37 @@ where
                 "typed validation certificate has no locally validated proposal".to_string(),
             );
         }
+        // The prepared certificate is intentionally retained across a round
+        // change by `install_verified_timeout_certificate`, because carry-forward
+        // needs it. It follows that a later round legitimately produces a
+        // *different* certified candidate whenever the timeout certificate
+        // carried no candidate forward, and the driver must adopt the highest
+        // prepared certificate rather than treat that as evidence of a fault.
+        //
+        // Comparing subjects without first comparing rounds made every ordinary
+        // round change fatal: the node failed closed with
+        // TYPED_DRIVER_SOURCE_CONFLICT, exited, and could not reproduce its
+        // signing authorizations afterwards, which stalled Testnet-v3 at the
+        // first round change on both the pre-reset and post-reset chains.
+        //
+        // Only two certificates for the *same* round are evidence of a fault.
+        // This mirrors the round comparison `install_verified_timeout_certificate`
+        // already performs for timeout certificates.
         if let Some(existing) = &self.prepared_certificate {
-            if !same_validation_certificate_subject(existing, &certificate) {
-                return Err(
-                    "TYPED_DRIVER_SOURCE_CONFLICT: validation certificates disagree on the certified candidate"
-                        .to_string(),
-                );
+            if certificate.round == existing.round {
+                if !same_validation_certificate_subject(existing, &certificate) {
+                    return Err(
+                        "TYPED_DRIVER_SOURCE_CONFLICT: validation certificates disagree on the certified candidate"
+                            .to_string(),
+                    );
+                }
+                return Ok(());
             }
-            return Ok(());
+            if certificate.round.0 < existing.round.0 {
+                // A delayed certificate from an earlier round can no longer
+                // describe the prepared candidate for the current round.
+                return Ok(());
+            }
         }
         self.prepared_certificate = Some(certificate);
         Ok(())
