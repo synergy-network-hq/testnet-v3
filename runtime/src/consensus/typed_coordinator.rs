@@ -2594,12 +2594,19 @@ where
                 // must not overwrite the newer transition state.
                 return Ok(());
             }
-            if existing.next_round != certificate.closing_round {
+            if certificate.next_round != self.coordinator.local_context.round {
                 return Err(
-                    "TYPED_DRIVER_SOURCE_CONFLICT: timeout certificates skip a round transition"
+                    "TYPED_DRIVER_SOURCE_CONFLICT: timeout certificate was not installed by the coordinator"
                         .to_string(),
                 );
             }
+            // A restarted or temporarily disconnected replica can receive a
+            // later strict-quorum TC without having observed every ephemeral
+            // intermediate TC. `TypedPosyCoordinator::accept_timeout_certificate`
+            // has already verified the certificate and recovered the local
+            // round to its successor. Requiring adjacency to the driver's
+            // last process-local TC made that valid recovery path fatal and
+            // trapped the replica in a restart loop.
         }
         self.timeout_certificate = Some(certificate.clone());
         self.validation_votes.clear();
@@ -4659,8 +4666,16 @@ mod tests {
         ));
 
         driver
+            .coordinator
+            .accept_timeout_certificate(strict_quorum_certificate.clone())
+            .expect("the coordinator must verify and install the first transition");
+        driver
             .install_verified_timeout_certificate(strict_quorum_certificate)
             .expect("first verified timeout certificate installs");
+        driver
+            .coordinator
+            .accept_timeout_certificate(full_quorum_certificate.clone())
+            .expect("the coordinator accepts equivalent strict-quorum replay");
         driver
             .install_verified_timeout_certificate(full_quorum_certificate)
             .expect("equivalent strict-quorum evidence must not halt liveness");
@@ -4668,7 +4683,6 @@ mod tests {
         // A timeout certificate authorizes its immediate successor round.  It
         // must be replaced, rather than treated as a conflicting source, when
         // the next verified timeout certificate closes that successor round.
-        driver.coordinator.local_context.round = Round(1);
         let next_round_votes = {
             let (consensus, signer) = (
                 &mut driver.coordinator.consensus,
@@ -4687,6 +4701,10 @@ mod tests {
             .form_timeout_certificate(&next_round_votes[..5])
             .expect("a verified successor-round timeout certificate must form");
         driver
+            .coordinator
+            .accept_timeout_certificate(successor_round_certificate.clone())
+            .expect("the coordinator must verify and install the successor transition");
+        driver
             .install_verified_timeout_certificate(successor_round_certificate.clone())
             .expect("the next sequential timeout certificate must replace the prior-round authorization");
         assert_eq!(
@@ -4696,6 +4714,79 @@ mod tests {
                 .expect("new timeout authorization must remain installed")
                 .closing_round,
             Round(1)
+        );
+    }
+
+    #[test]
+    fn verified_later_timeout_certificate_recovers_a_missed_round_transition() {
+        let mut driver = driver_with(coordinator_fixture(), 1);
+        let height_context = driver.coordinator.local_context.height_context.clone();
+        let validators = driver
+            .coordinator
+            .consensus
+            .validator_set
+            .validators
+            .clone();
+
+        let first_round_votes = {
+            let (consensus, signer) = (
+                &mut driver.coordinator.consensus,
+                &mut driver.coordinator.signer,
+            );
+            validators
+                .iter()
+                .map(|validator| {
+                    consensus.timeout_vote(signer, validator, &height_context, Round(0), None)
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .expect("fixture validators must form first-round timeout votes")
+        };
+        let first_certificate = driver
+            .coordinator
+            .form_timeout_certificate(&first_round_votes[..5])
+            .expect("first-round strict quorum certificate");
+        driver
+            .coordinator
+            .accept_timeout_certificate(first_certificate.clone())
+            .expect("coordinator installs first transition");
+        driver
+            .install_verified_timeout_certificate(first_certificate)
+            .expect("driver installs first transition");
+        assert_eq!(driver.coordinator.local_context.round, Round(1));
+
+        let later_round_votes = {
+            let (consensus, signer) = (
+                &mut driver.coordinator.consensus,
+                &mut driver.coordinator.signer,
+            );
+            validators
+                .iter()
+                .map(|validator| {
+                    consensus.timeout_vote(signer, validator, &height_context, Round(2), None)
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .expect("fixture validators must form later-round timeout votes")
+        };
+        let later_certificate = driver
+            .coordinator
+            .form_timeout_certificate(&later_round_votes[..5])
+            .expect("later-round strict quorum certificate");
+        driver
+            .coordinator
+            .accept_timeout_certificate(later_certificate.clone())
+            .expect("verified later TC recovers the coordinator");
+        driver
+            .install_verified_timeout_certificate(later_certificate)
+            .expect("driver accepts the coordinator-authorized recovery");
+
+        assert_eq!(driver.coordinator.local_context.round, Round(3));
+        assert_eq!(
+            driver
+                .timeout_certificate
+                .as_ref()
+                .expect("latest timeout authorization remains installed")
+                .closing_round,
+            Round(2)
         );
     }
 
