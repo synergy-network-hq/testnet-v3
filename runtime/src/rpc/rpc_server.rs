@@ -10380,7 +10380,7 @@ mod tests {
                 .collect(),
         };
         TypedFinalityRecord {
-            record_version: 2,
+            record_version: 3,
             height: block.header.height,
             block_id: block.block_id().unwrap(),
             quorum_certificate_root: quorum_certificate.root().unwrap(),

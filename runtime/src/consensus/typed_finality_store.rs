@@ -15,7 +15,12 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const STORE_VERSION: u32 = 2;
+// Version three binds successor consensus context to the QC subject rather
+// than its timing-dependent signature subset. Version-two records cannot be
+// resumed because they may have derived future heights from different QC
+// evidence roots; Testnet-v3 has not been publicly launched, so recovery
+// deliberately fails closed and requires a fresh genesis-bound store.
+const STORE_VERSION: u32 = 3;
 const TYPED_FINALITY_FILE: &str = "data/typed-posy-finality.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

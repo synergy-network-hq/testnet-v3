@@ -18,6 +18,10 @@ use crate::consensus::testnet_v3_bootstrap::{
 };
 use crate::consensus::timing_trace;
 use crate::consensus::typed_coordinator::AuthenticatedTypedConsensusPeer;
+use crate::consensus::typed_finality_observer::{
+    canonical_typed_finality_snapshot_from, import_typed_finality_observer_records,
+    typed_finality_observer_next_missing_height, typed_finality_observer_snapshot_from,
+};
 use crate::consensus::validator_keys::load_local_validator_keypair;
 use crate::crypto::aegis_pqvm::{
     AegisPqvmKeyRegistry, AegisPqvmSigner, AegisPqvmVerifier, SYNERGY_P2P_HANDSHAKE_V1,
@@ -27,7 +31,10 @@ use crate::etdag::{
     dispatch_etdag_certified_input, CertifiedProtectedInputArtifact, EtdagAuthenticatedIngressPeer,
 };
 use crate::genesis::canonical_genesis;
-use crate::p2p::messages::{NetworkMessage, TypedConsensusMessage};
+use crate::p2p::messages::{
+    validate_typed_finality_observer_message_size, NetworkMessage, TypedConsensusMessage,
+    TypedFinalityObserverMessage,
+};
 #[cfg(not(test))]
 use crate::p2p::validator_transport_registry::refresh_validator_transports;
 use crate::p2p::validator_transport_registry::{
@@ -98,6 +105,10 @@ const PUBLIC_HISTORY_GATEWAY_DIAL_ADDRESSES: &[&str] = &[
     "rpc.synergynode.xyz:5623",
     "archive.synergynode.xyz:5615",
     "73.79.66.255:5615",
+    // Canonical explorer/indexer P2P endpoint from the finalized Testnet-v3
+    // service topology. Relayers use this allowlist to serve only the
+    // intended public non-signing observer roles.
+    "74.208.227.23:5622",
 ];
 const PUBLIC_RELAYER_DIAL_ADDRESSES: &[&str] = &[
     "relay1.synergynode.xyz:5622",
@@ -4444,6 +4455,56 @@ fn peer_is_designated_relayer_sync_source(config: &NodeConfig, peer: &PeerConnec
         )
 }
 
+/// Relayers are the only non-validator peers allowed to pull a validator's
+/// finalized typed journal. The transport address is observed from the live
+/// WireGuard socket, and the relayer role is covered by the peer's PQC
+/// handshake; neither a self-reported status field nor a public endpoint can
+/// obtain this replay path.
+fn peer_is_validator_vpn_relayer(peer: &PeerConnection) -> bool {
+    peer.handshake_role
+        .as_deref()
+        .map(|role| {
+            matches!(
+                role.trim().to_ascii_lowercase().as_str(),
+                "relayer" | "relayer_node"
+            )
+        })
+        .unwrap_or(false)
+        && peer_connected_endpoint(peer)
+            .as_deref()
+            .is_some_and(is_validator_vpn_relayer_dial_address)
+}
+
+fn local_is_typed_finality_relayer(config: &NodeConfig) -> bool {
+    matches!(
+        config.identity.role.trim().to_ascii_lowercase().as_str(),
+        "relayer" | "relayer_node"
+    ) || matches!(
+        config
+            .role
+            .compiled_profile
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "relayer" | "relayer_node"
+    )
+}
+
+fn local_is_typed_finality_service_observer(config: &NodeConfig) -> bool {
+    matches!(
+        config.identity.role.trim().to_ascii_lowercase().as_str(),
+        "rpc_gateway" | "rpc_gateway_node" | "indexer_explorer" | "indexer_and_explorer_node"
+    ) || matches!(
+        config
+            .role
+            .compiled_profile
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "rpc_gateway" | "rpc_gateway_node" | "indexer_explorer" | "indexer_and_explorer_node"
+    )
+}
+
 fn local_validator_requires_designated_sync_sources(config: &NodeConfig) -> bool {
     local_node_runs_validator_consensus(config)
         && (current_validator_quarantine_duty_block().is_some()
@@ -5483,6 +5544,78 @@ impl P2PNetwork {
         Ok(sent)
     }
 
+    /// Pulls the next bounded finalized-typed segment for an installed
+    /// non-signing observer. A relayer may ask only a session-authenticated
+    /// validator across the validator VPN; RPC/indexer roles may ask only a
+    /// configured public relayer. Validators never use this method and never
+    /// expose RPC as a substitute for the verified P2P path.
+    pub fn request_typed_finality_observer_records(&self) -> Result<usize, String> {
+        let Some(next_height) = typed_finality_observer_next_missing_height() else {
+            return Ok(0);
+        };
+        let is_relayer = local_is_typed_finality_relayer(&self.config);
+        let is_service_observer = local_is_typed_finality_service_observer(&self.config);
+        if !is_relayer && !is_service_observer {
+            return Err(
+                "typed finality observer receiver is installed for an unsupported local role"
+                    .to_string(),
+            );
+        }
+        let wire_message = NetworkMessage::TypedFinalityObserver {
+            message: TypedFinalityObserverMessage::Request { next_height },
+        };
+        let targets = {
+            let peers = self.connected_peers.lock().unwrap();
+            peers
+                .iter()
+                .filter_map(|(address, peer)| {
+                    if peer.stream.is_none() {
+                        return None;
+                    }
+                    let session_id = current_peer_session_id(address)?;
+                    let authorized = if is_relayer {
+                        // A validated typed-consensus session is bound to the
+                        // exact finalized Genesis validator identity.
+                        typed_consensus_peer_for_session(address, session_id).is_some()
+                    } else {
+                        peer_is_designated_relayer_sync_source(&self.config, peer)
+                    };
+                    authorized.then_some((address.clone(), session_id))
+                })
+                .collect::<Vec<_>>()
+        };
+        let send_results = run_with_bounded_parallelism(
+            &targets,
+            targets.len(),
+            "typed finality observer request fanout",
+            |(address, session_id)| {
+                send_peer_message_for_session(
+                    &self.connected_peers,
+                    &self.peer_state_cache,
+                    address,
+                    *session_id,
+                    &wire_message,
+                    Duration::from_millis(CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                    "typed-finality-observer-request",
+                )
+            },
+        );
+        let mut sent = 0usize;
+        for ((address, _session_id), result) in targets.into_iter().zip(send_results) {
+            match result {
+                Ok(true) => sent += 1,
+                Ok(false) => {}
+                Err(error) => warn!(
+                    "p2p",
+                    "Failed to request typed finality observer records",
+                    "peer" => address,
+                    "error" => error
+                ),
+            }
+        }
+        Ok(sent)
+    }
+
     /// Relays one complete certified ETDAG input package only to currently
     /// authenticated, consensus-eligible validator peers.  The receiver does
     /// not trust this fanout: it rechecks the sender identity and every proof
@@ -6007,6 +6140,13 @@ impl P2PNetwork {
                 }
                 if !network.config.node.bootstrap_only {
                     network.request_peer_statuses();
+                }
+                if let Err(error) = network.request_typed_finality_observer_records() {
+                    warn!(
+                        "p2p",
+                        "Typed finality observer recovery request rejected",
+                        "error" => error
+                    );
                 }
 
                 let sync_active = sync_manager_is_active();
@@ -7601,11 +7741,123 @@ fn bypasses_shared_message_queue(message: &NetworkMessage) -> bool {
         NetworkMessage::VoteRequest { .. }
             | NetworkMessage::Vote { .. }
             | NetworkMessage::TypedConsensus { .. }
+            | NetworkMessage::TypedFinalityObserver { .. }
             | NetworkMessage::EtdagCertifiedInput { .. }
             | NetworkMessage::Block { .. }
             | NetworkMessage::GetBlocks { .. }
             | NetworkMessage::Blocks { .. }
     )
+}
+
+/// Handles non-signing finalized-chain replication. This path is intentionally
+/// separate from typed consensus ingress: neither a relayer nor a public
+/// observer can submit a proposal/vote or obtain a validator private key.
+fn handle_typed_finality_observer_message(
+    connected_peers: &PeersArc,
+    peer_state_cache: &PeerStateCacheArc,
+    config: &NodeConfig,
+    peer_address: &str,
+    session_id: u64,
+    message: TypedFinalityObserverMessage,
+) -> Result<(), String> {
+    if !peer_session_is_current(peer_address, session_id) {
+        return Err("typed finality observer message belongs to a replaced session".to_string());
+    }
+    match message {
+        TypedFinalityObserverMessage::Request { next_height } => {
+            let peer_is_vpn_relayer = connected_peers
+                .lock()
+                .map_err(|_| "typed finality observer peer registry lock is poisoned".to_string())?
+                .get(peer_address)
+                .is_some_and(peer_is_validator_vpn_relayer);
+            let peer_is_public_service = connected_peers
+                .lock()
+                .map_err(|_| "typed finality observer peer registry lock is poisoned".to_string())?
+                .get(peer_address)
+                .is_some_and(|peer| peer_is_designated_support_sync_source(config, peer));
+
+            let records = if local_is_typed_finality_relayer(config) {
+                if !peer_is_public_service {
+                    return Err(
+                        "typed finality observer request to relayer is not from a configured public service role"
+                            .to_string(),
+                    );
+                }
+                typed_finality_observer_snapshot_from(next_height)?
+            } else if local_node_runs_validator_consensus(config) {
+                if !peer_is_vpn_relayer {
+                    return Err(
+                        "typed finality observer request to validator is not from an authenticated validator-VPN relayer"
+                            .to_string(),
+                    );
+                }
+                canonical_typed_finality_snapshot_from(next_height)?
+            } else {
+                return Err(
+                    "typed finality observer request reached a role that cannot serve finalized records"
+                        .to_string(),
+                );
+            };
+            // A clean pre-genesis journal has no certified record yet. The
+            // requester retries from its immutable next height on heartbeat.
+            if records.is_empty() {
+                return Ok(());
+            }
+            let response = TypedFinalityObserverMessage::Records { records };
+            validate_typed_finality_observer_message_size(&response)?;
+            let sent = send_peer_message_for_session(
+                connected_peers,
+                peer_state_cache,
+                peer_address,
+                session_id,
+                &NetworkMessage::TypedFinalityObserver { message: response },
+                Duration::from_millis(CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                "typed-finality-observer-response",
+            )?;
+            if !sent {
+                return Err("typed finality observer response session was replaced".to_string());
+            }
+            Ok(())
+        }
+        TypedFinalityObserverMessage::Records { records } => {
+            let source_allowed = if local_is_typed_finality_relayer(config) {
+                // This is the strongest available binding: the sender proved
+                // possession of an exact active validator ML-DSA-65 key in
+                // the session's canonical Genesis handshake.
+                typed_consensus_peer_for_session(peer_address, session_id).is_some()
+            } else if local_is_typed_finality_service_observer(config) {
+                connected_peers
+                    .lock()
+                    .map_err(|_| {
+                        "typed finality observer peer registry lock is poisoned".to_string()
+                    })?
+                    .get(peer_address)
+                    .is_some_and(|peer| peer_is_designated_relayer_sync_source(config, peer))
+            } else {
+                false
+            };
+            if !source_allowed {
+                return Err(
+                    "typed finality observer records are not from an authorized finalized-chain source"
+                        .to_string(),
+                );
+            }
+            let message = TypedFinalityObserverMessage::Records { records };
+            validate_typed_finality_observer_message_size(&message)?;
+            let TypedFinalityObserverMessage::Records { records } = message else {
+                unreachable!("the observer records message was reconstructed above")
+            };
+            let imported = import_typed_finality_observer_records(&records)?;
+            info!(
+                "p2p",
+                "Verified typed finality observer records",
+                "peer" => peer_address.to_string(),
+                "imported" => imported as u64,
+                "next_height" => typed_finality_observer_next_missing_height().map(|height| height.0).unwrap_or(0)
+            );
+            Ok(())
+        }
+    }
 }
 
 fn dispatch_peer_message(
@@ -7668,6 +7920,24 @@ fn dispatch_peer_message(
                 warn!(
                     "p2p",
                     "Rejected typed consensus message",
+                    "peer" => peer_address.to_string(),
+                    "error" => error
+                );
+            }
+            Ok(())
+        }
+        NetworkMessage::TypedFinalityObserver { message } => {
+            if let Err(error) = handle_typed_finality_observer_message(
+                connected_peers,
+                peer_state_cache,
+                config,
+                peer_address,
+                session_id,
+                message,
+            ) {
+                warn!(
+                    "p2p",
+                    "Rejected typed finality observer message",
                     "peer" => peer_address.to_string(),
                     "error" => error
                 );
@@ -8743,6 +9013,23 @@ fn handle_messages(
                             warn!(
                                 "p2p",
                                 "Rejected typed consensus message",
+                                "peer" => peer_address.clone(),
+                                "error" => error
+                            );
+                        }
+                    }
+                    NetworkMessage::TypedFinalityObserver { message } => {
+                        if let Err(error) = handle_typed_finality_observer_message(
+                            &connected_peers,
+                            &peer_state_cache,
+                            &config,
+                            &peer_address,
+                            session_id,
+                            message,
+                        ) {
+                            warn!(
+                                "p2p",
+                                "Rejected typed finality observer message",
                                 "peer" => peer_address.clone(),
                                 "error" => error
                             );
@@ -11392,13 +11679,14 @@ mod tests {
         handle_status_message, handshake_version_mismatch_reason, hydrate_peer_from_cache,
         insert_seed_server_target, is_validator_vpn_dial_address,
         is_validator_vpn_relayer_dial_address, local_consensus_handshake_required,
+        local_is_typed_finality_relayer, local_is_typed_finality_service_observer,
         local_node_runs_validator_consensus, local_node_uses_service_batch_durability,
         local_peer_identity, merge_peer_state_from_existing, normalize_peer_target,
         parse_block_sync_busy_retry, parse_bootnode_dial_address, peer_has_identifying_metadata,
         peer_identity_key, peer_is_authorized_block_sync_requester,
         peer_is_designated_support_sync_source, peer_is_eligible_block_sync_source,
-        peer_is_eligible_block_sync_source_for_local, peer_matches_address,
-        peer_readiness_exclusion_reason_at, peer_write_gate,
+        peer_is_eligible_block_sync_source_for_local, peer_is_validator_vpn_relayer,
+        peer_matches_address, peer_readiness_exclusion_reason_at, peer_write_gate,
         pending_incoming_connections_from_host, preferred_connection_direction,
         preflight_validator_activation_transactions, receive_message,
         recover_peer_validator_address_for_vote_target, register_typed_consensus_peer_session,
@@ -11419,14 +11707,14 @@ mod tests {
         verify_handshake_pq_signature, vote_request_parent_sync_range,
         with_peer_stream_outside_peers_lock, ConnectionDirection, DialTargetsArc,
         DuplicateResolution, P2PNetwork, PeerConnection, PeerEntryGuard,
-        BACKGROUND_SYNC_POLL_MILLIS, BLOCK_SYNC_APPLY_ACTIVE, BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS,
-        DEFAULT_BOOTSTRAP_REFRESH_SECS, DUTY_DISABLED_TTL_SECS, IMMEDIATE_STATUS_SYNC_BATCH,
-        MAX_P2P_FRAME_BYTES, MAX_STATUS_SYNC_BATCH, MAX_SUPPORT_NODE_BLOCK_SYNC_RESPONSE_BLOCKS,
-        MAX_VALIDATOR_SUPPORT_SYNC_RESPONSE_BLOCKS, NORMAL_BOOTSTRAP_REFRESH_SECS,
-        PEER_SESSION_IDS, PEER_WRITE_GATES, PENDING_BLOCKS, QUARANTINE_STATUS_TTL_SECS,
-        SERVICE_BLOCK_SYNC_RESPONSE_TIMEOUT_SECS, SERVICE_SYNC_COORDINATOR,
-        STALE_UNIDENTIFIED_PEER_SECS, STALE_VALIDATOR_STATUS_SECS, STATUS_READY_TTL_SECS,
-        STATUS_REQUEST_MIN_INTERVAL_SECS, STATUS_RESPONSE_MIN_INTERVAL_SECS,
+        TypedFinalityObserverMessage, BACKGROUND_SYNC_POLL_MILLIS, BLOCK_SYNC_APPLY_ACTIVE,
+        BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS, DEFAULT_BOOTSTRAP_REFRESH_SECS, DUTY_DISABLED_TTL_SECS,
+        IMMEDIATE_STATUS_SYNC_BATCH, MAX_P2P_FRAME_BYTES, MAX_STATUS_SYNC_BATCH,
+        MAX_SUPPORT_NODE_BLOCK_SYNC_RESPONSE_BLOCKS, MAX_VALIDATOR_SUPPORT_SYNC_RESPONSE_BLOCKS,
+        NORMAL_BOOTSTRAP_REFRESH_SECS, PEER_SESSION_IDS, PEER_WRITE_GATES, PENDING_BLOCKS,
+        QUARANTINE_STATUS_TTL_SECS, SERVICE_BLOCK_SYNC_RESPONSE_TIMEOUT_SECS,
+        SERVICE_SYNC_COORDINATOR, STALE_UNIDENTIFIED_PEER_SECS, STALE_VALIDATOR_STATUS_SECS,
+        STATUS_READY_TTL_SECS, STATUS_REQUEST_MIN_INTERVAL_SECS, STATUS_RESPONSE_MIN_INTERVAL_SECS,
         SUPPORT_NODE_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS, TEST_COMMIT_VERIFIER_VALIDATOR_MANAGER,
         TYPED_CONSENSUS_PEER_SESSIONS, VALIDATOR_SUPPORT_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS,
     };
@@ -11606,6 +11894,49 @@ mod tests {
             consensus_duties_disabled: false,
             recovery_state: None,
         }
+    }
+
+    #[test]
+    fn typed_finality_observer_sources_are_scoped_to_the_intended_transport_tiers() {
+        let mut vpn_relayer = test_peer_with_validator_address(None);
+        vpn_relayer.handshake_role = Some("relayer".to_string());
+        vpn_relayer.connected_endpoint = Some("10.70.20.1:5622".to_string());
+        assert!(peer_is_validator_vpn_relayer(&vpn_relayer));
+
+        let mut public_relayer = vpn_relayer;
+        public_relayer.connected_endpoint = Some("73.79.66.255:5622".to_string());
+        assert!(
+            !peer_is_validator_vpn_relayer(&public_relayer),
+            "a public endpoint must not pull a validator's typed finality journal"
+        );
+
+        let mut config = NodeConfig::default();
+        config.identity.role = "relayer".to_string();
+        assert!(local_is_typed_finality_relayer(&config));
+        assert!(!local_is_typed_finality_service_observer(&config));
+
+        let mut canonical_indexer = test_peer_with_validator_address(None);
+        canonical_indexer.handshake_role = Some("indexer_explorer".to_string());
+        canonical_indexer.connected_endpoint = Some("74.208.227.23:5622".to_string());
+        assert!(
+            peer_is_designated_support_sync_source(&config, &canonical_indexer),
+            "the canonical Atlas indexer must be allowed to pull only verified relayer finality"
+        );
+
+        config.identity.role = "rpc_gateway".to_string();
+        assert!(!local_is_typed_finality_relayer(&config));
+        assert!(local_is_typed_finality_service_observer(&config));
+    }
+
+    #[test]
+    fn typed_finality_observer_messages_bypass_background_queue() {
+        assert!(bypasses_shared_message_queue(
+            &NetworkMessage::TypedFinalityObserver {
+                message: TypedFinalityObserverMessage::Request {
+                    next_height: crate::synergy_types::Height(1),
+                },
+            }
+        ));
     }
 
     #[test]

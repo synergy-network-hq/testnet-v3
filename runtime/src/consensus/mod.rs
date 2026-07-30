@@ -22,6 +22,7 @@ pub mod testnet_v3_finality_context;
 pub mod tests;
 pub mod timing_trace;
 pub mod typed_coordinator;
+pub mod typed_finality_observer;
 pub mod typed_finality_store;
 pub mod validator_keys;
 pub mod validator_scoring_params;

@@ -131,7 +131,9 @@ impl TypedConsensusPeerAuthorizer for FrozenTypedConsensusPeerAuthorizer {
             // validator; their signer set is independently verified by PoSy.
             TypedConsensusMessage::ValidationCertificate { .. }
             | TypedConsensusMessage::QuorumCertificate { .. }
-            | TypedConsensusMessage::TimeoutCertificate { .. } => {}
+            | TypedConsensusMessage::TimeoutCertificate { .. }
+            | TypedConsensusMessage::FinalityCheckpointRequest { .. }
+            | TypedConsensusMessage::FinalityCheckpoint { .. } => {}
         }
         Ok(())
     }
@@ -181,6 +183,10 @@ pub enum TypedCoordinatorEvent {
     },
     Finalized {
         record: TypedFinalityRecord,
+    },
+    FinalityCheckpointRequestAccepted,
+    FinalityCheckpointApplied {
+        imported_records: usize,
     },
 }
 
@@ -400,6 +406,8 @@ where
     finality_certificate: Option<QuorumCertificate>,
     timeout_certificate: Option<TimeoutCertificate>,
     proposal_material: BTreeMap<BlockId, (TargetAdmissionContext, ProtectedBlockInput)>,
+    last_finality_progress_at: Instant,
+    last_finality_recovery_request_at: Option<Instant>,
     metrics: TypedCoordinatorDriverMetrics,
 }
 
@@ -602,6 +610,13 @@ impl TypedPosyCoordinatorStartup {
 
 const COORDINATOR_INGRESS_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_QUEUED_TYPED_VOTES_PER_PEER_CONTEXT: usize = 64;
+/// A replay response is capped, so a prolonged outage recovers in sequential
+/// verified segments instead of allocating an unbounded peer-supplied history.
+const MAX_TYPED_FINALITY_CHECKPOINT_RECORDS: usize = 32;
+/// A healthy Testnet-v3 round finalizes well within this interval. Reaching it
+/// means the local node may have missed a certificate and should request its
+/// exact durable successor rather than sign stale rounds indefinitely.
+const FINALITY_RECOVERY_REQUEST_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Runs the sole typed-consensus mailbox consumer for a validator process.
 ///
@@ -766,7 +781,7 @@ impl TypedPosyCoordinator {
             || next_context
                 .height_context
                 .prior_finalized_qc_or_transition_root
-                != latest.quorum_certificate_root
+                != latest.quorum_certificate.finality_context_root()?
         {
             return Err("next typed height context is not bound to persisted finality".to_string());
         }
@@ -978,6 +993,11 @@ impl TypedPosyCoordinator {
             TypedConsensusMessage::TimeoutCertificate { certificate } => {
                 self.accept_timeout_certificate(certificate)
             }
+            TypedConsensusMessage::FinalityCheckpointRequest { .. }
+            | TypedConsensusMessage::FinalityCheckpoint { .. } => Err(
+                "typed finality checkpoint messages must be handled by the authenticated driver"
+                    .to_string(),
+            ),
         }
     }
 
@@ -1346,6 +1366,8 @@ where
             finality_certificate: None,
             timeout_certificate: None,
             proposal_material: BTreeMap::new(),
+            last_finality_progress_at: Instant::now(),
+            last_finality_recovery_request_at: None,
             metrics: TypedCoordinatorDriverMetrics::default(),
         })
     }
@@ -1483,6 +1505,7 @@ where
                 self.stage = TypedRoundStage::WaitingForCertificate;
             }
         }
+        self.request_finality_recovery_if_stalled(now)?;
         Ok(())
     }
 
@@ -1501,6 +1524,30 @@ where
     ) -> Result<TypedCoordinatorEvent, String> {
         validate_typed_consensus_message_size(&envelope.message)?;
         let message = envelope.message.clone();
+        if matches!(
+            message,
+            TypedConsensusMessage::FinalityCheckpointRequest { .. }
+                | TypedConsensusMessage::FinalityCheckpoint { .. }
+        ) {
+            let authenticated_peer = envelope.authenticated_peer.as_ref().ok_or_else(|| {
+                "typed consensus message has no Genesis-bound authenticated peer identity"
+                    .to_string()
+            })?;
+            peer_authorizer.authorize(authenticated_peer, &message)?;
+            let event = match message {
+                TypedConsensusMessage::FinalityCheckpointRequest { next_height } => {
+                    self.respond_to_finality_checkpoint_request(next_height)?;
+                    TypedCoordinatorEvent::FinalityCheckpointRequestAccepted
+                }
+                TypedConsensusMessage::FinalityCheckpoint { records } => {
+                    let imported_records = self.import_finality_checkpoint(records)?;
+                    TypedCoordinatorEvent::FinalityCheckpointApplied { imported_records }
+                }
+                _ => unreachable!("finality checkpoint match was checked above"),
+            };
+            self.metrics.accepted_messages = self.metrics.accepted_messages.saturating_add(1);
+            return Ok(event);
+        }
         let finalized_context = self.coordinator.local_context.height_context.clone();
         let event = self
             .coordinator
@@ -1553,6 +1600,153 @@ where
         }
         self.metrics.accepted_messages = self.metrics.accepted_messages.saturating_add(1);
         Ok(event)
+    }
+
+    /// Requests the exact next missing finalized height after bounded lack of
+    /// progress. The core-only launch runtime can replay its deterministic
+    /// blocks and QCs safely; a future ETDAG epoch must provide equivalent
+    /// protected-input recovery before it enables this path.
+    fn request_finality_recovery_if_stalled(&mut self, now: Instant) -> Result<(), String> {
+        if self.etdag_is_active()
+            || now
+                .checked_duration_since(self.last_finality_progress_at)
+                .map(|elapsed| elapsed < FINALITY_RECOVERY_REQUEST_INTERVAL)
+                .unwrap_or(true)
+        {
+            return Ok(());
+        }
+        if self
+            .last_finality_recovery_request_at
+            .and_then(|last| now.checked_duration_since(last))
+            .map(|elapsed| elapsed < FINALITY_RECOVERY_REQUEST_INTERVAL)
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        let next_height = self
+            .coordinator
+            .local_context
+            .latest_finalized_height
+            .0
+            .saturating_add(1);
+        self.broadcast(TypedConsensusMessage::FinalityCheckpointRequest {
+            next_height: crate::synergy_types::Height(next_height),
+        })?;
+        self.last_finality_recovery_request_at = Some(now);
+        Ok(())
+    }
+
+    /// Returns only persisted records, which have already passed structural
+    /// continuity checks. The recipient independently re-verifies all crypto,
+    /// execution, and successor-context rules before accepting them.
+    fn respond_to_finality_checkpoint_request(
+        &mut self,
+        next_height: crate::synergy_types::Height,
+    ) -> Result<(), String> {
+        if self.etdag_is_active() {
+            return Err(
+                "typed finality checkpoint recovery is unavailable after ETDAG activation"
+                    .to_string(),
+            );
+        }
+        let records = self
+            .coordinator
+            .finality_store
+            .recover()?
+            .into_iter()
+            .filter(|record| record.height.0 >= next_height.0)
+            .take(MAX_TYPED_FINALITY_CHECKPOINT_RECORDS)
+            .collect::<Vec<_>>();
+        if !records.is_empty() {
+            self.broadcast(TypedConsensusMessage::FinalityCheckpoint { records })?;
+        }
+        Ok(())
+    }
+
+    /// Replays a peer checkpoint through the normal core proposal, QC,
+    /// execution, durable-persistence, and successor-authority path. A
+    /// redundant matching prefix is harmless; a fork, gap, or rewrite is a
+    /// source conflict and fails closed.
+    fn import_finality_checkpoint(
+        &mut self,
+        records: Vec<TypedFinalityRecord>,
+    ) -> Result<usize, String> {
+        if self.etdag_is_active() {
+            return Err(
+                "typed finality checkpoint recovery is unavailable after ETDAG activation"
+                    .to_string(),
+            );
+        }
+        if records.is_empty() || records.len() > MAX_TYPED_FINALITY_CHECKPOINT_RECORDS {
+            return Err("typed finality checkpoint has an invalid record count".to_string());
+        }
+        let persisted = self.coordinator.finality_store.recover()?;
+        let mut imported = 0usize;
+        for supplied in records {
+            let local_height = self.coordinator.local_context.latest_finalized_height.0;
+            if supplied.height.0 <= local_height {
+                let index =
+                    supplied.height.0.checked_sub(1).ok_or_else(|| {
+                        "typed finality checkpoint contains a zero height".to_string()
+                    })? as usize;
+                let existing = persisted.get(index).ok_or_else(|| {
+                    "typed finality checkpoint claims a local height absent from durable state"
+                        .to_string()
+                })?;
+                if !same_typed_finality_record_subject(existing, &supplied)? {
+                    return Err(
+                        "TYPED_DRIVER_SOURCE_CONFLICT: typed finality checkpoint conflicts with durable finality"
+                            .to_string(),
+                    );
+                }
+                continue;
+            }
+            if supplied.height.0 != local_height.saturating_add(1) {
+                return Err(
+                    "typed finality checkpoint is not an exact successor of the local durable tip"
+                        .to_string(),
+                );
+            }
+            let finalized_context = self.coordinator.local_context.height_context.clone();
+            match self
+                .coordinator
+                .accept_core_proposal(finalized_context.clone(), supplied.block.clone())?
+            {
+                TypedCoordinatorEvent::ProposalAccepted { .. } => {}
+                _ => {
+                    return Err(
+                        "typed finality checkpoint core proposal produced an unexpected event"
+                            .to_string(),
+                    )
+                }
+            }
+            let accepted = match self
+                .coordinator
+                .accept_finality_certificate(supplied.quorum_certificate.clone())?
+            {
+                TypedCoordinatorEvent::Finalized { record } => record,
+                _ => {
+                    return Err("typed finality checkpoint QC did not produce finality".to_string())
+                }
+            };
+            if accepted != supplied {
+                return Err(
+                    "TYPED_DRIVER_SOURCE_CONFLICT: typed finality checkpoint replay differs from supplied evidence"
+                        .to_string(),
+                );
+            }
+            self.finalize_after_verified_qc(
+                supplied.quorum_certificate,
+                finalized_context,
+                accepted,
+            )?;
+            imported = imported.saturating_add(1);
+        }
+        if imported > 0 {
+            self.last_finality_progress_at = Instant::now();
+            self.last_finality_recovery_request_at = None;
+        }
+        Ok(imported)
     }
 
     fn try_emit_scheduled_proposal(&mut self) -> Result<(), String> {
@@ -2009,6 +2203,8 @@ where
             }
         }
         self.finality_certificate = Some(certificate.clone());
+        self.last_finality_progress_at = Instant::now();
+        self.last_finality_recovery_request_at = None;
         self.protected_inputs.prune_finalized_input(
             &certificate,
             &finalized_context,
@@ -2188,6 +2384,21 @@ fn same_quorum_certificate_subject(left: &QuorumCertificate, right: &QuorumCerti
         && left.threshold_weight_required == right.threshold_weight_required
 }
 
+/// Finality evidence may contain different valid strict-quorum signer subsets
+/// for one certified block. Durable evidence remains immutable on each node,
+/// while replay accepts only the same block and deterministic QC subject so a
+/// late proof cannot rewrite history or choose a different successor context.
+fn same_typed_finality_record_subject(
+    left: &TypedFinalityRecord,
+    right: &TypedFinalityRecord,
+) -> Result<bool, String> {
+    Ok(left.height == right.height
+        && left.block_id == right.block_id
+        && left.block == right.block
+        && left.quorum_certificate.finality_context_root()?
+            == right.quorum_certificate.finality_context_root()?)
+}
+
 fn same_validation_certificate_subject(
     left: &ValidationCertificate,
     right: &ValidationCertificate,
@@ -2326,7 +2537,7 @@ fn bind_recovered_finality(
         || local_context
             .height_context
             .prior_finalized_qc_or_transition_root
-            != latest.quorum_certificate_root
+            != latest.quorum_certificate.finality_context_root()?
     {
         return Err(
             "typed coordinator local context does not match recovered typed finality".to_string(),
@@ -3614,7 +3825,10 @@ mod tests {
                     b"height-two-epoch-zero",
                 ),
                 cryptographic_profile_root: epoch_zero_context.cryptographic_profile_root,
-                prior_finalized_qc_or_transition_root: finality_record.quorum_certificate_root,
+                prior_finalized_qc_or_transition_root: finality_record
+                    .quorum_certificate
+                    .finality_context_root()
+                    .unwrap(),
             },
             &coordinator.consensus.validator_set,
             &coordinator.consensus.cluster_map,
@@ -3898,6 +4112,15 @@ mod tests {
         authorizer: &FrozenTypedConsensusPeerAuthorizer,
         include: impl Fn(&TypedConsensusMessage) -> bool,
     ) -> Vec<String> {
+        relay_release_messages_with_delivery(drivers, authorizer, include, |_, _, _| true)
+    }
+
+    fn relay_release_messages_with_delivery(
+        drivers: &mut [ReleaseDriver],
+        authorizer: &FrozenTypedConsensusPeerAuthorizer,
+        include: impl Fn(&TypedConsensusMessage) -> bool,
+        should_deliver: impl Fn(usize, usize, &TypedConsensusMessage) -> bool,
+    ) -> Vec<String> {
         let mut rejected = Vec::new();
         loop {
             let mut outbound = Vec::new();
@@ -3915,7 +4138,9 @@ mod tests {
                 let authenticated_peer =
                     authenticated_peer_for_release_driver(&drivers[sender_index]);
                 for (recipient_index, recipient) in drivers.iter_mut().enumerate() {
-                    if recipient_index == sender_index {
+                    if recipient_index == sender_index
+                        || !should_deliver(sender_index, recipient_index, &message)
+                    {
                         continue;
                     }
                     if let Err(error) = recipient.handle_envelope(
@@ -4259,6 +4484,190 @@ mod tests {
                     .expect("first block must be durable")
                     .height,
                 Height(1)
+            );
+        }
+        drop(drivers);
+        for path in store_paths {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn six_validator_driver_recovers_a_missed_finality_qc_then_continues_together() {
+        let parameters = genesis_bound_parameters();
+        let (bootstrap, _genesis_anchor, deployed_genesis_state_root, coordinators, store_paths) =
+            six_validator_startup_fixture(parameters.clone());
+        let authorizer = FrozenTypedConsensusPeerAuthorizer::new(bootstrap.validator_set.clone())
+            .expect("freeze the six Genesis-bound P2P identities");
+        let mut drivers = coordinators
+            .into_iter()
+            .map(|coordinator| {
+                release_driver_with(
+                    coordinator,
+                    bootstrap.clone(),
+                    parameters.protocol_config.clone(),
+                    deployed_genesis_state_root,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        // Validator zero receives the proposal and validation phase, then
+        // misses every finality vote/QC for height one. The other five still
+        // form the exact strict quorum, reproducing the launch failure where
+        // one typed mailbox came online too late for the certificate stream.
+        for driver in &mut drivers {
+            let now = driver.round_started_at;
+            driver.tick_at(now).expect("height-one proposal scheduling");
+        }
+        let mut relay_errors = relay_release_messages_with_delivery(
+            &mut drivers,
+            &authorizer,
+            |_| true,
+            |_, recipient, message| {
+                recipient != 0
+                    || !matches!(
+                        message,
+                        TypedConsensusMessage::Vote { vote } if vote.phase == VotePhase::Finality
+                    ) && !matches!(message, TypedConsensusMessage::QuorumCertificate { .. })
+            },
+        );
+        for driver in &mut drivers {
+            driver
+                .tick_at(driver.round_started_at + Duration::from_millis(1_500))
+                .expect("height-one validation vote");
+        }
+        relay_errors.extend(relay_release_messages_with_delivery(
+            &mut drivers,
+            &authorizer,
+            |_| true,
+            |_, recipient, message| {
+                recipient != 0
+                    || !matches!(
+                        message,
+                        TypedConsensusMessage::Vote { vote } if vote.phase == VotePhase::Finality
+                    ) && !matches!(message, TypedConsensusMessage::QuorumCertificate { .. })
+            },
+        ));
+        for driver in &mut drivers {
+            driver
+                .tick_at(driver.round_started_at + Duration::from_millis(3_000))
+                .expect("height-one finality vote");
+        }
+        relay_errors.extend(relay_release_messages_with_delivery(
+            &mut drivers,
+            &authorizer,
+            |_| true,
+            |_, recipient, message| {
+                recipient != 0
+                    || !matches!(
+                        message,
+                        TypedConsensusMessage::Vote { vote } if vote.phase == VotePhase::Finality
+                    ) && !matches!(message, TypedConsensusMessage::QuorumCertificate { .. })
+            },
+        ));
+        // Once a five-of-six replica has finalized, late same-height votes
+        // and QCs from peers that have not yet observed it are correctly
+        // rejected as stale. The relay helper already asserts that none of
+        // these non-fatal rejections is a source conflict.
+        assert_eq!(
+            drivers[0].coordinator.local_context.latest_finalized_height,
+            Height(0)
+        );
+        for driver in &drivers[1..] {
+            assert_eq!(
+                driver.coordinator.local_context.latest_finalized_height,
+                Height(1)
+            );
+        }
+
+        // The lagging validator emits a bounded request for exactly height
+        // one. Deliver the request to a caught-up peer and one authenticated
+        // checkpoint response back to the lagging driver.
+        let request_at = drivers[0].last_finality_progress_at + FINALITY_RECOVERY_REQUEST_INTERVAL;
+        drivers[0]
+            .tick_at(request_at)
+            .expect("lagging validator must request verified finality recovery");
+        let request = drivers[0]
+            .egress
+            .messages
+            .iter()
+            .find(|message| matches!(message, TypedConsensusMessage::FinalityCheckpointRequest { next_height } if *next_height == Height(1)))
+            .cloned()
+            .expect("lagging validator must request its exact successor height");
+        let lagging_peer = authenticated_peer_for_release_driver(&drivers[0]);
+        drivers[1]
+            .handle_envelope(
+                TypedConsensusEnvelope {
+                    peer_address: "lagging-validator".to_string(),
+                    authenticated_peer: Some(lagging_peer),
+                    message: request,
+                },
+                &authorizer,
+            )
+            .expect("caught-up validator accepts an authenticated recovery request");
+        let checkpoint = drivers[1]
+            .egress
+            .messages
+            .iter()
+            .find(|message| matches!(message, TypedConsensusMessage::FinalityCheckpoint { records } if records.len() == 1 && records[0].height == Height(1)))
+            .cloned()
+            .expect("caught-up validator returns only the requested certified record");
+        let caught_up_peer = authenticated_peer_for_release_driver(&drivers[1]);
+        drivers[0]
+            .handle_envelope(
+                TypedConsensusEnvelope {
+                    peer_address: "caught-up-validator".to_string(),
+                    authenticated_peer: Some(caught_up_peer),
+                    message: checkpoint,
+                },
+                &authorizer,
+            )
+            .expect("lagging validator replays the checkpoint through normal QC verification");
+        for driver in &drivers {
+            assert_eq!(
+                driver.coordinator.local_context.latest_finalized_height,
+                Height(1)
+            );
+            assert_eq!(
+                driver.coordinator.local_context.height_context.height,
+                Height(2)
+            );
+        }
+
+        // All six then participate in the next height. This is the release
+        // gate: delayed worker recovery must restore six-validator liveness,
+        // not merely repair a local display or persisted-height counter.
+        for driver in &mut drivers {
+            let now = driver.round_started_at;
+            driver.tick_at(now).expect("height-two proposal scheduling");
+        }
+        relay_errors.extend(relay_release_messages(&mut drivers, &authorizer, |_| true));
+        for driver in &mut drivers {
+            driver
+                .tick_at(driver.round_started_at + Duration::from_millis(1_500))
+                .expect("height-two validation vote");
+        }
+        relay_errors.extend(relay_release_messages(&mut drivers, &authorizer, |_| true));
+        for driver in &mut drivers {
+            driver
+                .tick_at(driver.round_started_at + Duration::from_millis(3_000))
+                .expect("height-two finality vote");
+        }
+        relay_errors.extend(relay_release_messages(&mut drivers, &authorizer, |_| true));
+        assert!(
+            !relay_errors
+                .iter()
+                .any(|error| driver_error_is_fatal(error)),
+            "recovery replay must not emit a fatal source conflict: {relay_errors:?}"
+        );
+        for driver in &drivers {
+            assert_eq!(
+                driver.coordinator.local_context.latest_finalized_height,
+                Height(2)
+            );
+            assert_eq!(
+                driver.coordinator.local_context.height_context.height,
+                Height(3)
             );
         }
         drop(drivers);

@@ -27,6 +27,9 @@ use crate::consensus::typed_coordinator::{
     TypedFinalityContextDigestSource, TypedNextHeightContextSource, TypedPosyCoordinator,
     TypedPosyCoordinatorStartup, TypedPosyDriver,
 };
+use crate::consensus::typed_finality_observer::{
+    install_typed_finality_observer, remove_typed_finality_observer, TypedFinalityObserver,
+};
 use crate::consensus::typed_finality_store::TypedFinalityStore;
 use crate::consensus::validator_keys::{
     load_local_validator_keypair_for_height, validator_public_key_with_declared_algorithm,
@@ -915,6 +918,22 @@ fn should_start_consensus(config: &NodeConfig, profile: Option<&RoleProfile>) ->
         Some(profile) => profile.service_surface.contains(&"consensus"),
         None => true,
     }
+}
+
+/// Public service roles replicate only independently verified finality; they
+/// do not start the signing coordinator or load validator custody material.
+/// Relayers are the narrow bridge from the validator VPN to the public
+/// gateway/indexer tier, while the gateway and indexer remain read-only
+/// observers.
+fn should_start_typed_finality_observer(
+    config: &NodeConfig,
+    profile: Option<&RoleProfile>,
+) -> bool {
+    !config.node.bootstrap_only
+        && matches!(
+            profile.map(|value| value.role),
+            Some(NodeRole::Relayer | NodeRole::RpcGateway | NodeRole::IndexerExplorer)
+        )
 }
 
 /// The only production consensus-worker selection for Testnet-v3.  Keeping
@@ -2793,6 +2812,29 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
             let process_start_time = SystemTime::now();
 
             let p2p_enabled = should_start_p2p(&config, role_profile);
+            let typed_finality_observer_enabled =
+                should_start_typed_finality_observer(&config, role_profile);
+            if typed_finality_observer_enabled && !p2p_enabled {
+                eprintln!(
+                    "Service startup failed closed: typed finality observer roles require active P2P"
+                );
+                process::exit(1);
+            }
+            if typed_finality_observer_enabled {
+                let observer = TypedFinalityObserver::from_canonical_finalized_genesis()
+                    .unwrap_or_else(|error| {
+                        eprintln!(
+                            "Service startup failed closed: cannot initialize verified typed finality observer: {error}"
+                        );
+                        process::exit(1);
+                    });
+                install_typed_finality_observer(observer).unwrap_or_else(|error| {
+                    eprintln!(
+                        "Service startup failed closed: cannot install typed finality observer ingress: {error}"
+                    );
+                    process::exit(1);
+                });
+            }
             let p2p_network = if p2p_enabled {
                 let network = p2p::start_p2p_network(
                     Arc::clone(&blockchain),
@@ -3190,6 +3232,15 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                 .and_then(TypedPosyWorker::fatal_error);
             if let Some(typed_posy_worker) = typed_posy_worker {
                 typed_posy_worker.join();
+            }
+            if typed_finality_observer_enabled {
+                if let Err(error) = remove_typed_finality_observer() {
+                    warn!(
+                        "main",
+                        "Could not remove typed finality observer ingress during shutdown",
+                        "error" => error
+                    );
+                }
             }
             fs::remove_file("data/synergy-testnet.pid").ok();
             if let Some(error) = typed_worker_failure {
@@ -3732,6 +3783,31 @@ mod tests {
             source.contains("spawn_finalized_typed_posy_driver("),
             "the production role runtime must retain the finalized typed-driver entry point"
         );
+    }
+
+    #[test]
+    fn only_relayer_gateway_and_indexer_start_non_signing_typed_finality_observer() {
+        let config = NodeConfig::default();
+        assert!(should_start_typed_finality_observer(
+            &config,
+            Some(NodeRole::Relayer.profile())
+        ));
+        assert!(should_start_typed_finality_observer(
+            &config,
+            Some(NodeRole::RpcGateway.profile())
+        ));
+        assert!(should_start_typed_finality_observer(
+            &config,
+            Some(NodeRole::IndexerExplorer.profile())
+        ));
+        assert!(!should_start_typed_finality_observer(
+            &config,
+            Some(NodeRole::Validator.profile())
+        ));
+        assert!(!should_start_typed_finality_observer(
+            &config,
+            Some(NodeRole::ArchiveValidator.profile())
+        ));
     }
 
     #[test]
