@@ -349,6 +349,8 @@ enum TypedRoundStage {
     WaitingForCertificate,
 }
 
+const PROPOSAL_REBROADCAST_INTERVAL: Duration = Duration::from_millis(250);
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TypedCoordinatorDriverMetrics {
     pub accepted_messages: u64,
@@ -382,6 +384,7 @@ where
     next_height_source: H,
     ingress_rotator: R,
     round_started_at: Instant,
+    last_proposal_broadcast_at: Option<Instant>,
     stage: TypedRoundStage,
     emitted_validation_vote: bool,
     emitted_finality_vote: bool,
@@ -1327,6 +1330,7 @@ where
             next_height_source,
             ingress_rotator,
             round_started_at: Instant::now(),
+            last_proposal_broadcast_at: None,
             stage: TypedRoundStage::Proposal,
             emitted_validation_vote: false,
             emitted_finality_vote: false,
@@ -1431,9 +1435,17 @@ where
             .ok_or_else(|| "typed PoSy finality deadline overflow".to_string())?;
         let round_cap = Duration::from_millis(config.max_round_timeout_ms);
 
-        if !self.emitted_proposal {
+        let proposal_rebroadcast_due = self.last_proposal_broadcast_at.map_or(true, |last| {
+            now.checked_duration_since(last)
+                .map(|elapsed| elapsed >= PROPOSAL_REBROADCAST_INTERVAL)
+                .unwrap_or(false)
+        });
+        if self.stage == TypedRoundStage::Proposal
+            && (!self.emitted_proposal || proposal_rebroadcast_due)
+        {
             self.try_emit_scheduled_proposal()?;
             self.emitted_proposal = true;
+            self.last_proposal_broadcast_at = Some(now);
         }
 
         if elapsed >= round_cap && !self.emitted_timeout_vote {
@@ -1596,7 +1608,15 @@ where
         }
 
         if !self.etdag_is_active() {
-            let block = self.coordinator.propose_core_block()?;
+            // P2P may be up before a remote process has installed its typed
+            // mailbox. Re-broadcast the exact, already signed core proposal
+            // until the first proposal deadline; never create a second
+            // candidate for the same height and round.
+            let block = self
+                .current_round_proposal()
+                .cloned()
+                .map(Ok)
+                .unwrap_or_else(|| self.coordinator.propose_core_block())?;
             return self.broadcast_core_proposal(block);
         }
 
@@ -1962,9 +1982,9 @@ where
             );
         }
         if let Some(existing) = &self.prepared_certificate {
-            if existing.root()? != certificate.root()? {
+            if !same_validation_certificate_subject(existing, &certificate) {
                 return Err(
-                    "TYPED_DRIVER_SOURCE_CONFLICT: distinct valid validation certificates observed for one height"
+                    "TYPED_DRIVER_SOURCE_CONFLICT: validation certificates disagree on the certified candidate"
                         .to_string(),
                 );
             }
@@ -1981,9 +2001,9 @@ where
         record: TypedFinalityRecord,
     ) -> Result<(), String> {
         if let Some(existing) = &self.finality_certificate {
-            if existing.root()? != certificate.root()? {
+            if !same_quorum_certificate_subject(existing, &certificate) {
                 return Err(
-                    "TYPED_DRIVER_SOURCE_CONFLICT: distinct valid finality certificates observed for one height"
+                    "TYPED_DRIVER_SOURCE_CONFLICT: finality certificates disagree on the certified candidate"
                         .to_string(),
                 );
             }
@@ -2067,9 +2087,9 @@ where
         certificate: TimeoutCertificate,
     ) -> Result<(), String> {
         if let Some(existing) = &self.timeout_certificate {
-            if existing.root()? != certificate.root()? {
+            if !same_timeout_certificate_subject(existing, &certificate) {
                 return Err(
-                    "TYPED_DRIVER_SOURCE_CONFLICT: distinct valid timeout certificates observed for one round"
+                    "TYPED_DRIVER_SOURCE_CONFLICT: timeout certificates disagree on round or carry-forward source"
                         .to_string(),
                 );
             }
@@ -2083,6 +2103,7 @@ where
         self.observed_finality_votes.clear();
         self.observed_timeout_votes.clear();
         self.round_started_at = Instant::now();
+        self.last_proposal_broadcast_at = None;
         self.stage = TypedRoundStage::Proposal;
         self.emitted_proposal = false;
         self.emitted_validation_vote = false;
@@ -2093,6 +2114,7 @@ where
 
     fn reset_for_new_height(&mut self) {
         self.round_started_at = Instant::now();
+        self.last_proposal_broadcast_at = None;
         self.stage = TypedRoundStage::Proposal;
         self.emitted_proposal = false;
         self.emitted_validation_vote = false;
@@ -2127,6 +2149,46 @@ fn insert_distinct_vote(votes: &mut BTreeMap<ValidatorId, Vote>, vote: Vote) -> 
     }
     votes.insert(vote.validator_id.clone(), vote);
     Ok(())
+}
+
+/// A certificate proof may use any strict-quorum signer subset.  Its signer
+/// bitmap, signatures, and signed weight therefore identify the evidence, not
+/// a second consensus source.  Source conflicts are determined only by the
+/// certified subject.
+fn same_quorum_certificate_subject(left: &QuorumCertificate, right: &QuorumCertificate) -> bool {
+    left.qc_version == right.qc_version
+        && left.chain_id == right.chain_id
+        && left.network_id == right.network_id
+        && left.protocol_version == right.protocol_version
+        && left.height == right.height
+        && left.round == right.round
+        && left.epoch == right.epoch
+        && left.cluster_id == right.cluster_id
+        && left.height_context_root == right.height_context_root
+        && left.phase == right.phase
+        && left.block_id == right.block_id
+        && left.highest_prepared_vc_root == right.highest_prepared_vc_root
+        && left.active_validator_set_hash == right.active_validator_set_hash
+        && left.cluster_map_hash == right.cluster_map_hash
+        && left.threshold_weight_required == right.threshold_weight_required
+}
+
+fn same_validation_certificate_subject(
+    left: &ValidationCertificate,
+    right: &ValidationCertificate,
+) -> bool {
+    same_quorum_certificate_subject(
+        &left.as_verification_certificate(),
+        &right.as_verification_certificate(),
+    )
+}
+
+fn same_timeout_certificate_subject(left: &TimeoutCertificate, right: &TimeoutCertificate) -> bool {
+    left.next_round == right.next_round
+        && same_quorum_certificate_subject(
+            &left.as_verification_certificate(),
+            &right.as_verification_certificate(),
+        )
 }
 
 fn validate_canonical_driver_timeouts(
@@ -3822,6 +3884,24 @@ mod tests {
         assert_eq!(block.header.tx_count, 0);
         assert!(block.header.protected_batch.is_none());
 
+        // The first wire delivery can race a remote node's typed-mailbox
+        // installation.  A scheduled proposer must retransmit the exact same
+        // signed candidate, never mint a second proposal for this round.
+        let rebroadcast_at = driver
+            .last_proposal_broadcast_at
+            .expect("first proposal must record its broadcast time")
+            + PROPOSAL_REBROADCAST_INTERVAL;
+        driver
+            .tick_at(rebroadcast_at)
+            .expect("the exact core proposal must be safe to retransmit");
+        assert_eq!(driver.metrics().emitted_proposals, 2);
+        let retransmitted = match driver.egress.messages.last().cloned() {
+            Some(TypedConsensusMessage::CoreProposal { block, .. }) => block,
+            _ => panic!("proposal retransmission must retain the core-only wire variant"),
+        };
+        assert_eq!(retransmitted.candidate_id(), block.candidate_id());
+        assert_eq!(retransmitted, block);
+
         let proposal_deadline = driver.round_started_at + Duration::from_millis(1_500);
         driver
             .tick_at(proposal_deadline)
@@ -3853,6 +3933,56 @@ mod tests {
             })
             .expect_err("core-only wire path must reject any transaction payload marker");
         assert!(payload_error.contains("must not contain user transactions"));
+    }
+
+    #[test]
+    fn equivalent_timeout_certificates_with_different_strict_quorum_subsets_are_not_conflicts() {
+        let mut driver = driver_with(coordinator_fixture(), 1);
+        let height_context = driver.coordinator.local_context.height_context.clone();
+        let validators = driver
+            .coordinator
+            .consensus
+            .validator_set
+            .validators
+            .clone();
+        let votes = {
+            let (consensus, signer) = (
+                &mut driver.coordinator.consensus,
+                &mut driver.coordinator.signer,
+            );
+            validators
+                .iter()
+                .map(|validator| {
+                    consensus.timeout_vote(signer, validator, &height_context, Round(0), None)
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .expect("fixture validators must form timeout votes")
+        };
+        let strict_quorum_certificate = driver
+            .coordinator
+            .form_timeout_certificate(&votes[..5])
+            .expect("five of six active validators is the strict quorum");
+        let full_quorum_certificate = driver
+            .coordinator
+            .form_timeout_certificate(&votes)
+            .expect("all active validators may also form valid timeout evidence");
+
+        assert_ne!(
+            strict_quorum_certificate.root().unwrap(),
+            full_quorum_certificate.root().unwrap(),
+            "proof roots intentionally differ because their signer subsets differ"
+        );
+        assert!(same_timeout_certificate_subject(
+            &strict_quorum_certificate,
+            &full_quorum_certificate
+        ));
+
+        driver
+            .install_verified_timeout_certificate(strict_quorum_certificate)
+            .expect("first verified timeout certificate installs");
+        driver
+            .install_verified_timeout_certificate(full_quorum_certificate)
+            .expect("equivalent strict-quorum evidence must not halt liveness");
     }
 
     #[test]
