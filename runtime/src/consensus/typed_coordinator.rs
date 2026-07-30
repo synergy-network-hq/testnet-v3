@@ -367,8 +367,11 @@ enum TypedRoundStage {
     WaitingForCertificate,
 }
 
-const PROPOSAL_REBROADCAST_INTERVAL: Duration = Duration::from_millis(250);
-const VOTE_REBROADCAST_INTERVAL: Duration = Duration::from_millis(250);
+// One retry still occurs before the canonical 1,500 ms stage deadline, but a
+// healthy six-validator round must not spend most of one CPU core repeatedly
+// verifying identical ML-DSA artifacts.
+const PROPOSAL_REBROADCAST_INTERVAL: Duration = Duration::from_millis(750);
+const VOTE_REBROADCAST_INTERVAL: Duration = Duration::from_millis(750);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TypedCoordinatorDriverMetrics {
@@ -382,6 +385,7 @@ pub struct TypedCoordinatorDriverMetrics {
     pub emitted_finality_certificates: u64,
     pub emitted_timeout_certificates: u64,
     pub finalized_blocks: u64,
+    pub deduplicated_replays: u64,
 }
 
 /// Operational typed PoSy driver.  It is the only component that schedules
@@ -1616,6 +1620,10 @@ where
         });
         if self.stage != TypedRoundStage::WaitingForCertificate
             && elapsed < proposal_deadline
+            && !self
+                .prepared_certificate
+                .as_ref()
+                .is_some_and(|certificate| certificate.round == self.coordinator.local_context.round)
             && (!self.emitted_proposal || proposal_rebroadcast_due)
         {
             self.try_emit_scheduled_proposal()?;
@@ -1719,6 +1727,11 @@ where
             self.metrics.accepted_messages = self.metrics.accepted_messages.saturating_add(1);
             return Ok(event);
         }
+        if let Some(event) = self.accept_exact_authenticated_replay(&envelope, peer_authorizer)? {
+            self.metrics.accepted_messages = self.metrics.accepted_messages.saturating_add(1);
+            self.metrics.deduplicated_replays = self.metrics.deduplicated_replays.saturating_add(1);
+            return Ok(event);
+        }
         let finalized_context = self.coordinator.local_context.height_context.clone();
         let event = self
             .coordinator
@@ -1777,6 +1790,67 @@ where
         self.advance_healthy_path(Instant::now())?;
         self.metrics.accepted_messages = self.metrics.accepted_messages.saturating_add(1);
         Ok(event)
+    }
+
+    /// Returns a no-op event for an exact vote replay whose complete driver
+    /// effects have already been recorded in this height/round.
+    ///
+    /// Replays are common because proposal and vote retries deliberately
+    /// overlap lossy network delivery. Sending every exact retry back through
+    /// ML-DSA verification lets six honest validators create a self-inflicted
+    /// CPU queue. The authenticated peer binding is still checked here, and
+    /// any changed byte follows the normal full-verification path.
+    fn accept_exact_authenticated_replay(
+        &self,
+        envelope: &TypedConsensusEnvelope,
+        peer_authorizer: &dyn TypedConsensusPeerAuthorizer,
+    ) -> Result<Option<TypedCoordinatorEvent>, String> {
+        let authenticated_peer = envelope.authenticated_peer.as_ref().ok_or_else(|| {
+            "typed consensus message has no Genesis-bound authenticated peer identity".to_string()
+        })?;
+        peer_authorizer.authorize(authenticated_peer, &envelope.message)?;
+
+        match &envelope.message {
+            TypedConsensusMessage::Vote { vote } => {
+                let context = &self.coordinator.local_context.height_context;
+                if vote.height != context.height
+                    || vote.round != self.coordinator.local_context.round
+                    || vote.epoch != context.epoch
+                    || vote.cluster_id != context.assigned_cluster_id
+                    || vote.height_context_root != context.root()?
+                {
+                    // Installed timeout certificates deliberately allow a
+                    // fully verified late timeout vote from their closing
+                    // round. It cannot use this exact-replay shortcut, but it
+                    // must retain the normal recovery path below.
+                    return Ok(None);
+                }
+                let observed = match vote.phase {
+                    VotePhase::Validate => &self.observed_validation_votes,
+                    VotePhase::Finality => &self.observed_finality_votes,
+                    VotePhase::Timeout => &self.observed_timeout_votes,
+                };
+                if observed
+                    .get(&vote.validator_id)
+                    .is_some_and(|accepted| accepted == vote)
+                {
+                    return Ok(Some(TypedCoordinatorEvent::VoteAccepted {
+                        phase: vote.phase.clone(),
+                        candidate_id: vote.block_id.clone(),
+                    }));
+                }
+            }
+            TypedConsensusMessage::CoreProposal { .. }
+            | TypedConsensusMessage::Proposal { .. }
+            | TypedConsensusMessage::ValidationCertificate { .. }
+            | TypedConsensusMessage::TimeoutCertificate { .. }
+            | TypedConsensusMessage::QuorumCertificate { .. }
+            | TypedConsensusMessage::PreparedCertificateRequest { .. }
+            | TypedConsensusMessage::PreparedCertificateResponse { .. }
+            | TypedConsensusMessage::FinalityCheckpointRequest { .. }
+            | TypedConsensusMessage::FinalityCheckpoint { .. } => {}
+        }
+        Ok(None)
     }
 
     /// Requests the exact next missing finalized height after bounded lack of
@@ -2207,6 +2281,11 @@ where
         }
         let vote = self.coordinator.finality_vote_for(block, certificate)?;
         self.broadcast(TypedConsensusMessage::Vote { vote: vote.clone() })?;
+        // A verified VC proves that a strict quorum already received and
+        // validated the proposal. Continuing to flood validation votes after
+        // entering Finality only delays the finality votes that matter now.
+        self.local_vote_rebroadcasts
+            .retain(|(local, _)| local.phase != VotePhase::Validate);
         self.local_vote_rebroadcasts.push((vote.clone(), now));
         self.emitted_finality_vote = true;
         self.metrics.emitted_finality_votes = self.metrics.emitted_finality_votes.saturating_add(1);
@@ -2221,6 +2300,8 @@ where
             .coordinator
             .timeout_vote(self.prepared_certificate.as_ref())?;
         self.broadcast(TypedConsensusMessage::Vote { vote: vote.clone() })?;
+        // Once the round times out, only the timeout vote can advance it.
+        self.local_vote_rebroadcasts.clear();
         self.local_vote_rebroadcasts.push((vote.clone(), now));
         self.emitted_timeout_vote = true;
         self.metrics.emitted_timeout_votes = self.metrics.emitted_timeout_votes.saturating_add(1);
@@ -4934,6 +5015,85 @@ mod tests {
     }
 
     #[test]
+    fn driver_deduplicates_only_exact_authenticated_vote_replays() {
+        let mut coordinator = coordinator_fixture();
+        let scheduled = coordinator
+            .consensus
+            .proposer_for(
+                &coordinator.local_context.height_context,
+                coordinator.local_context.round,
+            )
+            .expect("round-zero proposer");
+        coordinator.local_validator_id = scheduled.validator_id;
+        let authorizer =
+            FrozenTypedConsensusPeerAuthorizer::new(coordinator.consensus.validator_set.clone())
+                .expect("freeze fixture validator identities");
+        let mut driver = driver_with(coordinator, 1);
+        driver
+            .tick()
+            .expect("emit and accept local healthy proposal");
+        let local_validator = driver
+            .coordinator
+            .consensus
+            .validator_set
+            .validators
+            .iter()
+            .find(|validator| validator.validator_id == driver.coordinator.local_validator_id)
+            .expect("local signer remains in the frozen fixture set");
+        let authenticated_peer = AuthenticatedTypedConsensusPeer {
+            validator_id: local_validator.validator_id.clone(),
+            validator_uma_id: local_validator.validator_uma_id.clone(),
+            consensus_key_id: local_validator.consensus_public_key.key_id.clone(),
+        };
+        let validation_vote = driver
+            .egress
+            .messages
+            .iter()
+            .find(|message| {
+                matches!(
+                    message,
+                    TypedConsensusMessage::Vote { vote }
+                        if vote.phase == VotePhase::Validate
+                )
+            })
+            .cloned()
+            .expect("capture exact validation vote");
+
+        driver
+            .handle_envelope(
+                TypedConsensusEnvelope {
+                    peer_address: "authenticated-replay".to_string(),
+                    authenticated_peer: Some(authenticated_peer.clone()),
+                    message: validation_vote.clone(),
+                },
+                &authorizer,
+            )
+            .expect("an exact authenticated vote replay is an idempotent no-op");
+        assert_eq!(driver.metrics().deduplicated_replays, 1);
+
+        let mut changed_vote = validation_vote;
+        let TypedConsensusMessage::Vote { vote } = &mut changed_vote else {
+            unreachable!("selected message was a validation vote");
+        };
+        vote.aegis_pq_signature.signature_bytes[0] ^= 0x01;
+        driver
+            .handle_envelope(
+                TypedConsensusEnvelope {
+                    peer_address: "changed-replay".to_string(),
+                    authenticated_peer: Some(authenticated_peer),
+                    message: changed_vote,
+                },
+                &authorizer,
+            )
+            .expect_err("a changed signature must take the full verification path");
+        assert_eq!(
+            driver.metrics().deduplicated_replays,
+            1,
+            "changed bytes must never enter the replay fast path"
+        );
+    }
+
+    #[test]
     fn six_validator_driver_finalizes_healthy_round_without_waiting_for_deadlines() {
         let parameters = genesis_bound_parameters();
         let (bootstrap, _genesis_anchor, deployed_genesis_state_root, coordinators, store_paths) =
@@ -4970,6 +5130,10 @@ mod tests {
             assert_eq!(driver.metrics().emitted_validation_votes, 1);
             assert_eq!(driver.metrics().emitted_finality_votes, 1);
             assert_eq!(driver.metrics().emitted_timeout_votes, 0);
+            assert!(
+                driver.local_vote_rebroadcasts.is_empty(),
+                "successor reset must discard every prior-height retry"
+            );
         }
 
         drop(drivers);

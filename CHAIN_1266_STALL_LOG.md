@@ -413,12 +413,53 @@ both implausibly small readings such as 0.02 seconds and exaggerated gaps.
    **Outcome:** the delay was proven in validator evidence rather than inferred
    only from Atlas. The chain remained converged and advancing at height 117,
    so no reset or emergency restart was justified.
+2. **Changed the typed coordinator to emit validation and finality votes
+   immediately after authenticated proposal and validation-certificate
+   acceptance. Retained 1,500/1,500/1,500/10,000 ms as failure deadlines and
+   retained independent retransmission of every locally authorized phase
+   vote.** Source revision
+   `a9fb7a07b839929d945baccb16be5ff1908db7eb`.  
+   **Outcome:** all 30 typed-coordinator tests passed. A new six-validator
+   regression finalized a healthy round before any stage deadline with one
+   validation and one finality vote per replica and zero timeout votes.
+   Startup-loss, two-timeout-round, carried-candidate, missed-QC, and
+   successor-height recovery regressions also passed.
+3. **Pushed the immutable source and authorized it in both guarded staging
+   scripts and the Control Panel release variables. Started Control Panel
+   workflow run `30583401875`.**  
+   **Outcome:** the workflow accepted the exact source binding and began the
+   corrected Linux runtime build. Deployment and live timing verification were
+   still pending when this action was recorded.
+4. **Deployed the verified `a9fb7a07…` artifacts to Relayers 1–3, the RPC
+   Gateway, Explorer Indexer, and all six validators using a coordinated
+   stop-stage-start cutover for the validator quorum.**  
+   **Outcome:** the height-246 successor split cleared without deleting chain
+   state. All six validators converged and advanced through height 311 with
+   zero service restarts or fatal signing conflicts.
+5. **Measured the post-cutover signing cadence and runtime load instead of
+   relying on Atlas. Inspected the typed driver's proposal/vote retry paths and
+   duplicate-message verification order.**  
+   **Outcome:** round-0 finality intervals remained approximately 5.5–6.6
+   seconds and each validator consumed approximately 104–114% of one CPU core.
+   The remaining delay is a self-inflicted authenticated replay workload:
+   proposals and every retained ML-DSA vote were rebroadcast every 250 ms, and
+   exact duplicate votes underwent full post-quantum verification again.
+6. **Implemented one bounded retry before the 1,500 ms stage deadline,
+   stopped superseded phase-vote retries, stopped same-round proposal retries
+   after preparation, and added an authenticated exact-vote replay fast path
+   that rejects changed signatures through normal verification.**  
+   **Outcome:** the full typed-coordinator module passed 31/31 tests, including
+   healthy finality, startup loss, two timeout rounds, carried-candidate
+   recovery, missed-QC recovery, bounded ingress, and the new exact-replay
+   tamper regression. No live node has received this performance correction
+   yet.
 
 ### Final outcome
 
-Open. The coordinator must use authenticated proposal/certificate arrival for
-the healthy fast path while retaining governed timeouts as failure deadlines.
-Atlas must stop labeling batch-ingestion intervals as block-production time.
+Open. Safety and forward progress are restored, but the tested replay-pressure
+correction must be built, deployed coherently, and measured against the
+sub-two-second target. Atlas must separately stop labeling batch-ingestion
+intervals as block-production time.
 
 ### Residual risks and next observation
 
@@ -434,6 +475,104 @@ evidence.
 - `/var/lib/synergy/validator/data/consensus_signing_authorizations.json` on
   validators 1–6
 - `runtime/src/consensus/typed_coordinator.rs`
+
+---
+
+## C1266-2026-07-30-006 — Post-finality successor-height split at height 246
+
+**Status:** Resolved  
+**Severity:** P0  
+**Detected:** 2026-07-30 approximately 21:29 UTC  
+**First bad height:** 247  
+**Last agreed finalized height:** 246  
+**Last agreed finalized block ID:** `a8eaf5d303ad3ca5ba2ffc86f1df15d425dc1030bffd48dd4dc27b4481b9e6bc`
+
+### Affected and responsible nodes
+
+- Affected: `synergy-val1` through `synergy-val6`.
+- All six validator services remained active with zero restarts and exposed
+  the same finalized height and block ID.
+- No individual node is responsible. The split occurred in the shared typed
+  coordinator after a valid round-2 finality event.
+
+### Symptoms and evidence
+
+- The finalized tip remained unchanged at height 246 across repeated samples.
+- Validators 1, 2, 4, and 5 retained a stale durable prepared record for
+  height 246 after that height was finalized. Their latest signing
+  authorization was a height-246 round-3 timeout carrying candidate
+  `1ce93f5dba108d3bf090015dda9bb28f0a7c408c059a57841312f504b4c5087e`.
+- Validators 3 and 6 had correctly cleared the height-246 prepared record and
+  authorized a height-247 round-0 no-carry timeout.
+- Every validator's typed finality store contained height 246 and the same
+  block ID. Validator 6 held a different valid QC proof root from the other
+  five, consistent with independently assembled strict-quorum signer subsets;
+  the finalized block subject did not differ.
+- No validator had restarted and no fatal consensus/signing conflict appeared.
+
+### Confirmed cause
+
+The durable evidence confirms a post-finality successor-state split, not a
+block fork: four replicas retained prior-height prepared/round state while two
+entered height 247. The exact triggering code path is inferred from the old
+runtime: `emit_finality_vote` can itself complete the QC and reset the driver,
+after which the caller unconditionally writes the previous height's
+`Finality` stage. This can overwrite the successor reset and leave replicas
+with different process-local stage and stale prepared-state cleanup outcomes.
+
+The already-tested `a9fb7a07…` runtime guards that assignment with the original
+height and round, so a locally completing finality vote cannot overwrite the
+successor reset. Its restart path also clears a prepared record whose height
+is already finalized.
+
+### Recovery actions and outcomes
+
+1. **Read this incident log from top to bottom and compared finality stores,
+   finality heads, prepared stores, signing journals, service states, and
+   restart counts on all six validators.**  
+   **Outcome:** confirmed one finalized block with no safety divergence and a
+   4/2 successor-state split. No chain data was deleted and no service was
+   restarted during diagnosis.
+2. **Downloaded and independently verified Control Panel workflow
+   `30583401875` artifact `testnet-v3-linux-runtime-hotfix`.**  
+   **Outcome:** every published checksum passed, the ELF binaries are x86-64
+   Linux executables, and `TESTNET_SOURCE_REVISION` binds the artifact to
+   `a9fb7a07b839929d945baccb16be5ff1908db7eb`. The validator binary SHA-256 is
+   `20018822311a70c0fe7279a4853f5b951b4ea49b464dea1c94915b45b0ec266c`.
+   No live service was changed at this checkpoint.
+3. **Switched Relayers 1–3, the RPC Gateway, and the Explorer Indexer to the
+   exact `a9fb7a07…` role-bound artifacts before touching validators.**  
+   **Outcome:** all five guarded switches completed without rollback, each
+   local RPC returned Chain 1266 and the canonical Genesis hash, and all five
+   services were active on the new runtime. Backups were written under
+   `/var/backups/synergy-testnet-v3/runtime-hotfix-*` on the assigned hosts.
+4. **Stopped all six validators, staged the exact role-bound validator binary
+   on every host while inactive, verified its version and checksum, then
+   started all six together.**  
+   **Outcome:** all validators cleared the stale height-246 state, converged
+   on height 247, and continued together through height 311. All six services
+   remained active with zero restarts and no fatal consensus or signing
+   conflict. No finalized data was deleted.
+
+### Final outcome
+
+Resolved. The agreed height-246 finality was preserved and the six validators
+resumed one canonical successor chain. The remaining excessive block interval
+is tracked separately in incident C1266-2026-07-30-005.
+
+### Residual risks and next observation
+
+Continue monitoring identical finalized block IDs and zero restart/fatal-error
+counts while the performance correction for incident 005 is deployed.
+
+### Source evidence
+
+- `/var/lib/synergy/validator/data/typed-posy-finality.json` on validators 1–6
+- `/var/lib/synergy/validator/data/typed-posy-prepared.json` on validators 1–6
+- `/var/lib/synergy/validator/data/consensus_signing_authorizations.json` on
+  validators 1–6
+- `runtime/src/consensus/typed_coordinator.rs`
+- Control Panel workflow run `30583401875`
 
 ---
 
