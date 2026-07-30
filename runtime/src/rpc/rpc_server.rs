@@ -1279,34 +1279,89 @@ fn network_validator_snapshot(
         });
     }
 
-    let total_observed_blocks = chain
-        .chain
-        .iter()
-        .filter(|block| block.block_index > 0)
-        .count() as u64;
-    let recent_active =
-        recent_active_validator_addresses(chain, validators.len(), &validator_id_to_address);
-
-    for block in chain.chain.iter().filter(|block| block.block_index > 0) {
-        let address = validator_id_to_address
-            .get(&block.validator_id)
-            .cloned()
-            .unwrap_or_else(|| block.validator_id.clone());
-        let validator = validators.entry(address.clone()).or_insert_with(|| {
-            synthesize_validator(
-                address.clone(),
-                String::new(),
-                format!("Validator-{}", &address[..8.min(address.len())]),
-                0,
-                genesis_timestamp,
-            )
+    // Testnet-v3 finality lives in the typed PoSy store. The inherited
+    // `BlockChain` remains at Genesis on read-only roles, so deriving activity
+    // from it made every live validator appear to have produced zero blocks.
+    // Once the typed store exists it is the sole finalized authority, matching
+    // the block/explorer RPC paths below.
+    let typed_finality = typed_finality_records_for_rpc().ok().flatten();
+    let total_observed_blocks = typed_finality
+        .as_ref()
+        .map(|records| records.len() as u64)
+        .unwrap_or_else(|| {
+            chain
+                .chain
+                .iter()
+                .filter(|block| block.block_index > 0)
+                .count() as u64
         });
-        validator.total_blocks_produced = validator.total_blocks_produced.saturating_add(1);
-        validator.total_transactions_validated = validator
-            .total_transactions_validated
-            .saturating_add(block.transactions.len() as u64);
-        validator.last_active = validator.last_active.max(block.timestamp);
-        validator.last_vote_timestamp = validator.last_vote_timestamp.max(block.timestamp);
+    let activity_window = validators.len().max(10).saturating_mul(12);
+    let recent_active = typed_finality
+        .as_ref()
+        .map(|records| {
+            records
+                .iter()
+                .rev()
+                .take(activity_window)
+                .map(|record| {
+                    let validator_id = record.block.header.proposer_validator_id.0.as_str();
+                    validator_id_to_address
+                        .get(validator_id)
+                        .cloned()
+                        .unwrap_or_else(|| validator_id.to_string())
+                })
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_else(|| {
+            recent_active_validator_addresses(chain, validators.len(), &validator_id_to_address)
+        });
+
+    if let Some(records) = typed_finality.as_ref() {
+        for record in records {
+            let validator_id = record.block.header.proposer_validator_id.0.as_str();
+            let address = validator_id_to_address
+                .get(validator_id)
+                .cloned()
+                .unwrap_or_else(|| validator_id.to_string());
+            let validator = validators.entry(address.clone()).or_insert_with(|| {
+                synthesize_validator(
+                    address.clone(),
+                    String::new(),
+                    format!("Validator-{}", &address[..8.min(address.len())]),
+                    0,
+                    genesis_timestamp,
+                )
+            });
+            validator.total_blocks_produced = validator.total_blocks_produced.saturating_add(1);
+            validator.total_transactions_validated = validator
+                .total_transactions_validated
+                .saturating_add(record.block.transactions.len() as u64);
+            let timestamp = record.block.header.timestamp_ms_consensus_bounded / 1_000;
+            validator.last_active = validator.last_active.max(timestamp);
+            validator.last_vote_timestamp = validator.last_vote_timestamp.max(timestamp);
+        }
+    } else {
+        for block in chain.chain.iter().filter(|block| block.block_index > 0) {
+            let address = validator_id_to_address
+                .get(&block.validator_id)
+                .cloned()
+                .unwrap_or_else(|| block.validator_id.clone());
+            let validator = validators.entry(address.clone()).or_insert_with(|| {
+                synthesize_validator(
+                    address.clone(),
+                    String::new(),
+                    format!("Validator-{}", &address[..8.min(address.len())]),
+                    0,
+                    genesis_timestamp,
+                )
+            });
+            validator.total_blocks_produced = validator.total_blocks_produced.saturating_add(1);
+            validator.total_transactions_validated = validator
+                .total_transactions_validated
+                .saturating_add(block.transactions.len() as u64);
+            validator.last_active = validator.last_active.max(block.timestamp);
+            validator.last_vote_timestamp = validator.last_vote_timestamp.max(block.timestamp);
+        }
     }
 
     let mut ordered = validators.into_values().collect::<Vec<_>>();

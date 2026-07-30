@@ -2715,15 +2715,45 @@ where
         &mut self,
         certificate: TimeoutCertificate,
     ) -> Result<(), String> {
-        if let Some(existing) = &self.timeout_certificate {
+        if let Some(existing) = self.timeout_certificate.clone() {
             if certificate.closing_round == existing.closing_round {
-                if !same_timeout_certificate_subject(existing, &certificate) {
-                    return Err(
-                        "TYPED_DRIVER_SOURCE_CONFLICT: timeout certificates disagree on round or carry-forward source"
-                            .to_string(),
-                    );
+                if !same_timeout_transition_context(&existing, &certificate) {
+                    return Err("TYPED_DRIVER_SOURCE_CONFLICT: timeout certificates disagree on the consensus transition context".to_string());
                 }
-                return Ok(());
+                match (
+                    existing.carry_forward_candidate_id.as_ref(),
+                    certificate.carry_forward_candidate_id.as_ref(),
+                ) {
+                    (Some(existing_candidate), Some(incoming_candidate))
+                        if existing_candidate != incoming_candidate =>
+                    {
+                        return Err(
+                            "TYPED_DRIVER_SOURCE_CONFLICT: timeout certificates carry different prepared candidates"
+                                .to_string(),
+                        );
+                    }
+                    (Some(_), None) | (None, None) | (Some(_), Some(_)) => {
+                        // A timeout proof may be assembled from any valid
+                        // strict-quorum subset. One subset can omit the sole
+                        // prepared report that another subset includes, and
+                        // the same candidate can be reported with different
+                        // valid VC proof roots. Neither changes the closed
+                        // round. Retain an already-installed carry requirement
+                        // and treat weaker/equivalent evidence as idempotent.
+                        return Ok(());
+                    }
+                    (None, Some(_)) => {
+                        // Upgrade a no-carry transition when another verified
+                        // strict quorum proves a prepared candidate. The
+                        // coordinator already advanced to `next_round`; replay
+                        // the independently verified TC through recovery so
+                        // the consensus core records the stronger carry rule.
+                        let height_context = self.coordinator.local_context.height_context.clone();
+                        self.coordinator
+                            .consensus
+                            .recover_round_after_tc(&certificate, &height_context)?;
+                    }
+                }
             }
             if certificate.closing_round.0 < existing.closing_round.0 {
                 // The coordinator already cryptographically accepted this
@@ -2867,12 +2897,36 @@ fn same_validation_certificate_subject(
     )
 }
 
+#[cfg(test)]
 fn same_timeout_certificate_subject(left: &TimeoutCertificate, right: &TimeoutCertificate) -> bool {
     left.next_round == right.next_round
         && same_quorum_certificate_subject(
             &left.as_verification_certificate(),
             &right.as_verification_certificate(),
         )
+}
+
+/// Compares the immutable round transition independently of the timeout
+/// quorum's local prepared knowledge and signer subset.
+///
+/// Two valid strict-quorum subsets can close the same round while only one
+/// includes a validator that observed a prepared VC. That is not a second
+/// consensus transition; the driver must retain or adopt the stronger carry
+/// requirement instead of terminating every validator process.
+fn same_timeout_transition_context(left: &TimeoutCertificate, right: &TimeoutCertificate) -> bool {
+    left.certificate_version == right.certificate_version
+        && left.chain_id == right.chain_id
+        && left.network_id == right.network_id
+        && left.protocol_version == right.protocol_version
+        && left.height == right.height
+        && left.closing_round == right.closing_round
+        && left.next_round == right.next_round
+        && left.epoch == right.epoch
+        && left.cluster_id == right.cluster_id
+        && left.height_context_root == right.height_context_root
+        && left.active_validator_set_hash == right.active_validator_set_hash
+        && left.cluster_map_hash == right.cluster_map_hash
+        && left.threshold_weight_required == right.threshold_weight_required
 }
 
 fn validate_canonical_driver_timeouts(
@@ -4882,6 +4936,91 @@ mod tests {
                 .closing_round,
             Round(1)
         );
+    }
+
+    #[test]
+    fn same_round_prepared_timeout_upgrades_an_installed_no_carry_transition() {
+        let mut coordinator = coordinator_fixture();
+        let height_context = coordinator.local_context.height_context.clone();
+        let validators = coordinator.consensus.validator_set.validators.clone();
+        let scheduled = coordinator
+            .consensus
+            .proposer_for(&height_context, Round(0))
+            .expect("round-zero proposer");
+        coordinator.local_validator_id = scheduled.validator_id;
+        let block = coordinator
+            .propose_core_block()
+            .expect("deterministic prepared candidate");
+        let validation_votes = validators
+            .iter()
+            .map(|validator| {
+                coordinator.consensus.validation_vote(
+                    &mut coordinator.signer,
+                    validator,
+                    &block,
+                    &height_context,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .expect("validation votes");
+        let prepared = coordinator
+            .form_validation_certificate(&validation_votes[..5])
+            .expect("prepared VC");
+        // Five validators report no prepared proof. The sixth reports the
+        // valid VC, so two different five-of-six quorums form a no-carry and
+        // a carry TC for the exact same round transition.
+        let timeout_votes = validators
+            .iter()
+            .enumerate()
+            .map(|(index, validator)| {
+                coordinator.consensus.timeout_vote(
+                    &mut coordinator.signer,
+                    validator,
+                    &height_context,
+                    Round(0),
+                    (index == validators.len() - 1).then_some(&prepared),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .expect("mixed timeout votes");
+        let no_carry = coordinator
+            .form_timeout_certificate(&timeout_votes[..5])
+            .expect("no-carry strict-quorum TC");
+        let carry = coordinator
+            .form_timeout_certificate(&timeout_votes[1..])
+            .expect("carry strict-quorum TC");
+
+        assert!(same_timeout_transition_context(&no_carry, &carry));
+        assert!(no_carry.carry_forward_candidate_id.is_none());
+        assert_eq!(
+            carry.carry_forward_candidate_id.as_ref(),
+            Some(&prepared.candidate_id)
+        );
+
+        let mut driver = driver_with(coordinator, 1);
+        driver
+            .coordinator
+            .accept_timeout_certificate(no_carry.clone())
+            .expect("install no-carry transition in the coordinator");
+        driver
+            .install_verified_timeout_certificate(no_carry)
+            .expect("install no-carry transition in the driver");
+        driver
+            .coordinator
+            .accept_timeout_certificate(carry.clone())
+            .expect("verify stronger same-round timeout evidence");
+        driver
+            .install_verified_timeout_certificate(carry.clone())
+            .expect("stronger carry evidence must upgrade without terminating");
+
+        assert_eq!(
+            driver
+                .timeout_certificate
+                .as_ref()
+                .and_then(|certificate| certificate.carry_forward_candidate_id.as_ref()),
+            Some(&prepared.candidate_id)
+        );
+        assert_eq!(driver.coordinator.local_context.round, carry.next_round);
     }
 
     #[test]
