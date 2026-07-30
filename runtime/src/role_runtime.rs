@@ -6,7 +6,7 @@ use std::process::{self, Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::config::{
     list_available_templates, load_node_config, load_node_config_from_template, NodeConfig,
@@ -870,6 +870,31 @@ fn is_validator_profile(profile: Option<&RoleProfile>) -> bool {
     matches!(profile.map(|value| value.role), Some(NodeRole::Validator))
 }
 
+/// Waits until every other finalized Genesis validator has a fresh,
+/// authenticated status session before starting the first typed round.  The
+/// worker treats an empty fanout as fatal, so starting it while P2P is still
+/// converging would create a deterministic startup race rather than a safe
+/// consensus failure.
+fn wait_for_finalized_typed_peer_readiness(
+    network: &p2p::networking::P2PNetwork,
+    required_remote_validators: usize,
+) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(45);
+    loop {
+        let ready = network.get_status_ready_validator_addresses();
+        if ready.len() >= required_remote_validators {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for finalized typed PoSy peer readiness: required {required_remote_validators} remote validators, observed {}",
+                ready.len()
+            ));
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
 fn local_validator_is_consensus_authorized(config: &NodeConfig) -> bool {
     let validator_address = resolve_local_validator_address(config);
     consensus_membership_validators(VALIDATOR_MANAGER.get_active_validators())
@@ -1169,6 +1194,7 @@ where
                 Err(_) => Some("typed PoSy driver worker panicked".to_string()),
             };
             if let Some(error) = failure {
+                eprintln!("Finalized typed PoSy worker failed closed: {error}");
                 if let Ok(mut slot) = worker_error.lock() {
                     *slot = Some(error);
                 }
@@ -2994,6 +3020,26 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
             // shutdown signal.  A typed-driver failure clears it before any
             // legacy path could be considered, and the role loop exits.
             let running = Arc::new(AtomicBool::new(true));
+            if consensus_enabled && is_validator_profile(role_profile) {
+                let required_remote_validators =
+                    genesis.validators().len().checked_sub(1).unwrap_or(0);
+                let network = p2p_network.as_ref().unwrap_or_else(|| {
+                    eprintln!(
+                        "Consensus startup failed closed: finalized typed PoSy requires an active P2P network"
+                    );
+                    process::exit(1);
+                });
+                info!(
+                    "main",
+                    "Waiting for finalized typed PoSy peer readiness",
+                    "required_remote_validators" => required_remote_validators as u64
+                );
+                wait_for_finalized_typed_peer_readiness(network, required_remote_validators)
+                    .unwrap_or_else(|error| {
+                        eprintln!("Consensus startup failed closed: {error}");
+                        process::exit(1);
+                    });
+            }
             let initial_consensus_startup = select_finalized_typed_driver_startup(
                 consensus_enabled,
                 p2p_network.is_some(),
@@ -3135,16 +3181,22 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                 std::thread::sleep(Duration::from_secs(1));
             }
 
-            info!("main", "Node shutdown gracefully");
-            fs::remove_file("data/synergy-testnet.pid").ok();
-
             for handle in role_services.worker_threads {
                 let _ = handle.join();
             }
 
+            let typed_worker_failure = typed_posy_worker
+                .as_ref()
+                .and_then(TypedPosyWorker::fatal_error);
             if let Some(typed_posy_worker) = typed_posy_worker {
                 typed_posy_worker.join();
             }
+            fs::remove_file("data/synergy-testnet.pid").ok();
+            if let Some(error) = typed_worker_failure {
+                eprintln!("Finalized typed PoSy worker failed closed: {error}");
+                process::exit(1);
+            }
+            info!("main", "Node shutdown gracefully");
         }
         "keygen" | "generate-keypair" => {
             use crate::address::generate_class_based_address;
