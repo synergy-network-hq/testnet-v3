@@ -1,5 +1,11 @@
 # Testnet-v3 launch — handoff to Codex
 
+> **Status notice (2026-07-30):** The launch-status and “immediate next
+> action” sections in this historical handoff are superseded by
+> [`CODEX_TO_CLAUDE_TESTNET_V3_HANDOFF_2026-07-30.md`](CODEX_TO_CLAUDE_TESTNET_V3_HANDOFF_2026-07-30.md).
+> Use the newer handoff for the current live node state, corrected runtime
+> artifact, blockers, and coordinated validator recovery procedure.
+
 Written 2026-07-28. Covers sessions 13i–13m. Everything stated here was executed
 and verified on the operator's machine, not inferred.
 

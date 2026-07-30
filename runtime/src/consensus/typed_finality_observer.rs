@@ -475,7 +475,13 @@ fn verify_record(
             "typed finality observer record is not the next immutable consensus height".to_string(),
         );
     }
-    consensus.validate_core_proposal(&record.block, context, execution_state)?;
+    // A durable finalized record carries no timeout certificate, so the live
+    // TC-driven round check can never be satisfied here and would reject every
+    // record finalized at a round greater than zero. Use the finalized-record
+    // recovery path, whose round authority is the finality QC verified
+    // immediately below, and which still binds `header.round` through the
+    // proposer schedule and the proposer's signature over the full header.
+    consensus.validate_finalized_core_record(&record.block, context, execution_state)?;
     verify_finality_qc(
         consensus,
         &record.block,
@@ -550,8 +556,8 @@ mod tests {
     use super::*;
     use crate::crypto::aegis_pqvm::AegisPqvmSigner;
     use crate::synergy_types::{
-        AegisPqKeyRole, ClusterId, ClusterMap, Hash, ValidatorId, ValidatorRecord, ValidatorSet,
-        ValidatorStatus,
+        AegisPqKeyRole, ClusterId, ClusterMap, Hash, Round, ValidatorId, ValidatorRecord,
+        ValidatorSet, ValidatorStatus,
     };
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -717,6 +723,226 @@ mod tests {
         store
             .append_verified_finality(&block, &qc)
             .expect("source finality")
+    }
+
+    /// Produces a record finalized at round 1 by driving the *source* coordinator
+    /// through a real timeout certificate, exactly as a live validator does.
+    fn signed_record_after_round_change(
+        consensus: &mut ProofOfSynergyBft,
+        signer: &mut AegisPqvmSigner,
+        context: &LocalConsensusContext,
+        state: &ExecutionState,
+        store: &TypedFinalityStore,
+    ) -> TypedFinalityRecord {
+        let validators = consensus.validator_set.validators.clone();
+        let timeout_votes = validators
+            .iter()
+            .take(5)
+            .map(|validator| {
+                consensus
+                    .timeout_vote(signer, validator, &context.height_context, Round(0), None)
+                    .expect("timeout vote")
+            })
+            .collect::<Vec<_>>();
+        let tc = consensus
+            .form_tc(&timeout_votes, &context.height_context)
+            .expect("timeout certificate");
+        assert_eq!(
+            consensus
+                .advance_round_after_tc(&tc, &context.height_context, Round(0))
+                .expect("authorized round advance"),
+            Round(1)
+        );
+
+        let mut round_one = context.clone();
+        round_one.round = Round(1);
+        let proposer = consensus
+            .proposer_for(&round_one.height_context, Round(1))
+            .expect("round-one scheduled proposer");
+        let block = consensus
+            .propose_core_block(signer, &proposer, &round_one, state)
+            .expect("round-one core block");
+        assert_eq!(block.header.round, Round(1));
+
+        let validation_votes = validators
+            .iter()
+            .take(5)
+            .map(|validator| {
+                consensus
+                    .validation_vote(signer, validator, &block, &round_one.height_context)
+                    .expect("validation vote")
+            })
+            .collect::<Vec<_>>();
+        let validation_certificate = consensus
+            .form_vc(&validation_votes, &round_one.height_context)
+            .expect("validation certificate");
+        let finality_votes = validators
+            .iter()
+            .take(5)
+            .map(|validator| {
+                consensus
+                    .finality_vote(
+                        signer,
+                        validator,
+                        &block,
+                        &validation_certificate,
+                        &round_one.height_context,
+                    )
+                    .expect("finality vote")
+            })
+            .collect::<Vec<_>>();
+        let qc = consensus
+            .form_qc(&finality_votes, &round_one.height_context)
+            .expect("finality QC");
+        store
+            .append_verified_finality(&block, &qc)
+            .expect("source finality")
+    }
+
+    #[test]
+    fn imports_a_finalized_record_produced_after_a_round_change() {
+        // Regression for the Testnet-v3 launch blocker: relayer, RPC, and
+        // indexer observers rejected every finalized record whose round was
+        // greater than zero with
+        //   "round 1 is not authorized; valid TC is required to advance from round 0"
+        // because `authorized_rounds` is live TC state that a non-signing
+        // observer can never populate. Testnet-v3 finalized height 1 at round 1,
+        // so no observer store was ever created and the public chain stayed at
+        // height 0 while validators advanced normally.
+        let (bootstrap, mut signer, protocol_config, anchor, deployed_root) = fixture();
+        let (source_store, source_path) = temp_store("source-round-change", anchor);
+        let (target_store, target_path) = temp_store("target-round-change", anchor);
+        let mut source_consensus = ProofOfSynergyBft::new(
+            &bootstrap.verifier,
+            bootstrap.validator_set.clone(),
+            bootstrap.cluster_map.clone(),
+            protocol_config.clone(),
+        );
+        let initial_context = bootstrap
+            .initial_local_consensus_context(&protocol_config, anchor, deployed_root)
+            .expect("initial context");
+        let record = signed_record_after_round_change(
+            &mut source_consensus,
+            &mut signer,
+            &initial_context,
+            &ExecutionState::new(),
+            &source_store,
+        );
+        assert_eq!(record.block.header.round, Round(1));
+
+        let mut target = observer(
+            bootstrap,
+            protocol_config,
+            anchor,
+            deployed_root,
+            target_store,
+        );
+        assert_eq!(
+            target.import_records(std::slice::from_ref(&record)),
+            Ok(1),
+            "an observer must accept a valid record finalized after a round change"
+        );
+        assert_eq!(target.next_missing_height(), Height(2));
+
+        let _ = std::fs::remove_file(source_path);
+        let _ = std::fs::remove_file(target.finality_store().path());
+        let _ = std::fs::remove_file(target_path);
+    }
+
+    #[test]
+    fn round_change_recovery_does_not_weaken_the_live_signing_path() {
+        // The recovery path must relax the round check *only* for durable
+        // finalized records. A live coordinator with no timeout certificate must
+        // still refuse the very same block.
+        let (bootstrap, mut signer, protocol_config, anchor, deployed_root) = fixture();
+        let (source_store, source_path) = temp_store("source-live-guard", anchor);
+        let mut source_consensus = ProofOfSynergyBft::new(
+            &bootstrap.verifier,
+            bootstrap.validator_set.clone(),
+            bootstrap.cluster_map.clone(),
+            protocol_config.clone(),
+        );
+        let initial_context = bootstrap
+            .initial_local_consensus_context(&protocol_config, anchor, deployed_root)
+            .expect("initial context");
+        let record = signed_record_after_round_change(
+            &mut source_consensus,
+            &mut signer,
+            &initial_context,
+            &ExecutionState::new(),
+            &source_store,
+        );
+
+        let mut live = ProofOfSynergyBft::new(
+            &bootstrap.verifier,
+            bootstrap.validator_set.clone(),
+            bootstrap.cluster_map.clone(),
+            protocol_config.clone(),
+        );
+        let error = live
+            .validate_core_proposal(&record.block, &initial_context, &ExecutionState::new())
+            .expect_err("the live signing path must still require a valid TC");
+        assert!(
+            error.contains("valid TC is required"),
+            "unexpected live-path error: {error}"
+        );
+
+        let mut recovery = ProofOfSynergyBft::new(
+            &bootstrap.verifier,
+            bootstrap.validator_set.clone(),
+            bootstrap.cluster_map.clone(),
+            protocol_config,
+        );
+        recovery
+            .validate_finalized_core_record(
+                &record.block,
+                &initial_context,
+                &ExecutionState::new(),
+            )
+            .expect("the recovery path must accept a finalized round-one record");
+
+        let _ = std::fs::remove_file(source_path);
+    }
+
+    #[test]
+    fn round_change_recovery_still_binds_the_round_to_the_proposer_schedule() {
+        // `candidate_id()` deliberately zeroes `round`, so the QC alone does not
+        // bind it. The proposer-schedule check for the exact round is what keeps
+        // the relaxed path sound: re-labelling a finalized block's round must
+        // fail even though its QC still verifies.
+        let (bootstrap, mut signer, protocol_config, anchor, deployed_root) = fixture();
+        let (source_store, source_path) = temp_store("source-round-tamper", anchor);
+        let mut source_consensus = ProofOfSynergyBft::new(
+            &bootstrap.verifier,
+            bootstrap.validator_set.clone(),
+            bootstrap.cluster_map.clone(),
+            protocol_config.clone(),
+        );
+        let initial_context = bootstrap
+            .initial_local_consensus_context(&protocol_config, anchor, deployed_root)
+            .expect("initial context");
+        let record = signed_record_after_round_change(
+            &mut source_consensus,
+            &mut signer,
+            &initial_context,
+            &ExecutionState::new(),
+            &source_store,
+        );
+
+        let mut tampered = record.block.clone();
+        tampered.header.round = Round(7);
+
+        let mut recovery = ProofOfSynergyBft::new(
+            &bootstrap.verifier,
+            bootstrap.validator_set.clone(),
+            bootstrap.cluster_map.clone(),
+            protocol_config,
+        );
+        recovery
+            .validate_finalized_core_record(&tampered, &initial_context, &ExecutionState::new())
+            .expect_err("a re-labelled round must not pass the recovery path");
+
+        let _ = std::fs::remove_file(source_path);
     }
 
     #[test]

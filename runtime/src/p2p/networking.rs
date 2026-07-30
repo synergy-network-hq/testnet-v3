@@ -4345,7 +4345,7 @@ fn connected_endpoint_host_matches_configured_address(
     let Some((connected_host, _connected_port)) = endpoint_host_port(connected_address) else {
         return false;
     };
-    let Some((configured_host, _configured_port)) = endpoint_host_port(configured_address) else {
+    let Some((configured_host, configured_port)) = endpoint_host_port(configured_address) else {
         return false;
     };
 
@@ -4358,7 +4358,14 @@ fn connected_endpoint_host_matches_configured_address(
         return connected_ip == configured_ip;
     }
 
-    configured_host
+    // `str::to_socket_addrs` requires a `host:port` string. Resolving the bare
+    // host alone always fails, which silently rejected every DNS-named
+    // allowlist entry on the incoming path and left a peer that advertises a
+    // hostname unauthorizable: the numeric entry matched its source host but
+    // not its advertised address, and the DNS entry matched its advertised
+    // address but never resolved. Resolve host and port together, as the
+    // port-exact sibling check already does.
+    (configured_host.as_str(), configured_port)
         .to_socket_addrs()
         .map(|addresses| {
             addresses
@@ -11737,6 +11744,7 @@ mod tests {
         chain_snapshot_clone_allowed, claim_status_rate_limit, collect_known_peer_addresses,
         configured_public_address_for_validator_in_set, configured_seed_server_dial_targets,
         configured_validator_p2p_dials, configured_validator_public_address_map,
+        connected_endpoint_host_matches_configured_address,
         connected_endpoint_matches_configured_address, connected_peer_key_for_address,
         connected_validator_participants, current_bootstrap_refresh_interval, current_timestamp,
         dial_with_timeout, disconnect_peer_after_poisoned_write, disconnect_peer_entry,
@@ -13009,6 +13017,47 @@ mod tests {
     fn parse_bootnode_dial_address_rejects_invalid_bare_host_targets() {
         assert_eq!(parse_bootnode_dial_address("snr://peer@test:5620"), None);
         assert_eq!(parse_bootnode_dial_address(""), None);
+    }
+
+    #[test]
+    fn incoming_host_match_resolves_dns_named_configured_endpoints() {
+        // Regression: this helper called `to_socket_addrs()` on a bare host with
+        // the port already stripped, which always fails. Every DNS-named
+        // allowlist entry was therefore unmatchable on the incoming path, so a
+        // support peer advertising a hostname could not be authorized at all:
+        // the numeric allowlist entry matched its observed source host but not
+        // its advertised address, and the DNS entry matched its advertised
+        // address but never resolved. That is why the RPC gateway, which
+        // advertises `rpc.synergynode.xyz:5623`, was rejected by every relayer
+        // with "typed finality observer request to relayer is not from a
+        // configured public service role".
+        assert!(connected_endpoint_host_matches_configured_address(
+            "127.0.0.1:54321",
+            "localhost:5623"
+        ));
+
+        // A resolved host that is not the observed source must still fail.
+        assert!(!connected_endpoint_host_matches_configured_address(
+            "203.0.113.7:54321",
+            "localhost:5623"
+        ));
+
+        // Numeric entries keep matching on host alone, ignoring the peer's
+        // ephemeral inbound source port.
+        assert!(connected_endpoint_host_matches_configured_address(
+            "167.86.83.83:54321",
+            "167.86.83.83:5623"
+        ));
+        assert!(!connected_endpoint_host_matches_configured_address(
+            "167.86.83.84:54321",
+            "167.86.83.83:5623"
+        ));
+
+        // A self-reported hostname is never transport evidence.
+        assert!(!connected_endpoint_host_matches_configured_address(
+            "localhost:54321",
+            "localhost:5623"
+        ));
     }
 
     #[test]

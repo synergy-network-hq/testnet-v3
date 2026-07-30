@@ -284,10 +284,18 @@ done
 [[ $(systemctl is-active "$unit" 2>/dev/null || true) == active ]] ||
   fail "unit did not become active after runtime switch: $unit"
 
-new_pid=$(systemctl show "$unit" -p MainPID --value)
-new_args=$(ps -p "$new_pid" -o args=)
+new_pid=
+new_args=
+for _ in $(seq 1 30); do
+  new_pid=$(systemctl show "$unit" -p MainPID --value)
+  new_args=$(ps -p "$new_pid" -o args= 2>/dev/null || true)
+  [[ $new_args == *"$binary_destination"* ]] && break
+  [[ $(systemctl is-active "$unit" 2>/dev/null || true) == active ]] ||
+    fail "unit stopped while waiting for the staged runtime process: $unit"
+  sleep 1
+done
 [[ $new_args == *"$binary_destination"* ]] ||
-  fail "live process is not using the staged runtime: $new_args"
+  fail "live process is not using the staged runtime after 30 seconds: $new_args"
 
 rpc_response=
 for _ in $(seq 1 30); do

@@ -66,6 +66,44 @@ pub struct ProofOfSynergyBft {
     required_carry_forward: BTreeMap<(Height, Hash, Round), BlockId>,
 }
 
+/// Selects which evidence authorizes a core proposal's `header.round`.
+///
+/// `authorized_rounds` is live, process-local consensus state: it is only ever
+/// written by [`ProofOfSynergyBft::advance_round_after_tc`]. A timeout
+/// certificate is an ephemeral liveness artifact and is deliberately not part
+/// of a durable [`crate::consensus::typed_finality_store::TypedFinalityRecord`],
+/// so a non-signing observer replaying finalized history can never populate it.
+/// Applying the live check to a durable record therefore rejects every record
+/// whose round is greater than zero, regardless of validity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoundAuthoritySource {
+    /// A round transition must already have been authorized locally by a
+    /// verified timeout certificate. Required on every signing path.
+    LiveTimeoutCertificate,
+    /// The round is authorized transitively by the finalized quorum
+    /// certificate that the caller verifies for this same record.
+    ///
+    /// This is sound only because every other round-dependent binding is still
+    /// enforced against `header.round` by
+    /// [`ProofOfSynergyBft::validate_finalized_core_record`]:
+    ///
+    /// * the header's proposer must be the scheduled proposer *for that exact
+    ///   round* (`proposer_for(height_context, block.header.round)`);
+    /// * the proposer's `ConsensusProposer` signature covers
+    ///   `block.header.canonical_bytes()`, which includes `round`, so a forged
+    ///   round requires forging that validator's ML-DSA-65 signature;
+    /// * a supermajority `VotePhase::Finality` quorum certificate exists for the
+    ///   candidate, meaning an honest supermajority each ran the live
+    ///   `LiveTimeoutCertificate` check before voting;
+    /// * the successor record's `parent_block_hash` commits to this header's
+    ///   full hash, so a tampered round breaks forward chain linkage.
+    ///
+    /// Note that `candidate_id()` intentionally zeroes `round`, so the quorum
+    /// certificate alone does not bind it. The proposer-schedule and proposer
+    /// signature checks above are what make this variant safe.
+    FinalizedQuorumCertificate,
+}
+
 impl ProofOfSynergyBft {
     pub fn new(
         verifier: &AegisPqvmVerifier,
@@ -398,9 +436,49 @@ impl ProofOfSynergyBft {
         context: &LocalConsensusContext,
         state: &ExecutionState,
     ) -> Result<(), String> {
+        self.validate_core_proposal_with_round_authority(
+            block,
+            context,
+            state,
+            RoundAuthoritySource::LiveTimeoutCertificate,
+        )
+    }
+
+    /// Validates a durably finalized core record during non-signing recovery.
+    ///
+    /// This is the same single validation algorithm as
+    /// [`Self::validate_core_proposal`] with exactly one difference: the round is
+    /// authorized by the record's finalized quorum certificate rather than by
+    /// live timeout-certificate state that a replaying observer cannot hold. See
+    /// [`RoundAuthoritySource::FinalizedQuorumCertificate`] for the full
+    /// soundness argument. Callers **must** independently verify the finality
+    /// quorum certificate for the same record.
+    pub fn validate_finalized_core_record(
+        &mut self,
+        block: &Block,
+        context: &LocalConsensusContext,
+        state: &ExecutionState,
+    ) -> Result<(), String> {
+        self.validate_core_proposal_with_round_authority(
+            block,
+            context,
+            state,
+            RoundAuthoritySource::FinalizedQuorumCertificate,
+        )
+    }
+
+    fn validate_core_proposal_with_round_authority(
+        &mut self,
+        block: &Block,
+        context: &LocalConsensusContext,
+        state: &ExecutionState,
+        round_authority: RoundAuthoritySource,
+    ) -> Result<(), String> {
         self.phase = ConsensusPhase::ValidatingProposal;
         self.ensure_testnet_context(context)?;
-        self.require_authorized_round(&context.height_context, block.header.round)?;
+        if round_authority == RoundAuthoritySource::LiveTimeoutCertificate {
+            self.require_authorized_round(&context.height_context, block.header.round)?;
+        }
         block.header.chain_id.require_testnet_v3()?;
         block.header.network_id.require_testnet_v3()?;
         if block.header.version != 1 {
