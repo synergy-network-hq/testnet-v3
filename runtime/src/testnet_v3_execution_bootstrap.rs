@@ -391,6 +391,7 @@ fn required_string<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
 mod tests {
     use super::*;
     use crate::genesis::load_genesis_from_path_for_test;
+    use crate::synq_execution::{execute_synq_static_call, SynQExecutionContext};
 
     fn archived_preapproval_identity_assigned_candidate() -> GenesisDocument {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -398,6 +399,13 @@ mod tests {
             .join("launch/production-genesis-ceremony/source-genesis.identity-assigned.json");
         load_genesis_from_path_for_test(path)
             .expect("archived pre-approval identity-assigned candidate must validate")
+    }
+
+    fn finalized_production_genesis() -> GenesisDocument {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("launch/production-node-configs/canonical-genesis/genesis.json");
+        load_genesis_from_path_for_test(path).expect("finalized production Genesis must validate")
     }
 
     #[test]
@@ -419,5 +427,57 @@ mod tests {
             artifact_keys: BTreeMap::new(),
         };
         assert!(prepared.reject_as_finalized_genesis_state().is_err());
+    }
+
+    #[test]
+    fn finalized_genesis_supports_real_public_synq_view_calls_without_mutation() {
+        let state =
+            load_finalized_testnet_v3_genesis_execution_state(&finalized_production_genesis())
+                .expect("finalized production Genesis must restore its AIVM state");
+        let contract_address = "sync1q2s4w0h2q98e2hv9rjycf4th4zwu7r9wxtmz";
+        let validator_address = "synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu";
+        let mut calldata = hex::decode("fb221343").expect("ABI selector must be hex");
+        calldata.extend_from_slice(
+            &serde_json::to_vec(&serde_json::json!([validator_address]))
+                .expect("ABI arguments must encode"),
+        );
+        let state_root_before = state.synq_aivm_state.state_root();
+
+        let receipt = execute_synq_static_call(
+            contract_address,
+            "synq-static-test-caller",
+            &calldata,
+            &state.synq_aivm_state,
+            &state.synq_artifacts,
+            &state.synq_contracts,
+            SynQExecutionContext {
+                runtime_block_height: 1,
+                runtime_block_timestamp_unix: 1_785_000_000,
+                sts_host: None,
+            },
+        )
+        .expect("public view selector must execute against finalized Genesis state");
+
+        assert_eq!(receipt.status, "succeeded");
+        assert!(!receipt.return_data_hex.is_empty());
+        assert_eq!(state.synq_aivm_state.state_root(), state_root_before);
+    }
+
+    #[test]
+    fn finalized_genesis_rejects_synq_write_selector_from_static_call_boundary() {
+        let state =
+            load_finalized_testnet_v3_genesis_execution_state(&finalized_production_genesis())
+                .expect("finalized production Genesis must restore its AIVM state");
+        let error = execute_synq_static_call(
+            "sync1q2s4w0h2q98e2hv9rjycf4th4zwu7r9wxtmz",
+            "synq-static-test-caller",
+            &hex::decode("26d190af").expect("ABI selector must be hex"),
+            &state.synq_aivm_state,
+            &state.synq_artifacts,
+            &state.synq_contracts,
+            SynQExecutionContext::default(),
+        )
+        .expect_err("static boundary must reject a public write selector");
+        assert!(error.contains("view ABI methods"));
     }
 }

@@ -4671,6 +4671,17 @@ fn certified_input_ingress_slot() -> &'static Mutex<Option<EtdagCertifiedInputIn
     CERTIFIED_INPUT_INGRESS.get_or_init(|| Mutex::new(None))
 }
 
+/// Reports whether this process has an activation-permitted, authenticated
+/// ETDAG ingress authority for its current typed-consensus height.  Public RPC
+/// uses this only as an availability gate; it grants no admission authority
+/// and exposes no private ETDAG material.
+pub fn etdag_certified_input_ingress_is_active() -> bool {
+    certified_input_ingress_slot()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .is_some()
+}
+
 /// Installs the one local ETDAG certified-input ingress authority for the
 /// current validator lifecycle.  Replacing it is prohibited because that
 /// would permit a network package to be evaluated under two different local

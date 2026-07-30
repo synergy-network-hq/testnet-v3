@@ -8,10 +8,80 @@ use crate::synq_execution::{
 };
 use aivm_core::state::ContractState;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{OnceLock, RwLock};
 
 pub const TESTNET_V3_GENESIS_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 pub const TESTNET_V3_GENESIS_CHAIN_ID: u64 = 1266;
 pub const TESTNET_V3_GENESIS_RUNTIME_NETWORK_ID: &str = "synergy-testnet-v3";
+
+/// The only RPC-visible execution state is a clone of the state that the
+/// finalized typed coordinator has already accepted.  It is deliberately not
+/// populated by RPC, mempool admission, or speculative proposal execution.
+///
+/// The slot is process-local because it is an availability cache, not a source
+/// of consensus truth: a restart must rebuild it from finalized Genesis and
+/// replayed finality before contract reads are re-enabled.
+static FINALIZED_EXECUTION_STATE_SNAPSHOT: OnceLock<RwLock<Option<ExecutionState>>> =
+    OnceLock::new();
+
+fn finalized_execution_state_snapshot_slot() -> &'static RwLock<Option<ExecutionState>> {
+    FINALIZED_EXECUTION_STATE_SNAPSHOT.get_or_init(|| RwLock::new(None))
+}
+
+/// Install the initial, Genesis-bound finalized execution state immediately
+/// before the typed coordinator begins serving consensus work.  Replacing a
+/// live snapshot is prohibited so a new role lifecycle cannot silently serve
+/// reads from a different coordinator instance.
+pub(crate) fn install_finalized_execution_state_snapshot(
+    state: ExecutionState,
+) -> Result<(), String> {
+    let mut slot = finalized_execution_state_snapshot_slot()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if slot.is_some() {
+        return Err("finalized execution-state snapshot is already installed".to_string());
+    }
+    *slot = Some(state);
+    Ok(())
+}
+
+/// Publish a state only after the local coordinator has verified the finality
+/// certificate and durably appended its finality record.  Returning `false`
+/// means no typed runtime is currently serving this process, so RPC remains
+/// fail-closed rather than fabricating a contract response.
+pub(crate) fn publish_finalized_execution_state_snapshot(state: &ExecutionState) -> bool {
+    let mut slot = finalized_execution_state_snapshot_slot()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(current) = slot.as_mut() else {
+        return false;
+    };
+    *current = state.clone();
+    true
+}
+
+/// Returns a copy so RPC static calls can never retain a mutable reference to
+/// consensus-owned state.
+pub(crate) fn finalized_execution_state_snapshot() -> Result<ExecutionState, String> {
+    finalized_execution_state_snapshot_slot()
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+        .ok_or_else(|| {
+            "finalized execution-state snapshot is unavailable; contract reads are not ready"
+                .to_string()
+        })
+}
+
+/// Remove the availability cache whenever the typed role stops.  A stopped
+/// node must not continue answering reads from a state that can no longer
+/// advance with finalized consensus.
+pub(crate) fn remove_finalized_execution_state_snapshot() {
+    let mut slot = finalized_execution_state_snapshot_slot()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *slot = None;
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionState {

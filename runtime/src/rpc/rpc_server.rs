@@ -35,8 +35,8 @@ use crate::sxcp;
 use crate::sync::{SyncManager, SyncState};
 use crate::synergy_types::{CanonicalSerialize, Hash, TxId};
 use crate::synq_execution::{
-    execute_synq_transaction_at, SynQArtifactKey, SynQContractArtifact, SynQDeploymentRecord,
-    SynQExecutionContext,
+    execute_synq_static_call, execute_synq_transaction_at, SynQArtifactKey, SynQContractArtifact,
+    SynQDeploymentRecord, SynQExecutionContext,
 };
 use crate::synq_receipts::{
     configured_synq_receipt_index_path, SynQIndexedReceipt, SynQReceiptIndex,
@@ -55,6 +55,7 @@ use crate::validator::{
 };
 use crate::wallet::WALLET_MANAGER;
 use crate::{info, warn};
+use aivm_core::state::StateKey;
 // Temporarily disabled for quick compile
 // use crate::aivm::AIVMRuntime;
 // use crate::aivm::runtime::{ContractType, AIVMExecutionContext};
@@ -2349,6 +2350,14 @@ fn execute_rpc_method(
 }
 
 fn submit_etdag_transaction_envelope(envelope_value: &Value) -> Value {
+    if !crate::etdag::etdag_certified_input_ingress_is_active() {
+        return json!({
+            "success": false,
+            "code": "ERR_ETDAG_NOT_ACTIVATED",
+            "error": "Encrypted transaction admission is unavailable until a finalized ETDAG activation permit and authenticated ingress are installed",
+            "automatic_plaintext_fallback": false,
+        });
+    }
     let submission = match serde_json::from_value::<crate::etdag::EtdagSubmissionEnvelope>(
         envelope_value.clone(),
     ) {
@@ -2506,24 +2515,29 @@ fn etdag_admission_package_json(params: &Value) -> Value {
 
 fn etdag_status_json() -> Value {
     match ETDAG_INGRESS_POOL.lock() {
-        Ok(pool) => json!({
-            "profile_id": crate::etdag::ETDAG_PROFILE_ID,
-            "enabled": true,
-            "plaintext_user_tx_allowed": false,
-            "automatic_plaintext_fallback_allowed": false,
-            "opaque_ingress_count": pool.len(),
-            "opaque_ingress_serialized_bytes": pool.serialized_bytes,
-            "opaque_ingress_max_entries": MAX_ETDAG_INGRESS_POOL_ENTRIES,
-            "opaque_ingress_max_serialized_bytes": MAX_ETDAG_INGRESS_POOL_SERIALIZED_BYTES,
-            "opaque_ingress_saturation_behavior": "reject_new_encrypted_submission_without_plaintext_fallback",
-            "target_admission_package_method": "synergy_getEtdagAdmissionPackage",
-            "target_admission_context_requires_future_qc": false,
-            "public_pending_content_before_reveal_gate": false,
-            "public_ordered_reveal_required": true,
-        }),
+        Ok(pool) => {
+            let activated = crate::etdag::etdag_certified_input_ingress_is_active();
+            json!({
+                "profile_id": crate::etdag::ETDAG_PROFILE_ID,
+                "enabled": activated,
+                "activation_status": if activated { "ACTIVE" } else { "FINALIZED_ACTIVATION_PERMIT_REQUIRED" },
+                "plaintext_user_tx_allowed": false,
+                "automatic_plaintext_fallback_allowed": false,
+                "encrypted_submission_available": activated,
+                "opaque_ingress_count": pool.len(),
+                "opaque_ingress_serialized_bytes": pool.serialized_bytes,
+                "opaque_ingress_max_entries": MAX_ETDAG_INGRESS_POOL_ENTRIES,
+                "opaque_ingress_max_serialized_bytes": MAX_ETDAG_INGRESS_POOL_SERIALIZED_BYTES,
+                "opaque_ingress_saturation_behavior": "reject_new_encrypted_submission_without_plaintext_fallback",
+                "target_admission_package_method": "synergy_getEtdagAdmissionPackage",
+                "target_admission_context_requires_future_qc": false,
+                "public_pending_content_before_reveal_gate": false,
+                "public_ordered_reveal_required": true,
+            })
+        }
         Err(_) => json!({
             "profile_id": crate::etdag::ETDAG_PROFILE_ID,
-            "enabled": true,
+            "enabled": false,
             "fail_closed": true,
             "error": "ETDAG ingress pool unavailable",
         }),
@@ -4728,37 +4742,11 @@ fn handle_json_rpc(
         }
 
         // 5. synergy_call
-        // Execute a contract call locally (read-only, no state change).
+        // Execute a verified public view call against the finalized SynQ
+        // execution snapshot.  This never mutates consensus state.
         "synergy_call" => {
             if let Some(call_obj) = params.get(0) {
-                let _from = call_obj.get("from").and_then(|v| v.as_str()).unwrap_or("");
-                let to = call_obj.get("to").and_then(|v| v.as_str());
-                let _data = call_obj
-                    .get("data")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("0x");
-                let _value = call_obj.get("value").and_then(|v| v.as_u64()).unwrap_or(0);
-
-                if let Some(to_addr) = to {
-                    // Check if the target is a known contract
-                    // For now, return empty result since AIVM is disabled
-                    // When AIVM is re-enabled, this will execute the contract call
-                    if to_addr.starts_with("sync1") || to_addr.starts_with("sync0") {
-                        // Contract address detected - AIVM currently disabled
-                        json!({
-                            "result": "0x",
-                            "note": "AIVM contract execution is currently disabled in testnet. Contract calls will return empty results."
-                        })
-                    } else {
-                        // Non-contract address - return the balance as a simple read
-                        json!({
-                            "result": "0x",
-                            "note": "Target address is not a contract"
-                        })
-                    }
-                } else {
-                    json!({"error": "Missing 'to' field in call object"})
-                }
+                synq_static_call_json(call_obj, chain)
             } else {
                 json!({"error": "Missing call object parameter"})
             }
@@ -4907,17 +4895,23 @@ fn handle_json_rpc(
         }
 
         // 8. synergy_getCode
-        // Get the code stored at an address.
+        // Get verified AIVM bytecode at a deployed SynQ address.
         "synergy_getCode" => {
             if let Some(address) = params.get(0).and_then(|v| v.as_str()) {
-                // Check if this is a contract address (sync1... prefix)
-                if address.starts_with("sync1") || address.starts_with("sync0") {
-                    // AIVM is currently disabled - return empty code
-                    // When re-enabled, this will look up the contract bytecode
-                    json!("0x")
-                } else {
-                    // Regular wallet address - no code
-                    json!("0x")
+                match finalized_synq_query_state() {
+                    Ok(state) => {
+                        let Some(deployment) = state.synq_contracts.get(address) else {
+                            return json!("0x");
+                        };
+                        match state.synq_artifacts.get(&deployment.artifact_key) {
+                            Some(artifact) => json!(format!("0x{}", hex::encode(&artifact.bytecode))),
+                            None => json!({
+                                "error": "Deployed SynQ contract artifact is missing from finalized execution state",
+                                "code": "SYNQ_CODE_ARTIFACT_MISSING"
+                            }),
+                        }
+                    }
+                    Err(error) => json!({"error": error, "code": "SYNQ_CODE_STATE_UNAVAILABLE"}),
                 }
             } else {
                 json!({"error": "Missing address parameter"})
@@ -4925,21 +4919,41 @@ fn handle_json_rpc(
         }
 
         // 9. synergy_getStorageAt
-        // Get the value from a storage position of a contract/account.
+        // Get a raw physical AIVM storage value. SynQ storage uses the
+        // deployed address as namespace; `position` is its exact 0x-encoded
+        // storage-key byte sequence.
         "synergy_getStorageAt" => {
-            if let (Some(address), Some(_position)) = (
+            if let (Some(address), Some(position)) = (
                 params.get(0).and_then(|v| v.as_str()),
                 params.get(1).and_then(|v| v.as_str()),
             ) {
-                let _block_tag = params.get(2).and_then(|v| v.as_str()).unwrap_or("latest");
-
-                if address.starts_with("sync1") || address.starts_with("sync0") {
-                    // Contract address - AIVM currently disabled
-                    // When re-enabled, this will read from contract storage
-                    json!("0x".to_string() + &"0".repeat(64))
+                let block_tag = params.get(2).and_then(|v| v.as_str()).unwrap_or("latest");
+                if block_tag != "latest" {
+                    json!({
+                        "error": "Historical SynQ storage queries are unavailable; only finalized latest state is supported",
+                        "code": "SYNQ_STORAGE_HISTORICAL_UNAVAILABLE"
+                    })
+                } else if !position.starts_with("0x") {
+                    json!({"error": "SynQ storage position must be 0x-prefixed hex", "code": "SYNQ_STORAGE_POSITION"})
                 } else {
-                    // Non-contract address - return zero
-                    json!("0x".to_string() + &"0".repeat(64))
+                    match hex::decode(&position[2..]) {
+                        Ok(key) => match finalized_synq_query_state() {
+                            Ok(state) => {
+                                if !state.synq_contracts.contains_key(address) {
+                                    json!("0x")
+                                } else {
+                                    let storage_key = StateKey::new(address.as_bytes().to_vec(), key);
+                                    json!(state
+                                        .synq_aivm_state
+                                        .get(&storage_key)
+                                        .map(|value| format!("0x{}", hex::encode(value)))
+                                        .unwrap_or_else(|| "0x".to_string()))
+                                }
+                            }
+                            Err(error) => json!({"error": error, "code": "SYNQ_STORAGE_STATE_UNAVAILABLE"}),
+                        },
+                        Err(_) => json!({"error": "SynQ storage position must contain valid hex", "code": "SYNQ_STORAGE_POSITION"}),
+                    }
                 }
             } else {
                 json!({"error": "Missing required parameters: address, position"})
@@ -5981,6 +5995,98 @@ fn handle_json_rpc(
         _ => {
             json!("Unknown method")
         }
+    }
+}
+
+/// Returns the immutable, finalized execution snapshot used by public SynQ
+/// reads.  The typed coordinator derives it from the Genesis-bound snapshot,
+/// then advances it only after finalized block execution and durable QC
+/// persistence; RPC itself has no path to fabricate or mutate it.
+fn finalized_synq_query_state() -> Result<crate::execution::ExecutionState, String> {
+    crate::execution::finalized_execution_state_snapshot()
+}
+
+fn synq_static_call_json(call_obj: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
+    let Some(to) = call_obj.get("to").and_then(Value::as_str) else {
+        return json!({"error": "Missing 'to' field in call object"});
+    };
+    if !to.starts_with("sync1") && !to.starts_with("sync0") {
+        return json!({"result": "0x", "note": "Target address is not a SynQ contract"});
+    }
+    if !synq_static_call_has_zero_value(call_obj.get("value")) {
+        return json!({
+            "error": "SynQ static calls must use zero call value",
+            "code": "SYNQ_STATIC_CALL_VALUE"
+        });
+    }
+    let data = call_obj.get("data").and_then(Value::as_str).unwrap_or("0x");
+    let encoded = data.strip_prefix("0x").unwrap_or(data);
+    let calldata = match hex::decode(encoded) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return json!({"error": "SynQ static call data must be 0x-prefixed hex", "code": "SYNQ_STATIC_CALL_DATA"})
+        }
+    };
+    let caller = call_obj
+        .get("from")
+        .and_then(Value::as_str)
+        .unwrap_or("synq-static-readonly");
+    let (height, timestamp) = match chain.lock() {
+        Ok(chain) => chain
+            .last()
+            .map(|block| (block.block_index, block.timestamp))
+            .unwrap_or((0, 0)),
+        Err(_) => {
+            return json!({"error": "Chain state is unavailable", "code": "SYNQ_STATIC_CALL_CHAIN"})
+        }
+    };
+    let state = match finalized_synq_query_state() {
+        Ok(state) => state,
+        Err(error) => return json!({"error": error, "code": "SYNQ_STATIC_CALL_STATE_UNAVAILABLE"}),
+    };
+    match execute_synq_static_call(
+        to,
+        caller,
+        &calldata,
+        &state.synq_aivm_state,
+        &state.synq_artifacts,
+        &state.synq_contracts,
+        SynQExecutionContext {
+            runtime_block_height: height,
+            runtime_block_timestamp_unix: timestamp,
+            sts_host: None,
+        },
+    ) {
+        Ok(receipt) if receipt.status == "succeeded" => json!({
+            "result": format!("0x{}", receipt.return_data_hex),
+            "synq_aivm": receipt,
+            "state_source": "finalized_execution_snapshot",
+            "read_only": true,
+        }),
+        Ok(receipt) => json!({
+            "error": receipt.error_message.clone().unwrap_or_else(|| "SynQ static call failed".to_string()),
+            "code": receipt.error_code,
+            "synq_aivm": receipt,
+            "state_source": "finalized_execution_snapshot",
+            "read_only": true,
+        }),
+        Err(error) => json!({"error": error, "code": "SYNQ_STATIC_CALL_REJECTED"}),
+    }
+}
+
+fn synq_static_call_has_zero_value(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => true,
+        Some(Value::Number(value)) => value.as_u64() == Some(0),
+        Some(Value::String(value)) => {
+            let trimmed = value.trim();
+            if let Some(hex_value) = trimmed.strip_prefix("0x") {
+                u128::from_str_radix(hex_value, 16) == Ok(0)
+            } else {
+                trimmed.parse::<u128>() == Ok(0)
+            }
+        }
+        _ => false,
     }
 }
 
@@ -9657,7 +9763,7 @@ fn simulate_transaction(
     {
         divergence = true;
         warnings.push(
-            "AIVM contract execution is currently disabled, so contract-side effects could not be fully simulated"
+            "Legacy public simulation does not execute AIVM contract side effects; use a finalized SynQ view call or submit an authenticated encrypted transaction"
                 .to_string(),
         );
     }

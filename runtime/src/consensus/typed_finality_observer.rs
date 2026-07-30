@@ -12,7 +12,11 @@ use crate::consensus::testnet_v3_bootstrap::{
 };
 use crate::consensus::testnet_v3_finality_context::FinalizedTypedContextProvider;
 use crate::consensus::typed_finality_store::{TypedFinalityRecord, TypedFinalityStore};
-use crate::execution::{compute_state_root_after, execute_block, ExecutionState};
+use crate::execution::{
+    compute_state_root_after, execute_block, install_finalized_execution_state_snapshot,
+    publish_finalized_execution_state_snapshot, remove_finalized_execution_state_snapshot,
+    ExecutionState,
+};
 use crate::genesis::{canonical_genesis, GenesisDocument};
 use crate::synergy_types::{
     Block, Epoch, Hash, Height, HeightConsensusContext, ProtocolConfig, VotePhase,
@@ -71,12 +75,16 @@ fn observer_ingress() -> &'static Mutex<Option<TypedFinalityObserver>> {
 
 /// Installs the only non-signing typed-finality receiver for this process.
 pub fn install_typed_finality_observer(observer: TypedFinalityObserver) -> Result<(), String> {
+    let execution_state = observer.finalized_execution_state_snapshot();
     let mut slot = observer_ingress()
         .lock()
         .map_err(|_| "typed finality observer ingress lock is poisoned".to_string())?;
     if slot.is_some() {
         return Err("typed finality observer ingress is already installed".to_string());
     }
+    install_finalized_execution_state_snapshot(execution_state).map_err(|error| {
+        format!("typed finality observer cannot install finalized execution snapshot: {error}")
+    })?;
     *slot = Some(observer);
     Ok(())
 }
@@ -87,6 +95,7 @@ pub fn remove_typed_finality_observer() -> Result<(), String> {
         .lock()
         .map_err(|_| "typed finality observer ingress lock is poisoned".to_string())?;
     *slot = None;
+    remove_finalized_execution_state_snapshot();
     Ok(())
 }
 
@@ -109,7 +118,17 @@ pub fn import_typed_finality_observer_records(
     let observer = slot
         .as_mut()
         .ok_or_else(|| "typed finality observer ingress is not installed".to_string())?;
-    observer.import_records(records)
+    let imported = observer.import_records(records)?;
+    // The observer independently verifies each QC, proposal, and execution
+    // root before this publish point. RPC therefore sees only the same
+    // finalized execution state that the durable observer journal accepts.
+    if !publish_finalized_execution_state_snapshot(&observer.execution_state) {
+        return Err(
+            "typed finality observer finalized execution snapshot is unexpectedly unavailable"
+                .to_string(),
+        );
+    }
+    Ok(imported)
 }
 
 /// Serves a bounded segment from the installed observer's independently
@@ -332,6 +351,12 @@ impl TypedFinalityObserver {
         &self.finality_store
     }
 
+    /// A read-only clone for the process-local RPC availability snapshot. The
+    /// observer never exposes a mutable reference to its verified state.
+    fn finalized_execution_state_snapshot(&self) -> ExecutionState {
+        self.execution_state.clone()
+    }
+
     /// Reads at most [`MAX_TYPED_FINALITY_OBSERVER_RECORDS`] persisted records
     /// starting at `next_height`. Returned records have already passed local
     /// replay during construction or import; a recipient must still verify
@@ -529,6 +554,12 @@ fn execute_finalized_core_block(
     state: &ExecutionState,
     block: &Block,
 ) -> Result<ExecutionState, String> {
+    if compute_state_root_after(state)? != block.header.state_root_before {
+        return Err(
+            "typed finality observer block does not extend the supplied execution-state root"
+                .to_string(),
+        );
+    }
     let mut authorized = state.clone();
     for transaction in &block.transactions {
         authorized.mark_authorized_at(
@@ -894,11 +925,7 @@ mod tests {
             protocol_config,
         );
         recovery
-            .validate_finalized_core_record(
-                &record.block,
-                &initial_context,
-                &ExecutionState::new(),
-            )
+            .validate_finalized_core_record(&record.block, &initial_context, &ExecutionState::new())
             .expect("the recovery path must accept a finalized round-one record");
 
         let _ = std::fs::remove_file(source_path);

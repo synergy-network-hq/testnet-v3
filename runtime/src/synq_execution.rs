@@ -306,6 +306,85 @@ pub fn execute_synq_transaction_at(
     }
 }
 
+/// Execute a verified public `view` method against an immutable snapshot of
+/// finalized SynQ state.  JSON-RPC reads must never create an admission
+/// artifact, mutate consensus state, or make a private method reachable.
+///
+/// This is intentionally separate from `execute_synq_transaction_at`: writes
+/// still require a chain-admitted, PQ-signed transaction and can only mutate
+/// state through finalized block execution.
+pub fn execute_synq_static_call(
+    contract_address: &str,
+    caller: &str,
+    calldata: &[u8],
+    aivm_state: &ContractState,
+    artifacts: &BTreeMap<SynQArtifactKey, SynQContractArtifact>,
+    deployments: &BTreeMap<String, SynQDeploymentRecord>,
+    execution_context: SynQExecutionContext,
+) -> Result<SynQAivmReceiptSummary, String> {
+    if calldata.len() < 4 {
+        return Err("SynQ static call requires a four-byte ABI selector".to_string());
+    }
+    let deployment = deployments.get(contract_address).ok_or_else(|| {
+        "SynQ static call target is not deployed in finalized execution state".to_string()
+    })?;
+    let artifact = artifacts.get(&deployment.artifact_key).ok_or_else(|| {
+        "SynQ static call target artifact is missing from finalized execution state".to_string()
+    })?;
+    let abi: serde_json::Value = serde_json::from_str(&artifact.abi_json)
+        .map_err(|error| format!("parse verified SynQ ABI for static call: {error}"))?;
+    let selector = format!("0x{}", hex::encode(&calldata[..4]));
+    let method = abi
+        .get("methods")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|methods| {
+            methods.iter().find(|method| {
+                method.get("selector").and_then(serde_json::Value::as_str)
+                    == Some(selector.as_str())
+            })
+        })
+        .ok_or_else(|| {
+            format!("SynQ static call selector {selector} is not in the verified ABI")
+        })?;
+    if method.get("visibility").and_then(serde_json::Value::as_str) != Some("public") {
+        return Err("SynQ static calls may invoke only public ABI methods".to_string());
+    }
+    if method.get("mutability").and_then(serde_json::Value::as_str) != Some("view") {
+        return Err("SynQ static calls may invoke only view ABI methods".to_string());
+    }
+
+    let mut context = ExecutionContext::testnet_1266_for_contract(contract_address, 1_000_000);
+    context.runtime_block_height = execution_context.runtime_block_height;
+    context.block_height = execution_context.runtime_block_height;
+    context.block_timestamp_unix = execution_context.runtime_block_timestamp_unix;
+    context.caller = caller.as_bytes().to_vec();
+    context.contract_address = contract_address.as_bytes().to_vec();
+    context.tx_hash = Hash::from_domain_bytes(
+        "SYNERGY_SYNQ_STATIC_CALL_V1",
+        &[contract_address.as_bytes(), caller.as_bytes(), calldata].concat(),
+    )
+    .0;
+    context.sts_host = execution_context.sts_host;
+    context.resolved_synq_contracts = resolved_synq_contracts(artifacts, deployments);
+
+    let request = synq_execution_request(
+        contract_address.to_string(),
+        artifact.to_aivm_artifact(),
+        context,
+        calldata.to_vec(),
+    );
+    let mut snapshot = aivm_state.clone();
+    let receipt = call_synq_contract(&request, &mut snapshot);
+    if receipt.status == ExecutionStatus::Succeeded
+        && snapshot.state_root() != aivm_state.state_root()
+    {
+        return Err(
+            "SynQ view call attempted to mutate state; static execution rejected it".to_string(),
+        );
+    }
+    Ok(summary_from_aivm_receipt(contract_address, &receipt))
+}
+
 fn execute_deploy(
     tx_id: &TxId,
     tx: &Transaction,

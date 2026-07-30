@@ -20,7 +20,10 @@ use crate::etdag::{
     EtdagDigest, EtdagParameters, EtdagProtectedInputCoordinator, ProtectedBlockInput,
     TargetAdmissionContext,
 };
-use crate::execution::{compute_state_root_after, execute_block, ExecutionState};
+use crate::execution::{
+    compute_state_root_after, execute_block, publish_finalized_execution_state_snapshot,
+    ExecutionState,
+};
 use crate::p2p::messages::{validate_typed_consensus_message_size, TypedConsensusMessage};
 use crate::synergy_types::{
     AegisPqKeyRole, Block, BlockId, ClusterMap, EpochTransition, Hash, QuorumCertificate,
@@ -749,6 +752,12 @@ impl TypedPosyCoordinator {
         &self.local_context
     }
 
+    /// A role-runtime-only copy used to initialize the read-only RPC snapshot
+    /// before the coordinator worker is made live.
+    pub(crate) fn finalized_execution_state_snapshot(&self) -> ExecutionState {
+        self.execution_state.clone()
+    }
+
     fn etdag_ingress_authority(&self) -> TypedEtdagIngressAuthority {
         TypedEtdagIngressAuthority {
             height_context: self.local_context.height_context.clone(),
@@ -1185,6 +1194,40 @@ impl TypedPosyCoordinator {
         Ok(TypedCoordinatorEvent::ProposalAccepted { candidate_id })
     }
 
+    /// Accepts a core-only proposal carried by a verified finality checkpoint.
+    ///
+    /// A lagging replica may have missed many ephemeral timeout certificates,
+    /// so its live round authority cannot validate a later finalized proposal
+    /// envelope. The supplied finality QC is the durable authority for that
+    /// exact candidate and round. Verify it first, then use the finalized-only
+    /// proposal path before installing the block for the normal commit path.
+    fn accept_finalized_core_proposal(
+        &mut self,
+        block: Block,
+        finality_certificate: &QuorumCertificate,
+    ) -> Result<TypedCoordinatorEvent, String> {
+        self.require_core_only_mode()?;
+        self.consensus
+            .verify_qc(finality_certificate, &self.local_context.height_context)?;
+        let candidate_id = block.candidate_id()?;
+        if finality_certificate.block_id != candidate_id
+            || finality_certificate.height != block.header.height
+            || finality_certificate.round != block.header.round
+        {
+            return Err(
+                "typed finality checkpoint QC does not certify its supplied core proposal"
+                    .to_string(),
+            );
+        }
+        self.consensus.validate_finalized_core_record(
+            &block,
+            &self.local_context,
+            &self.execution_state,
+        )?;
+        let candidate_id = self.record_accepted_proposal(&block)?;
+        Ok(TypedCoordinatorEvent::ProposalAccepted { candidate_id })
+    }
+
     /// Installs a prepared core candidate recovered from durable local state
     /// or an authenticated validator peer. The VC and TC provide the missing
     /// round authority; the block still passes the complete core proposal,
@@ -1288,6 +1331,11 @@ impl TypedPosyCoordinator {
             .finality_store
             .append_verified_finality(&block, &certificate)?;
         self.execution_state = next_state;
+        // The process-local RPC cache is updated only after both execution
+        // and durable finality have succeeded.  When no typed runtime owns
+        // the cache (for example in isolated unit tests), it remains absent
+        // and public contract reads fail closed.
+        let _ = publish_finalized_execution_state_snapshot(&self.execution_state);
         self.local_context.latest_finalized_height = block.header.height;
         self.local_context.latest_finalized_block_hash = Hash::from_hex(&record.block_id.0)
             .map_err(|error| format!("finalized typed block ID is not a hash: {error}"))?;
@@ -2866,10 +2914,15 @@ fn driver_error_is_fatal(error: &str) -> bool {
         || error.contains("typed coordinator event does not match")
 }
 
-fn execute_finalized_block(
+pub(crate) fn execute_finalized_block(
     state: &ExecutionState,
     block: &Block,
 ) -> Result<ExecutionState, String> {
+    if compute_state_root_after(state)? != block.header.state_root_before {
+        return Err(
+            "typed finalized block does not extend the supplied execution-state root".to_string(),
+        );
+    }
     let mut authorized = state.clone();
     for transaction in &block.transactions {
         authorized.mark_authorized_at(
@@ -2889,6 +2942,27 @@ fn execute_finalized_block(
         );
     }
     Ok(execution.state)
+}
+
+/// Deterministically reconstruct the only execution snapshot a restarted
+/// typed node may expose.  Every persisted block is replayed from the
+/// finalized Genesis snapshot and must reproduce both committed roots; a
+/// recovered consensus context alone is never enough to answer contract
+/// reads.
+pub(crate) fn replay_finalized_execution_state(
+    genesis_state: ExecutionState,
+    records: &[TypedFinalityRecord],
+) -> Result<ExecutionState, String> {
+    let mut state = genesis_state;
+    for record in records {
+        state = execute_finalized_block(&state, &record.block).map_err(|error| {
+            format!(
+                "replay finalized execution state at typed height {}: {error}",
+                record.height.0
+            )
+        })?;
+    }
+    Ok(state)
 }
 
 fn bind_recovered_finality(

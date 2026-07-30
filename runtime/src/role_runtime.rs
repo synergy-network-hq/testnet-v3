@@ -23,9 +23,9 @@ use crate::consensus::testnet_v3_bootstrap::load_testnet_v3_genesis_bootstrap;
 use crate::consensus::testnet_v3_finality_context::FinalizedTypedContextProvider;
 use crate::consensus::typed_coordinator::{
     import_local_genesis_bound_typed_signer, install_typed_coordinator_ingress,
-    remove_typed_coordinator_ingress, run_typed_posy_driver, P2pTypedConsensusEgress,
-    TypedFinalityContextDigestSource, TypedNextHeightContextSource, TypedPosyCoordinator,
-    TypedPosyCoordinatorStartup, TypedPosyDriver,
+    remove_typed_coordinator_ingress, replay_finalized_execution_state, run_typed_posy_driver,
+    P2pTypedConsensusEgress, TypedFinalityContextDigestSource, TypedNextHeightContextSource,
+    TypedPosyCoordinator, TypedPosyCoordinatorStartup, TypedPosyDriver,
 };
 use crate::consensus::typed_finality_observer::{
     install_typed_finality_observer, remove_typed_finality_observer, TypedFinalityObserver,
@@ -39,6 +39,9 @@ use crate::crypto::pqc::PQCManager;
 use crate::etdag::{
     install_etdag_certified_input_ingress, remove_etdag_certified_input_ingress,
     EtdagCertifiedInputIngress, EtdagParameters, EtdagProtectedInputCoordinator,
+};
+use crate::execution::{
+    install_finalized_execution_state_snapshot, remove_finalized_execution_state_snapshot,
 };
 use crate::genesis::{canonical_genesis, GenesisDocument};
 use crate::logging::{init_logger, LogLevel};
@@ -1162,6 +1165,7 @@ where
     D: TypedFinalityContextDigestSource + 'static,
     H: TypedNextHeightContextSource + 'static,
 {
+    let initial_execution_state = coordinator.finalized_execution_state_snapshot();
     // Build the driver before exposing either P2P ingress.  A failure here
     // must not leave an inbound path pointing at a partially initialized
     // signer.
@@ -1190,10 +1194,17 @@ where
             )
         }
     }
+    if let Err(error) = install_finalized_execution_state_snapshot(initial_execution_state) {
+        let _ = remove_etdag_certified_input_ingress();
+        return Err(format!(
+            "install finalized execution-state snapshot: {error}"
+        ));
+    }
     let receiver = match install_typed_coordinator_ingress(TYPED_POSY_INGRESS_CAPACITY) {
         Ok(receiver) => receiver,
         Err(error) => {
             let _ = remove_etdag_certified_input_ingress();
+            remove_finalized_execution_state_snapshot();
             return Err(format!("install typed PoSy ingress: {error}"));
         }
     };
@@ -1224,11 +1235,13 @@ where
             }
             let _ = remove_typed_coordinator_ingress();
             let _ = remove_etdag_certified_input_ingress();
+            remove_finalized_execution_state_snapshot();
         }) {
         Ok(handle) => handle,
         Err(error) => {
             let _ = remove_typed_coordinator_ingress();
             let _ = remove_etdag_certified_input_ingress();
+            remove_finalized_execution_state_snapshot();
             return Err(format!("spawn typed PoSy driver worker: {error}"));
         }
     };
@@ -1280,8 +1293,8 @@ fn build_finalized_typed_posy_coordinator(
     // This restoration refuses the candidate/pre-approval path and verifies
     // the embedded ceremony snapshot, its roots, deployed contracts, and
     // balances before any signing authority can exist.
-    let execution_state =
-        load_finalized_testnet_v3_genesis_execution_state(genesis).map_err(|error| {
+    let genesis_execution_state = load_finalized_testnet_v3_genesis_execution_state(genesis)
+        .map_err(|error| {
             format!("typed PoSy startup requires finalized Genesis execution state: {error}")
         })?;
     let genesis_anchor = Hash::from_hex(genesis.hash())
@@ -1316,6 +1329,17 @@ fn build_finalized_typed_posy_coordinator(
     .map_err(|error| format!("typed PoSy startup rejects local signer: {error}"))?;
     let finality_store = TypedFinalityStore::for_genesis_anchor(genesis_anchor)
         .map_err(|error| format!("typed PoSy finality store initialization failed: {error}"))?;
+    // A recovered context tells the coordinator where to resume consensus,
+    // but contract RPC must also reconstruct the exact state at that tip.  Do
+    // this before installing a signer or an RPC snapshot; any root mismatch
+    // turns startup into a fail-closed recovery error.
+    let execution_state = replay_finalized_execution_state(
+        genesis_execution_state,
+        &finality_store.recover().map_err(|error| {
+            format!("typed PoSy finalized execution replay cannot load store: {error}")
+        })?,
+    )
+    .map_err(|error| format!("typed PoSy finalized execution replay rejected startup: {error}"))?;
     // A restart may only resume at the deterministic successor of the durable
     // typed-QC tip.  The provider rejects a store from another Genesis,
     // malformed continuations, and epoch-transition state that lacks its
