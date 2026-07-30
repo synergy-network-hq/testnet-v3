@@ -81,7 +81,7 @@ done
 
 source_revision=$(tr -d '[:space:]' < "$artifact_dir/TESTNET_SOURCE_REVISION")
 [[ $source_revision =~ ^[0-9a-f]{40}$ ]] || fail 'artifact source revision is invalid'
-[[ $source_revision == d76dbf3ef315beca3a31974f7785d76b14e6e71c ]] ||
+[[ $source_revision == 606ec51f303b0cf19843f9da257d15ef38186681 ]] ||
   fail "artifact is not bound to the authorized Testnet-v3 source revision: $source_revision"
 
 checksum_entries=0
