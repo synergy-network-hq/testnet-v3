@@ -10,6 +10,9 @@ use crate::consensus::testnet_v3_bootstrap::TestnetV3GenesisBootstrap;
 use crate::consensus::typed_finality_store::{
     TypedEpochTransitionRecord, TypedFinalityRecord, TypedFinalityStore,
 };
+use crate::consensus::typed_prepared_store::{
+    TypedPreparedRecord, TypedPreparedStore, TYPED_PREPARED_RECORD_VERSION,
+};
 use crate::consensus_parameters::EtdagActivationPermit;
 use crate::crypto::aegis_pqvm::{AegisPqKeyLifecycleRecord, AegisPqvmSigner, AegisPqvmVerifier};
 use crate::crypto::pqc::{PQCAlgorithm, PQCManager, PQCPrivateKey, PQCPublicKey};
@@ -132,6 +135,8 @@ impl TypedConsensusPeerAuthorizer for FrozenTypedConsensusPeerAuthorizer {
             TypedConsensusMessage::ValidationCertificate { .. }
             | TypedConsensusMessage::QuorumCertificate { .. }
             | TypedConsensusMessage::TimeoutCertificate { .. }
+            | TypedConsensusMessage::PreparedCertificateRequest { .. }
+            | TypedConsensusMessage::PreparedCertificateResponse { .. }
             | TypedConsensusMessage::FinalityCheckpointRequest { .. }
             | TypedConsensusMessage::FinalityCheckpoint { .. } => {}
         }
@@ -187,6 +192,10 @@ pub enum TypedCoordinatorEvent {
     FinalityCheckpointRequestAccepted,
     FinalityCheckpointApplied {
         imported_records: usize,
+    },
+    PreparedCertificateRequestAccepted,
+    PreparedCertificateRecovered {
+        candidate_id: BlockId,
     },
 }
 
@@ -406,6 +415,7 @@ where
     finality_certificate: Option<QuorumCertificate>,
     timeout_certificate: Option<TimeoutCertificate>,
     proposal_material: BTreeMap<BlockId, (TargetAdmissionContext, ProtectedBlockInput)>,
+    prepared_store: TypedPreparedStore,
     last_finality_progress_at: Instant,
     last_finality_recovery_request_at: Option<Instant>,
     metrics: TypedCoordinatorDriverMetrics,
@@ -993,6 +1003,11 @@ impl TypedPosyCoordinator {
             TypedConsensusMessage::TimeoutCertificate { certificate } => {
                 self.accept_timeout_certificate(certificate)
             }
+            TypedConsensusMessage::PreparedCertificateRequest { .. }
+            | TypedConsensusMessage::PreparedCertificateResponse { .. } => Err(
+                "typed prepared-certificate recovery messages must be handled by the authenticated driver"
+                    .to_string(),
+            ),
             TypedConsensusMessage::FinalityCheckpointRequest { .. }
             | TypedConsensusMessage::FinalityCheckpoint { .. } => Err(
                 "typed finality checkpoint messages must be handled by the authenticated driver"
@@ -1169,6 +1184,52 @@ impl TypedPosyCoordinator {
         Ok(TypedCoordinatorEvent::ProposalAccepted { candidate_id })
     }
 
+    /// Installs a prepared core candidate recovered from durable local state
+    /// or an authenticated validator peer. The VC and TC provide the missing
+    /// round authority; the block still passes the complete core proposal,
+    /// execution, proposer-schedule, and ML-DSA verification path.
+    fn recover_core_prepared(
+        &mut self,
+        block: Block,
+        validation_certificate: &ValidationCertificate,
+        timeout_certificate: &TimeoutCertificate,
+    ) -> Result<BlockId, String> {
+        self.require_core_only_mode()?;
+        self.consensus
+            .verify_vc(validation_certificate, &self.local_context.height_context)?;
+        self.consensus
+            .verify_tc(timeout_certificate, &self.local_context.height_context)?;
+        let candidate_id = block.candidate_id()?;
+        let carries_prepared = timeout_certificate.carry_forward_candidate_id.as_ref()
+            == Some(&candidate_id)
+            && timeout_certificate.highest_prepared_vc_root == Some(validation_certificate.root()?);
+        let authorizes_prepared_round = timeout_certificate.carry_forward_candidate_id.is_none()
+            && timeout_certificate.highest_prepared_vc_root.is_none()
+            && timeout_certificate.next_round == block.header.round
+            && validation_certificate.round == block.header.round;
+        if validation_certificate.candidate_id != candidate_id
+            || (!carries_prepared && !authorizes_prepared_round)
+        {
+            return Err(
+                "typed prepared recovery does not bind one exact block, VC, and TC".to_string(),
+            );
+        }
+        self.consensus.validate_finalized_core_record(
+            &block,
+            &self.local_context,
+            &self.execution_state,
+        )?;
+        if self.local_context.round.0 > timeout_certificate.next_round.0 {
+            return Err("typed prepared recovery TC is older than the local round".to_string());
+        }
+        if self.local_context.round != timeout_certificate.next_round {
+            self.local_context.round = self
+                .consensus
+                .recover_round_after_tc(timeout_certificate, &self.local_context.height_context)?;
+        }
+        self.record_accepted_proposal(&block)
+    }
+
     fn require_core_only_mode(&self) -> Result<(), String> {
         if self.proposal_mode != TypedProposalMode::CoreOnly {
             return Err(
@@ -1237,11 +1298,31 @@ impl TypedPosyCoordinator {
         &mut self,
         certificate: TimeoutCertificate,
     ) -> Result<TypedCoordinatorEvent, String> {
-        let next_round = self.consensus.advance_round_after_tc(
-            &certificate,
-            &self.local_context.height_context,
-            self.local_context.round,
-        )?;
+        let next_round = if certificate.next_round == self.local_context.round {
+            // Multiple eligible replicas can form the same TC subject with
+            // different valid strict-quorum subsets. Re-verification is
+            // mandatory, but replay of the already-installed transition is
+            // idempotent.
+            self.consensus
+                .verify_tc(&certificate, &self.local_context.height_context)?;
+            self.local_context.round
+        } else if certificate.closing_round == self.local_context.round {
+            self.consensus.advance_round_after_tc(
+                &certificate,
+                &self.local_context.height_context,
+                self.local_context.round,
+            )?
+        } else if certificate.closing_round.0 > self.local_context.round.0 {
+            // A restarted validator may have only finalized state while its
+            // peers are already in a later round. A valid strict-quorum TC is
+            // sufficient authority to join its successor directly; requiring
+            // every process-local intermediate TC makes restarts permanent
+            // liveness failures.
+            self.consensus
+                .recover_round_after_tc(&certificate, &self.local_context.height_context)?
+        } else {
+            return Err("TC closes a round older than the local current round".to_string());
+        };
         self.local_context.round = next_round;
         Ok(TypedCoordinatorEvent::TimeoutCertificateAccepted {
             next_round: next_round.0,
@@ -1342,7 +1423,9 @@ where
         ingress_rotator: R,
     ) -> Result<Self, String> {
         validate_canonical_driver_timeouts(&coordinator.consensus.protocol_config)?;
-        Ok(Self {
+        let prepared_store = TypedPreparedStore::for_finality_store(&coordinator.finality_store)?;
+        let recovered_prepared = prepared_store.recover()?;
+        let mut driver = Self {
             coordinator,
             protected_inputs,
             egress,
@@ -1366,10 +1449,21 @@ where
             finality_certificate: None,
             timeout_certificate: None,
             proposal_material: BTreeMap::new(),
+            prepared_store,
             last_finality_progress_at: Instant::now(),
             last_finality_recovery_request_at: None,
             metrics: TypedCoordinatorDriverMetrics::default(),
-        })
+        };
+        if let Some(record) = recovered_prepared {
+            if record.height.0 <= driver.coordinator.local_context.latest_finalized_height.0 {
+                driver.prepared_store.clear_after_finality(
+                    driver.coordinator.local_context.latest_finalized_height,
+                )?;
+            } else {
+                driver.install_recovered_prepared_record(record, false)?;
+            }
+        }
+        Ok(driver)
     }
 
     pub fn coordinator(&self) -> &TypedPosyCoordinator {
@@ -1528,6 +1622,8 @@ where
             message,
             TypedConsensusMessage::FinalityCheckpointRequest { .. }
                 | TypedConsensusMessage::FinalityCheckpoint { .. }
+                | TypedConsensusMessage::PreparedCertificateRequest { .. }
+                | TypedConsensusMessage::PreparedCertificateResponse { .. }
         ) {
             let authenticated_peer = envelope.authenticated_peer.as_ref().ok_or_else(|| {
                 "typed consensus message has no Genesis-bound authenticated peer identity"
@@ -1543,7 +1639,31 @@ where
                     let imported_records = self.import_finality_checkpoint(records)?;
                     TypedCoordinatorEvent::FinalityCheckpointApplied { imported_records }
                 }
-                _ => unreachable!("finality checkpoint match was checked above"),
+                TypedConsensusMessage::PreparedCertificateRequest {
+                    timeout_certificate,
+                } => {
+                    self.respond_to_prepared_certificate_request(timeout_certificate)?;
+                    TypedCoordinatorEvent::PreparedCertificateRequestAccepted
+                }
+                TypedConsensusMessage::PreparedCertificateResponse {
+                    timeout_certificate,
+                    block,
+                    validation_certificate,
+                } => {
+                    let candidate_id = self.install_recovered_prepared_record(
+                        TypedPreparedRecord {
+                            record_version: TYPED_PREPARED_RECORD_VERSION,
+                            height: block.header.height,
+                            height_context_root: block.header.height_context_root,
+                            block,
+                            validation_certificate,
+                            timeout_certificate: Some(timeout_certificate),
+                        },
+                        true,
+                    )?;
+                    TypedCoordinatorEvent::PreparedCertificateRecovered { candidate_id }
+                }
+                _ => unreachable!("authenticated driver-only message match was checked above"),
             };
             self.metrics.accepted_messages = self.metrics.accepted_messages.saturating_add(1);
             return Ok(event);
@@ -1562,6 +1682,7 @@ where
                         "typed core proposal accepted under a different candidate ID".to_string(),
                     );
                 }
+                self.persist_prepared_if_complete()?;
             }
             (
                 TypedConsensusMessage::Proposal {
@@ -1634,6 +1755,49 @@ where
         })?;
         self.last_finality_recovery_request_at = Some(now);
         Ok(())
+    }
+
+    fn request_prepared_certificate(
+        &mut self,
+        timeout_certificate: &TimeoutCertificate,
+    ) -> Result<(), String> {
+        self.broadcast(TypedConsensusMessage::PreparedCertificateRequest {
+            timeout_certificate: timeout_certificate.clone(),
+        })
+    }
+
+    fn respond_to_prepared_certificate_request(
+        &mut self,
+        timeout_certificate: TimeoutCertificate,
+    ) -> Result<(), String> {
+        self.coordinator.consensus.verify_tc(
+            &timeout_certificate,
+            &self.coordinator.local_context.height_context,
+        )?;
+        let Some(candidate_id) = timeout_certificate.carry_forward_candidate_id.as_ref() else {
+            return Err("prepared recovery request TC carries no candidate".to_string());
+        };
+        let Some(validation_certificate) = self.prepared_certificate.as_ref() else {
+            return Ok(());
+        };
+        if validation_certificate.candidate_id != *candidate_id
+            || timeout_certificate.highest_prepared_vc_root != Some(validation_certificate.root()?)
+        {
+            return Ok(());
+        }
+        let Some(block) = self
+            .coordinator
+            .accepted_proposals
+            .get(candidate_id)
+            .cloned()
+        else {
+            return Ok(());
+        };
+        self.broadcast(TypedConsensusMessage::PreparedCertificateResponse {
+            timeout_certificate,
+            block,
+            validation_certificate: validation_certificate.clone(),
+        })
     }
 
     /// Returns only persisted records, which have already passed structural
@@ -1775,9 +1939,11 @@ where
                 // Treating these gaps as TYPED_DRIVER_SOURCE_CONFLICT killed the
                 // process on an ordinary liveness gap and stalled the chain.
                 let Some(certificate) = self.prepared_certificate.clone() else {
+                    self.request_prepared_certificate(&timeout_certificate)?;
                     return Ok(());
                 };
                 if certificate.candidate_id != candidate_id {
+                    self.request_prepared_certificate(&timeout_certificate)?;
                     return Ok(());
                 }
                 let Some(original) = self
@@ -1786,6 +1952,7 @@ where
                     .get(&candidate_id)
                     .cloned()
                 else {
+                    self.request_prepared_certificate(&timeout_certificate)?;
                     return Ok(());
                 };
                 let carried = self.coordinator.carry_forward_prepared_block(
@@ -2217,7 +2384,94 @@ where
             }
         }
         self.prepared_certificate = Some(certificate);
+        self.persist_prepared_if_complete()?;
         Ok(())
+    }
+
+    fn persist_prepared_if_complete(&mut self) -> Result<(), String> {
+        let Some(certificate) = self.prepared_certificate.as_ref() else {
+            return Ok(());
+        };
+        let Some(block) = self
+            .coordinator
+            .accepted_proposals
+            .get(&certificate.candidate_id)
+        else {
+            return Ok(());
+        };
+        self.prepared_store.persist_verified(
+            block,
+            certificate,
+            self.timeout_certificate.as_ref(),
+        )?;
+        Ok(())
+    }
+
+    fn install_recovered_prepared_record(
+        &mut self,
+        record: TypedPreparedRecord,
+        persist: bool,
+    ) -> Result<BlockId, String> {
+        let current_height = self.coordinator.local_context.height_context.height;
+        if record.height.0 <= self.coordinator.local_context.latest_finalized_height.0 {
+            self.prepared_store
+                .clear_after_finality(self.coordinator.local_context.latest_finalized_height)?;
+            return Err("typed prepared recovery record is already finalized".to_string());
+        }
+        if record.height != current_height
+            || record.height_context_root != self.coordinator.local_context.height_context.root()?
+        {
+            return Err(
+                "typed prepared recovery record is not for the active height context".to_string(),
+            );
+        }
+        let candidate_id = if let Some(timeout_certificate) = record.timeout_certificate.as_ref() {
+            self.coordinator.recover_core_prepared(
+                record.block.clone(),
+                &record.validation_certificate,
+                timeout_certificate,
+            )?
+        } else {
+            self.coordinator.consensus.verify_vc(
+                &record.validation_certificate,
+                &self.coordinator.local_context.height_context,
+            )?;
+            if record.validation_certificate.candidate_id != record.block.candidate_id()? {
+                return Err("typed prepared recovery VC does not certify its proposal".to_string());
+            }
+            match self.coordinator.accept_core_proposal(
+                self.coordinator.local_context.height_context.clone(),
+                record.block.clone(),
+            )? {
+                TypedCoordinatorEvent::ProposalAccepted { candidate_id } => candidate_id,
+                _ => {
+                    return Err(
+                        "typed prepared recovery proposal produced an unexpected event".to_string(),
+                    )
+                }
+            }
+        };
+        if persist {
+            self.prepared_store.persist_verified(
+                &record.block,
+                &record.validation_certificate,
+                record.timeout_certificate.as_ref(),
+            )?;
+        }
+        self.prepared_certificate = Some(record.validation_certificate);
+        self.timeout_certificate = record.timeout_certificate;
+        self.stage = if self.timeout_certificate.is_some() {
+            TypedRoundStage::Proposal
+        } else {
+            TypedRoundStage::Validation
+        };
+        self.round_started_at = Instant::now();
+        self.last_proposal_broadcast_at = None;
+        self.emitted_proposal = false;
+        self.emitted_validation_vote = false;
+        self.emitted_finality_vote = false;
+        self.emitted_timeout_vote = false;
+        Ok(candidate_id)
     }
 
     fn finalize_after_verified_qc(
@@ -2306,6 +2560,7 @@ where
             &successor_finality_digest,
         )?;
         self.metrics.finalized_blocks = self.metrics.finalized_blocks.saturating_add(1);
+        self.prepared_store.clear_after_finality(record.height)?;
         self.reset_for_new_height();
         Ok(())
     }
@@ -2338,7 +2593,7 @@ where
                 );
             }
         }
-        self.timeout_certificate = Some(certificate);
+        self.timeout_certificate = Some(certificate.clone());
         self.validation_votes.clear();
         self.finality_votes.clear();
         self.timeout_votes.clear();
@@ -2352,6 +2607,21 @@ where
         self.emitted_validation_vote = false;
         self.emitted_finality_vote = false;
         self.emitted_timeout_vote = false;
+        self.persist_prepared_if_complete()?;
+        if certificate.carry_forward_candidate_id.is_some()
+            && (self
+                .prepared_certificate
+                .as_ref()
+                .map(|prepared| &prepared.candidate_id)
+                != certificate.carry_forward_candidate_id.as_ref()
+                || certificate
+                    .carry_forward_candidate_id
+                    .as_ref()
+                    .and_then(|candidate| self.coordinator.accepted_proposals.get(candidate))
+                    .is_none())
+        {
+            self.request_prepared_certificate(&certificate)?;
+        }
         Ok(())
     }
 
@@ -4401,6 +4671,128 @@ mod tests {
     }
 
     #[test]
+    fn prepared_candidate_and_round_authority_survive_driver_restart() {
+        let mut coordinator = coordinator_fixture();
+        let scheduled = coordinator
+            .consensus
+            .proposer_for(&coordinator.local_context.height_context, Round(0))
+            .expect("round-zero proposer");
+        coordinator.local_validator_id = scheduled.validator_id;
+        let mut driver = driver_with(coordinator, 1);
+        driver.tick().expect("emit deterministic core proposal");
+        let block = driver
+            .current_round_proposal()
+            .expect("local proposal is accepted")
+            .clone();
+        let validators = driver
+            .coordinator
+            .consensus
+            .validator_set
+            .validators
+            .clone();
+        let height_context = driver.coordinator.local_context.height_context.clone();
+        let validation_votes = validators
+            .iter()
+            .map(|validator| {
+                driver.coordinator.consensus.validation_vote(
+                    &mut driver.coordinator.signer,
+                    validator,
+                    &block,
+                    &height_context,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .expect("fixture validation votes");
+        let validation_certificate = driver
+            .coordinator
+            .form_validation_certificate(&validation_votes[..5])
+            .expect("strict-quorum VC");
+        driver
+            .record_validation_certificate(validation_certificate.clone())
+            .expect("prepared VC becomes durable");
+        let timeout_votes = validators
+            .iter()
+            .map(|validator| {
+                driver.coordinator.consensus.timeout_vote(
+                    &mut driver.coordinator.signer,
+                    validator,
+                    &height_context,
+                    Round(0),
+                    Some(&validation_certificate),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .expect("fixture timeout votes");
+        let timeout_certificate = driver
+            .coordinator
+            .form_timeout_certificate(&timeout_votes[..5])
+            .expect("strict-quorum TC");
+        driver
+            .coordinator
+            .accept_timeout_certificate(timeout_certificate.clone())
+            .expect("TC advances live round");
+        driver
+            .install_verified_timeout_certificate(timeout_certificate.clone())
+            .expect("TC and prepared state become durable together");
+        assert!(driver.prepared_store.recover().unwrap().is_some());
+
+        let coordinator = driver.coordinator;
+        let finality_path = coordinator.finality_store.path().to_path_buf();
+        let TypedPosyCoordinator {
+            consensus,
+            signer,
+            local_validator_id,
+            mut local_context,
+            execution_state,
+            etdag_parameters,
+            finality_store,
+            ..
+        } = coordinator;
+        local_context.round = Round(0);
+        let mut restarted_consensus = ProofOfSynergyBft::new(
+            &consensus.verifier,
+            consensus.validator_set,
+            consensus.cluster_map,
+            consensus.protocol_config,
+        );
+        restarted_consensus.signing_authority = consensus.signing_authority;
+        let restarted_coordinator = TypedPosyCoordinator::new(
+            restarted_consensus,
+            signer,
+            local_validator_id,
+            local_context,
+            execution_state,
+            etdag_parameters,
+            finality_store,
+        )
+        .expect("rebuild coordinator from finalized state");
+        let restarted = driver_with(restarted_coordinator, 1);
+        assert_eq!(restarted.coordinator.local_context.round, Round(1));
+        assert_eq!(
+            restarted
+                .prepared_certificate
+                .as_ref()
+                .expect("restart restored the prepared VC"),
+            &validation_certificate
+        );
+        assert_eq!(
+            restarted
+                .timeout_certificate
+                .as_ref()
+                .expect("restart restored round authority"),
+            &timeout_certificate
+        );
+        assert!(restarted
+            .coordinator
+            .accepted_proposals
+            .contains_key(&validation_certificate.candidate_id));
+
+        drop(restarted);
+        let _ = std::fs::remove_file(finality_path.with_extension("prepared.json"));
+        let _ = std::fs::remove_file(finality_path);
+    }
+
+    #[test]
     fn six_validator_driver_survives_startup_loss_two_timeout_rounds_and_first_finality() {
         let parameters = genesis_bound_parameters();
         let (bootstrap, _genesis_anchor, deployed_genesis_state_root, coordinators, store_paths) =
@@ -4520,6 +4912,156 @@ mod tests {
         }
         drop(drivers);
         for path in store_paths {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn six_validator_driver_recovers_carried_candidate_for_missing_next_proposer() {
+        let parameters = genesis_bound_parameters();
+        let (bootstrap, _genesis_anchor, deployed_genesis_state_root, coordinators, store_paths) =
+            six_validator_startup_fixture(parameters.clone());
+        let authorizer = FrozenTypedConsensusPeerAuthorizer::new(bootstrap.validator_set.clone())
+            .expect("freeze the six Genesis-bound P2P identities");
+        let mut drivers = coordinators
+            .into_iter()
+            .map(|coordinator| {
+                release_driver_with(
+                    coordinator,
+                    bootstrap.clone(),
+                    parameters.protocol_config.clone(),
+                    deployed_genesis_state_root,
+                )
+            })
+            .collect::<Vec<_>>();
+        let round_one_proposer = drivers[0]
+            .coordinator
+            .consensus
+            .proposer_for(
+                &drivers[0].coordinator.local_context.height_context,
+                Round(1),
+            )
+            .expect("round-one proposer");
+        let missing_index = drivers
+            .iter()
+            .position(|driver| {
+                driver.coordinator.local_validator_id == round_one_proposer.validator_id
+            })
+            .expect("round-one proposer has a release driver");
+
+        for driver in &mut drivers {
+            let now = driver.round_started_at;
+            driver.tick_at(now).expect("round-zero scheduling");
+        }
+        let _ = relay_release_messages_with_delivery(
+            &mut drivers,
+            &authorizer,
+            |message| matches!(message, TypedConsensusMessage::CoreProposal { .. }),
+            |_, recipient, _| recipient != missing_index,
+        );
+
+        for driver in &mut drivers {
+            driver
+                .tick_at(driver.round_started_at + Duration::from_millis(1_500))
+                .expect("round-zero validation deadline");
+        }
+        let _ = relay_release_messages_with_delivery(
+            &mut drivers,
+            &authorizer,
+            |message| {
+                matches!(
+                    message,
+                    TypedConsensusMessage::Vote { vote } if vote.phase == VotePhase::Validate
+                ) || matches!(message, TypedConsensusMessage::ValidationCertificate { .. })
+            },
+            |_, recipient, _| recipient != missing_index,
+        );
+        assert!(drivers[missing_index].prepared_certificate.is_none());
+        assert_eq!(
+            drivers
+                .iter()
+                .filter(|driver| driver.prepared_certificate.is_some())
+                .count(),
+            5
+        );
+
+        for driver in &mut drivers {
+            let cap = Duration::from_millis(
+                driver
+                    .coordinator
+                    .consensus
+                    .protocol_config
+                    .max_round_timeout_ms,
+            );
+            driver
+                .tick_at(driver.round_started_at + cap)
+                .expect("prepared replicas must time out without finality delivery");
+        }
+        let relay_errors = relay_release_messages(&mut drivers, &authorizer, |message| {
+            matches!(
+                message,
+                TypedConsensusMessage::Vote { vote } if vote.phase == VotePhase::Timeout
+            ) || matches!(
+                message,
+                TypedConsensusMessage::TimeoutCertificate { .. }
+                    | TypedConsensusMessage::PreparedCertificateRequest { .. }
+                    | TypedConsensusMessage::PreparedCertificateResponse { .. }
+            )
+        });
+        assert!(
+            relay_errors.is_empty(),
+            "authenticated prepared recovery must not be rejected: {relay_errors:?}"
+        );
+        assert_eq!(
+            drivers[missing_index].coordinator.local_context.round,
+            Round(1)
+        );
+        assert!(drivers[missing_index].prepared_certificate.is_some());
+        assert!(drivers[missing_index]
+            .coordinator
+            .accepted_proposals
+            .contains_key(
+                &drivers[missing_index]
+                    .prepared_certificate
+                    .as_ref()
+                    .expect("recovered VC")
+                    .candidate_id
+            ));
+
+        for driver in &mut drivers {
+            let now = driver.round_started_at;
+            driver
+                .tick_at(now)
+                .expect("the recovered round-one proposer must carry the candidate");
+        }
+        let mut relay_errors = relay_release_messages(&mut drivers, &authorizer, |_| true);
+        for driver in &mut drivers {
+            driver
+                .tick_at(driver.round_started_at + Duration::from_millis(1_500))
+                .expect("carried proposal validation");
+        }
+        relay_errors.extend(relay_release_messages(&mut drivers, &authorizer, |_| true));
+        for driver in &mut drivers {
+            driver
+                .tick_at(driver.round_started_at + Duration::from_millis(3_000))
+                .expect("carried proposal finality");
+        }
+        relay_errors.extend(relay_release_messages(&mut drivers, &authorizer, |_| true));
+        for (index, driver) in drivers.iter().enumerate() {
+            assert_eq!(
+                driver.metrics().finalized_blocks,
+                1,
+                "replica {index} did not finalize recovered carry-forward: {relay_errors:?}"
+            );
+            assert_eq!(
+                driver.coordinator.local_context.height_context.height,
+                Height(2)
+            );
+        }
+
+        drop(drivers);
+        for path in store_paths {
+            let _ = std::fs::remove_file(path.with_extension("prepared.json"));
             let _ = std::fs::remove_file(path);
         }
     }

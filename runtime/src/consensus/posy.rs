@@ -1504,6 +1504,40 @@ impl ProofOfSynergyBft {
         Ok(tc.next_round)
     }
 
+    /// Restores the live round authority from one independently verified TC.
+    ///
+    /// A TC is itself a strict-quorum proof that its closing round completed,
+    /// so a restarted validator does not need every earlier process-local TC
+    /// to safely rejoin at `next_round`. The carried candidate remains bound
+    /// exactly as on the ordinary sequential transition path.
+    pub fn recover_round_after_tc(
+        &mut self,
+        tc: &TimeoutCertificate,
+        height_context: &HeightConsensusContext,
+    ) -> Result<Round, String> {
+        self.verify_tc(tc, height_context)?;
+        if tc.height != height_context.height
+            || tc.height_context_root != height_context.root()?
+            || tc.next_round.0 != tc.closing_round.0.saturating_add(1)
+        {
+            return Err("recovered TC is not bound to the active height/round".to_string());
+        }
+        let key = (height_context.height, height_context.root()?);
+        let authorized_round = self.authorized_rounds.entry(key).or_insert(Round(0));
+        if authorized_round.0 > tc.next_round.0 {
+            return Err("recovered TC is older than the locally authorized round".to_string());
+        }
+        *authorized_round = tc.next_round;
+        if let Some(candidate_id) = &tc.carry_forward_candidate_id {
+            self.required_carry_forward.insert(
+                (height_context.height, height_context.root()?, tc.next_round),
+                candidate_id.clone(),
+            );
+        }
+        self.phase = ConsensusPhase::WaitingForProposal;
+        Ok(tc.next_round)
+    }
+
     pub fn carry_forward_prepared_candidate(
         &mut self,
         signer: &mut AegisPqvmSigner,

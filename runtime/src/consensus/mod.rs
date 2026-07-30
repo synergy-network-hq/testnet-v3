@@ -24,6 +24,7 @@ pub mod timing_trace;
 pub mod typed_coordinator;
 pub mod typed_finality_observer;
 pub mod typed_finality_store;
+pub mod typed_prepared_store;
 pub mod validator_keys;
 pub mod validator_scoring_params;
 pub mod vrf;

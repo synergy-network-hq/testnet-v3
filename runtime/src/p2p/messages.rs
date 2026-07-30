@@ -19,6 +19,10 @@ use crate::transaction::Transaction;
 /// sends rather than to a partial in-memory field.
 pub const MAX_TYPED_CONSENSUS_CERTIFICATE_FRAME_BYTES: usize = 128 * 1024;
 pub const MAX_TYPED_CONSENSUS_PROPOSAL_FRAME_BYTES: usize = 8 * 1024 * 1024;
+/// A recovery response carries both a full ML-DSA-65 VC and TC plus the core
+/// block. It is still tightly bounded, but necessarily larger than one
+/// certificate frame.
+pub const MAX_TYPED_PREPARED_RECOVERY_FRAME_BYTES: usize = 256 * 1024;
 /// Bounded replay of already-verified typed finality. Recipients replay each
 /// record through normal core-proposal and QC verification before persistence.
 pub const MAX_TYPED_FINALITY_CHECKPOINT_FRAME_BYTES: usize = 4 * 1024 * 1024;
@@ -59,6 +63,20 @@ pub enum TypedConsensusMessage {
     },
     TimeoutCertificate {
         certificate: TimeoutCertificate,
+    },
+    /// Requests the exact verified proposal and VC named by a live TC.  The TC
+    /// is included so responders never select recovery material from an
+    /// unauthenticated candidate identifier.
+    PreparedCertificateRequest {
+        timeout_certificate: TimeoutCertificate,
+    },
+    /// Returns the bounded core-only proposal/VC pair required by the supplied
+    /// TC. Every field is independently verified before it becomes live or
+    /// durable state.
+    PreparedCertificateResponse {
+        timeout_certificate: TimeoutCertificate,
+        block: TypedBlock,
+        validation_certificate: ValidationCertificate,
     },
     /// Requests a bounded segment beginning at the caller's next missing
     /// height. Only authenticated finalized-Genesis validators may request it.
@@ -105,9 +123,14 @@ pub fn validate_typed_consensus_message_size(
         ),
         TypedConsensusMessage::ValidationCertificate { .. }
         | TypedConsensusMessage::QuorumCertificate { .. }
-        | TypedConsensusMessage::TimeoutCertificate { .. } => (
+        | TypedConsensusMessage::TimeoutCertificate { .. }
+        | TypedConsensusMessage::PreparedCertificateRequest { .. } => (
             "typed consensus certificate",
             MAX_TYPED_CONSENSUS_CERTIFICATE_FRAME_BYTES,
+        ),
+        TypedConsensusMessage::PreparedCertificateResponse { .. } => (
+            "typed prepared-certificate recovery",
+            MAX_TYPED_PREPARED_RECOVERY_FRAME_BYTES,
         ),
         TypedConsensusMessage::FinalityCheckpointRequest { .. } => return Ok(()),
         TypedConsensusMessage::FinalityCheckpoint { .. } => (
