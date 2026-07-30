@@ -1,6 +1,6 @@
 # Testnet-v3 launch handoff: Codex to Claude
 
-Last verified: **2026-07-30 11:16 UTC**
+Last verified: **2026-07-30 11:53 UTC**
 
 This document supersedes the launch-status portions of the older
 `launch/CODEX_HANDOFF.md`. That older document is still useful as historical
@@ -9,43 +9,51 @@ next action” is obsolete.
 
 ## 1. Executive status
 
-Testnet-v3 is **not live and healthy yet**.
+Testnet-v3 validator consensus is now **live and advancing**, but the public
+network is **not launch-complete** because finalized records are not propagating
+through the relayer observer path.
 
 The canonical genesis, governance approval, six validator identities, VPN
-generation, node configs, and v20.0.0 release source exist. All six validator
-services are running, but consensus is stalled:
+generation, node configs, and corrected v20.0.0 validator runtime are active.
+The coordinated six-validator recovery completed successfully. All six
+validators now use finality-store version 3 and advance on one common chain:
 
 | Node set | Current state |
 |---|---|
-| Validator 1 | active process; incompatible finality-store version 2; height 18 |
-| Validators 2–6 | active processes; incompatible finality-store version 2; common height 28 |
-| Relayers 1–3 | active; corrected v20 runtime deployed |
+| Validators 1–6 | active; corrected validator SHA; version-3 stores; common advancing chain at heights 58–59 in the 11:53 UTC sample |
+| Relayers 1–3 | active; corrected v20 runtime deployed; rejecting round-1 finalized records |
 | RPC gateway | active; corrected v20 runtime deployed; public height 0 |
 | Explorer index node | active; corrected v20 runtime deployed; height 0 |
 | Atlas | HTTP 200; six validators displayed; latest block 0 |
 
-Validator 1 is not on a conflicting fork. Its block 18 is in the prefix held by
-validators 2–6. The validator set is stalled because the currently running
-validator build created version-2 finality journals. The corrected runtime uses
-version 3 and intentionally refuses to resume those version-2 journals because
-the old successor context depended on a timing-selected QC signer subset.
+The obsolete version-2 validator finality/signing state was preserved in
+timestamped backup directories and removed from the live data paths. The
+corrected validator binary was staged on all six machines while the services
+were inactive, all launch invariants passed, and the services were then started
+through one coordinated barrier. The six validators have since finalized more
+than 50 version-3 blocks without a fork.
 
-The corrected Linux v20.0.0 runtime artifact has now built successfully and is
-verified locally. It is already running on all three relayers, the RPC gateway,
-and the explorer index node. It has **not** been installed on the six
-validators.
+The direct release blocker is now narrower and is reproduced identically on all
+three relayers:
 
-The next operator must perform one coordinated six-validator cutover:
+```text
+Rejected typed finality observer message
+round 1 is not authorized; valid TC is required to advance from round 0
+```
 
-1. Stop all six validator services.
-2. Preserve/quarantine only the obsolete prelaunch finality and signing
-   journals.
-3. Install the corrected validator binary on all six while they remain
-   inactive.
-4. Verify configs, genesis, identities, VPN, and binary hashes.
-5. Start all six through one barrier.
-6. Prove common advancing finality and propagation through relayers, RPC,
-   indexer, and Atlas.
+The relayers therefore do not create an observer finality store and remain at
+height 0. The public RPC and Atlas correctly remain at height 0 downstream.
+A secondary repeated authorization error must be resolved in the same pass:
+
+```text
+typed finality observer request to relayer is not from a configured public service role
+```
+
+The next operator must diagnose the complete durable-finality observer contract,
+fix both validation and service-role authorization together, add round-greater-
+than-zero recovery tests, build one immutable corrected v20.0.0 artifact, deploy
+it to the affected roles, and prove validator-to-Atlas propagation. Do not
+restart or alter the healthy validator set while diagnosing this observer path.
 
 Do not regenerate genesis, validator identities, validator consensus keys,
 ETDAG keys, contract addresses, or VPN identities.
@@ -259,13 +267,19 @@ Current local operational branch:
 
 `agent/control-panel-v20-testnet-v3-release`
 
-Current local and pushed branch commit:
+Branch commit before this live-status update:
 
-`98a709886fb48c27643e85d709b6af63f9e307dd`
+`081db33797288c21cf344968c37736ef84b45747`
 
-That commit fixes a runtime-switch verifier race by waiting for the
-`synergy-release-guard` shell to `exec` the actual runtime. It is pushed but was
-not yet merged into `main` when this handoff was written.
+Open handoff PR:
+
+`https://github.com/synergy-network-hq/testnet-v3/pull/5`
+
+The branch also contains commit `98a709886fb48c27643e85d709b6af63f9e307dd`,
+which fixes a runtime-switch verifier race by waiting for the
+`synergy-release-guard` shell to `exec` the actual runtime. Neither the
+operational-script commit nor this handoff PR was merged into `main` at the
+11:53 UTC verification point.
 
 Operational scripts:
 
@@ -346,14 +360,12 @@ Current validator runtime on every validator:
 
 ```text
 /opt/synergy/bin/synergy-validator
-SHA-256 543e3afb1d06c76c1a0fb23866b5658e0fe3ee04ccbdc2d0d103a2c042f48213
+SHA-256 0a1b295a38171a5657974172d3044af2f8e7f0ca072569ce7cc10bca4e069823
 Version output: Synergy Testnet Node v20.0.0
 ```
 
-This is the stale pre-correction v20 build. It must be replaced by the
-corrected validator artifact SHA:
-
-`0a1b295a38171a5657974172d3044af2f8e7f0ca072569ce7cc10bca4e069823`
+This is the corrected validator artifact. It was verified against the live
+process image on all six machines at 11:53 UTC.
 
 Canonical remote paths:
 
@@ -369,9 +381,6 @@ Canonical systemd config:
 
 Control Panel config workspace:
   /var/lib/synergy/validator/config/node.toml
-
-Operational manifest:
-  /var/lib/synergy/validator/config/operational-manifest.json
 
 Canonical genesis:
   /etc/synergy/testnet-v3/genesis.json
@@ -392,20 +401,46 @@ Recoverable backups:
   /var/backups/synergy-testnet-v3
 ```
 
+Correction to earlier handoff text: no validator has
+`/var/lib/synergy/validator/config/operational-manifest.json`, and the active
+service does not directly load one. Do **not** copy the similarly named Control
+Panel source artifact to the hosts: the only such source file found is a stale
+Testnet-v2/chain-1264 manifest. The live validator services have explicit
+Testnet-v3 validator addresses, canonical configs, canonical genesis, and
+VPN transports. The optional manifest lookup in the runtime is used only for a
+legacy local-slot/self-alias derivation path and is not a launch requirement for
+these explicitly bound V3 services.
+
 The consensus key exists on all six machines and was previously verified as
 mode `0600`, owned by the node service account, with a 5,377-byte protected
 key file. Never print it.
 
-Current finality state:
+The obsolete version-2 state was quarantined before the corrected runtime was
+started. Backup directories:
+
+| Alias | Version-2 quarantine | Runtime-switch backup |
+|---|---|---|
+| `synergy-val1` | `prelaunch-v2-validator-state-20260730T114436Z` | `runtime-hotfix-validator-20260730T114539Z` |
+| `synergy-val2` | `prelaunch-v2-validator-state-20260730T114437Z` | `runtime-hotfix-validator-20260730T114538Z` |
+| `synergy-val3` | `prelaunch-v2-validator-state-20260730T114437Z` | `runtime-hotfix-validator-20260730T114540Z` |
+| `synergy-val4` | `prelaunch-v2-validator-state-20260730T114437Z` | `runtime-hotfix-validator-20260730T114545Z` |
+| `synergy-val5` | `prelaunch-v2-validator-state-20260730T114438Z` | `runtime-hotfix-validator-20260730T114553Z` |
+| `synergy-val6` | `prelaunch-v2-validator-state-20260730T114437Z` | `runtime-hotfix-validator-20260730T114537Z` |
+
+Current finality state at the 11:53 UTC sample:
 
 | Alias | Store version | Height | Block ID |
 |---|---:|---:|---|
-| `synergy-val1` | 2 | 18 | `5bf3448cbae973b7f68798242e3a5d1a388dd28b9cb15742f203663467d2812b` |
-| `synergy-val2` | 2 | 28 | `893a38953f272dba40d33686cb9a39037c508711de6ac8ca88e01e624d53e887` |
-| `synergy-val3` | 2 | 28 | `893a38953f272dba40d33686cb9a39037c508711de6ac8ca88e01e624d53e887` |
-| `synergy-val4` | 2 | 28 | `893a38953f272dba40d33686cb9a39037c508711de6ac8ca88e01e624d53e887` |
-| `synergy-val5` | 2 | 28 | `893a38953f272dba40d33686cb9a39037c508711de6ac8ca88e01e624d53e887` |
-| `synergy-val6` | 2 | 28 | `893a38953f272dba40d33686cb9a39037c508711de6ac8ca88e01e624d53e887` |
+| `synergy-val1` | 3 | 58 | `61ec76a7f63d4a1ebe0d1ecc34da0f375e433bbdc96cfa44d900fa975c6e8b38` |
+| `synergy-val2` | 3 | 59 | `7e42b52b9e5da259c54f3b08f30de05c54e1daab1a8ff055e4dd9d6908793704` |
+| `synergy-val3` | 3 | 58 | `61ec76a7f63d4a1ebe0d1ecc34da0f375e433bbdc96cfa44d900fa975c6e8b38` |
+| `synergy-val4` | 3 | 58 | `61ec76a7f63d4a1ebe0d1ecc34da0f375e433bbdc96cfa44d900fa975c6e8b38` |
+| `synergy-val5` | 3 | 58 | `61ec76a7f63d4a1ebe0d1ecc34da0f375e433bbdc96cfa44d900fa975c6e8b38` |
+| `synergy-val6` | 3 | 58 | `61ec76a7f63d4a1ebe0d1ecc34da0f375e433bbdc96cfa44d900fa975c6e8b38` |
+
+Validator 2 was one block ahead in this instantaneous sample. Earlier samples
+showed all six at height 10 on one block ID, then normal one-block propagation
+lag at heights 13–14 and 16–17. No divergent same-height block ID was observed.
 
 Canonical validator addresses and config hashes:
 
@@ -457,6 +492,24 @@ Backups:
   /var/backups/synergy-testnet-v3
 ```
 
+The three relayer processes are active, but none has created a
+`typed-posy-finality.json` observer store. Their role data directories contain
+`chain.json`, `dag_state.json`, `role-runtime.json`, and the validator transport
+registry only. All three repeatedly reject validator records with:
+
+```text
+round 1 is not authorized; valid TC is required to advance from round 0
+```
+
+All three also log:
+
+```text
+typed finality observer request to relayer is not from a configured public service role
+```
+
+These were still occurring at 11:53 UTC. Fix and test both conditions before
+the next deployment; do not assume the first error is the only blocker.
+
 Do not touch the retired masked unit:
 
 `synergy-testnet-relayer.service`
@@ -501,9 +554,10 @@ Public endpoint:
 
 `https://testnet-core-rpc.synergy-network.io`
 
-`/healthz` currently returns HTTP 200 and `ok`, but the public chain height is
-still zero because no corrected validator set has finalized post-genesis
-blocks.
+`/healthz` currently returns HTTP 200 and `ok`. A live JSON-RPC query at
+11:53 UTC returned `synergy_blockNumber = 0` because the relayer finality
+observers reject the validators' finalized records. The validators themselves
+are already finalizing post-genesis blocks.
 
 ### 6.4 Explorer index node and Atlas
 
@@ -639,6 +693,12 @@ height zero, and zero transactions. The green readiness response only proves
 that the indexer and RPC agree at height zero; it does not prove that the chain
 is advancing.
 
+At 11:53 UTC the public summary still returned:
+
+```text
+chainId=1266 latestBlock=0 activeValidators=6 totalValidators=6 peerCount=3
+```
+
 `atlas-api.synergy-network.io` did not resolve when checked. It is not the
 canonical public URL used for the current launch verification.
 
@@ -712,38 +772,95 @@ The guarded finalizer was applied and wrote the Phase 7/8 integrity evidence.
   hash. Commit `98a7098...` changes the verifier to wait up to 30 seconds. The
   indexer then switched cleanly with that fix.
 
+### 7.5 Coordinated validator version-3 recovery
+
+The six-validator cutover described in the earlier version of this handoff is
+complete:
+
+1. The corrected artifact, immutable Testnet source revision, and release
+   config manifest were reverified.
+2. All six validator services were stopped through one barrier and verified
+   inactive.
+3. The exact version-2 finality/signing state was moved—not deleted—into the
+   timestamped backup directories listed in section 6.1.
+4. The corrected validator binary was staged on all six machines while the
+   services remained inactive.
+5. Pre-start checks passed for the binary, canonical genesis, per-validator
+   config, ML-DSA-65 key, absence of live version-2 journals, VPN peer set, and
+   lack of detached validator processes.
+6. All six validators were started through one barrier.
+7. All six created version-3 stores and converged on a common advancing chain.
+
+The initial startup warning that the typed coordinator was not running occurred
+before the coordinator was installed during service initialization. Each
+validator subsequently logged the `posy/2.2` coordinator starting and produced
+finalized records.
+
+Observed advancement samples:
+
+```text
+11:49:54 UTC  all six at height 10, common block ID
+11:50:05 UTC  validators at heights 13–14
+11:50:17 UTC  validators at heights 16–17
+11:53 UTC     validators at heights 58–59
+```
+
+This proves validator consensus and persistence recovery. It does not prove
+public launch readiness because the relayer observer defect described below
+still blocks downstream propagation.
+
 ## 8. Current blockers and incomplete work
 
-### Blocker 1: incompatible validator finality state
+### Blocker 1: relayer observer rejects valid round-1 finality
 
-This is the direct reason the chain is not advancing.
+This is the direct reason the public chain remains at height 0.
 
-- All six validators still run binary SHA `543e3a...`.
-- Their stores are format version 2.
-- Validator 1 is at height 18.
-- Validators 2–6 are at height 28.
-- The corrected runtime expects store version 3 and must start from the
-  canonical genesis after preserving the old prelaunch state.
+- Validator consensus is healthy and advancing with version-3 stores.
+- Each relayer receives finalized records but rejects them with
+  `round 1 is not authorized; valid TC is required to advance from round 0`.
+- No relayer creates a typed finality observer store.
+- RPC, indexer, and Atlas consequently remain at height 0.
 
-Do not delete the old state. The quarantine scripts move only the exact
-incompatible consensus files into timestamped backups.
+The relevant source areas are:
 
-### Blocker 2: coordinated validator cutover not performed
+```text
+runtime/src/consensus/typed_finality_observer.rs
+runtime/src/consensus/posy.rs
+runtime/src/p2p/messages.rs
+runtime/src/p2p/networking.rs
+runtime/src/role_runtime.rs
+```
 
-The corrected validator artifact is ready, but no validator has been switched.
-All six must be stopped, quarantined, staged, checked, and started as one
-coordinated operation.
+The exact invariant must be resolved from code and tests. Do not bypass or
+weaken consensus verification. Determine whether:
 
-### Incomplete 3: public propagation is unproven
+1. the finalized record must durably carry the TC/QC evidence that authorized
+   round 1 and the serving validator currently omits it; or
+2. the observer is applying a live round-transition check to a durable
+   finalized record whose QC already cryptographically authorizes its round and
+   should use the dedicated finalized-record recovery verification path.
 
-Relayers, RPC, indexer, and Atlas now run or consume the corrected code, but
-they cannot prove observer recovery until validators finalize new version-3
-records. After validator recovery, verify:
+Add tests for valid round-greater-than-zero recovery, missing/invalid evidence,
+gap rejection, and fork rejection before building another runtime artifact.
 
-- relayer observer stores advance;
+### Blocker 2: relayer service-role authorization mismatch
+
+All three relayers also reject a typed-finality observer request because its
+peer is not classified as a configured public service role. Audit the RPC and
+index role allowlists, the signed role identities, and the P2P authorization
+branch that handles observer requests. Resolve this in the same source/build/
+deployment pass as Blocker 1 so another long release is not spent discovering
+the second known failure afterward.
+
+### Incomplete 3: public propagation is blocked, not merely unproven
+
+After the two observer defects are fixed, verify:
+
+- all three relayer observer stores are created and advance;
 - RPC `synergy_blockNumber` advances;
-- indexer catches the same head;
-- Atlas `latestBlock` advances above zero and continues changing.
+- the explorer index node follows the same head;
+- Atlas `latestBlock` advances above zero across multiple samples;
+- relayers no longer log either known observer rejection.
 
 ### Incomplete 4: runtime release manifest is stale
 
@@ -760,20 +877,88 @@ workflow  30536627486
 artifact  8757259227
 ```
 
-### Incomplete 5: switch-verifier patch not merged
+### Incomplete 5: operational/handoff PR not merged
 
-Commit `98a709886fb48c27643e85d709b6af63f9e307dd` is pushed on
-`agent/control-panel-v20-testnet-v3-release` but not merged to Testnet `main`.
-Merge it after review.
+PR #5 is open and cleanly mergeable at commit
+`081db33797288c21cf344968c37736ef84b45747`. It contains the switch-verifier
+fix and this handoff. Merge it after review; do not confuse merging operational
+documentation with fixing the runtime observer defect.
 
-### Incomplete 6: boot persistence
+### Incomplete 6: Atlas endpoint and transport completion
+
+The endpoint contract and 400-response audit described in section 6.4 must be
+finished after this handoff update. Known issues before the final audit:
+
+- Cloudflare AOP is disabled while Nginx requires a client certificate;
+- browser-origin 400 bursts have been observed on all ten snapshot routes;
+- clusters, history, metrics, status, search, and OpenAPI routes are missing;
+- the denomination converter and gas tools exist only in a dirty local checkout
+  and are not deployed.
+
+### Incomplete 7: boot persistence
 
 The current launch services were observed as active but some are static or
 disabled. After the chain is demonstrably healthy, install or enable the
 intended boot target so an ordinary host reboot restores the full Testnet-v3
 stack. Do not change boot behavior during the coordinated consensus cutover.
 
-## 9. Exact recommended continuation procedure
+## 9. Current continuation and completed operator record
+
+### 9.1 Exact current continuation
+
+Do not repeat the validator quarantine/cutover procedure in section 9.2. It is
+retained only as an audit record of the completed recovery.
+
+1. Keep the six validators running. Capture multi-sample finality heights while
+   diagnosing, but do not restart them or alter their version-3 state.
+2. Inspect the complete finalized-record production, persistence,
+   serialization, serving, transport, and observer-validation path. Start with:
+
+   ```text
+   runtime/src/consensus/typed_finality_observer.rs
+   runtime/src/consensus/posy.rs
+   runtime/src/p2p/messages.rs
+   runtime/src/p2p/networking.rs
+   runtime/src/role_runtime.rs
+   ```
+
+3. Reproduce the round-1 rejection in a test using a real finalized record
+   shape. Prove the exact missing or misapplied evidence rather than relaxing
+   `validate_round_change`.
+4. In parallel within the same source audit, trace the known service-role
+   rejection from the configured RPC/index identity through relayer
+   authorization. Correct the allowlist/identity contract without broadening it
+   to arbitrary peers.
+5. Add round-greater-than-zero recovery, evidence-failure, gap, fork, and
+   unauthorized-role tests. Run the focused consensus/P2P/role suites before
+   any new release.
+6. Commit and merge the source fix, update the Control Panel workflow's
+   immutable `TESTNET_SOURCE_REV`, and build one new v20.0.0 Linux runtime
+   artifact in GitHub Actions. Do not use a locally compiled Mac artifact on
+   Linux nodes.
+7. Verify source revision, `SHA256SUMS`, release-config manifest, ELF
+   architecture, and embedded version. Stage roles while preserving current
+   binaries and data in timestamped backups.
+8. Deploy the corrected observer-capable artifact to relayers first. If the
+   durable record format or serving behavior changed, deploy validators only
+   through a coordinated no-data-loss barrier; otherwise leave the healthy
+   validators untouched. Then deploy RPC and index roles if their code changed.
+9. Require all of the following before declaring launch:
+
+   ```text
+   relayer observer stores created and advancing
+   no round-1/TC rejection
+   no public-service-role rejection
+   public RPC height advancing above zero
+   explorer index height following RPC
+   Atlas latestBlock and block list advancing across multiple samples
+   ```
+
+10. Update `launch/TESTNET_V3_LINUX_RUNTIME_RELEASE.json`, append final node
+    hashes/heights/backups/workflow provenance to launch evidence, and only then
+    address boot-persistence testing.
+
+### 9.2 Completed validator recovery record — do not rerun
 
 Run from:
 
@@ -787,7 +972,7 @@ Artifact directory:
 artifact_dir=/Users/devpup/Documents/Codex/2026-07-28/we/work/testnet-v3-v20-runtime-hotfix-30536627486
 ```
 
-### Step 1: re-verify the artifact
+### Completed step 1: re-verify the artifact
 
 ```bash
 (
@@ -803,7 +988,7 @@ cmp -s \
   launch/production-node-configs/release-config-manifest.json
 ```
 
-### Step 2: verify support services are still on the corrected binaries
+### Completed step 2: verify support services on corrected binaries
 
 For each of `synergy-relayer1`, `synergy-relayer2`, `synergy-relayer3`,
 `synergy-rpc`, and `synergy-index`, inspect the active unit’s MainPID,
@@ -816,7 +1001,7 @@ RPC/index: dc5eea12132e1f5445e3cf061e930d84ddf4bd5f3a4de2ed88ced57cb3f203b4
 
 Do not redeploy them if they already match.
 
-### Step 3: stop all six validators before changing any state
+### Completed step 3: stop all six validators before changing state
 
 Use a coordinated barrier:
 
@@ -839,7 +1024,7 @@ wait
 
 Then verify all six are inactive before proceeding.
 
-### Step 4: quarantine only the obsolete version-2 finality state
+### Completed step 4: quarantine only obsolete version-2 finality state
 
 Validator 1:
 
@@ -851,7 +1036,7 @@ scripts/quarantine-testnet-v3-v2-validator-state.sh \
   --apply
 ```
 
-Validators 2–6:
+Validators 2–6 were actually at height 29 in the final pre-cutover sample:
 
 ```bash
 for host_alias in \
@@ -859,8 +1044,8 @@ for host_alias in \
 do
   scripts/quarantine-testnet-v3-v2-validator-state.sh \
     --host "$host_alias" \
-    --expected-height 28 \
-    --expected-block-id 893a38953f272dba40d33686cb9a39037c508711de6ac8ca88e01e624d53e887 \
+    --expected-height 29 \
+    --expected-block-id 1098966c08ea29e2f870f7027f868b7b30acb5821da5f1fb7db5ac5669727b73 \
     --apply
 done
 ```
@@ -881,7 +1066,7 @@ consensus_proposals/               if present
 Do not move or delete `chain.json`, genesis, identity files, validator keys,
 node configs, DAG state, or unrelated data.
 
-### Step 5: stage the corrected validator binary while services remain inactive
+### Completed step 5: stage corrected binary while services remained inactive
 
 ```bash
 for host_alias in \
@@ -913,7 +1098,7 @@ Before starting any validator, verify on all six:
 - VPN interface and peer set are healthy;
 - no detached validator process is running.
 
-### Step 6: start all six through one barrier
+### Completed step 6: start all six through one barrier
 
 ```bash
 for host_alias in \
@@ -932,7 +1117,7 @@ done
 wait
 ```
 
-### Step 7: verify consensus, not merely process liveness
+### Completed step 7: verify consensus, not merely process liveness
 
 Poll all six version-3 finality stores. Success requires:
 
@@ -954,7 +1139,7 @@ sudo -n jq -r \
 
 Do not declare success from `systemctl is-active` alone.
 
-### Step 8: verify public propagation
+### Pending downstream step 8: verify public propagation after observer repair
 
 Public RPC:
 
@@ -985,7 +1170,7 @@ curl -fsS \
 Success requires an advancing nonzero public RPC height and Atlas
 `latestBlock`, not a single nonzero sample.
 
-### Step 9: write final evidence and update release records
+### Pending final step 9: write final evidence and update release records
 
 After stable multi-sample advancement:
 
