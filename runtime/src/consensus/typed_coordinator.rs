@@ -2012,6 +2012,16 @@ where
                     self.request_prepared_certificate(&timeout_certificate)?;
                     return Ok(());
                 }
+                if timeout_certificate.highest_prepared_vc_root != Some(certificate.root()?) {
+                    // A candidate can have more than one valid strict-quorum
+                    // VC proof (different signer subsets). The TC binds the
+                    // exact proof root, so a locally held VC for the same
+                    // candidate is insufficient authority for carry-forward.
+                    // Recover the exact proof instead of treating this normal
+                    // quorum-subset difference as a fatal protocol conflict.
+                    self.request_prepared_certificate(&timeout_certificate)?;
+                    return Ok(());
+                }
                 let Some(original) = self
                     .coordinator
                     .accepted_proposals
@@ -2515,11 +2525,31 @@ where
         else {
             return Ok(());
         };
-        self.prepared_store.persist_verified(
-            block,
-            certificate,
-            self.timeout_certificate.as_ref(),
-        )?;
+        let timeout_certificate =
+            if let Some(timeout_certificate) = self.timeout_certificate.as_ref() {
+                let carries_prepared = timeout_certificate.carry_forward_candidate_id.as_ref()
+                    == Some(&certificate.candidate_id)
+                    && timeout_certificate.highest_prepared_vc_root == Some(certificate.root()?);
+                let authorizes_prepared_round =
+                    timeout_certificate.carry_forward_candidate_id.is_none()
+                        && timeout_certificate.highest_prepared_vc_root.is_none()
+                        && timeout_certificate.next_round == block.header.round
+                        && certificate.round == block.header.round;
+                if !carries_prepared && !authorizes_prepared_round {
+                    // Do not overwrite a valid durable prepared record by
+                    // combining it with an unrelated later TC. This occurs when
+                    // the TC selected another valid VC proof root for the same
+                    // candidate, or when a no-carry TC supersedes a locally known
+                    // prior-round VC. Exact prepared-certificate recovery will
+                    // replace the record once matching authority is available.
+                    return Ok(());
+                }
+                Some(timeout_certificate)
+            } else {
+                None
+            };
+        self.prepared_store
+            .persist_verified(block, certificate, timeout_certificate)?;
         Ok(())
     }
 
@@ -5002,6 +5032,192 @@ mod tests {
         );
         assert_eq!(certificate.timeout_vote_subjects.len(), 5);
         assert_eq!(driver.coordinator.local_context.round, Round(1));
+    }
+
+    #[test]
+    fn different_valid_vc_root_for_same_candidate_requests_exact_recovery() {
+        let mut coordinator = coordinator_fixture();
+        let scheduled = coordinator
+            .consensus
+            .proposer_for(&coordinator.local_context.height_context, Round(0))
+            .expect("round-zero proposer");
+        coordinator.local_validator_id = scheduled.validator_id;
+        let mut driver = driver_with(coordinator, 1);
+        driver.tick().expect("emit deterministic core proposal");
+        let block = driver
+            .current_round_proposal()
+            .expect("local proposal is accepted")
+            .clone();
+        let validators = driver
+            .coordinator
+            .consensus
+            .validator_set
+            .validators
+            .clone();
+        let height_context = driver.coordinator.local_context.height_context.clone();
+        let validation_votes = validators
+            .iter()
+            .map(|validator| {
+                driver.coordinator.consensus.validation_vote(
+                    &mut driver.coordinator.signer,
+                    validator,
+                    &block,
+                    &height_context,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .expect("fixture validation votes");
+        let local_certificate = driver
+            .coordinator
+            .form_validation_certificate(&validation_votes[..5])
+            .expect("first valid strict-quorum VC");
+        let tc_certificate = driver
+            .coordinator
+            .form_validation_certificate(&validation_votes[1..])
+            .expect("second valid strict-quorum VC");
+        assert_eq!(local_certificate.candidate_id, tc_certificate.candidate_id);
+        assert_ne!(
+            local_certificate.root().unwrap(),
+            tc_certificate.root().unwrap()
+        );
+        driver
+            .record_validation_certificate(local_certificate.clone())
+            .expect("persist the locally observed VC");
+
+        let timeout_votes = validators
+            .iter()
+            .map(|validator| {
+                driver.coordinator.consensus.timeout_vote(
+                    &mut driver.coordinator.signer,
+                    validator,
+                    &height_context,
+                    Round(0),
+                    Some(&tc_certificate),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .expect("fixture timeout votes");
+        let timeout_certificate = driver
+            .coordinator
+            .form_timeout_certificate(&timeout_votes[..5])
+            .expect("TC binds the other valid VC root");
+        driver
+            .coordinator
+            .accept_timeout_certificate(timeout_certificate.clone())
+            .expect("coordinator accepts the TC");
+        driver
+            .install_verified_timeout_certificate(timeout_certificate.clone())
+            .expect("VC-root disagreement is a recoverable proof gap");
+
+        let persisted = driver
+            .prepared_store
+            .recover()
+            .expect("read prepared record")
+            .expect("local prepared record remains durable");
+        assert_eq!(
+            persisted.validation_certificate.root().unwrap(),
+            local_certificate.root().unwrap()
+        );
+        assert!(persisted.timeout_certificate.is_none());
+
+        let round_one_proposer = driver
+            .coordinator
+            .consensus
+            .proposer_for(&height_context, Round(1))
+            .expect("round-one proposer");
+        driver.coordinator.local_validator_id = round_one_proposer.validator_id;
+        driver.egress.messages.clear();
+        driver
+            .try_emit_scheduled_proposal()
+            .expect("mismatched proof root requests exact recovery without halting");
+        assert!(driver.egress.messages.iter().any(|message| matches!(
+            message,
+            TypedConsensusMessage::PreparedCertificateRequest {
+                timeout_certificate: requested
+            } if requested == &timeout_certificate
+        )));
+        assert!(!driver.egress.messages.iter().any(|message| matches!(
+            message,
+            TypedConsensusMessage::CoreProposal { .. } | TypedConsensusMessage::Proposal { .. }
+        )));
+    }
+
+    #[test]
+    fn no_carry_timeout_does_not_corrupt_local_prepared_record() {
+        let mut coordinator = coordinator_fixture();
+        let scheduled = coordinator
+            .consensus
+            .proposer_for(&coordinator.local_context.height_context, Round(0))
+            .expect("round-zero proposer");
+        coordinator.local_validator_id = scheduled.validator_id;
+        let mut driver = driver_with(coordinator, 1);
+        driver.tick().expect("emit deterministic core proposal");
+        let block = driver
+            .current_round_proposal()
+            .expect("local proposal is accepted")
+            .clone();
+        let validators = driver
+            .coordinator
+            .consensus
+            .validator_set
+            .validators
+            .clone();
+        let height_context = driver.coordinator.local_context.height_context.clone();
+        let validation_votes = validators
+            .iter()
+            .map(|validator| {
+                driver.coordinator.consensus.validation_vote(
+                    &mut driver.coordinator.signer,
+                    validator,
+                    &block,
+                    &height_context,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .expect("fixture validation votes");
+        let local_certificate = driver
+            .coordinator
+            .form_validation_certificate(&validation_votes[..5])
+            .expect("strict-quorum VC");
+        driver
+            .record_validation_certificate(local_certificate.clone())
+            .expect("persist the locally observed VC");
+
+        let timeout_votes = validators
+            .iter()
+            .map(|validator| {
+                driver.coordinator.consensus.timeout_vote(
+                    &mut driver.coordinator.signer,
+                    validator,
+                    &height_context,
+                    Round(0),
+                    None,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .expect("fixture plain timeout votes");
+        let timeout_certificate = driver
+            .coordinator
+            .form_timeout_certificate(&timeout_votes[..5])
+            .expect("no-carry TC");
+        driver
+            .coordinator
+            .accept_timeout_certificate(timeout_certificate.clone())
+            .expect("coordinator accepts the TC");
+        driver
+            .install_verified_timeout_certificate(timeout_certificate)
+            .expect("unrelated TC must not make prepared persistence fatal");
+
+        let persisted = driver
+            .prepared_store
+            .recover()
+            .expect("read prepared record")
+            .expect("local prepared record remains durable");
+        assert_eq!(
+            persisted.validation_certificate.root().unwrap(),
+            local_certificate.root().unwrap()
+        );
+        assert!(persisted.timeout_certificate.is_none());
     }
 
     #[test]
