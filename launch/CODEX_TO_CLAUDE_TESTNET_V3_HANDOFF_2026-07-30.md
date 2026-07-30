@@ -563,9 +563,81 @@ totalValidators  = 6
 peerCount        = 3
 ```
 
-The earlier Cloudflare 526 failure is no longer active. Atlas is showing zero
-blocks because its source RPC is at height zero, not because the current Atlas
-backend is failing to serve data.
+The earlier Cloudflare 526 failure is no longer active, but Atlas is **not yet
+verified stable**. A follow-up endpoint audit on 2026-07-30 found all of the
+following:
+
+- The API and indexer services are active, and the current valid read contracts
+  return the expected JSON when requests reach the backend.
+- A 240-request soak through both
+  `testnet-atlas-api.synergy-network.io` and the Pages proxy completed with
+  240 HTTP 200 responses at the end of the audit.
+- Nginx access logs nevertheless contain 460 real browser-origin HTTP 400
+  responses across the ten Atlas snapshot paths: 46 failures apiece for
+  blocks, transactions, validators, tokens, contracts, accounts, network
+  summary, DAG status, DAG frontier, and DAG topology.
+- The origin requires a Cloudflare client certificate:
+
+  ```text
+  /etc/nginx/snippets/synergy-cloudflare-aop.conf
+  ssl_verify_client on;
+  ```
+
+  but Cloudflare zone-level Authenticated Origin Pulls currently reports
+  `enabled: false`, with no hostname-level associations. Earlier failing
+  responses contained `No required SSL certificate was sent`. This mismatch is
+  the recurrence risk behind the intermittent HTTP 400 bursts and must be
+  corrected before Atlas is called stable.
+
+The backend currently defines 34 read-only GET routes including health and
+version routes. Thirty-three were exercised; the only route not invoked was a
+wallet-pairing session lookup because producing a valid session would require a
+state-changing session-creation request.
+
+Several visible Atlas messages describe genuine backend gaps rather than
+frontend transport failures. These routes currently return HTTP 404:
+
+```text
+/api/v1/clusters
+/api/v1/clusters/:id
+/api/v1/clusters/:id/history
+/api/v1/epochs
+/api/v1/epochs/:number
+/api/v1/epochs/:number/history
+/api/v1/metrics/network-activity
+/api/v1/metrics/blocks
+/api/v1/metrics/throughput
+/api/v1/metrics/indexer-lag
+/api/v1/status/components
+/api/v1/status/incidents
+/api/v1/search
+/api/v1/openapi.json
+```
+
+Accordingly, `Backend blocked`, `REQUIRED CONTRACT GET /clusters`, and many
+`Historical endpoint required` surfaces are deliberate unavailable states for
+contracts that do not exist yet. They are not evidence that the corresponding
+backend work was completed.
+
+The denomination converter and gas tools exist only in the dirty local Atlas
+checkout:
+
+```text
+/Volumes/xcode/Synergy-Network-Projects/network-websites/atlas-v3
+```
+
+They are not in Git commit `6edcd85fe8063b2f5db88b713ac3ed03a67c18c4`,
+which is the commit associated with the current production Pages deployment.
+The local tool work passes 66 tests, lint, and a production build, but it has
+not been committed, pushed, or deployed. The live `/converter` and `/gas`
+routes therefore still render the temporary Testnet-v3 activation landing
+page.
+
+Atlas is also showing zero blocks because its source RPC is at height zero.
+The current API summary reports chain ID 1266, six active validators, indexed
+height zero, and zero transactions. The green readiness response only proves
+that the indexer and RPC agree at height zero; it does not prove that the chain
+is advancing.
 
 `atlas-api.synergy-network.io` did not resolve when checked. It is not the
 canonical public URL used for the current launch verification.
