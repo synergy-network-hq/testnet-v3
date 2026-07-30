@@ -122,69 +122,6 @@ lazy_static! {
 }
 
 lazy_static! {
-    static ref ETDAG_INGRESS_POOL: Mutex<EtdagIngressPool> =
-        Mutex::new(EtdagIngressPool::default());
-}
-
-/// Opaque user ingress must be independently bounded.  Finality traffic does
-/// not share this pool, so a saturated ETDAG lane fails new user submissions
-/// closed rather than consuming the validator's unbounded memory budget.
-const MAX_ETDAG_INGRESS_POOL_ENTRIES: usize = 2_048;
-const MAX_ETDAG_INGRESS_POOL_SERIALIZED_BYTES: usize = 64 * 1024 * 1024;
-
-#[derive(Default)]
-struct EtdagIngressPool {
-    entries: BTreeMap<crate::etdag::EtdagDigest, crate::etdag::EtdagSubmissionEnvelope>,
-    serialized_bytes: usize,
-}
-
-impl EtdagIngressPool {
-    fn insert(
-        &mut self,
-        commitment: crate::etdag::EtdagDigest,
-        submission: crate::etdag::EtdagSubmissionEnvelope,
-        serialized_bytes: usize,
-    ) -> Result<(), &'static str> {
-        if let Some(existing) = self.entries.get(&commitment) {
-            return if existing == &submission {
-                Ok(())
-            } else {
-                Err("ERR_ETDAG_COMMITMENT_COLLISION")
-            };
-        }
-        let next_bytes = next_etdag_ingress_pool_bytes(
-            self.entries.len(),
-            self.serialized_bytes,
-            serialized_bytes,
-        )?;
-        self.entries.insert(commitment, submission);
-        self.serialized_bytes = next_bytes;
-        Ok(())
-    }
-
-    fn len(&self) -> usize {
-        self.entries.len()
-    }
-}
-
-fn next_etdag_ingress_pool_bytes(
-    entry_count: usize,
-    current_bytes: usize,
-    new_entry_bytes: usize,
-) -> Result<usize, &'static str> {
-    if entry_count >= MAX_ETDAG_INGRESS_POOL_ENTRIES {
-        return Err("ERR_ETDAG_INGRESS_POOL_FULL");
-    }
-    let next_bytes = current_bytes
-        .checked_add(new_entry_bytes)
-        .ok_or("ERR_ETDAG_INGRESS_POOL_FULL")?;
-    if next_bytes > MAX_ETDAG_INGRESS_POOL_SERIALIZED_BYTES {
-        return Err("ERR_ETDAG_INGRESS_POOL_FULL");
-    }
-    Ok(next_bytes)
-}
-
-lazy_static! {
     static ref NODE_START_TIME: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
 }
 
@@ -2349,7 +2286,7 @@ fn execute_rpc_method(
     }
 }
 
-fn submit_etdag_transaction_envelope(envelope_value: &Value) -> Value {
+fn submit_etdag_transaction_envelope(_envelope_value: &Value) -> Value {
     if !crate::etdag::etdag_certified_input_ingress_is_active() {
         return json!({
             "success": false,
@@ -2358,109 +2295,23 @@ fn submit_etdag_transaction_envelope(envelope_value: &Value) -> Value {
             "automatic_plaintext_fallback": false,
         });
     }
-    let submission = match serde_json::from_value::<crate::etdag::EtdagSubmissionEnvelope>(
-        envelope_value.clone(),
-    ) {
-        Ok(submission) => submission,
-        Err(error) => {
-            return json!({
-                "success": false,
-                "code": "ERR_INVALID_ETDAG_ENVELOPE",
-                "error": format!("Invalid encrypted transaction envelope: {error}"),
-            });
-        }
-    };
-    let envelope = &submission.sealed_bundle.envelope;
-    let target_height = envelope.target_height;
-    let assigned_cluster_id = envelope.assigned_cluster_id;
-    if envelope.chain_id.0 != current_chain_id() {
-        return json!({
-            "success": false,
-            "code": "ERR_WRONG_CHAIN",
-            "error": format!(
-                "ETDAG envelope chain {} does not match local chain {}",
-                envelope.chain_id.0,
-                current_chain_id()
-            ),
-        });
-    }
-    let admission_package = match crate::etdag::EtdagAdmissionPackageStore::process_wide()
-        .get(envelope.target_height)
-    {
-        Ok(Some(package)) => package,
-        Ok(None) => {
-            return json!({
-                "success": false,
-                "code": "ERR_TARGET_ADMISSION_PACKAGE_UNAVAILABLE",
-                "error": "The certified target-admission package is not available locally; the envelope was not accepted",
-                "target_height": envelope.target_height.0,
-            });
-        }
-        Err(error) => {
-            return json!({
-                "success": false,
-                "code": "ERR_TARGET_ADMISSION_PACKAGE_STORE",
-                "error": error,
-            });
-        }
-    };
-    if let Err(error) = submission.verify(
-        &admission_package.context,
-        &crate::etdag::EtdagParameters::default(),
-    ) {
-        return json!({
-            "success": false,
-            "code": "ERR_ETDAG_ADMISSION_REJECTED",
-            "error": error,
-        });
-    }
-    let serialized_bytes = match serde_json::to_vec(&submission) {
-        Ok(bytes) => bytes.len(),
-        Err(error) => {
-            return json!({
-                "success": false,
-                "code": "ERR_ETDAG_ENVELOPE_SERIALIZATION",
-                "error": format!("ETDAG envelope cannot be accounted for safely: {error}"),
-            });
-        }
-    };
-    let commitment = envelope.tx_commitment.clone();
-    let mut pool = match ETDAG_INGRESS_POOL.lock() {
-        Ok(pool) => pool,
-        Err(_) => {
-            return json!({
-                "success": false,
-                "code": "ERR_ETDAG_INGRESS_UNAVAILABLE",
-                "error": "ETDAG ingress pool lock poisoned",
-            });
-        }
-    };
-    if let Err(code) = pool.insert(commitment.clone(), submission, serialized_bytes) {
-        let error = match code {
-            "ERR_ETDAG_COMMITMENT_COLLISION" => {
-                "A different sealed envelope already occupies this commitment"
-            }
-            "ERR_ETDAG_INGRESS_POOL_FULL" => {
-                "The opaque ETDAG ingress budget is exhausted; retry after finality drains the target lane"
-            }
-            _ => "The opaque ETDAG ingress pool rejected the envelope",
-        };
-        return json!({
-            "success": false,
-            "code": code,
-            "error": error,
-            "automatic_plaintext_fallback": false,
-        });
-    }
+    etdag_distributed_admission_unavailable_json()
+}
+
+/// A raw sealed envelope is not an executable transaction.  It needs the
+/// validator-distributed availability, DAG-cut, batch-order, and ordered
+/// reveal certificates before a typed proposal may consume it.
+fn etdag_distributed_admission_unavailable_json() -> Value {
+    // Earlier code retained envelopes in a process-local pool but had no
+    // producer to advance them, returning a misleading success response. Do
+    // not retain or forward client data until that scheduler is installed.
     json!({
-        "success": true,
-        "tx_commitment": commitment.0,
-        "target_height": target_height.0,
-        "assigned_cluster_id": assigned_cluster_id.0,
-        "admission_status": "OPAQUE_INGRESS_RECEIVED",
-        "vac_certified": false,
-        "receipt_scope": "transport receipt only; final admission requires a VAC inclusion proof",
+        "success": false,
+        "code": "ERR_ETDAG_DISTRIBUTED_ADMISSION_UNAVAILABLE",
+        "error": "ETDAG is activation-permitted, but the validator-distributed admission scheduler is not installed; the sealed envelope was not retained or forwarded",
+        "admission_status": "NOT_ACCEPTED",
         "plaintext_exposed": false,
+        "automatic_plaintext_fallback": false,
     })
 }
 
@@ -2514,34 +2365,21 @@ fn etdag_admission_package_json(params: &Value) -> Value {
 }
 
 fn etdag_status_json() -> Value {
-    match ETDAG_INGRESS_POOL.lock() {
-        Ok(pool) => {
-            let activated = crate::etdag::etdag_certified_input_ingress_is_active();
-            json!({
-                "profile_id": crate::etdag::ETDAG_PROFILE_ID,
-                "enabled": activated,
-                "activation_status": if activated { "ACTIVE" } else { "FINALIZED_ACTIVATION_PERMIT_REQUIRED" },
-                "plaintext_user_tx_allowed": false,
-                "automatic_plaintext_fallback_allowed": false,
-                "encrypted_submission_available": activated,
-                "opaque_ingress_count": pool.len(),
-                "opaque_ingress_serialized_bytes": pool.serialized_bytes,
-                "opaque_ingress_max_entries": MAX_ETDAG_INGRESS_POOL_ENTRIES,
-                "opaque_ingress_max_serialized_bytes": MAX_ETDAG_INGRESS_POOL_SERIALIZED_BYTES,
-                "opaque_ingress_saturation_behavior": "reject_new_encrypted_submission_without_plaintext_fallback",
-                "target_admission_package_method": "synergy_getEtdagAdmissionPackage",
-                "target_admission_context_requires_future_qc": false,
-                "public_pending_content_before_reveal_gate": false,
-                "public_ordered_reveal_required": true,
-            })
-        }
-        Err(_) => json!({
-            "profile_id": crate::etdag::ETDAG_PROFILE_ID,
-            "enabled": false,
-            "fail_closed": true,
-            "error": "ETDAG ingress pool unavailable",
-        }),
-    }
+    let activated = crate::etdag::etdag_certified_input_ingress_is_active();
+    json!({
+        "profile_id": crate::etdag::ETDAG_PROFILE_ID,
+        "enabled": activated,
+        "activation_status": if activated { "ACTIVE_CERTIFIED_INPUT_INGRESS" } else { "FINALIZED_ACTIVATION_PERMIT_REQUIRED" },
+        "plaintext_user_tx_allowed": false,
+        "automatic_plaintext_fallback_allowed": false,
+        "encrypted_submission_available": false,
+        "submission_status": "VALIDATOR_DISTRIBUTED_ADMISSION_SCHEDULER_REQUIRED",
+        "raw_envelopes_retained": false,
+        "target_admission_package_method": "synergy_getEtdagAdmissionPackage",
+        "target_admission_context_requires_future_qc": false,
+        "public_pending_content_before_reveal_gate": false,
+        "public_ordered_reveal_required": true,
+    })
 }
 
 fn consensus_safety_halt_status_json() -> Value {
@@ -10545,23 +10383,15 @@ mod tests {
     }
 
     #[test]
-    fn etdag_ingress_budget_rejects_entry_and_byte_saturation() {
+    fn etdag_raw_envelopes_are_never_acknowledged_without_a_distributed_scheduler() {
+        let response = etdag_distributed_admission_unavailable_json();
+        assert_eq!(response["success"], json!(false));
         assert_eq!(
-            next_etdag_ingress_pool_bytes(0, 0, MAX_ETDAG_INGRESS_POOL_SERIALIZED_BYTES),
-            Ok(MAX_ETDAG_INGRESS_POOL_SERIALIZED_BYTES)
+            response["code"],
+            json!("ERR_ETDAG_DISTRIBUTED_ADMISSION_UNAVAILABLE")
         );
-        assert_eq!(
-            next_etdag_ingress_pool_bytes(0, 0, MAX_ETDAG_INGRESS_POOL_SERIALIZED_BYTES + 1),
-            Err("ERR_ETDAG_INGRESS_POOL_FULL")
-        );
-        assert_eq!(
-            next_etdag_ingress_pool_bytes(MAX_ETDAG_INGRESS_POOL_ENTRIES, 0, 1),
-            Err("ERR_ETDAG_INGRESS_POOL_FULL")
-        );
-        assert_eq!(
-            next_etdag_ingress_pool_bytes(0, usize::MAX, 1),
-            Err("ERR_ETDAG_INGRESS_POOL_FULL")
-        );
+        assert_eq!(response["admission_status"], json!("NOT_ACCEPTED"));
+        assert_eq!(response["automatic_plaintext_fallback"], json!(false));
     }
 
     struct RpcEnvVarGuard {
