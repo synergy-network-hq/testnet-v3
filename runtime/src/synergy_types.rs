@@ -1151,6 +1151,22 @@ pub struct TimeoutCertificate {
     pub signer_bitmap: Vec<u8>,
     pub aegis_pq_signatures: Vec<AegisPqSignature>,
     pub aegis_pq_key_ids: Vec<AegisPqKeyId>,
+    /// Per-signer timeout subjects, aligned with the signature/key vectors.
+    ///
+    /// Timeout votes close one height/round and may legitimately report
+    /// different local prepared knowledge.  Version-1 certificates omitted
+    /// this vector and therefore supported only a homogeneous timeout
+    /// subject.  Version-2 certificates retain every signed subject while the
+    /// certificate-level fields select the sole non-empty prepared subject,
+    /// if one exists.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub timeout_vote_subjects: Vec<TimeoutVoteSubject>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TimeoutVoteSubject {
+    pub block_id: BlockId,
+    pub highest_prepared_vc_root: Option<Hash>,
 }
 
 impl TimeoutCertificate {

@@ -407,7 +407,7 @@ where
     emitted_proposal: bool,
     validation_votes: BTreeMap<BlockId, BTreeMap<ValidatorId, Vote>>,
     finality_votes: BTreeMap<BlockId, BTreeMap<ValidatorId, Vote>>,
-    timeout_votes: BTreeMap<(BlockId, Option<Hash>), BTreeMap<ValidatorId, Vote>>,
+    timeout_votes: BTreeMap<ValidatorId, Vote>,
     observed_validation_votes: BTreeMap<ValidatorId, Vote>,
     observed_finality_votes: BTreeMap<ValidatorId, Vote>,
     observed_timeout_votes: BTreeMap<ValidatorId, Vote>,
@@ -2153,6 +2153,24 @@ where
 
     fn record_verified_vote(&mut self, vote: Vote) -> Result<(), String> {
         let context = &self.coordinator.local_context.height_context;
+        if vote.phase == VotePhase::Timeout
+            && vote.height == context.height
+            && vote.epoch == context.epoch
+            && vote.cluster_id == context.assigned_cluster_id
+            && vote.height_context_root == context.root()?
+            && self
+                .timeout_certificate
+                .as_ref()
+                .is_some_and(|certificate| certificate.closing_round == vote.round)
+            && vote.round.0 < self.coordinator.local_context.round.0
+        {
+            // Another replica may form and broadcast the TC before every
+            // authenticated timeout vote reaches this process.  Once that
+            // exact round transition is cryptographically installed, a late
+            // individually verified vote for its closing round is redundant,
+            // not conflicting current-round input.
+            return Ok(());
+        }
         if vote.height != context.height
             || vote.round != self.coordinator.local_context.round
             || vote.epoch != context.epoch
@@ -2224,9 +2242,8 @@ where
                 self.maybe_form_finality_certificate(&vote.block_id)
             }
             VotePhase::Timeout => {
-                let key = (vote.block_id.clone(), vote.highest_prepared_vc_root);
-                insert_distinct_vote(self.timeout_votes.entry(key.clone()).or_default(), vote)?;
-                self.maybe_form_timeout_certificate(&key)
+                insert_distinct_vote(&mut self.timeout_votes, vote)?;
+                self.maybe_form_timeout_certificate()
             }
         }
     }
@@ -2284,17 +2301,8 @@ where
         self.finalize_after_verified_qc(certificate, finalized_context, record)
     }
 
-    fn maybe_form_timeout_certificate(
-        &mut self,
-        key: &(BlockId, Option<Hash>),
-    ) -> Result<(), String> {
-        let votes = self
-            .timeout_votes
-            .get(key)
-            .ok_or_else(|| "typed timeout vote collector disappeared".to_string())?
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
+    fn maybe_form_timeout_certificate(&mut self) -> Result<(), String> {
+        let votes = self.timeout_votes.values().cloned().collect::<Vec<_>>();
         if !self.has_exact_quorum(&votes)? {
             return Ok(());
         }
@@ -4668,6 +4676,83 @@ mod tests {
                 .closing_round,
             Round(1)
         );
+    }
+
+    #[test]
+    fn mixed_prepared_and_plain_timeout_votes_advance_one_round() {
+        let mut coordinator = coordinator_fixture();
+        let scheduled = coordinator
+            .consensus
+            .proposer_for(&coordinator.local_context.height_context, Round(0))
+            .expect("round-zero proposer");
+        coordinator.local_validator_id = scheduled.validator_id;
+        let mut driver = driver_with(coordinator, 1);
+        driver.tick().expect("emit deterministic core proposal");
+        let block = driver
+            .current_round_proposal()
+            .expect("local proposal is accepted")
+            .clone();
+        let validators = driver
+            .coordinator
+            .consensus
+            .validator_set
+            .validators
+            .clone();
+        let height_context = driver.coordinator.local_context.height_context.clone();
+        let validation_votes = validators
+            .iter()
+            .map(|validator| {
+                driver.coordinator.consensus.validation_vote(
+                    &mut driver.coordinator.signer,
+                    validator,
+                    &block,
+                    &height_context,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .expect("fixture validation votes");
+        let prepared = driver
+            .coordinator
+            .form_validation_certificate(&validation_votes[..5])
+            .expect("strict-quorum VC");
+        let timeout_votes = validators
+            .iter()
+            .enumerate()
+            .map(|(index, validator)| {
+                driver.coordinator.consensus.timeout_vote(
+                    &mut driver.coordinator.signer,
+                    validator,
+                    &height_context,
+                    Round(0),
+                    (index >= 3).then_some(&prepared),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .expect("mixed timeout subjects remain individually valid");
+
+        for vote in timeout_votes.into_iter().take(5) {
+            driver
+                .record_verified_vote(vote)
+                .expect("same-round timeout votes must share one quorum collector");
+        }
+
+        let certificate = driver
+            .timeout_certificate
+            .as_ref()
+            .expect("three plain plus two prepared timeouts form a strict-quorum TC");
+        assert_eq!(certificate.certificate_version, 2);
+        assert_eq!(certificate.closing_round, Round(0));
+        assert_eq!(certificate.next_round, Round(1));
+        assert_eq!(
+            certificate.carry_forward_candidate_id.as_ref(),
+            Some(&prepared.candidate_id)
+        );
+        assert_eq!(
+            certificate.highest_prepared_vc_root,
+            Some(prepared.root().unwrap())
+        );
+        assert_eq!(certificate.timeout_vote_subjects.len(), 5);
+        assert_eq!(driver.coordinator.local_context.round, Round(1));
     }
 
     #[test]

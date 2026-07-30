@@ -1091,16 +1091,16 @@ impl ProofOfSynergyBft {
         {
             return Err("validator is not eligible to sign timeout".to_string());
         }
-        let (mut candidate_id, mut highest_prepared_vc_root) =
-            if let Some(vc) = highest_prepared_vc {
-                self.verify_vc(vc, height_context)?;
-                if vc.round.0 > closing_round.0 {
-                    return Err("highest prepared VC is from a future round".to_string());
-                }
-                (vc.candidate_id.clone(), Some(vc.root()?))
-            } else {
-                (BlockId(String::new()), None)
-            };
+        let (mut candidate_id, mut highest_prepared_vc_root) = if let Some(vc) = highest_prepared_vc
+        {
+            self.verify_vc(vc, height_context)?;
+            if vc.round.0 > closing_round.0 {
+                return Err("highest prepared VC is from a future round".to_string());
+            }
+            (vc.candidate_id.clone(), Some(vc.root()?))
+        } else {
+            (BlockId(String::new()), None)
+        };
 
         // This timeout slot may already be durably authorized by a previous
         // process. The prepared `ValidationCertificate` that determined the
@@ -1115,9 +1115,8 @@ impl ProofOfSynergyBft {
         // Re-emit exactly what this validator already committed to. That is the
         // safest available value: it reproduces the durable record byte-for-byte
         // and takes the idempotent path in the signing authority.
-        let recorded = self
-            .signing_authority
-            .recorded_authorization_for_slot(&ConsensusSigningAuthorization {
+        let recorded = self.signing_authority.recorded_authorization_for_slot(
+            &ConsensusSigningAuthorization {
                 chain_id: height_context.chain_id,
                 network_id: height_context.network_id.clone(),
                 protocol_version: height_context.protocol_version.clone(),
@@ -1130,7 +1129,8 @@ impl ProofOfSynergyBft {
                 phase: ConsensusSigningPhase::Timeout,
                 candidate_id: None,
                 highest_prepared_vc_root: None,
-            })?;
+            },
+        )?;
         if let Some(recorded) = recorded {
             candidate_id = recorded
                 .candidate_id
@@ -1248,6 +1248,29 @@ impl ProofOfSynergyBft {
             }
             _ => {}
         }
+        let mut timeout_prepared_subject = None;
+        if first.phase == VotePhase::Timeout {
+            for vote in &verified {
+                if vote.highest_prepared_vc_root.is_some() != !vote.block_id.0.is_empty() {
+                    return Err(
+                        "timeout vote prepared VC root and candidate must appear together"
+                            .to_string(),
+                    );
+                }
+                if let Some(root) = vote.highest_prepared_vc_root {
+                    let current = (vote.block_id.clone(), root);
+                    if timeout_prepared_subject
+                        .as_ref()
+                        .is_some_and(|existing| existing != &current)
+                    {
+                        return Err(
+                            "timeout votes report conflicting prepared candidates".to_string()
+                        );
+                    }
+                    timeout_prepared_subject = Some(current);
+                }
+            }
+        }
         let required_count = height_context.strict_count_quorum()?;
         if (verified.len() as u64) < required_count {
             return Err(format!(
@@ -1270,14 +1293,15 @@ impl ProofOfSynergyBft {
         let mut key_ids = Vec::new();
         let mut signed_weight = 0u64;
         for vote in &verified {
-            if vote.block_id != first.block_id
+            if (vote.phase != VotePhase::Timeout && vote.block_id != first.block_id)
                 || vote.height != first.height
                 || vote.round != first.round
                 || vote.epoch != first.epoch
                 || vote.cluster_id != first.cluster_id
                 || vote.height_context_root != first.height_context_root
                 || vote.phase != first.phase
-                || vote.highest_prepared_vc_root != first.highest_prepared_vc_root
+                || (vote.phase != VotePhase::Timeout
+                    && vote.highest_prepared_vc_root != first.highest_prepared_vc_root)
             {
                 return Err(
                     "votes do not target the exact same block/height/round/epoch/cluster"
@@ -1296,6 +1320,9 @@ impl ProofOfSynergyBft {
             signatures.push(vote.aegis_pq_signature.clone());
             key_ids.push(vote.key_id.clone());
         }
+        let (certificate_block_id, certificate_prepared_root) = timeout_prepared_subject
+            .map(|(candidate, root)| (candidate, Some(root)))
+            .unwrap_or_else(|| (first.block_id.clone(), first.highest_prepared_vc_root));
         let qc = QuorumCertificate {
             qc_version: 1,
             chain_id: first.chain_id,
@@ -1307,8 +1334,8 @@ impl ProofOfSynergyBft {
             cluster_id: first.cluster_id,
             height_context_root: first.height_context_root,
             phase: first.phase.clone(),
-            block_id: first.block_id.clone(),
-            highest_prepared_vc_root: first.highest_prepared_vc_root,
+            block_id: certificate_block_id,
+            highest_prepared_vc_root: certificate_prepared_root,
             active_validator_set_hash: first.active_validator_set_hash,
             cluster_map_hash: first.cluster_map_hash,
             threshold_weight_required: height_context.strict_weight_quorum()?,
@@ -1371,7 +1398,7 @@ impl ProofOfSynergyBft {
             Some(certificate.block_id)
         };
         let tc = TimeoutCertificate {
-            certificate_version: certificate.qc_version,
+            certificate_version: 2,
             chain_id: certificate.chain_id,
             network_id: certificate.network_id,
             protocol_version: certificate.protocol_version,
@@ -1390,6 +1417,13 @@ impl ProofOfSynergyBft {
             signer_bitmap: certificate.signer_bitmap,
             aegis_pq_signatures: certificate.aegis_pq_signatures,
             aegis_pq_key_ids: certificate.aegis_pq_key_ids,
+            timeout_vote_subjects: votes
+                .iter()
+                .map(|vote| crate::synergy_types::TimeoutVoteSubject {
+                    block_id: vote.block_id.clone(),
+                    highest_prepared_vc_root: vote.highest_prepared_vc_root,
+                })
+                .collect(),
         };
         self.verify_tc(&tc, height_context)?;
         Ok(tc)

@@ -738,6 +738,7 @@ impl AegisPqvmVerifier {
             validator_set,
             cluster_map,
             height_context,
+            None,
         )
     }
 
@@ -754,6 +755,7 @@ impl AegisPqvmVerifier {
             validator_set,
             cluster_map,
             height_context,
+            None,
         )
     }
 
@@ -776,12 +778,58 @@ impl AegisPqvmVerifier {
                 "TC prepared VC root and carry-forward candidate must appear together".to_string(),
             ));
         }
+        let timeout_vote_subjects = if certificate.timeout_vote_subjects.is_empty() {
+            None
+        } else {
+            if certificate.certificate_version < 2 {
+                return Err(AegisPqvmError(
+                    "heterogeneous timeout subjects require TC version 2".to_string(),
+                ));
+            }
+            if certificate.timeout_vote_subjects.len() != certificate.aegis_pq_signatures.len() {
+                return Err(AegisPqvmError(
+                    "TC timeout-subject/signature vector length mismatch".to_string(),
+                ));
+            }
+            let mut prepared_subject = None;
+            for subject in &certificate.timeout_vote_subjects {
+                if subject.highest_prepared_vc_root.is_some() != !subject.block_id.0.is_empty() {
+                    return Err(AegisPqvmError(
+                        "TC signer prepared root and candidate must appear together".to_string(),
+                    ));
+                }
+                if let Some(root) = subject.highest_prepared_vc_root {
+                    let current = (subject.block_id.clone(), root);
+                    if prepared_subject
+                        .as_ref()
+                        .is_some_and(|existing| existing != &current)
+                    {
+                        return Err(AegisPqvmError(
+                            "TC contains conflicting prepared subjects".to_string(),
+                        ));
+                    }
+                    prepared_subject = Some(current);
+                }
+            }
+            let declared = certificate
+                .carry_forward_candidate_id
+                .clone()
+                .zip(certificate.highest_prepared_vc_root);
+            if prepared_subject != declared {
+                return Err(AegisPqvmError(
+                    "TC declared carry-forward subject does not match signed timeout subjects"
+                        .to_string(),
+                ));
+            }
+            Some(certificate.timeout_vote_subjects.as_slice())
+        };
         self.verify_consensus_certificate_checked(
             &certificate.as_verification_certificate(),
             VotePhase::Timeout,
             validator_set,
             cluster_map,
             height_context,
+            timeout_vote_subjects,
         )
     }
 
@@ -792,6 +840,7 @@ impl AegisPqvmVerifier {
         validator_set: &ValidatorSet,
         cluster_map: &ClusterMap,
         height_context: &HeightConsensusContext,
+        timeout_vote_subjects: Option<&[crate::synergy_types::TimeoutVoteSubject]>,
     ) -> Result<(), AegisPqvmError> {
         self.ensure_initialized()?;
         if qc.phase != expected_phase {
@@ -862,6 +911,7 @@ impl AegisPqvmVerifier {
                     "QC signer is not in the QC cluster".to_string(),
                 ));
             }
+            let timeout_subject = timeout_vote_subjects.and_then(|subjects| subjects.get(position));
             let vote = Vote {
                 chain_id: qc.chain_id,
                 network_id: qc.network_id.clone(),
@@ -870,8 +920,12 @@ impl AegisPqvmVerifier {
                 epoch: qc.epoch,
                 cluster_id: qc.cluster_id,
                 phase: qc.phase.clone(),
-                block_id: qc.block_id.clone(),
-                highest_prepared_vc_root: qc.highest_prepared_vc_root,
+                block_id: timeout_subject
+                    .map(|subject| subject.block_id.clone())
+                    .unwrap_or_else(|| qc.block_id.clone()),
+                highest_prepared_vc_root: timeout_subject
+                    .map(|subject| subject.highest_prepared_vc_root)
+                    .unwrap_or(qc.highest_prepared_vc_root),
                 validator_id: validator.validator_id.clone(),
                 validator_uma_id: validator.validator_uma_id.clone(),
                 key_id,
