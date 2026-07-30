@@ -214,7 +214,20 @@ rollback() {
   systemctl start "$unit"
   printf 'ROLLBACK_PERFORMED\n' > "$backup_directory/rollback.txt"
 }
-trap 'rollback' ERR
+
+# `exit 1` inside `fail` does not reliably fire Bash's ERR trap. Arm an EXIT
+# handler only after the complete backup exists so every post-mutation failure,
+# including an explicit readiness failure, restores the prior binding.
+rollback_armed=true
+rollback_on_exit() {
+  status=$?
+  trap - EXIT
+  if [[ $status -ne 0 && $rollback_armed == true ]]; then
+    rollback
+  fi
+  exit "$status"
+}
+trap rollback_on_exit EXIT
 
 systemctl stop "$unit"
 [[ $(systemctl is-active "$unit" 2>/dev/null || true) == inactive ]] ||
@@ -298,7 +311,7 @@ done
   fail "live process is not using the staged runtime after 60 seconds: $new_args"
 
 rpc_response=
-for _ in $(seq 1 180); do
+for _ in $(seq 1 360); do
   rpc_response=$(
     curl -sS --max-time 2 \
       -H 'content-type: application/json' \
@@ -312,7 +325,8 @@ done
 [[ $rpc_response == *'c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d'* ]] ||
   fail 'local RPC did not return the canonical Testnet-v3 Genesis hash'
 
-trap - ERR
+rollback_armed=false
+trap - EXIT
 printf '{"result":"TESTNET_V3_V20_RUNTIME_SWITCHED","role":"%s","unit":"%s","source_revision":"%s","runtime_sha256":"%s","backup":"%s","service_active":true}\n' \
   "$role" \
   "$unit" \

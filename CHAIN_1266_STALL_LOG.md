@@ -453,6 +453,36 @@ both implausibly small readings such as 0.02 seconds and exaggerated gaps.
    recovery, missed-QC recovery, bounded ingress, and the new exact-replay
    tamper regression. No live node has received this performance correction
    yet.
+7. **Built the correction from immutable source revision
+   `d373e778f683dbf96d638736adcef89e0d127951` in Control Panel workflow
+   `30585860119`, downloaded its runtime artifact, verified all five published
+   checksums, and reread this incident log from first line through last line
+   before deployment.**  
+   **Outcome:** the artifact is source-bound, all three role binaries are
+   x86-64 Linux v20.0.0 executables, and the validator binary SHA-256 is
+   `df5333ac6d688cfb8b9625821c039a6a316c2d480787d8d1302f2369851abedf`.
+   Planned mutation: switch the five support roles first, stop and stage all
+   six validators inactive, then start the six-validator quorum together.
+8. **Attempted the guarded support-tier switch concurrently on Relayers 1–3,
+   RPC Gateway, and Explorer Indexer.**  
+   **Outcome:** every new process remained systemd-active but failed to expose
+   its local Chain 1266 RPC within the helper's 180-second readiness window.
+   Each helper exited nonzero and performed its automatic rollback. The prior
+   support runtimes were restored; no validator service or chain state was
+   changed. Startup journals and rollback evidence must be compared before
+   another switch.
+9. **Amendment to action 8 after inspecting every live process, backup, and
+   startup journal:** the helper printed a readiness failure but its ERR trap
+   was bypassed by `fail` calling `exit`; therefore it did not roll back.
+   Relayer RPC became ready 187–222 seconds after node startup, just beyond the
+   180-second gate. Replaced the ERR trap with an armed EXIT rollback handler
+   and extended the support-role RPC gate to 360 seconds.  
+   **Outcome:** Relayers 1–3 are active with zero restarts on runtime SHA-256
+   `f0d27ae27a56ccdb81989aa309416c5095469f9f1dfe4a870df65cce5a03e132`;
+   RPC Gateway and Explorer Indexer are active with zero restarts on SHA-256
+   `012f9081da22ef4887e83f4db8717bcede79d40848fd6826fe05d24ab51772a5`.
+   All five local RPC endpoints return Chain 1266 and canonical Genesis.
+   Validator services and chain state remain unchanged.
 
 ### Final outcome
 
