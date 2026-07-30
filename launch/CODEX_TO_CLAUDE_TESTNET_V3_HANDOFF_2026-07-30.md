@@ -1,6 +1,6 @@
 # Testnet-v3 launch handoff: Codex to Claude
 
-Last verified: **2026-07-30 11:53 UTC**
+Last verified: **2026-07-30 12:03 UTC**
 
 This document supersedes the launch-status portions of the older
 `launch/CODEX_HANDOFF.md`. That older document is still useful as historical
@@ -886,12 +886,21 @@ documentation with fixing the runtime observer defect.
 
 ### Incomplete 6: Atlas endpoint and transport completion
 
-The endpoint contract and 400-response audit described in section 6.4 must be
-finished after this handoff update. Known issues before the final audit:
+The endpoint audit is complete and recorded in:
 
-- Cloudflare AOP is disabled while Nginx requires a client certificate;
-- browser-origin 400 bursts have been observed on all ten snapshot routes;
-- clusters, history, metrics, status, search, and OpenAPI routes are missing;
+`launch/ATLAS_ENDPOINT_AUDIT_2026-07-30.md`
+
+It confirms:
+
+- all direct-API implemented GET routes currently behave according to their
+  deployed contracts;
+- the Pages worker does not proxy `/version` or `/docs/*`;
+- 26 UI-referenced GET contracts are entirely absent;
+- 460 genuine browser-origin HTTP 400s occurred across the ten snapshot routes,
+  although a later 400-request recurrence soak passed;
+- Cloudflare AOP remains disabled while Nginx requires a client certificate;
+- backend CORS advertises the explorer hostname instead of the canonical Atlas
+  hostname;
 - the denomination converter and gas tools exist only in a dirty local checkout
   and are not deployed.
 
@@ -1231,6 +1240,7 @@ Control Panel security-alert capture:
 Other useful launch reports:
 
 ```text
+launch/ATLAS_ENDPOINT_AUDIT_2026-07-30.md
 launch/TRACK_G_COMPLETE.md
 launch/SESSION_13K_TRACK_G_STATE.md
 launch/SESSION_13J_GOVERNANCE_AUTHORIZATION.md
