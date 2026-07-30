@@ -368,6 +368,7 @@ enum TypedRoundStage {
 }
 
 const PROPOSAL_REBROADCAST_INTERVAL: Duration = Duration::from_millis(250);
+const VOTE_REBROADCAST_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TypedCoordinatorDriverMetrics {
@@ -403,6 +404,8 @@ where
     ingress_rotator: R,
     round_started_at: Instant,
     last_proposal_broadcast_at: Option<Instant>,
+    last_vote_broadcast_at: Option<Instant>,
+    last_emitted_vote: Option<Vote>,
     stage: TypedRoundStage,
     emitted_validation_vote: bool,
     emitted_finality_vote: bool,
@@ -1487,6 +1490,8 @@ where
             ingress_rotator,
             round_started_at: Instant::now(),
             last_proposal_broadcast_at: None,
+            last_vote_broadcast_at: None,
+            last_emitted_vote: None,
             stage: TypedRoundStage::Proposal,
             emitted_validation_vote: false,
             emitted_finality_vote: false,
@@ -1617,19 +1622,20 @@ where
             self.emitted_proposal = true;
             self.last_proposal_broadcast_at = Some(now);
         }
+        self.rebroadcast_local_vote_if_due(now)?;
 
         if elapsed >= round_cap && !self.emitted_timeout_vote {
-            self.emit_timeout_vote()?;
+            self.emit_timeout_vote(now)?;
             self.stage = TypedRoundStage::WaitingForCertificate;
             return Ok(());
         }
 
         if self.stage == TypedRoundStage::Proposal && elapsed >= proposal_deadline {
             if let Some(block) = self.current_round_proposal().cloned() {
-                self.emit_validation_vote(&block)?;
+                self.emit_validation_vote(&block, now)?;
                 self.stage = TypedRoundStage::Validation;
             } else {
-                self.emit_timeout_vote()?;
+                self.emit_timeout_vote(now)?;
                 self.stage = TypedRoundStage::WaitingForCertificate;
             }
         }
@@ -1647,17 +1653,17 @@ where
                     .cloned()
             });
             if let (Some(block), Some(certificate)) = (prepared_block, prepared) {
-                self.emit_finality_vote(&block, &certificate)?;
+                self.emit_finality_vote(&block, &certificate, now)?;
                 self.stage = TypedRoundStage::Finality;
             } else {
-                self.emit_timeout_vote()?;
+                self.emit_timeout_vote(now)?;
                 self.stage = TypedRoundStage::WaitingForCertificate;
             }
         }
 
         if self.stage == TypedRoundStage::Finality && elapsed >= finality_deadline {
             if self.finality_certificate.is_none() {
-                self.emit_timeout_vote()?;
+                self.emit_timeout_vote(now)?;
                 self.stage = TypedRoundStage::WaitingForCertificate;
             }
         }
@@ -2136,12 +2142,14 @@ where
         Ok(())
     }
 
-    fn emit_validation_vote(&mut self, block: &Block) -> Result<(), String> {
+    fn emit_validation_vote(&mut self, block: &Block, now: Instant) -> Result<(), String> {
         if self.emitted_validation_vote {
             return Ok(());
         }
         let vote = self.coordinator.validation_vote_for(block)?;
         self.broadcast(TypedConsensusMessage::Vote { vote: vote.clone() })?;
+        self.last_vote_broadcast_at = Some(now);
+        self.last_emitted_vote = Some(vote.clone());
         self.emitted_validation_vote = true;
         self.metrics.emitted_validation_votes =
             self.metrics.emitted_validation_votes.saturating_add(1);
@@ -2152,18 +2160,21 @@ where
         &mut self,
         block: &Block,
         certificate: &ValidationCertificate,
+        now: Instant,
     ) -> Result<(), String> {
         if self.emitted_finality_vote {
             return Ok(());
         }
         let vote = self.coordinator.finality_vote_for(block, certificate)?;
         self.broadcast(TypedConsensusMessage::Vote { vote: vote.clone() })?;
+        self.last_vote_broadcast_at = Some(now);
+        self.last_emitted_vote = Some(vote.clone());
         self.emitted_finality_vote = true;
         self.metrics.emitted_finality_votes = self.metrics.emitted_finality_votes.saturating_add(1);
         self.record_verified_vote(vote)
     }
 
-    fn emit_timeout_vote(&mut self) -> Result<(), String> {
+    fn emit_timeout_vote(&mut self, now: Instant) -> Result<(), String> {
         if self.emitted_timeout_vote {
             return Ok(());
         }
@@ -2171,9 +2182,30 @@ where
             .coordinator
             .timeout_vote(self.prepared_certificate.as_ref())?;
         self.broadcast(TypedConsensusMessage::Vote { vote: vote.clone() })?;
+        self.last_vote_broadcast_at = Some(now);
+        self.last_emitted_vote = Some(vote.clone());
         self.emitted_timeout_vote = true;
         self.metrics.emitted_timeout_votes = self.metrics.emitted_timeout_votes.saturating_add(1);
         self.record_verified_vote(vote)
+    }
+
+    fn rebroadcast_local_vote_if_due(&mut self, now: Instant) -> Result<(), String> {
+        let Some(last_broadcast) = self.last_vote_broadcast_at else {
+            return Ok(());
+        };
+        let Some(vote) = self.last_emitted_vote.clone() else {
+            return Ok(());
+        };
+        let due = now
+            .checked_duration_since(last_broadcast)
+            .map(|elapsed| elapsed >= VOTE_REBROADCAST_INTERVAL)
+            .unwrap_or(false);
+        if !due {
+            return Ok(());
+        }
+        self.broadcast(TypedConsensusMessage::Vote { vote })?;
+        self.last_vote_broadcast_at = Some(now);
+        Ok(())
     }
 
     fn broadcast(&mut self, message: TypedConsensusMessage) -> Result<(), String> {
@@ -2613,6 +2645,8 @@ where
         };
         self.round_started_at = Instant::now();
         self.last_proposal_broadcast_at = None;
+        self.last_vote_broadcast_at = None;
+        self.last_emitted_vote = None;
         self.emitted_proposal = false;
         self.emitted_validation_vote = false;
         self.emitted_finality_vote = false;
@@ -2785,6 +2819,8 @@ where
         self.observed_timeout_votes.clear();
         self.round_started_at = Instant::now();
         self.last_proposal_broadcast_at = None;
+        self.last_vote_broadcast_at = None;
+        self.last_emitted_vote = None;
         self.stage = TypedRoundStage::Proposal;
         self.emitted_proposal = false;
         self.emitted_validation_vote = false;
@@ -2811,6 +2847,8 @@ where
     fn reset_for_new_height(&mut self) {
         self.round_started_at = Instant::now();
         self.last_proposal_broadcast_at = None;
+        self.last_vote_broadcast_at = None;
+        self.last_emitted_vote = None;
         self.stage = TypedRoundStage::Proposal;
         self.emitted_proposal = false;
         self.emitted_validation_vote = false;
@@ -6241,5 +6279,57 @@ mod tests {
         let now = driver.round_started_at + Duration::from_millis(1_500);
         let error = driver.tick_at(now).unwrap_err();
         assert!(error.contains("transport delivered to zero"));
+    }
+
+    #[test]
+    fn driver_rebroadcasts_identical_vote_after_remote_mailbox_startup_loss() {
+        let mut coordinator = coordinator_fixture();
+        let scheduled = coordinator
+            .consensus
+            .proposer_for(
+                &coordinator.local_context.height_context,
+                coordinator.local_context.round,
+            )
+            .unwrap()
+            .validator_id;
+        coordinator.local_validator_id = coordinator
+            .consensus
+            .validator_set
+            .validators
+            .iter()
+            .find(|validator| validator.validator_id != scheduled)
+            .unwrap()
+            .validator_id
+            .clone();
+        let mut driver = driver_with(coordinator, 1);
+        let first_deadline = driver.round_started_at + Duration::from_millis(1_500);
+        driver
+            .tick_at(first_deadline)
+            .expect("the first timeout vote is emitted");
+        let first_vote = driver
+            .egress
+            .messages
+            .iter()
+            .find_map(|message| match message {
+                TypedConsensusMessage::Vote { vote } => Some(vote.clone()),
+                _ => None,
+            })
+            .expect("capture the first timeout vote");
+        driver.egress.messages.clear();
+
+        driver
+            .tick_at(first_deadline + VOTE_REBROADCAST_INTERVAL)
+            .expect("the same signed vote is rebroadcast after startup loss");
+        let rebroadcast = driver
+            .egress
+            .messages
+            .iter()
+            .find_map(|message| match message {
+                TypedConsensusMessage::Vote { vote } => Some(vote.clone()),
+                _ => None,
+            })
+            .expect("capture the rebroadcast timeout vote");
+        assert_eq!(first_vote, rebroadcast);
+        assert_eq!(driver.metrics().emitted_timeout_votes, 1);
     }
 }
