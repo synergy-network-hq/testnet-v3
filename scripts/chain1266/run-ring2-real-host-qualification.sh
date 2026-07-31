@@ -11,12 +11,14 @@ release_id="${CHAIN1266_RING2_RELEASE_ID:?CHAIN1266_RING2_RELEASE_ID is required
 output="${CHAIN1266_RING2_OUTPUT_DIR:?CHAIN1266_RING2_OUTPUT_DIR is required}"
 target_height="${CHAIN1266_RING2_TARGET_HEIGHT:-10000}"
 run_id="${CHAIN1266_RING2_RUN_ID:-c1266q$(date -u +%Y%m%d%H%M%S)}"
+preflight_only="${CHAIN1266_RING2_PREFLIGHT_ONLY:-0}"
 
 [[ "$release_host" == synergy-val1 ]] || { echo "Ring-2 release host must be synergy-val1" >&2; exit 2; }
 [[ "$release_id" =~ ^chain1266-incarnation-4-rc[0-9]+$ ]] || { echo "invalid release ID" >&2; exit 2; }
 [[ "$release_dir" == /* && "$release_dir" != *$'\n'* ]] || { echo "release directory must be an absolute one-line remote path" >&2; exit 2; }
 [[ "$target_height" =~ ^[0-9]+$ ]] && (( target_height >= 10000 )) || { echo "target height must be at least 10000" >&2; exit 2; }
 [[ "$run_id" =~ ^c1266q[a-z0-9]{6,24}$ ]] || { echo "run ID must be a compact c1266q identifier" >&2; exit 2; }
+[[ "$preflight_only" == 0 || "$preflight_only" == 1 ]] || { echo "preflight-only must be 0 or 1" >&2; exit 2; }
 
 # Keep every logical command on a host multiplexed through exactly one
 # workbook-backed SSH master.  This is intentionally the only SSH interface
@@ -95,8 +97,6 @@ cleanup() {
     " || true
   done
 }
-trap cleanup EXIT INT TERM
-
 # A preflight is intentionally read-only.  The control-plane command that
 # appends RING2_REAL_HOST_QUALIFICATION_BEGIN must be run immediately before
 # this script, after this succeeds and before any of the mutations below.
@@ -122,6 +122,13 @@ PY
 )"
   [[ -n "${endpoint[$host]}" ]] || { echo "could not resolve workbook alias $host for WireGuard" >&2; exit 1; }
 done
+
+if [[ "$preflight_only" == 1 ]]; then
+  echo "CHAIN1266_RING2_REAL_HOST_PREFLIGHT_PASS release=$release_id run=$run_id"
+  exit 0
+fi
+
+trap cleanup EXIT INT TERM
 
 # Create the entire disposable source tree on val1.  No production state,
 # identity, WireGuard key, or canonical service file is read by this step.
