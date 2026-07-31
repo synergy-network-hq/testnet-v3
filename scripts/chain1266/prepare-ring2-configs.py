@@ -34,6 +34,24 @@ NODE_IPS = {
     "observer": "10.126.30.3",
 }
 
+# The source configs were rendered for the first disposable overlay.  Replace
+# every role endpoint explicitly, rather than relying on hostname substitutions:
+# persistent validator records retain their dial_address as an IP literal.
+LEGACY_NODE_IPS = {
+    "validator-node-01": "10.70.10.1",
+    "validator-node-02": "10.70.10.2",
+    "validator-node-03": "10.70.10.3",
+    "validator-node-04": "10.70.10.4",
+    "validator-node-05": "10.70.10.5",
+    "validator-node-06": "10.70.10.6",
+    "relay1": "10.70.20.1",
+    "relay2": "10.70.20.2",
+    "relay3": "10.70.20.3",
+    "rpc-gateway": "10.70.30.1",
+    "explorer-indexer": "10.70.30.2",
+    "observer": "10.70.30.3",
+}
+
 VALIDATOR_ADDRESSES = [
     "synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t",
     "synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk",
@@ -67,6 +85,8 @@ def rewrite_config(source: pathlib.Path, target: pathlib.Path, genesis: dict, ge
         text = text.replace(value, genesis_sha)
     for public, private in HOST_MAP.items():
         text = text.replace(public, private)
+    for role, legacy_ip in LEGACY_NODE_IPS.items():
+        text = text.replace(legacy_ip, NODE_IPS[role])
     text = re.sub(r'^bootnodes = .*$', 'bootnodes = []', text, flags=re.MULTILINE)
     text = re.sub(r'^seed_servers = .*$', 'seed_servers = []', text, flags=re.MULTILINE)
     text = re.sub(
@@ -136,7 +156,7 @@ def rewrite_config(source: pathlib.Path, target: pathlib.Path, genesis: dict, ge
         flags=re.MULTILINE,
     )
     if "synergynode.xyz" in text or re.search(
-        r"\b(?:65\.21\.202\.144|73\.79\.66\.255|209\.145\.50\.9|74\.208\.227\.23)\b",
+        r"\b(?:10\.70\.|65\.21\.202\.144|73\.79\.66\.255|209\.145\.50\.9|74\.208\.227\.23)\b",
         text,
     ):
         raise SystemExit(f"{source}: public-network target survived Ring-2 rendering")
