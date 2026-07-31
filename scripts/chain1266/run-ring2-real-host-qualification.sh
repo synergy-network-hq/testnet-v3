@@ -223,7 +223,7 @@ EOF
 CHAIN1266_ROLE_BINARY=$root/bin/$binary
 CHAIN1266_ROLE_CONFIG=$root/config/$config
 SYNERGY_PROJECT_ROOT=$root/project/$role
-SYNERGY_DATA_PATH=$data/$role/data
+SYNERGY_DATA_PATH=\$data/$role/data
 SYNERGY_GENESIS_FILE=$root/shared/genesis.json
 SYNERGY_DESIRED_STATE_MANIFEST=$root/shared/desired-state.json
 SYNERGY_DESIRED_STATE_MANIFEST_SHA256=\$(sudo -n sha256sum \"\$root/shared/desired-state.json\" | awk '{print \$1}')
