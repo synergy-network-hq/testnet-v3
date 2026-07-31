@@ -218,7 +218,8 @@ SYNERGY_CONSENSUS_START_RELEASE_FILE=$root/shared/start-consensus.json"
     ssh_run "$host" "
       set -euo pipefail
       root=$(q "$root"); data=$(q "$data_root"); unit=$(q "$unit"); role=$(q "$role")
-      sudo -n install -d -m 0755 /run/synergy-chain1266 /run/systemd/system/synergy-chain1266-role@.service.d \"\$data/\$role/data\" \"\$root/project/\$role\"
+      sudo -n install -d -m 0755 /run/synergy-chain1266 /run/systemd/system/synergy-chain1266-role@.service.d \"\$data/\$role/data\" \"\$root/project/\$role/config\"
+      sudo -n install -m 0644 \"\$root/config/$config\" \"\$root/project/\$role/config/node_config.toml\"
       sudo -n tee /run/systemd/system/synergy-chain1266-role@.service.d/$(q "$run_id").conf >/dev/null <<'EOF'
 [Service]
 EnvironmentFile=
