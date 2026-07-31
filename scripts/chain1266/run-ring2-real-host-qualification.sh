@@ -70,6 +70,7 @@ root="/opt/synergy/chain1266-qualification/$run_id"
 data_root="/var/lib/synergy/chain1266-qualification/$run_id"
 iface="c1266q${run_id: -6}"
 fw_chain="C1266Q${run_id: -6}"
+qualification_unit="/run/systemd/system/synergy-chain1266-role@.service"
 mkdir -p "$output"
 chmod 0700 "$output"
 
@@ -80,11 +81,12 @@ cleanup() {
   for host in "${hosts[@]}"; do
     ssh_run "$host" "
       set +e
-      run=$(q "$run_id"); root=$(q "$root"); data=$(q "$data_root"); iface=$(q "$iface"); chain=$(q "$fw_chain")
+      run=$(q "$run_id"); root=$(q "$root"); data=$(q "$data_root"); iface=$(q "$iface"); chain=$(q "$fw_chain"); unit_file=$(q "$qualification_unit")
       [[ \"\$run\" =~ ^c1266q[a-z0-9]{6,24}\$ ]] || exit 0
       for unit in \$(systemctl list-units --all --plain --no-legend 'synergy-chain1266-role@'\"\$run\"'-*.service' 2>/dev/null | awk '{print \$1}'); do sudo -n systemctl stop \"\$unit\" || true; done
       sudo -n rm -f /run/synergy-chain1266/\"\$run\"-*.env 2>/dev/null || true
       sudo -n rm -f /run/systemd/system/synergy-chain1266-role@.service.d/\"\$run\".conf 2>/dev/null || true
+      sudo -n rm -f \"\$unit_file\" 2>/dev/null || true
       sudo -n systemctl daemon-reload || true
       sudo -n iptables -D INPUT -d 10.70.0.0/16 -j \"\$chain\" 2>/dev/null || true
       sudo -n iptables -F \"\$chain\" 2>/dev/null || true
@@ -108,6 +110,7 @@ for host in "${hosts[@]}"; do
     for service in synergy-chain1266-role@validator-node-01.service synergy-chain1266-role@validator-node-02.service synergy-chain1266-role@validator-node-03.service synergy-chain1266-role@validator-node-04.service synergy-chain1266-role@validator-node-05.service synergy-chain1266-role@validator-node-06.service; do
       [[ "$(systemctl is-active "$service" 2>/dev/null || true)" != active ]]
     done
+    [[ ! -e /run/systemd/system/synergy-chain1266-role@.service ]]
   '
 done
 
@@ -196,6 +199,10 @@ for host in "${hosts[@]}"; do
   done
   quoted=(); for part in "${peer_args[@]}"; do quoted+=("$(q "$part")"); done
   ssh_run "$host" "set -euo pipefail; sudo -n wg set $(q "$iface") ${quoted[*]}; sudo -n iptables -N $(q "$fw_chain"); sudo -n iptables -A $(q "$fw_chain") -i lo -j RETURN; sudo -n iptables -A $(q "$fw_chain") -i $(q "$iface") -j RETURN; sudo -n iptables -A $(q "$fw_chain") -j DROP; sudo -n iptables -I INPUT -d 10.70.0.0/16 -j $(q "$fw_chain"); ip route show default dev $(q "$iface") | grep -q . && exit 1 || true"
+done
+
+for host in "${hosts[@]}"; do
+  ssh_run "$host" "sudo -n install -m 0644 $(q "$root")/systemd/synergy-chain1266-role@.service $(q "$qualification_unit"); sudo -n systemctl daemon-reload"
 done
 
 for host in "${hosts[@]}"; do
