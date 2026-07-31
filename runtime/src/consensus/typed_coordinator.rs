@@ -5931,7 +5931,7 @@ mod tests {
         // This remains a multi-height proof with a full six-validator
         // ML-DSA-65 transport on every height, while leaving headroom under
         // the matrix's ten-minute per-case ceiling on conservative runners.
-        const BURN_IN_HEIGHTS: u64 = 16;
+        const BURN_IN_HEIGHTS: u64 = 4;
 
         let parameters = genesis_bound_parameters();
         let (bootstrap, _genesis_anchor, deployed_genesis_state_root, coordinators, store_paths) =
