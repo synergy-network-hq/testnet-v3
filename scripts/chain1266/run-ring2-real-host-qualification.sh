@@ -147,6 +147,10 @@ ssh_run synergy-val1 "
   sudo -n cp \"\$release/genesis.json\" \"\$root/shared/source-genesis.json\"
   sudo -n \"\$root/bin/build-chain1266-private-ring-material\" --source-genesis \"\$root/shared/source-genesis.json\" --output-genesis \"\$root/shared/genesis.json\" --key-root \"\$root/private\"
   sudo -n python3 \"\$release/qualification-tools/prepare-ring2-configs.py\" --release-dir \"\$release\" --genesis \"\$root/shared/genesis.json\" --output \"\$root/config\"
+  if sudo -n grep -R -q -E '10[.]70[.]' "\$root/shared/genesis.json" "\$root/config"; then
+    echo 'private qualification material retains a legacy overlay endpoint' >&2
+    exit 1
+  fi
   release_id=$(q "$release_id")
   tag=chain1266-v20.0.0-rc.\${release_id##*rc}
   testnet=\$(jq -er .source.testnet_v3_revision \"\$release/desired-state.json\")
