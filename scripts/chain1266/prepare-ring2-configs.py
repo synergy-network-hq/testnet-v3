@@ -12,26 +12,26 @@ import shutil
 
 
 HOST_MAP = {
-    "relay1.synergynode.xyz": "10.70.20.1",
-    "relay2.synergynode.xyz": "10.70.20.2",
-    "relay3.synergynode.xyz": "10.70.20.3",
-    "rpc.synergynode.xyz": "10.70.30.1",
-    "atlas.synergynode.xyz": "10.70.30.2",
+    "relay1.synergynode.xyz": "10.126.20.1",
+    "relay2.synergynode.xyz": "10.126.20.2",
+    "relay3.synergynode.xyz": "10.126.20.3",
+    "rpc.synergynode.xyz": "10.126.30.1",
+    "atlas.synergynode.xyz": "10.126.30.2",
 }
 
 NODE_IPS = {
-    "validator-node-01": "10.70.10.1",
-    "validator-node-02": "10.70.10.2",
-    "validator-node-03": "10.70.10.3",
-    "validator-node-04": "10.70.10.4",
-    "validator-node-05": "10.70.10.5",
-    "validator-node-06": "10.70.10.6",
-    "relay1": "10.70.20.1",
-    "relay2": "10.70.20.2",
-    "relay3": "10.70.20.3",
-    "rpc-gateway": "10.70.30.1",
-    "explorer-indexer": "10.70.30.2",
-    "observer": "10.70.30.3",
+    "validator-node-01": "10.126.10.1",
+    "validator-node-02": "10.126.10.2",
+    "validator-node-03": "10.126.10.3",
+    "validator-node-04": "10.126.10.4",
+    "validator-node-05": "10.126.10.5",
+    "validator-node-06": "10.126.10.6",
+    "relay1": "10.126.20.1",
+    "relay2": "10.126.20.2",
+    "relay3": "10.126.20.3",
+    "rpc-gateway": "10.126.30.1",
+    "explorer-indexer": "10.126.30.2",
+    "observer": "10.126.30.3",
 }
 
 VALIDATOR_ADDRESSES = [
@@ -85,7 +85,7 @@ def rewrite_config(source: pathlib.Path, target: pathlib.Path, genesis: dict, ge
     ]
     isolated_targets = validator_targets + [
         address
-        for address in ("10.70.20.1:5622", "10.70.20.2:5622", "10.70.20.3:5622")
+        for address in ("10.126.20.1:5622", "10.126.20.2:5622", "10.126.20.3:5622")
         if address != f"{node_ip}:5622"
     ]
     encoded_targets = json.dumps(isolated_targets, separators=(", ", ": "))

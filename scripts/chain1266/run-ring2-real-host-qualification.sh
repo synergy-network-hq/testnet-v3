@@ -40,11 +40,11 @@ declare -A hosted_roles=(
   [synergy-val6]='validator-node-06 relay3 explorer-indexer observer'
 )
 declare -A role_ip=(
-  [validator-node-01]=10.70.10.1 [validator-node-02]=10.70.10.2
-  [validator-node-03]=10.70.10.3 [validator-node-04]=10.70.10.4
-  [validator-node-05]=10.70.10.5 [validator-node-06]=10.70.10.6
-  [relay1]=10.70.20.1 [relay2]=10.70.20.2 [relay3]=10.70.20.3
-  [rpc-gateway]=10.70.30.1 [explorer-indexer]=10.70.30.2 [observer]=10.70.30.3
+  [validator-node-01]=10.126.10.1 [validator-node-02]=10.126.10.2
+  [validator-node-03]=10.126.10.3 [validator-node-04]=10.126.10.4
+  [validator-node-05]=10.126.10.5 [validator-node-06]=10.126.10.6
+  [relay1]=10.126.20.1 [relay2]=10.126.20.2 [relay3]=10.126.20.3
+  [rpc-gateway]=10.126.30.1 [explorer-indexer]=10.126.30.2 [observer]=10.126.30.3
 )
 declare -A role_binary=(
   [validator-node-01]=synergy-validator-node [validator-node-02]=synergy-validator-node
@@ -88,7 +88,7 @@ cleanup() {
       sudo -n rm -f /run/systemd/system/synergy-chain1266-role@.service.d/\"\$run\".conf 2>/dev/null || true
       sudo -n rm -f \"\$unit_file\" 2>/dev/null || true
       sudo -n systemctl daemon-reload || true
-      sudo -n iptables -D INPUT -d 10.70.0.0/16 -j \"\$chain\" 2>/dev/null || true
+      sudo -n iptables -D INPUT -d 10.126.0.0/16 -j \"\$chain\" 2>/dev/null || true
       sudo -n iptables -F \"\$chain\" 2>/dev/null || true
       sudo -n iptables -X \"\$chain\" 2>/dev/null || true
       sudo -n ip link delete \"\$iface\" 2>/dev/null || true
@@ -198,7 +198,7 @@ for host in "${hosts[@]}"; do
     peer_args+=(peer "${wg_public[$peer]}" allowed-ips "$(IFS=,; echo "${allowed[*]}")" endpoint "${endpoint[$peer]}:$((51830 + ${host_number[$peer]}))" persistent-keepalive 5)
   done
   quoted=(); for part in "${peer_args[@]}"; do quoted+=("$(q "$part")"); done
-  ssh_run "$host" "set -euo pipefail; sudo -n wg set $(q "$iface") ${quoted[*]}; sudo -n iptables -N $(q "$fw_chain"); sudo -n iptables -A $(q "$fw_chain") -i lo -j RETURN; sudo -n iptables -A $(q "$fw_chain") -i $(q "$iface") -j RETURN; sudo -n iptables -A $(q "$fw_chain") -j DROP; sudo -n iptables -I INPUT -d 10.70.0.0/16 -j $(q "$fw_chain"); ip route show default dev $(q "$iface") | grep -q . && exit 1 || true"
+  ssh_run "$host" "set -euo pipefail; sudo -n wg set $(q "$iface") ${quoted[*]}; sudo -n iptables -N $(q "$fw_chain"); sudo -n iptables -A $(q "$fw_chain") -i lo -j RETURN; sudo -n iptables -A $(q "$fw_chain") -i $(q "$iface") -j RETURN; sudo -n iptables -A $(q "$fw_chain") -j DROP; sudo -n iptables -I INPUT -d 10.126.0.0/16 -j $(q "$fw_chain"); ip route show default dev $(q "$iface") | grep -q . && exit 1 || true"
 done
 
 for host in "${hosts[@]}"; do
