@@ -2308,7 +2308,8 @@ fn process_json_rpc_request_object(
         Ok(value) => Ok(Some(json!({
             "jsonrpc": "2.0",
             "id": id.clone().unwrap_or(Value::Null),
-            "result": value
+            "result": value,
+            "chain_context": rpc_chain_context_json()
         }))),
         Err(error) => Ok(Some(json_rpc_error_response(id, &error))),
     }
@@ -6438,7 +6439,8 @@ fn json_rpc_error_response(id: Option<Value>, error: &RpcError) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": id.unwrap_or(Value::Null),
-        "error": Value::Object(payload)
+        "error": Value::Object(payload),
+        "chain_context": rpc_chain_context_json()
     })
 }
 
@@ -6525,6 +6527,24 @@ fn current_genesis_hash() -> String {
         .unwrap_or_default()
 }
 
+fn rpc_chain_context_json() -> Value {
+    canonical_genesis()
+        .map(|genesis| {
+            json!({
+                "chain_id": genesis.chain_id(),
+                "chain_incarnation": genesis.chain_incarnation(),
+                "genesis_hash": genesis.hash(),
+            })
+        })
+        .unwrap_or_else(|_| {
+            json!({
+                "chain_id": 1266,
+                "chain_incarnation": Value::Null,
+                "genesis_hash": "",
+            })
+        })
+}
+
 fn current_protocol_version() -> String {
     canonical_genesis()
         .map(|genesis| genesis.protocol_version().to_string())
@@ -6538,6 +6558,7 @@ fn chain_identity_json() -> Value {
         "chain_id": chain_id,
         "chain_id_hex": format!("0x{chain_id:x}"),
         "network_id": current_network_id(),
+        "chain_incarnation": crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
         "genesis_hash": current_genesis_hash(),
     })
 }
@@ -9844,6 +9865,7 @@ fn emit_subscription_notifications(
                     let notification = json!({
                         "jsonrpc": "2.0",
                         "method": "synergy_subscription",
+                        "chain_context": rpc_chain_context_json(),
                         "params": {
                             "subscription": subscription_id,
                             "result": {
@@ -9885,6 +9907,7 @@ fn emit_subscription_notifications(
                         let notification = json!({
                             "jsonrpc": "2.0",
                             "method": "synergy_subscription",
+                            "chain_context": rpc_chain_context_json(),
                             "params": {
                                 "subscription": subscription_id,
                                 "result": log
@@ -9909,6 +9932,7 @@ fn emit_subscription_notifications(
                         let notification = json!({
                             "jsonrpc": "2.0",
                             "method": "synergy_subscription",
+                            "chain_context": rpc_chain_context_json(),
                             "params": {
                                 "subscription": subscription_id,
                                 "result": hash
@@ -9939,6 +9963,7 @@ fn emit_subscription_notifications(
                     let notification = json!({
                         "jsonrpc": "2.0",
                         "method": "synergy_subscription",
+                        "chain_context": rpc_chain_context_json(),
                         "params": {
                             "subscription": subscription_id,
                             "result": {

@@ -6,6 +6,7 @@ const digest = 'a'.repeat(64);
 const baseConfig = () => ({
   schema_version: 1,
   chain_id: 1266,
+  chain_incarnation: 4,
   network_id: 'synergy-testnet-v3',
   genesis_hash: digest,
   network_magic: '1a2b3c4d',
@@ -21,6 +22,7 @@ const baseConfig = () => ({
 test('accepts a complete final Testnet-v3 configuration', () => {
   const config = validateNetworkConfig(baseConfig());
   assert.equal(config.chain_id, 1266);
+  assert.equal(config.chain_incarnation, 4);
   assert.equal(config.network_id, 'synergy-testnet-v3');
   assert.match(config.manifest_sha256, /^[a-f0-9]{64}$/);
 });
@@ -35,6 +37,12 @@ test('fails closed on a non-Testnet-v3 chain identity', () => {
   const config = baseConfig();
   config.chain_id = 1265;
   assert.throws(() => validateNetworkConfig(config), /chain_id/);
+});
+
+test('fails closed on a stale chain incarnation', () => {
+  const config = baseConfig();
+  config.chain_incarnation = 3;
+  assert.throws(() => validateNetworkConfig(config), /chain_incarnation/);
 });
 
 test('fails closed without a secure websocket endpoint', () => {

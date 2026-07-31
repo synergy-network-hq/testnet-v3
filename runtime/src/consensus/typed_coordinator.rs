@@ -5,7 +5,8 @@
 //! validator duties are enabled; until then typed messages are rejected rather
 //! than being queued, replayed, or interpreted by a legacy handler.
 
-use crate::consensus::posy::{LocalConsensusContext, ProofOfSynergyBft};
+use crate::consensus::posy::{LocalConsensusContext, ProofOfSynergyBft, VerifiedVote};
+use crate::consensus::signing_authority::DurableConsensusRecoveryCheckpoint;
 use crate::consensus::testnet_v3_bootstrap::TestnetV3GenesisBootstrap;
 use crate::consensus::typed_finality_store::{
     TypedEpochTransitionRecord, TypedFinalityRecord, TypedFinalityStore,
@@ -30,11 +31,11 @@ use crate::synergy_types::{
     TimeoutCertificate, UmaId, ValidationCertificate, ValidatorId, ValidatorSet, ValidatorStatus,
     Vote, VotePhase,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Bounded inbound work item whose sender is authenticated by the P2P layer.
 #[derive(Debug, Clone)]
@@ -388,6 +389,156 @@ pub struct TypedCoordinatorDriverMetrics {
     pub deduplicated_replays: u64,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TypedConsensusTelemetrySnapshot {
+    pub finalized_height: u64,
+    pub finalized_block_id: String,
+    pub finalized_round: u64,
+    pub finality_interval_millis: u64,
+    pub finality_intervals_millis: VecDeque<u64>,
+    pub finalized_blocks: u64,
+    pub round_zero_finalized_blocks: u64,
+    pub current_height: u64,
+    pub current_round: u64,
+    pub prepared_height: u64,
+    pub prepared_candidate: String,
+    pub prepared_round: u64,
+    pub highest_qc_height: u64,
+    pub highest_qc_block_id: String,
+    pub highest_qc_root: String,
+    pub highest_tc_round: u64,
+    pub highest_tc_root: String,
+    pub mailbox_depth: usize,
+    pub phase_duration_millis: BTreeMap<String, u64>,
+    pub messages_received: BTreeMap<String, u64>,
+    pub messages_deduplicated: BTreeMap<String, u64>,
+    pub messages_rejected_precrypto: BTreeMap<String, u64>,
+    pub rebroadcasts: BTreeMap<String, u64>,
+    pub restarts: u64,
+    pub startup_phase: String,
+}
+
+#[derive(Debug, Default)]
+struct TypedConsensusTelemetry {
+    snapshot: TypedConsensusTelemetrySnapshot,
+    last_finalized_unix_ms: Option<u64>,
+}
+
+static TYPED_CONSENSUS_TELEMETRY: OnceLock<Mutex<TypedConsensusTelemetry>> = OnceLock::new();
+
+fn typed_consensus_telemetry() -> &'static Mutex<TypedConsensusTelemetry> {
+    TYPED_CONSENSUS_TELEMETRY.get_or_init(|| Mutex::new(TypedConsensusTelemetry::default()))
+}
+
+fn typed_message_kind(message: &TypedConsensusMessage) -> &'static str {
+    match message {
+        TypedConsensusMessage::CoreProposal { .. } => "core_proposal",
+        TypedConsensusMessage::Proposal { .. } => "proposal",
+        TypedConsensusMessage::Vote { vote } => match vote.phase {
+            VotePhase::Validate => "validation_vote",
+            VotePhase::Finality => "finality_vote",
+            VotePhase::Timeout => "timeout_vote",
+        },
+        TypedConsensusMessage::ValidationCertificate { .. } => "validation_certificate",
+        TypedConsensusMessage::QuorumCertificate { .. } => "quorum_certificate",
+        TypedConsensusMessage::TimeoutCertificate { .. } => "timeout_certificate",
+        TypedConsensusMessage::PreparedCertificateRequest { .. } => "prepared_certificate_request",
+        TypedConsensusMessage::PreparedCertificateResponse { .. } => {
+            "prepared_certificate_response"
+        }
+        TypedConsensusMessage::FinalityCheckpointRequest { .. } => "finality_checkpoint_request",
+        TypedConsensusMessage::FinalityCheckpoint { .. } => "finality_checkpoint",
+    }
+}
+
+fn increment_typed_metric(
+    select: impl FnOnce(&mut TypedConsensusTelemetrySnapshot) -> &mut BTreeMap<String, u64>,
+    label: &str,
+) {
+    if let Ok(mut telemetry) = typed_consensus_telemetry().lock() {
+        let value = select(&mut telemetry.snapshot)
+            .entry(label.to_string())
+            .or_default();
+        *value = value.saturating_add(1);
+    }
+}
+
+fn typed_round_stage_label(stage: TypedRoundStage) -> &'static str {
+    match stage {
+        TypedRoundStage::Proposal => "proposal",
+        TypedRoundStage::Validation => "validation",
+        TypedRoundStage::Finality => "finality",
+        TypedRoundStage::WaitingForCertificate => "waiting_for_certificate",
+    }
+}
+
+fn record_typed_phase_duration(stage: TypedRoundStage, elapsed: Duration) {
+    if let Ok(mut telemetry) = typed_consensus_telemetry().lock() {
+        telemetry.snapshot.phase_duration_millis.insert(
+            typed_round_stage_label(stage).to_string(),
+            elapsed.as_millis().min(u64::MAX as u128) as u64,
+        );
+    }
+}
+
+fn record_typed_finality(height: u64, block_id: &BlockId, round: u64) {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64;
+    if let Ok(mut telemetry) = typed_consensus_telemetry().lock() {
+        telemetry.snapshot.finalized_height = height;
+        telemetry.snapshot.finalized_block_id = block_id.0.clone();
+        telemetry.snapshot.finalized_round = round;
+        telemetry.snapshot.finalized_blocks = telemetry.snapshot.finalized_blocks.saturating_add(1);
+        if round == 0 {
+            telemetry.snapshot.round_zero_finalized_blocks = telemetry
+                .snapshot
+                .round_zero_finalized_blocks
+                .saturating_add(1);
+        }
+        telemetry.snapshot.finality_interval_millis = telemetry
+            .last_finalized_unix_ms
+            .map(|previous| now_ms.saturating_sub(previous))
+            .unwrap_or_default();
+        if telemetry.snapshot.finality_interval_millis > 0 {
+            let interval = telemetry.snapshot.finality_interval_millis;
+            telemetry
+                .snapshot
+                .finality_intervals_millis
+                .push_back(interval);
+            while telemetry.snapshot.finality_intervals_millis.len() > 10_000 {
+                telemetry.snapshot.finality_intervals_millis.pop_front();
+            }
+        }
+        telemetry.last_finalized_unix_ms = Some(now_ms);
+    }
+}
+
+pub fn typed_consensus_telemetry_snapshot() -> TypedConsensusTelemetrySnapshot {
+    let mut snapshot = typed_consensus_telemetry()
+        .lock()
+        .map(|telemetry| telemetry.snapshot.clone())
+        .unwrap_or_default();
+    let queued_votes = typed_vote_queue_depths()
+        .lock()
+        .map(|depths| depths.values().copied().sum::<usize>())
+        .unwrap_or_default();
+    let startup_messages = startup_buffer()
+        .lock()
+        .map(|buffer| buffer.messages.len())
+        .unwrap_or_default();
+    snapshot.mailbox_depth = queued_votes.saturating_add(startup_messages);
+    snapshot
+}
+
+pub fn set_typed_consensus_startup_phase(phase: &str) {
+    if let Ok(mut telemetry) = typed_consensus_telemetry().lock() {
+        telemetry.snapshot.startup_phase = phase.to_string();
+    }
+}
+
 /// Operational typed PoSy driver.  It is the only component that schedules
 /// proposal, vote, timeout, certificate, carry-forward, and next-height work.
 /// The coordinator still owns all cryptographic and state-transition checks;
@@ -408,6 +559,7 @@ where
     next_height_source: H,
     ingress_rotator: R,
     round_started_at: Instant,
+    stage_started_at: Instant,
     last_proposal_broadcast_at: Option<Instant>,
     local_vote_rebroadcasts: Vec<(Vote, Instant)>,
     stage: TypedRoundStage,
@@ -415,9 +567,9 @@ where
     emitted_finality_vote: bool,
     emitted_timeout_vote: bool,
     emitted_proposal: bool,
-    validation_votes: BTreeMap<BlockId, BTreeMap<ValidatorId, Vote>>,
-    finality_votes: BTreeMap<BlockId, BTreeMap<ValidatorId, Vote>>,
-    timeout_votes: BTreeMap<ValidatorId, Vote>,
+    validation_votes: BTreeMap<BlockId, BTreeMap<ValidatorId, VerifiedVote>>,
+    finality_votes: BTreeMap<BlockId, BTreeMap<ValidatorId, VerifiedVote>>,
+    timeout_votes: BTreeMap<ValidatorId, VerifiedVote>,
     observed_validation_votes: BTreeMap<ValidatorId, Vote>,
     observed_finality_votes: BTreeMap<ValidatorId, Vote>,
     observed_timeout_votes: BTreeMap<ValidatorId, Vote>,
@@ -1133,6 +1285,30 @@ impl TypedPosyCoordinator {
             .form_tc(votes, &self.local_context.height_context)
     }
 
+    fn form_validation_certificate_from_verified(
+        &mut self,
+        votes: &[VerifiedVote],
+    ) -> Result<ValidationCertificate, String> {
+        self.consensus
+            .form_vc_from_verified(votes, &self.local_context.height_context)
+    }
+
+    fn form_finality_certificate_from_verified(
+        &mut self,
+        votes: &[VerifiedVote],
+    ) -> Result<QuorumCertificate, String> {
+        self.consensus
+            .form_qc_from_verified(votes, &self.local_context.height_context)
+    }
+
+    fn form_timeout_certificate_from_verified(
+        &mut self,
+        votes: &[VerifiedVote],
+    ) -> Result<TimeoutCertificate, String> {
+        self.consensus
+            .form_tc_from_verified(votes, &self.local_context.height_context)
+    }
+
     /// Re-signs the exact prepared candidate for the TC-authorized next round.
     /// The underlying PoSy implementation verifies the VC, TC, scheduled
     /// proposer, and stable candidate identity before releasing the signature.
@@ -1351,6 +1527,8 @@ impl TypedPosyCoordinator {
         self.local_context.latest_finalized_block_hash = Hash::from_hex(&record.block_id.0)
             .map_err(|error| format!("finalized typed block ID is not a hash: {error}"))?;
         self.local_context.latest_finalized_state_root = block.header.state_root_after;
+        self.local_context.latest_finalized_timestamp_ms =
+            block.header.timestamp_ms_consensus_bounded;
         Ok(TypedCoordinatorEvent::Finalized { record })
     }
 
@@ -1474,6 +1652,16 @@ where
     H: TypedNextHeightContextSource,
     R: TypedEtdagIngressRotator,
 {
+    pub(crate) fn required_remote_validator_count(&self) -> usize {
+        self.coordinator
+            .consensus
+            .validator_set
+            .active_for_epoch(self.coordinator.local_context.height_context.epoch)
+            .validators
+            .len()
+            .saturating_sub(1)
+    }
+
     pub fn new_with_ingress_rotator(
         coordinator: TypedPosyCoordinator,
         protected_inputs: EtdagProtectedInputCoordinator,
@@ -1493,6 +1681,7 @@ where
             next_height_source,
             ingress_rotator,
             round_started_at: Instant::now(),
+            stage_started_at: Instant::now(),
             last_proposal_broadcast_at: None,
             local_vote_rebroadcasts: Vec::new(),
             stage: TypedRoundStage::Proposal,
@@ -1524,6 +1713,18 @@ where
             } else {
                 driver.install_recovered_prepared_record(record, false)?;
             }
+        }
+        driver.commit_atomic_recovery_checkpoint()?;
+        let durable_restarts = driver
+            .coordinator
+            .consensus
+            .signing_authority
+            .record_coordinator_start()?;
+        if let Ok(mut telemetry) = typed_consensus_telemetry().lock() {
+            telemetry.snapshot.restarts = durable_restarts;
+            telemetry.snapshot.current_height =
+                driver.coordinator.local_context.height_context.height.0;
+            telemetry.snapshot.current_round = driver.coordinator.local_context.round.0;
         }
         Ok(driver)
     }
@@ -1636,7 +1837,7 @@ where
 
         if elapsed >= round_cap && !self.emitted_timeout_vote {
             self.emit_timeout_vote(now)?;
-            self.stage = TypedRoundStage::WaitingForCertificate;
+            self.transition_stage(TypedRoundStage::WaitingForCertificate, now);
             return Ok(());
         }
 
@@ -1646,18 +1847,18 @@ where
 
         if self.stage == TypedRoundStage::Proposal && elapsed >= proposal_deadline {
             self.emit_timeout_vote(now)?;
-            self.stage = TypedRoundStage::WaitingForCertificate;
+            self.transition_stage(TypedRoundStage::WaitingForCertificate, now);
         }
 
         if self.stage == TypedRoundStage::Validation && elapsed >= validation_deadline {
             self.emit_timeout_vote(now)?;
-            self.stage = TypedRoundStage::WaitingForCertificate;
+            self.transition_stage(TypedRoundStage::WaitingForCertificate, now);
         }
 
         if self.stage == TypedRoundStage::Finality && elapsed >= finality_deadline {
             if self.finality_certificate.is_none() {
                 self.emit_timeout_vote(now)?;
-                self.stage = TypedRoundStage::WaitingForCertificate;
+                self.transition_stage(TypedRoundStage::WaitingForCertificate, now);
             }
         }
         self.request_finality_recovery_if_stalled(now)?;
@@ -1715,7 +1916,12 @@ where
                         TypedPreparedRecord {
                             record_version: TYPED_PREPARED_RECORD_VERSION,
                             height: block.header.height,
+                            epoch: block.header.epoch,
+                            current_round: timeout_certificate.next_round,
                             height_context_root: block.header.height_context_root,
+                            active_validator_set_hash: block.header.active_validator_set_hash,
+                            prepared_round: validation_certificate.round,
+                            prepared_candidate_id: block.candidate_id()?,
                             block,
                             validation_certificate,
                             timeout_certificate: Some(timeout_certificate),
@@ -1730,6 +1936,10 @@ where
             return Ok(event);
         }
         if let Some(event) = self.accept_exact_authenticated_replay(&envelope, peer_authorizer)? {
+            increment_typed_metric(
+                |snapshot| &mut snapshot.messages_deduplicated,
+                typed_message_kind(&message),
+            );
             self.metrics.accepted_messages = self.metrics.accepted_messages.saturating_add(1);
             self.metrics.deduplicated_replays = self.metrics.deduplicated_replays.saturating_add(1);
             return Ok(event);
@@ -2049,7 +2259,7 @@ where
         if self.stage == TypedRoundStage::Proposal {
             if let Some(block) = self.current_round_proposal().cloned() {
                 self.emit_validation_vote(&block, now)?;
-                self.stage = TypedRoundStage::Validation;
+                self.transition_stage(TypedRoundStage::Validation, now);
             }
         }
 
@@ -2075,7 +2285,7 @@ where
                 if self.coordinator.local_context.height_context.height == height
                     && self.coordinator.local_context.round == round
                 {
-                    self.stage = TypedRoundStage::Finality;
+                    self.transition_stage(TypedRoundStage::Finality, now);
                 }
             }
         }
@@ -2096,6 +2306,14 @@ where
         // to Validation or Finality because a remote mailbox can come online
         // after the first healthy-path broadcast.
         if let Some(block) = self.current_round_proposal().cloned() {
+            increment_typed_metric(
+                |snapshot| &mut snapshot.rebroadcasts,
+                if self.etdag_is_active() {
+                    "proposal"
+                } else {
+                    "core_proposal"
+                },
+            );
             if self.etdag_is_active() {
                 let candidate_id = block.candidate_id()?;
                 let (target_context, protected_block) = self
@@ -2323,6 +2541,10 @@ where
             .collect::<Vec<_>>();
         for index in due {
             let vote = self.local_vote_rebroadcasts[index].0.clone();
+            increment_typed_metric(
+                |snapshot| &mut snapshot.rebroadcasts,
+                typed_message_kind(&TypedConsensusMessage::Vote { vote: vote.clone() }),
+            );
             self.broadcast(TypedConsensusMessage::Vote { vote })?;
             self.local_vote_rebroadcasts[index].1 = now;
         }
@@ -2415,7 +2637,7 @@ where
             VotePhase::Timeout => &mut self.observed_timeout_votes,
         };
         if let Some(existing) = observations.get(&vote.validator_id) {
-            if existing.signing_bytes()? != vote.signing_bytes()? {
+            if existing.consensus_subject()? != vote.consensus_subject()? {
                 return Err(
                     "TYPED_DRIVER_SOURCE_CONFLICT: validator supplied conflicting votes for one height/round/phase"
                         .to_string(),
@@ -2424,6 +2646,7 @@ where
             return Ok(());
         }
         observations.insert(vote.validator_id.clone(), vote.clone());
+        let verified_vote = VerifiedVote::from_coordinator_acceptance(vote.clone())?;
 
         match phase {
             VotePhase::Validate => {
@@ -2436,11 +2659,11 @@ where
                         "typed validation vote has no locally validated proposal".to_string()
                     );
                 }
-                insert_distinct_vote(
+                insert_distinct_verified_vote(
                     self.validation_votes
                         .entry(vote.block_id.clone())
                         .or_default(),
-                    vote.clone(),
+                    verified_vote,
                 )?;
                 self.maybe_form_validation_certificate(&vote.block_id)
             }
@@ -2462,16 +2685,16 @@ where
                             .to_string(),
                     );
                 }
-                insert_distinct_vote(
+                insert_distinct_verified_vote(
                     self.finality_votes
                         .entry(vote.block_id.clone())
                         .or_default(),
-                    vote.clone(),
+                    verified_vote,
                 )?;
                 self.maybe_form_finality_certificate(&vote.block_id)
             }
             VotePhase::Timeout => {
-                insert_distinct_vote(&mut self.timeout_votes, vote)?;
+                insert_distinct_verified_vote(&mut self.timeout_votes, verified_vote)?;
                 self.maybe_form_timeout_certificate()
             }
         }
@@ -2488,7 +2711,9 @@ where
         if !self.has_exact_quorum(&votes)? {
             return Ok(());
         }
-        let certificate = self.coordinator.form_validation_certificate(&votes)?;
+        let certificate = self
+            .coordinator
+            .form_validation_certificate_from_verified(&votes)?;
         self.broadcast(TypedConsensusMessage::ValidationCertificate {
             certificate: certificate.clone(),
         })?;
@@ -2513,7 +2738,9 @@ where
         if !self.has_exact_quorum(&votes)? {
             return Ok(());
         }
-        let certificate = self.coordinator.form_finality_certificate(&votes)?;
+        let certificate = self
+            .coordinator
+            .form_finality_certificate_from_verified(&votes)?;
         let finalized_context = self.coordinator.local_context.height_context.clone();
         self.broadcast(TypedConsensusMessage::QuorumCertificate {
             certificate: certificate.clone(),
@@ -2535,7 +2762,9 @@ where
         if !self.has_exact_quorum(&votes)? {
             return Ok(());
         }
-        let certificate = self.coordinator.form_timeout_certificate(&votes)?;
+        let certificate = self
+            .coordinator
+            .form_timeout_certificate_from_verified(&votes)?;
         self.broadcast(TypedConsensusMessage::TimeoutCertificate {
             certificate: certificate.clone(),
         })?;
@@ -2552,7 +2781,7 @@ where
         }
     }
 
-    fn has_exact_quorum(&self, votes: &[Vote]) -> Result<bool, String> {
+    fn has_exact_quorum(&self, votes: &[VerifiedVote]) -> Result<bool, String> {
         let context = &self.coordinator.local_context.height_context;
         if (votes.len() as u64) < context.strict_count_quorum()? {
             return Ok(false);
@@ -2600,6 +2829,10 @@ where
                                 .to_string(),
                         );
                     }
+                    if certificate.root()? < existing.root()? {
+                        self.pending_validation_certificates
+                            .insert(certificate.candidate_id.clone(), certificate);
+                    }
                     return Ok(());
                 }
                 if certificate.round.0 < existing.round.0 {
@@ -2637,6 +2870,10 @@ where
                             .to_string(),
                     );
                 }
+                if certificate.root()? < existing.root()? {
+                    self.prepared_certificate = Some(certificate);
+                    self.persist_prepared_if_complete()?;
+                }
                 return Ok(());
             }
             if certificate.round.0 < existing.round.0 {
@@ -2645,7 +2882,18 @@ where
                 return Ok(());
             }
         }
+        let prepared_candidate = certificate.candidate_id.0.clone();
         self.prepared_certificate = Some(certificate);
+        if let Ok(mut telemetry) = typed_consensus_telemetry().lock() {
+            telemetry.snapshot.prepared_height =
+                self.coordinator.local_context.height_context.height.0;
+            telemetry.snapshot.prepared_candidate = prepared_candidate;
+            telemetry.snapshot.prepared_round = self
+                .prepared_certificate
+                .as_ref()
+                .map(|prepared| prepared.round.0)
+                .unwrap_or_default();
+        }
         self.persist_prepared_if_complete()?;
         Ok(())
     }
@@ -2703,6 +2951,7 @@ where
             };
         self.prepared_store
             .persist_verified(block, certificate, timeout_certificate)?;
+        self.commit_atomic_recovery_checkpoint()?;
         Ok(())
     }
 
@@ -2765,12 +3014,14 @@ where
             TypedRoundStage::Validation
         };
         self.round_started_at = Instant::now();
+        self.stage_started_at = self.round_started_at;
         self.last_proposal_broadcast_at = None;
         self.local_vote_rebroadcasts.clear();
         self.emitted_proposal = false;
         self.emitted_validation_vote = false;
         self.emitted_finality_vote = false;
         self.emitted_timeout_vote = false;
+        self.commit_atomic_recovery_checkpoint()?;
         Ok(candidate_id)
     }
 
@@ -2860,8 +3111,13 @@ where
             &successor_finality_digest,
         )?;
         self.metrics.finalized_blocks = self.metrics.finalized_blocks.saturating_add(1);
+        if let Some(elapsed) = Instant::now().checked_duration_since(self.stage_started_at) {
+            record_typed_phase_duration(self.stage, elapsed);
+        }
+        record_typed_finality(record.height.0, &record.block_id, certificate.round.0);
         self.prepared_store.clear_after_finality(record.height)?;
         self.reset_for_new_height();
+        self.commit_atomic_recovery_checkpoint()?;
         Ok(())
     }
 
@@ -2886,14 +3142,50 @@ where
                                 .to_string(),
                         );
                     }
-                    (Some(_), None) | (None, None) | (Some(_), Some(_)) => {
+                    (Some(_), None) => {
                         // A timeout proof may be assembled from any valid
                         // strict-quorum subset. One subset can omit the sole
                         // prepared report that another subset includes, and
                         // the same candidate can be reported with different
                         // valid VC proof roots. Neither changes the closed
-                        // round. Retain an already-installed carry requirement
-                        // and treat weaker/equivalent evidence as idempotent.
+                        // round. Retain the stronger already-installed carry
+                        // requirement.
+                        return Ok(());
+                    }
+                    (None, None) => {
+                        // Deterministically retain one evidence representation
+                        // so arrival order cannot choose the durable TC.
+                        if certificate.root()? < existing.root()? {
+                            self.timeout_certificate = Some(certificate);
+                            self.persist_prepared_if_complete()?;
+                        }
+                        return Ok(());
+                    }
+                    (Some(_), Some(_)) => {
+                        let existing_prepared_root = existing.highest_prepared_vc_root;
+                        let incoming_prepared_root = certificate.highest_prepared_vc_root;
+                        let local_prepared_root = self
+                            .prepared_certificate
+                            .as_ref()
+                            .map(ValidationCertificate::root)
+                            .transpose()?;
+                        let incoming_is_known_highest = incoming_prepared_root.is_some()
+                            && incoming_prepared_root == local_prepared_root;
+                        let existing_is_known_highest = existing_prepared_root.is_some()
+                            && existing_prepared_root == local_prepared_root;
+                        let select_incoming =
+                            match (incoming_is_known_highest, existing_is_known_highest) {
+                                (true, false) => true,
+                                (false, true) => false,
+                                _ => certificate.root()? < existing.root()?,
+                            };
+                        if select_incoming {
+                            self.timeout_certificate = Some(certificate.clone());
+                            self.persist_prepared_if_complete()?;
+                            if incoming_prepared_root != local_prepared_root {
+                                self.request_prepared_certificate(&certificate)?;
+                            }
+                        }
                         return Ok(());
                     }
                     (None, Some(_)) => {
@@ -2938,9 +3230,13 @@ where
         self.observed_finality_votes.clear();
         self.observed_timeout_votes.clear();
         self.round_started_at = Instant::now();
+        self.stage_started_at = self.round_started_at;
         self.last_proposal_broadcast_at = None;
         self.local_vote_rebroadcasts.clear();
         self.stage = TypedRoundStage::Proposal;
+        if let Ok(mut telemetry) = typed_consensus_telemetry().lock() {
+            telemetry.snapshot.current_round = certificate.next_round.0;
+        }
         self.emitted_proposal = false;
         self.emitted_validation_vote = false;
         self.emitted_finality_vote = false;
@@ -2960,11 +3256,13 @@ where
         {
             self.request_prepared_certificate(&certificate)?;
         }
+        self.commit_atomic_recovery_checkpoint()?;
         Ok(())
     }
 
     fn reset_for_new_height(&mut self) {
         self.round_started_at = Instant::now();
+        self.stage_started_at = self.round_started_at;
         self.last_proposal_broadcast_at = None;
         self.local_vote_rebroadcasts.clear();
         self.stage = TypedRoundStage::Proposal;
@@ -2983,6 +3281,95 @@ where
         self.finality_certificate = None;
         self.timeout_certificate = None;
         self.proposal_material.clear();
+        if let Ok(mut telemetry) = typed_consensus_telemetry().lock() {
+            telemetry.snapshot.current_round = 0;
+            telemetry.snapshot.current_height =
+                self.coordinator.local_context.height_context.height.0;
+            telemetry.snapshot.prepared_height = 0;
+            telemetry.snapshot.prepared_candidate.clear();
+            telemetry.snapshot.prepared_round = 0;
+        }
+    }
+
+    fn transition_stage(&mut self, next: TypedRoundStage, now: Instant) {
+        if self.stage != next {
+            if let Some(elapsed) = now.checked_duration_since(self.stage_started_at) {
+                record_typed_phase_duration(self.stage, elapsed);
+            }
+            self.stage = next;
+            self.stage_started_at = now;
+        }
+    }
+
+    fn commit_atomic_recovery_checkpoint(&self) -> Result<(), String> {
+        let latest = self.coordinator.finality_store.latest()?;
+        let (finalized_block, highest_qc) = latest
+            .map(|record| (Some(record.block), Some(record.quorum_certificate)))
+            .unwrap_or((None, None));
+        let prepared_block = self.prepared_certificate.as_ref().and_then(|certificate| {
+            self.coordinator
+                .accepted_proposals
+                .get(&certificate.candidate_id)
+                .cloned()
+        });
+        let prepared_certificate = prepared_block
+            .as_ref()
+            .and(self.prepared_certificate.clone());
+        let context = &self.coordinator.local_context;
+        let highest_qc_height = highest_qc
+            .as_ref()
+            .map(|certificate| certificate.height.0)
+            .unwrap_or_default();
+        let highest_qc_block_id = highest_qc
+            .as_ref()
+            .map(|certificate| certificate.block_id.0.clone())
+            .unwrap_or_default();
+        let highest_qc_root = highest_qc
+            .as_ref()
+            .map(|certificate| certificate.root().map(|root| root.to_hex()))
+            .transpose()?
+            .unwrap_or_default();
+        let highest_tc_round = self
+            .timeout_certificate
+            .as_ref()
+            .map(|certificate| certificate.next_round.0)
+            .unwrap_or_default();
+        let highest_tc_root = self
+            .timeout_certificate
+            .as_ref()
+            .map(|certificate| certificate.root().map(|root| root.to_hex()))
+            .transpose()?
+            .unwrap_or_default();
+        self.coordinator
+            .consensus
+            .signing_authority
+            .commit_recovery_checkpoint(&DurableConsensusRecoveryCheckpoint {
+                checkpoint_version: 2,
+                genesis_anchor: self.coordinator.finality_store.genesis_anchor(),
+                chain_id: context.height_context.chain_id,
+                chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+                network_id: context.height_context.network_id.clone(),
+                protocol_version: context.height_context.protocol_version.clone(),
+                epoch: context.height_context.epoch,
+                finalized_height: context.latest_finalized_height,
+                finalized_block,
+                highest_qc,
+                current_height: context.height_context.height,
+                current_round: context.round,
+                height_context_root: context.height_context.root()?,
+                active_validator_set_hash: context.height_context.active_validator_set_root,
+                prepared_block,
+                prepared_certificate,
+                highest_tc: self.timeout_certificate.clone(),
+            })?;
+        if let Ok(mut telemetry) = typed_consensus_telemetry().lock() {
+            telemetry.snapshot.highest_qc_height = highest_qc_height;
+            telemetry.snapshot.highest_qc_block_id = highest_qc_block_id;
+            telemetry.snapshot.highest_qc_root = highest_qc_root;
+            telemetry.snapshot.highest_tc_round = highest_tc_round;
+            telemetry.snapshot.highest_tc_root = highest_tc_root;
+        }
+        Ok(())
     }
 
     fn note_rejected_message(&mut self) {
@@ -2990,9 +3377,12 @@ where
     }
 }
 
-fn insert_distinct_vote(votes: &mut BTreeMap<ValidatorId, Vote>, vote: Vote) -> Result<(), String> {
+fn insert_distinct_verified_vote(
+    votes: &mut BTreeMap<ValidatorId, VerifiedVote>,
+    vote: VerifiedVote,
+) -> Result<(), String> {
     if let Some(existing) = votes.get(&vote.validator_id) {
-        if existing.signing_bytes()? != vote.signing_bytes()? {
+        if existing.subject_digest() != vote.subject_digest() {
             return Err(
                 "TYPED_DRIVER_SOURCE_CONFLICT: validator supplied conflicting votes for one consensus phase"
                     .to_string(),
@@ -3009,21 +3399,15 @@ fn insert_distinct_vote(votes: &mut BTreeMap<ValidatorId, Vote>, vote: Vote) -> 
 /// a second consensus source.  Source conflicts are determined only by the
 /// certified subject.
 fn same_quorum_certificate_subject(left: &QuorumCertificate, right: &QuorumCertificate) -> bool {
-    left.qc_version == right.qc_version
-        && left.chain_id == right.chain_id
-        && left.network_id == right.network_id
-        && left.protocol_version == right.protocol_version
-        && left.height == right.height
-        && left.round == right.round
-        && left.epoch == right.epoch
-        && left.cluster_id == right.cluster_id
-        && left.height_context_root == right.height_context_root
-        && left.phase == right.phase
-        && left.block_id == right.block_id
-        && left.highest_prepared_vc_root == right.highest_prepared_vc_root
-        && left.active_validator_set_hash == right.active_validator_set_hash
-        && left.cluster_map_hash == right.cluster_map_hash
-        && left.threshold_weight_required == right.threshold_weight_required
+    matches!(
+        (left.consensus_subject(), right.consensus_subject()),
+        (Ok(left_subject), Ok(right_subject))
+            if left_subject == right_subject
+                && left.qc_version == right.qc_version
+                && left.active_validator_set_hash == right.active_validator_set_hash
+                && left.cluster_map_hash == right.cluster_map_hash
+                && left.threshold_weight_required == right.threshold_weight_required
+    )
 }
 
 /// Finality evidence may contain different valid strict-quorum signer subsets
@@ -3070,19 +3454,23 @@ fn same_timeout_certificate_subject(left: &TimeoutCertificate, right: &TimeoutCe
 /// consensus transition; the driver must retain or adopt the stronger carry
 /// requirement instead of terminating every validator process.
 fn same_timeout_transition_context(left: &TimeoutCertificate, right: &TimeoutCertificate) -> bool {
-    left.certificate_version == right.certificate_version
-        && left.chain_id == right.chain_id
-        && left.network_id == right.network_id
-        && left.protocol_version == right.protocol_version
-        && left.height == right.height
-        && left.closing_round == right.closing_round
-        && left.next_round == right.next_round
-        && left.epoch == right.epoch
-        && left.cluster_id == right.cluster_id
-        && left.height_context_root == right.height_context_root
-        && left.active_validator_set_hash == right.active_validator_set_hash
-        && left.cluster_map_hash == right.cluster_map_hash
-        && left.threshold_weight_required == right.threshold_weight_required
+    let normalized = |certificate: &TimeoutCertificate| {
+        certificate.consensus_subject().map(|mut subject| {
+            subject.candidate_id = None;
+            subject.prepared_round = None;
+            subject
+        })
+    };
+    matches!(
+        (normalized(left), normalized(right)),
+        (Ok(left_subject), Ok(right_subject))
+            if left_subject == right_subject
+                && left.certificate_version == right.certificate_version
+                && left.next_round == right.next_round
+                && left.active_validator_set_hash == right.active_validator_set_hash
+                && left.cluster_map_hash == right.cluster_map_hash
+                && left.threshold_weight_required == right.threshold_weight_required
+    )
 }
 
 fn validate_canonical_driver_timeouts(
@@ -3390,12 +3778,52 @@ fn verifier_for_verified_epoch_transition(
 
 static COORDINATOR_INGRESS: OnceLock<Mutex<Option<SyncSender<TypedConsensusEnvelope>>>> =
     OnceLock::new();
+static COORDINATOR_STARTUP_BUFFER: OnceLock<Mutex<TypedCoordinatorStartupBuffer>> = OnceLock::new();
 type TypedVoteQueueKey = (ValidatorId, Hash);
 static TYPED_VOTE_QUEUE_DEPTHS: OnceLock<Mutex<BTreeMap<TypedVoteQueueKey, usize>>> =
     OnceLock::new();
 
 fn ingress_slot() -> &'static Mutex<Option<SyncSender<TypedConsensusEnvelope>>> {
     COORDINATOR_INGRESS.get_or_init(|| Mutex::new(None))
+}
+
+#[derive(Debug, Default)]
+struct TypedCoordinatorStartupBuffer {
+    accepting: bool,
+    capacity: usize,
+    messages: VecDeque<TypedConsensusEnvelope>,
+}
+
+fn startup_buffer() -> &'static Mutex<TypedCoordinatorStartupBuffer> {
+    COORDINATOR_STARTUP_BUFFER.get_or_init(|| Mutex::new(TypedCoordinatorStartupBuffer::default()))
+}
+
+/// Enables bounded authenticated P2P buffering before the coordinator mailbox
+/// is installed. The role runtime calls this before opening the P2P listener;
+/// unbound socket traffic still cannot enter because the P2P handshake must
+/// first produce `AuthenticatedTypedConsensusPeer`.
+pub fn begin_typed_consensus_startup_buffer(capacity: usize) -> Result<(), String> {
+    if capacity == 0 {
+        return Err("typed coordinator startup buffer capacity must be non-zero".to_string());
+    }
+    if ingress_slot()
+        .lock()
+        .map_err(|_| "typed coordinator ingress lock is poisoned".to_string())?
+        .is_some()
+    {
+        return Err("typed coordinator is already live; startup buffering is invalid".to_string());
+    }
+    let mut buffer = startup_buffer()
+        .lock()
+        .map_err(|_| "typed coordinator startup buffer lock is poisoned".to_string())?;
+    if buffer.accepting {
+        return Err("typed coordinator startup buffer is already active".to_string());
+    }
+    clear_typed_vote_queue_slots();
+    buffer.accepting = true;
+    buffer.capacity = capacity;
+    buffer.messages.clear();
+    Ok(())
 }
 
 fn typed_vote_queue_depths() -> &'static Mutex<BTreeMap<TypedVoteQueueKey, usize>> {
@@ -3478,7 +3906,21 @@ pub fn install_typed_coordinator_ingress(
     if slot.is_some() {
         return Err("typed coordinator ingress is already installed".to_string());
     }
-    clear_typed_vote_queue_slots();
+    let mut buffer = startup_buffer()
+        .lock()
+        .map_err(|_| "typed coordinator startup buffer lock is poisoned".to_string())?;
+    if buffer.messages.len() > queue_capacity {
+        return Err(
+            "typed coordinator startup buffer exceeds the installed mailbox capacity".to_string(),
+        );
+    }
+    while let Some(envelope) = buffer.messages.pop_front() {
+        sender.try_send(envelope).map_err(|_| {
+            "typed coordinator startup buffer could not drain into the mailbox".to_string()
+        })?;
+    }
+    buffer.accepting = false;
+    buffer.capacity = 0;
     *slot = Some(sender);
     Ok(receiver)
 }
@@ -3492,6 +3934,14 @@ pub fn remove_typed_coordinator_ingress() -> Result<(), String> {
         .lock()
         .map_err(|_| "typed coordinator ingress lock is poisoned".to_string())?;
     *slot = None;
+    let mut buffer = startup_buffer()
+        .lock()
+        .map_err(|_| "typed coordinator startup buffer lock is poisoned".to_string())?;
+    for envelope in buffer.messages.drain(..) {
+        release_typed_vote_queue_slot(&envelope);
+    }
+    buffer.accepting = false;
+    buffer.capacity = 0;
     clear_typed_vote_queue_slots();
     Ok(())
 }
@@ -3503,15 +3953,92 @@ pub fn dispatch_typed_consensus_message(
     authenticated_peer: Option<AuthenticatedTypedConsensusPeer>,
     message: TypedConsensusMessage,
 ) -> Result<(), String> {
-    validate_typed_consensus_message_size(&message)?;
+    let message_kind = typed_message_kind(&message);
+    increment_typed_metric(|snapshot| &mut snapshot.messages_received, message_kind);
+    if let Err(error) = validate_typed_consensus_message_size(&message) {
+        increment_typed_metric(
+            |snapshot| &mut snapshot.messages_rejected_precrypto,
+            "oversized",
+        );
+        return Err(error);
+    }
     let sender = ingress_slot()
         .lock()
         .map_err(|_| "typed coordinator ingress lock is poisoned".to_string())?
-        .clone()
-        .ok_or_else(|| {
-            "typed PoSy coordinator is not running; refusing consensus message".to_string()
-        })?;
-    let vote_slot_reserved = reserve_typed_vote_queue_slot(authenticated_peer.as_ref(), &message)?;
+        .clone();
+    let vote_slot_reserved =
+        match reserve_typed_vote_queue_slot(authenticated_peer.as_ref(), &message) {
+            Ok(reserved) => reserved,
+            Err(error) => {
+                increment_typed_metric(
+                    |snapshot| &mut snapshot.messages_rejected_precrypto,
+                    "per_validator_vote_quota",
+                );
+                return Err(error);
+            }
+        };
+    if sender.is_none() {
+        let mut buffer = startup_buffer()
+            .lock()
+            .map_err(|_| "typed coordinator startup buffer lock is poisoned".to_string())?;
+        if buffer.accepting {
+            if authenticated_peer.is_none() {
+                increment_typed_metric(
+                    |snapshot| &mut snapshot.messages_rejected_precrypto,
+                    "unauthenticated",
+                );
+                if vote_slot_reserved {
+                    let envelope = TypedConsensusEnvelope {
+                        peer_address: peer_address.to_string(),
+                        authenticated_peer,
+                        message,
+                    };
+                    release_typed_vote_queue_slot(&envelope);
+                }
+                return Err(
+                    "typed startup buffer refuses a message without authenticated validator identity"
+                        .to_string(),
+                );
+            }
+            if buffer.messages.len() >= buffer.capacity {
+                increment_typed_metric(
+                    |snapshot| &mut snapshot.messages_rejected_precrypto,
+                    "startup_buffer_saturated",
+                );
+                let envelope = TypedConsensusEnvelope {
+                    peer_address: peer_address.to_string(),
+                    authenticated_peer,
+                    message,
+                };
+                if vote_slot_reserved {
+                    release_typed_vote_queue_slot(&envelope);
+                }
+                return Err("typed PoSy startup buffer is saturated".to_string());
+            }
+            buffer.messages.push_back(TypedConsensusEnvelope {
+                peer_address: peer_address.to_string(),
+                authenticated_peer,
+                message,
+            });
+            return Ok(());
+        }
+        let envelope = TypedConsensusEnvelope {
+            peer_address: peer_address.to_string(),
+            authenticated_peer,
+            message,
+        };
+        if vote_slot_reserved {
+            release_typed_vote_queue_slot(&envelope);
+        }
+        increment_typed_metric(
+            |snapshot| &mut snapshot.messages_rejected_precrypto,
+            "coordinator_unavailable",
+        );
+        return Err(
+            "typed PoSy coordinator is not running; refusing consensus message".to_string(),
+        );
+    }
+    let sender = sender.expect("checked above");
     let send_result = sender.try_send(TypedConsensusEnvelope {
         peer_address: peer_address.to_string(),
         authenticated_peer,
@@ -3528,10 +4055,18 @@ pub fn dispatch_typed_consensus_message(
             }
             Err(match error {
                 TrySendError::Full(_) => {
+                    increment_typed_metric(
+                        |snapshot| &mut snapshot.messages_rejected_precrypto,
+                        "mailbox_saturated",
+                    );
                     "typed PoSy coordinator ingress is saturated; refusing consensus message"
                         .to_string()
                 }
                 TrySendError::Disconnected(_) => {
+                    increment_typed_metric(
+                        |snapshot| &mut snapshot.messages_rejected_precrypto,
+                        "mailbox_disconnected",
+                    );
                     "typed PoSy coordinator ingress is disconnected; refusing consensus message"
                         .to_string()
                 }
@@ -3614,19 +4149,31 @@ mod tests {
             unreachable!("vote fixture")
         };
         let mut votes = BTreeMap::new();
-        insert_distinct_vote(&mut votes, first.clone()).expect("first verified vote");
+        insert_distinct_verified_vote(
+            &mut votes,
+            VerifiedVote::from_coordinator_acceptance(first.clone())
+                .expect("verified vote fixture"),
+        )
+        .expect("first verified vote");
 
         let mut randomized_replay = first.clone();
         randomized_replay.aegis_pq_signature.signature_bytes = vec![2, 3, 4];
-        insert_distinct_vote(&mut votes, randomized_replay)
-            .expect("a randomized signature over the same payload is idempotent");
+        insert_distinct_verified_vote(
+            &mut votes,
+            VerifiedVote::from_coordinator_acceptance(randomized_replay)
+                .expect("verified replay fixture"),
+        )
+        .expect("a randomized signature over the same payload is idempotent");
         assert_eq!(votes.len(), 1);
 
         let mut conflict = first;
         conflict.block_id = BlockId("conflicting-candidate".to_string());
-        assert!(insert_distinct_vote(&mut votes, conflict)
-            .unwrap_err()
-            .contains("TYPED_DRIVER_SOURCE_CONFLICT"));
+        assert!(insert_distinct_verified_vote(
+            &mut votes,
+            VerifiedVote::from_coordinator_acceptance(conflict).expect("verified conflict fixture"),
+        )
+        .unwrap_err()
+        .contains("TYPED_DRIVER_SOURCE_CONFLICT"));
     }
 
     #[test]
@@ -3642,6 +4189,42 @@ mod tests {
             TypedConsensusMessage::Vote { .. }
         ));
         remove_typed_coordinator_ingress().unwrap();
+    }
+
+    #[test]
+    fn authenticated_messages_buffer_before_mailbox_install_and_drain_in_order() {
+        let _guard = INGRESS_TEST_LOCK.lock().unwrap();
+        reset_typed_coordinator_ingress_for_test();
+        begin_typed_consensus_startup_buffer(2).expect("enable bounded startup buffering");
+        let authenticated = AuthenticatedTypedConsensusPeer {
+            validator_id: ValidatorId("validator-1".to_string()),
+            validator_uma_id: UmaId("uma-1".to_string()),
+            consensus_key_id: AegisPqKeyId("key-1".to_string()),
+        };
+        assert!(
+            dispatch_typed_consensus_message("unauthenticated", None, vote())
+                .unwrap_err()
+                .contains("authenticated")
+        );
+        dispatch_typed_consensus_message(
+            "authenticated-validator",
+            Some(authenticated.clone()),
+            vote(),
+        )
+        .expect("authenticated pre-mailbox message is buffered");
+
+        let receiver = install_typed_coordinator_ingress(2)
+            .expect("mailbox installation atomically drains startup traffic");
+        let envelope = receiver
+            .recv_timeout(Duration::from_millis(100))
+            .expect("buffered message reaches the installed coordinator");
+        assert_eq!(envelope.authenticated_peer.as_ref(), Some(&authenticated));
+        assert!(matches!(
+            envelope.message,
+            TypedConsensusMessage::Vote { .. }
+        ));
+        release_typed_vote_queue_slot(&envelope);
+        reset_typed_coordinator_ingress_for_test();
     }
 
     #[test]
@@ -3742,6 +4325,7 @@ mod tests {
                 "typed-coordinator-test",
                 b"state-zero",
             ),
+            latest_finalized_timestamp_ms: 0,
             round: Round(0),
             evidence_root: Hash::from_domain_bytes("typed-coordinator-test", b"evidence"),
             app_version: 1,
@@ -4084,6 +4668,11 @@ mod tests {
             consensus_key_id: peer_record.consensus_public_key.key_id.clone(),
         };
         let wire = serde_json::to_vec(&NetworkMessage::TypedConsensus {
+            chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+            genesis_hash: crate::genesis::canonical_genesis()
+                .unwrap()
+                .hash()
+                .to_string(),
             message: TypedConsensusMessage::Vote {
                 vote: inbound_vote.clone(),
             },
@@ -4091,7 +4680,7 @@ mod tests {
         .expect("serialize exact typed P2P message");
         let decoded: NetworkMessage =
             serde_json::from_slice(&wire).expect("decode exact typed P2P message");
-        let NetworkMessage::TypedConsensus { message } = decoded else {
+        let NetworkMessage::TypedConsensus { message, .. } = decoded else {
             panic!("typed consensus artifact must not be decoded as legacy traffic");
         };
         let receiver = install_typed_coordinator_ingress(1).expect("install bounded ingress");
@@ -4480,6 +5069,26 @@ mod tests {
     }
 
     #[test]
+    fn observer_identity_cannot_advertise_a_validator_recovery_checkpoint() {
+        let coordinator = coordinator_fixture();
+        let authorizer =
+            FrozenTypedConsensusPeerAuthorizer::new(coordinator.consensus.validator_set.clone())
+                .expect("freeze validator-only recovery authority");
+        let observer = AuthenticatedTypedConsensusPeer {
+            validator_id: ValidatorId("rpc-observer".to_string()),
+            validator_uma_id: UmaId("rpc-observer".to_string()),
+            consensus_key_id: AegisPqKeyId("observer-key".to_string()),
+        };
+        let message = TypedConsensusMessage::FinalityCheckpointRequest {
+            next_height: Height(1),
+        };
+        assert!(authorizer
+            .authorize(&observer, &message)
+            .unwrap_err()
+            .contains("absent from the frozen set"));
+    }
+
+    #[test]
     fn signed_transition_activates_validators_seven_through_ten_and_derives_two_clusters() {
         let mut coordinator = coordinator_fixture();
         for index in 6..10 {
@@ -4644,6 +5253,7 @@ mod tests {
             latest_finalized_height: Height(1),
             latest_finalized_block_hash: finality_hash,
             latest_finalized_state_root: state_after,
+            latest_finalized_timestamp_ms: 0,
             round: Round(0),
             evidence_root: Hash::from_domain_bytes("typed-coordinator-test", b"evidence-two"),
             app_version: 1,
@@ -5136,6 +5746,85 @@ mod tests {
                 driver.local_vote_rebroadcasts.is_empty(),
                 "successor reset must discard every prior-height retry"
             );
+            let journal: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(driver.coordinator.consensus.signing_authority.path())
+                    .expect("read compact signing journal"),
+            )
+            .expect("parse compact signing journal");
+            assert_eq!(journal["retired_through_height"], 1);
+            assert_eq!(
+                journal["records"].as_array().map(Vec::len),
+                Some(0),
+                "exact envelopes must remain durable only until their height finalizes"
+            );
+        }
+
+        drop(drivers);
+        for path in store_paths {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn six_validator_actual_mldsa_multi_height_burn_in_preserves_round_zero_liveness() {
+        const BURN_IN_HEIGHTS: u64 = 100;
+
+        let parameters = genesis_bound_parameters();
+        let (bootstrap, _genesis_anchor, deployed_genesis_state_root, coordinators, store_paths) =
+            six_validator_startup_fixture(parameters.clone());
+        let authorizer = FrozenTypedConsensusPeerAuthorizer::new(bootstrap.validator_set.clone())
+            .expect("freeze the six Genesis-bound P2P identities");
+        let mut drivers = coordinators
+            .into_iter()
+            .map(|coordinator| {
+                release_driver_with(
+                    coordinator,
+                    bootstrap.clone(),
+                    parameters.protocol_config.clone(),
+                    deployed_genesis_state_root,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        for finalized_height in 1..=BURN_IN_HEIGHTS {
+            for driver in &mut drivers {
+                let now = driver.round_started_at;
+                driver
+                    .tick_at(now)
+                    .expect("healthy-path scheduling must remain event driven");
+            }
+            let relay_errors = relay_release_messages(&mut drivers, &authorizer, |_| true);
+            assert!(
+                relay_errors.is_empty(),
+                "height {finalized_height} produced relay errors: {relay_errors:?}"
+            );
+
+            for (index, driver) in drivers.iter().enumerate() {
+                assert_eq!(
+                    driver.coordinator.local_context.latest_finalized_height,
+                    Height(finalized_height),
+                    "replica {index} diverged during burn-in"
+                );
+                assert_eq!(
+                    driver.coordinator.local_context.height_context.height,
+                    Height(finalized_height + 1),
+                    "replica {index} did not install the durable successor context"
+                );
+                assert_eq!(
+                    driver.coordinator.local_context.round,
+                    Round(0),
+                    "replica {index} left the healthy round-zero path"
+                );
+                assert_eq!(driver.metrics().emitted_timeout_votes, 0);
+            }
+        }
+
+        for (index, driver) in drivers.iter().enumerate() {
+            assert_eq!(
+                driver.metrics().finalized_blocks,
+                BURN_IN_HEIGHTS,
+                "replica {index} did not finalize every burn-in height"
+            );
         }
 
         drop(drivers);
@@ -5397,6 +6086,53 @@ mod tests {
     }
 
     #[test]
+    fn verified_round_one_hundred_timeout_recovers_and_persists_round_authority() {
+        let mut driver = driver_with(coordinator_fixture(), 1);
+        let height_context = driver.coordinator.local_context.height_context.clone();
+        let validators = driver
+            .coordinator
+            .consensus
+            .validator_set
+            .validators
+            .clone();
+        let votes = {
+            let (consensus, signer) = (
+                &mut driver.coordinator.consensus,
+                &mut driver.coordinator.signer,
+            );
+            validators
+                .iter()
+                .map(|validator| {
+                    consensus.timeout_vote(signer, validator, &height_context, Round(100), None)
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .expect("actual ML-DSA timeout votes form at high round")
+        };
+        let certificate = driver
+            .coordinator
+            .form_timeout_certificate(&votes[..5])
+            .expect("strict-quorum high-round TC");
+        driver
+            .coordinator
+            .accept_timeout_certificate(certificate.clone())
+            .expect("verified high-round TC recovers missed transitions");
+        driver
+            .install_verified_timeout_certificate(certificate.clone())
+            .expect("high-round authority becomes atomic durable state");
+
+        assert_eq!(driver.coordinator.local_context.round, Round(101));
+        let recovered = driver
+            .coordinator
+            .consensus
+            .signing_authority
+            .recovery_checkpoint()
+            .unwrap()
+            .expect("atomic recovery checkpoint");
+        assert_eq!(recovered.current_round, Round(101));
+        assert_eq!(recovered.highest_tc.as_ref(), Some(&certificate));
+    }
+
+    #[test]
     fn mixed_prepared_and_plain_timeout_votes_advance_one_round() {
         let mut coordinator = coordinator_fixture();
         let scheduled = coordinator
@@ -5471,6 +6207,86 @@ mod tests {
         );
         assert_eq!(certificate.timeout_vote_subjects.len(), 5);
         assert_eq!(driver.coordinator.local_context.round, Round(1));
+    }
+
+    #[test]
+    fn timeout_split_extremes_and_serialization_order_preserve_safety_and_liveness() {
+        for carry_start in [5usize, 3usize] {
+            let mut coordinator = coordinator_fixture();
+            let scheduled = coordinator
+                .consensus
+                .proposer_for(&coordinator.local_context.height_context, Round(0))
+                .expect("round-zero proposer");
+            coordinator.local_validator_id = scheduled.validator_id;
+            let mut driver = driver_with(coordinator, 1);
+            driver.tick().expect("emit deterministic core proposal");
+            let block = driver
+                .current_round_proposal()
+                .expect("local proposal is accepted")
+                .clone();
+            let validators = driver
+                .coordinator
+                .consensus
+                .validator_set
+                .validators
+                .clone();
+            let height_context = driver.coordinator.local_context.height_context.clone();
+            let validation_votes = validators
+                .iter()
+                .map(|validator| {
+                    driver.coordinator.consensus.validation_vote(
+                        &mut driver.coordinator.signer,
+                        validator,
+                        &block,
+                        &height_context,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .expect("fixture validation votes");
+            let prepared = driver
+                .coordinator
+                .form_validation_certificate(&validation_votes[..5])
+                .expect("strict-quorum VC");
+            let timeout_votes = validators
+                .iter()
+                .enumerate()
+                .map(|(index, validator)| {
+                    driver.coordinator.consensus.timeout_vote(
+                        &mut driver.coordinator.signer,
+                        validator,
+                        &height_context,
+                        Round(0),
+                        (index >= carry_start).then_some(&prepared),
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .expect("plain and carry reports are individually valid");
+            let forward = driver
+                .coordinator
+                .form_timeout_certificate(&timeout_votes)
+                .expect("the six timeout reports form one transition");
+            let mut reversed_votes = timeout_votes.clone();
+            reversed_votes.reverse();
+            let reversed = driver
+                .coordinator
+                .form_timeout_certificate(&reversed_votes)
+                .expect("arrival order cannot change a valid transition");
+
+            assert_eq!(forward.root().unwrap(), reversed.root().unwrap());
+            assert_eq!(
+                forward.carry_forward_candidate_id.as_ref(),
+                Some(&prepared.candidate_id),
+                "both 5/1 and 3/3 splits preserve the strongest prepared evidence"
+            );
+            driver
+                .coordinator
+                .accept_timeout_certificate(forward.clone())
+                .expect("canonical timeout transition verifies");
+            driver
+                .install_verified_timeout_certificate(forward)
+                .expect("canonical timeout transition installs");
+            assert_eq!(driver.coordinator.local_context.round, Round(1));
+        }
     }
 
     #[test]
@@ -5793,6 +6609,9 @@ mod tests {
             .coordinator
             .accept_timeout_certificate(timeout_certificate.clone())
             .expect("advance the verified fixture to round one");
+        driver
+            .install_verified_timeout_certificate(timeout_certificate.clone())
+            .expect("install the same verified round authority in durable driver recovery");
         let round_one_proposer = driver
             .coordinator
             .consensus

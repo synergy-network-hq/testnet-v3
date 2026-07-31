@@ -37,6 +37,7 @@ export function validateNetworkConfig(config) {
   const input = asObject(config, 'configuration');
   if (input.schema_version !== 1) fail('schema_version must be 1');
   if (input.chain_id !== 1266) fail('chain_id must be 1266');
+  if (input.chain_incarnation !== 4) fail('chain_incarnation must be 4');
   if (input.network_id !== 'synergy-testnet-v3') fail('network_id must be synergy-testnet-v3');
   if (!HEX_64.test(input.genesis_hash || '')) fail('genesis_hash must be a lowercase 32-byte hash');
   if (!HEX_8.test(input.network_magic || '')) fail('network_magic must be a lowercase 4-byte value');
@@ -85,6 +86,7 @@ async function main() {
   const config = await readAndValidateConfig(path);
   process.stdout.write(`${JSON.stringify({
     chain_id: config.chain_id,
+    chain_incarnation: config.chain_incarnation,
     network_id: config.network_id,
     genesis_hash: config.genesis_hash,
     network_magic: config.network_magic,

@@ -265,6 +265,7 @@ impl FinalizedTypedContextProvider {
             latest_finalized_height: record.height,
             latest_finalized_block_hash: block_hash,
             latest_finalized_state_root: record.block.header.state_root_after,
+            latest_finalized_timestamp_ms: record.block.header.timestamp_ms_consensus_bounded,
             round: Round(0),
             evidence_root: record.quorum_certificate.finality_context_root()?,
             app_version: 1,

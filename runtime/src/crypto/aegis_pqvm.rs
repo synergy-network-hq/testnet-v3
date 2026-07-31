@@ -1,16 +1,20 @@
 use crate::consensus::signing_authority::{
-    ConsensusSigningAuthorization, ConsensusSigningPhase, DurableConsensusSigningAuthority,
+    ConsensusSigningAuthorization, DurableConsensusSigningAuthority,
 };
 use crate::crypto::pqc::{PQCAlgorithm, PQCManager, PQCPrivateKey, PQCPublicKey, PQCSignature};
 use crate::synergy_types::{
     AegisPqKeyId, AegisPqKeyRole, AegisPqPublicKey, AegisPqSignature, BlockId, ChainId, ClusterMap,
-    Epoch, EpochTransition, Hash, HeightConsensusContext, NetworkId, PeerHello, QuorumCertificate,
-    TimeoutCertificate, TxId, ValidationCertificate, ValidatorRecord, ValidatorSet,
-    ValidatorStatus, Vote, VotePhase,
+    Epoch, EpochTransition, Hash, Height, HeightConsensusContext, NetworkId, PeerHello,
+    QuorumCertificate, TimeoutCertificate, TxId, ValidationCertificate, ValidatorRecord,
+    ValidatorSet, ValidatorStatus, Vote, VotePhase,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::thread;
+use std::time::Instant;
 
 pub const SYNERGY_TX_V1: &str = "SYNERGY_TX_V1";
 pub const SYNERGY_BLOCK_V1: &str = "SYNERGY_BLOCK_V1";
@@ -421,6 +425,7 @@ impl AegisPqvmSigner {
             registry: self.registry.clone(),
             initialized: self.initialized,
             verified_signature_cache: Arc::new(Mutex::new(VerifiedSignatureCache::default())),
+            verification_pool: PqcVerificationPool::initialize(),
         }
     }
 
@@ -460,37 +465,41 @@ impl AegisPqvmSigner {
         vote: &Vote,
         authority: &DurableConsensusSigningAuthority,
     ) -> Result<AegisPqSignature, AegisPqvmError> {
-        let (phase, domain) = match vote.phase {
-            VotePhase::Validate => (ConsensusSigningPhase::Validate, SYNERGY_VALIDATE_VOTE_V1),
-            VotePhase::Finality => (ConsensusSigningPhase::Finality, SYNERGY_FINALITY_VOTE_V1),
-            VotePhase::Timeout => (ConsensusSigningPhase::Timeout, SYNERGY_TIMEOUT_VOTE_V1),
+        let domain = match vote.phase {
+            VotePhase::Validate => SYNERGY_VALIDATE_VOTE_V1,
+            VotePhase::Finality => SYNERGY_FINALITY_VOTE_V1,
+            VotePhase::Timeout => SYNERGY_TIMEOUT_VOTE_V1,
         };
-        let candidate_id = match vote.phase {
-            VotePhase::Validate | VotePhase::Finality => Some(vote.block_id.clone()),
-            VotePhase::Timeout if vote.block_id.0.is_empty() => None,
-            VotePhase::Timeout => Some(vote.block_id.clone()),
-        };
+        let authorization =
+            ConsensusSigningAuthorization::from_vote(vote).map_err(AegisPqvmError)?;
         authority
-            .authorize_before_signature(&ConsensusSigningAuthorization {
-                chain_id: vote.chain_id,
-                network_id: vote.network_id.clone(),
-                protocol_version: vote.protocol_version.clone(),
-                epoch: vote.epoch,
-                height: vote.height,
-                round: vote.round,
-                height_context_root: vote.height_context_root,
-                validator_id: vote.validator_id.clone(),
-                key_id: vote.key_id.clone(),
-                phase,
-                candidate_id,
-                highest_prepared_vc_root: vote.highest_prepared_vc_root,
-            })
+            .authorize_before_signature(&authorization)
             .map_err(AegisPqvmError)?;
-        self.sign_domain(
+        if let Some(recorded) = authority
+            .recorded_signed_vote_for_slot(&authorization)
+            .map_err(AegisPqvmError)?
+        {
+            if recorded.signing_bytes().map_err(AegisPqvmError)?
+                != vote.signing_bytes().map_err(AegisPqvmError)?
+            {
+                return Err(AegisPqvmError(
+                    "durable signed vote envelope does not match the authorized subject"
+                        .to_string(),
+                ));
+            }
+            return Ok(recorded.aegis_pq_signature);
+        }
+        let signature = self.sign_domain(
             domain,
             &vote.signing_bytes().map_err(AegisPqvmError)?,
             &vote.key_id,
-        )
+        )?;
+        let mut signed_vote = vote.clone();
+        signed_vote.aegis_pq_signature = signature.clone();
+        authority
+            .record_signed_vote(&signed_vote)
+            .map_err(AegisPqvmError)?;
+        Ok(signature)
     }
 
     pub fn sign_epoch_transition(
@@ -528,7 +537,7 @@ impl AegisPqvmSigner {
                 "Testnet-v3 consensus domain {domain} requires ML-DSA-65"
             )));
         }
-        let domain_payload = domain_payload(domain, payload);
+        let domain_payload = domain_payload(domain, payload)?;
         let signature = self
             .manager
             .sign(&private_key, &domain_payload)
@@ -555,9 +564,168 @@ pub struct AegisPqvmVerifier {
     pub registry: AegisPqvmKeyRegistry,
     initialized: bool,
     verified_signature_cache: Arc<Mutex<VerifiedSignatureCache>>,
+    verification_pool: Arc<PqcVerificationPool>,
 }
 
 const VERIFIED_SIGNATURE_CACHE_CAPACITY: usize = 4_096;
+const VERIFIED_SIGNATURE_CACHE_HEIGHT_WINDOW: u64 = 2;
+const PQC_VERIFICATION_QUEUE_CAPACITY: usize = 64;
+const DEFAULT_PQC_VERIFICATION_WORKERS: usize = 2;
+const MAX_PQC_VERIFICATION_WORKERS: usize = 4;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PqcVerificationMetricsSnapshot {
+    pub requests: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub cache_evictions: u64,
+    pub verification_duration_micros: u64,
+    pub queue_depth: usize,
+    pub queue_rejections: u64,
+}
+
+#[derive(Debug, Default)]
+struct PqcVerificationMetrics {
+    requests: AtomicU64,
+    cache_hits: AtomicU64,
+    cache_misses: AtomicU64,
+    cache_evictions: AtomicU64,
+    verification_duration_micros: AtomicU64,
+    queue_depth: AtomicUsize,
+    queue_rejections: AtomicU64,
+}
+
+impl PqcVerificationMetrics {
+    fn snapshot(&self) -> PqcVerificationMetricsSnapshot {
+        PqcVerificationMetricsSnapshot {
+            requests: self.requests.load(Ordering::Relaxed),
+            cache_hits: self.cache_hits.load(Ordering::Relaxed),
+            cache_misses: self.cache_misses.load(Ordering::Relaxed),
+            cache_evictions: self.cache_evictions.load(Ordering::Relaxed),
+            verification_duration_micros: self.verification_duration_micros.load(Ordering::Relaxed),
+            queue_depth: self.queue_depth.load(Ordering::Relaxed),
+            queue_rejections: self.queue_rejections.load(Ordering::Relaxed),
+        }
+    }
+}
+
+struct PqcVerificationRequest {
+    public_key: PQCPublicKey,
+    signature: PQCSignature,
+    message: Vec<u8>,
+    result: mpsc::Sender<Result<bool, String>>,
+}
+
+struct PqcVerificationPool {
+    sender: SyncSender<PqcVerificationRequest>,
+    metrics: Arc<PqcVerificationMetrics>,
+}
+
+impl std::fmt::Debug for PqcVerificationPool {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PqcVerificationPool")
+            .field("metrics", &self.metrics.snapshot())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PqcVerificationPool {
+    fn initialize() -> Arc<Self> {
+        static POOL: OnceLock<Arc<PqcVerificationPool>> = OnceLock::new();
+        Arc::clone(POOL.get_or_init(|| {
+            let worker_count = std::env::var("SYNERGY_PQC_VERIFY_WORKERS")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(DEFAULT_PQC_VERIFICATION_WORKERS)
+                .clamp(1, MAX_PQC_VERIFICATION_WORKERS);
+            let (sender, receiver) = mpsc::sync_channel(PQC_VERIFICATION_QUEUE_CAPACITY);
+            let receiver = Arc::new(Mutex::new(receiver));
+            let metrics = Arc::new(PqcVerificationMetrics::default());
+            for index in 0..worker_count {
+                let worker_receiver = Arc::clone(&receiver);
+                let worker_metrics = Arc::clone(&metrics);
+                thread::Builder::new()
+                    .name(format!("pqc-verify-{index}"))
+                    .spawn(move || pqc_verification_worker(worker_receiver, worker_metrics))
+                    .expect("spawn bounded PQC verification worker");
+            }
+            Arc::new(Self { sender, metrics })
+        }))
+    }
+
+    fn verify(
+        &self,
+        public_key: PQCPublicKey,
+        signature: PQCSignature,
+        message: Vec<u8>,
+    ) -> Result<bool, AegisPqvmError> {
+        let (result_sender, result_receiver) = mpsc::channel();
+        self.metrics.requests.fetch_add(1, Ordering::Relaxed);
+        self.metrics.queue_depth.fetch_add(1, Ordering::Relaxed);
+        match self.sender.try_send(PqcVerificationRequest {
+            public_key,
+            signature,
+            message,
+            result: result_sender,
+        }) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                self.metrics.queue_depth.fetch_sub(1, Ordering::Relaxed);
+                self.metrics
+                    .queue_rejections
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(AegisPqvmError(
+                    "bounded PQC verification pool is saturated".to_string(),
+                ));
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                self.metrics.queue_depth.fetch_sub(1, Ordering::Relaxed);
+                self.metrics
+                    .queue_rejections
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(AegisPqvmError(
+                    "bounded PQC verification pool is unavailable".to_string(),
+                ));
+            }
+        }
+        result_receiver
+            .recv()
+            .map_err(|_| AegisPqvmError("bounded PQC verification worker stopped".to_string()))?
+            .map_err(AegisPqvmError)
+    }
+}
+
+pub fn pqc_verification_metrics_snapshot() -> PqcVerificationMetricsSnapshot {
+    PqcVerificationPool::initialize().metrics.snapshot()
+}
+
+fn pqc_verification_worker(
+    receiver: Arc<Mutex<Receiver<PqcVerificationRequest>>>,
+    metrics: Arc<PqcVerificationMetrics>,
+) {
+    loop {
+        let request = {
+            let receiver = receiver
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            receiver.recv()
+        };
+        let Ok(request) = request else {
+            break;
+        };
+        metrics.queue_depth.fetch_sub(1, Ordering::Relaxed);
+        let started = Instant::now();
+        let result = PQCManager::new()
+            .verify(&request.public_key, &request.signature, &request.message)
+            .map_err(|error| format!("aegis-pqvm verification failed: {error}"));
+        metrics.verification_duration_micros.fetch_add(
+            started.elapsed().as_micros().min(u64::MAX as u128) as u64,
+            Ordering::Relaxed,
+        );
+        let _ = request.result.send(result);
+    }
+}
 
 /// A bounded positive-result cache for exact domain-signature transcripts.
 ///
@@ -570,30 +738,66 @@ const VERIFIED_SIGNATURE_CACHE_CAPACITY: usize = 4_096;
 /// signatures are never inserted.
 #[derive(Debug, Default)]
 struct VerifiedSignatureCache {
-    entries: BTreeSet<Hash>,
+    entries: BTreeMap<Hash, VerifiedSignatureCacheEntry>,
     insertion_order: VecDeque<Hash>,
-    hits: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct VerifiedSignatureCacheEntry {
+    epoch: Epoch,
+    height: Option<u64>,
 }
 
 impl VerifiedSignatureCache {
-    fn contains(&mut self, key: &Hash) -> bool {
-        let present = self.entries.contains(key);
-        if present {
-            self.hits = self.hits.saturating_add(1);
-        }
-        present
+    fn contains(&self, key: &Hash, epoch: Epoch, height: Option<Height>) -> bool {
+        self.entries.get(key).is_some_and(|entry| {
+            entry.epoch == epoch && entry.height == height.map(|height| height.0)
+        })
     }
 
-    fn insert(&mut self, key: Hash) {
-        if !self.entries.insert(key) {
-            return;
+    fn prune(&mut self, epoch: Epoch, height: Option<Height>) -> usize {
+        let minimum_height = height.map(|height| {
+            height
+                .0
+                .saturating_sub(VERIFIED_SIGNATURE_CACHE_HEIGHT_WINDOW)
+        });
+        let before = self.entries.len();
+        self.entries.retain(|_, entry| {
+            entry.epoch == epoch
+                && match (minimum_height, entry.height) {
+                    (Some(minimum), Some(entry_height)) => entry_height >= minimum,
+                    _ => true,
+                }
+        });
+        self.insertion_order
+            .retain(|key| self.entries.contains_key(key));
+        before.saturating_sub(self.entries.len())
+    }
+
+    fn insert(&mut self, key: Hash, epoch: Epoch, height: Option<Height>) -> usize {
+        let mut evicted = self.prune(epoch, height);
+        if self
+            .entries
+            .insert(
+                key,
+                VerifiedSignatureCacheEntry {
+                    epoch,
+                    height: height.map(|height| height.0),
+                },
+            )
+            .is_some()
+        {
+            return evicted;
         }
         self.insertion_order.push_back(key);
         while self.entries.len() > VERIFIED_SIGNATURE_CACHE_CAPACITY {
             if let Some(expired) = self.insertion_order.pop_front() {
-                self.entries.remove(&expired);
+                if self.entries.remove(&expired).is_some() {
+                    evicted = evicted.saturating_add(1);
+                }
             }
         }
+        evicted
     }
 }
 
@@ -608,6 +812,7 @@ impl AegisPqvmVerifier {
             registry,
             initialized: true,
             verified_signature_cache: Arc::new(Mutex::new(VerifiedSignatureCache::default())),
+            verification_pool: PqcVerificationPool::initialize(),
         })
     }
 
@@ -616,6 +821,7 @@ impl AegisPqvmVerifier {
             registry: AegisPqvmKeyRegistry::default(),
             initialized: false,
             verified_signature_cache: Arc::new(Mutex::new(VerifiedSignatureCache::default())),
+            verification_pool: PqcVerificationPool::initialize(),
         }
     }
 
@@ -747,12 +953,13 @@ impl AegisPqvmVerifier {
             VotePhase::Finality => SYNERGY_FINALITY_VOTE_V1,
             VotePhase::Timeout => SYNERGY_TIMEOUT_VOTE_V1,
         };
-        self.verify_domain_signature(
+        self.verify_domain_signature_scoped(
             domain,
             &vote.signing_bytes().map_err(AegisPqvmError)?,
             &vote.validator_uma_id.0,
             &vote.key_id,
             vote.epoch,
+            Some(vote.height),
             AegisPqKeyRole::ConsensusVote,
             &vote.aegis_pq_signature,
         )
@@ -936,6 +1143,7 @@ impl AegisPqvmVerifier {
         let mut signed_weight = 0u64;
         let mut seen_validators = BTreeSet::new();
         let mut seen_keys = BTreeSet::new();
+        let mut certificate_votes = Vec::with_capacity(signer_indexes.len());
         for (position, signer_index) in signer_indexes.iter().enumerate() {
             let validator = validators.get(*signer_index).ok_or_else(|| {
                 AegisPqvmError("QC signer bitmap references missing validator".to_string())
@@ -983,11 +1191,36 @@ impl AegisPqvmVerifier {
                 height_context_root: qc.height_context_root,
                 aegis_pq_signature: qc.aegis_pq_signatures[position].clone(),
             };
-            self.verify_vote_signature_checked(&vote, validator, expected_height_context_root)?;
+            certificate_votes.push((vote, validator.clone()));
             signed_weight = signed_weight
                 .checked_add(validator.voting_weight)
                 .ok_or_else(|| AegisPqvmError("QC signed-weight overflow".to_string()))?;
         }
+
+        // Certificate evidence is independent per signer. Submit every
+        // uncached ML-DSA transcript concurrently to the bounded verification
+        // pool; the coordinator thread waits only for the bounded batch result
+        // and never performs the post-quantum primitive itself.
+        thread::scope(|scope| -> Result<(), AegisPqvmError> {
+            let verification_results = certificate_votes
+                .iter()
+                .map(|(vote, validator)| {
+                    scope.spawn(|| {
+                        self.verify_vote_signature_checked(
+                            vote,
+                            validator,
+                            expected_height_context_root,
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            for result in verification_results {
+                result.join().map_err(|_| {
+                    AegisPqvmError("PQC certificate verification worker panicked".to_string())
+                })??;
+            }
+            Ok(())
+        })?;
 
         if signed_weight != qc.signed_weight {
             return Err(AegisPqvmError(format!(
@@ -1173,6 +1406,22 @@ impl AegisPqvmVerifier {
         role: AegisPqKeyRole,
         signature: &AegisPqSignature,
     ) -> Result<(), AegisPqvmError> {
+        self.verify_domain_signature_scoped(
+            domain, payload, uma_id, key_id, epoch, None, role, signature,
+        )
+    }
+
+    fn verify_domain_signature_scoped(
+        &self,
+        domain: &str,
+        payload: &[u8],
+        uma_id: &str,
+        key_id: &AegisPqKeyId,
+        epoch: Epoch,
+        height: Option<Height>,
+        role: AegisPqKeyRole,
+        signature: &AegisPqSignature,
+    ) -> Result<(), AegisPqvmError> {
         self.ensure_initialized()?;
         if !signature.is_present() {
             return Err(AegisPqvmError("missing Aegis PQC signature".to_string()));
@@ -1212,14 +1461,22 @@ impl AegisPqvmVerifier {
             &public_key.key_data,
         )?;
         {
-            let mut cache = self
+            let cache = self
                 .verified_signature_cache
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if cache.contains(&cache_key) {
+            if cache.contains(&cache_key, epoch, height) {
+                self.verification_pool
+                    .metrics
+                    .cache_hits
+                    .fetch_add(1, Ordering::Relaxed);
                 return Ok(());
             }
         }
+        self.verification_pool
+            .metrics
+            .cache_misses
+            .fetch_add(1, Ordering::Relaxed);
         let pqc_signature = PQCSignature {
             algorithm,
             signature_data: signature.signature_bytes.clone(),
@@ -1227,15 +1484,21 @@ impl AegisPqvmVerifier {
             public_key_id: key_id.0.clone(),
             created_at: 0,
         };
-        let manager = PQCManager::new();
-        let verified = manager
-            .verify(public_key, &pqc_signature, &domain_payload(domain, payload))
-            .map_err(|error| AegisPqvmError(format!("aegis-pqvm verification failed: {error}")))?;
+        let verified = self.verification_pool.verify(
+            public_key.clone(),
+            pqc_signature,
+            domain_payload(domain, payload)?,
+        )?;
         if verified {
-            self.verified_signature_cache
+            let evicted = self
+                .verified_signature_cache
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .insert(cache_key);
+                .insert(cache_key, epoch, height);
+            self.verification_pool
+                .metrics
+                .cache_evictions
+                .fetch_add(evicted as u64, Ordering::Relaxed);
             Ok(())
         } else {
             Err(AegisPqvmError(
@@ -1260,7 +1523,17 @@ impl AegisPqvmVerifier {
             .verified_signature_cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        (cache.entries.len(), cache.hits)
+        (
+            cache.entries.len(),
+            self.verification_pool
+                .metrics
+                .cache_hits
+                .load(Ordering::Relaxed),
+        )
+    }
+
+    pub fn verification_metrics_snapshot(&self) -> PqcVerificationMetricsSnapshot {
+        self.verification_pool.metrics.snapshot()
     }
 }
 
@@ -1293,7 +1566,7 @@ fn verified_signature_cache_key(
             + 72,
     );
     push_component(&mut material, domain.as_bytes());
-    push_component(&mut material, payload);
+    push_component(&mut material, &domain_payload(domain, payload)?);
     push_component(&mut material, uma_id.as_bytes());
     push_component(&mut material, key_id.0.as_bytes());
     push_component(&mut material, &epoch.0.to_be_bytes());
@@ -1354,13 +1627,30 @@ fn bitmap_signer_indexes(
     Ok(indexes)
 }
 
-fn domain_payload(domain: &str, payload: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(domain.len() + 16 + payload.len());
+fn domain_payload(domain: &str, payload: &[u8]) -> Result<Vec<u8>, AegisPqvmError> {
+    let consensus_domain = if domain_requires_chain_incarnation(domain) {
+        Some(
+            crate::synergy_types::current_consensus_domain()
+                .and_then(|domain| domain.canonical_bytes())
+                .map_err(AegisPqvmError)?,
+        )
+    } else {
+        None
+    };
+    let mut out = Vec::with_capacity(
+        domain.len() + consensus_domain.as_ref().map_or(0, Vec::len) + 24 + payload.len(),
+    );
     out.extend_from_slice(&(domain.len() as u64).to_be_bytes());
     out.extend_from_slice(domain.as_bytes());
+    if let Some(consensus_domain) = consensus_domain {
+        out.extend_from_slice(&(consensus_domain.len() as u64).to_be_bytes());
+        out.extend_from_slice(&consensus_domain);
+    } else {
+        out.extend_from_slice(&0_u64.to_be_bytes());
+    }
     out.extend_from_slice(&(payload.len() as u64).to_be_bytes());
     out.extend_from_slice(payload);
-    out
+    Ok(out)
 }
 
 fn parse_algorithm(value: &str) -> Result<PQCAlgorithm, AegisPqvmError> {
@@ -1398,6 +1688,10 @@ fn domain_requires_mldsa65(domain: &str) -> bool {
             | SYNERGY_QC_V1
             | SYNERGY_EPOCH_TRANSITION_V1
     ) || domain.starts_with("PoSy/ETDAG/")
+}
+
+fn domain_requires_chain_incarnation(domain: &str) -> bool {
+    domain_requires_mldsa65(domain) || domain == SYNERGY_P2P_HANDSHAKE_V1
 }
 
 #[cfg(test)]
@@ -1529,6 +1823,84 @@ mod tests {
             (1, 1),
             "changed payloads and signatures must never enter or hit the cache"
         );
+    }
+
+    #[test]
+    fn consensus_vote_restart_replays_the_exact_durable_randomized_signature() {
+        let mut signer = AegisPqvmSigner::initialize_required().expect("aegis signer");
+        let key_id = signer
+            .generate_and_register_key("uma-replay", vec![AegisPqKeyRole::ConsensusVote], Epoch(0))
+            .expect("key");
+        let record = validator_record(
+            &signer,
+            "validator-replay",
+            "uma-replay",
+            &key_id,
+            ValidatorStatus::Active,
+        );
+        let set = ValidatorSet {
+            epoch: Epoch(0),
+            validators: vec![record.clone()],
+        };
+        let cluster = ClusterMap {
+            epoch: Epoch(0),
+            assignments: vec![ClusterAssignment {
+                cluster_id: ClusterId(0),
+                validator_id: record.validator_id.clone(),
+            }],
+        };
+        let context_root =
+            Hash::from_domain_bytes("SYNERGY_TEST_HEIGHT_CONTEXT_V1", b"exact-replay");
+        let vote = Vote {
+            chain_id: ChainId::synergy_testnet_v3(),
+            network_id: NetworkId::synergy_testnet_v3(),
+            protocol_version: POSY_PROTOCOL_VERSION.to_string(),
+            height: Height(1),
+            round: Round(0),
+            epoch: Epoch(0),
+            cluster_id: ClusterId(0),
+            height_context_root: context_root,
+            phase: VotePhase::Finality,
+            block_id: BlockId::from("block-exact-replay"),
+            highest_prepared_vc_root: None,
+            validator_id: record.validator_id.clone(),
+            validator_uma_id: record.validator_uma_id.clone(),
+            key_id: key_id.clone(),
+            active_validator_set_hash: set.hash().unwrap(),
+            cluster_map_hash: cluster.hash().unwrap(),
+            aegis_pq_signature: AegisPqSignature {
+                algorithm: String::new(),
+                signature_bytes: Vec::new(),
+            },
+        };
+        let journal = crate::utils::test_temp_root(format!(
+            "synergy-exact-vote-replay-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let authority = DurableConsensusSigningAuthority::at_path(journal.clone());
+        let first = signer
+            .sign_consensus_vote(&vote, &authority)
+            .expect("first signature is durably committed");
+
+        let restarted = DurableConsensusSigningAuthority::at_path(journal.clone());
+        let replay = signer
+            .sign_consensus_vote(&vote, &restarted)
+            .expect("restart returns the exact stored envelope");
+        assert_eq!(
+            replay, first,
+            "restart must never create a second randomized signature for one subject"
+        );
+        let authorization = ConsensusSigningAuthorization::from_vote(&vote).unwrap();
+        let recorded = restarted
+            .recorded_signed_vote_for_slot(&authorization)
+            .unwrap()
+            .expect("exact envelope remains durable");
+        assert_eq!(recorded.aegis_pq_signature, first);
+        let _ = std::fs::remove_file(journal);
     }
 
     #[test]

@@ -504,6 +504,39 @@ both implausibly small readings such as 0.02 seconds and exaggerated gaps.
     took approximately two seconds in live evidence, exceeding the 1,500 ms
     failure deadline. Exact retry deduplication cannot solve this mandatory
     repeated-cryptography path.
+12. **Added a 4,096-entry bounded positive verification cache keyed by the
+    complete domain-signature transcript, including public-key bytes, while
+    retaining lifecycle/role/algorithm checks before every lookup. Built
+    immutable source `fd3b3e4d882b17e3393a13645984f044fdedc32b` in workflow
+    `30587342645`, verified all artifact checksums, and reread this complete
+    log before deployment.**
+    **Outcome:** altered payloads and signatures remain rejected and never
+    enter the cache. Aegis verifier tests passed 6/6, PoSy certificate/safety
+    tests passed 10/10, and typed-coordinator recovery/liveness tests passed
+    31/31. The validator artifact SHA-256 is
+    `5ed84c7f608173ce6013b5879c881c44ce2227f428cfd38161f70880718c4550`.
+    Live deployment and sustained timing evidence are pending.
+13. **Stopped the cache-only live rollout when the operator supplied the
+    complete architectural diagnosis and ordered the piecemeal rollout
+    abandoned. Cancelled Control Panel workflow `30587342645` and performed
+    read-only process checks on every support role and validator.**
+    **Outcome:** the cancellation completed with workflow conclusion
+    `cancelled`. Before the stop reached the already-running guarded helpers,
+    all three relayers had completed on role binary SHA-256
+    `8e329e835a7e6e30953005081ea003e901f01907ced346ed07f7554a4abd7966`;
+    RPC Gateway and Explorer Indexer had completed on generic binary SHA-256
+    `ee5834c94f469c45d88a359a8bbec2320d3aa51217a23bda400f12f57077491c`.
+    All five support services were active with zero restarts. No validator
+    deployment helper was invoked: validators 1–6 remained active with zero
+    service restarts on the preceding replay-bound release (validator SHA-256
+    `df5333ac6d688cfb8b9625821c039a6a316c2d480787d8d1302f2369851abedf`).
+    The partially deployed cache release is explicitly **not** accepted as a
+    release candidate or health result. The operator required one unified
+    implementation of canonical consensus-subject identity, certificate
+    equivalence/merge, durable atomic recovery, startup readiness gating,
+    role-based protocol authorization, verified-transcript reuse, a bounded
+    PQ worker pool/cache, the complete invariant/fault matrix, and then a full
+    disposable Chain 1266 state wipe and clean-Genesis restart.
 
 ### Final outcome
 

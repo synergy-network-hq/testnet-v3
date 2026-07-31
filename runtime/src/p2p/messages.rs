@@ -140,6 +140,8 @@ pub fn validate_typed_consensus_message_size(
         TypedConsensusMessage::Vote { .. } => return Ok(()),
     };
     let encoded = NetworkMessage::TypedConsensus {
+        chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+        genesis_hash: crate::genesis::canonical_genesis()?.hash().to_string(),
         message: message.clone(),
     };
     let frame_bytes = serde_json::to_vec(&encoded)
@@ -163,6 +165,8 @@ pub fn validate_typed_finality_observer_message_size(
         return Err("typed finality observer record segment cannot be empty".to_string());
     }
     let encoded = NetworkMessage::TypedFinalityObserver {
+        chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+        genesis_hash: crate::genesis::canonical_genesis()?.hash().to_string(),
         message: message.clone(),
     };
     let frame_bytes = serde_json::to_vec(&encoded)
@@ -198,6 +202,10 @@ pub enum NetworkMessage {
         capabilities: Vec<String>,
         #[serde(default)]
         chain_id: Option<u64>,
+        #[serde(default)]
+        chain_incarnation: Option<u64>,
+        #[serde(default)]
+        consensus_state_schema_version: Option<u32>,
         #[serde(default)]
         network_id: Option<u64>,
         #[serde(default)]
@@ -253,11 +261,15 @@ pub enum NetworkMessage {
     /// Typed PoSy v2.2 messages. These are dispatched through the dedicated
     /// coordinator mailbox and never through inherited consensus handlers.
     TypedConsensus {
+        chain_incarnation: u64,
+        genesis_hash: String,
         message: TypedConsensusMessage,
     },
     /// Verified, non-signing finalized-chain replication between the
     /// validator-VPN relayer tier and public RPC/indexer observer roles.
     TypedFinalityObserver {
+        chain_incarnation: u64,
+        genesis_hash: String,
         message: TypedFinalityObserverMessage,
     },
     /// A complete, already-certified ETDAG proof package. The P2P receiver
@@ -335,6 +347,11 @@ mod tests {
     #[test]
     fn typed_consensus_vote_round_trips_without_legacy_reinterpretation() {
         let message = NetworkMessage::TypedConsensus {
+            chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+            genesis_hash: crate::genesis::canonical_genesis()
+                .unwrap()
+                .hash()
+                .to_string(),
             message: TypedConsensusMessage::Vote {
                 vote: TypedVote {
                     chain_id: ChainId::synergy_testnet_v3(),
@@ -367,7 +384,8 @@ mod tests {
         assert!(matches!(
             decoded,
             NetworkMessage::TypedConsensus {
-                message: TypedConsensusMessage::Vote { .. }
+                message: TypedConsensusMessage::Vote { .. },
+                ..
             }
         ));
     }

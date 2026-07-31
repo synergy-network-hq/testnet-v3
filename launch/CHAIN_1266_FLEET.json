@@ -1,0 +1,145 @@
+{
+  "schema_version": 1,
+  "chain_id": 1266,
+  "chain_incarnation": 4,
+  "genesis_hash": "859c40e33cca7e02e7a3b3ebeafecbbf04ce29080863313ef893a8a5e6341c1d",
+  "stall_log": "CHAIN_1266_STALL_LOG.md",
+  "ssh": {
+    "batch_mode": true,
+    "connect_timeout_seconds": 8,
+    "control_persist_seconds": 900,
+    "control_path": "/tmp/synergy-chain1266-control-%C"
+  },
+  "nodes": [
+    {
+      "id": "validator-node-01",
+      "role": "validator",
+      "ssh_alias": "synergy-val1",
+      "service": "synergy-validator.service",
+      "metrics_url": "http://127.0.0.1:6030/metrics",
+      "config_path": "/etc/synergy/validator/config.toml",
+      "genesis_path": "/etc/synergy/testnet-v3/genesis.json",
+      "state_root": "/var/lib/synergy/validator/chain-1266/incarnation-4/data"
+    },
+    {
+      "id": "validator-node-02",
+      "role": "validator",
+      "ssh_alias": "synergy-val2",
+      "service": "synergy-validator.service",
+      "metrics_url": "http://127.0.0.1:6030/metrics",
+      "config_path": "/etc/synergy/validator/config.toml",
+      "genesis_path": "/etc/synergy/testnet-v3/genesis.json",
+      "state_root": "/var/lib/synergy/validator/chain-1266/incarnation-4/data"
+    },
+    {
+      "id": "validator-node-03",
+      "role": "validator",
+      "ssh_alias": "synergy-val3",
+      "service": "synergy-validator.service",
+      "metrics_url": "http://127.0.0.1:6030/metrics",
+      "config_path": "/etc/synergy/validator/config.toml",
+      "genesis_path": "/etc/synergy/testnet-v3/genesis.json",
+      "state_root": "/var/lib/synergy/validator/chain-1266/incarnation-4/data"
+    },
+    {
+      "id": "validator-node-04",
+      "role": "validator",
+      "ssh_alias": "synergy-val4",
+      "service": "synergy-validator.service",
+      "metrics_url": "http://127.0.0.1:6030/metrics",
+      "config_path": "/etc/synergy/validator/config.toml",
+      "genesis_path": "/etc/synergy/testnet-v3/genesis.json",
+      "state_root": "/var/lib/synergy/validator/chain-1266/incarnation-4/data"
+    },
+    {
+      "id": "validator-node-05",
+      "role": "validator",
+      "ssh_alias": "synergy-val5",
+      "service": "synergy-validator.service",
+      "metrics_url": "http://127.0.0.1:6030/metrics",
+      "config_path": "/etc/synergy/validator/config.toml",
+      "genesis_path": "/etc/synergy/testnet-v3/genesis.json",
+      "state_root": "/var/lib/synergy/validator/chain-1266/incarnation-4/data"
+    },
+    {
+      "id": "validator-node-06",
+      "role": "validator",
+      "ssh_alias": "synergy-val6",
+      "service": "synergy-validator.service",
+      "metrics_url": "http://127.0.0.1:6030/metrics",
+      "config_path": "/etc/synergy/validator/config.toml",
+      "genesis_path": "/etc/synergy/testnet-v3/genesis.json",
+      "state_root": "/var/lib/synergy/validator/chain-1266/incarnation-4/data"
+    },
+    {
+      "id": "relay1",
+      "role": "relayer",
+      "ssh_alias": "synergy-relayer1",
+      "service": "synergy-testnet-v3-relayer.service",
+      "metrics_url": "http://127.0.0.1:6030/metrics",
+      "config_path": "/etc/synergy/testnet-v3/relay1.toml",
+      "genesis_path": "/etc/synergy/testnet-v3/genesis.json",
+      "state_root": "/var/lib/synergy/testnet-v3/relay1/chain-1266/incarnation-4/data"
+    },
+    {
+      "id": "relay2",
+      "role": "relayer",
+      "ssh_alias": "synergy-relayer2",
+      "service": "synergy-testnet-v3-relayer.service",
+      "metrics_url": "http://127.0.0.1:6030/metrics",
+      "config_path": "/etc/synergy/testnet-v3/relay2.toml",
+      "genesis_path": "/etc/synergy/testnet-v3/genesis.json",
+      "state_root": "/var/lib/synergy/testnet-v3/relay2/chain-1266/incarnation-4/data"
+    },
+    {
+      "id": "relay3",
+      "role": "relayer",
+      "ssh_alias": "synergy-relayer3",
+      "service": "synergy-testnet-v3-relayer.service",
+      "metrics_url": "http://127.0.0.1:6030/metrics",
+      "config_path": "/etc/synergy/testnet-v3/relay3.toml",
+      "genesis_path": "/etc/synergy/testnet-v3/genesis.json",
+      "state_root": "/var/lib/synergy/testnet-v3/relay3/chain-1266/incarnation-4/data"
+    },
+    {
+      "id": "rpc-gateway",
+      "role": "rpc_gateway",
+      "ssh_alias": "synergy-rpc",
+      "service": "synergy-testnet-v3-rpc-gateway.service",
+      "metrics_url": "http://127.0.0.1:6030/metrics",
+      "config_path": "/etc/synergy/testnet-v3/rpc-gateway/node.toml",
+      "genesis_path": "/etc/synergy/testnet-v3/genesis.json",
+      "state_root": "/var/lib/synergy/testnet-v3/rpc-gateway/chain-1266/incarnation-4/data"
+    },
+    {
+      "id": "explorer-indexer",
+      "role": "explorer_indexer",
+      "ssh_alias": "synergy-index",
+      "service": "synergy-testnet-v3-explorer-indexer.service",
+      "metrics_url": "http://127.0.0.1:6030/metrics",
+      "config_path": "/etc/synergy/testnet-v3/explorer-indexer/node.toml",
+      "genesis_path": "/etc/synergy/testnet-v3/genesis.json",
+      "state_root": "/var/lib/synergy/testnet-v3/explorer-indexer/chain-1266/incarnation-4/data"
+    },
+    {
+      "id": "atlas-api",
+      "role": "atlas_api",
+      "ssh_alias": "synergy-index",
+      "service": "synergy-testnet-v3-atlas-api.service",
+      "metrics_url": "",
+      "config_path": "",
+      "genesis_path": "",
+      "state_root": "/var/lib/synergy/testnet-v3/atlas/api/chain-1266/incarnation-4/data"
+    },
+    {
+      "id": "atlas-indexer",
+      "role": "atlas_indexer",
+      "ssh_alias": "synergy-index",
+      "service": "synergy-testnet-v3-atlas-indexer.service",
+      "metrics_url": "",
+      "config_path": "",
+      "genesis_path": "",
+      "state_root": "/var/lib/synergy/testnet-v3/atlas/indexer/chain-1266/incarnation-4/data"
+    }
+  ]
+}

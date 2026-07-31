@@ -22,8 +22,9 @@ use crate::consensus::synergy_score::SynergyScoreCalculator;
 use crate::consensus::testnet_v3_bootstrap::load_testnet_v3_genesis_bootstrap;
 use crate::consensus::testnet_v3_finality_context::FinalizedTypedContextProvider;
 use crate::consensus::typed_coordinator::{
-    import_local_genesis_bound_typed_signer, install_typed_coordinator_ingress,
-    remove_typed_coordinator_ingress, replay_finalized_execution_state, run_typed_posy_driver,
+    begin_typed_consensus_startup_buffer, import_local_genesis_bound_typed_signer,
+    install_typed_coordinator_ingress, remove_typed_coordinator_ingress,
+    replay_finalized_execution_state, run_typed_posy_driver, set_typed_consensus_startup_phase,
     P2pTypedConsensusEgress, TypedFinalityContextDigestSource, TypedNextHeightContextSource,
     TypedPosyCoordinator, TypedPosyCoordinatorStartup, TypedPosyDriver,
 };
@@ -901,6 +902,66 @@ fn wait_for_finalized_typed_peer_readiness(
     }
 }
 
+/// Holds the scheduler after every immutable authority, durable store,
+/// mailbox, and authenticated peer is ready. A coordinated deployment may
+/// release all validators by installing one ML-DSA-87-signed, desired-state
+/// and Genesis-bound start command.
+fn wait_for_declared_consensus_start_barrier() -> Result<(), String> {
+    let paused = env::var("CONSENSUS_START_PAUSED")
+        .ok()
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"));
+    if !paused {
+        return Ok(());
+    }
+    let release_file = env::var("SYNERGY_CONSENSUS_START_RELEASE_FILE")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| crate::utils::resolve_data_path("data/consensus-start.release"));
+    let desired_state_path = env::var(crate::desired_state::DESIRED_STATE_ENV)
+        .map(PathBuf::from)
+        .map_err(|_| {
+            "consensus start barrier requires the installed desired-state manifest".to_string()
+        })?;
+    let desired_state_sha256 =
+        env::var(crate::desired_state::DESIRED_STATE_SHA256_ENV).map_err(|_| {
+            "consensus start barrier requires the verified desired-state digest".to_string()
+        })?;
+    loop {
+        match crate::consensus_start::verify_signed_start_command(
+            &release_file,
+            &desired_state_path,
+            &desired_state_sha256,
+        ) {
+            Ok(request) => {
+                let now_unix_ms = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|error| format!("consensus start clock failure: {error}"))?
+                    .as_millis()
+                    .min(u64::MAX as u128) as u64;
+                if now_unix_ms >= request.activate_unix_ms {
+                    return Ok(());
+                }
+                thread::sleep(Duration::from_millis(
+                    request
+                        .activate_unix_ms
+                        .saturating_sub(now_unix_ms)
+                        .min(100),
+                ));
+            }
+            Err(error) if error.contains("No such file") => {
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "verify consensus start release file {}: {error}",
+                    release_file.display()
+                ))
+            }
+        }
+    }
+}
+
 fn local_validator_is_consensus_authorized(config: &NodeConfig) -> bool {
     let validator_address = resolve_local_validator_address(config);
     consensus_membership_validators(VALIDATOR_MANAGER.get_active_validators())
@@ -1166,6 +1227,7 @@ where
     H: TypedNextHeightContextSource + 'static,
 {
     let initial_execution_state = coordinator.finalized_execution_state_snapshot();
+    let readiness_network = Arc::clone(&network);
     // Build the driver before exposing either P2P ingress.  A failure here
     // must not leave an inbound path pointing at a partially initialized
     // signer.
@@ -1177,6 +1239,7 @@ where
         next_height_source,
     )
     .map_err(|error| format!("typed PoSy driver construction failed: {error}"))?;
+    set_typed_consensus_startup_phase("RECOVERY_VALIDATED");
 
     if let Some(permit) = etdag_activation_permit.as_ref() {
         driver
@@ -1208,6 +1271,30 @@ where
             return Err(format!("install typed PoSy ingress: {error}"));
         }
     };
+    set_typed_consensus_startup_phase("MAILBOX_READY");
+    let required_remote_validators = driver.required_remote_validator_count();
+    if let Err(error) =
+        wait_for_finalized_typed_peer_readiness(&readiness_network, required_remote_validators)
+    {
+        let _ = remove_typed_coordinator_ingress();
+        let _ = remove_etdag_certified_input_ingress();
+        remove_finalized_execution_state_snapshot();
+        return Err(error);
+    }
+    set_typed_consensus_startup_phase("PEERS_READY");
+    if env::var("CONSENSUS_START_PAUSED")
+        .ok()
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+    {
+        set_typed_consensus_startup_phase("PAUSED_READY");
+    }
+    if let Err(error) = wait_for_declared_consensus_start_barrier() {
+        let _ = remove_typed_coordinator_ingress();
+        let _ = remove_etdag_certified_input_ingress();
+        remove_finalized_execution_state_snapshot();
+        return Err(format!("consensus start barrier rejected release: {error}"));
+    }
+    set_typed_consensus_startup_phase("RUNNING");
 
     let fatal_error = Arc::new(Mutex::new(None));
     let worker_error = Arc::clone(&fatal_error);
@@ -2602,6 +2689,11 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                 }
             }
 
+            let effective_config_path = config_path
+                .as_deref()
+                .map(PathBuf::from)
+                .or_else(|| env::var("SYNERGY_CONFIG_PATH").ok().map(PathBuf::from))
+                .unwrap_or_else(|| PathBuf::from("config/node.toml"));
             let mut config = if let Some(path) = config_path {
                 match load_node_config(Some(&path)) {
                     Ok(config) => config,
@@ -2646,6 +2738,21 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                     process::exit(1);
                 }
             };
+            let desired_role_profile = role_profile.unwrap_or_else(|| {
+                eprintln!(
+                    "Failed to validate Chain 1266 desired state: node role/profile is unresolved"
+                );
+                process::exit(1);
+            });
+            let release_id = crate::desired_state::verify_chain1266_desired_state(
+                desired_role_profile,
+                &config.identity.node_id,
+                &effective_config_path,
+            )
+            .unwrap_or_else(|error| {
+                eprintln!("Failed to validate Chain 1266 desired state: {error}");
+                process::exit(1);
+            });
 
             raise_runtime_nofile_limit(8192);
 
@@ -2665,16 +2772,15 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                 "network" => config.network.name.clone(),
                 "consensus" => config.consensus.algorithm.clone()
             );
-            if let Some(profile) = role_profile {
-                info!(
-                    "main",
-                    "Validated role-bound runtime profile",
-                    "role_id" => profile.role_id,
-                    "compiled_profile" => profile.compiled_profile,
-                    "authority_plane" => format!("{:?}", profile.authority_plane),
-                    "binary" => binary_name
-                );
-            }
+            info!(
+                "main",
+                "Validated role-bound runtime profile and desired state",
+                "role_id" => desired_role_profile.role_id,
+                "compiled_profile" => desired_role_profile.compiled_profile,
+                "authority_plane" => format!("{:?}", desired_role_profile.authority_plane),
+                "binary" => binary_name,
+                "release_id" => release_id
+            );
 
             env::set_var(
                 "SYNERGY_CONSENSUS_BLOCK_TIME_SECS",
@@ -2829,11 +2935,23 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
             info!("main", "Starting the node...");
 
             let pid = std::process::id();
-            if let Err(e) = fs::write("data/synergy-testnet.pid", pid.to_string()) {
+            let pid_path = crate::utils::resolve_data_path("data/synergy-testnet.pid");
+            if let Err(e) = fs::write(&pid_path, pid.to_string()) {
                 eprintln!("Warning: Failed to write PID file: {}", e);
             }
 
             let process_start_time = SystemTime::now();
+            let consensus_enabled = should_start_consensus(&config, role_profile);
+            if consensus_enabled && is_validator_profile(role_profile) {
+                begin_typed_consensus_startup_buffer(TYPED_POSY_INGRESS_CAPACITY)
+                    .unwrap_or_else(|error| {
+                        eprintln!(
+                            "Consensus startup failed closed before P2P listener activation: {error}"
+                        );
+                        process::exit(1);
+                    });
+                set_typed_consensus_startup_phase("BUFFERING_AUTHENTICATED_P2P");
+            }
 
             let p2p_enabled = should_start_p2p(&config, role_profile);
             let typed_finality_observer_enabled =
@@ -2979,7 +3097,6 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                 );
             }
 
-            let consensus_enabled = should_start_consensus(&config, role_profile);
             info!(
                 "main",
                 "Node initialized",
@@ -2993,8 +3110,8 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                 "consensus" => config.consensus.algorithm.clone()
             );
 
-            let reset_flag_path = "data/.reset_flag";
-            let should_sync = !std::path::Path::new(reset_flag_path).exists();
+            let reset_flag_path = crate::utils::resolve_data_path("data/.reset_flag");
+            let should_sync = !reset_flag_path.exists();
             let sync_required_before_join =
                 should_require_state_sync_before_join(&config, role_profile);
 
@@ -3043,7 +3160,7 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                     }
                 }
             } else {
-                std::fs::remove_file(reset_flag_path).ok();
+                std::fs::remove_file(&reset_flag_path).ok();
                 info!(
                     "main",
                     "Starting fresh after reset - skipping network sync",
@@ -3086,26 +3203,6 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
             // shutdown signal.  A typed-driver failure clears it before any
             // legacy path could be considered, and the role loop exits.
             let running = Arc::new(AtomicBool::new(true));
-            if consensus_enabled && is_validator_profile(role_profile) {
-                let required_remote_validators =
-                    genesis.validators().len().checked_sub(1).unwrap_or(0);
-                let network = p2p_network.as_ref().unwrap_or_else(|| {
-                    eprintln!(
-                        "Consensus startup failed closed: finalized typed PoSy requires an active P2P network"
-                    );
-                    process::exit(1);
-                });
-                info!(
-                    "main",
-                    "Waiting for finalized typed PoSy peer readiness",
-                    "required_remote_validators" => required_remote_validators as u64
-                );
-                wait_for_finalized_typed_peer_readiness(network, required_remote_validators)
-                    .unwrap_or_else(|error| {
-                        eprintln!("Consensus startup failed closed: {error}");
-                        process::exit(1);
-                    });
-            }
             let initial_consensus_startup = select_finalized_typed_driver_startup(
                 consensus_enabled,
                 p2p_network.is_some(),
@@ -3266,7 +3363,7 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                     );
                 }
             }
-            fs::remove_file("data/synergy-testnet.pid").ok();
+            fs::remove_file(&pid_path).ok();
             if let Some(error) = typed_worker_failure {
                 eprintln!("Finalized typed PoSy worker failed closed: {error}");
                 process::exit(1);

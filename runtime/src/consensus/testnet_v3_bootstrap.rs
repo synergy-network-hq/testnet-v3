@@ -128,6 +128,7 @@ impl TestnetV3GenesisBootstrap {
             latest_finalized_height: Height(0),
             latest_finalized_block_hash: genesis_anchor,
             latest_finalized_state_root: deployed_genesis_state_root,
+            latest_finalized_timestamp_ms: 0,
             round: Round(0),
             evidence_root: self.genesis_transition_root,
             app_version: 1,

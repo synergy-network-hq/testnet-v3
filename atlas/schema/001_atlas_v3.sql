@@ -3,6 +3,7 @@ BEGIN;
 CREATE TABLE atlas_network (
   singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
   chain_id BIGINT NOT NULL CHECK (chain_id = 1266),
+  chain_incarnation BIGINT NOT NULL CHECK (chain_incarnation = 4),
   network_id TEXT NOT NULL CHECK (network_id = 'synergy-testnet-v3'),
   genesis_hash TEXT NOT NULL CHECK (genesis_hash ~ '^[0-9a-f]{64}$'),
   network_magic TEXT NOT NULL CHECK (network_magic ~ '^[0-9a-f]{8}$'),
@@ -15,6 +16,7 @@ CREATE TABLE atlas_network (
 
 CREATE TABLE blocks (
   chain_id BIGINT NOT NULL DEFAULT 1266 CHECK (chain_id = 1266),
+  chain_incarnation BIGINT NOT NULL DEFAULT 4 CHECK (chain_incarnation = 4),
   network_id TEXT NOT NULL DEFAULT 'synergy-testnet-v3' CHECK (network_id = 'synergy-testnet-v3'),
   height BIGINT NOT NULL CHECK (height >= 0),
   hash TEXT NOT NULL,
@@ -30,6 +32,7 @@ CREATE TABLE blocks (
 
 CREATE TABLE transactions (
   chain_id BIGINT NOT NULL DEFAULT 1266 CHECK (chain_id = 1266),
+  chain_incarnation BIGINT NOT NULL DEFAULT 4 CHECK (chain_incarnation = 4),
   network_id TEXT NOT NULL DEFAULT 'synergy-testnet-v3' CHECK (network_id = 'synergy-testnet-v3'),
   hash TEXT NOT NULL,
   block_hash TEXT,
@@ -47,6 +50,7 @@ CREATE TABLE transactions (
 
 CREATE TABLE accounts (
   chain_id BIGINT NOT NULL DEFAULT 1266 CHECK (chain_id = 1266),
+  chain_incarnation BIGINT NOT NULL DEFAULT 4 CHECK (chain_incarnation = 4),
   network_id TEXT NOT NULL DEFAULT 'synergy-testnet-v3' CHECK (network_id = 'synergy-testnet-v3'),
   address TEXT NOT NULL,
   balance_base_units NUMERIC(78, 0) NOT NULL DEFAULT 0,
@@ -59,6 +63,7 @@ CREATE TABLE accounts (
 
 CREATE TABLE tokens (
   chain_id BIGINT NOT NULL DEFAULT 1266 CHECK (chain_id = 1266),
+  chain_incarnation BIGINT NOT NULL DEFAULT 4 CHECK (chain_incarnation = 4),
   network_id TEXT NOT NULL DEFAULT 'synergy-testnet-v3' CHECK (network_id = 'synergy-testnet-v3'),
   token_id TEXT NOT NULL,
   symbol TEXT NOT NULL,
@@ -70,6 +75,7 @@ CREATE TABLE tokens (
 );
 
 CREATE TABLE token_holders (
+  chain_incarnation BIGINT NOT NULL DEFAULT 4 CHECK (chain_incarnation = 4),
   network_id TEXT NOT NULL DEFAULT 'synergy-testnet-v3' CHECK (network_id = 'synergy-testnet-v3'),
   token_id TEXT NOT NULL,
   account_address TEXT NOT NULL,
@@ -80,6 +86,7 @@ CREATE TABLE token_holders (
 
 CREATE TABLE contracts (
   chain_id BIGINT NOT NULL DEFAULT 1266 CHECK (chain_id = 1266),
+  chain_incarnation BIGINT NOT NULL DEFAULT 4 CHECK (chain_incarnation = 4),
   network_id TEXT NOT NULL DEFAULT 'synergy-testnet-v3' CHECK (network_id = 'synergy-testnet-v3'),
   address TEXT NOT NULL,
   name TEXT,
@@ -95,6 +102,7 @@ CREATE TABLE contracts (
 
 CREATE TABLE validators (
   chain_id BIGINT NOT NULL DEFAULT 1266 CHECK (chain_id = 1266),
+  chain_incarnation BIGINT NOT NULL DEFAULT 4 CHECK (chain_incarnation = 4),
   network_id TEXT NOT NULL DEFAULT 'synergy-testnet-v3' CHECK (network_id = 'synergy-testnet-v3'),
   address TEXT NOT NULL,
   validator_id TEXT,
@@ -109,6 +117,7 @@ CREATE TABLE validators (
 );
 
 CREATE TABLE internal_transfers (
+  chain_incarnation BIGINT NOT NULL DEFAULT 4 CHECK (chain_incarnation = 4),
   network_id TEXT NOT NULL DEFAULT 'synergy-testnet-v3' CHECK (network_id = 'synergy-testnet-v3'),
   transaction_hash TEXT NOT NULL,
   transfer_index INTEGER NOT NULL CHECK (transfer_index >= 0),
@@ -120,6 +129,7 @@ CREATE TABLE internal_transfers (
 );
 
 CREATE TABLE approvals (
+  chain_incarnation BIGINT NOT NULL DEFAULT 4 CHECK (chain_incarnation = 4),
   network_id TEXT NOT NULL DEFAULT 'synergy-testnet-v3' CHECK (network_id = 'synergy-testnet-v3'),
   transaction_hash TEXT NOT NULL,
   approval_index INTEGER NOT NULL CHECK (approval_index >= 0),
@@ -132,6 +142,7 @@ CREATE TABLE approvals (
 );
 
 CREATE TABLE activity_records (
+  chain_incarnation BIGINT NOT NULL DEFAULT 4 CHECK (chain_incarnation = 4),
   network_id TEXT NOT NULL DEFAULT 'synergy-testnet-v3' CHECK (network_id = 'synergy-testnet-v3'),
   activity_id TEXT NOT NULL,
   account_address TEXT,
@@ -143,6 +154,7 @@ CREATE TABLE activity_records (
 );
 
 CREATE TABLE fee_collections (
+  chain_incarnation BIGINT NOT NULL DEFAULT 4 CHECK (chain_incarnation = 4),
   network_id TEXT NOT NULL DEFAULT 'synergy-testnet-v3' CHECK (network_id = 'synergy-testnet-v3'),
   transaction_hash TEXT NOT NULL,
   collector_address TEXT NOT NULL,
@@ -153,6 +165,7 @@ CREATE TABLE fee_collections (
 );
 
 CREATE TABLE reward_distributions (
+  chain_incarnation BIGINT NOT NULL DEFAULT 4 CHECK (chain_incarnation = 4),
   network_id TEXT NOT NULL DEFAULT 'synergy-testnet-v3' CHECK (network_id = 'synergy-testnet-v3'),
   distribution_id TEXT NOT NULL,
   validator_address TEXT,
@@ -165,6 +178,7 @@ CREATE TABLE reward_distributions (
 );
 
 CREATE TABLE etdag_vertices (
+  chain_incarnation BIGINT NOT NULL DEFAULT 4 CHECK (chain_incarnation = 4),
   network_id TEXT NOT NULL DEFAULT 'synergy-testnet-v3' CHECK (network_id = 'synergy-testnet-v3'),
   vertex_hash TEXT NOT NULL,
   block_hash TEXT,
@@ -177,6 +191,7 @@ CREATE TABLE etdag_vertices (
 );
 
 CREATE TABLE etdag_edges (
+  chain_incarnation BIGINT NOT NULL DEFAULT 4 CHECK (chain_incarnation = 4),
   network_id TEXT NOT NULL DEFAULT 'synergy-testnet-v3' CHECK (network_id = 'synergy-testnet-v3'),
   child_vertex_hash TEXT NOT NULL,
   parent_vertex_hash TEXT NOT NULL,
@@ -186,6 +201,7 @@ CREATE TABLE etdag_edges (
 );
 
 CREATE TABLE chart_points (
+  chain_incarnation BIGINT NOT NULL DEFAULT 4 CHECK (chain_incarnation = 4),
   network_id TEXT NOT NULL DEFAULT 'synergy-testnet-v3' CHECK (network_id = 'synergy-testnet-v3'),
   series TEXT NOT NULL,
   bucket_start TIMESTAMPTZ NOT NULL,
@@ -194,6 +210,7 @@ CREATE TABLE chart_points (
 );
 
 CREATE TABLE aggregate_metrics (
+  chain_incarnation BIGINT NOT NULL DEFAULT 4 CHECK (chain_incarnation = 4),
   network_id TEXT NOT NULL DEFAULT 'synergy-testnet-v3' CHECK (network_id = 'synergy-testnet-v3'),
   metric_name TEXT NOT NULL,
   metric_value JSONB NOT NULL,
@@ -204,6 +221,7 @@ CREATE TABLE aggregate_metrics (
 CREATE TABLE indexer_state (
   singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
   chain_id BIGINT NOT NULL DEFAULT 1266 CHECK (chain_id = 1266),
+  chain_incarnation BIGINT NOT NULL DEFAULT 4 CHECK (chain_incarnation = 4),
   network_id TEXT NOT NULL DEFAULT 'synergy-testnet-v3' CHECK (network_id = 'synergy-testnet-v3'),
   indexed_height BIGINT NOT NULL DEFAULT -1 CHECK (indexed_height >= -1),
   indexed_block_hash TEXT,
@@ -211,6 +229,7 @@ CREATE TABLE indexer_state (
 );
 
 CREATE TABLE indexer_checkpoints (
+  chain_incarnation BIGINT NOT NULL DEFAULT 4 CHECK (chain_incarnation = 4),
   network_id TEXT NOT NULL DEFAULT 'synergy-testnet-v3' CHECK (network_id = 'synergy-testnet-v3'),
   height BIGINT NOT NULL CHECK (height >= 0),
   block_hash TEXT NOT NULL,

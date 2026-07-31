@@ -8,6 +8,8 @@ use std::fmt;
 
 pub const SYNERGY_TESTNET_V3_CHAIN_ID: u64 = 1266;
 pub const SYNERGY_TESTNET_V3_NETWORK_ID: &str = "synergy-testnet-v3";
+pub const TESTNET_V3_CHAIN_INCARNATION: u64 = 4;
+pub const TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION: u32 = 4;
 pub const POSY_PROTOCOL_VERSION: &str = "posy/2.2";
 pub const TESTNET_V3_CONSENSUS_SIGNATURE_ALGORITHM: &str = "mldsa65";
 pub const TESTNET_V3_MLDSA65_PUBLIC_KEY_BYTES: usize = 1_952;
@@ -918,12 +920,108 @@ struct StableBlockCandidate {
     transactions: Vec<Transaction>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum VotePhase {
     Validate,
     Finality,
     Timeout,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ConsensusSubjectPhase {
+    Proposal,
+    Validate,
+    Finality,
+    Timeout,
+}
+
+impl From<&VotePhase> for ConsensusSubjectPhase {
+    fn from(value: &VotePhase) -> Self {
+        match value {
+            VotePhase::Validate => Self::Validate,
+            VotePhase::Finality => Self::Finality,
+            VotePhase::Timeout => Self::Timeout,
+        }
+    }
+}
+
+/// Canonical logical identity of one typed PoSy consensus decision.
+///
+/// Cryptographic evidence proves this subject but is deliberately absent from
+/// it. In particular, signer ordering/subsets, signature bytes, signer
+/// bitmaps, certificate serialization, and proof roots must never make two
+/// otherwise identical decisions compare unequal.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ConsensusSubject {
+    pub domain: ConsensusDomain,
+    pub chain_id: ChainId,
+    pub network_id: NetworkId,
+    pub protocol_version: String,
+    pub epoch: Epoch,
+    pub height: Height,
+    pub round: Round,
+    pub cluster_id: ClusterId,
+    pub height_context_root: Hash,
+    pub phase: ConsensusSubjectPhase,
+    pub candidate_id: Option<BlockId>,
+    /// The round at which this subject itself prepares/finalizes a candidate.
+    ///
+    /// Timeout carry evidence currently commits to the prepared certificate
+    /// root rather than embedding its round, so timeout subjects leave this
+    /// field absent and compare their carried candidate independently of the
+    /// selected proof representation.
+    pub prepared_round: Option<Round>,
+}
+
+impl ConsensusSubject {
+    pub fn digest(&self) -> Result<Hash, String> {
+        self.domain.validate()?;
+        if self.domain.chain_id != self.chain_id {
+            return Err("canonical consensus subject domain chain mismatch".to_string());
+        }
+        let bytes = serde_json::to_vec(self)
+            .map_err(|error| format!("canonical consensus subject serialize failed: {error}"))?;
+        Ok(Hash::from_domain_bytes(
+            "SYNERGY_CONSENSUS_SUBJECT_V1",
+            &bytes,
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ConsensusDomain {
+    pub chain_id: ChainId,
+    pub chain_incarnation: u64,
+    pub genesis_hash: Hash,
+}
+
+impl ConsensusDomain {
+    pub fn validate(&self) -> Result<(), String> {
+        self.chain_id.require_testnet_v3()?;
+        if self.chain_incarnation != TESTNET_V3_CHAIN_INCARNATION || self.genesis_hash.is_zero() {
+            return Err("wrong or incomplete Chain 1266 consensus domain".to_string());
+        }
+        Ok(())
+    }
+
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, String> {
+        self.validate()?;
+        serde_json::to_vec(self)
+            .map_err(|error| format!("canonical consensus domain serialize failed: {error}"))
+    }
+}
+
+pub fn current_consensus_domain() -> Result<ConsensusDomain, String> {
+    let genesis = crate::genesis::canonical_genesis()?;
+    let domain = ConsensusDomain {
+        chain_id: ChainId(genesis.chain_id()),
+        chain_incarnation: genesis.chain_incarnation(),
+        genesis_hash: Hash::from_hex(genesis.hash())?,
+    };
+    domain.validate()?;
+    Ok(domain)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -989,6 +1087,42 @@ impl Vote {
         })
         .map_err(|error| format!("vote signing payload serialize failed: {error}"))
     }
+
+    pub fn consensus_subject(&self) -> Result<ConsensusSubject, String> {
+        let carries_candidate = !self.block_id.0.is_empty();
+        match self.phase {
+            VotePhase::Validate | VotePhase::Finality => {
+                if !carries_candidate || self.highest_prepared_vc_root.is_some() {
+                    return Err(
+                        "validate/finality vote has a malformed consensus subject".to_string()
+                    );
+                }
+            }
+            VotePhase::Timeout => {
+                if carries_candidate != self.highest_prepared_vc_root.is_some() {
+                    return Err(
+                        "timeout vote prepared proof and candidate must appear together"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        Ok(ConsensusSubject {
+            domain: current_consensus_domain()?,
+            chain_id: self.chain_id,
+            network_id: self.network_id.clone(),
+            protocol_version: self.protocol_version.clone(),
+            epoch: self.epoch,
+            height: self.height,
+            round: self.round,
+            cluster_id: self.cluster_id,
+            height_context_root: self.height_context_root,
+            phase: ConsensusSubjectPhase::from(&self.phase),
+            candidate_id: carries_candidate.then(|| self.block_id.clone()),
+            prepared_round: matches!(self.phase, VotePhase::Validate | VotePhase::Finality)
+                .then_some(self.round),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1020,6 +1154,43 @@ impl QuorumCertificate {
             "SYNERGY_QUORUM_CERTIFICATE_V1",
             &self.canonical_bytes()?,
         ))
+    }
+
+    pub fn consensus_subject(&self) -> Result<ConsensusSubject, String> {
+        let carries_candidate = !self.block_id.0.is_empty();
+        match self.phase {
+            VotePhase::Validate | VotePhase::Finality => {
+                if !carries_candidate || self.highest_prepared_vc_root.is_some() {
+                    return Err(
+                        "validate/finality certificate has a malformed consensus subject"
+                            .to_string(),
+                    );
+                }
+            }
+            VotePhase::Timeout => {
+                if carries_candidate != self.highest_prepared_vc_root.is_some() {
+                    return Err(
+                        "timeout certificate prepared proof and candidate must appear together"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        Ok(ConsensusSubject {
+            domain: current_consensus_domain()?,
+            chain_id: self.chain_id,
+            network_id: self.network_id.clone(),
+            protocol_version: self.protocol_version.clone(),
+            epoch: self.epoch,
+            height: self.height,
+            round: self.round,
+            cluster_id: self.cluster_id,
+            height_context_root: self.height_context_root,
+            phase: ConsensusSubjectPhase::from(&self.phase),
+            candidate_id: carries_candidate.then(|| self.block_id.clone()),
+            prepared_round: matches!(self.phase, VotePhase::Validate | VotePhase::Finality)
+                .then_some(self.round),
+        })
     }
 
     /// The deterministic finalized-authority binding for the next height.
@@ -1105,6 +1276,10 @@ impl ValidationCertificate {
         ))
     }
 
+    pub fn consensus_subject(&self) -> Result<ConsensusSubject, String> {
+        self.as_verification_certificate().consensus_subject()
+    }
+
     pub fn as_verification_certificate(&self) -> QuorumCertificate {
         QuorumCertificate {
             qc_version: self.certificate_version,
@@ -1176,6 +1351,10 @@ impl TimeoutCertificate {
             "SYNERGY_TIMEOUT_CERTIFICATE_V1",
             &self.canonical_bytes()?,
         ))
+    }
+
+    pub fn consensus_subject(&self) -> Result<ConsensusSubject, String> {
+        self.as_verification_certificate().consensus_subject()
     }
 
     pub fn as_verification_certificate(&self) -> QuorumCertificate {

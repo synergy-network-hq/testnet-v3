@@ -1,5 +1,7 @@
 use crate::synergy_types::{
-    AegisPqKeyId, BlockId, ChainId, Epoch, Hash, Height, NetworkId, Round, ValidatorId,
+    current_consensus_domain, AegisPqKeyId, Block, BlockId, ChainId, ClusterId, ConsensusSubject,
+    ConsensusSubjectPhase, Epoch, Hash, Height, NetworkId, QuorumCertificate, Round,
+    TimeoutCertificate, ValidationCertificate, ValidatorId, Vote, VotePhase,
 };
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
@@ -8,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const CONSENSUS_SIGNING_JOURNAL_FORMAT: &str = "synergy-consensus-signing-journal-v2";
+pub const CONSENSUS_SIGNING_JOURNAL_FORMAT: &str = "synergy-consensus-signing-journal-v4";
 pub const CONSENSUS_SIGNING_JOURNAL_FILE: &str = "consensus_signing_authorizations.json";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -28,6 +30,7 @@ pub struct ConsensusSigningAuthorization {
     pub epoch: Epoch,
     pub height: Height,
     pub round: Round,
+    pub cluster_id: ClusterId,
     pub height_context_root: Hash,
     pub validator_id: ValidatorId,
     pub key_id: AegisPqKeyId,
@@ -37,6 +40,32 @@ pub struct ConsensusSigningAuthorization {
 }
 
 impl ConsensusSigningAuthorization {
+    pub fn from_vote(vote: &Vote) -> Result<Self, String> {
+        let phase = match vote.phase {
+            VotePhase::Validate => ConsensusSigningPhase::Validate,
+            VotePhase::Finality => ConsensusSigningPhase::Finality,
+            VotePhase::Timeout => ConsensusSigningPhase::Timeout,
+        };
+        let candidate_id = (!vote.block_id.0.is_empty()).then(|| vote.block_id.clone());
+        let authorization = Self {
+            chain_id: vote.chain_id,
+            network_id: vote.network_id.clone(),
+            protocol_version: vote.protocol_version.clone(),
+            epoch: vote.epoch,
+            height: vote.height,
+            round: vote.round,
+            cluster_id: vote.cluster_id,
+            height_context_root: vote.height_context_root,
+            validator_id: vote.validator_id.clone(),
+            key_id: vote.key_id.clone(),
+            phase,
+            candidate_id,
+            highest_prepared_vc_root: vote.highest_prepared_vc_root,
+        };
+        authorization.validate()?;
+        Ok(authorization)
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         self.chain_id.require_testnet_v3()?;
         self.network_id.require_testnet_v3()?;
@@ -88,11 +117,49 @@ impl ConsensusSigningAuthorization {
             epoch: self.epoch,
             height: self.height,
             round: Some(self.round),
+            cluster_id: self.cluster_id,
             height_context_root: self.height_context_root,
             validator_id: self.validator_id.clone(),
             key_id: self.key_id.clone(),
             phase: self.phase,
         }
+    }
+
+    pub fn consensus_subject(&self) -> Result<ConsensusSubject, String> {
+        self.validate()?;
+        let candidate_id = self
+            .candidate_id
+            .as_ref()
+            .filter(|candidate| !candidate.0.trim().is_empty())
+            .cloned();
+        let phase = match self.phase {
+            ConsensusSigningPhase::Proposal => ConsensusSubjectPhase::Proposal,
+            ConsensusSigningPhase::Validate => ConsensusSubjectPhase::Validate,
+            ConsensusSigningPhase::Finality => ConsensusSubjectPhase::Finality,
+            ConsensusSigningPhase::Timeout => ConsensusSubjectPhase::Timeout,
+        };
+        Ok(ConsensusSubject {
+            domain: current_consensus_domain()?,
+            chain_id: self.chain_id,
+            network_id: self.network_id.clone(),
+            protocol_version: self.protocol_version.clone(),
+            epoch: self.epoch,
+            height: self.height,
+            round: self.round,
+            cluster_id: self.cluster_id,
+            height_context_root: self.height_context_root,
+            phase,
+            candidate_id,
+            prepared_round: matches!(
+                self.phase,
+                ConsensusSigningPhase::Validate | ConsensusSigningPhase::Finality
+            )
+            .then_some(self.round),
+        })
+    }
+
+    pub fn subject_digest(&self) -> Result<Hash, String> {
+        self.consensus_subject()?.digest()
     }
 }
 
@@ -104,6 +171,7 @@ struct SigningSlotKey {
     epoch: Epoch,
     height: Height,
     round: Option<Round>,
+    cluster_id: ClusterId,
     height_context_root: Hash,
     validator_id: ValidatorId,
     key_id: AegisPqKeyId,
@@ -115,6 +183,11 @@ struct DurableSigningRecord {
     slot: SigningSlotKey,
     authorization: ConsensusSigningAuthorization,
     authorization_root: Hash,
+    subject_digest: Hash,
+    #[serde(default)]
+    signed_proposal: Option<Block>,
+    #[serde(default)]
+    signed_vote: Option<Vote>,
     persisted_at_unix_ms: u64,
 }
 
@@ -175,11 +248,128 @@ struct DurableSafetyHaltRecord {
     persisted_at_unix_ms: u64,
 }
 
+/// One atomic recovery image stored in the same fsync/rename transaction as
+/// signing authorizations and exact signed envelopes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DurableConsensusRecoveryCheckpoint {
+    pub checkpoint_version: u32,
+    pub genesis_anchor: Hash,
+    pub chain_id: ChainId,
+    pub chain_incarnation: u64,
+    pub network_id: NetworkId,
+    pub protocol_version: String,
+    pub epoch: Epoch,
+    pub finalized_height: Height,
+    pub finalized_block: Option<Block>,
+    pub highest_qc: Option<QuorumCertificate>,
+    pub current_height: Height,
+    pub current_round: Round,
+    pub height_context_root: Hash,
+    pub active_validator_set_hash: Hash,
+    pub prepared_block: Option<Block>,
+    pub prepared_certificate: Option<ValidationCertificate>,
+    pub highest_tc: Option<TimeoutCertificate>,
+}
+
+impl DurableConsensusRecoveryCheckpoint {
+    pub fn validate(&self) -> Result<(), String> {
+        self.chain_id.require_testnet_v3()?;
+        self.network_id.require_testnet_v3()?;
+        if self.checkpoint_version != 2
+            || self.genesis_anchor.is_zero()
+            || self.chain_incarnation != crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
+            || self.protocol_version.trim().is_empty()
+            || self.current_height.0 != self.finalized_height.0.saturating_add(1)
+            || self.height_context_root.is_zero()
+            || self.active_validator_set_hash.is_zero()
+        {
+            return Err("invalid atomic consensus recovery checkpoint".to_string());
+        }
+        match (
+            self.finalized_height.0,
+            self.finalized_block.as_ref(),
+            self.highest_qc.as_ref(),
+        ) {
+            (0, None, None) => {}
+            (height, Some(block), Some(qc))
+                if block.header.height.0 == height
+                    && qc.height.0 == height
+                    && qc.block_id == block.candidate_id()?
+                    && qc.phase == VotePhase::Finality => {}
+            _ => {
+                return Err("atomic recovery finalized block/QC binding is inconsistent".to_string())
+            }
+        }
+        match (
+            self.prepared_block.as_ref(),
+            self.prepared_certificate.as_ref(),
+        ) {
+            (None, None) => {}
+            (Some(block), Some(vc))
+                if block.header.height == self.current_height
+                    && block.header.epoch == self.epoch
+                    && block.header.height_context_root == self.height_context_root
+                    && block.header.active_validator_set_hash == self.active_validator_set_hash
+                    && vc.height == self.current_height
+                    && vc.epoch == self.epoch
+                    && vc.height_context_root == self.height_context_root
+                    && vc.active_validator_set_hash == self.active_validator_set_hash
+                    && vc.candidate_id == block.candidate_id()? => {}
+            _ => {
+                return Err("atomic recovery prepared block/VC binding is inconsistent".to_string())
+            }
+        }
+        if let Some(tc) = &self.highest_tc {
+            if tc.height != self.current_height
+                || tc.epoch != self.epoch
+                || tc.height_context_root != self.height_context_root
+                || tc.active_validator_set_hash != self.active_validator_set_hash
+                || tc.next_round != self.current_round
+            {
+                return Err(
+                    "atomic recovery timeout-certificate binding is inconsistent".to_string(),
+                );
+            }
+        } else if self.current_round.0 != 0 {
+            return Err(
+                "atomic recovery nonzero round lacks timeout-certificate authority".to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    pub fn root(&self) -> Result<Hash, String> {
+        self.validate()?;
+        Ok(Hash::from_domain_bytes(
+            "SYNERGY_TYPED_CONSENSUS_RECOVERY_CHECKPOINT_V1",
+            &serde_json::to_vec(self)
+                .map_err(|error| format!("serialize atomic recovery checkpoint: {error}"))?,
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct DurableRecoveryCheckpointRecord {
+    checkpoint: DurableConsensusRecoveryCheckpoint,
+    checkpoint_root: Hash,
+    persisted_at_unix_ms: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct DurableSigningJournal {
     format: String,
     records: Vec<DurableSigningRecord>,
     safety_halts: Vec<DurableSafetyHaltRecord>,
+    /// Every signing slot at or below this finalized height is permanently
+    /// retired. Exact randomized envelopes remain durable while their height
+    /// is live; the atomic finalized checkpoint then makes those old slots
+    /// impossible to sign again and permits bounded compaction.
+    #[serde(default)]
+    retired_through_height: u64,
+    #[serde(default)]
+    recovery_checkpoint: Option<DurableRecoveryCheckpointRecord>,
+    #[serde(default)]
+    coordinator_start_count: u64,
 }
 
 impl Default for DurableSigningJournal {
@@ -188,6 +378,9 @@ impl Default for DurableSigningJournal {
             format: CONSENSUS_SIGNING_JOURNAL_FORMAT.to_string(),
             records: Vec::new(),
             safety_halts: Vec::new(),
+            retired_through_height: 0,
+            recovery_checkpoint: None,
+            coordinator_start_count: 0,
         }
     }
 }
@@ -230,6 +423,7 @@ impl DurableConsensusSigningAuthority {
             "SYNERGY_CONSENSUS_SIGNING_AUTHORIZATION_V1",
             &authorization_bytes,
         );
+        let subject_digest = authorization.subject_digest()?;
         let lock = PROCESS_WIDE_SIGNING_LOCK.get_or_init(|| Mutex::new(()));
         let _guard = lock
             .lock()
@@ -267,6 +461,7 @@ impl DurableConsensusSigningAuthority {
         if let Some(existing) = journal.records.iter().find(|record| record.slot == slot) {
             if existing.authorization == *authorization
                 && existing.authorization_root == authorization_root
+                && existing.subject_digest == subject_digest
             {
                 return Ok(existing.authorization_root);
             }
@@ -275,10 +470,19 @@ impl DurableConsensusSigningAuthority {
                 slot.phase, existing.authorization.candidate_id
             ));
         }
+        if authorization.height.0 <= journal.retired_through_height {
+            return Err(format!(
+                "CONSENSUS_SIGNING_CONFLICT: height {} is retired through finalized height {}",
+                authorization.height.0, journal.retired_through_height
+            ));
+        }
         journal.records.push(DurableSigningRecord {
             slot,
             authorization: authorization.clone(),
             authorization_root,
+            subject_digest,
+            signed_proposal: None,
+            signed_vote: None,
             persisted_at_unix_ms: current_unix_ms(),
         });
         self.persist_unlocked(&journal)?;
@@ -333,6 +537,172 @@ impl DurableConsensusSigningAuthority {
             .records
             .iter()
             .any(|record| record.authorization == *authorization))
+    }
+
+    /// Persists the exact signed vote envelope before the caller may broadcast
+    /// it. This makes restart retransmission reuse the original randomized
+    /// ML-DSA signature rather than creating a second cryptographic
+    /// representation for the same logical subject.
+    pub fn record_signed_vote(&self, vote: &Vote) -> Result<(), String> {
+        if !vote.aegis_pq_signature.is_present() {
+            return Err("cannot journal an unsigned consensus vote".to_string());
+        }
+        let authorization = ConsensusSigningAuthorization::from_vote(vote)?;
+        let slot = authorization.slot_key();
+        let subject_digest = authorization.subject_digest()?;
+        let lock = PROCESS_WIDE_SIGNING_LOCK.get_or_init(|| Mutex::new(()));
+        let _guard = lock
+            .lock()
+            .map_err(|_| "consensus signing authority lock poisoned".to_string())?;
+        let mut journal = self.load_unlocked()?;
+        let record = journal
+            .records
+            .iter_mut()
+            .find(|record| record.slot == slot)
+            .ok_or_else(|| "signed vote has no prior durable signing authorization".to_string())?;
+        if record.authorization != authorization || record.subject_digest != subject_digest {
+            return Err(
+                "signed vote does not match its durable consensus subject authorization"
+                    .to_string(),
+            );
+        }
+        if let Some(existing) = &record.signed_vote {
+            if existing == vote {
+                return Ok(());
+            }
+            return Err(
+                "consensus signing journal already contains a different signed envelope"
+                    .to_string(),
+            );
+        }
+        record.signed_vote = Some(vote.clone());
+        self.persist_unlocked(&journal)
+    }
+
+    /// Atomically commits a proposal authorization together with the exact
+    /// signed block envelope. The caller may create the randomized signature
+    /// before this call, but must not release it to transport until this
+    /// method succeeds. A crash before this write leaves no authorization; a
+    /// crash after it can only rebroadcast this exact envelope.
+    pub fn record_signed_proposal(
+        &self,
+        authorization: &ConsensusSigningAuthorization,
+        block: &Block,
+    ) -> Result<(), String> {
+        authorization.validate()?;
+        if authorization.phase != ConsensusSigningPhase::Proposal
+            || !block.proposer_signature.is_present()
+            || authorization.candidate_id.as_ref() != Some(&block.candidate_id()?)
+            || authorization.chain_id != block.header.chain_id
+            || authorization.network_id != block.header.network_id
+            || authorization.protocol_version != block.header.protocol_version
+            || authorization.epoch != block.header.epoch
+            || authorization.height != block.header.height
+            || authorization.round != block.header.round
+            || authorization.cluster_id != block.header.cluster_id
+            || authorization.height_context_root != block.header.height_context_root
+            || authorization.validator_id != block.header.proposer_validator_id
+            || authorization.key_id != block.header.proposer_key_id
+        {
+            return Err(
+                "signed proposal does not match its durable consensus authorization".to_string(),
+            );
+        }
+        let authorization_bytes = serde_json::to_vec(authorization)
+            .map_err(|error| format!("serialize proposal signing authorization: {error}"))?;
+        let authorization_root = Hash::from_domain_bytes(
+            "SYNERGY_CONSENSUS_SIGNING_AUTHORIZATION_V1",
+            &authorization_bytes,
+        );
+        let subject_digest = authorization.subject_digest()?;
+        let slot = authorization.slot_key();
+        let lock = PROCESS_WIDE_SIGNING_LOCK.get_or_init(|| Mutex::new(()));
+        let _guard = lock
+            .lock()
+            .map_err(|_| "consensus signing authority lock poisoned".to_string())?;
+        let mut journal = self.load_unlocked()?;
+        if let Some(halt) = journal.safety_halts.first() {
+            return Err(format!(
+                "CONSENSUS_SAFETY_HALT: signing disabled by {:?} incident {}",
+                halt.incident.kind,
+                halt.incident_root.to_hex()
+            ));
+        }
+        if let Some(existing) = journal.records.iter().find(|record| record.slot == slot) {
+            if existing.authorization == *authorization
+                && existing.authorization_root == authorization_root
+                && existing.subject_digest == subject_digest
+                && existing.signed_proposal.as_ref() == Some(block)
+            {
+                return Ok(());
+            }
+            return Err(
+                "CONSENSUS_SIGNING_CONFLICT: proposal slot already contains different durable evidence"
+                    .to_string(),
+            );
+        }
+        if authorization.height.0 <= journal.retired_through_height {
+            return Err(format!(
+                "CONSENSUS_SIGNING_CONFLICT: proposal height {} is retired through finalized height {}",
+                authorization.height.0, journal.retired_through_height
+            ));
+        }
+        journal.records.push(DurableSigningRecord {
+            slot,
+            authorization: authorization.clone(),
+            authorization_root,
+            subject_digest,
+            signed_proposal: Some(block.clone()),
+            signed_vote: None,
+            persisted_at_unix_ms: current_unix_ms(),
+        });
+        self.persist_unlocked(&journal)
+    }
+
+    pub fn recorded_signed_proposal_for_slot(
+        &self,
+        probe: &ConsensusSigningAuthorization,
+    ) -> Result<Option<Block>, String> {
+        probe.validate()?;
+        if probe.phase != ConsensusSigningPhase::Proposal {
+            return Err("signed-proposal recovery requires a Proposal slot".to_string());
+        }
+        let lock = PROCESS_WIDE_SIGNING_LOCK.get_or_init(|| Mutex::new(()));
+        let _guard = lock
+            .lock()
+            .map_err(|_| "consensus signing authority lock poisoned".to_string())?;
+        let slot = probe.slot_key();
+        let journal = self.load_unlocked()?;
+        if let Some(halt) = journal.safety_halts.first() {
+            return Err(format!(
+                "CONSENSUS_SAFETY_HALT: signing disabled by {:?} incident {}",
+                halt.incident.kind,
+                halt.incident_root.to_hex()
+            ));
+        }
+        Ok(journal
+            .records
+            .into_iter()
+            .find(|record| record.slot == slot)
+            .and_then(|record| record.signed_proposal))
+    }
+
+    pub fn recorded_signed_vote_for_slot(
+        &self,
+        probe: &ConsensusSigningAuthorization,
+    ) -> Result<Option<Vote>, String> {
+        probe.validate()?;
+        let lock = PROCESS_WIDE_SIGNING_LOCK.get_or_init(|| Mutex::new(()));
+        let _guard = lock
+            .lock()
+            .map_err(|_| "consensus signing authority lock poisoned".to_string())?;
+        let slot = probe.slot_key();
+        Ok(self
+            .load_unlocked()?
+            .records
+            .into_iter()
+            .find(|record| record.slot == slot && record.authorization == *probe)
+            .and_then(|record| record.signed_vote))
     }
 
     /// Durably and irreversibly halts this authority before returning.
@@ -396,6 +766,123 @@ impl DurableConsensusSigningAuthority {
             .collect())
     }
 
+    pub fn commit_recovery_checkpoint(
+        &self,
+        checkpoint: &DurableConsensusRecoveryCheckpoint,
+    ) -> Result<Hash, String> {
+        checkpoint.validate()?;
+        let checkpoint_root = checkpoint.root()?;
+        let lock = PROCESS_WIDE_SIGNING_LOCK.get_or_init(|| Mutex::new(()));
+        let _guard = lock
+            .lock()
+            .map_err(|_| "consensus signing authority lock poisoned".to_string())?;
+        let mut journal = self.load_unlocked()?;
+        if let Some(existing) = &journal.recovery_checkpoint {
+            if existing.checkpoint.genesis_anchor != checkpoint.genesis_anchor {
+                return Err("atomic recovery checkpoint Genesis anchor cannot change".to_string());
+            }
+            if existing.checkpoint.finalized_height.0 > checkpoint.finalized_height.0 {
+                return Err("atomic recovery checkpoint refuses finalized rollback".to_string());
+            }
+            if existing.checkpoint.finalized_height == checkpoint.finalized_height
+                && existing
+                    .checkpoint
+                    .finalized_block
+                    .as_ref()
+                    .map(Block::block_id)
+                    .transpose()?
+                    != checkpoint
+                        .finalized_block
+                        .as_ref()
+                        .map(Block::block_id)
+                        .transpose()?
+            {
+                return Err(
+                    "TYPED_DRIVER_SOURCE_CONFLICT: atomic recovery finalized envelopes disagree"
+                        .to_string(),
+                );
+            }
+            if existing.checkpoint.current_height == checkpoint.current_height
+                && existing
+                    .checkpoint
+                    .prepared_block
+                    .as_ref()
+                    .map(Block::candidate_id)
+                    .transpose()?
+                    != checkpoint
+                        .prepared_block
+                        .as_ref()
+                        .map(Block::candidate_id)
+                        .transpose()?
+                && existing.checkpoint.prepared_certificate.is_some()
+                && checkpoint.prepared_certificate.is_some()
+            {
+                let existing_round = existing
+                    .checkpoint
+                    .prepared_certificate
+                    .as_ref()
+                    .map(|certificate| certificate.round.0)
+                    .unwrap_or_default();
+                let incoming_round = checkpoint
+                    .prepared_certificate
+                    .as_ref()
+                    .map(|certificate| certificate.round.0)
+                    .unwrap_or_default();
+                if incoming_round <= existing_round {
+                    return Err(
+                        "TYPED_DRIVER_SOURCE_CONFLICT: atomic recovery prepared candidates disagree"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        journal.recovery_checkpoint = Some(DurableRecoveryCheckpointRecord {
+            checkpoint: checkpoint.clone(),
+            checkpoint_root,
+            persisted_at_unix_ms: current_unix_ms(),
+        });
+        journal.retired_through_height = journal
+            .retired_through_height
+            .max(checkpoint.finalized_height.0);
+        journal
+            .records
+            .retain(|record| record.authorization.height.0 > journal.retired_through_height);
+        self.persist_unlocked(&journal)?;
+        Ok(checkpoint_root)
+    }
+
+    pub fn recovery_checkpoint(
+        &self,
+    ) -> Result<Option<DurableConsensusRecoveryCheckpoint>, String> {
+        let lock = PROCESS_WIDE_SIGNING_LOCK.get_or_init(|| Mutex::new(()));
+        let _guard = lock
+            .lock()
+            .map_err(|_| "consensus signing authority lock poisoned".to_string())?;
+        Ok(self
+            .load_unlocked()?
+            .recovery_checkpoint
+            .map(|record| record.checkpoint))
+    }
+
+    /// Records one successful typed-coordinator initialization in the same
+    /// durable journal that anchors signing and recovery state. The returned
+    /// value is the number of restarts after the first successful start, so a
+    /// fresh chain reports zero and the value survives process replacement.
+    pub fn record_coordinator_start(&self) -> Result<u64, String> {
+        let lock = PROCESS_WIDE_SIGNING_LOCK.get_or_init(|| Mutex::new(()));
+        let _guard = lock
+            .lock()
+            .map_err(|_| "consensus signing authority lock poisoned".to_string())?;
+        let mut journal = self.load_unlocked()?;
+        journal.coordinator_start_count = journal
+            .coordinator_start_count
+            .checked_add(1)
+            .ok_or_else(|| "typed coordinator start counter overflow".to_string())?;
+        let restarts = journal.coordinator_start_count.saturating_sub(1);
+        self.persist_unlocked(&journal)?;
+        Ok(restarts)
+    }
+
     fn load_unlocked(&self) -> Result<DurableSigningJournal, String> {
         if !self.path.exists() {
             return Ok(DurableSigningJournal::default());
@@ -410,11 +897,86 @@ impl DurableConsensusSigningAuthority {
                 journal.format
             ));
         }
+        for record in &journal.records {
+            record.authorization.validate()?;
+            if record.slot != record.authorization.slot_key() {
+                return Err("consensus signing journal slot binding mismatch".to_string());
+            }
+            if record.authorization.height.0 <= journal.retired_through_height {
+                return Err(
+                    "consensus signing journal retains a finalized retired signing slot"
+                        .to_string(),
+                );
+            }
+            let authorization_bytes = serde_json::to_vec(&record.authorization)
+                .map_err(|error| format!("serialize persisted signing authorization: {error}"))?;
+            let expected_root = Hash::from_domain_bytes(
+                "SYNERGY_CONSENSUS_SIGNING_AUTHORIZATION_V1",
+                &authorization_bytes,
+            );
+            if record.authorization_root != expected_root
+                || record.subject_digest != record.authorization.subject_digest()?
+            {
+                return Err("consensus signing journal subject binding mismatch".to_string());
+            }
+            if let Some(vote) = &record.signed_vote {
+                if !vote.aegis_pq_signature.is_present()
+                    || ConsensusSigningAuthorization::from_vote(vote)? != record.authorization
+                    || vote.consensus_subject()?.digest()? != record.subject_digest
+                {
+                    return Err(
+                        "consensus signing journal signed-envelope binding mismatch".to_string()
+                    );
+                }
+            }
+            if let Some(block) = &record.signed_proposal {
+                if record.authorization.phase != ConsensusSigningPhase::Proposal
+                    || !block.proposer_signature.is_present()
+                    || record.authorization.candidate_id.as_ref() != Some(&block.candidate_id()?)
+                    || record.authorization.chain_id != block.header.chain_id
+                    || record.authorization.network_id != block.header.network_id
+                    || record.authorization.protocol_version != block.header.protocol_version
+                    || record.authorization.epoch != block.header.epoch
+                    || record.authorization.height != block.header.height
+                    || record.authorization.round != block.header.round
+                    || record.authorization.cluster_id != block.header.cluster_id
+                    || record.authorization.height_context_root != block.header.height_context_root
+                    || record.authorization.validator_id != block.header.proposer_validator_id
+                    || record.authorization.key_id != block.header.proposer_key_id
+                {
+                    return Err(
+                        "consensus signing journal signed-proposal binding mismatch".to_string()
+                    );
+                }
+            }
+            if record.signed_vote.is_some() && record.signed_proposal.is_some() {
+                return Err(
+                    "consensus signing journal record contains two envelope kinds".to_string(),
+                );
+            }
+        }
         for halt in &journal.safety_halts {
             halt.incident.validate()?;
             if halt.incident.root()? != halt.incident_root {
                 return Err("consensus SafetyHalt incident root mismatch".to_string());
             }
+        }
+        if let Some(recovery) = &journal.recovery_checkpoint {
+            recovery.checkpoint.validate()?;
+            if recovery.checkpoint.root()? != recovery.checkpoint_root {
+                return Err("atomic consensus recovery checkpoint root mismatch".to_string());
+            }
+            if journal.retired_through_height != recovery.checkpoint.finalized_height.0 {
+                return Err(
+                    "signing retirement watermark disagrees with atomic recovery checkpoint"
+                        .to_string(),
+                );
+            }
+        } else if journal.retired_through_height != 0 {
+            return Err(
+                "signing retirement watermark exists without an atomic recovery checkpoint"
+                    .to_string(),
+            );
         }
         Ok(journal)
     }
@@ -440,7 +1002,10 @@ impl DurableConsensusSigningAuthority {
             std::process::id(),
             current_unix_nanos()
         ));
-        let bytes = serde_json::to_vec_pretty(journal)
+        // This is machine-owned durable state. Compact JSON materially lowers
+        // copy and fsync latency for large ML-DSA envelopes; incident tooling
+        // renders selected records separately for operators.
+        let bytes = serde_json::to_vec(journal)
             .map_err(|error| format!("serialize signing journal: {error}"))?;
         let write_result = (|| -> Result<(), String> {
             let mut file = OpenOptions::new()
@@ -533,6 +1098,7 @@ mod tests {
             epoch: Epoch(0),
             height: Height(1),
             round: Round(round),
+            cluster_id: ClusterId(0),
             height_context_root: Hash::from_domain_bytes("context", b"one"),
             validator_id: ValidatorId("validator-1".to_string()),
             key_id: AegisPqKeyId("key-1".to_string()),
@@ -555,6 +1121,71 @@ mod tests {
             first_evidence_root: Hash::from_domain_bytes("qc", b"candidate-a"),
             second_evidence_root: Hash::from_domain_bytes("qc", b"candidate-b"),
         }
+    }
+
+    fn recovery_checkpoint() -> DurableConsensusRecoveryCheckpoint {
+        DurableConsensusRecoveryCheckpoint {
+            checkpoint_version: 2,
+            genesis_anchor: Hash::from_domain_bytes("genesis", b"chain-1266"),
+            chain_id: ChainId::synergy_testnet_v3(),
+            chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+            network_id: NetworkId::synergy_testnet_v3(),
+            protocol_version: "posy/2.2".to_string(),
+            epoch: Epoch(0),
+            finalized_height: Height(0),
+            finalized_block: None,
+            highest_qc: None,
+            current_height: Height(1),
+            current_round: Round(0),
+            height_context_root: Hash::from_domain_bytes("context", b"height-one"),
+            active_validator_set_hash: Hash::from_domain_bytes("validators", b"epoch-zero"),
+            prepared_block: None,
+            prepared_certificate: None,
+            highest_tc: None,
+        }
+    }
+
+    #[test]
+    fn atomic_recovery_checkpoint_survives_interrupted_temp_write_and_rejects_tampering() {
+        let authority = temp_authority("atomic-recovery");
+        let checkpoint = recovery_checkpoint();
+        authority
+            .commit_recovery_checkpoint(&checkpoint)
+            .expect("atomic checkpoint commit");
+
+        let interrupted = authority.path().with_extension("tmp-interrupted");
+        fs::write(&interrupted, b"partial write").expect("simulate abandoned temp file");
+        let restarted = DurableConsensusSigningAuthority::at_path(authority.path().to_path_buf());
+        assert_eq!(
+            restarted.recovery_checkpoint().unwrap(),
+            Some(checkpoint.clone()),
+            "an unrenamed partial write cannot alter the committed recovery state"
+        );
+
+        let mut encoded: serde_json::Value =
+            serde_json::from_slice(&fs::read(authority.path()).unwrap()).unwrap();
+        encoded["recovery_checkpoint"]["checkpoint_root"] =
+            serde_json::to_value(Hash::zero()).unwrap();
+        fs::write(
+            authority.path(),
+            serde_json::to_vec_pretty(&encoded).unwrap(),
+        )
+        .unwrap();
+        assert!(restarted
+            .recovery_checkpoint()
+            .unwrap_err()
+            .contains("checkpoint root mismatch"));
+        let _ = fs::remove_file(interrupted);
+    }
+
+    #[test]
+    fn coordinator_restart_counter_is_durable_and_excludes_the_initial_start() {
+        let authority = temp_authority("durable-restart-count");
+        assert_eq!(authority.record_coordinator_start().unwrap(), 0);
+
+        let restarted = DurableConsensusSigningAuthority::at_path(authority.path().to_path_buf());
+        assert_eq!(restarted.record_coordinator_start().unwrap(), 1);
+        assert_eq!(restarted.record_coordinator_start().unwrap(), 2);
     }
 
     #[test]

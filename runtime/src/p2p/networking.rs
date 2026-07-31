@@ -578,6 +578,8 @@ struct HandshakePqSigningPayload {
     version: String,
     capabilities: Vec<String>,
     chain_id: Option<u64>,
+    chain_incarnation: Option<u64>,
+    consensus_state_schema_version: Option<u32>,
     network_id: Option<u64>,
     network_id_text: Option<String>,
     genesis_hash: String,
@@ -604,6 +606,8 @@ fn handshake_pq_signing_payload(message: &NetworkMessage) -> Result<Vec<u8>, Str
         version,
         capabilities,
         chain_id,
+        chain_incarnation,
+        consensus_state_schema_version,
         network_id,
         network_id_text,
         genesis_hash,
@@ -633,6 +637,8 @@ fn handshake_pq_signing_payload(message: &NetworkMessage) -> Result<Vec<u8>, Str
         version: version.clone(),
         capabilities: capabilities.clone(),
         chain_id: *chain_id,
+        chain_incarnation: *chain_incarnation,
+        consensus_state_schema_version: *consensus_state_schema_version,
         network_id: *network_id,
         network_id_text: network_id_text.clone(),
         genesis_hash: genesis_hash.clone(),
@@ -728,6 +734,10 @@ fn build_local_handshake_with_extra_capabilities(
         version: "1.0.0".to_string(),
         capabilities,
         chain_id: Some(local_chain_id(config)),
+        chain_incarnation: Some(crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION),
+        consensus_state_schema_version: Some(
+            crate::synergy_types::TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION,
+        ),
         network_id: Some(local_network_id(config)),
         network_id_text: Some(TESTNET_NETWORK_ID_TEXT.to_string()),
         genesis_hash: canonical_genesis_hash(),
@@ -806,6 +816,8 @@ fn verify_handshake_pq_signature(
         node_id,
         capabilities,
         chain_id,
+        chain_incarnation,
+        consensus_state_schema_version,
         network_id_text,
         validator_address,
         aegis_pq_public_key_id,
@@ -820,6 +832,20 @@ fn verify_handshake_pq_signature(
 
     if *chain_id != Some(1266) {
         return Err("Aegis PQC handshake must bind chain_id 1266".to_string());
+    }
+    if *chain_incarnation != Some(crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION) {
+        return Err(format!(
+            "Aegis PQC handshake must bind Chain 1266 incarnation {}",
+            crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
+        ));
+    }
+    if *consensus_state_schema_version
+        != Some(crate::synergy_types::TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION)
+    {
+        return Err(format!(
+            "Aegis PQC handshake must bind consensus state schema {}",
+            crate::synergy_types::TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION
+        ));
     }
     if network_id_text.as_deref() != Some(TESTNET_NETWORK_ID_TEXT) {
         return Err(format!(
@@ -908,6 +934,8 @@ fn verify_handshake_pq_signature(
 fn handshake_mismatch_reason(
     config: &NodeConfig,
     chain_id: Option<u64>,
+    chain_incarnation: Option<u64>,
+    consensus_state_schema_version: Option<u32>,
     network_id: Option<u64>,
     network_id_text: Option<&str>,
     genesis_hash: &str,
@@ -931,6 +959,23 @@ fn handshake_mismatch_reason(
             ));
         }
         None => return Some(format!("chain_id missing: expected {expected_chain_id}")),
+    }
+
+    if chain_incarnation != Some(crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION) {
+        return Some(format!(
+            "chain_incarnation differs: expected {}, remote {:?}",
+            crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+            chain_incarnation
+        ));
+    }
+    if consensus_state_schema_version
+        != Some(crate::synergy_types::TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION)
+    {
+        return Some(format!(
+            "consensus state schema differs: expected {}, remote {:?}",
+            crate::synergy_types::TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION,
+            consensus_state_schema_version
+        ));
     }
 
     match network_id {
@@ -5568,6 +5613,8 @@ impl P2PNetwork {
     ) -> Result<usize, String> {
         crate::p2p::messages::validate_typed_consensus_message_size(message)?;
         let wire_message = NetworkMessage::TypedConsensus {
+            chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+            genesis_hash: canonical_genesis_hash(),
             message: message.clone(),
         };
         let targets = {
@@ -5634,6 +5681,8 @@ impl P2PNetwork {
             );
         }
         let wire_message = NetworkMessage::TypedFinalityObserver {
+            chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+            genesis_hash: canonical_genesis_hash(),
             message: TypedFinalityObserverMessage::Request { next_height },
         };
         let targets = {
@@ -7882,7 +7931,11 @@ fn handle_typed_finality_observer_message(
                 peer_state_cache,
                 peer_address,
                 session_id,
-                &NetworkMessage::TypedFinalityObserver { message: response },
+                &NetworkMessage::TypedFinalityObserver {
+                    chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+                    genesis_hash: canonical_genesis_hash(),
+                    message: response,
+                },
                 Duration::from_millis(CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS),
                 "typed-finality-observer-response",
             )?;
@@ -7981,7 +8034,22 @@ fn dispatch_peer_message(
             handle_vote_message(connected_peers, config, peer_address, session_id, vote);
             Ok(())
         }
-        NetworkMessage::TypedConsensus { message } => {
+        NetworkMessage::TypedConsensus {
+            chain_incarnation,
+            genesis_hash,
+            message,
+        } => {
+            if chain_incarnation != crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
+                || genesis_hash != canonical_genesis_hash()
+            {
+                warn!(
+                    "p2p",
+                    "Rejected typed consensus frame from a different chain incarnation",
+                    "peer" => peer_address.to_string(),
+                    "incarnation" => chain_incarnation
+                );
+                return Ok(());
+            }
             if let Err(error) =
                 crate::consensus::typed_coordinator::dispatch_typed_consensus_message(
                     peer_address,
@@ -7998,7 +8066,22 @@ fn dispatch_peer_message(
             }
             Ok(())
         }
-        NetworkMessage::TypedFinalityObserver { message } => {
+        NetworkMessage::TypedFinalityObserver {
+            chain_incarnation,
+            genesis_hash,
+            message,
+        } => {
+            if chain_incarnation != crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
+                || genesis_hash != canonical_genesis_hash()
+            {
+                warn!(
+                    "p2p",
+                    "Rejected typed observer frame from a different chain incarnation",
+                    "peer" => peer_address.to_string(),
+                    "incarnation" => chain_incarnation
+                );
+                return Ok(());
+            }
             if let Err(error) = handle_typed_finality_observer_message(
                 connected_peers,
                 peer_state_cache,
@@ -8428,6 +8511,8 @@ fn handle_messages(
                         version,
                         capabilities,
                         chain_id,
+                        chain_incarnation,
+                        consensus_state_schema_version,
                         network_id,
                         network_id_text,
                         genesis_hash,
@@ -8454,6 +8539,8 @@ fn handle_messages(
                             version: version.clone(),
                             capabilities: capabilities.clone(),
                             chain_id,
+                            chain_incarnation,
+                            consensus_state_schema_version,
                             network_id,
                             network_id_text: network_id_text.clone(),
                             genesis_hash: genesis_hash.clone(),
@@ -8510,6 +8597,8 @@ fn handle_messages(
                         if let Some(reason) = handshake_mismatch_reason(
                             &config,
                             chain_id,
+                            chain_incarnation,
+                            consensus_state_schema_version,
                             network_id,
                             network_id_text.as_deref(),
                             &genesis_hash,
@@ -9074,7 +9163,22 @@ fn handle_messages(
                         session_id,
                         vote,
                     ),
-                    NetworkMessage::TypedConsensus { message } => {
+                    NetworkMessage::TypedConsensus {
+                        chain_incarnation,
+                        genesis_hash,
+                        message,
+                    } => {
+                        if chain_incarnation != crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
+                            || genesis_hash != canonical_genesis_hash()
+                        {
+                            warn!(
+                                "p2p",
+                                "Rejected old-incarnation typed consensus message",
+                                "peer" => peer_address.clone(),
+                                "incarnation" => chain_incarnation
+                            );
+                            continue;
+                        }
                         if let Err(error) =
                             crate::consensus::typed_coordinator::dispatch_typed_consensus_message(
                                 &peer_address,
@@ -9090,7 +9194,22 @@ fn handle_messages(
                             );
                         }
                     }
-                    NetworkMessage::TypedFinalityObserver { message } => {
+                    NetworkMessage::TypedFinalityObserver {
+                        chain_incarnation,
+                        genesis_hash,
+                        message,
+                    } => {
+                        if chain_incarnation != crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
+                            || genesis_hash != canonical_genesis_hash()
+                        {
+                            warn!(
+                                "p2p",
+                                "Rejected old-incarnation typed observer message",
+                                "peer" => peer_address.clone(),
+                                "incarnation" => chain_incarnation
+                            );
+                            continue;
+                        }
                         if let Err(error) = handle_typed_finality_observer_message(
                             &connected_peers,
                             &peer_state_cache,
@@ -12027,6 +12146,8 @@ mod tests {
     fn typed_finality_observer_messages_bypass_background_queue() {
         assert!(bypasses_shared_message_queue(
             &NetworkMessage::TypedFinalityObserver {
+                chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+                genesis_hash: canonical_genesis_hash(),
                 message: TypedFinalityObserverMessage::Request {
                     next_height: crate::synergy_types::Height(1),
                 },
@@ -12622,6 +12743,34 @@ mod tests {
         let handshake = build_local_handshake(&config).expect("handshake should sign");
 
         verify_handshake_pq_signature(&handshake).expect("handshake signature should verify");
+    }
+
+    #[test]
+    fn old_chain_incarnation_handshake_is_rejected_before_pq_verification() {
+        configure_canonical_genesis_path_for_tests();
+        let mut config = NodeConfig::default();
+        config.p2p.node_name = "genesisval1".to_string();
+        let mut handshake = build_local_handshake(&config).expect("handshake should sign");
+        if let NetworkMessage::Handshake {
+            chain_incarnation, ..
+        } = &mut handshake
+        {
+            *chain_incarnation =
+                Some(crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION.saturating_sub(1));
+        }
+
+        let requests_before =
+            crate::crypto::aegis_pqvm::pqc_verification_metrics_snapshot().requests;
+        let error = verify_handshake_pq_signature(&handshake)
+            .expect_err("an old chain incarnation must fail closed");
+        let requests_after =
+            crate::crypto::aegis_pqvm::pqc_verification_metrics_snapshot().requests;
+
+        assert!(error.contains("Chain 1266 incarnation"), "{error}");
+        assert_eq!(
+            requests_after, requests_before,
+            "incarnation mismatch must be rejected before PQ verification"
+        );
     }
 
     #[test]

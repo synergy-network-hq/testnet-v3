@@ -5,10 +5,15 @@ use serde_json::{json, Value};
 use sha2::Digest as _;
 use std::fs;
 use std::path::PathBuf;
+#[cfg(test)]
+use std::{cell::RefCell, collections::BTreeMap};
 
 use crate::consensus_parameters::{
     load_genesis_bound_consensus_parameters, LoadedConsensusParameters,
     CONSENSUS_PARAMETER_GENESIS_BINDING_SCHEMA_VERSION, CONSENSUS_PARAMETER_GENESIS_BINDING_STATUS,
+};
+use crate::synergy_types::{
+    TESTNET_V3_CHAIN_INCARNATION, TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION,
 };
 use crate::utils::resolve_data_path;
 
@@ -46,6 +51,8 @@ pub struct GenesisDocument {
     genesis_hash: String,
     network_magic_bytes: String,
     chain_id: u64,
+    chain_incarnation: u64,
+    consensus_state_schema_version: u32,
     network_id: u64,
     protocol_version: String,
     consensus_version: String,
@@ -71,17 +78,35 @@ pub fn canonical_genesis() -> Result<&'static GenesisDocument, String> {
 }
 
 #[cfg(test)]
+thread_local! {
+    /// Test suites select different complete Genesis documents through
+    /// `SYNERGY_GENESIS_FILE`. Cache by resolved path on each test thread so
+    /// one fixture cannot control another, while avoiding a full multi-megabyte
+    /// Genesis parse and integrity rehash for every consensus signature.
+    static TEST_CANONICAL_GENESIS: RefCell<
+        BTreeMap<PathBuf, Result<&'static GenesisDocument, String>>
+    > = RefCell::new(BTreeMap::new());
+}
+
+#[cfg(test)]
 pub fn canonical_genesis() -> Result<&'static GenesisDocument, String> {
     // Test modules deliberately switch `SYNERGY_GENESIS_FILE` to isolated,
     // signed fixtures. A process-global Lazy result makes whichever test runs
-    // first silently control every later test. Keep the immutable production
-    // cache above, but load an independent document for each test access.
-    // Leaking this small test-only object is intentional: callers keep the
-    // established `&'static GenesisDocument` interface and the test process
-    // exits immediately after the suite.
-    load_canonical_genesis_from_disk().map(|document| {
-        let leaked: &'static GenesisDocument = Box::leak(Box::new(document));
-        leaked
+    // first silently control every later test. A thread-local, path-keyed
+    // cache preserves that isolation and keeps consensus tests representative
+    // of the production cache rather than repeatedly hashing Genesis.
+    let path = genesis_path();
+    TEST_CANONICAL_GENESIS.with(|cache| {
+        if let Some(cached) = cache.borrow().get(&path) {
+            return cached.clone();
+        }
+        let loaded = load_canonical_genesis_from_path(path.clone()).map(|document| {
+            // The test executable owns this object until process exit, which
+            // preserves the established `&'static GenesisDocument` API.
+            Box::leak(Box::new(document)) as &'static GenesisDocument
+        });
+        cache.borrow_mut().insert(path, loaded.clone());
+        loaded
     })
 }
 
@@ -108,6 +133,14 @@ impl GenesisDocument {
 
     pub fn chain_id(&self) -> u64 {
         self.chain_id
+    }
+
+    pub fn chain_incarnation(&self) -> u64 {
+        self.chain_incarnation
+    }
+
+    pub fn consensus_state_schema_version(&self) -> u32 {
+        self.consensus_state_schema_version
     }
 
     pub fn network_id(&self) -> u64 {
@@ -160,6 +193,29 @@ fn load_canonical_genesis_from_path(path: PathBuf) -> Result<GenesisDocument, St
     let timestamp = parse_timestamp(required(&value, &["header", "timestamp"])?)
         .map_err(|error| format!("header.timestamp: {error}"))?;
     let chain_id = required_u64(&value, &["network", "chain_id"])?;
+    let chain_incarnation = required_u64(&value, &["network", "chain_incarnation"])?;
+    let consensus_state_schema_version =
+        required_u64(&value, &["consensus", "state_schema_version"])?;
+    if chain_incarnation != TESTNET_V3_CHAIN_INCARNATION {
+        return Err(format!(
+            "wrong Chain 1266 incarnation: expected {}, found {chain_incarnation}",
+            TESTNET_V3_CHAIN_INCARNATION
+        ));
+    }
+    if consensus_state_schema_version != u64::from(TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION) {
+        return Err(format!(
+            "wrong consensus state schema: expected {}, found {consensus_state_schema_version}",
+            TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION
+        ));
+    }
+    let expected_state_namespace = format!("chain-{chain_id}/incarnation-{chain_incarnation}");
+    if required_string(&value, &["consensus", "state_directory_namespace"])?
+        != expected_state_namespace
+    {
+        return Err(
+            "Genesis consensus state namespace does not match its chain domain".to_string(),
+        );
+    }
     let network_id = required_u64(&value, &["network", "network_id"])?;
     let protocol_version = required_string(&value, &["network", "protocol_version"])?;
     let consensus_version = required_string(&value, &["network", "consensus_version"])?;
@@ -189,6 +245,8 @@ fn load_canonical_genesis_from_path(path: PathBuf) -> Result<GenesisDocument, St
         genesis_hash,
         network_magic_bytes,
         chain_id,
+        chain_incarnation,
+        consensus_state_schema_version: consensus_state_schema_version as u32,
         network_id,
         protocol_version,
         consensus_version,
