@@ -92,6 +92,10 @@ name = "sign-chain1266-desired-state"
 path = "bin/sign-chain1266-desired-state.rs"
 
 [[bin]]
+name = "verify-chain1266-release-authorization"
+path = "bin/verify-chain1266-release-authorization.rs"
+
+[[bin]]
 name = "generate-node-keys"
 path = "../tools/generate_node_keys.rs"
 
