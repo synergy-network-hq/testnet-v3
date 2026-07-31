@@ -840,6 +840,11 @@ pub fn recompute_testnet_v3_candidate_integrity(value: &mut Value) -> Result<(),
             "validators",
         ],
     )?);
+    // The validator-set digest is part of the contracts payload.  Update it
+    // before deriving any root that includes that payload; qualification
+    // replaces the six public consensus keys with disposable ones.
+    value["contracts"]["validator_registry"]["init_params"]["validator_set_hash"] =
+        Value::String(validator_set_hash.clone());
     let contract_hash = hash_json(required(value, &["contracts"])?);
 
     let mut state_components = serde_json::Map::new();
@@ -890,8 +895,6 @@ pub fn recompute_testnet_v3_candidate_integrity(value: &mut Value) -> Result<(),
     value["header"]["receipts_root"] = Value::String(receipts_root.clone());
     value["header"]["state_root"] = Value::String(state_root.clone());
     value["header"]["data_root"] = Value::String(data_root);
-    value["contracts"]["validator_registry"]["init_params"]["validator_set_hash"] =
-        Value::String(validator_set_hash.clone());
     value["integrity"]["allocation_hash"] = Value::String(allocation_hash);
     value["integrity"]["validator_hash"] = Value::String(validator_hash);
     value["integrity"]["validator_set_hash"] = Value::String(validator_set_hash);
@@ -1332,6 +1335,16 @@ mod tests {
         candidate["network_magic_bytes"]["value"] = Value::String("00000000".to_string());
         let error = validate_integrity_hashes(&candidate).unwrap_err();
         assert!(error.contains("network_magic_bytes.value mismatch"));
+    }
+
+    #[test]
+    fn recomputation_rebinds_validator_set_before_contract_and_state_roots() {
+        let mut candidate = testnet_v3_candidate();
+        candidate["contracts"]["validator_registry"]["init_params"]["validators"][0]
+            ["consensus_public_key"] = Value::String("ring2-disposable-consensus-key".to_string());
+
+        recompute_testnet_v3_candidate_integrity(&mut candidate).unwrap();
+        validate_integrity_hashes(&candidate).unwrap();
     }
 
     #[test]
