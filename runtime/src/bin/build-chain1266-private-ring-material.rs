@@ -48,6 +48,27 @@ fn replace_exact_strings(value: &mut Value, replacements: &BTreeMap<String, Stri
     }
 }
 
+fn replace_endpoint_substrings(value: &mut Value, replacements: &BTreeMap<String, String>) {
+    match value {
+        Value::String(text) => {
+            for (source, replacement) in replacements {
+                *text = text.replace(source, replacement);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                replace_endpoint_substrings(item, replacements);
+            }
+        }
+        Value::Object(fields) => {
+            for field in fields.values_mut() {
+                replace_endpoint_substrings(field, replacements);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(unix)]
 fn restrict_private_key(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -67,6 +88,20 @@ fn main() {
         .unwrap_or_else(|error| fail(format!("read {}: {error}", source_path.display())));
     let mut genesis: Value = serde_json::from_slice(&bytes)
         .unwrap_or_else(|error| fail(format!("parse source Genesis: {error}")));
+    let private_endpoint_replacements = BTreeMap::from([
+        ("10.70.10.1".to_string(), "10.126.10.1".to_string()),
+        ("10.70.10.2".to_string(), "10.126.10.2".to_string()),
+        ("10.70.10.3".to_string(), "10.126.10.3".to_string()),
+        ("10.70.10.4".to_string(), "10.126.10.4".to_string()),
+        ("10.70.10.5".to_string(), "10.126.10.5".to_string()),
+        ("10.70.10.6".to_string(), "10.126.10.6".to_string()),
+        ("10.70.20.1".to_string(), "10.126.20.1".to_string()),
+        ("10.70.20.2".to_string(), "10.126.20.2".to_string()),
+        ("10.70.20.3".to_string(), "10.126.20.3".to_string()),
+        ("10.70.30.1".to_string(), "10.126.30.1".to_string()),
+        ("10.70.30.2".to_string(), "10.126.30.2".to_string()),
+        ("10.70.30.3".to_string(), "10.126.30.3".to_string()),
+    ]);
 
     let active = genesis
         .get("preconfigured_validators")
@@ -151,6 +186,13 @@ fn main() {
     )
     .unwrap_or_else(|error| fail(format!("write {}: {error}", start_public_path.display())));
     replace_exact_strings(&mut genesis, &replacements);
+    replace_endpoint_substrings(&mut genesis, &private_endpoint_replacements);
+    if serde_json::to_string(&genesis)
+        .expect("serialize private qualification Genesis for endpoint guard")
+        .contains("10.70.")
+    {
+        fail("private qualification Genesis retains a legacy overlay endpoint");
+    }
     genesis["env"] = Value::String("chain1266-private-qualification".to_string());
     recompute_testnet_v3_candidate_integrity(&mut genesis)
         .unwrap_or_else(|error| fail(format!("recompute qualification Genesis: {error}")));
