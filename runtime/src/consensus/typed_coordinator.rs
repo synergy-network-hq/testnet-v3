@@ -177,6 +177,12 @@ enum TypedProposalMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypedCoordinatorEvent {
+    /// An authenticated artifact from an already finalized height is an
+    /// idempotent network retry. It is discarded before PQ verification and
+    /// cannot alter the durable successor context.
+    StaleFinalizedHeightIgnored {
+        height: u64,
+    },
     ProposalAccepted {
         candidate_id: BlockId,
     },
@@ -451,6 +457,26 @@ fn typed_message_kind(message: &TypedConsensusMessage) -> &'static str {
     }
 }
 
+fn typed_message_height(message: &TypedConsensusMessage) -> Option<u64> {
+    match message {
+        TypedConsensusMessage::CoreProposal { height_context, .. }
+        | TypedConsensusMessage::Proposal { height_context, .. } => Some(height_context.height.0),
+        TypedConsensusMessage::Vote { vote } => Some(vote.height.0),
+        TypedConsensusMessage::ValidationCertificate { certificate } => Some(certificate.height.0),
+        TypedConsensusMessage::QuorumCertificate { certificate } => Some(certificate.height.0),
+        TypedConsensusMessage::TimeoutCertificate { certificate }
+        | TypedConsensusMessage::PreparedCertificateRequest {
+            timeout_certificate: certificate,
+        }
+        | TypedConsensusMessage::PreparedCertificateResponse {
+            timeout_certificate: certificate,
+            ..
+        } => Some(certificate.height.0),
+        TypedConsensusMessage::FinalityCheckpointRequest { .. }
+        | TypedConsensusMessage::FinalityCheckpoint { .. } => None,
+    }
+}
+
 fn increment_typed_metric(
     select: impl FnOnce(&mut TypedConsensusTelemetrySnapshot) -> &mut BTreeMap<String, u64>,
     label: &str,
@@ -513,6 +539,43 @@ fn record_typed_finality(height: u64, block_id: &BlockId, round: u64) {
             }
         }
         telemetry.last_finalized_unix_ms = Some(now_ms);
+    }
+}
+
+fn restore_typed_finality_telemetry(records: &[TypedFinalityRecord]) {
+    let Some(latest) = records.last() else {
+        return;
+    };
+    let retained_start = records.len().saturating_sub(10_001);
+    let retained = &records[retained_start..];
+    let mut intervals = retained
+        .windows(2)
+        .filter_map(|pair| {
+            pair[1]
+                .block
+                .header
+                .timestamp_ms_consensus_bounded
+                .checked_sub(pair[0].block.header.timestamp_ms_consensus_bounded)
+                .filter(|interval| *interval > 0)
+        })
+        .collect::<VecDeque<_>>();
+    while intervals.len() > 10_000 {
+        intervals.pop_front();
+    }
+    let latest_timestamp = latest.block.header.timestamp_ms_consensus_bounded;
+    let latest_interval = intervals.back().copied().unwrap_or_default();
+    if let Ok(mut telemetry) = typed_consensus_telemetry().lock() {
+        telemetry.snapshot.finalized_height = latest.height.0;
+        telemetry.snapshot.finalized_block_id = latest.block_id.0.clone();
+        telemetry.snapshot.finalized_round = latest.quorum_certificate.round.0;
+        telemetry.snapshot.finalized_blocks = records.len() as u64;
+        telemetry.snapshot.round_zero_finalized_blocks = records
+            .iter()
+            .filter(|record| record.quorum_certificate.round.0 == 0)
+            .count() as u64;
+        telemetry.snapshot.finality_interval_millis = latest_interval;
+        telemetry.snapshot.finality_intervals_millis = intervals;
+        telemetry.last_finalized_unix_ms = Some(latest_timestamp);
     }
 }
 
@@ -1671,6 +1734,8 @@ where
         ingress_rotator: R,
     ) -> Result<Self, String> {
         validate_canonical_driver_timeouts(&coordinator.consensus.protocol_config)?;
+        let recovered_finality = coordinator.finality_store.recover()?;
+        restore_typed_finality_telemetry(&recovered_finality);
         let prepared_store = TypedPreparedStore::for_finality_store(&coordinator.finality_store)?;
         let recovered_prepared = prepared_store.recover()?;
         let mut driver = Self {
@@ -1880,6 +1945,25 @@ where
     ) -> Result<TypedCoordinatorEvent, String> {
         validate_typed_consensus_message_size(&envelope.message)?;
         let message = envelope.message.clone();
+        if let Some(message_height) = typed_message_height(&message) {
+            let current_height = self.coordinator.local_context.height_context.height.0;
+            if message_height < current_height {
+                let authenticated_peer = envelope.authenticated_peer.as_ref().ok_or_else(|| {
+                    "typed consensus message has no Genesis-bound authenticated peer identity"
+                        .to_string()
+                })?;
+                peer_authorizer.authorize(authenticated_peer, &message)?;
+                increment_typed_metric(
+                    |snapshot| &mut snapshot.messages_rejected_precrypto,
+                    typed_message_kind(&message),
+                );
+                self.metrics.deduplicated_replays =
+                    self.metrics.deduplicated_replays.saturating_add(1);
+                return Ok(TypedCoordinatorEvent::StaleFinalizedHeightIgnored {
+                    height: message_height,
+                });
+            }
+        }
         if matches!(
             message,
             TypedConsensusMessage::FinalityCheckpointRequest { .. }
@@ -5703,6 +5787,83 @@ mod tests {
             1,
             "changed bytes must never enter the replay fast path"
         );
+    }
+
+    #[test]
+    fn authenticated_finalized_height_retries_are_ignored_before_pq_verification() {
+        let parameters = genesis_bound_parameters();
+        let (bootstrap, _genesis_anchor, deployed_genesis_state_root, coordinators, store_paths) =
+            six_validator_startup_fixture(parameters.clone());
+        let authorizer = FrozenTypedConsensusPeerAuthorizer::new(bootstrap.validator_set.clone())
+            .expect("freeze the six Genesis-bound P2P identities");
+        let mut drivers = coordinators
+            .into_iter()
+            .map(|coordinator| {
+                release_driver_with(
+                    coordinator,
+                    bootstrap.clone(),
+                    parameters.protocol_config.clone(),
+                    deployed_genesis_state_root,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        for driver in &mut drivers {
+            driver
+                .tick_at(driver.round_started_at)
+                .expect("emit the first healthy proposal");
+        }
+        let (vote_sender, stale_vote) = drivers
+            .iter()
+            .enumerate()
+            .find_map(|(index, driver)| {
+                driver
+                    .egress
+                    .messages
+                    .iter()
+                    .find_map(|message| match message {
+                        TypedConsensusMessage::Vote { vote } => Some((index, vote.clone())),
+                        _ => None,
+                    })
+            })
+            .expect("capture a height-one signed vote");
+        let authenticated_peer = authenticated_peer_for_release_driver(&drivers[vote_sender]);
+        let relay_errors = relay_release_messages(&mut drivers, &authorizer, |_| true);
+        assert!(relay_errors.is_empty(), "{relay_errors:?}");
+        assert!(drivers.iter().all(|driver| driver
+            .coordinator
+            .local_context
+            .height_context
+            .height
+            == Height(2)));
+
+        let mut corrupt_stale_vote = stale_vote;
+        corrupt_stale_vote.aegis_pq_signature.signature_bytes[0] ^= 0x01;
+        let event = drivers[1]
+            .handle_envelope(
+                TypedConsensusEnvelope {
+                    peer_address: "authenticated-finalized-retry".to_string(),
+                    authenticated_peer: Some(authenticated_peer),
+                    message: TypedConsensusMessage::Vote {
+                        vote: corrupt_stale_vote,
+                    },
+                },
+                &authorizer,
+            )
+            .expect("a finalized-height retry cannot alter successor state");
+        assert_eq!(
+            event,
+            TypedCoordinatorEvent::StaleFinalizedHeightIgnored { height: 1 }
+        );
+        assert_eq!(
+            drivers[1].coordinator.local_context.height_context.height,
+            Height(2)
+        );
+
+        drop(drivers);
+        for path in store_paths {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     #[test]

@@ -6,9 +6,15 @@ runtime="$root/runtime/src"
 report_dir="${CHAIN1266_QUALIFICATION_REPORT_DIR:-$root/launch/chain1266-qualification/ring1}"
 mkdir -p "$report_dir"
 started_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-source_revision="$(git -C "$root" rev-parse HEAD)"
-synq_revision="$(git -C "$root/../synq-language" rev-parse HEAD)"
-aegis_revision="$(git -C "$root" rev-parse "HEAD:runtime/aegis-pqvm")"
+source_revision="${CHAIN1266_TESTNET_REVISION:-$(git -C "$root" rev-parse HEAD)}"
+synq_revision="${CHAIN1266_SYNQ_REVISION:-$(git -C "$root/../synq-language" rev-parse HEAD)}"
+aegis_revision="${CHAIN1266_AEGIS_REVISION:-$(git -C "$root" rev-parse "HEAD:runtime/aegis-pqvm")}"
+for revision in "$source_revision" "$synq_revision" "$aegis_revision"; do
+  [[ "$revision" =~ ^[a-f0-9]{40,64}$ ]] || {
+    echo "Ring-1 source revision is not a canonical Git object ID" >&2
+    exit 1
+  }
+done
 log="$report_dir/fault-matrix.log"
 : >"$log"
 
@@ -25,6 +31,7 @@ cases=(
   "crash_after_sign_before_send|crypto::aegis_pqvm::tests::consensus_vote_restart_replays_the_exact_durable_randomized_signature"
   "crash_after_send_before_persistence|consensus::typed_coordinator::tests::driver_deduplicates_only_exact_authenticated_vote_replays"
   "crash_during_atomic_persistence|consensus::signing_authority::tests::atomic_recovery_checkpoint_survives_interrupted_temp_write_and_rejects_tampering"
+  "journal_compaction_retirement_watermark|consensus::signing_authority::tests::retirement_watermark_compacts_long_journals_and_rejects_inconsistent_history"
   "delayed_validator_startup|consensus::typed_coordinator::tests::six_validator_driver_survives_startup_loss_two_timeout_rounds_and_first_finality"
   "messages_before_coordinator_readiness|consensus::typed_coordinator::tests::authenticated_messages_buffer_before_mailbox_install_and_drain_in_order"
   "duplicate_and_replay_floods|consensus::typed_coordinator::tests::driver_deduplicates_only_exact_authenticated_vote_replays"
@@ -33,10 +40,12 @@ cases=(
   "later_round_checkpoint_recovery|consensus::typed_coordinator::tests::verified_round_one_hundred_timeout_recovers_and_persists_round_authority"
   "observer_stale_finality_injection|consensus::typed_coordinator::tests::observer_identity_cannot_advertise_a_validator_recovery_checkpoint"
   "old_incarnation_precrypto_rejection|p2p::networking::tests::old_chain_incarnation_handshake_is_rejected_before_pq_verification"
+  "stale_finalized_height_precrypto_rejection|consensus::typed_coordinator::tests::authenticated_finalized_height_retries_are_ignored_before_pq_verification"
   "real_mldsa_six_validator_burn_in|consensus::typed_coordinator::tests::six_validator_actual_mldsa_multi_height_burn_in_preserves_round_zero_liveness"
 )
 
 passed=0
+failed_case=""
 for entry in "${cases[@]}"; do
   case_id="${entry%%|*}"
   test_name="${entry#*|}"
@@ -79,18 +88,20 @@ PY
     passed=$((passed + 1))
   else
     printf 'CASE_FAIL id=%s\n' "$case_id" | tee -a "$log"
-    exit 1
+    failed_case="$case_id"
+    break
   fi
 done
 
 finished_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 python3 - "$report_dir/report.json" "$started_utc" "$finished_utc" \
-  "$source_revision" "$synq_revision" "$aegis_revision" "$passed" "${#cases[@]}" <<'PY'
+  "$source_revision" "$synq_revision" "$aegis_revision" "$passed" "${#cases[@]}" \
+  "$failed_case" <<'PY'
 import json
 import pathlib
 import sys
 
-path, started, finished, testnet, synq, aegis, passed, total = sys.argv[1:]
+path, started, finished, testnet, synq, aegis, passed, total, failed_case = sys.argv[1:]
 report = {
     "schema_version": 1,
     "ring": 1,
@@ -104,11 +115,25 @@ report = {
     },
     "cases_passed": int(passed),
     "cases_total": int(total),
+    "failed_case": failed_case or None,
     "real_mldsa": True,
+    "mldsa65_transport_authentication": {
+        "unit_guard": "validator_handshake_never_falls_back_to_the_fndsa_peer_identity",
+        "ring1_proof": "real_mldsa_six_validator_burn_in",
+        "ring2_proof": "p2p_verified_handshakes_total{algorithm=ML-DSA-65}",
+    },
     "validator_count": 6,
     "quorum": 5,
 }
 pathlib.Path(path).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
 PY
-sha256sum "$report_dir/report.json" "$log" >"$report_dir/SHA256SUMS"
+(
+  cd "$report_dir"
+  sha256sum report.json fault-matrix.log >SHA256SUMS
+)
+if [[ -n "$failed_case" ]]; then
+  printf 'CHAIN1266_RING1_FAIL passed=%s total=%s failed_case=%s report=%s\n' \
+    "$passed" "${#cases[@]}" "$failed_case" "$report_dir/report.json" >&2
+  exit 1
+fi
 printf 'CHAIN1266_RING1_PASS cases=%s report=%s\n' "$passed" "$report_dir/report.json"

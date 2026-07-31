@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+required=(
+  CHAIN1266_ROLE_BINARY
+  CHAIN1266_ROLE_CONFIG
+  SYNERGY_PROJECT_ROOT
+  SYNERGY_DATA_PATH
+  SYNERGY_GENESIS_FILE
+  SYNERGY_DESIRED_STATE_MANIFEST
+  SYNERGY_DESIRED_STATE_MANIFEST_SHA256
+  SYNERGY_DESIRED_STATE_SIGNATURE
+)
+for name in "${required[@]}"; do
+  [[ -n "${!name:-}" ]] || {
+    echo "Chain 1266 service environment omits $name" >&2
+    exit 1
+  }
+done
+for path_name in \
+  CHAIN1266_ROLE_BINARY \
+  CHAIN1266_ROLE_CONFIG \
+  SYNERGY_PROJECT_ROOT \
+  SYNERGY_DATA_PATH \
+  SYNERGY_GENESIS_FILE \
+  SYNERGY_DESIRED_STATE_MANIFEST \
+  SYNERGY_DESIRED_STATE_SIGNATURE
+do
+  path="${!path_name}"
+  [[ "$path" == /* ]] || {
+    echo "$path_name must be absolute" >&2
+    exit 1
+  }
+done
+[[ -x "$CHAIN1266_ROLE_BINARY" ]] || {
+  echo "Role binary is not executable: $CHAIN1266_ROLE_BINARY" >&2
+  exit 1
+}
+[[ -f "$CHAIN1266_ROLE_CONFIG" ]] || {
+  echo "Role configuration is missing: $CHAIN1266_ROLE_CONFIG" >&2
+  exit 1
+}
+if [[ "${SYNERGY_CHAIN1266_QUALIFICATION_MODE:-}" == "1" ]]; then
+  [[ "$SYNERGY_DATA_PATH" == /var/lib/synergy/chain1266-qualification/*/data ]] || {
+    echo "Qualification state is outside its dedicated Chain 1266 namespace" >&2
+    exit 1
+  }
+else
+  [[ "$SYNERGY_DATA_PATH" == */chain-1266/incarnation-4/data ]] || {
+    echo "Chain-derived state is outside the incarnation-4 namespace" >&2
+    exit 1
+  }
+fi
+[[ "$SYNERGY_DESIRED_STATE_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+  echo "Desired-state digest is not canonical SHA-256" >&2
+  exit 1
+}
+
+command=("$CHAIN1266_ROLE_BINARY" start --config "$CHAIN1266_ROLE_CONFIG")
+if [[ -n "${CHAIN1266_NETWORK_NAMESPACE:-}" ]]; then
+  [[ "$CHAIN1266_NETWORK_NAMESPACE" =~ ^[A-Za-z0-9_.-]+$ ]] || {
+    echo "Network namespace name is invalid" >&2
+    exit 1
+  }
+  exec /usr/bin/ip netns exec "$CHAIN1266_NETWORK_NAMESPACE" "${command[@]}"
+fi
+exec "${command[@]}"

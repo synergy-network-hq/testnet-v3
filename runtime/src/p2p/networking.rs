@@ -170,6 +170,22 @@ const TESTNET_NETWORK_ID_TEXT: &str = "synergy-testnet-v3";
 const TESTNET_AEGIS_PQVM_VERSION: &str = "aegis-pqvm";
 const DEFAULT_MAX_CHAIN_SNAPSHOT_CLONE_HEIGHT: u64 = 50_000;
 
+static VERIFIED_MLDSA65_HANDSHAKES: AtomicU64 = AtomicU64::new(0);
+static VERIFIED_FNDSA_HANDSHAKES: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct P2pHandshakeMetricsSnapshot {
+    pub mldsa65_verified: u64,
+    pub fndsa_verified: u64,
+}
+
+pub fn p2p_handshake_metrics_snapshot() -> P2pHandshakeMetricsSnapshot {
+    P2pHandshakeMetricsSnapshot {
+        mldsa65_verified: VERIFIED_MLDSA65_HANDSHAKES.load(Ordering::Relaxed),
+        fndsa_verified: VERIFIED_FNDSA_HANDSHAKES.load(Ordering::Relaxed),
+    }
+}
+
 fn compact_hot_chain_state_from_env(chain: &mut BlockChain, context: &str) {
     if let Some((retain_recent_blocks, removed_blocks)) = chain.compact_from_env() {
         if removed_blocks > 0 {
@@ -713,7 +729,7 @@ fn build_local_handshake_with_extra_capabilities(
         )?
     } else {
         signer
-            .generate_and_register_key(peer_uma, vec![AegisPqKeyRole::PeerIdentity], Epoch(0))
+            .generate_and_register_fndsa_peer_identity(peer_uma, Epoch(0))
             .map_err(|error| format!("aegis-pqvm P2P key loading failed: {error}"))?
     };
     let public_key = signer
@@ -875,7 +891,7 @@ fn verify_handshake_pq_signature(
     registry.register_public_key(
         node_id,
         PQCPublicKey {
-            algorithm,
+            algorithm: algorithm.clone(),
             key_data: aegis_pq_public_key.clone(),
             key_id: key_id.0.clone(),
             created_at: 0,
@@ -896,6 +912,15 @@ fn verify_handshake_pq_signature(
             signature,
         )
         .map_err(|error| format!("Aegis PQC peer handshake verification failed: {error}"))?;
+    match algorithm {
+        PQCAlgorithm::MLDSA65 => {
+            VERIFIED_MLDSA65_HANDSHAKES.fetch_add(1, Ordering::Relaxed);
+        }
+        PQCAlgorithm::FNDSA => {
+            VERIFIED_FNDSA_HANDSHAKES.fetch_add(1, Ordering::Relaxed);
+        }
+        _ => {}
+    }
 
     if capabilities
         .iter()
@@ -12737,12 +12762,55 @@ mod tests {
     fn signed_aegis_pqc_handshake_verifies() {
         configure_canonical_genesis_path_for_tests();
         let mut config = NodeConfig::default();
-        config.p2p.node_name = "genesisval1".to_string();
-        config.node.validator_address = "synv1local".to_string();
+        config.p2p.node_name = "qualification-relay".to_string();
+        config.node.bootstrap_only = true;
+        config.node.validator_address.clear();
 
         let handshake = build_local_handshake(&config).expect("handshake should sign");
 
         verify_handshake_pq_signature(&handshake).expect("handshake signature should verify");
+        let NetworkMessage::Handshake {
+            aegis_pq_public_key_algorithm,
+            ..
+        } = handshake
+        else {
+            panic!("expected handshake");
+        };
+        assert_eq!(aegis_pq_public_key_algorithm.as_deref(), Some("fndsa"));
+    }
+
+    /// The downstream FN-DSA-1024 peer identity must never be substituted for a
+    /// validator's Genesis-assigned ML-DSA-65 consensus key. A validator whose
+    /// custody key is unavailable must fail closed rather than quietly
+    /// generating a weaker non-consensus identity and still advertising the
+    /// typed PoSy validator capability.
+    ///
+    /// Live ML-DSA-65 handshake verification is proven separately by Ring 1
+    /// case `real_mldsa_six_validator_burn_in` and by the Ring 2
+    /// `p2p_verified_handshakes_total{algorithm="ML-DSA-65"}` counter; the
+    /// canonical Genesis fixture intentionally ships no validator private keys.
+    #[test]
+    fn validator_handshake_never_falls_back_to_the_fndsa_peer_identity() {
+        configure_canonical_genesis_path_for_tests();
+        let mut config = NodeConfig::default();
+        config.p2p.node_name = "genesisval1".to_string();
+        config.node.validator_address = "synv1local".to_string();
+        assert!(
+            local_consensus_handshake_required(&config),
+            "a configured validator address must select the consensus handshake path"
+        );
+
+        let error = build_local_handshake(&config)
+            .expect_err("a validator without its custody key must fail closed");
+
+        assert!(
+            error.contains("ML-DSA-65"),
+            "the validator path must demand the assigned ML-DSA-65 consensus key: {error}"
+        );
+        assert!(
+            !error.contains("fndsa"),
+            "the validator path must not reach the FN-DSA peer identity generator: {error}"
+        );
     }
 
     #[test]
@@ -12814,8 +12882,9 @@ mod tests {
     fn direct_vote_handshake_capability_is_signed_and_verifiable() {
         configure_canonical_genesis_path_for_tests();
         let mut config = NodeConfig::default();
-        config.p2p.node_name = "genesisval1".to_string();
-        config.node.validator_address = "synv1local".to_string();
+        config.p2p.node_name = "qualification-relay".to_string();
+        config.node.bootstrap_only = true;
+        config.node.validator_address.clear();
 
         let handshake = build_local_handshake_with_extra_capabilities(&config, &["direct-vote"])
             .expect("direct vote handshake should sign");

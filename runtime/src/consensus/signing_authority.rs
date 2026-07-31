@@ -1145,6 +1145,90 @@ mod tests {
         }
     }
 
+    fn finalized_recovery_checkpoint(height: u64) -> DurableConsensusRecoveryCheckpoint {
+        let block = Block {
+            header: crate::synergy_types::BlockHeader {
+                version: 2,
+                chain_id: ChainId::synergy_testnet_v3(),
+                network_id: NetworkId::synergy_testnet_v3(),
+                protocol_version: "posy/2.2".to_string(),
+                height: Height(height),
+                round: Round(0),
+                epoch: Epoch(0),
+                cluster_id: ClusterId(0),
+                height_context_root: Hash::from_domain_bytes("context", b"finalized"),
+                parent_block_hash: Hash::from_domain_bytes("block", b"parent"),
+                parent_state_root: Hash::from_domain_bytes("state", b"before"),
+                last_finalized_qc_hash: Hash::from_domain_bytes("qc", b"prior"),
+                proposer_validator_id: ValidatorId("validator-1".to_string()),
+                proposer_uma_id: crate::synergy_types::UmaId("uma-1".to_string()),
+                proposer_key_id: AegisPqKeyId("key-1".to_string()),
+                active_validator_set_hash: Hash::from_domain_bytes("validators", b"active"),
+                eligible_validator_set_hash: Hash::from_domain_bytes("validators", b"eligible"),
+                validator_consensus_key_root: Hash::from_domain_bytes("keys", b"consensus"),
+                frozen_bonded_weight_root: Hash::from_domain_bytes("weights", b"frozen"),
+                cluster_schedule_version: "v1".to_string(),
+                cluster_map_hash: Hash::from_domain_bytes("clusters", b"map"),
+                assigned_cluster_membership_root: Hash::from_domain_bytes("clusters", b"members"),
+                assigned_cluster_validator_count: 6,
+                assigned_cluster_total_voting_weight: 6,
+                proposer_schedule_hash: Hash::from_domain_bytes("proposers", b"schedule"),
+                protocol_config_hash: crate::consensus_parameters::ConsensusParameterRoot::zero(),
+                cryptographic_profile_root: Hash::from_domain_bytes("crypto", b"profile"),
+                dag_frontier_root: Hash::from_domain_bytes("dag", b"frontier"),
+                tx_order_root: Hash::from_domain_bytes("transactions", b"order"),
+                tx_count: 0,
+                protected_batch: None,
+                evidence_root: Hash::from_domain_bytes("evidence", b"none"),
+                state_root_before: Hash::from_domain_bytes("state", b"before"),
+                state_root_after: Hash::from_domain_bytes("state", b"after"),
+                receipt_root: Hash::from_domain_bytes("receipts", b"root"),
+                app_version: 1,
+                execution_version: 1,
+                dag_version: 1,
+                aegis_pqvm_version: "aegis-pqvm".to_string(),
+                timestamp_ms_consensus_bounded: 1,
+            },
+            transactions: Vec::new(),
+            proposer_signature: crate::synergy_types::AegisPqSignature {
+                algorithm: "mldsa65".to_string(),
+                signature_bytes: vec![1],
+            },
+        };
+        let quorum_certificate = QuorumCertificate {
+            qc_version: 1,
+            chain_id: block.header.chain_id,
+            network_id: block.header.network_id.clone(),
+            protocol_version: block.header.protocol_version.clone(),
+            height: block.header.height,
+            round: block.header.round,
+            epoch: block.header.epoch,
+            cluster_id: block.header.cluster_id,
+            height_context_root: block.header.height_context_root,
+            phase: VotePhase::Finality,
+            block_id: block.candidate_id().expect("candidate id"),
+            highest_prepared_vc_root: None,
+            active_validator_set_hash: block.header.active_validator_set_hash,
+            cluster_map_hash: block.header.cluster_map_hash,
+            threshold_weight_required: 5,
+            signed_weight: 5,
+            signer_bitmap: vec![0b0001_1111],
+            aegis_pq_signatures: vec![crate::synergy_types::AegisPqSignature {
+                algorithm: "mldsa65".to_string(),
+                signature_bytes: vec![1],
+            }],
+            aegis_pq_key_ids: vec![AegisPqKeyId("key-1".to_string())],
+        };
+        let mut checkpoint = recovery_checkpoint();
+        checkpoint.finalized_height = Height(height);
+        checkpoint.finalized_block = Some(block);
+        checkpoint.highest_qc = Some(quorum_certificate);
+        checkpoint.current_height = Height(height.saturating_add(1));
+        checkpoint.height_context_root = Hash::from_domain_bytes("context", b"successor");
+        checkpoint.active_validator_set_hash = Hash::from_domain_bytes("validators", b"active");
+        checkpoint
+    }
+
     #[test]
     fn atomic_recovery_checkpoint_survives_interrupted_temp_write_and_rejects_tampering() {
         let authority = temp_authority("atomic-recovery");
@@ -1176,6 +1260,99 @@ mod tests {
             .unwrap_err()
             .contains("checkpoint root mismatch"));
         let _ = fs::remove_file(interrupted);
+    }
+
+    #[test]
+    fn retirement_watermark_compacts_long_journals_and_rejects_inconsistent_history() {
+        const LONG_RUN_HEIGHT: u64 = 512;
+        const COMPACTION_INTERVAL: u64 = 64;
+
+        let authority = temp_authority("retirement-watermark");
+        let mut first_record = None;
+        for height in 1..=LONG_RUN_HEIGHT {
+            let mut record = authorization(ConsensusSigningPhase::Finality, 0, "candidate-a");
+            record.height = Height(height);
+            record.height_context_root =
+                Hash::from_domain_bytes("context", format!("height-{height}").as_bytes());
+            authority
+                .authorize_before_signature(&record)
+                .expect("record live signing authorization");
+            if height == 1 {
+                first_record = authority
+                    .load_unlocked()
+                    .expect("load first durable record")
+                    .records
+                    .into_iter()
+                    .next();
+            }
+            if height % COMPACTION_INTERVAL == 0 && height < LONG_RUN_HEIGHT {
+                authority
+                    .commit_recovery_checkpoint(&finalized_recovery_checkpoint(height))
+                    .expect("compact finalized signing slots");
+                let journal = authority.load_unlocked().expect("load compacted journal");
+                assert!(journal
+                    .records
+                    .iter()
+                    .all(|entry| entry.authorization.height.0 > height));
+                assert!(
+                    journal.records.len() < COMPACTION_INTERVAL as usize,
+                    "journal must remain bounded between finalized checkpoints"
+                );
+            }
+        }
+
+        authority
+            .commit_recovery_checkpoint(&finalized_recovery_checkpoint(LONG_RUN_HEIGHT - 1))
+            .expect("final watermark compaction");
+        let compacted = authority.load_unlocked().expect("load compacted journal");
+        assert_eq!(compacted.retired_through_height, LONG_RUN_HEIGHT - 1);
+        assert_eq!(compacted.records.len(), 1, "only the live height remains");
+        assert_eq!(compacted.records[0].authorization.height.0, LONG_RUN_HEIGHT);
+
+        let mut retired = authorization(ConsensusSigningPhase::Finality, 0, "candidate-a");
+        retired.height = Height(1);
+        retired.height_context_root = Hash::from_domain_bytes("context", b"height-1");
+        assert!(authority
+            .authorize_before_signature(&retired)
+            .expect_err("retired finalized height must never sign again")
+            .contains("retired through finalized height"));
+
+        let mut retaining_retired_record: serde_json::Value =
+            serde_json::from_slice(&fs::read(authority.path()).expect("read compacted journal"))
+                .expect("parse compacted journal");
+        retaining_retired_record["records"]
+            .as_array_mut()
+            .expect("journal records array")
+            .push(
+                serde_json::to_value(first_record.expect("first record")).expect("encode record"),
+            );
+        fs::write(
+            authority.path(),
+            serde_json::to_vec(&retaining_retired_record).expect("encode tampered journal"),
+        )
+        .expect("write tampered journal");
+        assert!(authority
+            .recovery_checkpoint()
+            .expect_err("retained finalized record must fail closed")
+            .contains("retains a finalized retired signing slot"));
+
+        let mismatched = temp_authority("retirement-watermark-mismatch");
+        mismatched
+            .commit_recovery_checkpoint(&finalized_recovery_checkpoint(1))
+            .expect("persist checkpoint");
+        let mut mismatched_watermark: serde_json::Value =
+            serde_json::from_slice(&fs::read(mismatched.path()).expect("read checkpoint"))
+                .expect("parse checkpoint");
+        mismatched_watermark["retired_through_height"] = serde_json::json!(2);
+        fs::write(
+            mismatched.path(),
+            serde_json::to_vec(&mismatched_watermark).expect("encode mismatch"),
+        )
+        .expect("write mismatched watermark");
+        assert!(mismatched
+            .recovery_checkpoint()
+            .expect_err("watermark must match its atomic checkpoint")
+            .contains("retirement watermark disagrees"));
     }
 
     #[test]

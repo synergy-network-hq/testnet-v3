@@ -179,7 +179,9 @@ jobs:
             --bin build-chain1266-desired-state \
             --bin build-chain1266-private-ring-material \
             --bin sign-chain1266-desired-state \
-            --bin sign-chain1266-start-command
+            --bin sign-chain1266-start-command \
+            --bin verify-chain1266-release-authorization \
+            --bin testnet-v3-genesis-release-approval
           out="$RUNNER_TEMP/chain1266-release"
           mkdir -p "$out/bin" "$out/config"
           for binary in \
@@ -191,19 +193,29 @@ jobs:
             build-chain1266-desired-state \
             build-chain1266-private-ring-material \
             sign-chain1266-desired-state \
-            sign-chain1266-start-command
+            sign-chain1266-start-command \
+            verify-chain1266-release-authorization \
+            testnet-v3-genesis-release-approval
           do
             install -m 0755 "runtime/target/release/$binary" "$out/bin/$binary"
             "$out/bin/$binary" --version >/dev/null 2>&1 || true
           done
           cp genesis.testnet-v3.identity-assigned.json "$out/genesis.json"
+          cp launch/production-genesis-ceremony/testnet-v3-genesis-release-approval.json \
+            "$out/genesis-release-approval.json"
           cp launch/CHAIN_1266_DEPENDENCIES.lock.json "$out/dependencies.lock.json"
           cp -R launch/chain1266-systemd "$out/systemd"
+          cp -R atlas "$out/atlas"
           cp -R launch/production-node-configs/validators "$out/config/"
           cp -R launch/production-node-configs/relayers "$out/config/"
           cp -R launch/production-node-configs/rpc-gateway "$out/config/"
           cp -R launch/production-node-configs/explorer-indexer "$out/config/"
           cp -R launch/production-node-configs/observer "$out/config/"
+          "$out/bin/testnet-v3-genesis-release-approval" \
+            --verify \
+            --candidate launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json \
+            --authorities launch/TESTNET_V3_PRODUCTION_AUTHORITIES.json \
+            --approval launch/production-genesis-ceremony/testnet-v3-genesis-release-approval.json
 
       - name: Refuse stale Genesis-bound configurations
         shell: bash
@@ -252,6 +264,44 @@ jobs:
           args+=(--configuration "observer=$out/config/observer/observer.toml")
           "$out/bin/build-chain1266-desired-state" "${args[@]}" \
             --output "$out/desired-state.json"
+          desired_sha="$(sha256sum "$out/desired-state.json" | awk '{print $1}')"
+          approval_sha="$(sha256sum "$out/genesis-release-approval.json" | awk '{print $1}')"
+          genesis_hash="$(jq -er .integrity.genesis_hash "$out/genesis.json")"
+          network_magic="$(jq -er .network_magic_bytes.value "$out/genesis.json")"
+          jq -n \
+            --arg genesis_hash "$genesis_hash" \
+            --arg network_magic "$network_magic" \
+            --arg approval_sha "$approval_sha" \
+            --arg release_sha "$desired_sha" \
+            '{
+              schema_version:1,
+              chain_id:1266,
+              chain_incarnation:4,
+              network_id:"synergy-testnet-v3",
+              genesis_hash:$genesis_hash,
+              network_magic:$network_magic,
+              finalization:{
+                status:"final",
+                approval_sha256:$approval_sha,
+                release_sha256:$release_sha
+              },
+              endpoints:{
+                rpc:"https://testnet-core-rpc.synergy-network.io",
+                api:"https://testnet-atlas-api.synergy-network.io",
+                websocket:"wss://testnet-core-ws.synergy-network.io"
+              },
+              token_metadata:{source_url:"https://testnet-core-rpc.synergy-network.io",sha256:$release_sha},
+              validator_registry:{source_url:"https://testnet-core-rpc.synergy-network.io",sha256:$release_sha},
+              contracts:{source_url:"https://testnet-core-rpc.synergy-network.io",sha256:$release_sha},
+              fee_reward:{source_url:"https://testnet-core-rpc.synergy-network.io",sha256:$release_sha},
+              posy_etdag:{
+                source_url:"https://testnet-core-rpc.synergy-network.io",
+                sha256:$release_sha,
+                target_block_time_ms:2000
+              }
+            }' >"$out/atlas-network.json"
+          node "$out/atlas/scripts/validate-network-config.mjs" \
+            "$out/atlas-network.json"
 
       - name: Generate SBOM
         uses: anchore/sbom-action@v0
@@ -284,7 +334,7 @@ jobs:
           path: ${{ runner.temp }}/chain1266-release
 
   ring2-private-qualification:
-    name: Ring 2 private process qualification
+    name: Ring 2 isolated preflight (not real-host qualification)
     needs:
       - resolve-signed-tag
       - build-role-artifacts
@@ -294,9 +344,28 @@ jobs:
       contents: read
       id-token: write
       attestations: write
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: atlas_chain1266
+          POSTGRES_USER: atlas_qualification
+          POSTGRES_PASSWORD: atlas_qualification
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U atlas_qualification -d atlas_chain1266"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install private-ring service and WireGuard dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iproute2 postgresql-client wireguard-tools
 
       - uses: actions/download-artifact@v4
         with:
@@ -317,6 +386,7 @@ jobs:
         env:
           CHAIN1266_RELEASE_DIR: ${{ runner.temp }}/chain1266-release
           CHAIN1266_QUALIFICATION_ROOT: ${{ runner.temp }}/chain1266-ring2
+          CHAIN1266_RING2_ATLAS_DATABASE_URL: postgresql://atlas_qualification:atlas_qualification@127.0.0.1:5432/atlas_chain1266
         run: scripts/chain1266/run-ring2-private-qualification.sh
 
       - uses: actions/upload-artifact@v4
@@ -325,3 +395,143 @@ jobs:
           if-no-files-found: error
           retention-days: 30
           path: ${{ runner.temp }}/chain1266-ring2/evidence
+
+  promote-qualified-release:
+    name: Bind immutable release to both qualification rings
+    needs:
+      - resolve-signed-tag
+      - ring1
+      - build-role-artifacts
+      - ring2-private-qualification
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: chain1266-role-release-${{ needs.resolve-signed-tag.outputs.release_id }}
+          path: ${{ runner.temp }}/role-release
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: chain1266-ring1-${{ needs.resolve-signed-tag.outputs.release_id }}
+          path: ${{ runner.temp }}/ring1
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: chain1266-ring2-${{ needs.resolve-signed-tag.outputs.release_id }}
+          path: ${{ runner.temp }}/ring2
+
+      - name: Verify complete qualification identity
+        shell: bash
+        env:
+          RELEASE_ID: ${{ needs.resolve-signed-tag.outputs.release_id }}
+          TESTNET_REVISION: ${{ needs.resolve-signed-tag.outputs.testnet_revision }}
+          SYNQ_REVISION: ${{ needs.resolve-signed-tag.outputs.synq_revision }}
+          AEGIS_REVISION: ${{ needs.resolve-signed-tag.outputs.aegis_revision }}
+        run: |
+          set -euo pipefail
+          (cd "$RUNNER_TEMP/role-release" && sha256sum --check SHA256SUMS)
+          (cd "$RUNNER_TEMP/ring1" && sha256sum --check SHA256SUMS)
+          (cd "$RUNNER_TEMP/ring2" && sha256sum --check SHA256SUMS)
+          jq -e \
+            --arg testnet "$TESTNET_REVISION" \
+            --arg synq "$SYNQ_REVISION" \
+            --arg aegis "$AEGIS_REVISION" \
+            '.result == "PASS"
+             and .cases_passed == 23
+             and .cases_total == 23
+             and .real_mldsa == true
+             and .mldsa65_transport_authentication.unit_guard == "validator_handshake_never_falls_back_to_the_fndsa_peer_identity"
+             and .mldsa65_transport_authentication.ring1_proof == "real_mldsa_six_validator_burn_in"
+             and .mldsa65_transport_authentication.ring2_proof == "p2p_verified_handshakes_total{algorithm=ML-DSA-65}"
+             and .source.testnet_v3_revision == $testnet
+             and .source.synq_revision == $synq
+             and .source.aegis_revision == $aegis' \
+            "$RUNNER_TEMP/ring1/report.json" >/dev/null
+          jq -e \
+            --arg release "$RELEASE_ID" \
+            '.result == "PASS"
+             and .operational_state == "STABLE"
+             and .release_id == $release
+             and .finalized_height >= 10000
+             and .validator_count == 6
+             and .quorum == 5
+             and .wireguard_overlay == true
+             and .wireguard_credentials_disposable == true
+             and .qualification_environment == "six-real-validator-hosts"
+             and .real_pq_handshakes.mldsa65_verified > 0
+             and .real_pq_handshakes.fndsa1024_verified > 0
+             and .canonical_systemd_unit == "synergy-chain1266-role@.service"
+             and .production_custody_material_used == false' \
+            "$RUNNER_TEMP/ring2/report.json" >/dev/null
+
+      - name: Assemble promotable release record
+        shell: bash
+        env:
+          RELEASE_ID: ${{ needs.resolve-signed-tag.outputs.release_id }}
+          TESTNET_REVISION: ${{ needs.resolve-signed-tag.outputs.testnet_revision }}
+          SYNQ_REVISION: ${{ needs.resolve-signed-tag.outputs.synq_revision }}
+          AEGIS_REVISION: ${{ needs.resolve-signed-tag.outputs.aegis_revision }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/chain1266-promotable"
+          mkdir -p "$out/release" "$out/qualification/ring1" "$out/qualification/ring2"
+          cp -R "$RUNNER_TEMP/role-release/." "$out/release/"
+          cp -R "$RUNNER_TEMP/ring1/." "$out/qualification/ring1/"
+          cp -R "$RUNNER_TEMP/ring2/." "$out/qualification/ring2/"
+          desired_sha="$(sha256sum "$out/release/desired-state.json" | awk '{print $1}')"
+          ring1_sha="$(sha256sum "$out/qualification/ring1/report.json" | awk '{print $1}')"
+          ring2_sha="$(sha256sum "$out/qualification/ring2/report.json" | awk '{print $1}')"
+          jq -n \
+            --arg release_id "$RELEASE_ID" \
+            --arg release_tag "$GITHUB_REF_NAME" \
+            --arg testnet_revision "$TESTNET_REVISION" \
+            --arg synq_revision "$SYNQ_REVISION" \
+            --arg aegis_revision "$AEGIS_REVISION" \
+            --arg desired_state_sha256 "$desired_sha" \
+            --arg ring1_report_sha256 "$ring1_sha" \
+            --arg ring2_report_sha256 "$ring2_sha" \
+            '{
+              schema_version:1,
+              result:"PROMOTABLE",
+              release_id:$release_id,
+              release_tag:$release_tag,
+              chain:{chain_id:1266,chain_incarnation:4},
+              source:{
+                testnet_v3_revision:$testnet_revision,
+                synq_revision:$synq_revision,
+                aegis_revision:$aegis_revision
+              },
+              desired_state_sha256:$desired_state_sha256,
+              qualification:{
+                ring1:{result:"PASS",cases:23,report_sha256:$ring1_report_sha256},
+                ring2:{result:"PASS",stable_height:10000,report_sha256:$ring2_report_sha256}
+              },
+              public_deployment_authorized:false,
+              governance_desired_state_signature_required:true
+            }' >"$out/release-qualification.json"
+          find "$out" -type f ! -name SHA256SUMS -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            | sed "s#  $out/#  #" >"$out/SHA256SUMS"
+
+      - name: Sign promotable release provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ runner.temp }}/chain1266-promotable/**
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chain1266-promotable-${{ needs.resolve-signed-tag.outputs.release_id }}
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 30
+          path: ${{ runner.temp }}/chain1266-promotable

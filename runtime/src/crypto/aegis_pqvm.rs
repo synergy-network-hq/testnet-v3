@@ -397,6 +397,43 @@ impl AegisPqvmSigner {
         ))
     }
 
+    /// Generates the non-consensus peer identity used by downstream support
+    /// roles. Validator identities are registered separately from their
+    /// Genesis-assigned ML-DSA-65 custody key and must never call this path.
+    pub fn generate_and_register_fndsa_peer_identity(
+        &mut self,
+        uma_id: &str,
+        active_from_epoch: Epoch,
+    ) -> Result<AegisPqKeyId, AegisPqvmError> {
+        self.ensure_initialized()?;
+        let (mut public_key, mut private_key) = self
+            .manager
+            .generate_keypair(PQCAlgorithm::FNDSA)
+            .map_err(|error| {
+                AegisPqvmError(format!("FN-DSA peer identity generation failed: {error}"))
+            })?;
+        if self
+            .registry
+            .public_keys
+            .contains_key(&AegisPqKeyId(public_key.key_id.clone()))
+        {
+            let unique_key_id = format!(
+                "{}_{}",
+                public_key.key_id,
+                self.registry.public_keys.len().saturating_add(1)
+            );
+            public_key.key_id = unique_key_id.clone();
+            private_key.public_key_id = unique_key_id;
+        }
+        Ok(self.registry.register_keypair(
+            uma_id,
+            public_key,
+            private_key,
+            vec![AegisPqKeyRole::PeerIdentity],
+            active_from_epoch,
+        ))
+    }
+
     pub fn register_existing_keypair(
         &mut self,
         uma_id: &str,

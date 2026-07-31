@@ -187,6 +187,33 @@ fn configured_manifest_signature_path() -> Result<PathBuf, String> {
         .map_err(|_| format!("{DESIRED_STATE_SIGNATURE_ENV} is required for Chain 1266 startup"))
 }
 
+fn state_root_matches_namespace(
+    state_root: &Path,
+    qualification_mode: bool,
+    production_namespace: &str,
+) -> bool {
+    if !state_root.is_absolute()
+        || state_root
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+        || state_root.file_name().and_then(|value| value.to_str()) != Some("data")
+    {
+        return false;
+    }
+    if qualification_mode {
+        let qualification_root = Path::new("/var/lib/synergy/chain1266-qualification");
+        let Ok(relative) = state_root.strip_prefix(qualification_root) else {
+            return false;
+        };
+        // Require a run and a role below the dedicated root, rather than
+        // accepting the root itself or a path that could overlap production.
+        return relative.components().count() == 3;
+    }
+    state_root
+        .parent()
+        .is_some_and(|parent| parent.ends_with(Path::new(production_namespace)))
+}
+
 fn verify_desired_state_signature(
     manifest: &DesiredStateManifest,
     manifest_sha256: &str,
@@ -229,6 +256,55 @@ fn verify_desired_state_signature(
         return Err("desired-state ML-DSA-87 signature verification failed".to_string());
     }
     Ok(())
+}
+
+pub fn verify_signed_desired_state_file(
+    manifest_path: &Path,
+    signature_path: &Path,
+) -> Result<DesiredStateSignatureRequest, String> {
+    let manifest_bytes =
+        fs::read(manifest_path).map_err(|error| format!("read desired-state manifest: {error}"))?;
+    let signature_bytes = fs::read(signature_path)
+        .map_err(|error| format!("read desired-state signature: {error}"))?;
+    let manifest: DesiredStateManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|error| format!("parse strict desired-state manifest: {error}"))?;
+    if manifest.schema_version != EXPECTED_SCHEMA_VERSION
+        || manifest.chain.chain_id != SYNERGY_TESTNET_V3_CHAIN_ID
+        || manifest.chain.incarnation != TESTNET_V3_CHAIN_INCARNATION
+        || manifest.chain.quorum != EXPECTED_QUORUM
+        || manifest.state.consensus_schema_version != TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION
+        || manifest.state.directory_namespace != "chain-1266/incarnation-4"
+        || manifest.start_authority.public_key_fingerprint != PRODUCTION_GOVERNANCE_FINGERPRINT
+    {
+        return Err(
+            "signed desired state is outside the production Chain 1266 incarnation-4 profile"
+                .to_string(),
+        );
+    }
+    if manifest.start_authority.signature_algorithm != "ML-DSA-87"
+        || manifest.start_authority.signature_domain
+            != crate::consensus_start::CHAIN1266_START_SIGNATURE_DOMAIN
+    {
+        return Err(
+            "signed desired state uses an unsupported Governance Authority profile".to_string(),
+        );
+    }
+    let governance_public_key = general_purpose::STANDARD
+        .decode(&manifest.start_authority.public_key_base64)
+        .map_err(|error| format!("decode Governance Authority public key: {error}"))?;
+    if governance_public_key.len() != 2_592 {
+        return Err("Governance Authority public key is not ML-DSA-87".to_string());
+    }
+    if format!("sha256:{}", sha256_bytes(&governance_public_key))
+        != manifest.start_authority.public_key_fingerprint
+    {
+        return Err("Governance Authority public key fingerprint mismatch".to_string());
+    }
+    let manifest_sha256 = sha256_bytes(&manifest_bytes);
+    verify_desired_state_signature(&manifest, &manifest_sha256, &signature_bytes)?;
+    let signed: SignedDesiredStateManifest = serde_json::from_slice(&signature_bytes)
+        .map_err(|error| format!("parse strict signed desired-state manifest: {error}"))?;
+    Ok(signed.request)
 }
 
 /// Verifies every local release input before any role opens chain-derived
@@ -286,18 +362,18 @@ pub fn verify_chain1266_desired_state(
     {
         return Err("desired-state consensus schema or state namespace is invalid".to_string());
     }
+    let qualification_mode = env::var(CHAIN1266_QUALIFICATION_MODE_ENV).as_deref() == Ok("1");
     let state_root = env::var("SYNERGY_DATA_PATH")
         .map(PathBuf::from)
         .map_err(|_| "SYNERGY_DATA_PATH is required for incarnation-isolated state".to_string())?;
-    if !state_root.is_absolute()
-        || state_root.file_name().and_then(|value| value.to_str()) != Some("data")
-        || !state_root
-            .parent()
-            .is_some_and(|parent| parent.ends_with(Path::new(&manifest.state.directory_namespace)))
-    {
+    if !state_root_matches_namespace(
+        &state_root,
+        qualification_mode,
+        &manifest.state.directory_namespace,
+    ) {
         return Err(format!(
-            "state root must be the data directory under absolute namespace {}",
-            manifest.state.directory_namespace
+            "state root is outside the required Chain 1266 namespace {}",
+            manifest.state.directory_namespace,
         ));
     }
     if manifest.start_authority.signature_algorithm != "ML-DSA-87"
@@ -328,12 +404,15 @@ pub fn verify_chain1266_desired_state(
     verify_desired_state_signature(&manifest, &manifest_sha256, &signature_bytes)?;
 
     let genesis = canonical_genesis()?;
-    let private_qualification = env::var(CHAIN1266_QUALIFICATION_MODE_ENV).as_deref() == Ok("1")
+    let private_qualification = qualification_mode
         && genesis
             .value()
             .get("env")
             .and_then(serde_json::Value::as_str)
             == Some("chain1266-private-qualification");
+    if qualification_mode != private_qualification {
+        return Err("qualification mode requires the private qualification Genesis".to_string());
+    }
     if !private_qualification
         && manifest.start_authority.public_key_fingerprint != PRODUCTION_GOVERNANCE_FINGERPRINT
     {
@@ -456,6 +535,35 @@ mod tests {
     use crate::crypto::pqc::{PQCAlgorithm, PQCManager};
 
     #[test]
+    fn qualification_state_namespace_is_separate_and_cannot_escape() {
+        assert!(state_root_matches_namespace(
+            Path::new("/var/lib/synergy/chain1266-qualification/run-1/validator-node-01/data"),
+            true,
+            "chain-1266/incarnation-4",
+        ));
+        assert!(!state_root_matches_namespace(
+            Path::new("/var/lib/synergy/chain1266-qualification/data"),
+            true,
+            "chain-1266/incarnation-4",
+        ));
+        assert!(!state_root_matches_namespace(
+            Path::new("/var/lib/synergy/chain1266-qualification/run-1/validator-node-01/../../incarnation-4/data"),
+            true,
+            "chain-1266/incarnation-4",
+        ));
+        assert!(!state_root_matches_namespace(
+            Path::new("/var/lib/synergy/validator/chain-1266/incarnation-4/data"),
+            true,
+            "chain-1266/incarnation-4",
+        ));
+        assert!(state_root_matches_namespace(
+            Path::new("/var/lib/synergy/validator/chain-1266/incarnation-4/data"),
+            false,
+            "chain-1266/incarnation-4",
+        ));
+    }
+
+    #[test]
     fn desired_state_signature_is_real_mldsa87_and_digest_bound() {
         let mut manager = PQCManager::new();
         let (public, private) = manager
@@ -524,5 +632,97 @@ mod tests {
             verify_desired_state_signature(&manifest, &"77".repeat(32), &bytes).is_err(),
             "changing the desired-state digest must invalidate the authorization"
         );
+        let mut tampered_signature = general_purpose::STANDARD
+            .decode(&signed.signature_base64)
+            .expect("decode test signature");
+        tampered_signature[0] ^= 0x01;
+        let tampered_bytes = serde_json::to_vec(&SignedDesiredStateManifest {
+            request: signed.request.clone(),
+            signature_base64: general_purpose::STANDARD.encode(tampered_signature),
+        })
+        .expect("encode tampered signature envelope");
+        assert!(
+            verify_desired_state_signature(&manifest, &manifest_sha256, &tampered_bytes).is_err(),
+            "flipping a real ML-DSA-87 signature byte must invalidate authorization"
+        );
+    }
+
+    #[test]
+    fn external_release_verifier_binds_governance_fingerprint_to_public_key() {
+        let mut manager = PQCManager::new();
+        let (public, private) = manager
+            .generate_keypair(PQCAlgorithm::MLDSA87)
+            .expect("generate unrelated ML-DSA-87 key");
+        let manifest = serde_json::json!({
+            "schema_version": 1,
+            "release_id": "chain1266-incarnation-4-rc1",
+            "release_tag": "chain1266-v20.0.0-rc.1",
+            "chain": {
+                "chain_id": 1266,
+                "incarnation": 4,
+                "genesis_hash": "11".repeat(32),
+                "validator_set_root": "22".repeat(32),
+                "quorum": 5,
+            },
+            "source": {
+                "testnet_v3_revision": "33".repeat(20),
+                "synq_revision": "44".repeat(20),
+                "aegis_revision": "55".repeat(20),
+            },
+            "state": {
+                "consensus_schema_version": TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION,
+                "directory_namespace": "chain-1266/incarnation-4",
+            },
+            "start_authority": {
+                "signature_algorithm": "ML-DSA-87",
+                "signature_domain": crate::consensus_start::CHAIN1266_START_SIGNATURE_DOMAIN,
+                // This field previously let the unrelated key below impersonate
+                // the frozen authority when the release CLI did not recompute it.
+                "public_key_fingerprint": PRODUCTION_GOVERNANCE_FINGERPRINT,
+                "public_key_base64": general_purpose::STANDARD.encode(&public.key_data),
+            },
+            "artifacts": {},
+            "configuration": {},
+        });
+        let manifest_bytes = serde_json::to_vec(&manifest).expect("encode manifest");
+        let request = DesiredStateSignatureRequest {
+            schema_version: 1,
+            action: "AUTHORIZE_DESIRED_STATE".to_string(),
+            release_id: "chain1266-incarnation-4-rc1".to_string(),
+            chain_id: 1266,
+            chain_incarnation: 4,
+            genesis_hash: "11".repeat(32),
+            desired_state_sha256: sha256_bytes(&manifest_bytes),
+            signature_algorithm: "ML-DSA-87".to_string(),
+            signature_domain: CHAIN1266_DESIRED_STATE_SIGNATURE_DOMAIN.to_string(),
+            authority_public_key_fingerprint: PRODUCTION_GOVERNANCE_FINGERPRINT.to_string(),
+        };
+        let signature = Sign::mldsa87()
+            .sign_ctx(
+                &serde_json::to_vec(&request).expect("encode authorization"),
+                &private.key_data,
+                CHAIN1266_DESIRED_STATE_SIGNATURE_DOMAIN.as_bytes(),
+            )
+            .expect("sign unrelated authorization");
+        let signature_bytes = serde_json::to_vec(&SignedDesiredStateManifest {
+            request,
+            signature_base64: general_purpose::STANDARD.encode(signature),
+        })
+        .expect("encode signed authorization");
+        let manifest_path = crate::utils::test_temp_root(format!(
+            "synergy-chain1266-forged-authority-{}-manifest.json",
+            std::process::id()
+        ));
+        let signature_path = manifest_path.with_file_name(format!(
+            "synergy-chain1266-forged-authority-{}-signature.json",
+            std::process::id()
+        ));
+        fs::write(&manifest_path, manifest_bytes).expect("write forged manifest");
+        fs::write(&signature_path, signature_bytes).expect("write forged signature");
+        let error = verify_signed_desired_state_file(&manifest_path, &signature_path)
+            .expect_err("unrelated public key must not impersonate Governance Authority");
+        assert!(error.contains("public key fingerprint mismatch"), "{error}");
+        let _ = fs::remove_file(manifest_path);
+        let _ = fs::remove_file(signature_path);
     }
 }

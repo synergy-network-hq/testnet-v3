@@ -793,6 +793,21 @@ fn render_metrics(config: &NodeConfig, start_time: SystemTime) -> String {
     // database insertion time.
     let typed = crate::consensus::typed_coordinator::typed_consensus_telemetry_snapshot();
     let pqc = crate::crypto::aegis_pqvm::pqc_verification_metrics_snapshot();
+    let p2p_handshakes = crate::p2p::networking::p2p_handshake_metrics_snapshot();
+    push_metric_header(
+        &mut body,
+        "p2p_verified_handshakes_total",
+        "P2P handshakes successfully verified with the real post-quantum implementation.",
+        "counter",
+    );
+    body.push_str(&format!(
+        "p2p_verified_handshakes_total{{algorithm=\"ML-DSA-65\"}} {}\n",
+        p2p_handshakes.mldsa65_verified
+    ));
+    body.push_str(&format!(
+        "p2p_verified_handshakes_total{{algorithm=\"FN-DSA-1024\"}} {}\n",
+        p2p_handshakes.fndsa_verified
+    ));
     push_metric_header(
         &mut body,
         "consensus_finalized_height",

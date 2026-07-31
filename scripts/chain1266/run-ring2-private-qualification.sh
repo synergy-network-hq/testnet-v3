@@ -12,6 +12,7 @@ qualification="${CHAIN1266_QUALIFICATION_ROOT:?CHAIN1266_QUALIFICATION_ROOT is r
 target_height="${CHAIN1266_RING2_TARGET_HEIGHT:-10000}"
 startup_ceiling="${CHAIN1266_RING2_STARTUP_CEILING_SECONDS:-600}"
 progress_ceiling="${CHAIN1266_RING2_PROGRESS_CEILING_SECONDS:-30}"
+atlas_database_url="${CHAIN1266_RING2_ATLAS_DATABASE_URL:?CHAIN1266_RING2_ATLAS_DATABASE_URL is required}"
 
 case "$qualification" in
   /tmp/*|/home/runner/work/_temp/*) ;;
@@ -21,7 +22,7 @@ esac
   echo "Ring-2 target must be at least 10,000 finalized blocks" >&2
   exit 1
 }
-for command in ip tc jq curl python3 sha256sum prlimit nice; do
+for command in ip tc wg jq curl python3 psql sha256sum systemctl journalctl; do
   command -v "$command" >/dev/null || {
     echo "Ring-2 requires $command" >&2
     exit 1
@@ -53,6 +54,7 @@ configs="$qualification/config"
 projects="$qualification/nodes"
 pids="$qualification/pids"
 logs="$evidence/logs"
+qualification_state_root="/var/lib/synergy/chain1266-qualification/$network_prefix"
 mkdir -p "$private_root" "$evidence" "$projects" "$pids" "$logs"
 
 nodes=(
@@ -70,18 +72,25 @@ declare -A node_ip=(
 )
 declare -A node_ns=()
 declare -A process_pid=()
+declare -A underlay_ip=()
+declare -A wireguard_port=()
+declare -A wireguard_public_key=()
+role_unit="synergy-chain1266-role@"
+installed_unit="/etc/systemd/system/synergy-chain1266-role@.service"
+installed_launcher="/usr/local/libexec/synergy/chain1266-role-service"
+service_environment_root="/run/synergy-chain1266"
 
 cleanup() {
   set +e
   for node in "${nodes[@]}"; do
-    pid="${process_pid[$node]:-}"
-    [[ -n "$pid" ]] && sudo kill -TERM "$pid" >/dev/null 2>&1
+    sudo systemctl stop "${role_unit}${node}.service" >/dev/null 2>&1
   done
-  sleep 1
-  for node in "${nodes[@]}"; do
-    pid="${process_pid[$node]:-}"
-    [[ -n "$pid" ]] && sudo kill -KILL "$pid" >/dev/null 2>&1
-  done
+  sudo rm -f "$installed_unit" "$installed_launcher"
+  sudo rm -rf "$service_environment_root"
+  if [[ "$qualification_state_root" == /var/lib/synergy/chain1266-qualification/c1266q* ]]; then
+    sudo rm -rf -- "$qualification_state_root"
+  fi
+  sudo systemctl daemon-reload >/dev/null 2>&1
   for node in "${nodes[@]}"; do
     ns="${node_ns[$node]:-}"
     [[ -n "$ns" ]] && sudo ip netns delete "$ns" >/dev/null 2>&1
@@ -103,13 +112,15 @@ for index in "${!nodes[@]}"; do
   host_veth="${network_prefix}h${index}"
   peer_veth="${network_prefix}p${index}"
   node_ns[$node]="$ns"
+  underlay_ip[$node]="172.31.126.$((index + 10))"
+  wireguard_port[$node]="$((51820 + index))"
   sudo ip netns add "$ns"
   sudo ip link add "$host_veth" type veth peer name "$peer_veth"
   sudo ip link set "$host_veth" master "$bridge"
   sudo ip link set "$host_veth" up
   sudo ip link set "$peer_veth" netns "$ns"
   sudo ip -n "$ns" link set "$peer_veth" name eth0
-  sudo ip -n "$ns" addr add "${node_ip[$node]}/16" dev eth0
+  sudo ip -n "$ns" addr add "${underlay_ip[$node]}/24" dev eth0
   sudo ip -n "$ns" link set lo up
   sudo ip -n "$ns" link set eth0 up
   if sudo ip -n "$ns" route show default | grep -q .; then
@@ -117,6 +128,57 @@ for index in "${!nodes[@]}"; do
     exit 1
   fi
 done
+
+# Build an isolated full-mesh WireGuard transport using disposable credentials.
+# The Ethernet bridge is underlay-only; every Chain 1266 role binds and dials
+# through the same 10.70.0.0/16 overlay used by the public role configs.
+wireguard_root="$private_root/wireguard"
+mkdir -p "$wireguard_root"
+chmod 0700 "$wireguard_root"
+for node in "${nodes[@]}"; do
+  private_key="$wireguard_root/$node.private"
+  public_key="$wireguard_root/$node.public"
+  umask 077
+  wg genkey >"$private_key"
+  wg pubkey <"$private_key" >"$public_key"
+  wireguard_public_key[$node]="$(<"$public_key")"
+  sudo ip -n "${node_ns[$node]}" link add sy-vpn type wireguard
+  sudo ip -n "${node_ns[$node]}" addr add "${node_ip[$node]}/16" dev sy-vpn
+  sudo ip netns exec "${node_ns[$node]}" \
+    wg set sy-vpn \
+      private-key "$private_key" \
+      listen-port "${wireguard_port[$node]}"
+done
+for node in "${nodes[@]}"; do
+  peer_args=()
+  for peer in "${nodes[@]}"; do
+    [[ "$peer" == "$node" ]] && continue
+    peer_args+=(
+      peer "${wireguard_public_key[$peer]}"
+      allowed-ips "${node_ip[$peer]}/32"
+      endpoint "${underlay_ip[$peer]}:${wireguard_port[$peer]}"
+      persistent-keepalive 5
+    )
+  done
+  sudo ip netns exec "${node_ns[$node]}" wg set sy-vpn "${peer_args[@]}"
+  sudo ip -n "${node_ns[$node]}" link set sy-vpn up
+  peer_count="$(
+    sudo ip netns exec "${node_ns[$node]}" wg show sy-vpn peers | sed '/^$/d' | wc -l | tr -d ' '
+  )"
+  [[ "$peer_count" == 11 ]] || {
+    echo "$node WireGuard peer count is $peer_count, expected 11" >&2
+    exit 1
+  }
+done
+
+sudo install -d -m 0755 "$(dirname "$installed_launcher")" "$service_environment_root"
+sudo install -m 0755 \
+  "$release/systemd/chain1266-role-service" \
+  "$installed_launcher"
+sudo install -m 0644 \
+  "$release/systemd/synergy-chain1266-role@.service" \
+  "$installed_unit"
+sudo systemctl daemon-reload
 
 "$release/bin/build-chain1266-private-ring-material" \
   --source-genesis "$release/genesis.json" \
@@ -186,15 +248,15 @@ binary_for() {
 
 start_node() {
   local node="$1"
-  local project="$projects/$node/chain-1266/incarnation-4"
+  local project="$projects/$node"
   local config
   local source_config
   local binary
-  local key_args=()
+  local environment_file="$service_environment_root/$node.env"
   source_config="$(config_for "$node")"
   config="$project/config/node_config.toml"
   binary="$(binary_for "$node")"
-  state_root="$project/data"
+  state_root="$qualification_state_root/$node/data"
   mkdir -p "$state_root" "$project/config"
   cp "$source_config" "$config"
   cp "$qualification/genesis.json" "$project/config/genesis.json"
@@ -205,29 +267,47 @@ start_node() {
   if [[ "$node" == validator-* ]]; then
     number="${node##*0}"
     validator_id="validator-$number"
-    key_args=(
-      "SYNERGY_VALIDATOR_MLDSA65_CONSENSUS_PRIVATE_KEY_FILE=$private_root/$validator_id/mldsa65-consensus.private.key"
-      "CONSENSUS_START_PAUSED=1"
-      "SYNERGY_CONSENSUS_START_RELEASE_FILE=$qualification/start-consensus.json"
-    )
   fi
-  sudo ip netns exec "${node_ns[$node]}" \
-    env \
-      "SYNERGY_PROJECT_ROOT=$project" \
-      "SYNERGY_DATA_PATH=$state_root" \
-      "SYNERGY_GENESIS_FILE=$qualification/genesis.json" \
-      "SYNERGY_DESIRED_STATE_MANIFEST=$qualification/desired-state.json" \
-      "SYNERGY_DESIRED_STATE_MANIFEST_SHA256=$desired_sha" \
-      "SYNERGY_DESIRED_STATE_SIGNATURE=$qualification/desired-state.signature.json" \
-      "SYNERGY_CHAIN1266_QUALIFICATION_MODE=1" \
-      "SYNERGY_ENABLE_METRICS=true" \
-      "${key_args[@]}" \
-    prlimit --nofile=8192:8192 --as=4294967296 \
-    nice -n 5 \
-    "$binary" start --config "$config" \
-    >"$logs/$node.log" 2>&1 &
-  process_pid[$node]=$!
-  printf '%s\n' "$!" >"$pids/$node.pid"
+  {
+    printf 'CHAIN1266_ROLE_BINARY=%s\n' "$binary"
+    printf 'CHAIN1266_ROLE_CONFIG=%s\n' "$config"
+    printf 'CHAIN1266_NETWORK_NAMESPACE=%s\n' "${node_ns[$node]}"
+    printf 'SYNERGY_PROJECT_ROOT=%s\n' "$project"
+    printf 'SYNERGY_DATA_PATH=%s\n' "$state_root"
+    printf 'SYNERGY_GENESIS_FILE=%s\n' "$qualification/genesis.json"
+    printf 'SYNERGY_DESIRED_STATE_MANIFEST=%s\n' "$qualification/desired-state.json"
+    printf 'SYNERGY_DESIRED_STATE_MANIFEST_SHA256=%s\n' "$desired_sha"
+    printf 'SYNERGY_DESIRED_STATE_SIGNATURE=%s\n' \
+      "$qualification/desired-state.signature.json"
+    printf 'SYNERGY_CHAIN1266_QUALIFICATION_MODE=1\n'
+    printf 'SYNERGY_ENABLE_METRICS=true\n'
+    if [[ "$node" == validator-* ]]; then
+      printf 'SYNERGY_VALIDATOR_MLDSA65_CONSENSUS_PRIVATE_KEY_FILE=%s\n' \
+        "$private_root/$validator_id/mldsa65-consensus.private.key"
+      printf 'CONSENSUS_START_PAUSED=1\n'
+      printf 'SYNERGY_CONSENSUS_START_RELEASE_FILE=%s\n' \
+        "$qualification/start-consensus.json"
+    fi
+  } | sudo tee "$environment_file" >/dev/null
+  sudo chmod 0600 "$environment_file"
+  sudo systemctl reset-failed "${role_unit}${node}.service" >/dev/null 2>&1 || true
+  sudo systemctl start "${role_unit}${node}.service"
+  process_pid[$node]="$(
+    sudo systemctl show "${role_unit}${node}.service" --property=MainPID --value
+  )"
+  printf '%s\n' "${process_pid[$node]}" >"$pids/$node.pid"
+}
+
+stop_node() {
+  sudo systemctl stop "${role_unit}$1.service"
+}
+
+node_is_active() {
+  sudo systemctl is-active --quiet "${role_unit}$1.service"
+}
+
+node_log_tail() {
+  sudo journalctl -u "${role_unit}$1.service" --no-pager -n "${2:-100}"
 }
 
 metric() {
@@ -243,15 +323,85 @@ metrics_text() {
     curl --fail --silent --max-time 2 http://127.0.0.1:6030/metrics
 }
 
+write_direct_health_gate() {
+  local output="$1"
+  local required_height="$2"
+  local rows="$qualification/direct-health-rows.jsonl"
+  : >"$rows"
+  for node in \
+    validator-node-01 validator-node-02 validator-node-03 \
+    validator-node-04 validator-node-05 validator-node-06
+  do
+    text="$(metrics_text "$node")"
+    height="$(awk '$1 == "consensus_finalized_height" {print int($2); exit}' <<<"$text")"
+    samples_count="$(
+      awk '$1 == "consensus_finality_interval_sample_count" {print int($2); exit}' <<<"$text"
+    )"
+    mean="$(
+      awk '$1 == "consensus_finality_interval_mean_seconds" {print $2; exit}' <<<"$text"
+    )"
+    median="$(
+      awk '$1 == "consensus_finality_interval_median_seconds" {print $2; exit}' <<<"$text"
+    )"
+    p95="$(
+      awk '$1 == "consensus_finality_interval_p95_seconds" {print $2; exit}' <<<"$text"
+    )"
+    ratio="$(awk '$1 == "consensus_round_zero_ratio" {print $2; exit}' <<<"$text")"
+    restarts="$(awk '$1 == "consensus_restart_count" {print int($2); exit}' <<<"$text")"
+    jq -n \
+      --arg node "$node" \
+      --argjson height "${height:-0}" \
+      --argjson sample_count "${samples_count:-0}" \
+      --argjson mean "${mean:-999}" \
+      --argjson median "${median:-999}" \
+      --argjson p95 "${p95:-999}" \
+      --argjson round_zero_ratio "${ratio:-0}" \
+      --argjson restart_count "${restarts:-0}" \
+      '{
+        node:$node,
+        finalized_height:$height,
+        sample_count:$sample_count,
+        mean_finality_interval_seconds:$mean,
+        median_finality_interval_seconds:$median,
+        p95_finality_interval_seconds:$p95,
+        round_zero_ratio:$round_zero_ratio,
+        restart_count:$restart_count
+      }' >>"$rows"
+  done
+  jq -s \
+    --argjson required_height "$required_height" \
+    '{
+      source:"direct_typed_consensus_metrics",
+      required_height:$required_height,
+      validators:.
+    }' "$rows" >"$output"
+  jq -e '
+    .required_height as $height
+    | ([($height - 1), 10000] | min) as $required_samples
+    | (.validators | length) == 6
+      and all(.validators[];
+        .finalized_height >= $height
+        and .sample_count >= $required_samples
+        and .mean_finality_interval_seconds <= 2.0
+        and .median_finality_interval_seconds <= 1.5
+        and .p95_finality_interval_seconds <= 3.0
+        and .round_zero_ratio >= 0.99
+      )
+  ' "$output" >/dev/null
+}
+
 for node in relay1 relay2 relay3 rpc-gateway explorer-indexer observer; do
   start_node "$node"
 done
 for node in \
   validator-node-01 validator-node-02 validator-node-03 \
-  validator-node-04 validator-node-05 validator-node-06
+  validator-node-04 validator-node-05
 do
   start_node "$node"
 done
+delayed_validator_start_seconds=5
+sleep "$delayed_validator_start_seconds"
+start_node validator-node-06
 
 startup_deadline=$((SECONDS + startup_ceiling))
 while :; do
@@ -263,9 +413,9 @@ while :; do
     if metrics_text "$node" 2>/dev/null \
       | grep -q 'consensus_startup_phase_info{phase="PAUSED_READY"} 1'; then
       ready=$((ready + 1))
-    elif ! sudo kill -0 "${process_pid[$node]}" 2>/dev/null; then
+    elif ! node_is_active "$node"; then
       echo "$node exited before PAUSED_READY" >&2
-      tail -100 "$logs/$node.log" >&2
+      node_log_tail "$node" 100 >&2
       exit 1
     fi
   done
@@ -274,6 +424,45 @@ while :; do
     echo "Ring-2 validators did not reach PAUSED_READY before the state-aware ceiling" >&2
     exit 1
   fi
+  sleep 1
+done
+prestart_height_max=0
+for node in \
+  validator-node-01 validator-node-02 validator-node-03 \
+  validator-node-04 validator-node-05 validator-node-06
+do
+  height="$(metric "$node" consensus_finalized_height || echo 0)"
+  ((height <= prestart_height_max)) || prestart_height_max="$height"
+done
+((prestart_height_max == 0)) || {
+  echo "A validator finalized before the signed readiness-barrier release" >&2
+  exit 1
+}
+jq -n \
+  --argjson delayed_start_seconds "$delayed_validator_start_seconds" \
+  '{
+    result:"PASS",
+    delayed_validator:"validator-node-06",
+    delayed_start_seconds:$delayed_start_seconds,
+    all_six_paused_ready:true,
+    finalized_height_before_signed_start:0
+  }' >"$evidence/delayed-validator-startup.json"
+
+wireguard_deadline=$((SECONDS + 30))
+while :; do
+  overlay_ready=0
+  for node in "${nodes[@]}"; do
+    handshakes="$(
+      sudo ip netns exec "${node_ns[$node]}" wg show sy-vpn dump \
+        | awk 'NR > 1 && $5 > 0 {count++} END {print count + 0}'
+    )"
+    ((handshakes == 11)) && overlay_ready=$((overlay_ready + 1))
+  done
+  ((overlay_ready == ${#nodes[@]})) && break
+  ((SECONDS < wireguard_deadline)) || {
+    echo "Ring-2 disposable WireGuard mesh did not complete all handshakes" >&2
+    exit 1
+  }
   sleep 1
 done
 
@@ -365,21 +554,48 @@ JSON
     sudo ip netns exec "${node_ns[rpc-gateway]}" \
       node "$repo/atlas/scripts/preflight-live-rpc.mjs" "$qualification/atlas-network.json" \
       >"$evidence/atlas-rpc-preflight.json"
+    psql "$atlas_database_url" -v ON_ERROR_STOP=1 \
+      -f "$repo/atlas/schema/001_atlas_v3.sql" \
+      >"$evidence/atlas-schema-install.log"
+    psql "$atlas_database_url" -v ON_ERROR_STOP=1 <<SQL
+INSERT INTO atlas_network (
+  chain_id, chain_incarnation, network_id, genesis_hash, network_magic,
+  rpc_url, api_url, websocket_url, manifest_sha256
+) VALUES (
+  1266, 4, 'synergy-testnet-v3',
+  '$(jq -er .integrity.genesis_hash "$qualification/genesis.json")',
+  'c1266004', 'http://10.70.30.1:5640', 'qualification://atlas-api',
+  'qualification://atlas-websocket', '$desired_sha'
+);
+SQL
+    psql "$atlas_database_url" -At -F $'\t' -v ON_ERROR_STOP=1 \
+      -c "SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE' AND table_name <> 'atlas_network' AND NOT EXISTS (SELECT 1 FROM information_schema.columns c WHERE c.table_schema='public' AND c.table_name=information_schema.tables.table_name AND c.column_name='chain_incarnation') ORDER BY table_name" \
+      >"$evidence/atlas-tables-without-incarnation.txt"
+    [[ ! -s "$evidence/atlas-tables-without-incarnation.txt" ]] || {
+      echo "Atlas schema contains rows without chain_incarnation binding" >&2
+      exit 1
+    }
+    jq -n \
+      --argjson activated_at_height "$min_height" \
+      --arg genesis_hash "$(jq -er .integrity.genesis_hash "$qualification/genesis.json")" \
+      '{
+        result:"ATLAS_BOUND_AFTER_OPERATIONAL",
+        activated_at_height:$activated_at_height,
+        chain_id:1266,
+        chain_incarnation:4,
+        genesis_hash:$genesis_hash,
+        schema_rows_incarnation_bound:true
+      }' >"$evidence/atlas-activation.json"
   fi
   if ((min_height >= 1000)) && [[ "$healthy_recorded" == false ]]; then
-    python3 "$qualification/collect-health.py" "$samples" "$evidence/gate-1000-health.json"
-    jq -e '
-      .mean_finality_interval_seconds <= 2.0 and
-      .median_finality_interval_seconds <= 1.5 and
-      .p95_finality_interval_seconds <= 3.0 and
-      .round_zero_ratio >= 0.99
-    ' "$evidence/gate-1000-health.json" >/dev/null
+    write_direct_health_gate "$evidence/gate-1000-health.json" 1000
+    jq -e 'all(.validators[]; .restart_count == 0)' \
+      "$evidence/gate-1000-health.json" >/dev/null
     healthy_recorded=true
   fi
   if ((min_height >= 1000)) && [[ "$faults_complete" == false ]]; then
     before_fault="$min_height"
-    stopped_pid="${process_pid[validator-node-06]}"
-    sudo kill -TERM "$stopped_pid"
+    stop_node validator-node-06
     wait_deadline=$((SECONDS + 25))
     observed_nonzero=false
     while ((SECONDS < wait_deadline)); do
@@ -414,11 +630,11 @@ JSON
     # WireGuard-style packet impairment is applied only to the restarted sixth
     # validator; the other five must retain finality.
     sudo ip netns exec "${node_ns[validator-node-06]}" \
-      tc qdisc add dev eth0 root netem loss 10%
+      tc qdisc add dev sy-vpn root netem loss 10%
     impairment_before="$(metric validator-node-01 consensus_finalized_height)"
     sleep 12
     sudo ip netns exec "${node_ns[validator-node-06]}" \
-      tc qdisc del dev eth0 root
+      tc qdisc del dev sy-vpn root
     impairment_after="$(metric validator-node-01 consensus_finalized_height)"
     ((impairment_after > impairment_before)) || {
       echo "Five-validator quorum stopped under one-peer packet loss" >&2
@@ -426,10 +642,9 @@ JSON
     }
     # Observer state is disposable and must reconstruct without influencing
     # any validator's locks or recovery authority.
-    observer_pid="${process_pid[observer]}"
-    sudo kill -TERM "$observer_pid"
+    stop_node observer
     sleep 2
-    observer_state="$projects/observer/chain-1266/incarnation-4/data"
+    observer_state="$qualification_state_root/observer/data"
     find "$observer_state" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
     : >"$observer_state/.reset_flag"
     start_node observer
@@ -457,18 +672,48 @@ JSON
   sleep 1
 done
 
-python3 "$qualification/collect-health.py" "$samples" "$evidence/gate-10000-stable.json"
+write_direct_health_gate "$evidence/gate-10000-stable.json" 10000
 jq -e '
-  .finalized_height >= 10000 and
-  .mean_finality_interval_seconds <= 2.0 and
-  .median_finality_interval_seconds <= 1.5 and
-  .p95_finality_interval_seconds <= 3.0 and
-  .round_zero_ratio >= 0.99
+  all(.validators[];
+    if .node == "validator-node-06"
+    then .restart_count == 1
+    else .restart_count == 0
+    end
+  )
 ' "$evidence/gate-10000-stable.json" >/dev/null
+final_validator_height="$(metric validator-node-01 consensus_finalized_height)"
+for node in relay1 relay2 relay3 rpc-gateway explorer-indexer observer; do
+  support_height="$(metric "$node" consensus_finalized_height || echo 0)"
+  ((final_validator_height - support_height <= 2)) || {
+    echo "$node is more than two blocks behind at the stable gate" >&2
+    exit 1
+  }
+done
 
 for node in "${nodes[@]}"; do
   metrics_text "$node" >"$evidence/$node.metrics"
+  sudo journalctl -u "${role_unit}${node}.service" --no-pager -o short-iso-precise \
+    >"$logs/$node.log"
+  sudo ip netns exec "${node_ns[$node]}" wg show sy-vpn dump \
+    | awk 'NR == 1 {$1 = "[REDACTED-PRIVATE-KEY]"} {print}' \
+    >"$evidence/$node.wireguard.txt"
 done
+verified_mldsa65_handshakes="$(
+  awk '/^p2p_verified_handshakes_total\\{algorithm="ML-DSA-65"\\}/ {total += $2} END {print total + 0}' \
+    "$evidence"/*.metrics
+)"
+verified_fndsa_handshakes="$(
+  awk '/^p2p_verified_handshakes_total\\{algorithm="FN-DSA-1024"\\}/ {total += $2} END {print total + 0}' \
+    "$evidence"/*.metrics
+)"
+((verified_mldsa65_handshakes > 0)) || {
+  echo "Ring-2 did not prove a real ML-DSA-65 P2P handshake" >&2
+  exit 1
+}
+((verified_fndsa_handshakes > 0)) || {
+  echo "Ring-2 did not prove a real FN-DSA-1024 P2P handshake" >&2
+  exit 1
+}
 jq -n \
   --arg result PASS \
   --arg state STABLE \
@@ -476,6 +721,8 @@ jq -n \
   --arg desired_state_sha256 "$desired_sha" \
   --arg genesis_hash "$(jq -er .integrity.genesis_hash "$qualification/genesis.json")" \
   --argjson target_height "$target_height" \
+  --argjson verified_mldsa65_handshakes "$verified_mldsa65_handshakes" \
+  --argjson verified_fndsa_handshakes "$verified_fndsa_handshakes" \
   '{
     schema_version:1,
     ring:2,
@@ -483,7 +730,16 @@ jq -n \
     operational_state:$state,
     release_id:$release_id,
     desired_state_sha256:$desired_state_sha256,
+    qualification_environment:"single-host-ci-preflight",
     isolated_public_network:true,
+    wireguard_overlay:true,
+    wireguard_credentials_disposable:true,
+    real_pq_handshakes:{
+      mldsa65_verified:$verified_mldsa65_handshakes,
+      fndsa1024_verified:$verified_fndsa_handshakes
+    },
+    canonical_systemd_unit:"synergy-chain1266-role@.service",
+    systemd_resource_profile:{memory_max_bytes:4294967296,cpu_quota_percent:100,limit_nofile:8192,restart:"no"},
     production_custody_material_used:false,
     validator_count:6,
     quorum:5,
