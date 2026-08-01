@@ -336,7 +336,12 @@ fn same_post_finality_context(
         && current.latest_finalized_height == finalized.height
         && current.latest_finalized_block_hash == finalized_block_hash
         && current.latest_finalized_state_root == finalized.block.header.state_root_after
-        && current.round == finalized.block.header.round
+        // A valid QC can arrive after this replica has advanced through one
+        // or more timeout rounds at the same height. The certified block
+        // round is therefore a lower bound on the local round, not an exact
+        // equality requirement. QC verification already binds the height,
+        // candidate, membership, incarnation, and parameter context.
+        && current.round.0 >= finalized.block.header.round.0
         && current.evidence_root == predecessor.evidence_root
         && current.app_version == predecessor.app_version
         && current.execution_version == predecessor.execution_version

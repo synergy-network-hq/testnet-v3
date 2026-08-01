@@ -380,6 +380,7 @@ enum TypedRoundStage {
 // verifying identical ML-DSA artifacts.
 const PROPOSAL_REBROADCAST_INTERVAL: Duration = Duration::from_millis(750);
 const VOTE_REBROADCAST_INTERVAL: Duration = Duration::from_millis(750);
+const FINALITY_QC_REBROADCAST_INTERVAL: Duration = Duration::from_millis(750);
 const FINALITY_BACKUP_AGGREGATOR_STAGGER: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -627,6 +628,7 @@ where
     stage_started_at: Instant,
     last_proposal_broadcast_at: Option<Instant>,
     local_vote_rebroadcasts: Vec<(Vote, Instant)>,
+    recent_finality_qc_rebroadcast: Option<(QuorumCertificate, Instant)>,
     stage: TypedRoundStage,
     emitted_validation_vote: bool,
     emitted_finality_vote: bool,
@@ -1739,6 +1741,9 @@ where
         validate_canonical_driver_timeouts(&coordinator.consensus.protocol_config)?;
         let recovered_finality = coordinator.finality_store.recover()?;
         restore_typed_finality_telemetry(&recovered_finality);
+        let recovered_finality_qc = recovered_finality
+            .last()
+            .map(|record| (record.quorum_certificate.clone(), Instant::now()));
         let prepared_store = TypedPreparedStore::for_finality_store(&coordinator.finality_store)?;
         let recovered_prepared = prepared_store.recover()?;
         let mut driver = Self {
@@ -1752,6 +1757,7 @@ where
             stage_started_at: Instant::now(),
             last_proposal_broadcast_at: None,
             local_vote_rebroadcasts: Vec::new(),
+            recent_finality_qc_rebroadcast: recovered_finality_qc,
             stage: TypedRoundStage::Proposal,
             emitted_validation_vote: false,
             emitted_finality_vote: false,
@@ -1903,6 +1909,7 @@ where
             self.last_proposal_broadcast_at = Some(now);
         }
         self.rebroadcast_local_vote_if_due(now)?;
+        self.rebroadcast_recent_finality_qc_if_due(now)?;
 
         if elapsed >= round_cap && !self.emitted_timeout_vote {
             self.emit_timeout_vote(now)?;
@@ -2658,6 +2665,44 @@ where
         Ok(())
     }
 
+    /// Retains the exact highest finalized QC across the successor-height
+    /// reset until that successor itself finalizes. A peer that missed the
+    /// original one-shot QC fanout can therefore install the existing
+    /// certificate after advancing through timeout rounds; no second QC or
+    /// alternate consensus source is created.
+    fn rebroadcast_recent_finality_qc_if_due(&mut self, now: Instant) -> Result<(), String> {
+        let Some((certificate, last_broadcast)) = self.recent_finality_qc_rebroadcast.clone()
+        else {
+            return Ok(());
+        };
+        let current_height = self.coordinator.local_context.height_context.height.0;
+        let successor_height = certificate.height.0.saturating_add(1);
+        if current_height > successor_height {
+            self.recent_finality_qc_rebroadcast = None;
+            return Ok(());
+        }
+        if current_height != successor_height
+            || now
+                .checked_duration_since(last_broadcast)
+                .map(|elapsed| elapsed < FINALITY_QC_REBROADCAST_INTERVAL)
+                .unwrap_or(true)
+        {
+            return Ok(());
+        }
+        increment_typed_metric(|snapshot| &mut snapshot.rebroadcasts, "quorum_certificate");
+        self.broadcast(TypedConsensusMessage::QuorumCertificate {
+            certificate: certificate.clone(),
+        })?;
+        if self
+            .recent_finality_qc_rebroadcast
+            .as_ref()
+            .is_some_and(|(retained, _)| same_quorum_certificate_subject(retained, &certificate))
+        {
+            self.recent_finality_qc_rebroadcast = Some((certificate, now));
+        }
+        Ok(())
+    }
+
     fn broadcast(&mut self, message: TypedConsensusMessage) -> Result<(), String> {
         let _delivered = self.egress.broadcast(&message)?;
         Ok(())
@@ -3239,6 +3284,7 @@ where
             }
         }
         self.finality_certificate = Some(certificate.clone());
+        self.recent_finality_qc_rebroadcast = Some((certificate.clone(), Instant::now()));
         self.last_finality_progress_at = Instant::now();
         self.last_finality_recovery_request_at = None;
         self.protected_inputs.prune_finalized_input(
@@ -6203,6 +6249,267 @@ mod tests {
                 driver.coordinator.local_context.height_context.height,
                 Height(2),
                 "replica {index} did not enter the successor height"
+            );
+        }
+
+        drop(drivers);
+        for path in store_paths {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn six_validator_lagging_replicas_recover_a_withheld_qc_after_timeout_round() {
+        let parameters = genesis_bound_parameters();
+        let (bootstrap, _genesis_anchor, deployed_genesis_state_root, coordinators, store_paths) =
+            six_validator_startup_fixture(parameters.clone());
+        let authorizer = FrozenTypedConsensusPeerAuthorizer::new(bootstrap.validator_set.clone())
+            .expect("freeze the six Genesis-bound P2P identities");
+        let mut drivers = coordinators
+            .into_iter()
+            .map(|coordinator| {
+                release_driver_with(
+                    coordinator,
+                    bootstrap.clone(),
+                    parameters.protocol_config.clone(),
+                    deployed_genesis_state_root,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let proposer = drivers[0]
+            .coordinator
+            .consensus
+            .proposer_for(
+                &drivers[0].coordinator.local_context.height_context,
+                Round(0),
+            )
+            .expect("height-one round-zero proposer");
+        let proposer_index = drivers
+            .iter()
+            .position(|driver| driver.coordinator.local_validator_id == proposer.validator_id)
+            .expect("scheduled proposer belongs to the fixture");
+        let proposer_peer = authenticated_peer_for_release_driver(&drivers[proposer_index]);
+        let block = drivers[proposer_index]
+            .coordinator
+            .propose_core_block()
+            .expect("scheduled proposer forms the height-one core block");
+        let proposal = TypedConsensusMessage::CoreProposal {
+            height_context: drivers[proposer_index]
+                .coordinator
+                .local_context
+                .height_context
+                .clone(),
+            block: block.clone(),
+        };
+        for driver in &mut drivers {
+            driver
+                .handle_envelope(
+                    TypedConsensusEnvelope {
+                        peer_address: "scheduled-proposer".to_string(),
+                        authenticated_peer: Some(proposer_peer.clone()),
+                        message: proposal.clone(),
+                    },
+                    &authorizer,
+                )
+                .expect("every replica accepts the same authenticated proposal");
+        }
+
+        let validation_votes = drivers
+            .iter()
+            .map(|driver| {
+                driver
+                    .egress
+                    .messages
+                    .iter()
+                    .find_map(|message| match message {
+                        TypedConsensusMessage::Vote { vote }
+                            if vote.phase == VotePhase::Validate =>
+                        {
+                            Some(vote.clone())
+                        }
+                        _ => None,
+                    })
+                    .expect("each replica emits one validation vote")
+            })
+            .collect::<Vec<_>>();
+        let validation_certificate = drivers[proposer_index]
+            .coordinator
+            .form_validation_certificate(&validation_votes[..5])
+            .expect("five validation votes form the prepared certificate");
+        let validation_message = TypedConsensusMessage::ValidationCertificate {
+            certificate: validation_certificate.clone(),
+        };
+        for driver in &mut drivers {
+            driver
+                .handle_envelope(
+                    TypedConsensusEnvelope {
+                        peer_address: "scheduled-proposer".to_string(),
+                        authenticated_peer: Some(proposer_peer.clone()),
+                        message: validation_message.clone(),
+                    },
+                    &authorizer,
+                )
+                .expect("every replica installs the prepared certificate");
+        }
+
+        let finality_votes = drivers
+            .iter()
+            .map(|driver| {
+                driver
+                    .egress
+                    .messages
+                    .iter()
+                    .find_map(|message| match message {
+                        TypedConsensusMessage::Vote { vote }
+                            if vote.phase == VotePhase::Finality =>
+                        {
+                            Some(vote.clone())
+                        }
+                        _ => None,
+                    })
+                    .expect("each replica emits one finality vote")
+            })
+            .collect::<Vec<_>>();
+        let finality_qc = drivers[proposer_index]
+            .coordinator
+            .form_finality_certificate(&finality_votes[..5])
+            .expect("five finality votes form one valid QC");
+
+        // All replicas advance through a normal timeout transition before
+        // the valid round-zero QC is delivered. This proves the QC remains
+        // acceptable after local round advancement.
+        let timeout_votes = drivers
+            .iter_mut()
+            .map(|driver| {
+                driver
+                    .coordinator
+                    .timeout_vote(Some(&validation_certificate))
+                    .expect("each replica signs the same round-zero timeout subject")
+            })
+            .collect::<Vec<_>>();
+        let timeout_certificate = drivers[proposer_index]
+            .coordinator
+            .form_timeout_certificate(&timeout_votes[..5])
+            .expect("five timeout votes form the round-one transition");
+        let timeout_message = TypedConsensusMessage::TimeoutCertificate {
+            certificate: timeout_certificate,
+        };
+        for driver in &mut drivers {
+            driver
+                .handle_envelope(
+                    TypedConsensusEnvelope {
+                        peer_address: "timeout-certificate-relay".to_string(),
+                        authenticated_peer: Some(proposer_peer.clone()),
+                        message: timeout_message.clone(),
+                    },
+                    &authorizer,
+                )
+                .expect("every replica advances to timeout round one");
+            assert_eq!(driver.coordinator.local_context.round, Round(1));
+        }
+
+        let lagging_indices = (0..drivers.len())
+            .filter(|index| *index != proposer_index)
+            .take(2)
+            .collect::<Vec<_>>();
+        let caught_up_indices = (0..drivers.len())
+            .filter(|index| !lagging_indices.contains(index))
+            .collect::<Vec<_>>();
+        let qc_message = TypedConsensusMessage::QuorumCertificate {
+            certificate: finality_qc.clone(),
+        };
+        for index in &caught_up_indices {
+            drivers[*index]
+                .handle_envelope(
+                    TypedConsensusEnvelope {
+                        peer_address: "initial-qc-fanout".to_string(),
+                        authenticated_peer: Some(proposer_peer.clone()),
+                        message: qc_message.clone(),
+                    },
+                    &authorizer,
+                )
+                .expect("the initial QC advances each reached replica");
+            assert_eq!(
+                drivers[*index]
+                    .coordinator
+                    .local_context
+                    .height_context
+                    .height,
+                Height(2)
+            );
+        }
+        for index in &lagging_indices {
+            assert_eq!(
+                drivers[*index]
+                    .coordinator
+                    .local_context
+                    .height_context
+                    .height,
+                Height(1)
+            );
+            assert_eq!(drivers[*index].coordinator.local_context.round, Round(1));
+        }
+
+        let rebroadcaster = caught_up_indices[0];
+        for driver in &mut drivers {
+            driver.egress.messages.clear();
+        }
+        let rebroadcast_at = drivers[rebroadcaster]
+            .recent_finality_qc_rebroadcast
+            .as_ref()
+            .map(|(_, last)| *last + FINALITY_QC_REBROADCAST_INTERVAL)
+            .expect("a finalized replica retains its exact highest QC");
+        drivers[rebroadcaster]
+            .tick_at(rebroadcast_at)
+            .expect("the caught-up replica rebroadcasts its retained QC");
+        let relay_errors = relay_release_messages(&mut drivers, &authorizer, |message| {
+            matches!(message, TypedConsensusMessage::QuorumCertificate { .. })
+        });
+        assert!(relay_errors.is_empty(), "{relay_errors:?}");
+
+        let finalized_hash = drivers[0]
+            .coordinator
+            .local_context
+            .latest_finalized_block_hash;
+        for (index, driver) in drivers.iter().enumerate() {
+            assert_eq!(
+                driver.coordinator.local_context.latest_finalized_height,
+                Height(1),
+                "replica {index} did not install the existing QC"
+            );
+            assert_eq!(
+                driver.coordinator.local_context.height_context.height,
+                Height(2),
+                "replica {index} did not enter the common successor height"
+            );
+            assert_eq!(
+                driver.coordinator.local_context.latest_finalized_block_hash, finalized_hash,
+                "replica {index} finalized a different block"
+            );
+            assert_eq!(
+                driver.metrics().emitted_finality_certificates,
+                0,
+                "recovery must not require a second locally formed QC"
+            );
+        }
+
+        // Replaying the equivalent exact QC after all replicas advance is an
+        // idempotent stale retry and cannot alter successor state.
+        for index in 0..drivers.len() {
+            let event = drivers[index]
+                .handle_envelope(
+                    TypedConsensusEnvelope {
+                        peer_address: "duplicate-qc".to_string(),
+                        authenticated_peer: Some(proposer_peer.clone()),
+                        message: qc_message.clone(),
+                    },
+                    &authorizer,
+                )
+                .expect("duplicate QC delivery remains harmless");
+            assert_eq!(
+                event,
+                TypedCoordinatorEvent::StaleFinalizedHeightIgnored { height: 1 }
             );
         }
 
