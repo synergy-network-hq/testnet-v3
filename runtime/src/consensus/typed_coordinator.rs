@@ -221,10 +221,11 @@ pub struct TypedCoordinatorIngressMetrics {
 /// Authenticated outbound path for typed consensus artifacts.
 ///
 /// The scheduler has no authority to turn a local state transition into a
-/// network action when the transport is unavailable.  Implementations must
-/// return an error for a failed fan-out and the driver treats an empty fan-out
-/// as a failure as well: signing into an isolated validator is not a valid
-/// Testnet-v3 consensus action.
+/// network action when the transport is unavailable. Implementations return
+/// an error for a failed fan-out, while an empty authenticated fan-out is a
+/// transient delivery result: the driver retains the exact signed artifact
+/// for rebroadcast and cannot advance without independently verified quorum
+/// evidence.
 pub trait TypedConsensusEgress: Send {
     fn broadcast(&mut self, message: &TypedConsensusMessage) -> Result<usize, String>;
 }
@@ -232,8 +233,8 @@ pub trait TypedConsensusEgress: Send {
 /// P2P adapter for the only supported production egress path.  It deliberately
 /// wraps the existing typed P2P fan-out rather than opening a second socket or
 /// legacy-consensus path.  The underlying P2P API reports the number of
-/// authenticated eligible peers that accepted the send; zero is rejected by
-/// the driver.
+/// authenticated eligible peers that accepted the send. A zero count leaves
+/// the exact signed artifact pending for the driver's bounded rebroadcast.
 pub struct P2pTypedConsensusEgress {
     network: Arc<crate::p2p::networking::P2PNetwork>,
 }
@@ -2658,12 +2659,7 @@ where
     }
 
     fn broadcast(&mut self, message: TypedConsensusMessage) -> Result<(), String> {
-        let delivered = self.egress.broadcast(&message)?;
-        if delivered == 0 {
-            return Err(
-                "typed PoSy transport delivered to zero authenticated validator peers".to_string(),
-            );
-        }
+        let _delivered = self.egress.broadcast(&message)?;
         Ok(())
     }
 }
@@ -7782,7 +7778,7 @@ mod tests {
     }
 
     #[test]
-    fn driver_timeout_vote_fails_closed_when_p2p_fanout_is_empty() {
+    fn driver_retains_exact_timeout_vote_when_p2p_fanout_is_temporarily_empty() {
         let mut coordinator = coordinator_fixture();
         let scheduled = coordinator
             .consensus
@@ -7804,8 +7800,35 @@ mod tests {
         coordinator.local_validator_id = local;
         let mut driver = driver_with(coordinator, 0);
         let now = driver.round_started_at + Duration::from_millis(1_500);
-        let error = driver.tick_at(now).unwrap_err();
-        assert!(error.contains("transport delivered to zero"));
+        driver
+            .tick_at(now)
+            .expect("an empty transient fanout must retain the exact signed timeout vote");
+        let first_vote = driver
+            .egress
+            .messages
+            .iter()
+            .find_map(|message| match message {
+                TypedConsensusMessage::Vote { vote } => Some(vote.clone()),
+                _ => None,
+            })
+            .expect("capture the locally retained timeout vote");
+        assert_eq!(driver.metrics().emitted_timeout_votes, 1);
+
+        driver.egress.messages.clear();
+        driver
+            .tick_at(now + VOTE_REBROADCAST_INTERVAL)
+            .expect("the same signed vote must be retried after transport recovery");
+        let rebroadcast = driver
+            .egress
+            .messages
+            .iter()
+            .find_map(|message| match message {
+                TypedConsensusMessage::Vote { vote } => Some(vote.clone()),
+                _ => None,
+            })
+            .expect("capture the exact rebroadcast");
+        assert_eq!(rebroadcast, first_vote);
+        assert_eq!(driver.metrics().emitted_timeout_votes, 1);
     }
 
     #[test]
