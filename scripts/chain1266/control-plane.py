@@ -470,12 +470,19 @@ journalctl -u "$service" --since '-15 seconds' --no-pager -o cat 2>/dev/null \
             fail("fleet does not contain exactly six validator hosts")
         outcomes = []
         for node in validators:
+            services = [node.service]
+            if node.legacy_service and node.legacy_service not in services:
+                services.append(node.legacy_service)
+            quoted = " ".join(json.dumps(service) for service in services)
             result = self.ssh(
                 node,
                 f"""set -eu
-state="$(systemctl is-active {json.dumps(node.service)} 2>/dev/null || true)"
-[[ "$state" != active ]]
-printf 'canonical_service_state=%s\\n' "$state"
+services=({quoted})
+for service in "${{services[@]}}"; do
+  state="$(systemctl is-active "$service" 2>/dev/null || true)"
+  [[ "$state" != active && "$state" != activating ]]
+  printf 'canonical_service=%s state=%s\\n' "$service" "$state"
+done
 """,
             )
             outcomes.append(

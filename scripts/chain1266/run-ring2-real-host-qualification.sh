@@ -111,8 +111,9 @@ for host in "${hosts[@]}"; do
     set -eu
     for command in sudo systemctl ip wg iptables curl jq sha256sum journalctl tc; do command -v "$command" >/dev/null; done
     sudo -n true
-    for service in synergy-chain1266-role@validator-node-01.service synergy-chain1266-role@validator-node-02.service synergy-chain1266-role@validator-node-03.service synergy-chain1266-role@validator-node-04.service synergy-chain1266-role@validator-node-05.service synergy-chain1266-role@validator-node-06.service; do
-      [[ "$(systemctl is-active "$service" 2>/dev/null || true)" != active ]]
+    for service in synergy-chain1266-role@validator-node-01.service synergy-chain1266-role@validator-node-02.service synergy-chain1266-role@validator-node-03.service synergy-chain1266-role@validator-node-04.service synergy-chain1266-role@validator-node-05.service synergy-chain1266-role@validator-node-06.service synergy-validator.service; do
+      state="$(systemctl is-active "$service" 2>/dev/null || true)"
+      [[ "$state" != active && "$state" != activating ]]
     done
     [[ ! -e /run/systemd/system/synergy-chain1266-role@.service ]]
   '
@@ -318,6 +319,18 @@ for role in validator-node-01 validator-node-02 validator-node-03 validator-node
     echo "a validator finalized before the signed start release" >&2
     exit 1
   }
+done
+# Recheck immediately before the signed release: the private validators share
+# these hosts with the quarantined public service, so a legacy-service restart
+# would invalidate the qualification even if the initial preflight was clean.
+for host in "${hosts[@]}"; do
+  ssh_run "$host" '
+    state="$(systemctl is-active synergy-validator.service 2>/dev/null || true)"
+    [[ "$state" != active && "$state" != activating ]] || {
+      echo "legacy public validator service became active during Ring-2 setup" >&2
+      exit 1
+    }
+  '
 done
 mesh_deadline=$((SECONDS + 60))
 while :; do
