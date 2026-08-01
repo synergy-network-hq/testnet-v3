@@ -65,6 +65,7 @@ declare -A role_config=(
 declare -A role_host=()
 for host in "${hosts[@]}"; do for role in ${hosted_roles[$host]}; do role_host[$role]="$host"; done; done
 roles=(validator-node-01 validator-node-02 validator-node-03 validator-node-04 validator-node-05 validator-node-06 relay1 relay2 relay3 rpc-gateway explorer-indexer observer)
+validator_roles=(validator-node-01 validator-node-02 validator-node-03 validator-node-04 validator-node-05 validator-node-06)
 
 root="/opt/synergy/chain1266-qualification/$run_id"
 data_root="/var/lib/synergy/chain1266-qualification/$run_id"
@@ -259,6 +260,24 @@ stop_role() { local role="$1" host="${role_host[$1]}"; ssh_run "$host" "sudo -n 
 metric_text() { local role="$1" host="${role_host[$1]}"; ssh_capture "$host" "curl --fail --silent --max-time 3 http://$(q "${role_ip[$role]}"):6030/metrics"; }
 metric() { local role="$1" name="$2"; metric_text "$role" | awk -v n="$name" '$1 == n {print $2; exit}'; }
 
+# A sequential SSH sweep can observe a healthy two-second chain at several
+# different heights.  Sample every validator concurrently and reject a slow
+# collection rather than mistaking controller latency for validator lag.
+collect_validator_snapshot() {
+  local started="$EPOCHREALTIME" finished elapsed_ms role pid
+  local -a pids=()
+  for role in "${validator_roles[@]}"; do
+    (metric_text "$role" >"$output/$role.metrics") &
+    pids+=("$!")
+  done
+  for pid in "${pids[@]}"; do
+    wait "$pid" || { echo "validator metrics snapshot request failed" >&2; return 1; }
+  done
+  finished="$EPOCHREALTIME"
+  elapsed_ms="$(awk -v started="$started" -v finished="$finished" 'BEGIN { printf "%d", (finished - started) * 1000 }')"
+  (( elapsed_ms <= 1000 )) || { echo "validator metrics snapshot exceeded one second: ${elapsed_ms}ms" >&2; return 1; }
+}
+
 for role in relay1 relay2 relay3 rpc-gateway explorer-indexer observer validator-node-01 validator-node-02 validator-node-03 validator-node-04 validator-node-05; do start_role "$role"; done
 sleep 5
 start_role validator-node-06
@@ -298,15 +317,26 @@ for host in "${hosts[@]}"; do [[ "$host" == synergy-val1 ]] || ssh "${ssh_option
 last_height=0; last_progress=$SECONDS; faults_done=false
 while :; do
   heights=(); ids=()
-  for role in validator-node-01 validator-node-02 validator-node-03 validator-node-04 validator-node-05 validator-node-06; do
-    text="$(metric_text "$role")"
-    heights+=("$(awk '$1 == "consensus_finalized_height" {print int($2); exit}' <<<"$text")")
+  collect_validator_snapshot
+  for role in "${validator_roles[@]}"; do
+    text="$(<"$output/$role.metrics")"
+    height="$(awk '$1 == "consensus_finalized_height" {print int($2); exit}' <<<"$text")"
+    [[ "$height" =~ ^[0-9]+$ ]] || { echo "missing finalized height from $role" >&2; exit 1; }
+    heights+=("$height")
     ids+=("$(sed -n 's/^consensus_finalized_block_id{block_id="\([^"]*\)"} 1$/\1/p' <<<"$text")")
-    printf '%s\n' "$text" >"$output/$role.metrics"
   done
   min="$(printf '%s\n' "${heights[@]}" | sort -n | head -1)"; max="$(printf '%s\n' "${heights[@]}" | sort -n | tail -1)"
   (( max - min <= 2 )) || { echo "validator tip spread exceeded two blocks: ${heights[*]}" >&2; exit 1; }
-  [[ "$(printf '%s\n' "${ids[@]}" | sort -u | sed '/^$/d' | wc -l | tr -d ' ')" -le 1 ]] || { echo "validator finalized block IDs diverged" >&2; exit 1; }
+  declare -A block_id_at_height=()
+  for index in "${!heights[@]}"; do
+    height="${heights[$index]}"; block_id="${ids[$index]}"
+    [[ -n "$block_id" ]] || continue
+    [[ -z "${block_id_at_height[$height]+present}" || "${block_id_at_height[$height]}" == "$block_id" ]] || {
+      echo "validator finalized block IDs diverged at height $height" >&2
+      exit 1
+    }
+    block_id_at_height[$height]="$block_id"
+  done
   if (( min > last_height )); then last_height="$min"; last_progress=$SECONDS; elif (( SECONDS - last_progress > 30 )); then echo "finality stalled" >&2; exit 1; fi
   if (( min >= 1000 && "$faults_done" == false )); then
     before="$min"; stop_role validator-node-06; sleep 10
