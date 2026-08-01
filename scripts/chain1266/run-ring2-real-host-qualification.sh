@@ -78,6 +78,14 @@ qualification_unit="/run/systemd/system/synergy-chain1266-role@.service"
 mkdir -p "$output"
 chmod 0700 "$output"
 
+stage="local-validation"
+report_unexpected_error() {
+  local status="$?"
+  printf 'CHAIN1266_RING2_RUNNER_ERROR stage=%s status=%s command=%q\n' "$stage" "$status" "$BASH_COMMAND" >&2
+  exit "$status"
+}
+trap report_unexpected_error ERR
+
 cleanup_started=false
 capture_pre_cleanup_diagnostics() {
   [[ -d "$output" ]] || return 0
@@ -128,6 +136,7 @@ cleanup() {
 # appends RING2_REAL_HOST_QUALIFICATION_BEGIN must be run immediately before
 # this script, after this succeeds and before any of the mutations below.
 for host in "${hosts[@]}"; do
+  stage="read-only-preflight-$host"
   ssh_run "$host" '
     set -eu
     for command in sudo systemctl ip wg iptables curl jq sha256sum journalctl tc; do command -v "$command" >/dev/null; done
@@ -161,6 +170,7 @@ trap cleanup EXIT INT TERM
 
 # Create the entire disposable source tree on val1.  No production state,
 # identity, WireGuard key, or canonical service file is read by this step.
+stage="private-material-render"
 ssh_run synergy-val1 "
   set -euo pipefail
   release=$(q "$release_dir"); root=$(q "$root"); run=$(q "$run_id")
@@ -200,7 +210,11 @@ stream_to_host() {
   ssh "${ssh_options[@]}" synergy-val1 "sudo -n tar -C $(q "$root") -cf - bin systemd shared config private/validator-$number" \
     | ssh "${ssh_options[@]}" "$host" "sudo -n install -d -m 0700 $(q "$root"); sudo -n tar -C $(q "$root") -xf -"
 }
-for host in "${hosts[@]}"; do [[ "$host" == synergy-val1 ]] || stream_to_host "$host"; done
+for host in "${hosts[@]}"; do
+  [[ "$host" == synergy-val1 ]] && continue
+  stage="package-stream-$host"
+  stream_to_host "$host"
+done
 
 # Support roles share hosts with validators in the real-host exercise.  The
 # private renderer assigns every role a separate loopback RPC/WS/gRPC surface;
@@ -208,6 +222,7 @@ for host in "${hosts[@]}"; do [[ "$host" == synergy-val1 ]] || stream_to_host "$
 # owns one of those listeners.
 for host in "${hosts[@]}"; do
   for role in ${hosted_roles[$host]}; do
+    stage="legacy-rpc-port-preflight-$host-$role"
     config="${role_config[$role]}"
     ssh_run "$host" "
       set -euo pipefail
@@ -226,6 +241,7 @@ done
 echo "CHAIN1266_PRIVATE_RPC_PORTS_AVAILABLE"
 
 for host in "${hosts[@]}"; do
+  stage="wireguard-interface-$host"
   ips=(); for role in ${hosted_roles[$host]}; do ips+=("${role_ip[$role]}/16"); done
   key="$(ssh_capture "$host" "
     set -euo pipefail
@@ -242,8 +258,10 @@ for host in "${hosts[@]}"; do
   wg_public[$host]="$(tr -d '[:space:]' <<<"$key")"
   [[ "${wg_public[$host]}" =~ ^[A-Za-z0-9+/]{42,44}=$ ]] || { echo "WireGuard public key generation failed on $host" >&2; exit 1; }
 done
+echo "CHAIN1266_PRIVATE_WIREGUARD_INTERFACES_READY"
 
 for host in "${hosts[@]}"; do
+  stage="wireguard-mesh-$host"
   peer_args=()
   for peer in "${hosts[@]}"; do
     [[ "$peer" == "$host" ]] && continue
@@ -253,6 +271,7 @@ for host in "${hosts[@]}"; do
   quoted=(); for part in "${peer_args[@]}"; do quoted+=("$(q "$part")"); done
   ssh_run "$host" "set -euo pipefail; sudo -n wg set $(q "$iface") ${quoted[*]}; sudo -n iptables -N $(q "$fw_chain"); sudo -n iptables -A $(q "$fw_chain") -i lo -j RETURN; sudo -n iptables -A $(q "$fw_chain") -i $(q "$iface") -j RETURN; sudo -n iptables -A $(q "$fw_chain") -j DROP; sudo -n iptables -I INPUT -d 10.126.0.0/16 -j $(q "$fw_chain"); ip route show default dev $(q "$iface") | grep -q . && exit 1 || true"
 done
+echo "CHAIN1266_PRIVATE_WIREGUARD_MESH_CONFIGURED"
 
 validate_private_socket_host() {
   local host="$1"
@@ -275,7 +294,10 @@ validate_private_socket_host() {
     done < <(sudo -n jq -r --arg host \"\$expected_host\" '.hosts[\$host][] | [.protocol,.bind,(.port|tostring),.role,.purpose,(.required|tostring)] | @tsv' \"\$manifest\")
   "
 }
-for host in "${hosts[@]}"; do validate_private_socket_host "$host"; done
+for host in "${hosts[@]}"; do
+  stage="socket-host-preflight-$host"
+  validate_private_socket_host "$host"
+done
 echo "CHAIN1266_PRIVATE_SOCKET_HOST_PREFLIGHT_PASS"
 
 for host in "${hosts[@]}"; do
