@@ -2660,6 +2660,22 @@ where
             .find(|block| block.header.round == self.coordinator.local_context.round)
     }
 
+    /// The validator authorized to propose a round is also its healthy-path
+    /// certificate aggregator. Every validator still sends and verifies its
+    /// own vote, but emitting the same strict-quorum VC/QC from all six
+    /// replicas creates redundant ML-DSA proof traffic on the critical path.
+    ///
+    /// Timeout certificates deliberately do not use this gate: when the
+    /// proposer is unavailable, any live strict quorum must still be able to
+    /// advance the round and elect the next proposer.
+    fn local_is_current_round_proposer(&self) -> Result<bool, String> {
+        let proposer = self.coordinator.consensus.proposer_for(
+            &self.coordinator.local_context.height_context,
+            self.coordinator.local_context.round,
+        )?;
+        Ok(proposer.validator_id == self.coordinator.local_validator_id)
+    }
+
     fn record_proposal_material(
         &mut self,
         candidate_id: &BlockId,
@@ -2785,6 +2801,19 @@ where
     }
 
     fn maybe_form_validation_certificate(&mut self, candidate_id: &BlockId) -> Result<(), String> {
+        if !self.local_is_current_round_proposer()? {
+            return Ok(());
+        }
+        if self
+            .prepared_certificate
+            .as_ref()
+            .is_some_and(|certificate| {
+                certificate.candidate_id == *candidate_id
+                    && certificate.round == self.coordinator.local_context.round
+            })
+        {
+            return Ok(());
+        }
         let votes = self
             .validation_votes
             .get(candidate_id)
@@ -2810,6 +2839,9 @@ where
 
     fn maybe_form_finality_certificate(&mut self, candidate_id: &BlockId) -> Result<(), String> {
         if self.finality_certificate.is_some() {
+            return Ok(());
+        }
+        if !self.local_is_current_round_proposer()? {
             return Ok(());
         }
         let votes = self
@@ -5893,6 +5925,23 @@ mod tests {
         }
         let relay_errors = relay_release_messages(&mut drivers, &authorizer, |_| true);
 
+        assert_eq!(
+            drivers
+                .iter()
+                .map(|driver| driver.metrics().emitted_validation_certificates)
+                .sum::<u64>(),
+            1,
+            "the round-zero proposer must be the sole healthy-path VC aggregator"
+        );
+        assert_eq!(
+            drivers
+                .iter()
+                .map(|driver| driver.metrics().emitted_finality_certificates)
+                .sum::<u64>(),
+            1,
+            "the round-zero proposer must be the sole healthy-path QC aggregator"
+        );
+
         for (index, driver) in drivers.iter().enumerate() {
             assert_eq!(
                 driver.coordinator.local_context.height_context.height,
@@ -5990,6 +6039,22 @@ mod tests {
                 "replica {index} did not finalize every burn-in height"
             );
         }
+        assert_eq!(
+            drivers
+                .iter()
+                .map(|driver| driver.metrics().emitted_validation_certificates)
+                .sum::<u64>(),
+            BURN_IN_HEIGHTS,
+            "each healthy height must have exactly one VC aggregator"
+        );
+        assert_eq!(
+            drivers
+                .iter()
+                .map(|driver| driver.metrics().emitted_finality_certificates)
+                .sum::<u64>(),
+            BURN_IN_HEIGHTS,
+            "each healthy height must have exactly one QC aggregator"
+        );
 
         drop(drivers);
         for path in store_paths {
