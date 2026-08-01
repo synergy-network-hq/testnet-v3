@@ -25,7 +25,7 @@ metrics_sample_interval_seconds="${CHAIN1266_RING2_METRICS_SAMPLE_INTERVAL_SECON
 # Keep every logical command on a host multiplexed through exactly one
 # workbook-backed SSH master.  This is intentionally the only SSH interface
 # used by this runner; it never accepts hostnames or addresses as arguments.
-control_path="${CHAIN1266_SSH_CONTROL_PATH:-/tmp/synergy-chain1266-control-%C}"
+control_path="${CHAIN1266_SSH_CONTROL_PATH:-/Users/devpup/.chain1266-control/%C}"
 ssh_options=(-o BatchMode=yes -o ConnectTimeout=8 -o ControlMaster=auto -o ControlPersist=900 -o "ControlPath=$control_path")
 ssh_run() { local alias="$1"; shift; ssh "${ssh_options[@]}" "$alias" bash -s <<<"$*"; }
 ssh_capture() { local alias="$1"; shift; ssh "${ssh_options[@]}" "$alias" bash -s <<<"$*"; }
@@ -64,10 +64,11 @@ declare -A role_config=(
   [rpc-gateway]=rpc-gateway/rpc-gateway.toml
   [explorer-indexer]=explorer-indexer/explorer-indexer.toml [observer]=observer/observer.toml
 )
-declare -A role_host=()
+declare -A role_host=() role_metrics_endpoint=()
 for host in "${hosts[@]}"; do for role in ${hosted_roles[$host]}; do role_host[$role]="$host"; done; done
 roles=(validator-node-01 validator-node-02 validator-node-03 validator-node-04 validator-node-05 validator-node-06 relay1 relay2 relay3 rpc-gateway explorer-indexer observer)
 validator_roles=(validator-node-01 validator-node-02 validator-node-03 validator-node-04 validator-node-05 validator-node-06)
+support_roles=(relay1 relay2 relay3 rpc-gateway explorer-indexer observer)
 
 root="/opt/synergy/chain1266-qualification/$run_id"
 data_root="/var/lib/synergy/chain1266-qualification/$run_id"
@@ -91,7 +92,7 @@ capture_pre_cleanup_diagnostics() {
         systemctl show \"\$unit\" --no-pager --property=ActiveState,SubState,MainPID,ExecMainCode,ExecMainStatus,NRestarts
         journalctl -u \"\$unit\" --no-pager -n 200 -o short-iso-precise
       done
-      ss -ltnp '( sport = :6030 )' 2>&1 || true
+      sudo -n ss -lntup 2>&1 || true
     " >"$output/$host.pre-cleanup-diagnostics.txt" 2>&1 || true
   done
 }
@@ -162,7 +163,7 @@ trap cleanup EXIT INT TERM
 # identity, WireGuard key, or canonical service file is read by this step.
 ssh_run synergy-val1 "
   set -euo pipefail
-  release=$(q "$release_dir"); root=$(q "$root")
+  release=$(q "$release_dir"); root=$(q "$root"); run=$(q "$run_id")
   test -x \"\$release/bin/build-chain1266-private-ring-material\"
   test -x \"\$release/bin/build-chain1266-desired-state\"
   test -x \"\$release/bin/sign-chain1266-desired-state\"
@@ -171,7 +172,7 @@ ssh_run synergy-val1 "
   sudo -n cp -a \"\$release/bin\" \"\$release/systemd\" \"\$root/\"
   sudo -n cp \"\$release/genesis.json\" \"\$root/shared/source-genesis.json\"
   sudo -n \"\$root/bin/build-chain1266-private-ring-material\" --source-genesis \"\$root/shared/source-genesis.json\" --output-genesis \"\$root/shared/genesis.json\" --key-root \"\$root/private\"
-  sudo -n python3 \"\$release/qualification-tools/prepare-ring2-configs.py\" --release-dir \"\$release\" --genesis \"\$root/shared/genesis.json\" --output \"\$root/config\"
+  sudo -n python3 \"\$release/qualification-tools/prepare-ring2-configs.py\" --release-dir \"\$release\" --genesis \"\$root/shared/genesis.json\" --output \"\$root/config\" --run-id \"\$run\"
   if sudo -n grep -R -q -E '10[.]70[.]' "\$root/shared/genesis.json" "\$root/config"; then
     echo 'private qualification material retains a legacy overlay endpoint' >&2
     exit 1
@@ -253,13 +254,37 @@ for host in "${hosts[@]}"; do
   ssh_run "$host" "set -euo pipefail; sudo -n wg set $(q "$iface") ${quoted[*]}; sudo -n iptables -N $(q "$fw_chain"); sudo -n iptables -A $(q "$fw_chain") -i lo -j RETURN; sudo -n iptables -A $(q "$fw_chain") -i $(q "$iface") -j RETURN; sudo -n iptables -A $(q "$fw_chain") -j DROP; sudo -n iptables -I INPUT -d 10.126.0.0/16 -j $(q "$fw_chain"); ip route show default dev $(q "$iface") | grep -q . && exit 1 || true"
 done
 
+validate_private_socket_host() {
+  local host="$1"
+  ssh_run "$host" "
+    set -euo pipefail
+    root=$(q "$root"); iface=$(q "$iface"); expected_host=$(q "$host"); run=$(q "$run_id")
+    manifest=\"\$root/config/QUALIFICATION_SOCKET_MANIFEST.json\"
+    [[ \"\$(sudo -n jq -er .run_id \"\$manifest\")\" == \"\$run\" ]]
+    [[ \"\$(sudo -n jq -er .qualification_configuration \"\$manifest\")\" == ring2-config-r7 ]]
+    sudo -n ss -H -lntup >/dev/null
+    while IFS=\$'\\t' read -r protocol bind port role purpose required; do
+      [[ \"\$protocol\" == tcp && \"\$port\" =~ ^[0-9]+\$ && \"\$required\" == true ]] || exit 1
+      if [[ \"\$bind\" == 10.126.* ]]; then
+        sudo -n ip -o -4 addr show dev \"\$iface\" | awk '{print \$4}' | cut -d/ -f1 | grep -Fx \"\$bind\" >/dev/null
+      fi
+      if sudo -n ss -H -lnt \"( sport = :\$port )\" | grep -q .; then
+        echo \"private socket already occupied host=\$expected_host role=\$role purpose=\$purpose port=\$port\" >&2
+        exit 1
+      fi
+    done < <(sudo -n jq -r --arg host \"\$expected_host\" '.hosts[\$host][] | [.protocol,.bind,(.port|tostring),.role,.purpose,(.required|tostring)] | @tsv' \"\$manifest\")
+  "
+}
+for host in "${hosts[@]}"; do validate_private_socket_host "$host"; done
+echo "CHAIN1266_PRIVATE_SOCKET_HOST_PREFLIGHT_PASS"
+
 for host in "${hosts[@]}"; do
   ssh_run "$host" "sudo -n install -m 0644 $(q "$root")/systemd/synergy-chain1266-role@.service $(q "$qualification_unit"); sudo -n systemctl daemon-reload"
 done
 
 for host in "${hosts[@]}"; do
   for role in ${hosted_roles[$host]}; do
-    unit="$run_id-$role"; binary="${role_binary[$role]}"; config="${role_config[$role]}"; ip="${role_ip[$role]}"
+    unit="$run_id-$role"; binary="${role_binary[$role]}"; config="${role_config[$role]}"
     validator_env=''
     if [[ "$role" == validator-* ]]; then
       number="${role##*-0}"
@@ -290,7 +315,6 @@ SYNERGY_DESIRED_STATE_MANIFEST_SHA256=\$(sudo -n sha256sum \"\$root/shared/desir
 SYNERGY_DESIRED_STATE_SIGNATURE=$root/shared/desired-state.signature.json
 SYNERGY_CHAIN1266_QUALIFICATION_MODE=1
 SYNERGY_ENABLE_METRICS=true
-SYNERGY_METRICS_BIND=$ip:6030
 $validator_env
 EOF
       sudo -n chmod 0600 /run/synergy-chain1266/\"\$unit\".env
@@ -299,9 +323,46 @@ EOF
   done
 done
 
+# The renderer is the sole source of private metrics endpoints.  Read the
+# rendered values once from the immutable controller copy instead of retaining
+# a second port map in the supervisor.
+for role in "${roles[@]}"; do
+  endpoint="$(ssh_capture synergy-val1 "sudo -n sed -n 's/^metrics_bind = \"\\(.*\\)\"$/\\1/p' $(q "$root/config/${role_config[$role]}")")"
+  [[ "$endpoint" == "${role_ip[$role]}:"* ]] || { echo "invalid private metrics endpoint for $role" >&2; exit 1; }
+  port="${endpoint##*:}"
+  [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 22000 && port <= 29999 )) || { echo "private metrics port is outside the qualification range for $role" >&2; exit 1; }
+  role_metrics_endpoint[$role]="$endpoint"
+done
+echo "CHAIN1266_PRIVATE_METRICS_ENDPOINTS_READY"
+
 start_role() { local role="$1" host="${role_host[$1]}"; ssh_run "$host" "sudo -n systemctl reset-failed synergy-chain1266-role@$(q "$run_id-$role").service || true; sudo -n systemctl start synergy-chain1266-role@$(q "$run_id-$role").service"; }
 stop_role() { local role="$1" host="${role_host[$1]}"; ssh_run "$host" "sudo -n systemctl stop synergy-chain1266-role@$(q "$run_id-$role").service"; }
-metric_text() { local role="$1" host="${role_host[$1]}"; ssh_capture "$host" "curl --fail --silent --max-time 3 http://$(q "${role_ip[$role]}"):6030/metrics"; }
+validate_started_role() {
+  local role="$1" host="${role_host[$1]}" unit="$run_id-$role" endpoint="${role_metrics_endpoint[$role]}"
+  ssh_run "$host" "
+    set -euo pipefail
+    root=$(q "$root"); unit=$(q "$unit"); role=$(q "$role"); endpoint=$(q "$endpoint")
+    manifest=\"\$root/config/QUALIFICATION_SOCKET_MANIFEST.json\"
+    [[ \"\$(systemctl is-active \"synergy-chain1266-role@\$unit.service\")\" == active ]]
+    pid=\"\$(systemctl show \"synergy-chain1266-role@\$unit.service\" --property=MainPID --value)\"
+    [[ \"\$pid\" =~ ^[1-9][0-9]*\$ ]]
+    deadline=\$((SECONDS + 15))
+    while :; do
+      missing=false
+      while IFS=\$'\\t' read -r protocol bind port purpose; do
+        [[ \"\$protocol\" == tcp && \"\$port\" =~ ^[0-9]+\$ ]] || exit 1
+        line=\"\$(sudo -n ss -H -ltnp \"( sport = :\$port )\" || true)\"
+        [[ -n \"\$line\" && \"\$line\" == *\"pid=\$pid,\"* ]] || missing=true
+      done < <(sudo -n jq -r --arg role \"\$role\" '.hosts[] | .[] | select(.role == \$role and .required == true) | [.protocol,.bind,(.port|tostring),.purpose] | @tsv' \"\$manifest\")
+      [[ \"\$missing\" == false ]] && curl --fail --silent --max-time 3 \"http://\$endpoint/metrics\" >/dev/null && break
+      (( SECONDS < deadline )) || { echo \"required private listeners are not ready for \$role\" >&2; exit 1; }
+      sleep 1
+    done
+    ! sudo -n journalctl -u \"synergy-chain1266-role@\$unit.service\" --no-pager -o cat | grep -Eiq 'AddrInUse|Address already in use|Failed to bind|panicked at'
+  "
+  echo "CHAIN1266_PRIVATE_ROLE_SOCKET_READY role=$role"
+}
+metric_text() { local role="$1" host="${role_host[$1]}"; ssh_capture "$host" "curl --fail --silent --max-time 3 http://$(q "${role_metrics_endpoint[$role]}")/metrics"; }
 metric() { local role="$1" name="$2"; metric_text "$role" | awk -v n="$name" '$1 == n {print $2; exit}'; }
 
 # A sequential SSH sweep can observe a healthy two-second chain at several
@@ -320,7 +381,7 @@ metric_text_at() {
     # Each request begins at the shared second above. Completion time is not
     # a validator-health signal, and a busy host can need longer than three
     # seconds to serialize its metrics response.
-    curl --fail --silent --show-error --connect-timeout 3 --max-time 10 http://$(q "${role_ip[$role]}"):6030/metrics
+    curl --fail --silent --show-error --connect-timeout 3 --max-time 10 http://$(q "${role_metrics_endpoint[$role]}")/metrics
   "
 }
 
@@ -361,7 +422,7 @@ collect_validator_snapshot() {
   return 1
 }
 
-for role in relay1 relay2 relay3 rpc-gateway explorer-indexer observer validator-node-01 validator-node-02 validator-node-03 validator-node-04 validator-node-05; do start_role "$role"; done
+for role in validator-node-01 validator-node-02 validator-node-03 validator-node-04 validator-node-05; do start_role "$role"; done
 sleep 5
 start_role validator-node-06
 
@@ -375,6 +436,9 @@ while :; do
   (( SECONDS < deadline )) || { echo "validators did not reach PAUSED_READY" >&2; exit 1; }
   sleep 2
 done
+
+for role in "${validator_roles[@]}"; do validate_started_role "$role"; done
+echo "CHAIN1266_VALIDATOR_PAUSED_READY_6_OF_6"
 
 for role in validator-node-01 validator-node-02 validator-node-03 validator-node-04 validator-node-05 validator-node-06; do
   [[ "$(metric "$role" consensus_finalized_height || echo 0)" == 0 ]] || {
@@ -409,7 +473,7 @@ activate_ms="$(( $(ssh_capture synergy-val1 'date +%s') * 1000 + 10000 ))"
 ssh_run synergy-val1 "sudo -n $(q "$root")/bin/sign-chain1266-start-command --desired-state $(q "$root")/shared/desired-state.json --private-key $(q "$root")/private/start-authority.private.key --activate-unix-ms $(q "$activate_ms") --output $(q "$root")/shared/start-consensus.json"
 for host in "${hosts[@]}"; do [[ "$host" == synergy-val1 ]] || ssh "${ssh_options[@]}" synergy-val1 "sudo -n tar -C $(q "$root/shared") -cf - start-consensus.json" | ssh "${ssh_options[@]}" "$host" "sudo -n tar -C $(q "$root/shared") -xf -"; done
 
-last_height=0; last_progress=$SECONDS; faults_done=false
+last_height=0; last_progress=$SECONDS; faults_done=false; support_started=false
 while :; do
   heights=(); ids=()
   collect_validator_snapshot
@@ -437,12 +501,24 @@ while :; do
     block_id_at_height[$height]="$block_id"
   done
   if (( min > last_height )); then last_height="$min"; last_progress=$SECONDS; elif (( SECONDS - last_progress > 30 )); then echo "finality stalled" >&2; exit 1; fi
+  if (( min >= 100 )) && [[ "$support_started" == false ]]; then
+    for role in "${validator_roles[@]}"; do
+      restart_count="$(awk '$1 == "consensus_restart_count" {print int($2); exit}' "$output/$role.metrics")"
+      [[ "$restart_count" == 0 ]] || { echo "validator restart observed before the smoke gate: $role" >&2; exit 1; }
+      validate_started_role "$role"
+    done
+    echo "CHAIN1266_VALIDATOR_SMOKE_100_PASSED"
+    for role in "${support_roles[@]}"; do start_role "$role"; done
+    for role in "${support_roles[@]}"; do validate_started_role "$role"; done
+    support_started=true
+    echo "CHAIN1266_DOWNSTREAM_ROLES_STARTED"
+  fi
   if (( min >= 1000 && "$faults_done" == false )); then
     before="$min"; stop_role validator-node-06; sleep 10
     progressed="$(metric validator-node-01 consensus_finalized_height || echo 0)"; (( progressed > before )) || { echo "five-validator quorum did not continue" >&2; exit 1; }
-    start_role validator-node-06; rejoin_deadline=$((SECONDS + 180)); while (( $(metric validator-node-01 consensus_finalized_height || echo 999999) - $(metric validator-node-06 consensus_finalized_height || echo 0) > 2 )); do (( SECONDS < rejoin_deadline )) || { echo "validator 6 failed to rejoin" >&2; exit 1; }; sleep 2; done
+    start_role validator-node-06; validate_started_role validator-node-06; rejoin_deadline=$((SECONDS + 180)); while (( $(metric validator-node-01 consensus_finalized_height || echo 999999) - $(metric validator-node-06 consensus_finalized_height || echo 0) > 2 )); do (( SECONDS < rejoin_deadline )) || { echo "validator 6 failed to rejoin" >&2; exit 1; }; sleep 2; done
     ssh_run synergy-val6 "sudo -n tc qdisc add dev $(q "$iface") root netem loss 10%"; before_loss="$(metric validator-node-01 consensus_finalized_height)"; sleep 12; ssh_run synergy-val6 "sudo -n tc qdisc del dev $(q "$iface") root"; (( $(metric validator-node-01 consensus_finalized_height) > before_loss )) || { echo "quorum failed during peer impairment" >&2; exit 1; }
-    stop_role observer; ssh_run synergy-val6 "set -eu; d=$(q "$data_root")/observer/data; sudo -n find \"\$d\" -mindepth 1 -delete; sudo -n touch \"\$d/.reset_flag\""; start_role observer
+    stop_role observer; ssh_run synergy-val6 "set -eu; d=$(q "$data_root")/observer/data; sudo -n find \"\$d\" -mindepth 1 -delete; sudo -n touch \"\$d/.reset_flag\""; start_role observer; validate_started_role observer
     observer_deadline=$((SECONDS + 180)); while (( $(metric validator-node-01 consensus_finalized_height || echo 999999) - $(metric observer consensus_finalized_height || echo 0) > 2 )); do (( SECONDS < observer_deadline )) || { echo "wiped observer failed to resynchronize" >&2; exit 1; }; sleep 2; done
     faults_done=true
     jq -n --argjson before "$before" --argjson after "$(metric validator-node-01 consensus_finalized_height)" '{single_validator_restart:"PASS",packet_loss:"PASS",observer_wipe_resync:"PASS",height_before:$before,height_after:$after}' >"$output/fault-recovery.json"
