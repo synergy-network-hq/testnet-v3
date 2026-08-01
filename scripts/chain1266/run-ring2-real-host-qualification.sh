@@ -283,7 +283,8 @@ validate_private_socket_host() {
     [[ \"\$(sudo -n jq -er .qualification_configuration \"\$manifest\")\" == ring2-config-r7 ]]
     sudo -n ss -H -lntup >/dev/null
     while IFS=\$'\\t' read -r protocol bind port role purpose required; do
-      [[ \"\$protocol\" == tcp && \"\$port\" =~ ^[0-9]+\$ && \"\$required\" == true ]] || exit 1
+      [[ \"\$protocol\" == tcp && \"\$port\" =~ ^[0-9]+\$ && \"\$required\" =~ ^(true|false)\$ ]] || exit 1
+      [[ \"\$required\" == true ]] || continue
       if [[ \"\$bind\" == 10.126.* ]]; then
         sudo -n ip -o -4 addr show dev \"\$iface\" | awk '{print \$4}' | cut -d/ -f1 | grep -Fx \"\$bind\" >/dev/null
       fi
