@@ -201,6 +201,29 @@ stream_to_host() {
 }
 for host in "${hosts[@]}"; do [[ "$host" == synergy-val1 ]] || stream_to_host "$host"; done
 
+# Support roles share hosts with validators in the real-host exercise.  The
+# private renderer assigns every role a separate loopback RPC/WS/gRPC surface;
+# refuse the run before consensus release if another local process already
+# owns one of those listeners.
+for host in "${hosts[@]}"; do
+  for role in ${hosted_roles[$host]}; do
+    config="${role_config[$role]}"
+    ssh_run "$host" "
+      set -euo pipefail
+      config=$(q "$root/config/$config")
+      ports=\$(sudo -n sed -n 's/^[[:space:]]*\\(http_port\\|ws_port\\|grpc_port\\)[[:space:]]*=[[:space:]]*\\([0-9][0-9]*\\)[[:space:]]*$/\\2/p' \"\$config\")
+      for port in \$ports; do
+        [[ \"\$port\" =~ ^[0-9]+\$ ]] || { echo \"invalid private RPC port in \$config\" >&2; exit 1; }
+        if sudo -n ss -H -ltn \"( sport = :\$port )\" | grep -q .; then
+          echo \"private RPC port \$port from \$config is already in use\" >&2
+          exit 1
+        fi
+      done
+    "
+  done
+done
+echo "CHAIN1266_PRIVATE_RPC_PORTS_AVAILABLE"
+
 for host in "${hosts[@]}"; do
   ips=(); for role in ${hosted_roles[$host]}; do ips+=("${role_ip[$role]}/16"); done
   key="$(ssh_capture "$host" "

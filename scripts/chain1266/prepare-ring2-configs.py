@@ -34,6 +34,27 @@ NODE_IPS = {
     "observer": "10.126.30.3",
 }
 
+# Ring 2 deliberately co-locates support roles with validators on hosts 4--6.
+# The production renderer correctly uses loopback RPC listeners because its
+# roles are normally on different machines, but reusing 5640/5660 here causes
+# competing private processes to panic while binding.  Assigning every
+# disposable role its own loopback-only RPC surface keeps the private overlay
+# topology intact without changing the public configuration or the runtime.
+ROLE_RPC_PORTS = {
+    "validator-node-01": (15641, 16641, 17641),
+    "validator-node-02": (15642, 16642, 17642),
+    "validator-node-03": (15643, 16643, 17643),
+    "validator-node-04": (15644, 16644, 17644),
+    "validator-node-05": (15645, 16645, 17645),
+    "validator-node-06": (15646, 16646, 17646),
+    "relay1": (15647, 16647, 17647),
+    "relay2": (15648, 16648, 17648),
+    "relay3": (15649, 16649, 17649),
+    "rpc-gateway": (15650, 16650, 17650),
+    "explorer-indexer": (15651, 16651, 17651),
+    "observer": (15652, 16652, 17652),
+}
+
 # The source configs were rendered for the first disposable overlay.  Replace
 # every role endpoint explicitly, rather than relying on hostname substitutions:
 # persistent validator records retain their dial_address as an IP literal.
@@ -73,6 +94,10 @@ def rewrite_config(source: pathlib.Path, target: pathlib.Path, genesis: dict, ge
         raise SystemExit(f"{source}: unknown Ring-2 node identity")
     node_id = node_match.group(1)
     node_ip = NODE_IPS[node_id]
+    try:
+        rpc_port, ws_port, grpc_port = ROLE_RPC_PORTS[node_id]
+    except KeyError as error:
+        raise SystemExit(f"{source}: no private RPC port assignment for {node_id}") from error
     p2p_match = re.search(r"^p2p_port = ([0-9]+)$", text, flags=re.MULTILINE)
     if not p2p_match:
         raise SystemExit(f"{source}: missing P2P port")
@@ -155,6 +180,18 @@ def rewrite_config(source: pathlib.Path, target: pathlib.Path, genesis: dict, ge
         text,
         flags=re.MULTILINE,
     )
+    text = re.sub(r"^rpc_port = [0-9]+$", f"rpc_port = {rpc_port}", text, flags=re.MULTILINE)
+    text = re.sub(r"^ws_port = [0-9]+$", f"ws_port = {ws_port}", text, flags=re.MULTILINE)
+    text = re.sub(
+        r'^bind_address = ".*"$',
+        f'bind_address = "127.0.0.1:{rpc_port}"',
+        text,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    text = re.sub(r"^http_port = [0-9]+$", f"http_port = {rpc_port}", text, flags=re.MULTILINE)
+    text = re.sub(r"^ws_port = [0-9]+$", f"ws_port = {ws_port}", text, flags=re.MULTILINE)
+    text = re.sub(r"^grpc_port = [0-9]+$", f"grpc_port = {grpc_port}", text, flags=re.MULTILINE)
     if "synergynode.xyz" in text or re.search(
         r"\b(?:10\.70\.|65\.21\.202\.144|73\.79\.66\.255|209\.145\.50\.9|74\.208\.227\.23)\b",
         text,
@@ -170,6 +207,13 @@ def main() -> None:
     parser.add_argument("--genesis", type=pathlib.Path, required=True)
     parser.add_argument("--output", type=pathlib.Path, required=True)
     args = parser.parse_args()
+
+    if set(ROLE_RPC_PORTS) != set(NODE_IPS):
+        raise SystemExit("private Ring-2 RPC port map does not cover exactly the rendered roles")
+    for column, label in enumerate(("HTTP", "WebSocket", "gRPC")):
+        ports = [assignment[column] for assignment in ROLE_RPC_PORTS.values()]
+        if len(ports) != len(set(ports)):
+            raise SystemExit(f"private Ring-2 {label} port map is not unique")
 
     genesis = json.loads(args.genesis.read_text())
     if genesis["network"]["chain_id"] != 1266 or genesis["network"]["chain_incarnation"] != 4:
