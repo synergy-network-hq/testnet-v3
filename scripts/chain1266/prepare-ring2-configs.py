@@ -38,12 +38,17 @@ NODE_IPS = {
 # validators on hosts 4--6.  A production config can reuse loopback ports
 # because these roles normally reside on separate machines; a private run may
 # not.  Every configured listener therefore has an explicit host-aware,
-# deterministic allocation in the qualification-only range.
+# deterministic allocation.  The frozen RC6 runtime accepts authenticated
+# validator VPN transports only on the canonical validator P2P port, so the
+# six validators retain that port; they run on separate hosts and cannot
+# collide with one another.  All other qualification listeners use the
+# dedicated range below.
+VALIDATOR_P2P_PORT = 5622
 QUALIFICATION_PORT_BASE = 22000
 QUALIFICATION_PORT_LIMIT = 29999
 QUALIFICATION_HOST_STRIDE = 1000
 QUALIFICATION_ROLE_STRIDE = 10
-QUALIFICATION_CONFIGURATION_ID = "ring2-config-r7"
+QUALIFICATION_CONFIGURATION_ID = "ring2-config-r8"
 
 HOST_ROLES = {
     "synergy-val1": ("validator-node-01",),
@@ -75,7 +80,7 @@ def socket_ports(node_id: str) -> dict[str, int]:
         "websocket_rpc": base + 1,
         "grpc": base + 2,
         "metrics": base + 3,
-        "p2p_tcp": base + 4,
+        "p2p_tcp": VALIDATOR_P2P_PORT if node_id.startswith("validator-node-") else base + 4,
         "discovery_tcp": base + 5,
     }
 
@@ -105,6 +110,7 @@ def socket_manifest(run_id=None) -> dict:
         "port_policy": {
             "range_start": QUALIFICATION_PORT_BASE,
             "range_end": QUALIFICATION_PORT_LIMIT,
+            "validator_p2p_port": VALIDATOR_P2P_PORT,
             "host_stride": QUALIFICATION_HOST_STRIDE,
             "role_stride": QUALIFICATION_ROLE_STRIDE,
             "wildcard_binds_overlap": ["0.0.0.0", "::", "[::]"],
@@ -361,6 +367,12 @@ def binds_overlap(left: str, right: str) -> bool:
     return left == right or left in wildcard or right in wildcard
 
 
+def socket_port_follows_policy(role: str, purpose: str, port: int) -> bool:
+    if role.startswith("validator-node-") and purpose == "p2p_tcp":
+        return port == VALIDATOR_P2P_PORT
+    return QUALIFICATION_PORT_BASE <= port <= QUALIFICATION_PORT_LIMIT
+
+
 def validate_socket_manifest(manifest: dict, configs: dict[str, pathlib.Path]) -> None:
     if manifest["qualification_configuration"] != QUALIFICATION_CONFIGURATION_ID:
         raise SystemExit("unexpected private qualification socket manifest identity")
@@ -380,7 +392,7 @@ def validate_socket_manifest(manifest: dict, configs: dict[str, pathlib.Path]) -
                 raise SystemExit(f"socket manifest has an invalid role or endpoint on {host}")
             if protocol != "tcp" or not isinstance(bind, str) or not isinstance(port, int):
                 raise SystemExit(f"socket manifest has an invalid socket assignment for {role}/{purpose}")
-            if not isinstance(required, bool) or not QUALIFICATION_PORT_BASE <= port <= QUALIFICATION_PORT_LIMIT:
+            if not isinstance(required, bool) or not socket_port_follows_policy(role, purpose, port):
                 raise SystemExit(f"socket manifest has an invalid socket policy for {role}/{purpose}")
             for prior_host, prior_protocol, prior_bind, prior_port, prior_role in claimed:
                 if (
@@ -408,8 +420,8 @@ def validate_socket_manifest(manifest: dict, configs: dict[str, pathlib.Path]) -
             entry = entries_by_role.get(role, {}).get(purpose)
             if entry is None or entry["protocol"] != "tcp" or entry["bind"] != bind or entry["port"] != port:
                 raise SystemExit(f"{path}: {purpose} disagrees with qualification socket manifest")
-            if not QUALIFICATION_PORT_BASE <= port <= QUALIFICATION_PORT_LIMIT:
-                raise SystemExit(f"{path}: {purpose} leaves the qualification port range")
+            if not socket_port_follows_policy(role, purpose, port):
+                raise SystemExit(f"{path}: {purpose} violates the qualification socket policy")
             if entry["required"] != enabled.get(purpose, True):
                 raise SystemExit(
                     f"{path}: {purpose} activation disagrees with qualification socket manifest"
