@@ -379,6 +379,7 @@ enum TypedRoundStage {
 // verifying identical ML-DSA artifacts.
 const PROPOSAL_REBROADCAST_INTERVAL: Duration = Duration::from_millis(750);
 const VOTE_REBROADCAST_INTERVAL: Duration = Duration::from_millis(750);
+const FINALITY_BACKUP_AGGREGATOR_STAGGER: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TypedCoordinatorDriverMetrics {
@@ -636,6 +637,7 @@ where
     observed_validation_votes: BTreeMap<ValidatorId, Vote>,
     observed_finality_votes: BTreeMap<ValidatorId, Vote>,
     observed_timeout_votes: BTreeMap<ValidatorId, Vote>,
+    finality_quorum_observed_at: Option<Instant>,
     prepared_certificate: Option<ValidationCertificate>,
     pending_validation_certificates: BTreeMap<BlockId, ValidationCertificate>,
     finality_certificate: Option<QuorumCertificate>,
@@ -1760,6 +1762,7 @@ where
             observed_validation_votes: BTreeMap::new(),
             observed_finality_votes: BTreeMap::new(),
             observed_timeout_votes: BTreeMap::new(),
+            finality_quorum_observed_at: None,
             prepared_certificate: None,
             pending_validation_certificates: BTreeMap::new(),
             finality_certificate: None,
@@ -1909,6 +1912,25 @@ where
         // Authenticated proposal and certificate arrival drives the healthy
         // path. Governed timeout values below are failure deadlines only.
         self.advance_healthy_path(now)?;
+
+        // The scheduled proposer remains the zero-delay QC aggregator. If it
+        // does not emit after another replica has already collected an exact
+        // verified finality quorum, deterministic backups become eligible in
+        // leader-schedule order. This recovery path runs before the governed
+        // finality deadline and never changes quorum or timeout parameters.
+        if self.stage == TypedRoundStage::Finality {
+            if let Some(candidate_id) = self
+                .prepared_certificate
+                .as_ref()
+                .map(|certificate| certificate.candidate_id.clone())
+            {
+                let height = self.coordinator.local_context.height_context.height;
+                self.maybe_form_finality_certificate_with_backup(&candidate_id, now)?;
+                if self.coordinator.local_context.height_context.height != height {
+                    return Ok(());
+                }
+            }
+        }
 
         if self.stage == TypedRoundStage::Proposal && elapsed >= proposal_deadline {
             self.emit_timeout_vote(now)?;
@@ -2841,9 +2863,6 @@ where
         if self.finality_certificate.is_some() {
             return Ok(());
         }
-        if !self.local_is_current_round_proposer()? {
-            return Ok(());
-        }
         let votes = self
             .finality_votes
             .get(candidate_id)
@@ -2854,6 +2873,73 @@ where
         if !self.has_exact_quorum(&votes)? {
             return Ok(());
         }
+        self.finality_quorum_observed_at
+            .get_or_insert_with(Instant::now);
+        if !self.local_is_current_round_proposer()? {
+            return Ok(());
+        }
+        self.form_finality_certificate_from_local_quorum(votes)
+    }
+
+    fn maybe_form_finality_certificate_with_backup(
+        &mut self,
+        candidate_id: &BlockId,
+        now: Instant,
+    ) -> Result<(), String> {
+        if self.finality_certificate.is_some() {
+            return Ok(());
+        }
+        let Some(votes_by_validator) = self.finality_votes.get(candidate_id) else {
+            return Ok(());
+        };
+        let votes = votes_by_validator.values().cloned().collect::<Vec<_>>();
+        if !self.has_exact_quorum(&votes)? {
+            return Ok(());
+        }
+        let quorum_observed_at = *self.finality_quorum_observed_at.get_or_insert(now);
+        let backup_rank = self.local_finality_aggregator_rank()?;
+        let stagger = FINALITY_BACKUP_AGGREGATOR_STAGGER
+            .checked_mul(
+                u32::try_from(backup_rank)
+                    .map_err(|_| "finality backup-aggregator rank exceeds u32".to_string())?,
+            )
+            .ok_or_else(|| "finality backup-aggregator stagger overflow".to_string())?;
+        if now
+            .checked_duration_since(quorum_observed_at)
+            .map(|elapsed| elapsed < stagger)
+            .unwrap_or(true)
+        {
+            return Ok(());
+        }
+        self.form_finality_certificate_from_local_quorum(votes)
+    }
+
+    fn local_finality_aggregator_rank(&self) -> Result<usize, String> {
+        let context = &self.coordinator.local_context.height_context;
+        let schedule = &context.leader_schedule;
+        if schedule.is_empty() {
+            return Err("height context has no finality aggregator schedule".to_string());
+        }
+        let primary = context.authorized_proposer(self.coordinator.local_context.round)?;
+        let primary_index = schedule
+            .iter()
+            .position(|validator_id| validator_id == primary)
+            .ok_or_else(|| {
+                "primary finality aggregator is absent from leader schedule".to_string()
+            })?;
+        let local_index = schedule
+            .iter()
+            .position(|validator_id| validator_id == &self.coordinator.local_validator_id)
+            .ok_or_else(|| {
+                "local finality aggregator is absent from leader schedule".to_string()
+            })?;
+        Ok((local_index + schedule.len() - primary_index) % schedule.len())
+    }
+
+    fn form_finality_certificate_from_local_quorum(
+        &mut self,
+        votes: Vec<VerifiedVote>,
+    ) -> Result<(), String> {
         let certificate = self
             .coordinator
             .form_finality_certificate_from_verified(&votes)?;
@@ -3133,6 +3219,7 @@ where
         self.stage_started_at = self.round_started_at;
         self.last_proposal_broadcast_at = None;
         self.local_vote_rebroadcasts.clear();
+        self.finality_quorum_observed_at = None;
         self.emitted_proposal = false;
         self.emitted_validation_vote = false;
         self.emitted_finality_vote = false;
@@ -3345,6 +3432,7 @@ where
         self.observed_validation_votes.clear();
         self.observed_finality_votes.clear();
         self.observed_timeout_votes.clear();
+        self.finality_quorum_observed_at = None;
         self.round_started_at = Instant::now();
         self.stage_started_at = self.round_started_at;
         self.last_proposal_broadcast_at = None;
@@ -3392,6 +3480,7 @@ where
         self.observed_validation_votes.clear();
         self.observed_finality_votes.clear();
         self.observed_timeout_votes.clear();
+        self.finality_quorum_observed_at = None;
         self.prepared_certificate = None;
         self.pending_validation_certificates.clear();
         self.finality_certificate = None;
@@ -5966,6 +6055,158 @@ mod tests {
                 journal["records"].as_array().map(Vec::len),
                 Some(0),
                 "exact envelopes must remain durable only until their height finalizes"
+            );
+        }
+
+        drop(drivers);
+        for path in store_paths {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn six_validator_staggered_backup_forms_finality_qc_when_primary_misses_quorum() {
+        let parameters = genesis_bound_parameters();
+        let (bootstrap, _genesis_anchor, deployed_genesis_state_root, coordinators, store_paths) =
+            six_validator_startup_fixture(parameters.clone());
+        let authorizer = FrozenTypedConsensusPeerAuthorizer::new(bootstrap.validator_set.clone())
+            .expect("freeze the six Genesis-bound P2P identities");
+        let mut drivers = coordinators
+            .into_iter()
+            .map(|coordinator| {
+                release_driver_with(
+                    coordinator,
+                    bootstrap.clone(),
+                    parameters.protocol_config.clone(),
+                    deployed_genesis_state_root,
+                )
+            })
+            .collect::<Vec<_>>();
+        let proposer = drivers[0]
+            .coordinator
+            .consensus
+            .proposer_for(
+                &drivers[0].coordinator.local_context.height_context,
+                Round(0),
+            )
+            .expect("height-one round-zero proposer");
+        let proposer_index = drivers
+            .iter()
+            .position(|driver| driver.coordinator.local_validator_id == proposer.validator_id)
+            .expect("scheduled proposer belongs to the six-validator fixture");
+        let mut non_proposers = (0..drivers.len())
+            .filter(|index| *index != proposer_index)
+            .map(|index| {
+                let rank = drivers[index]
+                    .local_finality_aggregator_rank()
+                    .expect("fixture finality-aggregator rank");
+                (rank, index)
+            })
+            .collect::<Vec<_>>();
+        non_proposers.sort_unstable();
+        assert_eq!(
+            non_proposers
+                .iter()
+                .map(|(rank, _)| *rank)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5]
+        );
+        let non_proposer_indices = non_proposers
+            .iter()
+            .map(|(_, index)| *index)
+            .collect::<Vec<_>>();
+        let withheld_senders = [non_proposer_indices[0], non_proposer_indices[1]];
+        let first_backup_index = non_proposers[0].1;
+        let second_backup_index = non_proposers[1].1;
+
+        for driver in &mut drivers {
+            let now = driver.round_started_at;
+            driver
+                .tick_at(now)
+                .expect("emit the first healthy proposal");
+        }
+        let relay_errors = relay_release_messages_with_delivery(
+            &mut drivers,
+            &authorizer,
+            |_| true,
+            |sender_index, recipient_index, message| {
+                !(recipient_index == proposer_index
+                    && withheld_senders.contains(&sender_index)
+                    && matches!(
+                        message,
+                        TypedConsensusMessage::Vote { vote }
+                            if vote.phase == VotePhase::Finality
+                    ))
+            },
+        );
+        assert!(relay_errors.is_empty(), "{relay_errors:?}");
+        assert!(drivers
+            .iter()
+            .all(|driver| { driver.coordinator.local_context.height_context.height == Height(1) }));
+        assert_eq!(
+            drivers[proposer_index]
+                .finality_votes
+                .values()
+                .next()
+                .map(BTreeMap::len),
+            Some(4),
+            "the scheduled proposer must remain below the five-of-six finality quorum"
+        );
+        assert_eq!(
+            drivers[first_backup_index]
+                .finality_votes
+                .values()
+                .next()
+                .map(BTreeMap::len),
+            Some(6),
+            "a non-proposer must retain the verified finality quorum it observed"
+        );
+
+        let second_observed = drivers[second_backup_index]
+            .finality_quorum_observed_at
+            .expect("second backup observed exact finality quorum");
+        drivers[second_backup_index]
+            .tick_at(second_observed + FINALITY_BACKUP_AGGREGATOR_STAGGER)
+            .expect("a later backup remains ineligible during the first stagger");
+        assert_eq!(
+            drivers[second_backup_index]
+                .metrics()
+                .emitted_finality_certificates,
+            0,
+            "the second backup must not race the deterministic first backup"
+        );
+
+        let first_observed = drivers[first_backup_index]
+            .finality_quorum_observed_at
+            .expect("first backup observed exact finality quorum");
+        drivers[first_backup_index]
+            .tick_at(first_observed + FINALITY_BACKUP_AGGREGATOR_STAGGER)
+            .expect("the first deterministic backup must recover finality");
+        assert_eq!(
+            drivers[first_backup_index]
+                .metrics()
+                .emitted_finality_certificates,
+            1,
+            "the first staggered backup must emit one finality QC"
+        );
+        assert_eq!(
+            drivers[first_backup_index].metrics().emitted_timeout_votes,
+            0,
+            "verified finality quorum must take precedence over a timeout vote"
+        );
+
+        let relay_errors = relay_release_messages(&mut drivers, &authorizer, |_| true);
+        assert!(relay_errors.is_empty(), "{relay_errors:?}");
+        for (index, driver) in drivers.iter().enumerate() {
+            assert_eq!(
+                driver.coordinator.local_context.latest_finalized_height,
+                Height(1),
+                "replica {index} did not install the fallback finality QC"
+            );
+            assert_eq!(
+                driver.coordinator.local_context.height_context.height,
+                Height(2),
+                "replica {index} did not enter the successor height"
             );
         }
 
