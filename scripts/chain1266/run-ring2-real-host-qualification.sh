@@ -83,7 +83,10 @@ cleanup() {
       set +e
       run=$(q "$run_id"); root=$(q "$root"); data=$(q "$data_root"); iface=$(q "$iface"); chain=$(q "$fw_chain"); unit_file=$(q "$qualification_unit")
       [[ \"\$run\" =~ ^c1266q[a-z0-9]{6,24}\$ ]] || exit 0
-      for unit in \$(systemctl list-units --all --plain --no-legend 'synergy-chain1266-role@'\"\$run\"'-*.service' 2>/dev/null | awk '{print \$1}'); do sudo -n systemctl stop \"\$unit\" || true; done
+      for unit in \$(systemctl list-units --all --plain --no-legend 'synergy-chain1266-role@'\"\$run\"'-*.service' 2>/dev/null | awk '{print \$1}'); do
+        sudo -n systemctl stop \"\$unit\" || true
+        sudo -n systemctl reset-failed \"\$unit\" || true
+      done
       sudo -n rm -f /run/synergy-chain1266/\"\$run\"-*.env 2>/dev/null || true
       sudo -n rm -f /run/systemd/system/synergy-chain1266-role@.service.d/\"\$run\".conf 2>/dev/null || true
       sudo -n rm -f \"\$unit_file\" 2>/dev/null || true

@@ -4601,7 +4601,9 @@ fn peer_is_validator_vpn_relayer(peer: &PeerConnection) -> bool {
         && peer_connected_endpoint(peer)
             .as_deref()
             .is_some_and(|endpoint| match peer.direction {
-                ConnectionDirection::Outgoing => is_validator_vpn_relayer_dial_address(endpoint),
+                ConnectionDirection::Outgoing => {
+                    is_current_validator_vpn_relayer_dial_address(endpoint)
+                }
                 // A relayer may also connect into a validator.  TCP assigns
                 // that connection an ephemeral source port, so retain the
                 // signed relayer role and verify only the canonical VPN host
@@ -5439,7 +5441,9 @@ impl P2PNetwork {
         *is_running.lock().unwrap() = true;
 
         #[cfg(not(test))]
-        if local_node_uses_signed_validator_transports(&self.config) {
+        if local_node_uses_signed_validator_transports(&self.config)
+            && !chain1266_private_qualification_mode()
+        {
             match refresh_validator_transports() {
                 Ok(refresh) => info!(
                     "p2p",
@@ -9980,7 +9984,11 @@ fn validator_vpn_transport_for_target(
     config: &NodeConfig,
     validator_address: &str,
 ) -> Option<String> {
-    validator_vpn_transport_for_target_with_static_fallback(config, validator_address, cfg!(test))
+    validator_vpn_transport_for_target_with_static_fallback(
+        config,
+        validator_address,
+        cfg!(test) || chain1266_private_qualification_mode(),
+    )
 }
 
 fn validator_vpn_transport_for_target_with_static_fallback(
@@ -9988,19 +9996,34 @@ fn validator_vpn_transport_for_target_with_static_fallback(
     validator_address: &str,
     allow_static_fallback: bool,
 ) -> Option<String> {
+    let qualification_mode = chain1266_private_qualification_mode();
     let validator_address = normalize_validator_address_target(validator_address)?;
-    if let Some(dial_address) = validator_transport_for(&validator_address) {
-        let dial_address = parse_bootnode_dial_address(&dial_address)?;
-        if is_validator_vpn_dial_address(&dial_address) {
-            return Some(dial_address);
+    // Qualification has a disposable WireGuard mesh and its own rendered
+    // validator transport map. Never load a public coordinator snapshot there:
+    // even a valid public mapping would reconnect the isolated release to the
+    // public Chain 1266 overlay.
+    if !qualification_mode {
+        if let Some(dial_address) = validator_transport_for(&validator_address) {
+            let dial_address = parse_bootnode_dial_address(&dial_address)?;
+            if is_validator_vpn_dial_address(&dial_address) {
+                return Some(dial_address);
+            }
         }
-    }
-    if has_validator_transports() {
-        return None;
+        if has_validator_transports() {
+            return None;
+        }
     }
     if !allow_static_fallback {
         return None;
     }
+    configured_validator_vpn_transport_for_target(config, &validator_address, qualification_mode)
+}
+
+fn configured_validator_vpn_transport_for_target(
+    config: &NodeConfig,
+    validator_address: &str,
+    require_private_qualification_overlay: bool,
+) -> Option<String> {
     config
         .network
         .validator_vpn_transports
@@ -10010,7 +10033,16 @@ fn validator_vpn_transport_for_target_with_static_fallback(
                 normalize_validator_address_target(&transport.validator_address)?;
             if configured_validator == validator_address {
                 let dial_address = parse_bootnode_dial_address(&transport.dial_address)?;
-                is_validator_vpn_dial_address(&dial_address).then_some(dial_address)
+                let approved = if require_private_qualification_overlay {
+                    is_private_qualification_innernet_dial_address(&dial_address, 10)
+                } else {
+                    is_validator_vpn_dial_address(&dial_address)
+                };
+                if approved {
+                    Some(dial_address)
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -10023,7 +10055,7 @@ fn resolve_peer_transport_address(config: &NodeConfig, target: &str) -> Option<S
     } else {
         let parsed = parse_bootnode_dial_address(target)?;
         if local_node_uses_signed_validator_transports(config)
-            && is_validator_vpn_dial_address(&parsed)
+            && is_current_validator_vpn_dial_address(&parsed)
         {
             return None;
         }
@@ -10045,7 +10077,8 @@ fn normalize_peer_target(config: &NodeConfig, value: &str) -> Option<String> {
     }
 
     let parsed = parse_bootnode_dial_address(value)?;
-    if local_node_uses_signed_validator_transports(config) && is_validator_vpn_dial_address(&parsed)
+    if local_node_uses_signed_validator_transports(config)
+        && is_current_validator_vpn_dial_address(&parsed)
     {
         return None;
     }
@@ -10134,7 +10167,7 @@ fn is_assigned_synergy_dial_address(value: &str) -> bool {
 }
 
 fn is_assigned_or_validator_vpn_dial_address(value: &str) -> bool {
-    is_assigned_synergy_dial_address(value) || is_validator_vpn_dial_address(value)
+    is_assigned_synergy_dial_address(value) || is_current_validator_vpn_dial_address(value)
 }
 
 fn local_validator_vpn_peer_scope(config: &NodeConfig) -> bool {
@@ -10143,6 +10176,10 @@ fn local_validator_vpn_peer_scope(config: &NodeConfig) -> bool {
 
 fn local_node_uses_signed_validator_transports(config: &NodeConfig) -> bool {
     local_validator_vpn_peer_scope(config) || local_p2p_role(config).eq_ignore_ascii_case("relayer")
+}
+
+fn chain1266_private_qualification_mode() -> bool {
+    std::env::var(crate::desired_state::CHAIN1266_QUALIFICATION_MODE_ENV).as_deref() == Ok("1")
 }
 
 fn local_node_uses_relayer_only_topology(config: &NodeConfig) -> bool {
@@ -10162,10 +10199,10 @@ fn is_public_relayer_dial_address(value: &str) -> bool {
 fn peer_target_allowed_by_local_scope(config: &NodeConfig, value: &str) -> bool {
     if local_validator_vpn_peer_scope(config) {
         normalize_validator_address_target(value).is_some()
-            || is_validator_vpn_relayer_dial_address(value)
+            || is_current_validator_vpn_relayer_dial_address(value)
     } else if local_p2p_role(config).eq_ignore_ascii_case("relayer") {
         normalize_validator_address_target(value).is_some()
-            || is_validator_vpn_relayer_dial_address(value)
+            || is_current_validator_vpn_relayer_dial_address(value)
             || is_assigned_synergy_dial_address(value)
     } else if local_node_uses_relayer_only_topology(config) {
         is_public_relayer_dial_address(value)
@@ -10179,7 +10216,21 @@ fn is_validator_vpn_dial_address(value: &str) -> bool {
     is_canonical_innernet_dial_address(value, 10)
 }
 
+fn is_current_validator_vpn_dial_address(value: &str) -> bool {
+    is_validator_vpn_dial_address(value)
+        || (chain1266_private_qualification_mode()
+            && is_private_qualification_innernet_dial_address(value, 10))
+}
+
 fn is_canonical_innernet_dial_address(value: &str, third_octet: u8) -> bool {
+    is_innernet_dial_address(value, 70, third_octet)
+}
+
+fn is_private_qualification_innernet_dial_address(value: &str, third_octet: u8) -> bool {
+    is_innernet_dial_address(value, 126, third_octet)
+}
+
+fn is_innernet_dial_address(value: &str, second_octet: u8, third_octet: u8) -> bool {
     let Some(normalized) = parse_bootnode_dial_address(value) else {
         return false;
     };
@@ -10192,7 +10243,7 @@ fn is_canonical_innernet_dial_address(value: &str, third_octet: u8) -> bool {
     validator_vpn_dial_octets(&normalized)
         .map(|octets| {
             octets[0] == 10
-                && octets[1] == 70
+                && octets[1] == second_octet
                 && octets[2] == third_octet
                 && (1..=254).contains(&octets[3])
         })
@@ -10201,6 +10252,12 @@ fn is_canonical_innernet_dial_address(value: &str, third_octet: u8) -> bool {
 
 fn is_validator_vpn_relayer_dial_address(value: &str) -> bool {
     is_canonical_innernet_dial_address(value, 20)
+}
+
+fn is_current_validator_vpn_relayer_dial_address(value: &str) -> bool {
+    is_validator_vpn_relayer_dial_address(value)
+        || (chain1266_private_qualification_mode()
+            && is_private_qualification_innernet_dial_address(value, 20))
 }
 
 fn validator_vpn_dial_octets(value: &str) -> Option<[u8; 4]> {
@@ -16043,6 +16100,44 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn private_qualification_static_transport_requires_the_isolated_overlay() {
+        let validator = "synv1privatequalificationxxxxxxxxxxxxxxxxxx";
+        let mut config = NodeConfig::default();
+        config.network.validator_vpn_transports = vec![ValidatorVpnTransportConfig {
+            validator_address: validator.to_string(),
+            dial_address: "10.126.10.8:5622".to_string(),
+        }];
+
+        assert_eq!(
+            super::configured_validator_vpn_transport_for_target(&config, validator, true),
+            Some("10.126.10.8:5622".to_string())
+        );
+
+        config.network.validator_vpn_transports[0].dial_address = "10.70.10.8:5622".to_string();
+        assert_eq!(
+            super::configured_validator_vpn_transport_for_target(&config, validator, true),
+            None
+        );
+
+        assert!(super::is_private_qualification_innernet_dial_address(
+            "10.126.10.8:5622",
+            10,
+        ));
+        assert!(super::is_private_qualification_innernet_dial_address(
+            "10.126.20.8:5622",
+            20,
+        ));
+        assert!(!super::is_private_qualification_innernet_dial_address(
+            "10.70.20.8:5622",
+            20,
+        ));
+        assert!(!super::is_private_qualification_innernet_dial_address(
+            "10.126.20.8:5621",
+            20,
+        ));
     }
 
     #[test]
