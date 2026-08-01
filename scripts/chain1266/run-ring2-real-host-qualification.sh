@@ -261,21 +261,38 @@ metric_text() { local role="$1" host="${role_host[$1]}"; ssh_capture "$host" "cu
 metric() { local role="$1" name="$2"; metric_text "$role" | awk -v n="$name" '$1 == n {print $2; exit}'; }
 
 # A sequential SSH sweep can observe a healthy two-second chain at several
-# different heights.  Sample every validator concurrently and reject a slow
-# collection rather than mistaking controller latency for validator lag.
+# different heights. Dispatch every collector before a shared future second so
+# the metrics requests themselves occur concurrently; controller transport
+# completion time is not a validator-health signal.
+metric_text_at() {
+  local role="$1" target_unix="$2" host="${role_host[$1]}"
+  ssh_capture "$host" "
+    set -eu
+    target=$(q "$target_unix")
+    while (( \$(date +%s) < target )); do sleep 0.05; done
+    observed=\$(date +%s)
+    (( observed <= target + 1 )) || { echo \"snapshot collector missed common target: target=\$target observed=\$observed\" >&2; exit 1; }
+    printf '# chain1266_snapshot_target_unix=%s observed_unix=%s\\n' \"\$target\" \"\$observed\"
+    curl --fail --silent --max-time 3 http://$(q "${role_ip[$role]}"):6030/metrics
+  "
+}
+
 collect_validator_snapshot() {
-  local started="$EPOCHREALTIME" finished elapsed_ms role pid
+  local target_unix="$(( $(date +%s) + 3 ))" role pid
   local -a pids=()
   for role in "${validator_roles[@]}"; do
-    (metric_text "$role" >"$output/$role.metrics") &
+    (metric_text_at "$role" "$target_unix" >"$output/$role.metrics") &
     pids+=("$!")
   done
   for pid in "${pids[@]}"; do
     wait "$pid" || { echo "validator metrics snapshot request failed" >&2; return 1; }
   done
-  finished="$EPOCHREALTIME"
-  elapsed_ms="$(awk -v started="$started" -v finished="$finished" 'BEGIN { printf "%d", (finished - started) * 1000 }')"
-  (( elapsed_ms <= 1000 )) || { echo "validator metrics snapshot exceeded one second: ${elapsed_ms}ms" >&2; return 1; }
+  for role in "${validator_roles[@]}"; do
+    grep -qx "# chain1266_snapshot_target_unix=${target_unix} observed_unix=${target_unix}" "$output/$role.metrics" || {
+      echo "validator metrics snapshot was not collected at the common target" >&2
+      return 1
+    }
+  done
 }
 
 for role in relay1 relay2 relay3 rpc-gateway explorer-indexer observer validator-node-01 validator-node-02 validator-node-03 validator-node-04 validator-node-05; do start_role "$role"; done
