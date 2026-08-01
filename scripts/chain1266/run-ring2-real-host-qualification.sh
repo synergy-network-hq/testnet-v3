@@ -12,6 +12,7 @@ output="${CHAIN1266_RING2_OUTPUT_DIR:?CHAIN1266_RING2_OUTPUT_DIR is required}"
 target_height="${CHAIN1266_RING2_TARGET_HEIGHT:-10000}"
 run_id="${CHAIN1266_RING2_RUN_ID:-c1266q$(date -u +%Y%m%d%H%M%S)}"
 preflight_only="${CHAIN1266_RING2_PREFLIGHT_ONLY:-0}"
+metrics_sample_interval_seconds="${CHAIN1266_RING2_METRICS_SAMPLE_INTERVAL_SECONDS:-10}"
 
 [[ "$release_host" == synergy-val1 ]] || { echo "Ring-2 release host must be synergy-val1" >&2; exit 2; }
 [[ "$release_id" =~ ^chain1266-incarnation-4-rc[0-9]+$ ]] || { echo "invalid release ID" >&2; exit 2; }
@@ -19,6 +20,7 @@ preflight_only="${CHAIN1266_RING2_PREFLIGHT_ONLY:-0}"
 [[ "$target_height" =~ ^[0-9]+$ ]] && (( target_height >= 10000 )) || { echo "target height must be at least 10000" >&2; exit 2; }
 [[ "$run_id" =~ ^c1266q[a-z0-9]{6,24}$ ]] || { echo "run ID must be a compact c1266q identifier" >&2; exit 2; }
 [[ "$preflight_only" == 0 || "$preflight_only" == 1 ]] || { echo "preflight-only must be 0 or 1" >&2; exit 2; }
+[[ "$metrics_sample_interval_seconds" =~ ^[0-9]+$ ]] && (( metrics_sample_interval_seconds >= 5 && metrics_sample_interval_seconds <= 30 )) || { echo "metrics sample interval must be 5 through 30 seconds" >&2; exit 2; }
 
 # Keep every logical command on a host multiplexed through exactly one
 # workbook-backed SSH master.  This is intentionally the only SSH interface
@@ -76,9 +78,27 @@ mkdir -p "$output"
 chmod 0700 "$output"
 
 cleanup_started=false
+capture_pre_cleanup_diagnostics() {
+  [[ -d "$output" ]] || return 0
+  for host in "${hosts[@]}"; do
+    ssh_capture "$host" "
+      set +e
+      run=$(q "$run_id")
+      printf 'captured_unix=%s\\n' \"\$(date +%s)\"
+      systemctl list-units --all --plain --no-legend 'synergy-chain1266-role@'\"\$run\"'-*.service'
+      for unit in \$(systemctl list-units --all --plain --no-legend 'synergy-chain1266-role@'\"\$run\"'-*.service' 2>/dev/null | awk '{print \$1}'); do
+        printf '\\n[%s]\\n' \"\$unit\"
+        systemctl show \"\$unit\" --no-pager --property=ActiveState,SubState,MainPID,ExecMainCode,ExecMainStatus,NRestarts
+        journalctl -u \"\$unit\" --no-pager -n 200 -o short-iso-precise
+      done
+      ss -ltnp '( sport = :6030 )' 2>&1 || true
+    " >"$output/$host.pre-cleanup-diagnostics.txt" 2>&1 || true
+  done
+}
 cleanup() {
   [[ "$cleanup_started" == false ]] || return
   cleanup_started=true
+  capture_pre_cleanup_diagnostics
   for host in "${hosts[@]}"; do
     ssh_run "$host" "
       set +e
@@ -281,22 +301,41 @@ metric_text_at() {
   "
 }
 
-collect_validator_snapshot() {
-  local target_unix="$(( $(date +%s) + 3 ))" role pid
+collect_validator_snapshot_once() {
+  local target_unix="$(( $(date +%s) + 3 ))" attempt_id="$((RANDOM))" role pid tmp
+  local failed=false
   local -a pids=()
+  local -a temporary_files=()
   for role in "${validator_roles[@]}"; do
-    (metric_text_at "$role" "$target_unix" >"$output/$role.metrics") &
+    tmp="$output/.${role}.snapshot-${target_unix}-${attempt_id}.tmp"
+    temporary_files+=("$tmp")
+    rm -f "$tmp"
+    (metric_text_at "$role" "$target_unix" >"$tmp") &
     pids+=("$!")
   done
-  for pid in "${pids[@]}"; do
-    wait "$pid" || { echo "validator metrics snapshot request failed" >&2; return 1; }
+  for pid in "${pids[@]}"; do wait "$pid" || failed=true; done
+  [[ "$failed" == false ]] || { rm -f "${temporary_files[@]}"; return 1; }
+  for role in "${validator_roles[@]}"; do
+    tmp="$output/.${role}.snapshot-${target_unix}-${attempt_id}.tmp"
+    grep -qx "# chain1266_snapshot_target_unix=${target_unix} observed_unix=${target_unix}" "$tmp" || { rm -f "${temporary_files[@]}"; return 1; }
   done
   for role in "${validator_roles[@]}"; do
-    grep -qx "# chain1266_snapshot_target_unix=${target_unix} observed_unix=${target_unix}" "$output/$role.metrics" || {
-      echo "validator metrics snapshot was not collected at the common target" >&2
-      return 1
-    }
+    tmp="$output/.${role}.snapshot-${target_unix}-${attempt_id}.tmp"
+    mv "$tmp" "$output/$role.metrics"
   done
+}
+
+collect_validator_snapshot() {
+  local attempt
+  for attempt in 1 2 3; do
+    collect_validator_snapshot_once && return 0
+    (( attempt < 3 )) && { echo "QUALIFICATION_INFRASTRUCTURE_DEGRADED snapshot_attempt=$attempt retrying" >&2; sleep 2; }
+  done
+  jq -n --arg run_id "$run_id" --arg failure_class QUALIFICATION_INFRASTRUCTURE_FAILURE --argjson attempts 3 \
+    '{schema_version:1,run_id:$run_id,failure_class:$failure_class,snapshot_attempts:$attempts}' \
+    >"$output/qualification-failure.json"
+  echo "validator metrics snapshot request failed after three attempts" >&2
+  return 1
 }
 
 for role in relay1 relay2 relay3 rpc-gateway explorer-indexer observer validator-node-01 validator-node-02 validator-node-03 validator-node-04 validator-node-05; do start_role "$role"; done
@@ -382,7 +421,11 @@ while :; do
     jq -n --argjson before "$before" --argjson after "$(metric validator-node-01 consensus_finalized_height)" '{single_validator_restart:"PASS",packet_loss:"PASS",observer_wipe_resync:"PASS",height_before:$before,height_after:$after}' >"$output/fault-recovery.json"
   fi
   (( min >= target_height )) && [[ "$faults_done" == true ]] && break
-  sleep 1
+  # The metrics endpoint serializes a substantial runtime snapshot.  Sampling
+  # six validators every second becomes observer-induced consensus pressure;
+  # the finality metrics are cumulative, so a ten-second cadence preserves
+  # every qualification gate without perturbing the system under test.
+  sleep "$metrics_sample_interval_seconds"
 done
 
 for role in "${roles[@]}"; do ssh_capture "${role_host[$role]}" "sudo -n journalctl -u synergy-chain1266-role@$(q "$run_id-$role").service --no-pager -n 200 -o short-iso-precise" >"$output/$role.log" || true; done
