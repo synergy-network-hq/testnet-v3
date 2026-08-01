@@ -273,7 +273,10 @@ metric_text_at() {
     observed=\$(date +%s)
     (( observed <= target + 1 )) || { echo \"snapshot collector missed common target: target=\$target observed=\$observed\" >&2; exit 1; }
     printf '# chain1266_snapshot_target_unix=%s observed_unix=%s\\n' \"\$target\" \"\$observed\"
-    curl --fail --silent --max-time 3 http://$(q "${role_ip[$role]}"):6030/metrics
+    # Each request begins at the shared second above. Completion time is not
+    # a validator-health signal, and a busy host can need longer than three
+    # seconds to serialize its metrics response.
+    curl --fail --silent --show-error --connect-timeout 3 --max-time 10 http://$(q "${role_ip[$role]}"):6030/metrics
   "
 }
 
