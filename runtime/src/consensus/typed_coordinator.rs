@@ -2838,15 +2838,28 @@ where
                 {
                     return Err("typed finality vote has no locally validated proposal".to_string());
                 }
-                let prepared = self.prepared_certificate.as_ref().ok_or_else(|| {
-                    "typed finality vote arrived before a matching validation certificate"
-                        .to_string()
-                })?;
-                if prepared.candidate_id != vote.block_id {
-                    return Err(
-                        "TYPED_DRIVER_SOURCE_CONFLICT: finality vote conflicts with the prepared candidate"
-                            .to_string(),
-                    );
+                match self.prepared_certificate.as_ref() {
+                    Some(prepared)
+                        if prepared.candidate_id != vote.block_id
+                            && prepared.round == vote.round =>
+                    {
+                        // Two candidates prepared in one height/round remain
+                        // a genuine safety conflict.
+                        return Err(
+                            "TYPED_DRIVER_SOURCE_CONFLICT: finality vote conflicts with the prepared candidate"
+                                .to_string(),
+                        );
+                    }
+                    Some(prepared)
+                        if prepared.candidate_id != vote.block_id
+                            && prepared.round.0 > vote.round.0 =>
+                    {
+                        return Err(
+                            "TYPED_DRIVER_SOURCE_CONFLICT: finality vote predates the prepared candidate"
+                                .to_string(),
+                        );
+                    }
+                    _ => {}
                 }
                 insert_distinct_verified_vote(
                     self.finality_votes
@@ -2854,6 +2867,17 @@ where
                         .or_default(),
                     verified_vote,
                 )?;
+                if !self.prepared_certificate.as_ref().is_some_and(|prepared| {
+                    prepared.candidate_id == vote.block_id && prepared.round.0 <= vote.round.0
+                }) {
+                    // A proposal and its finality votes can overtake the
+                    // matching VC. Retain the already verified votes, but do
+                    // not aggregate them until that certificate is verified
+                    // and installed. An older-round prepared candidate is a
+                    // lock to preserve, not evidence that the later-round
+                    // finality vote conflicts.
+                    return Ok(());
+                }
                 self.maybe_form_finality_certificate(&vote.block_id)
             }
             VotePhase::Timeout => {
@@ -2904,13 +2928,10 @@ where
         if self.finality_certificate.is_some() {
             return Ok(());
         }
-        let votes = self
-            .finality_votes
-            .get(candidate_id)
-            .ok_or_else(|| "typed finality vote collector disappeared".to_string())?
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
+        let Some(votes_by_validator) = self.finality_votes.get(candidate_id) else {
+            return Ok(());
+        };
+        let votes = votes_by_validator.values().cloned().collect::<Vec<_>>();
         if !self.has_exact_quorum(&votes)? {
             return Ok(());
         }
@@ -3125,7 +3146,8 @@ where
                 return Ok(());
             }
         }
-        let prepared_candidate = certificate.candidate_id.0.clone();
+        let prepared_candidate_id = certificate.candidate_id.clone();
+        let prepared_candidate = prepared_candidate_id.0.clone();
         self.prepared_certificate = Some(certificate);
         if let Ok(mut telemetry) = typed_consensus_telemetry().lock() {
             telemetry.snapshot.prepared_height =
@@ -3138,7 +3160,10 @@ where
                 .unwrap_or_default();
         }
         self.persist_prepared_if_complete()?;
-        Ok(())
+        // Finality votes can legitimately arrive after their proposal but
+        // before this VC. If a quorum was retained, installing the matching
+        // certificate must immediately resume the ordinary QC path.
+        self.maybe_form_finality_certificate(&prepared_candidate_id)
     }
 
     fn install_pending_validation_certificate(
@@ -7244,6 +7269,162 @@ mod tests {
             message,
             TypedConsensusMessage::CoreProposal { .. } | TypedConsensusMessage::Proposal { .. }
         )));
+    }
+
+    #[test]
+    fn later_round_finality_votes_wait_for_their_matching_vc() {
+        let mut coordinator = coordinator_fixture();
+        let height_context = coordinator.local_context.height_context.clone();
+        let validators = coordinator.consensus.validator_set.validators.clone();
+        let round_zero_proposer = coordinator
+            .consensus
+            .proposer_for(&height_context, Round(0))
+            .expect("round-zero proposer");
+        coordinator.local_validator_id = round_zero_proposer.validator_id;
+        let mut driver = driver_with(coordinator, 1);
+        driver.tick().expect("emit round-zero proposal");
+        let first_block = driver
+            .current_round_proposal()
+            .expect("round-zero proposal is accepted")
+            .clone();
+        let first_validation_votes = validators
+            .iter()
+            .map(|validator| {
+                driver.coordinator.consensus.validation_vote(
+                    &mut driver.coordinator.signer,
+                    validator,
+                    &first_block,
+                    &height_context,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .expect("round-zero validation votes");
+        let first_prepared = driver
+            .coordinator
+            .form_validation_certificate(&first_validation_votes[..5])
+            .expect("round-zero prepared certificate");
+        driver
+            .record_validation_certificate(first_prepared.clone())
+            .expect("install round-zero prepared certificate");
+
+        let timeout_votes = validators
+            .iter()
+            .map(|validator| {
+                driver.coordinator.consensus.timeout_vote(
+                    &mut driver.coordinator.signer,
+                    validator,
+                    &height_context,
+                    Round(0),
+                    None,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .expect("round-zero no-carry timeout votes");
+        let timeout_certificate = driver
+            .coordinator
+            .form_timeout_certificate(&timeout_votes[..5])
+            .expect("round-zero no-carry TC");
+        driver
+            .coordinator
+            .accept_timeout_certificate(timeout_certificate.clone())
+            .expect("advance coordinator to round one");
+        driver
+            .install_verified_timeout_certificate(timeout_certificate)
+            .expect("install round-one authority");
+
+        let round_one_proposer = driver
+            .coordinator
+            .consensus
+            .proposer_for(&height_context, Round(1))
+            .expect("round-one proposer");
+        driver.coordinator.local_validator_id = round_one_proposer.validator_id.clone();
+        driver
+            .try_emit_scheduled_proposal()
+            .expect("emit a new round-one proposal after the no-carry TC");
+        let second_block = driver
+            .current_round_proposal()
+            .expect("round-one proposal is accepted")
+            .clone();
+        assert_ne!(
+            first_block.candidate_id().unwrap(),
+            second_block.candidate_id().unwrap()
+        );
+        let second_validation_votes = validators
+            .iter()
+            .map(|validator| {
+                driver.coordinator.consensus.validation_vote(
+                    &mut driver.coordinator.signer,
+                    validator,
+                    &second_block,
+                    &height_context,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .expect("round-one validation votes");
+        let second_prepared = driver
+            .coordinator
+            .form_validation_certificate(&second_validation_votes[..5])
+            .expect("round-one prepared certificate");
+        let second_finality_votes = validators
+            .iter()
+            .map(|validator| {
+                driver.coordinator.consensus.finality_vote(
+                    &mut driver.coordinator.signer,
+                    validator,
+                    &second_block,
+                    &second_prepared,
+                    &height_context,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .expect("round-one finality votes");
+
+        for vote in second_finality_votes.into_iter().take(5) {
+            driver
+                .record_verified_vote(vote)
+                .expect("later-round finality vote waits for its matching VC");
+        }
+        assert_eq!(driver.coordinator.local_context.round, Round(1));
+        assert_eq!(
+            driver
+                .prepared_certificate
+                .as_ref()
+                .expect("older prepared lock remains until the new VC arrives")
+                .candidate_id,
+            first_prepared.candidate_id
+        );
+        assert_eq!(
+            driver
+                .finality_votes
+                .get(&second_prepared.candidate_id)
+                .map(BTreeMap::len),
+            Some(5)
+        );
+
+        // Keep this replica on the backup path so the focused unit does not
+        // need a release-grade next-height provider. The matching VC must
+        // still release the retained quorum to ordinary aggregation without
+        // reporting a source conflict.
+        driver.coordinator.local_validator_id = validators
+            .iter()
+            .find(|validator| validator.validator_id != round_one_proposer.validator_id)
+            .expect("fixture contains a non-proposer backup")
+            .validator_id
+            .clone();
+        let second_candidate = second_prepared.candidate_id.clone();
+        driver
+            .record_validation_certificate(second_prepared)
+            .expect("matching VC releases the buffered finality quorum");
+        assert_eq!(
+            driver
+                .prepared_certificate
+                .as_ref()
+                .expect("matching later-round VC is installed")
+                .candidate_id,
+            second_candidate
+        );
+        assert!(driver.finality_quorum_observed_at.is_some());
+        assert_eq!(driver.coordinator.local_context.round, Round(1));
     }
 
     #[test]
