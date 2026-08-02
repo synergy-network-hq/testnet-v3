@@ -62,7 +62,10 @@ The following components are implemented and covered by focused unit tests:
 - assignment, proposal, commit, execution, idempotence, and finality sync in
   `coordinated_runtime.rs`.
 - a dedicated validator role worker in `role_runtime.rs` that selects P1
-  instead of constructing or starting the typed PoSy worker.
+  instead of constructing or starting the typed PoSy worker; it recovers exact
+  authenticated Aegis admission envelopes from the ordinary transaction pool,
+  canonically orders them, and builds an admitted block. It uses an empty block
+  only when that recovered admission set is empty.
 
 The P1 role worker starts only after it has bound canonical Genesis, the
 finalized six-validator set, the local finalized signing key, and the signed
@@ -70,11 +73,9 @@ start barrier. On a controlled reset, it verifies that the shared chain is
 exactly canonical Genesis at height 0 and that no coordinated/typed finality,
 coordinator, or signing journal survived before consuming `.reset_flag`.
 
-The remaining release blockers are the canonical user-transaction admission
-path (the current P1 builder may produce an empty block only when no admitted
-transaction is available), non-signing coordinated-finality replication for
-support roles, and the six-validator integration/Atlas qualification harness.
-These gaps keep the mode non-deployable and unqualified.
+The remaining release blockers are non-signing coordinated-finality replication
+for support roles and the six-validator integration/Atlas qualification
+harness. These gaps keep the mode non-deployable and unqualified.
 
 ## Epochs and initial height
 

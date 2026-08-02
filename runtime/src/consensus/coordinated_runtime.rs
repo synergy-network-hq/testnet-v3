@@ -5,6 +5,11 @@
 //! and separate durable finality. It intentionally exposes no vote, QC, VC,
 //! TC, aggregation, or coordinator-election operation.
 
+use crate::aegis_tx_tool::AegisTxSubmissionEnvelope;
+use crate::consensus::coordinated_admission::{
+    coordinated_dag_frontier_root, coordinated_transaction_ids,
+    verify_coordinated_transaction_admissions,
+};
 use crate::consensus::coordinated_finality_store::{
     CoordinatedFinalityRecord, CoordinatedFinalityStore,
 };
@@ -354,6 +359,7 @@ impl CoordinatedRuntime {
         &mut self,
         assignment: &ProducerAssignment,
         mut block: Block,
+        transaction_admissions: Vec<AegisTxSubmissionEnvelope>,
     ) -> Result<(CoordinatedProposal, Block), String> {
         self.accept_assignment(assignment)?;
         if self.local_validator_id.0 != assignment.assigned_producer_id {
@@ -372,6 +378,28 @@ impl CoordinatedRuntime {
         if block.proposer_signature.is_present() {
             return Err(
                 "coordinated producer block must be unsigned before its durable signing boundary"
+                    .to_string(),
+            );
+        }
+
+        let transaction_admission_root = verify_coordinated_transaction_admissions(
+            &block.transactions,
+            &transaction_admissions,
+            block.header.height,
+            block
+                .header
+                .timestamp_ms_consensus_bounded
+                .saturating_div(1_000),
+        )?;
+        if block.header.dag_frontier_root
+            != coordinated_dag_frontier_root(
+                block.header.parent_block_hash,
+                block.header.tx_order_root,
+                transaction_admission_root,
+            )
+        {
+            return Err(
+                "coordinated producer block does not bind its transaction-admission witnesses"
                     .to_string(),
             );
         }
@@ -434,18 +462,7 @@ impl CoordinatedRuntime {
             )?;
         }
 
-        let transaction_ids = block
-            .transactions
-            .iter()
-            .map(|transaction| {
-                Ok(crate::synergy_types::TxId::from_hash(
-                    Hash::from_domain_bytes(
-                        "SYNERGY_EXECUTION_TX_ID_V1",
-                        &transaction.canonical_bytes()?,
-                    ),
-                ))
-            })
-            .collect::<Result<Vec<_>, String>>()?;
+        let transaction_ids = coordinated_transaction_ids(&block.transactions)?;
         let proposal = CoordinatedProposal {
             epoch: assignment.epoch,
             height: assignment.height,
@@ -455,6 +472,8 @@ impl CoordinatedRuntime {
             block_hash: Hash::from_hex(&block.block_id()?.0)
                 .map_err(|error| format!("coordinated block ID is not a hash: {error}"))?,
             transaction_root: crate::dag_mempool::compute_tx_order_root(&transaction_ids)?,
+            transaction_admission_root,
+            transaction_admissions,
             receipt_root: block.header.receipt_root,
             state_root: block.header.state_root_after,
             producer_id: assignment.assigned_producer_id.clone(),
@@ -466,14 +485,13 @@ impl CoordinatedRuntime {
         Ok((proposal, block))
     }
 
-    /// Builds the canonical empty block for the local assigned producer. This
-    /// is valid only when the coordinated typed-admission source has no ready
-    /// transactions. Transaction-bearing construction remains a separate
-    /// admission-preserving path; this helper cannot be used to bypass it.
-    pub fn build_empty_assigned_block(
+    /// Builds the canonical block for the local assigned producer from the
+    /// exact ordered Aegis admission witnesses selected for this turn.
+    pub fn build_assigned_block(
         &self,
         assignment: &ProducerAssignment,
         context: &CoordinatedBlockBuildContext,
+        transaction_admissions: &[AegisTxSubmissionEnvelope],
     ) -> Result<Block, String> {
         context.validate()?;
         if self.local_validator_id.0 != assignment.assigned_producer_id {
@@ -492,6 +510,16 @@ impl CoordinatedRuntime {
                     .to_string(),
             );
         }
+        let transactions = transaction_admissions
+            .iter()
+            .map(|admission| admission.transaction.clone())
+            .collect::<Vec<_>>();
+        let transaction_admission_root = verify_coordinated_transaction_admissions(
+            &transactions,
+            transaction_admissions,
+            Height(assignment.height),
+            assignment.intended_block_timestamp_ms.saturating_div(1_000),
+        )?;
 
         let active_validators = self
             .verifier
@@ -506,7 +534,8 @@ impl CoordinatedRuntime {
             .verifier
             .validator_record(&assignment.assigned_producer_id)?;
         let state_root = compute_state_root_after(&self.execution_state)?;
-        let tx_order_root = crate::dag_mempool::compute_tx_order_root(&[])?;
+        let transaction_ids = coordinated_transaction_ids(&transactions)?;
+        let tx_order_root = crate::dag_mempool::compute_tx_order_root(&transaction_ids)?;
         let validator_set_root = active_validators.hash()?;
         let consensus_key_root = active_validators.consensus_key_root()?;
         let frozen_weight_root = active_validators.frozen_bonded_weight_root()?;
@@ -557,12 +586,10 @@ impl CoordinatedRuntime {
             "SYNERGY_COORDINATED_BLOCK_CONTEXT_V1",
             &height_context_material,
         );
-        let mut dag_frontier_material = Vec::new();
-        dag_frontier_material.extend_from_slice(&assignment.parent_block_hash.0);
-        dag_frontier_material.extend_from_slice(&tx_order_root.0);
-        let dag_frontier_root = Hash::from_domain_bytes(
-            "SYNERGY_COORDINATED_EMPTY_DAG_FRONTIER_V1",
-            &dag_frontier_material,
+        let dag_frontier_root = coordinated_dag_frontier_root(
+            assignment.parent_block_hash,
+            tx_order_root,
+            transaction_admission_root,
         );
         let mut block = Block {
             header: BlockHeader {
@@ -595,7 +622,8 @@ impl CoordinatedRuntime {
                 cryptographic_profile_root: context.cryptographic_profile_root,
                 dag_frontier_root,
                 tx_order_root,
-                tx_count: 0,
+                tx_count: u64::try_from(transactions.len())
+                    .map_err(|_| "coordinated block transaction count exceeds u64".to_string())?,
                 protected_batch: None,
                 evidence_root: assignment.prior_finality_reference,
                 state_root_before: state_root,
@@ -607,16 +635,34 @@ impl CoordinatedRuntime {
                 aegis_pqvm_version: "aegis-pqvm".to_string(),
                 timestamp_ms_consensus_bounded: assignment.intended_block_timestamp_ms,
             },
-            transactions: Vec::new(),
+            transactions,
             proposer_signature: AegisPqSignature {
                 algorithm: String::new(),
                 signature_bytes: Vec::new(),
             },
         };
-        let execution = execute_block(&block, &self.execution_state)?;
+        let mut authorized = self.execution_state.clone();
+        for transaction in &block.transactions {
+            authorized.mark_authorized_at(
+                transaction,
+                assignment.intended_block_timestamp_ms.saturating_div(1_000),
+            )?;
+        }
+        let execution = execute_block(&block, &authorized)?;
         block.header.state_root_after = execution.state_root_after;
         block.header.receipt_root = execution.receipt_root;
         Ok(block)
+    }
+
+    /// Builds the canonical empty block only when the P1 admission source has
+    /// no ready user transaction. Callers with any admitted work must use
+    /// [`Self::build_assigned_block`] so it is executed and signed in order.
+    pub fn build_empty_assigned_block(
+        &self,
+        assignment: &ProducerAssignment,
+        context: &CoordinatedBlockBuildContext,
+    ) -> Result<Block, String> {
+        self.build_assigned_block(assignment, context, &[])
     }
 
     /// Verifies, executes, and finalizes a producer block on Val1. The exact
@@ -1141,7 +1187,11 @@ mod tests {
                     b"coordinated-runtime-test",
                 ),
                 cryptographic_profile_root: hash("cryptographic-profile"),
-                dag_frontier_root: hash("empty-dag-frontier"),
+                dag_frontier_root: coordinated_dag_frontier_root(
+                    assignment.parent_block_hash,
+                    transaction_root,
+                    Hash::zero(),
+                ),
                 tx_order_root: transaction_root,
                 tx_count: 0,
                 protected_batch: None,
@@ -1180,6 +1230,8 @@ mod tests {
             prior_finality_reference: assignment.prior_finality_reference,
             block_hash: Hash::from_hex(&block.block_id().expect("block ID").0).expect("block hash"),
             transaction_root,
+            transaction_admission_root: Hash::zero(),
+            transaction_admissions: Vec::new(),
             receipt_root,
             state_root,
             producer_id: assignment.assigned_producer_id.clone(),
@@ -1259,7 +1311,7 @@ mod tests {
         };
 
         let (proposal, signed_block) = producer
-            .sign_assigned_producer_block(&assignment, unsigned_block.clone())
+            .sign_assigned_producer_block(&assignment, unsigned_block.clone(), Vec::new())
             .expect("assigned producer signs through the durable journal");
         assert_eq!(proposal.producer_id, "validator-2");
         assert!(signed_block.proposer_signature.is_present());
@@ -1269,7 +1321,7 @@ mod tests {
             .expect("journaled producer block remains independently verifiable");
 
         let (replayed_proposal, replayed_block) = producer
-            .sign_assigned_producer_block(&assignment, unsigned_block)
+            .sign_assigned_producer_block(&assignment, unsigned_block, Vec::new())
             .expect("producer restart path reuses the exact durable block");
         assert_eq!(replayed_proposal, proposal);
         assert_eq!(replayed_block, signed_block);
@@ -1316,12 +1368,68 @@ mod tests {
         assert!(block.header.last_finalized_qc_hash.is_zero());
 
         let (proposal, signed) = producer
-            .sign_assigned_producer_block(&assignment, block)
+            .sign_assigned_producer_block(&assignment, block, Vec::new())
             .expect("sign the exact built block through the durable producer journal");
         producer
             .verifier
             .verify_producer_block(&assignment, &proposal, &signed)
             .expect("every validator can verify the built producer block");
+    }
+
+    #[test]
+    fn assigned_producer_builds_and_all_validators_verify_an_admitted_user_transaction() {
+        let mut producer = fixture_for_local("validator-2");
+        let context = block_build_context();
+        let timestamp = producer
+            .next_assignment_timestamp(&context)
+            .expect("derive Genesis-bound assignment timestamp");
+        let mut assignment = producer
+            .coordinator_state
+            .assignment_template(&producer.config, producer.verifier.epoch().0, timestamp)
+            .expect("build Val1 assignment subject");
+        let coordinator_key = producer
+            .verifier
+            .validator_record("validator-1")
+            .expect("configured coordinator")
+            .consensus_public_key
+            .key_id
+            .clone();
+        assignment.coordinator_signature = producer
+            .signer
+            .sign_domain(
+                COORDINATED_ASSIGNMENT_DOMAIN,
+                &assignment.signing_hash().expect("assignment hash").0,
+                &coordinator_key,
+            )
+            .expect("Val1 signs the assignment with the finalized key");
+        producer
+            .accept_assignment(&assignment)
+            .expect("install signed producer assignment");
+
+        let report = crate::aegis_tx_tool::sign_with_new_aegis_transaction_key(
+            crate::aegis_tx_tool::AegisTxBuildOptions {
+                ttl_height: assignment.height.saturating_add(10),
+                ..crate::aegis_tx_tool::AegisTxBuildOptions::default()
+            },
+        )
+        .expect("create a signed user transaction");
+        producer.execution_state = ExecutionState::new()
+            .with_balance(&report.transaction.sender_uma_or_account, 1_000_000);
+        let admissions = vec![report.submission_envelope];
+
+        let block = producer
+            .build_assigned_block(&assignment, &context, &admissions)
+            .expect("build an admitted coordinated user block");
+        assert_eq!(block.header.tx_count, 1);
+        assert_eq!(block.transactions, vec![report.transaction]);
+        let (proposal, signed) = producer
+            .sign_assigned_producer_block(&assignment, block, admissions)
+            .expect("sign the admitted block through the durable producer journal");
+        assert!(!proposal.transaction_admission_root.is_zero());
+        producer
+            .verifier
+            .verify_producer_block(&assignment, &proposal, &signed)
+            .expect("every validator independently verifies the user witness and block");
     }
 
     #[test]

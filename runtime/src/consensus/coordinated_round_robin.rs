@@ -8,6 +8,10 @@
 //! consensus keys, persisting this state before broadcast, and passing the
 //! canonical block execution result to this state machine.
 
+use crate::aegis_tx_tool::AegisTxSubmissionEnvelope;
+use crate::consensus::coordinated_admission::{
+    coordinated_dag_frontier_root, verify_coordinated_transaction_admissions,
+};
 use crate::crypto::aegis_pqvm::{AegisPqvmVerifier, SYNERGY_BLOCK_V1};
 use crate::dag_mempool::compute_tx_order_root;
 use crate::p2p::messages::{
@@ -294,10 +298,27 @@ impl CoordinatedConsensusVerifier {
                 "coordinated producer block does not match its signed assignment".to_string(),
             );
         }
-        for transaction in &block.transactions {
-            self.verifier
-                .verify_transaction_signature_checked(transaction)
-                .map_err(|error| format!("verify coordinated transaction signature: {error}"))?;
+        let transaction_admission_root = verify_coordinated_transaction_admissions(
+            &block.transactions,
+            &proposal.transaction_admissions,
+            block.header.height,
+            block
+                .header
+                .timestamp_ms_consensus_bounded
+                .saturating_div(1_000),
+        )?;
+        if proposal.transaction_admission_root != transaction_admission_root
+            || block.header.dag_frontier_root
+                != coordinated_dag_frontier_root(
+                    block.header.parent_block_hash,
+                    block.header.tx_order_root,
+                    transaction_admission_root,
+                )
+        {
+            return Err(
+                "coordinated producer block transaction-admission witness is not bound to its signed header"
+                    .to_string(),
+            );
         }
         self.verifier
             .verify_domain_signature(
@@ -592,6 +613,11 @@ pub struct CoordinatedProposal {
     pub prior_finality_reference: Hash,
     pub block_hash: Hash,
     pub transaction_root: Hash,
+    /// The ordered Aegis public-key/lifecycle witnesses for block user
+    /// transactions. This root is bound into both the producer-signed header
+    /// and Val1's sole commit.
+    pub transaction_admission_root: Hash,
+    pub transaction_admissions: Vec<AegisTxSubmissionEnvelope>,
     pub receipt_root: Hash,
     pub state_root: Hash,
     pub producer_id: String,
@@ -629,6 +655,7 @@ pub struct CoordinatorCommit {
     pub prior_finality_reference: Hash,
     pub block_hash: Hash,
     pub transaction_root: Hash,
+    pub transaction_admission_root: Hash,
     pub receipt_root: Hash,
     pub state_root: Hash,
     pub producer_id: String,
@@ -650,6 +677,7 @@ impl CoordinatorCommit {
             prior_finality_reference: self.prior_finality_reference,
             block_hash: self.block_hash,
             transaction_root: self.transaction_root,
+            transaction_admission_root: self.transaction_admission_root,
             receipt_root: self.receipt_root,
             state_root: self.state_root,
             producer_id: self.producer_id.clone(),
@@ -702,6 +730,7 @@ struct CoordinatorCommitPayload {
     prior_finality_reference: Hash,
     block_hash: Hash,
     transaction_root: Hash,
+    transaction_admission_root: Hash,
     receipt_root: Hash,
     state_root: Hash,
     producer_id: String,
@@ -1021,6 +1050,7 @@ impl CoordinatorState {
             prior_finality_reference: proposal.prior_finality_reference,
             block_hash: proposal.block_hash,
             transaction_root: proposal.transaction_root,
+            transaction_admission_root: proposal.transaction_admission_root,
             receipt_root: proposal.receipt_root,
             state_root: proposal.state_root,
             producer_id: proposal.producer_id.clone(),
@@ -1510,6 +1540,8 @@ mod tests {
             prior_finality_reference: assignment.prior_finality_reference,
             block_hash: hash(block),
             transaction_root: hash("tx"),
+            transaction_admission_root: Hash::zero(),
+            transaction_admissions: Vec::new(),
             receipt_root: hash("receipt"),
             state_root: hash("state"),
             producer_id: assignment.assigned_producer_id.clone(),
@@ -1581,6 +1613,8 @@ mod tests {
             prior_finality_reference: replacement.prior_finality_reference,
             block_hash: hash("height-100"),
             transaction_root: hash("tx"),
+            transaction_admission_root: Hash::zero(),
+            transaction_admissions: Vec::new(),
             receipt_root: hash("receipt"),
             state_root: hash("state"),
             producer_id: replacement.assigned_producer_id.clone(),
@@ -1658,6 +1692,8 @@ mod tests {
             prior_finality_reference: stale.prior_finality_reference,
             block_hash: hash("stale"),
             transaction_root: hash("tx"),
+            transaction_admission_root: Hash::zero(),
+            transaction_admissions: Vec::new(),
             receipt_root: hash("receipt"),
             state_root: hash("state"),
             producer_id: stale.assigned_producer_id.clone(),

@@ -8,6 +8,9 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::aegis_tx_tool::{
+    decode_aegis_carrier_data, is_legacy_aegis_carrier_transaction, AegisTxSubmissionEnvelope,
+};
 use crate::config::{
     list_available_templates, load_node_config, load_node_config_from_template, NodeConfig,
     ResolvedConsensusMode,
@@ -64,7 +67,8 @@ use crate::rpc::rpc_server::{SHARED_CHAIN, SYNC_MANAGER, TX_POOL};
 use crate::sxcp;
 use crate::sync::SyncManager;
 use crate::synergy_types::{
-    Hash, Height, POSY_PROTOCOL_VERSION, SYNERGY_TESTNET_V3_CHAIN_ID, SYNERGY_TESTNET_V3_NETWORK_ID,
+    CanonicalSerialize, Hash, Height, POSY_PROTOCOL_VERSION, SYNERGY_TESTNET_V3_CHAIN_ID,
+    SYNERGY_TESTNET_V3_NETWORK_ID,
 };
 use crate::telemetry;
 use crate::testnet_v3_execution_bootstrap::load_finalized_testnet_v3_genesis_execution_state;
@@ -1578,6 +1582,38 @@ fn publish_coordinated_finalized_execution_state(
     Ok(())
 }
 
+/// Recovers only the exact, authenticated Aegis envelopes submitted through
+/// the ordinary RPC/P2P transaction pool. The legacy carrier is merely the
+/// transport envelope: P1 signs and executes its contained typed transaction,
+/// never the carrier representation. Sorting canonical bytes makes a local
+/// producer's selection stable across a retry/restart with the same pool.
+fn select_coordinated_transaction_admissions() -> Result<Vec<AegisTxSubmissionEnvelope>, String> {
+    let pool = TX_POOL
+        .lock()
+        .map_err(|_| "coordinated transaction pool lock is poisoned".to_string())?
+        .clone();
+    let mut admissions = Vec::new();
+    for transaction in &pool {
+        if !is_legacy_aegis_carrier_transaction(transaction) {
+            continue;
+        }
+        let data = transaction
+            .data
+            .as_deref()
+            .ok_or_else(|| "Aegis carrier transaction omitted carrier data".to_string())?;
+        let admission = decode_aegis_carrier_data(data)
+            .map_err(|error| format!("decode coordinated transaction admission: {error}"))?;
+        admissions.push(admission);
+    }
+    admissions.sort_by(|left, right| {
+        left.transaction
+            .canonical_bytes()
+            .unwrap_or_default()
+            .cmp(&right.transaction.canonical_bytes().unwrap_or_default())
+    });
+    Ok(admissions)
+}
+
 fn maybe_broadcast_local_coordinated_proposal(
     runtime: &mut CoordinatedRuntime,
     block_context: &CoordinatedBlockBuildContext,
@@ -1589,8 +1625,9 @@ fn maybe_broadcast_local_coordinated_proposal(
     if assignment.assigned_producer_id != runtime.local_validator_id().0 {
         return Ok(());
     }
-    let block = runtime.build_empty_assigned_block(&assignment, block_context)?;
-    let (proposal, block) = runtime.sign_assigned_producer_block(&assignment, block)?;
+    let admissions = select_coordinated_transaction_admissions()?;
+    let block = runtime.build_assigned_block(&assignment, block_context, &admissions)?;
+    let (proposal, block) = runtime.sign_assigned_producer_block(&assignment, block, admissions)?;
     broadcast_coordinated_to_all_validators(
         network,
         &crate::p2p::messages::CoordinatedConsensusMessage::ProposedBlock {
@@ -4483,6 +4520,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    static COORDINATED_POOL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     struct EnvRestore {
         project_root: Option<String>,
@@ -5369,6 +5407,45 @@ mod tests {
             startup,
             FinalizedConsensusDriverStartup::SpawnCoordinatedRoundRobinDriver
         );
+    }
+
+    #[test]
+    fn coordinated_producer_recovers_and_canonically_orders_rpc_aegis_admissions() {
+        let _guard = COORDINATED_POOL_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("coordinated pool test lock");
+        let first = crate::aegis_tx_tool::sign_with_new_aegis_transaction_key(
+            crate::aegis_tx_tool::AegisTxBuildOptions::default(),
+        )
+        .expect("first signed Aegis transaction");
+        let mut second_options = crate::aegis_tx_tool::AegisTxBuildOptions::default();
+        second_options.nonce = 1;
+        let second = crate::aegis_tx_tool::sign_with_new_aegis_transaction_key(second_options)
+            .expect("second signed Aegis transaction");
+
+        let saved = TX_POOL.lock().expect("transaction pool lock").clone();
+        {
+            let mut pool = TX_POOL.lock().expect("transaction pool lock");
+            pool.clear();
+            pool.push(second.rpc_transaction);
+            pool.push(first.rpc_transaction);
+        }
+        let admissions = select_coordinated_transaction_admissions()
+            .expect("recover exact Aegis admissions from the RPC pool");
+        *TX_POOL.lock().expect("transaction pool lock") = saved;
+
+        assert_eq!(admissions.len(), 2);
+        assert!(admissions.windows(2).all(|pair| {
+            pair[0]
+                .transaction
+                .canonical_bytes()
+                .expect("canonical first transaction")
+                <= pair[1]
+                    .transaction
+                    .canonical_bytes()
+                    .expect("canonical second transaction")
+        }));
     }
 
     #[test]

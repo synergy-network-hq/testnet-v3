@@ -366,6 +366,16 @@ fn tx_id_from_signed_tx(verifier: &AegisPqvmVerifier, tx: &Transaction) -> Resul
 pub fn verify_aegis_submission_envelope(
     envelope: &AegisTxSubmissionEnvelope,
 ) -> Result<(), String> {
+    verify_aegis_submission_envelope_at(envelope, current_timestamp())
+}
+
+/// Verifies an Aegis submission against a caller-supplied consensus timestamp.
+/// Consensus callers must use their signed block timestamp rather than their
+/// local wall clock so admission is reproducible on every validator.
+pub fn verify_aegis_submission_envelope_at(
+    envelope: &AegisTxSubmissionEnvelope,
+    consensus_timestamp_unix: u64,
+) -> Result<(), String> {
     if envelope.public_key.key_id != envelope.transaction.aegis_pq_key_id {
         return Err(
             "Aegis transaction public key id does not match transaction key id".to_string(),
@@ -399,7 +409,7 @@ pub fn verify_aegis_submission_envelope(
     }
     crate::synq_admission::verify_transaction_payload_for_chain_admission(
         &envelope.transaction,
-        current_timestamp(),
+        consensus_timestamp_unix,
     )
     .map_err(|error| format!("SynQ admission rejected [{}]: {error}", error.code()))?;
     let verifier = AegisPqvmVerifier::initialize_required_for_public_key(

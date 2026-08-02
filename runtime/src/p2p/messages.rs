@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::block::{Block, BlockHeader};
+use crate::consensus::coordinated_admission::{
+    coordinated_dag_frontier_root, coordinated_transaction_admission_root,
+};
 use crate::consensus::coordinated_round_robin::{
     CoordinatedProposal, CoordinatedRoundRobinConfig, CoordinatorCommit, ProducerAssignment,
 };
@@ -178,6 +181,8 @@ impl CoordinatedCommittedBlockPackage {
             .collect::<Result<Vec<_>, String>>()?;
         let transaction_count = u64::try_from(transaction_ids.len())
             .map_err(|_| "coordinated package transaction count exceeds u64".to_string())?;
+        let transaction_admission_root =
+            coordinated_transaction_admission_root(&self.proposal.transaction_admissions)?;
         let block_hash = Hash::from_hex(&self.block.block_id()?.0)
             .map_err(|error| format!("coordinated package block ID is not a hash: {error}"))?;
         if self.block.header.epoch.0 != self.assignment.epoch
@@ -191,6 +196,13 @@ impl CoordinatedCommittedBlockPackage {
             || self.block.header.proposer_validator_id.0 != self.assignment.assigned_producer_id
             || self.block.header.tx_count != transaction_count
             || self.block.header.tx_order_root != compute_tx_order_root(&transaction_ids)?
+            || self.proposal.transaction_admission_root != transaction_admission_root
+            || self.block.header.dag_frontier_root
+                != coordinated_dag_frontier_root(
+                    self.block.header.parent_block_hash,
+                    self.block.header.tx_order_root,
+                    transaction_admission_root,
+                )
             || self.block.header.state_root_after != self.proposal.state_root
             || self.block.header.receipt_root != self.proposal.receipt_root
             || self.block.proposer_signature != self.proposal.producer_signature
@@ -220,6 +232,8 @@ impl CoordinatedCommittedBlockPackage {
                 != self.proposal.prior_finality_reference
             || self.coordinator_commit.block_hash != self.proposal.block_hash
             || self.coordinator_commit.transaction_root != self.proposal.transaction_root
+            || self.coordinator_commit.transaction_admission_root
+                != self.proposal.transaction_admission_root
             || self.coordinator_commit.receipt_root != self.proposal.receipt_root
             || self.coordinator_commit.state_root != self.proposal.state_root
             || self.coordinator_commit.producer_id != self.proposal.producer_id

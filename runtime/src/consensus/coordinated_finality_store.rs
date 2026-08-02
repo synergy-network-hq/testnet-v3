@@ -434,6 +434,7 @@ fn validate_record(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::consensus::coordinated_admission::coordinated_dag_frontier_root;
     use crate::consensus::coordinated_round_robin::{
         CoordinatedProposal, CoordinatorCommit, ProducerAssignment, COORDINATED_ROUND_ROBIN_V1,
     };
@@ -531,7 +532,11 @@ mod tests {
                     b"coordinated-test-parameters",
                 ),
                 cryptographic_profile_root: hash("crypto"),
-                dag_frontier_root: hash("dag"),
+                dag_frontier_root: coordinated_dag_frontier_root(
+                    parent_block_hash,
+                    transaction_root,
+                    Hash::zero(),
+                ),
                 tx_order_root: transaction_root,
                 tx_count: 0,
                 protected_batch: None,
@@ -558,6 +563,8 @@ mod tests {
             prior_finality_reference,
             block_hash,
             transaction_root,
+            transaction_admission_root: Hash::zero(),
+            transaction_admissions: Vec::new(),
             receipt_root,
             state_root,
             producer_id: "validator-2".to_string(),
@@ -575,6 +582,7 @@ mod tests {
             prior_finality_reference,
             block_hash,
             transaction_root,
+            transaction_admission_root: Hash::zero(),
             receipt_root,
             state_root,
             producer_id: "validator-2".to_string(),
