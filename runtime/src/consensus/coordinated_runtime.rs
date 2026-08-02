@@ -16,16 +16,71 @@ use crate::consensus::coordinated_round_robin::{
 use crate::consensus::signing_authority::{
     CoordinatedSigningAuthorization, CoordinatedSigningPhase, DurableConsensusSigningAuthority,
 };
+use crate::consensus_parameters::ConsensusParameterRoot;
 use crate::crypto::aegis_pqvm::{AegisPqvmSigner, SYNERGY_BLOCK_V1};
-use crate::execution::{compute_state_root_after, execute_block, ExecutionState};
+use crate::execution::{
+    compute_receipt_root, compute_state_root_after, execute_block, ExecutionState,
+};
 use crate::p2p::messages::{
     CoordinatedCommittedBlockPackage, CoordinatedConsensusMessage,
     MAX_COORDINATED_CONSENSUS_SYNC_RANGE_BLOCKS,
 };
 use crate::synergy_types::{
-    AegisPqKeyId, Block, CanonicalSerialize, ChainId, Epoch, Hash, Height, NetworkId, Round,
-    ValidatorId, ValidatorSet,
+    AegisPqKeyId, AegisPqSignature, Block, BlockHeader, CanonicalSerialize, ChainId, ClusterId,
+    Epoch, Hash, Height, NetworkId, Round, ValidatorId, ValidatorSet,
 };
+
+/// Immutable, Genesis-bound data required to construct a P1 coordinated
+/// block.  It is deliberately smaller than the retired PoSy height context:
+/// it provides metadata and deterministic timing only, not an inherited
+/// proposer schedule, QC, VC, TC, or vote authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoordinatedBlockBuildContext {
+    pub genesis_anchor: Hash,
+    pub genesis_timestamp_ms: u64,
+    pub protocol_config_hash: ConsensusParameterRoot,
+    pub cryptographic_profile_root: Hash,
+}
+
+impl CoordinatedBlockBuildContext {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.genesis_anchor.is_zero()
+            || self.genesis_timestamp_ms == 0
+            || self.protocol_config_hash.is_zero()
+            || self.cryptographic_profile_root.is_zero()
+        {
+            return Err("coordinated block build context is incomplete".to_string());
+        }
+        Ok(())
+    }
+
+    fn timestamp_for(
+        &self,
+        config: &CoordinatedRoundRobinConfig,
+        height: u64,
+        producer_round: u64,
+    ) -> Result<u64, String> {
+        self.validate()?;
+        if height == 0 {
+            return Err(
+                "coordinated block timestamp cannot target genesis height zero".to_string(),
+            );
+        }
+        let height_offset = height
+            .saturating_sub(1)
+            .checked_mul(config.target_block_interval_ms)
+            .ok_or_else(|| "coordinated block timestamp height offset overflow".to_string())?;
+        let round_offset = producer_round
+            .checked_mul(config.producer_turn_timeout_ms)
+            .ok_or_else(|| {
+                "coordinated block timestamp producer-round offset overflow".to_string()
+            })?;
+        self.genesis_timestamp_ms
+            .checked_add(height_offset)
+            .and_then(|timestamp| timestamp.checked_add(round_offset))
+            .ok_or_else(|| "coordinated block timestamp overflow".to_string())
+    }
+}
 
 /// The outcome of applying one fully verified coordinated finality package.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +200,29 @@ impl CoordinatedRuntime {
 
     pub fn is_local_coordinator(&self) -> bool {
         self.local_validator_id.0 == self.config.coordinator_id
+    }
+
+    pub fn pending_assignment(&self) -> Option<&ProducerAssignment> {
+        self.coordinator_state.pending_assignment.as_ref()
+    }
+
+    pub fn local_validator_id(&self) -> &ValidatorId {
+        &self.local_validator_id
+    }
+
+    /// Derives the only timestamp Val1 may use for the current durable next
+    /// assignment.  The result is a Genesis-bound height/round coordinate,
+    /// not a local clock reading, so restart replay has the exact same signing
+    /// subject.
+    pub fn next_assignment_timestamp(
+        &self,
+        context: &CoordinatedBlockBuildContext,
+    ) -> Result<u64, String> {
+        context.timestamp_for(
+            &self.config,
+            self.coordinator_state.next_height(),
+            self.coordinator_state.pending_round,
+        )
     }
 
     /// Creates or safely replays Val1's next assignment. The supplied time is
@@ -361,6 +439,159 @@ impl CoordinatedRuntime {
         self.verifier
             .verify_producer_block(assignment, &proposal, &block)?;
         Ok((proposal, block))
+    }
+
+    /// Builds the canonical empty block for the local assigned producer. This
+    /// is valid only when the coordinated typed-admission source has no ready
+    /// transactions. Transaction-bearing construction remains a separate
+    /// admission-preserving path; this helper cannot be used to bypass it.
+    pub fn build_empty_assigned_block(
+        &self,
+        assignment: &ProducerAssignment,
+        context: &CoordinatedBlockBuildContext,
+    ) -> Result<Block, String> {
+        context.validate()?;
+        if self.local_validator_id.0 != assignment.assigned_producer_id {
+            return Err("only the assigned producer may build a coordinated block".to_string());
+        }
+        if self.coordinator_state.pending_assignment.as_ref() != Some(assignment) {
+            return Err(
+                "coordinated block build does not match the durable pending assignment".to_string(),
+            );
+        }
+        let expected_timestamp =
+            context.timestamp_for(&self.config, assignment.height, assignment.producer_round)?;
+        if assignment.intended_block_timestamp_ms != expected_timestamp {
+            return Err(
+                "coordinated assignment timestamp does not match the Genesis-bound height/round schedule"
+                    .to_string(),
+            );
+        }
+
+        let active_validators = self
+            .verifier
+            .validator_set()
+            .active_for_epoch(Epoch(assignment.epoch));
+        if active_validators.validators.len() != 6 {
+            return Err(
+                "coordinated block requires the finalized six-validator active set".to_string(),
+            );
+        }
+        let producer = self
+            .verifier
+            .validator_record(&assignment.assigned_producer_id)?;
+        let state_root = compute_state_root_after(&self.execution_state)?;
+        let tx_order_root = crate::dag_mempool::compute_tx_order_root(&[])?;
+        let validator_set_root = active_validators.hash()?;
+        let consensus_key_root = active_validators.consensus_key_root()?;
+        let frozen_weight_root = active_validators.frozen_bonded_weight_root()?;
+        let total_weight =
+            active_validators
+                .validators
+                .iter()
+                .try_fold(0u64, |total, validator| {
+                    total
+                        .checked_add(validator.voting_weight)
+                        .ok_or_else(|| "coordinated validator weight total overflow".to_string())
+                })?;
+        let mut membership_material = Vec::new();
+        for validator in &active_validators.validators {
+            membership_material.extend_from_slice(validator.validator_id.0.as_bytes());
+            membership_material.push(0);
+            membership_material.extend_from_slice(&validator.voting_weight.to_be_bytes());
+        }
+        let membership_root = Hash::from_domain_bytes(
+            "SYNERGY_COORDINATED_SINGLE_CLUSTER_MEMBERSHIP_V1",
+            &membership_material,
+        );
+        let cluster_map_root = Hash::from_domain_bytes(
+            "SYNERGY_COORDINATED_SINGLE_CLUSTER_MAP_V1",
+            &membership_root.0,
+        );
+        let producer_schedule_root = Hash::from_domain_bytes(
+            "SYNERGY_COORDINATED_PRODUCER_ROTATION_V1",
+            &serde_json::to_vec(&self.config.producer_ids)
+                .map_err(|error| format!("serialize coordinated producer schedule: {error}"))?,
+        );
+        let assignment_hash = assignment.signing_hash()?;
+        let mut height_context_material = Vec::new();
+        for root in [
+            context.genesis_anchor,
+            assignment_hash,
+            validator_set_root,
+            consensus_key_root,
+            frozen_weight_root,
+            membership_root,
+            context.cryptographic_profile_root,
+        ] {
+            height_context_material.extend_from_slice(&root.0);
+        }
+        height_context_material.extend_from_slice(&assignment.height.to_be_bytes());
+        height_context_material.extend_from_slice(&assignment.producer_round.to_be_bytes());
+        let height_context_root = Hash::from_domain_bytes(
+            "SYNERGY_COORDINATED_BLOCK_CONTEXT_V1",
+            &height_context_material,
+        );
+        let mut dag_frontier_material = Vec::new();
+        dag_frontier_material.extend_from_slice(&assignment.parent_block_hash.0);
+        dag_frontier_material.extend_from_slice(&tx_order_root.0);
+        let dag_frontier_root = Hash::from_domain_bytes(
+            "SYNERGY_COORDINATED_EMPTY_DAG_FRONTIER_V1",
+            &dag_frontier_material,
+        );
+        let mut block = Block {
+            header: BlockHeader {
+                version: 1,
+                chain_id: ChainId::synergy_testnet_v3(),
+                network_id: NetworkId::synergy_testnet_v3(),
+                protocol_version: self.config.consensus_version.clone(),
+                height: Height(assignment.height),
+                round: Round(assignment.producer_round),
+                epoch: Epoch(assignment.epoch),
+                cluster_id: ClusterId(0),
+                height_context_root,
+                parent_block_hash: assignment.parent_block_hash,
+                parent_state_root: state_root,
+                last_finalized_qc_hash: Hash::zero(),
+                proposer_validator_id: producer.validator_id.clone(),
+                proposer_uma_id: producer.validator_uma_id.clone(),
+                proposer_key_id: producer.consensus_public_key.key_id.clone(),
+                active_validator_set_hash: validator_set_root,
+                eligible_validator_set_hash: membership_root,
+                validator_consensus_key_root: consensus_key_root,
+                frozen_bonded_weight_root: frozen_weight_root,
+                cluster_schedule_version: "coordinated-round-robin-v1".to_string(),
+                cluster_map_hash: cluster_map_root,
+                assigned_cluster_membership_root: membership_root,
+                assigned_cluster_validator_count: 6,
+                assigned_cluster_total_voting_weight: total_weight,
+                proposer_schedule_hash: producer_schedule_root,
+                protocol_config_hash: context.protocol_config_hash,
+                cryptographic_profile_root: context.cryptographic_profile_root,
+                dag_frontier_root,
+                tx_order_root,
+                tx_count: 0,
+                protected_batch: None,
+                evidence_root: assignment.prior_finality_reference,
+                state_root_before: state_root,
+                state_root_after: state_root,
+                receipt_root: compute_receipt_root(&[])?,
+                app_version: 1,
+                execution_version: 1,
+                dag_version: 1,
+                aegis_pqvm_version: "aegis-pqvm".to_string(),
+                timestamp_ms_consensus_bounded: assignment.intended_block_timestamp_ms,
+            },
+            transactions: Vec::new(),
+            proposer_signature: AegisPqSignature {
+                algorithm: String::new(),
+                signature_bytes: Vec::new(),
+            },
+        };
+        let execution = execute_block(&block, &self.execution_state)?;
+        block.header.state_root_after = execution.state_root_after;
+        block.header.receipt_root = execution.receipt_root;
+        Ok(block)
     }
 
     /// Verifies, executes, and finalizes a producer block on Val1. The exact
@@ -933,6 +1164,17 @@ mod tests {
         (proposal, block)
     }
 
+    fn block_build_context() -> CoordinatedBlockBuildContext {
+        CoordinatedBlockBuildContext {
+            genesis_anchor: hash("genesis-anchor"),
+            genesis_timestamp_ms: 1_000,
+            protocol_config_hash: ConsensusParameterRoot::from_canonical_manifest_bytes(
+                b"coordinated-runtime-test-parameters",
+            ),
+            cryptographic_profile_root: hash("cryptographic-profile"),
+        }
+    }
+
     fn authenticated_peer(
         runtime: &CoordinatedRuntime,
         validator_id: &str,
@@ -1006,6 +1248,55 @@ mod tests {
             .expect("producer restart path reuses the exact durable block");
         assert_eq!(replayed_proposal, proposal);
         assert_eq!(replayed_block, signed_block);
+    }
+
+    #[test]
+    fn assigned_producer_builds_the_genesis_scheduled_empty_block() {
+        let mut producer = fixture_for_local("validator-2");
+        let context = block_build_context();
+        let timestamp = producer
+            .next_assignment_timestamp(&context)
+            .expect("derive Genesis-bound assignment timestamp");
+        let mut assignment = producer
+            .coordinator_state
+            .assignment_template(&producer.config, producer.verifier.epoch().0, timestamp)
+            .expect("build Val1 assignment subject");
+        let coordinator_key = producer
+            .verifier
+            .validator_record("validator-1")
+            .expect("configured coordinator")
+            .consensus_public_key
+            .key_id
+            .clone();
+        assignment.coordinator_signature = producer
+            .signer
+            .sign_domain(
+                COORDINATED_ASSIGNMENT_DOMAIN,
+                &assignment.signing_hash().expect("assignment hash").0,
+                &coordinator_key,
+            )
+            .expect("Val1 signs the assignment with the finalized key");
+        producer
+            .accept_assignment(&assignment)
+            .expect("install signed producer assignment");
+
+        let block = producer
+            .build_empty_assigned_block(&assignment, &context)
+            .expect("build canonical empty block only after an empty admission source");
+        assert_eq!(block.header.height, Height(42));
+        assert_eq!(block.header.round, Round(0));
+        assert_eq!(block.header.timestamp_ms_consensus_bounded, timestamp);
+        assert_eq!(block.header.tx_count, 0);
+        assert!(block.transactions.is_empty());
+        assert!(block.header.last_finalized_qc_hash.is_zero());
+
+        let (proposal, signed) = producer
+            .sign_assigned_producer_block(&assignment, block)
+            .expect("sign the exact built block through the durable producer journal");
+        producer
+            .verifier
+            .verify_producer_block(&assignment, &proposal, &signed)
+            .expect("every validator can verify the built producer block");
     }
 
     #[test]
