@@ -1,5 +1,5 @@
 use crate::block::{Block, BlockChain, HOT_CHAIN_RETENTION_BLOCKS_ENV};
-use crate::config::NodeConfig;
+use crate::config::{NodeConfig, ResolvedConsensusMode};
 use crate::consensus::anti_divergence::{
     current_validator_quarantine_duty_block, record_self_quarantine_for_canonical_lock_conflict,
 };
@@ -7,6 +7,11 @@ use crate::consensus::chain_durability::{
     append_committed_block_bodies, append_committed_block_body,
 };
 use crate::consensus::consensus_algorithm::ProofOfSynergy;
+use crate::consensus::coordinated_finality_observer::{
+    canonical_coordinated_finality_snapshot_from,
+    coordinated_finality_observer_next_missing_height, coordinated_finality_observer_snapshot_from,
+    import_coordinated_finality_observer_records,
+};
 use crate::consensus::coordinated_round_robin::AuthenticatedCoordinatedConsensusPeer;
 use crate::consensus::dual_quorum::{DualQuorumConsensus, QuorumCertificate};
 use crate::consensus::legacy_canonical_lock::{
@@ -33,8 +38,10 @@ use crate::etdag::{
 };
 use crate::genesis::canonical_genesis;
 use crate::p2p::messages::{
-    validate_coordinated_consensus_message_size, validate_typed_finality_observer_message_size,
-    CoordinatedConsensusMessage, NetworkMessage, TypedConsensusMessage,
+    validate_coordinated_consensus_message_size,
+    validate_coordinated_finality_observer_message_size,
+    validate_typed_finality_observer_message_size, CoordinatedConsensusMessage,
+    CoordinatedFinalityObserverMessage, NetworkMessage, TypedConsensusMessage,
     TypedFinalityObserverMessage,
 };
 #[cfg(not(test))]
@@ -4651,6 +4658,22 @@ fn local_is_typed_finality_service_observer(config: &NodeConfig) -> bool {
     )
 }
 
+/// Returns the release-validated P1 configuration only when this process is
+/// actually configured for `coordinated_round_robin_v1`. A support role must
+/// never accept P1 observer traffic merely because a peer asks for it.
+fn local_coordinated_finality_observer_config(
+    config: &NodeConfig,
+) -> Option<crate::consensus::coordinated_round_robin::CoordinatedRoundRobinConfig> {
+    match config
+        .consensus
+        .resolve_mode(config.blockchain.chain_id, &config.network.network_id)
+        .ok()?
+    {
+        ResolvedConsensusMode::CoordinatedRoundRobinV1(coordinated) => Some(coordinated),
+        ResolvedConsensusMode::PosyV2_2 => None,
+    }
+}
+
 fn local_validator_requires_designated_sync_sources(config: &NodeConfig) -> bool {
     local_node_runs_validator_consensus(config)
         && (current_validator_quarantine_duty_block().is_some()
@@ -5827,6 +5850,85 @@ impl P2PNetwork {
         Ok(sent)
     }
 
+    /// Pulls the next bounded `coordinated_round_robin_v1` finality segment
+    /// for an installed non-signing support observer. The topology is the
+    /// same narrow bridge as typed finality: validator -> VPN relayer ->
+    /// configured public RPC/indexer observer. P1 coordinator traffic is
+    /// never used as a support-tier synchronization channel.
+    pub fn request_coordinated_finality_observer_records(&self) -> Result<usize, String> {
+        let Some(next_height) = coordinated_finality_observer_next_missing_height() else {
+            return Ok(0);
+        };
+        let Some(_coordinated_config) = local_coordinated_finality_observer_config(&self.config)
+        else {
+            return Err(
+                "coordinated finality observer receiver is installed outside coordinated_round_robin_v1"
+                    .to_string(),
+            );
+        };
+        let is_relayer = local_is_typed_finality_relayer(&self.config);
+        let is_service_observer = local_is_typed_finality_service_observer(&self.config);
+        if !is_relayer && !is_service_observer {
+            return Err(
+                "coordinated finality observer receiver is installed for an unsupported local role"
+                    .to_string(),
+            );
+        }
+        let wire_message = NetworkMessage::CoordinatedFinalityObserver {
+            chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+            genesis_hash: canonical_genesis_hash(),
+            message: CoordinatedFinalityObserverMessage::Request { next_height },
+        };
+        let targets = {
+            let peers = self.connected_peers.lock().unwrap();
+            peers
+                .iter()
+                .filter_map(|(address, peer)| {
+                    if peer.stream.is_none() {
+                        return None;
+                    }
+                    let session_id = current_peer_session_id(address)?;
+                    let authorized = if is_relayer {
+                        typed_consensus_peer_for_session(address, session_id).is_some()
+                    } else {
+                        peer_is_designated_relayer_sync_source(&self.config, peer)
+                    };
+                    authorized.then_some((address.clone(), session_id))
+                })
+                .collect::<Vec<_>>()
+        };
+        let send_results = run_with_bounded_parallelism(
+            &targets,
+            targets.len(),
+            "coordinated finality observer request fanout",
+            |(address, session_id)| {
+                send_peer_message_for_session(
+                    &self.connected_peers,
+                    &self.peer_state_cache,
+                    address,
+                    *session_id,
+                    &wire_message,
+                    Duration::from_millis(CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                    "coordinated-finality-observer-request",
+                )
+            },
+        );
+        let mut sent = 0usize;
+        for ((address, _session_id), result) in targets.into_iter().zip(send_results) {
+            match result {
+                Ok(true) => sent += 1,
+                Ok(false) => {}
+                Err(error) => warn!(
+                    "p2p",
+                    "Failed to request coordinated finality observer records",
+                    "peer" => address,
+                    "error" => error
+                ),
+            }
+        }
+        Ok(sent)
+    }
+
     /// Relays one complete certified ETDAG input package only to currently
     /// authenticated, consensus-eligible validator peers.  The receiver does
     /// not trust this fanout: it rechecks the sender identity and every proof
@@ -6356,6 +6458,13 @@ impl P2PNetwork {
                     warn!(
                         "p2p",
                         "Typed finality observer recovery request rejected",
+                        "error" => error
+                    );
+                }
+                if let Err(error) = network.request_coordinated_finality_observer_records() {
+                    warn!(
+                        "p2p",
+                        "Coordinated finality observer recovery request rejected",
                         "error" => error
                     );
                 }
@@ -7954,6 +8063,7 @@ fn bypasses_shared_message_queue(message: &NetworkMessage) -> bool {
             | NetworkMessage::TypedConsensus { .. }
             | NetworkMessage::CoordinatedConsensus { .. }
             | NetworkMessage::TypedFinalityObserver { .. }
+            | NetworkMessage::CoordinatedFinalityObserver { .. }
             | NetworkMessage::EtdagCertifiedInput { .. }
             | NetworkMessage::Block { .. }
             | NetworkMessage::GetBlocks { .. }
@@ -8070,6 +8180,129 @@ fn handle_typed_finality_observer_message(
                 "peer" => peer_address.to_string(),
                 "imported" => imported as u64,
                 "next_height" => typed_finality_observer_next_missing_height().map(|height| height.0).unwrap_or(0)
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Handles P1 finalized-only replication. Unlike `CoordinatedConsensus`, this
+/// path never dispatches into a validator mailbox: it is limited to verified
+/// durable coordinator packages and the same authenticated tier boundaries as
+/// the typed observer bridge.
+fn handle_coordinated_finality_observer_message(
+    connected_peers: &PeersArc,
+    peer_state_cache: &PeerStateCacheArc,
+    config: &NodeConfig,
+    peer_address: &str,
+    session_id: u64,
+    message: CoordinatedFinalityObserverMessage,
+) -> Result<(), String> {
+    if !peer_session_is_current(peer_address, session_id) {
+        return Err(
+            "coordinated finality observer message belongs to a replaced session".to_string(),
+        );
+    }
+    let coordinated_config =
+        local_coordinated_finality_observer_config(config).ok_or_else(|| {
+            "coordinated finality observer traffic is disabled outside coordinated_round_robin_v1"
+                .to_string()
+        })?;
+    match message {
+        CoordinatedFinalityObserverMessage::Request { next_height } => {
+            let peer_is_vpn_relayer = connected_peers
+                .lock()
+                .map_err(|_| {
+                    "coordinated finality observer peer registry lock is poisoned".to_string()
+                })?
+                .get(peer_address)
+                .is_some_and(peer_is_validator_vpn_relayer);
+            let peer_is_public_service = connected_peers
+                .lock()
+                .map_err(|_| {
+                    "coordinated finality observer peer registry lock is poisoned".to_string()
+                })?
+                .get(peer_address)
+                .is_some_and(|peer| peer_is_designated_support_sync_source(config, peer));
+            let records = if local_is_typed_finality_relayer(config) {
+                if !peer_is_public_service {
+                    return Err(
+                        "coordinated finality observer request to relayer is not from a configured public service role"
+                            .to_string(),
+                    );
+                }
+                coordinated_finality_observer_snapshot_from(next_height)?
+            } else if local_node_runs_validator_consensus(config) {
+                if !peer_is_vpn_relayer {
+                    return Err(
+                        "coordinated finality observer request to validator is not from an authenticated validator-VPN relayer"
+                            .to_string(),
+                    );
+                }
+                canonical_coordinated_finality_snapshot_from(&coordinated_config, next_height)?
+            } else {
+                return Err(
+                    "coordinated finality observer request reached a role that cannot serve finalized records"
+                        .to_string(),
+                );
+            };
+            if records.is_empty() {
+                return Ok(());
+            }
+            let response = CoordinatedFinalityObserverMessage::Records { records };
+            validate_coordinated_finality_observer_message_size(&response)?;
+            let sent = send_peer_message_for_session(
+                connected_peers,
+                peer_state_cache,
+                peer_address,
+                session_id,
+                &NetworkMessage::CoordinatedFinalityObserver {
+                    chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+                    genesis_hash: canonical_genesis_hash(),
+                    message: response,
+                },
+                Duration::from_millis(CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                "coordinated-finality-observer-response",
+            )?;
+            if !sent {
+                return Err(
+                    "coordinated finality observer response session was replaced".to_string(),
+                );
+            }
+            Ok(())
+        }
+        CoordinatedFinalityObserverMessage::Records { records } => {
+            let source_allowed = if local_is_typed_finality_relayer(config) {
+                typed_consensus_peer_for_session(peer_address, session_id).is_some()
+            } else if local_is_typed_finality_service_observer(config) {
+                connected_peers
+                    .lock()
+                    .map_err(|_| {
+                        "coordinated finality observer peer registry lock is poisoned".to_string()
+                    })?
+                    .get(peer_address)
+                    .is_some_and(|peer| peer_is_designated_relayer_sync_source(config, peer))
+            } else {
+                false
+            };
+            if !source_allowed {
+                return Err(
+                    "coordinated finality observer records are not from an authorized finalized-chain source"
+                        .to_string(),
+                );
+            }
+            let message = CoordinatedFinalityObserverMessage::Records { records };
+            validate_coordinated_finality_observer_message_size(&message)?;
+            let CoordinatedFinalityObserverMessage::Records { records } = message else {
+                unreachable!("the coordinated observer records message was reconstructed above")
+            };
+            let imported = import_coordinated_finality_observer_records(&records)?;
+            info!(
+                "p2p",
+                "Verified coordinated finality observer records",
+                "peer" => peer_address.to_string(),
+                "imported" => imported as u64,
+                "next_height" => coordinated_finality_observer_next_missing_height().map(|height| height.0).unwrap_or(0)
             );
             Ok(())
         }
@@ -8222,6 +8455,39 @@ fn dispatch_peer_message(
                 warn!(
                     "p2p",
                     "Rejected typed finality observer message",
+                    "peer" => peer_address.to_string(),
+                    "error" => error
+                );
+            }
+            Ok(())
+        }
+        NetworkMessage::CoordinatedFinalityObserver {
+            chain_incarnation,
+            genesis_hash,
+            message,
+        } => {
+            if chain_incarnation != crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
+                || genesis_hash != canonical_genesis_hash()
+            {
+                warn!(
+                    "p2p",
+                    "Rejected coordinated observer frame from a different chain incarnation",
+                    "peer" => peer_address.to_string(),
+                    "incarnation" => chain_incarnation
+                );
+                return Ok(());
+            }
+            if let Err(error) = handle_coordinated_finality_observer_message(
+                connected_peers,
+                peer_state_cache,
+                config,
+                peer_address,
+                session_id,
+                message,
+            ) {
+                warn!(
+                    "p2p",
+                    "Rejected coordinated finality observer message",
                     "peer" => peer_address.to_string(),
                     "error" => error
                 );

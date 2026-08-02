@@ -93,6 +93,13 @@ impl CoordinatedFinalityStore {
         self.migration_parent_state_root
     }
 
+    /// Returns the immutable block anchor that the first coordinated package
+    /// must extend. Non-signing observers use this public value to bind their
+    /// replay to the same finalized Genesis/migration subject as validators.
+    pub fn migration_parent_block_hash(&self) -> Hash {
+        self.migration_parent_block_hash
+    }
+
     pub fn first_coordinated_height(&self) -> Height {
         self.first_coordinated_height
     }

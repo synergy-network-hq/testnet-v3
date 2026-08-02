@@ -9,6 +9,7 @@ pub mod chain_durability;
 pub mod consensus_algorithm;
 pub mod consensus_fork;
 pub mod coordinated_admission;
+pub mod coordinated_finality_observer;
 pub mod coordinated_finality_store;
 pub mod coordinated_round_robin;
 pub mod coordinated_runtime;

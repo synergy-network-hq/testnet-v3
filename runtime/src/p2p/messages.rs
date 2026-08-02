@@ -4,6 +4,7 @@ use crate::block::{Block, BlockHeader};
 use crate::consensus::coordinated_admission::{
     coordinated_dag_frontier_root, coordinated_transaction_admission_root,
 };
+use crate::consensus::coordinated_finality_store::CoordinatedFinalityRecord;
 use crate::consensus::coordinated_round_robin::{
     CoordinatedProposal, CoordinatedRoundRobinConfig, CoordinatorCommit, ProducerAssignment,
 };
@@ -45,6 +46,9 @@ pub const MAX_COORDINATED_CONSENSUS_ASSIGNMENT_FRAME_BYTES: usize = 128 * 1024;
 pub const MAX_COORDINATED_CONSENSUS_BLOCK_PACKAGE_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_COORDINATED_CONSENSUS_SYNC_RANGE_FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_COORDINATED_CONSENSUS_SYNC_RANGE_BLOCKS: usize = 64;
+/// Finalized-only P1 observer traffic has its own bounded wire variant so
+/// relayers/RPC/indexers cannot be routed through coordinator consensus.
+pub const MAX_COORDINATED_FINALITY_OBSERVER_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
 /// The only wire representation for the typed PoSy v2.2 state machine.
 ///
@@ -116,6 +120,19 @@ pub enum TypedFinalityObserverMessage {
     },
     /// A bounded consecutive sequence of finalized typed records.
     Records { records: Vec<TypedFinalityRecord> },
+}
+
+/// Non-signing P1 finality replication for the validator-VPN relayer and
+/// public service tiers. This never carries an assignment, proposal, commit
+/// request, or any authority to enter the coordinator mailbox.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CoordinatedFinalityObserverMessage {
+    Request {
+        next_height: crate::synergy_types::Height,
+    },
+    Records {
+        records: Vec<CoordinatedFinalityRecord>,
+    },
 }
 
 /// The temporary coordinator-driven wire protocol.  It deliberately has no
@@ -323,6 +340,37 @@ pub fn validate_typed_finality_observer_message_size(
     )
 }
 
+/// Applies the P1 support-tier record-count and exact-frame budget before an
+/// untrusted relayer or public peer reaches finality replay.
+pub fn validate_coordinated_finality_observer_message_size(
+    message: &CoordinatedFinalityObserverMessage,
+) -> Result<(), String> {
+    let CoordinatedFinalityObserverMessage::Records { records } = message else {
+        return Ok(());
+    };
+    if records.is_empty()
+        || records.len()
+            > crate::consensus::coordinated_finality_observer::MAX_COORDINATED_FINALITY_OBSERVER_RECORDS
+    {
+        return Err("coordinated finality observer record segment has an invalid record count".to_string());
+    }
+    let encoded = NetworkMessage::CoordinatedFinalityObserver {
+        chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+        genesis_hash: crate::genesis::canonical_genesis()?.hash().to_string(),
+        message: message.clone(),
+    };
+    let frame_bytes = serde_json::to_vec(&encoded)
+        .map_err(|error| format!("serialize coordinated finality observer frame: {error}"))?
+        .len()
+        .checked_add(4)
+        .ok_or_else(|| "coordinated finality observer frame length overflow".to_string())?;
+    validate_typed_consensus_frame_length(
+        "coordinated finality observer record segment",
+        frame_bytes,
+        MAX_COORDINATED_FINALITY_OBSERVER_FRAME_BYTES,
+    )
+}
+
 /// Applies a resource budget before a coordinated-mode message reaches its
 /// coordinator or block-sync handler.  Structural and signature validation is
 /// performed by the mode-specific receiver because it requires the local
@@ -470,6 +518,13 @@ pub enum NetworkMessage {
         chain_incarnation: u64,
         genesis_hash: String,
         message: TypedFinalityObserverMessage,
+    },
+    /// Finalized-only `coordinated_round_robin_v1` evidence replication.
+    /// This is intentionally distinct from [`Self::CoordinatedConsensus`].
+    CoordinatedFinalityObserver {
+        chain_incarnation: u64,
+        genesis_hash: String,
+        message: CoordinatedFinalityObserverMessage,
     },
     /// A complete, already-certified ETDAG proof package. The P2P receiver
     /// binds it to local height/finality authority before durable admission;
