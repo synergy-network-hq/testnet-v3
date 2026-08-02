@@ -80,6 +80,10 @@ name = "build-chain1266-desired-state"
 path = "bin/build-chain1266-desired-state.rs"
 
 [[bin]]
+name = "build-chain1266-consensus-activation"
+path = "bin/build-chain1266-consensus-activation.rs"
+
+[[bin]]
 name = "build-chain1266-private-ring-material"
 path = "bin/build-chain1266-private-ring-material.rs"
 
@@ -90,6 +94,10 @@ path = "bin/sign-chain1266-start-command.rs"
 [[bin]]
 name = "sign-chain1266-desired-state"
 path = "bin/sign-chain1266-desired-state.rs"
+
+[[bin]]
+name = "sign-chain1266-consensus-activation"
+path = "bin/sign-chain1266-consensus-activation.rs"
 
 [[bin]]
 name = "verify-chain1266-release-authorization"

@@ -10,6 +10,7 @@ pub mod cluster;
 pub mod community_onboarding;
 pub mod config;
 pub mod consensus;
+pub mod consensus_activation;
 pub mod consensus_parameters;
 pub mod consensus_start;
 pub mod consensus_state;

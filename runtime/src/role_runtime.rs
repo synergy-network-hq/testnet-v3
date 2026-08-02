@@ -37,7 +37,7 @@ use crate::consensus::self_realign::{
 use crate::consensus::signing_authority::DurableConsensusSigningAuthority;
 use crate::consensus::synergy_score::SynergyScoreCalculator;
 use crate::consensus::testnet_v3_bootstrap::{
-    load_coordinated_round_robin_genesis_bootstrap, load_testnet_v3_genesis_bootstrap,
+    load_coordinated_round_robin_activation_bootstrap, load_testnet_v3_genesis_bootstrap,
 };
 use crate::consensus::testnet_v3_finality_context::FinalizedTypedContextProvider;
 use crate::consensus::typed_coordinator::{
@@ -1549,39 +1549,30 @@ fn build_finalized_coordinated_runtime_inputs(
     };
     let genesis = canonical_genesis()
         .map_err(|error| format!("coordinated runtime cannot load canonical Genesis: {error}"))?;
-    let consensus_parameters = genesis.consensus_parameters().cloned().ok_or_else(|| {
-        "coordinated runtime requires a finalized consensus parameter binding in canonical Genesis"
-            .to_string()
-    })?;
-    consensus_parameters
-        .require_genesis_binding()
+    let activation = crate::consensus_activation::load_installed_consensus_activation(genesis)
         .map_err(|error| {
-            format!("coordinated runtime rejects a non-Genesis-bound parameter manifest: {error}")
+            format!("coordinated runtime rejects its signed immutable-Genesis activation: {error}")
         })?;
-    let finalized_p1 = consensus_parameters
-        .require_coordinated_round_robin_manifest()
-        .map_err(|error| {
-            format!("coordinated runtime rejects non-P1 Genesis parameters: {error}")
-        })?;
-    if finalized_p1.coordinated_round_robin.coordinator_id != coordinated_config.coordinator_id
-        || finalized_p1.coordinated_round_robin.producer_ids != coordinated_config.producer_ids
-        || finalized_p1
-            .coordinated_round_robin
-            .producer_turn_timeout_ms
+    if activation.manifest.consensus_mode != coordinated_config.consensus_version
+        || activation.manifest.coordinator_id != coordinated_config.coordinator_id
+        || activation.manifest.producer_ids != coordinated_config.producer_ids
+        || activation.manifest.producer_turn_timeout_ms
             != coordinated_config.producer_turn_timeout_ms
-        || finalized_p1.target_block_time_ms != coordinated_config.target_block_interval_ms
+        || coordinated_config.target_block_interval_ms
+            != crate::consensus_parameters::COORDINATED_P1_TARGET_BLOCK_TIME_MS
     {
         return Err(
-            "coordinated runtime configuration disagrees with its Genesis-bound P1 authority"
+            "coordinated runtime configuration disagrees with its signed P1 activation authority"
                 .to_string(),
         );
     }
-    let bootstrap = load_coordinated_round_robin_genesis_bootstrap(genesis).map_err(|error| {
-        format!("coordinated runtime cannot derive finalized P1 Genesis bootstrap: {error}")
-    })?;
+    let bootstrap =
+        load_coordinated_round_robin_activation_bootstrap(genesis).map_err(|error| {
+            format!("coordinated runtime cannot derive immutable-Genesis P1 bootstrap: {error}")
+        })?;
     // The P1 committed-block header carries the exact canonical manifest root,
     // not a compatibility `ProtocolConfig` assembled for the retired engine.
-    let protocol_config_hash = consensus_parameters.root;
+    let protocol_config_hash = activation.root;
     let genesis_execution_state = load_finalized_testnet_v3_genesis_execution_state(genesis)
         .map_err(|error| {
             format!("coordinated runtime requires finalized Genesis execution state: {error}")

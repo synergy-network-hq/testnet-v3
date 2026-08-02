@@ -286,6 +286,7 @@ pub fn consensus_key_id_for_operator(operator_address: &str) -> Result<AegisPqKe
 enum GenesisBootstrapConsensusMode {
     PosyV2_2,
     CoordinatedRoundRobinV1,
+    CoordinatedRoundRobinActivationV1,
 }
 
 /// Builds the typed-PoSy validator and verifier state directly from the
@@ -306,6 +307,18 @@ pub fn load_coordinated_round_robin_genesis_bootstrap(
     load_genesis_bootstrap(
         genesis,
         GenesisBootstrapConsensusMode::CoordinatedRoundRobinV1,
+    )
+}
+
+/// Builds the P1 verifier from the immutable canonical PoSy Genesis after a
+/// separate signed consensus-activation manifest has been verified by the
+/// caller. This helper cannot itself authorize a mode switch.
+pub fn load_coordinated_round_robin_activation_bootstrap(
+    genesis: &GenesisDocument,
+) -> Result<TestnetV3GenesisBootstrap, String> {
+    load_genesis_bootstrap(
+        genesis,
+        GenesisBootstrapConsensusMode::CoordinatedRoundRobinActivationV1,
     )
 }
 
@@ -337,6 +350,14 @@ fn load_genesis_bootstrap(
                 != crate::consensus_parameters::COORDINATED_ROUND_ROBIN_V1_PROTOCOL_VERSION
             {
                 return Err("coordinated P1 Genesis consensus binding is invalid".to_string());
+            }
+        }
+        GenesisBootstrapConsensusMode::CoordinatedRoundRobinActivationV1 => {
+            if genesis.consensus_version() != POSY_PROTOCOL_VERSION {
+                return Err(
+                    "coordinated P1 activation requires the immutable canonical PoSy Genesis"
+                        .to_string(),
+                );
             }
         }
         GenesisBootstrapConsensusMode::PosyV2_2 => {}
@@ -432,7 +453,8 @@ fn load_genesis_bootstrap(
                             AegisPqKeyRole::ConsensusVote,
                             AegisPqKeyRole::EpochTransition,
                         ],
-                        GenesisBootstrapConsensusMode::CoordinatedRoundRobinV1 => {
+                        GenesisBootstrapConsensusMode::CoordinatedRoundRobinV1
+                        | GenesisBootstrapConsensusMode::CoordinatedRoundRobinActivationV1 => {
                             vec![AegisPqKeyRole::ConsensusProposer]
                         }
                     },
