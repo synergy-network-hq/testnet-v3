@@ -67,6 +67,7 @@ pub struct BlockchainConfig {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
 pub struct ConsensusConfig {
     #[serde(default = "default_consensus_protocol_version")]
     pub algorithm: String,
@@ -289,6 +290,53 @@ fn default_penalization_enabled() -> bool {
     true
 }
 
+impl Default for ConsensusConfig {
+    fn default() -> Self {
+        Self {
+            algorithm: default_consensus_protocol_version(),
+            mode: default_consensus_mode(),
+            coordinator_id: String::new(),
+            producer_ids: Vec::new(),
+            producer_turn_timeout_ms: default_producer_turn_timeout_ms(),
+            block_time_secs: 2,
+            epoch_length: 1_000,
+            target_block_time_ms: default_target_block_time_ms(),
+            proposal_timeout_ms: default_proposal_timeout_ms(),
+            prevote_timeout_ms: default_prevote_timeout_ms(),
+            precommit_timeout_ms: default_precommit_timeout_ms(),
+            max_round_timeout_ms: default_max_round_timeout_ms(),
+            emergency_stable_committee_mode: default_emergency_stable_committee_mode(),
+            freeze_validator_set: default_freeze_validator_set(),
+            freeze_score_weighted_proposer_order: default_freeze_score_weighted_proposer_order(),
+            vote_only_rejoin_enabled: default_vote_only_rejoin_enabled(),
+            vote_only_probation_blocks: default_vote_only_probation_blocks(),
+            min_validators: default_min_validators(),
+            validator_cluster_size: 6,
+            validator_vote_threshold: default_validator_vote_threshold(),
+            max_validators: default_max_validators(),
+            status_ready_gate_enabled: default_status_ready_gate_enabled(),
+            status_ready_min_validators: 0,
+            status_ready_genesis_grace_secs: default_status_ready_genesis_grace_secs(),
+            allow_genesis_status_bypass: default_allow_genesis_status_bypass(),
+            mesh_settle_secs: default_mesh_settle_secs(),
+            leader_timeout_secs: 0,
+            vote_timeout_secs: default_vote_timeout_secs(),
+            block_timeout_secs: default_block_timeout_secs(),
+            penalization_enabled: default_penalization_enabled(),
+            synergy_score_decay_rate: 0.05,
+            vrf_enabled: true,
+            vrf_seed_epoch_interval: 1_000,
+            max_synergy_points_per_epoch: 100,
+            max_tasks_per_validator: 10,
+            reward_weighting: RewardWeighting {
+                task_accuracy: 0.5,
+                uptime: 0.3,
+                collaboration: 0.2,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RewardWeighting {
     pub task_accuracy: f64,
@@ -463,49 +511,7 @@ impl Default for NodeConfig {
                 max_gas_limit: "0x2fefd8".to_string(),
                 chain_id: 1266,
             },
-            consensus: ConsensusConfig {
-                algorithm: default_consensus_protocol_version(),
-                mode: default_consensus_mode(),
-                coordinator_id: String::new(),
-                producer_ids: vec![],
-                producer_turn_timeout_ms: default_producer_turn_timeout_ms(),
-                block_time_secs: 2,
-                epoch_length: 1000,
-                target_block_time_ms: default_target_block_time_ms(),
-                proposal_timeout_ms: default_proposal_timeout_ms(),
-                prevote_timeout_ms: default_prevote_timeout_ms(),
-                precommit_timeout_ms: default_precommit_timeout_ms(),
-                max_round_timeout_ms: default_max_round_timeout_ms(),
-                emergency_stable_committee_mode: default_emergency_stable_committee_mode(),
-                freeze_validator_set: default_freeze_validator_set(),
-                freeze_score_weighted_proposer_order: default_freeze_score_weighted_proposer_order(
-                ),
-                vote_only_rejoin_enabled: default_vote_only_rejoin_enabled(),
-                vote_only_probation_blocks: default_vote_only_probation_blocks(),
-                min_validators: default_min_validators(),
-                validator_cluster_size: 6,
-                validator_vote_threshold: default_validator_vote_threshold(),
-                max_validators: default_max_validators(),
-                status_ready_gate_enabled: default_status_ready_gate_enabled(),
-                status_ready_min_validators: 0,
-                status_ready_genesis_grace_secs: default_status_ready_genesis_grace_secs(),
-                allow_genesis_status_bypass: default_allow_genesis_status_bypass(),
-                mesh_settle_secs: default_mesh_settle_secs(),
-                leader_timeout_secs: 0,
-                vote_timeout_secs: default_vote_timeout_secs(),
-                block_timeout_secs: default_block_timeout_secs(),
-                penalization_enabled: default_penalization_enabled(),
-                synergy_score_decay_rate: 0.05,
-                vrf_enabled: true,
-                vrf_seed_epoch_interval: 1000,
-                max_synergy_points_per_epoch: 100,
-                max_tasks_per_validator: 10,
-                reward_weighting: RewardWeighting {
-                    task_accuracy: 0.5,
-                    uptime: 0.3,
-                    collaboration: 0.2,
-                },
-            },
+            consensus: ConsensusConfig::default(),
             logging: LoggingConfig {
                 log_level: "info".to_string(),
                 log_file: "data/logs/synergy-node.log".to_string(),
@@ -633,6 +639,8 @@ pub fn load_node_config_from_template(node_type: &str) -> Result<NodeConfig, Box
 }
 
 fn enforce_consensus_config_invariants(config: &NodeConfig) -> Result<(), Box<dyn Error>> {
+    use crate::consensus::coordinated_round_robin::COORDINATED_ROUND_ROBIN_V1;
+
     if config.blockchain.chain_id != 1266 || config.network.id != 1266 {
         return Err(format!(
             "Synergy Testnet v3 requires chain_id/network id 1266, found blockchain.chain_id={} network.id={}",
@@ -649,6 +657,30 @@ fn enforce_consensus_config_invariants(config: &NodeConfig) -> Result<(), Box<dy
     }
     if config.consensus.allow_genesis_status_bypass {
         return Err("genesis status bypass is disabled for PQC Testnet consensus".into());
+    }
+    if config.consensus.algorithm != COORDINATED_ROUND_ROBIN_V1
+        || config.consensus.mode != COORDINATED_ROUND_ROBIN_V1
+    {
+        return Err(format!(
+            "this Chain 1266 release only accepts consensus algorithm/mode {COORDINATED_ROUND_ROBIN_V1}; typed PoSy and fallback consensus are disabled"
+        )
+        .into());
+    }
+    for variable in [
+        "CHAIN1266_VOTING_ENABLED",
+        "CHAIN1266_QUORUM_ENABLED",
+        "CHAIN1266_QC_ENABLED",
+    ] {
+        if env::var(variable)
+            .ok()
+            .as_deref()
+            .and_then(parse_env_bool)
+            .unwrap_or(false)
+        {
+            return Err(
+                format!("{variable}=true is forbidden by coordinated_round_robin_v1").into(),
+            );
+        }
     }
     Ok(())
 }
@@ -976,7 +1008,9 @@ fn parse_node_config_content(
     source_path: Option<&Path>,
 ) -> Result<NodeConfig, Box<dyn Error>> {
     let raw: toml::Value = toml::from_str(content)?;
-    let mut config = toml::from_str::<NodeConfig>(content).unwrap_or_default();
+    let mut config = toml::from_str::<NodeConfig>(content).map_err(|error| {
+        format!("node configuration cannot be deserialized without fallback defaults: {error}")
+    })?;
 
     apply_compatibility_overrides(&mut config, &raw);
 

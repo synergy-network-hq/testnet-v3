@@ -5665,6 +5665,9 @@ impl P2PNetwork {
         &self,
         message: &TypedConsensusMessage,
     ) -> Result<usize, String> {
+        if coordinated_consensus_active(&self.config) {
+            return Err("typed PoSy egress is disabled in coordinated_round_robin_v1".to_string());
+        }
         crate::p2p::messages::validate_typed_consensus_message_size(message)?;
         let wire_message = NetworkMessage::TypedConsensus {
             chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
@@ -5774,6 +5777,54 @@ impl P2PNetwork {
             }
         }
         Ok(sent)
+    }
+
+    /// Sends an assigned producer block directly to the authenticated
+    /// coordinator. Unlike assignments and committed packages, producer
+    /// candidates are never broadcast to non-coordinator validators.
+    pub fn send_coordinated_consensus_to_validator(
+        &self,
+        validator_id: &str,
+        message: &CoordinatedConsensusMessage,
+    ) -> Result<(), String> {
+        validate_coordinated_consensus_message_size(message)?;
+        let wire_message = NetworkMessage::CoordinatedConsensus {
+            chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+            genesis_hash: canonical_genesis_hash(),
+            message: message.clone(),
+        };
+        let target = {
+            let peers = self
+                .connected_peers
+                .lock()
+                .map_err(|_| "coordinated peer registry lock is poisoned".to_string())?;
+            peers.iter().find_map(|(address, peer)| {
+                if peer.stream.is_none() {
+                    return None;
+                }
+                let session_id = current_peer_session_id(address)?;
+                let identity = typed_consensus_peer_for_session(address, session_id)?;
+                (identity.validator_id.0 == validator_id).then(|| (address.clone(), session_id))
+            })
+        }
+        .ok_or_else(|| {
+            format!("coordinated producer has no authenticated route to {validator_id}")
+        })?;
+        let sent = send_peer_message_for_session(
+            &self.connected_peers,
+            &self.peer_state_cache,
+            &target.0,
+            target.1,
+            &wire_message,
+            Duration::from_millis(CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS),
+            "coordinated-producer-block",
+        )?;
+        if !sent {
+            return Err(format!(
+                "coordinated producer session to {validator_id} was replaced"
+            ));
+        }
+        Ok(())
     }
 
     /// Pulls the next bounded finalized-typed segment for an installed
@@ -5993,6 +6044,14 @@ impl P2PNetwork {
         epoch_number: u64,
         round_number: u64,
     ) -> usize {
+        if coordinated_consensus_active(&self.config) {
+            warn!(
+                "p2p",
+                "Refused validator-voting egress in coordinated mode",
+                "message_type" => "VoteRequest"
+            );
+            return 0;
+        }
         let message = NetworkMessage::VoteRequest {
             block_data: block.clone(),
             epoch_number,
@@ -8071,6 +8130,15 @@ fn bypasses_shared_message_queue(message: &NetworkMessage) -> bool {
     )
 }
 
+fn coordinated_consensus_active(config: &NodeConfig) -> bool {
+    matches!(
+        config
+            .consensus
+            .resolve_mode(config.blockchain.chain_id, &config.network.network_id),
+        Ok(crate::config::ResolvedConsensusMode::CoordinatedRoundRobinV1(_))
+    )
+}
+
 /// Handles non-signing finalized-chain replication. This path is intentionally
 /// separate from typed consensus ingress: neither a relayer nor a public
 /// observer can submit a proposal/vote or obtain a validator private key.
@@ -8338,6 +8406,15 @@ fn dispatch_peer_message(
             epoch_number,
             round_number,
         } => {
+            if coordinated_consensus_active(config) {
+                warn!(
+                    "p2p",
+                    "Rejected validator-voting message in coordinated mode",
+                    "peer" => peer_address.to_string(),
+                    "message_type" => "VoteRequest"
+                );
+                return Ok(());
+            }
             // Vote requests and vote payloads sit directly on the block production
             // critical path. Handle them immediately instead of routing them through
             // the shared background queue with status, ping, and sync traffic.
@@ -8355,6 +8432,15 @@ fn dispatch_peer_message(
             Ok(())
         }
         NetworkMessage::Vote { vote } => {
+            if coordinated_consensus_active(config) {
+                warn!(
+                    "p2p",
+                    "Rejected validator-voting message in coordinated mode",
+                    "peer" => peer_address.to_string(),
+                    "message_type" => "Vote"
+                );
+                return Ok(());
+            }
             handle_vote_message(connected_peers, config, peer_address, session_id, vote);
             Ok(())
         }
@@ -8363,6 +8449,14 @@ fn dispatch_peer_message(
             genesis_hash,
             message,
         } => {
+            if coordinated_consensus_active(config) {
+                warn!(
+                    "p2p",
+                    "Rejected typed PoSy message in coordinated mode",
+                    "peer" => peer_address.to_string()
+                );
+                return Ok(());
+            }
             if chain_incarnation != crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
                 || genesis_hash != canonical_genesis_hash()
             {
