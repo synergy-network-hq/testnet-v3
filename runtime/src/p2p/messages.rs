@@ -1,12 +1,15 @@
 use serde::{Deserialize, Serialize};
 
 use crate::block::{Block, BlockHeader};
+use crate::consensus::coordinated_round_robin::{
+    CoordinatedProposal, CoordinatedRoundRobinConfig, CoordinatorCommit, ProducerAssignment,
+};
 use crate::consensus::dual_quorum::{QuorumCertificate, Vote};
 use crate::consensus::typed_finality_store::TypedFinalityRecord;
 use crate::etdag::{CertifiedProtectedInputArtifact, ProtectedBlockInput, TargetAdmissionContext};
 use crate::synergy_types::AegisPqSignature;
 use crate::synergy_types::{
-    Block as TypedBlock, HeightConsensusContext, QuorumCertificate as TypedQuorumCertificate,
+    Block as TypedBlock, Hash, HeightConsensusContext, QuorumCertificate as TypedQuorumCertificate,
     TimeoutCertificate, ValidationCertificate, Vote as TypedVote,
 };
 use crate::transaction::Transaction;
@@ -30,6 +33,13 @@ pub const MAX_TYPED_FINALITY_CHECKPOINT_FRAME_BYTES: usize = 4 * 1024 * 1024;
 /// so they receive the tighter certificate-sized transport budget rather than
 /// the ETDAG package allowance.
 pub const MAX_TYPED_CONSENSUS_CORE_PROPOSAL_FRAME_BYTES: usize = 128 * 1024;
+/// Coordinated-mode packages contain the canonical block plus one assignment
+/// and one coordinator commit. They must remain bounded independently from
+/// the retired PoSy certificate transport budgets.
+pub const MAX_COORDINATED_CONSENSUS_ASSIGNMENT_FRAME_BYTES: usize = 128 * 1024;
+pub const MAX_COORDINATED_CONSENSUS_BLOCK_PACKAGE_FRAME_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_COORDINATED_CONSENSUS_SYNC_RANGE_FRAME_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_COORDINATED_CONSENSUS_SYNC_RANGE_BLOCKS: usize = 64;
 
 /// The only wire representation for the typed PoSy v2.2 state machine.
 ///
@@ -101,6 +111,97 @@ pub enum TypedFinalityObserverMessage {
     },
     /// A bounded consecutive sequence of finalized typed records.
     Records { records: Vec<TypedFinalityRecord> },
+}
+
+/// The temporary coordinator-driven wire protocol.  It deliberately has no
+/// vote, validation certificate, quorum certificate, timeout certificate, or
+/// aggregator object.  Message signatures are verified against canonical
+/// validator consensus keys by the coordinated runtime adapter before any
+/// state or block installation changes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CoordinatedConsensusMessage {
+    ProducerAssignment {
+        assignment: ProducerAssignment,
+    },
+    ProposedBlock {
+        assignment: ProducerAssignment,
+        proposal: CoordinatedProposal,
+        block: TypedBlock,
+    },
+    CoordinatorCommit {
+        package: CoordinatedCommittedBlockPackage,
+    },
+    GetCommittedBlock {
+        height: u64,
+    },
+    GetCommittedBlockRange {
+        start_height: u64,
+        end_height: u64,
+    },
+    CommittedBlock {
+        package: CoordinatedCommittedBlockPackage,
+    },
+    CommittedBlockRange {
+        packages: Vec<CoordinatedCommittedBlockPackage>,
+    },
+}
+
+/// A relayable, independently verifiable finalized-block package.  The packet
+/// carries everything needed to prove coordinated finality without recreating
+/// a certificate or contacting the original coordinator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoordinatedCommittedBlockPackage {
+    pub block: TypedBlock,
+    pub assignment: ProducerAssignment,
+    pub proposal: CoordinatedProposal,
+    pub coordinator_commit: CoordinatorCommit,
+}
+
+impl CoordinatedCommittedBlockPackage {
+    pub fn validate_against(&self, config: &CoordinatedRoundRobinConfig) -> Result<(), String> {
+        self.assignment.validate_shape(config)?;
+        self.proposal.validate_shape()?;
+        self.coordinator_commit.validate_shape(config)?;
+        let assignment_hash = self.assignment.signing_hash()?;
+        let block_hash = Hash::from_hex(&self.block.block_id()?.0)
+            .map_err(|error| format!("coordinated package block ID is not a hash: {error}"))?;
+        if self.block.header.height.0 != self.assignment.height
+            || self.block.header.round.0 != self.assignment.producer_round
+            || self.block.header.parent_block_hash != self.assignment.parent_block_hash
+            || self.block.header.proposer_validator_id.0 != self.assignment.assigned_producer_id
+            || self.block.header.state_root_after != self.proposal.state_root
+            || self.block.header.receipt_root != self.proposal.receipt_root
+            || self.block.proposer_signature != self.proposal.producer_signature
+        {
+            return Err(
+                "coordinated package block does not match its producer assignment".to_string(),
+            );
+        }
+        if self.proposal.height != self.assignment.height
+            || self.proposal.producer_round != self.assignment.producer_round
+            || self.proposal.parent_block_hash != self.assignment.parent_block_hash
+            || self.proposal.block_hash != block_hash
+            || self.proposal.producer_id != self.assignment.assigned_producer_id
+            || self.proposal.assignment_hash != assignment_hash
+        {
+            return Err(
+                "coordinated package proposal does not match its assignment and block".to_string(),
+            );
+        }
+        if self.coordinator_commit.height != self.proposal.height
+            || self.coordinator_commit.producer_round != self.proposal.producer_round
+            || self.coordinator_commit.parent_block_hash != self.proposal.parent_block_hash
+            || self.coordinator_commit.block_hash != self.proposal.block_hash
+            || self.coordinator_commit.transaction_root != self.proposal.transaction_root
+            || self.coordinator_commit.receipt_root != self.proposal.receipt_root
+            || self.coordinator_commit.state_root != self.proposal.state_root
+            || self.coordinator_commit.producer_id != self.proposal.producer_id
+            || self.coordinator_commit.assignment_hash != assignment_hash
+        {
+            return Err("coordinated package commit does not match its proposal".to_string());
+        }
+        Ok(())
+    }
 }
 
 /// Rejects typed consensus wire artifacts that exceed the Testnet-v3 resource
@@ -179,6 +280,56 @@ pub fn validate_typed_finality_observer_message_size(
         frame_bytes,
         MAX_TYPED_FINALITY_CHECKPOINT_FRAME_BYTES,
     )
+}
+
+/// Applies a resource budget before a coordinated-mode message reaches its
+/// coordinator or block-sync handler.  Structural and signature validation is
+/// performed by the mode-specific receiver because it requires the local
+/// canonical validator configuration and consensus key registry.
+pub fn validate_coordinated_consensus_message_size(
+    message: &CoordinatedConsensusMessage,
+) -> Result<(), String> {
+    let (kind, maximum) = match message {
+        CoordinatedConsensusMessage::ProducerAssignment { .. }
+        | CoordinatedConsensusMessage::GetCommittedBlock { .. }
+        | CoordinatedConsensusMessage::GetCommittedBlockRange { .. } => (
+            "coordinated consensus control message",
+            MAX_COORDINATED_CONSENSUS_ASSIGNMENT_FRAME_BYTES,
+        ),
+        CoordinatedConsensusMessage::ProposedBlock { .. }
+        | CoordinatedConsensusMessage::CoordinatorCommit { .. }
+        | CoordinatedConsensusMessage::CommittedBlock { .. } => (
+            "coordinated consensus block package",
+            MAX_COORDINATED_CONSENSUS_BLOCK_PACKAGE_FRAME_BYTES,
+        ),
+        CoordinatedConsensusMessage::CommittedBlockRange { packages } => {
+            if packages.is_empty() {
+                return Err("coordinated committed-block range cannot be empty".to_string());
+            }
+            if packages.len() > MAX_COORDINATED_CONSENSUS_SYNC_RANGE_BLOCKS {
+                return Err(format!(
+                    "coordinated committed-block range has {} packages, exceeding limit {}",
+                    packages.len(),
+                    MAX_COORDINATED_CONSENSUS_SYNC_RANGE_BLOCKS
+                ));
+            }
+            (
+                "coordinated committed-block range",
+                MAX_COORDINATED_CONSENSUS_SYNC_RANGE_FRAME_BYTES,
+            )
+        }
+    };
+    let encoded = NetworkMessage::CoordinatedConsensus {
+        chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+        genesis_hash: crate::genesis::canonical_genesis()?.hash().to_string(),
+        message: message.clone(),
+    };
+    let frame_bytes = serde_json::to_vec(&encoded)
+        .map_err(|error| format!("serialize {kind} frame: {error}"))?
+        .len()
+        .checked_add(4)
+        .ok_or_else(|| format!("{kind} frame length overflow"))?;
+    validate_typed_consensus_frame_length(kind, frame_bytes, maximum)
 }
 
 fn validate_typed_consensus_frame_length(
@@ -264,6 +415,13 @@ pub enum NetworkMessage {
         chain_incarnation: u64,
         genesis_hash: String,
         message: TypedConsensusMessage,
+    },
+    /// Temporary coordinator-driven messages. They have their own protocol
+    /// variant so no legacy or typed-PoSy handler can reinterpret them.
+    CoordinatedConsensus {
+        chain_incarnation: u64,
+        genesis_hash: String,
+        message: CoordinatedConsensusMessage,
     },
     /// Verified, non-signing finalized-chain replication between the
     /// validator-VPN relayer tier and public RPC/indexer observer roles.
@@ -443,5 +601,81 @@ mod tests {
         .expect_err("proposal frame above the 8 MiB cap must fail closed");
 
         assert!(error.contains("8388608"));
+    }
+
+    #[test]
+    fn coordinated_assignment_round_trips_as_its_own_message_family() {
+        let assignment = ProducerAssignment {
+            chain_id: 1266,
+            network_id: "synergy-testnet-v3".to_string(),
+            consensus_version:
+                crate::consensus::coordinated_round_robin::COORDINATED_ROUND_ROBIN_V1.to_string(),
+            height: 1,
+            producer_round: 0,
+            parent_block_hash: Hash::zero(),
+            assigned_producer_id: "validator-2".to_string(),
+            coordinator_id: "validator-1".to_string(),
+            assignment_sequence: 1,
+            intended_block_timestamp_ms: 2_000,
+            coordinator_signature: AegisPqSignature {
+                algorithm: "ML-DSA-65".to_string(),
+                signature_bytes: vec![7; 32],
+            },
+        };
+        let message = NetworkMessage::CoordinatedConsensus {
+            chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+            genesis_hash: crate::genesis::canonical_genesis()
+                .expect("canonical Genesis should load")
+                .hash()
+                .to_string(),
+            message: CoordinatedConsensusMessage::ProducerAssignment {
+                assignment: assignment.clone(),
+            },
+        };
+        let decoded: NetworkMessage =
+            serde_json::from_slice(&serde_json::to_vec(&message).expect("wire message serializes"))
+                .expect("wire message deserializes");
+        match decoded {
+            NetworkMessage::CoordinatedConsensus {
+                message: CoordinatedConsensusMessage::ProducerAssignment { assignment: actual },
+                ..
+            } => assert_eq!(actual, assignment),
+            _ => panic!("coordinated assignment was reinterpreted as another message family"),
+        }
+    }
+
+    #[test]
+    fn coordinated_sync_range_rejects_an_empty_response_before_delivery() {
+        let error = validate_coordinated_consensus_message_size(
+            &CoordinatedConsensusMessage::CommittedBlockRange { packages: vec![] },
+        )
+        .expect_err("an empty coordinated sync range is invalid");
+        assert!(error.contains("cannot be empty"));
+    }
+
+    #[test]
+    fn oversized_coordinated_assignment_is_rejected_before_delivery() {
+        let assignment = ProducerAssignment {
+            chain_id: 1266,
+            network_id: "synergy-testnet-v3".to_string(),
+            consensus_version:
+                crate::consensus::coordinated_round_robin::COORDINATED_ROUND_ROBIN_V1.to_string(),
+            height: 1,
+            producer_round: 0,
+            parent_block_hash: Hash::zero(),
+            assigned_producer_id: "validator-2".to_string(),
+            coordinator_id: "validator-1".to_string(),
+            assignment_sequence: 1,
+            intended_block_timestamp_ms: 2_000,
+            coordinator_signature: AegisPqSignature {
+                algorithm: "ML-DSA-65".to_string(),
+                signature_bytes: vec![9; MAX_COORDINATED_CONSENSUS_ASSIGNMENT_FRAME_BYTES],
+            },
+        };
+        let error = validate_coordinated_consensus_message_size(
+            &CoordinatedConsensusMessage::ProducerAssignment { assignment },
+        )
+        .expect_err("oversized coordinated assignment must be rejected");
+        assert!(error.contains("131072"));
     }
 }
