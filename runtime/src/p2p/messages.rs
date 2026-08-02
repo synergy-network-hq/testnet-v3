@@ -169,6 +169,8 @@ impl CoordinatedCommittedBlockPackage {
             || self.block.header.height.0 != self.assignment.height
             || self.block.header.round.0 != self.assignment.producer_round
             || self.block.header.parent_block_hash != self.assignment.parent_block_hash
+            || self.block.header.evidence_root != self.assignment.prior_finality_reference
+            || !self.block.header.last_finalized_qc_hash.is_zero()
             || self.block.header.proposer_validator_id.0 != self.assignment.assigned_producer_id
             || self.block.header.state_root_after != self.proposal.state_root
             || self.block.header.receipt_root != self.proposal.receipt_root
@@ -182,6 +184,7 @@ impl CoordinatedCommittedBlockPackage {
             || self.proposal.height != self.assignment.height
             || self.proposal.producer_round != self.assignment.producer_round
             || self.proposal.parent_block_hash != self.assignment.parent_block_hash
+            || self.proposal.prior_finality_reference != self.assignment.prior_finality_reference
             || self.proposal.block_hash != block_hash
             || self.proposal.producer_id != self.assignment.assigned_producer_id
             || self.proposal.assignment_hash != assignment_hash
@@ -194,6 +197,8 @@ impl CoordinatedCommittedBlockPackage {
             || self.coordinator_commit.height != self.proposal.height
             || self.coordinator_commit.producer_round != self.proposal.producer_round
             || self.coordinator_commit.parent_block_hash != self.proposal.parent_block_hash
+            || self.coordinator_commit.prior_finality_reference
+                != self.proposal.prior_finality_reference
             || self.coordinator_commit.block_hash != self.proposal.block_hash
             || self.coordinator_commit.transaction_root != self.proposal.transaction_root
             || self.coordinator_commit.receipt_root != self.proposal.receipt_root
@@ -617,6 +622,7 @@ mod tests {
             height: 1,
             producer_round: 0,
             parent_block_hash: Hash::zero(),
+            prior_finality_reference: Hash::zero(),
             assigned_producer_id: "validator-2".to_string(),
             coordinator_id: "validator-1".to_string(),
             assignment_sequence: 1,
@@ -668,6 +674,7 @@ mod tests {
             height: 1,
             producer_round: 0,
             parent_block_hash: Hash::zero(),
+            prior_finality_reference: Hash::zero(),
             assigned_producer_id: "validator-2".to_string(),
             coordinator_id: "validator-1".to_string(),
             assignment_sequence: 1,

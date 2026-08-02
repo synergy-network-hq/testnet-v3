@@ -421,6 +421,7 @@ mod tests {
     ) -> CoordinatedCommittedBlockPackage {
         let transaction_root = hash(&format!("transaction-root-{height}"));
         let receipt_root = hash(&format!("receipt-root-{height}"));
+        let prior_finality_reference = hash(&format!("prior-finality-reference-{height}"));
         let assignment = ProducerAssignment {
             chain_id: 1266,
             network_id: "synergy-testnet-v3".to_string(),
@@ -429,6 +430,7 @@ mod tests {
             height,
             producer_round: 0,
             parent_block_hash,
+            prior_finality_reference,
             assigned_producer_id: "validator-2".to_string(),
             coordinator_id: "validator-1".to_string(),
             assignment_sequence: height,
@@ -448,7 +450,7 @@ mod tests {
                 height_context_root: hash("context"),
                 parent_block_hash,
                 parent_state_root,
-                last_finalized_qc_hash: hash("legacy-proof-reference"),
+                last_finalized_qc_hash: Hash::zero(),
                 proposer_validator_id: ValidatorId("validator-2".to_string()),
                 proposer_uma_id: UmaId("uma-validator-2".to_string()),
                 proposer_key_id: AegisPqKeyId("validator-2-key".to_string()),
@@ -470,7 +472,7 @@ mod tests {
                 tx_order_root: transaction_root,
                 tx_count: 0,
                 protected_batch: None,
-                evidence_root: hash("evidence"),
+                evidence_root: prior_finality_reference,
                 state_root_before: parent_state_root,
                 state_root_after: state_root,
                 receipt_root,
@@ -490,6 +492,7 @@ mod tests {
             height,
             producer_round: 0,
             parent_block_hash,
+            prior_finality_reference,
             block_hash,
             transaction_root,
             receipt_root,
@@ -506,6 +509,7 @@ mod tests {
             height,
             producer_round: 0,
             parent_block_hash,
+            prior_finality_reference,
             block_hash,
             transaction_root,
             receipt_root,

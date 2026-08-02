@@ -253,6 +253,7 @@ impl CoordinatedConsensusVerifier {
             || proposal.height != assignment.height
             || proposal.producer_round != assignment.producer_round
             || proposal.parent_block_hash != assignment.parent_block_hash
+            || proposal.prior_finality_reference != assignment.prior_finality_reference
             || proposal.block_hash != block_hash
             || proposal.producer_id != assignment.assigned_producer_id
             || proposal.assignment_hash != assignment.signing_hash()?
@@ -262,6 +263,8 @@ impl CoordinatedConsensusVerifier {
             || block.header.height.0 != assignment.height
             || block.header.round.0 != assignment.producer_round
             || block.header.parent_block_hash != assignment.parent_block_hash
+            || block.header.evidence_root != assignment.prior_finality_reference
+            || !block.header.last_finalized_qc_hash.is_zero()
             || block.header.proposer_validator_id != producer.validator_id
             || block.header.proposer_uma_id != producer.validator_uma_id
             || block.header.proposer_key_id != producer.consensus_public_key.key_id
@@ -461,6 +464,10 @@ pub struct ProducerAssignment {
     pub height: u64,
     pub producer_round: u64,
     pub parent_block_hash: Hash,
+    /// The prior finalized coordinated commit hash, or the immutable migration
+    /// anchor for the first coordinated height. This is carried in the block's
+    /// generic evidence root; the legacy QC header field remains zero.
+    pub prior_finality_reference: Hash,
     pub assigned_producer_id: String,
     pub coordinator_id: String,
     pub assignment_sequence: u64,
@@ -478,6 +485,7 @@ impl ProducerAssignment {
             height: self.height,
             producer_round: self.producer_round,
             parent_block_hash: self.parent_block_hash,
+            prior_finality_reference: self.prior_finality_reference,
             assigned_producer_id: self.assigned_producer_id.clone(),
             coordinator_id: self.coordinator_id.clone(),
             assignment_sequence: self.assignment_sequence,
@@ -526,6 +534,7 @@ struct ProducerAssignmentPayload {
     height: u64,
     producer_round: u64,
     parent_block_hash: Hash,
+    prior_finality_reference: Hash,
     assigned_producer_id: String,
     coordinator_id: String,
     assignment_sequence: u64,
@@ -542,6 +551,7 @@ pub struct CoordinatedProposal {
     pub height: u64,
     pub producer_round: u64,
     pub parent_block_hash: Hash,
+    pub prior_finality_reference: Hash,
     pub block_hash: Hash,
     pub transaction_root: Hash,
     pub receipt_root: Hash,
@@ -578,6 +588,7 @@ pub struct CoordinatorCommit {
     pub height: u64,
     pub producer_round: u64,
     pub parent_block_hash: Hash,
+    pub prior_finality_reference: Hash,
     pub block_hash: Hash,
     pub transaction_root: Hash,
     pub receipt_root: Hash,
@@ -598,6 +609,7 @@ impl CoordinatorCommit {
             height: self.height,
             producer_round: self.producer_round,
             parent_block_hash: self.parent_block_hash,
+            prior_finality_reference: self.prior_finality_reference,
             block_hash: self.block_hash,
             transaction_root: self.transaction_root,
             receipt_root: self.receipt_root,
@@ -649,6 +661,7 @@ struct CoordinatorCommitPayload {
     height: u64,
     producer_round: u64,
     parent_block_hash: Hash,
+    prior_finality_reference: Hash,
     block_hash: Hash,
     transaction_root: Hash,
     receipt_root: Hash,
@@ -674,6 +687,7 @@ pub struct CoordinatorState {
     pub state_version: u32,
     pub last_finalized_height: u64,
     pub last_finalized_block_hash: Hash,
+    pub last_finality_reference: Hash,
     pub pending_height: Option<u64>,
     pub pending_round: u64,
     pub pending_producer_id: Option<String>,
@@ -696,6 +710,10 @@ impl CoordinatorState {
             state_version: COORDINATOR_STATE_VERSION,
             last_finalized_height,
             last_finalized_block_hash,
+            last_finality_reference: Hash::from_domain_bytes(
+                "SYNERGY_COORDINATED_MIGRATION_ANCHOR_V1",
+                &last_finalized_block_hash.0,
+            ),
             pending_height: None,
             pending_round: 0,
             pending_producer_id: None,
@@ -712,6 +730,22 @@ impl CoordinatorState {
 
     pub fn next_height(&self) -> u64 {
         self.last_finalized_height.saturating_add(1)
+    }
+
+    /// Constructs state from the exact verified predecessor at activation.
+    /// The supplied reference is the migration proof anchor, not a synthetic
+    /// QC; every successor is then bound to the prior coordinator commit.
+    pub fn from_migration_anchor(
+        last_finalized_height: u64,
+        last_finalized_block_hash: Hash,
+        last_finality_reference: Hash,
+    ) -> Result<Self, String> {
+        if last_finality_reference.is_zero() {
+            return Err("coordinated migration finality reference cannot be zero".to_string());
+        }
+        let mut state = Self::new(last_finalized_height, last_finalized_block_hash);
+        state.last_finality_reference = last_finality_reference;
+        Ok(state)
     }
 
     pub fn issue_assignment(
@@ -742,6 +776,7 @@ impl CoordinatorState {
             height,
             producer_round: self.pending_round,
             parent_block_hash: self.last_finalized_block_hash,
+            prior_finality_reference: self.last_finality_reference,
             assigned_producer_id: producer_id.clone(),
             coordinator_id: config.coordinator_id.clone(),
             assignment_sequence: self.assignment_sequence.saturating_add(1),
@@ -807,6 +842,7 @@ impl CoordinatorState {
             || proposal.height != assignment.height
             || proposal.producer_round != assignment.producer_round
             || proposal.parent_block_hash != assignment.parent_block_hash
+            || proposal.prior_finality_reference != assignment.prior_finality_reference
             || proposal.producer_id != assignment.assigned_producer_id
             || proposal.assignment_hash != assignment_hash
         {
@@ -830,6 +866,7 @@ impl CoordinatorState {
             height: proposal.height,
             producer_round: proposal.producer_round,
             parent_block_hash: proposal.parent_block_hash,
+            prior_finality_reference: proposal.prior_finality_reference,
             block_hash: proposal.block_hash,
             transaction_root: proposal.transaction_root,
             receipt_root: proposal.receipt_root,
@@ -863,16 +900,19 @@ impl CoordinatorState {
             || commit.height != assignment.height
             || commit.producer_round != assignment.producer_round
             || commit.parent_block_hash != assignment.parent_block_hash
+            || commit.prior_finality_reference != assignment.prior_finality_reference
             || commit.producer_id != assignment.assigned_producer_id
             || commit.assignment_hash != assignment_hash
         {
             return Err("coordinator commit does not match the current assignment".to_string());
         }
 
+        let finality_reference = commit.signing_hash()?;
         self.signer_journal.insert(commit.height, commit.block_hash);
         self.committed_block_hash_for_pending_height = Some(commit.block_hash);
         self.last_finalized_height = commit.height;
         self.last_finalized_block_hash = commit.block_hash;
+        self.last_finality_reference = finality_reference;
         self.last_commit = Some(commit);
         self.producer_cursor = config.successor_cursor(self.producer_cursor);
         self.pending_height = None;
@@ -894,6 +934,9 @@ impl CoordinatorState {
         }
         if self.producer_cursor >= config.producer_ids.len() {
             return Err("coordinated coordinator state has an invalid producer cursor".to_string());
+        }
+        if self.last_finality_reference.is_zero() {
+            return Err("coordinated coordinator state has no finality reference".to_string());
         }
         match &self.pending_assignment {
             Some(assignment) => {
@@ -1130,6 +1173,7 @@ mod tests {
                 height: 1,
                 producer_round: 0,
                 parent_block_hash: hash("genesis"),
+                prior_finality_reference: hash("migration-anchor"),
                 assigned_producer_id: "validator-2".to_string(),
                 coordinator_id: "validator-1".to_string(),
                 assignment_sequence: 1,
@@ -1297,6 +1341,7 @@ mod tests {
             height: assignment.height,
             producer_round: assignment.producer_round,
             parent_block_hash: assignment.parent_block_hash,
+            prior_finality_reference: assignment.prior_finality_reference,
             block_hash: hash(block),
             transaction_root: hash("tx"),
             receipt_root: hash("receipt"),
@@ -1367,6 +1412,7 @@ mod tests {
             height: replacement.height,
             producer_round: replacement.producer_round,
             parent_block_hash: replacement.parent_block_hash,
+            prior_finality_reference: replacement.prior_finality_reference,
             block_hash: hash("height-100"),
             transaction_root: hash("tx"),
             receipt_root: hash("receipt"),
@@ -1420,6 +1466,7 @@ mod tests {
             height: stale.height,
             producer_round: stale.producer_round,
             parent_block_hash: stale.parent_block_hash,
+            prior_finality_reference: stale.prior_finality_reference,
             block_hash: hash("stale"),
             transaction_root: hash("tx"),
             receipt_root: hash("receipt"),
