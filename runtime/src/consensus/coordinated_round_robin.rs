@@ -8,18 +8,122 @@
 //! consensus keys, persisting this state before broadcast, and passing the
 //! canonical block execution result to this state machine.
 
-use crate::synergy_types::{AegisPqSignature, CanonicalSerialize, Hash};
+use crate::p2p::messages::{
+    validate_coordinated_consensus_message_size, CoordinatedConsensusMessage,
+};
+use crate::synergy_types::{
+    AegisPqKeyId, AegisPqSignature, CanonicalSerialize, Hash, UmaId, ValidatorId,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{mpsc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const COORDINATED_ROUND_ROBIN_V1: &str = "coordinated_round_robin_v1";
 pub const COORDINATED_ASSIGNMENT_DOMAIN: &str = "SYNERGY_COORDINATED_ASSIGNMENT_V1";
 pub const COORDINATED_COMMIT_DOMAIN: &str = "SYNERGY_COORDINATED_COMMIT_V1";
 const COORDINATOR_STATE_VERSION: u32 = 1;
+
+/// The exact validator identity established by the canonical Testnet-v3
+/// handshake.  This is deliberately a distinct type from the retired typed
+/// PoSy peer envelope, even though both begin with the same authenticated
+/// Genesis identity proof.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthenticatedCoordinatedConsensusPeer {
+    pub validator_id: ValidatorId,
+    pub validator_uma_id: UmaId,
+    pub consensus_key_id: AegisPqKeyId,
+}
+
+/// A bounded P2P delivery envelope.  The runtime verifies that the authenticated
+/// session identity has the authority required for the contained assignment,
+/// proposal, commit, or sync request before it mutates consensus state.
+#[derive(Debug, Clone)]
+pub struct CoordinatedConsensusEnvelope {
+    pub peer_address: String,
+    pub authenticated_peer: AuthenticatedCoordinatedConsensusPeer,
+    pub message: CoordinatedConsensusMessage,
+}
+
+static COORDINATED_CONSENSUS_INGRESS: OnceLock<
+    Mutex<Option<mpsc::SyncSender<CoordinatedConsensusEnvelope>>>,
+> = OnceLock::new();
+
+fn coordinated_ingress_slot(
+) -> &'static Mutex<Option<mpsc::SyncSender<CoordinatedConsensusEnvelope>>> {
+    COORDINATED_CONSENSUS_INGRESS.get_or_init(|| Mutex::new(None))
+}
+
+/// Installs the only coordinated-mode mailbox for this process.  Replacing a
+/// live mailbox is forbidden because it could split the coordinator signing
+/// journal from the worker that owns it.
+pub fn install_coordinated_consensus_ingress(
+    queue_capacity: usize,
+) -> Result<mpsc::Receiver<CoordinatedConsensusEnvelope>, String> {
+    if queue_capacity == 0 {
+        return Err("coordinated consensus ingress queue capacity must be non-zero".to_string());
+    }
+    let (sender, receiver) = mpsc::sync_channel(queue_capacity);
+    let mut slot = coordinated_ingress_slot()
+        .lock()
+        .map_err(|_| "coordinated consensus ingress lock is poisoned".to_string())?;
+    if slot.is_some() {
+        return Err("coordinated consensus ingress is already installed".to_string());
+    }
+    *slot = Some(sender);
+    Ok(receiver)
+}
+
+/// Removes coordinated ingress after its worker has stopped.  Only the role
+/// runtime should call this; P2P traffic cannot install or replace a worker.
+pub fn remove_coordinated_consensus_ingress() -> Result<(), String> {
+    let mut slot = coordinated_ingress_slot()
+        .lock()
+        .map_err(|_| "coordinated consensus ingress lock is poisoned".to_string())?;
+    *slot = None;
+    Ok(())
+}
+
+/// Delivers a coordinated-consensus message to its dedicated mailbox.  There
+/// is no legacy or typed-PoSy fallback: an absent worker, an unauthenticated
+/// peer, a saturated queue, and an oversized frame all fail closed.
+pub fn dispatch_coordinated_consensus_message(
+    peer_address: &str,
+    authenticated_peer: Option<AuthenticatedCoordinatedConsensusPeer>,
+    message: CoordinatedConsensusMessage,
+) -> Result<(), String> {
+    validate_coordinated_consensus_message_size(&message)?;
+    let authenticated_peer = authenticated_peer.ok_or_else(|| {
+        "coordinated consensus refuses a message without authenticated validator identity"
+            .to_string()
+    })?;
+    let sender = coordinated_ingress_slot()
+        .lock()
+        .map_err(|_| "coordinated consensus ingress lock is poisoned".to_string())?
+        .clone()
+        .ok_or_else(|| {
+            "coordinated consensus coordinator is not running; refusing consensus message"
+                .to_string()
+        })?;
+    sender
+        .try_send(CoordinatedConsensusEnvelope {
+            peer_address: peer_address.to_string(),
+            authenticated_peer,
+            message,
+        })
+        .map_err(|error| match error {
+            mpsc::TrySendError::Full(_) => {
+                "coordinated consensus ingress is saturated; refusing consensus message".to_string()
+            }
+            mpsc::TrySendError::Disconnected(_) => {
+                "coordinated consensus ingress is disconnected; refusing consensus message"
+                    .to_string()
+            }
+        })
+}
 
 /// Immutable configuration for the temporary testnet-only consensus mode.
 ///
@@ -749,6 +853,69 @@ mod tests {
             target_block_interval_ms: 2_000,
             producer_turn_timeout_ms: 4_000,
         }
+    }
+
+    fn authenticated_peer() -> AuthenticatedCoordinatedConsensusPeer {
+        AuthenticatedCoordinatedConsensusPeer {
+            validator_id: ValidatorId("validator-2".to_string()),
+            validator_uma_id: UmaId("uma-validator-2".to_string()),
+            consensus_key_id: AegisPqKeyId("validator-2-consensus-key".to_string()),
+        }
+    }
+
+    fn assignment_message() -> CoordinatedConsensusMessage {
+        CoordinatedConsensusMessage::ProducerAssignment {
+            assignment: ProducerAssignment {
+                chain_id: 1266,
+                network_id: "synergy-testnet-v3".to_string(),
+                consensus_version: COORDINATED_ROUND_ROBIN_V1.to_string(),
+                height: 1,
+                producer_round: 0,
+                parent_block_hash: hash("genesis"),
+                assigned_producer_id: "validator-2".to_string(),
+                coordinator_id: "validator-1".to_string(),
+                assignment_sequence: 1,
+                intended_block_timestamp_ms: 1_000,
+                coordinator_signature: signature("assignment"),
+            },
+        }
+    }
+
+    #[test]
+    fn coordinated_messages_fail_closed_without_a_running_worker() {
+        let _ = remove_coordinated_consensus_ingress();
+        let error = dispatch_coordinated_consensus_message(
+            "validator-2-peer",
+            Some(authenticated_peer()),
+            assignment_message(),
+        )
+        .expect_err("a coordinated message must not use a legacy fallback");
+        assert!(error.contains("coordinator is not running"));
+    }
+
+    #[test]
+    fn coordinated_messages_require_an_authenticated_session_and_dedicated_mailbox() {
+        let _ = remove_coordinated_consensus_ingress();
+        let receiver = install_coordinated_consensus_ingress(1).expect("install mailbox");
+        let unauthenticated =
+            dispatch_coordinated_consensus_message("unknown-peer", None, assignment_message())
+                .expect_err("unauthenticated P2P traffic must not reach the worker");
+        assert!(unauthenticated.contains("authenticated validator identity"));
+
+        dispatch_coordinated_consensus_message(
+            "validator-2-peer",
+            Some(authenticated_peer()),
+            assignment_message(),
+        )
+        .expect("authenticated traffic reaches the dedicated mailbox");
+        let envelope = receiver.try_recv().expect("mailbox delivery");
+        assert_eq!(envelope.peer_address, "validator-2-peer");
+        assert_eq!(envelope.authenticated_peer.validator_id.0, "validator-2");
+        assert!(matches!(
+            envelope.message,
+            CoordinatedConsensusMessage::ProducerAssignment { .. }
+        ));
+        remove_coordinated_consensus_ingress().expect("remove mailbox");
     }
 
     fn commit_current(

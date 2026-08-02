@@ -7,6 +7,7 @@ use crate::consensus::chain_durability::{
     append_committed_block_bodies, append_committed_block_body,
 };
 use crate::consensus::consensus_algorithm::ProofOfSynergy;
+use crate::consensus::coordinated_round_robin::AuthenticatedCoordinatedConsensusPeer;
 use crate::consensus::dual_quorum::{DualQuorumConsensus, QuorumCertificate};
 use crate::consensus::legacy_canonical_lock::{
     legacy_canonical_commit_record, quarantine_legacy_canonical_locks_above,
@@ -32,7 +33,8 @@ use crate::etdag::{
 };
 use crate::genesis::canonical_genesis;
 use crate::p2p::messages::{
-    validate_typed_finality_observer_message_size, NetworkMessage, TypedConsensusMessage,
+    validate_coordinated_consensus_message_size, validate_typed_finality_observer_message_size,
+    CoordinatedConsensusMessage, NetworkMessage, TypedConsensusMessage,
     TypedFinalityObserverMessage,
 };
 #[cfg(not(test))]
@@ -5692,6 +5694,65 @@ impl P2PNetwork {
         Ok(sent)
     }
 
+    /// Sends a coordinated-mode artifact only to authenticated validator peers.
+    /// Its wire family and resource limits are independent from retired typed
+    /// PoSy traffic, so no certificate handler can reinterpret this message.
+    pub fn broadcast_coordinated_consensus(
+        &self,
+        message: &CoordinatedConsensusMessage,
+    ) -> Result<usize, String> {
+        validate_coordinated_consensus_message_size(message)?;
+        let wire_message = NetworkMessage::CoordinatedConsensus {
+            chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+            genesis_hash: canonical_genesis_hash(),
+            message: message.clone(),
+        };
+        let targets = {
+            let peers = self.connected_peers.lock().unwrap();
+            peers
+                .iter()
+                .filter_map(|(address, peer)| {
+                    if peer.stream.is_none()
+                        || !peer_is_active_consensus_validator(&self.config, peer)
+                    {
+                        return None;
+                    }
+                    current_peer_session_id(address).map(|session_id| (address.clone(), session_id))
+                })
+                .collect::<Vec<_>>()
+        };
+        let send_results = run_with_bounded_parallelism(
+            &targets,
+            targets.len(),
+            "coordinated consensus fanout",
+            |(address, session_id)| {
+                send_peer_message_for_session(
+                    &self.connected_peers,
+                    &self.peer_state_cache,
+                    address,
+                    *session_id,
+                    &wire_message,
+                    Duration::from_millis(CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                    "coordinated-consensus",
+                )
+            },
+        );
+        let mut sent = 0usize;
+        for ((address, _session_id), result) in targets.into_iter().zip(send_results) {
+            match result {
+                Ok(true) => sent += 1,
+                Ok(false) => {}
+                Err(error) => warn!(
+                    "p2p",
+                    "Failed to send coordinated consensus message",
+                    "peer" => address,
+                    "error" => error
+                ),
+            }
+        }
+        Ok(sent)
+    }
+
     /// Pulls the next bounded finalized-typed segment for an installed
     /// non-signing observer. A relayer may ask only a session-authenticated
     /// validator across the validator VPN; RPC/indexer roles may ask only a
@@ -7891,6 +7952,7 @@ fn bypasses_shared_message_queue(message: &NetworkMessage) -> bool {
         NetworkMessage::VoteRequest { .. }
             | NetworkMessage::Vote { .. }
             | NetworkMessage::TypedConsensus { .. }
+            | NetworkMessage::CoordinatedConsensus { .. }
             | NetworkMessage::TypedFinalityObserver { .. }
             | NetworkMessage::EtdagCertifiedInput { .. }
             | NetworkMessage::Block { .. }
@@ -8089,6 +8151,44 @@ fn dispatch_peer_message(
                 warn!(
                     "p2p",
                     "Rejected typed consensus message",
+                    "peer" => peer_address.to_string(),
+                    "error" => error
+                );
+            }
+            Ok(())
+        }
+        NetworkMessage::CoordinatedConsensus {
+            chain_incarnation,
+            genesis_hash,
+            message,
+        } => {
+            if chain_incarnation != crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
+                || genesis_hash != canonical_genesis_hash()
+            {
+                warn!(
+                    "p2p",
+                    "Rejected coordinated consensus frame from a different chain incarnation",
+                    "peer" => peer_address.to_string(),
+                    "incarnation" => chain_incarnation
+                );
+                return Ok(());
+            }
+            let authenticated_peer = typed_consensus_peer_for_session(peer_address, session_id)
+                .map(|peer| AuthenticatedCoordinatedConsensusPeer {
+                    validator_id: peer.validator_id,
+                    validator_uma_id: peer.validator_uma_id,
+                    consensus_key_id: peer.consensus_key_id,
+                });
+            if let Err(error) =
+                crate::consensus::coordinated_round_robin::dispatch_coordinated_consensus_message(
+                    peer_address,
+                    authenticated_peer,
+                    message,
+                )
+            {
+                warn!(
+                    "p2p",
+                    "Rejected coordinated consensus message",
                     "peer" => peer_address.to_string(),
                     "error" => error
                 );
@@ -9218,6 +9318,43 @@ fn handle_messages(
                             warn!(
                                 "p2p",
                                 "Rejected typed consensus message",
+                                "peer" => peer_address.clone(),
+                                "error" => error
+                            );
+                        }
+                    }
+                    NetworkMessage::CoordinatedConsensus {
+                        chain_incarnation,
+                        genesis_hash,
+                        message,
+                    } => {
+                        if chain_incarnation != crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
+                            || genesis_hash != canonical_genesis_hash()
+                        {
+                            warn!(
+                                "p2p",
+                                "Rejected old-incarnation coordinated consensus message",
+                                "peer" => peer_address.clone(),
+                                "incarnation" => chain_incarnation
+                            );
+                            continue;
+                        }
+                        let authenticated_peer =
+                            typed_consensus_peer_for_session(&peer_address, session_id).map(
+                                |peer| AuthenticatedCoordinatedConsensusPeer {
+                                    validator_id: peer.validator_id,
+                                    validator_uma_id: peer.validator_uma_id,
+                                    consensus_key_id: peer.consensus_key_id,
+                                },
+                            );
+                        if let Err(error) = crate::consensus::coordinated_round_robin::dispatch_coordinated_consensus_message(
+                            &peer_address,
+                            authenticated_peer,
+                            message,
+                        ) {
+                            warn!(
+                                "p2p",
+                                "Rejected coordinated consensus message",
                                 "peer" => peer_address.clone(),
                                 "error" => error
                             );
