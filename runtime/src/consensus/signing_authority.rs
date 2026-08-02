@@ -1,7 +1,7 @@
 use crate::synergy_types::{
-    current_consensus_domain, AegisPqKeyId, Block, BlockId, ChainId, ClusterId, ConsensusSubject,
-    ConsensusSubjectPhase, Epoch, Hash, Height, NetworkId, QuorumCertificate, Round,
-    TimeoutCertificate, ValidationCertificate, ValidatorId, Vote, VotePhase,
+    current_consensus_domain, AegisPqKeyId, AegisPqSignature, Block, BlockId, ChainId, ClusterId,
+    ConsensusSubject, ConsensusSubjectPhase, Epoch, Hash, Height, NetworkId, QuorumCertificate,
+    Round, TimeoutCertificate, ValidationCertificate, ValidatorId, Vote, VotePhase,
 };
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
@@ -20,6 +20,76 @@ pub enum ConsensusSigningPhase {
     Validate,
     Finality,
     Timeout,
+}
+
+/// The two signature subjects in temporary coordinator-driven consensus.
+/// Unlike the retired certificate phases, an assignment permits one new round
+/// at the same height after a timeout, while a commit permits exactly one block
+/// hash for that height across all rounds and key rotations.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum CoordinatedSigningPhase {
+    Assignment,
+    Commit,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CoordinatedSigningAuthorization {
+    pub chain_id: ChainId,
+    pub network_id: NetworkId,
+    pub consensus_version: String,
+    pub epoch: Epoch,
+    pub height: Height,
+    pub producer_round: Round,
+    pub coordinator_id: ValidatorId,
+    pub key_id: AegisPqKeyId,
+    pub phase: CoordinatedSigningPhase,
+    /// The domain-separated assignment or commit hash to be signed.  The
+    /// journal never permits an alternate subject for one durable slot.
+    pub subject_hash: Hash,
+}
+
+impl CoordinatedSigningAuthorization {
+    pub fn validate(&self) -> Result<(), String> {
+        self.chain_id.require_testnet_v3()?;
+        self.network_id.require_testnet_v3()?;
+        if self.consensus_version != "coordinated_round_robin_v1"
+            || self.height.0 == 0
+            || self.coordinator_id.0.trim().is_empty()
+            || self.key_id.0.trim().is_empty()
+            || self.subject_hash.is_zero()
+        {
+            return Err("invalid coordinated consensus signing authorization".to_string());
+        }
+        Ok(())
+    }
+
+    pub fn root(&self) -> Result<Hash, String> {
+        self.validate()?;
+        let bytes = serde_json::to_vec(self)
+            .map_err(|error| format!("serialize coordinated signing authorization: {error}"))?;
+        Ok(Hash::from_domain_bytes(
+            "SYNERGY_COORDINATED_SIGNING_AUTHORIZATION_V1",
+            &bytes,
+        ))
+    }
+
+    fn slot_key(&self) -> CoordinatedSigningSlotKey {
+        CoordinatedSigningSlotKey {
+            chain_id: self.chain_id,
+            network_id: self.network_id.clone(),
+            consensus_version: self.consensus_version.clone(),
+            epoch: self.epoch,
+            height: self.height,
+            coordinator_id: self.coordinator_id.clone(),
+            phase: self.phase,
+            // A coordinator may issue a replacement assignment for a later
+            // producer round at the same height. A commit deliberately drops
+            // the round so Val1 can never sign two block subjects at a height.
+            producer_round: (self.phase == CoordinatedSigningPhase::Assignment)
+                .then_some(self.producer_round),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -191,6 +261,27 @@ struct DurableSigningRecord {
     persisted_at_unix_ms: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+struct CoordinatedSigningSlotKey {
+    chain_id: ChainId,
+    network_id: NetworkId,
+    consensus_version: String,
+    epoch: Epoch,
+    height: Height,
+    coordinator_id: ValidatorId,
+    phase: CoordinatedSigningPhase,
+    producer_round: Option<Round>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct DurableCoordinatedSigningRecord {
+    slot: CoordinatedSigningSlotKey,
+    authorization: CoordinatedSigningAuthorization,
+    authorization_root: Hash,
+    signature: AegisPqSignature,
+    persisted_at_unix_ms: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum SafetyHaltKind {
@@ -359,6 +450,10 @@ struct DurableRecoveryCheckpointRecord {
 struct DurableSigningJournal {
     format: String,
     records: Vec<DurableSigningRecord>,
+    /// Coordinated-mode authorizations are intentionally stored in their own
+    /// sequence so no QC/vote schema can be mistaken for a coordinator commit.
+    #[serde(default)]
+    coordinated_records: Vec<DurableCoordinatedSigningRecord>,
     safety_halts: Vec<DurableSafetyHaltRecord>,
     /// Every signing slot at or below this finalized height is permanently
     /// retired. Exact randomized envelopes remain durable while their height
@@ -377,6 +472,7 @@ impl Default for DurableSigningJournal {
         Self {
             format: CONSENSUS_SIGNING_JOURNAL_FORMAT.to_string(),
             records: Vec::new(),
+            coordinated_records: Vec::new(),
             safety_halts: Vec::new(),
             retired_through_height: 0,
             recovery_checkpoint: None,
@@ -537,6 +633,99 @@ impl DurableConsensusSigningAuthority {
             .records
             .iter()
             .any(|record| record.authorization == *authorization))
+    }
+
+    /// Atomically journals an exact temporary-coordinator signature before it
+    /// may be broadcast.  A commit's durable slot excludes producer round and
+    /// key ID, so Val1 cannot sign a second block hash at one height even after
+    /// a timeout, restart, or consensus-key rotation.
+    pub fn record_coordinated_signature(
+        &self,
+        authorization: &CoordinatedSigningAuthorization,
+        signature: &AegisPqSignature,
+    ) -> Result<(), String> {
+        authorization.validate()?;
+        if !signature.is_present() {
+            return Err("cannot journal an empty coordinated consensus signature".to_string());
+        }
+        let authorization_root = authorization.root()?;
+        let slot = authorization.slot_key();
+        let lock = PROCESS_WIDE_SIGNING_LOCK.get_or_init(|| Mutex::new(()));
+        let _guard = lock
+            .lock()
+            .map_err(|_| "consensus signing authority lock poisoned".to_string())?;
+        let mut journal = self.load_unlocked()?;
+        if let Some(halt) = journal.safety_halts.first() {
+            return Err(format!(
+                "CONSENSUS_SAFETY_HALT: signing disabled by {:?} incident {}",
+                halt.incident.kind,
+                halt.incident_root.to_hex()
+            ));
+        }
+        if let Some(existing) = journal
+            .coordinated_records
+            .iter()
+            .find(|record| record.slot == slot)
+        {
+            if existing.authorization == *authorization
+                && existing.authorization_root == authorization_root
+                && existing.signature == *signature
+            {
+                return Ok(());
+            }
+            return Err(format!(
+                "CONSENSUS_SIGNING_CONFLICT: coordinated {:?} slot already contains different durable evidence",
+                slot.phase
+            ));
+        }
+        if authorization.height.0 <= journal.retired_through_height {
+            return Err(format!(
+                "CONSENSUS_SIGNING_CONFLICT: coordinated height {} is retired through finalized height {}",
+                authorization.height.0, journal.retired_through_height
+            ));
+        }
+        journal
+            .coordinated_records
+            .push(DurableCoordinatedSigningRecord {
+                slot,
+                authorization: authorization.clone(),
+                authorization_root,
+                signature: signature.clone(),
+                persisted_at_unix_ms: current_unix_ms(),
+            });
+        self.persist_unlocked(&journal)
+    }
+
+    /// Recovers the exact randomized coordinator signature for safe replay.
+    /// A different authorization in the same slot is a safety conflict, not a
+    /// reason to create a second signature.
+    pub fn recorded_coordinated_signature(
+        &self,
+        authorization: &CoordinatedSigningAuthorization,
+    ) -> Result<Option<AegisPqSignature>, String> {
+        authorization.validate()?;
+        let slot = authorization.slot_key();
+        let lock = PROCESS_WIDE_SIGNING_LOCK.get_or_init(|| Mutex::new(()));
+        let _guard = lock
+            .lock()
+            .map_err(|_| "consensus signing authority lock poisoned".to_string())?;
+        let journal = self.load_unlocked()?;
+        let Some(record) = journal
+            .coordinated_records
+            .into_iter()
+            .find(|record| record.slot == slot)
+        else {
+            return Ok(None);
+        };
+        if record.authorization != *authorization
+            || record.authorization_root != authorization.root()?
+        {
+            return Err(
+                "CONSENSUS_SIGNING_CONFLICT: coordinated signing slot has a different subject"
+                    .to_string(),
+            );
+        }
+        Ok(Some(record.signature))
     }
 
     /// Persists the exact signed vote envelope before the caller may broadcast
@@ -955,6 +1144,27 @@ impl DurableConsensusSigningAuthority {
                 );
             }
         }
+        let mut coordinated_slots = std::collections::BTreeSet::new();
+        for record in &journal.coordinated_records {
+            record.authorization.validate()?;
+            if record.slot != record.authorization.slot_key()
+                || record.authorization_root != record.authorization.root()?
+                || !record.signature.is_present()
+            {
+                return Err("coordinated signing journal record binding mismatch".to_string());
+            }
+            if record.authorization.height.0 <= journal.retired_through_height {
+                return Err(
+                    "coordinated signing journal retains a finalized retired signing slot"
+                        .to_string(),
+                );
+            }
+            if !coordinated_slots.insert(record.slot.clone()) {
+                return Err(
+                    "coordinated signing journal contains duplicate signing slots".to_string(),
+                );
+            }
+        }
         for halt in &journal.safety_halts {
             halt.incident.validate()?;
             if halt.incident.root()? != halt.incident_root {
@@ -1106,6 +1316,77 @@ mod tests {
             candidate_id: Some(BlockId(candidate.to_string())),
             highest_prepared_vc_root: None,
         }
+    }
+
+    fn coordinated_authorization(
+        phase: CoordinatedSigningPhase,
+        round: u64,
+        subject: &str,
+    ) -> CoordinatedSigningAuthorization {
+        CoordinatedSigningAuthorization {
+            chain_id: ChainId::synergy_testnet_v3(),
+            network_id: NetworkId::synergy_testnet_v3(),
+            consensus_version: "coordinated_round_robin_v1".to_string(),
+            epoch: Epoch(0),
+            height: Height(51),
+            producer_round: Round(round),
+            coordinator_id: ValidatorId("validator-1".to_string()),
+            key_id: AegisPqKeyId("validator-1-consensus-key".to_string()),
+            phase,
+            subject_hash: Hash::from_domain_bytes(
+                "SYNERGY_COORDINATED_SIGNING_TEST",
+                subject.as_bytes(),
+            ),
+        }
+    }
+
+    fn coordinated_signature(label: &str) -> AegisPqSignature {
+        AegisPqSignature {
+            algorithm: "mldsa65".to_string(),
+            signature_bytes: label.as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn coordinated_commit_journal_refuses_a_second_block_subject_at_one_height() {
+        let authority = temp_authority("coordinated-commit-conflict");
+        let first = coordinated_authorization(CoordinatedSigningPhase::Commit, 0, "block-a");
+        let signature = coordinated_signature("commit-a");
+        authority
+            .record_coordinated_signature(&first, &signature)
+            .expect("persist first coordinator commit before broadcast");
+        assert_eq!(
+            authority
+                .recorded_coordinated_signature(&first)
+                .expect("recover recorded signature"),
+            Some(signature)
+        );
+
+        let conflicting = coordinated_authorization(CoordinatedSigningPhase::Commit, 1, "block-b");
+        assert!(authority
+            .record_coordinated_signature(&conflicting, &coordinated_signature("commit-b"))
+            .expect_err("a later producer round cannot authorize a second committed block")
+            .contains("CONSENSUS_SIGNING_CONFLICT"));
+    }
+
+    #[test]
+    fn coordinated_assignment_journal_allows_one_replacement_round_but_not_two_subjects() {
+        let authority = temp_authority("coordinated-assignment-rounds");
+        let first =
+            coordinated_authorization(CoordinatedSigningPhase::Assignment, 0, "assignment-a");
+        authority
+            .record_coordinated_signature(&first, &coordinated_signature("assignment-a"))
+            .expect("persist initial assignment");
+        let replacement =
+            coordinated_authorization(CoordinatedSigningPhase::Assignment, 1, "assignment-b");
+        authority
+            .record_coordinated_signature(&replacement, &coordinated_signature("assignment-b"))
+            .expect("persist replacement assignment after a timeout");
+        let conflicting =
+            coordinated_authorization(CoordinatedSigningPhase::Assignment, 1, "assignment-c");
+        assert!(authority
+            .record_coordinated_signature(&conflicting, &coordinated_signature("assignment-c"))
+            .is_err());
     }
 
     fn conflicting_qc_incident() -> SafetyHaltIncident {
