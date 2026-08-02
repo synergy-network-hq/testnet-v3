@@ -16,14 +16,15 @@ use crate::consensus::coordinated_round_robin::{
 use crate::consensus::signing_authority::{
     CoordinatedSigningAuthorization, CoordinatedSigningPhase, DurableConsensusSigningAuthority,
 };
-use crate::crypto::aegis_pqvm::AegisPqvmSigner;
+use crate::crypto::aegis_pqvm::{AegisPqvmSigner, SYNERGY_BLOCK_V1};
 use crate::execution::{compute_state_root_after, execute_block, ExecutionState};
 use crate::p2p::messages::{
     CoordinatedCommittedBlockPackage, CoordinatedConsensusMessage,
     MAX_COORDINATED_CONSENSUS_SYNC_RANGE_BLOCKS,
 };
 use crate::synergy_types::{
-    AegisPqKeyId, Block, ChainId, Epoch, Hash, Height, NetworkId, Round, ValidatorId, ValidatorSet,
+    AegisPqKeyId, Block, CanonicalSerialize, ChainId, Epoch, Hash, Height, NetworkId, Round,
+    ValidatorId, ValidatorSet,
 };
 
 /// The outcome of applying one fully verified coordinated finality package.
@@ -237,6 +238,129 @@ impl CoordinatedRuntime {
             }
         }
         self.install_assignment(assignment)
+    }
+
+    /// Signs the exact canonical block authorized for the local producer turn.
+    ///
+    /// The producer signature is journaled with the assignment's height and
+    /// round before the proposal can leave the process. A restart therefore
+    /// reuses the original randomized ML-DSA envelope rather than signing a
+    /// second representation of the same block subject. This method does not
+    /// finalize or mutate execution state; only Val1's later commit does that.
+    pub fn sign_assigned_producer_block(
+        &mut self,
+        assignment: &ProducerAssignment,
+        mut block: Block,
+    ) -> Result<(CoordinatedProposal, Block), String> {
+        self.accept_assignment(assignment)?;
+        if self.local_validator_id.0 != assignment.assigned_producer_id {
+            return Err(
+                "only the signed assigned producer may create a coordinated block".to_string(),
+            );
+        }
+        if assignment.height != self.coordinator_state.next_height()
+            || self.coordinator_state.pending_assignment.as_ref() != Some(assignment)
+        {
+            return Err(
+                "coordinated producer assignment is not the durable current block subject"
+                    .to_string(),
+            );
+        }
+        if block.proposer_signature.is_present() {
+            return Err(
+                "coordinated producer block must be unsigned before its durable signing boundary"
+                    .to_string(),
+            );
+        }
+
+        // Deterministic execution is required before signing so the producer
+        // never authorizes header state or receipt roots it cannot reproduce.
+        let _next_execution_state = execute_coordinated_block(&self.execution_state, &block)?;
+        let block_hash = Hash::from_hex(&block.block_id()?.0)
+            .map_err(|error| format!("coordinated block ID is not a hash: {error}"))?;
+        let authorization = CoordinatedSigningAuthorization {
+            chain_id: ChainId::synergy_testnet_v3(),
+            network_id: NetworkId::synergy_testnet_v3(),
+            consensus_version: self.config.consensus_version.clone(),
+            epoch: self.verifier.epoch(),
+            height: Height(assignment.height),
+            producer_round: Round(assignment.producer_round),
+            // This pre-existing field names the signing validator for the
+            // durable record. For ProducerBlock it is the assigned producer;
+            // Assignment and Commit remain restricted to Val1 below.
+            coordinator_id: self.local_validator_id.clone(),
+            key_id: self.local_consensus_key_id.clone(),
+            phase: CoordinatedSigningPhase::ProducerBlock,
+            subject_hash: block_hash,
+        };
+        if let Some(recorded) = self
+            .signing_authority
+            .recorded_coordinated_envelope(&authorization)?
+        {
+            block = serde_json::from_slice(&recorded.signed_envelope)
+                .map_err(|error| format!("decode durable coordinated producer block: {error}"))?;
+            let recovered_hash = Hash::from_hex(&block.block_id()?.0).map_err(|error| {
+                format!("durable coordinated producer block ID is not a hash: {error}")
+            })?;
+            if recovered_hash != authorization.subject_hash
+                || block.proposer_signature != recorded.signature
+            {
+                return Err(
+                    "durable coordinated producer block does not match its authorization"
+                        .to_string(),
+                );
+            }
+        } else {
+            let producer = self
+                .verifier
+                .validator_record(&assignment.assigned_producer_id)?;
+            block.proposer_signature = self
+                .signer
+                .sign_domain(
+                    SYNERGY_BLOCK_V1,
+                    &block.header.canonical_bytes()?,
+                    &producer.consensus_public_key.key_id,
+                )
+                .map_err(|error| format!("sign coordinated producer block: {error}"))?;
+            let envelope = serde_json::to_vec(&block)
+                .map_err(|error| format!("serialize coordinated producer block: {error}"))?;
+            self.signing_authority.record_coordinated_envelope(
+                &authorization,
+                &block.proposer_signature,
+                &envelope,
+            )?;
+        }
+
+        let transaction_ids = block
+            .transactions
+            .iter()
+            .map(|transaction| {
+                Ok(crate::synergy_types::TxId::from_hash(
+                    Hash::from_domain_bytes(
+                        "SYNERGY_EXECUTION_TX_ID_V1",
+                        &transaction.canonical_bytes()?,
+                    ),
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let proposal = CoordinatedProposal {
+            epoch: assignment.epoch,
+            height: assignment.height,
+            producer_round: assignment.producer_round,
+            parent_block_hash: assignment.parent_block_hash,
+            prior_finality_reference: assignment.prior_finality_reference,
+            block_hash: Hash::from_hex(&block.block_id()?.0)
+                .map_err(|error| format!("coordinated block ID is not a hash: {error}"))?,
+            transaction_root: crate::dag_mempool::compute_tx_order_root(&transaction_ids)?,
+            receipt_root: block.header.receipt_root,
+            state_root: block.header.state_root_after,
+            producer_id: assignment.assigned_producer_id.clone(),
+            assignment_hash: assignment.signing_hash()?,
+            producer_signature: block.proposer_signature.clone(),
+        };
+        self.verifier
+            .verify_producer_block(assignment, &proposal, &block)?;
+        Ok((proposal, block))
     }
 
     /// Verifies, executes, and finalizes a producer block on Val1. The exact
@@ -640,6 +764,10 @@ mod tests {
     }
 
     fn fixture() -> CoordinatedRuntime {
+        fixture_for_local("validator-1")
+    }
+
+    fn fixture_for_local(local_validator_id: &str) -> CoordinatedRuntime {
         let mut signer = AegisPqvmSigner::initialize_required().expect("Aegis signer");
         let mut validators = Vec::new();
         for index in 1..=6 {
@@ -703,7 +831,7 @@ mod tests {
             config(),
             &validator_set,
             signer.verifier(),
-            ValidatorId("validator-1".to_string()),
+            ValidatorId(local_validator_id.to_string()),
             signer,
             authority,
             state_store,
@@ -833,6 +961,51 @@ mod tests {
             runtime.coordinator_state().pending_assignment.as_ref(),
             Some(&assignment)
         );
+    }
+
+    #[test]
+    fn assigned_producer_journals_and_replays_the_exact_signed_block() {
+        let mut producer = fixture_for_local("validator-2");
+        let mut assignment = producer
+            .coordinator_state
+            .assignment_template(&producer.config, producer.verifier.epoch().0, 2_000)
+            .expect("build Val1 assignment subject");
+        let coordinator_key = producer
+            .verifier
+            .validator_record("validator-1")
+            .expect("configured coordinator")
+            .consensus_public_key
+            .key_id
+            .clone();
+        assignment.coordinator_signature = producer
+            .signer
+            .sign_domain(
+                COORDINATED_ASSIGNMENT_DOMAIN,
+                &assignment.signing_hash().expect("assignment hash").0,
+                &coordinator_key,
+            )
+            .expect("Val1 signs the assignment with the finalized key");
+        let (_, mut unsigned_block) = signed_empty_proposal(&mut producer, &assignment);
+        unsigned_block.proposer_signature = crate::synergy_types::AegisPqSignature {
+            algorithm: String::new(),
+            signature_bytes: Vec::new(),
+        };
+
+        let (proposal, signed_block) = producer
+            .sign_assigned_producer_block(&assignment, unsigned_block.clone())
+            .expect("assigned producer signs through the durable journal");
+        assert_eq!(proposal.producer_id, "validator-2");
+        assert!(signed_block.proposer_signature.is_present());
+        producer
+            .verifier
+            .verify_producer_block(&assignment, &proposal, &signed_block)
+            .expect("journaled producer block remains independently verifiable");
+
+        let (replayed_proposal, replayed_block) = producer
+            .sign_assigned_producer_block(&assignment, unsigned_block)
+            .expect("producer restart path reuses the exact durable block");
+        assert_eq!(replayed_proposal, proposal);
+        assert_eq!(replayed_block, signed_block);
     }
 
     #[test]

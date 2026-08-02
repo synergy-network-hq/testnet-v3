@@ -30,6 +30,10 @@ pub enum ConsensusSigningPhase {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum CoordinatedSigningPhase {
     Assignment,
+    /// The assigned producer's exact canonical block envelope. This remains
+    /// distinct from Val1's finality commit: a producer may sign only the
+    /// one block bound to its signed assignment and producer round.
+    ProducerBlock,
     Commit,
 }
 
@@ -84,9 +88,11 @@ impl CoordinatedSigningAuthorization {
             coordinator_id: self.coordinator_id.clone(),
             phase: self.phase,
             // A coordinator may issue a replacement assignment for a later
-            // producer round at the same height. A commit deliberately drops
-            // the round so Val1 can never sign two block subjects at a height.
-            producer_round: (self.phase == CoordinatedSigningPhase::Assignment)
+            // producer round at the same height. Its assigned producer has a
+            // separately journaled block slot for that same round. A commit
+            // deliberately drops the round so Val1 can never sign two block
+            // subjects at one height.
+            producer_round: (self.phase != CoordinatedSigningPhase::Commit)
                 .then_some(self.producer_round),
         }
     }
@@ -1470,6 +1476,50 @@ mod tests {
                 b"serialized-assignment-c",
             )
             .is_err());
+    }
+
+    #[test]
+    fn coordinated_producer_block_journal_binds_one_block_to_each_assigned_round() {
+        let authority = temp_authority("coordinated-producer-block-rounds");
+        let first = coordinated_authorization(
+            CoordinatedSigningPhase::ProducerBlock,
+            0,
+            "producer-block-a",
+        );
+        authority
+            .record_coordinated_envelope(
+                &first,
+                &coordinated_signature("producer-block-a"),
+                b"serialized-producer-block-a",
+            )
+            .expect("persist assigned producer block before it is broadcast");
+
+        let conflicting = coordinated_authorization(
+            CoordinatedSigningPhase::ProducerBlock,
+            0,
+            "producer-block-b",
+        );
+        assert!(authority
+            .record_coordinated_envelope(
+                &conflicting,
+                &coordinated_signature("producer-block-b"),
+                b"serialized-producer-block-b",
+            )
+            .expect_err("one producer assignment cannot authorize two block subjects")
+            .contains("CONSENSUS_SIGNING_CONFLICT"));
+
+        let replacement = coordinated_authorization(
+            CoordinatedSigningPhase::ProducerBlock,
+            1,
+            "producer-block-c",
+        );
+        authority
+            .record_coordinated_envelope(
+                &replacement,
+                &coordinated_signature("producer-block-c"),
+                b"serialized-producer-block-c",
+            )
+            .expect("a timeout replacement producer round has a separate durable slot");
     }
 
     fn conflicting_qc_incident() -> SafetyHaltIncident {
