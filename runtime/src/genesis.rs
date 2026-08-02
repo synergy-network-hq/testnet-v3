@@ -530,7 +530,7 @@ fn load_candidate_consensus_parameters(
     let loaded = load_genesis_bound_consensus_parameters(binding)?;
     let manifest = &loaded.manifest;
     if required_string(value, &["integrity", "consensus_parameter_decision_id"])?
-        != manifest.governance_approval_id
+        != manifest.governance_approval_id()
     {
         return Err(
             "Genesis integrity Decision ID disagrees with finalized consensus parameters"
@@ -563,17 +563,22 @@ fn load_candidate_consensus_parameters(
         );
     }
 
-    if required_u64(value, &["network", "chain_id"])? != manifest.chain_id.0 {
+    if required_u64(value, &["network", "chain_id"])? != manifest.chain_id().0 {
         return Err("Genesis chain ID disagrees with finalized consensus parameters".to_string());
     }
-    if required_string(value, &["network", "network_slug"])? != manifest.network_id.0 {
+    if required_string(value, &["network", "network_slug"])? != manifest.network_id().0 {
         return Err("Genesis network ID disagrees with finalized consensus parameters".to_string());
     }
-    if required_string(value, &["network", "consensus_version"])? != manifest.protocol_version {
+    if required_string(value, &["network", "consensus_version"])? != manifest.protocol_version() {
         return Err(
             "Genesis consensus version disagrees with finalized consensus parameters".to_string(),
         );
     }
+    if let Ok(manifest) = manifest.coordinated_round_robin() {
+        validate_coordinated_p1_genesis_parameters(value, manifest)?;
+        return Ok(Some(loaded));
+    }
+    let manifest = manifest.as_posy()?;
     if required_u64(value, &["consensus", "epoch", "length_blocks"])?
         != manifest
             .epoch_length_slots
@@ -667,6 +672,79 @@ fn load_candidate_consensus_parameters(
         }
     }
     Ok(Some(loaded))
+}
+
+fn validate_coordinated_p1_genesis_parameters(
+    value: &Value,
+    manifest: &crate::consensus_parameters::CoordinatedRoundRobinParameterManifest,
+) -> Result<(), String> {
+    let consensus = required(value, &["consensus"])?
+        .as_object()
+        .ok_or_else(|| "Genesis consensus is not an object".to_string())?;
+    let expected_keys = [
+        "algorithm",
+        "coordinator_id",
+        "mode",
+        "producer_ids",
+        "producer_turn_timeout_ms",
+        "state_directory_namespace",
+        "state_schema_version",
+        "target_block_time_ms",
+    ]
+    .into_iter()
+    .collect::<std::collections::BTreeSet<_>>();
+    let actual_keys = consensus
+        .keys()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    if actual_keys != expected_keys {
+        return Err(
+            "coordinated P1 Genesis consensus contains legacy PoSy or missing P1 parameters"
+                .to_string(),
+        );
+    }
+    if required_string(value, &["consensus", "algorithm"])? != manifest.protocol_version
+        || required_string(value, &["consensus", "mode"])? != manifest.protocol_version
+        || required_u64(value, &["consensus", "target_block_time_ms"])?
+            != manifest.target_block_time_ms
+        || required_string(value, &["consensus", "coordinator_id"])?
+            != manifest.coordinated_round_robin.coordinator_id
+        || required_u64(value, &["consensus", "producer_turn_timeout_ms"])?
+            != manifest.coordinated_round_robin.producer_turn_timeout_ms
+    {
+        return Err(
+            "Genesis coordinated P1 parameters disagree with the finalized parameter binding"
+                .to_string(),
+        );
+    }
+    let producers = required_array(value, &["consensus", "producer_ids"])?
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| "Genesis coordinated P1 producer ID is not a string".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if producers != manifest.coordinated_round_robin.producer_ids {
+        return Err(
+            "Genesis coordinated P1 producer ordering disagrees with the finalized parameter binding"
+                .to_string(),
+        );
+    }
+    for validator in required_array(value, &["validators"])? {
+        if required_string(validator, &["consensus_key_type"])?
+            .to_ascii_lowercase()
+            .replace('-', "")
+            != manifest.consensus_signature_algorithm
+        {
+            return Err(
+                "Genesis validator consensus key algorithm disagrees with finalized coordinated P1 parameters"
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
 }
 
 fn validate_testnet_v3_candidate_integrity_hashes(value: &Value) -> Result<(), String> {
@@ -937,28 +1015,50 @@ pub fn bind_testnet_v3_genesis_consensus_parameters(
     }
     let manifest = &loaded.manifest;
     manifest.validate_finalized()?;
-    value["consensus"]["epoch"]["length_blocks"] = json!(manifest
-        .epoch_length_slots
-        .ok_or_else(|| "finalized epoch length is missing".to_string())?);
-    value["consensus"]["target_block_time_ms"] = json!(manifest.target_block_time_ms);
-    value["consensus"]["cluster_schedule_version"] =
-        Value::String(manifest.cluster_schedule_version.clone());
-    value["consensus"]["initial_active_validator_count"] =
-        json!(manifest.initial_cluster_validator_count);
-    value["consensus"]["min_validator_count"] = json!(manifest.initial_cluster_validator_count);
-    value["consensus"]["min_quorum_threshold"] = json!(manifest.initial_availability_quorum);
-    value["consensus"]["min_stake_nwei"] =
-        Value::String(manifest.required_validator_stake_nwei.to_string());
-    value["consensus"]["timeouts"] = json!({
-        "proposal_ms": manifest.proposal_timeout_ms,
-        "prevote_ms": manifest.prevote_timeout_ms,
-        "precommit_ms": manifest.precommit_timeout_ms,
-        "max_round_ms": manifest.max_round_timeout_ms,
-    });
+    match manifest {
+        crate::consensus_parameters::FinalizedConsensusParameterManifest::PosyV2_2(manifest) => {
+            value["consensus"]["epoch"]["length_blocks"] = json!(manifest
+                .epoch_length_slots
+                .ok_or_else(|| "finalized epoch length is missing".to_string())?);
+            value["consensus"]["target_block_time_ms"] = json!(manifest.target_block_time_ms);
+            value["consensus"]["cluster_schedule_version"] =
+                Value::String(manifest.cluster_schedule_version.clone());
+            value["consensus"]["initial_active_validator_count"] =
+                json!(manifest.initial_cluster_validator_count);
+            value["consensus"]["min_validator_count"] = json!(manifest.initial_cluster_validator_count);
+            value["consensus"]["min_quorum_threshold"] = json!(manifest.initial_availability_quorum);
+            value["consensus"]["min_stake_nwei"] =
+                Value::String(manifest.required_validator_stake_nwei.to_string());
+            value["consensus"]["timeouts"] = json!({
+                "proposal_ms": manifest.proposal_timeout_ms,
+                "prevote_ms": manifest.prevote_timeout_ms,
+                "precommit_ms": manifest.precommit_timeout_ms,
+                "max_round_ms": manifest.max_round_timeout_ms,
+            });
+        }
+        crate::consensus_parameters::FinalizedConsensusParameterManifest::CoordinatedRoundRobinV1(
+            manifest,
+        ) => {
+            let state_directory_namespace =
+                required_string(value, &["consensus", "state_directory_namespace"])?;
+            let state_schema_version = required_u64(value, &["consensus", "state_schema_version"])?;
+            value["network"]["consensus_version"] = Value::String(manifest.protocol_version.clone());
+            value["consensus"] = json!({
+                "algorithm": manifest.protocol_version,
+                "mode": manifest.protocol_version,
+                "target_block_time_ms": manifest.target_block_time_ms,
+                "coordinator_id": manifest.coordinated_round_robin.coordinator_id,
+                "producer_ids": manifest.coordinated_round_robin.producer_ids,
+                "producer_turn_timeout_ms": manifest.coordinated_round_robin.producer_turn_timeout_ms,
+                "state_directory_namespace": state_directory_namespace,
+                "state_schema_version": state_schema_version,
+            });
+        }
+    }
 
     let canonical_manifest_sha256 = hex::encode(sha2::Sha256::digest(&loaded.canonical_bytes));
     let root = loaded.root.to_hex();
-    let decision_id = manifest.governance_approval_id.clone();
+    let decision_id = manifest.governance_approval_id().to_string();
     value["consensus_parameters"] = json!({
         "schema_version": CONSENSUS_PARAMETER_GENESIS_BINDING_SCHEMA_VERSION,
         "status": CONSENSUS_PARAMETER_GENESIS_BINDING_STATUS,
@@ -972,7 +1072,7 @@ pub fn bind_testnet_v3_genesis_consensus_parameters(
     value["integrity"]["consensus_parameter_manifest_sha256"] =
         Value::String(canonical_manifest_sha256);
     value["integrity"]["consensus_parameter_decision_id"] =
-        Value::String(manifest.governance_approval_id.clone());
+        Value::String(manifest.governance_approval_id().to_string());
 
     let hash_inputs = value["canonicalization"]["genesis_hash_inputs"]
         .as_array_mut()
@@ -1425,6 +1525,94 @@ mod tests {
         assert!(load_candidate_consensus_parameters(&candidate)
             .unwrap_err()
             .contains("proposal_ms disagrees"));
+    }
+
+    #[test]
+    fn coordinated_p1_binding_replaces_posy_consensus_shape_and_rejects_legacy_fields() {
+        use crate::consensus_parameters::{
+            CoordinatedRoundRobinParameterManifest, CoordinatedRoundRobinParameters,
+            CONSENSUS_PARAMETER_ACTIVATION_BOUNDARY,
+            CONSENSUS_PARAMETER_MANIFEST_COORDINATED_P1_SCHEMA_VERSION,
+            CONSENSUS_PARAMETER_MANIFEST_FINALIZED_STATUS, CONSENSUS_PARAMETER_MANIFEST_RELEASE_ID,
+            COORDINATED_P1_COORDINATOR_ID, COORDINATED_P1_PRODUCER_IDS,
+            COORDINATED_P1_PRODUCER_TURN_TIMEOUT_MS, COORDINATED_P1_TARGET_BLOCK_TIME_MS,
+            COORDINATED_ROUND_ROBIN_V1_PROTOCOL_VERSION,
+        };
+
+        let manifest = CoordinatedRoundRobinParameterManifest {
+            schema_version: CONSENSUS_PARAMETER_MANIFEST_COORDINATED_P1_SCHEMA_VERSION,
+            release_id: CONSENSUS_PARAMETER_MANIFEST_RELEASE_ID.to_string(),
+            status: CONSENSUS_PARAMETER_MANIFEST_FINALIZED_STATUS.to_string(),
+            governance_approval_id: "TV3-P1-GENESIS-UNIT-TEST".to_string(),
+            chain_id: crate::synergy_types::ChainId::synergy_testnet_v3(),
+            network_id: crate::synergy_types::NetworkId::synergy_testnet_v3(),
+            protocol_version: COORDINATED_ROUND_ROBIN_V1_PROTOCOL_VERSION.to_string(),
+            activation_boundary: CONSENSUS_PARAMETER_ACTIVATION_BOUNDARY.to_string(),
+            target_block_time_ms: COORDINATED_P1_TARGET_BLOCK_TIME_MS,
+            consensus_signature_algorithm:
+                crate::synergy_types::TESTNET_V3_CONSENSUS_SIGNATURE_ALGORITHM.to_string(),
+            coordinated_round_robin: CoordinatedRoundRobinParameters {
+                coordinator_id: COORDINATED_P1_COORDINATOR_ID.to_string(),
+                producer_ids: COORDINATED_P1_PRODUCER_IDS
+                    .iter()
+                    .map(|producer| (*producer).to_string())
+                    .collect(),
+                producer_turn_timeout_ms: COORDINATED_P1_PRODUCER_TURN_TIMEOUT_MS,
+            },
+        };
+        let manifest_bytes = manifest.canonical_bytes().expect("canonical P1 manifest");
+        let parameters =
+            crate::consensus_parameters::load_finalized_consensus_parameters_from_bytes(
+                &manifest_bytes,
+            )
+            .expect("load P1 manifest");
+        let mut candidate = testnet_v3_candidate();
+        bind_testnet_v3_genesis_consensus_parameters(&mut candidate, &parameters, &"11".repeat(32))
+            .expect("bind P1 manifest into candidate");
+
+        assert_eq!(
+            candidate["network"]["consensus_version"].as_str(),
+            Some(COORDINATED_ROUND_ROBIN_V1_PROTOCOL_VERSION)
+        );
+        assert_eq!(
+            candidate["consensus"]["mode"].as_str(),
+            Some(COORDINATED_ROUND_ROBIN_V1_PROTOCOL_VERSION)
+        );
+        validate_integrity_hashes(&candidate).expect("P1 Genesis integrity binding");
+
+        let path = crate::utils::test_temp_root(format!(
+            "synergy-p1-genesis-binding-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::write(
+            &path,
+            serde_json::to_vec(&candidate).expect("encode P1 Genesis"),
+        )
+        .expect("write P1 Genesis");
+        let loaded = load_canonical_genesis_from_path(path.clone()).expect("load P1 Genesis");
+        fs::remove_file(path).expect("remove P1 Genesis");
+        let bootstrap =
+            crate::consensus::testnet_v3_bootstrap::load_coordinated_round_robin_genesis_bootstrap(
+                &loaded,
+            )
+            .expect("bootstrap P1 Genesis");
+        assert_eq!(
+            bootstrap
+                .validator_set
+                .active_for_epoch(crate::synergy_types::Epoch(0))
+                .validators
+                .len(),
+            6
+        );
+
+        candidate["consensus"]["timeouts"] = json!({ "proposal_ms": 1_500 });
+        assert!(load_candidate_consensus_parameters(&candidate)
+            .expect_err("P1 Genesis must reject an old typed timeout object")
+            .contains("legacy PoSy"));
     }
 
     #[test]

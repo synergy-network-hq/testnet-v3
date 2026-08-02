@@ -503,7 +503,12 @@ fn finalized_consensus_parameters(root: &Path) -> (LoadedConsensusParameters, St
     let decision_path = root.join(CONSENSUS_PARAMETER_DECISION_FILE);
     let decision_bytes = read_bytes(&decision_path);
     let decision_sha256 = sha256_bytes(&decision_bytes);
-    let decision_id = loaded.manifest.governance_approval_id.clone();
+    let manifest = loaded.manifest.as_posy().unwrap_or_else(|error| {
+        fail(format!(
+            "legacy finalization requires PoSy parameters: {error}"
+        ))
+    });
+    let decision_id = manifest.governance_approval_id.clone();
     let decision_marker = format!("Decision ID: `{decision_id}`");
     if !decision_bytes
         .windows(decision_marker.len())
@@ -515,12 +520,12 @@ fn finalized_consensus_parameters(root: &Path) -> (LoadedConsensusParameters, St
             decision_id
         ));
     }
-    if loaded.manifest.epoch_length_slots != Some(1_000)
-        || loaded.manifest.target_block_time_ms != 2_000
-        || loaded.manifest.proposal_timeout_ms != 1_500
-        || loaded.manifest.prevote_timeout_ms != 1_500
-        || loaded.manifest.precommit_timeout_ms != 1_500
-        || loaded.manifest.max_round_timeout_ms != 10_000
+    if manifest.epoch_length_slots != Some(1_000)
+        || manifest.target_block_time_ms != 2_000
+        || manifest.proposal_timeout_ms != 1_500
+        || manifest.prevote_timeout_ms != 1_500
+        || manifest.precommit_timeout_ms != 1_500
+        || manifest.max_round_timeout_ms != 10_000
     {
         fail("finalized consensus manifest does not contain the approved launch timing profile");
     }

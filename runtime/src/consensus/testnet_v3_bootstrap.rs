@@ -282,19 +282,64 @@ pub fn consensus_key_id_for_operator(operator_address: &str) -> Result<AegisPqKe
     )))
 }
 
-/// Builds the typed validator and verifier state directly from the canonical
-/// Testnet-v3 Genesis document.
+#[derive(Clone, Copy)]
+enum GenesisBootstrapConsensusMode {
+    PosyV2_2,
+    CoordinatedRoundRobinV1,
+}
+
+/// Builds the typed-PoSy validator and verifier state directly from the
+/// canonical Testnet-v3 Genesis document.
 pub fn load_testnet_v3_genesis_bootstrap(
     genesis: &GenesisDocument,
 ) -> Result<TestnetV3GenesisBootstrap, String> {
+    load_genesis_bootstrap(genesis, GenesisBootstrapConsensusMode::PosyV2_2)
+}
+
+/// Builds the P1 verifier state from a Genesis binding that explicitly
+/// authorizes coordinated round robin. It registers only the proposer role;
+/// the P1 verifier has no vote, QC, VC, TC, aggregation, or epoch-transition
+/// authority.
+pub fn load_coordinated_round_robin_genesis_bootstrap(
+    genesis: &GenesisDocument,
+) -> Result<TestnetV3GenesisBootstrap, String> {
+    load_genesis_bootstrap(
+        genesis,
+        GenesisBootstrapConsensusMode::CoordinatedRoundRobinV1,
+    )
+}
+
+fn load_genesis_bootstrap(
+    genesis: &GenesisDocument,
+    mode: GenesisBootstrapConsensusMode,
+) -> Result<TestnetV3GenesisBootstrap, String> {
     if genesis.chain_id() != 1266 {
         return Err(format!(
-            "typed PoSy Genesis has chain_id {}; expected 1266",
+            "Testnet-v3 Genesis has chain_id {}; expected 1266",
             genesis.chain_id()
         ));
     }
-    if genesis.network_id() != 1266 || genesis.consensus_version() != "posy/2.2" {
-        return Err("typed PoSy Genesis network/consensus binding is invalid".to_string());
+    if genesis.network_id() != 1266 {
+        return Err("Testnet-v3 Genesis network binding is invalid".to_string());
+    }
+    match mode {
+        GenesisBootstrapConsensusMode::PosyV2_2
+            if genesis.consensus_version() != POSY_PROTOCOL_VERSION =>
+        {
+            return Err("typed PoSy Genesis consensus binding is invalid".to_string());
+        }
+        GenesisBootstrapConsensusMode::CoordinatedRoundRobinV1 => {
+            let parameters = genesis.consensus_parameters().ok_or_else(|| {
+                "coordinated P1 Genesis has no finalized consensus parameter binding".to_string()
+            })?;
+            parameters.require_coordinated_round_robin_manifest()?;
+            if genesis.consensus_version()
+                != crate::consensus_parameters::COORDINATED_ROUND_ROBIN_V1_PROTOCOL_VERSION
+            {
+                return Err("coordinated P1 Genesis consensus binding is invalid".to_string());
+            }
+        }
+        GenesisBootstrapConsensusMode::PosyV2_2 => {}
     }
 
     let records = genesis
@@ -381,16 +426,16 @@ pub fn load_testnet_v3_genesis_bootstrap(
                 AegisPqKeyLifecycleRecord {
                     uma_id: validator.validator_uma_id.0.clone(),
                     key_id: consensus.key_id.clone(),
-                    roles: vec![
-                        AegisPqKeyRole::ConsensusProposer,
-                        AegisPqKeyRole::ConsensusVote,
-                        // The already-active Genesis validators, and only
-                        // those validators, may authorize an epoch transition
-                        // that activates one of the preconfigured records.
-                        // Pending validators are deliberately absent from this
-                        // verifier lifecycle until that transition succeeds.
-                        AegisPqKeyRole::EpochTransition,
-                    ],
+                    roles: match mode {
+                        GenesisBootstrapConsensusMode::PosyV2_2 => vec![
+                            AegisPqKeyRole::ConsensusProposer,
+                            AegisPqKeyRole::ConsensusVote,
+                            AegisPqKeyRole::EpochTransition,
+                        ],
+                        GenesisBootstrapConsensusMode::CoordinatedRoundRobinV1 => {
+                            vec![AegisPqKeyRole::ConsensusProposer]
+                        }
+                    },
                     active_from_epoch: epoch,
                     active_until_epoch: None,
                     revoked_from_epoch: None,

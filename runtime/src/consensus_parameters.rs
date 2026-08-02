@@ -17,6 +17,10 @@ pub const CONSENSUS_PARAMETER_MANIFEST_SCHEMA_VERSION: u32 = 2;
 /// deferral, rather than implicit activation from the presence of ETDAG
 /// cryptographic parameters.
 pub const CONSENSUS_PARAMETER_MANIFEST_ETDAG_ACTIVATION_SCHEMA_VERSION: u32 = 3;
+/// Schema version 4 is the deliberately narrow P1 coordinated-round-robin
+/// manifest. It is structurally separate from typed-PoSy manifests so a P1
+/// Genesis cannot carry quorum, vote, QC, VC, TC, or aggregation parameters.
+pub const CONSENSUS_PARAMETER_MANIFEST_COORDINATED_P1_SCHEMA_VERSION: u32 = 4;
 pub const CONSENSUS_PARAMETER_MANIFEST_RELEASE_ID: &str = "testnet-v3";
 pub const CONSENSUS_PARAMETER_MANIFEST_FINALIZED_STATUS: &str = "FINALIZED";
 pub const CONSENSUS_PARAMETER_ACTIVATION_BOUNDARY: &str = "genesis_or_declared_epoch_boundary";
@@ -26,6 +30,17 @@ pub const MAX_CONSENSUS_PARAMETER_MANIFEST_BYTES: usize = 64 * 1024;
 pub const ERR_ETDAG_DEFERRED: &str = "ETDAG_DEFERRED_UNTIL_FINALIZED_EPOCH_MANIFEST";
 pub const ERR_ETDAG_PREMATURE_ACTIVATION: &str =
     "ETDAG_PREMATURE_ACTIVATION_BEFORE_DECLARED_EPOCH_BOUNDARY";
+pub const COORDINATED_ROUND_ROBIN_V1_PROTOCOL_VERSION: &str = "coordinated_round_robin_v1";
+pub const COORDINATED_P1_COORDINATOR_ID: &str = "validator-1";
+pub const COORDINATED_P1_PRODUCER_IDS: [&str; 5] = [
+    "validator-2",
+    "validator-3",
+    "validator-4",
+    "validator-5",
+    "validator-6",
+];
+pub const COORDINATED_P1_PRODUCER_TURN_TIMEOUT_MS: u64 = 4_000;
+pub const COORDINATED_P1_TARGET_BLOCK_TIME_MS: u64 = 2_000;
 
 /// The workbook-mandated 512-bit root of the exact canonical parameter
 /// manifest bytes. This is deliberately not the runtime's general 256-bit
@@ -443,6 +458,292 @@ impl ConsensusParameterManifest {
     }
 }
 
+/// The exact P1 authority carried by a newly signed coordinated-round-robin
+/// Genesis. It is intentionally not embedded in the legacy PoSy parameter
+/// manifest: keeping the schemas disjoint makes old quorum and vote fields a
+/// deserialization error before a P1 process can start.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CoordinatedRoundRobinParameters {
+    pub coordinator_id: String,
+    pub producer_ids: Vec<String>,
+    pub producer_turn_timeout_ms: u64,
+}
+
+impl CoordinatedRoundRobinParameters {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.coordinator_id != COORDINATED_P1_COORDINATOR_ID
+            || self.producer_turn_timeout_ms != COORDINATED_P1_PRODUCER_TURN_TIMEOUT_MS
+            || self.producer_ids.len() != COORDINATED_P1_PRODUCER_IDS.len()
+            || self
+                .producer_ids
+                .iter()
+                .map(String::as_str)
+                .ne(COORDINATED_P1_PRODUCER_IDS)
+        {
+            return Err(
+                "coordinated P1 parameters must be Val1 coordinator, ordered Val2--Val6 producers, and a 4000 ms producer-turn timeout"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// The P1 manifest contains only common chain bindings and the temporary
+/// coordinated-round-robin authority. Its `deny_unknown_fields` contract is
+/// part of the consensus boundary: any old PoSy transport, quorum, vote, QC,
+/// VC, TC, or aggregation setting invalidates the signed Genesis binding.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CoordinatedRoundRobinParameterManifest {
+    pub schema_version: u32,
+    pub release_id: String,
+    pub status: String,
+    pub governance_approval_id: String,
+    pub chain_id: ChainId,
+    pub network_id: NetworkId,
+    pub protocol_version: String,
+    pub activation_boundary: String,
+    pub target_block_time_ms: u64,
+    pub consensus_signature_algorithm: String,
+    pub coordinated_round_robin: CoordinatedRoundRobinParameters,
+}
+
+impl CoordinatedRoundRobinParameterManifest {
+    pub fn validate_finalized(&self) -> Result<(), String> {
+        if self.schema_version != CONSENSUS_PARAMETER_MANIFEST_COORDINATED_P1_SCHEMA_VERSION {
+            return Err(format!(
+                "unsupported coordinated P1 parameter manifest schema version: expected {}, found {}",
+                CONSENSUS_PARAMETER_MANIFEST_COORDINATED_P1_SCHEMA_VERSION, self.schema_version
+            ));
+        }
+        if self.release_id != CONSENSUS_PARAMETER_MANIFEST_RELEASE_ID {
+            return Err(format!(
+                "wrong consensus parameter release ID: expected {}, found {}",
+                CONSENSUS_PARAMETER_MANIFEST_RELEASE_ID, self.release_id
+            ));
+        }
+        if self.status != CONSENSUS_PARAMETER_MANIFEST_FINALIZED_STATUS {
+            return Err(
+                "coordinated P1 parameter manifest is not governance-finalized; validator startup is prohibited"
+                    .to_string(),
+            );
+        }
+        if self.governance_approval_id.trim().is_empty() {
+            return Err(
+                "finalized coordinated P1 parameter manifest is missing governance approval ID"
+                    .to_string(),
+            );
+        }
+        self.chain_id.require_testnet_v3()?;
+        self.network_id.require_testnet_v3()?;
+        if self.protocol_version != COORDINATED_ROUND_ROBIN_V1_PROTOCOL_VERSION {
+            return Err(format!(
+                "wrong coordinated P1 protocol version: expected {COORDINATED_ROUND_ROBIN_V1_PROTOCOL_VERSION}, found {}",
+                self.protocol_version
+            ));
+        }
+        if self.activation_boundary != CONSENSUS_PARAMETER_ACTIVATION_BOUNDARY {
+            return Err(format!(
+                "consensus parameter activation boundary must be {CONSENSUS_PARAMETER_ACTIVATION_BOUNDARY}"
+            ));
+        }
+        if self.target_block_time_ms != COORDINATED_P1_TARGET_BLOCK_TIME_MS {
+            return Err(format!(
+                "coordinated P1 target block time must be {COORDINATED_P1_TARGET_BLOCK_TIME_MS} ms"
+            ));
+        }
+        if self.consensus_signature_algorithm != TESTNET_V3_CONSENSUS_SIGNATURE_ALGORITHM {
+            return Err(format!(
+                "wrong validator consensus signature algorithm: expected {TESTNET_V3_CONSENSUS_SIGNATURE_ALGORITHM}, found {}",
+                self.consensus_signature_algorithm
+            ));
+        }
+        self.coordinated_round_robin.validate()
+    }
+
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, String> {
+        self.validate_finalized()?;
+        serde_json::to_vec(self).map_err(|error| {
+            format!("canonical coordinated P1 parameter manifest serialization failed: {error}")
+        })
+    }
+
+    pub fn root(&self) -> Result<ConsensusParameterRoot, String> {
+        Ok(ConsensusParameterRoot::from_canonical_manifest_bytes(
+            &self.canonical_bytes()?,
+        ))
+    }
+}
+
+/// The finalized manifest has an explicit protocol-dispatched schema. Do not
+/// use `untagged` deserialization here: it could let a P1-labelled document
+/// first deserialize as a legacy PoSy shape. P1 is always decoded through its
+/// strict, no-legacy-fields schema.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum FinalizedConsensusParameterManifest {
+    PosyV2_2(ConsensusParameterManifest),
+    CoordinatedRoundRobinV1(CoordinatedRoundRobinParameterManifest),
+}
+
+impl<'de> Deserialize<'de> for FinalizedConsensusParameterManifest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let protocol_version = value
+            .get("protocol_version")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                serde::de::Error::custom("consensus parameter manifest has no protocol_version")
+            })?;
+        match protocol_version {
+            POSY_PROTOCOL_VERSION => serde_json::from_value(value)
+                .map(Self::PosyV2_2)
+                .map_err(serde::de::Error::custom),
+            COORDINATED_ROUND_ROBIN_V1_PROTOCOL_VERSION => serde_json::from_value(value)
+                .map(Self::CoordinatedRoundRobinV1)
+                .map_err(serde::de::Error::custom),
+            other => Err(serde::de::Error::custom(format!(
+                "unsupported consensus parameter protocol version {other}"
+            ))),
+        }
+    }
+}
+
+impl FinalizedConsensusParameterManifest {
+    pub fn validate_finalized(&self) -> Result<(), String> {
+        match self {
+            Self::PosyV2_2(manifest) => manifest.validate_finalized(),
+            Self::CoordinatedRoundRobinV1(manifest) => manifest.validate_finalized(),
+        }
+    }
+
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, String> {
+        match self {
+            Self::PosyV2_2(manifest) => manifest.canonical_bytes(),
+            Self::CoordinatedRoundRobinV1(manifest) => manifest.canonical_bytes(),
+        }
+    }
+
+    pub fn root(&self) -> Result<ConsensusParameterRoot, String> {
+        Ok(ConsensusParameterRoot::from_canonical_manifest_bytes(
+            &self.canonical_bytes()?,
+        ))
+    }
+
+    pub fn governance_approval_id(&self) -> &str {
+        match self {
+            Self::PosyV2_2(manifest) => &manifest.governance_approval_id,
+            Self::CoordinatedRoundRobinV1(manifest) => &manifest.governance_approval_id,
+        }
+    }
+
+    pub fn chain_id(&self) -> ChainId {
+        match self {
+            Self::PosyV2_2(manifest) => manifest.chain_id,
+            Self::CoordinatedRoundRobinV1(manifest) => manifest.chain_id,
+        }
+    }
+
+    pub fn network_id(&self) -> &NetworkId {
+        match self {
+            Self::PosyV2_2(manifest) => &manifest.network_id,
+            Self::CoordinatedRoundRobinV1(manifest) => &manifest.network_id,
+        }
+    }
+
+    pub fn protocol_version(&self) -> &str {
+        match self {
+            Self::PosyV2_2(manifest) => &manifest.protocol_version,
+            Self::CoordinatedRoundRobinV1(manifest) => &manifest.protocol_version,
+        }
+    }
+
+    pub fn consensus_signature_algorithm(&self) -> &str {
+        match self {
+            Self::PosyV2_2(manifest) => &manifest.consensus_signature_algorithm,
+            Self::CoordinatedRoundRobinV1(manifest) => &manifest.consensus_signature_algorithm,
+        }
+    }
+
+    pub fn as_posy(&self) -> Result<&ConsensusParameterManifest, String> {
+        match self {
+            Self::PosyV2_2(manifest) => Ok(manifest),
+            Self::CoordinatedRoundRobinV1(_) => Err(
+                "typed PoSy startup rejects a coordinated_round_robin_v1 Genesis binding"
+                    .to_string(),
+            ),
+        }
+    }
+
+    pub fn coordinated_round_robin(
+        &self,
+    ) -> Result<&CoordinatedRoundRobinParameterManifest, String> {
+        match self {
+            Self::PosyV2_2(_) => {
+                Err("coordinated P1 startup rejects a PoSy Genesis parameter binding".to_string())
+            }
+            Self::CoordinatedRoundRobinV1(manifest) => Ok(manifest),
+        }
+    }
+
+    pub fn protocol_config(&self) -> Result<ProtocolConfig, String> {
+        match self {
+            Self::PosyV2_2(manifest) => manifest.protocol_config(),
+            Self::CoordinatedRoundRobinV1(manifest) => {
+                manifest.validate_finalized()?;
+                let mut config = ProtocolConfig {
+                    chain_id: manifest.chain_id,
+                    network_id: manifest.network_id.clone(),
+                    consensus_parameter_root: manifest.root()?,
+                    runtime_config_commitment: crate::synergy_types::Hash::zero(),
+                    shadow_epochs_required: 0,
+                    activation_delay_epochs: 0,
+                    minimum_shadow_blocks: 0,
+                    max_finalized_lag_blocks: 0,
+                    required_vote_match_rate_ppm: 0,
+                    required_validator_stake_nwei: 0,
+                    allow_over_staking: false,
+                    anti_divergence_enabled: false,
+                    auto_reconciliation_enabled: false,
+                    self_quarantine_on_local_divergence: false,
+                    peer_quarantine_on_invalid_finality_claim: false,
+                    require_quorum_peer_confirmation_for_reconciliation: false,
+                    min_canonical_sync_peers: 0,
+                    max_rejoin_lag_blocks: 0,
+                    rejoin_only_at_round_boundary: false,
+                    allow_quorum_reduction: false,
+                    proposal_timeout_ms: 0,
+                    prevote_timeout_ms: 0,
+                    precommit_timeout_ms: 0,
+                    max_round_timeout_ms: 0,
+                };
+                // P1 callers use the manifest root directly. This sealed
+                // compatibility value exists only because legacy typed code
+                // still owns `ProtocolConfig`; no P1 parameter populates it.
+                config.seal_runtime_binding()?;
+                Ok(config)
+            }
+        }
+    }
+
+    pub(crate) fn require_etdag_activation_at_epoch(
+        &self,
+        current_epoch: Epoch,
+    ) -> Result<EtdagActivationPermit, String> {
+        match self {
+            Self::PosyV2_2(manifest) => manifest.require_etdag_activation_at_epoch(current_epoch),
+            Self::CoordinatedRoundRobinV1(_) => Err(format!(
+                "{ERR_ETDAG_DEFERRED}: coordinated P1 has no ETDAG vote or aggregation path"
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadedConsensusParameterSource {
     FinalizedManifest,
@@ -451,7 +752,7 @@ pub enum LoadedConsensusParameterSource {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedConsensusParameters {
-    pub manifest: ConsensusParameterManifest,
+    pub manifest: FinalizedConsensusParameterManifest,
     pub canonical_bytes: Vec<u8>,
     pub root: ConsensusParameterRoot,
     pub protocol_config: ProtocolConfig,
@@ -466,6 +767,18 @@ impl LoadedConsensusParameters {
             );
         }
         Ok(())
+    }
+
+    pub fn require_posy_manifest(&self) -> Result<&ConsensusParameterManifest, String> {
+        self.require_genesis_binding()?;
+        self.manifest.as_posy()
+    }
+
+    pub fn require_coordinated_round_robin_manifest(
+        &self,
+    ) -> Result<&CoordinatedRoundRobinParameterManifest, String> {
+        self.require_genesis_binding()?;
+        self.manifest.coordinated_round_robin()
     }
 
     pub(crate) fn require_etdag_activation_at_epoch(
@@ -486,7 +799,7 @@ struct ConsensusParameterGenesisBinding {
     release_decision_sha256: String,
     canonical_manifest_sha256: String,
     parameter_root_sha3_512: ConsensusParameterRoot,
-    manifest: ConsensusParameterManifest,
+    manifest: FinalizedConsensusParameterManifest,
 }
 
 pub fn load_finalized_consensus_parameters(
@@ -514,7 +827,7 @@ pub fn load_finalized_consensus_parameters_from_bytes(
             MAX_CONSENSUS_PARAMETER_MANIFEST_BYTES
         ));
     }
-    let manifest: ConsensusParameterManifest = serde_json::from_slice(bytes)
+    let manifest: FinalizedConsensusParameterManifest = serde_json::from_slice(bytes)
         .map_err(|error| format!("invalid consensus parameter manifest JSON: {error}"))?;
     let canonical_bytes = manifest.canonical_bytes()?;
     if bytes != canonical_bytes.as_slice() {
@@ -576,10 +889,11 @@ pub fn load_genesis_bound_consensus_parameters(
         ));
     }
 
-    if binding.decision_id != loaded.manifest.governance_approval_id {
+    if binding.decision_id != loaded.manifest.governance_approval_id() {
         return Err(format!(
             "Genesis consensus parameter Decision ID mismatch: expected {}, found {}",
-            loaded.manifest.governance_approval_id, binding.decision_id
+            loaded.manifest.governance_approval_id(),
+            binding.decision_id
         ));
     }
     if binding.release_decision_sha256.len() != 64
@@ -678,7 +992,10 @@ mod tests {
         fs::write(&path, &bytes).unwrap();
         let loaded = load_finalized_consensus_parameters(&path).unwrap();
         fs::remove_file(path).unwrap();
-        assert_eq!(loaded.manifest, manifest);
+        assert_eq!(
+            loaded.manifest,
+            FinalizedConsensusParameterManifest::PosyV2_2(manifest.clone())
+        );
         assert_eq!(loaded.canonical_bytes, bytes);
         assert_eq!(loaded.root, manifest.root().unwrap());
         assert!(loaded.require_genesis_binding().is_err());
@@ -786,53 +1103,49 @@ mod tests {
         assert!(decision
             .windows(decision_id.len())
             .any(|window| window == decision_id.as_bytes()));
-        assert_eq!(loaded.manifest.governance_approval_id, decision_id);
-        assert_eq!(loaded.manifest.epoch_length_slots, Some(1_000));
-        assert_eq!(loaded.manifest.target_block_time_ms, 2_000);
-        assert_eq!(loaded.manifest.proposal_timeout_ms, 1_500);
-        assert_eq!(loaded.manifest.prevote_timeout_ms, 1_500);
-        assert_eq!(loaded.manifest.precommit_timeout_ms, 1_500);
-        assert_eq!(loaded.manifest.max_round_timeout_ms, 10_000);
-        assert_eq!(loaded.manifest.etdag_activation, None);
+        let manifest = loaded.manifest.as_posy().expect("legacy release manifest");
+        assert_eq!(manifest.governance_approval_id, decision_id);
+        assert_eq!(manifest.epoch_length_slots, Some(1_000));
+        assert_eq!(manifest.target_block_time_ms, 2_000);
+        assert_eq!(manifest.proposal_timeout_ms, 1_500);
+        assert_eq!(manifest.prevote_timeout_ms, 1_500);
+        assert_eq!(manifest.precommit_timeout_ms, 1_500);
+        assert_eq!(manifest.max_round_timeout_ms, 10_000);
+        assert_eq!(manifest.etdag_activation, None);
         assert!(loaded
             .require_etdag_activation_at_epoch(Epoch(0))
             .unwrap_err()
             .contains(ERR_ETDAG_DEFERRED));
         assert_eq!(
-            loaded.manifest.activation_boundary,
+            manifest.activation_boundary,
             CONSENSUS_PARAMETER_ACTIVATION_BOUNDARY
         );
         assert_eq!(
-            loaded
-                .manifest
+            manifest
                 .healthy_network_performance_targets
                 .healthy_proposal_target_ms,
             450
         );
         assert_eq!(
-            loaded
-                .manifest
+            manifest
                 .healthy_network_performance_targets
                 .healthy_qc_target_ms,
             1_850
         );
         assert_eq!(
-            loaded
-                .manifest
+            manifest
                 .healthy_network_performance_targets
                 .healthy_commit_target_ms,
             2_250
         );
         assert_eq!(
-            loaded
-                .manifest
+            manifest
                 .healthy_network_performance_targets
                 .finality_p95_target_ms,
             2_500
         );
         assert_eq!(
-            loaded
-                .manifest
+            manifest
                 .healthy_network_performance_targets
                 .finality_p99_target_ms,
             3_000
@@ -876,5 +1189,68 @@ mod tests {
         assert!(load_genesis_bound_consensus_parameters(&tampered_decision)
             .unwrap_err()
             .contains("Decision ID mismatch"));
+    }
+
+    fn coordinated_p1_fixture() -> CoordinatedRoundRobinParameterManifest {
+        CoordinatedRoundRobinParameterManifest {
+            schema_version: CONSENSUS_PARAMETER_MANIFEST_COORDINATED_P1_SCHEMA_VERSION,
+            release_id: CONSENSUS_PARAMETER_MANIFEST_RELEASE_ID.to_string(),
+            status: CONSENSUS_PARAMETER_MANIFEST_FINALIZED_STATUS.to_string(),
+            governance_approval_id: "TV3-P1-PARAMS-UNIT-TEST".to_string(),
+            chain_id: ChainId::synergy_testnet_v3(),
+            network_id: NetworkId::synergy_testnet_v3(),
+            protocol_version: COORDINATED_ROUND_ROBIN_V1_PROTOCOL_VERSION.to_string(),
+            activation_boundary: CONSENSUS_PARAMETER_ACTIVATION_BOUNDARY.to_string(),
+            target_block_time_ms: COORDINATED_P1_TARGET_BLOCK_TIME_MS,
+            consensus_signature_algorithm: TESTNET_V3_CONSENSUS_SIGNATURE_ALGORITHM.to_string(),
+            coordinated_round_robin: CoordinatedRoundRobinParameters {
+                coordinator_id: COORDINATED_P1_COORDINATOR_ID.to_string(),
+                producer_ids: COORDINATED_P1_PRODUCER_IDS
+                    .iter()
+                    .map(|producer| (*producer).to_string())
+                    .collect(),
+                producer_turn_timeout_ms: COORDINATED_P1_PRODUCER_TURN_TIMEOUT_MS,
+            },
+        }
+    }
+
+    #[test]
+    fn coordinated_p1_manifest_is_canonical_and_has_no_posy_parameters() {
+        let manifest = coordinated_p1_fixture();
+        let bytes = manifest.canonical_bytes().expect("canonical P1 parameters");
+        let loaded = load_finalized_consensus_parameters_from_bytes(&bytes)
+            .expect("load canonical P1 parameters");
+        let p1 = loaded
+            .manifest
+            .coordinated_round_robin()
+            .expect("P1 manifest selection");
+        assert_eq!(p1, &manifest);
+        assert!(loaded.require_genesis_binding().is_err());
+    }
+
+    #[test]
+    fn coordinated_p1_manifest_rejects_legacy_posy_field_presence() {
+        let mut value = serde_json::to_value(coordinated_p1_fixture()).expect("encode P1");
+        value["proposal_timeout_ms"] = Value::from(1_500_u64);
+        let error = serde_json::from_value::<FinalizedConsensusParameterManifest>(value)
+            .expect_err("P1 must reject a PoSy timeout field");
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn coordinated_p1_manifest_rejects_drifted_producer_order_or_timeout() {
+        let mut manifest = coordinated_p1_fixture();
+        manifest.coordinated_round_robin.producer_ids.swap(0, 1);
+        assert!(manifest
+            .validate_finalized()
+            .expect_err("P1 producer order must be exact")
+            .contains("ordered Val2--Val6"));
+
+        let mut manifest = coordinated_p1_fixture();
+        manifest.coordinated_round_robin.producer_turn_timeout_ms = 3_999;
+        assert!(manifest
+            .validate_finalized()
+            .expect_err("P1 timeout must be exact")
+            .contains("4000 ms"));
     }
 }

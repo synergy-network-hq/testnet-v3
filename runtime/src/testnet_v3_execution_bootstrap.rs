@@ -74,9 +74,7 @@ pub fn prepare_testnet_v3_genesis_execution_state(
     if genesis.chain_id() != 1266 || genesis.network_id() != 1266 {
         return Err("SynQ Genesis artifact preparation requires chain ID 1266".to_string());
     }
-    if genesis.protocol_version() != "1.0.0" || genesis.consensus_version() != "posy/2.2" {
-        return Err("SynQ Genesis artifact preparation has invalid protocol binding".to_string());
-    }
+    require_supported_execution_genesis_protocol(genesis, "SynQ Genesis artifact preparation")?;
 
     let contracts = required_object(genesis.value(), "contracts")?;
     let root = genesis
@@ -128,9 +126,7 @@ pub fn load_finalized_testnet_v3_genesis_execution_state(
     if genesis.chain_id() != 1266 || genesis.network_id() != 1266 {
         return Err("finalized SynQ Genesis state requires chain ID 1266".to_string());
     }
-    if genesis.protocol_version() != "1.0.0" || genesis.consensus_version() != "posy/2.2" {
-        return Err("finalized SynQ Genesis state has invalid protocol binding".to_string());
-    }
+    require_supported_execution_genesis_protocol(genesis, "finalized SynQ Genesis state")?;
 
     let deployment = genesis
         .value()
@@ -221,6 +217,24 @@ pub fn load_finalized_testnet_v3_genesis_execution_state(
     }
 
     Ok(state)
+}
+
+fn require_supported_execution_genesis_protocol(
+    genesis: &GenesisDocument,
+    context: &str,
+) -> Result<(), String> {
+    if genesis.protocol_version() != "1.0.0" {
+        return Err(format!("{context} has invalid protocol binding"));
+    }
+    match genesis.consensus_version() {
+        "posy/2.2" => Ok(()),
+        crate::consensus_parameters::COORDINATED_ROUND_ROBIN_V1_PROTOCOL_VERSION => genesis
+            .consensus_parameters()
+            .ok_or_else(|| format!("{context} requires a finalized coordinated P1 manifest"))?
+            .require_coordinated_round_robin_manifest()
+            .map(|_| ()),
+        _ => Err(format!("{context} has invalid protocol binding")),
+    }
 }
 
 fn verify_pre_approval_contract_record(

@@ -36,14 +36,17 @@ use crate::consensus::self_realign::{
 };
 use crate::consensus::signing_authority::DurableConsensusSigningAuthority;
 use crate::consensus::synergy_score::SynergyScoreCalculator;
-use crate::consensus::testnet_v3_bootstrap::load_testnet_v3_genesis_bootstrap;
+use crate::consensus::testnet_v3_bootstrap::{
+    load_coordinated_round_robin_genesis_bootstrap, load_testnet_v3_genesis_bootstrap,
+};
 use crate::consensus::testnet_v3_finality_context::FinalizedTypedContextProvider;
 use crate::consensus::typed_coordinator::{
-    begin_typed_consensus_startup_buffer, import_local_genesis_bound_typed_signer,
-    install_typed_coordinator_ingress, remove_typed_coordinator_ingress,
-    replay_finalized_execution_state, run_typed_posy_driver, set_typed_consensus_startup_phase,
-    P2pTypedConsensusEgress, TypedFinalityContextDigestSource, TypedNextHeightContextSource,
-    TypedPosyCoordinator, TypedPosyCoordinatorStartup, TypedPosyDriver,
+    begin_typed_consensus_startup_buffer, import_local_genesis_bound_coordinated_signer,
+    import_local_genesis_bound_typed_signer, install_typed_coordinator_ingress,
+    remove_typed_coordinator_ingress, replay_finalized_execution_state, run_typed_posy_driver,
+    set_typed_consensus_startup_phase, P2pTypedConsensusEgress, TypedFinalityContextDigestSource,
+    TypedNextHeightContextSource, TypedPosyCoordinator, TypedPosyCoordinatorStartup,
+    TypedPosyDriver,
 };
 use crate::consensus::typed_finality_observer::{
     install_typed_finality_observer, remove_typed_finality_observer, TypedFinalityObserver,
@@ -1234,7 +1237,20 @@ fn ensure_node_config_matches_finalized_consensus_parameters(
     let parameters = genesis.consensus_parameters().ok_or_else(|| {
         "canonical Testnet-v3 Genesis has no finalized consensus parameter manifest".to_string()
     })?;
-    let manifest = &parameters.manifest;
+    match &parameters.manifest {
+        crate::consensus_parameters::FinalizedConsensusParameterManifest::PosyV2_2(manifest) => {
+            ensure_node_config_matches_posy_parameters(config, manifest)
+        }
+        crate::consensus_parameters::FinalizedConsensusParameterManifest::CoordinatedRoundRobinV1(
+            manifest,
+        ) => ensure_node_config_matches_coordinated_p1_parameters(config, manifest),
+    }
+}
+
+fn ensure_node_config_matches_posy_parameters(
+    config: &NodeConfig,
+    manifest: &crate::consensus_parameters::ConsensusParameterManifest,
+) -> Result<(), String> {
     let epoch_length = manifest
         .epoch_length_slots
         .ok_or_else(|| "finalized consensus parameters have no epoch length".to_string())?;
@@ -1308,6 +1324,65 @@ fn ensure_node_config_matches_finalized_consensus_parameters(
     if configured_stage_timeouts != finalized_stage_timeouts {
         return Err(
             "node stage-timeout configuration disagrees with finalized consensus parameters"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn ensure_node_config_matches_coordinated_p1_parameters(
+    config: &NodeConfig,
+    manifest: &crate::consensus_parameters::CoordinatedRoundRobinParameterManifest,
+) -> Result<(), String> {
+    manifest.validate_finalized()?;
+    let block_time_ms = config
+        .consensus
+        .block_time_secs
+        .checked_mul(1_000)
+        .ok_or_else(|| "node consensus block time overflows milliseconds".to_string())?;
+    let blockchain_block_time_ms = config
+        .blockchain
+        .block_time
+        .checked_mul(1_000)
+        .ok_or_else(|| "node blockchain block time overflows milliseconds".to_string())?;
+    if config.blockchain.chain_id != manifest.chain_id.0
+        || config.network.id != manifest.chain_id.0
+        || config.network.network_id != manifest.network_id.0
+    {
+        return Err(
+            "node chain or network configuration disagrees with finalized coordinated P1 parameters"
+                .to_string(),
+        );
+    }
+    if config.consensus.algorithm.trim() != manifest.protocol_version
+        || config.consensus.mode.trim() != manifest.protocol_version
+    {
+        return Err(
+            "node consensus protocol identifier or mode disagrees with finalized coordinated P1 parameters"
+                .to_string(),
+        );
+    }
+    if block_time_ms != manifest.target_block_time_ms
+        || blockchain_block_time_ms != manifest.target_block_time_ms
+        || config.consensus.target_block_time_ms != manifest.target_block_time_ms
+    {
+        return Err(format!(
+            "node block-time configuration disagrees with finalized {} ms coordinated P1 target",
+            manifest.target_block_time_ms
+        ));
+    }
+    let resolved = config
+        .consensus
+        .coordinated_round_robin_config(config.blockchain.chain_id, &config.network.network_id)?;
+    let bound = &manifest.coordinated_round_robin;
+    if resolved.consensus_version != manifest.protocol_version
+        || resolved.coordinator_id != bound.coordinator_id
+        || resolved.producer_ids != bound.producer_ids
+        || resolved.producer_turn_timeout_ms != bound.producer_turn_timeout_ms
+        || resolved.target_block_interval_ms != manifest.target_block_time_ms
+    {
+        return Err(
+            "node coordinated P1 rotation configuration disagrees with the finalized Genesis parameters"
                 .to_string(),
         );
     }
@@ -1474,9 +1549,6 @@ fn build_finalized_coordinated_runtime_inputs(
     };
     let genesis = canonical_genesis()
         .map_err(|error| format!("coordinated runtime cannot load canonical Genesis: {error}"))?;
-    let bootstrap = load_testnet_v3_genesis_bootstrap(genesis).map_err(|error| {
-        format!("coordinated runtime cannot derive finalized Genesis bootstrap: {error}")
-    })?;
     let consensus_parameters = genesis.consensus_parameters().cloned().ok_or_else(|| {
         "coordinated runtime requires a finalized consensus parameter binding in canonical Genesis"
             .to_string()
@@ -1486,12 +1558,30 @@ fn build_finalized_coordinated_runtime_inputs(
         .map_err(|error| {
             format!("coordinated runtime rejects a non-Genesis-bound parameter manifest: {error}")
         })?;
-    let protocol_config_hash = consensus_parameters
-        .protocol_config
-        .hash()
+    let finalized_p1 = consensus_parameters
+        .require_coordinated_round_robin_manifest()
         .map_err(|error| {
-            format!("coordinated runtime cannot hash finalized parameters: {error}")
+            format!("coordinated runtime rejects non-P1 Genesis parameters: {error}")
         })?;
+    if finalized_p1.coordinated_round_robin.coordinator_id != coordinated_config.coordinator_id
+        || finalized_p1.coordinated_round_robin.producer_ids != coordinated_config.producer_ids
+        || finalized_p1
+            .coordinated_round_robin
+            .producer_turn_timeout_ms
+            != coordinated_config.producer_turn_timeout_ms
+        || finalized_p1.target_block_time_ms != coordinated_config.target_block_interval_ms
+    {
+        return Err(
+            "coordinated runtime configuration disagrees with its Genesis-bound P1 authority"
+                .to_string(),
+        );
+    }
+    let bootstrap = load_coordinated_round_robin_genesis_bootstrap(genesis).map_err(|error| {
+        format!("coordinated runtime cannot derive finalized P1 Genesis bootstrap: {error}")
+    })?;
+    // The P1 committed-block header carries the exact canonical manifest root,
+    // not a compatibility `ProtocolConfig` assembled for the retired engine.
+    let protocol_config_hash = consensus_parameters.root;
     let genesis_execution_state = load_finalized_testnet_v3_genesis_execution_state(genesis)
         .map_err(|error| {
             format!("coordinated runtime requires finalized Genesis execution state: {error}")
@@ -1523,7 +1613,7 @@ fn build_finalized_coordinated_runtime_inputs(
                     "coordinated runtime cannot load canonical local consensus signing key: {error}"
                 )
             })?;
-    let (signer, local_validator_id) = import_local_genesis_bound_typed_signer(
+    let (signer, local_validator_id) = import_local_genesis_bound_coordinated_signer(
         &bootstrap,
         &validator_address,
         public_key,
@@ -1943,6 +2033,9 @@ fn build_finalized_typed_posy_coordinator(
         .map_err(|error| {
             format!("typed PoSy startup refuses a non-Genesis-bound parameter manifest: {error}")
         })?;
+    consensus_parameters
+        .require_posy_manifest()
+        .map_err(|error| format!("typed PoSy startup rejects non-PoSy parameters: {error}"))?;
 
     // This restoration refuses the candidate/pre-approval path and verifies
     // the embedded ceremony snapshot, its roots, deployed contracts, and
@@ -2072,6 +2165,9 @@ fn build_finalized_typed_posy_runtime_inputs(
         .map_err(|error| {
             format!("typed PoSy driver rejects a non-Genesis-bound parameter manifest: {error}")
         })?;
+    consensus_parameters
+        .require_posy_manifest()
+        .map_err(|error| format!("typed PoSy driver rejects non-PoSy parameters: {error}"))?;
     let deployed_genesis_state_root = genesis
         .value()
         .get("execution")

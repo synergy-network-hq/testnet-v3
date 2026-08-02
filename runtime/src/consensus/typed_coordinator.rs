@@ -687,9 +687,56 @@ pub fn import_local_genesis_bound_typed_signer(
     public_key: PQCPublicKey,
     private_key: PQCPrivateKey,
 ) -> Result<(AegisPqvmSigner, ValidatorId), String> {
+    import_local_genesis_bound_signer_with_roles(
+        genesis_bootstrap,
+        local_validator_operator_address,
+        public_key,
+        private_key,
+        &[
+            AegisPqKeyRole::ConsensusProposer,
+            AegisPqKeyRole::ConsensusVote,
+            AegisPqKeyRole::EpochTransition,
+        ],
+        "typed PoSy",
+        b"SYNERGY_TESTNET_V3_TYPED_POSY_LOCAL_KEY_BINDING_V1",
+    )
+}
+
+/// Imports the one Genesis-bound key permitted to sign coordinated P1
+/// assignments, proposals, and commits. The P1 signer has only the proposer
+/// lifecycle role; it cannot create vote, QC, VC, TC, aggregation, or epoch
+/// transition evidence.
+pub fn import_local_genesis_bound_coordinated_signer(
+    genesis_bootstrap: &TestnetV3GenesisBootstrap,
+    local_validator_operator_address: &str,
+    public_key: PQCPublicKey,
+    private_key: PQCPrivateKey,
+) -> Result<(AegisPqvmSigner, ValidatorId), String> {
+    import_local_genesis_bound_signer_with_roles(
+        genesis_bootstrap,
+        local_validator_operator_address,
+        public_key,
+        private_key,
+        &[AegisPqKeyRole::ConsensusProposer],
+        "coordinated P1",
+        b"SYNERGY_TESTNET_V3_COORDINATED_P1_LOCAL_KEY_BINDING_V1",
+    )
+}
+
+fn import_local_genesis_bound_signer_with_roles(
+    genesis_bootstrap: &TestnetV3GenesisBootstrap,
+    local_validator_operator_address: &str,
+    public_key: PQCPublicKey,
+    private_key: PQCPrivateKey,
+    roles: &[AegisPqKeyRole],
+    mode_name: &str,
+    challenge: &[u8],
+) -> Result<(AegisPqvmSigner, ValidatorId), String> {
     let operator = local_validator_operator_address.trim();
     if operator.is_empty() {
-        return Err("typed PoSy local validator operator address is empty".to_string());
+        return Err(format!(
+            "{mode_name} local validator operator address is empty"
+        ));
     }
     let validator = genesis_bootstrap
         .validator_set
@@ -708,7 +755,9 @@ pub fn import_local_genesis_bound_typed_signer(
     if public_key.algorithm != PQCAlgorithm::MLDSA65
         || private_key.algorithm != PQCAlgorithm::MLDSA65
     {
-        return Err("typed PoSy local consensus key must use ML-DSA-65".to_string());
+        return Err(format!(
+            "{mode_name} local consensus key must use ML-DSA-65"
+        ));
     }
     if public_key.key_id != validator.consensus_public_key.key_id.0
         || private_key.public_key_id != public_key.key_id
@@ -724,7 +773,6 @@ pub fn import_local_genesis_bound_typed_signer(
     // before it is registered for signing.  Neither the key nor the signature
     // is logged or returned from this boundary.
     let mut key_check = PQCManager::new();
-    let challenge = b"SYNERGY_TESTNET_V3_TYPED_POSY_LOCAL_KEY_BINDING_V1";
     let signature = key_check
         .sign(&private_key, challenge)
         .map_err(|_| "local consensus private key self-test failed".to_string())?;
@@ -736,17 +784,13 @@ pub fn import_local_genesis_bound_typed_signer(
     }
 
     let mut signer = AegisPqvmSigner::initialize_required()
-        .map_err(|error| format!("initialize typed PoSy Aegis signer: {error}"))?;
+        .map_err(|error| format!("initialize {mode_name} Aegis signer: {error}"))?;
     let registered_key_id = signer
         .register_existing_keypair(
             &validator.validator_uma_id.0,
             public_key,
             private_key,
-            vec![
-                AegisPqKeyRole::ConsensusProposer,
-                AegisPqKeyRole::ConsensusVote,
-                AegisPqKeyRole::EpochTransition,
-            ],
+            roles.to_vec(),
             validator.activation_epoch,
         )
         .map_err(|error| format!("import canonical local consensus key: {error}"))?;
@@ -756,18 +800,16 @@ pub fn import_local_genesis_bound_typed_signer(
                 .to_string(),
         );
     }
-    for role in [
-        AegisPqKeyRole::ConsensusProposer,
-        AegisPqKeyRole::ConsensusVote,
-        AegisPqKeyRole::EpochTransition,
-    ] {
+    for role in roles {
         if !signer.registry.key_is_active_for_epoch(
             &validator.validator_uma_id.0,
             &registered_key_id,
             validator.activation_epoch,
-            role,
+            role.clone(),
         ) {
-            return Err("typed PoSy signer lifecycle disagrees with finalized Genesis".to_string());
+            return Err(format!(
+                "{mode_name} signer lifecycle disagrees with finalized Genesis"
+            ));
         }
     }
     Ok((signer, validator.validator_id.clone()))
@@ -799,6 +841,9 @@ impl TypedPosyCoordinatorStartup {
         self.consensus_parameters
             .require_genesis_binding()
             .map_err(|error| format!("typed PoSy startup refuses unbound parameters: {error}"))?;
+        self.consensus_parameters
+            .require_posy_manifest()
+            .map_err(|error| format!("typed PoSy startup refuses non-PoSy parameters: {error}"))?;
         self.consensus_parameters.manifest.validate_finalized()?;
         if self.consensus_parameters.root
             != self
@@ -4874,10 +4919,21 @@ mod tests {
             .expect("canonical Genesis cluster map");
         assert_eq!(
             canonical_active.validators.len() as u64,
-            parameters.manifest.initial_cluster_validator_count,
+            parameters
+                .manifest
+                .as_posy()
+                .expect("typed PoSy parameters")
+                .initial_cluster_validator_count,
             "the finalized release must start with its six canonical validators"
         );
-        assert_eq!(parameters.manifest.initial_availability_quorum, 5);
+        assert_eq!(
+            parameters
+                .manifest
+                .as_posy()
+                .expect("typed PoSy parameters")
+                .initial_availability_quorum,
+            5
+        );
 
         let (bootstrap, genesis_anchor, deployed_genesis_state_root, mut coordinators, store_paths) =
             six_validator_startup_fixture(parameters.clone());
