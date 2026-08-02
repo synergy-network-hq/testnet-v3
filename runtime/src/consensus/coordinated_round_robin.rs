@@ -766,23 +766,11 @@ impl CoordinatorState {
                 "cannot issue a producer assignment without a coordinator signature".to_string(),
             );
         }
-        let height = self.next_height();
-        let producer_id = config.producer_at(self.producer_cursor)?.to_string();
-        let assignment = ProducerAssignment {
-            chain_id: config.chain_id,
-            network_id: config.network_id.clone(),
-            consensus_version: config.consensus_version.clone(),
-            epoch,
-            height,
-            producer_round: self.pending_round,
-            parent_block_hash: self.last_finalized_block_hash,
-            prior_finality_reference: self.last_finality_reference,
-            assigned_producer_id: producer_id.clone(),
-            coordinator_id: config.coordinator_id.clone(),
-            assignment_sequence: self.assignment_sequence.saturating_add(1),
-            intended_block_timestamp_ms,
-            coordinator_signature,
-        };
+        let mut assignment =
+            self.assignment_template(config, epoch, intended_block_timestamp_ms)?;
+        let height = assignment.height;
+        let producer_id = assignment.assigned_producer_id.clone();
+        assignment.coordinator_signature = coordinator_signature;
         assignment.validate_shape(config)?;
         let assignment_hash = assignment.signing_hash()?;
         self.pending_height = Some(height);
@@ -792,6 +780,49 @@ impl CoordinatorState {
         self.committed_block_hash_for_pending_height = None;
         self.assignment_sequence = assignment.assignment_sequence;
         Ok(assignment)
+    }
+
+    /// Returns the exact next assignment subject before it is signed.  The
+    /// timestamp is supplied by the deterministic block-context provider, not
+    /// by a wall clock, so a restart can recover the same durable subject.
+    pub fn assignment_template(
+        &self,
+        config: &CoordinatedRoundRobinConfig,
+        epoch: u64,
+        intended_block_timestamp_ms: u64,
+    ) -> Result<ProducerAssignment, String> {
+        config.validate()?;
+        if let Some(assignment) = &self.pending_assignment {
+            if self.committed_block_hash_for_pending_height.is_none() {
+                if assignment.epoch != epoch
+                    || assignment.intended_block_timestamp_ms != intended_block_timestamp_ms
+                {
+                    return Err(
+                        "pending coordinated assignment does not match the deterministic signing context"
+                            .to_string(),
+                    );
+                }
+                return Ok(assignment.clone());
+            }
+        }
+        Ok(ProducerAssignment {
+            chain_id: config.chain_id,
+            network_id: config.network_id.clone(),
+            consensus_version: config.consensus_version.clone(),
+            epoch,
+            height: self.next_height(),
+            producer_round: self.pending_round,
+            parent_block_hash: self.last_finalized_block_hash,
+            prior_finality_reference: self.last_finality_reference,
+            assigned_producer_id: config.producer_at(self.producer_cursor)?.to_string(),
+            coordinator_id: config.coordinator_id.clone(),
+            assignment_sequence: self.assignment_sequence.saturating_add(1),
+            intended_block_timestamp_ms,
+            coordinator_signature: AegisPqSignature {
+                algorithm: String::new(),
+                signature_bytes: Vec::new(),
+            },
+        })
     }
 
     /// Records a timeout or an invalid proposal.  This never advances the
@@ -836,6 +867,21 @@ impl CoordinatorState {
         if !coordinator_signature.is_present() {
             return Err("cannot commit a block without a coordinator signature".to_string());
         }
+        let mut commit = self.commit_template(config, proposal)?;
+        commit.coordinator_signature = coordinator_signature;
+        commit.validate_shape(config)?;
+        Ok(commit)
+    }
+
+    /// Returns the exact coordinator-commit subject before its single Val1
+    /// signature is created and durably journaled.
+    pub fn commit_template(
+        &self,
+        config: &CoordinatedRoundRobinConfig,
+        proposal: &CoordinatedProposal,
+    ) -> Result<CoordinatorCommit, String> {
+        config.validate()?;
+        proposal.validate_shape()?;
         let assignment = self.current_assignment(config)?;
         let assignment_hash = assignment.signing_hash()?;
         if proposal.epoch != assignment.epoch
@@ -874,7 +920,10 @@ impl CoordinatorState {
             producer_id: proposal.producer_id.clone(),
             coordinator_id: config.coordinator_id.clone(),
             assignment_hash,
-            coordinator_signature,
+            coordinator_signature: AegisPqSignature {
+                algorithm: String::new(),
+                signature_bytes: Vec::new(),
+            },
         })
     }
 

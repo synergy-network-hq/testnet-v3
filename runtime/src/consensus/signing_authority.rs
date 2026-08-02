@@ -279,7 +279,18 @@ struct DurableCoordinatedSigningRecord {
     authorization: CoordinatedSigningAuthorization,
     authorization_root: Hash,
     signature: AegisPqSignature,
+    /// Exact serialized assignment or commit envelope, including the
+    /// randomized signature, for safe restart retransmission.
+    #[serde(default)]
+    signed_envelope: Vec<u8>,
     persisted_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoordinatedSignedEnvelope {
+    pub authorization: CoordinatedSigningAuthorization,
+    pub signature: AegisPqSignature,
+    pub signed_envelope: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -635,18 +646,22 @@ impl DurableConsensusSigningAuthority {
             .any(|record| record.authorization == *authorization))
     }
 
-    /// Atomically journals an exact temporary-coordinator signature before it
-    /// may be broadcast.  A commit's durable slot excludes producer round and
-    /// key ID, so Val1 cannot sign a second block hash at one height even after
-    /// a timeout, restart, or consensus-key rotation.
-    pub fn record_coordinated_signature(
+    /// Atomically journals an exact temporary-coordinator signature and wire
+    /// envelope before either may be broadcast. A commit's durable slot
+    /// excludes producer round and key ID, so Val1 cannot sign a second block
+    /// hash at one height even after a timeout, restart, or key rotation.
+    pub fn record_coordinated_envelope(
         &self,
         authorization: &CoordinatedSigningAuthorization,
         signature: &AegisPqSignature,
+        signed_envelope: &[u8],
     ) -> Result<(), String> {
         authorization.validate()?;
         if !signature.is_present() {
             return Err("cannot journal an empty coordinated consensus signature".to_string());
+        }
+        if signed_envelope.is_empty() {
+            return Err("cannot journal an empty coordinated signed envelope".to_string());
         }
         let authorization_root = authorization.root()?;
         let slot = authorization.slot_key();
@@ -670,6 +685,7 @@ impl DurableConsensusSigningAuthority {
             if existing.authorization == *authorization
                 && existing.authorization_root == authorization_root
                 && existing.signature == *signature
+                && existing.signed_envelope == signed_envelope
             {
                 return Ok(());
             }
@@ -691,6 +707,7 @@ impl DurableConsensusSigningAuthority {
                 authorization: authorization.clone(),
                 authorization_root,
                 signature: signature.clone(),
+                signed_envelope: signed_envelope.to_vec(),
                 persisted_at_unix_ms: current_unix_ms(),
             });
         self.persist_unlocked(&journal)
@@ -726,6 +743,46 @@ impl DurableConsensusSigningAuthority {
             );
         }
         Ok(Some(record.signature))
+    }
+
+    /// Recovers the exact serialized coordinator artifact for restart replay.
+    pub fn recorded_coordinated_envelope(
+        &self,
+        authorization: &CoordinatedSigningAuthorization,
+    ) -> Result<Option<CoordinatedSignedEnvelope>, String> {
+        authorization.validate()?;
+        let slot = authorization.slot_key();
+        let lock = PROCESS_WIDE_SIGNING_LOCK.get_or_init(|| Mutex::new(()));
+        let _guard = lock
+            .lock()
+            .map_err(|_| "consensus signing authority lock poisoned".to_string())?;
+        let journal = self.load_unlocked()?;
+        let Some(record) = journal
+            .coordinated_records
+            .into_iter()
+            .find(|record| record.slot == slot)
+        else {
+            return Ok(None);
+        };
+        if record.authorization != *authorization
+            || record.authorization_root != authorization.root()?
+        {
+            return Err(
+                "CONSENSUS_SIGNING_CONFLICT: coordinated signing slot has a different subject"
+                    .to_string(),
+            );
+        }
+        if record.signed_envelope.is_empty() {
+            return Err(
+                "coordinated signing journal lacks the exact envelope required for restart replay"
+                    .to_string(),
+            );
+        }
+        Ok(Some(CoordinatedSignedEnvelope {
+            authorization: record.authorization,
+            signature: record.signature,
+            signed_envelope: record.signed_envelope,
+        }))
     }
 
     /// Persists the exact signed vote envelope before the caller may broadcast
@@ -1150,6 +1207,7 @@ impl DurableConsensusSigningAuthority {
             if record.slot != record.authorization.slot_key()
                 || record.authorization_root != record.authorization.root()?
                 || !record.signature.is_present()
+                || record.signed_envelope.is_empty()
             {
                 return Err("coordinated signing journal record binding mismatch".to_string());
             }
@@ -1352,8 +1410,9 @@ mod tests {
         let authority = temp_authority("coordinated-commit-conflict");
         let first = coordinated_authorization(CoordinatedSigningPhase::Commit, 0, "block-a");
         let signature = coordinated_signature("commit-a");
+        let envelope = b"serialized-commit-a";
         authority
-            .record_coordinated_signature(&first, &signature)
+            .record_coordinated_envelope(&first, &signature, envelope)
             .expect("persist first coordinator commit before broadcast");
         assert_eq!(
             authority
@@ -1361,10 +1420,22 @@ mod tests {
                 .expect("recover recorded signature"),
             Some(signature)
         );
+        assert_eq!(
+            authority
+                .recorded_coordinated_envelope(&first)
+                .expect("recover serialized envelope")
+                .expect("envelope exists")
+                .signed_envelope,
+            envelope
+        );
 
         let conflicting = coordinated_authorization(CoordinatedSigningPhase::Commit, 1, "block-b");
         assert!(authority
-            .record_coordinated_signature(&conflicting, &coordinated_signature("commit-b"))
+            .record_coordinated_envelope(
+                &conflicting,
+                &coordinated_signature("commit-b"),
+                b"serialized-commit-b",
+            )
             .expect_err("a later producer round cannot authorize a second committed block")
             .contains("CONSENSUS_SIGNING_CONFLICT"));
     }
@@ -1375,17 +1446,29 @@ mod tests {
         let first =
             coordinated_authorization(CoordinatedSigningPhase::Assignment, 0, "assignment-a");
         authority
-            .record_coordinated_signature(&first, &coordinated_signature("assignment-a"))
+            .record_coordinated_envelope(
+                &first,
+                &coordinated_signature("assignment-a"),
+                b"serialized-assignment-a",
+            )
             .expect("persist initial assignment");
         let replacement =
             coordinated_authorization(CoordinatedSigningPhase::Assignment, 1, "assignment-b");
         authority
-            .record_coordinated_signature(&replacement, &coordinated_signature("assignment-b"))
+            .record_coordinated_envelope(
+                &replacement,
+                &coordinated_signature("assignment-b"),
+                b"serialized-assignment-b",
+            )
             .expect("persist replacement assignment after a timeout");
         let conflicting =
             coordinated_authorization(CoordinatedSigningPhase::Assignment, 1, "assignment-c");
         assert!(authority
-            .record_coordinated_signature(&conflicting, &coordinated_signature("assignment-c"))
+            .record_coordinated_envelope(
+                &conflicting,
+                &coordinated_signature("assignment-c"),
+                b"serialized-assignment-c",
+            )
             .is_err());
     }
 
