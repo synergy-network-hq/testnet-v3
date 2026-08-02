@@ -31,9 +31,18 @@ pub const CHAIN1266_QUALIFICATION_MODE_ENV: &str = "SYNERGY_CHAIN1266_QUALIFICAT
 const PRODUCTION_GOVERNANCE_FINGERPRINT: &str =
     "sha256:7f296c61ad8c636dd21eb8c3dd360e981ba720cdef1b2a7e84f3c1107f6eb200";
 const EXPECTED_SCHEMA_VERSION: u32 = 1;
-const EXPECTED_QUORUM: u64 = 5;
+pub const CHAIN1266_P1_CONSENSUS_MODE: &str = "coordinated_round_robin_v1";
+pub const CHAIN1266_P1_COORDINATOR_ID: &str = "validator-1";
+pub const CHAIN1266_P1_PRODUCER_IDS: [&str; 5] = [
+    "validator-2",
+    "validator-3",
+    "validator-4",
+    "validator-5",
+    "validator-6",
+];
+pub const CHAIN1266_P1_PRODUCER_TURN_TIMEOUT_MS: u64 = 4_000;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DesiredStateManifest {
     schema_version: u32,
@@ -47,17 +56,16 @@ struct DesiredStateManifest {
     configuration: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DesiredChain {
     chain_id: u64,
     incarnation: u64,
     genesis_hash: String,
     validator_set_root: String,
-    quorum: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DesiredSource {
     testnet_v3_revision: String,
@@ -65,14 +73,18 @@ struct DesiredSource {
     aegis_revision: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DesiredConsensusState {
     consensus_schema_version: u32,
     directory_namespace: String,
+    mode: String,
+    coordinator_id: String,
+    producer_ids: Vec<String>,
+    producer_turn_timeout_ms: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DesiredStartAuthority {
     signature_algorithm: String,
@@ -162,6 +174,41 @@ fn required_lower_hex(name: &str, value: &str, bytes: usize) -> Result<(), Strin
 
 fn required_source_revision(name: &str, value: &str) -> Result<(), String> {
     required_lower_hex(name, value, 20)
+}
+
+/// Rejects every consensus profile except the exact, temporary Chain 1266 P1
+/// coordinator and producer rotation.  The desired-state signature covers the
+/// serialized manifest digest, so these values cannot drift after signing.
+pub fn validate_chain1266_p1_consensus_binding(
+    mode: &str,
+    coordinator_id: &str,
+    producer_ids: &[String],
+    producer_turn_timeout_ms: u64,
+) -> Result<(), String> {
+    if mode != CHAIN1266_P1_CONSENSUS_MODE
+        || coordinator_id != CHAIN1266_P1_COORDINATOR_ID
+        || producer_turn_timeout_ms != CHAIN1266_P1_PRODUCER_TURN_TIMEOUT_MS
+        || producer_ids.len() != CHAIN1266_P1_PRODUCER_IDS.len()
+        || producer_ids
+            .iter()
+            .map(String::as_str)
+            .ne(CHAIN1266_P1_PRODUCER_IDS)
+    {
+        return Err(
+            "desired-state consensus binding is not the canonical Chain 1266 P1 coordinated round-robin profile"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_desired_state_p1_consensus(state: &DesiredConsensusState) -> Result<(), String> {
+    validate_chain1266_p1_consensus_binding(
+        &state.mode,
+        &state.coordinator_id,
+        &state.producer_ids,
+        state.producer_turn_timeout_ms,
+    )
 }
 
 fn compiled_revision(name: &str, value: Option<&'static str>) -> Result<&'static str, String> {
@@ -271,7 +318,6 @@ pub fn verify_signed_desired_state_file(
     if manifest.schema_version != EXPECTED_SCHEMA_VERSION
         || manifest.chain.chain_id != SYNERGY_TESTNET_V3_CHAIN_ID
         || manifest.chain.incarnation != TESTNET_V3_CHAIN_INCARNATION
-        || manifest.chain.quorum != EXPECTED_QUORUM
         || manifest.state.consensus_schema_version != TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION
         || manifest.state.directory_namespace != "chain-1266/incarnation-4"
         || manifest.start_authority.public_key_fingerprint != PRODUCTION_GOVERNANCE_FINGERPRINT
@@ -281,6 +327,7 @@ pub fn verify_signed_desired_state_file(
                 .to_string(),
         );
     }
+    validate_desired_state_p1_consensus(&manifest.state)?;
     if manifest.start_authority.signature_algorithm != "ML-DSA-87"
         || manifest.start_authority.signature_domain
             != crate::consensus_start::CHAIN1266_START_SIGNATURE_DOMAIN
@@ -349,9 +396,8 @@ pub fn verify_chain1266_desired_state(
     }
     if manifest.chain.chain_id != SYNERGY_TESTNET_V3_CHAIN_ID
         || manifest.chain.incarnation != TESTNET_V3_CHAIN_INCARNATION
-        || manifest.chain.quorum != EXPECTED_QUORUM
     {
-        return Err("desired-state Chain 1266 domain or quorum is invalid".to_string());
+        return Err("desired-state Chain 1266 domain is invalid".to_string());
     }
     if manifest.state.consensus_schema_version != TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION
         || manifest.state.directory_namespace
@@ -362,6 +408,7 @@ pub fn verify_chain1266_desired_state(
     {
         return Err("desired-state consensus schema or state namespace is invalid".to_string());
     }
+    validate_desired_state_p1_consensus(&manifest.state)?;
     let qualification_mode = env::var(CHAIN1266_QUALIFICATION_MODE_ENV).as_deref() == Ok("1");
     let state_root = env::var("SYNERGY_DATA_PATH")
         .map(PathBuf::from)
@@ -564,13 +611,46 @@ mod tests {
     }
 
     #[test]
+    fn p1_consensus_binding_rejects_legacy_posy_mode() {
+        let producers = CHAIN1266_P1_PRODUCER_IDS
+            .iter()
+            .map(|producer| (*producer).to_string())
+            .collect::<Vec<_>>();
+        let error = validate_chain1266_p1_consensus_binding(
+            "posy_v2_2",
+            CHAIN1266_P1_COORDINATOR_ID,
+            &producers,
+            CHAIN1266_P1_PRODUCER_TURN_TIMEOUT_MS,
+        )
+        .expect_err("legacy PoSy must not be authorized in desired state");
+        assert!(error.contains("canonical Chain 1266 P1"), "{error}");
+    }
+
+    #[test]
+    fn p1_consensus_binding_rejects_reordered_producers() {
+        let mut producers = CHAIN1266_P1_PRODUCER_IDS
+            .iter()
+            .map(|producer| (*producer).to_string())
+            .collect::<Vec<_>>();
+        producers.swap(0, 1);
+        let error = validate_chain1266_p1_consensus_binding(
+            CHAIN1266_P1_CONSENSUS_MODE,
+            CHAIN1266_P1_COORDINATOR_ID,
+            &producers,
+            CHAIN1266_P1_PRODUCER_TURN_TIMEOUT_MS,
+        )
+        .expect_err("producer order must be bound by desired state");
+        assert!(error.contains("canonical Chain 1266 P1"), "{error}");
+    }
+
+    #[test]
     fn desired_state_signature_is_real_mldsa87_and_digest_bound() {
         let mut manager = PQCManager::new();
         let (public, private) = manager
             .generate_keypair(PQCAlgorithm::MLDSA87)
             .expect("generate ML-DSA-87 test authority");
         let fingerprint = format!("sha256:{}", sha256_bytes(&public.key_data));
-        let manifest = DesiredStateManifest {
+        let mut manifest = DesiredStateManifest {
             schema_version: 1,
             release_id: "chain1266-incarnation-4-rc1".to_string(),
             release_tag: "chain1266-v20.0.0-rc.1".to_string(),
@@ -579,7 +659,6 @@ mod tests {
                 incarnation: 4,
                 genesis_hash: "11".repeat(32),
                 validator_set_root: "22".repeat(32),
-                quorum: 5,
             },
             source: DesiredSource {
                 testnet_v3_revision: "33".repeat(20),
@@ -589,6 +668,13 @@ mod tests {
             state: DesiredConsensusState {
                 consensus_schema_version: 4,
                 directory_namespace: "chain-1266/incarnation-4".to_string(),
+                mode: CHAIN1266_P1_CONSENSUS_MODE.to_string(),
+                coordinator_id: CHAIN1266_P1_COORDINATOR_ID.to_string(),
+                producer_ids: CHAIN1266_P1_PRODUCER_IDS
+                    .iter()
+                    .map(|producer| (*producer).to_string())
+                    .collect(),
+                producer_turn_timeout_ms: CHAIN1266_P1_PRODUCER_TURN_TIMEOUT_MS,
             },
             start_authority: DesiredStartAuthority {
                 signature_algorithm: "ML-DSA-87".to_string(),
@@ -600,7 +686,9 @@ mod tests {
             artifacts: BTreeMap::new(),
             configuration: BTreeMap::new(),
         };
-        let manifest_sha256 = "66".repeat(32);
+        let manifest_sha256 = sha256_bytes(
+            &serde_json::to_vec(&manifest).expect("encode canonical desired-state manifest"),
+        );
         let request = DesiredStateSignatureRequest {
             schema_version: 1,
             action: "AUTHORIZE_DESIRED_STATE".to_string(),
@@ -628,9 +716,13 @@ mod tests {
         let bytes = serde_json::to_vec(&signed).expect("encode signature envelope");
         verify_desired_state_signature(&manifest, &manifest_sha256, &bytes)
             .expect("valid desired-state signature");
+        manifest.state.producer_ids.swap(0, 1);
+        let modified_manifest_sha256 = sha256_bytes(
+            &serde_json::to_vec(&manifest).expect("encode altered desired-state manifest"),
+        );
         assert!(
-            verify_desired_state_signature(&manifest, &"77".repeat(32), &bytes).is_err(),
-            "changing the desired-state digest must invalidate the authorization"
+            verify_desired_state_signature(&manifest, &modified_manifest_sha256, &bytes).is_err(),
+            "changing the P1 producer order must invalidate the digest-bound authorization"
         );
         let mut tampered_signature = general_purpose::STANDARD
             .decode(&signed.signature_base64)
@@ -662,7 +754,6 @@ mod tests {
                 "incarnation": 4,
                 "genesis_hash": "11".repeat(32),
                 "validator_set_root": "22".repeat(32),
-                "quorum": 5,
             },
             "source": {
                 "testnet_v3_revision": "33".repeat(20),
@@ -672,6 +763,10 @@ mod tests {
             "state": {
                 "consensus_schema_version": TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION,
                 "directory_namespace": "chain-1266/incarnation-4",
+                "mode": CHAIN1266_P1_CONSENSUS_MODE,
+                "coordinator_id": CHAIN1266_P1_COORDINATOR_ID,
+                "producer_ids": CHAIN1266_P1_PRODUCER_IDS,
+                "producer_turn_timeout_ms": CHAIN1266_P1_PRODUCER_TURN_TIMEOUT_MS,
             },
             "start_authority": {
                 "signature_algorithm": "ML-DSA-87",

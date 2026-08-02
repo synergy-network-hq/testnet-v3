@@ -36,16 +36,28 @@ pub struct SignedChain1266StartCommand {
 struct DesiredStateStartView {
     release_id: String,
     chain: DesiredChainView,
+    state: DesiredConsensusStateView,
     start_authority: StartAuthorityView,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DesiredChainView {
     chain_id: u64,
     incarnation: u64,
     genesis_hash: String,
     validator_set_root: String,
-    quorum: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DesiredConsensusStateView {
+    consensus_schema_version: u32,
+    directory_namespace: String,
+    mode: String,
+    coordinator_id: String,
+    producer_ids: Vec<String>,
+    producer_turn_timeout_ms: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,9 +85,22 @@ pub fn verify_signed_start_command(
     }
     let desired: DesiredStateStartView = serde_json::from_slice(&desired_bytes)
         .map_err(|error| format!("parse desired state for start barrier: {error}"))?;
-    if desired.chain.validator_set_root.is_empty() || desired.chain.quorum != 5 {
+    if desired.chain.validator_set_root.is_empty() {
         return Err("start barrier desired state has an invalid validator authority".to_string());
     }
+    if desired.state.consensus_schema_version
+        != crate::synergy_types::TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION
+        || desired.state.directory_namespace != "chain-1266/incarnation-4"
+    {
+        return Err("start barrier desired state has an invalid P1 state namespace".to_string());
+    }
+    crate::desired_state::validate_chain1266_p1_consensus_binding(
+        &desired.state.mode,
+        &desired.state.coordinator_id,
+        &desired.state.producer_ids,
+        desired.state.producer_turn_timeout_ms,
+    )
+    .map_err(|error| format!("start barrier desired state: {error}"))?;
     let command: SignedChain1266StartCommand = serde_json::from_slice(
         &fs::read(command_path)
             .map_err(|error| format!("read signed consensus start command: {error}"))?,
