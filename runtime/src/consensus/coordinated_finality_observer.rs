@@ -53,6 +53,20 @@ pub struct CoordinatedFinalityObserver {
     execution_state: ExecutionState,
     finality_store: CoordinatedFinalityStore,
     next_missing_height: Height,
+    latest_finalized_block_id: String,
+    latest_finalized_producer_id: String,
+    latest_finalized_producer_round: u64,
+}
+
+/// Public finality-only telemetry for a support role.  This is populated from
+/// the observer's independently verified durable prefix, never from an Atlas
+/// insertion timestamp or an unverified peer status claim.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CoordinatedFinalityObserverTelemetryTip {
+    pub finalized_height: u64,
+    pub finalized_block_id: String,
+    pub finalized_producer_id: String,
+    pub finalized_producer_round: u64,
 }
 
 // A public support process owns at most one finalized observer. Installing it
@@ -98,6 +112,17 @@ pub fn coordinated_finality_observer_next_missing_height() -> Option<Height> {
     observer_ingress().lock().ok().and_then(|slot| {
         slot.as_ref()
             .map(CoordinatedFinalityObserver::next_missing_height)
+    })
+}
+
+/// Returns the currently replicated finalized tip for metrics collection.
+/// The value contains no signing state and is available only while the
+/// support-role observer is installed.
+pub fn coordinated_finality_observer_telemetry_tip(
+) -> Option<CoordinatedFinalityObserverTelemetryTip> {
+    observer_ingress().lock().ok().and_then(|slot| {
+        slot.as_ref()
+            .map(CoordinatedFinalityObserver::telemetry_tip)
     })
 }
 
@@ -285,12 +310,18 @@ impl CoordinatedFinalityObserver {
             );
         }
 
+        let mut latest_finalized_block_id = inputs.migration_parent_block_hash.to_hex();
+        let mut latest_finalized_producer_id = String::new();
+        let mut latest_finalized_producer_round = 0;
         let records = inputs.finality_store.recover(&inputs.config)?;
         let mut execution_state = inputs.execution_state;
         let mut next_missing_height = inputs.first_coordinated_height;
         for record in &records {
             verify_record(&verifier, &execution_state, record, next_missing_height)?;
             execution_state = execute_coordinated_block(&execution_state, &record.package.block)?;
+            latest_finalized_block_id = record.block_id.0.clone();
+            latest_finalized_producer_id = record.package.coordinator_commit.producer_id.clone();
+            latest_finalized_producer_round = record.package.coordinator_commit.producer_round;
             next_missing_height = Height(
                 next_missing_height
                     .0
@@ -304,6 +335,9 @@ impl CoordinatedFinalityObserver {
             execution_state,
             finality_store: inputs.finality_store,
             next_missing_height,
+            latest_finalized_block_id,
+            latest_finalized_producer_id,
+            latest_finalized_producer_round,
         })
     }
 
@@ -315,6 +349,15 @@ impl CoordinatedFinalityObserver {
     /// Returns this observer's durable finality store.
     pub fn finality_store(&self) -> &CoordinatedFinalityStore {
         &self.finality_store
+    }
+
+    fn telemetry_tip(&self) -> CoordinatedFinalityObserverTelemetryTip {
+        CoordinatedFinalityObserverTelemetryTip {
+            finalized_height: self.next_missing_height.0.saturating_sub(1),
+            finalized_block_id: self.latest_finalized_block_id.clone(),
+            finalized_producer_id: self.latest_finalized_producer_id.clone(),
+            finalized_producer_round: self.latest_finalized_producer_round,
+        }
     }
 
     /// Reads at most [`MAX_COORDINATED_FINALITY_OBSERVER_RECORDS`] records from
@@ -382,6 +425,10 @@ impl CoordinatedFinalityObserver {
                 );
             }
             self.execution_state = next_execution_state;
+            self.latest_finalized_block_id = record.block_id.0.clone();
+            self.latest_finalized_producer_id =
+                record.package.coordinator_commit.producer_id.clone();
+            self.latest_finalized_producer_round = record.package.coordinator_commit.producer_round;
             self.next_missing_height = Height(
                 self.next_missing_height
                     .0
@@ -749,6 +796,17 @@ mod tests {
             1
         );
         assert_eq!(observer.next_missing_height(), Height(2));
+        let telemetry_tip = observer.telemetry_tip();
+        assert_eq!(telemetry_tip.finalized_height, 1);
+        assert_eq!(telemetry_tip.finalized_block_id, record.block_id.0.clone());
+        assert_eq!(
+            telemetry_tip.finalized_producer_id,
+            record.package.coordinator_commit.producer_id.clone()
+        );
+        assert_eq!(
+            telemetry_tip.finalized_producer_round,
+            record.package.coordinator_commit.producer_round
+        );
         assert_eq!(
             observer
                 .finality_store()

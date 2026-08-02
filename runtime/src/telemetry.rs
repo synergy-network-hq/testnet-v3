@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::config::NodeConfig;
+use crate::config::{NodeConfig, ResolvedConsensusMode};
 use crate::gas::constants::BLOCK_GAS_LIMIT;
 use crate::info;
 use crate::rpc::rpc_server::{SHARED_CHAIN, SYNC_MANAGER, TX_POOL};
@@ -15,8 +15,50 @@ const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8"
 
 type ChainMetricsSnapshot = (u64, u64, u64, u64, u64, u64, u64, u64, f64, f64, f64);
 
+/// A process-local view of the signed P1 coordinator lifecycle.  It carries
+/// only public finality/assignment identities; no signing material, proposal
+/// body, or mempool data is ever exposed through metrics.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CoordinatedConsensusTelemetrySnapshot {
+    pub active: bool,
+    pub finalized_height: u64,
+    pub finalized_block_id: String,
+    pub finalized_producer_id: String,
+    pub finalized_producer_round: u64,
+    pub assigned_height: u64,
+    pub assigned_producer_round: u64,
+    pub assigned_producer_id: String,
+    pub missed_turns_total: u64,
+}
+
 lazy_static::lazy_static! {
     static ref LAST_CHAIN_METRICS_SNAPSHOT: Mutex<Option<ChainMetricsSnapshot>> = Mutex::new(None);
+    static ref COORDINATED_CONSENSUS_TELEMETRY: Mutex<CoordinatedConsensusTelemetrySnapshot> =
+        Mutex::new(CoordinatedConsensusTelemetrySnapshot::default());
+}
+
+/// Publishes the P1 validator worker's durable state after every lifecycle
+/// transition.  The role runtime owns the source state; this module only
+/// renders a read-only copy for qualification and monitoring.
+pub fn publish_coordinated_consensus_telemetry(snapshot: CoordinatedConsensusTelemetrySnapshot) {
+    if let Ok(mut telemetry) = COORDINATED_CONSENSUS_TELEMETRY.lock() {
+        *telemetry = snapshot;
+    }
+}
+
+/// Clears P1 worker telemetry during a controlled worker shutdown so a later
+/// non-P1 startup in the same process cannot inherit stale consensus state.
+pub fn clear_coordinated_consensus_telemetry() {
+    if let Ok(mut telemetry) = COORDINATED_CONSENSUS_TELEMETRY.lock() {
+        *telemetry = CoordinatedConsensusTelemetrySnapshot::default();
+    }
+}
+
+fn coordinated_consensus_telemetry_snapshot() -> CoordinatedConsensusTelemetrySnapshot {
+    COORDINATED_CONSENSUS_TELEMETRY
+        .lock()
+        .map(|telemetry| telemetry.clone())
+        .unwrap_or_default()
 }
 
 pub fn start_metrics_server(bind_address: &str, config: NodeConfig, start_time: SystemTime) {
@@ -1540,7 +1582,147 @@ fn render_metrics(config: &NodeConfig, start_time: SystemTime) -> String {
         "synergy_process_start_time_seconds {start_time_seconds}\n"
     ));
 
+    render_coordinated_consensus_metrics(&mut body, config);
+
     body
+}
+
+/// Renders P1-only finality and turn-state evidence.  The legacy typed-PoSy
+/// series above remain backward-compatible operational diagnostics, but are
+/// never used as evidence for a coordinated release.  These series appear
+/// only when the loaded config resolves to the explicit P1 mode.
+fn render_coordinated_consensus_metrics(body: &mut String, config: &NodeConfig) {
+    let Ok(ResolvedConsensusMode::CoordinatedRoundRobinV1(coordinated_config)) = config
+        .consensus
+        .resolve_mode(config.blockchain.chain_id, &config.network.network_id)
+    else {
+        return;
+    };
+
+    let validator = coordinated_consensus_telemetry_snapshot();
+    let observer = crate::consensus::coordinated_finality_observer::coordinated_finality_observer_telemetry_tip();
+    let (
+        source,
+        active,
+        finalized_height,
+        finalized_block_id,
+        finalized_producer_id,
+        finalized_producer_round,
+        assigned_height,
+        assigned_producer_round,
+        assigned_producer_id,
+        missed_turns_total,
+    ) = if validator.active {
+        (
+            "validator",
+            1_u8,
+            validator.finalized_height,
+            validator.finalized_block_id,
+            validator.finalized_producer_id,
+            validator.finalized_producer_round,
+            validator.assigned_height,
+            validator.assigned_producer_round,
+            validator.assigned_producer_id,
+            validator.missed_turns_total,
+        )
+    } else if let Some(observer) = observer {
+        (
+            "observer",
+            1_u8,
+            observer.finalized_height,
+            observer.finalized_block_id,
+            observer.finalized_producer_id,
+            observer.finalized_producer_round,
+            0,
+            0,
+            String::new(),
+            0,
+        )
+    } else {
+        (
+            "uninitialized",
+            0_u8,
+            0,
+            String::new(),
+            String::new(),
+            0,
+            0,
+            0,
+            String::new(),
+            0,
+        )
+    };
+
+    push_metric_header(
+        body,
+        "coordinated_consensus_mode_info",
+        "Configured coordinated-round-robin P1 mode and source of its independently verified finality.",
+        "gauge",
+    );
+    body.push_str(&format!(
+        "coordinated_consensus_mode_info{{mode=\"{}\",coordinator_id=\"{}\",source=\"{source}\"}} 1\n",
+        escape_label_value(&coordinated_config.consensus_version),
+        escape_label_value(&coordinated_config.coordinator_id),
+    ));
+    push_metric_header(
+        body,
+        "coordinated_consensus_active",
+        "One only after the P1 validator worker or non-signing finality observer is installed.",
+        "gauge",
+    );
+    body.push_str(&format!(
+        "coordinated_consensus_active{{source=\"{source}\"}} {active}\n"
+    ));
+    push_metric_header(
+        body,
+        "coordinated_consensus_finalized_height",
+        "Latest independently verified P1 finalized height; observer values are replicated finality, not database insertion height.",
+        "gauge",
+    );
+    body.push_str(&format!(
+        "coordinated_consensus_finalized_height{{source=\"{source}\"}} {finalized_height}\n"
+    ));
+    push_metric_header(
+        body,
+        "coordinated_consensus_finalized_block_id",
+        "Digest of the latest independently verified P1 finalized block.",
+        "gauge",
+    );
+    body.push_str(&format!(
+        "coordinated_consensus_finalized_block_id{{source=\"{source}\",block_id=\"{}\"}} 1\n",
+        escape_label_value(&finalized_block_id)
+    ));
+    push_metric_header(
+        body,
+        "coordinated_consensus_finalized_producer_info",
+        "Producer and producer round bound by the latest signed P1 coordinator commit.",
+        "gauge",
+    );
+    body.push_str(&format!(
+        "coordinated_consensus_finalized_producer_info{{source=\"{source}\",producer_id=\"{}\",producer_round=\"{finalized_producer_round}\"}} 1\n",
+        escape_label_value(&finalized_producer_id)
+    ));
+    if source == "validator" {
+        push_metric_header(
+            body,
+            "coordinated_consensus_assignment_info",
+            "Current signed P1 assignment, or the next deterministic producer turn when no assignment is pending.",
+            "gauge",
+        );
+        body.push_str(&format!(
+            "coordinated_consensus_assignment_info{{height=\"{assigned_height}\",producer_round=\"{assigned_producer_round}\",producer_id=\"{}\"}} 1\n",
+            escape_label_value(&assigned_producer_id)
+        ));
+        push_metric_header(
+            body,
+            "coordinated_consensus_missed_turns_total",
+            "Durably evidenced P1 producer turns skipped without advancing block height.",
+            "counter",
+        );
+        body.push_str(&format!(
+            "coordinated_consensus_missed_turns_total {missed_turns_total}\n"
+        ));
+    }
 }
 
 fn push_metric_header(body: &mut String, name: &str, help: &str, metric_type: &str) {
@@ -1698,6 +1880,60 @@ mod tests {
                 "missing release-gate metric {metric}"
             );
         }
+    }
+
+    #[test]
+    fn render_metrics_exposes_signed_p1_finality_without_typed_relabeling() {
+        let mut config = NodeConfig::default();
+        config.blockchain.chain_id = 1266;
+        config.network.network_id = "synergy-testnet-v3".to_string();
+        config.consensus.mode =
+            crate::consensus::coordinated_round_robin::COORDINATED_ROUND_ROBIN_V1.to_string();
+        config.consensus.coordinator_id = "validator-1".to_string();
+        config.consensus.producer_ids = (2..=6).map(|index| format!("validator-{index}")).collect();
+
+        super::publish_coordinated_consensus_telemetry(
+            super::CoordinatedConsensusTelemetrySnapshot {
+                active: true,
+                finalized_height: 73,
+                finalized_block_id: "p1-finalized-block".to_string(),
+                finalized_producer_id: "validator-4".to_string(),
+                finalized_producer_round: 2,
+                assigned_height: 74,
+                assigned_producer_round: 0,
+                assigned_producer_id: "validator-5".to_string(),
+                missed_turns_total: 3,
+            },
+        );
+        let mut body = String::new();
+        super::render_coordinated_consensus_metrics(&mut body, &config);
+        super::clear_coordinated_consensus_telemetry();
+
+        assert!(body.contains(
+            "coordinated_consensus_mode_info{mode=\"coordinated_round_robin_v1\",coordinator_id=\"validator-1\",source=\"validator\"} 1"
+        ));
+        assert!(body.contains("coordinated_consensus_finalized_height{source=\"validator\"} 73"));
+        assert!(body.contains(
+            "coordinated_consensus_finalized_block_id{source=\"validator\",block_id=\"p1-finalized-block\"} 1"
+        ));
+        assert!(body.contains(
+            "coordinated_consensus_assignment_info{height=\"74\",producer_round=\"0\",producer_id=\"validator-5\"} 1"
+        ));
+        assert!(body.contains("coordinated_consensus_missed_turns_total 3"));
+    }
+
+    #[test]
+    fn non_p1_config_does_not_emit_coordinated_consensus_metrics() {
+        super::publish_coordinated_consensus_telemetry(
+            super::CoordinatedConsensusTelemetrySnapshot {
+                active: true,
+                ..Default::default()
+            },
+        );
+        let mut body = String::new();
+        super::render_coordinated_consensus_metrics(&mut body, &NodeConfig::default());
+        super::clear_coordinated_consensus_telemetry();
+        assert!(!body.contains("coordinated_consensus_mode_info"));
     }
 
     #[test]

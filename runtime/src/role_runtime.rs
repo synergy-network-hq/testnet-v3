@@ -1606,6 +1606,57 @@ fn publish_coordinated_finalized_execution_state(
     Ok(())
 }
 
+/// Publishes a read-only P1 lifecycle snapshot after a durable state
+/// transition.  The missed-turn total is derived from the signed assignment
+/// sequence rather than the coordinator-local event list, so every validator
+/// reports the same count after receiving a replacement assignment.
+fn publish_coordinated_runtime_telemetry(
+    runtime: &CoordinatedRuntime,
+    config: &crate::consensus::coordinated_round_robin::CoordinatedRoundRobinConfig,
+) {
+    let state = runtime.coordinator_state();
+    let (assigned_height, assigned_producer_round, assigned_producer_id) = state
+        .pending_assignment
+        .as_ref()
+        .map(|assignment| {
+            (
+                assignment.height,
+                assignment.producer_round,
+                assignment.assigned_producer_id.clone(),
+            )
+        })
+        .unwrap_or_else(|| {
+            (
+                state.next_height(),
+                state.pending_round,
+                config
+                    .producer_at(state.producer_cursor)
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        });
+    let (finalized_producer_id, finalized_producer_round) = state
+        .last_commit
+        .as_ref()
+        .map(|commit| (commit.producer_id.clone(), commit.producer_round))
+        .unwrap_or_default();
+    telemetry::publish_coordinated_consensus_telemetry(
+        telemetry::CoordinatedConsensusTelemetrySnapshot {
+            active: true,
+            finalized_height: state.last_finalized_height,
+            finalized_block_id: state.last_finalized_block_hash.to_hex(),
+            finalized_producer_id,
+            finalized_producer_round,
+            assigned_height,
+            assigned_producer_round,
+            assigned_producer_id,
+            missed_turns_total: state
+                .assignment_sequence
+                .saturating_sub(state.last_finalized_height),
+        },
+    );
+}
+
 /// Recovers only the exact, authenticated Aegis envelopes submitted through
 /// the ordinary RPC/P2P transaction pool. The legacy carrier is merely the
 /// transport envelope: P1 signs and executes its contained typed transaction,
@@ -1699,6 +1750,7 @@ fn run_coordinated_round_robin_driver(
         // proposal subject.
         maybe_broadcast_local_coordinated_proposal(runtime, block_context, network)?;
     }
+    publish_coordinated_runtime_telemetry(runtime, config);
 
     while running.load(Ordering::Acquire) {
         let now = Instant::now();
@@ -1726,6 +1778,7 @@ fn run_coordinated_round_robin_driver(
                             assignment,
                         },
                     )?;
+                    publish_coordinated_runtime_telemetry(runtime, config);
                     producer_deadline = Some(
                         Instant::now() + Duration::from_millis(config.producer_turn_timeout_ms),
                     );
@@ -1764,6 +1817,7 @@ fn run_coordinated_round_robin_driver(
                     maybe_broadcast_local_coordinated_proposal(runtime, block_context, network)?;
                 }
                 publish_coordinated_finalized_execution_state(runtime)?;
+                publish_coordinated_runtime_telemetry(runtime, config);
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -1779,6 +1833,7 @@ fn spawn_coordinated_round_robin_driver(
     network: Arc<p2p::networking::P2PNetwork>,
     running: Arc<AtomicBool>,
 ) -> Result<CoordinatedRoundRobinWorker, String> {
+    telemetry::clear_coordinated_consensus_telemetry();
     let inputs = build_finalized_coordinated_runtime_inputs(config)?;
     let initial_execution_state = inputs.runtime.execution_state().clone();
     install_finalized_execution_state_snapshot(initial_execution_state)
@@ -1835,11 +1890,13 @@ fn spawn_coordinated_round_robin_driver(
             }
             let _ = remove_coordinated_consensus_ingress();
             remove_finalized_execution_state_snapshot();
+            telemetry::clear_coordinated_consensus_telemetry();
         }) {
         Ok(handle) => handle,
         Err(error) => {
             let _ = remove_coordinated_consensus_ingress();
             remove_finalized_execution_state_snapshot();
+            telemetry::clear_coordinated_consensus_telemetry();
             return Err(format!("spawn coordinated round-robin worker: {error}"));
         }
     };
