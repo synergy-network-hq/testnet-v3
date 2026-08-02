@@ -89,6 +89,14 @@ impl CoordinatedFinalityStore {
         &self.path
     }
 
+    pub fn migration_parent_state_root(&self) -> Hash {
+        self.migration_parent_state_root
+    }
+
+    pub fn first_coordinated_height(&self) -> Height {
+        self.first_coordinated_height
+    }
+
     pub fn recover(
         &self,
         config: &CoordinatedRoundRobinConfig,
@@ -376,6 +384,7 @@ mod tests {
         CoordinatedProposal, CoordinatorCommit, ProducerAssignment, COORDINATED_ROUND_ROBIN_V1,
     };
     use crate::consensus_parameters::ConsensusParameterRoot;
+    use crate::dag_mempool::compute_tx_order_root;
     use crate::synergy_types::{
         AegisPqKeyId, AegisPqSignature, Block, BlockHeader, ChainId, ClusterId, Epoch, NetworkId,
         Round, UmaId, ValidatorId,
@@ -419,7 +428,7 @@ mod tests {
         parent_state_root: Hash,
         state_root: Hash,
     ) -> CoordinatedCommittedBlockPackage {
-        let transaction_root = hash(&format!("transaction-root-{height}"));
+        let transaction_root = compute_tx_order_root(&[]).expect("empty transaction root");
         let receipt_root = hash(&format!("receipt-root-{height}"));
         let prior_finality_reference = hash(&format!("prior-finality-reference-{height}"));
         let assignment = ProducerAssignment {

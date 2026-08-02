@@ -6,11 +6,13 @@ use crate::consensus::coordinated_round_robin::{
 };
 use crate::consensus::dual_quorum::{QuorumCertificate, Vote};
 use crate::consensus::typed_finality_store::TypedFinalityRecord;
+use crate::dag_mempool::compute_tx_order_root;
 use crate::etdag::{CertifiedProtectedInputArtifact, ProtectedBlockInput, TargetAdmissionContext};
 use crate::synergy_types::AegisPqSignature;
 use crate::synergy_types::{
-    Block as TypedBlock, Hash, HeightConsensusContext, QuorumCertificate as TypedQuorumCertificate,
-    TimeoutCertificate, ValidationCertificate, Vote as TypedVote,
+    Block as TypedBlock, CanonicalSerialize, Hash, HeightConsensusContext,
+    QuorumCertificate as TypedQuorumCertificate, TimeoutCertificate, TxId, ValidationCertificate,
+    Vote as TypedVote,
 };
 use crate::transaction::Transaction;
 
@@ -163,15 +165,32 @@ impl CoordinatedCommittedBlockPackage {
         self.proposal.validate_shape()?;
         self.coordinator_commit.validate_shape(config)?;
         let assignment_hash = self.assignment.signing_hash()?;
+        let transaction_ids = self
+            .block
+            .transactions
+            .iter()
+            .map(|transaction| {
+                Ok(TxId::from_hash(Hash::from_domain_bytes(
+                    "SYNERGY_EXECUTION_TX_ID_V1",
+                    &transaction.canonical_bytes()?,
+                )))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let transaction_count = u64::try_from(transaction_ids.len())
+            .map_err(|_| "coordinated package transaction count exceeds u64".to_string())?;
         let block_hash = Hash::from_hex(&self.block.block_id()?.0)
             .map_err(|error| format!("coordinated package block ID is not a hash: {error}"))?;
         if self.block.header.epoch.0 != self.assignment.epoch
             || self.block.header.height.0 != self.assignment.height
             || self.block.header.round.0 != self.assignment.producer_round
+            || self.block.header.protocol_version != self.assignment.consensus_version
             || self.block.header.parent_block_hash != self.assignment.parent_block_hash
+            || self.block.header.parent_state_root != self.block.header.state_root_before
             || self.block.header.evidence_root != self.assignment.prior_finality_reference
             || !self.block.header.last_finalized_qc_hash.is_zero()
             || self.block.header.proposer_validator_id.0 != self.assignment.assigned_producer_id
+            || self.block.header.tx_count != transaction_count
+            || self.block.header.tx_order_root != compute_tx_order_root(&transaction_ids)?
             || self.block.header.state_root_after != self.proposal.state_root
             || self.block.header.receipt_root != self.proposal.receipt_root
             || self.block.proposer_signature != self.proposal.producer_signature

@@ -9,13 +9,14 @@
 //! canonical block execution result to this state machine.
 
 use crate::crypto::aegis_pqvm::{AegisPqvmVerifier, SYNERGY_BLOCK_V1};
+use crate::dag_mempool::compute_tx_order_root;
 use crate::p2p::messages::{
     validate_coordinated_consensus_message_size, CoordinatedCommittedBlockPackage,
     CoordinatedConsensusMessage,
 };
 use crate::synergy_types::{
     AegisPqKeyId, AegisPqKeyRole, AegisPqSignature, Block as TypedBlock, CanonicalSerialize, Epoch,
-    Hash, UmaId, ValidatorId, ValidatorRecord, ValidatorSet,
+    Hash, TxId, UmaId, ValidatorId, ValidatorRecord, ValidatorSet,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -249,6 +250,18 @@ impl CoordinatedConsensusVerifier {
         let producer = self.validator(&assignment.assigned_producer_id)?;
         let block_hash = Hash::from_hex(&block.block_id()?.0)
             .map_err(|error| format!("coordinated block ID is not a hash: {error}"))?;
+        let transaction_ids = block
+            .transactions
+            .iter()
+            .map(|transaction| {
+                Ok(TxId::from_hash(Hash::from_domain_bytes(
+                    "SYNERGY_EXECUTION_TX_ID_V1",
+                    &transaction.canonical_bytes()?,
+                )))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let transaction_count = u64::try_from(transaction_ids.len())
+            .map_err(|_| "coordinated block transaction count exceeds u64".to_string())?;
         if proposal.epoch != assignment.epoch
             || proposal.height != assignment.height
             || proposal.producer_round != assignment.producer_round
@@ -262,12 +275,16 @@ impl CoordinatedConsensusVerifier {
             || block.header.epoch.0 != assignment.epoch
             || block.header.height.0 != assignment.height
             || block.header.round.0 != assignment.producer_round
+            || block.header.protocol_version != assignment.consensus_version
             || block.header.parent_block_hash != assignment.parent_block_hash
+            || block.header.parent_state_root != block.header.state_root_before
             || block.header.evidence_root != assignment.prior_finality_reference
             || !block.header.last_finalized_qc_hash.is_zero()
             || block.header.proposer_validator_id != producer.validator_id
             || block.header.proposer_uma_id != producer.validator_uma_id
             || block.header.proposer_key_id != producer.consensus_public_key.key_id
+            || block.header.tx_count != transaction_count
+            || block.header.tx_order_root != compute_tx_order_root(&transaction_ids)?
             || block.header.tx_order_root != proposal.transaction_root
             || block.header.receipt_root != proposal.receipt_root
             || block.header.state_root_after != proposal.state_root
@@ -276,6 +293,11 @@ impl CoordinatedConsensusVerifier {
             return Err(
                 "coordinated producer block does not match its signed assignment".to_string(),
             );
+        }
+        for transaction in &block.transactions {
+            self.verifier
+                .verify_transaction_signature_checked(transaction)
+                .map_err(|error| format!("verify coordinated transaction signature: {error}"))?;
         }
         self.verifier
             .verify_domain_signature(
@@ -365,6 +387,22 @@ impl CoordinatedConsensusVerifier {
                 "coordinated consensus validator {validator_id} is not in the finalized active set"
             )
         })
+    }
+
+    /// Returns an active canonical validator record after the constructor has
+    /// proven that the configured six-validator membership is exact.
+    pub fn validator_record(&self, validator_id: &str) -> Result<&ValidatorRecord, String> {
+        self.validator(validator_id)
+    }
+
+    /// Returns the exact active six-validator set that the constructor bound
+    /// to this coordinated session. Callers receive a value, never mutable
+    /// access to the verifier's canonical membership map.
+    pub fn validator_set(&self) -> ValidatorSet {
+        ValidatorSet {
+            epoch: self.epoch,
+            validators: self.active_validators.values().cloned().collect(),
+        }
     }
 }
 
