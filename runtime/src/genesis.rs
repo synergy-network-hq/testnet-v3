@@ -18,6 +18,12 @@ use crate::synergy_types::{
 use crate::utils::resolve_data_path;
 
 const ZERO_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+/// The only deployed Chain 1266 Genesis record that predates the explicit
+/// incarnation/schema fields. This semantic hash is immutable: the loader
+/// derives the P1 state domain for this one record, but never rewrites Genesis
+/// or accepts a similarly-shaped replacement.
+const CHAIN_1266_PRE_P1_GENESIS_HASH: &str =
+    "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d";
 
 #[derive(Debug, Clone)]
 pub struct GenesisBalance {
@@ -193,9 +199,19 @@ fn load_canonical_genesis_from_path(path: PathBuf) -> Result<GenesisDocument, St
     let timestamp = parse_timestamp(required(&value, &["header", "timestamp"])?)
         .map_err(|error| format!("header.timestamp: {error}"))?;
     let chain_id = required_u64(&value, &["network", "chain_id"])?;
-    let chain_incarnation = required_u64(&value, &["network", "chain_incarnation"])?;
-    let consensus_state_schema_version =
-        required_u64(&value, &["consensus", "state_schema_version"])?;
+    let is_pre_p1_chain1266_genesis = is_chain1266_pre_p1_genesis(&value);
+    let chain_incarnation = required_u64_or_derived_pre_p1_value(
+        &value,
+        &["network", "chain_incarnation"],
+        TESTNET_V3_CHAIN_INCARNATION,
+        is_pre_p1_chain1266_genesis,
+    )?;
+    let consensus_state_schema_version = required_u64_or_derived_pre_p1_value(
+        &value,
+        &["consensus", "state_schema_version"],
+        u64::from(TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION),
+        is_pre_p1_chain1266_genesis,
+    )?;
     if chain_incarnation != TESTNET_V3_CHAIN_INCARNATION {
         return Err(format!(
             "wrong Chain 1266 incarnation: expected {}, found {chain_incarnation}",
@@ -209,9 +225,13 @@ fn load_canonical_genesis_from_path(path: PathBuf) -> Result<GenesisDocument, St
         ));
     }
     let expected_state_namespace = format!("chain-{chain_id}/incarnation-{chain_incarnation}");
-    if required_string(&value, &["consensus", "state_directory_namespace"])?
-        != expected_state_namespace
-    {
+    let state_namespace = required_string_or_derived_pre_p1_value(
+        &value,
+        &["consensus", "state_directory_namespace"],
+        &expected_state_namespace,
+        is_pre_p1_chain1266_genesis,
+    )?;
+    if state_namespace != expected_state_namespace {
         return Err(
             "Genesis consensus state namespace does not match its chain domain".to_string(),
         );
@@ -513,6 +533,22 @@ fn is_testnet_v3_candidate_schema(value: &Value) -> bool {
         .and_then(|entry| entry.get("json_profile"))
         .and_then(Value::as_str)
         == Some("deterministic_sorted_keys_no_insignificant_whitespace")
+}
+
+/// Identifies precisely the deployed, immutable pre-P1 Chain 1266 Genesis.
+/// The subsequent integrity validation still re-computes the bound semantic
+/// hash, so neither matching metadata nor this compatibility branch can admit
+/// a modified Genesis document.
+fn is_chain1266_pre_p1_genesis(value: &Value) -> bool {
+    required_u64(value, &["header", "block_height"]) == Ok(0)
+        && required_u64(value, &["network", "chain_id"]) == Ok(1266)
+        && required_u64(value, &["network", "network_id"]) == Ok(1266)
+        && required_string(value, &["network", "network_slug"]).as_deref()
+            == Ok("synergy-testnet-v3")
+        && required_string(value, &["network", "consensus_version"]).as_deref() == Ok("posy/2.2")
+        && required_string(value, &["consensus", "algorithm"]).as_deref() == Ok("ProofOfSynergy")
+        && required_string(value, &["integrity", "genesis_hash"]).as_deref()
+            == Ok(CHAIN_1266_PRE_P1_GENESIS_HASH)
 }
 
 fn load_candidate_consensus_parameters(
@@ -1324,10 +1360,49 @@ fn required_string(value: &Value, path: &[&str]) -> Result<String, String> {
         .ok_or_else(|| format!("path {} is not a string", path.join(".")))
 }
 
+fn required_u64_or_derived_pre_p1_value(
+    value: &Value,
+    path: &[&str],
+    derived_value: u64,
+    allow_missing_pre_p1_value: bool,
+) -> Result<u64, String> {
+    match optional(value, path) {
+        Some(entry) => entry
+            .as_u64()
+            .ok_or_else(|| format!("path {} is not a u64", path.join("."))),
+        None if allow_missing_pre_p1_value => Ok(derived_value),
+        None => Err(format!("missing path {}", path.join("."))),
+    }
+}
+
+fn required_string_or_derived_pre_p1_value(
+    value: &Value,
+    path: &[&str],
+    derived_value: &str,
+    allow_missing_pre_p1_value: bool,
+) -> Result<String, String> {
+    match optional(value, path) {
+        Some(entry) => entry
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| format!("path {} is not a string", path.join("."))),
+        None if allow_missing_pre_p1_value => Ok(derived_value.to_string()),
+        None => Err(format!("missing path {}", path.join("."))),
+    }
+}
+
 fn required_u64(value: &Value, path: &[&str]) -> Result<u64, String> {
     required(value, path)?
         .as_u64()
         .ok_or_else(|| format!("path {} is not a u64", path.join(".")))
+}
+
+fn optional<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    let mut current = value;
+    for segment in path {
+        current = current.get(*segment)?;
+    }
+    Some(current)
 }
 
 fn hash_json(value: &Value) -> String {
@@ -1479,6 +1554,45 @@ mod tests {
         assert_eq!(document.network_id(), 1266);
         assert_eq!(document.validators().len(), 6);
         assert_eq!(document.network_magic_bytes(), expected_magic);
+    }
+
+    #[test]
+    fn runtime_loader_derives_p1_domain_only_for_immutable_pre_p1_genesis() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let path = root.join(
+            "launch/production-node-configs.backup-9e7b92431902/canonical-genesis/genesis.json",
+        );
+        let document = load_canonical_genesis_from_path(path.clone())
+            .expect("the immutable deployed Chain 1266 Genesis must load");
+        assert_eq!(document.hash(), CHAIN_1266_PRE_P1_GENESIS_HASH);
+        assert_eq!(document.chain_incarnation(), TESTNET_V3_CHAIN_INCARNATION);
+        assert_eq!(
+            document.consensus_state_schema_version(),
+            TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION
+        );
+
+        let mut mutated: Value = serde_json::from_slice(
+            &fs::read(path).expect("read immutable deployed Chain 1266 Genesis"),
+        )
+        .expect("parse immutable deployed Chain 1266 Genesis");
+        mutated["network"]["chain_incarnation"] = json!(3);
+        let mutation_path = crate::utils::test_temp_root(format!(
+            "synergy-pre-p1-genesis-incarnation-mutation-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::write(
+            &mutation_path,
+            serde_json::to_vec(&mutated).expect("encode mutated Genesis"),
+        )
+        .expect("write mutated Genesis");
+        let error = load_canonical_genesis_from_path(mutation_path.clone())
+            .expect_err("present incorrect incarnation must not be derived");
+        fs::remove_file(mutation_path).expect("remove mutated Genesis");
+        assert!(error.contains("wrong Chain 1266 incarnation"));
     }
 
     #[test]
