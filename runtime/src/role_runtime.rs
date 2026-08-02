@@ -1647,6 +1647,43 @@ fn ensure_consensus_pqc_runtime_ready(config: &NodeConfig) -> Result<(), String>
     Ok(())
 }
 
+/// A controlled fresh-genesis reset creates `.reset_flag` only after the fleet
+/// controller has removed every chain-derived root.  Do not let that marker
+/// merely skip sync: prove the in-memory chain contains the one canonical
+/// genesis block before the flag is consumed.  Otherwise a partial or manual
+/// reset could resume a stale nonzero history while logging a misleading
+/// "fresh" start.
+fn ensure_fresh_genesis_reset_state(
+    blockchain: &Arc<Mutex<crate::block::BlockChain>>,
+) -> Result<(), String> {
+    let canonical = canonical_genesis().map_err(|error| {
+        format!("fresh-reset verification cannot load canonical genesis: {error}")
+    })?;
+    let chain = blockchain
+        .lock()
+        .map_err(|_| "fresh-reset verification cannot lock shared chain".to_string())?;
+    if chain.chain.len() != 1 {
+        return Err(format!(
+            "fresh-reset marker requires exactly one genesis block, found {} blocks",
+            chain.chain.len()
+        ));
+    }
+    let genesis = chain
+        .last()
+        .ok_or_else(|| "fresh-reset marker found an empty shared chain".to_string())?;
+    if genesis.block_index != 0
+        || genesis.hash != canonical.hash()
+        || !genesis.transactions.is_empty()
+        || !genesis.validate()
+    {
+        return Err(
+            "fresh-reset marker does not resolve to the immutable canonical genesis state"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn ensure_local_validator_consensus_key_bound(config: &NodeConfig) -> Result<(), String> {
     let validator_address = resolve_local_validator_address(config);
     ensure_local_validator_record_available(&validator_address)?;
@@ -2345,6 +2382,40 @@ mod launch_block1_tests {
 
         assert!(result.is_ok());
         let _ = fs::remove_dir_all(project_root);
+    }
+
+    #[test]
+    fn fresh_reset_marker_requires_exactly_the_canonical_genesis_block() {
+        let blockchain = Arc::new(Mutex::new(BlockChain::new()));
+        blockchain
+            .lock()
+            .expect("test shared chain lock")
+            .genesis()
+            .expect("canonical genesis");
+
+        ensure_fresh_genesis_reset_state(&blockchain)
+            .expect("a fresh reset may consume only canonical genesis state");
+    }
+
+    #[test]
+    fn fresh_reset_marker_rejects_any_nonzero_block_history() {
+        let blockchain = Arc::new(Mutex::new(BlockChain::new()));
+        let mut chain = blockchain.lock().expect("test shared chain lock");
+        chain.genesis().expect("canonical genesis");
+        let genesis = chain.last().expect("genesis block").clone();
+        chain.add_block(Block::new_with_timestamp(
+            1,
+            Vec::new(),
+            genesis.hash,
+            "validator-2".to_string(),
+            1,
+            1,
+        ));
+        drop(chain);
+
+        let error = ensure_fresh_genesis_reset_state(&blockchain)
+            .expect_err("fresh-reset marker must not retain block data");
+        assert!(error.contains("exactly one genesis block"));
     }
 }
 
@@ -3177,6 +3248,12 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                     }
                 }
             } else {
+                ensure_fresh_genesis_reset_state(&blockchain).unwrap_or_else(|error| {
+                    eprintln!(
+                        "Fresh-genesis reset failed closed before consensus startup: {error}"
+                    );
+                    process::exit(1);
+                });
                 std::fs::remove_file(&reset_flag_path).ok();
                 info!(
                     "main",
