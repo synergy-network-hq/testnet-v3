@@ -225,6 +225,31 @@ impl CoordinatedRuntime {
         )
     }
 
+    /// Derives the timestamp for the replacement assignment that follows a
+    /// producer timeout. The height remains unchanged while the durable
+    /// producer round advances exactly once.
+    pub fn timeout_replacement_assignment_timestamp(
+        &self,
+        context: &CoordinatedBlockBuildContext,
+    ) -> Result<u64, String> {
+        if self.coordinator_state.pending_assignment.is_none() {
+            return Err(
+                "cannot derive a coordinated timeout replacement without a pending assignment"
+                    .to_string(),
+            );
+        }
+        let replacement_round = self
+            .coordinator_state
+            .pending_round
+            .checked_add(1)
+            .ok_or_else(|| "coordinated producer round overflow".to_string())?;
+        context.timestamp_for(
+            &self.config,
+            self.coordinator_state.next_height(),
+            replacement_round,
+        )
+    }
+
     /// Creates or safely replays Val1's next assignment. The supplied time is
     /// the canonical context-derived timestamp, never a local wall-clock read.
     pub fn issue_signed_assignment(
@@ -566,7 +591,7 @@ impl CoordinatedRuntime {
                 assigned_cluster_validator_count: 6,
                 assigned_cluster_total_voting_weight: total_weight,
                 proposer_schedule_hash: producer_schedule_root,
-                protocol_config_hash: context.protocol_config_hash,
+                protocol_config_hash: context.protocol_config_hash.clone(),
                 cryptographic_profile_root: context.cryptographic_profile_root,
                 dag_frontier_root,
                 tx_order_root,
@@ -1297,6 +1322,33 @@ mod tests {
             .verifier
             .verify_producer_block(&assignment, &proposal, &signed)
             .expect("every validator can verify the built producer block");
+    }
+
+    #[test]
+    fn timeout_replacement_uses_the_same_height_and_next_scheduled_round() {
+        let mut coordinator = fixture();
+        let context = block_build_context();
+        let first_timestamp = coordinator
+            .next_assignment_timestamp(&context)
+            .expect("derive first assignment timestamp");
+        let first = coordinator
+            .issue_signed_assignment(first_timestamp)
+            .expect("issue the initial assignment");
+        let replacement_timestamp = coordinator
+            .timeout_replacement_assignment_timestamp(&context)
+            .expect("derive the next producer-round timestamp before advancing state");
+        let replacement = coordinator
+            .skip_producer_turn_and_issue_assignment("producer timeout", replacement_timestamp)
+            .expect("replace the missed producer without advancing height");
+
+        assert_eq!(replacement.height, first.height);
+        assert_eq!(replacement.producer_round, first.producer_round + 1);
+        assert_eq!(replacement.assigned_producer_id, "validator-3");
+        assert!(replacement.intended_block_timestamp_ms > first.intended_block_timestamp_ms);
+        assert_eq!(
+            replacement.intended_block_timestamp_ms,
+            replacement_timestamp
+        );
     }
 
     #[test]

@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{self, Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -14,11 +14,20 @@ use crate::config::{
 };
 use crate::consensus::cartel_detection::{CartelDetectionEngine, WhistleblowerSystem};
 use crate::consensus::consensus_fork;
+use crate::consensus::coordinated_finality_store::CoordinatedFinalityStore;
+use crate::consensus::coordinated_round_robin::{
+    install_coordinated_consensus_ingress, remove_coordinated_consensus_ingress,
+    CoordinatedConsensusEnvelope, CoordinatorState, CoordinatorStateStore,
+};
+use crate::consensus::coordinated_runtime::{
+    CoordinatedBlockBuildContext, CoordinatedRuntime, CoordinatedRuntimeAction,
+};
 use crate::consensus::dao_governance::{DAOGovernance, SynergyOracle};
 use crate::consensus::dual_quorum::{EntropyBeacon, ValidatorRotation};
 use crate::consensus::self_realign::{
     expected_genesis_hash, persisted_recovery_state, RealignmentState,
 };
+use crate::consensus::signing_authority::DurableConsensusSigningAuthority;
 use crate::consensus::synergy_score::SynergyScoreCalculator;
 use crate::consensus::testnet_v3_bootstrap::load_testnet_v3_genesis_bootstrap;
 use crate::consensus::testnet_v3_finality_context::FinalizedTypedContextProvider;
@@ -43,7 +52,8 @@ use crate::etdag::{
     EtdagCertifiedInputIngress, EtdagParameters, EtdagProtectedInputCoordinator,
 };
 use crate::execution::{
-    install_finalized_execution_state_snapshot, remove_finalized_execution_state_snapshot,
+    install_finalized_execution_state_snapshot, publish_finalized_execution_state_snapshot,
+    remove_finalized_execution_state_snapshot,
 };
 use crate::genesis::{canonical_genesis, GenesisDocument};
 use crate::logging::{init_logger, LogLevel};
@@ -54,7 +64,7 @@ use crate::rpc::rpc_server::{SHARED_CHAIN, SYNC_MANAGER, TX_POOL};
 use crate::sxcp;
 use crate::sync::SyncManager;
 use crate::synergy_types::{
-    Hash, POSY_PROTOCOL_VERSION, SYNERGY_TESTNET_V3_CHAIN_ID, SYNERGY_TESTNET_V3_NETWORK_ID,
+    Hash, Height, POSY_PROTOCOL_VERSION, SYNERGY_TESTNET_V3_CHAIN_ID, SYNERGY_TESTNET_V3_NETWORK_ID,
 };
 use crate::telemetry;
 use crate::testnet_v3_execution_bootstrap::load_finalized_testnet_v3_genesis_execution_state;
@@ -72,6 +82,8 @@ const OFFLINE_SNAPSHOT_COMMAND_STACK_BYTES: usize = 64 * 1024 * 1024;
 /// consensus work bounded independently from the general P2P queue so a peer
 /// cannot turn a delayed validator round into unbounded memory consumption.
 const TYPED_POSY_INGRESS_CAPACITY: usize = 512;
+const COORDINATED_ROUND_ROBIN_INGRESS_CAPACITY: usize = 512;
+const COORDINATED_REMOTE_VALIDATOR_COUNT: usize = 5;
 
 struct RoleProcessGuard {
     child: Mutex<Child>,
@@ -94,6 +106,48 @@ impl TypedPosyWorker {
 
     fn join(self) {
         let _ = self.handle.join();
+    }
+}
+
+/// Owns the only P1 coordinated worker started by a role runtime. Its error
+/// is fatal: a validator must never remain available after losing the sole
+/// signed assignment/commit lifecycle or its independent finality boundary.
+struct CoordinatedRoundRobinWorker {
+    handle: thread::JoinHandle<()>,
+    fatal_error: Arc<Mutex<Option<String>>>,
+}
+
+impl CoordinatedRoundRobinWorker {
+    fn fatal_error(&self) -> Option<String> {
+        self.fatal_error.lock().ok().and_then(|error| error.clone())
+    }
+
+    fn join(self) {
+        let _ = self.handle.join();
+    }
+}
+
+/// The runtime has one and only one consensus worker.  P1's worker is kept
+/// separate from typed PoSy so no inherited proposal, QC, VC, TC, vote, or
+/// aggregation code can enter a coordinated launch through lifecycle glue.
+enum FinalizedConsensusWorker {
+    TypedPosy(TypedPosyWorker),
+    CoordinatedRoundRobin(CoordinatedRoundRobinWorker),
+}
+
+impl FinalizedConsensusWorker {
+    fn fatal_error(&self) -> Option<String> {
+        match self {
+            Self::TypedPosy(worker) => worker.fatal_error(),
+            Self::CoordinatedRoundRobin(worker) => worker.fatal_error(),
+        }
+    }
+
+    fn join(self) {
+        match self {
+            Self::TypedPosy(worker) => worker.join(),
+            Self::CoordinatedRoundRobin(worker) => worker.join(),
+        }
     }
 }
 
@@ -994,49 +1048,68 @@ fn should_start_typed_finality_observer(
     config: &NodeConfig,
     profile: Option<&RoleProfile>,
 ) -> bool {
-    !config.node.bootstrap_only
+    !matches!(
+        config
+            .consensus
+            .resolve_mode(config.blockchain.chain_id, &config.network.network_id),
+        Ok(ResolvedConsensusMode::CoordinatedRoundRobinV1(_))
+    ) && !config.node.bootstrap_only
         && matches!(
             profile.map(|value| value.role),
             Some(NodeRole::Relayer | NodeRole::RpcGateway | NodeRole::IndexerExplorer)
         )
 }
 
-/// The only production consensus-worker selection for Testnet-v3.  Keeping
-/// this decision independent from worker construction makes the two required
-/// authorities explicit: an authorized validator needs both a live P2P
-/// transport and a successful finalized-Genesis/key/finality preflight before
-/// it can reach the typed driver.  There is intentionally no legacy variant.
+/// The only production consensus-worker selection for Testnet-v3. Keeping
+/// this decision independent from worker construction makes the required
+/// authorities explicit: an authorized validator needs both live P2P and a
+/// successful finalized-Genesis/key/finality preflight. There is intentionally
+/// no legacy consensus variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FinalizedTypedDriverStartup {
+enum FinalizedConsensusDriverStartup {
     Disabled,
     SpawnFinalizedTypedDriver,
+    SpawnCoordinatedRoundRobinDriver,
 }
 
-fn select_finalized_typed_driver_startup(
+fn select_finalized_consensus_driver_startup(
     consensus_enabled: bool,
     p2p_available: bool,
-    finalized_input_validation: Option<Result<(), String>>,
-) -> Result<FinalizedTypedDriverStartup, String> {
+    finalized_input_validation: Option<Result<ResolvedConsensusMode, String>>,
+) -> Result<FinalizedConsensusDriverStartup, String> {
     if !consensus_enabled {
-        return Ok(FinalizedTypedDriverStartup::Disabled);
+        return Ok(FinalizedConsensusDriverStartup::Disabled);
     }
     if !p2p_available {
         return Err(
-            "finalized typed PoSy requires an active P2P network; refusing consensus startup"
+            "finalized consensus requires an active P2P network; refusing consensus startup"
                 .to_string(),
         );
     }
 
     match finalized_input_validation {
-        Some(Ok(())) => Ok(FinalizedTypedDriverStartup::SpawnFinalizedTypedDriver),
+        Some(Ok(ResolvedConsensusMode::PosyV2_2)) => {
+            Ok(FinalizedConsensusDriverStartup::SpawnFinalizedTypedDriver)
+        }
+        Some(Ok(ResolvedConsensusMode::CoordinatedRoundRobinV1(_))) => {
+            Ok(FinalizedConsensusDriverStartup::SpawnCoordinatedRoundRobinDriver)
+        }
         Some(Err(error)) => Err(format!(
-            "finalized typed PoSy inputs are unavailable; refusing consensus startup: {error}"
+            "finalized consensus inputs are unavailable; refusing consensus startup: {error}"
         )),
         None => Err(
-            "finalized typed PoSy inputs were not validated; refusing consensus startup"
-                .to_string(),
+            "finalized consensus inputs were not validated; refusing consensus startup".to_string(),
         ),
     }
+}
+
+fn resolved_consensus_runtime_preflight(
+    config: &NodeConfig,
+) -> Result<ResolvedConsensusMode, String> {
+    ensure_consensus_pqc_runtime_ready(config)?;
+    config
+        .consensus
+        .resolve_mode(config.blockchain.chain_id, &config.network.network_id)
 }
 
 fn should_require_state_sync_before_join(
@@ -1340,6 +1413,366 @@ where
     })
 }
 
+struct FinalizedCoordinatedRuntimeInputs {
+    runtime: CoordinatedRuntime,
+    block_context: CoordinatedBlockBuildContext,
+    config: crate::consensus::coordinated_round_robin::CoordinatedRoundRobinConfig,
+}
+
+/// Builds the P1 runtime exclusively from canonical Genesis, the finalized
+/// six-validator set, and the local finalized consensus key. It has no
+/// candidate-Genesis, legacy-chain, generated-key, or typed-PoSy fallback.
+fn build_finalized_coordinated_runtime_inputs(
+    config: &NodeConfig,
+) -> Result<FinalizedCoordinatedRuntimeInputs, String> {
+    let mode = config
+        .consensus
+        .resolve_mode(config.blockchain.chain_id, &config.network.network_id)?;
+    let ResolvedConsensusMode::CoordinatedRoundRobinV1(coordinated_config) = mode else {
+        return Err(
+            "coordinated runtime construction requires coordinated_round_robin_v1".to_string(),
+        );
+    };
+    let genesis = canonical_genesis()
+        .map_err(|error| format!("coordinated runtime cannot load canonical Genesis: {error}"))?;
+    let bootstrap = load_testnet_v3_genesis_bootstrap(genesis).map_err(|error| {
+        format!("coordinated runtime cannot derive finalized Genesis bootstrap: {error}")
+    })?;
+    let consensus_parameters = genesis.consensus_parameters().cloned().ok_or_else(|| {
+        "coordinated runtime requires a finalized consensus parameter binding in canonical Genesis"
+            .to_string()
+    })?;
+    consensus_parameters
+        .require_genesis_binding()
+        .map_err(|error| {
+            format!("coordinated runtime rejects a non-Genesis-bound parameter manifest: {error}")
+        })?;
+    let protocol_config_hash = consensus_parameters
+        .protocol_config
+        .hash()
+        .map_err(|error| {
+            format!("coordinated runtime cannot hash finalized parameters: {error}")
+        })?;
+    let genesis_execution_state = load_finalized_testnet_v3_genesis_execution_state(genesis)
+        .map_err(|error| {
+            format!("coordinated runtime requires finalized Genesis execution state: {error}")
+        })?;
+    let deployed_genesis_state_root = genesis
+        .value()
+        .get("execution")
+        .and_then(|execution| execution.get("genesis_execution_state_root"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "finalized Genesis omits execution.genesis_execution_state_root".to_string())
+        .and_then(|root| {
+            Hash::from_hex(root).map_err(|error| {
+                format!("finalized Genesis execution state root is not canonical: {error}")
+            })
+        })?;
+    let genesis_anchor = Hash::from_hex(genesis.hash())
+        .map_err(|error| format!("canonical Genesis hash is not a coordinated anchor: {error}"))?;
+    let genesis_timestamp_ms = genesis
+        .timestamp()
+        .checked_mul(1_000)
+        .ok_or_else(|| "canonical Genesis timestamp milliseconds overflow".to_string())?;
+
+    let validator_address = resolve_local_validator_address(config);
+    ensure_local_validator_record_available(&validator_address)?;
+    let (public_key, private_key) =
+        load_local_validator_keypair_for_height(0, &validator_address, &VALIDATOR_MANAGER)
+            .map_err(|error| {
+                format!(
+                    "coordinated runtime cannot load canonical local consensus signing key: {error}"
+                )
+            })?;
+    let (signer, local_validator_id) = import_local_genesis_bound_typed_signer(
+        &bootstrap,
+        &validator_address,
+        public_key,
+        private_key,
+    )
+    .map_err(|error| format!("coordinated runtime rejects local signer: {error}"))?;
+    let initial_state = CoordinatorState::from_migration_anchor(
+        0,
+        genesis_anchor,
+        bootstrap.genesis_transition_root,
+    )
+    .map_err(|error| {
+        format!("coordinated runtime cannot create the Genesis anchor state: {error}")
+    })?;
+    let state_store = CoordinatorStateStore::at_path(crate::utils::resolve_data_path(
+        "data/coordinated-round-robin-state.json",
+    ))
+    .map_err(|error| format!("coordinated runtime state store initialization failed: {error}"))?;
+    let finality_store = CoordinatedFinalityStore::for_migration_anchor(
+        genesis_anchor,
+        deployed_genesis_state_root,
+        Height(1),
+    )
+    .map_err(|error| format!("coordinated finality store initialization failed: {error}"))?;
+    let runtime = CoordinatedRuntime::new(
+        coordinated_config.clone(),
+        &bootstrap.validator_set,
+        bootstrap.verifier,
+        local_validator_id,
+        signer,
+        DurableConsensusSigningAuthority::process_wide(),
+        state_store,
+        initial_state,
+        finality_store,
+        genesis_execution_state,
+    )
+    .map_err(|error| format!("coordinated runtime startup rejected: {error}"))?;
+    let block_context = CoordinatedBlockBuildContext {
+        genesis_anchor,
+        genesis_timestamp_ms,
+        protocol_config_hash,
+        cryptographic_profile_root: bootstrap.cryptographic_profile_root,
+    };
+    block_context
+        .validate()
+        .map_err(|error| format!("coordinated block context is invalid: {error}"))?;
+    Ok(FinalizedCoordinatedRuntimeInputs {
+        runtime,
+        block_context,
+        config: coordinated_config,
+    })
+}
+
+fn broadcast_coordinated_to_all_validators(
+    network: &p2p::networking::P2PNetwork,
+    message: &crate::p2p::messages::CoordinatedConsensusMessage,
+) -> Result<(), String> {
+    let sent = network.broadcast_coordinated_consensus(message)?;
+    if sent != COORDINATED_REMOTE_VALIDATOR_COUNT {
+        return Err(format!(
+            "coordinated consensus requires fanout to all {COORDINATED_REMOTE_VALIDATOR_COUNT} remote validators, sent to {sent}"
+        ));
+    }
+    Ok(())
+}
+
+fn publish_coordinated_finalized_execution_state(
+    runtime: &CoordinatedRuntime,
+) -> Result<(), String> {
+    if !publish_finalized_execution_state_snapshot(runtime.execution_state()) {
+        return Err(
+            "coordinated finality cannot publish without its installed execution snapshot"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn maybe_broadcast_local_coordinated_proposal(
+    runtime: &mut CoordinatedRuntime,
+    block_context: &CoordinatedBlockBuildContext,
+    network: &p2p::networking::P2PNetwork,
+) -> Result<(), String> {
+    let Some(assignment) = runtime.pending_assignment().cloned() else {
+        return Ok(());
+    };
+    if assignment.assigned_producer_id != runtime.local_validator_id().0 {
+        return Ok(());
+    }
+    let block = runtime.build_empty_assigned_block(&assignment, block_context)?;
+    let (proposal, block) = runtime.sign_assigned_producer_block(&assignment, block)?;
+    broadcast_coordinated_to_all_validators(
+        network,
+        &crate::p2p::messages::CoordinatedConsensusMessage::ProposedBlock {
+            assignment,
+            proposal,
+            block,
+        },
+    )
+}
+
+fn issue_or_rebroadcast_coordinated_assignment(
+    runtime: &mut CoordinatedRuntime,
+    block_context: &CoordinatedBlockBuildContext,
+    network: &p2p::networking::P2PNetwork,
+) -> Result<(), String> {
+    let assignment = match runtime.pending_assignment().cloned() {
+        Some(assignment) => assignment,
+        None => {
+            runtime.issue_signed_assignment(runtime.next_assignment_timestamp(block_context)?)?
+        }
+    };
+    broadcast_coordinated_to_all_validators(
+        network,
+        &crate::p2p::messages::CoordinatedConsensusMessage::ProducerAssignment { assignment },
+    )
+}
+
+fn run_coordinated_round_robin_driver(
+    runtime: &mut CoordinatedRuntime,
+    block_context: &CoordinatedBlockBuildContext,
+    config: &crate::consensus::coordinated_round_robin::CoordinatedRoundRobinConfig,
+    receiver: &mpsc::Receiver<CoordinatedConsensusEnvelope>,
+    network: &p2p::networking::P2PNetwork,
+    running: &AtomicBool,
+) -> Result<(), String> {
+    let mut producer_deadline = None;
+    let mut next_assignment_due = None;
+    if runtime.is_local_coordinator() {
+        issue_or_rebroadcast_coordinated_assignment(runtime, block_context, network)?;
+        producer_deadline =
+            Some(Instant::now() + Duration::from_millis(config.producer_turn_timeout_ms));
+    } else {
+        // On restart the local producer retransmits only its exact durable
+        // envelope for a still-pending assignment; it cannot invent a new
+        // proposal subject.
+        maybe_broadcast_local_coordinated_proposal(runtime, block_context, network)?;
+    }
+
+    while running.load(Ordering::Acquire) {
+        let now = Instant::now();
+        if runtime.is_local_coordinator() {
+            if let Some(due) = next_assignment_due {
+                if now >= due {
+                    issue_or_rebroadcast_coordinated_assignment(runtime, block_context, network)?;
+                    producer_deadline = Some(
+                        Instant::now() + Duration::from_millis(config.producer_turn_timeout_ms),
+                    );
+                    next_assignment_due = None;
+                }
+            }
+            if let Some(deadline) = producer_deadline {
+                if now >= deadline && runtime.pending_assignment().is_some() {
+                    let replacement_timestamp =
+                        runtime.timeout_replacement_assignment_timestamp(block_context)?;
+                    let assignment = runtime.skip_producer_turn_and_issue_assignment(
+                        "producer timeout",
+                        replacement_timestamp,
+                    )?;
+                    broadcast_coordinated_to_all_validators(
+                        network,
+                        &crate::p2p::messages::CoordinatedConsensusMessage::ProducerAssignment {
+                            assignment,
+                        },
+                    )?;
+                    producer_deadline = Some(
+                        Instant::now() + Duration::from_millis(config.producer_turn_timeout_ms),
+                    );
+                }
+            }
+        }
+
+        match receiver.recv_timeout(Duration::from_millis(50)) {
+            Ok(envelope) => {
+                let received_assignment = matches!(
+                    &envelope.message,
+                    crate::p2p::messages::CoordinatedConsensusMessage::ProducerAssignment { .. }
+                );
+                let action = runtime
+                    .handle_authenticated_message(&envelope.authenticated_peer, envelope.message)?;
+                match action {
+                    CoordinatedRuntimeAction::None => {}
+                    CoordinatedRuntimeAction::BroadcastCommitted(package) => {
+                        broadcast_coordinated_to_all_validators(
+                            network,
+                            &crate::p2p::messages::CoordinatedConsensusMessage::CommittedBlock {
+                                package,
+                            },
+                        )?;
+                        publish_coordinated_finalized_execution_state(runtime)?;
+                        producer_deadline = None;
+                        next_assignment_due = Some(
+                            Instant::now() + Duration::from_millis(config.target_block_interval_ms),
+                        );
+                    }
+                    CoordinatedRuntimeAction::Respond(message) => {
+                        broadcast_coordinated_to_all_validators(network, &message)?;
+                    }
+                }
+                if received_assignment {
+                    maybe_broadcast_local_coordinated_proposal(runtime, block_context, network)?;
+                }
+                publish_coordinated_finalized_execution_state(runtime)?;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("coordinated consensus ingress disconnected".to_string())
+            }
+        }
+    }
+    Ok(())
+}
+
+fn spawn_coordinated_round_robin_driver(
+    config: &NodeConfig,
+    network: Arc<p2p::networking::P2PNetwork>,
+    running: Arc<AtomicBool>,
+) -> Result<CoordinatedRoundRobinWorker, String> {
+    let inputs = build_finalized_coordinated_runtime_inputs(config)?;
+    let initial_execution_state = inputs.runtime.execution_state().clone();
+    install_finalized_execution_state_snapshot(initial_execution_state)
+        .map_err(|error| format!("install coordinated execution-state snapshot: {error}"))?;
+    let receiver =
+        match install_coordinated_consensus_ingress(COORDINATED_ROUND_ROBIN_INGRESS_CAPACITY) {
+            Ok(receiver) => receiver,
+            Err(error) => {
+                remove_finalized_execution_state_snapshot();
+                return Err(format!("install coordinated consensus ingress: {error}"));
+            }
+        };
+    if let Err(error) =
+        wait_for_finalized_typed_peer_readiness(&network, COORDINATED_REMOTE_VALIDATOR_COUNT)
+    {
+        let _ = remove_coordinated_consensus_ingress();
+        remove_finalized_execution_state_snapshot();
+        return Err(error);
+    }
+    if let Err(error) = wait_for_declared_consensus_start_barrier() {
+        let _ = remove_coordinated_consensus_ingress();
+        remove_finalized_execution_state_snapshot();
+        return Err(format!("consensus start barrier rejected release: {error}"));
+    }
+
+    let fatal_error = Arc::new(Mutex::new(None));
+    let worker_error = Arc::clone(&fatal_error);
+    let worker_running = Arc::clone(&running);
+    let handle = match thread::Builder::new()
+        .name("coordinated-round-robin-driver".to_string())
+        .spawn(move || {
+            let mut runtime = inputs.runtime;
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_coordinated_round_robin_driver(
+                    &mut runtime,
+                    &inputs.block_context,
+                    &inputs.config,
+                    &receiver,
+                    &network,
+                    &worker_running,
+                )
+            }));
+            let failure = match result {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some(error),
+                Err(_) => Some("coordinated round-robin worker panicked".to_string()),
+            };
+            if let Some(error) = failure {
+                eprintln!("Coordinated round-robin worker failed closed: {error}");
+                if let Ok(mut slot) = worker_error.lock() {
+                    *slot = Some(error);
+                }
+                worker_running.store(false, Ordering::Release);
+            }
+            let _ = remove_coordinated_consensus_ingress();
+            remove_finalized_execution_state_snapshot();
+        }) {
+        Ok(handle) => handle,
+        Err(error) => {
+            let _ = remove_coordinated_consensus_ingress();
+            remove_finalized_execution_state_snapshot();
+            return Err(format!("spawn coordinated round-robin worker: {error}"));
+        }
+    };
+    Ok(CoordinatedRoundRobinWorker {
+        handle,
+        fatal_error,
+    })
+}
+
 // The inherited ProofOfSynergy/DualQuorum loop deliberately has no production
 // entry point.  Keep the assertion helper test-only: production validator
 // startup below owns only `spawn_finalized_typed_posy_driver`.
@@ -1612,22 +2045,9 @@ fn ensure_consensus_pqc_runtime_ready(config: &NodeConfig) -> Result<(), String>
             config.network.network_id
         ));
     }
-    match config
+    let mode = config
         .consensus
-        .resolve_mode(config.blockchain.chain_id, &config.network.network_id)?
-    {
-        ResolvedConsensusMode::PosyV2_2 => {}
-        ResolvedConsensusMode::CoordinatedRoundRobinV1(_) => {
-            // The coordinated worker is intentionally not routed through the
-            // typed PoSy constructor. Until its own runtime adapter is
-            // installed, fail closed rather than letting a coordinated
-            // configuration accidentally start proposal/QC/TC tasks.
-            return Err(
-                "coordinated_round_robin_v1 is selected but its runtime adapter is not installed; refusing to start typed PoSy alongside coordinated mode"
-                    .to_string(),
-            );
-        }
-    }
+        .resolve_mode(config.blockchain.chain_id, &config.network.network_id)?;
     if config.consensus.allow_genesis_status_bypass {
         return Err("validator consensus refuses genesis status bypass configuration".to_string());
     }
@@ -1635,15 +2055,22 @@ fn ensure_consensus_pqc_runtime_ready(config: &NodeConfig) -> Result<(), String>
         .map_err(|error| format!("validator consensus cannot load canonical Genesis: {error}"))?;
     load_testnet_v3_genesis_bootstrap(genesis).map_err(|error| {
         format!(
-            "validator consensus canonical Genesis is not a valid typed Testnet-v3 bootstrap: {error}"
+            "validator consensus canonical Genesis is not a valid Testnet-v3 bootstrap: {error}"
         )
     })?;
     ensure_local_validator_consensus_key_bound(config)?;
-    // Constructing the coordinator proves the local key, immutable Genesis
-    // anchor, parameter root, ceremony execution snapshot, and typed finality
-    // boundary agree before the still-separate operational driver is allowed
-    // to request signing authority.
-    let _coordinator = build_finalized_typed_posy_coordinator(config)?;
+    match mode {
+        ResolvedConsensusMode::PosyV2_2 => {
+            // Constructing the coordinator proves the local key, immutable
+            // Genesis anchor, parameter root, ceremony execution snapshot,
+            // and typed finality boundary agree before it requests signing.
+            let _coordinator = build_finalized_typed_posy_coordinator(config)?;
+        }
+        ResolvedConsensusMode::CoordinatedRoundRobinV1(_) => {
+            // P1 has its own separate runtime, finality, and signing journals.
+            // Do not construct typed PoSy as a preflight side effect.
+        }
+    }
     Ok(())
 }
 
@@ -3030,7 +3457,14 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
 
             let process_start_time = SystemTime::now();
             let consensus_enabled = should_start_consensus(&config, role_profile);
-            if consensus_enabled && is_validator_profile(role_profile) {
+            let coordinated_mode_selected = matches!(
+                config
+                    .consensus
+                    .resolve_mode(config.blockchain.chain_id, &config.network.network_id),
+                Ok(ResolvedConsensusMode::CoordinatedRoundRobinV1(_))
+            );
+            if consensus_enabled && is_validator_profile(role_profile) && !coordinated_mode_selected
+            {
                 begin_typed_consensus_startup_buffer(TYPED_POSY_INGRESS_CAPACITY)
                     .unwrap_or_else(|error| {
                         eprintln!(
@@ -3203,7 +3637,28 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
             let sync_required_before_join =
                 should_require_state_sync_before_join(&config, role_profile);
 
-            if !should_start_sync(&config, role_profile) {
+            if coordinated_mode_selected && consensus_enabled && is_validator_profile(role_profile)
+            {
+                if should_sync {
+                    info!(
+                        "main",
+                        "Skipping generic legacy sync for coordinated consensus; the signed coordinated finality store is the only recovery authority"
+                    );
+                } else {
+                    ensure_fresh_genesis_reset_state(&blockchain).unwrap_or_else(|error| {
+                        eprintln!(
+                            "Fresh-genesis reset failed closed before coordinated consensus startup: {error}"
+                        );
+                        process::exit(1);
+                    });
+                    std::fs::remove_file(&reset_flag_path).ok();
+                    info!(
+                        "main",
+                        "Starting coordinated consensus from the verified block-0 Genesis reset",
+                        "height" => 0
+                    );
+                }
+            } else if !should_start_sync(&config, role_profile) {
                 info!("main", "Chain sync disabled for this node profile");
             } else if should_sync {
                 let mut sync_attempt = 1_u64;
@@ -3293,17 +3748,17 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                 );
             }
 
-            // The typed worker and every role-local worker share this one
-            // shutdown signal.  A typed-driver failure clears it before any
+            // The consensus worker and every role-local worker share this one
+            // shutdown signal. A consensus failure clears it before any
             // legacy path could be considered, and the role loop exits.
             let running = Arc::new(AtomicBool::new(true));
-            let initial_consensus_startup = select_finalized_typed_driver_startup(
+            let initial_consensus_startup = select_finalized_consensus_driver_startup(
                 consensus_enabled,
                 p2p_network.is_some(),
-                consensus_enabled.then(|| ensure_consensus_pqc_runtime_ready(&config)),
+                consensus_enabled.then(|| resolved_consensus_runtime_preflight(&config)),
             );
-            let mut typed_posy_worker = match initial_consensus_startup {
-                Ok(FinalizedTypedDriverStartup::Disabled) => {
+            let mut consensus_worker = match initial_consensus_startup {
+                Ok(FinalizedConsensusDriverStartup::Disabled) => {
                     info!(
                         "main",
                         "Consensus engine disabled for this node profile",
@@ -3313,7 +3768,7 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                     );
                     None
                 }
-                Ok(FinalizedTypedDriverStartup::SpawnFinalizedTypedDriver) => {
+                Ok(FinalizedConsensusDriverStartup::SpawnFinalizedTypedDriver) => {
                     info!(
                         "main",
                         "Starting finalized typed PoSy consensus worker",
@@ -3330,7 +3785,34 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                     };
                     match spawn_finalized_typed_posy_driver(&config, network, Arc::clone(&running))
                     {
-                        Ok(worker) => Some(worker),
+                        Ok(worker) => Some(FinalizedConsensusWorker::TypedPosy(worker)),
+                        Err(error) => {
+                            eprintln!("Consensus startup failed closed: {error}");
+                            process::exit(1);
+                        }
+                    }
+                }
+                Ok(FinalizedConsensusDriverStartup::SpawnCoordinatedRoundRobinDriver) => {
+                    info!(
+                        "main",
+                        "Starting coordinated round-robin consensus worker",
+                        "algorithm" => config.consensus.algorithm.clone()
+                    );
+                    let network = match p2p_network.as_ref().cloned() {
+                        Some(network) => network,
+                        None => {
+                            eprintln!(
+                                "Consensus startup failed closed: coordinated round-robin requires an active P2P network"
+                            );
+                            process::exit(1);
+                        }
+                    };
+                    match spawn_coordinated_round_robin_driver(
+                        &config,
+                        network,
+                        Arc::clone(&running),
+                    ) {
+                        Ok(worker) => Some(FinalizedConsensusWorker::CoordinatedRoundRobin(worker)),
                         Err(error) => {
                             eprintln!("Consensus startup failed closed: {error}");
                             process::exit(1);
@@ -3370,28 +3852,28 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
 
             while running.load(Ordering::SeqCst) {
                 refresh_sync_source_policy(&config, role_profile);
-                if let Some(worker) = typed_posy_worker.as_ref() {
+                if let Some(worker) = consensus_worker.as_ref() {
                     if let Some(error) = worker.fatal_error() {
-                        eprintln!("Finalized typed PoSy worker failed closed: {error}");
+                        eprintln!("Finalized consensus worker failed closed: {error}");
                         running.store(false, Ordering::SeqCst);
                         continue;
                     }
                 }
-                if typed_posy_worker.is_none()
+                if consensus_worker.is_none()
                     && watch_for_activation_consensus
                     && local_validator_is_consensus_authorized(&config)
                 {
                     info!(
                         "main",
-                        "Validator activation observed; starting finalized typed PoSy worker",
+                        "Validator activation observed; starting finalized consensus worker",
                         "validator_address" => resolve_local_validator_address(&config)
                     );
-                    match select_finalized_typed_driver_startup(
+                    match select_finalized_consensus_driver_startup(
                         true,
                         p2p_network.is_some(),
-                        Some(ensure_consensus_pqc_runtime_ready(&config)),
+                        Some(resolved_consensus_runtime_preflight(&config)),
                     ) {
-                        Ok(FinalizedTypedDriverStartup::SpawnFinalizedTypedDriver) => {
+                        Ok(FinalizedConsensusDriverStartup::SpawnFinalizedTypedDriver) => {
                             let network = match p2p_network.as_ref().cloned() {
                                 Some(network) => network,
                                 None => {
@@ -3401,21 +3883,45 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                                     process::exit(1);
                                 }
                             };
-                            typed_posy_worker = match spawn_finalized_typed_posy_driver(
+                            consensus_worker = match spawn_finalized_typed_posy_driver(
                                 &config,
                                 network,
                                 Arc::clone(&running),
                             ) {
-                                Ok(worker) => Some(worker),
+                                Ok(worker) => Some(FinalizedConsensusWorker::TypedPosy(worker)),
                                 Err(error) => {
                                     eprintln!("Consensus activation failed closed: {error}");
                                     process::exit(1);
                                 }
                             };
                         }
-                        Ok(FinalizedTypedDriverStartup::Disabled) => {
+                        Ok(FinalizedConsensusDriverStartup::SpawnCoordinatedRoundRobinDriver) => {
+                            let network = match p2p_network.as_ref().cloned() {
+                                Some(network) => network,
+                                None => {
+                                    eprintln!(
+                                        "Consensus activation failed closed: coordinated round-robin requires an active P2P network"
+                                    );
+                                    process::exit(1);
+                                }
+                            };
+                            consensus_worker = match spawn_coordinated_round_robin_driver(
+                                &config,
+                                network,
+                                Arc::clone(&running),
+                            ) {
+                                Ok(worker) => {
+                                    Some(FinalizedConsensusWorker::CoordinatedRoundRobin(worker))
+                                }
+                                Err(error) => {
+                                    eprintln!("Consensus activation failed closed: {error}");
+                                    process::exit(1);
+                                }
+                            };
+                        }
+                        Ok(FinalizedConsensusDriverStartup::Disabled) => {
                             eprintln!(
-                                "Consensus activation failed closed: authorized validator did not select the finalized typed driver"
+                                "Consensus activation failed closed: authorized validator did not select a finalized consensus worker"
                             );
                             process::exit(1);
                         }
@@ -3442,11 +3948,11 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                 let _ = handle.join();
             }
 
-            let typed_worker_failure = typed_posy_worker
+            let consensus_worker_failure = consensus_worker
                 .as_ref()
-                .and_then(TypedPosyWorker::fatal_error);
-            if let Some(typed_posy_worker) = typed_posy_worker {
-                typed_posy_worker.join();
+                .and_then(FinalizedConsensusWorker::fatal_error);
+            if let Some(consensus_worker) = consensus_worker {
+                consensus_worker.join();
             }
             if typed_finality_observer_enabled {
                 if let Err(error) = remove_typed_finality_observer() {
@@ -3458,8 +3964,8 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                 }
             }
             fs::remove_file(&pid_path).ok();
-            if let Some(error) = typed_worker_failure {
-                eprintln!("Finalized typed PoSy worker failed closed: {error}");
+            if let Some(error) = consensus_worker_failure {
+                eprintln!("Finalized consensus worker failed closed: {error}");
                 process::exit(1);
             }
             info!("main", "Node shutdown gracefully");
@@ -3998,6 +4504,10 @@ mod tests {
             source.contains("spawn_finalized_typed_posy_driver("),
             "the production role runtime must retain the finalized typed-driver entry point"
         );
+        assert!(
+            source.contains("spawn_coordinated_round_robin_driver("),
+            "the production role runtime must retain the separate P1 coordinated-driver entry point"
+        );
     }
 
     #[test]
@@ -4044,24 +4554,30 @@ mod tests {
 
         let consensus_enabled =
             should_start_consensus(&config, Some(NodeRole::Validator.profile()));
-        let startup = select_finalized_typed_driver_startup(consensus_enabled, true, Some(Ok(())))
-            .expect(
-                "an authorized validator with P2P and finalized inputs must select typed startup",
-            );
+        let startup = select_finalized_consensus_driver_startup(
+            consensus_enabled,
+            true,
+            Some(Ok(ResolvedConsensusMode::PosyV2_2)),
+        )
+        .expect("an authorized validator with P2P and finalized inputs must select typed startup");
 
         assert_eq!(
             startup,
-            FinalizedTypedDriverStartup::SpawnFinalizedTypedDriver
+            FinalizedConsensusDriverStartup::SpawnFinalizedTypedDriver
         );
     }
 
     #[test]
     fn finalized_typed_driver_startup_fails_closed_without_p2p_or_finalized_inputs() {
-        let no_p2p = select_finalized_typed_driver_startup(true, false, Some(Ok(())))
-            .expect_err("consensus startup without P2P must fail closed");
+        let no_p2p = select_finalized_consensus_driver_startup(
+            true,
+            false,
+            Some(Ok(ResolvedConsensusMode::PosyV2_2)),
+        )
+        .expect_err("consensus startup without P2P must fail closed");
         assert!(no_p2p.contains("active P2P network"));
 
-        let invalid_finalized_inputs = select_finalized_typed_driver_startup(
+        let invalid_finalized_inputs = select_finalized_consensus_driver_startup(
             true,
             true,
             Some(Err("missing canonical finality context".to_string())),
@@ -4775,22 +5291,35 @@ mod tests {
     }
 
     #[test]
-    fn coordinated_mode_cannot_start_the_typed_posy_worker() {
-        let mut config = NodeConfig::default();
-        config.consensus.mode =
-            crate::consensus::coordinated_round_robin::COORDINATED_ROUND_ROBIN_V1.to_string();
-        config.consensus.coordinator_id = "validator-1".to_string();
-        config.consensus.producer_ids = vec![
-            "validator-2".to_string(),
-            "validator-3".to_string(),
-            "validator-4".to_string(),
-            "validator-5".to_string(),
-            "validator-6".to_string(),
-        ];
-
-        let error = ensure_consensus_pqc_runtime_ready(&config)
-            .expect_err("a coordinated configuration must never enter typed PoSy startup");
-        assert!(error.contains("refusing to start typed PoSy"));
+    fn coordinated_mode_selects_its_own_worker_not_typed_posy() {
+        let coordinated = crate::consensus::coordinated_round_robin::CoordinatedRoundRobinConfig {
+            chain_id: 1266,
+            network_id: "synergy-testnet-v3".to_string(),
+            consensus_version:
+                crate::consensus::coordinated_round_robin::COORDINATED_ROUND_ROBIN_V1.to_string(),
+            coordinator_id: "validator-1".to_string(),
+            producer_ids: vec![
+                "validator-2".to_string(),
+                "validator-3".to_string(),
+                "validator-4".to_string(),
+                "validator-5".to_string(),
+                "validator-6".to_string(),
+            ],
+            target_block_interval_ms: 2_000,
+            producer_turn_timeout_ms: 4_000,
+        };
+        let startup = select_finalized_consensus_driver_startup(
+            true,
+            true,
+            Some(Ok(ResolvedConsensusMode::CoordinatedRoundRobinV1(
+                coordinated,
+            ))),
+        )
+        .expect("a coordinated configuration must select its dedicated worker");
+        assert_eq!(
+            startup,
+            FinalizedConsensusDriverStartup::SpawnCoordinatedRoundRobinDriver
+        );
     }
 
     #[test]
