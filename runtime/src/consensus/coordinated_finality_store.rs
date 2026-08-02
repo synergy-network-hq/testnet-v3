@@ -317,6 +317,14 @@ fn default_coordinated_finality_path() -> PathBuf {
         .unwrap_or_else(|| crate::utils::resolve_data_path(COORDINATED_FINALITY_FILE))
 }
 
+/// Returns the configured coordinated-finality path without opening or
+/// creating it. Public read surfaces use this to distinguish a mode that has
+/// not produced a coordinated block yet from an existing store that must be
+/// treated as the sole, independently verified finality authority.
+pub(crate) fn configured_coordinated_finality_path() -> PathBuf {
+    default_coordinated_finality_path()
+}
+
 fn record_from_package(
     config: &CoordinatedRoundRobinConfig,
     package: &CoordinatedCommittedBlockPackage,

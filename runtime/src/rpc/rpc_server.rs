@@ -10,6 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::block::{Block, BlockChain, HOT_CHAIN_RETENTION_BLOCKS_ENV};
 use crate::cluster::{fault_tolerance_f, quorum_threshold, EpochClusterAssignmentSnapshot};
+use crate::config::ResolvedConsensusMode;
 use crate::consensus::chain_durability::recover_chain_and_validate_canonical;
 #[cfg(test)]
 use crate::consensus::consensus_algorithm::reconcile_validator_registry_clusters_for_height;
@@ -19,11 +20,16 @@ use crate::consensus::consensus_algorithm::{
     EPOCH_RANDOMNESS_V3_ACTIVATION_EPOCH, EPOCH_RANDOMNESS_V3_ACTIVATION_HEIGHT,
 };
 use crate::consensus::consensus_fork;
+use crate::consensus::coordinated_finality_store::{
+    configured_coordinated_finality_path, CoordinatedFinalityRecord, CoordinatedFinalityStore,
+};
+use crate::consensus::coordinated_round_robin::CoordinatedConsensusVerifier;
 use crate::consensus::dual_quorum::{required_validator_quorum, DualQuorumConsensus};
 use crate::consensus::legacy_canonical_lock::{
     legacy_canonical_commit_record, write_legacy_canonical_lock,
 };
 use crate::consensus::synergy_score::SynergyScoreCalculator;
+use crate::consensus::testnet_v3_bootstrap::load_testnet_v3_genesis_bootstrap;
 use crate::consensus::typed_finality_store::{
     configured_typed_finality_path, TypedFinalityRecord, TypedFinalityStore,
 };
@@ -1279,13 +1285,13 @@ fn network_validator_snapshot(
         });
     }
 
-    // Testnet-v3 finality lives in the typed PoSy store. The inherited
+    // Testnet-v3 finality lives in one durable finality store. The inherited
     // `BlockChain` remains at Genesis on read-only roles, so deriving activity
     // from it made every live validator appear to have produced zero blocks.
-    // Once the typed store exists it is the sole finalized authority, matching
-    // the block/explorer RPC paths below.
-    let typed_finality = typed_finality_records_for_rpc().ok().flatten();
-    let total_observed_blocks = typed_finality
+    // Once a supported finality store exists it is the sole finalized
+    // authority, matching the block/explorer RPC paths below.
+    let finality_records = finality_records_for_rpc().ok().flatten();
+    let total_observed_blocks = finality_records
         .as_ref()
         .map(|records| records.len() as u64)
         .unwrap_or_else(|| {
@@ -1296,15 +1302,17 @@ fn network_validator_snapshot(
                 .count() as u64
         });
     let activity_window = validators.len().max(10).saturating_mul(12);
-    let recent_active = typed_finality
+    let recent_active = finality_records
         .as_ref()
         .map(|records| {
             records
                 .iter()
+                .collect::<Vec<_>>()
+                .into_iter()
                 .rev()
                 .take(activity_window)
                 .map(|record| {
-                    let validator_id = record.block.header.proposer_validator_id.0.as_str();
+                    let validator_id = record.proposer_validator_id();
                     validator_id_to_address
                         .get(validator_id)
                         .cloned()
@@ -1316,9 +1324,9 @@ fn network_validator_snapshot(
             recent_active_validator_addresses(chain, validators.len(), &validator_id_to_address)
         });
 
-    if let Some(records) = typed_finality.as_ref() {
-        for record in records {
-            let validator_id = record.block.header.proposer_validator_id.0.as_str();
+    if let Some(records) = finality_records.as_ref() {
+        for record in records.iter() {
+            let validator_id = record.proposer_validator_id();
             let address = validator_id_to_address
                 .get(validator_id)
                 .cloned()
@@ -1335,8 +1343,8 @@ fn network_validator_snapshot(
             validator.total_blocks_produced = validator.total_blocks_produced.saturating_add(1);
             validator.total_transactions_validated = validator
                 .total_transactions_validated
-                .saturating_add(record.block.transactions.len() as u64);
-            let timestamp = record.block.header.timestamp_ms_consensus_bounded / 1_000;
+                .saturating_add(record.transaction_count() as u64);
+            let timestamp = record.timestamp_ms() / 1_000;
             validator.last_active = validator.last_active.max(timestamp);
             validator.last_vote_timestamp = validator.last_vote_timestamp.max(timestamp);
         }
@@ -6563,11 +6571,10 @@ fn chain_identity_json() -> Value {
     })
 }
 
-/// Loads the sole finalized Testnet-v3 authority used by the typed PoSy
-/// coordinator. `None` means that no typed store exists yet and legacy reads
-/// retain their existing behavior. Once the file exists, even an empty store
-/// is authoritative and legacy post-Genesis blocks must not leak through
-/// explorer RPC.
+/// Loads the finalized Testnet-v3 authority used by the typed PoSy coordinator.
+/// `None` means that no typed store exists yet and legacy reads retain their
+/// existing behavior. Once the file exists, even an empty store is authoritative
+/// and legacy post-Genesis blocks must not leak through explorer RPC.
 fn typed_finality_records_for_rpc() -> Result<Option<Vec<TypedFinalityRecord>>, String> {
     let path = configured_typed_finality_path();
     if !path.is_file() {
@@ -6587,12 +6594,190 @@ fn typed_finality_records_for_rpc() -> Result<Option<Vec<TypedFinalityRecord>>, 
         .map_err(|error| format!("typed finality RPC store validation failed: {error}"))
 }
 
-fn typed_finality_rpc_error(error: impl Into<String>) -> Value {
+/// Loads and independently re-verifies every finalized coordinated package
+/// before exposing it to public reads. The store's append boundary already
+/// checks continuity, but RPC repeats signature verification so an operator
+/// cannot turn a copied or tampered journal into a public finality claim.
+fn coordinated_finality_records_for_rpc() -> Result<Option<Vec<CoordinatedFinalityRecord>>, String>
+{
+    let path = configured_coordinated_finality_path();
+    if !path.is_file() {
+        return Ok(None);
+    }
+
+    let node_config = crate::config::load_node_config(None).map_err(|error| {
+        format!("coordinated finality RPC cannot load the selected node configuration: {error}")
+    })?;
+    let coordinated_config = match node_config.consensus.resolve_mode(
+        node_config.blockchain.chain_id,
+        &node_config.network.network_id,
+    ) {
+        Ok(ResolvedConsensusMode::CoordinatedRoundRobinV1(config)) => config,
+        Ok(ResolvedConsensusMode::PosyV2_2) => {
+            return Err(
+                "coordinated finality journal exists while the selected consensus mode is not coordinated_round_robin_v1"
+                    .to_string(),
+            )
+        }
+        Err(error) => {
+            return Err(format!(
+                "coordinated finality RPC cannot resolve the selected consensus mode: {error}"
+            ))
+        }
+    };
+
+    let genesis = canonical_genesis().map_err(|error| {
+        format!("coordinated finality RPC cannot load canonical Genesis: {error}")
+    })?;
+    let genesis_anchor = Hash::from_hex(genesis.hash()).map_err(|error| {
+        format!("coordinated finality RPC cannot parse the canonical Genesis anchor: {error}")
+    })?;
+    let genesis_state_root = genesis
+        .value()
+        .get("execution")
+        .and_then(|execution| execution.get("genesis_execution_state_root"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            "coordinated finality RPC canonical Genesis omits execution.genesis_execution_state_root"
+                .to_string()
+        })
+        .and_then(|root| {
+            Hash::from_hex(root).map_err(|error| {
+                format!(
+                    "coordinated finality RPC cannot parse the canonical Genesis state root: {error}"
+                )
+            })
+        })?;
+    let store = CoordinatedFinalityStore::for_migration_anchor(
+        genesis_anchor,
+        genesis_state_root,
+        crate::synergy_types::Height(1),
+    )
+    .map_err(|error| format!("coordinated finality RPC store initialization failed: {error}"))?;
+    let records = store
+        .recover(&coordinated_config)
+        .map_err(|error| format!("coordinated finality RPC store validation failed: {error}"))?;
+
+    let bootstrap = load_testnet_v3_genesis_bootstrap(&genesis).map_err(|error| {
+        format!("coordinated finality RPC cannot load canonical validator keys: {error}")
+    })?;
+    let verifier = CoordinatedConsensusVerifier::new(
+        coordinated_config,
+        &bootstrap.validator_set,
+        bootstrap.verifier,
+    )
+    .map_err(|error| format!("coordinated finality RPC verifier initialization failed: {error}"))?;
+    for record in &records {
+        verifier
+            .verify_committed_block_package(&record.package)
+            .map_err(|error| {
+                format!(
+                    "coordinated finality RPC rejects persisted package at height {}: {error}",
+                    record.height.0
+                )
+            })?;
+    }
+    Ok(Some(records))
+}
+
+/// Public finality has exactly one durable source. A typed PoSy journal and a
+/// coordinated journal can never coexist in a single chain incarnation: that
+/// would make the explorer select consensus evidence rather than verify it.
+enum RpcFinalityRecords {
+    Typed(Vec<TypedFinalityRecord>),
+    Coordinated(Vec<CoordinatedFinalityRecord>),
+}
+
+#[derive(Clone, Copy)]
+enum RpcFinalityRecordRef<'a> {
+    Typed(&'a TypedFinalityRecord),
+    Coordinated(&'a CoordinatedFinalityRecord),
+}
+
+impl RpcFinalityRecords {
+    fn iter(&self) -> Box<dyn Iterator<Item = RpcFinalityRecordRef<'_>> + '_> {
+        match self {
+            Self::Typed(records) => Box::new(records.iter().map(RpcFinalityRecordRef::Typed)),
+            Self::Coordinated(records) => {
+                Box::new(records.iter().map(RpcFinalityRecordRef::Coordinated))
+            }
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Typed(records) => records.len(),
+            Self::Coordinated(records) => records.len(),
+        }
+    }
+}
+
+impl<'a> RpcFinalityRecordRef<'a> {
+    fn height(self) -> u64 {
+        match self {
+            Self::Typed(record) => record.height.0,
+            Self::Coordinated(record) => record.height.0,
+        }
+    }
+
+    fn block_id(self) -> &'a str {
+        match self {
+            Self::Typed(record) => record.block_id.0.as_str(),
+            Self::Coordinated(record) => record.block_id.0.as_str(),
+        }
+    }
+
+    fn proposer_validator_id(self) -> &'a str {
+        match self {
+            Self::Typed(record) => record.block.header.proposer_validator_id.0.as_str(),
+            Self::Coordinated(record) => {
+                record.package.block.header.proposer_validator_id.0.as_str()
+            }
+        }
+    }
+
+    fn transaction_count(self) -> usize {
+        match self {
+            Self::Typed(record) => record.block.transactions.len(),
+            Self::Coordinated(record) => record.package.block.transactions.len(),
+        }
+    }
+
+    fn timestamp_ms(self) -> u64 {
+        match self {
+            Self::Typed(record) => record.block.header.timestamp_ms_consensus_bounded,
+            Self::Coordinated(record) => record.package.block.header.timestamp_ms_consensus_bounded,
+        }
+    }
+}
+
+fn finality_records_for_rpc() -> Result<Option<RpcFinalityRecords>, String> {
+    let typed_exists = configured_typed_finality_path().is_file();
+    let coordinated_exists = configured_coordinated_finality_path().is_file();
+    if typed_exists && coordinated_exists {
+        return Err(
+            "typed PoSy and coordinated finality journals both exist; refusing mixed consensus authority"
+                .to_string(),
+        );
+    }
+    if coordinated_exists {
+        return coordinated_finality_records_for_rpc()
+            .map(|records| records.map(RpcFinalityRecords::Coordinated));
+    }
+    if typed_exists {
+        return typed_finality_records_for_rpc()
+            .map(|records| records.map(RpcFinalityRecords::Typed));
+    }
+    Ok(None)
+}
+
+fn finality_rpc_error(error: impl Into<String>) -> Value {
     json!({
         "error": error.into(),
         "fail_closed": true,
-        "source": "typed_posy_finality_store",
-        "path": configured_typed_finality_path().to_string_lossy(),
+        "source": "finality_authority",
+        "typed_posy_path": configured_typed_finality_path().to_string_lossy(),
+        "coordinated_round_robin_path": configured_coordinated_finality_path().to_string_lossy(),
         "chain": chain_identity_json(),
     })
 }
@@ -6658,12 +6843,107 @@ fn typed_finality_record_to_finalized_head_json(record: &TypedFinalityRecord) ->
     })
 }
 
+fn coordinated_finality_record_to_explorer_json(
+    record: &CoordinatedFinalityRecord,
+) -> Result<Value, String> {
+    let package = &record.package;
+    let block = &package.block;
+    let header = &block.header;
+    let transactions = serde_json::to_value(&block.transactions)
+        .map_err(|error| format!("serialize coordinated finalized transactions: {error}"))?;
+    Ok(json!({
+        "block_index": record.height.0,
+        "height": record.height.0,
+        "timestamp": header.timestamp_ms_consensus_bounded / 1_000,
+        "timestamp_ms": header.timestamp_ms_consensus_bounded,
+        "hash": record.block_id.0.as_str(),
+        "block_id": record.block_id.0.as_str(),
+        "previous_hash": header.parent_block_hash.to_hex(),
+        "parent_hash": header.parent_block_hash.to_hex(),
+        "validator_id": header.proposer_validator_id.0.as_str(),
+        "validator": header.proposer_validator_id.0.as_str(),
+        "proposer_uma_id": header.proposer_uma_id.0.as_str(),
+        "proposer_key_id": header.proposer_key_id.0.as_str(),
+        "tx_count": block.transactions.len() as u64,
+        "transactions": transactions,
+        "transaction_format": "coordinated_round_robin_v1",
+        "state_root_before": header.state_root_before.to_hex(),
+        "state_root_after": header.state_root_after.to_hex(),
+        "receipt_root": header.receipt_root.to_hex(),
+        "height_context_root": header.height_context_root.to_hex(),
+        "active_validator_set_hash": header.active_validator_set_hash.to_hex(),
+        "cluster_map_hash": header.cluster_map_hash.to_hex(),
+        "round": header.round.0,
+        "epoch": header.epoch.0,
+        "cluster_id": header.cluster_id.0,
+        "protocol_version": header.protocol_version.as_str(),
+        "coordinator_id": package.coordinator_commit.coordinator_id,
+        "assigned_producer_id": package.assignment.assigned_producer_id,
+        "producer_turn": package.assignment.producer_round,
+        "producer_assignment_hash": package.assignment.signing_hash()?.to_hex(),
+        "coordinator_commit_hash": record.coordinator_commit_hash.to_hex(),
+        "coordinator_commit_signature_algorithm": package.coordinator_commit.coordinator_signature.algorithm,
+        "finality_proof_type": "coordinator_commit",
+        "finalized": true,
+        "source": "coordinated_round_robin_finality_store",
+    }))
+}
+
+fn coordinated_finality_record_to_finalized_head_json(record: &CoordinatedFinalityRecord) -> Value {
+    let package = &record.package;
+    let header = &package.block.header;
+    json!({
+        "found": true,
+        "height": record.height.0,
+        "block_hash": record.block_id.0.as_str(),
+        "block_id": record.block_id.0.as_str(),
+        "parent_hash": header.parent_block_hash.to_hex(),
+        "state_root": header.state_root_after.to_hex(),
+        "coordinator_id": package.coordinator_commit.coordinator_id,
+        "assigned_producer_id": package.assignment.assigned_producer_id,
+        "producer_turn": package.assignment.producer_round,
+        "producer_assignment_hash": package.proposal.assignment_hash.to_hex(),
+        "coordinator_commit_hash": record.coordinator_commit_hash.to_hex(),
+        "finality_proof_type": "coordinator_commit",
+        "timestamp": header.timestamp_ms_consensus_bounded / 1_000,
+        "timestamp_ms": header.timestamp_ms_consensus_bounded,
+        "round": header.round.0,
+        "epoch": header.epoch.0,
+        "source": "coordinated_round_robin_finality_store",
+        "chain": chain_identity_json(),
+    })
+}
+
+fn finality_record_to_explorer_json(record: RpcFinalityRecordRef<'_>) -> Result<Value, String> {
+    match record {
+        RpcFinalityRecordRef::Typed(record) => typed_finality_record_to_explorer_json(record),
+        RpcFinalityRecordRef::Coordinated(record) => {
+            coordinated_finality_record_to_explorer_json(record)
+        }
+    }
+}
+
+fn finality_record_to_finalized_head_json(record: RpcFinalityRecordRef<'_>) -> Value {
+    match record {
+        RpcFinalityRecordRef::Typed(record) => typed_finality_record_to_finalized_head_json(record),
+        RpcFinalityRecordRef::Coordinated(record) => {
+            coordinated_finality_record_to_finalized_head_json(record)
+        }
+    }
+}
+
 fn authoritative_block_height(
-    typed_records: Option<&[TypedFinalityRecord]>,
+    finality_records: Option<&RpcFinalityRecords>,
     legacy_height: Option<u64>,
 ) -> Option<u64> {
-    match typed_records {
-        Some(records) => Some(records.last().map(|record| record.height.0).unwrap_or(0)),
+    match finality_records {
+        Some(records) => Some(
+            records
+                .iter()
+                .last()
+                .map(|record| record.height())
+                .unwrap_or(0),
+        ),
         None => legacy_height,
     }
 }
@@ -6682,8 +6962,8 @@ fn legacy_block_by_number(
 }
 
 fn block_by_number_json(chain: &Arc<Mutex<BlockChain>>, block_number: u64) -> Value {
-    match typed_finality_records_for_rpc() {
-        Err(error) => typed_finality_rpc_error(error),
+    match finality_records_for_rpc() {
+        Err(error) => finality_rpc_error(error),
         Ok(Some(records)) => {
             if block_number == 0 {
                 return legacy_block_by_number(chain, 0)
@@ -6693,10 +6973,10 @@ fn block_by_number_json(chain: &Arc<Mutex<BlockChain>>, block_number: u64) -> Va
             }
             match records
                 .iter()
-                .find(|record| record.height.0 == block_number)
+                .find(|record| record.height() == block_number)
             {
-                Some(record) => typed_finality_record_to_explorer_json(record)
-                    .unwrap_or_else(|error| typed_finality_rpc_error(error)),
+                Some(record) => finality_record_to_explorer_json(record)
+                    .unwrap_or_else(|error| finality_rpc_error(error)),
                 None => Value::Null,
             }
         }
@@ -6709,15 +6989,15 @@ fn block_by_number_json(chain: &Arc<Mutex<BlockChain>>, block_number: u64) -> Va
 
 fn block_by_hash_json(chain: &Arc<Mutex<BlockChain>>, block_hash: &str) -> Value {
     let normalized = block_hash.trim().trim_start_matches("0x");
-    match typed_finality_records_for_rpc() {
-        Err(error) => typed_finality_rpc_error(error),
+    match finality_records_for_rpc() {
+        Err(error) => finality_rpc_error(error),
         Ok(Some(records)) => {
             if let Some(record) = records
                 .iter()
-                .find(|record| record.block_id.0.eq_ignore_ascii_case(normalized))
+                .find(|record| record.block_id().eq_ignore_ascii_case(normalized))
             {
-                return typed_finality_record_to_explorer_json(record)
-                    .unwrap_or_else(|error| typed_finality_rpc_error(error));
+                return finality_record_to_explorer_json(record)
+                    .unwrap_or_else(|error| finality_rpc_error(error));
             }
             legacy_block_by_number(chain, 0)
                 .filter(|block| block.hash.trim().eq_ignore_ascii_case(normalized))
@@ -6742,11 +7022,11 @@ fn block_by_hash_json(chain: &Arc<Mutex<BlockChain>>, block_hash: &str) -> Value
 }
 
 fn latest_block_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
-    match typed_finality_records_for_rpc() {
-        Err(error) => typed_finality_rpc_error(error),
-        Ok(Some(records)) => match records.last() {
-            Some(record) => typed_finality_record_to_explorer_json(record)
-                .unwrap_or_else(|error| typed_finality_rpc_error(error)),
+    match finality_records_for_rpc() {
+        Err(error) => finality_rpc_error(error),
+        Ok(Some(records)) => match records.iter().last() {
+            Some(record) => finality_record_to_explorer_json(record)
+                .unwrap_or_else(|error| finality_rpc_error(error)),
             None => legacy_block_by_number(chain, 0)
                 .as_ref()
                 .map(block_to_explorer_json)
@@ -6760,8 +7040,8 @@ fn latest_block_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
 }
 
 fn block_range_json(chain: &Arc<Mutex<BlockChain>>, start: u64, end: u64) -> Value {
-    match typed_finality_records_for_rpc() {
-        Err(error) => typed_finality_rpc_error(error),
+    match finality_records_for_rpc() {
+        Err(error) => finality_rpc_error(error),
         Ok(Some(records)) => {
             let mut blocks = Vec::new();
             if start == 0 && end >= start {
@@ -6771,11 +7051,11 @@ fn block_range_json(chain: &Arc<Mutex<BlockChain>>, start: u64, end: u64) -> Val
             }
             for record in records
                 .iter()
-                .filter(|record| record.height.0 >= start && record.height.0 <= end)
+                .filter(|record| record.height() >= start && record.height() <= end)
             {
-                match typed_finality_record_to_explorer_json(record) {
+                match finality_record_to_explorer_json(record) {
                     Ok(block) => blocks.push(block),
-                    Err(error) => return typed_finality_rpc_error(error),
+                    Err(error) => return finality_rpc_error(error),
                 }
             }
             json!(blocks)
@@ -6791,7 +7071,7 @@ fn block_range_json(chain: &Arc<Mutex<BlockChain>>, start: u64, end: u64) -> Val
                     .collect::<Vec<_>>())
             })
             .unwrap_or_else(|_| {
-                typed_finality_rpc_error("legacy block range unavailable: chain lock poisoned")
+                finality_rpc_error("legacy block range unavailable: chain lock poisoned")
             }),
     }
 }
@@ -7088,8 +7368,8 @@ fn chain_tip_snapshot_for_status(chain: &Arc<Mutex<BlockChain>>) -> ChainTipSnap
 }
 
 fn block_number_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
-    match typed_finality_records_for_rpc() {
-        Err(error) => return typed_finality_rpc_error(error),
+    match finality_records_for_rpc() {
+        Err(error) => return finality_rpc_error(error),
         Ok(Some(records)) => {
             return json!(authoritative_block_height(Some(&records), None).unwrap_or(0));
         }
@@ -7210,17 +7490,17 @@ fn latest_canonical_lock_json() -> Value {
 }
 
 fn latest_finalized_head_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
-    match typed_finality_records_for_rpc() {
-        Err(error) => return typed_finality_rpc_error(error),
+    match finality_records_for_rpc() {
+        Err(error) => return finality_rpc_error(error),
         Ok(Some(records)) => {
-            if let Some(record) = records.last() {
-                return typed_finality_record_to_finalized_head_json(record);
+            if let Some(record) = records.iter().last() {
+                return finality_record_to_finalized_head_json(record);
             }
             return json!({
                 "found": false,
                 "height": 0,
                 "block_hash": current_genesis_hash(),
-                "source": "typed_posy_genesis_boundary",
+                "source": "finality_store_genesis_boundary",
                 "chain": chain_identity_json(),
             });
         }
@@ -10273,6 +10553,10 @@ mod tests {
     use crate::aegis_tx_tool::{sign_with_new_aegis_transaction_key, AegisTxBuildOptions};
     use crate::block::{Block, BlockChain};
     use crate::consensus::consensus_algorithm::ProofOfSynergy;
+    use crate::consensus::coordinated_finality_store::CoordinatedFinalityRecord;
+    use crate::consensus::coordinated_round_robin::{
+        CoordinatedProposal, CoordinatorCommit, ProducerAssignment, COORDINATED_ROUND_ROBIN_V1,
+    };
     use crate::crypto::pqc::{PQCAlgorithm, PQCManager};
     use crate::sts::{
         encode_sts_payload, CreateFungibleParams, FungibleControlFlags, StsSignedPayload, StsTx,
@@ -10425,6 +10709,83 @@ mod tests {
         }
     }
 
+    fn coordinated_rpc_finality_record(height: u64) -> CoordinatedFinalityRecord {
+        let mut block = typed_rpc_finality_record(height).block;
+        block.header.protocol_version = COORDINATED_ROUND_ROBIN_V1.to_string();
+        block.header.last_finalized_qc_hash = Hash::zero();
+        block.header.proposer_validator_id = ValidatorId("validator-2".to_string());
+        block.header.proposer_uma_id = UmaId("uma-validator-2".to_string());
+        block.header.proposer_key_id = AegisPqKeyId("validator-key-2".to_string());
+
+        let assignment = ProducerAssignment {
+            chain_id: 1266,
+            network_id: "synergy-testnet-v3".to_string(),
+            consensus_version: COORDINATED_ROUND_ROBIN_V1.to_string(),
+            epoch: 0,
+            height,
+            producer_round: 0,
+            parent_block_hash: block.header.parent_block_hash,
+            prior_finality_reference: block.header.evidence_root,
+            assigned_producer_id: "validator-2".to_string(),
+            coordinator_id: "validator-1".to_string(),
+            assignment_sequence: 1,
+            intended_block_timestamp_ms: block.header.timestamp_ms_consensus_bounded,
+            coordinator_signature: AegisPqSignature {
+                algorithm: "mldsa65".to_string(),
+                signature_bytes: vec![2],
+            },
+        };
+        let assignment_hash = assignment.signing_hash().unwrap();
+        let block_hash = Hash::from_hex(&block.block_id().unwrap().0).unwrap();
+        let proposal = CoordinatedProposal {
+            epoch: 0,
+            height,
+            producer_round: 0,
+            parent_block_hash: block.header.parent_block_hash,
+            prior_finality_reference: block.header.evidence_root,
+            block_hash,
+            transaction_root: block.header.tx_order_root,
+            receipt_root: block.header.receipt_root,
+            state_root: block.header.state_root_after,
+            producer_id: "validator-2".to_string(),
+            assignment_hash,
+            producer_signature: block.proposer_signature.clone(),
+        };
+        let coordinator_commit = CoordinatorCommit {
+            chain_id: 1266,
+            network_id: "synergy-testnet-v3".to_string(),
+            consensus_version: COORDINATED_ROUND_ROBIN_V1.to_string(),
+            epoch: 0,
+            height,
+            producer_round: 0,
+            parent_block_hash: block.header.parent_block_hash,
+            prior_finality_reference: block.header.evidence_root,
+            block_hash,
+            transaction_root: block.header.tx_order_root,
+            receipt_root: block.header.receipt_root,
+            state_root: block.header.state_root_after,
+            producer_id: "validator-2".to_string(),
+            coordinator_id: "validator-1".to_string(),
+            assignment_hash,
+            coordinator_signature: AegisPqSignature {
+                algorithm: "mldsa65".to_string(),
+                signature_bytes: vec![1],
+            },
+        };
+        CoordinatedFinalityRecord {
+            record_version: 1,
+            height: Height(height),
+            block_id: block.block_id().unwrap(),
+            coordinator_commit_hash: coordinator_commit.signing_hash().unwrap(),
+            package: crate::p2p::messages::CoordinatedCommittedBlockPackage {
+                block,
+                assignment,
+                proposal,
+                coordinator_commit,
+            },
+        }
+    }
+
     #[test]
     fn typed_finality_explorer_block_preserves_real_identity_and_transactions() {
         let record = typed_rpc_finality_record(1);
@@ -10452,12 +10813,54 @@ mod tests {
     #[test]
     fn typed_finality_height_is_authoritative_only_after_store_presence() {
         let record = typed_rpc_finality_record(7);
+        let records = RpcFinalityRecords::Typed(vec![record]);
         assert_eq!(
-            authoritative_block_height(Some(std::slice::from_ref(&record)), Some(99)),
+            authoritative_block_height(Some(&records), Some(99)),
             Some(7)
         );
-        assert_eq!(authoritative_block_height(Some(&[]), Some(99)), Some(0));
+        assert_eq!(
+            authoritative_block_height(Some(&RpcFinalityRecords::Typed(Vec::new())), Some(99)),
+            Some(0)
+        );
         assert_eq!(authoritative_block_height(None, Some(99)), Some(99));
+    }
+
+    #[test]
+    fn coordinated_finality_explorer_block_preserves_commit_proof_without_qc_fields() {
+        let record = coordinated_rpc_finality_record(4);
+        let response = coordinated_finality_record_to_explorer_json(&record).unwrap();
+
+        assert_eq!(response["height"], json!(4));
+        assert_eq!(response["validator_id"], json!("validator-2"));
+        assert_eq!(response["coordinator_id"], json!("validator-1"));
+        assert_eq!(response["assigned_producer_id"], json!("validator-2"));
+        assert_eq!(
+            response["coordinator_commit_hash"],
+            json!(record.coordinator_commit_hash.to_hex())
+        );
+        assert_eq!(response["finality_proof_type"], json!("coordinator_commit"));
+        assert_eq!(
+            response["source"],
+            json!("coordinated_round_robin_finality_store")
+        );
+        assert!(response.get("quorum_certificate_root").is_none());
+        assert!(response.get("qc_signed_weight").is_none());
+    }
+
+    #[test]
+    fn coordinated_finality_height_is_authoritative_only_after_store_presence() {
+        let records = RpcFinalityRecords::Coordinated(vec![coordinated_rpc_finality_record(4)]);
+        assert_eq!(
+            authoritative_block_height(Some(&records), Some(99)),
+            Some(4)
+        );
+        assert_eq!(
+            authoritative_block_height(
+                Some(&RpcFinalityRecords::Coordinated(Vec::new())),
+                Some(99)
+            ),
+            Some(0)
+        );
     }
 
     #[test]
