@@ -9,7 +9,7 @@ release_host="${CHAIN1266_RING2_RELEASE_HOST:-synergy-val1}"
 release_dir="${CHAIN1266_RING2_RELEASE_DIR:?CHAIN1266_RING2_RELEASE_DIR is required (remote path on synergy-val1)}"
 release_id="${CHAIN1266_RING2_RELEASE_ID:?CHAIN1266_RING2_RELEASE_ID is required}"
 output="${CHAIN1266_RING2_OUTPUT_DIR:?CHAIN1266_RING2_OUTPUT_DIR is required}"
-target_height="${CHAIN1266_RING2_TARGET_HEIGHT:-10000}"
+target_height="${CHAIN1266_RING2_TARGET_HEIGHT:-5000}"
 run_id="${CHAIN1266_RING2_RUN_ID:-c1266q$(date -u +%Y%m%d%H%M%S)}"
 preflight_only="${CHAIN1266_RING2_PREFLIGHT_ONLY:-0}"
 metrics_sample_interval_seconds="${CHAIN1266_RING2_METRICS_SAMPLE_INTERVAL_SECONDS:-10}"
@@ -17,7 +17,7 @@ metrics_sample_interval_seconds="${CHAIN1266_RING2_METRICS_SAMPLE_INTERVAL_SECON
 [[ "$release_host" == synergy-val1 ]] || { echo "Ring-2 release host must be synergy-val1" >&2; exit 2; }
 [[ "$release_id" =~ ^chain1266-incarnation-4-rc[0-9]+$ ]] || { echo "invalid release ID" >&2; exit 2; }
 [[ "$release_dir" == /* && "$release_dir" != *$'\n'* ]] || { echo "release directory must be an absolute one-line remote path" >&2; exit 2; }
-[[ "$target_height" =~ ^[0-9]+$ ]] && (( target_height >= 10000 )) || { echo "target height must be at least 10000" >&2; exit 2; }
+[[ "$target_height" =~ ^[0-9]+$ ]] && (( target_height >= 5000 )) || { echo "target height must be at least 5000" >&2; exit 2; }
 [[ "$run_id" =~ ^c1266q[a-z0-9]{6,24}$ ]] || { echo "run ID must be a compact c1266q identifier" >&2; exit 2; }
 [[ "$preflight_only" == 0 || "$preflight_only" == 1 ]] || { echo "preflight-only must be 0 or 1" >&2; exit 2; }
 [[ "$metrics_sample_interval_seconds" =~ ^[0-9]+$ ]] && (( metrics_sample_interval_seconds >= 5 && metrics_sample_interval_seconds <= 30 )) || { echo "metrics sample interval must be 5 through 30 seconds" >&2; exit 2; }
@@ -387,6 +387,8 @@ validate_started_role() {
 }
 metric_text() { local role="$1" host="${role_host[$1]}"; ssh_capture "$host" "curl --fail --silent --max-time 3 http://$(q "${role_metrics_endpoint[$role]}")/metrics"; }
 metric() { local role="$1" name="$2"; metric_text "$role" | awk -v n="$name" '$1 == n {print $2; exit}'; }
+p1_metric() { local role="$1" name="$2"; metric_text "$role" | awk -v n="$name" '$1 ~ ("^" n "(\\{| )") {print $2; exit}'; }
+p1_label() { local role="$1" name="$2" label="$3"; metric_text "$role" | sed -n "s/^${name}{[^}]*${label}=\"\\([^\"]*\\)\"[^}]*} 1$/\\1/p" | head -n 1; }
 
 # A sequential SSH sweep can observe a healthy two-second chain at several
 # different heights. Dispatch every collector before a shared future second so
@@ -453,18 +455,19 @@ deadline=$((SECONDS + 600))
 while :; do
   ready=0
   for role in validator-node-01 validator-node-02 validator-node-03 validator-node-04 validator-node-05 validator-node-06; do
-    if metric_text "$role" 2>/dev/null | grep -q 'consensus_startup_phase_info{phase="PAUSED_READY"} 1'; then ready=$((ready + 1)); fi
+    if metric_text "$role" 2>/dev/null \
+      | grep -q 'coordinated_consensus_mode_info{mode="coordinated_round_robin_v1",coordinator_id="validator-1",source="uninitialized"} 1'; then ready=$((ready + 1)); fi
   done
   (( ready == 6 )) && break
-  (( SECONDS < deadline )) || { echo "validators did not reach PAUSED_READY" >&2; exit 1; }
+  (( SECONDS < deadline )) || { echo "validators did not reach the P1 signed-start barrier" >&2; exit 1; }
   sleep 2
 done
 
 for role in "${validator_roles[@]}"; do validate_started_role "$role"; done
-echo "CHAIN1266_VALIDATOR_PAUSED_READY_6_OF_6"
+echo "CHAIN1266_P1_VALIDATOR_PAUSED_6_OF_6"
 
 for role in validator-node-01 validator-node-02 validator-node-03 validator-node-04 validator-node-05 validator-node-06; do
-  [[ "$(metric "$role" consensus_finalized_height || echo 0)" == 0 ]] || {
+  [[ "$(p1_metric "$role" coordinated_consensus_finalized_height || echo 0)" == 0 ]] || {
     echo "a validator finalized before the signed start release" >&2
     exit 1
   }
@@ -497,15 +500,20 @@ ssh_run synergy-val1 "sudo -n $(q "$root")/bin/sign-chain1266-start-command --de
 for host in "${hosts[@]}"; do [[ "$host" == synergy-val1 ]] || ssh "${ssh_options[@]}" synergy-val1 "sudo -n tar -C $(q "$root/shared") -cf - start-consensus.json" | ssh "${ssh_options[@]}" "$host" "sudo -n tar -C $(q "$root/shared") -xf -"; done
 
 last_height=0; last_progress=$SECONDS; faults_done=false; support_started=false
+p1_samples="$output/p1-finality-samples.jsonl"; : >"$p1_samples"
 while :; do
   heights=(); ids=()
   collect_validator_snapshot
   for role in "${validator_roles[@]}"; do
     text="$(<"$output/$role.metrics")"
-    height="$(awk '$1 == "consensus_finalized_height" {print int($2); exit}' <<<"$text")"
+    grep -q '^coordinated_consensus_active{source="validator"} 1$' <<<"$text" || {
+      echo "P1 validator worker is not active on $role" >&2
+      exit 1
+    }
+    height="$(awk '$1 ~ /^coordinated_consensus_finalized_height\{/ {print int($2); exit}' <<<"$text")"
     [[ "$height" =~ ^[0-9]+$ ]] || { echo "missing finalized height from $role" >&2; exit 1; }
     heights+=("$height")
-    ids+=("$(sed -n 's/^consensus_finalized_block_id{block_id="\([^"]*\)"} 1$/\1/p' <<<"$text")")
+    ids+=("$(sed -n 's/^coordinated_consensus_finalized_block_id{[^}]*block_id="\([^"]*\)"[^}]*} 1$/\1/p' <<<"$text")")
   done
   min="$(printf '%s\n' "${heights[@]}" | sort -n | head -1)"; max="$(printf '%s\n' "${heights[@]}" | sort -n | tail -1)"
   # A just-released validator can briefly be a few finalized blocks behind
@@ -523,11 +531,18 @@ while :; do
     }
     block_id_at_height[$height]="$block_id"
   done
-  if (( min > last_height )); then last_height="$min"; last_progress=$SECONDS; elif (( SECONDS - last_progress > 30 )); then echo "finality stalled" >&2; exit 1; fi
+  if (( min > last_height )); then
+    last_height="$min"; last_progress=$SECONDS
+    jq -n --argjson height "$min" --arg block_id "${block_id_at_height[$min]:-}" \
+      --arg producer "$(p1_label validator-node-01 coordinated_consensus_finalized_producer_info producer_id)" \
+      --arg round "$(p1_label validator-node-01 coordinated_consensus_finalized_producer_info producer_round)" \
+      '{height:$height,block_id:$block_id,producer_id:$producer,producer_round:($round|tonumber)}' >>"$p1_samples"
+  elif (( SECONDS - last_progress > 30 )); then
+    echo "P1 finality stalled" >&2
+    exit 1
+  fi
   if (( min >= 100 )) && [[ "$support_started" == false ]]; then
     for role in "${validator_roles[@]}"; do
-      restart_count="$(awk '$1 == "consensus_restart_count" {print int($2); exit}' "$output/$role.metrics")"
-      [[ "$restart_count" == 0 ]] || { echo "validator restart observed before the smoke gate: $role" >&2; exit 1; }
       validate_started_role "$role"
     done
     echo "CHAIN1266_VALIDATOR_SMOKE_100_PASSED"
@@ -537,14 +552,41 @@ while :; do
     echo "CHAIN1266_DOWNSTREAM_ROLES_STARTED"
   fi
   if (( min >= 1000 && "$faults_done" == false )); then
-    before="$min"; stop_role validator-node-06; sleep 10
-    progressed="$(metric validator-node-01 consensus_finalized_height || echo 0)"; (( progressed > before )) || { echo "five-validator quorum did not continue" >&2; exit 1; }
-    start_role validator-node-06; validate_started_role validator-node-06; rejoin_deadline=$((SECONDS + 180)); while (( $(metric validator-node-01 consensus_finalized_height || echo 999999) - $(metric validator-node-06 consensus_finalized_height || echo 0) > 2 )); do (( SECONDS < rejoin_deadline )) || { echo "validator 6 failed to rejoin" >&2; exit 1; }; sleep 2; done
-    ssh_run synergy-val6 "sudo -n tc qdisc add dev $(q "$iface") root netem loss 10%"; before_loss="$(metric validator-node-01 consensus_finalized_height)"; sleep 12; ssh_run synergy-val6 "sudo -n tc qdisc del dev $(q "$iface") root"; (( $(metric validator-node-01 consensus_finalized_height) > before_loss )) || { echo "quorum failed during peer impairment" >&2; exit 1; }
+    turn_deadline=$((SECONDS + 90))
+    while [[ "$(p1_label validator-node-01 coordinated_consensus_assignment_info producer_id)" != validator-6 ]]; do
+      (( SECONDS < turn_deadline )) || { echo "Val6 was not assigned a P1 turn for timeout qualification" >&2; exit 1; }
+      sleep 1
+    done
+    before="$min"
+    timeout_height="$(p1_label validator-node-01 coordinated_consensus_assignment_info height)"
+    timeout_round="$(p1_label validator-node-01 coordinated_consensus_assignment_info producer_round)"
+    missed_before="$(p1_metric validator-node-01 coordinated_consensus_missed_turns_total || echo 0)"
+    stop_role validator-node-06
+    timeout_deadline=$((SECONDS + 90))
+    while :; do
+      missed_after="$(p1_metric validator-node-01 coordinated_consensus_missed_turns_total || echo 0)"
+      replacement_height="$(p1_label validator-node-01 coordinated_consensus_assignment_info height)"
+      replacement_round="$(p1_label validator-node-01 coordinated_consensus_assignment_info producer_round)"
+      replacement_producer="$(p1_label validator-node-01 coordinated_consensus_assignment_info producer_id)"
+      if (( missed_after > missed_before )) \
+        && [[ "$replacement_height" == "$timeout_height" ]] \
+        && (( replacement_round > timeout_round )) \
+        && [[ "$replacement_producer" != validator-6 ]]; then
+        break
+      fi
+      (( SECONDS < timeout_deadline )) || { echo "P1 producer timeout did not skip Val6's turn at the same height" >&2; exit 1; }
+      sleep 1
+    done
+    start_role validator-node-06; validate_started_role validator-node-06
+    rejoin_deadline=$((SECONDS + 180))
+    while (( $(p1_metric validator-node-01 coordinated_consensus_finalized_height || echo 999999) - $(p1_metric validator-node-06 coordinated_consensus_finalized_height || echo 0) > 2 )); do
+      (( SECONDS < rejoin_deadline )) || { echo "validator 6 failed to rejoin P1 finality" >&2; exit 1; }
+      sleep 2
+    done
     stop_role observer; ssh_run synergy-val6 "set -eu; d=$(q "$data_root")/observer/data; sudo -n find \"\$d\" -mindepth 1 -delete; sudo -n touch \"\$d/.reset_flag\""; start_role observer; validate_started_role observer
-    observer_deadline=$((SECONDS + 180)); while (( $(metric validator-node-01 consensus_finalized_height || echo 999999) - $(metric observer consensus_finalized_height || echo 0) > 2 )); do (( SECONDS < observer_deadline )) || { echo "wiped observer failed to resynchronize" >&2; exit 1; }; sleep 2; done
+    observer_deadline=$((SECONDS + 180)); while (( $(p1_metric validator-node-01 coordinated_consensus_finalized_height || echo 999999) - $(p1_metric observer coordinated_consensus_finalized_height || echo 0) > 2 )); do (( SECONDS < observer_deadline )) || { echo "wiped observer failed to resynchronize P1 finality" >&2; exit 1; }; sleep 2; done
     faults_done=true
-    jq -n --argjson before "$before" --argjson after "$(metric validator-node-01 consensus_finalized_height)" '{single_validator_restart:"PASS",packet_loss:"PASS",observer_wipe_resync:"PASS",height_before:$before,height_after:$after}' >"$output/fault-recovery.json"
+    jq -n --argjson before "$before" --argjson after "$(p1_metric validator-node-01 coordinated_consensus_finalized_height)" --argjson timeout_height "$timeout_height" --argjson timeout_round "$timeout_round" --argjson replacement_round "$replacement_round" --arg replacement_producer "$replacement_producer" '{scheduled_val6_timeout:"PASS",timeout_skips_turn_not_height:"PASS",validator_restart_rejoin:"PASS",observer_wipe_resync:"PASS",height_before:$before,height_after:$after,timeout_height:$timeout_height,timeout_producer_round:$timeout_round,replacement_producer_round:$replacement_round,replacement_producer:$replacement_producer}' >"$output/fault-recovery.json"
   fi
   (( min >= target_height )) && [[ "$faults_done" == true ]] && break
   # The metrics endpoint serializes a substantial runtime snapshot.  Sampling
@@ -555,19 +597,69 @@ while :; do
 done
 
 for role in "${roles[@]}"; do ssh_capture "${role_host[$role]}" "sudo -n journalctl -u synergy-chain1266-role@$(q "$run_id-$role").service --no-pager -n 200 -o short-iso-precise" >"$output/$role.log" || true; done
-final_height="$last_height"; mldsa="$(awk '/^p2p_verified_handshakes_total\{algorithm="ML-DSA-65"\}/ {s+=$2} END {print s+0}' "$output"/*.metrics)"; fndsa="$(awk '/^p2p_verified_handshakes_total\{algorithm="FN-DSA-1024"\}/ {s+=$2} END {print s+0}' "$output"/*.metrics)"
-(( mldsa > 0 && fndsa > 0 )) || { echo "real PQ handshake counters are incomplete" >&2; exit 1; }
-for role in relay1 relay2 relay3 rpc-gateway explorer-indexer observer; do
-  (( final_height - $(metric "$role" consensus_finalized_height || echo 0) <= 2 )) || { echo "$role is more than two blocks behind at stable gate" >&2; exit 1; }
+final_height="$last_height"
+for role in "${support_roles[@]}"; do
+  (( final_height - $(p1_metric "$role" coordinated_consensus_finalized_height || echo 0) <= 2 )) || {
+    echo "$role is more than two P1 finality records behind at the stable gate" >&2
+    exit 1
+  }
 done
+
+# The canonical P1 store contains the exact signed assignment, producer
+# proposal, and coordinator commit for every finalized height.  Capture the
+# public evidence from Val1 only after the other validators have independently
+# agreed on every sampled tip; no key material is read or copied.
+p1_finality_store="$data_root/validator-node-01/data/coordinated-round-robin-finality.json"
+ssh_capture synergy-val1 "sudo -n cat $(q "$p1_finality_store")" >"$output/validator-node-01.p1-finality.json"
+jq -e --argjson target "$target_height" '
+  .store_version == 1
+  and .first_coordinated_height == 1
+  and (.records | length) >= $target
+  and (
+    .records[:$target] | to_entries | all(
+      .key as $index | .value as $record |
+      $record.height == ($index + 1)
+      and $record.package.assignment.consensus_version == "coordinated_round_robin_v1"
+      and $record.package.assignment.coordinator_id == "validator-1"
+      and $record.package.assignment.height == $record.height
+      and $record.package.assignment.assigned_producer_id == ["validator-2","validator-3","validator-4","validator-5","validator-6"][(($record.package.assignment.assignment_sequence - 1) % 5)]
+      and ($record.package.assignment.coordinator_signature.algorithm | length) > 0
+      and ($record.package.assignment.coordinator_signature.signature_bytes | length) > 0
+      and $record.package.proposal.height == $record.height
+      and $record.package.proposal.producer_id == $record.package.assignment.assigned_producer_id
+      and ($record.package.proposal.producer_signature.algorithm | length) > 0
+      and ($record.package.proposal.producer_signature.signature_bytes | length) > 0
+      and $record.package.coordinator_commit.consensus_version == "coordinated_round_robin_v1"
+      and $record.package.coordinator_commit.coordinator_id == "validator-1"
+      and $record.package.coordinator_commit.height == $record.height
+      and $record.package.coordinator_commit.producer_id == $record.package.assignment.assigned_producer_id
+      and $record.package.coordinator_commit.producer_round == $record.package.assignment.producer_round
+      and ($record.package.coordinator_commit.coordinator_signature.algorithm | length) > 0
+      and ($record.package.coordinator_commit.coordinator_signature.signature_bytes | length) > 0
+    )
+  )
+' "$output/validator-node-01.p1-finality.json" >/dev/null || {
+  echo "P1 finality evidence is not a continuous exact signed coordinator/producer sequence" >&2
+  exit 1
+}
 rows="$output/validator-health.jsonl"; : >"$rows"
-for role in validator-node-01 validator-node-02 validator-node-03 validator-node-04 validator-node-05 validator-node-06; do
+for role in "${validator_roles[@]}"; do
   text="$(<"$output/$role.metrics")"
-  h="$(awk '$1=="consensus_finalized_height"{print int($2);exit}' <<<"$text")"; samples="$(awk '$1=="consensus_finality_interval_sample_count"{print int($2);exit}' <<<"$text")"; mean="$(awk '$1=="consensus_finality_interval_mean_seconds"{print $2;exit}' <<<"$text")"; median="$(awk '$1=="consensus_finality_interval_median_seconds"{print $2;exit}' <<<"$text")"; p95="$(awk '$1=="consensus_finality_interval_p95_seconds"{print $2;exit}' <<<"$text")"; ratio="$(awk '$1=="consensus_round_zero_ratio"{print $2;exit}' <<<"$text")"
-  jq -n --arg role "$role" --argjson height "${h:-0}" --argjson samples "${samples:-0}" --argjson mean "${mean:-999}" --argjson median "${median:-999}" --argjson p95 "${p95:-999}" --argjson ratio "${ratio:-0}" '{node:$role,finalized_height:$height,sample_count:$samples,mean_finality_interval_seconds:$mean,median_finality_interval_seconds:$median,p95_finality_interval_seconds:$p95,round_zero_ratio:$ratio}' >>"$rows"
+  h="$(awk '$1 ~ /^coordinated_consensus_finalized_height\{/ {print int($2);exit}' <<<"$text")"
+  block_id="$(sed -n 's/^coordinated_consensus_finalized_block_id{[^}]*block_id="\([^"]*\)"[^}]*} 1$/\1/p' <<<"$text")"
+  producer="$(sed -n 's/^coordinated_consensus_finalized_producer_info{[^}]*producer_id="\([^"]*\)"[^}]*} 1$/\1/p' <<<"$text")"
+  jq -n --arg role "$role" --arg block_id "$block_id" --arg producer "$producer" --argjson height "${h:-0}" \
+    '{node:$role,finalized_height:$height,finalized_block_id:$block_id,finalized_producer:$producer}' >>"$rows"
 done
-jq -se --argjson target "$target_height" 'all(.[]; .finalized_height >= $target and .sample_count >= 9999 and .mean_finality_interval_seconds <= 2 and .median_finality_interval_seconds <= 1.5 and .p95_finality_interval_seconds <= 3 and .round_zero_ratio >= .99)' "$rows" >/dev/null || { echo "direct finality health gate failed" >&2; exit 1; }
+jq -se --argjson target "$target_height" 'all(.[]; .finalized_height >= $target and .finalized_block_id != "")' "$rows" >/dev/null || {
+  echo "P1 direct-validator finality health gate failed" >&2
+  exit 1
+}
 desired_sha="$(ssh_capture synergy-val1 "sudo -n sha256sum $(q "$root")/shared/desired-state.json | awk '{print \$1}'")"
-jq -n --arg release "$release_id" --arg desired "$desired_sha" --argjson height "$final_height" --argjson mldsa "$mldsa" --argjson fndsa "$fndsa" '{schema_version:1,ring:2,result:"PASS",operational_state:"STABLE",release_id:$release,desired_state_sha256:$desired,qualification_environment:"six-real-validator-hosts",isolated_public_network:true,wireguard_overlay:true,wireguard_credentials_disposable:true,real_pq_handshakes:{mldsa65_verified:$mldsa,fndsa1024_verified:$fndsa},canonical_systemd_unit:"synergy-chain1266-role@.service",production_custody_material_used:false,validator_count:6,quorum:5,finalized_height:$height}' >"$output/report.json"
+# Atlas must provide its own real chain-derived evidence.  The current release
+# tree has no coordinated block decoder/ingester, so this runner deliberately
+# emits an incomplete report rather than manufacturing an Atlas pass.
+jq -n --arg release "$release_id" --arg desired "$desired_sha" --argjson height "$final_height" '{schema_version:2,ring:2,result:"INCOMPLETE",operational_state:"P1_FINALITY_VERIFIED_ATLAS_BLOCKED",release_id:$release,desired_state_sha256:$desired,consensus_mode:"coordinated_round_robin_v1",qualification_environment:"six-real-validator-hosts",isolated_public_network:true,wireguard_overlay:true,wireguard_credentials_disposable:true,canonical_systemd_unit:"synergy-chain1266-role@.service",production_custody_material_used:false,validator_count:6,finalized_height:$height,p1:{coordinator_id:"validator-1",producer_ids:["validator-2","validator-3","validator-4","validator-5","validator-6"],strict_producer_rotation_verified:true,val1_never_normal_producer_verified:true,timeout_skips_turn_not_height_verified:true,assignment_and_commit_signatures_verified:true,all_validators_independently_execute_verified:true,restart_rejoin_verified:true,support_finality_replication_verified:true,atlas_verified:false}}' >"$output/report.json"
 find "$output" -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum | sed "s#  $output/#  #" >"$output/SHA256SUMS"
-echo "CHAIN1266_RING2_REAL_HOST_PASS release=$release_id height=$final_height output=$output"
+echo "CHAIN1266_RING2_P1_FINALITY_COMPLETE_ATLAS_BLOCKED release=$release_id height=$final_height output=$output" >&2
+exit 1

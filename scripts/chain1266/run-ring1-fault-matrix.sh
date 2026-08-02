@@ -19,29 +19,26 @@ log="$report_dir/fault-matrix.log"
 : >"$log"
 
 cases=(
-  "five_of_six_signer_subsets|consensus::typed_coordinator::tests::equivalent_timeout_certificates_with_different_strict_quorum_subsets_are_not_conflicts"
-  "carry_and_no_carry_timeout|consensus::typed_coordinator::tests::mixed_prepared_and_plain_timeout_votes_advance_one_round"
-  "different_proof_roots_same_candidate|consensus::typed_coordinator::tests::timeout_certificate_canonicalizes_vc_roots_for_one_prepared_candidate"
-  "randomized_vote_signatures|consensus::typed_coordinator::tests::randomized_signature_replay_keeps_one_vote_subject"
-  "certificate_before_proposal|consensus::typed_coordinator::tests::future_round_validation_certificate_waits_for_its_proposal_envelope"
-  "proposal_before_supporting_certificate|consensus::typed_coordinator::tests::six_validator_driver_finalizes_healthy_round_without_waiting_for_deadlines"
-  "missed_proposal|consensus::typed_coordinator::tests::six_validator_driver_recovers_carried_candidate_for_missing_next_proposer"
-  "missed_validation_certificate|consensus::typed_coordinator::tests::six_validator_driver_survives_startup_loss_two_timeout_rounds_and_first_finality"
-  "missed_finality_certificate|consensus::typed_coordinator::tests::six_validator_driver_recovers_a_missed_finality_qc_then_continues_together"
-  "crash_after_sign_before_send|crypto::aegis_pqvm::tests::consensus_vote_restart_replays_the_exact_durable_randomized_signature"
-  "crash_after_send_before_persistence|consensus::typed_coordinator::tests::driver_deduplicates_only_exact_authenticated_vote_replays"
-  "crash_during_atomic_persistence|consensus::signing_authority::tests::atomic_recovery_checkpoint_survives_interrupted_temp_write_and_rejects_tampering"
-  "journal_compaction_retirement_watermark|consensus::signing_authority::tests::retirement_watermark_compacts_long_journals_and_rejects_inconsistent_history"
-  "delayed_validator_startup|consensus::typed_coordinator::tests::six_validator_driver_survives_startup_loss_two_timeout_rounds_and_first_finality"
-  "messages_before_coordinator_readiness|consensus::typed_coordinator::tests::authenticated_messages_buffer_before_mailbox_install_and_drain_in_order"
-  "duplicate_and_replay_floods|consensus::typed_coordinator::tests::driver_deduplicates_only_exact_authenticated_vote_replays"
-  "out_of_order_future_round_evidence|consensus::typed_coordinator::tests::future_round_validation_certificate_waits_for_its_proposal_envelope"
-  "multiple_consecutive_timeout_rounds|consensus::typed_coordinator::tests::six_validator_driver_survives_startup_loss_two_timeout_rounds_and_first_finality"
-  "later_round_checkpoint_recovery|consensus::typed_coordinator::tests::verified_round_one_hundred_timeout_recovers_and_persists_round_authority"
-  "observer_stale_finality_injection|consensus::typed_coordinator::tests::observer_identity_cannot_advertise_a_validator_recovery_checkpoint"
-  "old_incarnation_precrypto_rejection|p2p::networking::tests::old_chain_incarnation_handshake_is_rejected_before_pq_verification"
-  "stale_finalized_height_precrypto_rejection|consensus::typed_coordinator::tests::authenticated_finalized_height_retries_are_ignored_before_pq_verification"
-  "real_mldsa_six_validator_burn_in|consensus::typed_coordinator::tests::six_validator_actual_mldsa_multi_height_burn_in_preserves_round_zero_liveness"
+  "canonical_val1_assignment|consensus::coordinated_round_robin::tests::assignments_require_the_canonical_coordinator_key_and_epoch"
+  "p1_config_exactly_one_coordinator_five_producers|consensus::coordinated_round_robin::tests::configuration_requires_one_coordinator_and_five_distinct_producers"
+  "dedicated_authenticated_consensus_ingress|consensus::coordinated_round_robin::tests::coordinated_messages_require_an_authenticated_session_and_dedicated_mailbox"
+  "no_legacy_consensus_fallback|consensus::coordinated_round_robin::tests::coordinated_messages_fail_closed_without_a_running_worker"
+  "strict_val2_to_val6_rotation|consensus::coordinated_round_robin::tests::five_producers_rotate_strictly_after_successful_blocks"
+  "timeout_skips_turn_not_height|consensus::coordinated_round_robin::tests::missed_turn_advances_producer_not_block_height"
+  "replacement_assignment_recovers_lagging_validator|consensus::coordinated_round_robin::tests::lagging_validator_reconstructs_a_signed_replacement_assignment"
+  "stale_producer_round_rejected|consensus::coordinated_round_robin::tests::stale_producer_round_is_rejected_after_missed_turn"
+  "coordinator_cannot_equivocate_at_height|consensus::coordinated_round_robin::tests::coordinator_cannot_commit_two_hashes_at_one_height"
+  "coordinator_cursor_is_durable|consensus::coordinated_round_robin::tests::state_persists_and_recovers_pending_assignment_without_resetting_cursor"
+  "assignment_and_block_signatures_are_durable|consensus::coordinated_runtime::tests::assigned_producer_journals_and_replays_the_exact_signed_block"
+  "independent_execution_of_user_transaction|consensus::coordinated_runtime::tests::assigned_producer_builds_and_all_validators_verify_an_admitted_user_transaction"
+  "runtime_timeout_preserves_height|consensus::coordinated_runtime::tests::timeout_replacement_uses_the_same_height_and_next_scheduled_round"
+  "coordinator_persists_committed_finality|consensus::coordinated_runtime::tests::coordinator_finalizes_signed_block_and_repairs_a_persisted_finality_gap"
+  "exact_finality_packages_are_anchored|consensus::coordinated_finality_store::tests::persists_exact_packages_from_the_immutable_migration_anchor"
+  "support_observer_verifies_without_signing|consensus::coordinated_finality_observer::tests::imports_a_verified_finalized_package_without_signing_authority"
+  "user_admission_is_exact_and_deterministic|consensus::coordinated_admission::tests::coordinated_admission_binds_the_exact_user_transaction_and_witness"
+  "fresh_reset_requires_genesis_only|role_runtime::tests::fresh_reset_marker_requires_exactly_the_canonical_genesis_block"
+  "fresh_reset_rejects_stale_p1_finality|role_runtime::tests::fresh_reset_marker_rejects_stale_coordinated_finality_history"
+  "support_roles_are_non_signing_observers|role_runtime::tests::only_support_roles_start_non_signing_coordinated_finality_observer"
 )
 
 passed=0
@@ -102,9 +99,15 @@ import pathlib
 import sys
 
 path, started, finished, testnet, synq, aegis, passed, total, failed_case = sys.argv[1:]
+case_ids = [
+    entry.split("id=", 1)[1].split(" ", 1)[0]
+    for entry in pathlib.Path(path).with_name("fault-matrix.log").read_text().splitlines()
+    if entry.startswith("CASE_START id=")
+]
 report = {
-    "schema_version": 1,
+    "schema_version": 2,
     "ring": 1,
+    "consensus_mode": "coordinated_round_robin_v1",
     "result": "PASS" if passed == total else "FAIL",
     "started_utc": started,
     "finished_utc": finished,
@@ -116,14 +119,20 @@ report = {
     "cases_passed": int(passed),
     "cases_total": int(total),
     "failed_case": failed_case or None,
-    "real_mldsa": True,
-    "mldsa65_transport_authentication": {
-        "unit_guard": "validator_handshake_never_falls_back_to_the_fndsa_peer_identity",
-        "ring1_proof": "real_mldsa_six_validator_burn_in",
-        "ring2_proof": "p2p_verified_handshakes_total{algorithm=ML-DSA-65}",
+    "case_ids": case_ids,
+    "p1_invariants": {
+        "coordinator_id": "validator-1",
+        "producer_ids": ["validator-2", "validator-3", "validator-4", "validator-5", "validator-6"],
+        "val1_is_not_a_normal_producer": True,
+        "timeout_skips_producer_turn_not_height": True,
+        "assignment_and_commit_signatures_required": True,
+        "all_validators_execute_identically": True,
+        "legacy_posy_qc_vc_tc_vote_aggregation_disabled": True,
+        "durable_signing_and_restart_replay": True,
+        "fresh_reset_requires_block_zero_genesis": True,
+        "support_roles_verify_without_signing": True,
     },
     "validator_count": 6,
-    "quorum": 5,
 }
 pathlib.Path(path).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
 PY

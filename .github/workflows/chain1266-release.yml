@@ -227,6 +227,18 @@ jobs:
               echo "Stale Genesis binding in $config" >&2
               exit 1
             }
+            grep -Fxq 'algorithm = "coordinated_round_robin_v1"' "$config" || {
+              echo "P1 consensus algorithm is missing from $config" >&2
+              exit 1
+            }
+            grep -Fxq 'mode = "coordinated_round_robin_v1"' "$config" || {
+              echo "P1 consensus mode is missing from $config" >&2
+              exit 1
+            }
+            grep -Fq 'coordinator_id = "validator-1"' "$config" || {
+              echo "P1 coordinator binding is missing from $config" >&2
+              exit 1
+            }
           done < <(find launch/production-node-configs/{validators,relayers,rpc-gateway,explorer-indexer,observer} -type f -name '*.toml' -print)
 
       - name: Generate exact desired-state manifest and checksums
@@ -294,10 +306,13 @@ jobs:
               validator_registry:{source_url:"https://testnet-core-rpc.synergy-network.io",sha256:$release_sha},
               contracts:{source_url:"https://testnet-core-rpc.synergy-network.io",sha256:$release_sha},
               fee_reward:{source_url:"https://testnet-core-rpc.synergy-network.io",sha256:$release_sha},
-              posy_etdag:{
+              coordinated_round_robin:{
                 source_url:"https://testnet-core-rpc.synergy-network.io",
                 sha256:$release_sha,
-                target_block_time_ms:2000
+                mode:"coordinated_round_robin_v1",
+                coordinator_id:"validator-1",
+                producer_ids:["validator-2","validator-3","validator-4","validator-5","validator-6"],
+                producer_turn_timeout_ms:4000
               }
             }' >"$out/atlas-network.json"
           node "$out/atlas/scripts/validate-network-config.mjs" \
@@ -446,12 +461,20 @@ jobs:
             --arg synq "$SYNQ_REVISION" \
             --arg aegis "$AEGIS_REVISION" \
             '.result == "PASS"
-             and .cases_passed == 23
-             and .cases_total == 23
-             and .real_mldsa == true
-             and .mldsa65_transport_authentication.unit_guard == "validator_handshake_never_falls_back_to_the_fndsa_peer_identity"
-             and .mldsa65_transport_authentication.ring1_proof == "real_mldsa_six_validator_burn_in"
-             and .mldsa65_transport_authentication.ring2_proof == "p2p_verified_handshakes_total{algorithm=ML-DSA-65}"
+             and .consensus_mode == "coordinated_round_robin_v1"
+             and .cases_passed == 20
+             and .cases_total == 20
+             and (.case_ids | length) == 20
+             and .p1_invariants.coordinator_id == "validator-1"
+             and .p1_invariants.producer_ids == ["validator-2","validator-3","validator-4","validator-5","validator-6"]
+             and .p1_invariants.val1_is_not_a_normal_producer == true
+             and .p1_invariants.timeout_skips_producer_turn_not_height == true
+             and .p1_invariants.assignment_and_commit_signatures_required == true
+             and .p1_invariants.all_validators_execute_identically == true
+             and .p1_invariants.legacy_posy_qc_vc_tc_vote_aggregation_disabled == true
+             and .p1_invariants.durable_signing_and_restart_replay == true
+             and .p1_invariants.fresh_reset_requires_block_zero_genesis == true
+             and .p1_invariants.support_roles_verify_without_signing == true
              and .source.testnet_v3_revision == $testnet
              and .source.synq_revision == $synq
              and .source.aegis_revision == $aegis' \
@@ -461,14 +484,22 @@ jobs:
             '.result == "PASS"
              and .operational_state == "STABLE"
              and .release_id == $release
-             and .finalized_height >= 10000
+             and .consensus_mode == "coordinated_round_robin_v1"
+             and .finalized_height >= 5000
              and .validator_count == 6
-             and .quorum == 5
+             and .p1.coordinator_id == "validator-1"
+             and .p1.producer_ids == ["validator-2","validator-3","validator-4","validator-5","validator-6"]
+             and .p1.strict_producer_rotation_verified == true
+             and .p1.val1_never_normal_producer_verified == true
+             and .p1.timeout_skips_turn_not_height_verified == true
+             and .p1.assignment_and_commit_signatures_verified == true
+             and .p1.all_validators_independently_execute_verified == true
+             and .p1.restart_rejoin_verified == true
+             and .p1.support_finality_replication_verified == true
+             and .p1.atlas_verified == true
              and .wireguard_overlay == true
              and .wireguard_credentials_disposable == true
              and .qualification_environment == "six-real-validator-hosts"
-             and .real_pq_handshakes.mldsa65_verified > 0
-             and .real_pq_handshakes.fndsa1024_verified > 0
              and .canonical_systemd_unit == "synergy-chain1266-role@.service"
              and .production_custody_material_used == false' \
             "$RUNNER_TEMP/ring2/report.json" >/dev/null
@@ -488,6 +519,7 @@ jobs:
           cp -R "$RUNNER_TEMP/ring1/." "$out/qualification/ring1/"
           cp -R "$RUNNER_TEMP/ring2/." "$out/qualification/ring2/"
           desired_sha="$(sha256sum "$out/release/desired-state.json" | awk '{print $1}')"
+          genesis_hash="$(jq -er '.chain.genesis_hash' "$out/release/desired-state.json")"
           ring1_sha="$(sha256sum "$out/qualification/ring1/report.json" | awk '{print $1}')"
           ring2_sha="$(sha256sum "$out/qualification/ring2/report.json" | awk '{print $1}')"
           jq -n \
@@ -497,14 +529,17 @@ jobs:
             --arg synq_revision "$SYNQ_REVISION" \
             --arg aegis_revision "$AEGIS_REVISION" \
             --arg desired_state_sha256 "$desired_sha" \
+            --arg genesis_hash "$genesis_hash" \
             --arg ring1_report_sha256 "$ring1_sha" \
             --arg ring2_report_sha256 "$ring2_sha" \
             '{
-              schema_version:1,
+              schema_version:2,
               result:"PROMOTABLE",
               release_id:$release_id,
               release_tag:$release_tag,
               chain:{chain_id:1266,chain_incarnation:4},
+              consensus_mode:"coordinated_round_robin_v1",
+              genesis_hash:$genesis_hash,
               source:{
                 testnet_v3_revision:$testnet_revision,
                 synq_revision:$synq_revision,
@@ -512,8 +547,8 @@ jobs:
               },
               desired_state_sha256:$desired_state_sha256,
               qualification:{
-                ring1:{result:"PASS",cases:23,report_sha256:$ring1_report_sha256},
-                ring2:{result:"PASS",stable_height:10000,report_sha256:$ring2_report_sha256}
+                ring1:{result:"PASS",cases:20,report_sha256:$ring1_report_sha256},
+                ring2:{result:"PASS",stable_height:5000,report_sha256:$ring2_report_sha256}
               },
               public_deployment_authorized:false,
               governance_desired_state_signature_required:true

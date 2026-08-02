@@ -16,7 +16,14 @@ const baseConfig = () => ({
   validator_registry: { source_url: 'https://metadata.example.test/validators.json', sha256: digest },
   contracts: { source_url: 'https://metadata.example.test/contracts.json', sha256: digest },
   fee_reward: { source_url: 'https://metadata.example.test/economics.json', sha256: digest },
-  posy_etdag: { source_url: 'https://metadata.example.test/consensus.json', sha256: digest, target_block_time_ms: 2000 },
+  coordinated_round_robin: {
+    source_url: 'https://metadata.example.test/consensus.json',
+    sha256: digest,
+    mode: 'coordinated_round_robin_v1',
+    coordinator_id: 'validator-1',
+    producer_ids: ['validator-2', 'validator-3', 'validator-4', 'validator-5', 'validator-6'],
+    producer_turn_timeout_ms: 4000,
+  },
 });
 
 test('accepts a complete final Testnet-v3 configuration', () => {

@@ -4,7 +4,8 @@ import { pathToFileURL } from 'node:url';
 
 const HEX_64 = /^[a-f0-9]{64}$/;
 const HEX_8 = /^[a-f0-9]{8}$/;
-const REQUIRED_SECTION_NAMES = ['token_metadata', 'validator_registry', 'contracts', 'fee_reward', 'posy_etdag'];
+const REQUIRED_SECTION_NAMES = ['token_metadata', 'validator_registry', 'contracts', 'fee_reward', 'coordinated_round_robin'];
+const P1_PRODUCERS = ['validator-2', 'validator-3', 'validator-4', 'validator-5', 'validator-6'];
 
 function fail(message) {
   throw new Error(`Invalid Atlas Testnet-v3 network configuration: ${message}`);
@@ -59,8 +60,18 @@ export function validateNetworkConfig(config) {
     requiredUrl(section.source_url, `${name}.source_url`);
     requiredDigest(section.sha256, `${name}.sha256`);
   }
-  if (!Number.isInteger(input.posy_etdag.target_block_time_ms) || input.posy_etdag.target_block_time_ms <= 0) {
-    fail('posy_etdag.target_block_time_ms must be a positive integer');
+  const coordinated = input.coordinated_round_robin;
+  if (coordinated.mode !== 'coordinated_round_robin_v1') {
+    fail('coordinated_round_robin.mode must be coordinated_round_robin_v1');
+  }
+  if (coordinated.coordinator_id !== 'validator-1') {
+    fail('coordinated_round_robin.coordinator_id must be validator-1');
+  }
+  if (JSON.stringify(coordinated.producer_ids) !== JSON.stringify(P1_PRODUCERS)) {
+    fail('coordinated_round_robin.producer_ids must be validator-2 through validator-6 in order');
+  }
+  if (coordinated.producer_turn_timeout_ms !== 4000) {
+    fail('coordinated_round_robin.producer_turn_timeout_ms must be 4000');
   }
 
   return {

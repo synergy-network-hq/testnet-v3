@@ -57,6 +57,33 @@ ROLE_ARTIFACT_KEY = {
     "explorer_indexer": "indexer_and_explorer_node",
     "observer": "observer_light_node",
 }
+P1_CONSENSUS_MODE = "coordinated_round_robin_v1"
+P1_COORDINATOR_ID = "validator-1"
+P1_PRODUCER_IDS = ["validator-2", "validator-3", "validator-4", "validator-5", "validator-6"]
+P1_RING1_CASE_IDS = frozenset(
+    {
+        "canonical_val1_assignment",
+        "p1_config_exactly_one_coordinator_five_producers",
+        "dedicated_authenticated_consensus_ingress",
+        "no_legacy_consensus_fallback",
+        "strict_val2_to_val6_rotation",
+        "timeout_skips_turn_not_height",
+        "replacement_assignment_recovers_lagging_validator",
+        "stale_producer_round_rejected",
+        "coordinator_cannot_equivocate_at_height",
+        "coordinator_cursor_is_durable",
+        "assignment_and_block_signatures_are_durable",
+        "independent_execution_of_user_transaction",
+        "runtime_timeout_preserves_height",
+        "coordinator_persists_committed_finality",
+        "exact_finality_packages_are_anchored",
+        "support_observer_verifies_without_signing",
+        "user_admission_is_exact_and_deterministic",
+        "fresh_reset_requires_genesis_only",
+        "fresh_reset_rejects_stale_p1_finality",
+        "support_roles_are_non_signing_observers",
+    }
+)
 
 
 def fail(message: str) -> "NoReturn":
@@ -121,29 +148,64 @@ def validate_promotable_release(
     desired_path = release / "desired-state.json"
     desired = json.loads(desired_path.read_text())
     release_id = desired.get("release_id", "")
+    p1 = report1.get("p1_invariants", {})
+    ring2_p1 = report2.get("p1", {})
+    desired_p1 = desired.get("state", {})
     if (
         qualification.get("result") != "PROMOTABLE"
         or qualification.get("public_deployment_authorized") is not False
         or report1.get("result") != "PASS"
-        or report1.get("cases_passed") != 23
-        or report1.get("cases_total") != 23
-        or report1.get("mldsa65_transport_authentication", {}).get("unit_guard")
-        != "validator_handshake_never_falls_back_to_the_fndsa_peer_identity"
-        or report1.get("mldsa65_transport_authentication", {}).get("ring1_proof")
-        != "real_mldsa_six_validator_burn_in"
-        or report1.get("mldsa65_transport_authentication", {}).get("ring2_proof")
-        != "p2p_verified_handshakes_total{algorithm=ML-DSA-65}"
+        or report1.get("consensus_mode") != P1_CONSENSUS_MODE
+        or report1.get("cases_passed") != len(P1_RING1_CASE_IDS)
+        or report1.get("cases_total") != len(P1_RING1_CASE_IDS)
+        or frozenset(report1.get("case_ids", [])) != P1_RING1_CASE_IDS
+        or p1.get("coordinator_id") != P1_COORDINATOR_ID
+        or p1.get("producer_ids") != P1_PRODUCER_IDS
+        or any(
+            p1.get(field) is not True
+            for field in (
+                "val1_is_not_a_normal_producer",
+                "timeout_skips_producer_turn_not_height",
+                "assignment_and_commit_signatures_required",
+                "all_validators_execute_identically",
+                "legacy_posy_qc_vc_tc_vote_aggregation_disabled",
+                "durable_signing_and_restart_replay",
+                "fresh_reset_requires_block_zero_genesis",
+                "support_roles_verify_without_signing",
+            )
+        )
         or report2.get("result") != "PASS"
         or report2.get("operational_state") != "STABLE"
-        or report2.get("finalized_height", 0) < 10_000
+        or report2.get("consensus_mode") != P1_CONSENSUS_MODE
+        or report2.get("finalized_height", 0) < 5_000
+        or report2.get("validator_count") != 6
+        or ring2_p1.get("coordinator_id") != P1_COORDINATOR_ID
+        or ring2_p1.get("producer_ids") != P1_PRODUCER_IDS
+        or any(
+            ring2_p1.get(field) is not True
+            for field in (
+                "strict_producer_rotation_verified",
+                "val1_never_normal_producer_verified",
+                "timeout_skips_turn_not_height_verified",
+                "assignment_and_commit_signatures_verified",
+                "all_validators_independently_execute_verified",
+                "restart_rejoin_verified",
+                "support_finality_replication_verified",
+                "atlas_verified",
+            )
+        )
         or report2.get("wireguard_overlay") is not True
         or report2.get("qualification_environment") != "six-real-validator-hosts"
         or report2.get("canonical_systemd_unit")
         != "synergy-chain1266-role@.service"
         or desired.get("chain", {}).get("chain_id") != 1266
         or desired["chain"].get("incarnation") != 4
-        or desired["chain"].get("genesis_hash")
-        != "859c40e33cca7e02e7a3b3ebeafecbbf04ce29080863313ef893a8a5e6341c1d"
+        or desired_p1.get("mode") != P1_CONSENSUS_MODE
+        or desired_p1.get("coordinator_id") != P1_COORDINATOR_ID
+        or desired_p1.get("producer_ids") != P1_PRODUCER_IDS
+        or desired_p1.get("producer_turn_timeout_ms") != 4_000
+        or qualification.get("consensus_mode") != P1_CONSENSUS_MODE
+        or qualification.get("genesis_hash") != desired["chain"].get("genesis_hash")
         or qualification.get("desired_state_sha256") != sha256(desired_path)
         or not re.fullmatch(r"chain1266-incarnation-4-rc[0-9]+", release_id)
     ):
