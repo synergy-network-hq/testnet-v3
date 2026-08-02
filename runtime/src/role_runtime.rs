@@ -84,6 +84,17 @@ const OFFLINE_SNAPSHOT_COMMAND_STACK_BYTES: usize = 64 * 1024 * 1024;
 const TYPED_POSY_INGRESS_CAPACITY: usize = 512;
 const COORDINATED_ROUND_ROBIN_INGRESS_CAPACITY: usize = 512;
 const COORDINATED_REMOTE_VALIDATOR_COUNT: usize = 5;
+/// A reset marker is proof that the controller removed *all* mutable consensus
+/// history.  These are the locally durable consensus artifacts that must never
+/// survive a fresh-genesis launch.  The block-chain journal itself is checked
+/// separately against the canonical height-zero Genesis block.
+const FRESH_RESET_FORBIDDEN_CONSENSUS_ARTIFACTS: &[&str] = &[
+    "coordinated-round-robin-finality.json",
+    "coordinated-round-robin-state.json",
+    "consensus_signing_authorizations.json",
+    "typed-posy-finality.json",
+    "typed-posy-finality.prepared.json",
+];
 
 struct RoleProcessGuard {
     child: Mutex<Child>,
@@ -1503,7 +1514,11 @@ fn build_finalized_coordinated_runtime_inputs(
         "data/coordinated-round-robin-state.json",
     ))
     .map_err(|error| format!("coordinated runtime state store initialization failed: {error}"))?;
-    let finality_store = CoordinatedFinalityStore::for_migration_anchor(
+    // A controlled reset wipes this exact controller-managed data root.  Do
+    // not permit an environment-selected finality location that could retain
+    // old block data outside the release-bound deletion manifest.
+    let finality_store = CoordinatedFinalityStore::at_path(
+        crate::utils::resolve_data_path("data/coordinated-round-robin-finality.json"),
         genesis_anchor,
         deployed_genesis_state_root,
         Height(1),
@@ -2083,6 +2098,7 @@ fn ensure_consensus_pqc_runtime_ready(config: &NodeConfig) -> Result<(), String>
 fn ensure_fresh_genesis_reset_state(
     blockchain: &Arc<Mutex<crate::block::BlockChain>>,
 ) -> Result<(), String> {
+    ensure_fresh_reset_has_no_consensus_history(&crate::utils::resolve_data_path("data"))?;
     let canonical = canonical_genesis().map_err(|error| {
         format!("fresh-reset verification cannot load canonical genesis: {error}")
     })?;
@@ -2107,6 +2123,23 @@ fn ensure_fresh_genesis_reset_state(
             "fresh-reset marker does not resolve to the immutable canonical genesis state"
                 .to_string(),
         );
+    }
+    Ok(())
+}
+
+/// The reset marker comes only from the controlled fleet reset.  Reject it if
+/// any durable finality, coordinator, or signing history remains: accepting a
+/// marker in that state could make the next process appear to restart at
+/// height zero while still being bound by an earlier chain incarnation.
+fn ensure_fresh_reset_has_no_consensus_history(data_root: &Path) -> Result<(), String> {
+    for artifact in FRESH_RESET_FORBIDDEN_CONSENSUS_ARTIFACTS {
+        let path = data_root.join(artifact);
+        if path.exists() {
+            return Err(format!(
+                "fresh-reset marker refuses stale consensus history at {}",
+                path.display()
+            ));
+        }
     }
     Ok(())
 }
@@ -2822,6 +2855,22 @@ mod launch_block1_tests {
 
         ensure_fresh_genesis_reset_state(&blockchain)
             .expect("a fresh reset may consume only canonical genesis state");
+    }
+
+    #[test]
+    fn fresh_reset_marker_rejects_stale_coordinated_finality_history() {
+        let project_root = temp_project_root("fresh-reset-stale-coordinated-history");
+        let data_root = project_root.join("data");
+        fs::create_dir_all(&data_root).expect("create isolated data root");
+        let stale_finality = data_root.join("coordinated-round-robin-finality.json");
+        fs::write(&stale_finality, b"stale coordinated history")
+            .expect("write stale coordinated finality");
+
+        let error = ensure_fresh_reset_has_no_consensus_history(&data_root)
+            .expect_err("fresh-reset marker must reject retained coordinated finality");
+
+        assert!(error.contains("coordinated-round-robin-finality.json"));
+        let _ = fs::remove_dir_all(project_root);
     }
 
     #[test]

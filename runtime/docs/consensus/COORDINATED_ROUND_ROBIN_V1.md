@@ -61,12 +61,20 @@ The following components are implemented and covered by focused unit tests:
   `p2p/messages.rs` and `p2p/networking.rs`;
 - assignment, proposal, commit, execution, idempotence, and finality sync in
   `coordinated_runtime.rs`.
+- a dedicated validator role worker in `role_runtime.rs` that selects P1
+  instead of constructing or starting the typed PoSy worker.
 
-The role runtime intentionally still rejects a production coordinated-mode
-start. The remaining work is to connect this runtime to canonical block
-construction, canonical chain/RPC persistence, bounded P2P egress and the
-six-validator integration harness. This prevents a release from appearing
-healthy while only producing test-shaped or unobservable blocks.
+The P1 role worker starts only after it has bound canonical Genesis, the
+finalized six-validator set, the local finalized signing key, and the signed
+start barrier. On a controlled reset, it verifies that the shared chain is
+exactly canonical Genesis at height 0 and that no coordinated/typed finality,
+coordinator, or signing journal survived before consuming `.reset_flag`.
+
+The remaining release blockers are the canonical user-transaction admission
+path (the current P1 builder may produce an empty block only when no admitted
+transaction is available), non-signing coordinated-finality replication for
+support roles, and the six-validator integration/Atlas qualification harness.
+These gaps keep the mode non-deployable and unqualified.
 
 ## Epochs and initial height
 

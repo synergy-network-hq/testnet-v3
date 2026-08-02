@@ -41,6 +41,10 @@ release:
    observer/indexer support, and no protected material.
 4. `wipe-all-chain-state --deletion-manifest …` deletes only those approved
    roots, recreates each state directory mode `0700`, and writes `.reset_flag`.
+   At first validator startup, the P1 worker refuses the marker if the loaded
+   chain is not exactly canonical Genesis at height 0 or if any coordinated
+   finality, coordinator-state, signing, or retired typed-finality journal
+   remains.
 5. `reset-atlas-offline` drops only the explicit Atlas chain-derived tables and
    recreates the empty incarnation-4 schema; it does not drop PostgreSQL
    `public` or user-facing non-chain tables.
