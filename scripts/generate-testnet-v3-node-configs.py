@@ -430,6 +430,7 @@ def verify_release_authorization(
     release_integrity_path: Path,
     authorities_path: Path,
     approval_verifier: Path,
+    allow_verified_record_relocation: bool = False,
 ) -> dict[str, str]:
     """Verify both signed governance approval and post-apply integrity evidence.
 
@@ -457,7 +458,7 @@ def verify_release_authorization(
         fail("Phase-7/8 release integrity record is not in the applied release-gates state")
 
     applied_genesis = require_path_within_repository(root, release.get("genesis_file"), "release integrity genesis_file")
-    if genesis_path.resolve() != applied_genesis:
+    if not allow_verified_record_relocation and genesis_path.resolve() != applied_genesis:
         fail("Supplied Genesis is not the exact canonical Genesis named by release integrity evidence")
     if not applied_genesis.is_file():
         fail(f"Release integrity canonical Genesis does not exist: {applied_genesis}")
@@ -488,7 +489,7 @@ def verify_release_authorization(
     approved_artifact = recorded_path(
         root, release.get("release_approval_artifact"), "release integrity release_approval_artifact"
     )
-    if approval_path.resolve() != approved_artifact:
+    if not allow_verified_record_relocation and approval_path.resolve() != approved_artifact:
         fail("Supplied approval artifact is not the exact artifact named by release integrity evidence")
     approval_sha256 = sha256_file(approval_path)
     if approval_sha256 != require_sha256(
@@ -2141,6 +2142,14 @@ def main() -> int:
         default=repository_root() / "runtime/target/debug/testnet-v3-genesis-release-approval",
         help="built Rust release-approval verifier (never a signing tool)",
     )
+    parser.add_argument(
+        "--allow-verified-record-relocation",
+        action="store_true",
+        help=(
+            "allow remote staging copies when their Genesis and approval bytes "
+            "still match the signed Phase-7/8 record and the Rust verifier"
+        ),
+    )
     parser.add_argument("--output-dir", type=Path, help="generated config output directory")
     mode = parser.add_mutually_exclusive_group(required=False)
     mode.add_argument("--apply", action="store_true", help="publish a newly generated tree (backs up an existing tree)")
@@ -2172,6 +2181,7 @@ def main() -> int:
             release_integrity_path=args.release_integrity,
             authorities_path=args.authorities_file,
             approval_verifier=args.approval_verifier,
+            allow_verified_record_relocation=args.allow_verified_record_relocation,
         )
         outputs, manifest, deployment_payloads = build_outputs(
             args.genesis, args.topology, args.vpn_public_registry, release_binding
