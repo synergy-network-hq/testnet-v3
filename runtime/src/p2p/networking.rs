@@ -12,7 +12,9 @@ use crate::consensus::coordinated_finality_observer::{
     coordinated_finality_observer_next_missing_height, coordinated_finality_observer_snapshot_from,
     import_coordinated_finality_observer_records,
 };
-use crate::consensus::coordinated_round_robin::AuthenticatedCoordinatedConsensusPeer;
+use crate::consensus::coordinated_round_robin::{
+    AuthenticatedCoordinatedConsensusPeer, COORDINATED_ROUND_ROBIN_V1,
+};
 use crate::consensus::dual_quorum::{DualQuorumConsensus, QuorumCertificate};
 use crate::consensus::legacy_canonical_lock::{
     legacy_canonical_commit_record, quarantine_legacy_canonical_locks_above,
@@ -126,6 +128,7 @@ const PUBLIC_RELAYER_DIAL_ADDRESSES: &[&str] = &[
 ];
 const MAX_BLOCK_SYNC_RESPONSE_BLOCKS: u32 = 64;
 const TYPED_POSY_VALIDATOR_CAPABILITY: &str = "typed-posy-v2.2-validator";
+const COORDINATED_VALIDATOR_CAPABILITY: &str = "coordinated-round-robin-v1-validator";
 // Identity bindings are session-scoped and bounded.  A socket address is not a
 // consensus identity, so this registry exists solely to carry the result of a
 // verified Genesis-bound handshake into the typed coordinator mailbox.
@@ -545,6 +548,9 @@ fn local_protocol_version(config: &NodeConfig) -> String {
 }
 
 fn local_consensus_version(config: &NodeConfig) -> String {
+    if config.consensus.algorithm.trim() == COORDINATED_ROUND_ROBIN_V1 {
+        return COORDINATED_ROUND_ROBIN_V1.to_string();
+    }
     canonical_genesis()
         .map(|genesis| genesis.consensus_version().to_string())
         .unwrap_or_else(|_| config.consensus.algorithm.clone())
@@ -746,7 +752,12 @@ fn build_local_handshake_with_extra_capabilities(
         .map_err(|error| format!("aegis-pqvm P2P public key loading failed: {error}"))?;
     let mut capabilities = vec!["blocks".to_string(), "transactions".to_string()];
     if local_consensus_handshake_required(config) {
-        capabilities.push(TYPED_POSY_VALIDATOR_CAPABILITY.to_string());
+        let capability = if config.consensus.algorithm.trim() == COORDINATED_ROUND_ROBIN_V1 {
+            COORDINATED_VALIDATOR_CAPABILITY
+        } else {
+            TYPED_POSY_VALIDATOR_CAPABILITY
+        };
+        capabilities.push(capability.to_string());
     }
     for capability in extra_capabilities {
         let capability = capability.trim();
@@ -797,13 +808,15 @@ fn build_local_handshake_with_extra_capabilities(
     Ok(handshake)
 }
 
-/// A typed validator handshake is a proof of possession of the exact
-/// Genesis-assigned ML-DSA-65 consensus key.  It must never fall back to an
-/// ephemeral P2P key: that would authenticate a connection but not the
-/// validator authorized to emit typed PoSy artifacts.
+/// A validator consensus handshake proves possession of the exact
+/// Genesis-assigned ML-DSA-65 key. Both the retired typed engine and the active
+/// coordinated engine require this identity binding; neither may fall back to
+/// an ephemeral P2P key.
 fn local_consensus_handshake_required(config: &NodeConfig) -> bool {
-    config.consensus.algorithm.trim() == "posy/2.2"
-        && !config.node.bootstrap_only
+    matches!(
+        config.consensus.algorithm.trim(),
+        "posy/2.2" | COORDINATED_ROUND_ROBIN_V1
+    ) && !config.node.bootstrap_only
         && !config.node.validator_address.trim().is_empty()
 }
 
@@ -931,10 +944,10 @@ fn verify_handshake_pq_signature(
         _ => {}
     }
 
-    if capabilities
-        .iter()
-        .any(|capability| capability == TYPED_POSY_VALIDATOR_CAPABILITY)
-    {
+    if capabilities.iter().any(|capability| {
+        capability == TYPED_POSY_VALIDATOR_CAPABILITY
+            || capability == COORDINATED_VALIDATOR_CAPABILITY
+    }) {
         let validator_address = validator_address
             .as_deref()
             .map(str::trim)
@@ -12450,15 +12463,15 @@ mod tests {
         handle_status_message, handshake_version_mismatch_reason, hydrate_peer_from_cache,
         insert_seed_server_target, is_validator_vpn_dial_address,
         is_validator_vpn_relayer_dial_address, local_consensus_handshake_required,
-        local_is_typed_finality_relayer, local_is_typed_finality_service_observer,
-        local_node_runs_validator_consensus, local_node_uses_service_batch_durability,
-        local_peer_identity, merge_peer_state_from_existing, normalize_peer_target,
-        parse_block_sync_busy_retry, parse_bootnode_dial_address, peer_has_identifying_metadata,
-        peer_identity_key, peer_is_authorized_block_sync_requester,
-        peer_is_designated_support_sync_source, peer_is_eligible_block_sync_source,
-        peer_is_eligible_block_sync_source_for_local, peer_is_validator_vpn_relayer,
-        peer_matches_address, peer_readiness_exclusion_reason_at, peer_write_gate,
-        pending_incoming_connections_from_host, preferred_connection_direction,
+        local_consensus_version, local_is_typed_finality_relayer,
+        local_is_typed_finality_service_observer, local_node_runs_validator_consensus,
+        local_node_uses_service_batch_durability, local_peer_identity,
+        merge_peer_state_from_existing, normalize_peer_target, parse_block_sync_busy_retry,
+        parse_bootnode_dial_address, peer_has_identifying_metadata, peer_identity_key,
+        peer_is_authorized_block_sync_requester, peer_is_designated_support_sync_source,
+        peer_is_eligible_block_sync_source, peer_is_eligible_block_sync_source_for_local,
+        peer_is_validator_vpn_relayer, peer_matches_address, peer_readiness_exclusion_reason_at,
+        peer_write_gate, pending_incoming_connections_from_host, preferred_connection_direction,
         preflight_validator_activation_transactions, receive_message,
         recover_peer_validator_address_for_vote_target, register_typed_consensus_peer_session,
         register_validator_consensus_handshake_key, release_block_sync_apply_slot_after_worker,
@@ -12479,13 +12492,14 @@ mod tests {
         with_peer_stream_outside_peers_lock, ConnectionDirection, DialTargetsArc,
         DuplicateResolution, P2PNetwork, PeerConnection, PeerEntryGuard,
         TypedFinalityObserverMessage, BACKGROUND_SYNC_POLL_MILLIS, BLOCK_SYNC_APPLY_ACTIVE,
-        BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS, DEFAULT_BOOTSTRAP_REFRESH_SECS, DUTY_DISABLED_TTL_SECS,
-        IMMEDIATE_STATUS_SYNC_BATCH, MAX_P2P_FRAME_BYTES, MAX_STATUS_SYNC_BATCH,
-        MAX_SUPPORT_NODE_BLOCK_SYNC_RESPONSE_BLOCKS, MAX_VALIDATOR_SUPPORT_SYNC_RESPONSE_BLOCKS,
-        NORMAL_BOOTSTRAP_REFRESH_SECS, PEER_SESSION_IDS, PEER_WRITE_GATES, PENDING_BLOCKS,
-        QUARANTINE_STATUS_TTL_SECS, SERVICE_BLOCK_SYNC_RESPONSE_TIMEOUT_SECS,
-        SERVICE_SYNC_COORDINATOR, STALE_UNIDENTIFIED_PEER_SECS, STALE_VALIDATOR_STATUS_SECS,
-        STATUS_READY_TTL_SECS, STATUS_REQUEST_MIN_INTERVAL_SECS, STATUS_RESPONSE_MIN_INTERVAL_SECS,
+        BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS, COORDINATED_ROUND_ROBIN_V1,
+        DEFAULT_BOOTSTRAP_REFRESH_SECS, DUTY_DISABLED_TTL_SECS, IMMEDIATE_STATUS_SYNC_BATCH,
+        MAX_P2P_FRAME_BYTES, MAX_STATUS_SYNC_BATCH, MAX_SUPPORT_NODE_BLOCK_SYNC_RESPONSE_BLOCKS,
+        MAX_VALIDATOR_SUPPORT_SYNC_RESPONSE_BLOCKS, NORMAL_BOOTSTRAP_REFRESH_SECS,
+        PEER_SESSION_IDS, PEER_WRITE_GATES, PENDING_BLOCKS, QUARANTINE_STATUS_TTL_SECS,
+        SERVICE_BLOCK_SYNC_RESPONSE_TIMEOUT_SECS, SERVICE_SYNC_COORDINATOR,
+        STALE_UNIDENTIFIED_PEER_SECS, STALE_VALIDATOR_STATUS_SECS, STATUS_READY_TTL_SECS,
+        STATUS_REQUEST_MIN_INTERVAL_SECS, STATUS_RESPONSE_MIN_INTERVAL_SECS,
         SUPPORT_NODE_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS, TEST_COMMIT_VERIFIER_VALIDATOR_MANAGER,
         TYPED_CONSENSUS_PEER_SESSIONS, VALIDATOR_SUPPORT_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS,
     };
@@ -13555,11 +13569,16 @@ mod tests {
     fn typed_validator_handshake_requirement_excludes_bootstrap_and_legacy_profiles() {
         let mut config = NodeConfig::default();
         config.node.validator_address = "synv1validator".to_string();
+        config.consensus.algorithm = "legacy-posy".to_string();
         assert!(!local_consensus_handshake_required(&config));
         config.consensus.algorithm = "posy/2.2".to_string();
         assert!(local_consensus_handshake_required(&config));
         config.node.bootstrap_only = true;
         assert!(!local_consensus_handshake_required(&config));
+        config.node.bootstrap_only = false;
+        config.consensus.algorithm = COORDINATED_ROUND_ROBIN_V1.to_string();
+        assert!(local_consensus_handshake_required(&config));
+        assert_eq!(local_consensus_version(&config), COORDINATED_ROUND_ROBIN_V1);
     }
 
     #[test]
