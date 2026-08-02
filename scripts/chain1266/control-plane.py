@@ -236,6 +236,16 @@ class Node:
     legacy_service: str = ""
 
 
+def preserved_wipe_entries(node: Node, root: str) -> list[str]:
+    """Return the exact non-derived records allowed beneath a wipe root."""
+    # Historical validator layouts stored this authorization record beneath the
+    # otherwise-derived data directory.  It is custody material, so reset
+    # must preserve it instead of treating its location as deletion authority.
+    if node.role == "validator" and root == "/var/lib/synergy/validator/data":
+        return ["consensus_signing_authorizations.json"]
+    return []
+
+
 class Controller:
     def __init__(self, fleet_path: pathlib.Path) -> None:
         self.fleet_path = fleet_path
@@ -598,13 +608,30 @@ echo CHAIN1266_ROLE_STOPPED
                 ):
                     fail(f"unsafe exact wipe root for {node.id}: {root}")
             quoted_roots = " ".join(json.dumps(root) for root in roots)
+            preserved_by_root = {
+                root: preserved_wipe_entries(node, root) for root in roots
+            }
+            quoted_preserved_paths = " ".join(
+                json.dumps(f"{root}/{entry}")
+                for root, entries in preserved_by_root.items()
+                for entry in entries
+            )
             services = [node.service]
             if node.legacy_service and node.legacy_service not in services:
                 services.append(node.legacy_service)
             quoted_services = " ".join(json.dumps(service) for service in services)
             script = f"""set -euo pipefail
 roots=({quoted_roots})
+preserved_paths=({quoted_preserved_paths})
 services=({quoted_services})
+is_preserved() {{
+  local candidate="$1"
+  local preserved
+  for preserved in "${{preserved_paths[@]}}"; do
+    [[ "$candidate" == "$preserved" ]] && return 0
+  done
+  return 1
+}}
 for service in "${{services[@]}}"; do
   state="$(systemctl is-active "$service" 2>/dev/null || true)"
   [[ "$state" != active && "$state" != activating ]] || {{
@@ -619,15 +646,26 @@ for root in "${{roots[@]}}"; do
     *) echo "unsafe exact Chain 1266 wipe root: $root" >&2; exit 1 ;;
   esac
   if [[ -d "$root" ]]; then
+    for preserved in "${{preserved_paths[@]}}"; do
+      [[ "$preserved" == "$root/"* ]] || continue
+      [[ -f "$preserved" ]] || {{
+        echo "required preserved custody record is missing: $preserved" >&2
+        exit 1
+      }}
+    done
     protected="$(sudo -n find "$root" -xdev -type f \\
       \\( -iname '*.key' -o -iname '*private*' -o -iname '*identity*' \\
          -o -iname '*credential*' -o -iname '*custody*' -o -iname '*wireguard*' \\
-         -o -iname '*innernet*' \\) -print -quit)"
+         -o -iname '*innernet*' -o -iname '*authorization*' \\) -print | while IFS= read -r candidate; do
+      is_preserved "$candidate" || {{ printf '%s\\n' "$candidate"; break; }}
+    done)"
     [[ -z "$protected" ]] || {{
       echo "protected material would be in deletion scope: $protected" >&2
       exit 1
     }}
-    entries="$(sudo -n find "$root" -xdev -mindepth 1 -maxdepth 1 -print | wc -l | tr -d ' ')"
+    entries="$(sudo -n find "$root" -xdev -mindepth 1 -maxdepth 1 -print | while IFS= read -r candidate; do
+      is_preserved "$candidate" || printf '%s\\n' "$candidate"
+    done | wc -l | tr -d ' ')"
     bytes="$(sudo -n du -sk "$root" | awk '{{print $1 * 1024}}')"
     printf 'ROOT=%s\\tEXISTS=true\\tENTRIES=%s\\tBYTES=%s\\n' "$root" "$entries" "$bytes"
   elif [[ -e "$root" ]]; then
@@ -661,6 +699,7 @@ done
                         "exists": exists == "true",
                         "top_level_entries": int(entries),
                         "bytes_on_disk": int(bytes_on_disk),
+                        "preserved_entries": preserved_by_root[root],
                     }
                 )
             if {item["root"] for item in targets} != set(roots):
@@ -725,11 +764,30 @@ done
                 ):
                     fail(f"unsafe exact wipe root for {node.id}: {root}")
             quoted_roots = " ".join(json.dumps(root) for root in roots)
+            quoted_preserved_paths = " ".join(
+                json.dumps(f"{root}/{entry}")
+                for root in roots
+                for entry in preserved_wipe_entries(node, root)
+            )
+            quoted_state_preserved = " ".join(
+                json.dumps(entry)
+                for entry in preserved_wipe_entries(node, node.state_root)
+            )
             outcome = self.mutate(
                 node,
                 f"""set -euo pipefail
 state={json.dumps(node.state_root)}
 roots=({quoted_roots})
+preserved_paths=({quoted_preserved_paths})
+state_preserved=({quoted_state_preserved})
+is_preserved() {{
+  local candidate="$1"
+  local preserved
+  for preserved in "${{preserved_paths[@]}}"; do
+    [[ "$candidate" == "$preserved" ]] && return 0
+  done
+  return 1
+}}
 for service in {json.dumps(node.service)} {json.dumps(node.legacy_service or node.service)}; do
   service_state="$(systemctl is-active "$service" 2>/dev/null || true)"
   [[ "$service_state" != active && "$service_state" != activating ]] || {{
@@ -744,20 +802,39 @@ for root in "${{roots[@]}}"; do
     *) echo "unsafe exact Chain 1266 wipe root: $root" >&2; exit 1 ;;
   esac
   if [[ -d "$root" ]]; then
+    for preserved in "${{preserved_paths[@]}}"; do
+      [[ "$preserved" == "$root/"* ]] || continue
+      [[ -f "$preserved" ]] || {{
+        echo "required preserved custody record is missing: $preserved" >&2
+        exit 1
+      }}
+    done
     protected="$(sudo -n find "$root" -xdev -type f \
       \\( -iname '*.key' -o -iname '*private*' -o -iname '*identity*' \
          -o -iname '*credential*' -o -iname '*custody*' -o -iname '*wireguard*' \
-         -o -iname '*innernet*' \\) -print -quit)"
+         -o -iname '*innernet*' -o -iname '*authorization*' \\) -print | while IFS= read -r candidate; do
+      is_preserved "$candidate" || {{ printf '%s\\n' "$candidate"; break; }}
+    done)"
     [[ -z "$protected" ]] || {{
       echo "refusing to delete protected material under $root: $protected" >&2
       exit 1
     }}
-    sudo -n find "$root" -mindepth 1 -maxdepth 1 -exec rm -rf -- {{}} +
+    while IFS= read -r candidate; do
+      is_preserved "$candidate" && continue
+      sudo -n rm -rf -- "$candidate"
+    done < <(sudo -n find "$root" -xdev -mindepth 1 -maxdepth 1 -print)
   fi
 done
 sudo -n install -d -m 0700 "$state"
 sudo -n touch "$state/.reset_flag"
-remaining="$(sudo -n find "$state" -mindepth 1 -maxdepth 1 ! -name .reset_flag -print -quit)"
+remaining="$(sudo -n find "$state" -mindepth 1 -maxdepth 1 -print | while IFS= read -r candidate; do
+  [[ "$candidate" == "$state/.reset_flag" ]] && continue
+  for entry in "${{state_preserved[@]}}"; do
+    [[ "$candidate" == "$state/$entry" ]] && continue 2
+  done
+  printf '%s\\n' "$candidate"
+  break
+done)"
 [[ -z "$remaining" ]] || {{
   echo "state root is not empty after reset" >&2
   exit 1
