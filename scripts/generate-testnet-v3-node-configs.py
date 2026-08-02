@@ -30,10 +30,19 @@ from pathlib import Path
 from typing import Any
 
 
-GENERATOR_VERSION = "testnet-v3-node-configs/v6"
+GENERATOR_VERSION = "testnet-v3-node-configs/v7-coordinated-round-robin-p1"
 CHAIN_ID = 1266
 NETWORK_ID = "synergy-testnet-v3"
 VALIDATOR_P2P_PORT = 5622
+COORDINATED_CONSENSUS_MODE = "coordinated_round_robin_v1"
+COORDINATED_COORDINATOR_ID = "validator-1"
+COORDINATED_PRODUCER_IDS = (
+    "validator-2",
+    "validator-3",
+    "validator-4",
+    "validator-5",
+    "validator-6",
+)
 RELEASE_INTEGRITY_STATUS = "PHASE_7_8_APPLIED_PENDING_RELEASE_GATES"
 RELEASE_APPROVAL_RESULT = "RELEASE_APPROVAL_VERIFIED"
 UNRESOLVED_PLACEHOLDER = re.compile(r"<[A-Z][A-Z0-9_:-]*>")
@@ -821,28 +830,17 @@ def toml_config(
         "chain_id = 1266",
         "",
         "[consensus]",
-        'algorithm = "posy/2.2"',
+        f"algorithm = {q(COORDINATED_CONSENSUS_MODE)}",
+        f"mode = {q(COORDINATED_CONSENSUS_MODE)}",
+        f"coordinator_id = {q(COORDINATED_COORDINATOR_ID)}",
+        f"producer_ids = {array(COORDINATED_PRODUCER_IDS)}",
         "block_time_secs = 2",
         "epoch_length = 1000",
         "target_block_time_ms = 2000",
-        "proposal_timeout_ms = 1500",
-        "prevote_timeout_ms = 1500",
-        "precommit_timeout_ms = 1500",
-        "max_round_timeout_ms = 10000",
+        "producer_turn_timeout_ms = 4000",
         "min_validators = 6",
         "validator_cluster_size = 6",
-        "validator_vote_threshold = 5",
-        "synergy_score_decay_rate = 0.05",
-        "vrf_enabled = true",
-        "vrf_seed_epoch_interval = 1000",
-        "max_synergy_points_per_epoch = 100",
-        "max_tasks_per_validator = 10",
         "allow_genesis_status_bypass = false",
-        "",
-        "[consensus.reward_weighting]",
-        "task_accuracy = 0.5",
-        "uptime = 0.3",
-        "collaboration = 0.2",
         "",
         "[p2p]",
         f"listen_address = {q(listen_address)}",
