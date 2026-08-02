@@ -348,7 +348,7 @@ mod tests {
 
     #[test]
     fn p1_consensus_parser_rejects_a_retired_posy_timeout() {
-        let path = synergy_testnet::utils::test_temp_root(format!(
+        let path = std::env::temp_dir().join(format!(
             "chain1266-p1-posy-config-{}.toml",
             std::process::id()
         ));
@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn p1_consensus_parser_requires_the_exact_producer_order() {
-        let path = synergy_testnet::utils::test_temp_root(format!(
+        let path = std::env::temp_dir().join(format!(
             "chain1266-p1-order-config-{}.toml",
             std::process::id()
         ));
