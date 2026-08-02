@@ -70,6 +70,21 @@ pub struct BlockchainConfig {
 pub struct ConsensusConfig {
     #[serde(default = "default_consensus_protocol_version")]
     pub algorithm: String,
+    /// Explicit runtime consensus-mode boundary.  `algorithm` remains the
+    /// protocol compatibility label; this field selects which single engine is
+    /// authorized to run for a height range.
+    #[serde(default = "default_consensus_mode")]
+    pub mode: String,
+    /// Canonical coordinator identity for the temporary coordinated mode.
+    /// Empty unless that mode is explicitly configured.
+    #[serde(default)]
+    pub coordinator_id: String,
+    /// Ordered canonical producer identities for the temporary coordinated
+    /// mode. These must never be inferred from peer order or transport data.
+    #[serde(default)]
+    pub producer_ids: Vec<String>,
+    #[serde(default = "default_producer_turn_timeout_ms")]
+    pub producer_turn_timeout_ms: u64,
     pub block_time_secs: u64,
     pub epoch_length: u64,
     #[serde(default = "default_target_block_time_ms")]
@@ -125,8 +140,73 @@ pub struct ConsensusConfig {
     pub reward_weighting: RewardWeighting,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedConsensusMode {
+    PosyV2_2,
+    CoordinatedRoundRobinV1(crate::consensus::coordinated_round_robin::CoordinatedRoundRobinConfig),
+}
+
 fn default_consensus_protocol_version() -> String {
     POSY_PROTOCOL_VERSION.to_string()
+}
+
+fn default_consensus_mode() -> String {
+    "posy_v2_2".to_string()
+}
+
+fn default_producer_turn_timeout_ms() -> u64 {
+    4_000
+}
+
+impl ConsensusConfig {
+    pub fn resolve_mode(
+        &self,
+        chain_id: u64,
+        network_id: &str,
+    ) -> Result<ResolvedConsensusMode, String> {
+        use crate::consensus::coordinated_round_robin::COORDINATED_ROUND_ROBIN_V1;
+
+        match self.mode.as_str() {
+            "posy_v2_2" => Ok(ResolvedConsensusMode::PosyV2_2),
+            COORDINATED_ROUND_ROBIN_V1 => Ok(ResolvedConsensusMode::CoordinatedRoundRobinV1(
+                self.coordinated_round_robin_config(chain_id, network_id)?,
+            )),
+            mode => Err(format!("unsupported consensus mode {mode}")),
+        }
+    }
+
+    /// Resolves the temporary mode only when configuration explicitly selects
+    /// it. The role runtime uses this typed value as its single dispatcher
+    /// boundary, preventing the existing PoSy worker from running alongside
+    /// coordinated mode.
+    pub fn coordinated_round_robin_config(
+        &self,
+        chain_id: u64,
+        network_id: &str,
+    ) -> Result<crate::consensus::coordinated_round_robin::CoordinatedRoundRobinConfig, String>
+    {
+        use crate::consensus::coordinated_round_robin::{
+            CoordinatedRoundRobinConfig, COORDINATED_ROUND_ROBIN_V1,
+        };
+
+        if self.mode != COORDINATED_ROUND_ROBIN_V1 {
+            return Err(format!(
+                "consensus mode {} is not {}",
+                self.mode, COORDINATED_ROUND_ROBIN_V1
+            ));
+        }
+        let mode = CoordinatedRoundRobinConfig {
+            chain_id,
+            network_id: network_id.to_string(),
+            consensus_version: self.mode.clone(),
+            coordinator_id: self.coordinator_id.clone(),
+            producer_ids: self.producer_ids.clone(),
+            target_block_interval_ms: self.target_block_time_ms,
+            producer_turn_timeout_ms: self.producer_turn_timeout_ms,
+        };
+        mode.validate()?;
+        Ok(mode)
+    }
 }
 
 fn default_target_block_time_ms() -> u64 {
@@ -385,6 +465,10 @@ impl Default for NodeConfig {
             },
             consensus: ConsensusConfig {
                 algorithm: default_consensus_protocol_version(),
+                mode: default_consensus_mode(),
+                coordinator_id: String::new(),
+                producer_ids: vec![],
+                producer_turn_timeout_ms: default_producer_turn_timeout_ms(),
                 block_time_secs: 2,
                 epoch_length: 1000,
                 target_block_time_ms: default_target_block_time_ms(),
@@ -2049,5 +2133,32 @@ validator_address = "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5"
 
         fs::remove_file(&config_path).ok();
         fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn coordinated_mode_requires_explicit_canonical_configuration() {
+        let mut consensus = NodeConfig::default().consensus;
+        consensus.mode =
+            crate::consensus::coordinated_round_robin::COORDINATED_ROUND_ROBIN_V1.to_string();
+        consensus.coordinator_id = "validator-1".to_string();
+        consensus.producer_ids = vec![
+            "validator-2".to_string(),
+            "validator-3".to_string(),
+            "validator-4".to_string(),
+            "validator-5".to_string(),
+            "validator-6".to_string(),
+        ];
+        let resolved = consensus
+            .resolve_mode(1266, "synergy-testnet-v3")
+            .expect("complete coordinated configuration should resolve");
+        match resolved {
+            ResolvedConsensusMode::CoordinatedRoundRobinV1(config) => {
+                assert_eq!(config.producer_turn_timeout_ms, 4_000);
+            }
+            ResolvedConsensusMode::PosyV2_2 => panic!("coordinated configuration resolved to PoSy"),
+        }
+
+        consensus.producer_ids.pop();
+        assert!(consensus.resolve_mode(1266, "synergy-testnet-v3").is_err());
     }
 }

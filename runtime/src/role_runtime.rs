@@ -10,6 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::config::{
     list_available_templates, load_node_config, load_node_config_from_template, NodeConfig,
+    ResolvedConsensusMode,
 };
 use crate::consensus::cartel_detection::{CartelDetectionEngine, WhistleblowerSystem};
 use crate::consensus::consensus_fork;
@@ -1610,6 +1611,22 @@ fn ensure_consensus_pqc_runtime_ready(config: &NodeConfig) -> Result<(), String>
             "validator consensus requires network_id synergy-testnet-v3, found {}",
             config.network.network_id
         ));
+    }
+    match config
+        .consensus
+        .resolve_mode(config.blockchain.chain_id, &config.network.network_id)?
+    {
+        ResolvedConsensusMode::PosyV2_2 => {}
+        ResolvedConsensusMode::CoordinatedRoundRobinV1(_) => {
+            // The coordinated worker is intentionally not routed through the
+            // typed PoSy constructor. Until its own runtime adapter is
+            // installed, fail closed rather than letting a coordinated
+            // configuration accidentally start proposal/QC/TC tasks.
+            return Err(
+                "coordinated_round_robin_v1 is selected but its runtime adapter is not installed; refusing to start typed PoSy alongside coordinated mode"
+                    .to_string(),
+            );
+        }
     }
     if config.consensus.allow_genesis_status_bypass {
         return Err("validator consensus refuses genesis status bypass configuration".to_string());
@@ -4678,6 +4695,25 @@ mod tests {
             .expect_err("validator without canonical record must fail preflight");
 
         assert!(error.contains("not present in finalized validator registry"));
+    }
+
+    #[test]
+    fn coordinated_mode_cannot_start_the_typed_posy_worker() {
+        let mut config = NodeConfig::default();
+        config.consensus.mode =
+            crate::consensus::coordinated_round_robin::COORDINATED_ROUND_ROBIN_V1.to_string();
+        config.consensus.coordinator_id = "validator-1".to_string();
+        config.consensus.producer_ids = vec![
+            "validator-2".to_string(),
+            "validator-3".to_string(),
+            "validator-4".to_string(),
+            "validator-5".to_string(),
+            "validator-6".to_string(),
+        ];
+
+        let error = ensure_consensus_pqc_runtime_ready(&config)
+            .expect_err("a coordinated configuration must never enter typed PoSy startup");
+        assert!(error.contains("refusing to start typed PoSy"));
     }
 
     #[test]
