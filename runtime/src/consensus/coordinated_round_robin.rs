@@ -8,14 +8,17 @@
 //! consensus keys, persisting this state before broadcast, and passing the
 //! canonical block execution result to this state machine.
 
+use crate::crypto::aegis_pqvm::{AegisPqvmVerifier, SYNERGY_BLOCK_V1};
 use crate::p2p::messages::{
-    validate_coordinated_consensus_message_size, CoordinatedConsensusMessage,
+    validate_coordinated_consensus_message_size, CoordinatedCommittedBlockPackage,
+    CoordinatedConsensusMessage,
 };
 use crate::synergy_types::{
-    AegisPqKeyId, AegisPqSignature, CanonicalSerialize, Hash, UmaId, ValidatorId,
+    AegisPqKeyId, AegisPqKeyRole, AegisPqSignature, Block as TypedBlock, CanonicalSerialize, Epoch,
+    Hash, UmaId, ValidatorId, ValidatorRecord, ValidatorSet,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -125,6 +128,243 @@ pub fn dispatch_coordinated_consensus_message(
         })
 }
 
+/// Verification authority built exclusively from the finalized active
+/// validator set.  It rejects a configuration that is not exactly Val1 as
+/// coordinator plus Val2--Val6 as producers, and it never derives identities
+/// from a P2P address, connection order, or an unverified message field.
+#[derive(Debug, Clone)]
+pub struct CoordinatedConsensusVerifier {
+    config: CoordinatedRoundRobinConfig,
+    active_validators: BTreeMap<String, ValidatorRecord>,
+    verifier: AegisPqvmVerifier,
+    epoch: Epoch,
+}
+
+impl CoordinatedConsensusVerifier {
+    pub fn new(
+        config: CoordinatedRoundRobinConfig,
+        validator_set: &ValidatorSet,
+        verifier: AegisPqvmVerifier,
+    ) -> Result<Self, String> {
+        config.validate()?;
+        let epoch = validator_set.epoch;
+        let active_set = validator_set.active_for_epoch(epoch);
+        active_set.validate_unique_validator_and_key_ids()?;
+        let configured = std::iter::once(config.coordinator_id.clone())
+            .chain(config.producer_ids.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        let active = active_set
+            .validators
+            .iter()
+            .map(|validator| validator.validator_id.0.clone())
+            .collect::<BTreeSet<_>>();
+        if configured != active {
+            return Err(
+                "coordinated mode must bind exactly the finalized active six-validator set"
+                    .to_string(),
+            );
+        }
+        if active_set.validators.len() != 6 {
+            return Err(
+                "coordinated mode requires exactly six active finalized validators".to_string(),
+            );
+        }
+        let active_validators = active_set
+            .validators
+            .into_iter()
+            .map(|validator| (validator.validator_id.0.clone(), validator))
+            .collect();
+        Ok(Self {
+            config,
+            active_validators,
+            verifier,
+            epoch,
+        })
+    }
+
+    pub fn config(&self) -> &CoordinatedRoundRobinConfig {
+        &self.config
+    }
+
+    pub fn epoch(&self) -> Epoch {
+        self.epoch
+    }
+
+    /// Checks that the TLS/P2P-session identity is exactly the finalized
+    /// validator identity and consensus key claimed by the peer.  Packet
+    /// content is verified separately so session authentication cannot be
+    /// substituted for a signature.
+    pub fn verify_authenticated_peer(
+        &self,
+        peer: &AuthenticatedCoordinatedConsensusPeer,
+    ) -> Result<(), String> {
+        let validator = self.validator(&peer.validator_id.0)?;
+        if validator.validator_uma_id != peer.validator_uma_id
+            || validator.consensus_public_key.key_id != peer.consensus_key_id
+        {
+            return Err(
+                "coordinated consensus peer identity does not match finalized validator keys"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Verifies Val1's signed producer assignment.  The signature covers the
+    /// exact chain, epoch, height, parent, ordered producer turn, and intended
+    /// timestamp through [`ProducerAssignment::signing_hash`].
+    pub fn verify_assignment(&self, assignment: &ProducerAssignment) -> Result<(), String> {
+        assignment.validate_shape(&self.config)?;
+        if assignment.epoch != self.epoch.0 {
+            return Err(
+                "coordinated assignment epoch does not match finalized validator set".to_string(),
+            );
+        }
+        let coordinator = self.validator(&self.config.coordinator_id)?;
+        self.verifier
+            .verify_domain_signature(
+                COORDINATED_ASSIGNMENT_DOMAIN,
+                &assignment.signing_hash()?.0,
+                &coordinator.validator_uma_id.0,
+                &coordinator.consensus_public_key.key_id,
+                self.epoch,
+                AegisPqKeyRole::ConsensusProposer,
+                &assignment.coordinator_signature,
+            )
+            .map_err(|error| format!("verify coordinated producer assignment: {error}"))
+    }
+
+    /// Verifies the producer's canonical block signature and every binding
+    /// between the signed Val1 assignment and the announced block.  It does
+    /// not perform execution; callers must execute deterministically before
+    /// accepting a coordinator commit.
+    pub fn verify_producer_block(
+        &self,
+        assignment: &ProducerAssignment,
+        proposal: &CoordinatedProposal,
+        block: &TypedBlock,
+    ) -> Result<(), String> {
+        self.verify_assignment(assignment)?;
+        proposal.validate_shape()?;
+        let producer = self.validator(&assignment.assigned_producer_id)?;
+        let block_hash = Hash::from_hex(&block.block_id()?.0)
+            .map_err(|error| format!("coordinated block ID is not a hash: {error}"))?;
+        if proposal.epoch != assignment.epoch
+            || proposal.height != assignment.height
+            || proposal.producer_round != assignment.producer_round
+            || proposal.parent_block_hash != assignment.parent_block_hash
+            || proposal.block_hash != block_hash
+            || proposal.producer_id != assignment.assigned_producer_id
+            || proposal.assignment_hash != assignment.signing_hash()?
+            || block.header.chain_id.0 != assignment.chain_id
+            || block.header.network_id.0 != assignment.network_id
+            || block.header.epoch.0 != assignment.epoch
+            || block.header.height.0 != assignment.height
+            || block.header.round.0 != assignment.producer_round
+            || block.header.parent_block_hash != assignment.parent_block_hash
+            || block.header.proposer_validator_id != producer.validator_id
+            || block.header.proposer_uma_id != producer.validator_uma_id
+            || block.header.proposer_key_id != producer.consensus_public_key.key_id
+            || block.header.tx_order_root != proposal.transaction_root
+            || block.header.receipt_root != proposal.receipt_root
+            || block.header.state_root_after != proposal.state_root
+            || block.proposer_signature != proposal.producer_signature
+        {
+            return Err(
+                "coordinated producer block does not match its signed assignment".to_string(),
+            );
+        }
+        self.verifier
+            .verify_domain_signature(
+                SYNERGY_BLOCK_V1,
+                &block.header.canonical_bytes()?,
+                &producer.validator_uma_id.0,
+                &producer.consensus_public_key.key_id,
+                self.epoch,
+                AegisPqKeyRole::ConsensusProposer,
+                &block.proposer_signature,
+            )
+            .map_err(|error| format!("verify coordinated producer block: {error}"))
+    }
+
+    /// Verifies Val1's sole coordinator commitment.  This is not a QC or a
+    /// certificate: it is one consensus-key signature over the fully bound,
+    /// already-executed producer block subject.
+    pub fn verify_commit(&self, commit: &CoordinatorCommit) -> Result<(), String> {
+        commit.validate_shape(&self.config)?;
+        if commit.epoch != self.epoch.0 {
+            return Err(
+                "coordinated commit epoch does not match finalized validator set".to_string(),
+            );
+        }
+        let coordinator = self.validator(&self.config.coordinator_id)?;
+        self.verifier
+            .verify_domain_signature(
+                COORDINATED_COMMIT_DOMAIN,
+                &commit.signing_hash()?.0,
+                &coordinator.validator_uma_id.0,
+                &coordinator.consensus_public_key.key_id,
+                self.epoch,
+                AegisPqKeyRole::ConsensusProposer,
+                &commit.coordinator_signature,
+            )
+            .map_err(|error| format!("verify coordinated coordinator commit: {error}"))
+    }
+
+    /// Verifies every cryptographic and structural binding in a relayable
+    /// finalized package.  Execution and durable storage remain separate,
+    /// mandatory steps performed by the runtime adapter.
+    pub fn verify_committed_block_package(
+        &self,
+        package: &CoordinatedCommittedBlockPackage,
+    ) -> Result<(), String> {
+        package.validate_against(&self.config)?;
+        self.verify_producer_block(&package.assignment, &package.proposal, &package.block)?;
+        self.verify_commit(&package.coordinator_commit)
+    }
+
+    /// Ensures the session identity is authorized to originate the wire item
+    /// that it sends. Finalized packages may be relayed by any authenticated
+    /// member of the six-validator set, but first-hop assignments, proposals,
+    /// and commits must originate from the accountable signer.
+    pub fn verify_message_sender(
+        &self,
+        peer: &AuthenticatedCoordinatedConsensusPeer,
+        message: &CoordinatedConsensusMessage,
+    ) -> Result<(), String> {
+        self.verify_authenticated_peer(peer)?;
+        let expected_signer = match message {
+            CoordinatedConsensusMessage::ProducerAssignment { assignment } => {
+                Some(&assignment.coordinator_id)
+            }
+            CoordinatedConsensusMessage::ProposedBlock { assignment, .. } => {
+                Some(&assignment.assigned_producer_id)
+            }
+            CoordinatedConsensusMessage::CoordinatorCommit { package } => {
+                Some(&package.coordinator_commit.coordinator_id)
+            }
+            CoordinatedConsensusMessage::GetCommittedBlock { .. }
+            | CoordinatedConsensusMessage::GetCommittedBlockRange { .. }
+            | CoordinatedConsensusMessage::CommittedBlock { .. }
+            | CoordinatedConsensusMessage::CommittedBlockRange { .. } => None,
+        };
+        if expected_signer.is_some_and(|validator_id| validator_id != &peer.validator_id.0) {
+            return Err(
+                "coordinated consensus message sender is not its accountable validator".to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    fn validator(&self, validator_id: &str) -> Result<&ValidatorRecord, String> {
+        self.active_validators.get(validator_id).ok_or_else(|| {
+            format!(
+                "coordinated consensus validator {validator_id} is not in the finalized active set"
+            )
+        })
+    }
+}
+
 /// Immutable configuration for the temporary testnet-only consensus mode.
 ///
 /// Identities are canonical validator identities, never peer addresses, DNS
@@ -214,6 +454,10 @@ pub struct ProducerAssignment {
     pub chain_id: u64,
     pub network_id: String,
     pub consensus_version: String,
+    /// The finalized consensus epoch whose canonical validator keys authorize
+    /// this assignment.  This prevents a valid prior-epoch assignment from
+    /// being replayed after a validator-set transition.
+    pub epoch: u64,
     pub height: u64,
     pub producer_round: u64,
     pub parent_block_hash: Hash,
@@ -230,6 +474,7 @@ impl ProducerAssignment {
             chain_id: self.chain_id,
             network_id: self.network_id.clone(),
             consensus_version: self.consensus_version.clone(),
+            epoch: self.epoch,
             height: self.height,
             producer_round: self.producer_round,
             parent_block_hash: self.parent_block_hash,
@@ -277,6 +522,7 @@ struct ProducerAssignmentPayload {
     chain_id: u64,
     network_id: String,
     consensus_version: String,
+    epoch: u64,
     height: u64,
     producer_round: u64,
     parent_block_hash: Hash,
@@ -292,6 +538,7 @@ struct ProducerAssignmentPayload {
 /// [`CoordinatorCommit`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CoordinatedProposal {
+    pub epoch: u64,
     pub height: u64,
     pub producer_round: u64,
     pub parent_block_hash: Hash,
@@ -327,6 +574,7 @@ pub struct CoordinatorCommit {
     pub chain_id: u64,
     pub network_id: String,
     pub consensus_version: String,
+    pub epoch: u64,
     pub height: u64,
     pub producer_round: u64,
     pub parent_block_hash: Hash,
@@ -346,6 +594,7 @@ impl CoordinatorCommit {
             chain_id: self.chain_id,
             network_id: self.network_id.clone(),
             consensus_version: self.consensus_version.clone(),
+            epoch: self.epoch,
             height: self.height,
             producer_round: self.producer_round,
             parent_block_hash: self.parent_block_hash,
@@ -396,6 +645,7 @@ struct CoordinatorCommitPayload {
     chain_id: u64,
     network_id: String,
     consensus_version: String,
+    epoch: u64,
     height: u64,
     producer_round: u64,
     parent_block_hash: Hash,
@@ -467,6 +717,7 @@ impl CoordinatorState {
     pub fn issue_assignment(
         &mut self,
         config: &CoordinatedRoundRobinConfig,
+        epoch: u64,
         intended_block_timestamp_ms: u64,
         coordinator_signature: AegisPqSignature,
     ) -> Result<ProducerAssignment, String> {
@@ -487,6 +738,7 @@ impl CoordinatorState {
             chain_id: config.chain_id,
             network_id: config.network_id.clone(),
             consensus_version: config.consensus_version.clone(),
+            epoch,
             height,
             producer_round: self.pending_round,
             parent_block_hash: self.last_finalized_block_hash,
@@ -551,7 +803,8 @@ impl CoordinatorState {
         }
         let assignment = self.current_assignment(config)?;
         let assignment_hash = assignment.signing_hash()?;
-        if proposal.height != assignment.height
+        if proposal.epoch != assignment.epoch
+            || proposal.height != assignment.height
             || proposal.producer_round != assignment.producer_round
             || proposal.parent_block_hash != assignment.parent_block_hash
             || proposal.producer_id != assignment.assigned_producer_id
@@ -573,6 +826,7 @@ impl CoordinatorState {
             chain_id: config.chain_id,
             network_id: config.network_id.clone(),
             consensus_version: config.consensus_version.clone(),
+            epoch: proposal.epoch,
             height: proposal.height,
             producer_round: proposal.producer_round,
             parent_block_hash: proposal.parent_block_hash,
@@ -605,7 +859,8 @@ impl CoordinatorState {
         }
         let assignment = self.current_assignment(config)?;
         let assignment_hash = assignment.signing_hash()?;
-        if commit.height != assignment.height
+        if commit.epoch != assignment.epoch
+            || commit.height != assignment.height
             || commit.producer_round != assignment.producer_round
             || commit.parent_block_hash != assignment.parent_block_hash
             || commit.producer_id != assignment.assigned_producer_id
@@ -824,6 +1079,8 @@ impl CoordinatorStateStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::aegis_pqvm::AegisPqvmSigner;
+    use crate::synergy_types::{AegisPqKeyRole, ClusterId, Epoch, ValidatorStatus};
     use std::env;
 
     fn hash(label: &str) -> Hash {
@@ -869,6 +1126,7 @@ mod tests {
                 chain_id: 1266,
                 network_id: "synergy-testnet-v3".to_string(),
                 consensus_version: COORDINATED_ROUND_ROBIN_V1.to_string(),
+                epoch: 0,
                 height: 1,
                 producer_round: 0,
                 parent_block_hash: hash("genesis"),
@@ -879,6 +1137,114 @@ mod tests {
                 coordinator_signature: signature("assignment"),
             },
         }
+    }
+
+    fn cryptographic_verifier_fixture() -> (
+        AegisPqvmSigner,
+        CoordinatedConsensusVerifier,
+        AegisPqKeyId,
+        AuthenticatedCoordinatedConsensusPeer,
+        AuthenticatedCoordinatedConsensusPeer,
+    ) {
+        let mut signer = AegisPqvmSigner::initialize_required().expect("Aegis signer");
+        let mut validators = Vec::new();
+        let mut coordinator_key_id = None;
+        let mut coordinator_peer = None;
+        let mut producer_peer = None;
+        for index in 1..=6 {
+            let validator_id = ValidatorId(format!("validator-{index}"));
+            let uma_id = UmaId(format!("uma-validator-{index}"));
+            let key_id = signer
+                .generate_and_register_key(
+                    &uma_id.0,
+                    vec![AegisPqKeyRole::ConsensusProposer],
+                    Epoch(0),
+                )
+                .expect("register test consensus key");
+            let public_key = signer
+                .public_key_record(&key_id)
+                .expect("registered public consensus key");
+            let peer = AuthenticatedCoordinatedConsensusPeer {
+                validator_id: validator_id.clone(),
+                validator_uma_id: uma_id.clone(),
+                consensus_key_id: key_id.clone(),
+            };
+            if index == 1 {
+                coordinator_key_id = Some(key_id.clone());
+                coordinator_peer = Some(peer.clone());
+            }
+            if index == 2 {
+                producer_peer = Some(peer.clone());
+            }
+            validators.push(ValidatorRecord {
+                validator_id,
+                validator_uma_id: uma_id,
+                consensus_public_key: public_key.clone(),
+                peer_public_key: public_key.clone(),
+                operator_public_key: public_key,
+                voting_weight: 1,
+                status: ValidatorStatus::Active,
+                cluster_id: ClusterId(0),
+                activation_epoch: Epoch(0),
+            });
+        }
+        let verifier = CoordinatedConsensusVerifier::new(
+            config(),
+            &ValidatorSet {
+                epoch: Epoch(0),
+                validators,
+            },
+            signer.verifier(),
+        )
+        .expect("coordinated verifier from canonical active set");
+        (
+            signer,
+            verifier,
+            coordinator_key_id.expect("coordinator key"),
+            coordinator_peer.expect("coordinator peer"),
+            producer_peer.expect("producer peer"),
+        )
+    }
+
+    #[test]
+    fn assignments_require_the_canonical_coordinator_key_and_epoch() {
+        let (mut signer, verifier, coordinator_key_id, coordinator_peer, producer_peer) =
+            cryptographic_verifier_fixture();
+        let CoordinatedConsensusMessage::ProducerAssignment { mut assignment } =
+            assignment_message()
+        else {
+            unreachable!("fixture creates an assignment")
+        };
+        assignment.coordinator_signature = signer
+            .sign_domain(
+                COORDINATED_ASSIGNMENT_DOMAIN,
+                &assignment.signing_hash().expect("assignment hash").0,
+                &coordinator_key_id,
+            )
+            .expect("sign assignment with Val1 consensus key");
+
+        verifier
+            .verify_assignment(&assignment)
+            .expect("Val1 assignment verifies against finalized keys");
+        verifier
+            .verify_message_sender(
+                &coordinator_peer,
+                &CoordinatedConsensusMessage::ProducerAssignment {
+                    assignment: assignment.clone(),
+                },
+            )
+            .expect("Val1 is the accountable assignment sender");
+        assert!(verifier
+            .verify_message_sender(
+                &producer_peer,
+                &CoordinatedConsensusMessage::ProducerAssignment {
+                    assignment: assignment.clone(),
+                },
+            )
+            .is_err());
+
+        assignment.epoch = 1;
+        assert!(verifier.verify_assignment(&assignment).is_err());
     }
 
     #[test]
@@ -924,9 +1290,10 @@ mod tests {
         block: &str,
     ) -> CoordinatorCommit {
         let assignment = state
-            .issue_assignment(config, 1_000, signature("assignment"))
+            .issue_assignment(config, 0, 1_000, signature("assignment"))
             .expect("assignment should issue");
         let proposal = CoordinatedProposal {
+            epoch: assignment.epoch,
             height: assignment.height,
             producer_round: assignment.producer_round,
             parent_block_hash: assignment.parent_block_hash,
@@ -979,7 +1346,7 @@ mod tests {
         let config = config();
         let mut state = CoordinatorState::new(99, hash("parent"));
         let first = state
-            .issue_assignment(&config, 100, signature("assignment-1"))
+            .issue_assignment(&config, 0, 100, signature("assignment-1"))
             .expect("first assignment");
         assert_eq!(first.height, 100);
         assert_eq!(first.assigned_producer_id, "validator-2");
@@ -989,13 +1356,14 @@ mod tests {
         assert_eq!(missed.height, 100);
         assert_eq!(state.last_finalized_height, 99);
         let replacement = state
-            .issue_assignment(&config, 200, signature("assignment-2"))
+            .issue_assignment(&config, 0, 200, signature("assignment-2"))
             .expect("replacement assignment");
         assert_eq!(replacement.height, 100);
         assert_eq!(replacement.producer_round, 1);
         assert_eq!(replacement.assigned_producer_id, "validator-3");
 
         let proposal = CoordinatedProposal {
+            epoch: replacement.epoch,
             height: replacement.height,
             producer_round: replacement.producer_round,
             parent_block_hash: replacement.parent_block_hash,
@@ -1014,7 +1382,7 @@ mod tests {
             .record_commit(&config, commit)
             .expect("replacement commit records");
         let next = state
-            .issue_assignment(&config, 300, signature("assignment-3"))
+            .issue_assignment(&config, 0, 300, signature("assignment-3"))
             .expect("next assignment");
         assert_eq!(next.height, 101);
         assert_eq!(next.assigned_producer_id, "validator-4");
@@ -1039,15 +1407,16 @@ mod tests {
         let config = config();
         let mut state = CoordinatorState::new(20, hash("parent"));
         let stale = state
-            .issue_assignment(&config, 100, signature("assignment-1"))
+            .issue_assignment(&config, 0, 100, signature("assignment-1"))
             .expect("assignment issues");
         state
             .mark_producer_turn_missed(&config, "producer offline")
             .expect("turn can be missed");
         let _replacement = state
-            .issue_assignment(&config, 200, signature("assignment-2"))
+            .issue_assignment(&config, 0, 200, signature("assignment-2"))
             .expect("replacement issues");
         let stale_proposal = CoordinatedProposal {
+            epoch: stale.epoch,
             height: stale.height,
             producer_round: stale.producer_round,
             parent_block_hash: stale.parent_block_hash,
@@ -1079,7 +1448,7 @@ mod tests {
         let store = CoordinatorStateStore::at_path(&path).expect("store path");
         let mut state = CoordinatorState::new(40, hash("parent"));
         let assignment = state
-            .issue_assignment(&config, 123, signature("assignment"))
+            .issue_assignment(&config, 0, 123, signature("assignment"))
             .expect("assignment issues");
         store.persist(&config, &state).expect("state persists");
         let recovered = store

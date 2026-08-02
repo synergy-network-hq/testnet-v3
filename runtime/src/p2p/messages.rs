@@ -165,7 +165,8 @@ impl CoordinatedCommittedBlockPackage {
         let assignment_hash = self.assignment.signing_hash()?;
         let block_hash = Hash::from_hex(&self.block.block_id()?.0)
             .map_err(|error| format!("coordinated package block ID is not a hash: {error}"))?;
-        if self.block.header.height.0 != self.assignment.height
+        if self.block.header.epoch.0 != self.assignment.epoch
+            || self.block.header.height.0 != self.assignment.height
             || self.block.header.round.0 != self.assignment.producer_round
             || self.block.header.parent_block_hash != self.assignment.parent_block_hash
             || self.block.header.proposer_validator_id.0 != self.assignment.assigned_producer_id
@@ -177,7 +178,8 @@ impl CoordinatedCommittedBlockPackage {
                 "coordinated package block does not match its producer assignment".to_string(),
             );
         }
-        if self.proposal.height != self.assignment.height
+        if self.proposal.epoch != self.assignment.epoch
+            || self.proposal.height != self.assignment.height
             || self.proposal.producer_round != self.assignment.producer_round
             || self.proposal.parent_block_hash != self.assignment.parent_block_hash
             || self.proposal.block_hash != block_hash
@@ -188,7 +190,8 @@ impl CoordinatedCommittedBlockPackage {
                 "coordinated package proposal does not match its assignment and block".to_string(),
             );
         }
-        if self.coordinator_commit.height != self.proposal.height
+        if self.coordinator_commit.epoch != self.proposal.epoch
+            || self.coordinator_commit.height != self.proposal.height
             || self.coordinator_commit.producer_round != self.proposal.producer_round
             || self.coordinator_commit.parent_block_hash != self.proposal.parent_block_hash
             || self.coordinator_commit.block_hash != self.proposal.block_hash
@@ -610,6 +613,7 @@ mod tests {
             network_id: "synergy-testnet-v3".to_string(),
             consensus_version:
                 crate::consensus::coordinated_round_robin::COORDINATED_ROUND_ROBIN_V1.to_string(),
+            epoch: 0,
             height: 1,
             producer_round: 0,
             parent_block_hash: Hash::zero(),
@@ -660,6 +664,7 @@ mod tests {
             network_id: "synergy-testnet-v3".to_string(),
             consensus_version:
                 crate::consensus::coordinated_round_robin::COORDINATED_ROUND_ROBIN_V1.to_string(),
+            epoch: 0,
             height: 1,
             producer_round: 0,
             parent_block_hash: Hash::zero(),
