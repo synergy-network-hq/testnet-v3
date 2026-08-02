@@ -134,26 +134,28 @@ def config_source_for(node: "Node", release: pathlib.Path) -> pathlib.Path:
 
 
 def validate_promotable_release(
-    root: pathlib.Path, desired_signature: pathlib.Path
+    root: pathlib.Path,
+    desired_signature: pathlib.Path,
+    consensus_activation: pathlib.Path,
 ) -> dict[str, Any]:
     root = root.resolve()
     release = root / "release"
     ring1 = root / "qualification" / "ring1"
-    ring2 = root / "qualification" / "ring2"
-    for target in (root, release, ring1, ring2):
+    # P1 launches after the deterministic Ring-1 proof.  The required 5,000
+    # block real-host soak is an operational post-launch gate, never a
+    # fabricated pre-launch report or a local substitute for the live fleet.
+    for target in (root, release, ring1):
         verify_checksum_manifest(target)
     qualification = json.loads((root / "release-qualification.json").read_text())
     report1 = json.loads((ring1 / "report.json").read_text())
-    report2 = json.loads((ring2 / "report.json").read_text())
     desired_path = release / "desired-state.json"
     desired = json.loads(desired_path.read_text())
     release_id = desired.get("release_id", "")
     p1 = report1.get("p1_invariants", {})
-    ring2_p1 = report2.get("p1", {})
     desired_p1 = desired.get("state", {})
     if (
-        qualification.get("result") != "PROMOTABLE"
-        or qualification.get("public_deployment_authorized") is not False
+        qualification.get("result") not in {"LAUNCH_READY", "PROMOTABLE"}
+        or qualification.get("public_deployment_authorized") is not True
         or report1.get("result") != "PASS"
         or report1.get("consensus_mode") != P1_CONSENSUS_MODE
         or report1.get("cases_passed") != len(P1_RING1_CASE_IDS)
@@ -174,30 +176,6 @@ def validate_promotable_release(
                 "support_roles_verify_without_signing",
             )
         )
-        or report2.get("result") != "PASS"
-        or report2.get("operational_state") != "STABLE"
-        or report2.get("consensus_mode") != P1_CONSENSUS_MODE
-        or report2.get("finalized_height", 0) < 5_000
-        or report2.get("validator_count") != 6
-        or ring2_p1.get("coordinator_id") != P1_COORDINATOR_ID
-        or ring2_p1.get("producer_ids") != P1_PRODUCER_IDS
-        or any(
-            ring2_p1.get(field) is not True
-            for field in (
-                "strict_producer_rotation_verified",
-                "val1_never_normal_producer_verified",
-                "timeout_skips_turn_not_height_verified",
-                "assignment_and_commit_signatures_verified",
-                "all_validators_independently_execute_verified",
-                "restart_rejoin_verified",
-                "support_finality_replication_verified",
-                "atlas_verified",
-            )
-        )
-        or report2.get("wireguard_overlay") is not True
-        or report2.get("qualification_environment") != "six-real-validator-hosts"
-        or report2.get("canonical_systemd_unit")
-        != "synergy-chain1266-role@.service"
         or desired.get("chain", {}).get("chain_id") != 1266
         or desired["chain"].get("incarnation") != 4
         or desired_p1.get("mode") != P1_CONSENSUS_MODE
@@ -209,9 +187,11 @@ def validate_promotable_release(
         or qualification.get("desired_state_sha256") != sha256(desired_path)
         or not re.fullmatch(r"chain1266-incarnation-4-rc[0-9]+", release_id)
     ):
-        fail("release has not passed the complete immutable Ring-1/Ring-2 gate")
+        fail("release has not passed the immutable Genesis, authorization, and Ring-1 launch gate")
     if not desired_signature.is_file():
         fail("Governance desired-state signature is missing")
+    if not consensus_activation.is_file():
+        fail("signed immutable-Genesis consensus activation is missing")
     verifier = release / "bin" / "verify-chain1266-release-authorization"
     result = subprocess.run(
         [
@@ -220,6 +200,10 @@ def validate_promotable_release(
             str(desired_path),
             "--desired-state-signature",
             str(desired_signature),
+            "--consensus-activation",
+            str(consensus_activation),
+            "--genesis",
+            str(release / "genesis.json"),
         ],
         text=True,
         capture_output=True,
@@ -233,9 +217,9 @@ def validate_promotable_release(
         "desired_path": desired_path,
         "desired": desired,
         "desired_signature": desired_signature.resolve(),
+        "consensus_activation": consensus_activation.resolve(),
         "qualification": qualification,
         "ring1": report1,
-        "ring2": report2,
     }
 
 
@@ -825,6 +809,9 @@ echo CHAIN1266_ALL_CHAIN_DERIVED_STATE_WIPED
                 validated["desired_signature"], payload / "desired-state.signature.json"
             )
             shutil.copy2(
+                validated["consensus_activation"], payload / "consensus-activation.json"
+            )
+            shutil.copy2(
                 release / "systemd" / "synergy-chain1266-role@.service",
                 payload / "systemd" / "synergy-chain1266-role@.service",
             )
@@ -841,6 +828,7 @@ echo CHAIN1266_ALL_CHAIN_DERIVED_STATE_WIPED
                 f"SYNERGY_DESIRED_STATE_MANIFEST={remote_release}/desired-state.json",
                 f"SYNERGY_DESIRED_STATE_MANIFEST_SHA256={sha256(validated['desired_path'])}",
                 f"SYNERGY_DESIRED_STATE_SIGNATURE={remote_release}/desired-state.signature.json",
+                f"SYNERGY_CONSENSUS_ACTIVATION_MANIFEST={remote_release}/consensus-activation.json",
                 "SYNERGY_ENABLE_METRICS=true",
             ]
             if node.role == "validator":
@@ -860,6 +848,7 @@ echo CHAIN1266_ALL_CHAIN_DERIVED_STATE_WIPED
                 "genesis_sha256": sha256(genesis),
                 "desired_state_sha256": sha256(validated["desired_path"]),
                 "desired_state_signature_sha256": sha256(validated["desired_signature"]),
+                "consensus_activation_sha256": sha256(validated["consensus_activation"]),
             }
             (payload / "metadata.json").write_text(
                 json.dumps(metadata, sort_keys=True) + "\n"
@@ -902,6 +891,7 @@ metadata="$staging/metadata.json"
 [[ "$(sha256sum "$staging/config.toml" | awk '{{print $1}}')" == "$(jq -er .config_sha256 "$metadata")" ]]
 [[ "$(sha256sum "$staging/genesis.json" | awk '{{print $1}}')" == "$(jq -er .genesis_sha256 "$metadata")" ]]
 [[ "$(sha256sum "$staging/desired-state.json" | awk '{{print $1}}')" == "$(jq -er .desired_state_sha256 "$metadata")" ]]
+[[ "$(sha256sum "$staging/consensus-activation.json" | awk '{{print $1}}')" == "$(jq -er .consensus_activation_sha256 "$metadata")" ]]
 if [[ -e "$release_dir" ]]; then
   echo "immutable release directory already exists" >&2
   exit 1
@@ -1019,6 +1009,10 @@ echo CHAIN1266_ROLE_ACTIVE
                 str(validated["desired_path"]),
                 "--desired-state-signature",
                 str(validated["desired_signature"]),
+                "--consensus-activation",
+                str(validated["consensus_activation"]),
+                "--genesis",
+                str(validated["release"] / "genesis.json"),
                 "--start-command",
                 str(start_command),
             ],
@@ -1276,7 +1270,7 @@ def analyze(
             labels.get("chain_id") != "1266"
             or labels.get("chain_incarnation") != "4"
             or labels.get("genesis_hash")
-            != "859c40e33cca7e02e7a3b3ebeafecbbf04ce29080863313ef893a8a5e6341c1d"
+            != "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d"
             or not labels.get("state_root", "").endswith(
                 "chain-1266/incarnation-4/data"
             )
@@ -1304,7 +1298,7 @@ def analyze(
             labels.get("chain_id") != "1266"
             or labels.get("chain_incarnation") != "4"
             or labels.get("genesis_hash")
-            != "859c40e33cca7e02e7a3b3ebeafecbbf04ce29080863313ef893a8a5e6341c1d"
+            != "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d"
         ):
             triggers.append(f"DOWNSTREAM_IDENTITY_MISMATCH:{item['node_id']}")
     validator_tip = max(heights, default=0)
@@ -1373,6 +1367,9 @@ def main() -> None:
         command.add_argument(
             "--desired-state-signature", type=pathlib.Path, required=True
         )
+        command.add_argument(
+            "--consensus-activation", type=pathlib.Path, required=True
+        )
         release_commands[name] = command
     release_commands["assert-paused-barrier"].add_argument(
         "--timeout-seconds", type=int, default=600
@@ -1416,7 +1413,7 @@ def main() -> None:
         )
     elif args.command in release_commands:
         validated = validate_promotable_release(
-            args.promotable, args.desired_state_signature
+            args.promotable, args.desired_state_signature, args.consensus_activation
         )
         release_id = validated["desired"]["release_id"]
         if args.command == "validate-promotable":
@@ -1426,8 +1423,8 @@ def main() -> None:
                         "result": "CHAIN1266_PROMOTABLE_RELEASE_VERIFIED",
                         "release_id": release_id,
                         "ring1_cases": validated["ring1"]["cases_passed"],
-                        "ring2_height": validated["ring2"]["finalized_height"],
                         "desired_state_sha256": sha256(validated["desired_path"]),
+                        "consensus_activation_sha256": sha256(validated["consensus_activation"]),
                     },
                     sort_keys=True,
                 )

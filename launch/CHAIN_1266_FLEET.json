@@ -2,7 +2,7 @@
   "schema_version": 1,
   "chain_id": 1266,
   "chain_incarnation": 4,
-  "genesis_hash": "859c40e33cca7e02e7a3b3ebeafecbbf04ce29080863313ef893a8a5e6341c1d",
+  "genesis_hash": "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",
   "stall_log": "CHAIN_1266_STALL_LOG.md",
   "wipe_roots": {
     "validator-node-01": ["/var/lib/synergy/validator/data", "/var/lib/synergy/validator/chain-1266/incarnation-4/data"],
@@ -24,7 +24,7 @@
     "batch_mode": true,
     "connect_timeout_seconds": 8,
     "control_persist_seconds": 900,
-    "control_path": "/tmp/synergy-chain1266-control-%C"
+    "control_path": "/tmp/synergy-chain1266-fleet-%C"
   },
   "nodes": [
     {
