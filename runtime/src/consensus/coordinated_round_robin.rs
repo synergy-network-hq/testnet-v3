@@ -888,10 +888,13 @@ impl CoordinatorState {
         let skipped_turns = assignment.producer_round.saturating_sub(pending_round);
         let skipped_turns_usize = usize::try_from(skipped_turns)
             .map_err(|_| "coordinated skipped producer-round count exceeds usize".to_string())?;
-        let expected_sequence = self
-            .assignment_sequence
-            .saturating_add(skipped_turns)
-            .saturating_add(1);
+        let expected_sequence = if self.pending_assignment.is_some() {
+            self.assignment_sequence.saturating_add(skipped_turns)
+        } else {
+            self.assignment_sequence
+                .saturating_add(skipped_turns)
+                .saturating_add(1)
+        };
         if assignment.assignment_sequence != expected_sequence {
             return Err(
                 "coordinated assignment sequence does not account for skipped producer turns"
@@ -1524,15 +1527,11 @@ mod tests {
         remove_coordinated_consensus_ingress().expect("remove mailbox");
     }
 
-    fn commit_current(
-        state: &mut CoordinatorState,
-        config: &CoordinatedRoundRobinConfig,
+    fn proposal_for_assignment(
+        assignment: &ProducerAssignment,
         block: &str,
-    ) -> CoordinatorCommit {
-        let assignment = state
-            .issue_assignment(config, 0, 1_000, signature("assignment"))
-            .expect("assignment should issue");
-        let proposal = CoordinatedProposal {
+    ) -> CoordinatedProposal {
+        CoordinatedProposal {
             epoch: assignment.epoch,
             height: assignment.height,
             producer_round: assignment.producer_round,
@@ -1547,7 +1546,18 @@ mod tests {
             producer_id: assignment.assigned_producer_id.clone(),
             assignment_hash: assignment.signing_hash().expect("assignment hashes"),
             producer_signature: signature("producer"),
-        };
+        }
+    }
+
+    fn commit_current(
+        state: &mut CoordinatorState,
+        config: &CoordinatedRoundRobinConfig,
+        block: &str,
+    ) -> CoordinatorCommit {
+        let assignment = state
+            .issue_assignment(config, 0, 1_000, signature("assignment"))
+            .expect("assignment should issue");
+        let proposal = proposal_for_assignment(&assignment, block);
         let commit = state
             .prepare_commit(config, &proposal, signature("commit"))
             .expect("commit should prepare");
@@ -1655,6 +1665,108 @@ mod tests {
         assert_eq!(lagging.pending_assignment, Some(replacement));
         assert_eq!(lagging.producer_cursor, 1);
         assert!(lagging.missed_turns.is_empty());
+    }
+
+    #[test]
+    fn follower_installs_timeout_replacement_after_initial_assignment() {
+        let config = config();
+        let mut coordinator = CoordinatorState::new(99, hash("parent"));
+        let first = coordinator
+            .issue_assignment(&config, 0, 100, signature("assignment-1"))
+            .expect("first assignment");
+        let mut follower = CoordinatorState::new(99, hash("parent"));
+        follower
+            .install_verified_assignment(&config, &first)
+            .expect("follower installs initial assignment");
+
+        coordinator
+            .mark_producer_turn_missed(&config, "timeout")
+            .expect("coordinator records missed turn");
+        let replacement = coordinator
+            .issue_assignment(&config, 0, 200, signature("assignment-2"))
+            .expect("replacement assignment");
+        follower
+            .install_verified_assignment(&config, &replacement)
+            .expect("follower installs timeout replacement");
+
+        assert_eq!(
+            (
+                follower.pending_assignment.as_ref(),
+                follower.producer_cursor,
+                follower.assignment_sequence,
+            ),
+            (Some(&replacement), 1, 2)
+        );
+    }
+
+    #[test]
+    fn recovered_follower_installs_high_round_assignment() {
+        let config = config();
+        let mut coordinator = CoordinatorState::new(99, hash("parent"));
+        let first = coordinator
+            .issue_assignment(&config, 0, 100, signature("assignment-1"))
+            .expect("first assignment");
+        let first_proposal = proposal_for_assignment(&first, "height-100");
+        let first_commit = coordinator
+            .prepare_commit(&config, &first_proposal, signature("commit-1"))
+            .expect("first commit prepares");
+        coordinator
+            .record_commit(&config, first_commit.clone())
+            .expect("first commit records");
+
+        let mut follower = CoordinatorState::new(99, hash("parent"));
+        follower
+            .install_verified_assignment(&config, &first)
+            .expect("follower installs first assignment");
+        follower
+            .record_commit(&config, first_commit)
+            .expect("follower records first commit");
+        let unique = format!(
+            "synergy-coordinated-recovered-follower-{}-{}.json",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        );
+        let path = env::temp_dir().join(unique);
+        let store = CoordinatorStateStore::at_path(&path).expect("store path");
+        store
+            .persist(&config, &follower)
+            .expect("follower state persists");
+        let mut recovered = store
+            .load(&config)
+            .expect("follower state reloads")
+            .expect("follower state exists");
+
+        coordinator
+            .issue_assignment(&config, 0, 200, signature("assignment-2"))
+            .expect("next-height initial assignment");
+        coordinator
+            .mark_producer_turn_missed(&config, "timeout-1")
+            .expect("first next-height turn is missed");
+        coordinator
+            .issue_assignment(&config, 0, 300, signature("assignment-3"))
+            .expect("first replacement assignment");
+        coordinator
+            .mark_producer_turn_missed(&config, "timeout-2")
+            .expect("replacement turn is missed");
+        let high_round = coordinator
+            .issue_assignment(&config, 0, 400, signature("assignment-4"))
+            .expect("high-round replacement assignment");
+        recovered
+            .install_verified_assignment(&config, &high_round)
+            .expect("recovered follower installs high-round assignment");
+
+        assert_eq!(
+            (
+                recovered.pending_assignment.as_ref(),
+                recovered.producer_cursor,
+                recovered.assignment_sequence,
+            ),
+            (Some(&high_round), 3, 4)
+        );
+        let _ = fs::remove_file(path);
     }
 
     #[test]

@@ -56,6 +56,11 @@ fi
   exit 1
 }
 
+# RPC and other in-process consumers reload the active node configuration via
+# SYNERGY_CONFIG_PATH after startup. Keep those reads bound to the same
+# role-specific file that passed desired-state verification above.
+export SYNERGY_CONFIG_PATH="$CHAIN1266_ROLE_CONFIG"
+
 command=("$CHAIN1266_ROLE_BINARY" start --config "$CHAIN1266_ROLE_CONFIG")
 if [[ -n "${CHAIN1266_NETWORK_NAMESPACE:-}" ]]; then
   [[ "$CHAIN1266_NETWORK_NAMESPACE" =~ ^[A-Za-z0-9_.-]+$ ]] || {
