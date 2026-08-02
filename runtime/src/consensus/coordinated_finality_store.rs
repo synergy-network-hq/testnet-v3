@@ -111,6 +111,52 @@ impl CoordinatedFinalityStore {
         Ok(self.load_state(config)?.records.into_iter().last())
     }
 
+    /// Returns the exact durable finalized package at one height. This is a
+    /// read-only synchronization surface; callers still authenticate peers and
+    /// enforce their own bounded request policy before responding.
+    pub fn at_height(
+        &self,
+        config: &CoordinatedRoundRobinConfig,
+        height: Height,
+    ) -> Result<Option<CoordinatedFinalityRecord>, String> {
+        Ok(self
+            .load_state(config)?
+            .records
+            .into_iter()
+            .find(|record| record.height == height))
+    }
+
+    /// Returns a bounded, consecutive finalized segment for catch-up. The
+    /// store never fills a gap or silently truncates a requested continuation.
+    pub fn range(
+        &self,
+        config: &CoordinatedRoundRobinConfig,
+        start_height: Height,
+        end_height: Height,
+        maximum_records: usize,
+    ) -> Result<Vec<CoordinatedFinalityRecord>, String> {
+        if start_height.0 == 0 || end_height.0 < start_height.0 || maximum_records == 0 {
+            return Err("coordinated finality range request is invalid".to_string());
+        }
+        let requested = end_height
+            .0
+            .saturating_sub(start_height.0)
+            .saturating_add(1);
+        if requested > u64::try_from(maximum_records).unwrap_or(u64::MAX) {
+            return Err("coordinated finality range exceeds its configured bound".to_string());
+        }
+        let records = self
+            .load_state(config)?
+            .records
+            .into_iter()
+            .filter(|record| record.height.0 >= start_height.0 && record.height.0 <= end_height.0)
+            .collect::<Vec<_>>();
+        if records.len() != usize::try_from(requested).unwrap_or(usize::MAX) {
+            return Err("coordinated finality range is not fully available".to_string());
+        }
+        Ok(records)
+    }
+
     /// Writes an independently verified and executed package.  It is
     /// idempotent only for the exact already-persisted record; an alternate
     /// block, commit, or state root at any height fails closed.

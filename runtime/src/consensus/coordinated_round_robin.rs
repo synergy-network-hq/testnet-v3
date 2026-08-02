@@ -820,6 +820,74 @@ impl CoordinatorState {
         Ok(assignment)
     }
 
+    /// Installs a coordinator-signed assignment received from the network.
+    /// A validator may have missed one or more timeout replacement rounds, so
+    /// this derives the skipped producer cursor from the signed round and
+    /// sequence rather than requiring a local copy of each superseded
+    /// assignment. It never fabricates a missed-turn event or a signature.
+    pub fn install_verified_assignment(
+        &mut self,
+        config: &CoordinatedRoundRobinConfig,
+        assignment: &ProducerAssignment,
+    ) -> Result<(), String> {
+        config.validate()?;
+        assignment.validate_shape(config)?;
+        if assignment.height != self.next_height()
+            || assignment.parent_block_hash != self.last_finalized_block_hash
+            || assignment.prior_finality_reference != self.last_finality_reference
+        {
+            return Err(
+                "coordinated assignment does not extend the local finalized state".to_string(),
+            );
+        }
+        if let Some(pending) = self.pending_assignment.as_ref() {
+            if pending == assignment {
+                return Ok(());
+            }
+            if assignment.height != pending.height {
+                return Err("coordinated assignment conflicts with the pending height".to_string());
+            }
+        }
+        let pending_round = self
+            .pending_assignment
+            .as_ref()
+            .map(|pending| pending.producer_round)
+            .unwrap_or(self.pending_round);
+        if assignment.producer_round < pending_round {
+            return Err("coordinated assignment regresses the producer round".to_string());
+        }
+        let skipped_turns = assignment.producer_round.saturating_sub(pending_round);
+        let skipped_turns_usize = usize::try_from(skipped_turns)
+            .map_err(|_| "coordinated skipped producer-round count exceeds usize".to_string())?;
+        let expected_sequence = self
+            .assignment_sequence
+            .saturating_add(skipped_turns)
+            .saturating_add(1);
+        if assignment.assignment_sequence != expected_sequence {
+            return Err(
+                "coordinated assignment sequence does not account for skipped producer turns"
+                    .to_string(),
+            );
+        }
+        let expected_cursor =
+            (self.producer_cursor + skipped_turns_usize) % config.producer_ids.len();
+        if assignment.assigned_producer_id != config.producer_at(expected_cursor)? {
+            return Err(
+                "coordinated assignment producer does not match the persistent rotation cursor"
+                    .to_string(),
+            );
+        }
+        self.pending_height = Some(assignment.height);
+        self.pending_round = assignment.producer_round;
+        self.pending_producer_id = Some(assignment.assigned_producer_id.clone());
+        self.producer_cursor = expected_cursor;
+        self.pending_assignment_hash = Some(assignment.signing_hash()?);
+        self.pending_assignment = Some(assignment.clone());
+        self.committed_block_hash_for_pending_height = None;
+        self.assignment_sequence = assignment.assignment_sequence;
+        Ok(())
+    }
+
     /// Returns the exact next assignment subject before it is signed.  The
     /// timestamp is supplied by the deterministic block-context provider, not
     /// by a wall clock, so a restart can recover the same durable subject.
@@ -1212,6 +1280,9 @@ mod tests {
     use crate::crypto::aegis_pqvm::AegisPqvmSigner;
     use crate::synergy_types::{AegisPqKeyRole, ClusterId, Epoch, ValidatorStatus};
     use std::env;
+    use std::sync::{Mutex, OnceLock};
+
+    static COORDINATED_INGRESS_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     fn hash(label: &str) -> Hash {
         Hash::from_domain_bytes("COORDINATED_ROUND_ROBIN_TEST", label.as_bytes())
@@ -1380,6 +1451,10 @@ mod tests {
 
     #[test]
     fn coordinated_messages_fail_closed_without_a_running_worker() {
+        let _guard = COORDINATED_INGRESS_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("coordinated ingress test lock");
         let _ = remove_coordinated_consensus_ingress();
         let error = dispatch_coordinated_consensus_message(
             "validator-2-peer",
@@ -1392,6 +1467,10 @@ mod tests {
 
     #[test]
     fn coordinated_messages_require_an_authenticated_session_and_dedicated_mailbox() {
+        let _guard = COORDINATED_INGRESS_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("coordinated ingress test lock");
         let _ = remove_coordinated_consensus_ingress();
         let receiver = install_coordinated_consensus_ingress(1).expect("install mailbox");
         let unauthenticated =
@@ -1519,6 +1598,29 @@ mod tests {
             .expect("next assignment");
         assert_eq!(next.height, 101);
         assert_eq!(next.assigned_producer_id, "validator-4");
+    }
+
+    #[test]
+    fn lagging_validator_reconstructs_a_signed_replacement_assignment() {
+        let config = config();
+        let mut coordinator = CoordinatorState::new(99, hash("parent"));
+        coordinator
+            .issue_assignment(&config, 0, 100, signature("assignment-1"))
+            .expect("first assignment");
+        coordinator
+            .mark_producer_turn_missed(&config, "timeout")
+            .expect("coordinator records missed turn");
+        let replacement = coordinator
+            .issue_assignment(&config, 0, 200, signature("assignment-2"))
+            .expect("signed replacement assignment");
+
+        let mut lagging = CoordinatorState::new(99, hash("parent"));
+        lagging
+            .install_verified_assignment(&config, &replacement)
+            .expect("signed replacement supplies enough cursor state for catch-up");
+        assert_eq!(lagging.pending_assignment, Some(replacement));
+        assert_eq!(lagging.producer_cursor, 1);
+        assert!(lagging.missed_turns.is_empty());
     }
 
     #[test]

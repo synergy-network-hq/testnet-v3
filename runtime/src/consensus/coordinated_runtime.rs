@@ -9,16 +9,19 @@ use crate::consensus::coordinated_finality_store::{
     CoordinatedFinalityRecord, CoordinatedFinalityStore,
 };
 use crate::consensus::coordinated_round_robin::{
-    CoordinatedConsensusVerifier, CoordinatedProposal, CoordinatedRoundRobinConfig,
-    CoordinatorCommit, CoordinatorState, CoordinatorStateStore, ProducerAssignment,
-    COORDINATED_ASSIGNMENT_DOMAIN, COORDINATED_COMMIT_DOMAIN,
+    AuthenticatedCoordinatedConsensusPeer, CoordinatedConsensusVerifier, CoordinatedProposal,
+    CoordinatedRoundRobinConfig, CoordinatorCommit, CoordinatorState, CoordinatorStateStore,
+    ProducerAssignment, COORDINATED_ASSIGNMENT_DOMAIN, COORDINATED_COMMIT_DOMAIN,
 };
 use crate::consensus::signing_authority::{
     CoordinatedSigningAuthorization, CoordinatedSigningPhase, DurableConsensusSigningAuthority,
 };
 use crate::crypto::aegis_pqvm::AegisPqvmSigner;
 use crate::execution::{compute_state_root_after, execute_block, ExecutionState};
-use crate::p2p::messages::CoordinatedCommittedBlockPackage;
+use crate::p2p::messages::{
+    CoordinatedCommittedBlockPackage, CoordinatedConsensusMessage,
+    MAX_COORDINATED_CONSENSUS_SYNC_RANGE_BLOCKS,
+};
 use crate::synergy_types::{
     AegisPqKeyId, Block, ChainId, Epoch, Hash, Height, NetworkId, Round, ValidatorId, ValidatorSet,
 };
@@ -28,6 +31,16 @@ use crate::synergy_types::{
 pub struct CoordinatedRuntimeFinality {
     pub record: CoordinatedFinalityRecord,
     pub block_hash: Hash,
+}
+
+/// The caller owns transport egress; this runtime core owns only the exact
+/// authenticated response or broadcast artifact. It deliberately returns no
+/// vote, QC, VC, TC, or aggregation artifact because none exist in this mode.
+#[derive(Debug, Clone)]
+pub enum CoordinatedRuntimeAction {
+    None,
+    BroadcastCommitted(CoordinatedCommittedBlockPackage),
+    Respond(CoordinatedConsensusMessage),
 }
 
 /// A no-QC, no-vote consensus lifecycle.  The role runtime supplies canonical
@@ -210,6 +223,19 @@ impl CoordinatedRuntime {
     /// a local rotation cursor.
     pub fn accept_assignment(&mut self, assignment: &ProducerAssignment) -> Result<(), String> {
         self.verifier.verify_assignment(assignment)?;
+        if assignment.height <= self.coordinator_state.last_finalized_height {
+            // A durable finalized block proves that this assignment can no
+            // longer affect local rotation. It was still signature-checked
+            // above, so duplicated or stale traffic is harmless.
+            return Ok(());
+        }
+        if let Some(pending) = self.coordinator_state.pending_assignment.as_ref() {
+            if assignment.height == pending.height
+                && assignment.producer_round < pending.producer_round
+            {
+                return Ok(());
+            }
+        }
         self.install_assignment(assignment)
     }
 
@@ -289,11 +315,105 @@ impl CoordinatedRuntime {
         &mut self,
         package: CoordinatedCommittedBlockPackage,
     ) -> Result<CoordinatedRuntimeFinality, String> {
+        if package.block.header.height.0 <= self.coordinator_state.last_finalized_height {
+            let existing = self
+                .finality_store
+                .at_height(&self.config, package.block.header.height)?
+                .ok_or_else(|| {
+                    "coordinated runtime state is finalized beyond a missing durable package"
+                        .to_string()
+                })?;
+            if existing.package != package {
+                return Err(
+                    "coordinated finality replay conflicts with persisted evidence".to_string(),
+                );
+            }
+            let block_hash = Hash::from_hex(&existing.block_id.0)
+                .map_err(|error| format!("coordinated finality block ID is not a hash: {error}"))?;
+            return Ok(CoordinatedRuntimeFinality {
+                record: existing,
+                block_hash,
+            });
+        }
         self.accept_assignment(&package.assignment)?;
         self.verifier.verify_committed_block_package(&package)?;
         let next_execution_state =
             execute_coordinated_block(&self.execution_state, &package.block)?;
         self.finalize_verified_package(package, next_execution_state)
+    }
+
+    /// Handles exactly one authenticated coordinated P2P message. The role
+    /// runtime broadcasts or responds with the returned action only after this
+    /// method has completed all required signature, execution, and durable
+    /// persistence steps.
+    pub fn handle_authenticated_message(
+        &mut self,
+        peer: &AuthenticatedCoordinatedConsensusPeer,
+        message: CoordinatedConsensusMessage,
+    ) -> Result<CoordinatedRuntimeAction, String> {
+        self.verifier.verify_message_sender(peer, &message)?;
+        match message {
+            CoordinatedConsensusMessage::ProducerAssignment { assignment } => {
+                self.accept_assignment(&assignment)?;
+                Ok(CoordinatedRuntimeAction::None)
+            }
+            CoordinatedConsensusMessage::ProposedBlock {
+                assignment,
+                proposal,
+                block,
+            } => {
+                if !self.is_local_coordinator()
+                    || proposal.height <= self.coordinator_state.last_finalized_height
+                {
+                    return Ok(CoordinatedRuntimeAction::None);
+                }
+                let package = self.commit_executed_proposal(&assignment, &proposal, &block)?;
+                Ok(CoordinatedRuntimeAction::BroadcastCommitted(package))
+            }
+            CoordinatedConsensusMessage::CoordinatorCommit { package }
+            | CoordinatedConsensusMessage::CommittedBlock { package } => {
+                self.accept_committed_package(package)?;
+                Ok(CoordinatedRuntimeAction::None)
+            }
+            CoordinatedConsensusMessage::GetCommittedBlock { height } => {
+                let record = self
+                    .finality_store
+                    .at_height(&self.config, Height(height))?
+                    .ok_or_else(|| {
+                        "requested coordinated finality block is unavailable".to_string()
+                    })?;
+                Ok(CoordinatedRuntimeAction::Respond(
+                    CoordinatedConsensusMessage::CommittedBlock {
+                        package: record.package,
+                    },
+                ))
+            }
+            CoordinatedConsensusMessage::GetCommittedBlockRange {
+                start_height,
+                end_height,
+            } => {
+                let packages = self
+                    .finality_store
+                    .range(
+                        &self.config,
+                        Height(start_height),
+                        Height(end_height),
+                        MAX_COORDINATED_CONSENSUS_SYNC_RANGE_BLOCKS,
+                    )?
+                    .into_iter()
+                    .map(|record| record.package)
+                    .collect();
+                Ok(CoordinatedRuntimeAction::Respond(
+                    CoordinatedConsensusMessage::CommittedBlockRange { packages },
+                ))
+            }
+            CoordinatedConsensusMessage::CommittedBlockRange { packages } => {
+                for package in packages {
+                    self.accept_committed_package(package)?;
+                }
+                Ok(CoordinatedRuntimeAction::None)
+            }
+        }
     }
 
     fn finalize_verified_package(
@@ -318,30 +438,8 @@ impl CoordinatedRuntime {
     }
 
     fn install_assignment(&mut self, assignment: &ProducerAssignment) -> Result<(), String> {
-        let template = self.coordinator_state.assignment_template(
-            &self.config,
-            assignment.epoch,
-            assignment.intended_block_timestamp_ms,
-        )?;
-        if template.signing_hash()? != assignment.signing_hash()? {
-            return Err(
-                "coordinated assignment does not match the local persistent rotation state"
-                    .to_string(),
-            );
-        }
         let mut candidate_state = self.coordinator_state.clone();
-        let installed = candidate_state.issue_assignment(
-            &self.config,
-            assignment.epoch,
-            assignment.intended_block_timestamp_ms,
-            assignment.coordinator_signature.clone(),
-        )?;
-        if installed != *assignment {
-            return Err(
-                "coordinated assignment persistence returned different durable evidence"
-                    .to_string(),
-            );
-        }
+        candidate_state.install_verified_assignment(&self.config, assignment)?;
         self.coordinator_state_store
             .persist(&self.config, &candidate_state)?;
         self.coordinator_state = candidate_state;
@@ -377,10 +475,10 @@ impl CoordinatedRuntime {
     }
 }
 
-/// Repairs only the safe, one-record persistence gap where separate finality
-/// was fsynced but the already-pending coordinator state was not. Anything
-/// broader is ambiguous (for example, it could omit locally recorded timeout
-/// skips) and therefore remains a startup failure instead of inventing state.
+/// Reconstructs a lagging coordinator-state file from separately durable,
+/// cryptographically verified finality packages. Each package carries the
+/// signed assignment that proves any skipped producer turns, so recovery
+/// never invents a coordinator decision or recreates a signature.
 fn reconcile_coordinator_state(
     config: &CoordinatedRoundRobinConfig,
     verifier: &CoordinatedConsensusVerifier,
@@ -398,6 +496,13 @@ fn reconcile_coordinator_state(
         }
         return Ok(());
     };
+    let state_height = state.last_finalized_height;
+    if state_height > latest.height.0 {
+        return Err(
+            "coordinated state is ahead of its separate finality store; refusing recovery"
+                .to_string(),
+        );
+    }
     let latest_hash = Hash::from_hex(&latest.block_id.0)
         .map_err(|error| format!("coordinated finality block ID is not a hash: {error}"))?;
     let latest_reference = latest.package.coordinator_commit.signing_hash()?;
@@ -412,37 +517,30 @@ fn reconcile_coordinator_state(
         }
         return Ok(());
     }
-    if state.last_finalized_height.saturating_add(1) != latest.height.0 {
-        return Err(
-            "coordinated state does not have the one safe finality record needed for recovery"
-                .to_string(),
-        );
-    }
-    if let Some(previous) = records.iter().rev().nth(1) {
-        let previous_hash = Hash::from_hex(&previous.block_id.0).map_err(|error| {
-            format!("coordinated finality predecessor block ID is not a hash: {error}")
+    let mut repaired = state.clone();
+    let mut expected_height = repaired.next_height();
+    let first_missing = records
+        .iter()
+        .position(|record| record.height.0 == expected_height)
+        .ok_or_else(|| {
+            "coordinated finality recovery has no record for the local successor height".to_string()
         })?;
-        if state.last_finalized_block_hash != previous_hash
-            || state.last_finality_reference
-                != previous.package.coordinator_commit.signing_hash()?
-        {
+    for record in &records[first_missing..] {
+        if record.height.0 != expected_height {
             return Err(
-                "coordinated recovery state does not match the persisted predecessor".to_string(),
+                "coordinated finality recovery has a gap after the local coordinator state"
+                    .to_string(),
             );
         }
-    } else if state.last_finalized_height >= first_coordinated_height.0 {
-        return Err(
-            "coordinated recovery has no persisted predecessor for its coordinator state"
-                .to_string(),
-        );
-    }
-    verifier.verify_committed_block_package(&latest.package)?;
-    let mut repaired = state.clone();
-    if !repaired.record_commit(config, latest.package.coordinator_commit.clone())? {
-        return Err(
-            "coordinated recovery found an already-recorded commit with an inconsistent finality tip"
-                .to_string(),
-        );
+        verifier.verify_committed_block_package(&record.package)?;
+        repaired.install_verified_assignment(config, &record.package.assignment)?;
+        if !repaired.record_commit(config, record.package.coordinator_commit.clone())? {
+            return Err(
+                "coordinated recovery found an already-recorded commit with an inconsistent finality tip"
+                    .to_string(),
+            );
+        }
+        expected_height = repaired.next_height();
     }
     if repaired.last_finalized_block_hash != latest_hash
         || repaired.last_finality_reference != latest_reference
@@ -707,6 +805,21 @@ mod tests {
         (proposal, block)
     }
 
+    fn authenticated_peer(
+        runtime: &CoordinatedRuntime,
+        validator_id: &str,
+    ) -> AuthenticatedCoordinatedConsensusPeer {
+        let validator = runtime
+            .verifier
+            .validator_record(validator_id)
+            .expect("configured validator");
+        AuthenticatedCoordinatedConsensusPeer {
+            validator_id: validator.validator_id.clone(),
+            validator_uma_id: validator.validator_uma_id.clone(),
+            consensus_key_id: validator.consensus_public_key.key_id.clone(),
+        }
+    }
+
     #[test]
     fn coordinator_signs_and_persists_the_first_assignment() {
         let mut runtime = fixture();
@@ -730,12 +843,60 @@ mod tests {
             .expect("Val1 signs assignment");
         let pending_state = runtime.coordinator_state().clone();
         let (proposal, block) = signed_empty_proposal(&mut runtime, &assignment);
-        let package = runtime
-            .commit_executed_proposal(&assignment, &proposal, &block)
+        let producer_peer = authenticated_peer(&runtime, "validator-2");
+        let action = runtime
+            .handle_authenticated_message(
+                &producer_peer,
+                CoordinatedConsensusMessage::ProposedBlock {
+                    assignment: assignment.clone(),
+                    proposal,
+                    block,
+                },
+            )
             .expect("Val1 verifies, executes, and commits the producer block");
+        let CoordinatedRuntimeAction::BroadcastCommitted(package) = action else {
+            panic!("coordinator must return the durable committed package for broadcast");
+        };
         assert_eq!(package.block.header.height, Height(42));
         assert_eq!(runtime.coordinator_state().last_finalized_height, 42);
         assert!(runtime.coordinator_state().pending_assignment.is_none());
+        let replay = runtime
+            .accept_committed_package(package.clone())
+            .expect("the exact committed package is idempotent");
+        assert_eq!(replay.record.package, package);
+        let requester = authenticated_peer(&runtime, "validator-3");
+        let response = runtime
+            .handle_authenticated_message(
+                &requester,
+                CoordinatedConsensusMessage::GetCommittedBlock { height: 42 },
+            )
+            .expect("any authenticated validator can request durable finality");
+        assert!(matches!(
+            response,
+            CoordinatedRuntimeAction::Respond(CoordinatedConsensusMessage::CommittedBlock {
+                package: response_package
+            }) if response_package == package
+        ));
+        let next_assignment = runtime
+            .issue_signed_assignment(4_000)
+            .expect("Val1 signs the successor assignment");
+        assert_eq!(next_assignment.assigned_producer_id, "validator-3");
+        let (next_proposal, next_block) = signed_empty_proposal(&mut runtime, &next_assignment);
+        let next_producer_peer = authenticated_peer(&runtime, "validator-3");
+        let next_action = runtime
+            .handle_authenticated_message(
+                &next_producer_peer,
+                CoordinatedConsensusMessage::ProposedBlock {
+                    assignment: next_assignment,
+                    proposal: next_proposal,
+                    block: next_block,
+                },
+            )
+            .expect("Val1 commits the successor block");
+        let CoordinatedRuntimeAction::BroadcastCommitted(next_package) = next_action else {
+            panic!("coordinator must return the second durable package for broadcast");
+        };
+        assert_eq!(runtime.coordinator_state().last_finalized_height, 43);
 
         // Model a crash after separate finality was fsynced but before the
         // coordinator state replacement. The pending signed assignment gives
@@ -775,10 +936,10 @@ mod tests {
             ExecutionState::new(),
         )
         .expect("recover one persisted coordinated finality record");
-        assert_eq!(restored.coordinator_state().last_finalized_height, 42);
+        assert_eq!(restored.coordinator_state().last_finalized_height, 43);
         assert_eq!(
             restored.coordinator_state().last_finalized_block_hash,
-            package.coordinator_commit.block_hash
+            next_package.coordinator_commit.block_hash
         );
     }
 }
