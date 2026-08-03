@@ -809,33 +809,43 @@ impl CoordinatedRuntime {
                 Ok(CoordinatedRuntimeAction::None)
             }
             CoordinatedConsensusMessage::GetCommittedBlock { height } => {
-                let record = self
+                let response = match self
                     .finality_store
                     .at_height(&self.config, Height(height))?
-                    .ok_or_else(|| {
-                        "requested coordinated finality block is unavailable".to_string()
-                    })?;
-                Ok(CoordinatedRuntimeAction::Respond(
-                    CoordinatedConsensusMessage::CommittedBlock {
+                {
+                    Some(record) => CoordinatedConsensusMessage::CommittedBlock {
                         package: record.package,
                     },
-                ))
+                    // A requester can legitimately reach the Val1 current tip.
+                    // Return an authenticated empty range rather than making
+                    // the coordinator fail because no successor is final yet.
+                    None => CoordinatedConsensusMessage::CommittedBlockRange {
+                        packages: Vec::new(),
+                    },
+                };
+                Ok(CoordinatedRuntimeAction::Respond(response))
             }
             CoordinatedConsensusMessage::GetCommittedBlockRange {
                 start_height,
                 end_height,
             } => {
-                let packages = self
-                    .finality_store
-                    .range(
-                        &self.config,
-                        Height(start_height),
-                        Height(end_height),
-                        MAX_COORDINATED_CONSENSUS_SYNC_RANGE_BLOCKS,
-                    )?
-                    .into_iter()
-                    .map(|record| record.package)
-                    .collect();
+                let requested = end_height
+                    .checked_sub(start_height)
+                    .and_then(|span| span.checked_add(1))
+                    .ok_or_else(|| "coordinated finality range overflows".to_string())?;
+                if requested > MAX_COORDINATED_CONSENSUS_SYNC_RANGE_BLOCKS as u64 {
+                    return Ok(CoordinatedRuntimeAction::None);
+                }
+                let mut packages = Vec::new();
+                for height in start_height..=end_height {
+                    let Some(record) = self
+                        .finality_store
+                        .at_height(&self.config, Height(height))?
+                    else {
+                        break;
+                    };
+                    packages.push(record.package);
+                }
                 Ok(CoordinatedRuntimeAction::Respond(
                     CoordinatedConsensusMessage::CommittedBlockRange { packages },
                 ))
@@ -1566,6 +1576,18 @@ mod tests {
             CoordinatedRuntimeAction::Respond(CoordinatedConsensusMessage::CommittedBlock {
                 package: response_package
             }) if response_package == package
+        ));
+        let unavailable = runtime
+            .handle_authenticated_message(
+                &requester,
+                CoordinatedConsensusMessage::GetCommittedBlock { height: 43 },
+            )
+            .expect("a request at the finalized tip is not fatal");
+        assert!(matches!(
+            unavailable,
+            CoordinatedRuntimeAction::Respond(CoordinatedConsensusMessage::CommittedBlockRange {
+                packages
+            }) if packages.is_empty()
         ));
         let next_assignment = runtime
             .issue_signed_assignment(4_000)

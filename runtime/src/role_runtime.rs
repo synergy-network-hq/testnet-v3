@@ -1869,21 +1869,15 @@ fn issue_or_rebroadcast_coordinated_assignment(
     )
 }
 
-fn request_missing_coordinated_finality(
+fn request_next_coordinated_finality(
     runtime: &CoordinatedRuntime,
     config: &crate::consensus::coordinated_round_robin::CoordinatedRoundRobinConfig,
     network: &p2p::networking::P2PNetwork,
 ) -> Result<(), String> {
-    let start_height = runtime.coordinator_state().next_height();
-    let end_height = start_height.saturating_add(
-        (crate::p2p::messages::MAX_COORDINATED_CONSENSUS_SYNC_RANGE_BLOCKS as u64)
-            .saturating_sub(1),
-    );
     network.send_coordinated_consensus_to_validator(
         &config.coordinator_id,
-        &crate::p2p::messages::CoordinatedConsensusMessage::GetCommittedBlockRange {
-            start_height,
-            end_height,
+        &crate::p2p::messages::CoordinatedConsensusMessage::GetCommittedBlock {
+            height: runtime.coordinator_state().next_height(),
         },
     )
 }
@@ -1898,6 +1892,7 @@ fn run_coordinated_round_robin_driver(
 ) -> Result<(), String> {
     let mut producer_deadline = None;
     let mut next_assignment_due = None;
+    let mut finality_sync_pending = false;
     if runtime.is_local_coordinator() {
         issue_or_rebroadcast_coordinated_assignment(runtime, block_context, network)?;
         producer_deadline =
@@ -1913,9 +1908,10 @@ fn run_coordinated_round_robin_driver(
             network,
         )?;
         // A restarted follower may be behind the live assignment stream.
-        // Request only authenticated, bounded finality packages; failure to
-        // reach Val1 is retried when the next future assignment arrives.
-        let _ = request_missing_coordinated_finality(runtime, config, network);
+        // Request one authenticated committed package at a time; a missing
+        // successor receives an empty response and leaves the worker active.
+        finality_sync_pending = true;
+        let _ = request_next_coordinated_finality(runtime, config, network);
     }
     publish_coordinated_runtime_telemetry(runtime, config);
 
@@ -1964,10 +1960,15 @@ fn run_coordinated_round_robin_driver(
                     crate::p2p::messages::CoordinatedConsensusMessage::ProducerAssignment { assignment }
                         if assignment.height > runtime.coordinator_state().next_height()
                 );
-                let received_full_finality_range = matches!(
+                let received_finality_response = matches!(
+                    &envelope.message,
+                    crate::p2p::messages::CoordinatedConsensusMessage::CommittedBlock { .. }
+                        | crate::p2p::messages::CoordinatedConsensusMessage::CommittedBlockRange { .. }
+                );
+                let received_empty_finality_range = matches!(
                     &envelope.message,
                     crate::p2p::messages::CoordinatedConsensusMessage::CommittedBlockRange { packages }
-                        if packages.len() == crate::p2p::messages::MAX_COORDINATED_CONSENSUS_SYNC_RANGE_BLOCKS
+                        if packages.is_empty()
                 );
                 let action = runtime
                     .handle_authenticated_message(&envelope.authenticated_peer, envelope.message)?;
@@ -1998,8 +1999,14 @@ fn run_coordinated_round_robin_driver(
                         network,
                     )?;
                 }
-                if deferred_assignment || received_full_finality_range {
-                    let _ = request_missing_coordinated_finality(runtime, config, network);
+                if deferred_assignment {
+                    finality_sync_pending = true;
+                    let _ = request_next_coordinated_finality(runtime, config, network);
+                }
+                if received_empty_finality_range {
+                    finality_sync_pending = false;
+                } else if finality_sync_pending && received_finality_response {
+                    let _ = request_next_coordinated_finality(runtime, config, network);
                 }
                 publish_coordinated_finalized_execution_state(runtime)?;
                 publish_coordinated_runtime_telemetry(runtime, config);
