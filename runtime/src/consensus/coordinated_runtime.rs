@@ -338,6 +338,13 @@ impl CoordinatedRuntime {
             // above, so duplicated or stale traffic is harmless.
             return Ok(());
         }
+        if assignment.height > self.coordinator_state.next_height() {
+            // The signature is authentic but its finalized predecessor is not
+            // local yet. Defer it without moving the cursor; the role driver
+            // requests the bounded committed-finality range before retrying.
+            return Ok(());
+        }
+
         if let Some(pending) = self.coordinator_state.pending_assignment.as_ref() {
             if assignment.height == pending.height
                 && assignment.producer_round < pending.producer_round
@@ -1430,6 +1437,65 @@ mod tests {
             .verifier
             .verify_producer_block(&assignment, &proposal, &signed)
             .expect("every validator independently verifies the user witness and block");
+    }
+
+    #[test]
+    fn lagging_validator_defers_future_assignment_until_finality_catches_up() {
+        let mut coordinator = fixture();
+        let first = coordinator
+            .issue_signed_assignment(2_000)
+            .expect("Val1 signs the initial assignment");
+        let (proposal, block) = signed_empty_proposal(&mut coordinator, &first);
+        let producer_peer = authenticated_peer(&coordinator, "validator-2");
+        let action = coordinator
+            .handle_authenticated_message(
+                &producer_peer,
+                CoordinatedConsensusMessage::ProposedBlock {
+                    assignment: first,
+                    proposal,
+                    block,
+                },
+            )
+            .expect("Val1 commits the initial package");
+        let CoordinatedRuntimeAction::BroadcastCommitted(package) = action else {
+            panic!("Val1 must broadcast the committed package");
+        };
+        let future = coordinator
+            .issue_signed_assignment(4_000)
+            .expect("Val1 signs the successor assignment");
+
+        coordinator.coordinator_state = CoordinatorState::from_migration_anchor(
+            41,
+            hash("migration-parent"),
+            hash("migration-proof"),
+        )
+        .expect("recreate the lagging durable state");
+        coordinator
+            .accept_assignment(&future)
+            .expect("a verified future assignment is deferred while finality catches up");
+        assert_eq!(coordinator.coordinator_state().last_finalized_height, 41);
+        assert!(coordinator.coordinator_state().pending_assignment.is_none());
+
+        let mut repaired = CoordinatorState::from_migration_anchor(
+            41,
+            hash("migration-parent"),
+            hash("migration-proof"),
+        )
+        .expect("recreate the signed predecessor state");
+        repaired
+            .install_verified_assignment(&coordinator.config, &package.assignment)
+            .expect("install the exact signed predecessor assignment");
+        assert!(repaired
+            .record_commit(&coordinator.config, package.coordinator_commit.clone())
+            .expect("commit the exact signed predecessor finality"));
+        coordinator.coordinator_state = repaired;
+        coordinator
+            .accept_assignment(&future)
+            .expect("the deferred assignment installs after its predecessor finality");
+        assert_eq!(
+            coordinator.coordinator_state().pending_assignment.as_ref(),
+            Some(&future)
+        );
     }
 
     #[test]

@@ -1869,6 +1869,25 @@ fn issue_or_rebroadcast_coordinated_assignment(
     )
 }
 
+fn request_missing_coordinated_finality(
+    runtime: &CoordinatedRuntime,
+    config: &crate::consensus::coordinated_round_robin::CoordinatedRoundRobinConfig,
+    network: &p2p::networking::P2PNetwork,
+) -> Result<(), String> {
+    let start_height = runtime.coordinator_state().next_height();
+    let end_height = start_height.saturating_add(
+        (crate::p2p::messages::MAX_COORDINATED_CONSENSUS_SYNC_RANGE_BLOCKS as u64)
+            .saturating_sub(1),
+    );
+    network.send_coordinated_consensus_to_validator(
+        &config.coordinator_id,
+        &crate::p2p::messages::CoordinatedConsensusMessage::GetCommittedBlockRange {
+            start_height,
+            end_height,
+        },
+    )
+}
+
 fn run_coordinated_round_robin_driver(
     runtime: &mut CoordinatedRuntime,
     block_context: &CoordinatedBlockBuildContext,
@@ -1893,6 +1912,10 @@ fn run_coordinated_round_robin_driver(
             &config.coordinator_id,
             network,
         )?;
+        // A restarted follower may be behind the live assignment stream.
+        // Request only authenticated, bounded finality packages; failure to
+        // reach Val1 is retried when the next future assignment arrives.
+        let _ = request_missing_coordinated_finality(runtime, config, network);
     }
     publish_coordinated_runtime_telemetry(runtime, config);
 
@@ -1936,6 +1959,16 @@ fn run_coordinated_round_robin_driver(
                     &envelope.message,
                     crate::p2p::messages::CoordinatedConsensusMessage::ProducerAssignment { .. }
                 );
+                let deferred_assignment = matches!(
+                    &envelope.message,
+                    crate::p2p::messages::CoordinatedConsensusMessage::ProducerAssignment { assignment }
+                        if assignment.height > runtime.coordinator_state().next_height()
+                );
+                let received_full_finality_range = matches!(
+                    &envelope.message,
+                    crate::p2p::messages::CoordinatedConsensusMessage::CommittedBlockRange { packages }
+                        if packages.len() == crate::p2p::messages::MAX_COORDINATED_CONSENSUS_SYNC_RANGE_BLOCKS
+                );
                 let action = runtime
                     .handle_authenticated_message(&envelope.authenticated_peer, envelope.message)?;
                 match action {
@@ -1964,6 +1997,9 @@ fn run_coordinated_round_robin_driver(
                         &config.coordinator_id,
                         network,
                     )?;
+                }
+                if deferred_assignment || received_full_finality_range {
+                    let _ = request_missing_coordinated_finality(runtime, config, network);
                 }
                 publish_coordinated_finalized_execution_state(runtime)?;
                 publish_coordinated_runtime_telemetry(runtime, config);
