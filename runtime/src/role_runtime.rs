@@ -2017,7 +2017,10 @@ fn run_coordinated_round_robin_driver(
                         );
                     }
                     CoordinatedRuntimeAction::Respond(message) => {
-                        broadcast_coordinated_to_reachable_validators(network, &message)?;
+                        network.send_coordinated_consensus_to_validator(
+                            envelope.authenticated_peer.validator_id.0.as_str(),
+                            &message,
+                        )?;
                     }
                 }
                 if received_assignment {
