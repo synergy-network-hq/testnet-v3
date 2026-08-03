@@ -1841,7 +1841,16 @@ fn maybe_broadcast_local_coordinated_proposal(
     }
     let admissions = select_coordinated_transaction_admissions()?;
     let block = runtime.build_assigned_block(&assignment, block_context, &admissions)?;
-    let (proposal, block) = runtime.sign_assigned_producer_block(&assignment, block, admissions)?;
+    let (proposal, block) =
+        match runtime.sign_assigned_producer_block(&assignment, block, admissions) {
+            Ok(value) => value,
+            Err(error) if error.contains("CONSENSUS_SIGNING_CONFLICT") => {
+                // A stale durable slot may never authorize a second subject. Leave
+                // the producer online as a follower and let Val1 time out this turn.
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
     network.send_coordinated_consensus_to_validator(
         coordinator_id,
         &crate::p2p::messages::CoordinatedConsensusMessage::ProposedBlock {
@@ -1970,6 +1979,26 @@ fn run_coordinated_round_robin_driver(
                     crate::p2p::messages::CoordinatedConsensusMessage::CommittedBlockRange { packages }
                         if packages.is_empty()
                 );
+                let expected_finality_height = runtime.coordinator_state().next_height();
+                let deferred_finality = match &envelope.message {
+                    crate::p2p::messages::CoordinatedConsensusMessage::CommittedBlock {
+                        package,
+                    } => package.block.header.height.0 > expected_finality_height,
+                    crate::p2p::messages::CoordinatedConsensusMessage::CommittedBlockRange {
+                        packages,
+                    } => packages
+                        .first()
+                        .map(|package| package.block.header.height.0 > expected_finality_height)
+                        .unwrap_or(false),
+                    _ => false,
+                };
+                if deferred_finality {
+                    // A live broadcast can be ahead of this follower. Do not
+                    // append it out of order; continue the one-block sync.
+                    finality_sync_pending = true;
+                    let _ = request_next_coordinated_finality(runtime, config, network);
+                    continue;
+                }
                 let action = runtime
                     .handle_authenticated_message(&envelope.authenticated_peer, envelope.message)?;
                 match action {
