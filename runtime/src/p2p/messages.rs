@@ -392,9 +392,6 @@ pub fn validate_coordinated_consensus_message_size(
             MAX_COORDINATED_CONSENSUS_BLOCK_PACKAGE_FRAME_BYTES,
         ),
         CoordinatedConsensusMessage::CommittedBlockRange { packages } => {
-            if packages.is_empty() {
-                return Err("coordinated committed-block range cannot be empty".to_string());
-            }
             if packages.len() > MAX_COORDINATED_CONSENSUS_SYNC_RANGE_BLOCKS {
                 return Err(format!(
                     "coordinated committed-block range has {} packages, exceeding limit {}",
@@ -743,12 +740,11 @@ mod tests {
     }
 
     #[test]
-    fn coordinated_sync_range_rejects_an_empty_response_before_delivery() {
-        let error = validate_coordinated_consensus_message_size(
+    fn coordinated_sync_range_accepts_an_empty_terminal_response() {
+        validate_coordinated_consensus_message_size(
             &CoordinatedConsensusMessage::CommittedBlockRange { packages: vec![] },
         )
-        .expect_err("an empty coordinated sync range is invalid");
-        assert!(error.contains("cannot be empty"));
+        .expect("an empty coordinated sync range is a valid terminal response");
     }
 
     #[test]
