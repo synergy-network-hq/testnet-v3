@@ -1883,10 +1883,16 @@ fn request_next_coordinated_finality(
     config: &crate::consensus::coordinated_round_robin::CoordinatedRoundRobinConfig,
     network: &p2p::networking::P2PNetwork,
 ) -> Result<(), String> {
+    let start_height = runtime.coordinator_state().next_height();
+    let end_height = start_height.saturating_add(
+        (crate::p2p::messages::MAX_COORDINATED_CONSENSUS_SYNC_RANGE_BLOCKS as u64)
+            .saturating_sub(1),
+    );
     network.send_coordinated_consensus_to_validator(
         &config.coordinator_id,
-        &crate::p2p::messages::CoordinatedConsensusMessage::GetCommittedBlock {
-            height: runtime.coordinator_state().next_height(),
+        &crate::p2p::messages::CoordinatedConsensusMessage::GetCommittedBlockRange {
+            start_height,
+            end_height,
         },
     )
 }
