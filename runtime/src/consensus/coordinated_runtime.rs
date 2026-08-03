@@ -799,7 +799,7 @@ impl CoordinatedRuntime {
                     || proposal.height <= self.coordinator_state.last_finalized_height
                     // A delayed proposal can only be accepted for Val1's exact
                     // current signed assignment; stale proposals are dropped.
-                    || self.pending_assignment() != Some(&assignment)
+                    || self.pending_assignment().is_some_and(|expected| expected != &assignment)
                 {
                     return Ok(CoordinatedRuntimeAction::None);
                 }
