@@ -1936,26 +1936,6 @@ fn run_coordinated_round_robin_driver(
                     next_assignment_due = None;
                 }
             }
-            if let Some(deadline) = producer_deadline {
-                if now >= deadline && runtime.pending_assignment().is_some() {
-                    let replacement_timestamp =
-                        runtime.timeout_replacement_assignment_timestamp(block_context)?;
-                    let assignment = runtime.skip_producer_turn_and_issue_assignment(
-                        "producer timeout",
-                        replacement_timestamp,
-                    )?;
-                    broadcast_coordinated_to_reachable_validators(
-                        network,
-                        &crate::p2p::messages::CoordinatedConsensusMessage::ProducerAssignment {
-                            assignment,
-                        },
-                    )?;
-                    publish_coordinated_runtime_telemetry(runtime, config);
-                    producer_deadline = Some(
-                        Instant::now() + Duration::from_millis(config.producer_turn_timeout_ms),
-                    );
-                }
-            }
         }
 
         match receiver.recv_timeout(Duration::from_millis(50)) {
@@ -2046,6 +2026,33 @@ fn run_coordinated_round_robin_driver(
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 return Err("coordinated consensus ingress disconnected".to_string())
+            }
+        }
+
+        // A proposal already queued by the authenticated P2P reader is still
+        // for Val1's durable current assignment. Process it before the
+        // timeout path makes that exact subject stale; an idle receiver still
+        // advances the producer turn under the configured deadline.
+        if runtime.is_local_coordinator() {
+            if let Some(deadline) = producer_deadline {
+                if Instant::now() >= deadline && runtime.pending_assignment().is_some() {
+                    let replacement_timestamp =
+                        runtime.timeout_replacement_assignment_timestamp(block_context)?;
+                    let assignment = runtime.skip_producer_turn_and_issue_assignment(
+                        "producer timeout",
+                        replacement_timestamp,
+                    )?;
+                    broadcast_coordinated_to_reachable_validators(
+                        network,
+                        &crate::p2p::messages::CoordinatedConsensusMessage::ProducerAssignment {
+                            assignment,
+                        },
+                    )?;
+                    publish_coordinated_runtime_telemetry(runtime, config);
+                    producer_deadline = Some(
+                        Instant::now() + Duration::from_millis(config.producer_turn_timeout_ms),
+                    );
+                }
             }
         }
     }
