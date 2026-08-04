@@ -20,6 +20,16 @@ pub mod legacy_canonical_lock;
 pub mod posy;
 pub mod self_realign;
 pub mod signing_authority;
+pub mod single_authority_finality_store;
+pub mod single_authority_writable_store;
+pub mod single_authority_writer_lock;
+#[cfg(test)]
+pub mod single_authority_perf_tests;
+pub mod single_authority_signing_journal;
+#[cfg(test)]
+pub mod single_authority_signing_journal_tests;
+#[cfg(test)]
+pub mod single_authority_finality_store_tests;
 pub mod synergy_score;
 pub mod testnet_v3_bootstrap;
 pub mod testnet_v3_finality_context;
