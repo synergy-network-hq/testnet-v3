@@ -1899,7 +1899,211 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument("--required-port", action="append")
     preflight.add_argument("--signing-challenge-verified", action="store_true")
     preflight.set_defaults(func=command_preflight)
+
+    rebind = sub.add_parser("rebind-single-authority")
+    rebind.add_argument("--genesis", required=True)
+    rebind.add_argument("--authority-bundle", required=True)
+    rebind.add_argument("--out-dir", required=True)
+    rebind.set_defaults(func=command_rebind_single_authority)
     return parser
+
+
+SA_EXPECTED_INPUT_HASH = (
+    "d79053eb922517c75657f3315985cb6e96edaa68ec1ca45a67ba0955b6902042"
+)
+SA_RELEASE_ID = "chain1266-incarnation-5-single-authority-rc1"
+SA_AUTHORITY_ID = "authority-node-01"
+SA_CATALOG_ID = "NODE-AUTHORITY-01"
+SA_ADDRESS = "synv11n57gc4h9tnt3c78crncx46hnlg9vz8eu4lu"
+SA_PEER_ID = "ca2903a8cc1f2db03a5b9a7c18a82d268598c23529e85371c647902df5d19fd9"
+SA_NAMESPACE = "chain-1266/incarnation-5"
+SA_BLOCK_TIME_MS = 1000
+SA_FIRST_HEIGHT = 1
+SA_PRESERVED = [
+    "contracts", "genesis_deployment", "execution",
+    "allocations", "balances", "accounts", "token",
+]
+SA_FORBIDDEN_CONSENSUS = (
+    "epoch", "cluster", "quorum", "qc", "round", "coordinator",
+    "producer", "rotation", "voting", "validator_count", "stake",
+    "leader", "proposal", "slashing", "finality", "model", "algorithm",
+)
+
+
+def sa_validator_id_hash(validator_id: str) -> str:
+    """Historical convention: blake3 over the raw UTF-8 validator identifier.
+
+    NOT hash_json — proven against all six existing genesis validator entries
+    by sa_assert_validator_id_hash_convention().
+    """
+    return blake3.blake3(validator_id.encode("utf-8")).hexdigest()
+
+
+def sa_assert_validator_id_hash_convention(validators: list[dict[str, Any]]) -> None:
+    """Regression assertion against the known existing validator vectors."""
+    for entry in validators:
+        expected = entry.get("validator_id_hash")
+        actual = sa_validator_id_hash(entry["validator_id"])
+        if expected != actual:
+            fail(
+                "validator_id_hash convention regression for "
+                f"{entry['validator_id']}: pinned={expected} derived={actual}"
+            )
+
+
+def sa_build_authority_validator(bundle: dict[str, Any], template: dict[str, Any]) -> dict[str, Any]:
+    """Authority entry with the CORRECT key mapping (no historical entropy/identity swap)."""
+    identity_pk = bundle["public_key"]                                  # FN-DSA-1024
+    account_pk = bundle["account_key"]["public_key"]                    # ML-DSA-87
+    consensus_pk = bundle["consensus_key"]["public_key"]                # ML-DSA-65
+    entropy_pk = bundle["entropy_contribution_key"]["public_key"]       # ML-KEM-768
+    node_pk = bundle["node_identity_key"]["public_key"]                 # Ed25519
+
+    if identity_pk == entropy_pk:
+        fail("authority identity_public_key must not be the entropy key")
+
+    key_bundle_hash = hash_json({
+        "account_public_key": account_pk,
+        "consensus_public_key": consensus_pk,
+        "identity_public_key": identity_pk,
+        "node_identity_public_key": node_pk,
+        "peer_id": SA_PEER_ID,
+    })
+    metadata_hash = hash_json({
+        "address": SA_ADDRESS,
+        "address_type": bundle.get("address_type", ""),
+        "algorithm": bundle.get("algorithm", ""),
+        "created_at": bundle.get("created_at", ""),
+        "validator_id": SA_AUTHORITY_ID,
+    })
+    entry = {
+        "account_key_type": "ML-DSA-87",
+        "account_public_key": account_pk,
+        "activation_height": SA_FIRST_HEIGHT,
+        "address_type": "synv1",
+        "allocation_account_id": SA_CATALOG_ID,
+        "commission_rate_bps": template["commission_rate_bps"],
+        "consensus_key_type": "ML-DSA-65",
+        "consensus_public_key": consensus_pk,
+        "deactivation_height": None,
+        "entropy_contribution_key": entropy_pk,
+        "entropy_key_type": "ML-KEM-768",
+        "identity": SA_AUTHORITY_ID,
+        "identity_key_type": "FN-DSA-1024",
+        "identity_public_key": identity_pk,
+        "key_bundle_hash": key_bundle_hash,
+        "metadata_hash": metadata_hash,
+        "moniker": "Synergy Authority Node 01",
+        "node_identity_key": node_pk,
+        "node_identity_key_type": "Ed25519",
+        "operator_address": SA_ADDRESS,
+        "peer_id": SA_PEER_ID,
+        "reward_address": SA_ADDRESS,
+        "slashing_status": "none",
+        "stake_nwei": template["stake_nwei"],
+        "status": "active_at_genesis",
+        "validator_id": SA_AUTHORITY_ID,
+        "validator_id_hash": sa_validator_id_hash(SA_AUTHORITY_ID),
+        "voting_power": template["voting_power"],
+    }
+    if set(entry) != set(template):
+        fail("authority entry field set differs from the genesis validator schema: "
+             f"missing={sorted(set(template) - set(entry))} "
+             f"extra={sorted(set(entry) - set(template))}")
+    return entry
+
+
+def sa_build_consensus(previous: dict[str, Any]) -> dict[str, Any]:
+    namespace = previous.get("state_directory_namespace")
+    if namespace != SA_NAMESPACE:
+        fail(f"consensus.state_directory_namespace is {namespace!r}, expected {SA_NAMESPACE!r}")
+    consensus = {
+        "protocol": "single_authority_v1",
+        "state_directory_namespace": namespace,
+        "authority_id": SA_AUTHORITY_ID,
+        "authority_identity_catalog_id": SA_CATALOG_ID,
+        "authority_address": SA_ADDRESS,
+        "authority_peer_id": SA_PEER_ID,
+        "target_block_time_ms": SA_BLOCK_TIME_MS,
+        "first_authority_height": SA_FIRST_HEIGHT,
+        "pending_consensus_transition": None,
+    }
+    for key in consensus:
+        if key in ("protocol", "authority_id", "authority_identity_catalog_id",
+                   "authority_address", "authority_peer_id",
+                   "state_directory_namespace", "target_block_time_ms",
+                   "first_authority_height", "pending_consensus_transition"):
+            continue
+        fail(f"unexpected consensus key {key!r}")
+    for key in consensus:
+        low = key.lower()
+        if any(bad in low for bad in SA_FORBIDDEN_CONSENSUS):
+            fail(f"single-authority consensus must not contain {key!r}")
+    return consensus
+
+
+def command_rebind_single_authority(args: argparse.Namespace) -> None:
+    genesis_path = Path(args.genesis)
+    document = json.loads(genesis_path.read_text())
+    actual = document.get("integrity", {}).get("genesis_hash")
+    if actual != SA_EXPECTED_INPUT_HASH:
+        fail(f"input genesis_hash {actual} != expected {SA_EXPECTED_INPUT_HASH}")
+
+    bundle = json.loads(Path(args.authority_bundle).read_text())
+    if bundle.get("address") != SA_ADDRESS:
+        fail(f"authority bundle address {bundle.get('address')} != {SA_ADDRESS}")
+    if bundle.get("node_identity_key", {}).get("peer_id") != SA_PEER_ID:
+        fail("authority bundle peer_id mismatch")
+
+    before = {key: copy.deepcopy(document[key]) for key in SA_PRESERVED}
+    before_integrity = copy.deepcopy(document["integrity"])
+    registry_before = hash_json(document["contracts"]["validator_registry"])
+
+    sa_assert_validator_id_hash_convention(document["validators"])
+    print("VALIDATOR_ID_HASH_CONVENTION_OK blake3(raw utf-8) x%d historical entries"
+          % len(document["validators"]))
+
+    template = document["validators"][0]
+    authority = sa_build_authority_validator(bundle, template)
+    document["validators"] = [authority]
+    document["consensus"] = sa_build_consensus(document["consensus"])
+
+    for key in SA_PRESERVED:
+        if document[key] != before[key]:
+            fail(f"preserved subtree {key!r} was modified")
+    if hash_json(document["contracts"]["validator_registry"]) != registry_before:
+        fail("validator_registry contract subtree was modified")
+
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    structural = out_dir / "genesis.structural.json"
+    structural.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
+
+    (out_dir / "rebind-report.json").write_text(json.dumps({
+        "release_id": SA_RELEASE_ID,
+        "input_genesis_hash": SA_EXPECTED_INPUT_HASH,
+        "authority": {
+            "authority_id": SA_AUTHORITY_ID,
+            "catalog_id": SA_CATALOG_ID,
+            "address": SA_ADDRESS,
+            "peer_id": SA_PEER_ID,
+            "key_bundle_hash": authority["key_bundle_hash"],
+            "validator_id_hash": authority["validator_id_hash"],
+            "metadata_hash": authority["metadata_hash"],
+        },
+        "preserved_subtree_digests": {k: hash_json(before[k]) for k in SA_PRESERVED},
+        "validator_registry_digest": registry_before,
+        "pre_rebind_integrity": before_integrity,
+        "state_directory_namespace": SA_NAMESPACE,
+    }, indent=2, sort_keys=True) + "\n")
+
+    print("STRUCTURAL_CANDIDATE", structural)
+    print("PRESERVED_SUBTREES_UNCHANGED", " ".join(SA_PRESERVED))
+    print("VALIDATOR_REGISTRY_DIGEST", registry_before)
+    print("ACTIVE_VALIDATORS", len(document["validators"]),
+          document["validators"][0]["validator_id"])
+    print("CONSENSUS_NAMESPACE", document["consensus"]["state_directory_namespace"])
+    print("NEXT invoke the Rust recompute path to finalize integrity roots")
 
 
 def main() -> None:

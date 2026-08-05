@@ -193,3 +193,7 @@ ceremony = []
 name = "synergy-genesis-ceremony"
 path = "bin/synergy-genesis-ceremony.rs"
 required-features = ["ceremony"]
+
+[[bin]]
+name = "recompute-testnet-v3-genesis"
+path = "bin/recompute-testnet-v3-genesis.rs"

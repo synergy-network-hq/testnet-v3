@@ -614,6 +614,17 @@ fn load_candidate_consensus_parameters(
         validate_coordinated_p1_genesis_parameters(value, manifest)?;
         return Ok(Some(loaded));
     }
+    // `single_authority_v1` carries no epoch/cluster/quorum profile: the
+    // authoritative consensus bindings live in the ML-DSA-87 signed
+    // DesiredStateV2 and are verified by
+    // `consensus::single_authority_startup::resolve_verified_consensus_startup`.
+    // The PoSy-shaped parameter cross-checks below do not apply.
+    if matches!(
+        required_string(value, &["consensus", "protocol"]).as_deref(),
+        Ok("single_authority_v1")
+    ) {
+        return Ok(Some(loaded));
+    }
     let manifest = manifest.as_posy()?;
     if required_u64(value, &["consensus", "epoch", "length_blocks"])?
         != manifest

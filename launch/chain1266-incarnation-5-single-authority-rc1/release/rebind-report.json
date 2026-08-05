@@ -1,0 +1,41 @@
+{
+  "authority": {
+    "address": "synv11n57gc4h9tnt3c78crncx46hnlg9vz8eu4lu",
+    "authority_id": "authority-node-01",
+    "catalog_id": "NODE-AUTHORITY-01",
+    "key_bundle_hash": "33d950e0736a82b79c840c343824b5629d776ee969132457ef6f1ecc1bd63823",
+    "metadata_hash": "738d98f055d97107b847c134eee9446600f29d1408e58df5231e019483f2f666",
+    "peer_id": "ca2903a8cc1f2db03a5b9a7c18a82d268598c23529e85371c647902df5d19fd9",
+    "validator_id_hash": "ec4af396cb892603473a62c40ba99a78017e374a0000a4eca9c7fd97a4734496"
+  },
+  "input_genesis_hash": "d79053eb922517c75657f3315985cb6e96edaa68ec1ca45a67ba0955b6902042",
+  "pre_rebind_integrity": {
+    "allocation_hash": "7736e8714a8c6e6f2f6e47297762c791d08b8994af9a844d4871a51fabfe8ff3",
+    "consensus_parameter_decision_id": "TV3-POSY-PARAMS-2026-07-28-01",
+    "consensus_parameter_manifest_sha256": "5451f7084bfd97d136a1ab035d70b09ddc3262e6cc4e142b90091bac3a3ea854",
+    "consensus_parameter_root_sha3_512": "2e6760bed60c8f8e44b3b693254367f0da9a8aa9efae46c517856fb78be7402cf232c064083116b805278e95a952660f7a92e16ca9cd9349aa74467d577127cd",
+    "contract_hash": "2e5e017fca374c54a9869c1355677c9cc5d4a36e30d250e6ad2dbadad04ccbdd",
+    "deployment_manifest_hash": "a1a700d3bbb020360ddbd02ceb85f4d33bef78646ba3f0ac2bd56eb036bc9271",
+    "genesis_hash": "d79053eb922517c75657f3315985cb6e96edaa68ec1ca45a67ba0955b6902042",
+    "post_deployment_aivm_state_root": "6bb65e453b33a5a9bdbcf6446fc1bf5ad6bec487375def6e8cf74c3b2f0dc452",
+    "post_deployment_execution_state_root": "2902ef7dc3f6d49d30ced4b03274c4f5708b84c88bf368fd051ebee11ffb0c39",
+    "receipt_root": "1ddd5472813884fe71456bd3df736848820db8fb55a3f307792b2796027e828a",
+    "signed_by": [],
+    "state_root": "b16876eb896c608b3237f38f1946b0cd7fc3905a5f028626efa45bd59a623326",
+    "status": "candidate_deployment_bound_pending_release_approval",
+    "validator_hash": "fa6fee15dd8f932deeee46bf94ccb32e55af29e7d37e60c5dc8e47bf076698d1",
+    "validator_set_hash": "fa6fee15dd8f932deeee46bf94ccb32e55af29e7d37e60c5dc8e47bf076698d1"
+  },
+  "preserved_subtree_digests": {
+    "accounts": "c53cdda1ac3bd1f5c53112c64f61047956fdd72d777aa368a908cbf84cccb673",
+    "allocations": "7736e8714a8c6e6f2f6e47297762c791d08b8994af9a844d4871a51fabfe8ff3",
+    "balances": "c234c09b152b0f1284fb39f5d17ea37d35a2bee0d9c840fde4667f99abf337a7",
+    "contracts": "2e5e017fca374c54a9869c1355677c9cc5d4a36e30d250e6ad2dbadad04ccbdd",
+    "execution": "e9a822501c45066b5feaabb1f5dbd6f0f9c68d587de20313c45010b29c5f72ec",
+    "genesis_deployment": "bfada0147fb0d4484868df13250f34fbf9a8d7c1036e31d03769c3bca6e426e0",
+    "token": "1c8f9750de5d1840369cda6eef9fd48a931052c26d5a6712b8fa513624fde775"
+  },
+  "release_id": "chain1266-incarnation-5-single-authority-rc1",
+  "state_directory_namespace": "chain-1266/incarnation-5",
+  "validator_registry_digest": "054e963eee15c7d64027b849ab75fa84c6d4b51c71e824436eead3b37ec5b470"
+}
