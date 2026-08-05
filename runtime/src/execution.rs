@@ -1,6 +1,6 @@
 use crate::crypto::aegis_pqvm::{SYNERGY_RECEIPT_ROOT_V1, SYNERGY_STATE_ROOT_V1};
 use crate::sts::{StsSignedPayload, StsState};
-use crate::synergy_types::{Block, CanonicalSerialize, Hash, Transaction, TxId};
+use crate::synergy_types::{Block, CanonicalSerialize, Hash, Height, Transaction, TxId};
 use crate::synq_admission::SynQVerificationSummary;
 use crate::synq_execution::{
     execute_synq_transaction_at, sts_host_context_from_sts_state, SynQAivmReceiptSummary,
@@ -332,23 +332,49 @@ pub struct ExecutionResult {
     pub receipt_root: Hash,
 }
 
-pub fn execute_block(block: &Block, state: &ExecutionState) -> Result<ExecutionResult, String> {
-    let graph = build_execution_graph(&block.transactions)?;
+/// Protocol-neutral execution inputs.
+///
+/// These are the ONLY block-derived values the state transition actually
+/// reads. Round, epoch, cluster, QC, validator-set, proposer-schedule, and
+/// bonded-weight fields belong to PoSy block construction and validation, not
+/// to execution, so they are deliberately absent here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionBlockContext {
+    pub height: Height,
+    /// Consensus-bounded block timestamp, in milliseconds.
+    pub timestamp_ms: u64,
+}
+
+impl ExecutionBlockContext {
+    /// Derives the neutral context from a PoSy typed block header.
+    pub fn from_typed_header(header: &crate::synergy_types::BlockHeader) -> Self {
+        Self {
+            height: header.height,
+            timestamp_ms: header.timestamp_ms_consensus_bounded,
+        }
+    }
+}
+
+/// The canonical state transition. One execution engine, called by both the
+/// PoSy typed path and the single-authority driver.
+pub fn execute_block_contents(
+    context: &ExecutionBlockContext,
+    transactions: &[Transaction],
+    state: &ExecutionState,
+) -> Result<ExecutionResult, String> {
+    let graph = build_execution_graph(transactions)?;
     let batches = split_into_parallel_batches(&graph);
     let mut working_state = state.clone();
     let mut receipts = Vec::new();
     let synq_context = SynQExecutionContext {
-        runtime_block_height: block.header.height.0,
-        runtime_block_timestamp_unix: block
-            .header
-            .timestamp_ms_consensus_bounded
-            .saturating_div(1_000),
+        runtime_block_height: context.height.0,
+        runtime_block_timestamp_unix: context.timestamp_ms.saturating_div(1_000),
         sts_host: None,
     };
     for batch in batches {
         let mut batch_receipts = execute_batch_parallel(
             &batch,
-            &block.transactions,
+            transactions,
             &mut working_state,
             synq_context.clone(),
         )?;
@@ -363,6 +389,16 @@ pub fn execute_block(block: &Block, state: &ExecutionState) -> Result<ExecutionR
         state_root_after,
         receipt_root,
     })
+}
+
+/// PoSy/BFT-compatible wrapper. Semantics are unchanged: it derives the
+/// neutral context from the typed header and delegates.
+pub fn execute_block(block: &Block, state: &ExecutionState) -> Result<ExecutionResult, String> {
+    execute_block_contents(
+        &ExecutionBlockContext::from_typed_header(&block.header),
+        &block.transactions,
+        state,
+    )
 }
 
 pub fn build_execution_graph(transactions: &[Transaction]) -> Result<ExecutionGraph, String> {

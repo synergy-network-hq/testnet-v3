@@ -29,6 +29,8 @@ pub mod desired_state_v2_tests;
 pub mod epoch;
 pub mod etdag;
 pub mod execution;
+#[cfg(test)]
+pub mod execution_neutral_tests;
 pub mod fleet_status;
 pub mod gas;
 pub mod genesis;
