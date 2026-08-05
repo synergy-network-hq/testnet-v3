@@ -3005,6 +3005,23 @@ mod tests {
         );
     }
 
+    /// The launch consensus configuration. Kept in one place so a protocol
+    /// change is a single edit and no test silently re-enables typed PoSy.
+    fn apply_release_consensus_config(config: &mut crate::config::NodeConfig) {
+        use crate::consensus::single_authority_finality_store::SINGLE_AUTHORITY_CONSENSUS_PROTOCOL;
+        use crate::consensus::single_authority_startup::{
+            LAUNCH_AUTHORITY_ID, LAUNCH_NETWORK_ID, LAUNCH_TARGET_BLOCK_TIME_MS,
+        };
+        config.consensus.algorithm = SINGLE_AUTHORITY_CONSENSUS_PROTOCOL.to_string();
+        config.consensus.mode = SINGLE_AUTHORITY_CONSENSUS_PROTOCOL.to_string();
+        config.consensus.coordinator_id = String::new();
+        config.consensus.producer_ids = Vec::new();
+        config.consensus.target_block_time_ms = LAUNCH_TARGET_BLOCK_TIME_MS;
+        config.consensus.release_id = "chain1266-single-authority-rc1".to_string();
+        config.identity.node_id = LAUNCH_AUTHORITY_ID.to_string();
+        config.network.network_id = LAUNCH_NETWORK_ID.to_string();
+    }
+
     #[test]
     fn epoch_validator_set_ignores_config_peers_vpn_and_registry_drift() {
         let _env_lock = validator_test_env_lock();
@@ -3017,6 +3034,10 @@ mod tests {
         let snapshot_path = temp_dir.join("epoch-validator-sets.json");
 
         let mut config = crate::config::NodeConfig::default();
+        // This test covers peer/VPN/registry drift, not consensus selection, so
+        // it must declare a consensus configuration this release actually runs.
+        // The default is typed PoSy, which the release gate rejects by design.
+        apply_release_consensus_config(&mut config);
         config.node.strict_validator_allowlist = true;
         config.node.allowed_validator_addresses = all_addresses.clone();
         config.network.persistent_peers = vec!["validator-7".to_string()];

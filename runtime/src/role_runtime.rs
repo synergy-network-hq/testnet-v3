@@ -5326,8 +5326,12 @@ mod tests {
             !source.contains(&inherited_role_startup),
             "the production role runtime must not retain the legacy consensus startup path"
         );
+        // Built by concatenation so this assertion cannot match its own source
+        // text, exactly as the three checks above do.
+        let typed_dispatcher_variant =
+            ["FinalizedConsensusDriverStartup", "::", "SpawnFinalizedTypedDriver"].concat();
         assert!(
-            !source.contains("FinalizedConsensusDriverStartup::SpawnFinalizedTypedDriver"),
+            !source.contains(&typed_dispatcher_variant),
             "the production role runtime must not expose a typed PoSy dispatcher variant"
         );
         assert!(

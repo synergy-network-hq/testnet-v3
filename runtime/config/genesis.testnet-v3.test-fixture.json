@@ -4090,8 +4090,8 @@
     ]
   },
   "test_fixture": {
-    "applied_canonical_genesis_hash": "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",
-    "applied_canonical_genesis_sha256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+    "applied_canonical_genesis_hash": "d79053eb922517c75657f3315985cb6e96edaa68ec1ca45a67ba0955b6902042",
+    "applied_canonical_genesis_sha256": "2e60911ceea6fe73dfe95a2b2a1b74770043d154b5c5c8c359084e70a44431fe",
     "applied_canonical_genesis_source": "genesis.testnet-v3.identity-assigned.json",
     "is_test_fixture": true,
     "never_load_in_production": true,

@@ -673,14 +673,54 @@ fn enforce_consensus_config_invariants(config: &NodeConfig) -> Result<(), Box<dy
     if config.consensus.allow_genesis_status_bypass {
         return Err("genesis status bypass is disabled for PQC Testnet consensus".into());
     }
-    if config.consensus.algorithm != COORDINATED_ROUND_ROBIN_V1
-        || config.consensus.mode != COORDINATED_ROUND_ROBIN_V1
-    {
+    // Protocol-aware validation, keyed on the engine selector `mode`. Only the
+    // protocols this release can actually run are accepted; an unknown mode is
+    // still rejected and typed PoSy remains disabled. `algorithm` is the
+    // protocol compatibility label and must name the same protocol as `mode`.
+    match config.consensus.mode.as_str() {
+        COORDINATED_ROUND_ROBIN_V1 => {
+            require_matching_algorithm_label(config, COORDINATED_ROUND_ROBIN_V1)?;
+            enforce_coordinated_round_robin_config_invariants(config)?;
+        }
+        crate::consensus::single_authority_finality_store::SINGLE_AUTHORITY_CONSENSUS_PROTOCOL => {
+            require_matching_algorithm_label(
+                config,
+                crate::consensus::single_authority_finality_store::SINGLE_AUTHORITY_CONSENSUS_PROTOCOL,
+            )?;
+            enforce_single_authority_config_invariants(config)?;
+        }
+        other => {
+            return Err(format!(
+                "this Chain 1266 release only accepts consensus algorithm/mode {COORDINATED_ROUND_ROBIN_V1} or {}; typed PoSy and fallback consensus are disabled, and {other} is unknown",
+                crate::consensus::single_authority_finality_store::SINGLE_AUTHORITY_CONSENSUS_PROTOCOL
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// `algorithm` is the protocol compatibility label and `mode` is the engine
+/// selector. They use different vocabularies for typed PoSy ("posy/2.2" vs
+/// "posy_v2_2") but must always name the same protocol.
+fn require_matching_algorithm_label(
+    config: &NodeConfig,
+    protocol: &str,
+) -> Result<(), Box<dyn Error>> {
+    if config.consensus.algorithm != protocol {
         return Err(format!(
-            "this Chain 1266 release only accepts consensus algorithm/mode {COORDINATED_ROUND_ROBIN_V1}; typed PoSy and fallback consensus are disabled"
+            "consensus mode {protocol} requires algorithm label {protocol}, found {}",
+            config.consensus.algorithm
         )
         .into());
     }
+    Ok(())
+}
+
+/// Consensus-object kill switches that must remain off for every protocol this
+/// release runs. Neither coordinated round-robin nor single authority uses
+/// validator voting, quorum, or quorum certificates.
+fn enforce_no_consensus_object_overrides(protocol: &str) -> Result<(), Box<dyn Error>> {
     for variable in [
         "CHAIN1266_VOTING_ENABLED",
         "CHAIN1266_QUORUM_ENABLED",
@@ -692,10 +732,78 @@ fn enforce_consensus_config_invariants(config: &NodeConfig) -> Result<(), Box<dy
             .and_then(parse_env_bool)
             .unwrap_or(false)
         {
-            return Err(
-                format!("{variable}=true is forbidden by coordinated_round_robin_v1").into(),
-            );
+            return Err(format!("{variable}=true is forbidden by {protocol}").into());
         }
+    }
+    Ok(())
+}
+
+/// Unchanged coordinated validation.
+fn enforce_coordinated_round_robin_config_invariants(
+    config: &NodeConfig,
+) -> Result<(), Box<dyn Error>> {
+    use crate::consensus::coordinated_round_robin::COORDINATED_ROUND_ROBIN_V1;
+    enforce_no_consensus_object_overrides(COORDINATED_ROUND_ROBIN_V1)
+}
+
+/// Configuration invariants for `single_authority_v1`.
+///
+/// The signed bindings that this node cannot know from local configuration -
+/// chain incarnation, directory namespace, authority ML-DSA-65 fingerprint and
+/// the null pending transition - are verified against Genesis and the ML-DSA-87
+/// signed DesiredStateV2 by
+/// `consensus::single_authority_startup::resolve_verified_consensus_startup`,
+/// which is the only path permitted to select this driver. What is checked here
+/// is what local configuration itself asserts.
+fn enforce_single_authority_config_invariants(config: &NodeConfig) -> Result<(), Box<dyn Error>> {
+    use crate::consensus::single_authority_finality_store::SINGLE_AUTHORITY_CONSENSUS_PROTOCOL;
+    use crate::consensus::single_authority_startup::{
+        LAUNCH_AUTHORITY_ID, LAUNCH_NETWORK_ID, LAUNCH_TARGET_BLOCK_TIME_MS,
+    };
+
+    enforce_no_consensus_object_overrides(SINGLE_AUTHORITY_CONSENSUS_PROTOCOL)?;
+
+    if config.network.network_id != LAUNCH_NETWORK_ID {
+        return Err(format!(
+            "{SINGLE_AUTHORITY_CONSENSUS_PROTOCOL} requires network {LAUNCH_NETWORK_ID}, found {}",
+            config.network.network_id
+        )
+        .into());
+    }
+    if config.identity.node_id != LAUNCH_AUTHORITY_ID {
+        return Err(format!(
+            "{SINGLE_AUTHORITY_CONSENSUS_PROTOCOL} requires authority identity {LAUNCH_AUTHORITY_ID}, found {}",
+            config.identity.node_id
+        )
+        .into());
+    }
+    if config.consensus.target_block_time_ms != LAUNCH_TARGET_BLOCK_TIME_MS {
+        return Err(format!(
+            "{SINGLE_AUTHORITY_CONSENSUS_PROTOCOL} requires a {LAUNCH_TARGET_BLOCK_TIME_MS}ms target block time, found {}",
+            config.consensus.target_block_time_ms
+        )
+        .into());
+    }
+    // No coordinated-only field may be present. These are not merely unused:
+    // a populated coordinator or producer set means the operator staged a
+    // coordinated configuration against a single-authority release.
+    if !config.consensus.coordinator_id.trim().is_empty() {
+        return Err(format!(
+            "{SINGLE_AUTHORITY_CONSENSUS_PROTOCOL} must not configure a coordinator"
+        )
+        .into());
+    }
+    if !config.consensus.producer_ids.is_empty() {
+        return Err(format!(
+            "{SINGLE_AUTHORITY_CONSENSUS_PROTOCOL} must not configure producers"
+        )
+        .into());
+    }
+    if config.consensus.release_id.trim().is_empty() {
+        return Err(format!(
+            "{SINGLE_AUTHORITY_CONSENSUS_PROTOCOL} requires a release id to cross-check against the signed activation"
+        )
+        .into());
     }
     Ok(())
 }

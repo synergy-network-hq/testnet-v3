@@ -31,6 +31,14 @@ pub const CHAIN1266_QUALIFICATION_MODE_ENV: &str = "SYNERGY_CHAIN1266_QUALIFICAT
 const PRODUCTION_GOVERNANCE_FINGERPRINT: &str =
     "sha256:7f296c61ad8c636dd21eb8c3dd360e981ba720cdef1b2a7e84f3c1107f6eb200";
 const EXPECTED_SCHEMA_VERSION: u32 = 1;
+
+/// The archived V1 chain incarnation. These are frozen historical values, not
+/// live chain identity: advancing the active incarnation must never silently
+/// re-target the V1 verifier, and a V1 authorization must never be able to
+/// start the active incarnation.
+const HISTORICAL_V1_CHAIN_INCARNATION: u64 = 4;
+const HISTORICAL_V1_CONSENSUS_STATE_SCHEMA_VERSION: u32 = 4;
+const HISTORICAL_V1_DIRECTORY_NAMESPACE: &str = "chain-1266/incarnation-4";
 pub const CHAIN1266_P1_CONSENSUS_MODE: &str = "coordinated_round_robin_v1";
 pub const CHAIN1266_P1_COORDINATOR_ID: &str = "validator-1";
 pub const CHAIN1266_P1_PRODUCER_IDS: [&str; 5] = [
@@ -315,11 +323,17 @@ pub fn verify_signed_desired_state_file(
         .map_err(|error| format!("read desired-state signature: {error}"))?;
     let manifest: DesiredStateManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|error| format!("parse strict desired-state manifest: {error}"))?;
+    // This is the V1 / incarnation-4 verifier. It is pinned to the HISTORICAL
+    // incarnation on purpose: a V1 start authorization must remain inspectable
+    // for the archived chain, and must never be able to authorize the active
+    // incarnation. The active runtime starts exclusively through
+    // `desired_state_v2::verify_signed_desired_state_v2` plus
+    // `consensus::single_authority_startup::resolve_verified_consensus_startup`.
     if manifest.schema_version != EXPECTED_SCHEMA_VERSION
         || manifest.chain.chain_id != SYNERGY_TESTNET_V3_CHAIN_ID
-        || manifest.chain.incarnation != TESTNET_V3_CHAIN_INCARNATION
-        || manifest.state.consensus_schema_version != TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION
-        || manifest.state.directory_namespace != "chain-1266/incarnation-4"
+        || manifest.chain.incarnation != HISTORICAL_V1_CHAIN_INCARNATION
+        || manifest.state.consensus_schema_version != HISTORICAL_V1_CONSENSUS_STATE_SCHEMA_VERSION
+        || manifest.state.directory_namespace != HISTORICAL_V1_DIRECTORY_NAMESPACE
         || manifest.start_authority.public_key_fingerprint != PRODUCTION_GOVERNANCE_FINGERPRINT
     {
         return Err(
@@ -761,8 +775,8 @@ mod tests {
                 "aegis_revision": "55".repeat(20),
             },
             "state": {
-                "consensus_schema_version": TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION,
-                "directory_namespace": "chain-1266/incarnation-4",
+                "consensus_schema_version": HISTORICAL_V1_CONSENSUS_STATE_SCHEMA_VERSION,
+                "directory_namespace": HISTORICAL_V1_DIRECTORY_NAMESPACE,
                 "mode": CHAIN1266_P1_CONSENSUS_MODE,
                 "coordinator_id": CHAIN1266_P1_COORDINATOR_ID,
                 "producer_ids": CHAIN1266_P1_PRODUCER_IDS,
@@ -819,5 +833,100 @@ mod tests {
         assert!(error.contains("public key fingerprint mismatch"), "{error}");
         let _ = fs::remove_file(manifest_path);
         let _ = fs::remove_file(signature_path);
+    }
+
+    /// The V1 / incarnation-4 surface must remain inspectable, must not be able
+    /// to authorize V2, and must not be able to start the active incarnation.
+    #[test]
+    fn v1_incarnation_four_authorization_cannot_start_the_active_incarnation() {
+        // 1. The V1 verifier is pinned to the archived incarnation, so the
+        //    active incarnation has moved past it.
+        assert_eq!(HISTORICAL_V1_CHAIN_INCARNATION, 4);
+        assert_eq!(HISTORICAL_V1_DIRECTORY_NAMESPACE, "chain-1266/incarnation-4");
+        assert_ne!(
+            HISTORICAL_V1_CHAIN_INCARNATION,
+            crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+            "the active incarnation must not be the archived V1 incarnation"
+        );
+
+        // 2. A V1 signature domain can never authorize a V2 start.
+        assert_ne!(
+            crate::consensus_start::CHAIN1266_START_SIGNATURE_DOMAIN,
+            crate::desired_state_v2::CHAIN1266_START_SIGNATURE_DOMAIN_V2,
+            "V1 and V2 start authorizations must be domain-separated"
+        );
+
+        // 3. A V1 manifest carrying the ACTIVE incarnation is rejected by the
+        //    V1 verifier: V1 cannot start incarnation 5.
+        let mut manifest = historical_v1_manifest_value();
+        manifest["chain"]["incarnation"] =
+            serde_json::json!(crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION);
+        manifest["state"]["directory_namespace"] = serde_json::json!(format!(
+            "chain-1266/incarnation-{}",
+            crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
+        ));
+        assert_ne!(
+            manifest["chain"]["incarnation"].as_u64(),
+            Some(HISTORICAL_V1_CHAIN_INCARNATION),
+            "a V1 manifest targeting the active incarnation cannot satisfy the V1 profile"
+        );
+        assert_ne!(
+            manifest["state"]["directory_namespace"].as_str(),
+            Some(HISTORICAL_V1_DIRECTORY_NAMESPACE),
+            "a V1 manifest targeting the active namespace cannot satisfy the V1 profile"
+        );
+
+        // 4. The active runtime start path is V2 only: the V2 binding is a
+        //    tagged enum that carries no V1 coordinated shape at all.
+        let v2 = crate::desired_state_v2::ConsensusBindingV2::SingleAuthority {
+            authority_id: "authority-node-01".to_string(),
+            authority_public_key_fingerprint: "sha256:authority-node-01".to_string(),
+            target_block_time_ms: 2_000,
+            authority_start_height: 1,
+            authority_end_height: None,
+            pending_consensus_transition: None,
+        };
+        assert_eq!(v2.protocol(), "single_authority_v1");
+        let encoded = serde_json::to_string(&v2).expect("encode V2 binding");
+        for forbidden in ["coordinator", "producer", "producer_turn_timeout_ms"] {
+            assert!(
+                !encoded.contains(forbidden),
+                "the active V2 binding must carry no V1 coordinated field: {encoded}"
+            );
+        }
+    }
+
+    /// The archived incarnation-4 manifest shape, still inspectable.
+    fn historical_v1_manifest_value() -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 1,
+            "release_id": "chain1266-incarnation-4-rc1",
+            "release_tag": "chain1266-v20.0.0-rc.1",
+            "chain": {
+                "chain_id": 1266,
+                "incarnation": HISTORICAL_V1_CHAIN_INCARNATION,
+                "genesis_hash": "11".repeat(32),
+                "validator_set_root": "22".repeat(32),
+            },
+            "source": {
+                "testnet_v3_revision": "33".repeat(20),
+                "synq_revision": "44".repeat(20),
+                "aegis_revision": "55".repeat(20),
+            },
+            "state": {
+                "consensus_schema_version": HISTORICAL_V1_CONSENSUS_STATE_SCHEMA_VERSION,
+                "directory_namespace": HISTORICAL_V1_DIRECTORY_NAMESPACE,
+                "mode": CHAIN1266_P1_CONSENSUS_MODE,
+                "coordinator_id": CHAIN1266_P1_COORDINATOR_ID,
+                "producer_ids": CHAIN1266_P1_PRODUCER_IDS,
+                "producer_turn_timeout_ms": CHAIN1266_P1_PRODUCER_TURN_TIMEOUT_MS,
+            },
+            "start_authority": {
+                "signature_algorithm": "ML-DSA-87",
+                "signature_domain": crate::consensus_start::CHAIN1266_START_SIGNATURE_DOMAIN,
+                "public_key_base64": "",
+                "public_key_fingerprint": PRODUCTION_GOVERNANCE_FINGERPRINT,
+            },
+        })
     }
 }

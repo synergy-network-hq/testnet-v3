@@ -77,14 +77,81 @@ fn publish(path: &Path, bytes: &[u8], validate_runtime: bool) {
         .unwrap_or_else(|error| fail(format!("publish {}: {error}", path.display())));
 }
 
+/// Rebinds the test fixture's recorded provenance to the CURRENT canonical
+/// source Genesis, then recomputes the fixture's own integrity roots.
+///
+/// The fixture keeps its own independently derived Genesis hash by design; only
+/// the `applied_canonical_genesis_*` provenance fields track the source. This
+/// exists so an incarnation advance never leaves the fixture pointing at a
+/// superseded canonical Genesis, and so that pointer is never hand-edited.
+fn refresh_fixture_provenance(root: &Path, apply: bool) {
+    let source_relative = "genesis.testnet-v3.identity-assigned.json";
+    let source_path = root.join(source_relative);
+    let fixture_path = root.join("runtime/config/genesis.testnet-v3.test-fixture.json");
+
+    let source_bytes = fs::read(&source_path)
+        .unwrap_or_else(|error| fail(format!("read {}: {error}", source_path.display())));
+    let source: Value = serde_json::from_slice(&source_bytes)
+        .unwrap_or_else(|error| fail(format!("parse {}: {error}", source_path.display())));
+    let source_hash = source["integrity"]["genesis_hash"]
+        .as_str()
+        .unwrap_or_else(|| fail("canonical source lacks a Genesis hash"))
+        .to_string();
+    let source_sha256 = sha256(&source_bytes);
+
+    let mut fixture: Value = serde_json::from_slice(
+        &fs::read(&fixture_path)
+            .unwrap_or_else(|error| fail(format!("read {}: {error}", fixture_path.display()))),
+    )
+    .unwrap_or_else(|error| fail(format!("parse {}: {error}", fixture_path.display())));
+    if fixture["test_fixture"]["is_test_fixture"] != Value::Bool(true) {
+        fail("refusing to rewrite provenance on a document that is not the test fixture");
+    }
+    fixture["test_fixture"]["applied_canonical_genesis_hash"] = Value::String(source_hash.clone());
+    fixture["test_fixture"]["applied_canonical_genesis_sha256"] =
+        Value::String(source_sha256.clone());
+    fixture["test_fixture"]["applied_canonical_genesis_source"] =
+        Value::String(source_relative.to_string());
+    recompute_testnet_v3_candidate_integrity(&mut fixture)
+        .unwrap_or_else(|error| fail(format!("recompute fixture: {error}")));
+    let fixture_hash = fixture["integrity"]["genesis_hash"]
+        .as_str()
+        .unwrap_or_else(|| fail("fixture lacks a Genesis hash"))
+        .to_string();
+    if fixture_hash == source_hash {
+        fail("the test fixture must keep an independently derived Genesis hash");
+    }
+    let bytes = encode(&fixture);
+    if apply {
+        fs::write(&fixture_path, &bytes)
+            .unwrap_or_else(|error| fail(format!("write {}: {error}", fixture_path.display())));
+    }
+    println!(
+        "runtime/config/genesis.testnet-v3.test-fixture.json mode={} applied_canonical_genesis_hash={} applied_canonical_genesis_sha256={} fixture_genesis_hash={} file_sha256={}",
+        if apply { "APPLY" } else { "CHECK" },
+        source_hash,
+        source_sha256,
+        fixture_hash,
+        sha256(&bytes)
+    );
+}
+
 fn main() {
-    let apply = match std::env::args().nth(1).as_deref() {
-        Some("--check") => false,
-        Some("--apply") => true,
-        _ => fail("use exactly one of --check or --apply"),
+    let (apply, refresh_provenance) = match std::env::args().nth(1).as_deref() {
+        Some("--check") => (false, false),
+        Some("--apply") => (true, false),
+        Some("--refresh-fixture-provenance-check") => (false, true),
+        Some("--refresh-fixture-provenance") => (true, true),
+        _ => fail(
+            "use exactly one of --check, --apply, --refresh-fixture-provenance-check or --refresh-fixture-provenance",
+        ),
     };
     if std::env::args().len() != 2 {
-        fail("use exactly one of --check or --apply");
+        fail("use exactly one mode argument");
+    }
+    if refresh_provenance {
+        refresh_fixture_provenance(&repo(), apply);
+        return;
     }
 
     let root = repo();
