@@ -76,6 +76,10 @@ name = "advance-testnet-v3-chain-incarnation"
 path = "bin/advance-testnet-v3-chain-incarnation.rs"
 
 [[bin]]
+name = "chain1266-single-authority-bootstrap"
+path = "bin/chain1266-single-authority-bootstrap.rs"
+
+[[bin]]
 name = "build-chain1266-desired-state"
 path = "bin/build-chain1266-desired-state.rs"
 
