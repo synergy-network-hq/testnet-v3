@@ -57,6 +57,11 @@ fn inputs(dir: &TempDir) -> SingleAuthorityRuntimeInputs {
         finality_head_path: dir.0.join("finality.head.json"),
         signing_journal_path: dir.0.join("signing-journal.json"),
         committed_block_log_path: dir.0.join("committed-blocks.ndjson"),
+        execution_state_path: dir.0.join("execution-state.json"),
+        receipt_log_path: dir.0.join("receipts.ndjson"),
+        // Durability-only slice: an empty canonical execution state. The real
+        // Genesis-derived state is exercised by the real-transaction suite.
+        genesis_execution_state: crate::execution::ExecutionState::new(),
     }
 }
 

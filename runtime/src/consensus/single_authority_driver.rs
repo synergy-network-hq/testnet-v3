@@ -7,12 +7,21 @@
 //! No coordinator, producer, vote, QC, quorum, round, cluster, view change,
 //! catch-up, peer, or relayer participation exists in this path.
 
+use super::single_authority_execution::{
+    append_receipt_frame, authorize_for_execution, genesis_anchor_block, load_execution_state,
+    persist_execution_state, recover_receipt_frames, require_state_root_agreement,
+    typed_transactions_for_block, SingleAuthorityReceiptFrame,
+};
 use super::single_authority_finality_store::*;
 use super::single_authority_signing_journal::*;
 use super::single_authority_writable_store::WritableSingleAuthorityStore;
-use crate::block::Block;
+use crate::block::{Block, BlockChain};
 use crate::crypto::pqc::{PQCAlgorithm, PQCManager, PQCPrivateKey, PQCPublicKey};
-use crate::synergy_types::Hash;
+use crate::execution::{
+    execute_block_contents, compute_state_root_after, ExecutionBlockContext, ExecutionResult,
+    ExecutionState,
+};
+use crate::synergy_types::{Hash, Height};
 use crate::transaction::Transaction;
 use std::path::PathBuf;
 
@@ -34,6 +43,12 @@ pub struct SingleAuthorityRuntimeInputs {
     pub finality_head_path: PathBuf,
     pub signing_journal_path: PathBuf,
     pub committed_block_log_path: PathBuf,
+    pub execution_state_path: PathBuf,
+    pub receipt_log_path: PathBuf,
+    /// Canonical Genesis-derived execution state. This is the height-0 state
+    /// the first authority block extends, and it is produced by the Genesis
+    /// path, never synthesised by the driver.
+    pub genesis_execution_state: ExecutionState,
 }
 
 impl SingleAuthorityRuntimeInputs {
@@ -71,6 +86,8 @@ pub struct SingleAuthorityDriver {
     journal: SingleAuthoritySigningJournal,
     store: WritableSingleAuthorityStore,
     parent: FinalizedParent,
+    execution_state: ExecutionState,
+    chain: BlockChain,
 }
 
 impl SingleAuthorityDriver {
@@ -93,12 +110,14 @@ impl SingleAuthorityDriver {
         let writable = WritableSingleAuthorityStore::open(store)?;
 
         // Genesis is finalized height 0 and is NOT in the authority finality
-        // log: it is bound by the ML-DSA-87 start authorization.
+        // log: it is bound by the ML-DSA-87 start authorization. Its state root
+        // is the canonical Genesis execution state root, not a zero placeholder.
+        let genesis_state_root = compute_state_root_after(&inputs.genesis_execution_state)?;
         let parent = match writable.cached_tail() {
             None => FinalizedParent {
                 height: 0,
                 block_hash: inputs.genesis_hash.clone(),
-                state_root: Hash::zero(),
+                state_root: genesis_state_root,
             },
             Some(tail) => FinalizedParent {
                 height: tail.height,
@@ -106,12 +125,87 @@ impl SingleAuthorityDriver {
                 state_root: tail.state_root,
             },
         };
+
+        // Recover the committed block bodies and reconcile them against the
+        // finality log, the durable execution state, and the receipt log. Any
+        // disagreement is a hard startup failure.
+        let mut chain = BlockChain::new();
+        chain.add_block(genesis_anchor_block(&inputs.genesis_hash));
+        crate::consensus::chain_durability::recover_chain_from_committed_block_log_at(
+            &mut chain,
+            &inputs.committed_block_log_path,
+        )?;
+        let execution_state = Self::reconcile_recovered_state(&inputs, &parent, &chain)?;
+
         Ok(Self {
             inputs,
             journal,
             store: writable,
             parent,
+            execution_state,
+            chain,
         })
+    }
+
+    /// Fails closed unless committed bodies, execution state, receipts, the
+    /// finality record, and the durable head all describe the same chain tip.
+    fn reconcile_recovered_state(
+        inputs: &SingleAuthorityRuntimeInputs,
+        parent: &FinalizedParent,
+        chain: &BlockChain,
+    ) -> Result<ExecutionState, String> {
+        let receipts = recover_receipt_frames(&inputs.receipt_log_path)?;
+        let durable_state = load_execution_state(&inputs.execution_state_path)?;
+
+        if parent.height == 0 {
+            if chain.last().map(|tip| tip.block_index) != Some(0) {
+                return Err(
+                    "committed block bodies exist but no authority height is finalized".to_string(),
+                );
+            }
+            if !receipts.is_empty() {
+                return Err(
+                    "durable receipts exist but no authority height is finalized".to_string()
+                );
+            }
+            let state = durable_state.unwrap_or_else(|| inputs.genesis_execution_state.clone());
+            require_state_root_agreement(&state, parent.state_root, "genesis recovery")?;
+            return Ok(state);
+        }
+
+        let tip = chain.last().ok_or_else(|| {
+            format!(
+                "finalized height {} has no recovered committed block body",
+                parent.height
+            )
+        })?;
+        if tip.block_index != parent.height || tip.hash != parent.block_hash {
+            return Err(format!(
+                "recovered committed block tip {}:{} does not match finalized head {}:{}",
+                tip.block_index, tip.hash, parent.height, parent.block_hash
+            ));
+        }
+        let frame = receipts.get(&parent.height).ok_or_else(|| {
+            format!("finalized height {} has no durable receipts", parent.height)
+        })?;
+        if frame.block_hash != parent.block_hash || frame.state_root_after != parent.state_root {
+            return Err(format!(
+                "durable receipt frame at height {} disagrees with the finalized record",
+                parent.height
+            ));
+        }
+        let state = durable_state.ok_or_else(|| {
+            format!(
+                "finalized height {} has no durable execution state",
+                parent.height
+            )
+        })?;
+        require_state_root_agreement(
+            &state,
+            parent.state_root,
+            &format!("height {} recovery", parent.height),
+        )?;
+        Ok(state)
     }
 
     pub fn next_height(&self) -> u64 {
@@ -120,6 +214,16 @@ impl SingleAuthorityDriver {
 
     pub fn finalized_parent(&self) -> &FinalizedParent {
         &self.parent
+    }
+
+    /// The finalized execution state the next block extends.
+    pub fn execution_state(&self) -> &ExecutionState {
+        &self.execution_state
+    }
+
+    /// The recovered committed block bodies.
+    pub fn chain(&self) -> &BlockChain {
+        &self.chain
     }
 }
 
@@ -142,18 +246,16 @@ impl SingleAuthorityDriver {
         // `Block::hash` is blake3 hex, so this round-trips exactly via to_hex()
         // and a recovered parent reproduces the identical canonical block id.
         let block_hash = Hash::from_hex(&block.hash)?;
-        let state_root = Hash::from_domain_bytes(
-            "SYNERGY_CHAIN1266_SINGLE_AUTHORITY_STATE_ROOT",
-            block.hash.as_bytes(),
-        );
-        let transaction_root = Hash::from_domain_bytes(
-            "SYNERGY_CHAIN1266_SINGLE_AUTHORITY_TX_ROOT",
-            block.transactions_root.as_bytes(),
-        );
-        let receipt_root = Hash::from_domain_bytes(
-            "SYNERGY_CHAIN1266_SINGLE_AUTHORITY_RECEIPT_ROOT",
-            block.transactions_root.as_bytes(),
-        );
+
+        // 1b. Canonical execution. The roots below are produced by the one
+        // shared state transition, not by the driver. Height and the
+        // consensus-bounded block timestamp are the only block-derived inputs.
+        let execution = self.execute_block_body(&block)?;
+        let state_root = execution.state_root_after;
+        let receipt_root = execution.receipt_root;
+        // `transactions_root` is the canonical blake3 merkle root already
+        // committed in the block preimage; it round-trips exactly.
+        let transaction_root = Hash::from_hex(&block.transactions_root)?;
 
         // 2. Signing subject bound to the exact canonical block.
         let subject = SingleAuthoritySigningSubject {
@@ -202,8 +304,35 @@ impl SingleAuthorityDriver {
             subject,
             signature_bytes,
             &mut block,
+            execution,
         )?;
         Ok(block)
+    }
+
+    /// Runs the canonical, protocol-neutral state transition over a block body.
+    ///
+    /// Every carrier is re-admitted here; a body the admission path would
+    /// reject can never be executed or finalized.
+    pub fn execute_block_body(&self, block: &Block) -> Result<ExecutionResult, String> {
+        let consensus_timestamp_unix = block.timestamp;
+        let typed = typed_transactions_for_block(
+            &block.transactions,
+            &self.chain,
+            consensus_timestamp_unix,
+        )?;
+        let authorized = authorize_for_execution(
+            &self.execution_state,
+            &typed,
+            consensus_timestamp_unix,
+        )?;
+        execute_block_contents(
+            &ExecutionBlockContext {
+                height: Height(block.block_index),
+                timestamp_ms: consensus_timestamp_unix.saturating_mul(1_000),
+            },
+            &typed,
+            &authorized,
+        )
     }
 }
 
@@ -218,6 +347,7 @@ impl SingleAuthorityDriver {
         subject: SingleAuthoritySigningSubject,
         signature_bytes: Vec<u8>,
         block: &mut Block,
+        execution: ExecutionResult,
     ) -> Result<(), String> {
         use base64::{engine::general_purpose, Engine as _};
 
@@ -244,6 +374,21 @@ impl SingleAuthorityDriver {
         crate::consensus::chain_durability::append_committed_block_body_at(
             block,
             &self.inputs.committed_block_log_path,
+        )?;
+
+        // 6b. Persist the executed state and the canonical receipts BEFORE
+        // finality is appended, so a crash can never leave a finalized height
+        // without its reproducible execution products.
+        persist_execution_state(&self.inputs.execution_state_path, &execution.state)?;
+        append_receipt_frame(
+            &self.inputs.receipt_log_path,
+            &SingleAuthorityReceiptFrame {
+                height: subject.height,
+                block_hash: block.hash.clone(),
+                receipt_root,
+                state_root_after: state_root,
+                receipts: execution.receipts.clone(),
+            },
         )?;
 
         // 7. Append + fsync the finality record.
@@ -273,7 +418,10 @@ impl SingleAuthorityDriver {
         self.store.commit_head(&record)?;
         self.journal.mark_finalized(&subject)?;
 
-        // 9. Only now may the parent advance (publication would happen here).
+        // 9. Only now may the parent, the in-memory chain, and the execution
+        // state advance (publication would happen here).
+        self.chain.add_block_extending_tip(block.clone())?;
+        self.execution_state = execution.state;
         self.parent = FinalizedParent {
             height: subject.height,
             block_hash: block.hash.clone(),
