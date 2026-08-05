@@ -38,7 +38,7 @@ pub const LAUNCH_CHAIN_ID: u64 = 1266;
 pub const LAUNCH_CHAIN_INCARNATION: u64 = 5;
 pub const LAUNCH_NETWORK_ID: &str = "synergy-testnet-v3";
 pub const LAUNCH_AUTHORITY_ID: &str = "authority-node-01";
-pub const LAUNCH_TARGET_BLOCK_TIME_MS: u64 = 2_000;
+pub const LAUNCH_TARGET_BLOCK_TIME_MS: u64 = 1_000;
 
 /// The fully verified single-authority startup decision.
 #[derive(Debug, Clone, PartialEq, Eq)]

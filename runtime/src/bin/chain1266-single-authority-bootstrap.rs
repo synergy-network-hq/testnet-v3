@@ -33,7 +33,7 @@ const CHAIN_ID: u64 = 1266;
 const CHAIN_INCARNATION: u64 = 5;
 const NETWORK_ID: &str = "synergy-testnet-v3";
 const AUTHORITY_ID: &str = "authority-node-01";
-const TARGET_BLOCK_TIME_MS: u64 = 2_000;
+const TARGET_BLOCK_TIME_MS: u64 = 1_000;
 
 fn fail(message: impl AsRef<str>) -> ! {
     eprintln!("chain1266-single-authority-bootstrap: {}", message.as_ref());

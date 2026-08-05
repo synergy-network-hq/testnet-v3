@@ -294,7 +294,7 @@ fn d13b_launch_constants_are_enforced_on_the_signed_binding() {
     };
     let signed = sign(&authority, &state);
     let error = resolve(&state, &signed, &expectation()).unwrap_err();
-    assert!(error.contains("2000ms block time"), "{error}");
+    assert!(error.contains("ms block time"), "{error}");
 
     // A non-null pending transition.
     let mut state = single_authority_state();

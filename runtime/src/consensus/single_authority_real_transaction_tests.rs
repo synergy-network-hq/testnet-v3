@@ -35,7 +35,7 @@ const CHAIN_INCARNATION: u64 = 5;
 const NETWORK_ID: &str = "synergy-testnet-v3";
 const AUTHORITY_ID: &str = "authority-node-01";
 const RELEASE_ID: &str = "chain1266-single-authority-rc1";
-const TARGET_BLOCK_TIME_MS: u64 = 2_000;
+const TARGET_BLOCK_TIME_MS: u64 = 1_000;
 
 const SENDER_GENESIS_BALANCE_NWEI: u128 = 5_000_000_000_000_000_000;
 const TRANSFER_AMOUNT_NWEI: u128 = 1_000_000_000_000_000;
