@@ -20,6 +20,9 @@ pub mod legacy_canonical_lock;
 pub mod posy;
 pub mod self_realign;
 pub mod signing_authority;
+pub mod single_authority_driver;
+#[cfg(test)]
+pub mod single_authority_first_block_tests;
 pub mod single_authority_finality_store;
 pub mod single_authority_writable_store;
 pub mod single_authority_writer_lock;

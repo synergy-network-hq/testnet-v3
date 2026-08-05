@@ -39,6 +39,7 @@ impl Drop for TempDir {
 
 fn binding() -> SingleAuthorityChainBinding {
     SingleAuthorityChainBinding {
+        first_authority_height: 0,
         chain_id: 1266,
         chain_incarnation: 5,
         authority_id: "authority-node-01".to_string(),

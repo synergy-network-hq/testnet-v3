@@ -49,6 +49,7 @@ impl Drop for TempDir {
 
 fn binding() -> SingleAuthorityChainBinding {
     SingleAuthorityChainBinding {
+        first_authority_height: 0,
         chain_id: TEST_CHAIN_ID,
         chain_incarnation: TEST_INCARNATION,
         authority_id: TEST_AUTHORITY.to_string(),
@@ -112,7 +113,7 @@ fn t01_first_record_appends_and_recovers() {
     let recovery = reopened.recover().expect("recover");
     assert_eq!(recovery.records.len(), 1);
     assert_eq!(recovery.records[0], record);
-    assert_eq!(recovery.next_height(), 1);
+    assert_eq!(recovery.next_height_or(0), 1);
     assert!(!recovery.truncated_trailing_frame);
 }
 
@@ -124,7 +125,7 @@ fn t02_consecutive_records_recover_in_order() {
 
     let recovery = open_store(&dir).recover().expect("recover");
     assert_eq!(recovery.records, seeded);
-    assert_eq!(recovery.next_height(), 5);
+    assert_eq!(recovery.next_height_or(0), 5);
 }
 
 #[test]

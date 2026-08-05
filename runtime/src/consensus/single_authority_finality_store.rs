@@ -59,6 +59,10 @@ pub struct SingleAuthorityFinalityRecord {
 /// Immutable chain identity every record in one log must agree with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SingleAuthorityChainBinding {
+    /// The first height this log contains. Genesis (height 0) is bound by the
+    /// ML-DSA-87 start authorization and is NOT an authority-produced record,
+    /// so a production chain starts this log at height 1.
+    pub first_authority_height: u64,
     pub chain_id: u64,
     pub chain_incarnation: u64,
     pub authority_id: String,
@@ -95,8 +99,11 @@ impl SingleAuthorityRecovery {
         self.records.last()
     }
 
-    pub fn next_height(&self) -> u64 {
-        self.records.last().map(|r| r.height + 1).unwrap_or(0)
+    pub fn next_height_or(&self, first_authority_height: u64) -> u64 {
+        self.records
+            .last()
+            .map(|r| r.height + 1)
+            .unwrap_or(first_authority_height)
     }
 }
 
@@ -237,12 +244,14 @@ fn validate_record_shape(
 fn validate_linkage(
     previous: Option<&SingleAuthorityFinalityRecord>,
     next: &SingleAuthorityFinalityRecord,
+    first_authority_height: u64,
 ) -> Result<(), String> {
     match previous {
         None => {
-            if next.height != 0 {
+            if next.height != first_authority_height {
                 return Err(format!(
-                    "single-authority finality log must begin at height 0, found {}",
+                    "single-authority finality log must begin at height {first_authority_height}, \
+                     found {}",
                     next.height
                 ));
             }
@@ -318,6 +327,10 @@ impl SingleAuthorityFinalityStore {
     pub fn head_path(&self) -> &Path {
         &self.head_path
     }
+
+    pub fn binding(&self) -> &SingleAuthorityChainBinding {
+        &self.binding
+    }
 }
 
 impl SingleAuthorityFinalityStore {
@@ -373,7 +386,7 @@ impl SingleAuthorityFinalityStore {
                 }
                 FrameRead::Complete { record, end_offset } => {
                     validate_record_shape(&record, &self.binding)?;
-                    validate_linkage(records.last(), &record)?;
+                    validate_linkage(records.last(), &record, self.binding.first_authority_height)?;
                     records.push(*record);
                     offset = end_offset;
                 }
@@ -410,7 +423,7 @@ impl SingleAuthorityFinalityStore {
                 ));
             }
         }
-        validate_linkage(recovery.records.last(), record)?;
+        validate_linkage(recovery.records.last(), record, self.binding.first_authority_height)?;
         if recovery.truncated_trailing_frame {
             self.truncate_to(recovery.durable_end_offset)?;
         }
@@ -596,7 +609,7 @@ impl SingleAuthorityFinalityStore {
         }
 
         Ok(SingleAuthorityStartupState {
-            next_height: recovery.next_height(),
+            next_height: recovery.next_height_or(self.binding.first_authority_height),
             finalized: latest,
             head_advanced_during_recovery: head_advanced,
             truncated_trailing_frame: recovery.truncated_trailing_frame,

@@ -55,7 +55,10 @@ impl WritableSingleAuthorityStore {
     }
 
     pub fn next_height(&self) -> u64 {
-        self.cached_tail.as_ref().map(|r| r.height + 1).unwrap_or(0)
+        self.cached_tail
+            .as_ref()
+            .map(|r| r.height + 1)
+            .unwrap_or(self.store.binding().first_authority_height)
     }
 
     fn check_usable(&self) -> Result<(), String> {
@@ -80,9 +83,10 @@ impl WritableSingleAuthorityStore {
         // Linkage is validated against the CACHED tail, not a fresh scan.
         match &self.cached_tail {
             None => {
-                if record.height != 0 {
+                let first = self.store.binding().first_authority_height;
+                if record.height != first {
                     return Err(format!(
-                        "single-authority finality log must begin at height 0, found {}",
+                        "single-authority finality log must begin at height {first}, found {}",
                         record.height
                     ));
                 }
