@@ -1203,8 +1203,8 @@
       "invalid_block_slash_pct": 5,
       "jail_duration_seconds": 86400
     },
-    "state_directory_namespace": "chain-1266/incarnation-4",
-    "state_schema_version": 4,
+    "state_directory_namespace": "chain-1266/incarnation-5",
+    "state_schema_version": 5,
     "target_block_time_ms": 2000,
     "timeouts": {
       "max_round_ms": 10000,
@@ -249060,7 +249060,7 @@
     "extra_data": "synergy-network/genesis/testnet-v3/v1",
     "parent_hash": "0000000000000000000000000000000000000000000000000000000000000000",
     "receipts_root": "1ddd5472813884fe71456bd3df736848820db8fb55a3f307792b2796027e828a",
-    "state_root": "c44dbfe6be31822cff7973e21760db08eda39a8a9868b38a5a1836b100e9b226",
+    "state_root": "b16876eb896c608b3237f38f1946b0cd7fc3905a5f028626efa45bd59a623326",
     "timestamp": 1775044800,
     "transactions_root": "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
   },
@@ -249071,12 +249071,12 @@
     "consensus_parameter_root_sha3_512": "2e6760bed60c8f8e44b3b693254367f0da9a8aa9efae46c517856fb78be7402cf232c064083116b805278e95a952660f7a92e16ca9cd9349aa74467d577127cd",
     "contract_hash": "2e5e017fca374c54a9869c1355677c9cc5d4a36e30d250e6ad2dbadad04ccbdd",
     "deployment_manifest_hash": "a1a700d3bbb020360ddbd02ceb85f4d33bef78646ba3f0ac2bd56eb036bc9271",
-    "genesis_hash": "859c40e33cca7e02e7a3b3ebeafecbbf04ce29080863313ef893a8a5e6341c1d",
+    "genesis_hash": "d79053eb922517c75657f3315985cb6e96edaa68ec1ca45a67ba0955b6902042",
     "post_deployment_aivm_state_root": "6bb65e453b33a5a9bdbcf6446fc1bf5ad6bec487375def6e8cf74c3b2f0dc452",
     "post_deployment_execution_state_root": "2902ef7dc3f6d49d30ced4b03274c4f5708b84c88bf368fd051ebee11ffb0c39",
     "receipt_root": "1ddd5472813884fe71456bd3df736848820db8fb55a3f307792b2796027e828a",
     "signed_by": [],
-    "state_root": "c44dbfe6be31822cff7973e21760db08eda39a8a9868b38a5a1836b100e9b226",
+    "state_root": "b16876eb896c608b3237f38f1946b0cd7fc3905a5f028626efa45bd59a623326",
     "status": "candidate_deployment_bound_pending_release_approval",
     "validator_hash": "fa6fee15dd8f932deeee46bf94ccb32e55af29e7d37e60c5dc8e47bf076698d1",
     "validator_set_hash": "fa6fee15dd8f932deeee46bf94ccb32e55af29e7d37e60c5dc8e47bf076698d1"
@@ -249153,7 +249153,7 @@
   },
   "network": {
     "chain_id": 1266,
-    "chain_incarnation": 4,
+    "chain_incarnation": 5,
     "consensus_version": "posy/2.2",
     "display_name": "Synergy Testnet v3",
     "genesis_schema_version": "v1.5",
@@ -249167,7 +249167,7 @@
   "network_magic_bytes": {
     "derivation": "first_4_bytes(blake3('synergy-network-magic-v1' || 'synergy:testnet-v3' || candidate_genesis_hash))",
     "status": "candidate_recomputed_pending_release_approval",
-    "value": "00f2dfeb"
+    "value": "518e08b0"
   },
   "node_identities": [
     {

@@ -1194,8 +1194,8 @@
       "invalid_block_slash_pct": 5,
       "jail_duration_seconds": 86400
     },
-    "state_directory_namespace": "chain-1266/incarnation-4",
-    "state_schema_version": 4,
+    "state_directory_namespace": "chain-1266/incarnation-5",
+    "state_schema_version": 5,
     "target_block_time_ms": 2000,
     "timeouts": {
       "max_round_ms": 10000,
@@ -2105,7 +2105,7 @@
     "extra_data": "synergy-network/genesis/testnet-v3/v1",
     "parent_hash": "0000000000000000000000000000000000000000000000000000000000000000",
     "receipts_root": "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
-    "state_root": "c5173fb5cad1f81fba97e9e18aedfcc3c2d27a2785ac36152986f5be36c5ffc6",
+    "state_root": "df5bacd5ca06e413df5aa8cfa68f16b58bbfcf0857bd330fccb5c474ee8af5bf",
     "timestamp": 1775044800,
     "transactions_root": "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
   },
@@ -2115,9 +2115,9 @@
     "consensus_parameter_manifest_sha256": "5451f7084bfd97d136a1ab035d70b09ddc3262e6cc4e142b90091bac3a3ea854",
     "consensus_parameter_root_sha3_512": "2e6760bed60c8f8e44b3b693254367f0da9a8aa9efae46c517856fb78be7402cf232c064083116b805278e95a952660f7a92e16ca9cd9349aa74467d577127cd",
     "contract_hash": "f8f512afb0101f6f8f5f65c5d5d653d6784b25912b1d2094aff11e5ee80a3099",
-    "genesis_hash": "45373a796f9b39296c8c881dd8549431c49c6513edab5c5b3bc63b379fd54637",
+    "genesis_hash": "afacb89b7c0306f489a24ef10f6bd31d615f600bada898b4f85c2999f25b429a",
     "signed_by": [],
-    "state_root": "c5173fb5cad1f81fba97e9e18aedfcc3c2d27a2785ac36152986f5be36c5ffc6",
+    "state_root": "df5bacd5ca06e413df5aa8cfa68f16b58bbfcf0857bd330fccb5c474ee8af5bf",
     "status": "candidate_parameter_bound_pending_deployment",
     "validator_hash": "fa6fee15dd8f932deeee46bf94ccb32e55af29e7d37e60c5dc8e47bf076698d1",
     "validator_set_hash": "fa6fee15dd8f932deeee46bf94ccb32e55af29e7d37e60c5dc8e47bf076698d1"
@@ -2195,7 +2195,7 @@
   },
   "network": {
     "chain_id": 1266,
-    "chain_incarnation": 4,
+    "chain_incarnation": 5,
     "consensus_version": "posy/2.2",
     "display_name": "Synergy Testnet v3",
     "genesis_schema_version": "v1.5",
@@ -2209,7 +2209,7 @@
   "network_magic_bytes": {
     "derivation": "first_4_bytes(blake3('synergy-network-magic-v1' || 'synergy:testnet-v3' || candidate_genesis_hash))",
     "status": "candidate_pending_genesis_approval",
-    "value": "48232d3b"
+    "value": "b733306b"
   },
   "node_identities": [
     {

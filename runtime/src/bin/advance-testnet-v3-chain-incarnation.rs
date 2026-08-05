@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use synergy_testnet::genesis::{load_genesis_from_path, recompute_testnet_v3_candidate_integrity};
 
 const CHAIN_ID: u64 = 1266;
-const NEW_INCARNATION: u64 = 4;
-const CONSENSUS_STATE_SCHEMA_VERSION: u64 = 4;
+const NEW_INCARNATION: u64 = 5;
+const CONSENSUS_STATE_SCHEMA_VERSION: u64 = 5;
 
 fn fail(message: impl AsRef<str>) -> ! {
     eprintln!("advance-testnet-v3-chain-incarnation: {}", message.as_ref());
@@ -43,6 +43,12 @@ fn transformed(path: &Path) -> (Value, Vec<u8>) {
         fail(format!("{} is not Chain 1266", path.display()));
     }
     let prior = value["network"]["chain_incarnation"].as_u64().unwrap_or(0);
+    if prior == NEW_INCARNATION {
+        fail(format!(
+            "{} is already incarnation {NEW_INCARNATION}; refusing to reuse a published incarnation",
+            path.display()
+        ));
+    }
     if prior > NEW_INCARNATION {
         fail(format!(
             "{} has incarnation {prior}; refusing a non-incrementing transition to {NEW_INCARNATION}",
@@ -59,7 +65,8 @@ fn transformed(path: &Path) -> (Value, Vec<u8>) {
 }
 
 fn publish(path: &Path, bytes: &[u8], validate_runtime: bool) {
-    let temporary = path.with_extension(format!("incarnation-4-{}", std::process::id()));
+    let temporary =
+        path.with_extension(format!("incarnation-{NEW_INCARNATION}-{}", std::process::id()));
     fs::write(&temporary, bytes)
         .unwrap_or_else(|error| fail(format!("write {}: {error}", temporary.display())));
     if validate_runtime {
