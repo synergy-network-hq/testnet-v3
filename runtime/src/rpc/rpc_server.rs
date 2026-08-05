@@ -6613,7 +6613,7 @@ fn coordinated_finality_records_for_rpc() -> Result<Option<Vec<CoordinatedFinali
         &node_config.network.network_id,
     ) {
         Ok(ResolvedConsensusMode::CoordinatedRoundRobinV1(config)) => config,
-        Ok(ResolvedConsensusMode::PosyV2_2) => {
+        Ok(ResolvedConsensusMode::PosyV2_2) | Ok(ResolvedConsensusMode::SingleAuthorityV1) => {
             return Err(
                 "coordinated finality journal exists while the selected consensus mode is not coordinated_round_robin_v1"
                     .to_string(),

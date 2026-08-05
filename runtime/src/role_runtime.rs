@@ -35,6 +35,9 @@ use crate::consensus::self_realign::{
     expected_genesis_hash, persisted_recovery_state, RealignmentState,
 };
 use crate::consensus::signing_authority::DurableConsensusSigningAuthority;
+use crate::consensus::single_authority_startup::{
+    SingleAuthorityStartupPlan, VerifiedConsensusStartup,
+};
 use crate::consensus::synergy_score::SynergyScoreCalculator;
 use crate::consensus::testnet_v3_bootstrap::{
     load_coordinated_round_robin_activation_bootstrap, load_testnet_v3_genesis_bootstrap,
@@ -158,19 +161,41 @@ impl CoordinatedRoundRobinWorker {
 /// aggregation code can enter a coordinated launch through lifecycle glue.
 enum FinalizedConsensusWorker {
     CoordinatedRoundRobin(CoordinatedRoundRobinWorker),
+    SingleAuthority(SingleAuthorityWorker),
 }
 
 impl FinalizedConsensusWorker {
     fn fatal_error(&self) -> Option<String> {
         match self {
             Self::CoordinatedRoundRobin(worker) => worker.fatal_error(),
+            Self::SingleAuthority(worker) => worker.fatal_error(),
         }
     }
 
     fn join(self) {
         match self {
             Self::CoordinatedRoundRobin(worker) => worker.join(),
+            Self::SingleAuthority(worker) => worker.join(),
         }
+    }
+}
+
+/// Owns the only `single_authority_v1` worker started by a role runtime.
+///
+/// It carries no ingress channel, no network handle, and no coordinated state:
+/// the single-authority driver neither sends nor receives consensus messages.
+struct SingleAuthorityWorker {
+    handle: thread::JoinHandle<()>,
+    fatal_error: Arc<Mutex<Option<String>>>,
+}
+
+impl SingleAuthorityWorker {
+    fn fatal_error(&self) -> Option<String> {
+        self.fatal_error.lock().ok().and_then(|error| error.clone())
+    }
+
+    fn join(self) {
+        let _ = self.handle.join();
     }
 }
 
@@ -1108,30 +1133,82 @@ fn should_start_coordinated_finality_observer(
 /// authorities explicit: an authorized validator needs both live P2P and a
 /// successful finalized-Genesis/key/finality preflight. There is intentionally
 /// no legacy consensus variant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum FinalizedConsensusDriverStartup {
     Disabled,
     SpawnCoordinatedRoundRobinDriver,
+    SpawnSingleAuthorityDriver(Box<SingleAuthorityStartupPlan>),
 }
 
+/// Resolves which consensus driver starts.
+///
+/// Order is fixed and protocol-neutral: the SIGNED consensus binding is
+/// resolved FIRST, and only then is protocol-specific preflight applied.
+/// `single_authority_v1` has no peers, so its branch requires no P2P network,
+/// no discovery, no endpoint refresh, no peer or quorum readiness, no relayer,
+/// and no second validator. The coordinated and PoSy branches keep the exact
+/// P2P preflight they had before.
+///
+/// A local configuration value, an environment variable, the presence or
+/// absence of P2P, and an old V1 desired-state file may never select or
+/// deselect a driver. `signed_startup` is the only input that can select
+/// single authority.
 fn select_finalized_consensus_driver_startup(
     consensus_enabled: bool,
     p2p_available: bool,
     finalized_input_validation: Option<Result<ResolvedConsensusMode, String>>,
+    signed_startup: Option<Result<VerifiedConsensusStartup, String>>,
 ) -> Result<FinalizedConsensusDriverStartup, String> {
     if !consensus_enabled {
         return Ok(FinalizedConsensusDriverStartup::Disabled);
     }
-    if !p2p_available {
-        return Err(
-            "finalized consensus requires an active P2P network; refusing consensus startup"
-                .to_string(),
-        );
+
+    // 1. Branch on the verified signed activation before any preflight.
+    match signed_startup {
+        Some(Err(error)) => {
+            return Err(format!(
+                "signed consensus activation is invalid; refusing consensus startup: {error}"
+            ));
+        }
+        Some(Ok(VerifiedConsensusStartup::SingleAuthority(plan))) => {
+            // No P2P, no peers, no discovery, no quorum, no relayer.
+            return Ok(FinalizedConsensusDriverStartup::SpawnSingleAuthorityDriver(
+                plan,
+            ));
+        }
+        Some(Ok(VerifiedConsensusStartup::CoordinatedRoundRobin)) => {
+            require_p2p_preflight(p2p_available)?;
+            return match finalized_input_validation {
+                Some(Ok(ResolvedConsensusMode::CoordinatedRoundRobinV1(_))) => {
+                    Ok(FinalizedConsensusDriverStartup::SpawnCoordinatedRoundRobinDriver)
+                }
+                Some(Ok(other)) => Err(format!(
+                    "local consensus mode {} disagrees with the signed coordinated activation",
+                    local_mode_name(&other)
+                )),
+                Some(Err(error)) => Err(format!(
+                    "finalized consensus inputs are unavailable; refusing consensus startup: {error}"
+                )),
+                None => Err(
+                    "finalized consensus inputs were not validated; refusing consensus startup"
+                        .to_string(),
+                ),
+            };
+        }
+        None => {}
     }
 
+    // 2. No signed V2 activation is installed. Preserve the existing behavior
+    //    exactly, and refuse any locally-requested single-authority start.
+    require_p2p_preflight(p2p_available)?;
     match finalized_input_validation {
         Some(Ok(ResolvedConsensusMode::PosyV2_2)) => Err(
             "typed PoSy is disabled in this Chain 1266 release; coordinated_round_robin_v1 is required"
+                .to_string(),
+        ),
+        Some(Ok(ResolvedConsensusMode::SingleAuthorityV1)) => Err(
+            "single_authority_v1 requires a verified ML-DSA-87 signed DesiredStateV2 activation; \
+             local configuration and environment variables cannot select it"
                 .to_string(),
         ),
         Some(Ok(ResolvedConsensusMode::CoordinatedRoundRobinV1(_))) => {
@@ -1143,6 +1220,108 @@ fn select_finalized_consensus_driver_startup(
         None => Err(
             "finalized consensus inputs were not validated; refusing consensus startup".to_string(),
         ),
+    }
+}
+
+/// Canonical installed V2 activation artifacts.
+const INSTALLED_DESIRED_STATE_V2_PATH: &str = "config/chain1266-desired-state-v2.json";
+const INSTALLED_START_AUTHORIZATION_V2_PATH: &str =
+    "config/chain1266-start-authorization-v2.json";
+
+/// Loads and fully verifies the installed signed `DesiredStateV2` activation.
+///
+/// Returns `None` only when no V2 activation artifact is installed at all. A
+/// present-but-invalid artifact returns `Some(Err(..))` and fails startup
+/// closed; it is never silently ignored in favour of local configuration.
+fn resolve_installed_signed_consensus_startup(
+    config: &NodeConfig,
+) -> Option<Result<VerifiedConsensusStartup, String>> {
+    let desired_state_path = crate::utils::resolve_data_path(INSTALLED_DESIRED_STATE_V2_PATH);
+    let authorization_path =
+        crate::utils::resolve_data_path(INSTALLED_START_AUTHORIZATION_V2_PATH);
+    if !desired_state_path.exists() && !authorization_path.exists() {
+        return None;
+    }
+    Some(verify_installed_signed_consensus_startup(
+        config,
+        &desired_state_path,
+        &authorization_path,
+    ))
+}
+
+fn verify_installed_signed_consensus_startup(
+    config: &NodeConfig,
+    desired_state_path: &Path,
+    authorization_path: &Path,
+) -> Result<VerifiedConsensusStartup, String> {
+    let desired_state_bytes = fs::read(desired_state_path).map_err(|error| {
+        format!(
+            "read installed desired state v2 {}: {error}",
+            desired_state_path.display()
+        )
+    })?;
+    let signed: crate::desired_state_v2::SignedDesiredStateV2 = serde_json::from_slice(
+        &fs::read(authorization_path).map_err(|error| {
+            format!(
+                "read installed start authorization {}: {error}",
+                authorization_path.display()
+            )
+        })?,
+    )
+    .map_err(|error| format!("parse installed start authorization: {error}"))?;
+
+    let expectation = build_startup_expectation(config)?;
+    crate::consensus::single_authority_startup::resolve_verified_consensus_startup(
+        &desired_state_bytes,
+        &signed,
+        &expectation,
+    )
+}
+
+fn build_startup_expectation(
+    config: &NodeConfig,
+) -> Result<crate::consensus::single_authority_startup::StartupExpectation, String> {
+    let genesis = crate::genesis::canonical_genesis()?;
+    let authority_address = resolve_local_validator_address(config);
+    let (authority_public_key, _) = crate::consensus::validator_keys::load_local_validator_keypair(
+        &authority_address,
+        &VALIDATOR_MANAGER,
+    )?;
+    Ok(
+        crate::consensus::single_authority_startup::StartupExpectation {
+            genesis_chain_id: genesis.chain_id(),
+            genesis_chain_incarnation: genesis.chain_incarnation(),
+            genesis_network_id: crate::synergy_types::SYNERGY_TESTNET_V3_NETWORK_ID.to_string(),
+            genesis_hash: genesis.hash().to_string(),
+            genesis_directory_namespace: format!(
+                "chain-{}/incarnation-{}",
+                genesis.chain_id(),
+                genesis.chain_incarnation()
+            ),
+            release_id: config.consensus.release_id.clone(),
+            authority_id: config.identity.node_id.clone(),
+            authority_public_key_fingerprint: format!(
+                "sha256:{}",
+                hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&authority_public_key.key_data))
+            ),
+            authority_key_algorithm: authority_public_key.algorithm,
+        },
+    )
+}
+
+/// The unchanged P2P preflight, applied only to peer-based protocols.
+fn require_p2p_preflight(p2p_available: bool) -> Result<(), String> {
+    if p2p_available {
+        return Ok(());
+    }
+    Err("finalized consensus requires an active P2P network; refusing consensus startup".to_string())
+}
+
+fn local_mode_name(mode: &ResolvedConsensusMode) -> &'static str {
+    match mode {
+        ResolvedConsensusMode::PosyV2_2 => "posy_v2_2",
+        ResolvedConsensusMode::CoordinatedRoundRobinV1(_) => "coordinated_round_robin_v1",
+        ResolvedConsensusMode::SingleAuthorityV1 => "single_authority_v1",
     }
 }
 
@@ -2065,6 +2244,186 @@ fn run_coordinated_round_robin_driver(
     Ok(())
 }
 
+/// The `single_authority_v1` block-production loop.
+///
+/// One authority, one block per height, at the signed target block time. There
+/// is no coordinator, producer, assignment, proposal, vote, certificate,
+/// quorum, round, cluster, view change, catch-up, peer, or relayer here, and no
+/// consensus ingress channel exists for this path to read from.
+fn run_single_authority_driver(
+    driver: &mut crate::consensus::single_authority_driver::SingleAuthorityDriver,
+    target_block_time_ms: u64,
+    running: &AtomicBool,
+) -> Result<(), String> {
+    let interval = Duration::from_millis(target_block_time_ms.max(1));
+    let mut next_due = Instant::now();
+    while running.load(Ordering::Acquire) {
+        let now = Instant::now();
+        if now < next_due {
+            thread::sleep(std::cmp::min(next_due - now, Duration::from_millis(50)));
+            continue;
+        }
+        // Transaction selection is wired to the canonical single-authority
+        // admission pool. Until public ingress is restored the authority
+        // produces empty canonical blocks, which is a full finalization cycle.
+        let block = driver.produce_next_block(Vec::new())?;
+        publish_single_authority_finalized_execution_state(driver)?;
+        next_due = Instant::now() + interval;
+        let _ = block;
+    }
+    Ok(())
+}
+
+fn publish_single_authority_finalized_execution_state(
+    driver: &crate::consensus::single_authority_driver::SingleAuthorityDriver,
+) -> Result<(), String> {
+    install_finalized_execution_state_snapshot(driver.execution_state().clone())
+        .map_err(|error| format!("install single-authority execution-state snapshot: {error}"))
+}
+
+/// Durable single-authority paths, derived from the SIGNED namespace so a
+/// stale incarnation directory can never be opened.
+fn single_authority_durable_paths(
+    plan: &SingleAuthorityStartupPlan,
+) -> crate::consensus::single_authority_startup::SingleAuthorityDurablePaths {
+    let root = crate::utils::resolve_data_path(&format!(
+        "data/consensus/{}",
+        plan.directory_namespace.replace('/', "-")
+    ));
+    crate::consensus::single_authority_startup::SingleAuthorityDurablePaths {
+        finality_log_path: root.join("single-authority-finality.log"),
+        finality_head_path: root.join("single-authority-finality.head.json"),
+        signing_journal_path: root.join("single-authority-signing-journal.json"),
+        committed_block_log_path: root.join("single-authority-committed-blocks.ndjson"),
+        execution_state_path: root.join("single-authority-execution-state.json"),
+        receipt_log_path: root.join("single-authority-receipts.ndjson"),
+    }
+}
+
+/// Builds the driver inputs from the VERIFIED plan. Nothing coordinated is
+/// constructed, instantiated, or read on this path.
+fn build_single_authority_runtime_inputs(
+    config: &NodeConfig,
+    plan: &SingleAuthorityStartupPlan,
+) -> Result<
+    crate::consensus::single_authority_driver::SingleAuthorityRuntimeInputs,
+    String,
+> {
+    let genesis = crate::genesis::canonical_genesis()?;
+    if genesis.hash() != plan.genesis_hash {
+        return Err(
+            "canonical Genesis hash disagrees with the signed single-authority activation"
+                .to_string(),
+        );
+    }
+    let genesis_execution_state =
+        crate::testnet_v3_execution_bootstrap::load_finalized_testnet_v3_genesis_execution_state(
+            genesis,
+        )?;
+
+    let authority_address = resolve_local_validator_address(config);
+    let (authority_public_key, authority_private_key) =
+        crate::consensus::validator_keys::load_local_validator_keypair(
+            &authority_address,
+            &VALIDATOR_MANAGER,
+        )?;
+    if authority_public_key.algorithm != crate::crypto::pqc::PQCAlgorithm::MLDSA65 {
+        return Err(format!(
+            "single-authority block signing requires ML-DSA-65, found {:?}",
+            authority_public_key.algorithm
+        ));
+    }
+    let fingerprint = format!(
+        "sha256:{}",
+        hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&authority_public_key.key_data))
+    );
+    if fingerprint != plan.authority_public_key_fingerprint {
+        return Err(
+            "local authority key fingerprint disagrees with the signed activation".to_string(),
+        );
+    }
+
+    let paths = single_authority_durable_paths(plan);
+    crate::consensus::single_authority_startup::require_durable_binding_agreement(plan, &paths)?;
+
+    Ok(
+        crate::consensus::single_authority_driver::SingleAuthorityRuntimeInputs {
+            chain_id: plan.chain_id,
+            chain_incarnation: plan.chain_incarnation,
+            network_id: plan.network_id.clone(),
+            release_id: plan.release_id.clone(),
+            authority_id: plan.authority_id.clone(),
+            authority_key_id: format!("{}-block-key", plan.authority_id),
+            authority_public_key,
+            authority_private_key,
+            authority_public_key_fingerprint: plan.authority_public_key_fingerprint.clone(),
+            target_block_time_ms: plan.target_block_time_ms,
+            genesis_hash: plan.genesis_hash.clone(),
+            directory_namespace: plan.directory_namespace.clone(),
+            finality_log_path: paths.finality_log_path,
+            finality_head_path: paths.finality_head_path,
+            signing_journal_path: paths.signing_journal_path,
+            committed_block_log_path: paths.committed_block_log_path,
+            execution_state_path: paths.execution_state_path,
+            receipt_log_path: paths.receipt_log_path,
+            genesis_execution_state,
+        },
+    )
+}
+
+/// Starts the single-authority worker. It takes no network handle and installs
+/// no consensus ingress: this protocol has no peers.
+fn spawn_single_authority_driver(
+    config: &NodeConfig,
+    plan: &SingleAuthorityStartupPlan,
+    running: Arc<AtomicBool>,
+) -> Result<SingleAuthorityWorker, String> {
+    let inputs = build_single_authority_runtime_inputs(config, plan)?;
+    let target_block_time_ms = inputs.target_block_time_ms;
+    let mut driver =
+        crate::consensus::single_authority_driver::SingleAuthorityDriver::start(inputs)?;
+    install_finalized_execution_state_snapshot(driver.execution_state().clone())
+        .map_err(|error| format!("install single-authority execution-state snapshot: {error}"))?;
+
+    let fatal_error = Arc::new(Mutex::new(None));
+    let worker_error = Arc::clone(&fatal_error);
+    let worker_running = Arc::clone(&running);
+    let handle = match thread::Builder::new()
+        .name("single-authority-driver".to_string())
+        .spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                run_single_authority_driver(
+                    &mut driver,
+                    target_block_time_ms,
+                    &worker_running,
+                )
+            }));
+            let failure = match result {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some(error),
+                Err(_) => Some("single-authority worker panicked".to_string()),
+            };
+            if let Some(error) = failure {
+                eprintln!("Single-authority worker failed closed: {error}");
+                if let Ok(mut slot) = worker_error.lock() {
+                    *slot = Some(error);
+                }
+                worker_running.store(false, Ordering::Release);
+            }
+            remove_finalized_execution_state_snapshot();
+        }) {
+        Ok(handle) => handle,
+        Err(error) => {
+            remove_finalized_execution_state_snapshot();
+            return Err(format!("spawn single-authority worker: {error}"));
+        }
+    };
+    Ok(SingleAuthorityWorker {
+        handle,
+        fatal_error,
+    })
+}
+
 fn spawn_coordinated_round_robin_driver(
     config: &NodeConfig,
     network: Arc<p2p::networking::P2PNetwork>,
@@ -2438,6 +2797,10 @@ fn ensure_consensus_pqc_runtime_ready(config: &NodeConfig) -> Result<(), String>
         ResolvedConsensusMode::CoordinatedRoundRobinV1(_) => {
             // P1 has its own separate runtime, finality, and signing journals.
             // Do not construct typed PoSy as a preflight side effect.
+        }
+        ResolvedConsensusMode::SingleAuthorityV1 => {
+            // Single authority never runs this peer-based preflight: it has no
+            // peers, and its own startup gate is the signed V2 activation.
         }
     }
     Ok(())
@@ -3914,7 +4277,9 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                     Ok(ResolvedConsensusMode::CoordinatedRoundRobinV1(coordinated_config)) => {
                         coordinated_config
                     }
-                    Ok(ResolvedConsensusMode::PosyV2_2) | Err(_) => {
+                    Ok(ResolvedConsensusMode::PosyV2_2)
+                    | Ok(ResolvedConsensusMode::SingleAuthorityV1)
+                    | Err(_) => {
                         eprintln!(
                             "Service startup failed closed: coordinated finality observer selected without a valid P1 configuration"
                         );
@@ -4190,7 +4555,16 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
             // shutdown signal. A consensus failure clears it before any
             // legacy path could be considered, and the role loop exits.
             let running = Arc::new(AtomicBool::new(true));
-            if consensus_enabled {
+            // The signed activation decides the protocol before any
+            // protocol-specific preflight or announcement runs.
+            let signed_consensus_startup = consensus_enabled
+                .then(|| resolve_installed_signed_consensus_startup(&config))
+                .flatten();
+            let signed_single_authority = matches!(
+                signed_consensus_startup,
+                Some(Ok(VerifiedConsensusStartup::SingleAuthority(_)))
+            );
+            if consensus_enabled && !signed_single_authority {
                 announce_chain1266_coordinated_runtime(&config).unwrap_or_else(|error| {
                     eprintln!("Consensus startup failed closed: {error}");
                     process::exit(1);
@@ -4199,7 +4573,9 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
             let initial_consensus_startup = select_finalized_consensus_driver_startup(
                 consensus_enabled,
                 p2p_network.is_some(),
-                consensus_enabled.then(|| resolved_consensus_runtime_preflight(&config)),
+                (consensus_enabled && !signed_single_authority)
+                    .then(|| resolved_consensus_runtime_preflight(&config)),
+                signed_consensus_startup,
             );
             let mut consensus_worker = match initial_consensus_startup {
                 Ok(FinalizedConsensusDriverStartup::Disabled) => {
@@ -4233,6 +4609,24 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                         Arc::clone(&running),
                     ) {
                         Ok(worker) => Some(FinalizedConsensusWorker::CoordinatedRoundRobin(worker)),
+                        Err(error) => {
+                            eprintln!("Consensus startup failed closed: {error}");
+                            process::exit(1);
+                        }
+                    }
+                }
+                Ok(FinalizedConsensusDriverStartup::SpawnSingleAuthorityDriver(plan)) => {
+                    info!(
+                        "main",
+                        "Starting single-authority consensus worker",
+                        "protocol" => "single_authority_v1",
+                        "authority_id" => plan.authority_id.clone(),
+                        "chain_incarnation" => plan.chain_incarnation,
+                        "target_block_time_ms" => plan.target_block_time_ms
+                    );
+                    // No network handle, no ingress, no peers.
+                    match spawn_single_authority_driver(&config, &plan, Arc::clone(&running)) {
+                        Ok(worker) => Some(FinalizedConsensusWorker::SingleAuthority(worker)),
                         Err(error) => {
                             eprintln!("Consensus startup failed closed: {error}");
                             process::exit(1);
@@ -4288,11 +4682,35 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                         "Validator activation observed; starting finalized consensus worker",
                         "validator_address" => resolve_local_validator_address(&config)
                     );
+                    let activation_signed_startup =
+                        resolve_installed_signed_consensus_startup(&config);
+                    let activation_single_authority = matches!(
+                        activation_signed_startup,
+                        Some(Ok(VerifiedConsensusStartup::SingleAuthority(_)))
+                    );
                     match select_finalized_consensus_driver_startup(
                         true,
                         p2p_network.is_some(),
-                        Some(resolved_consensus_runtime_preflight(&config)),
+                        (!activation_single_authority)
+                            .then(|| resolved_consensus_runtime_preflight(&config)),
+                        activation_signed_startup,
                     ) {
+                        Ok(FinalizedConsensusDriverStartup::SpawnSingleAuthorityDriver(plan)) => {
+                            consensus_worker =
+                                match spawn_single_authority_driver(
+                                    &config,
+                                    &plan,
+                                    Arc::clone(&running),
+                                ) {
+                                    Ok(worker) => {
+                                        Some(FinalizedConsensusWorker::SingleAuthority(worker))
+                                    }
+                                    Err(error) => {
+                                        eprintln!("Consensus activation failed closed: {error}");
+                                        process::exit(1);
+                                    }
+                                };
+                        }
                         Ok(FinalizedConsensusDriverStartup::SpawnCoordinatedRoundRobinDriver) => {
                             let network = match p2p_network.as_ref().cloned() {
                                 Some(network) => network,
@@ -4991,6 +5409,7 @@ mod tests {
             consensus_enabled,
             true,
             Some(Ok(ResolvedConsensusMode::PosyV2_2)),
+            None,
         )
         .expect_err("the P1-only release must reject typed startup");
 
@@ -5003,6 +5422,7 @@ mod tests {
             true,
             false,
             Some(Ok(ResolvedConsensusMode::PosyV2_2)),
+            None,
         )
         .expect_err("consensus startup without P2P must fail closed");
         assert!(no_p2p.contains("active P2P network"));
@@ -5011,6 +5431,7 @@ mod tests {
             true,
             true,
             Some(Err("missing canonical finality context".to_string())),
+            None,
         )
         .expect_err("consensus startup with invalid finalized inputs must fail closed");
         assert!(invalid_finalized_inputs.contains("missing canonical finality context"));
@@ -5744,12 +6165,235 @@ mod tests {
             Some(Ok(ResolvedConsensusMode::CoordinatedRoundRobinV1(
                 coordinated,
             ))),
+            None,
         )
         .expect("a coordinated configuration must select its dedicated worker");
         assert_eq!(
             startup,
             FinalizedConsensusDriverStartup::SpawnCoordinatedRoundRobinDriver
         );
+    }
+
+    fn single_authority_plan() -> SingleAuthorityStartupPlan {
+        use crate::consensus::single_authority_startup::*;
+        SingleAuthorityStartupPlan {
+            chain_id: LAUNCH_CHAIN_ID,
+            chain_incarnation: LAUNCH_CHAIN_INCARNATION,
+            network_id: LAUNCH_NETWORK_ID.to_string(),
+            release_id: "chain1266-single-authority-rc1".to_string(),
+            directory_namespace: "chain-1266/incarnation-5".to_string(),
+            genesis_hash: "e25f4d99ec61e7c2db362549e6d950391ee13c7c21f4e51c6bbd051f063cd4e8"
+                .to_string(),
+            authority_id: LAUNCH_AUTHORITY_ID.to_string(),
+            authority_public_key_fingerprint: "sha256:authority-node-01".to_string(),
+            target_block_time_ms: LAUNCH_TARGET_BLOCK_TIME_MS,
+            authority_start_height: 1,
+        }
+    }
+
+    fn signed_single_authority() -> Option<Result<VerifiedConsensusStartup, String>> {
+        Some(Ok(VerifiedConsensusStartup::SingleAuthority(Box::new(
+            single_authority_plan(),
+        ))))
+    }
+
+    /// D01. A valid signed single-authority activation selects its driver.
+    #[test]
+    fn d01_signed_single_authority_activation_selects_the_single_authority_driver() {
+        let startup = select_finalized_consensus_driver_startup(
+            true,
+            true,
+            None,
+            signed_single_authority(),
+        )
+        .expect("a signed single-authority activation must select its driver");
+        assert_eq!(
+            startup,
+            FinalizedConsensusDriverStartup::SpawnSingleAuthorityDriver(Box::new(
+                single_authority_plan()
+            ))
+        );
+    }
+
+    /// D02/D03. Single authority starts with no P2P service and with P2P
+    /// explicitly unavailable. It requires no peers, discovery, endpoint
+    /// refresh, peer/quorum readiness, relayer, or second validator.
+    #[test]
+    fn d02_single_authority_starts_without_any_p2p_service() {
+        let startup =
+            select_finalized_consensus_driver_startup(true, false, None, signed_single_authority())
+                .expect("single authority must not require a P2P network");
+        assert!(matches!(
+            startup,
+            FinalizedConsensusDriverStartup::SpawnSingleAuthorityDriver(_)
+        ));
+    }
+
+    #[test]
+    fn d03_single_authority_starts_when_p2p_is_explicitly_unavailable() {
+        // Even when the locally resolved mode is unavailable AND P2P is down,
+        // the signed binding still selects single authority.
+        let startup = select_finalized_consensus_driver_startup(
+            true,
+            false,
+            Some(Err("P2P transport is unavailable".to_string())),
+            signed_single_authority(),
+        )
+        .expect("single authority ignores P2P and local mode resolution");
+        assert!(matches!(
+            startup,
+            FinalizedConsensusDriverStartup::SpawnSingleAuthorityDriver(_)
+        ));
+    }
+
+    /// D04. P2P availability does not change the selected mode.
+    #[test]
+    fn d04_p2p_availability_does_not_change_the_single_authority_selection() {
+        let with_p2p =
+            select_finalized_consensus_driver_startup(true, true, None, signed_single_authority())
+                .expect("with p2p");
+        let without_p2p =
+            select_finalized_consensus_driver_startup(true, false, None, signed_single_authority())
+                .expect("without p2p");
+        assert_eq!(with_p2p, without_p2p);
+    }
+
+    /// D05. Coordinated mode without P2P fails exactly as before.
+    #[test]
+    fn d05_coordinated_mode_without_p2p_fails_exactly_as_before() {
+        let coordinated = crate::consensus::coordinated_round_robin::CoordinatedRoundRobinConfig {
+            chain_id: 1266,
+            network_id: "synergy-testnet-v3".to_string(),
+            consensus_version:
+                crate::consensus::coordinated_round_robin::COORDINATED_ROUND_ROBIN_V1.to_string(),
+            coordinator_id: "validator-1".to_string(),
+            producer_ids: (2..=6).map(|index| format!("validator-{index}")).collect(),
+            target_block_interval_ms: 2_000,
+            producer_turn_timeout_ms: 4_000,
+        };
+        // Unsigned path.
+        let error = select_finalized_consensus_driver_startup(
+            true,
+            false,
+            Some(Ok(ResolvedConsensusMode::CoordinatedRoundRobinV1(
+                coordinated.clone(),
+            ))),
+            None,
+        )
+        .expect_err("coordinated without P2P must fail closed");
+        assert!(error.contains("active P2P network"), "{error}");
+
+        // Signed coordinated path keeps the same preflight.
+        let error = select_finalized_consensus_driver_startup(
+            true,
+            false,
+            Some(Ok(ResolvedConsensusMode::CoordinatedRoundRobinV1(
+                coordinated,
+            ))),
+            Some(Ok(VerifiedConsensusStartup::CoordinatedRoundRobin)),
+        )
+        .expect_err("signed coordinated without P2P must fail closed");
+        assert!(error.contains("active P2P network"), "{error}");
+    }
+
+    /// D06. PoSy mode without P2P fails exactly as before.
+    #[test]
+    fn d06_posy_mode_without_p2p_fails_exactly_as_before() {
+        let error = select_finalized_consensus_driver_startup(
+            true,
+            false,
+            Some(Ok(ResolvedConsensusMode::PosyV2_2)),
+            None,
+        )
+        .expect_err("PoSy without P2P must fail closed");
+        assert!(error.contains("active P2P network"), "{error}");
+
+        let error = select_finalized_consensus_driver_startup(
+            true,
+            true,
+            Some(Ok(ResolvedConsensusMode::PosyV2_2)),
+            None,
+        )
+        .expect_err("PoSy is disabled in this release");
+        assert!(error.contains("typed PoSy is disabled"), "{error}");
+    }
+
+    /// D07. A configuration/environment-only request for single authority is
+    /// rejected: only a verified signed activation can select it.
+    #[test]
+    fn d07_environment_only_single_authority_request_is_rejected() {
+        let mut config = NodeConfig::default();
+        config.consensus.mode =
+            crate::consensus::single_authority_finality_store::SINGLE_AUTHORITY_CONSENSUS_PROTOCOL
+                .to_string();
+        let resolved = config
+            .consensus
+            .resolve_mode(1266, "synergy-testnet-v3")
+            .expect("the mode parses");
+        assert_eq!(resolved, ResolvedConsensusMode::SingleAuthorityV1);
+
+        let error =
+            select_finalized_consensus_driver_startup(true, true, Some(Ok(resolved)), None)
+                .expect_err("configuration alone must not select single authority");
+        assert!(
+            error.contains("requires a verified ML-DSA-87 signed DesiredStateV2 activation"),
+            "{error}"
+        );
+    }
+
+    /// An invalid signed activation fails closed rather than falling back to
+    /// local configuration.
+    #[test]
+    fn d07b_invalid_signed_activation_never_falls_back_to_local_configuration() {
+        let coordinated = crate::consensus::coordinated_round_robin::CoordinatedRoundRobinConfig {
+            chain_id: 1266,
+            network_id: "synergy-testnet-v3".to_string(),
+            consensus_version:
+                crate::consensus::coordinated_round_robin::COORDINATED_ROUND_ROBIN_V1.to_string(),
+            coordinator_id: "validator-1".to_string(),
+            producer_ids: (2..=6).map(|index| format!("validator-{index}")).collect(),
+            target_block_interval_ms: 2_000,
+            producer_turn_timeout_ms: 4_000,
+        };
+        let error = select_finalized_consensus_driver_startup(
+            true,
+            true,
+            Some(Ok(ResolvedConsensusMode::CoordinatedRoundRobinV1(
+                coordinated,
+            ))),
+            Some(Err("start authorization signature verification failed".to_string())),
+        )
+        .expect_err("a broken signed activation must fail closed");
+        assert!(
+            error.contains("signed consensus activation is invalid"),
+            "{error}"
+        );
+    }
+
+    /// D14. The single-authority branch constructs no coordinated input.
+    #[test]
+    fn d14_single_authority_dispatch_constructs_no_coordinated_input() {
+        let startup =
+            select_finalized_consensus_driver_startup(true, false, None, signed_single_authority())
+                .expect("single authority");
+        let rendered = format!("{startup:?}").to_ascii_lowercase();
+        for forbidden in [
+            "peer",
+            "vote",
+            "qc",
+            "quorum",
+            "coordinator",
+            "producer",
+            "certificate",
+            "round",
+            "cluster",
+            "relayer",
+        ] {
+            assert!(
+                !rendered.contains(forbidden),
+                "single-authority dispatch leaked `{forbidden}`: {rendered}"
+            );
+        }
     }
 
     #[test]

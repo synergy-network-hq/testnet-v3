@@ -4683,7 +4683,7 @@ fn local_coordinated_finality_observer_config(
         .ok()?
     {
         ResolvedConsensusMode::CoordinatedRoundRobinV1(coordinated) => Some(coordinated),
-        ResolvedConsensusMode::PosyV2_2 => None,
+        ResolvedConsensusMode::PosyV2_2 | ResolvedConsensusMode::SingleAuthorityV1 => None,
     }
 }
 

@@ -255,6 +255,11 @@ impl SingleAuthoritySigningJournal {
         Ok(self.load()?.safety_halts)
     }
 
+    /// Every durable journal entry, for startup binding verification.
+    pub fn entries(&self) -> Result<Vec<SingleAuthorityJournalEntry>, String> {
+        Ok(self.load()?.entries)
+    }
+
     pub fn enter_safety_halt(
         &self,
         namespace: &SingleAuthorityHaltNamespace,

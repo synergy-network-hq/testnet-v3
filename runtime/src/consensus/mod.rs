@@ -27,6 +27,9 @@ pub mod single_authority_first_block_tests;
 pub mod single_authority_finality_store;
 #[cfg(test)]
 pub mod single_authority_real_transaction_tests;
+pub mod single_authority_startup;
+#[cfg(test)]
+pub mod single_authority_startup_tests;
 pub mod single_authority_writable_store;
 pub mod single_authority_writer_lock;
 #[cfg(test)]

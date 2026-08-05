@@ -86,6 +86,11 @@ pub struct ConsensusConfig {
     pub producer_ids: Vec<String>,
     #[serde(default = "default_producer_turn_timeout_ms")]
     pub producer_turn_timeout_ms: u64,
+    /// The runtime's own statement of which release it is. It is cross-checked
+    /// against the signed activation and can never select a consensus protocol
+    /// on its own.
+    #[serde(default)]
+    pub release_id: String,
     pub block_time_secs: u64,
     pub epoch_length: u64,
     #[serde(default = "default_target_block_time_ms")]
@@ -145,6 +150,12 @@ pub struct ConsensusConfig {
 pub enum ResolvedConsensusMode {
     PosyV2_2,
     CoordinatedRoundRobinV1(crate::consensus::coordinated_round_robin::CoordinatedRoundRobinConfig),
+    /// Locally *requested* single authority. This value can never select the
+    /// single-authority driver by itself: only a verified ML-DSA-87 signed
+    /// `DesiredStateV2` activation can. It exists so the dispatcher can reject
+    /// a configuration-only request explicitly instead of reporting an
+    /// unsupported mode.
+    SingleAuthorityV1,
 }
 
 fn default_consensus_protocol_version() -> String {
@@ -172,6 +183,9 @@ impl ConsensusConfig {
             COORDINATED_ROUND_ROBIN_V1 => Ok(ResolvedConsensusMode::CoordinatedRoundRobinV1(
                 self.coordinated_round_robin_config(chain_id, network_id)?,
             )),
+            crate::consensus::single_authority_finality_store::SINGLE_AUTHORITY_CONSENSUS_PROTOCOL => {
+                Ok(ResolvedConsensusMode::SingleAuthorityV1)
+            }
             mode => Err(format!("unsupported consensus mode {mode}")),
         }
     }
@@ -298,6 +312,7 @@ impl Default for ConsensusConfig {
             coordinator_id: String::new(),
             producer_ids: Vec::new(),
             producer_turn_timeout_ms: default_producer_turn_timeout_ms(),
+            release_id: String::new(),
             block_time_secs: 2,
             epoch_length: 1_000,
             target_block_time_ms: default_target_block_time_ms(),
@@ -2189,8 +2204,21 @@ validator_address = "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5"
             ResolvedConsensusMode::CoordinatedRoundRobinV1(config) => {
                 assert_eq!(config.producer_turn_timeout_ms, 4_000);
             }
-            ResolvedConsensusMode::PosyV2_2 => panic!("coordinated configuration resolved to PoSy"),
+            other => panic!("coordinated configuration resolved to {other:?}"),
         }
+
+        // A configuration-only single-authority request resolves to a value
+        // the dispatcher rejects; it can never select the driver.
+        let mut single = ConsensusConfig::default();
+        single.mode =
+            crate::consensus::single_authority_finality_store::SINGLE_AUTHORITY_CONSENSUS_PROTOCOL
+                .to_string();
+        assert_eq!(
+            single
+                .resolve_mode(1266, "synergy-testnet-v3")
+                .expect("single-authority mode parses"),
+            ResolvedConsensusMode::SingleAuthorityV1
+        );
 
         consensus.producer_ids.pop();
         assert!(consensus.resolve_mode(1266, "synergy-testnet-v3").is_err());
