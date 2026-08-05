@@ -19,6 +19,10 @@ pub mod crypto;
 pub mod dag;
 pub mod dag_mempool;
 pub mod desired_state;
+pub mod chain_incarnation_namespace;
+pub mod desired_state_v2;
+#[cfg(test)]
+pub mod desired_state_v2_tests;
 pub mod epoch;
 pub mod etdag;
 pub mod execution;
