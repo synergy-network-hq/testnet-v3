@@ -224,7 +224,8 @@ fn load_canonical_genesis_from_path(path: PathBuf) -> Result<GenesisDocument, St
         &value,
         &["consensus", "state_schema_version"],
         u64::from(TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION),
-        is_pre_p1_chain1266_genesis,
+        is_pre_p1_chain1266_genesis
+            || is_chain1266_incarnation5_single_authority_genesis(&value),
     )?;
     if chain_incarnation != TESTNET_V3_CHAIN_INCARNATION {
         return Err(format!(
@@ -563,6 +564,22 @@ fn is_chain1266_pre_p1_genesis(value: &Value) -> bool {
         && required_string(value, &["consensus", "algorithm"]).as_deref() == Ok("ProofOfSynergy")
         && required_string(value, &["integrity", "genesis_hash"]).as_deref()
             == Ok(CHAIN_1266_PRE_P1_GENESIS_HASH)
+}
+
+/// The incarnation-5 Genesis replaces the whole PoSy `.consensus` object with
+/// the `single_authority_v1` profile, which carries no `state_schema_version`.
+/// That version is not a free parameter for this incarnation: it is fixed at
+/// `TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION` and is re-asserted immediately
+/// after it is derived. A document that DOES carry the field must still state
+/// the correct value, and the semantic Genesis hash is verified either way, so
+/// this branch cannot admit a modified Genesis.
+fn is_chain1266_incarnation5_single_authority_genesis(value: &Value) -> bool {
+    required_u64(value, &["network", "chain_id"])
+        == Ok(crate::synergy_types::SYNERGY_TESTNET_V3_CHAIN_ID)
+        && required_u64(value, &["network", "chain_incarnation"])
+            == Ok(TESTNET_V3_CHAIN_INCARNATION)
+        && required_string(value, &["consensus", "protocol"]).as_deref()
+            == Ok(crate::consensus::single_authority_finality_store::SINGLE_AUTHORITY_CONSENSUS_PROTOCOL)
 }
 
 fn load_candidate_consensus_parameters(
