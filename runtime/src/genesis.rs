@@ -161,6 +161,20 @@ impl GenesisDocument {
         &self.consensus_version
     }
 
+    /// The consensus protocol this Genesis binds (`.consensus.protocol`).
+    ///
+    /// This is the trusted dispatch anchor for
+    /// `consensus::chain1266_startup_dispatch::dispatch_chain1266_startup`.
+    /// It is read from the canonical Genesis document, never from local
+    /// configuration or the environment.
+    pub fn consensus_protocol(&self) -> &str {
+        self.value
+            .get("consensus")
+            .and_then(|consensus| consensus.get("protocol"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+    }
+
     pub fn timestamp(&self) -> u64 {
         self.timestamp
     }

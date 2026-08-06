@@ -1309,6 +1309,91 @@ fn build_startup_expectation(
     )
 }
 
+/// Genesis-anchored Chain 1266 startup dispatch.
+///
+/// The canonical Genesis document decides which start-authorization verifier
+/// runs. Incarnation 4 + `coordinated_round_robin_v1` keeps the legacy V1
+/// verifier verbatim. Incarnation 5 + `single_authority_v1` is governed
+/// exclusively by the ML-DSA-87 signed `DesiredStateV2`; the V1 verifier is
+/// never invoked on that path, and a missing or invalid V2 activation fails
+/// closed rather than falling back.
+fn resolve_chain1266_startup_release_id(
+    config: &NodeConfig,
+    profile: &'static crate::role_profiles::RoleProfile,
+    config_path: &Path,
+) -> Result<String, String> {
+    use crate::consensus::chain1266_startup_dispatch::{
+        dispatch_chain1266_startup, Chain1266StartupDispatch,
+    };
+
+    let genesis = crate::genesis::canonical_genesis()?;
+    let dispatch = dispatch_chain1266_startup(
+        genesis.chain_id(),
+        genesis.chain_incarnation(),
+        genesis.consensus_protocol(),
+    )?;
+
+    match dispatch {
+        Chain1266StartupDispatch::SingleAuthorityV2 => {
+            verify_chain1266_incarnation5_single_authority_startup(config)
+        }
+        Chain1266StartupDispatch::CoordinatedV1 | Chain1266StartupDispatch::NonChain1266 => {
+            crate::desired_state::verify_chain1266_desired_state(
+                profile,
+                &config.identity.node_id,
+                config_path,
+            )
+        }
+    }
+}
+
+/// The incarnation-5 single-authority branch. Reads the installed V2 artifacts
+/// and hands them to the one existing V2 verifier plus the launch pins.
+fn verify_chain1266_incarnation5_single_authority_startup(
+    config: &NodeConfig,
+) -> Result<String, String> {
+    use crate::consensus::chain1266_startup_dispatch::{
+        verify_single_authority_v2_activation, SingleAuthorityLaunchPins,
+    };
+
+    let desired_state_path = crate::utils::resolve_data_path(INSTALLED_DESIRED_STATE_V2_PATH);
+    let authorization_path =
+        crate::utils::resolve_data_path(INSTALLED_START_AUTHORIZATION_V2_PATH);
+    if !desired_state_path.exists() || !authorization_path.exists() {
+        return Err(format!(
+            "single_authority_v1 requires an installed ML-DSA-87 signed DesiredStateV2 \
+             activation; expected {} and {}. V1 fallback is forbidden on the incarnation-5 path",
+            desired_state_path.display(),
+            authorization_path.display()
+        ));
+    }
+
+    let desired_state_bytes = fs::read(&desired_state_path).map_err(|error| {
+        format!(
+            "read installed desired state v2 {}: {error}",
+            desired_state_path.display()
+        )
+    })?;
+    let signed: crate::desired_state_v2::SignedDesiredStateV2 = serde_json::from_slice(
+        &fs::read(&authorization_path).map_err(|error| {
+            format!(
+                "read installed start authorization {}: {error}",
+                authorization_path.display()
+            )
+        })?,
+    )
+    .map_err(|error| format!("parse installed start authorization: {error}"))?;
+
+    let expectation = build_startup_expectation(config)?;
+    verify_single_authority_v2_activation(
+        &desired_state_bytes,
+        &signed,
+        &expectation,
+        &resolve_local_validator_address(config),
+        &SingleAuthorityLaunchPins::incarnation5(),
+    )
+}
+
 /// The unchanged P2P preflight, applied only to peer-based protocols.
 fn require_p2p_preflight(p2p_available: bool) -> Result<(), String> {
     if p2p_available {
@@ -4025,9 +4110,15 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                 );
                 process::exit(1);
             });
-            let release_id = crate::desired_state::verify_chain1266_desired_state(
+            // Startup dispatch is anchored on the canonical Genesis, never on
+            // local configuration or environment variables. Incarnation 4 with
+            // coordinated_round_robin_v1 keeps the unchanged legacy V1
+            // verifier; incarnation 5 with single_authority_v1 is governed
+            // exclusively by the ML-DSA-87 signed DesiredStateV2 and must never
+            // invoke or accept V1.
+            let release_id = resolve_chain1266_startup_release_id(
+                &config,
                 desired_role_profile,
-                &config.identity.node_id,
                 &effective_config_path,
             )
             .unwrap_or_else(|error| {

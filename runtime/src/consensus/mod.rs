@@ -20,6 +20,9 @@ pub mod legacy_canonical_lock;
 pub mod posy;
 pub mod self_realign;
 pub mod signing_authority;
+pub mod chain1266_startup_dispatch;
+#[cfg(test)]
+pub mod chain1266_startup_dispatch_tests;
 pub mod single_authority_driver;
 pub mod single_authority_execution;
 #[cfg(test)]
