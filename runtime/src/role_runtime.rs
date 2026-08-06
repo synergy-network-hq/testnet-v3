@@ -1384,13 +1384,72 @@ fn verify_chain1266_incarnation5_single_authority_startup(
     )
     .map_err(|error| format!("parse installed start authorization: {error}"))?;
 
-    let expectation = build_startup_expectation(config)?;
+    // The expectation is built from the canonical Genesis, not from the live
+    // validator registry: this runs before the registry is seeded, and Genesis
+    // is the trusted dispatch anchor. The registry-backed expectation is still
+    // applied later by `resolve_installed_signed_consensus_startup` when the
+    // consensus driver is selected.
+    let expectation = build_genesis_startup_expectation(config)?;
     verify_single_authority_v2_activation(
         &desired_state_bytes,
         &signed,
         &expectation,
         &resolve_local_validator_address(config),
         &SingleAuthorityLaunchPins::incarnation5(),
+    )
+}
+
+/// Startup expectation derived purely from the canonical Genesis document and
+/// the local release statement. Used by the incarnation-5 dispatch branch.
+fn build_genesis_startup_expectation(
+    config: &NodeConfig,
+) -> Result<crate::consensus::single_authority_startup::StartupExpectation, String> {
+    use base64::{engine::general_purpose, Engine as _};
+
+    let genesis = crate::genesis::canonical_genesis()?;
+    let authority_address = resolve_local_validator_address(config);
+    let validator = genesis
+        .validators()
+        .iter()
+        .find(|validator| validator.operator_address == authority_address)
+        .ok_or_else(|| {
+            format!("Genesis has no validator for the local authority address {authority_address}")
+        })?;
+    let algorithm = match validator.consensus_key_type.as_str() {
+        "ML-DSA-65" => crate::crypto::pqc::PQCAlgorithm::MLDSA65,
+        "ML-DSA-87" => crate::crypto::pqc::PQCAlgorithm::MLDSA87,
+        other => {
+            return Err(format!(
+                "Genesis authority {authority_address} declares unsupported consensus key type \
+                 {other}"
+            ))
+        }
+    };
+    let consensus_public_key = general_purpose::STANDARD
+        .decode(&validator.consensus_public_key)
+        .map_err(|error| {
+            format!("decode Genesis consensus public key for {authority_address}: {error}")
+        })?;
+
+    Ok(
+        crate::consensus::single_authority_startup::StartupExpectation {
+            genesis_chain_id: genesis.chain_id(),
+            genesis_chain_incarnation: genesis.chain_incarnation(),
+            genesis_network_id: crate::synergy_types::SYNERGY_TESTNET_V3_NETWORK_ID.to_string(),
+            genesis_hash: genesis.hash().to_string(),
+            genesis_directory_namespace: format!(
+                "chain-{}/incarnation-{}",
+                genesis.chain_id(),
+                genesis.chain_incarnation()
+            ),
+            release_id: config.consensus.release_id.clone(),
+            authority_id: config.identity.node_id.clone(),
+            authority_public_key_fingerprint: format!(
+                "sha256:{}",
+                hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&consensus_public_key))
+            ),
+            authority_key_algorithm: algorithm,
+        },
     )
 }
 
