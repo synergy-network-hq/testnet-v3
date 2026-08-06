@@ -2421,15 +2421,33 @@ fn run_single_authority_driver(
             thread::sleep(std::cmp::min(next_due - now, Duration::from_millis(50)));
             continue;
         }
-        // Transaction selection is wired to the canonical single-authority
-        // admission pool. Until public ingress is restored the authority
-        // produces empty canonical blocks, which is a full finalization cycle.
-        let block = driver.produce_next_block(Vec::new())?;
+        // Transaction selection is wired to the canonical admission pool. The
+        // driver re-admits every carrier it is handed, so this only supplies a
+        // body: block construction, signing, execution and finality are
+        // unchanged, and an empty pool still produces a full finalization
+        // cycle over an empty canonical block.
+        let selected = drain_single_authority_admission_pool();
+        let block = driver.produce_next_block(selected)?;
         publish_single_authority_finalized_execution_state(driver)?;
         next_due = Instant::now() + interval;
         let _ = block;
     }
     Ok(())
+}
+
+/// Takes the currently admitted transactions for the next single-authority
+/// block. Bounded per height so one oversized batch cannot stall production.
+fn drain_single_authority_admission_pool() -> Vec<crate::transaction::Transaction> {
+    const MAX_TRANSACTIONS_PER_BLOCK: usize = 256;
+
+    let Ok(mut pool) = crate::rpc::rpc_server::TX_POOL.lock() else {
+        return Vec::new();
+    };
+    if pool.is_empty() {
+        return Vec::new();
+    }
+    let take = pool.len().min(MAX_TRANSACTIONS_PER_BLOCK);
+    pool.drain(..take).collect()
 }
 
 fn publish_single_authority_finalized_execution_state(
