@@ -2435,8 +2435,18 @@ fn run_single_authority_driver(
 fn publish_single_authority_finalized_execution_state(
     driver: &crate::consensus::single_authority_driver::SingleAuthorityDriver,
 ) -> Result<(), String> {
-    install_finalized_execution_state_snapshot(driver.execution_state().clone())
-        .map_err(|error| format!("install single-authority execution-state snapshot: {error}"))
+    // The snapshot is INSTALLED once, by `spawn_single_authority_driver`,
+    // before the loop begins. Every subsequent finalized height PUBLISHES into
+    // that live slot; re-installing would be refused and would kill the driver
+    // immediately after the first block.
+    if publish_finalized_execution_state_snapshot(driver.execution_state()) {
+        Ok(())
+    } else {
+        Err(
+            "publish single-authority execution-state snapshot: no finalized snapshot is installed"
+                .to_string(),
+        )
+    }
 }
 
 /// Durable single-authority paths, derived from the SIGNED namespace so a
