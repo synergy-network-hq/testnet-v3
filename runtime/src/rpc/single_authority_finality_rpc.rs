@@ -216,6 +216,10 @@ pub fn entry_to_explorer_json(
         "transaction_format": SINGLE_AUTHORITY_CONSENSUS_PROTOCOL,
         "finality_status": "finalized",
         "finalized": true,
+        "finality_proof_type": "authority_signature",
+        "finality_source": "single_authority_finality_store",
+        "source": "single_authority_finality_store",
+        "chain": crate::rpc::rpc_server::chain_identity_json(),
     }))
 }
 

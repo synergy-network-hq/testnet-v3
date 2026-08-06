@@ -6560,7 +6560,7 @@ fn current_protocol_version() -> String {
         .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string())
 }
 
-fn chain_identity_json() -> Value {
+pub fn chain_identity_json() -> Value {
     let chain_id = current_chain_id();
     json!({
         "name": current_chain_name(),
