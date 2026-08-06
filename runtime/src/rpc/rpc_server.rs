@@ -9,6 +9,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::block::{Block, BlockChain, HOT_CHAIN_RETENTION_BLOCKS_ENV};
+use crate::rpc::single_authority_finality_rpc::SingleAuthorityRpcEntry;
 use crate::cluster::{fault_tolerance_f, quorum_threshold, EpochClusterAssignmentSnapshot};
 use crate::config::ResolvedConsensusMode;
 use crate::consensus::chain_durability::recover_chain_and_validate_canonical;
@@ -1314,9 +1315,9 @@ fn network_validator_snapshot(
                 .map(|record| {
                     let validator_id = record.proposer_validator_id();
                     validator_id_to_address
-                        .get(validator_id)
+                        .get(validator_id.as_str())
                         .cloned()
-                        .unwrap_or_else(|| validator_id.to_string())
+                        .unwrap_or(validator_id)
                 })
                 .collect::<HashSet<_>>()
         })
@@ -1328,9 +1329,9 @@ fn network_validator_snapshot(
         for record in records.iter() {
             let validator_id = record.proposer_validator_id();
             let address = validator_id_to_address
-                .get(validator_id)
+                .get(validator_id.as_str())
                 .cloned()
-                .unwrap_or_else(|| validator_id.to_string());
+                .unwrap_or(validator_id);
             let validator = validators.entry(address.clone()).or_insert_with(|| {
                 synthesize_validator(
                     address.clone(),
@@ -6686,12 +6687,14 @@ fn coordinated_finality_records_for_rpc() -> Result<Option<Vec<CoordinatedFinali
 enum RpcFinalityRecords {
     Typed(Vec<TypedFinalityRecord>),
     Coordinated(Vec<CoordinatedFinalityRecord>),
+    SingleAuthority(Vec<SingleAuthorityRpcEntry>),
 }
 
 #[derive(Clone, Copy)]
 enum RpcFinalityRecordRef<'a> {
     Typed(&'a TypedFinalityRecord),
     Coordinated(&'a CoordinatedFinalityRecord),
+    SingleAuthority(&'a SingleAuthorityRpcEntry),
 }
 
 impl RpcFinalityRecords {
@@ -6701,6 +6704,9 @@ impl RpcFinalityRecords {
             Self::Coordinated(records) => {
                 Box::new(records.iter().map(RpcFinalityRecordRef::Coordinated))
             }
+            Self::SingleAuthority(entries) => {
+                Box::new(entries.iter().map(RpcFinalityRecordRef::SingleAuthority))
+            }
         }
     }
 
@@ -6708,6 +6714,7 @@ impl RpcFinalityRecords {
         match self {
             Self::Typed(records) => records.len(),
             Self::Coordinated(records) => records.len(),
+            Self::SingleAuthority(entries) => entries.len(),
         }
     }
 }
@@ -6717,22 +6724,31 @@ impl<'a> RpcFinalityRecordRef<'a> {
         match self {
             Self::Typed(record) => record.height.0,
             Self::Coordinated(record) => record.height.0,
+            Self::SingleAuthority(entry) => entry.height(),
         }
     }
 
-    fn block_id(self) -> &'a str {
+    fn block_id(self) -> String {
         match self {
-            Self::Typed(record) => record.block_id.0.as_str(),
-            Self::Coordinated(record) => record.block_id.0.as_str(),
+            Self::Typed(record) => record.block_id.0.to_string(),
+            Self::Coordinated(record) => record.block_id.0.to_string(),
+            Self::SingleAuthority(entry) => entry.block_id(),
         }
     }
 
-    fn proposer_validator_id(self) -> &'a str {
+    fn proposer_validator_id(self) -> String {
         match self {
-            Self::Typed(record) => record.block.header.proposer_validator_id.0.as_str(),
-            Self::Coordinated(record) => {
-                record.package.block.header.proposer_validator_id.0.as_str()
-            }
+            Self::Typed(record) => record.block.header.proposer_validator_id.0.to_string(),
+            Self::Coordinated(record) => record
+                .package
+                .block
+                .header
+                .proposer_validator_id
+                .0
+                .to_string(),
+            // The single-authority chain identifies its producer by the synv1
+            // authority address bound in Genesis.
+            Self::SingleAuthority(entry) => entry.authority_address.clone(),
         }
     }
 
@@ -6740,6 +6756,7 @@ impl<'a> RpcFinalityRecordRef<'a> {
         match self {
             Self::Typed(record) => record.block.transactions.len(),
             Self::Coordinated(record) => record.package.block.transactions.len(),
+            Self::SingleAuthority(entry) => entry.transaction_count(),
         }
     }
 
@@ -6747,11 +6764,26 @@ impl<'a> RpcFinalityRecordRef<'a> {
         match self {
             Self::Typed(record) => record.block.header.timestamp_ms_consensus_bounded,
             Self::Coordinated(record) => record.package.block.header.timestamp_ms_consensus_bounded,
+            Self::SingleAuthority(entry) => entry.timestamp_ms(),
         }
     }
 }
 
 fn finality_records_for_rpc() -> Result<Option<RpcFinalityRecords>, String> {
+    // Chain 1266 incarnation 5 / single_authority_v1 has exactly one finality
+    // source: the journal the single-authority driver writes. This branch is
+    // selected by the canonical Genesis, is checked FIRST, and never consults
+    // the typed-PoSy or coordinated journals, the validator registry, or the
+    // execution-state snapshot. Any failure here fails closed rather than
+    // answering from a stale incarnation.
+    let genesis = crate::genesis::canonical_genesis()?;
+    if crate::rpc::single_authority_finality_rpc::genesis_binds_single_authority(genesis) {
+        return crate::rpc::single_authority_finality_rpc::single_authority_entries_for_rpc(
+            genesis,
+        )
+        .map(|entries| entries.map(RpcFinalityRecords::SingleAuthority));
+    }
+
     let typed_exists = configured_typed_finality_path().is_file();
     let coordinated_exists = configured_coordinated_finality_path().is_file();
     if typed_exists && coordinated_exists {
@@ -6920,6 +6952,9 @@ fn finality_record_to_explorer_json(record: RpcFinalityRecordRef<'_>) -> Result<
         RpcFinalityRecordRef::Coordinated(record) => {
             coordinated_finality_record_to_explorer_json(record)
         }
+        RpcFinalityRecordRef::SingleAuthority(entry) => {
+            crate::rpc::single_authority_finality_rpc::entry_to_explorer_json(entry)
+        }
     }
 }
 
@@ -6928,6 +6963,9 @@ fn finality_record_to_finalized_head_json(record: RpcFinalityRecordRef<'_>) -> V
         RpcFinalityRecordRef::Typed(record) => typed_finality_record_to_finalized_head_json(record),
         RpcFinalityRecordRef::Coordinated(record) => {
             coordinated_finality_record_to_finalized_head_json(record)
+        }
+        RpcFinalityRecordRef::SingleAuthority(entry) => {
+            crate::rpc::single_authority_finality_rpc::entry_to_finalized_head_json(entry)
         }
     }
 }
@@ -10811,6 +10849,149 @@ mod tests {
         assert!(response.get("nonce").is_none());
         assert_eq!(response["qc_signer_count"], json!(5));
         assert_eq!(response["source"], json!("typed_posy_finality_store"));
+    }
+
+    // ---------------------------------------------------------------
+    // Chain 1266 incarnation 5 / single_authority_v1 RPC read path.
+    // ---------------------------------------------------------------
+
+    const SA_AUTHORITY_ADDRESS: &str = "synv11n57gc4h9tnt3c78crncx46hnlg9vz8eu4lu";
+
+    fn sa_entry(height: u64, parent: crate::synergy_types::Hash) -> SingleAuthorityRpcEntry {
+        use crate::consensus::single_authority_finality_store::SingleAuthorityFinalityRecord;
+        use crate::synergy_types::Hash;
+
+        let block_hash = Hash::from_domain_bytes("SA_TEST_BLOCK", &height.to_be_bytes());
+        SingleAuthorityRpcEntry {
+            record: SingleAuthorityFinalityRecord {
+                schema_version: 1,
+                chain_id: 1266,
+                chain_incarnation: 5,
+                consensus_protocol: "single_authority_v1".to_string(),
+                release_id: "chain1266-incarnation-5-single-authority-rc1".to_string(),
+                height,
+                block_hash,
+                parent_hash: parent,
+                state_root: Hash::from_domain_bytes("SA_TEST_STATE", &height.to_be_bytes()),
+                transaction_root: Hash::from_domain_bytes("SA_TEST_TX", &height.to_be_bytes()),
+                receipt_root: Hash::from_domain_bytes("SA_TEST_RCPT", &height.to_be_bytes()),
+                authority_id: "authority-node-01".to_string(),
+                authority_public_key_fingerprint: "sha256:2420c052".to_string(),
+                authority_signature_base64: "c2ln".to_string(),
+                finalized_timestamp_ms: 1_700_000_000_000 + height * 1_000,
+            },
+            body: None,
+            authority_address: SA_AUTHORITY_ADDRESS.to_string(),
+        }
+    }
+
+    fn sa_journal(n: u64) -> Vec<SingleAuthorityRpcEntry> {
+        let mut parent = crate::synergy_types::Hash::from_domain_bytes("SA_TEST_GENESIS", b"0");
+        let mut entries = Vec::new();
+        for height in 1..=n {
+            let entry = sa_entry(height, parent);
+            parent = entry.record.block_hash;
+            entries.push(entry);
+        }
+        entries
+    }
+
+    /// R1. A journal holding heights 1..N reports N as the authoritative height.
+    #[test]
+    fn r1_single_authority_journal_height_is_the_highest_finalized_height() {
+        let records = RpcFinalityRecords::SingleAuthority(sa_journal(37));
+        assert_eq!(records.len(), 37);
+        assert_eq!(
+            authoritative_block_height(Some(&records), Some(99)),
+            Some(37)
+        );
+    }
+
+    /// R2. Block 1 and block N are both returned, with the real identity.
+    #[test]
+    fn r2_single_authority_block_one_and_head_are_returned() {
+        let entries = sa_journal(37);
+        let records = RpcFinalityRecords::SingleAuthority(entries.clone());
+
+        let first = records.iter().find(|r| r.height() == 1).unwrap();
+        let block_one = finality_record_to_explorer_json(first).unwrap();
+        assert_eq!(block_one["height"], json!(1));
+        assert_eq!(block_one["hash"], json!(entries[0].record.block_hash.to_hex()));
+        assert_eq!(block_one["consensus_protocol"], json!("single_authority_v1"));
+        assert_eq!(block_one["validator_id"], json!(SA_AUTHORITY_ADDRESS));
+        assert_eq!(block_one["authority_address"], json!(SA_AUTHORITY_ADDRESS));
+        assert_eq!(block_one["finality_status"], json!("finalized"));
+        assert_eq!(block_one["tx_count"], json!(0));
+        assert!(block_one["transactions"].is_array());
+
+        let head = records.iter().find(|r| r.height() == 37).unwrap();
+        let block_head = finality_record_to_explorer_json(head).unwrap();
+        assert_eq!(block_head["height"], json!(37));
+        assert_eq!(
+            block_head["hash"],
+            json!(entries[36].record.block_hash.to_hex())
+        );
+        assert_eq!(
+            block_head["parent_hash"],
+            json!(entries[35].record.block_hash.to_hex())
+        );
+    }
+
+    /// R3. Parent/hash continuity in the RPC view matches the journal exactly.
+    #[test]
+    fn r3_single_authority_parent_hash_continuity_matches_the_journal() {
+        let entries = sa_journal(20);
+        let records = RpcFinalityRecords::SingleAuthority(entries.clone());
+        let view: Vec<_> = records.iter().collect();
+
+        for (index, record) in view.iter().enumerate() {
+            let height = (index as u64) + 1;
+            assert_eq!(record.height(), height);
+            let json_block = finality_record_to_explorer_json(*record).unwrap();
+            if index > 0 {
+                assert_eq!(
+                    json_block["parent_hash"],
+                    json!(entries[index - 1].record.block_hash.to_hex()),
+                    "height {height} must extend its predecessor"
+                );
+            }
+            assert_eq!(json_block["hash"], json!(entries[index].record.block_hash.to_hex()));
+        }
+    }
+
+    /// R4. The incarnation-5 view exposes no PoSy or coordinated evidence, so a
+    /// consumer cannot be served round, quorum, cluster or coordinator data.
+    #[test]
+    fn r4_single_authority_view_carries_no_posy_or_coordinated_fields() {
+        let records = RpcFinalityRecords::SingleAuthority(sa_journal(3));
+        for record in records.iter() {
+            let json_block = finality_record_to_explorer_json(record).unwrap();
+            for forbidden in [
+                "qc_signer_count",
+                "coordinator_id",
+                "assigned_producer_id",
+                "coordinator_commit_hash",
+                "round",
+                "epoch",
+                "cluster_id",
+                "cluster_map_hash",
+                "active_validator_set_hash",
+            ] {
+                assert!(
+                    json_block.get(forbidden).is_none(),
+                    "single-authority block must not expose {forbidden}"
+                );
+            }
+        }
+    }
+
+    /// R5. An empty single-authority journal reports height 0 and never falls
+    /// back to a legacy incarnation-4 height.
+    #[test]
+    fn r5_empty_single_authority_journal_fails_closed_without_legacy_fallback() {
+        let empty = RpcFinalityRecords::SingleAuthority(Vec::new());
+        assert_eq!(authoritative_block_height(Some(&empty), Some(4_512)), Some(0));
+        assert_eq!(empty.iter().count(), 0);
     }
 
     #[test]

@@ -1,4 +1,5 @@
 pub mod rpc_server;
+pub mod single_authority_finality_rpc;
 
 // Temporarily disabled to avoid tokio runtime issues
 // pub fn start_rpc_server() {
