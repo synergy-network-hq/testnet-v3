@@ -1619,6 +1619,20 @@ fn ensure_node_config_matches_finalized_consensus_parameters(
         }
         return Ok(());
     }
+    // `single_authority_v1` carries no epoch/cluster/quorum profile: its
+    // authoritative consensus bindings live in the ML-DSA-87 signed
+    // DesiredStateV2, already verified by
+    // `chain1266_startup_dispatch::verify_single_authority_v2_activation`.
+    // The PoSy-shaped parameter cross-checks do not apply, exactly as in
+    // `genesis::load_candidate_consensus_parameters`.
+    if matches!(
+        config
+            .consensus
+            .resolve_mode(config.blockchain.chain_id, &config.network.network_id)?,
+        ResolvedConsensusMode::SingleAuthorityV1
+    ) {
+        return Ok(());
+    }
     let parameters = genesis.consensus_parameters().ok_or_else(|| {
         "canonical Testnet-v3 Genesis has no finalized consensus parameter manifest".to_string()
     })?;
