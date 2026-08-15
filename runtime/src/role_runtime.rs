@@ -5135,7 +5135,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_operator_args_require_chain_id_1264() {
+    fn snapshot_operator_args_require_chain_id_1266() {
         let missing = vec![
             "synergy-testnet".to_string(),
             "create-snapshot".to_string(),
