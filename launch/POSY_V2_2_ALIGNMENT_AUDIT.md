@@ -190,3 +190,61 @@ The next required implementation work is:
 4. Complete the Security Specification v7 control audit and remediate every
    network-wide gap.
 5. Only then generate fresh identities and prepare signed genesis inputs.
+
+## 2026-08-12 proposed PoSy v3 simplified profile
+
+This branch adds an epoch-gated `posy/3.0` proposal; it does not change the
+currently finalized v2.2 parameter manifest or activate validator duties. The
+proposal replaces the future healthy-path `VALIDATE -> VC -> FINALITY -> QC`
+ceremony with `PROPOSAL -> VOTE -> QC`, retains strict count and frozen-weight
+quorum verification, and uses a three-certified-block commit rule. Exceptional
+recovery uses only a quorum-certified TC.
+
+The proposed leader authority is one immutable, full-SHA3-512-ranked ring per
+epoch with fixed ten-block leases. Sequential TCs forfeit only the remainder of
+the current lease; local clocks, health observations, live-set inference,
+floating-point stake priority, and fallback loops have no authority. The next
+lease starts from the original frozen schedule.
+
+Implementation evidence produced in this branch:
+
+- The focused simplified-consensus suites exercise real ML-DSA-65 proposal and
+  QC signatures, strict 4-of-5 plus strict frozen-weight quorum, lease
+  inheritance, chained finality, restart, verified state-sync reconstruction,
+  lock rejection, protected-execution-root binding, signer-independent
+  certificate subjects, and conflicting-QC SafetyHalt. Aggregate counts are
+  intentionally omitted from this moving branch audit; the PR verification
+  record must retain the exact command output from the final candidate commit.
+- The five-OS-process qualification harness passes with five durable
+  `SimplifiedConsensusStateMachine` workers. Each worker owns an ephemeral
+  ML-DSA-65 key, uses the production proposal/vote/timeout signing methods and
+  Aegis verifier, persists its signer journal and safety state, verifies QC/TC
+  objects, reconstructs a peer state-sync bundle, and survives process restart.
+  The scenarios include four-of-five progress, three-of-five fail-closed,
+  invalid signatures, stale and wrong-highest-QC TCs, two sequential takeovers,
+  a lagging-worker heal, three-chain finality, lease-boundary reset, and 40
+  repeated failure rounds. Ephemeral private-key files are removed at exit.
+- That harness is driver-orchestrated over child-process standard input/output.
+  The parent creates proposal work, requests signatures, assembles certificates,
+  relays them, and simulates unavailable/healed workers. It does **not** launch
+  five autonomous `synergy-node` validators, use the authenticated P2P wire
+  transport, generate blocks from ETDAG/protected execution, apply committed
+  execution/state roots, or prove the production role-runtime driver lifecycle.
+- The schema-4 manifest proposal is canonical and deliberately refuses
+  activation. Its SHA3-512 parameter root is
+  `2c8be6837fa49c160887cc1fcf2b741eadd72172bdeed27c9645c08ebe88be5fb562ca82e89af7cbe821157aba6d0e20a7727f0ff9e191a14dff5744fd4de101`.
+  This is the protocol's SHA3-512 `ConsensusParameterRoot`; a conventional
+  SHA-512 file digest is a different value.
+- A standalone v3 parameter-control workbook proposal records five-validator
+  count/weight liveness and keeps the activation result `BLOCKED`.
+
+The `posy_v3_five_process_harness_passed` launch-readiness gate remains
+`false`. The passing state-machine harness is strong component evidence, but it
+does not meet the broader autonomous-node/driver/P2P/execution/commit scope
+implied by a launch gate. Specification approval, a finalized canonical
+manifest, activation coordinates, final five-validator public topology and
+weights, a role-runtime-integrated authenticated simplified driver, signed release
+artifacts, full regression/chaos/performance/soak qualification, and live
+activation also remain false. The inherited production engine remains
+disabled; this proposal does not create a launch path around existing
+Testnet-v3 blockers.

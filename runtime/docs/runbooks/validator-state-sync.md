@@ -19,6 +19,26 @@ live repair authorization.
 - No live deployment, validator restart, state mutation, or quorum change is
   allowed without explicit authorization.
 
+## Proposed PoSy v3 certified reconstruction
+
+For a future activated `posy/3.0` epoch, a peer bundle is acceptable only when
+the node independently verifies the pinned epoch context and anchor, every
+ML-DSA-65 QC and TC signature, strict dual quorum, consecutive QC ancestry,
+sequential TC predecessors, and the three-chain-derived finalized head. Peer
+claims for `highest_qc`, `locked_qc`, signer counts, weights, and finality are
+never trusted as cached authority.
+
+State sync preserves the receiving node's durable last-vote record and any
+SafetyHalt. It rejects a lower highest QC, a lower finalized head, missing TC
+evidence for takeover rounds, or evidence outside the anchored chain. A node
+may resume signing only after the reconstructed state is atomically persisted
+and the existing signer journal independently permits signing.
+
+Do not recover by deleting signer state, clearing a lock, forcing a leader,
+editing height, or sequencing restarts. A restarted validator learns successor
+authority only from a verified TC chain; the next ten-block lease boundary
+resets authority to the frozen epoch schedule automatically.
+
 ## Plan Generation
 
 ```bash

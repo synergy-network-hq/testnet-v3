@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::block::{Block, BlockHeader};
 use crate::consensus::dual_quorum::{QuorumCertificate, Vote};
+use crate::consensus::simplified_posy::SimplifiedConsensusMessage;
 use crate::consensus::typed_finality_store::TypedFinalityRecord;
 use crate::etdag::{CertifiedProtectedInputArtifact, ProtectedBlockInput, TargetAdmissionContext};
 use crate::synergy_types::AegisPqSignature;
@@ -30,6 +31,11 @@ pub const MAX_TYPED_FINALITY_CHECKPOINT_FRAME_BYTES: usize = 4 * 1024 * 1024;
 /// so they receive the tighter certificate-sized transport budget rather than
 /// the ETDAG package allowance.
 pub const MAX_TYPED_CONSENSUS_CORE_PROPOSAL_FRAME_BYTES: usize = 128 * 1024;
+pub const MAX_SIMPLIFIED_CONSENSUS_CERTIFICATE_FRAME_BYTES: usize = 256 * 1024;
+pub const MAX_SIMPLIFIED_CONSENSUS_PROPOSAL_FRAME_BYTES: usize = 512 * 1024;
+pub const MAX_SIMPLIFIED_CONSENSUS_STATE_SYNC_FRAME_BYTES: usize = 256 * 1024;
+pub const MAX_SIMPLIFIED_CONSENSUS_VOTE_FRAME_BYTES: usize = 64 * 1024;
+pub const MAX_SIMPLIFIED_CONSENSUS_CONTROL_FRAME_BYTES: usize = 16 * 1024;
 
 /// The only wire representation for the typed PoSy v2.2 state machine.
 ///
@@ -255,6 +261,11 @@ pub enum NetworkMessage {
     TypedConsensus {
         message: TypedConsensusMessage,
     },
+    /// PoSy v3 simplified consensus is intentionally a distinct wire family;
+    /// it cannot be decoded by the v2.2 coordinator or inherited handlers.
+    SimplifiedConsensus {
+        message: SimplifiedConsensusMessage,
+    },
     /// Verified, non-signing finalized-chain replication between the
     /// validator-VPN relayer tier and public RPC/indexer observer roles.
     TypedFinalityObserver {
@@ -322,6 +333,45 @@ pub enum NetworkMessage {
         #[serde(default)]
         quorum_certificates: Vec<QuorumCertificate>,
     },
+}
+
+pub fn validate_simplified_consensus_message_size(
+    message: &SimplifiedConsensusMessage,
+) -> Result<(), String> {
+    let (kind, maximum) = match message {
+        SimplifiedConsensusMessage::Proposal { .. } => (
+            "simplified consensus proposal",
+            MAX_SIMPLIFIED_CONSENSUS_PROPOSAL_FRAME_BYTES,
+        ),
+        SimplifiedConsensusMessage::ReliableDelivery { .. }
+        | SimplifiedConsensusMessage::Vote { .. }
+        | SimplifiedConsensusMessage::TimeoutVote { .. } => (
+            "simplified consensus vote",
+            MAX_SIMPLIFIED_CONSENSUS_VOTE_FRAME_BYTES,
+        ),
+        SimplifiedConsensusMessage::QuorumCertificate { .. }
+        | SimplifiedConsensusMessage::TimeoutCertificate { .. } => (
+            "simplified consensus certificate",
+            MAX_SIMPLIFIED_CONSENSUS_CERTIFICATE_FRAME_BYTES,
+        ),
+        SimplifiedConsensusMessage::StateSyncRequest { .. } => (
+            "simplified consensus state-sync request",
+            MAX_SIMPLIFIED_CONSENSUS_CONTROL_FRAME_BYTES,
+        ),
+        SimplifiedConsensusMessage::StateSyncChunk { .. } => (
+            "simplified consensus state-sync chunk",
+            MAX_SIMPLIFIED_CONSENSUS_STATE_SYNC_FRAME_BYTES,
+        ),
+    };
+    let encoded = NetworkMessage::SimplifiedConsensus {
+        message: message.clone(),
+    };
+    let frame_bytes = serde_json::to_vec(&encoded)
+        .map_err(|error| format!("serialize {kind} frame: {error}"))?
+        .len()
+        .checked_add(4)
+        .ok_or_else(|| format!("{kind} frame length overflow"))?;
+    validate_typed_consensus_frame_length(kind, frame_bytes, maximum)
 }
 
 #[cfg(test)]

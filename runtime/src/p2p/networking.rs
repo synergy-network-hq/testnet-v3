@@ -13,6 +13,9 @@ use crate::consensus::legacy_canonical_lock::{
     verify_legacy_canonical_lock, verify_legacy_canonical_locks, write_legacy_canonical_lock,
     write_legacy_canonical_locks,
 };
+use crate::consensus::simplified_posy::{
+    AuthenticatedSimplifiedConsensusPeer, SimplifiedConsensusMessage,
+};
 use crate::consensus::testnet_v3_bootstrap::{
     authenticate_active_typed_consensus_peer, load_testnet_v3_genesis_bootstrap,
 };
@@ -32,8 +35,11 @@ use crate::etdag::{
 };
 use crate::genesis::canonical_genesis;
 use crate::p2p::messages::{
-    validate_typed_finality_observer_message_size, NetworkMessage, TypedConsensusMessage,
-    TypedFinalityObserverMessage,
+    validate_simplified_consensus_message_size, validate_typed_finality_observer_message_size,
+    NetworkMessage, TypedConsensusMessage, TypedFinalityObserverMessage,
+    MAX_SIMPLIFIED_CONSENSUS_CERTIFICATE_FRAME_BYTES, MAX_SIMPLIFIED_CONSENSUS_CONTROL_FRAME_BYTES,
+    MAX_SIMPLIFIED_CONSENSUS_PROPOSAL_FRAME_BYTES, MAX_SIMPLIFIED_CONSENSUS_STATE_SYNC_FRAME_BYTES,
+    MAX_SIMPLIFIED_CONSENSUS_VOTE_FRAME_BYTES,
 };
 #[cfg(not(test))]
 use crate::p2p::validator_transport_registry::refresh_validator_transports;
@@ -45,7 +51,7 @@ use crate::rpc::rpc_server::{
     SYNC_MANAGER, TX_POOL,
 };
 use crate::sync::SyncState;
-use crate::synergy_types::{AegisPqKeyId, AegisPqKeyRole, Epoch};
+use crate::synergy_types::{AegisPqKeyId, AegisPqKeyRole, Epoch, ValidatorId};
 use crate::transaction::Transaction;
 use crate::validator::{
     apply_validator_activation_transaction, canonical_active_validator_set_hash,
@@ -63,7 +69,7 @@ use serde_json;
 use socket2::{SockRef, TcpKeepalive};
 #[cfg(test)]
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
@@ -3197,6 +3203,19 @@ fn typed_consensus_peer_for_session(
         .cloned()
 }
 
+fn simplified_consensus_peer_for_session(
+    peer_address: &str,
+    session_id: u64,
+) -> Option<AuthenticatedSimplifiedConsensusPeer> {
+    typed_consensus_peer_for_session(peer_address, session_id).map(|peer| {
+        AuthenticatedSimplifiedConsensusPeer {
+            validator_id: peer.validator_id,
+            validator_uma_id: peer.validator_uma_id,
+            consensus_key_id: peer.consensus_key_id,
+        }
+    })
+}
+
 /// Converts the P2P handshake identity into the narrower ETDAG ingress
 /// identity.  It is intentionally derived from the same session-scoped,
 /// Genesis-bound authentication record as typed consensus traffic rather than
@@ -5616,6 +5635,69 @@ impl P2PNetwork {
         Ok(sent)
     }
 
+    /// Sends a PoSy v3 artifact only over the already authenticated validator
+    /// sessions. The simplified driver rebinds each peer to its frozen
+    /// five-validator epoch context before processing the message.
+    pub fn broadcast_simplified_consensus(
+        &self,
+        message: &SimplifiedConsensusMessage,
+        frozen_validator_ids: &BTreeSet<ValidatorId>,
+    ) -> Result<usize, String> {
+        validate_simplified_consensus_message_size(message)?;
+        if frozen_validator_ids.is_empty() {
+            return Err("simplified consensus frozen egress set is empty".to_string());
+        }
+        let wire_message = NetworkMessage::SimplifiedConsensus {
+            message: message.clone(),
+        };
+        let targets = {
+            let peers = self.connected_peers.lock().unwrap();
+            peers
+                .iter()
+                .filter_map(|(address, peer)| {
+                    if peer.stream.is_none() {
+                        return None;
+                    }
+                    let session_id = current_peer_session_id(address)?;
+                    let identity = simplified_consensus_peer_for_session(address, session_id)?;
+                    frozen_validator_ids
+                        .contains(&identity.validator_id)
+                        .then(|| (address.clone(), session_id))
+                })
+                .collect::<Vec<_>>()
+        };
+        let send_results = run_with_bounded_parallelism(
+            &targets,
+            targets.len(),
+            "simplified consensus fanout",
+            |(address, session_id)| {
+                send_peer_message_for_session(
+                    &self.connected_peers,
+                    &self.peer_state_cache,
+                    address,
+                    *session_id,
+                    &wire_message,
+                    Duration::from_millis(CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                    "simplified-consensus",
+                )
+            },
+        );
+        let mut sent = 0usize;
+        for ((address, _), result) in targets.into_iter().zip(send_results) {
+            match result {
+                Ok(true) => sent += 1,
+                Ok(false) => {}
+                Err(error) => warn!(
+                    "p2p",
+                    "Failed to send simplified consensus message",
+                    "peer" => address,
+                    "error" => error
+                ),
+            }
+        }
+        Ok(sent)
+    }
+
     /// Pulls the next bounded finalized-typed segment for an installed
     /// non-signing observer. A relayer may ask only a session-authenticated
     /// validator across the validator VPN; RPC/indexer roles may ask only a
@@ -5973,6 +6055,32 @@ impl P2PNetwork {
 
     pub fn get_status_ready_validator_addresses(&self) -> Vec<String> {
         status_ready_validator_addresses(&self.config, &self.connected_peers)
+    }
+
+    /// Returns only fresh session-authenticated validator identities from the
+    /// immutable v3 frozen set. Address counts or mutable membership cannot
+    /// satisfy simplified startup readiness.
+    pub fn get_status_ready_simplified_validator_ids(
+        &self,
+        frozen_validator_ids: &BTreeSet<ValidatorId>,
+    ) -> BTreeSet<ValidatorId> {
+        let now = current_timestamp();
+        let peers = self.connected_peers.lock().unwrap();
+        peers
+            .iter()
+            .filter_map(|(address, peer)| {
+                if peer.stream.is_none()
+                    || peer_readiness_exclusion_reason_at(peer, now, None).is_some()
+                {
+                    return None;
+                }
+                let session_id = current_peer_session_id(address)?;
+                let identity = simplified_consensus_peer_for_session(address, session_id)?;
+                frozen_validator_ids
+                    .contains(&identity.validator_id)
+                    .then_some(identity.validator_id)
+            })
+            .collect()
     }
 
     pub fn get_best_validator_peer_height(&self) -> u64 {
@@ -7813,6 +7921,7 @@ fn bypasses_shared_message_queue(message: &NetworkMessage) -> bool {
         NetworkMessage::VoteRequest { .. }
             | NetworkMessage::Vote { .. }
             | NetworkMessage::TypedConsensus { .. }
+            | NetworkMessage::SimplifiedConsensus { .. }
             | NetworkMessage::TypedFinalityObserver { .. }
             | NetworkMessage::EtdagCertifiedInput { .. }
             | NetworkMessage::Block { .. }
@@ -7992,6 +8101,23 @@ fn dispatch_peer_message(
                 warn!(
                     "p2p",
                     "Rejected typed consensus message",
+                    "peer" => peer_address.to_string(),
+                    "error" => error
+                );
+            }
+            Ok(())
+        }
+        NetworkMessage::SimplifiedConsensus { message } => {
+            if let Err(error) =
+                crate::consensus::simplified_posy::dispatch_simplified_consensus_message(
+                    peer_address,
+                    simplified_consensus_peer_for_session(peer_address, session_id),
+                    message,
+                )
+            {
+                warn!(
+                    "p2p",
+                    "Rejected simplified consensus message",
                     "peer" => peer_address.to_string(),
                     "error" => error
                 );
@@ -9090,6 +9216,22 @@ fn handle_messages(
                             );
                         }
                     }
+                    NetworkMessage::SimplifiedConsensus { message } => {
+                        if let Err(error) =
+                            crate::consensus::simplified_posy::dispatch_simplified_consensus_message(
+                                &peer_address,
+                                simplified_consensus_peer_for_session(&peer_address, session_id),
+                                message,
+                            )
+                        {
+                            warn!(
+                                "p2p",
+                                "Rejected simplified consensus message",
+                                "peer" => peer_address.clone(),
+                                "error" => error
+                            );
+                        }
+                    }
                     NetworkMessage::TypedFinalityObserver { message } => {
                         if let Err(error) = handle_typed_finality_observer_message(
                             &connected_peers,
@@ -9703,9 +9845,21 @@ fn receive_message(stream: &mut impl Read) -> Result<NetworkMessage, io::Error> 
         ));
     }
 
-    // Read message data
+    // Read a small envelope prefix before allocating the declared payload.
+    // Simplified consensus uses JSON's externally tagged enum representation,
+    // so its outer and inner kind are visible here. This prevents an
+    // authenticated peer from forcing a 64-MiB allocation before the tighter
+    // consensus-kind cap is known.
+    const PREDECODE_PREFIX_BYTES: usize = 4 * 1024;
+    let prefix_len = len.min(PREDECODE_PREFIX_BYTES);
+    let mut prefix = vec![0u8; prefix_len];
+    stream.read_exact(&mut prefix)?;
+    validate_simplified_predecode_frame_length(len, &prefix)?;
+
+    // Read the remainder after the predecode allocation gate.
     let mut data = vec![0u8; len];
-    stream.read_exact(&mut data)?;
+    data[..prefix_len].copy_from_slice(&prefix);
+    stream.read_exact(&mut data[prefix_len..])?;
 
     // Parse JSON message
     let json =
@@ -9714,6 +9868,50 @@ fn receive_message(stream: &mut impl Read) -> Result<NetworkMessage, io::Error> 
         serde_json::from_str(&json).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
     Ok(message)
+}
+
+fn validate_simplified_predecode_frame_length(len: usize, prefix: &[u8]) -> io::Result<()> {
+    let prefix = std::str::from_utf8(prefix)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if !prefix.contains("\"SimplifiedConsensus\"") {
+        return Ok(());
+    }
+    let (kind, maximum) = if prefix.contains("\"Proposal\"") {
+        ("proposal", MAX_SIMPLIFIED_CONSENSUS_PROPOSAL_FRAME_BYTES)
+    } else if prefix.contains("\"ReliableDelivery\"")
+        || prefix.contains("\"Vote\"")
+        || prefix.contains("\"TimeoutVote\"")
+    {
+        ("vote", MAX_SIMPLIFIED_CONSENSUS_VOTE_FRAME_BYTES)
+    } else if prefix.contains("\"QuorumCertificate\"") || prefix.contains("\"TimeoutCertificate\"")
+    {
+        (
+            "certificate",
+            MAX_SIMPLIFIED_CONSENSUS_CERTIFICATE_FRAME_BYTES,
+        )
+    } else if prefix.contains("\"StateSyncRequest\"") {
+        (
+            "state-sync request",
+            MAX_SIMPLIFIED_CONSENSUS_CONTROL_FRAME_BYTES,
+        )
+    } else if prefix.contains("\"StateSyncChunk\"") {
+        (
+            "state-sync chunk",
+            MAX_SIMPLIFIED_CONSENSUS_STATE_SYNC_FRAME_BYTES,
+        )
+    } else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "simplified consensus frame does not declare a bounded message kind in its predecode prefix",
+        ));
+    };
+    if len > maximum {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("simplified consensus {kind} frame length {len} exceeds limit {maximum}"),
+        ));
+    }
+    Ok(())
 }
 
 fn current_timestamp() -> u64 {
@@ -11775,7 +11973,8 @@ mod tests {
         status_ready_validator_addresses_with_local_duty_gate, status_ready_validator_participants,
         status_sync_batch, support_peer_sync_request_is_too_deep, sync_batch_limit_for_role,
         typed_consensus_peer_for_session, validate_outbound_frame_length,
-        validate_vote_request_extends_local_tip, validator_status_genesis_grace_remaining_secs,
+        validate_simplified_predecode_frame_length, validate_vote_request_extends_local_tip,
+        validator_status_genesis_grace_remaining_secs,
         validator_status_genesis_within_grace_window, verify_batch_with_bounded_parallelism,
         verify_handshake_pq_signature, vote_request_parent_sync_range,
         with_peer_stream_outside_peers_lock, ConnectionDirection, DialTargetsArc,
@@ -11810,6 +12009,7 @@ mod tests {
     use crate::crypto::aegis_pqvm::AegisPqvmSigner;
     use crate::crypto::pqc::{PQCAlgorithm, PQCManager, PQCSignature};
     use crate::p2p::messages::NetworkMessage;
+    use crate::p2p::messages::MAX_SIMPLIFIED_CONSENSUS_VOTE_FRAME_BYTES;
     use crate::synergy_types::{AegisPqKeyId, AegisPqKeyRole, Epoch, UmaId, ValidatorId};
     use crate::transaction::Transaction;
     use crate::validator::{
@@ -11823,6 +12023,21 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::{mpsc, Arc, Barrier, Mutex, MutexGuard};
+
+    #[test]
+    fn simplified_vote_frame_is_bounded_before_full_payload_allocation() {
+        let prefix = br#"{"SimplifiedConsensus":{"message":{"Vote":{"vote":{}}}}}"#;
+        validate_simplified_predecode_frame_length(
+            MAX_SIMPLIFIED_CONSENSUS_VOTE_FRAME_BYTES,
+            prefix,
+        )
+        .unwrap();
+        assert!(validate_simplified_predecode_frame_length(
+            MAX_SIMPLIFIED_CONSENSUS_VOTE_FRAME_BYTES + 1,
+            prefix,
+        )
+        .is_err());
+    }
     use std::thread;
     use std::time::{Duration, Instant};
 

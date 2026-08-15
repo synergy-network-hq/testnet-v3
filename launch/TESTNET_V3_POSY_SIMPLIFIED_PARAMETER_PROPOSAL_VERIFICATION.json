@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "status": "PROPOSAL_VERIFIED_NOT_ACTIVATABLE",
+  "verified_at": "2026-08-12",
+  "source_base_commit": "63a96a533fa3cad14d21671d5528e1162a4dbd6c",
+  "candidate_branch": "feat/posy-simplified-consensus",
+  "candidate_commit": null,
+  "candidate_commit_status": "PENDING",
+  "manifest": "launch/TESTNET_V3_POSY_SIMPLIFIED_PARAMETER_PROPOSAL.json",
+  "schema": "launch/TESTNET_V3_POSY_SIMPLIFIED_PARAMETER_SCHEMA_V4.json",
+  "canonical_byte_length": 1541,
+  "sha256_file_digest": "9cb68d3cefe6fecf8be8eb62590d21196a6e4cd8cde79242b19fc38e28e1e89a",
+  "sha512_file_digest": "f76ca719f98fe19351cff600c8ae0cff06c240da9ab7117b6f31369146651d7c0f7fa4ec3187257b50bcf79475b65f8b7f63e80ffa9bf2abe978a7733bb2d940",
+  "consensus_parameter_root_algorithm": "SHA3-512(canonical_manifest_bytes)",
+  "consensus_parameter_root": "2c8be6837fa49c160887cc1fcf2b741eadd72172bdeed27c9645c08ebe88be5fb562ca82e89af7cbe821157aba6d0e20a7727f0ff9e191a14dff5744fd4de101",
+  "runtime_loader_result": "PASS",
+  "runtime_activation_result": "REFUSED_PROPOSAL_NOT_ACTIVATED",
+  "governance_approval_id": null,
+  "activation_epoch": null,
+  "activation_height": null
+}

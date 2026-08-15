@@ -15,6 +15,14 @@ pub const CONSENSUS_SIGNING_JOURNAL_FILE: &str = "consensus_signing_authorizatio
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ConsensusSigningPhase {
     Proposal,
+    /// Authenticated reliable-delivery transport statement. This is not an
+    /// ordinary block vote and never contributes directly to finality.
+    ProposalEcho,
+    /// Authenticated reliable-delivery transport statement. This is not an
+    /// ordinary block vote and never contributes directly to finality.
+    ProposalReady,
+    /// The sole ordinary block-vote phase in the activated PoSy v3 profile.
+    Vote,
     Validate,
     Finality,
     Timeout,
@@ -34,6 +42,10 @@ pub struct ConsensusSigningAuthorization {
     pub phase: ConsensusSigningPhase,
     pub candidate_id: Option<BlockId>,
     pub highest_prepared_vc_root: Option<Hash>,
+    /// Verified no-carry TC that proves a prior same-height block vote could
+    /// not have formed a hidden QC and therefore permits a new candidate.
+    #[serde(default)]
+    pub conflict_unlock_tc_id: Option<Hash>,
 }
 
 impl ConsensusSigningAuthorization {
@@ -54,6 +66,9 @@ impl ConsensusSigningAuthorization {
         }
         match self.phase {
             ConsensusSigningPhase::Proposal
+            | ConsensusSigningPhase::ProposalEcho
+            | ConsensusSigningPhase::ProposalReady
+            | ConsensusSigningPhase::Vote
             | ConsensusSigningPhase::Validate
             | ConsensusSigningPhase::Finality => {
                 if self
@@ -62,12 +77,12 @@ impl ConsensusSigningAuthorization {
                     .is_none_or(|candidate| candidate.0.trim().is_empty())
                 {
                     return Err(
-                        "validate/finality authorization requires a candidate id".to_string()
+                        "candidate signing authorization requires a candidate id".to_string()
                     );
                 }
                 if self.highest_prepared_vc_root.is_some() {
                     return Err(
-                        "proposal/validate/finality authorization cannot carry a prepared VC root"
+                        "candidate signing authorization cannot carry a prepared VC root"
                             .to_string(),
                     );
                 }
@@ -76,6 +91,14 @@ impl ConsensusSigningAuthorization {
         }
         if self.highest_prepared_vc_root.is_some_and(Hash::is_zero) {
             return Err("prepared VC root must be absent or nonzero".to_string());
+        }
+        if self.conflict_unlock_tc_id.is_some_and(Hash::is_zero) {
+            return Err("conflict-unlock TC root must be absent or nonzero".to_string());
+        }
+        if self.conflict_unlock_tc_id.is_some()
+            && self.phase != ConsensusSigningPhase::Vote
+        {
+            return Err("only a block vote can carry conflict-unlock TC authority".to_string());
         }
         Ok(())
     }
@@ -121,6 +144,9 @@ struct DurableSigningRecord {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum SafetyHaltKind {
+    ConflictingQuorumCertificates,
+    ConflictingTimeoutCertificates,
+    ConflictingTimeoutAndQuorumEvidence,
     ConflictingFinalityCertificates,
     ConflictingBatchOrderCertificates,
     SigningJournalInconsistency,
@@ -243,10 +269,13 @@ impl DurableConsensusSigningAuthority {
             ));
         }
         let slot = authorization.slot_key();
-        if authorization.phase == ConsensusSigningPhase::Finality {
+        if matches!(
+            authorization.phase,
+            ConsensusSigningPhase::Finality | ConsensusSigningPhase::Vote
+        ) {
             let conflicting_candidate = journal.records.iter().find(|record| {
                 let existing = &record.authorization;
-                existing.phase == ConsensusSigningPhase::Finality
+                existing.phase == authorization.phase
                     && existing.chain_id == authorization.chain_id
                     && existing.network_id == authorization.network_id
                     && existing.protocol_version == authorization.protocol_version
@@ -258,10 +287,17 @@ impl DurableConsensusSigningAuthority {
                     && existing.candidate_id != authorization.candidate_id
             });
             if let Some(existing) = conflicting_candidate {
+                if authorization.phase == ConsensusSigningPhase::Vote
+                    && authorization.conflict_unlock_tc_id.is_some()
+                {
+                    // The state machine verifies this TC and its no-carry
+                    // intersection proof before reaching the journal.
+                } else {
                 return Err(format!(
-                    "CONSENSUS_SIGNING_CONFLICT: Finality height already authorizes candidate {:?}",
-                    existing.authorization.candidate_id
+                    "CONSENSUS_SIGNING_CONFLICT: {:?} height already authorizes candidate {:?}",
+                    authorization.phase, existing.authorization.candidate_id
                 ));
+                }
             }
         }
         if let Some(existing) = journal.records.iter().find(|record| record.slot == slot) {
@@ -539,6 +575,7 @@ mod tests {
             phase,
             candidate_id: Some(BlockId(candidate.to_string())),
             highest_prepared_vc_root: None,
+            conflict_unlock_tc_id: None,
         }
     }
 
@@ -656,6 +693,71 @@ mod tests {
     }
 
     #[test]
+    fn simplified_vote_is_height_scoped_across_takeover_rounds() {
+        let authority = temp_authority("simplified-vote-height");
+        let first = authorization(ConsensusSigningPhase::Vote, 0, "candidate-a");
+        authority.authorize_before_signature(&first).unwrap();
+        assert!(
+            authority
+                .authorize_before_signature(&authorization(
+                    ConsensusSigningPhase::Vote,
+                    1,
+                    "candidate-a",
+                ))
+                .is_ok(),
+            "a TC-authorized round may re-emit authority for the same candidate"
+        );
+        assert!(authority
+            .authorize_before_signature(&authorization(
+                ConsensusSigningPhase::Vote,
+                1,
+                "candidate-b",
+            ))
+            .unwrap_err()
+            .contains("CONSENSUS_SIGNING_CONFLICT"));
+    }
+
+    #[test]
+    fn verified_no_carry_tc_can_unlock_a_same_height_vote_change() {
+        let authority = temp_authority("simplified-vote-no-carry-unlock");
+        authority
+            .authorize_before_signature(&authorization(
+                ConsensusSigningPhase::Vote,
+                0,
+                "candidate-a",
+            ))
+            .unwrap();
+        let mut unlocked = authorization(ConsensusSigningPhase::Vote, 1, "candidate-b");
+        unlocked.conflict_unlock_tc_id = Some(Hash::from_domain_bytes(
+            "verified-no-carry-tc",
+            b"height-1-round-0",
+        ));
+        authority.authorize_before_signature(&unlocked).unwrap();
+    }
+
+    #[test]
+    fn reliable_delivery_ready_is_round_scoped() {
+        let authority = temp_authority("reliable-delivery-ready-round");
+        let first = authorization(ConsensusSigningPhase::ProposalReady, 0, "candidate-a");
+        authority.authorize_before_signature(&first).unwrap();
+        assert!(authority
+            .authorize_before_signature(&authorization(
+                ConsensusSigningPhase::ProposalReady,
+                0,
+                "candidate-b",
+            ))
+            .unwrap_err()
+            .contains("CONSENSUS_SIGNING_CONFLICT"));
+        authority
+            .authorize_before_signature(&authorization(
+                ConsensusSigningPhase::ProposalReady,
+                3,
+                "candidate-b",
+            ))
+            .unwrap();
+    }
+
+    #[test]
     fn idempotent_retry_does_not_append_or_fail() {
         let authority = temp_authority("idempotent");
         let authorization = authorization(ConsensusSigningPhase::Finality, 0, "candidate-a");
@@ -680,6 +782,9 @@ mod tests {
         assert_eq!(restarted.safety_halt_incidents().unwrap(), vec![incident]);
         for phase in [
             ConsensusSigningPhase::Proposal,
+            ConsensusSigningPhase::ProposalEcho,
+            ConsensusSigningPhase::ProposalReady,
+            ConsensusSigningPhase::Vote,
             ConsensusSigningPhase::Validate,
             ConsensusSigningPhase::Finality,
             ConsensusSigningPhase::Timeout,

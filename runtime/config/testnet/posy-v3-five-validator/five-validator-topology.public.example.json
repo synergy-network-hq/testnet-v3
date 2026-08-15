@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "status": "PROPOSED_NOT_ACTIVATED",
+  "chain_id": 1266,
+  "network_id": "synergy-testnet-v3",
+  "protocol_version": "posy/3.0",
+  "cluster_count": 1,
+  "validators": [
+    {"validator_id":"REQUIRED_APPROVED_VALIDATOR_1","consensus_key_id":"REQUIRED_APPROVED_ML_DSA_65_KEY_1","frozen_voting_weight":"REQUIRED_GOVERNED_INTEGER_WEIGHT_1"},
+    {"validator_id":"REQUIRED_APPROVED_VALIDATOR_2","consensus_key_id":"REQUIRED_APPROVED_ML_DSA_65_KEY_2","frozen_voting_weight":"REQUIRED_GOVERNED_INTEGER_WEIGHT_2"},
+    {"validator_id":"REQUIRED_APPROVED_VALIDATOR_3","consensus_key_id":"REQUIRED_APPROVED_ML_DSA_65_KEY_3","frozen_voting_weight":"REQUIRED_GOVERNED_INTEGER_WEIGHT_3"},
+    {"validator_id":"REQUIRED_APPROVED_VALIDATOR_4","consensus_key_id":"REQUIRED_APPROVED_ML_DSA_65_KEY_4","frozen_voting_weight":"REQUIRED_GOVERNED_INTEGER_WEIGHT_4"},
+    {"validator_id":"REQUIRED_APPROVED_VALIDATOR_5","consensus_key_id":"REQUIRED_APPROVED_ML_DSA_65_KEY_5","frozen_voting_weight":"REQUIRED_GOVERNED_INTEGER_WEIGHT_5"}
+  ],
+  "private_material_present": false
+}

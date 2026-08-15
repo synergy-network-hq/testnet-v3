@@ -1,0 +1,20 @@
+{
+ "inventory_source": "/Volumes/xcode/Synergy-Network-Projects/.codex-worktrees/posy-simplified-consensus",
+ "destination": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3.worktrees/posy-simplified-consensus",
+ "original_volume": "external:xcode",
+ "mode": "MOVE",
+ "kind": "GIT_WORKTREE",
+ "reason": "linked worktree of synergy-network-hq/testnet-v3 on branch feat/posy-simplified-consensus - needs `git worktree repair`",
+ "bytes_at_scan": 8012525875,
+ "files_at_scan": 40166,
+ "regenerable_bytes_inside": 7319696236,
+ "relocated_at": "2026-08-14T04:32:08-05:00",
+ "consolidation_batch": "2026-08-13",
+ "verification": {
+  "files_before": 40172,
+  "files_after": 40172,
+  "bytes_before": 8012525935,
+  "bytes_after": 8012525935,
+  "match": true
+ }
+}

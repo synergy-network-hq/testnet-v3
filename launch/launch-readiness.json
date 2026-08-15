@@ -66,6 +66,13 @@
     "bootstrap_bundles_regenerated": false,
     "observability_validated": false,
     "prepare_only_dry_run_passed": false,
+    "posy_v3_specification_approved": false,
+    "posy_v3_parameter_manifest_finalized": false,
+    "posy_v3_activation_epoch_declared": false,
+    "posy_v3_five_validator_topology_finalized": false,
+    "posy_v3_five_process_harness_passed": false,
+    "posy_v3_full_qualification_passed": false,
+    "posy_v3_runtime_activated": false,
     "launch_approved": false,
     "validator_vpn_material_generated": true,
     "validator_vpn_live_validation_passed": false
@@ -75,6 +82,7 @@
   "approval_record": null,
   "audit_records": {
     "posy_v2_2": "launch/POSY_V2_2_ALIGNMENT_AUDIT.md",
+    "posy_v3_simplified_proposal": "docs/posy-v3/REQUIREMENTS_CROSSWALK.md",
     "security_v7": "launch/SECURITY_V7_ALIGNMENT_AUDIT.md"
   },
   "identity_validation": {
