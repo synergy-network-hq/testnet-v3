@@ -1129,6 +1129,7 @@ impl ProofOfSynergyBft {
                 phase: ConsensusSigningPhase::Timeout,
                 candidate_id: None,
                 highest_prepared_vc_root: None,
+                conflict_unlock_tc_id: None,
             },
         )?;
         if let Some(recorded) = recorded {
@@ -1674,6 +1675,7 @@ impl ProofOfSynergyBft {
                 phase: ConsensusSigningPhase::Proposal,
                 candidate_id: Some(candidate_id),
                 highest_prepared_vc_root: None,
+                conflict_unlock_tc_id: None,
             })
     }
 

@@ -2,8 +2,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::block::{Block, BlockHeader};
 use crate::consensus::dual_quorum::{QuorumCertificate, Vote};
+use crate::consensus::simplified_posy::{
+    SimplifiedConsensusMessage, SimplifiedTargetAdmissionVoteRequest,
+};
 use crate::consensus::typed_finality_store::TypedFinalityRecord;
-use crate::etdag::{CertifiedProtectedInputArtifact, ProtectedBlockInput, TargetAdmissionContext};
+use crate::etdag::{
+    CertifiedProtectedInputArtifact, ProtectedBlockInput, TargetAdmissionContext,
+    TargetAdmissionPackage,
+};
 use crate::synergy_types::AegisPqSignature;
 use crate::synergy_types::{
     Block as TypedBlock, HeightConsensusContext, QuorumCertificate as TypedQuorumCertificate,
@@ -30,6 +36,29 @@ pub const MAX_TYPED_FINALITY_CHECKPOINT_FRAME_BYTES: usize = 4 * 1024 * 1024;
 /// so they receive the tighter certificate-sized transport budget rather than
 /// the ETDAG package allowance.
 pub const MAX_TYPED_CONSENSUS_CORE_PROPOSAL_FRAME_BYTES: usize = 128 * 1024;
+pub const MAX_SIMPLIFIED_CONSENSUS_CERTIFICATE_FRAME_BYTES: usize = 256 * 1024;
+pub const MAX_SIMPLIFIED_CONSENSUS_PROPOSAL_FRAME_BYTES: usize = 512 * 1024;
+pub const MAX_SIMPLIFIED_CONSENSUS_STATE_SYNC_FRAME_BYTES: usize = 256 * 1024;
+pub const MAX_SIMPLIFIED_CONSENSUS_VOTE_FRAME_BYTES: usize = 64 * 1024;
+pub const MAX_SIMPLIFIED_CONSENSUS_CONTROL_FRAME_BYTES: usize = 16 * 1024;
+/// One target-admission vote repeats the exact public ML-KEM registry committed
+/// by its signed context. The cap is independent from normal block votes.
+pub const MAX_SIMPLIFIED_TARGET_ADMISSION_VOTE_FRAME_BYTES: usize = 128 * 1024;
+/// A certified package carries the same registry plus a dynamic strict-quorum
+/// set of ML-DSA-65 signatures. It remains bounded independently of the 64 MiB
+/// generic transport ceiling.
+pub const MAX_SIMPLIFIED_TARGET_ADMISSION_PACKAGE_FRAME_BYTES: usize = 512 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub enum SimplifiedTargetAdmissionMessage {
+    Vote {
+        request: SimplifiedTargetAdmissionVoteRequest,
+    },
+    CertifiedPackage {
+        package: TargetAdmissionPackage,
+    },
+}
 
 /// The only wire representation for the typed PoSy v2.2 state machine.
 ///
@@ -255,6 +284,17 @@ pub enum NetworkMessage {
     TypedConsensus {
         message: TypedConsensusMessage,
     },
+    /// PoSy v3 simplified consensus is intentionally a distinct wire family;
+    /// it cannot be decoded by the v2.2 coordinator or inherited handlers.
+    SimplifiedConsensus {
+        message: SimplifiedConsensusMessage,
+    },
+    /// Schedule-neutral H+3 target-admission traffic is separated from block
+    /// consensus so it receives its own predecode and signature-verification
+    /// budget before reaching the process-wide producer.
+    SimplifiedTargetAdmission {
+        message: SimplifiedTargetAdmissionMessage,
+    },
     /// Verified, non-signing finalized-chain replication between the
     /// validator-VPN relayer tier and public RPC/indexer observer roles.
     TypedFinalityObserver {
@@ -324,9 +364,75 @@ pub enum NetworkMessage {
     },
 }
 
+pub fn validate_simplified_consensus_message_size(
+    message: &SimplifiedConsensusMessage,
+) -> Result<(), String> {
+    let (kind, maximum) = match message {
+        SimplifiedConsensusMessage::Proposal { .. } => (
+            "simplified consensus proposal",
+            MAX_SIMPLIFIED_CONSENSUS_PROPOSAL_FRAME_BYTES,
+        ),
+        SimplifiedConsensusMessage::ReliableDelivery { .. }
+        | SimplifiedConsensusMessage::Vote { .. }
+        | SimplifiedConsensusMessage::TimeoutVote { .. } => (
+            "simplified consensus vote",
+            MAX_SIMPLIFIED_CONSENSUS_VOTE_FRAME_BYTES,
+        ),
+        SimplifiedConsensusMessage::QuorumCertificate { .. }
+        | SimplifiedConsensusMessage::TimeoutCertificate { .. } => (
+            "simplified consensus certificate",
+            MAX_SIMPLIFIED_CONSENSUS_CERTIFICATE_FRAME_BYTES,
+        ),
+        SimplifiedConsensusMessage::StateSyncRequest { .. }
+        | SimplifiedConsensusMessage::MaterialRequest { .. } => (
+            "simplified consensus state-sync request",
+            MAX_SIMPLIFIED_CONSENSUS_CONTROL_FRAME_BYTES,
+        ),
+        SimplifiedConsensusMessage::StateSyncChunk { .. }
+        | SimplifiedConsensusMessage::MaterialChunk { .. } => (
+            "simplified consensus state-sync chunk",
+            MAX_SIMPLIFIED_CONSENSUS_STATE_SYNC_FRAME_BYTES,
+        ),
+    };
+    let encoded = NetworkMessage::SimplifiedConsensus {
+        message: message.clone(),
+    };
+    let frame_bytes = serde_json::to_vec(&encoded)
+        .map_err(|error| format!("serialize {kind} frame: {error}"))?
+        .len()
+        .checked_add(4)
+        .ok_or_else(|| format!("{kind} frame length overflow"))?;
+    validate_typed_consensus_frame_length(kind, frame_bytes, maximum)
+}
+
+pub fn validate_simplified_target_admission_message_size(
+    message: &SimplifiedTargetAdmissionMessage,
+) -> Result<(), String> {
+    let (kind, maximum) = match message {
+        SimplifiedTargetAdmissionMessage::Vote { .. } => (
+            "simplified target-admission vote",
+            MAX_SIMPLIFIED_TARGET_ADMISSION_VOTE_FRAME_BYTES,
+        ),
+        SimplifiedTargetAdmissionMessage::CertifiedPackage { .. } => (
+            "simplified target-admission certified package",
+            MAX_SIMPLIFIED_TARGET_ADMISSION_PACKAGE_FRAME_BYTES,
+        ),
+    };
+    let encoded = NetworkMessage::SimplifiedTargetAdmission {
+        message: message.clone(),
+    };
+    let frame_bytes = serde_json::to_vec(&encoded)
+        .map_err(|error| format!("serialize {kind} frame: {error}"))?
+        .len()
+        .checked_add(4)
+        .ok_or_else(|| format!("{kind} frame length overflow"))?;
+    validate_typed_consensus_frame_length(kind, frame_bytes, maximum)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::etdag::tests::{fixture, target_admission_package};
     use crate::synergy_types::{
         AegisPqKeyId, AegisPqSignature, BlockId, ChainId, ClusterId, Epoch, Hash, Height,
         NetworkId, Round, UmaId, ValidatorId, VotePhase,
@@ -425,5 +531,52 @@ mod tests {
         .expect_err("proposal frame above the 8 MiB cap must fail closed");
 
         assert!(error.contains("8388608"));
+    }
+
+    #[test]
+    fn target_admission_vote_and_package_have_independent_exact_wire_caps() {
+        let mut fixture = fixture(5, None);
+        let context = fixture.context.clone();
+        let package = target_admission_package(&mut fixture, context.clone());
+        let request = SimplifiedTargetAdmissionVoteRequest {
+            context,
+            ingress_kem_registry: package.ingress_kem_registry.clone(),
+            vote: package.certificate.votes[0].clone(),
+        };
+        validate_simplified_target_admission_message_size(
+            &SimplifiedTargetAdmissionMessage::Vote {
+                request: request.clone(),
+            },
+        )
+        .expect("ordinary target-admission vote must fit its wire budget");
+        validate_simplified_target_admission_message_size(
+            &SimplifiedTargetAdmissionMessage::CertifiedPackage {
+                package: package.clone(),
+            },
+        )
+        .expect("ordinary target-admission package must fit its wire budget");
+
+        let mut oversized_vote = request;
+        oversized_vote.vote.signature.signature_bytes =
+            vec![0; MAX_SIMPLIFIED_TARGET_ADMISSION_VOTE_FRAME_BYTES];
+        let error = validate_simplified_target_admission_message_size(
+            &SimplifiedTargetAdmissionMessage::Vote {
+                request: oversized_vote,
+            },
+        )
+        .expect_err("oversized target-admission vote must fail closed");
+        assert!(error.contains("target-admission vote frame"));
+
+        let mut oversized_package = package;
+        oversized_package.certificate.votes[0]
+            .signature
+            .signature_bytes = vec![0; MAX_SIMPLIFIED_TARGET_ADMISSION_PACKAGE_FRAME_BYTES];
+        let error = validate_simplified_target_admission_message_size(
+            &SimplifiedTargetAdmissionMessage::CertifiedPackage {
+                package: oversized_package,
+            },
+        )
+        .expect_err("oversized target-admission package must fail closed");
+        assert!(error.contains("target-admission certified package frame"));
     }
 }

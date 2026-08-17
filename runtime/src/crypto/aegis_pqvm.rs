@@ -484,6 +484,7 @@ impl AegisPqvmSigner {
                 phase,
                 candidate_id,
                 highest_prepared_vc_root: vote.highest_prepared_vc_root,
+                conflict_unlock_tc_id: None,
             })
             .map_err(AegisPqvmError)?;
         self.sign_domain(
@@ -1398,6 +1399,7 @@ fn domain_requires_mldsa65(domain: &str) -> bool {
             | SYNERGY_QC_V1
             | SYNERGY_EPOCH_TRANSITION_V1
     ) || domain.starts_with("PoSy/ETDAG/")
+        || domain.starts_with("PoSy/Consensus/v3/")
 }
 
 #[cfg(test)]

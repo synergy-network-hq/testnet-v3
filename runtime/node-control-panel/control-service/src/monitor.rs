@@ -23,10 +23,9 @@ const INNERNET_RELAYER_ADDRESS_PREFIX: &str = "10.70.20";
 fn validator_quorum_threshold(total_validators: usize) -> usize {
     if total_validators == 0 {
         0
-    } else if total_validators == 5 {
-        3
     } else {
-        (total_validators * 2).div_ceil(3)
+        // Smallest q satisfying 3*q > 2*n, without multiplication overflow.
+        total_validators - (total_validators - 1) / 3
     }
 }
 
@@ -2255,8 +2254,8 @@ mod terminal_command_tests {
     #[test]
     fn validator_quorum_threshold_matches_cluster_policy() {
         assert_eq!(validator_quorum_threshold(0), 0);
-        assert_eq!(validator_quorum_threshold(5), 3);
-        assert_eq!(validator_quorum_threshold(6), 4);
+        assert_eq!(validator_quorum_threshold(5), 4);
+        assert_eq!(validator_quorum_threshold(6), 5);
         assert_eq!(validator_quorum_threshold(7), 5);
     }
 
@@ -2264,13 +2263,13 @@ mod terminal_command_tests {
     fn validator_network_quorum_uses_largest_balanced_cluster() {
         for (validators, clusters, largest_cluster, quorum) in [
             (0, 0, 0, 0),
-            (6, 1, 6, 4),
-            (9, 1, 9, 6),
-            (10, 2, 5, 3),
+            (6, 1, 6, 5),
+            (9, 1, 9, 7),
+            (10, 2, 5, 4),
             (15, 2, 8, 6),
             (20, 2, 10, 7),
             (21, 3, 7, 5),
-            (27, 3, 9, 6),
+            (27, 3, 9, 7),
             (28, 4, 7, 5),
             (29, 4, 8, 6),
             (35, 5, 7, 5),

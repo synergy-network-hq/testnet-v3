@@ -10,7 +10,7 @@ Historical release notes reconstructed from local git tag ranges for the control
 - Add native macOS DMG and Linux DEB release tooling that stages one validator at a time, creates uniquely named artifacts for Validators 01–21, emits SHA-256 manifests, and clears secret staging on exit.
 - Route all 66 Operations actions through an owner-scoped, allowlisted local PTY bridge while preserving typed control-service execution and single-copy command output.
 - Reconstruct validator membership on service-node restart from finalized activation evidence so relayer and RPC snapshots cannot remain on a stale registry epoch while the chain advances.
-- Report validator-set transition height and independent per-cluster quorum semantics explicitly, including exact 3-of-5 enforcement for each cluster at ten active validators.
+- Report validator-set transition height and independent per-cluster quorum semantics explicitly, including the strict `3*q > 2*n` threshold (4-of-5 for each cluster at ten active validators).
 - Migrate coordinator VPN allocation, bootstrap routes, enrollment validation, and persisted leases to the canonical `10.70.10.0/24` validator and `10.70.20.0/24` relayer ranges, with legacy state cleanup and release-literal enforcement.
 - Keep the embedded runtime on the last verified build while the restart-safe membership fix is completed; source and bundle versions will be aligned before the next installer release.
 

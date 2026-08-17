@@ -12,9 +12,22 @@ Status: **all 844 Parameter Register controls checked; Testnet-v3 launch remains
 - Semantic pass: token-cooccurrence candidates used only to locate code.
 - Adjudication pass: every row classified separately for component implementation, production integration, verification evidence, and final launch gate.
 
-## Decisive result
+## Historical-snapshot warning
 
-The current tree now contains tested typed PoSy and ETDAG components that make many workbook divergence statements stale. However, `runtime/src/role_runtime.rs:931-935` deliberately returns `POSY_V2_2_OPERATIONAL_COORDINATOR_NOT_READY`. The validator production path therefore cannot start the typed coordinator. No component-only PASS is treated as production readiness.
+This row audit predates the finalized typed v2.2 runtime wiring and the PoSy v3
+simplification branch. Its file counts, source hash, focused-test count, and
+component classifications are retained as historical evidence, not as current
+launch authority. Current status is maintained in
+`launch/POSY_V2_2_ALIGNMENT_AUDIT.md`, `launch/launch-readiness.json`, and the
+PoSy v3 requirements crosswalk.
+
+## Decisive result at the time of this snapshot
+
+The audited tree contained tested typed PoSy and ETDAG components but had not
+yet installed the typed coordinator in the validator role runtime. That
+specific finding is superseded: the current tree runs finalized typed v2.2 and
+contains a Genesis-bound initial simplified-v3 runtime path. Current launch
+gates nevertheless remain blocked; no component-only PASS is launch evidence.
 
 Focused suites run during this audit: **49 passed, 0 failed**.
 
@@ -49,7 +62,7 @@ The 106 rows marked `STALE_SUPERSEDED_BY_CURRENT_COMPONENT_CODE` are not automat
 - Healthy-path targets (450 ms proposal, 1,850 ms QC, 2,250 ms commit, 2,500 ms p95 finality, and 3,000 ms p99 finality) remain performance gates and are not consensus timeouts.
 - `PID-002`: workbook text still describes PoSy 2.1 while current typed code requires `posy/2.2`.
 
-## Remaining launch-critical blockers derived from the row audit
+## Remaining launch-critical blockers at the time of the row audit
 
 1. Wire the typed PoSy/ETDAG coordinator into the production role runtime and prove it is the only reachable validator signing path.
 2. Complete a fresh custody-prompted ceremony execution and bind the already-approved parameter root into the final deployed Genesis artifact.

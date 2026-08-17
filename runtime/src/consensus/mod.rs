@@ -15,6 +15,7 @@ pub mod legacy_canonical_lock;
 pub mod posy;
 pub mod self_realign;
 pub mod signing_authority;
+pub mod simplified_posy;
 pub mod synergy_score;
 pub mod testnet_v3_bootstrap;
 pub mod testnet_v3_finality_context;

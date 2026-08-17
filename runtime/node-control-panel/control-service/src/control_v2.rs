@@ -2035,10 +2035,9 @@ pub fn cluster_registry_fixture(name: &str) -> Result<DynamicClusterRegistry, St
 fn quorum_threshold(total: usize) -> usize {
     if total == 0 {
         0
-    } else if total == 5 {
-        3
     } else {
-        (total * 2).div_ceil(3)
+        // Smallest q satisfying 3*q > 2*n, without multiplication overflow.
+        total - (total - 1) / 3
     }
 }
 
@@ -2786,7 +2785,7 @@ mod tests {
         assert!(two_cluster
             .clusters
             .iter()
-            .all(|cluster| cluster.quorum_threshold == 3));
+            .all(|cluster| cluster.quorum_threshold == 4));
         let three_cluster = cluster_registry_fixture("three-cluster").unwrap();
         assert_eq!(
             three_cluster
@@ -2816,8 +2815,8 @@ mod tests {
     #[test]
     fn cluster_quorum_threshold_matches_runtime_policy() {
         assert_eq!(quorum_threshold(0), 0);
-        assert_eq!(quorum_threshold(5), 3);
-        assert_eq!(quorum_threshold(6), 4);
+        assert_eq!(quorum_threshold(5), 4);
+        assert_eq!(quorum_threshold(6), 5);
         assert_eq!(quorum_threshold(7), 5);
     }
 

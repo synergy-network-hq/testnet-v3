@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const ETDAG_PROFILE_ID: &str = "POSY-ETDAG-v2.2-rc1";
@@ -255,9 +255,32 @@ impl TargetAdmissionContext {
         cluster_map: &ClusterMap,
         protocol_config: &ProtocolConfig,
     ) -> Result<Self, String> {
-        validate_target_admission_spec(&spec)?;
         protocol_config.chain_id.require_testnet_v3()?;
         protocol_config.network_id.require_testnet_v3()?;
+        Self::derive_with_parameter_root(spec, validator_set, cluster_map, protocol_config.hash()?)
+    }
+
+    /// Derive an admission context for a schedule-neutral consensus protocol
+    /// from its exact finalized 512-bit manifest root.
+    pub fn derive_schedule_neutral(
+        spec: TargetAdmissionContextSpec,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        consensus_parameter_root: ConsensusParameterRoot,
+    ) -> Result<Self, String> {
+        Self::derive_with_parameter_root(spec, validator_set, cluster_map, consensus_parameter_root)
+    }
+
+    fn derive_with_parameter_root(
+        spec: TargetAdmissionContextSpec,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        consensus_parameter_root: ConsensusParameterRoot,
+    ) -> Result<Self, String> {
+        validate_target_admission_spec(&spec)?;
+        if consensus_parameter_root.is_zero() {
+            return Err("target admission consensus parameter root is missing".to_string());
+        }
         if validator_set.epoch != spec.epoch || cluster_map.epoch != spec.epoch {
             return Err("target admission epoch does not match frozen topology".to_string());
         }
@@ -316,7 +339,7 @@ impl TargetAdmissionContext {
             assigned_cluster_membership_root: membership_root,
             assigned_cluster_validator_count: member_count,
             assigned_cluster_total_voting_weight: total_weight,
-            consensus_parameter_root: protocol_config.hash()?,
+            consensus_parameter_root,
             cryptographic_profile_root: spec.cryptographic_profile_root,
             ingress_kem_registry_root: spec.ingress_kem_registry_root,
         };
@@ -401,6 +424,21 @@ impl TargetAdmissionContext {
     ) -> Result<(), String> {
         self.validate_validator_and_cluster_bindings(validator_set, cluster_map)?;
         if self.consensus_parameter_root != protocol_config.hash()? {
+            return Err("target admission parameter root mismatch".to_string());
+        }
+        Ok(())
+    }
+
+    /// Validate the immutable topology and the exact finalized parameter root
+    /// without importing a consensus scheduler's runtime configuration.
+    pub fn validate_against_parameter_root(
+        &self,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        consensus_parameter_root: ConsensusParameterRoot,
+    ) -> Result<(), String> {
+        self.validate_validator_and_cluster_bindings(validator_set, cluster_map)?;
+        if self.consensus_parameter_root != consensus_parameter_root {
             return Err("target admission parameter root mismatch".to_string());
         }
         Ok(())
@@ -1620,6 +1658,20 @@ struct TargetAdmissionCertificateTranscript {
 }
 
 impl TargetAdmissionCertificate {
+    pub fn without_votes(context: &TargetAdmissionContext) -> Result<Self, String> {
+        context.validate()?;
+        Ok(Self {
+            certificate_version: 2,
+            target_context_root: context.root()?,
+            ingress_kem_registry_root: context.ingress_kem_registry_root.clone(),
+            source_finalized_height: context.source_finalized_height,
+            source_finality_context_root: context.source_finality_context_root,
+            signer_count: 0,
+            signed_weight: 0,
+            votes: Vec::new(),
+        })
+    }
+
     /// Returns the canonical pre-signature transcript for this exact target
     /// admission certificate.  Offline custody tooling may request these
     /// bytes, but signature acceptance remains exclusively in [`Self::verify`]
@@ -1675,26 +1727,13 @@ impl TargetAdmissionCertificate {
                 );
             }
             prior = Some(&vote.signer_validator_id);
-            let member = members
-                .iter()
-                .find(|member| member.validator_id == vote.signer_validator_id)
-                .ok_or_else(|| {
-                    "target admission certificate signer is outside assigned cluster".to_string()
-                })?;
-            if member.consensus_public_key.key_id != vote.signer_key_id {
-                return Err("target admission signer key does not match frozen key".to_string());
-            }
-            verifier
-                .verify_domain_signature(
-                    DOMAIN_TARGET_ADMISSION,
-                    &transcript,
-                    &member.validator_uma_id.0,
-                    &vote.signer_key_id,
-                    context.epoch,
-                    AegisPqKeyRole::ConsensusVote,
-                    &vote.signature,
-                )
-                .map_err(|error| error.to_string())?;
+            let member = verify_target_admission_vote_with_transcript(
+                vote,
+                &transcript,
+                verifier,
+                context,
+                &members,
+            )?;
             signed_weight = signed_weight
                 .checked_add(member.voting_weight)
                 .ok_or_else(|| "target admission signed weight overflow".to_string())?;
@@ -1715,6 +1754,89 @@ impl TargetAdmissionCertificate {
     }
 }
 
+fn verify_target_admission_vote_with_transcript<'a>(
+    vote: &EtdagSignedVote,
+    transcript: &[u8],
+    verifier: &AegisPqvmVerifier,
+    context: &TargetAdmissionContext,
+    members: &'a [ValidatorRecord],
+) -> Result<&'a ValidatorRecord, String> {
+    let member = members
+        .iter()
+        .find(|member| member.validator_id == vote.signer_validator_id)
+        .ok_or_else(|| {
+            "target admission certificate signer is outside assigned cluster".to_string()
+        })?;
+    if member.consensus_public_key.key_id != vote.signer_key_id {
+        return Err("target admission signer key does not match frozen key".to_string());
+    }
+    verifier
+        .verify_domain_signature(
+            DOMAIN_TARGET_ADMISSION,
+            transcript,
+            &member.validator_uma_id.0,
+            &vote.signer_key_id,
+            context.epoch,
+            AegisPqKeyRole::ConsensusVote,
+            &vote.signature,
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(member)
+}
+
+pub fn verify_target_admission_vote(
+    vote: &EtdagSignedVote,
+    verifier: &AegisPqvmVerifier,
+    context: &TargetAdmissionContext,
+    validator_set: &ValidatorSet,
+    cluster_map: &ClusterMap,
+) -> Result<(), String> {
+    context.validate_validator_and_cluster_bindings(validator_set, cluster_map)?;
+    let members = validator_set
+        .active_for_epoch(context.epoch)
+        .active_for_cluster(context.assigned_cluster_id);
+    let certificate = TargetAdmissionCertificate::without_votes(context)?;
+    verify_target_admission_vote_with_transcript(
+        vote,
+        &certificate.signing_bytes(context)?,
+        verifier,
+        context,
+        &members,
+    )?;
+    Ok(())
+}
+
+pub fn form_target_admission_certificate(
+    context: &TargetAdmissionContext,
+    mut votes: Vec<EtdagSignedVote>,
+    verifier: &AegisPqvmVerifier,
+    validator_set: &ValidatorSet,
+    cluster_map: &ClusterMap,
+) -> Result<TargetAdmissionCertificate, String> {
+    votes.sort_by(|left, right| left.signer_validator_id.cmp(&right.signer_validator_id));
+    let members = validator_set
+        .active_for_epoch(context.epoch)
+        .active_for_cluster(context.assigned_cluster_id);
+    let signed_weight = votes.iter().try_fold(0u64, |total, vote| {
+        let member = members
+            .iter()
+            .find(|member| member.validator_id == vote.signer_validator_id)
+            .ok_or_else(|| {
+                "target admission certificate signer is outside assigned cluster".to_string()
+            })?;
+        total
+            .checked_add(member.voting_weight)
+            .ok_or_else(|| "target admission signed weight overflow".to_string())
+    })?;
+    let mut certificate = TargetAdmissionCertificate::without_votes(context)?;
+    certificate.signer_count = u64::try_from(votes.len())
+        .map_err(|_| "target admission signer count exceeds u64".to_string())?;
+    certificate.signed_weight = signed_weight;
+    certificate.votes = votes;
+    certificate.verify(verifier, context, validator_set, cluster_map)?;
+    Ok(certificate)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TargetAdmissionPackage {
     pub context: TargetAdmissionContext,
@@ -1732,6 +1854,27 @@ impl TargetAdmissionPackage {
     ) -> Result<(), String> {
         self.context
             .validate_against(validator_set, cluster_map, protocol_config)?;
+        self.ingress_kem_registry
+            .validate_against(&self.context, validator_set)?;
+        self.certificate
+            .verify(verifier, &self.context, validator_set, cluster_map)
+    }
+
+    /// Schedule-neutral verification used by simplified consensus. The
+    /// finalized manifest root is supplied directly; no legacy runtime
+    /// configuration is synthesized to stand in for it.
+    pub fn verify_against_parameter_root(
+        &self,
+        verifier: &AegisPqvmVerifier,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        consensus_parameter_root: ConsensusParameterRoot,
+    ) -> Result<(), String> {
+        self.context.validate_against_parameter_root(
+            validator_set,
+            cluster_map,
+            consensus_parameter_root,
+        )?;
         self.ingress_kem_registry
             .validate_against(&self.context, validator_set)?;
         self.certificate
@@ -1904,6 +2047,17 @@ struct VoteAuthorizationRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct TargetAdmissionAuthorizationRecord {
+    validator_id: ValidatorId,
+    key_id: AegisPqKeyId,
+    epoch: Epoch,
+    target_height: Height,
+    assigned_cluster_id: ClusterId,
+    target_context_root: Hash,
+    transcript_digest: EtdagDigest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct DecryptReleaseRecord {
     epoch: Epoch,
     target_height: Height,
@@ -1922,6 +2076,8 @@ struct EtdagDurableJournal {
     nonce_reservations: Vec<NonceReservationRecord>,
     admission_closes: Vec<AdmissionCloseRecord>,
     vote_authorizations: Vec<VoteAuthorizationRecord>,
+    #[serde(default)]
+    target_admission_authorizations: Vec<TargetAdmissionAuthorizationRecord>,
     decrypt_releases: Vec<DecryptReleaseRecord>,
 }
 
@@ -1932,6 +2088,7 @@ impl Default for EtdagDurableJournal {
             nonce_reservations: Vec::new(),
             admission_closes: Vec::new(),
             vote_authorizations: Vec::new(),
+            target_admission_authorizations: Vec::new(),
             decrypt_releases: Vec::new(),
         }
     }
@@ -1990,6 +2147,10 @@ impl EtdagAdmissionPackageStore {
         protocol_config: &ProtocolConfig,
     ) -> Result<EtdagDigest, String> {
         package.verify(verifier, validator_set, cluster_map, protocol_config)?;
+        self.install_preverified(package)
+    }
+
+    fn install_preverified(&self, package: &TargetAdmissionPackage) -> Result<EtdagDigest, String> {
         let package_digest = package.package_digest()?;
         let _guard = ETDAG_ADMISSION_STORE_LOCK
             .get_or_init(|| Mutex::new(()))
@@ -2246,6 +2407,59 @@ impl EtdagSafetyJournal {
         })
     }
 
+    pub fn authorize_target_admission_before_signature(
+        &self,
+        context: &TargetAdmissionContext,
+        validator: &ValidatorRecord,
+        certificate: &TargetAdmissionCertificate,
+    ) -> Result<EtdagDigest, String> {
+        require_process_wide_consensus_signing_allowed()?;
+        context.validate()?;
+        if validator.status != ValidatorStatus::Active
+            || !validator.is_active_for_epoch(context.epoch)
+            || validator.cluster_id != context.assigned_cluster_id
+            || validator.consensus_public_key.key_id.0.trim().is_empty()
+        {
+            return Err("target admission signer is outside its frozen authority".to_string());
+        }
+        let expected = TargetAdmissionCertificate::without_votes(context)?;
+        if certificate != &expected {
+            return Err("target admission signer received a noncanonical transcript".to_string());
+        }
+        let transcript = certificate.signing_bytes(context)?;
+        let transcript_digest =
+            EtdagDigest::from_domain_bytes(DOMAIN_TARGET_ADMISSION, &transcript);
+        self.with_journal(|journal| {
+            let record = TargetAdmissionAuthorizationRecord {
+                validator_id: validator.validator_id.clone(),
+                key_id: validator.consensus_public_key.key_id.clone(),
+                epoch: context.epoch,
+                target_height: context.target_height,
+                assigned_cluster_id: context.assigned_cluster_id,
+                target_context_root: context.root()?,
+                transcript_digest: transcript_digest.clone(),
+            };
+            if let Some(existing) =
+                journal
+                    .target_admission_authorizations
+                    .iter()
+                    .find(|existing| {
+                        existing.validator_id == record.validator_id
+                            && existing.epoch == record.epoch
+                            && existing.target_height == record.target_height
+                            && existing.assigned_cluster_id == record.assigned_cluster_id
+                    })
+            {
+                if existing == &record {
+                    return Ok((transcript_digest.clone(), false));
+                }
+                return Err("ETDAG_TARGET_ADMISSION_SIGNING_CONFLICT".to_string());
+            }
+            journal.target_admission_authorizations.push(record);
+            Ok((transcript_digest.clone(), true))
+        })
+    }
+
     pub fn authorize_decrypt_release(
         &self,
         gate: &RevealGate,
@@ -2472,6 +2686,28 @@ pub fn sign_etdag_vote(
         .sign_domain(
             transcript.phase.signature_domain(),
             &transcript.canonical_bytes()?,
+            &validator.consensus_public_key.key_id,
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(EtdagSignedVote {
+        signer_validator_id: validator.validator_id.clone(),
+        signer_key_id: validator.consensus_public_key.key_id.clone(),
+        signature,
+    })
+}
+
+pub fn sign_target_admission_vote(
+    signer: &mut AegisPqvmSigner,
+    journal: &EtdagSafetyJournal,
+    context: &TargetAdmissionContext,
+    validator: &ValidatorRecord,
+) -> Result<EtdagSignedVote, String> {
+    let certificate = TargetAdmissionCertificate::without_votes(context)?;
+    journal.authorize_target_admission_before_signature(context, validator, &certificate)?;
+    let signature = signer
+        .sign_domain(
+            DOMAIN_TARGET_ADMISSION,
+            &certificate.signing_bytes(context)?,
             &validator.consensus_public_key.key_id,
         )
         .map_err(|error| error.to_string())?;
@@ -3968,6 +4204,12 @@ pub struct ProtectedBlockInput {
 }
 
 impl ProtectedBlockInput {
+    /// Stable digest used by schedule-neutral protected-material stores.
+    /// Verification remains mandatory before this digest gains authority.
+    pub fn digest(&self) -> Result<EtdagDigest, String> {
+        protected_input_digest(self)
+    }
+
     pub fn verify_and_extract_transactions(
         &self,
         verifier: &AegisPqvmVerifier,
@@ -4249,6 +4491,49 @@ impl EtdagProtectedInputStore {
             cluster_map,
             parameters,
         )?;
+        self.install_verified_entry(
+            target_admission_package_digest,
+            protected_input,
+            height_context.height,
+            expected_finality_context_digest,
+        )
+    }
+
+    fn install_verified_schedule_neutral(
+        &self,
+        target_admission_package_digest: EtdagDigest,
+        protected_input: &ProtectedBlockInput,
+        target_context: &TargetAdmissionContext,
+        expected_finality_context_digest: &EtdagDigest,
+        verifier: &AegisPqvmVerifier,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        parameters: &EtdagParameters,
+    ) -> Result<EtdagDigest, String> {
+        verify_certified_protected_input_schedule_neutral(
+            protected_input,
+            target_context,
+            expected_finality_context_digest,
+            verifier,
+            validator_set,
+            cluster_map,
+            parameters,
+        )?;
+        self.install_verified_entry(
+            target_admission_package_digest,
+            protected_input,
+            target_context.target_height,
+            expected_finality_context_digest,
+        )
+    }
+
+    fn install_verified_entry(
+        &self,
+        target_admission_package_digest: EtdagDigest,
+        protected_input: &ProtectedBlockInput,
+        height: Height,
+        expected_finality_context_digest: &EtdagDigest,
+    ) -> Result<EtdagDigest, String> {
         target_admission_package_digest.validate("target admission package digest")?;
         if target_admission_package_digest.is_zero() {
             return Err("ETDAG_PROTECTED_INPUT_MISSING_ADMISSION_PACKAGE".to_string());
@@ -4258,7 +4543,6 @@ impl EtdagProtectedInputStore {
         if serialized_bytes > MAX_ETDAG_PROTECTED_INPUT_STORE_SERIALIZED_BYTES as u64 {
             return Err("ETDAG_PROTECTED_INPUT_STORE_ENTRY_TOO_LARGE".to_string());
         }
-        let height = height_context.height;
         let entry = EtdagProtectedInputStoreEntry {
             target_admission_package_digest,
             canonical_finality_context_digest: expected_finality_context_digest.clone(),
@@ -4327,6 +4611,46 @@ impl EtdagProtectedInputStore {
             &entry.protected_input,
             target_context,
             height_context,
+            expected_finality_context_digest,
+            verifier,
+            validator_set,
+            cluster_map,
+            parameters,
+        )?;
+        Ok(entry.protected_input.clone())
+    }
+
+    fn load_verified_schedule_neutral(
+        &self,
+        target_admission_package_digest: &EtdagDigest,
+        target_context: &TargetAdmissionContext,
+        expected_finality_context_digest: &EtdagDigest,
+        verifier: &AegisPqvmVerifier,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        parameters: &EtdagParameters,
+    ) -> Result<ProtectedBlockInput, String> {
+        let _guard = ETDAG_PROTECTED_INPUT_STORE_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| "ETDAG protected-input store lock poisoned".to_string())?;
+        let store = self.load_unlocked()?;
+        let entry = store
+            .entries
+            .get(&target_context.target_height)
+            .ok_or_else(|| {
+                "ETDAG_PROTECTED_INPUT_NOT_READY: no verified protected input for target height"
+                    .to_string()
+            })?;
+        if &entry.target_admission_package_digest != target_admission_package_digest
+            || &entry.canonical_finality_context_digest != expected_finality_context_digest
+        {
+            return Err("ETDAG_PROTECTED_INPUT_CONTEXT_MISMATCH".to_string());
+        }
+        verify_protected_input_store_entry(target_context.target_height, entry)?;
+        verify_certified_protected_input_schedule_neutral(
+            &entry.protected_input,
+            target_context,
             expected_finality_context_digest,
             verifier,
             validator_set,
@@ -4529,6 +4853,47 @@ fn verify_certified_protected_input(
         .map(|_| ())
 }
 
+fn verify_certified_protected_input_schedule_neutral(
+    protected_input: &ProtectedBlockInput,
+    target_context: &TargetAdmissionContext,
+    expected_finality_context_digest: &EtdagDigest,
+    verifier: &AegisPqvmVerifier,
+    validator_set: &ValidatorSet,
+    cluster_map: &ClusterMap,
+    parameters: &EtdagParameters,
+) -> Result<(), String> {
+    target_context.validate_validator_and_cluster_bindings(validator_set, cluster_map)?;
+    expected_finality_context_digest.validate("expected canonical finality context digest")?;
+    if expected_finality_context_digest.is_zero() {
+        return Err("ETDAG_PROTECTED_INPUT_MISSING_FINALITY_CONTEXT".to_string());
+    }
+    let target_height = target_context.target_height;
+    if protected_input.dcc.candidate.target_height != target_height
+        || protected_input.boc.bvc.batch_candidate.target_height != target_height
+        || protected_input.reveal.target_height != target_height
+    {
+        return Err("ETDAG_PROTECTED_INPUT_TARGET_HEIGHT_MISMATCH".to_string());
+    }
+    if protected_input
+        .boc
+        .bvc
+        .batch_candidate
+        .canonical_finality_context_digest
+        != *expected_finality_context_digest
+    {
+        return Err("ETDAG_PROTECTED_INPUT_FINALITY_CONTEXT_MISMATCH".to_string());
+    }
+    protected_input
+        .verify_and_extract_transactions(
+            verifier,
+            target_context,
+            validator_set,
+            cluster_map,
+            parameters,
+        )
+        .map(|_| ())
+}
+
 /// Complete, public ETDAG proof material that may be relayed between
 /// authenticated Testnet-v3 validators.
 ///
@@ -4664,10 +5029,116 @@ impl EtdagCertifiedInputIngress {
     }
 }
 
-static CERTIFIED_INPUT_INGRESS: OnceLock<Mutex<Option<EtdagCertifiedInputIngress>>> =
+/// Finalized-chain authority used by schedule-neutral ETDAG ingress.
+/// Implementations must reject a target context whose source-finality fields
+/// do not equal their current durable finalized state.
+pub trait EtdagScheduleNeutralFinalityAuthority: Send + Sync {
+    fn canonical_finality_context_digest(
+        &self,
+        target_context: &TargetAdmissionContext,
+    ) -> Result<EtdagDigest, String>;
+}
+
+/// Authenticated ETDAG ingress for consensus protocols whose scheduling is
+/// not represented by [`HeightConsensusContext`].
+pub struct EtdagScheduleNeutralCertifiedInputIngress {
+    coordinator: EtdagProtectedInputCoordinator,
+    finality_authority: Arc<dyn EtdagScheduleNeutralFinalityAuthority>,
+    verifier: AegisPqvmVerifier,
+    validator_set: ValidatorSet,
+    cluster_map: ClusterMap,
+    consensus_parameter_root: ConsensusParameterRoot,
+    parameters: EtdagParameters,
+}
+
+impl EtdagScheduleNeutralCertifiedInputIngress {
+    pub fn new(
+        coordinator: EtdagProtectedInputCoordinator,
+        finality_authority: Arc<dyn EtdagScheduleNeutralFinalityAuthority>,
+        verifier: AegisPqvmVerifier,
+        validator_set: ValidatorSet,
+        cluster_map: ClusterMap,
+        consensus_parameter_root: ConsensusParameterRoot,
+        parameters: EtdagParameters,
+    ) -> Result<Self, String> {
+        let active = validator_set.active_for_epoch(validator_set.epoch);
+        active.validate_unique_validator_and_key_ids()?;
+        if active.validators.is_empty()
+            || cluster_map.epoch != validator_set.epoch
+            || cluster_map != cluster_map.canonicalized()
+            || consensus_parameter_root.is_zero()
+        {
+            return Err("invalid schedule-neutral ETDAG ingress authority".to_string());
+        }
+        cluster_map.validate_complete_balanced_assignment(&active)?;
+        parameters.validate()?;
+        Ok(Self {
+            coordinator,
+            finality_authority,
+            verifier,
+            validator_set,
+            cluster_map,
+            consensus_parameter_root,
+            parameters,
+        })
+    }
+
+    fn authorize_peer(&self, peer: &EtdagAuthenticatedIngressPeer) -> Result<(), String> {
+        let validator = self
+            .validator_set
+            .validators
+            .iter()
+            .find(|validator| validator.validator_id == peer.validator_id)
+            .ok_or_else(|| "ETDAG_CERTIFIED_INPUT_UNTRUSTED_PEER".to_string())?;
+        if validator.status != ValidatorStatus::Active
+            || !validator.is_active_for_epoch(self.validator_set.epoch)
+            || validator.validator_uma_id != peer.validator_uma_id
+            || validator.consensus_public_key.key_id != peer.consensus_key_id
+        {
+            return Err("ETDAG_CERTIFIED_INPUT_UNTRUSTED_PEER".to_string());
+        }
+        Ok(())
+    }
+
+    pub fn admit_from_authenticated_peer(
+        &self,
+        peer: &EtdagAuthenticatedIngressPeer,
+        artifact: &CertifiedProtectedInputArtifact,
+    ) -> Result<EtdagDigest, String> {
+        artifact.validate_wire_size()?;
+        self.authorize_peer(peer)?;
+        artifact.admission_package.verify_against_parameter_root(
+            &self.verifier,
+            &self.validator_set,
+            &self.cluster_map,
+            self.consensus_parameter_root,
+        )?;
+        let finality_digest = self
+            .finality_authority
+            .canonical_finality_context_digest(&artifact.admission_package.context)?;
+        self.coordinator
+            .admit_certified_public_input_schedule_neutral(
+                &artifact.admission_package,
+                &artifact.protected_input,
+                &finality_digest,
+                &self.verifier,
+                &self.validator_set,
+                &self.cluster_map,
+                self.consensus_parameter_root,
+                &self.parameters,
+            )
+    }
+}
+
+enum InstalledEtdagCertifiedInputIngress {
+    Typed(EtdagCertifiedInputIngress),
+    ScheduleNeutral(EtdagScheduleNeutralCertifiedInputIngress),
+}
+
+static CERTIFIED_INPUT_INGRESS: OnceLock<Mutex<Option<InstalledEtdagCertifiedInputIngress>>> =
     OnceLock::new();
 
-fn certified_input_ingress_slot() -> &'static Mutex<Option<EtdagCertifiedInputIngress>> {
+fn certified_input_ingress_slot() -> &'static Mutex<Option<InstalledEtdagCertifiedInputIngress>> {
     CERTIFIED_INPUT_INGRESS.get_or_init(|| Mutex::new(None))
 }
 
@@ -4696,7 +5167,24 @@ pub(crate) fn install_etdag_certified_input_ingress(
     if slot.is_some() {
         return Err("ETDAG certified-input ingress is already installed".to_string());
     }
-    *slot = Some(ingress);
+    *slot = Some(InstalledEtdagCertifiedInputIngress::Typed(ingress));
+    Ok(())
+}
+
+/// Install a finalized-manifest-permitted schedule-neutral ingress authority.
+pub(crate) fn install_schedule_neutral_etdag_certified_input_ingress(
+    _activation_permit: EtdagActivationPermit,
+    ingress: EtdagScheduleNeutralCertifiedInputIngress,
+) -> Result<(), String> {
+    let mut slot = certified_input_ingress_slot()
+        .lock()
+        .map_err(|_| "ETDAG certified-input ingress lock is poisoned".to_string())?;
+    if slot.is_some() {
+        return Err("ETDAG certified-input ingress is already installed".to_string());
+    }
+    *slot = Some(InstalledEtdagCertifiedInputIngress::ScheduleNeutral(
+        ingress,
+    ));
     Ok(())
 }
 
@@ -4714,6 +5202,11 @@ pub fn rotate_etdag_certified_input_ingress(
     let current = slot
         .as_ref()
         .ok_or_else(|| "ETDAG certified-input ingress is not installed".to_string())?;
+    let InstalledEtdagCertifiedInputIngress::Typed(current) = current else {
+        return Err(
+            "ETDAG schedule-neutral ingress cannot be rotated by the typed scheduler".to_string(),
+        );
+    };
     let expected_height = current
         .height_context
         .height
@@ -4730,7 +5223,7 @@ pub fn rotate_etdag_certified_input_ingress(
     {
         return Err("ETDAG_CERTIFIED_INPUT_INGRESS_FINALITY_ROOT_NOT_ADVANCED".to_string());
     }
-    *slot = Some(successor);
+    *slot = Some(InstalledEtdagCertifiedInputIngress::Typed(successor));
     Ok(())
 }
 
@@ -4762,7 +5255,14 @@ pub fn dispatch_etdag_certified_input(
     let peer = authenticated_peer.ok_or_else(|| {
         "ETDAG_CERTIFIED_INPUT_UNAUTHENTICATED_PEER: refusing protected input".to_string()
     })?;
-    ingress.admit_from_authenticated_peer(&peer, &artifact)
+    match ingress {
+        InstalledEtdagCertifiedInputIngress::Typed(ingress) => {
+            ingress.admit_from_authenticated_peer(&peer, &artifact)
+        }
+        InstalledEtdagCertifiedInputIngress::ScheduleNeutral(ingress) => {
+            ingress.admit_from_authenticated_peer(&peer, &artifact)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -4846,6 +5346,72 @@ impl EtdagProtectedInputCoordinator {
         )
     }
 
+    /// Verify and durably admit protected input without importing the legacy
+    /// height scheduler into the caller's consensus protocol.
+    ///
+    /// The certified admission package remains the sole authority for ETDAG
+    /// topology and H+3 bindings. The caller supplies only the independently
+    /// derived canonical finality digest used by deterministic batch order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn admit_certified_public_input_schedule_neutral(
+        &self,
+        admission_package: &TargetAdmissionPackage,
+        protected_input: &ProtectedBlockInput,
+        expected_finality_context_digest: &EtdagDigest,
+        verifier: &AegisPqvmVerifier,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        consensus_parameter_root: ConsensusParameterRoot,
+        parameters: &EtdagParameters,
+    ) -> Result<EtdagDigest, String> {
+        CertifiedProtectedInputArtifact {
+            admission_package: admission_package.clone(),
+            protected_input: protected_input.clone(),
+        }
+        .validate_wire_size()?;
+        admission_package.verify_against_parameter_root(
+            verifier,
+            validator_set,
+            cluster_map,
+            consensus_parameter_root,
+        )?;
+        let admission_digest = self
+            .admission_store
+            .install_preverified(admission_package)?;
+        self.protected_input_store
+            .install_verified_schedule_neutral(
+                admission_digest,
+                protected_input,
+                &admission_package.context,
+                expected_finality_context_digest,
+                verifier,
+                validator_set,
+                cluster_map,
+                parameters,
+            )
+    }
+
+    /// Install a fully certified admission package before its separately
+    /// certified protected input arrives. This grants no proposal authority:
+    /// [`Self::load_ready_protected_material_schedule_neutral`] still requires
+    /// the matching protected input and re-verifies both records.
+    pub fn install_certified_admission_package_schedule_neutral(
+        &self,
+        admission_package: &TargetAdmissionPackage,
+        verifier: &AegisPqvmVerifier,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        consensus_parameter_root: ConsensusParameterRoot,
+    ) -> Result<EtdagDigest, String> {
+        admission_package.verify_against_parameter_root(
+            verifier,
+            validator_set,
+            cluster_map,
+            consensus_parameter_root,
+        )?;
+        self.admission_store.install_preverified(admission_package)
+    }
+
     /// Load a proposal-ready protected input only after re-verifying the
     /// durable proof package and its matching certified admission package.
     #[allow(clippy::too_many_arguments)]
@@ -4881,6 +5447,79 @@ impl EtdagProtectedInputCoordinator {
             cluster_map,
             parameters,
         )
+    }
+
+    /// Re-verify and load the exact certified admission context for one target
+    /// height without accepting proposer or round schedule input.
+    pub fn load_verified_target_admission_context_schedule_neutral(
+        &self,
+        target_height: Height,
+        verifier: &AegisPqvmVerifier,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        consensus_parameter_root: ConsensusParameterRoot,
+    ) -> Result<TargetAdmissionContext, String> {
+        let admission_package = self
+            .admission_store
+            .get(target_height)?
+            .ok_or_else(|| {
+                "ETDAG_PROTECTED_INPUT_NOT_READY: no certified target-admission package for target height"
+                    .to_string()
+            })?;
+        admission_package.verify_against_parameter_root(
+            verifier,
+            validator_set,
+            cluster_map,
+            consensus_parameter_root,
+        )?;
+        if admission_package.context.target_height != target_height {
+            return Err("ETDAG_PROTECTED_INPUT_TARGET_HEIGHT_MISMATCH".to_string());
+        }
+        Ok(admission_package.context)
+    }
+
+    /// Re-verify and load the exact durable protected material paired with its
+    /// certified admission context, while leaving consensus scheduling to the
+    /// simplified protocol.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_ready_protected_material_schedule_neutral(
+        &self,
+        target_height: Height,
+        expected_finality_context_digest: &EtdagDigest,
+        verifier: &AegisPqvmVerifier,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        consensus_parameter_root: ConsensusParameterRoot,
+        parameters: &EtdagParameters,
+    ) -> Result<(TargetAdmissionContext, ProtectedBlockInput), String> {
+        let target_context = self.load_verified_target_admission_context_schedule_neutral(
+            target_height,
+            verifier,
+            validator_set,
+            cluster_map,
+            consensus_parameter_root,
+        )?;
+        let admission_package = self
+            .admission_store
+            .get(target_height)?
+            .ok_or_else(|| {
+                "ETDAG_PROTECTED_INPUT_NOT_READY: no certified target-admission package for target height"
+                    .to_string()
+            })?;
+        if admission_package.context != target_context {
+            return Err("ETDAG_ADMISSION_PACKAGE_CONFLICT".to_string());
+        }
+        let admission_digest = admission_package.package_digest()?;
+        let protected_input = self.protected_input_store.load_verified_schedule_neutral(
+            &admission_digest,
+            &target_context,
+            expected_finality_context_digest,
+            verifier,
+            validator_set,
+            cluster_map,
+            parameters,
+        )?;
+        Ok((target_context, protected_input))
     }
 
     /// Returns the immutable admission context paired with a target height
@@ -5179,7 +5818,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn target_admission_package(
+    pub(crate) fn target_admission_package(
         fixture: &mut Fixture,
         context: TargetAdmissionContext,
     ) -> TargetAdmissionPackage {
@@ -6524,6 +7163,23 @@ pub(crate) mod tests {
             .contains("authenticated ciphertext plaintext"));
     }
 
+    struct ExactScheduleNeutralFinalityAuthority {
+        expected_context: TargetAdmissionContext,
+        digest: EtdagDigest,
+    }
+
+    impl EtdagScheduleNeutralFinalityAuthority for ExactScheduleNeutralFinalityAuthority {
+        fn canonical_finality_context_digest(
+            &self,
+            target_context: &TargetAdmissionContext,
+        ) -> Result<EtdagDigest, String> {
+            if target_context != &self.expected_context {
+                return Err("test schedule-neutral finality context mismatch".to_string());
+            }
+            Ok(self.digest.clone())
+        }
+    }
+
     #[test]
     fn certified_input_ingress_requires_local_context_authenticated_peer_and_untampered_proof() {
         static INGRESS_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -6584,6 +7240,31 @@ pub(crate) mod tests {
             dispatch_etdag_certified_input(Some(authenticated_peer.clone()), artifact.clone())
                 .unwrap();
         assert_eq!(digest, protected_input_digest(&protected).unwrap());
+        remove_etdag_certified_input_ingress().unwrap();
+
+        let schedule_neutral_ingress = EtdagScheduleNeutralCertifiedInputIngress::new(
+            temp_protected_input_coordinator("network-ingress-schedule-neutral"),
+            Arc::new(ExactScheduleNeutralFinalityAuthority {
+                expected_context: artifact.admission_package.context.clone(),
+                digest: expected_finality_context.clone(),
+            }),
+            verifier.clone(),
+            fixture.validator_set.clone(),
+            fixture.cluster_map.clone(),
+            artifact.admission_package.context.consensus_parameter_root,
+            EtdagParameters::default(),
+        )
+        .unwrap();
+        install_schedule_neutral_etdag_certified_input_ingress(
+            EtdagActivationPermit::test_only(),
+            schedule_neutral_ingress,
+        )
+        .unwrap();
+        assert_eq!(
+            dispatch_etdag_certified_input(Some(authenticated_peer.clone()), artifact.clone(),)
+                .unwrap(),
+            protected_input_digest(&protected).unwrap()
+        );
         remove_etdag_certified_input_ingress().unwrap();
 
         let untrusted_ingress = EtdagCertifiedInputIngress::new(
