@@ -237,12 +237,12 @@ class Node:
 
 
 def preserved_wipe_entries(node: Node, root: str) -> list[str]:
-    """Return the exact non-derived records allowed beneath a wipe root."""
-    # Historical validator layouts stored this authorization record beneath the
-    # otherwise-derived data directory.  It is custody material, so reset
-    # must preserve it instead of treating its location as deletion authority.
-    if node.role == "validator" and root == "/var/lib/synergy/validator/data":
-        return ["consensus_signing_authorizations.json"]
+    """Return entries that may remain beneath a derived-state wipe root.
+
+    A fresh-genesis marker requires an empty active consensus history.  The
+    signing-authorization journal is archived outside the state root before a
+    reset when retention is required; it must never be retained in-place.
+    """
     return []
 
 
@@ -632,6 +632,9 @@ is_preserved() {{
   done
   return 1
 }}
+is_discarded_consensus_journal() {{
+  [[ "${{1##*/}}" == consensus_signing_authorizations.json ]]
+}}
 for service in "${{services[@]}}"; do
   state="$(systemctl is-active "$service" 2>/dev/null || true)"
   [[ "$state" != active && "$state" != activating ]] || {{
@@ -645,10 +648,10 @@ for root in "${{roots[@]}}"; do
     /var/cache/synergy*/data|/var/cache/synergy*/cache|/var/cache/synergy*/chain|/var/cache/synergy*/snapshots) ;;
     *) echo "unsafe exact Chain 1266 wipe root: $root" >&2; exit 1 ;;
   esac
-  if [[ -d "$root" ]]; then
+  if sudo -n test -d "$root"; then
     for preserved in "${{preserved_paths[@]}}"; do
       [[ "$preserved" == "$root/"* ]] || continue
-      [[ -f "$preserved" ]] || {{
+      sudo -n test -f "$preserved" || {{
         echo "required preserved custody record is missing: $preserved" >&2
         exit 1
       }}
@@ -657,7 +660,7 @@ for root in "${{roots[@]}}"; do
       \\( -iname '*.key' -o -iname '*private*' -o -iname '*identity*' \\
          -o -iname '*credential*' -o -iname '*custody*' -o -iname '*wireguard*' \\
          -o -iname '*innernet*' -o -iname '*authorization*' \\) -print | while IFS= read -r candidate; do
-      is_preserved "$candidate" || {{ printf '%s\\n' "$candidate"; break; }}
+      is_preserved "$candidate" || is_discarded_consensus_journal "$candidate" || {{ printf '%s\\n' "$candidate"; break; }}
     done)"
     [[ -z "$protected" ]] || {{
       echo "protected material would be in deletion scope: $protected" >&2
@@ -668,7 +671,7 @@ for root in "${{roots[@]}}"; do
     done | wc -l | tr -d ' ')"
     bytes="$(sudo -n du -sk "$root" | awk '{{print $1 * 1024}}')"
     printf 'ROOT=%s\\tEXISTS=true\\tENTRIES=%s\\tBYTES=%s\\n' "$root" "$entries" "$bytes"
-  elif [[ -e "$root" ]]; then
+  elif sudo -n test -e "$root"; then
     echo "wipe target exists but is not a directory: $root" >&2
     exit 1
   else
@@ -685,7 +688,7 @@ done
             targets = []
             for line in result.stdout.splitlines():
                 match = re.fullmatch(
-                    r"ROOT=(.+)\\tEXISTS=(true|false)\\tENTRIES=([0-9]+)\\tBYTES=([0-9]+)",
+                    r"ROOT=(.+)\tEXISTS=(true|false)\tENTRIES=([0-9]+)\tBYTES=([0-9]+)",
                     line,
                 )
                 if not match:
@@ -788,6 +791,9 @@ is_preserved() {{
   done
   return 1
 }}
+is_discarded_consensus_journal() {{
+  [[ "${{1##*/}}" == consensus_signing_authorizations.json ]]
+}}
 for service in {json.dumps(node.service)} {json.dumps(node.legacy_service or node.service)}; do
   service_state="$(systemctl is-active "$service" 2>/dev/null || true)"
   [[ "$service_state" != active && "$service_state" != activating ]] || {{
@@ -801,10 +807,10 @@ for root in "${{roots[@]}}"; do
     /var/cache/synergy*/data|/var/cache/synergy*/cache|/var/cache/synergy*/chain|/var/cache/synergy*/snapshots) ;;
     *) echo "unsafe exact Chain 1266 wipe root: $root" >&2; exit 1 ;;
   esac
-  if [[ -d "$root" ]]; then
+  if sudo -n test -d "$root"; then
     for preserved in "${{preserved_paths[@]}}"; do
       [[ "$preserved" == "$root/"* ]] || continue
-      [[ -f "$preserved" ]] || {{
+      sudo -n test -f "$preserved" || {{
         echo "required preserved custody record is missing: $preserved" >&2
         exit 1
       }}
@@ -813,16 +819,29 @@ for root in "${{roots[@]}}"; do
       \\( -iname '*.key' -o -iname '*private*' -o -iname '*identity*' \
          -o -iname '*credential*' -o -iname '*custody*' -o -iname '*wireguard*' \
          -o -iname '*innernet*' -o -iname '*authorization*' \\) -print | while IFS= read -r candidate; do
-      is_preserved "$candidate" || {{ printf '%s\\n' "$candidate"; break; }}
+      is_preserved "$candidate" || is_discarded_consensus_journal "$candidate" || {{ printf '%s\\n' "$candidate"; break; }}
     done)"
     [[ -z "$protected" ]] || {{
       echo "refusing to delete protected material under $root: $protected" >&2
       exit 1
     }}
-    while IFS= read -r candidate; do
-      is_preserved "$candidate" && continue
-      sudo -n rm -rf -- "$candidate"
-    done < <(sudo -n find "$root" -xdev -mindepth 1 -maxdepth 1 -print)
+    while IFS= read -r -d '' candidate; do
+      preserve_candidate=false
+      for preserved in "${{preserved_paths[@]}}"; do
+        if [[ "$candidate" == "$preserved" ]]; then
+          preserve_candidate=true
+          break
+        fi
+      done
+      if [[ "$preserve_candidate" == true ]]; then
+        continue
+      fi
+      sudo -n /bin/rm -rf -- "$candidate"
+      sudo -n test ! -e "$candidate" || {{
+        echo "derived-state entry survived deletion: $candidate" >&2
+        exit 1
+      }}
+    done < <(sudo -n find "$root" -xdev -mindepth 1 -maxdepth 1 -print0)
   fi
 done
 sudo -n install -d -m 0700 "$state"
@@ -896,6 +915,23 @@ echo CHAIN1266_ALL_CHAIN_DERIVED_STATE_WIPED
                 release / "systemd" / "chain1266-role-service",
                 payload / "systemd" / "chain1266-role-service",
             )
+            if node.role == "explorer_indexer":
+                # Atlas is sealed as part of the exact release only on its
+                # co-located indexer host.  macOS orchestration may use a
+                # verifier shim, but the target must receive the sealed Linux
+                # verifier that the P1 Atlas authorization check executes.
+                verifier = release / "bin" / "verify-chain1266-release-authorization"
+                sealed_verifier = verifier.with_name(f"{verifier.name}.linux-sealed")
+                verifier_source = sealed_verifier if sealed_verifier.is_file() else verifier
+                if not verifier_source.is_file():
+                    fail("promotable release omits the P1 Atlas authorization verifier")
+                atlas_source = release / "atlas"
+                atlas_reset_manifest = release / "atlas-reset-manifest.json"
+                if not atlas_source.is_dir() or not atlas_reset_manifest.is_file():
+                    fail("promotable release omits the sealed P1 Atlas payload")
+                shutil.copy2(verifier_source, payload / "bin" / verifier.name)
+                shutil.copytree(atlas_source, payload / "atlas", symlinks=False)
+                shutil.copy2(atlas_reset_manifest, payload / "atlas-reset-manifest.json")
             environment = [
                 f"CHAIN1266_ROLE_BINARY={remote_release}/bin/{binary_name}",
                 f"CHAIN1266_ROLE_CONFIG={node.config_path}",
@@ -964,17 +1000,63 @@ sudo -n tar -xf "$archive" -C "$staging" --strip-components=1
 metadata="$staging/metadata.json"
 [[ "$(jq -er .release_id "$metadata")" == "$release_id" ]]
 [[ "$(jq -er .node_id "$metadata")" == "$node_id" ]]
-[[ "$(sha256sum "$staging/bin/{binary_name}" | awk '{{print $1}}')" == "$(jq -er .binary_sha256 "$metadata")" ]]
-[[ "$(sha256sum "$staging/config.toml" | awk '{{print $1}}')" == "$(jq -er .config_sha256 "$metadata")" ]]
-[[ "$(sha256sum "$staging/genesis.json" | awk '{{print $1}}')" == "$(jq -er .genesis_sha256 "$metadata")" ]]
-[[ "$(sha256sum "$staging/desired-state.json" | awk '{{print $1}}')" == "$(jq -er .desired_state_sha256 "$metadata")" ]]
-[[ "$(sha256sum "$staging/consensus-activation.json" | awk '{{print $1}}')" == "$(jq -er .consensus_activation_sha256 "$metadata")" ]]
+[[ "$(sudo -n sha256sum "$staging/bin/{binary_name}" | awk '{{print $1}}')" == "$(jq -er .binary_sha256 "$metadata")" ]]
+[[ "$(sudo -n sha256sum "$staging/config.toml" | awk '{{print $1}}')" == "$(jq -er .config_sha256 "$metadata")" ]]
+[[ "$(sudo -n sha256sum "$staging/genesis.json" | awk '{{print $1}}')" == "$(jq -er .genesis_sha256 "$metadata")" ]]
+[[ "$(sudo -n sha256sum "$staging/desired-state.json" | awk '{{print $1}}')" == "$(jq -er .desired_state_sha256 "$metadata")" ]]
+[[ "$(sudo -n sha256sum "$staging/consensus-activation.json" | awk '{{print $1}}')" == "$(jq -er .consensus_activation_sha256 "$metadata")" ]]
 if [[ -e "$release_dir" ]]; then
   echo "immutable release directory already exists" >&2
   exit 1
 fi
 sudo -n mv "$staging" "$release_dir"
 sudo -n chmod 0755 "$release_dir/bin/{binary_name}" "$release_dir/systemd/chain1266-role-service"
+if [[ {json.dumps(node.role)} == "explorer_indexer" ]]; then
+  sudo -n chmod 0755 "$release_dir/bin/verify-chain1266-release-authorization"
+  sudo -n chmod 0644 \
+    "$release_dir/desired-state.json" \
+    "$release_dir/desired-state.signature.json" \
+    "$release_dir/consensus-activation.json" \
+    "$release_dir/genesis.json" \
+    "$release_dir/atlas/P1_RELEASE_MANIFEST.json" \
+    "$release_dir/atlas-reset-manifest.json"
+  sudo -n find "$release_dir/atlas" -type d -exec chmod 0755 {{}} +
+  sudo -n find "$release_dir/atlas" -type f -exec chmod a+r {{}} +
+  "$release_dir/atlas/ops/verify-p1-release.sh" --release-root "$release_dir"
+  backend_env=/etc/synergy/testnet-v3/atlas/backend.env
+  indexer_env=/etc/synergy/testnet-v3/atlas/indexer.env
+  atlas_current=/opt/synergy/testnet-v3/atlas/current
+  [[ -f "$backend_env" && -f "$indexer_env" ]]
+  binding="$(mktemp)"
+  backend_merged="$(mktemp)"
+  indexer_merged="$(mktemp)"
+  cleanup_atlas_binding() {{ rm -f "$binding" "$backend_merged" "$indexer_merged"; }}
+  trap cleanup_atlas_binding EXIT
+  "$release_dir/atlas/ops/emit-p1-service-environment.sh" \
+    --release-root "$release_dir" >"$binding"
+  merge_atlas_env() {{
+    local existing="$1"
+    local output="$2"
+    local include_start_block="$3"
+    sudo -n awk -F= '\
+      $1 !~ /^(SYNERGY_ATLAS_RELEASE_ID|SYNERGY_ATLAS_CANONICAL_GENESIS_HASH|SYNERGY_CHAIN1266_RELEASE_ROOT|SYNERGY_CHAIN1266_RELEASE_VERIFIER|SYNERGY_CHAIN1266_DESIRED_STATE_PATH|SYNERGY_CHAIN1266_DESIRED_STATE_SIGNATURE_PATH|SYNERGY_CHAIN1266_CONSENSUS_ACTIVATION_PATH|SYNERGY_CHAIN1266_GENESIS_PATH|SYNERGY_ATLAS_RELEASE_MANIFEST_PATH|SYNERGY_ATLAS_RELEASE_MANIFEST_SHA256|SYNERGY_ATLAS_RESET_MANIFEST_PATH|SYNERGY_ATLAS_RESET_MANIFEST_SHA256|SYNERGY_ATLAS_INGEST_RPC_URL|START_BLOCK)$/ {{print}}\
+    ' "$existing" >"$output"
+    cat "$binding" >>"$output"
+    if [[ "$include_start_block" == true ]]; then
+      printf 'START_BLOCK=0\\n' >>"$output"
+    fi
+  }}
+  merge_atlas_env "$backend_env" "$backend_merged" false
+  merge_atlas_env "$indexer_env" "$indexer_merged" true
+  sudo -n install -o root -g synergy-atlas-v3 -m 0640 "$backend_merged" "$backend_env"
+  sudo -n install -o root -g synergy-atlas-v3 -m 0640 "$indexer_merged" "$indexer_env"
+  sudo -n install -d -m 0755 "$(dirname "$atlas_current")"
+  sudo -n ln -sfn "$release_dir/atlas" "$atlas_current"
+  sudo -n systemctl stop synergy-testnet-v3-atlas-indexer.service
+  sudo -n systemctl restart synergy-testnet-v3-atlas-api.service
+  systemctl is-active --quiet synergy-testnet-v3-atlas-api.service
+  [[ "$(systemctl is-active synergy-testnet-v3-atlas-indexer.service 2>/dev/null || true)" != active ]]
+fi
 sudo -n install -d -m 0755 "$(dirname "$config_path")" "$(dirname "$genesis_path")" "$project_root/config" "$state_root"
 sudo -n install -m 0644 "$release_dir/config.toml" "$config_path"
 sudo -n install -m 0644 "$release_dir/config.toml" "$project_root/config/node_config.toml"
@@ -984,6 +1066,10 @@ sudo -n install -d -m 0755 /usr/local/libexec/synergy /etc/synergy/chain1266
 sudo -n install -m 0755 "$release_dir/systemd/chain1266-role-service" /usr/local/libexec/synergy/chain1266-role-service
 sudo -n install -m 0644 "$release_dir/systemd/synergy-chain1266-role@.service" /etc/systemd/system/synergy-chain1266-role@.service
 sudo -n install -m 0600 "$release_dir/node.env" "/etc/synergy/chain1266/${{node_id}}.env"
+sudo -n rm -f "/run/synergy-chain1266/${{node_id}}.env"
+if [[ {json.dumps(node.role)} == "validator" ]]; then
+  sudo -n rm -f /etc/synergy/chain1266/start-consensus.json
+fi
 sudo -n systemctl daemon-reload
 sudo -n systemctl enable {json.dumps(node.service)}
 sudo -n rm -f "$archive"
@@ -1039,9 +1125,15 @@ echo CHAIN1266_ROLE_ACTIVE
                 phase = metrics.get("consensus_startup_phase_info", {})
                 identity = metrics.get("chain1266_desired_state_info", {})
                 labels = identity.get("labels", {}) if isinstance(identity, dict) else {}
+                phase_name = phase.get("labels", {}).get("phase")
+                coordinated_paused = (
+                    phase_name == "UNINITIALIZED"
+                    and int(float(metrics.get("consensus_finalized_height", 0))) == 0
+                )
                 if (
                     item["ssh_exit"] == 0
-                    and phase.get("labels", {}).get("phase") == "PAUSED_READY"
+                    and item["parsed"].get("systemd", {}).get("ActiveState") == "active"
+                    and (phase_name == "PAUSED_READY" or coordinated_paused)
                     and labels.get("release_id") == release_id
                     and labels.get("chain_incarnation") == "4"
                     and labels.get("genesis_hash") == self.fleet["genesis_hash"]
@@ -1540,16 +1632,18 @@ def main() -> None:
                 for node in controller.nodes
                 if node.role == "validator"
             ]
-            heights = [
-                int(
-                    item["parsed"]
-                    .get("metrics", {})
-                    .get("consensus_finalized_height", 0)
+            heights = []
+            for item in validators:
+                metrics = item["parsed"].get("metrics", {})
+                sample = metrics.get(
+                    "coordinated_consensus_finalized_height",
+                    metrics.get("consensus_finalized_height", 0),
                 )
-                for item in validators
-            ]
-            if len(heights) != 6 or min(heights, default=0) < 100:
-                fail("Atlas cannot activate before the 100-block OPERATIONAL gate")
+                if isinstance(sample, dict):
+                    sample = sample.get("value", 0)
+                heights.append(int(sample))
+            if len(heights) != 6 or min(heights, default=0) < 1:
+                fail("Atlas cannot activate before the first coordinated block")
             controller.reset_atlas_schema(
                 validated, args.atlas_database_env_file, False
             )

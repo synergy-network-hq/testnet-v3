@@ -1,0 +1,265 @@
+SECTION=SYSTEMD
+MainPID=0
+NRestarts=0
+ExecMainStatus=1
+MemoryCurrent=[not set]
+CPUUsageNSec=683519000
+ActiveState=failed
+SubState=failed
+ConfigSHA256=50e91c9b34b337645b28f43d90b12c6d41a93fcf6f66aeb75e1d47b91fc6891e
+GenesisSHA256=ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf
+SECTION=METRICS
+
+SECTION=JOURNAL
+2026-08-02T16:07:36.740704+02:00 vmi3371822 chain1266-role-service[3425306]:   "peer": "10.70.20.1:5622",
+2026-08-02T16:07:36.740704+02:00 vmi3371822 chain1266-role-service[3425306]:   "transport": "10.70.20.1:5622"
+2026-08-02T16:07:36.740704+02:00 vmi3371822 chain1266-role-service[3425306]: }
+2026-08-02T16:07:36.745738+02:00 vmi3371822 chain1266-role-service[3425306]: [2026-08-02 14:07:36 UTC] [WARN] [p2p] Failed to dial peer
+2026-08-02T16:07:36.745738+02:00 vmi3371822 chain1266-role-service[3425306]:   Metadata: {
+2026-08-02T16:07:36.745738+02:00 vmi3371822 chain1266-role-service[3425306]:   "error": "connection timed out",
+2026-08-02T16:07:36.745738+02:00 vmi3371822 chain1266-role-service[3425306]:   "peer": "10.70.20.2:5622",
+2026-08-02T16:07:36.745738+02:00 vmi3371822 chain1266-role-service[3425306]:   "transport": "10.70.20.2:5622"
+2026-08-02T16:07:36.745738+02:00 vmi3371822 chain1266-role-service[3425306]: }
+2026-08-02T16:07:36.755103+02:00 vmi3371822 chain1266-role-service[3425306]: [2026-08-02 14:07:36 UTC] [WARN] [p2p] Failed to dial peer
+2026-08-02T16:07:36.755103+02:00 vmi3371822 chain1266-role-service[3425306]:   Metadata: {
+2026-08-02T16:07:36.755103+02:00 vmi3371822 chain1266-role-service[3425306]:   "error": "connection timed out",
+2026-08-02T16:07:36.755103+02:00 vmi3371822 chain1266-role-service[3425306]:   "peer": "10.70.20.3:5622",
+2026-08-02T16:07:36.755103+02:00 vmi3371822 chain1266-role-service[3425306]:   "transport": "10.70.20.3:5622"
+2026-08-02T16:07:36.755103+02:00 vmi3371822 chain1266-role-service[3425306]: }
+2026-08-02T16:07:42.316712+02:00 vmi3371822 chain1266-role-service[3425306]: [2026-08-02 14:07:42 UTC] [INFO] [p2p] Resolved bootstrap dial targets
+2026-08-02T16:07:42.316712+02:00 vmi3371822 chain1266-role-service[3425306]:   Metadata: {
+2026-08-02T16:07:42.316712+02:00 vmi3371822 chain1266-role-service[3425306]:   "targets": "[\"10.70.20.1:5622\", \"10.70.20.2:5622\", \"10.70.20.3:5622\", \"synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu\", \"synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj\", \"synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk\", \"synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg\", \"synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t\"]"
+2026-08-02T16:07:42.316712+02:00 vmi3371822 chain1266-role-service[3425306]: }
+2026-08-02T16:07:42.320433+02:00 vmi3371822 chain1266-role-service[3425306]: [2026-08-02 14:07:42 UTC] [WARN] [p2p] Failed to dial peer
+2026-08-02T16:07:42.320433+02:00 vmi3371822 chain1266-role-service[3425306]:   Metadata: {
+2026-08-02T16:07:42.320433+02:00 vmi3371822 chain1266-role-service[3425306]:   "error": "Connection refused (os error 111)",
+2026-08-02T16:07:42.320433+02:00 vmi3371822 chain1266-role-service[3425306]:   "peer": "synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk",
+2026-08-02T16:07:42.320433+02:00 vmi3371822 chain1266-role-service[3425306]:   "transport": "10.70.10.2:5622"
+2026-08-02T16:07:42.320433+02:00 vmi3371822 chain1266-role-service[3425306]: }
+2026-08-02T16:07:42.334448+02:00 vmi3371822 chain1266-role-service[3425306]: [2026-08-02 14:07:42 UTC] [INFO] [p2p] Received status
+2026-08-02T16:07:42.334448+02:00 vmi3371822 chain1266-role-service[3425306]:   Metadata: {
+2026-08-02T16:07:42.334448+02:00 vmi3371822 chain1266-role-service[3425306]:   "height": 0,
+2026-08-02T16:07:42.334448+02:00 vmi3371822 chain1266-role-service[3425306]:   "peer": "synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t"
+2026-08-02T16:07:42.334448+02:00 vmi3371822 chain1266-role-service[3425306]: }
+2026-08-02T16:07:42.347960+02:00 vmi3371822 chain1266-role-service[3425306]: [2026-08-02 14:07:42 UTC] [INFO] [p2p] Received status
+2026-08-02T16:07:42.347960+02:00 vmi3371822 chain1266-role-service[3425306]:   Metadata: {
+2026-08-02T16:07:42.347960+02:00 vmi3371822 chain1266-role-service[3425306]:   "height": 0,
+2026-08-02T16:07:42.347960+02:00 vmi3371822 chain1266-role-service[3425306]:   "peer": "synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj"
+2026-08-02T16:07:42.347960+02:00 vmi3371822 chain1266-role-service[3425306]: }
+2026-08-02T16:07:42.436560+02:00 vmi3371822 chain1266-role-service[3425306]: [2026-08-02 14:07:42 UTC] [INFO] [p2p] Received status
+2026-08-02T16:07:42.436560+02:00 vmi3371822 chain1266-role-service[3425306]:   Metadata: {
+2026-08-02T16:07:42.436560+02:00 vmi3371822 chain1266-role-service[3425306]:   "height": 0,
+2026-08-02T16:07:42.436560+02:00 vmi3371822 chain1266-role-service[3425306]:   "peer": "synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg"
+2026-08-02T16:07:42.436560+02:00 vmi3371822 chain1266-role-service[3425306]: }
+2026-08-02T16:07:42.549854+02:00 vmi3371822 chain1266-role-service[3425306]: [2026-08-02 14:07:42 UTC] [INFO] [p2p] Received status
+2026-08-02T16:07:42.549854+02:00 vmi3371822 chain1266-role-service[3425306]:   Metadata: {
+2026-08-02T16:07:42.549854+02:00 vmi3371822 chain1266-role-service[3425306]:   "height": 0,
+2026-08-02T16:07:42.549854+02:00 vmi3371822 chain1266-role-service[3425306]:   "peer": "synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu"
+2026-08-02T16:07:42.549854+02:00 vmi3371822 chain1266-role-service[3425306]: }
+2026-08-02T16:07:47.333431+02:00 vmi3371822 chain1266-role-service[3425306]: [2026-08-02 14:07:47 UTC] [WARN] [p2p] Failed to dial peer
+2026-08-02T16:07:47.333431+02:00 vmi3371822 chain1266-role-service[3425306]:   Metadata: {
+2026-08-02T16:07:47.333431+02:00 vmi3371822 chain1266-role-service[3425306]:   "error": "connection timed out",
+2026-08-02T16:07:47.333431+02:00 vmi3371822 chain1266-role-service[3425306]:   "peer": "10.70.20.1:5622",
+2026-08-02T16:07:47.333431+02:00 vmi3371822 chain1266-role-service[3425306]:   "transport": "10.70.20.1:5622"
+2026-08-02T16:07:47.333431+02:00 vmi3371822 chain1266-role-service[3425306]: }
+2026-08-02T16:07:47.341530+02:00 vmi3371822 chain1266-role-service[3425306]: [2026-08-02 14:07:47 UTC] [WARN] [p2p] Failed to dial peer
+2026-08-02T16:07:47.341530+02:00 vmi3371822 chain1266-role-service[3425306]:   Metadata: {
+2026-08-02T16:07:47.341530+02:00 vmi3371822 chain1266-role-service[3425306]:   "error": "connection timed out",
+2026-08-02T16:07:47.341530+02:00 vmi3371822 chain1266-role-service[3425306]:   "peer": "10.70.20.3:5622",
+2026-08-02T16:07:47.341530+02:00 vmi3371822 chain1266-role-service[3425306]:   "transport": "10.70.20.3:5622"
+2026-08-02T16:07:47.341530+02:00 vmi3371822 chain1266-role-service[3425306]: }
+2026-08-02T16:07:47.342097+02:00 vmi3371822 chain1266-role-service[3425306]: [2026-08-02 14:07:47 UTC] [WARN] [p2p] Failed to dial peer
+2026-08-02T16:07:47.342097+02:00 vmi3371822 chain1266-role-service[3425306]:   Metadata: {
+2026-08-02T16:07:47.342097+02:00 vmi3371822 chain1266-role-service[3425306]:   "error": "connection timed out",
+2026-08-02T16:07:47.342097+02:00 vmi3371822 chain1266-role-service[3425306]:   "peer": "10.70.20.2:5622",
+2026-08-02T16:07:47.342097+02:00 vmi3371822 chain1266-role-service[3425306]:   "transport": "10.70.20.2:5622"
+2026-08-02T16:07:47.342097+02:00 vmi3371822 chain1266-role-service[3425306]: }
+2026-08-02T16:07:52.310784+02:00 vmi3371822 chain1266-role-service[3425306]: [2026-08-02 14:07:52 UTC] [INFO] [p2p] Peer disconnected
+2026-08-02T16:07:52.310784+02:00 vmi3371822 chain1266-role-service[3425306]:   Metadata: {
+2026-08-02T16:07:52.310784+02:00 vmi3371822 chain1266-role-service[3425306]:   "peer": "synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t"
+2026-08-02T16:07:52.310784+02:00 vmi3371822 chain1266-role-service[3425306]: }
+2026-08-02T16:07:52.902355+02:00 vmi3371822 chain1266-role-service[3425306]: [2026-08-02 14:07:52 UTC] [INFO] [p2p] Resolved bootstrap dial targets
+2026-08-02T16:07:52.902355+02:00 vmi3371822 chain1266-role-service[3425306]:   Metadata: {
+2026-08-02T16:07:52.902355+02:00 vmi3371822 chain1266-role-service[3425306]:   "targets": "[\"10.70.20.1:5622\", \"10.70.20.2:5622\", \"10.70.20.3:5622\", \"synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu\", \"synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj\", \"synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk\", \"synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg\", \"synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t\"]"
+2026-08-02T16:07:52.902355+02:00 vmi3371822 chain1266-role-service[3425306]: }
+2026-08-02T16:07:52.905697+02:00 vmi3371822 chain1266-role-service[3425306]: [2026-08-02 14:07:52 UTC] [WARN] [p2p] Failed to dial peer
+2026-08-02T16:07:52.905697+02:00 vmi3371822 chain1266-role-service[3425306]:   Metadata: {
+2026-08-02T16:07:52.905697+02:00 vmi3371822 chain1266-role-service[3425306]:   "error": "Connection refused (os error 111)",
+2026-08-02T16:07:52.905697+02:00 vmi3371822 chain1266-role-service[3425306]:   "peer": "synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk",
+2026-08-02T16:07:52.905697+02:00 vmi3371822 chain1266-role-service[3425306]:   "transport": "10.70.10.2:5622"
+2026-08-02T16:07:52.905697+02:00 vmi3371822 chain1266-role-service[3425306]: }
+2026-08-02T16:07:52.919246+02:00 vmi3371822 chain1266-role-service[3425306]: [2026-08-02 14:07:52 UTC] [INFO] [p2p] Received status
+2026-08-02T16:07:52.919577+02:00 vmi3371822 chain1266-role-service[3425306]:   Metadata: {
+2026-08-02T16:07:52.919577+02:00 vmi3371822 chain1266-role-service[3425306]:   "height": 0,
+2026-08-02T16:07:52.919577+02:00 vmi3371822 chain1266-role-service[3425306]:   "peer": "synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj"
+2026-08-02T16:07:52.919577+02:00 vmi3371822 chain1266-role-service[3425306]: }
+2026-08-02T16:07:52.951325+02:00 vmi3371822 chain1266-role-service[3425306]: [2026-08-02 14:07:52 UTC] [INFO] [p2p] Received status
+2026-08-02T16:07:52.951325+02:00 vmi3371822 chain1266-role-service[3425306]:   Metadata: {
+2026-08-02T16:07:52.951325+02:00 vmi3371822 chain1266-role-service[3425306]:   "height": 0,
+2026-08-02T16:07:52.951325+02:00 vmi3371822 chain1266-role-service[3425306]:   "peer": "synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg"
+2026-08-02T16:07:52.951325+02:00 vmi3371822 chain1266-role-service[3425306]: }
+2026-08-02T16:07:53.046541+02:00 vmi3371822 chain1266-role-service[3425306]: [2026-08-02 14:07:53 UTC] [INFO] [p2p] Received status
+2026-08-02T16:07:53.046541+02:00 vmi3371822 chain1266-role-service[3425306]:   Metadata: {
+2026-08-02T16:07:53.046541+02:00 vmi3371822 chain1266-role-service[3425306]:   "height": 0,
+2026-08-02T16:07:53.046541+02:00 vmi3371822 chain1266-role-service[3425306]:   "peer": "synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu"
+2026-08-02T16:07:53.046541+02:00 vmi3371822 chain1266-role-service[3425306]: }
+2026-08-02T16:07:56.169936+02:00 vmi3371822 chain1266-role-service[3425306]: [2026-08-02 14:07:56 UTC] [INFO] [p2p] Peer disconnected
+2026-08-02T16:07:56.169936+02:00 vmi3371822 chain1266-role-service[3425306]:   Metadata: {
+2026-08-02T16:07:56.169936+02:00 vmi3371822 chain1266-role-service[3425306]:   "peer": "synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj"
+2026-08-02T16:07:56.169936+02:00 vmi3371822 chain1266-role-service[3425306]: }
+2026-08-02T16:07:57.216502+02:00 vmi3371822 chain1266-role-service[3425306]: [2026-08-02 14:07:57 UTC] [INFO] [p2p] Peer disconnected
+2026-08-02T16:07:57.216502+02:00 vmi3371822 chain1266-role-service[3425306]:   Metadata: {
+2026-08-02T16:07:57.216502+02:00 vmi3371822 chain1266-role-service[3425306]:   "peer": "synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg"
+2026-08-02T16:07:57.216502+02:00 vmi3371822 chain1266-role-service[3425306]: }
+2026-08-02T16:07:57.926409+02:00 vmi3371822 chain1266-role-service[3425306]: [2026-08-02 14:07:57 UTC] [WARN] [p2p] Failed to dial peer
+2026-08-02T16:07:57.926409+02:00 vmi3371822 chain1266-role-service[3425306]:   Metadata: {
+2026-08-02T16:07:57.926409+02:00 vmi3371822 chain1266-role-service[3425306]:   "error": "connection timed out",
+2026-08-02T16:07:57.926409+02:00 vmi3371822 chain1266-role-service[3425306]:   "peer": "10.70.20.1:5622",
+2026-08-02T16:07:57.926409+02:00 vmi3371822 chain1266-role-service[3425306]:   "transport": "10.70.20.1:5622"
+2026-08-02T16:07:57.926409+02:00 vmi3371822 chain1266-role-service[3425306]: }
+2026-08-02T16:07:57.926980+02:00 vmi3371822 chain1266-role-service[3425306]: [2026-08-02 14:07:57 UTC] [WARN] [p2p] Failed to dial peer
+2026-08-02T16:07:57.926980+02:00 vmi3371822 chain1266-role-service[3425306]:   Metadata: {
+2026-08-02T16:07:57.926980+02:00 vmi3371822 chain1266-role-service[3425306]:   "error": "connection timed out",
+2026-08-02T16:07:57.926980+02:00 vmi3371822 chain1266-role-service[3425306]:   "peer": "10.70.20.3:5622",
+2026-08-02T16:07:57.926980+02:00 vmi3371822 chain1266-role-service[3425306]:   "transport": "10.70.20.3:5622"
+2026-08-02T16:07:57.926980+02:00 vmi3371822 chain1266-role-service[3425306]: }
+2026-08-02T16:07:57.926980+02:00 vmi3371822 chain1266-role-service[3425306]: [2026-08-02 14:07:57 UTC] [WARN] [p2p] Failed to dial peer
+2026-08-02T16:07:57.926980+02:00 vmi3371822 chain1266-role-service[3425306]:   Metadata: {
+2026-08-02T16:07:57.926980+02:00 vmi3371822 chain1266-role-service[3425306]:   "error": "connection timed out",
+2026-08-02T16:07:57.926980+02:00 vmi3371822 chain1266-role-service[3425306]:   "peer": "10.70.20.2:5622",
+2026-08-02T16:07:57.926980+02:00 vmi3371822 chain1266-role-service[3425306]:   "transport": "10.70.20.2:5622"
+2026-08-02T16:07:57.926980+02:00 vmi3371822 chain1266-role-service[3425306]: }
+2026-08-02T16:07:59.817405+02:00 vmi3371822 chain1266-role-service[3425306]: [2026-08-02 14:07:59 UTC] [INFO] [p2p] Peer disconnected
+2026-08-02T16:07:59.817405+02:00 vmi3371822 chain1266-role-service[3425306]:   Metadata: {
+2026-08-02T16:07:59.817405+02:00 vmi3371822 chain1266-role-service[3425306]:   "peer": "synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu"
+2026-08-02T16:07:59.817405+02:00 vmi3371822 chain1266-role-service[3425306]: }
+2026-08-02T16:08:01.629902+02:00 vmi3371822 systemd[1]: Stopping synergy-chain1266-role@validator-node-06.service - Synergy Chain 1266 immutable role instance validator-node-06...
+2026-08-02T16:08:01.679070+02:00 vmi3371822 systemd[1]: synergy-chain1266-role@validator-node-06.service: Deactivated successfully.
+2026-08-02T16:08:01.681150+02:00 vmi3371822 systemd[1]: Stopped synergy-chain1266-role@validator-node-06.service - Synergy Chain 1266 immutable role instance validator-node-06.
+2026-08-02T16:08:01.684312+02:00 vmi3371822 systemd[1]: synergy-chain1266-role@validator-node-06.service: Consumed 23min 20.227s CPU time, 74.8M memory peak, 0B memory swap peak.
+2026-08-02T16:22:11.374123+02:00 vmi3371822 systemd[1]: Started synergy-chain1266-role@validator-node-06.service - Synergy Chain 1266 immutable role instance validator-node-06.
+2026-08-02T16:22:11.823568+02:00 vmi3371822 chain1266-role-service[3471533]: [2026-08-02 14:22:11 UTC] [INFO] [main] Synergy testnet node starting...
+2026-08-02T16:22:11.825180+02:00 vmi3371822 chain1266-role-service[3471533]: [2026-08-02 14:22:11 UTC] [INFO] [main] Configuration loaded successfully
+2026-08-02T16:22:11.825180+02:00 vmi3371822 chain1266-role-service[3471533]:   Metadata: {
+2026-08-02T16:22:11.825180+02:00 vmi3371822 chain1266-role-service[3471533]:   "consensus": "posy/2.2",
+2026-08-02T16:22:11.825180+02:00 vmi3371822 chain1266-role-service[3471533]:   "network": "Synergy Testnet"
+2026-08-02T16:22:11.825180+02:00 vmi3371822 chain1266-role-service[3471533]: }
+2026-08-02T16:22:11.825180+02:00 vmi3371822 chain1266-role-service[3471533]: [2026-08-02 14:22:11 UTC] [INFO] [main] Validated role-bound runtime profile and desired state
+2026-08-02T16:22:11.825180+02:00 vmi3371822 chain1266-role-service[3471533]:   Metadata: {
+2026-08-02T16:22:11.825180+02:00 vmi3371822 chain1266-role-service[3471533]:   "authority_plane": "Consensus",
+2026-08-02T16:22:11.825180+02:00 vmi3371822 chain1266-role-service[3471533]:   "binary": "synergy-validator-node",
+2026-08-02T16:22:11.825180+02:00 vmi3371822 chain1266-role-service[3471533]:   "compiled_profile": "validator_node",
+2026-08-02T16:22:11.825180+02:00 vmi3371822 chain1266-role-service[3471533]:   "release_id": "chain1266-incarnation-4-rc14",
+2026-08-02T16:22:11.825180+02:00 vmi3371822 chain1266-role-service[3471533]:   "role_id": "validator"
+2026-08-02T16:22:11.825180+02:00 vmi3371822 chain1266-role-service[3471533]: }
+2026-08-02T16:22:11.825863+02:00 vmi3371822 chain1266-role-service[3471533]: [2026-08-02 14:22:11 UTC] [INFO] [main] Project root validated
+2026-08-02T16:22:11.825863+02:00 vmi3371822 chain1266-role-service[3471533]:   Metadata: {
+2026-08-02T16:22:11.825863+02:00 vmi3371822 chain1266-role-service[3471533]:   "root": "/var/lib/synergy/validator/chain-1266/incarnation-4"
+2026-08-02T16:22:11.825863+02:00 vmi3371822 chain1266-role-service[3471533]: }
+2026-08-02T16:22:11.826118+02:00 vmi3371822 chain1266-role-service[3471533]: [2026-08-02 14:22:11 UTC] [INFO] [main] Canonical Genesis validator membership loaded before P2P
+2026-08-02T16:22:11.826118+02:00 vmi3371822 chain1266-role-service[3471533]:   Metadata: {
+2026-08-02T16:22:11.826118+02:00 vmi3371822 chain1266-role-service[3471533]:   "active_validator_count": 6,
+2026-08-02T16:22:11.826118+02:00 vmi3371822 chain1266-role-service[3471533]:   "validator_address": "synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc"
+2026-08-02T16:22:11.826118+02:00 vmi3371822 chain1266-role-service[3471533]: }
+2026-08-02T16:22:11.826118+02:00 vmi3371822 chain1266-role-service[3471533]: [2026-08-02 14:22:11 UTC] [INFO] [main] Canonical genesis loaded
+2026-08-02T16:22:11.826118+02:00 vmi3371822 chain1266-role-service[3471533]:   Metadata: {
+2026-08-02T16:22:11.826118+02:00 vmi3371822 chain1266-role-service[3471533]:   "hash": "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",
+2026-08-02T16:22:11.826118+02:00 vmi3371822 chain1266-role-service[3471533]:   "path": "/etc/synergy/testnet-v3/genesis.json"
+2026-08-02T16:22:11.826118+02:00 vmi3371822 chain1266-role-service[3471533]: }
+2026-08-02T16:22:11.829506+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 2638950000000000000 SNRG to synl1g8hgegyaezgqwq755zjrglwr7wrvz3jj6dvr
+2026-08-02T16:22:11.829506+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 50000000000000 SNRG to synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t
+2026-08-02T16:22:11.829506+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 50000000000000 SNRG to synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk
+2026-08-02T16:22:11.829506+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 50000000000000 SNRG to synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj
+2026-08-02T16:22:11.829506+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 50000000000000 SNRG to synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg
+2026-08-02T16:22:11.829506+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 50000000000000 SNRG to synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu
+2026-08-02T16:22:11.829506+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 50000000000000 SNRG to synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc
+2026-08-02T16:22:11.829506+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 50000000000000 SNRG to synv11lgxgqj3juusy9rdfc6r0z4p0sf2ext4f48g
+2026-08-02T16:22:11.829506+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 50000000000000 SNRG to synv11nqlh9w5nrqsg0y0lq6lljtgxnm0d5ep30l5
+2026-08-02T16:22:11.829506+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 50000000000000 SNRG to synv11tcpv98np8eexpua5fq5wc4kvj4ul7e5x3k7
+2026-08-02T16:22:11.829506+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 50000000000000 SNRG to synv11dm930g9e0l96rxfg65fn8z4y2vm7qz3yfn3
+2026-08-02T16:22:11.829506+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 50000000000000 SNRG to synv112ggx4l8st0uq3gvy6hqvaa4d90w5uanaqjz
+2026-08-02T16:22:11.829506+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 50000000000000 SNRG to synv11tf8hc6fsrdg0jpcqy8xay0awack2k69a36l
+2026-08-02T16:22:11.829506+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 50000000000000 SNRG to synv11p8ej4mxf3uuepqxvnlnus67aut8vtman47g
+2026-08-02T16:22:11.829506+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 50000000000000 SNRG to synv11sadw92489zclv0v0p56fmjhwqze56ud0wm2
+2026-08-02T16:22:11.829506+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 50000000000000 SNRG to synv11t2u2xh3elek5q682lqprclauyatn5xjq4pq
+2026-08-02T16:22:11.829506+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 50000000000000 SNRG to synv11t4hhy3k4dh9xlnn5fus82e3t70d3q8ur8fa
+2026-08-02T16:22:11.829506+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 50000000000000 SNRG to synv11x3pzwp2xvd4jxs6fq5hvahrrglcytahtz7w
+2026-08-02T16:22:11.829506+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 50000000000000 SNRG to synv11daswzvvaklsl2e0hxmtz39de62w9qum6c9k
+2026-08-02T16:22:11.831258+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 50000000000000 SNRG to synv11p5emxjn9a0y4u8jsq6qupcuwsgwedxnl0p5
+2026-08-02T16:22:11.831258+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 50000000000000 SNRG to synv11gvzqyvuqrtpjck8jdefsfefqz4rjfytw44h
+2026-08-02T16:22:11.831258+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 50000000000000 SNRG to synv119uv7nqfvypqtm7fgpmsjju5y4yz73apw4hx
+2026-08-02T16:22:11.831258+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 2226000000000000000 SNRG to synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4
+2026-08-02T16:22:11.831258+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 1559000000000000000 SNRG to synm16uf39wtwzlqkyfteme5uqpythp9lx635mfcm
+2026-08-02T16:22:11.831258+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 1000000000000000 SNRG to syns10a8prj2pvm3lwtd2zf8ke54zhq8ux3804kl2
+2026-08-02T16:22:11.831258+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 1440000000000000000 SNRG to synm1k8p8ket4tp4hyvpa0whv9cfhetd0hwzgp07v
+2026-08-02T16:22:11.831258+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 1260000000000000000 SNRG to synm16gqdhdfq5au7zhxrpedh8k7y5ks7ajl34hj6
+2026-08-02T16:22:11.831258+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 894000000000000000 SNRG to synm1yps0r6977nxdsuqmvmep9h045k8yg5mrmlur
+2026-08-02T16:22:11.831258+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 720000000000000000 SNRG to synu18tmdavp9yskftz4lldshrxvzwyg0tpnu23n9
+2026-08-02T16:22:11.831258+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 720000000000000000 SNRG to synu134gwnzuwzrg698rpnk85qdc7r6u2fll34nmp
+2026-08-02T16:22:11.831258+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 340000000000000000 SNRG to sync14jnyrvt489hz592zc8j5ujptpfxllmy0yu40
+2026-08-02T16:22:11.831258+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 200000000000000000 SNRG to synm1qz58et37qrxza8qv58lw93cf3nc4y4g5mlh8
+2026-08-02T16:22:11.831258+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 0 SNRG to synf1pnchsrnyral0u9r65xusjrexuctfh465h06l
+2026-08-02T16:22:11.831258+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 0 SNRG to synq1fkv2x4arnmxldk35m4e2furg9lq7xp77agdc
+2026-08-02T16:22:11.831258+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 0 SNRG to synq188dfee3r9qu7hyd2kvjp4025wg0s8mmrltfl
+2026-08-02T16:22:11.831258+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Genesis allocation: 0 SNRG to syn00000000000000000000000000000000000000
+2026-08-02T16:22:11.831258+02:00 vmi3371822 chain1266-role-service[3471533]: [2026-08-02 14:22:11 UTC] [INFO] [main] No saved token state found (using genesis allocations)
+2026-08-02T16:22:11.831258+02:00 vmi3371822 chain1266-role-service[3471533]:   Metadata: {
+2026-08-02T16:22:11.831258+02:00 vmi3371822 chain1266-role-service[3471533]:   "error": "token state file does not exist: /var/lib/synergy/validator/chain-1266/incarnation-4/data/token_state.json"
+2026-08-02T16:22:11.831258+02:00 vmi3371822 chain1266-role-service[3471533]: }
+2026-08-02T16:22:11.833346+02:00 vmi3371822 chain1266-role-service[3471533]: Validator reward pool is empty at startup; it remains fee/governance funded and no tokens were minted
+2026-08-02T16:22:11.833447+02:00 vmi3371822 chain1266-role-service[3471533]: [2026-08-02 14:22:11 UTC] [INFO] [main] Starting the node...
+2026-08-02T16:22:16.837478+02:00 vmi3371822 chain1266-role-service[3471533]: [2026-08-02 14:22:16 UTC] [WARN] [p2p] Validator transport registry was unavailable at network start; validator peer admission remains closed
+2026-08-02T16:22:16.837478+02:00 vmi3371822 chain1266-role-service[3471533]:   Metadata: {
+2026-08-02T16:22:16.837478+02:00 vmi3371822 chain1266-role-service[3471533]:   "error": "validator transport snapshot fetch failed: error sending request for url (https://vpn-coordinator.synergy-network.io/v1/mesh/transports/current)"
+2026-08-02T16:22:16.837478+02:00 vmi3371822 chain1266-role-service[3471533]: }
+2026-08-02T16:22:16.838640+02:00 vmi3371822 chain1266-role-service[3471533]: [2026-08-02 14:22:16 UTC] [INFO] [p2p] P2P network started
+2026-08-02T16:22:16.838640+02:00 vmi3371822 chain1266-role-service[3471533]:   Metadata: {
+2026-08-02T16:22:16.838640+02:00 vmi3371822 chain1266-role-service[3471533]:   "bootnodes": 3,
+2026-08-02T16:22:16.838640+02:00 vmi3371822 chain1266-role-service[3471533]:   "listen_address": "10.70.10.6:5622",
+2026-08-02T16:22:16.838640+02:00 vmi3371822 chain1266-role-service[3471533]:   "public_address": "synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc"
+2026-08-02T16:22:16.838640+02:00 vmi3371822 chain1266-role-service[3471533]: }
+2026-08-02T16:22:16.838640+02:00 vmi3371822 chain1266-role-service[3471533]: [2026-08-02 14:22:16 UTC] [INFO] [main] P2P network started
+2026-08-02T16:22:16.838640+02:00 vmi3371822 chain1266-role-service[3471533]:   Metadata: {
+2026-08-02T16:22:16.838640+02:00 vmi3371822 chain1266-role-service[3471533]:   "listen_address": "10.70.10.6:5622"
+2026-08-02T16:22:16.838640+02:00 vmi3371822 chain1266-role-service[3471533]: }
+2026-08-02T16:22:16.838640+02:00 vmi3371822 chain1266-role-service[3471533]: [2026-08-02 14:22:16 UTC] [INFO] [p2p] P2P listener bound
+2026-08-02T16:22:16.838640+02:00 vmi3371822 chain1266-role-service[3471533]:   Metadata: {
+2026-08-02T16:22:16.838640+02:00 vmi3371822 chain1266-role-service[3471533]:   "listen_address": "10.70.10.6:5622"
+2026-08-02T16:22:16.838640+02:00 vmi3371822 chain1266-role-service[3471533]: }
+2026-08-02T16:22:16.839328+02:00 vmi3371822 chain1266-role-service[3471533]: 📡 RPC server running on 127.0.0.1:5640
+2026-08-02T16:22:16.839328+02:00 vmi3371822 chain1266-role-service[3471533]: ℹ️ No validator registry found at startup: No such file or directory (os error 2)
+2026-08-02T16:22:16.839328+02:00 vmi3371822 chain1266-role-service[3471533]: ✅ Loaded 6 validators from registry at startup
+2026-08-02T16:22:16.839530+02:00 vmi3371822 chain1266-role-service[3471533]: 📡 RPC WebSocket server running on 127.0.0.1:5660
+2026-08-02T16:22:16.890240+02:00 vmi3371822 chain1266-role-service[3471533]: [2026-08-02 14:22:16 UTC] [INFO] [main] RPC server ready
+2026-08-02T16:22:16.890240+02:00 vmi3371822 chain1266-role-service[3471533]:   Metadata: {
+2026-08-02T16:22:16.890240+02:00 vmi3371822 chain1266-role-service[3471533]:   "port": 5640
+2026-08-02T16:22:16.890240+02:00 vmi3371822 chain1266-role-service[3471533]: }
+2026-08-02T16:22:17.081097+02:00 vmi3371822 chain1266-role-service[3471533]: [2026-08-02 14:22:17 UTC] [INFO] [main] Configured local sync source policy
+2026-08-02T16:22:17.081097+02:00 vmi3371822 chain1266-role-service[3471533]:   Metadata: {
+2026-08-02T16:22:17.081097+02:00 vmi3371822 chain1266-role-service[3471533]:   "support_sources_only": false,
+2026-08-02T16:22:17.081097+02:00 vmi3371822 chain1266-role-service[3471533]:   "validator_profile": true
+2026-08-02T16:22:17.081097+02:00 vmi3371822 chain1266-role-service[3471533]: }
+2026-08-02T16:22:17.082712+02:00 vmi3371822 chain1266-role-service[3471533]: [2026-08-02 14:22:17 UTC] [INFO] [telemetry] Metrics listener bound
+2026-08-02T16:22:17.082712+02:00 vmi3371822 chain1266-role-service[3471533]:   Metadata: {
+2026-08-02T16:22:17.082712+02:00 vmi3371822 chain1266-role-service[3471533]:   "bind_address": "127.0.0.1:6030"
+2026-08-02T16:22:17.082712+02:00 vmi3371822 chain1266-role-service[3471533]: }
+2026-08-02T16:22:17.133188+02:00 vmi3371822 chain1266-role-service[3471533]: [2026-08-02 14:22:17 UTC] [INFO] [main] Metrics server ready
+2026-08-02T16:22:17.133188+02:00 vmi3371822 chain1266-role-service[3471533]:   Metadata: {
+2026-08-02T16:22:17.133188+02:00 vmi3371822 chain1266-role-service[3471533]:   "bind_address": "127.0.0.1:6030"
+2026-08-02T16:22:17.133188+02:00 vmi3371822 chain1266-role-service[3471533]: }
+2026-08-02T16:22:17.133188+02:00 vmi3371822 chain1266-role-service[3471533]: [2026-08-02 14:22:17 UTC] [INFO] [main] Node initialized
+2026-08-02T16:22:17.133188+02:00 vmi3371822 chain1266-role-service[3471533]:   Metadata: {
+2026-08-02T16:22:17.133188+02:00 vmi3371822 chain1266-role-service[3471533]:   "bootstrap_only": false,
+2026-08-02T16:22:17.133188+02:00 vmi3371822 chain1266-role-service[3471533]:   "consensus": "posy/2.2",
+2026-08-02T16:22:17.133188+02:00 vmi3371822 chain1266-role-service[3471533]:   "metrics_bind": "127.0.0.1:6030",
+2026-08-02T16:22:17.133188+02:00 vmi3371822 chain1266-role-service[3471533]:   "metrics_enabled": true,
+2026-08-02T16:22:17.133188+02:00 vmi3371822 chain1266-role-service[3471533]:   "p2p_address": "10.70.10.6:5622",
+2026-08-02T16:22:17.133188+02:00 vmi3371822 chain1266-role-service[3471533]:   "p2p_enabled": true,
+2026-08-02T16:22:17.133188+02:00 vmi3371822 chain1266-role-service[3471533]:   "rpc_enabled": true,
+2026-08-02T16:22:17.133188+02:00 vmi3371822 chain1266-role-service[3471533]:   "rpc_port": 5640
+2026-08-02T16:22:17.133188+02:00 vmi3371822 chain1266-role-service[3471533]: }
+2026-08-02T16:22:17.134354+02:00 vmi3371822 chain1266-role-service[3471533]: Fresh-genesis reset failed closed before consensus startup: fresh-reset marker refuses stale consensus history at /var/lib/synergy/validator/chain-1266/incarnation-4/data/consensus_signing_authorizations.json
+2026-08-02T16:22:17.148603+02:00 vmi3371822 systemd[1]: synergy-chain1266-role@validator-node-06.service: Main process exited, code=exited, status=1/FAILURE
+2026-08-02T16:22:17.148838+02:00 vmi3371822 systemd[1]: synergy-chain1266-role@validator-node-06.service: Failed with result 'exit-code'.
+
+SECTION=FAULTS

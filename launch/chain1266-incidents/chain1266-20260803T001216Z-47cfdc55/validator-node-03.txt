@@ -1,0 +1,13 @@
+SECTION=SYSTEMD
+MainPID=0
+NRestarts=0
+ExecMainStatus=1
+MemoryCurrent=[not set]
+CPUUsageNSec=7173075000
+ActiveState=failed
+SubState=failed
+SECTION=METRICS
+
+SECTION=JOURNAL
+
+SECTION=FAULTS

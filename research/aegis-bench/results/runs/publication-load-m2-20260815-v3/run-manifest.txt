@@ -1,0 +1,14 @@
+classification=MEASURED_AND_DERIVED
+run_id=publication-load-m2-20260815-v3
+mode=load-local
+source_commit=9d3ab807a08ef4cf1077dbc23213e2314ce37c87
+environment_id=macmini-m2-macos26.5.2-rust1.97.1-aarch64-20260814
+genesis_sha256=ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf
+keygen_iterations=30
+operation_iterations=500
+warmup_iterations=10
+cold_processes=30
+completed_utc=2026-08-15T00:15:20Z
+raw_generator_sources_changed_since_measurement=false
+derived_outputs_regenerated_utc=2026-08-15T00:39:07Z
+derived_regeneration_note=Analyzer plot/nullable-summary improvements and report provenance-manifest expansion only; authoritative raw rows unchanged; original manifest retained as SHA256SUMS.measurement-completion

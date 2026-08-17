@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="650" viewBox="0 0 1100 650">
+<rect width="100%" height="100%" fill="white"/>
+<g font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" fill="#1d2733">
+<text x="550.0" y="33.0" font-size="18" text-anchor="middle">Derived Aegis verification calls per successful block</text>
+<line x1="105" y1="565.0" x2="855" y2="565.0" stroke="#d9e0e6"/>
+<text x="95.0" y="569.0" font-size="11" text-anchor="end">10^1</text>
+<line x1="105" y1="440.0" x2="855" y2="440.0" stroke="#d9e0e6"/>
+<text x="95.0" y="444.0" font-size="11" text-anchor="end">10^2</text>
+<line x1="105" y1="315.0" x2="855" y2="315.0" stroke="#d9e0e6"/>
+<text x="95.0" y="319.0" font-size="11" text-anchor="end">10^3</text>
+<line x1="105" y1="190.0" x2="855" y2="190.0" stroke="#d9e0e6"/>
+<text x="95.0" y="194.0" font-size="11" text-anchor="end">10^4</text>
+<line x1="105" y1="65.0" x2="855" y2="65.0" stroke="#d9e0e6"/>
+<text x="95.0" y="69.0" font-size="11" text-anchor="end">10^5</text>
+<line x1="105.0" y1="65" x2="105.0" y2="565" stroke="#eef1f4"/>
+<text x="105.0" y="585.0" font-size="10" text-anchor="middle">4</text>
+<line x1="225.4" y1="65" x2="225.4" y2="565" stroke="#eef1f4"/>
+<text x="225.4" y="585.0" font-size="10" text-anchor="middle">6</text>
+<line x1="271.2" y1="65" x2="271.2" y2="565" stroke="#eef1f4"/>
+<text x="271.2" y="585.0" font-size="10" text-anchor="middle">7</text>
+<line x1="377.1" y1="65" x2="377.1" y2="565" stroke="#eef1f4"/>
+<text x="377.1" y="585.0" font-size="10" text-anchor="middle">10</text>
+<line x1="516.7" y1="65" x2="516.7" y2="565" stroke="#eef1f4"/>
+<text x="516.7" y="585.0" font-size="10" text-anchor="middle">16</text>
+<line x1="649.2" y1="65" x2="649.2" y2="565" stroke="#eef1f4"/>
+<text x="649.2" y="585.0" font-size="10" text-anchor="middle">25</text>
+<line x1="855.0" y1="65" x2="855.0" y2="565" stroke="#eef1f4"/>
+<text x="855.0" y="585.0" font-size="10" text-anchor="middle">50</text>
+<polyline points="105.0,511.1 225.4,491.1 271.2,483.3 377.1,465.1 516.7,440.5 649.2,416.9 855.0,379.8" fill="none" stroke="#355C7D" stroke-width="2"/>
+<circle cx="105.0" cy="511.1" r="3" fill="#355C7D"/>
+<circle cx="225.4" cy="491.1" r="3" fill="#355C7D"/>
+<circle cx="271.2" cy="483.3" r="3" fill="#355C7D"/>
+<circle cx="377.1" cy="465.1" r="3" fill="#355C7D"/>
+<circle cx="516.7" cy="440.5" r="3" fill="#355C7D"/>
+<circle cx="649.2" cy="416.9" r="3" fill="#355C7D"/>
+<circle cx="855.0" cy="379.8" r="3" fill="#355C7D"/>
+<line x1="880" y1="81" x2="910" y2="81" stroke="#355C7D" stroke-width="3"/>
+<text x="917.0" y="85.0" font-size="10" text-anchor="start">T=1</text>
+<polyline points="105.0,457.8 225.4,438.9 271.2,431.5 377.1,413.8 516.7,389.8 649.2,366.5 855.0,329.8" fill="none" stroke="#C06C84" stroke-width="2"/>
+<circle cx="105.0" cy="457.8" r="3" fill="#C06C84"/>
+<circle cx="225.4" cy="438.9" r="3" fill="#C06C84"/>
+<circle cx="271.2" cy="431.5" r="3" fill="#C06C84"/>
+<circle cx="377.1" cy="413.8" r="3" fill="#C06C84"/>
+<circle cx="516.7" cy="389.8" r="3" fill="#C06C84"/>
+<circle cx="649.2" cy="366.5" r="3" fill="#C06C84"/>
+<circle cx="855.0" cy="329.8" r="3" fill="#C06C84"/>
+<line x1="880" y1="105" x2="910" y2="105" stroke="#C06C84" stroke-width="3"/>
+<text x="917.0" y="109.0" font-size="10" text-anchor="start">T=10</text>
+<polyline points="105.0,350.3 225.4,331.9 271.2,324.7 377.1,307.3 516.7,283.6 649.2,260.5 855.0,223.9" fill="none" stroke="#6C5B7B" stroke-width="2"/>
+<circle cx="105.0" cy="350.3" r="3" fill="#6C5B7B"/>
+<circle cx="225.4" cy="331.9" r="3" fill="#6C5B7B"/>
+<circle cx="271.2" cy="324.7" r="3" fill="#6C5B7B"/>
+<circle cx="377.1" cy="307.3" r="3" fill="#6C5B7B"/>
+<circle cx="516.7" cy="283.6" r="3" fill="#6C5B7B"/>
+<circle cx="649.2" cy="260.5" r="3" fill="#6C5B7B"/>
+<circle cx="855.0" cy="223.9" r="3" fill="#6C5B7B"/>
+<line x1="880" y1="129" x2="910" y2="129" stroke="#6C5B7B" stroke-width="3"/>
+<text x="917.0" y="133.0" font-size="10" text-anchor="start">T=100</text>
+<polyline points="105.0,305.7 225.4,287.4 271.2,280.1 377.1,262.8 516.7,239.2 649.2,216.1 855.0,179.5" fill="none" stroke="#F67280" stroke-width="2"/>
+<circle cx="105.0" cy="305.7" r="3" fill="#F67280"/>
+<circle cx="225.4" cy="287.4" r="3" fill="#F67280"/>
+<circle cx="271.2" cy="280.1" r="3" fill="#F67280"/>
+<circle cx="377.1" cy="262.8" r="3" fill="#F67280"/>
+<circle cx="516.7" cy="239.2" r="3" fill="#F67280"/>
+<circle cx="649.2" cy="216.1" r="3" fill="#F67280"/>
+<circle cx="855.0" cy="179.5" r="3" fill="#F67280"/>
+<line x1="880" y1="153" x2="910" y2="153" stroke="#F67280" stroke-width="3"/>
+<text x="917.0" y="157.0" font-size="10" text-anchor="start">T=233</text>
+<text x="480.0" y="630.0" font-size="12" text-anchor="middle">Validator count N (log2 scale)</text>
+<text x="24.0" y="315.0" font-size="12" text-anchor="middle" transform="rotate(-90 24.0 315.0)">Aegis verification calls (log scale)</text>
+</g></svg>

@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="650" viewBox="0 0 1100 650">
+<rect width="100%" height="100%" fill="white"/>
+<g font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" fill="#1d2733">
+<text x="550.0" y="33.0" font-size="18" text-anchor="middle">Controlled verification burst tail latency</text>
+<line x1="105" y1="565.0" x2="855" y2="565.0" stroke="#d9e0e6"/>
+<text x="95.0" y="569.0" font-size="11" text-anchor="end">10^-1</text>
+<line x1="105" y1="398.3" x2="855" y2="398.3" stroke="#d9e0e6"/>
+<text x="95.0" y="402.3" font-size="11" text-anchor="end">10^0</text>
+<line x1="105" y1="231.7" x2="855" y2="231.7" stroke="#d9e0e6"/>
+<text x="95.0" y="235.7" font-size="11" text-anchor="end">10^1</text>
+<line x1="105" y1="65.0" x2="855" y2="65.0" stroke="#d9e0e6"/>
+<text x="95.0" y="69.0" font-size="11" text-anchor="end">10^2</text>
+<line x1="105.0" y1="65" x2="105.0" y2="565" stroke="#eef1f4"/>
+<text x="105.0" y="585.0" font-size="10" text-anchor="middle">1</text>
+<line x1="212.1" y1="65" x2="212.1" y2="565" stroke="#eef1f4"/>
+<text x="212.1" y="585.0" font-size="10" text-anchor="middle">2</text>
+<line x1="319.3" y1="65" x2="319.3" y2="565" stroke="#eef1f4"/>
+<text x="319.3" y="585.0" font-size="10" text-anchor="middle">4</text>
+<line x1="426.4" y1="65" x2="426.4" y2="565" stroke="#eef1f4"/>
+<text x="426.4" y="585.0" font-size="10" text-anchor="middle">8</text>
+<line x1="533.6" y1="65" x2="533.6" y2="565" stroke="#eef1f4"/>
+<text x="533.6" y="585.0" font-size="10" text-anchor="middle">16</text>
+<line x1="747.9" y1="65" x2="747.9" y2="565" stroke="#eef1f4"/>
+<text x="747.9" y="585.0" font-size="10" text-anchor="middle">64</text>
+<line x1="750.3" y1="65" x2="750.3" y2="565" stroke="#eef1f4"/>
+<text x="750.3" y="585.0" font-size="10" text-anchor="middle">65</text>
+<line x1="855.0" y1="65" x2="855.0" y2="565" stroke="#eef1f4"/>
+<text x="855.0" y="585.0" font-size="10" text-anchor="middle">128</text>
+<polyline points="105.0,482.8 212.1,479.1 319.3,435.2 426.4,390.3 533.6,315.7 747.9,193.6 750.3,191.0 855.0,187.4" fill="none" stroke="#355C7D" stroke-width="2"/>
+<circle cx="105.0" cy="482.8" r="3" fill="#355C7D"/>
+<circle cx="212.1" cy="479.1" r="3" fill="#355C7D"/>
+<circle cx="319.3" cy="435.2" r="3" fill="#355C7D"/>
+<circle cx="426.4" cy="390.3" r="3" fill="#355C7D"/>
+<circle cx="533.6" cy="315.7" r="3" fill="#355C7D"/>
+<circle cx="747.9" cy="193.6" r="3" fill="#355C7D"/>
+<circle cx="750.3" cy="191.0" r="3" fill="#355C7D"/>
+<circle cx="855.0" cy="187.4" r="3" fill="#355C7D"/>
+<line x1="880" y1="81" x2="910" y2="81" stroke="#355C7D" stroke-width="3"/>
+<text x="917.0" y="85.0" font-size="10" text-anchor="start">workers1 p95</text>
+<polyline points="105.0,454.5 212.1,470.3 319.3,428.5 426.4,387.9 533.6,311.7 747.9,192.7 750.3,189.9 855.0,185.9" fill="none" stroke="#C06C84" stroke-width="2"/>
+<circle cx="105.0" cy="454.5" r="3" fill="#C06C84"/>
+<circle cx="212.1" cy="470.3" r="3" fill="#C06C84"/>
+<circle cx="319.3" cy="428.5" r="3" fill="#C06C84"/>
+<circle cx="426.4" cy="387.9" r="3" fill="#C06C84"/>
+<circle cx="533.6" cy="311.7" r="3" fill="#C06C84"/>
+<circle cx="747.9" cy="192.7" r="3" fill="#C06C84"/>
+<circle cx="750.3" cy="189.9" r="3" fill="#C06C84"/>
+<circle cx="855.0" cy="185.9" r="3" fill="#C06C84"/>
+<line x1="880" y1="105" x2="910" y2="105" stroke="#C06C84" stroke-width="3"/>
+<text x="917.0" y="109.0" font-size="10" text-anchor="start">workers1 p99</text>
+<polyline points="105.0,517.0 212.1,506.2 319.3,463.6 426.4,406.2 533.6,316.5 747.9,194.2 750.3,193.8 855.0,187.7" fill="none" stroke="#6C5B7B" stroke-width="2"/>
+<circle cx="105.0" cy="517.0" r="3" fill="#6C5B7B"/>
+<circle cx="212.1" cy="506.2" r="3" fill="#6C5B7B"/>
+<circle cx="319.3" cy="463.6" r="3" fill="#6C5B7B"/>
+<circle cx="426.4" cy="406.2" r="3" fill="#6C5B7B"/>
+<circle cx="533.6" cy="316.5" r="3" fill="#6C5B7B"/>
+<circle cx="747.9" cy="194.2" r="3" fill="#6C5B7B"/>
+<circle cx="750.3" cy="193.8" r="3" fill="#6C5B7B"/>
+<circle cx="855.0" cy="187.7" r="3" fill="#6C5B7B"/>
+<line x1="880" y1="129" x2="910" y2="129" stroke="#6C5B7B" stroke-width="3"/>
+<text x="917.0" y="133.0" font-size="10" text-anchor="start">workers2 p95</text>
+<polyline points="105.0,484.8 212.1,492.8 319.3,459.2 426.4,397.3 533.6,305.4 747.9,191.4 750.3,192.4 855.0,178.8" fill="none" stroke="#F67280" stroke-width="2"/>
+<circle cx="105.0" cy="484.8" r="3" fill="#F67280"/>
+<circle cx="212.1" cy="492.8" r="3" fill="#F67280"/>
+<circle cx="319.3" cy="459.2" r="3" fill="#F67280"/>
+<circle cx="426.4" cy="397.3" r="3" fill="#F67280"/>
+<circle cx="533.6" cy="305.4" r="3" fill="#F67280"/>
+<circle cx="747.9" cy="191.4" r="3" fill="#F67280"/>
+<circle cx="750.3" cy="192.4" r="3" fill="#F67280"/>
+<circle cx="855.0" cy="178.8" r="3" fill="#F67280"/>
+<line x1="880" y1="153" x2="910" y2="153" stroke="#F67280" stroke-width="3"/>
+<text x="917.0" y="157.0" font-size="10" text-anchor="start">workers2 p99</text>
+<polyline points="105.0,496.2 212.1,499.3 319.3,474.4 426.4,405.4 533.6,311.6 747.9,192.0 750.3,185.4 855.0,176.0" fill="none" stroke="#2A9D8F" stroke-width="2"/>
+<circle cx="105.0" cy="496.2" r="3" fill="#2A9D8F"/>
+<circle cx="212.1" cy="499.3" r="3" fill="#2A9D8F"/>
+<circle cx="319.3" cy="474.4" r="3" fill="#2A9D8F"/>
+<circle cx="426.4" cy="405.4" r="3" fill="#2A9D8F"/>
+<circle cx="533.6" cy="311.6" r="3" fill="#2A9D8F"/>
+<circle cx="747.9" cy="192.0" r="3" fill="#2A9D8F"/>
+<circle cx="750.3" cy="185.4" r="3" fill="#2A9D8F"/>
+<circle cx="855.0" cy="176.0" r="3" fill="#2A9D8F"/>
+<line x1="880" y1="177" x2="910" y2="177" stroke="#2A9D8F" stroke-width="3"/>
+<text x="917.0" y="181.0" font-size="10" text-anchor="start">workers4 p95</text>
+<polyline points="105.0,472.9 212.1,465.7 319.3,461.3 426.4,400.6 533.6,302.2 747.9,189.2 750.3,168.9 855.0,161.9" fill="none" stroke="#E9C46A" stroke-width="2"/>
+<circle cx="105.0" cy="472.9" r="3" fill="#E9C46A"/>
+<circle cx="212.1" cy="465.7" r="3" fill="#E9C46A"/>
+<circle cx="319.3" cy="461.3" r="3" fill="#E9C46A"/>
+<circle cx="426.4" cy="400.6" r="3" fill="#E9C46A"/>
+<circle cx="533.6" cy="302.2" r="3" fill="#E9C46A"/>
+<circle cx="747.9" cy="189.2" r="3" fill="#E9C46A"/>
+<circle cx="750.3" cy="168.9" r="3" fill="#E9C46A"/>
+<circle cx="855.0" cy="161.9" r="3" fill="#E9C46A"/>
+<line x1="880" y1="201" x2="910" y2="201" stroke="#E9C46A" stroke-width="3"/>
+<text x="917.0" y="205.0" font-size="10" text-anchor="start">workers4 p99</text>
+<text x="480.0" y="630.0" font-size="12" text-anchor="middle">Concurrent verification attempts (log2 scale)</text>
+<text x="24.0" y="315.0" font-size="12" text-anchor="middle" transform="rotate(-90 24.0 315.0)">Burst wall latency (milliseconds, log scale)</text>
+</g></svg>

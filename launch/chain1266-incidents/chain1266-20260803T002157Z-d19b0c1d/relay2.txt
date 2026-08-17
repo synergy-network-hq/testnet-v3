@@ -1,0 +1,654 @@
+SECTION=SYSTEMD
+MainPID=1212939
+NRestarts=0
+ExecMainStatus=0
+MemoryCurrent=462733312
+CPUUsageNSec=1813764924000
+ActiveState=active
+SubState=running
+ExecutablePath=/opt/synergy/chain1266/releases/chain1266-incarnation-4-rc18/bin/synergy-relayer-node
+ExecutableSHA256=a7d985583bfbabebf3a67d00ba9f2ffc2e7bb58bf26cf1c717dda0d5095bfa1b
+ConfigSHA256=deed4bf2da9f82f53005c5acac01722dd3da8d31aaaf4fb41147c91527ece54b
+GenesisSHA256=ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf
+SECTION=METRICS
+# HELP synergy_node_info Static identity and role labels for this Synergy node.
+# TYPE synergy_node_info gauge
+synergy_node_info{network="synergy-testnet-v3",role="relayer",node_id="relay2",node_name="relay2",validator_address=""} 1
+# HELP synergy_chain_height Latest block height in the shared chain state.
+# TYPE synergy_chain_height gauge
+synergy_chain_height 0
+# HELP synergy_chain_blocks_total Number of blocks currently held in memory.
+# TYPE synergy_chain_blocks_total gauge
+synergy_chain_blocks_total 1
+# HELP synergy_chain_last_block_timestamp_seconds Unix timestamp for the latest block in the shared chain state.
+# TYPE synergy_chain_last_block_timestamp_seconds gauge
+synergy_chain_last_block_timestamp_seconds 1775044800
+# HELP synergy_chain_last_block_age_seconds Age of the latest local block, in seconds.
+# TYPE synergy_chain_last_block_age_seconds gauge
+synergy_chain_last_block_age_seconds 10671715
+# HELP synergy_chain_latest_block_transactions Number of transactions included in the latest local block.
+# TYPE synergy_chain_latest_block_transactions gauge
+synergy_chain_latest_block_transactions 0
+# HELP synergy_chain_latest_block_gas_nwei Total transaction fee units in the latest local block, measured in nWei.
+# TYPE synergy_chain_latest_block_gas_nwei gauge
+synergy_chain_latest_block_gas_nwei 0
+# HELP synergy_chain_latest_block_interval_seconds Seconds between the latest block and its local parent.
+# TYPE synergy_chain_latest_block_interval_seconds gauge
+synergy_chain_latest_block_interval_seconds 0
+# HELP synergy_chain_transactions_total Total number of transactions currently held in local chain state.
+# TYPE synergy_chain_transactions_total gauge
+synergy_chain_transactions_total 0
+# HELP synergy_chain_recent_transactions_total Transactions included in the latest 100 local blocks.
+# TYPE synergy_chain_recent_transactions_total gauge
+synergy_chain_recent_transactions_total 0
+# HELP synergy_chain_recent_avg_block_time_seconds Average block interval across the latest 100 local blocks.
+# TYPE synergy_chain_recent_avg_block_time_seconds gauge
+synergy_chain_recent_avg_block_time_seconds 0.000
+# HELP synergy_chain_recent_avg_transactions_per_block Average transaction count per block across the latest 100 local blocks.
+# TYPE synergy_chain_recent_avg_transactions_per_block gauge
+synergy_chain_recent_avg_transactions_per_block 0.000
+# HELP synergy_chain_recent_avg_gas_nwei_per_block Average transaction fee units per block across the latest 100 local blocks, measured in nWei.
+# TYPE synergy_chain_recent_avg_gas_nwei_per_block gauge
+synergy_chain_recent_avg_gas_nwei_per_block 0.000
+# HELP synergy_chain_block_gas_limit Configured maximum gas per block.
+# TYPE synergy_chain_block_gas_limit gauge
+synergy_chain_block_gas_limit 30000000
+# HELP synergy_chain_recent_gas_utilization_ratio Average recent block gas divided by the configured block gas limit.
+# TYPE synergy_chain_recent_gas_utilization_ratio gauge
+synergy_chain_recent_gas_utilization_ratio 0.000000
+# HELP synergy_validator_registry_total Number of validators tracked in the local registry.
+# TYPE synergy_validator_registry_total gauge
+synergy_validator_registry_total 0
+# HELP synergy_validator_pending_total Number of validator registrations still pending approval.
+# TYPE synergy_validator_pending_total gauge
+synergy_validator_pending_total 0
+# HELP synergy_validator_status_total Number of validators in each status bucket.
+# TYPE synergy_validator_status_total gauge
+synergy_validator_status_total{status="active"} 0
+synergy_validator_status_total{status="inactive"} 0
+synergy_validator_status_total{status="jailed"} 0
+synergy_validator_status_total{status="slashed"} 0
+# HELP synergy_validator_clusters_total Number of validator clusters in the local registry.
+# TYPE synergy_validator_clusters_total gauge
+synergy_validator_clusters_total 0
+# HELP synergy_configured_peer_targets_total Total configured peer bootstrap targets for this node.
+# TYPE synergy_configured_peer_targets_total gauge
+synergy_configured_peer_targets_total 17
+# HELP synergy_live_validator_count Validators currently observed as live over the P2P status path.
+# TYPE synergy_live_validator_count gauge
+synergy_live_validator_count 6
+# HELP synergy_consensus_active_validator_count Validators currently eligible for consensus from live P2P status evidence.
+# TYPE synergy_consensus_active_validator_count gauge
+synergy_consensus_active_validator_count 6
+# HELP synergy_registry_active_validator_count Validators marked active in the local validator registry.
+# TYPE synergy_registry_active_validator_count gauge
+synergy_registry_active_validator_count 0
+# HELP synergy_current_consensus_height Most recent consensus height observed by the local round runner.
+# TYPE synergy_current_consensus_height gauge
+synergy_current_consensus_height 0
+# HELP synergy_current_consensus_round Most recent consensus round observed by the local round runner.
+# TYPE synergy_current_consensus_round gauge
+synergy_current_consensus_round 0
+# HELP synergy_consensus_timeout_mode Current consensus timeout mode, labelled as fast or recovery.
+# TYPE synergy_consensus_timeout_mode gauge
+synergy_consensus_timeout_mode{mode=""} 1
+# HELP synergy_consensus_effective_vote_timeout_seconds Effective vote timeout used for the current consensus round.
+# TYPE synergy_consensus_effective_vote_timeout_seconds gauge
+synergy_consensus_effective_vote_timeout_seconds 0
+# HELP synergy_consensus_votes_collected Votes collected in the most recently observed consensus round.
+# TYPE synergy_consensus_votes_collected gauge
+synergy_consensus_votes_collected 0
+# HELP synergy_consensus_votes_required Votes required for quorum in the most recently observed consensus round.
+# TYPE synergy_consensus_votes_required gauge
+synergy_consensus_votes_required 0
+# HELP synergy_consensus_leader_info Leader identity for the most recently observed consensus round.
+# TYPE synergy_consensus_leader_info gauge
+synergy_consensus_leader_info{leader="",reason=""} 1
+# HELP synergy_proposal_cache_discard_total Cached block proposals discarded because they were unsafe to reuse.
+# TYPE synergy_proposal_cache_discard_total counter
+synergy_proposal_cache_discard_total 0
+# HELP synergy_expired_transaction_drop_total Expired transactions dropped before block proposal construction.
+# TYPE synergy_expired_transaction_drop_total counter
+synergy_expired_transaction_drop_total 0
+# HELP synergy_qrpc_fallback_total qRPC read requests served from last-known-good or fallback state.
+# TYPE synergy_qrpc_fallback_total counter
+synergy_qrpc_fallback_total 0
+# HELP p2p_verified_handshakes_total P2P handshakes successfully verified with the real post-quantum implementation.
+# TYPE p2p_verified_handshakes_total counter
+p2p_verified_handshakes_total{algorithm="ML-DSA-65"} 10
+p2p_verified_handshakes_total{algorithm="FN-DSA-1024"} 7
+# HELP consensus_finalized_height Latest height finalized by the typed validator coordinator.
+# TYPE consensus_finalized_height gauge
+consensus_finalized_height 0
+# HELP consensus_finalized_block_id Identity of the latest block finalized directly by typed consensus.
+# TYPE consensus_finalized_block_id gauge
+consensus_finalized_block_id{block_id=""} 1
+# HELP consensus_finalized_round Round that finalized the latest typed block.
+# TYPE consensus_finalized_round gauge
+consensus_finalized_round 0
+# HELP consensus_finality_interval_seconds Wall-clock interval between the latest two local typed finality commits.
+# TYPE consensus_finality_interval_seconds gauge
+consensus_finality_interval_seconds 0.000000
+# HELP consensus_finality_interval_mean_seconds Mean typed finality interval over the latest 10,000 finalized-block intervals.
+# TYPE consensus_finality_interval_mean_seconds gauge
+consensus_finality_interval_mean_seconds 0.000000
+# HELP consensus_finality_interval_median_seconds Median typed finality interval over the latest 10,000 finalized-block intervals.
+# TYPE consensus_finality_interval_median_seconds gauge
+consensus_finality_interval_median_seconds 0.000000
+# HELP consensus_finality_interval_p95_seconds P95 typed finality interval over the latest 10,000 finalized-block intervals.
+# TYPE consensus_finality_interval_p95_seconds gauge
+consensus_finality_interval_p95_seconds 0.000000
+# HELP consensus_finality_interval_sample_count Number of typed finality intervals retained for direct health qualification.
+# TYPE consensus_finality_interval_sample_count gauge
+consensus_finality_interval_sample_count 0.000000
+# HELP consensus_phase_duration_seconds Most recently completed typed consensus phase duration.
+# TYPE consensus_phase_duration_seconds gauge
+# HELP consensus_startup_phase_info Current typed-consensus startup/readiness phase.
+# TYPE consensus_startup_phase_info gauge
+consensus_startup_phase_info{phase="UNINITIALIZED"} 1
+# HELP consensus_ready One only after recovery, mailbox, peer readiness, and release barrier complete.
+# TYPE consensus_ready gauge
+consensus_ready 0
+# HELP consensus_round_zero_ratio Fraction of locally finalized typed blocks committed in round zero.
+# TYPE consensus_round_zero_ratio gauge
+consensus_round_zero_ratio 0
+# HELP consensus_current_height Current typed consensus height.
+# TYPE consensus_current_height gauge
+consensus_current_height 0
+# HELP consensus_current_round Current typed consensus round.
+# TYPE consensus_current_round gauge
+consensus_current_round 0
+# HELP consensus_prepared_height Height of the current durable prepared certificate.
+# TYPE consensus_prepared_height gauge
+consensus_prepared_height 0
+# HELP consensus_prepared_round Round of the current durable prepared certificate.
+# TYPE consensus_prepared_round gauge
+consensus_prepared_round 0
+# HELP consensus_mailbox_depth Messages in the typed startup buffer and bounded coordinator mailbox quotas.
+# TYPE consensus_mailbox_depth gauge
+consensus_mailbox_depth 0
+# HELP consensus_prepared_candidate Candidate identity held by the latest durable prepared certificate.
+# TYPE consensus_prepared_candidate gauge
+consensus_prepared_candidate{candidate_id=""} 1
+# HELP consensus_highest_qc_height Height of the highest durable typed finality quorum certificate.
+# TYPE consensus_highest_qc_height gauge
+consensus_highest_qc_height 0
+# HELP consensus_highest_tc_round Next round authorized by the highest durable timeout certificate.
+# TYPE consensus_highest_tc_round gauge
+consensus_highest_tc_round 0
+# HELP consensus_highest_qc_block_id Candidate bound by the highest durable finality QC.
+# TYPE consensus_highest_qc_block_id gauge
+consensus_highest_qc_block_id{block_id=""} 1
+# HELP consensus_highest_qc_root Canonical root of the highest durable finality QC.
+# TYPE consensus_highest_qc_root gauge
+consensus_highest_qc_root{root=""} 1
+# HELP consensus_highest_tc_root Canonical root of the highest durable timeout certificate.
+# TYPE consensus_highest_tc_root gauge
+consensus_highest_tc_root{root=""} 1
+# HELP chain1266_desired_state_info Exact verified release, source, artifact, config, Genesis, and state identity.
+# TYPE chain1266_desired_state_info gauge
+chain1266_desired_state_info{release_id="chain1266-incarnation-4-rc18",node_id="relay2",role_profile="relayer_node",chain_id="1266",chain_incarnation="4",genesis_hash="c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",validator_set_root="90c44da3ff3a2d94d9396953ae71baa21727610779531666e4aad6b2d03c71d1",consensus_state_schema_version="4",state_namespace="chain-1266/incarnation-4",testnet_v3_revision="39e0e812f1c97bf9c0f3bb4791c883ecab5ea6ea",synq_revision="3f7886701ffee4303a24fa6c6584b792a5e36254",aegis_revision="b51884a661e3aed4bb242ecbced47f3d8777b313",binary_sha256="a7d985583bfbabebf3a67d00ba9f2ffc2e7bb58bf26cf1c717dda0d5095bfa1b",configuration_sha256="deed4bf2da9f82f53005c5acac01722dd3da8d31aaaf4fb41147c91527ece54b",desired_state_sha256="6bdeec1dcb3c85ffb0b7e828588125dfbdc60121ebf6b046b58bdea22e9898ca",desired_state_signature_sha256="90dcb607c2fd8085d4e9678c27626f2113cd0acf84dabd0f868db53799c7a770",state_root="/var/lib/synergy/testnet-v3/relay2/chain-1266/incarnation-4/data"} 1
+# HELP consensus_messages_received_total Typed consensus messages received by type.
+# TYPE consensus_messages_received_total counter
+# HELP consensus_messages_deduplicated_total Typed consensus messages suppressed as exact replays by type.
+# TYPE consensus_messages_deduplicated_total counter
+# HELP consensus_messages_rejected_precrypto_total Typed messages rejected before PQ verification by reason.
+# TYPE consensus_messages_rejected_precrypto_total counter
+# HELP consensus_rebroadcast_total Typed consensus rebroadcasts by message type.
+# TYPE consensus_rebroadcast_total counter
+# HELP pqc_verification_requests_total Uncached PQ verification jobs submitted to the bounded worker pool.
+# TYPE pqc_verification_requests_total counter
+pqc_verification_requests_total 1250
+# HELP pqc_verification_cache_hits_total Positive PQ verification cache hits.
+# TYPE pqc_verification_cache_hits_total counter
+pqc_verification_cache_hits_total 0
+# HELP pqc_verification_cache_misses_total Positive PQ verification cache misses.
+# TYPE pqc_verification_cache_misses_total counter
+pqc_verification_cache_misses_total 1250
+# HELP pqc_verification_duration_seconds Cumulative worker time spent performing uncached PQ verification.
+# TYPE pqc_verification_duration_seconds counter
+pqc_verification_duration_seconds 0.397537
+# HELP pqc_verification_queue_depth Current bounded PQ verification queue depth.
+# TYPE pqc_verification_queue_depth gauge
+pqc_verification_queue_depth 0
+# HELP pqc_verification_cache_evictions Positive PQ verification cache evictions.
+# TYPE pqc_verification_cache_evictions counter
+pqc_verification_cache_evictions 0
+# HELP pqc_verification_queue_rejections PQ verification jobs rejected by bounded backpressure.
+# TYPE pqc_verification_queue_rejections counter
+pqc_verification_queue_rejections 0
+# HELP consensus_restarts_total Typed coordinator restarts durably observed after the first successful start.
+# TYPE consensus_restarts_total counter
+consensus_restarts_total 0
+# HELP consensus_message_deduplications Total exact typed-consensus envelope deduplications.
+# TYPE consensus_message_deduplications counter
+consensus_message_deduplications 0
+# HELP consensus_precrypto_rejections Total typed messages rejected before PQ verification.
+# TYPE consensus_precrypto_rejections counter
+consensus_precrypto_rejections 0
+# HELP consensus_rebroadcasts Total typed consensus rebroadcasts.
+# TYPE consensus_rebroadcasts counter
+consensus_rebroadcasts 0
+# HELP consensus_restart_count Durable typed-coordinator restart count.
+# TYPE consensus_restart_count counter
+consensus_restart_count 0
+# HELP pqc_verification_requests Uncached PQ verification requests.
+# TYPE pqc_verification_requests counter
+pqc_verification_requests 1250
+# HELP pqc_verification_cache_hits Positive PQ verification cache hits.
+# TYPE pqc_verification_cache_hits counter
+pqc_verification_cache_hits 0
+# HELP pqc_verification_cache_misses Positive PQ verification cache misses.
+# TYPE pqc_verification_cache_misses counter
+pqc_verification_cache_misses 1250
+# HELP pqc_verification_duration Cumulative PQ verification worker duration in seconds.
+# TYPE pqc_verification_duration counter
+pqc_verification_duration 0.397537
+# HELP synergy_mempool_pending_transactions Transactions waiting in the local node transaction pool.
+# TYPE synergy_mempool_pending_transactions gauge
+synergy_mempool_pending_transactions 0
+# HELP synergy_mempool_gas_limit_total Sum of gas limits for transactions waiting in the local transaction pool.
+# TYPE synergy_mempool_gas_limit_total gauge
+synergy_mempool_gas_limit_total 0
+# HELP synergy_mempool_fee_nwei_total Total fee units for transactions waiting in the local transaction pool, measured in nWei.
+# TYPE synergy_mempool_fee_nwei_total gauge
+synergy_mempool_fee_nwei_total 0
+# HELP synergy_mempool_gas_price_nwei Gas price distribution for transactions waiting in the local transaction pool.
+# TYPE synergy_mempool_gas_price_nwei gauge
+synergy_mempool_gas_price_nwei{stat="min"} 0
+synergy_mempool_gas_price_nwei{stat="avg"} 0.000
+synergy_mempool_gas_price_nwei{stat="max"} 0
+# HELP synergy_sync_info Current sync state label for this node.
+# TYPE synergy_sync_info gauge
+synergy_sync_info{state="idle"} 1
+# HELP synergy_sync_in_progress Whether this node is currently syncing, represented as 0 or 1.
+# TYPE synergy_sync_in_progress gauge
+synergy_sync_in_progress 0
+# HELP synergy_sync_highest_block Highest block height observed by the sync manager.
+# TYPE synergy_sync_highest_block gauge
+synergy_sync_highest_block 0
+# HELP synergy_sync_starting_block Block height where the current sync run started.
+# TYPE synergy_sync_starting_block gauge
+synergy_sync_starting_block 0
+# HELP synergy_sync_gap_blocks Difference between the highest observed sync height and this node's local height.
+# TYPE synergy_sync_gap_blocks gauge
+synergy_sync_gap_blocks 0
+# HELP synergy_sync_progress_percent Current sync progress percentage reported by the sync manager.
+# TYPE synergy_sync_progress_percent gauge
+synergy_sync_progress_percent 100.000
+# HELP synergy_p2p_peers_connected Connected P2P peers visible to this node.
+# TYPE synergy_p2p_peers_connected gauge
+synergy_p2p_peers_connected 6
+# HELP synergy_p2p_status_ready_validators Connected validators with status data ready for consensus membership checks.
+# TYPE synergy_p2p_status_ready_validators gauge
+synergy_p2p_status_ready_validators 6
+# HELP synergy_p2p_best_validator_peer_height Best block height reported by connected validator peers.
+# TYPE synergy_p2p_best_validator_peer_height gauge
+synergy_p2p_best_validator_peer_height 0
+# HELP synergy_p2p_peer_info Static peer labels for currently connected peers.
+# TYPE synergy_p2p_peer_info gauge
+# HELP synergy_p2p_peer_height Last block height reported by each connected peer.
+# TYPE synergy_p2p_peer_height gauge
+# HELP synergy_p2p_peer_last_seen_age_seconds Seconds since each connected peer was last seen.
+# TYPE synergy_p2p_peer_last_seen_age_seconds gauge
+# HELP synergy_p2p_peer_status_age_seconds Seconds since each connected peer last sent status data.
+# TYPE synergy_p2p_peer_status_age_seconds gauge
+# HELP synergy_p2p_peer_blocks_sent_total Blocks sent to each connected peer by this process.
+# TYPE synergy_p2p_peer_blocks_sent_total counter
+# HELP synergy_p2p_peer_blocks_received_total Blocks received from each connected peer by this process.
+# TYPE synergy_p2p_peer_blocks_received_total counter
+# HELP synergy_p2p_peer_txs_sent_total Transactions sent to each connected peer by this process.
+# TYPE synergy_p2p_peer_txs_sent_total counter
+# HELP synergy_p2p_peer_txs_received_total Transactions received from each connected peer by this process.
+# TYPE synergy_p2p_peer_txs_received_total counter
+synergy_p2p_peer_info{peer="synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t",direction="incoming",node_id="validator-node-01",validator_address="synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t"} 1
+synergy_p2p_peer_height{peer="synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t"} 0
+synergy_p2p_peer_last_seen_age_seconds{peer="synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t"} 6
+synergy_p2p_peer_status_age_seconds{peer="synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t"} 7
+synergy_p2p_peer_blocks_sent_total{peer="synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t"} 0
+synergy_p2p_peer_blocks_received_total{peer="synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t"} 0
+synergy_p2p_peer_txs_sent_total{peer="synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t"} 0
+synergy_p2p_peer_txs_received_total{peer="synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t"} 0
+synergy_p2p_peer_info{peer="209.145.50.9:5622",direction="outgoing",node_id="observer",validator_address="observer"} 1
+synergy_p2p_peer_height{peer="209.145.50.9:5622"} 0
+synergy_p2p_peer_last_seen_age_seconds{peer="209.145.50.9:5622"} 5
+synergy_p2p_peer_status_age_seconds{peer="209.145.50.9:5622"} 9
+synergy_p2p_peer_blocks_sent_total{peer="209.145.50.9:5622"} 0
+synergy_p2p_peer_blocks_received_total{peer="209.145.50.9:5622"} 0
+synergy_p2p_peer_txs_sent_total{peer="209.145.50.9:5622"} 0
+synergy_p2p_peer_txs_received_total{peer="209.145.50.9:5622"} 0
+synergy_p2p_peer_info{peer="74.208.227.23:5622",direction="incoming",node_id="explorer-indexer",validator_address="explorer-indexer"} 1
+synergy_p2p_peer_height{peer="74.208.227.23:5622"} 0
+synergy_p2p_peer_last_seen_age_seconds{peer="74.208.227.23:5622"} 8
+synergy_p2p_peer_status_age_seconds{peer="74.208.227.23:5622"} 6
+synergy_p2p_peer_blocks_sent_total{peer="74.208.227.23:5622"} 0
+synergy_p2p_peer_blocks_received_total{peer="74.208.227.23:5622"} 0
+synergy_p2p_peer_txs_sent_total{peer="74.208.227.23:5622"} 0
+synergy_p2p_peer_txs_received_total{peer="74.208.227.23:5622"} 0
+synergy_p2p_peer_info{peer="rpc.synergynode.xyz:5623",direction="incoming",node_id="rpc-gateway",validator_address="rpc-gateway"} 1
+synergy_p2p_peer_height{peer="rpc.synergynode.xyz:5623"} 0
+synergy_p2p_peer_last_seen_age_seconds{peer="rpc.synergynode.xyz:5623"} 4
+synergy_p2p_peer_status_age_seconds{peer="rpc.synergynode.xyz:5623"} 5
+synergy_p2p_peer_blocks_sent_total{peer="rpc.synergynode.xyz:5623"} 0
+synergy_p2p_peer_blocks_received_total{peer="rpc.synergynode.xyz:5623"} 0
+synergy_p2p_peer_txs_sent_total{peer="rpc.synergynode.xyz:5623"} 0
+synergy_p2p_peer_txs_received_total{peer="rpc.synergynode.xyz:5623"} 0
+synergy_p2p_peer_info{peer="relay3.synergynode.xyz:5622",direction="outgoing",node_id="relay3",validator_address="relay3"} 1
+synergy_p2p_peer_height{peer="relay3.synergynode.xyz:5622"} 0
+synergy_p2p_peer_last_seen_age_seconds{peer="relay3.synergynode.xyz:5622"} 6
+synergy_p2p_peer_status_age_seconds{peer="relay3.synergynode.xyz:5622"} 8
+synergy_p2p_peer_blocks_sent_total{peer="relay3.synergynode.xyz:5622"} 0
+synergy_p2p_peer_blocks_received_total{peer="relay3.synergynode.xyz:5622"} 0
+synergy_p2p_peer_txs_sent_total{peer="relay3.synergynode.xyz:5622"} 0
+synergy_p2p_peer_txs_received_total{peer="relay3.synergynode.xyz:5622"} 0
+synergy_p2p_peer_info{peer="relay1.synergynode.xyz:5622",direction="incoming",node_id="relay1",validator_address="relay1"} 1
+synergy_p2p_peer_height{peer="relay1.synergynode.xyz:5622"} 0
+synergy_p2p_peer_last_seen_age_seconds{peer="relay1.synergynode.xyz:5622"} 5
+synergy_p2p_peer_status_age_seconds{peer="relay1.synergynode.xyz:5622"} 9
+synergy_p2p_peer_blocks_sent_total{peer="relay1.synergynode.xyz:5622"} 0
+synergy_p2p_peer_blocks_received_total{peer="relay1.synergynode.xyz:5622"} 0
+synergy_p2p_peer_txs_sent_total{peer="relay1.synergynode.xyz:5622"} 0
+synergy_p2p_peer_txs_received_total{peer="relay1.synergynode.xyz:5622"} 0
+# HELP synergy_consensus_config Consensus timing and quorum configuration values.
+# TYPE synergy_consensus_config gauge
+synergy_consensus_config{setting="block_time_secs"} 2
+synergy_consensus_config{setting="vote_timeout_secs"} 2
+synergy_consensus_config{setting="block_timeout_secs"} 6
+synergy_consensus_config{setting="leader_timeout_secs"} 0
+synergy_consensus_config{setting="validator_vote_threshold"} 5
+synergy_consensus_config{setting="min_validators"} 6
+# HELP synergy_validator_blocks_produced_total Blocks produced by each validator according to the local registry.
+# TYPE synergy_validator_blocks_produced_total counter
+# HELP synergy_validator_transactions_validated_total Transactions validated by each validator according to the local registry.
+# TYPE synergy_validator_transactions_validated_total counter
+# HELP synergy_validator_missed_blocks_total Missed blocks recorded for each validator according to the local registry.
+# TYPE synergy_validator_missed_blocks_total counter
+# HELP synergy_validator_average_block_time_seconds Average block time recorded for each validator according to the local registry.
+# TYPE synergy_validator_average_block_time_seconds gauge
+# HELP synergy_validator_uptime_percent Uptime percentage recorded for each validator according to the local registry.
+# TYPE synergy_validator_uptime_percent gauge
+# HELP synergy_validator_synergy_score Synergy score recorded for each validator according to the local registry.
+# TYPE synergy_validator_synergy_score gauge
+# HELP synergy_validator_stake_nwei Stake amount recorded for each validator according to the local registry.
+# TYPE synergy_validator_stake_nwei gauge
+# HELP synergy_validator_consecutive_missed_votes Consecutive missed votes recorded for each validator according to the local registry.
+# TYPE synergy_validator_consecutive_missed_votes gauge
+# HELP synergy_validator_missed_vote_window Rolling missed-vote window recorded for each validator according to the local registry.
+# TYPE synergy_validator_missed_vote_window gauge
+# HELP synergy_validator_equivocation_evidence_total Equivocation evidence count recorded for each validator according to the local registry.
+# TYPE synergy_validator_equivocation_evidence_total counter
+# HELP synergy_node_uptime_seconds Process uptime in seconds.
+# TYPE synergy_node_uptime_seconds counter
+synergy_node_uptime_seconds 14801
+# HELP synergy_process_start_time_seconds Unix timestamp for the current process start time.
+# TYPE synergy_process_start_time_seconds gauge
+synergy_process_start_time_seconds 1785701714
+# HELP coordinated_consensus_mode_info Configured coordinated-round-robin P1 mode and source of its independently verified finality.
+# TYPE coordinated_consensus_mode_info gauge
+coordinated_consensus_mode_info{mode="coordinated_round_robin_v1",coordinator_id="validator-1",source="observer"} 1
+# HELP coordinated_consensus_active One only after the P1 validator worker or non-signing finality observer is installed.
+# TYPE coordinated_consensus_active gauge
+coordinated_consensus_active{source="observer"} 1
+# HELP coordinated_consensus_finalized_height Latest independently verified P1 finalized height; observer values are replicated finality, not database insertion height.
+# TYPE coordinated_consensus_finalized_height gauge
+coordinated_consensus_finalized_height{source="observer"} 411
+# HELP coordinated_consensus_finalized_block_id Digest of the latest independently verified P1 finalized block.
+# TYPE coordinated_consensus_finalized_block_id gauge
+coordinated_consensus_finalized_block_id{source="observer",block_id="0b3c8c22374d977817b96b95099890b29c561c56004a16d10e4945b50154c784"} 1
+# HELP coordinated_consensus_finalized_producer_info Producer and producer round bound by the latest signed P1 coordinator commit.
+# TYPE coordinated_consensus_finalized_producer_info gauge
+coordinated_consensus_finalized_producer_info{source="observer",producer_id="validator-2",producer_round="0"} 1
+
+SECTION=JOURNAL
+2026-08-03T02:21:29.845288+02:00 vmi3231913 chain1266-role-service[1212939]:   "local_network_id": 1266,
+2026-08-03T02:21:29.845288+02:00 vmi3231913 chain1266-role-service[1212939]:   "local_network_magic_bytes": "7661a387",
+2026-08-03T02:21:29.845288+02:00 vmi3231913 chain1266-role-service[1212939]:   "node_id": "bootnode1",
+2026-08-03T02:21:29.845288+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "170.64.187.206:45616",
+2026-08-03T02:21:29.845288+02:00 vmi3231913 chain1266-role-service[1212939]:   "reason": "chain_incarnation differs: expected 4, remote None"
+2026-08-03T02:21:29.845288+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:33.894511+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:33 UTC] [INFO] [p2p] Incoming peer connection
+2026-08-03T02:21:33.894511+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:33.894511+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "157.245.226.240:43022"
+2026-08-03T02:21:33.894511+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:33.953608+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:33 UTC] [WARN] [p2p] Rejecting peer handshake for canonical testnet identity mismatch
+2026-08-03T02:21:33.953608+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:33.953608+02:00 vmi3231913 chain1266-role-service[1212939]:   "local_chain_id": 1266,
+2026-08-03T02:21:33.953608+02:00 vmi3231913 chain1266-role-service[1212939]:   "local_genesis_hash": "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",
+2026-08-03T02:21:33.953608+02:00 vmi3231913 chain1266-role-service[1212939]:   "local_network_id": 1266,
+2026-08-03T02:21:33.953608+02:00 vmi3231913 chain1266-role-service[1212939]:   "local_network_magic_bytes": "7661a387",
+2026-08-03T02:21:33.953608+02:00 vmi3231913 chain1266-role-service[1212939]:   "node_id": "bootnode3",
+2026-08-03T02:21:33.953608+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "157.245.226.240:43022",
+2026-08-03T02:21:33.953608+02:00 vmi3231913 chain1266-role-service[1212939]:   "reason": "chain_incarnation differs: expected 4, remote None"
+2026-08-03T02:21:33.953608+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:35.547825+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:35 UTC] [WARN] [p2p] Failed to dial peer
+2026-08-03T02:21:35.547825+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:35.547825+02:00 vmi3231913 chain1266-role-service[1212939]:   "error": "Connection refused (os error 111)",
+2026-08-03T02:21:35.547825+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "archive.synergynode.xyz:5615",
+2026-08-03T02:21:35.547825+02:00 vmi3231913 chain1266-role-service[1212939]:   "transport": "archive.synergynode.xyz:5615"
+2026-08-03T02:21:35.547825+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:36.060858+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:36 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T02:21:36.060858+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:36.060858+02:00 vmi3231913 chain1266-role-service[1212939]:   "source_peer": "relay3.synergynode.xyz:5622",
+2026-08-03T02:21:36.060858+02:00 vmi3231913 chain1266-role-service[1212939]:   "target": "archive.synergynode.xyz:5615"
+2026-08-03T02:21:36.060858+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:36.061311+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:36 UTC] [INFO] [p2p] Peer disconnected
+2026-08-03T02:21:36.061311+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:36.061311+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "bootnode3.synergynode.xyz:5620"
+2026-08-03T02:21:36.061311+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:36.061617+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:36 UTC] [INFO] [p2p] Peer disconnected
+2026-08-03T02:21:36.061617+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:36.061617+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "bootnode2.synergynode.xyz:5620"
+2026-08-03T02:21:36.061617+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:36.061773+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:36 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T02:21:36.061773+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:36.061773+02:00 vmi3231913 chain1266-role-service[1212939]:   "source_peer": "relay3.synergynode.xyz:5622",
+2026-08-03T02:21:36.061773+02:00 vmi3231913 chain1266-role-service[1212939]:   "target": "bootnode2.synergynode.xyz:5620"
+2026-08-03T02:21:36.061773+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:36.061773+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:36 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T02:21:36.061773+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:36.061773+02:00 vmi3231913 chain1266-role-service[1212939]:   "source_peer": "relay3.synergynode.xyz:5622",
+2026-08-03T02:21:36.061773+02:00 vmi3231913 chain1266-role-service[1212939]:   "target": "bootnode3.synergynode.xyz:5620"
+2026-08-03T02:21:36.061773+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:36.062062+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:36 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T02:21:36.062062+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:36.062062+02:00 vmi3231913 chain1266-role-service[1212939]:   "source_peer": "195.26.241.95:36106",
+2026-08-03T02:21:36.062062+02:00 vmi3231913 chain1266-role-service[1212939]:   "target": "archive.synergynode.xyz:5615"
+2026-08-03T02:21:36.062062+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:36.062062+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:36 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T02:21:36.062062+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:36.062062+02:00 vmi3231913 chain1266-role-service[1212939]:   "source_peer": "195.26.241.95:36106",
+2026-08-03T02:21:36.062062+02:00 vmi3231913 chain1266-role-service[1212939]:   "target": "bootnode2.synergynode.xyz:5620"
+2026-08-03T02:21:36.062062+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:36.062062+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:36 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T02:21:36.062062+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:36.062062+02:00 vmi3231913 chain1266-role-service[1212939]:   "source_peer": "195.26.241.95:36106",
+2026-08-03T02:21:36.062062+02:00 vmi3231913 chain1266-role-service[1212939]:   "target": "bootnode3.synergynode.xyz:5620"
+2026-08-03T02:21:36.062062+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:36.169450+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:36 UTC] [INFO] [p2p] Received status
+2026-08-03T02:21:36.169450+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:36.169450+02:00 vmi3231913 chain1266-role-service[1212939]:   "height": 0,
+2026-08-03T02:21:36.169450+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "195.26.241.95:36106"
+2026-08-03T02:21:36.169450+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:36.170035+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:36 UTC] [INFO] [p2p] Peer disconnected
+2026-08-03T02:21:36.170035+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:36.170035+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "bootnode1.synergynode.xyz:5620"
+2026-08-03T02:21:36.170035+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:37.093544+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:37 UTC] [INFO] [p2p] Received status
+2026-08-03T02:21:37.093544+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:37.093544+02:00 vmi3231913 chain1266-role-service[1212939]:   "height": 0,
+2026-08-03T02:21:37.093544+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "10.70.10.1:56992"
+2026-08-03T02:21:37.093544+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:37.314516+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:37 UTC] [INFO] [p2p] Received status
+2026-08-03T02:21:37.314516+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:37.314516+02:00 vmi3231913 chain1266-role-service[1212939]:   "height": 0,
+2026-08-03T02:21:37.314516+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "relay3.synergynode.xyz:5622"
+2026-08-03T02:21:37.314516+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:38.280738+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:38 UTC] [INFO] [p2p] Received status
+2026-08-03T02:21:38.280738+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:38.280738+02:00 vmi3231913 chain1266-role-service[1212939]:   "height": 0,
+2026-08-03T02:21:38.280738+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "167.86.83.83:58152"
+2026-08-03T02:21:38.280738+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:39.266411+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:39 UTC] [INFO] [p2p] Received status
+2026-08-03T02:21:39.266411+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:39.266411+02:00 vmi3231913 chain1266-role-service[1212939]:   "height": 0,
+2026-08-03T02:21:39.266411+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "209.145.50.9:5622"
+2026-08-03T02:21:39.266411+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:39.428621+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:39 UTC] [INFO] [p2p] Received status
+2026-08-03T02:21:39.428621+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:39.428621+02:00 vmi3231913 chain1266-role-service[1212939]:   "height": 0,
+2026-08-03T02:21:39.428621+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "74.208.227.23:56120"
+2026-08-03T02:21:39.428621+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:40.208417+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:40 UTC] [INFO] [p2p] Incoming peer connection
+2026-08-03T02:21:40.208417+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:40.208417+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "146.190.210.121:47050"
+2026-08-03T02:21:40.208417+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:40.264670+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:40 UTC] [WARN] [p2p] Rejecting peer handshake for canonical testnet identity mismatch
+2026-08-03T02:21:40.264670+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:40.264670+02:00 vmi3231913 chain1266-role-service[1212939]:   "local_chain_id": 1266,
+2026-08-03T02:21:40.264670+02:00 vmi3231913 chain1266-role-service[1212939]:   "local_genesis_hash": "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",
+2026-08-03T02:21:40.264670+02:00 vmi3231913 chain1266-role-service[1212939]:   "local_network_id": 1266,
+2026-08-03T02:21:40.264670+02:00 vmi3231913 chain1266-role-service[1212939]:   "local_network_magic_bytes": "7661a387",
+2026-08-03T02:21:40.264670+02:00 vmi3231913 chain1266-role-service[1212939]:   "node_id": "bootnode2",
+2026-08-03T02:21:40.264670+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "146.190.210.121:47050",
+2026-08-03T02:21:40.264670+02:00 vmi3231913 chain1266-role-service[1212939]:   "reason": "chain_incarnation differs: expected 4, remote None"
+2026-08-03T02:21:40.264670+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:43.942048+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:43 UTC] [INFO] [p2p] Incoming peer connection
+2026-08-03T02:21:43.942048+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:43.942048+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "170.64.187.206:60024"
+2026-08-03T02:21:43.942048+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:44.142974+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:44 UTC] [WARN] [p2p] Rejecting peer handshake for canonical testnet identity mismatch
+2026-08-03T02:21:44.142974+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:44.142974+02:00 vmi3231913 chain1266-role-service[1212939]:   "local_chain_id": 1266,
+2026-08-03T02:21:44.142974+02:00 vmi3231913 chain1266-role-service[1212939]:   "local_genesis_hash": "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",
+2026-08-03T02:21:44.142974+02:00 vmi3231913 chain1266-role-service[1212939]:   "local_network_id": 1266,
+2026-08-03T02:21:44.142974+02:00 vmi3231913 chain1266-role-service[1212939]:   "local_network_magic_bytes": "7661a387",
+2026-08-03T02:21:44.142974+02:00 vmi3231913 chain1266-role-service[1212939]:   "node_id": "bootnode1",
+2026-08-03T02:21:44.142974+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "170.64.187.206:60024",
+2026-08-03T02:21:44.142974+02:00 vmi3231913 chain1266-role-service[1212939]:   "reason": "chain_incarnation differs: expected 4, remote None"
+2026-08-03T02:21:44.142974+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:45.986757+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:45 UTC] [WARN] [p2p] Failed to dial peer
+2026-08-03T02:21:45.986757+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:45.986757+02:00 vmi3231913 chain1266-role-service[1212939]:   "error": "Connection refused (os error 111)",
+2026-08-03T02:21:45.986757+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "archive.synergynode.xyz:5615",
+2026-08-03T02:21:45.986757+02:00 vmi3231913 chain1266-role-service[1212939]:   "transport": "archive.synergynode.xyz:5615"
+2026-08-03T02:21:45.986757+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:46.403702+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:46 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T02:21:46.403702+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:46.403702+02:00 vmi3231913 chain1266-role-service[1212939]:   "source_peer": "195.26.241.95:36106",
+2026-08-03T02:21:46.403702+02:00 vmi3231913 chain1266-role-service[1212939]:   "target": "archive.synergynode.xyz:5615"
+2026-08-03T02:21:46.403702+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:46.404128+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:46 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T02:21:46.404128+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:46.404128+02:00 vmi3231913 chain1266-role-service[1212939]:   "source_peer": "195.26.241.95:36106",
+2026-08-03T02:21:46.404128+02:00 vmi3231913 chain1266-role-service[1212939]:   "target": "bootnode1.synergynode.xyz:5620"
+2026-08-03T02:21:46.404128+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:46.404390+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:46 UTC] [INFO] [p2p] Peer disconnected
+2026-08-03T02:21:46.404390+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:46.404390+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "bootnode3.synergynode.xyz:5620"
+2026-08-03T02:21:46.404390+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:46.404623+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:46 UTC] [INFO] [p2p] Peer disconnected
+2026-08-03T02:21:46.404623+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:46.404623+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "bootnode2.synergynode.xyz:5620"
+2026-08-03T02:21:46.404623+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:46.405181+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:46 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T02:21:46.405181+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:46.405181+02:00 vmi3231913 chain1266-role-service[1212939]:   "source_peer": "195.26.241.95:36106",
+2026-08-03T02:21:46.405181+02:00 vmi3231913 chain1266-role-service[1212939]:   "target": "bootnode2.synergynode.xyz:5620"
+2026-08-03T02:21:46.405181+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:46.405181+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:46 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T02:21:46.405181+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:46.405181+02:00 vmi3231913 chain1266-role-service[1212939]:   "source_peer": "195.26.241.95:36106",
+2026-08-03T02:21:46.405181+02:00 vmi3231913 chain1266-role-service[1212939]:   "target": "bootnode3.synergynode.xyz:5620"
+2026-08-03T02:21:46.405181+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:46.575220+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:46 UTC] [INFO] [p2p] Received status
+2026-08-03T02:21:46.575220+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:46.575220+02:00 vmi3231913 chain1266-role-service[1212939]:   "height": 0,
+2026-08-03T02:21:46.575220+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "209.145.50.9:5622"
+2026-08-03T02:21:46.575220+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:46.685541+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:46 UTC] [INFO] [p2p] Received status
+2026-08-03T02:21:46.685541+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:46.685541+02:00 vmi3231913 chain1266-role-service[1212939]:   "height": 0,
+2026-08-03T02:21:46.685541+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "195.26.241.95:36106"
+2026-08-03T02:21:46.685541+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:46.686259+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:46 UTC] [INFO] [p2p] Peer disconnected
+2026-08-03T02:21:46.686259+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:46.686259+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "bootnode1.synergynode.xyz:5620"
+2026-08-03T02:21:46.686259+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:47.610328+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:47 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T02:21:47.610328+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:47.610328+02:00 vmi3231913 chain1266-role-service[1212939]:   "source_peer": "relay3.synergynode.xyz:5622",
+2026-08-03T02:21:47.610328+02:00 vmi3231913 chain1266-role-service[1212939]:   "target": "archive.synergynode.xyz:5615"
+2026-08-03T02:21:47.610328+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:47.611146+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:47 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T02:21:47.611146+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:47.611146+02:00 vmi3231913 chain1266-role-service[1212939]:   "source_peer": "relay3.synergynode.xyz:5622",
+2026-08-03T02:21:47.611146+02:00 vmi3231913 chain1266-role-service[1212939]:   "target": "bootnode1.synergynode.xyz:5620"
+2026-08-03T02:21:47.611146+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:47.611146+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:47 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T02:21:47.611146+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:47.611146+02:00 vmi3231913 chain1266-role-service[1212939]:   "source_peer": "relay3.synergynode.xyz:5622",
+2026-08-03T02:21:47.611146+02:00 vmi3231913 chain1266-role-service[1212939]:   "target": "bootnode2.synergynode.xyz:5620"
+2026-08-03T02:21:47.611146+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:47.611146+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:47 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T02:21:47.611146+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:47.611146+02:00 vmi3231913 chain1266-role-service[1212939]:   "source_peer": "relay3.synergynode.xyz:5622",
+2026-08-03T02:21:47.611146+02:00 vmi3231913 chain1266-role-service[1212939]:   "target": "bootnode3.synergynode.xyz:5620"
+2026-08-03T02:21:47.611146+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:47.874242+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:47 UTC] [INFO] [p2p] Received status
+2026-08-03T02:21:47.874242+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:47.874242+02:00 vmi3231913 chain1266-role-service[1212939]:   "height": 0,
+2026-08-03T02:21:47.874242+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "relay3.synergynode.xyz:5622"
+2026-08-03T02:21:47.874242+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:48.788574+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:48 UTC] [INFO] [p2p] Received status
+2026-08-03T02:21:48.788574+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:48.788574+02:00 vmi3231913 chain1266-role-service[1212939]:   "height": 0,
+2026-08-03T02:21:48.788574+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "10.70.10.1:56992"
+2026-08-03T02:21:48.788574+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:48.790053+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:48 UTC] [INFO] [p2p] Incoming peer connection
+2026-08-03T02:21:48.790053+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:48.790053+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "157.245.226.240:57118"
+2026-08-03T02:21:48.790053+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:49.010333+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:49 UTC] [INFO] [p2p] Received status
+2026-08-03T02:21:49.010333+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:49.010333+02:00 vmi3231913 chain1266-role-service[1212939]:   "height": 0,
+2026-08-03T02:21:49.010333+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "74.208.227.23:56120"
+2026-08-03T02:21:49.010333+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:49.977772+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:49 UTC] [INFO] [p2p] Peer disconnected
+2026-08-03T02:21:49.977772+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:49.977772+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "157.245.226.240:57118"
+2026-08-03T02:21:49.977772+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:50.085523+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:50 UTC] [INFO] [p2p] Received status
+2026-08-03T02:21:50.085523+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:50.085523+02:00 vmi3231913 chain1266-role-service[1212939]:   "height": 0,
+2026-08-03T02:21:50.085523+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "167.86.83.83:58152"
+2026-08-03T02:21:50.085523+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:54.236216+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:54 UTC] [INFO] [p2p] Incoming peer connection
+2026-08-03T02:21:54.236216+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:54.236216+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "146.190.210.121:39430"
+2026-08-03T02:21:54.236216+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:54.291945+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:54 UTC] [WARN] [p2p] Rejecting peer handshake for canonical testnet identity mismatch
+2026-08-03T02:21:54.291945+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:54.291945+02:00 vmi3231913 chain1266-role-service[1212939]:   "local_chain_id": 1266,
+2026-08-03T02:21:54.291945+02:00 vmi3231913 chain1266-role-service[1212939]:   "local_genesis_hash": "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",
+2026-08-03T02:21:54.291945+02:00 vmi3231913 chain1266-role-service[1212939]:   "local_network_id": 1266,
+2026-08-03T02:21:54.291945+02:00 vmi3231913 chain1266-role-service[1212939]:   "local_network_magic_bytes": "7661a387",
+2026-08-03T02:21:54.291945+02:00 vmi3231913 chain1266-role-service[1212939]:   "node_id": "bootnode2",
+2026-08-03T02:21:54.291945+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "146.190.210.121:39430",
+2026-08-03T02:21:54.291945+02:00 vmi3231913 chain1266-role-service[1212939]:   "reason": "chain_incarnation differs: expected 4, remote None"
+2026-08-03T02:21:54.291945+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:54.661719+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:54 UTC] [INFO] [p2p] Incoming peer connection
+2026-08-03T02:21:54.661719+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:54.661719+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "170.64.187.206:43976"
+2026-08-03T02:21:54.661719+02:00 vmi3231913 chain1266-role-service[1212939]: }
+2026-08-03T02:21:54.867073+02:00 vmi3231913 chain1266-role-service[1212939]: [2026-08-03 00:21:54 UTC] [WARN] [p2p] Rejecting peer handshake for canonical testnet identity mismatch
+2026-08-03T02:21:54.867073+02:00 vmi3231913 chain1266-role-service[1212939]:   Metadata: {
+2026-08-03T02:21:54.867073+02:00 vmi3231913 chain1266-role-service[1212939]:   "local_chain_id": 1266,
+2026-08-03T02:21:54.867073+02:00 vmi3231913 chain1266-role-service[1212939]:   "local_genesis_hash": "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",
+2026-08-03T02:21:54.867073+02:00 vmi3231913 chain1266-role-service[1212939]:   "local_network_id": 1266,
+2026-08-03T02:21:54.867073+02:00 vmi3231913 chain1266-role-service[1212939]:   "local_network_magic_bytes": "7661a387",
+2026-08-03T02:21:54.867073+02:00 vmi3231913 chain1266-role-service[1212939]:   "node_id": "bootnode1",
+2026-08-03T02:21:54.867073+02:00 vmi3231913 chain1266-role-service[1212939]:   "peer": "170.64.187.206:43976",
+2026-08-03T02:21:54.867073+02:00 vmi3231913 chain1266-role-service[1212939]:   "reason": "chain_incarnation differs: expected 4, remote None"
+2026-08-03T02:21:54.867073+02:00 vmi3231913 chain1266-role-service[1212939]: }
+
+SECTION=FAULTS

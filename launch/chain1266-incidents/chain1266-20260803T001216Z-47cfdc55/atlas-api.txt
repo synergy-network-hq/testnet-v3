@@ -1,0 +1,15 @@
+SECTION=SYSTEMD
+MainPID=1124841
+NRestarts=0
+ExecMainStatus=0
+MemoryCurrent=59797504
+CPUUsageNSec=32272791000
+ActiveState=active
+SubState=running
+ExecutablePath=/usr/bin/node
+ExecutableSHA256=93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068
+SECTION=METRICS
+
+SECTION=JOURNAL
+
+SECTION=FAULTS

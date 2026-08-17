@@ -1,0 +1,17 @@
+SECTION=SYSTEMD
+MainPID=0
+NRestarts=0
+ExecMainStatus=1
+MemoryCurrent=[not set]
+CPUUsageNSec=844965000
+ActiveState=failed
+SubState=failed
+SECTION=METRICS
+
+SECTION=JOURNAL
+Hint: You are currently not seeing messages from other users and the system.
+      Users in groups 'adm', 'systemd-journal' can see all messages.
+      Pass -q to turn off this notice.
+-- No entries --
+
+SECTION=FAULTS

@@ -1,0 +1,97 @@
+{
+  "assumptions": [
+    "one successful coordinated_round_robin_v1 block without timeout, retry, replay, or sync traffic",
+    "the coordinator has N-1 connected remote validator peers",
+    "the assigned producer receives the committed package after proposing",
+    "the shared positive-result cache retains the exact assignment, block, commit, and transaction signatures",
+    "frame-byte inputs are medians of exact locally serialized production NetworkMessage values",
+    "modeled verification wall time is not block, round, CPU, or finality latency"
+  ],
+  "classification": "DERIVED",
+  "configured_validator_count": 6,
+  "formulas": {
+    "aggregate_frame_bytes": "(N-1)*assignment_frame+proposal_frame+(N-1)*committed_frame",
+    "consensus_aegis_verify_calls": "5*N+2",
+    "consensus_signatures_created": "3",
+    "network_transmissions": "2*N-1",
+    "positive_cache_hits": "2*N+3+T",
+    "primitive_cache_misses": "3*N-1+N*T",
+    "transaction_aegis_verify_calls": "(N+1)*T"
+  },
+  "inputs": [
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/publication-load-m2-20260815-v2/raw/publication-load-m2-20260815-v2-load-workers1.csv",
+      "rows": 800,
+      "sha256": "2cfbc581ebc9eecbdfaae45378254da0c1e516cd523b3e4ac120eb90ec8a5140"
+    },
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/publication-load-m2-20260815-v2/raw/publication-load-m2-20260815-v2-load-workers2.csv",
+      "rows": 800,
+      "sha256": "bc27804bc5ea24da85b940ae3c6a2638d69a74397ae1ec7293788150bdc36eef"
+    },
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/publication-load-m2-20260815-v2/raw/publication-load-m2-20260815-v2-load-workers4.csv",
+      "rows": 800,
+      "sha256": "d947520cf8ebf9749051353422be041f22270729758b84769ba60930935bfdaa"
+    },
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/publication-load-m2-20260815-v3/raw/publication-load-m2-20260815-v3-load-workers1.csv",
+      "rows": 800,
+      "sha256": "483ee2a27fa1a0c0b89e86f2469a2ef8be95543f0c5cff1f97360683adc57508"
+    },
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/publication-load-m2-20260815-v3/raw/publication-load-m2-20260815-v3-load-workers2.csv",
+      "rows": 800,
+      "sha256": "b0554e34fac28bee81742b4da42067ee4a817cc1be3a07952937b6a526dbbd33"
+    },
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/publication-load-m2-20260815-v3/raw/publication-load-m2-20260815-v3-load-workers4.csv",
+      "rows": 800,
+      "sha256": "76963da1ba6d2ce1ee679759c91ece1202d295c7ee9c92fea511fe1e6de4a7a6"
+    },
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/publication-m2-20260815-v1/raw/publication-m2-20260815-v1-aegis.csv",
+      "rows": 55800,
+      "sha256": "e9ece79a0e4c24b99991fe8134dbaf0c3d57f969fe56e7b0bcd14e9580b5eca4"
+    },
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/publication-m2-20260815-v1/raw/publication-m2-20260815-v1-cold-start.csv",
+      "rows": 210,
+      "sha256": "e555a7b5eb53622caba87d364c1b4c0ff5a63e2384f0398df177e2f81de8f9cd"
+    },
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/publication-m2-20260815-v1/raw/publication-m2-20260815-v1-lifecycle.csv",
+      "rows": 3160,
+      "sha256": "8e85adf1997e1ba8b675ba03cfcba1678347ffa8f0782771531695c6a6278587"
+    },
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/publication-m2-20260815-v1/raw/publication-m2-20260815-v1-load-workers1.csv",
+      "rows": 800,
+      "sha256": "77fdc3c083a62885c08f928b00bc34900a600f5d0d05bae8c2693a33869f1e51"
+    },
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/publication-m2-20260815-v1/raw/publication-m2-20260815-v1-load-workers2.csv",
+      "rows": 800,
+      "sha256": "ede9ee4ead727b12b0c76a55119dd7cd77fd940f00f3a675c56d0aa0c6fa4389"
+    },
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/publication-m2-20260815-v1/raw/publication-m2-20260815-v1-load-workers4.csv",
+      "rows": 800,
+      "sha256": "44240134d96148fe3003408d73423ed355c64ffa373c5262251a70e31ae39d7a"
+    },
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/publication-m2-20260815-v1/raw/publication-m2-20260815-v1-primitive.csv",
+      "rows": 58350,
+      "sha256": "6f17313973f1d37a46fb2bc87f7c073a8964162bcc99bc7e7338654c6bcea91e"
+    },
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/publication-m2-20260815-v1/raw/publication-m2-20260815-v1-protocol.csv",
+      "rows": 79510,
+      "sha256": "c8dd7ef155701e10933f95eb1f29e6fd5ae613d809a9162502b0afec0ca41841"
+    }
+  ],
+  "measured_aegis_cache_hit_median_ns": 7333.0,
+  "measured_aegis_cache_miss_median_ns": 126000.0,
+  "publication_raw_row_count": 204230,
+  "source_commit": "9d3ab807a08ef4cf1077dbc23213e2314ce37c87"
+}

@@ -94,8 +94,8 @@ def socket_manifest(run_id=None) -> dict:
             ports = socket_ports(role)
             entries.extend(
                 [
-                    {"role": role, "purpose": "http_rpc", "protocol": "tcp", "bind": "127.0.0.1", "port": ports["http_rpc"], "required": True},
-                    {"role": role, "purpose": "websocket_rpc", "protocol": "tcp", "bind": "127.0.0.1", "port": ports["websocket_rpc"], "required": True},
+                    {"role": role, "purpose": "http_rpc", "protocol": "tcp", "bind": "127.0.0.1", "port": ports["http_rpc"], "required": role != "observer"},
+                    {"role": role, "purpose": "websocket_rpc", "protocol": "tcp", "bind": "127.0.0.1", "port": ports["websocket_rpc"], "required": role != "observer"},
                     {"role": role, "purpose": "grpc", "protocol": "tcp", "bind": "127.0.0.1", "port": ports["grpc"], "required": False},
                     {"role": role, "purpose": "metrics", "protocol": "tcp", "bind": NODE_IPS[role], "port": ports["metrics"], "required": True},
                     {"role": role, "purpose": "p2p_tcp", "protocol": "tcp", "bind": NODE_IPS[role], "port": ports["p2p_tcp"], "required": True},
@@ -127,6 +127,8 @@ def socket_manifest(run_id=None) -> dict:
         "disabled_configuration_fields": {
             "grpc": "no gRPC listener implementation exists in this runtime",
             "discovery_tcp": "private qualification uses explicit P2P peers; this runtime has no discovery listener implementation",
+            "observer_http_rpc": "ObserverLight does not expose the generic HTTP RPC server",
+            "observer_websocket_rpc": "ObserverLight does not expose the generic WebSocket RPC server",
         },
     }
 
@@ -291,6 +293,11 @@ def rewrite_config(source: pathlib.Path, target: pathlib.Path, genesis: dict, ge
     text = re.sub(r"^ws_port = [0-9]+$", f"ws_port = {ports['websocket_rpc']}", text, flags=re.MULTILINE)
     text = re.sub(r"^grpc_port = [0-9]+$", f"grpc_port = {ports['grpc']}", text, flags=re.MULTILINE)
     text = re.sub(r"^enable_grpc = true$", "enable_grpc = false", text, flags=re.MULTILINE)
+    if node_id == "observer":
+        # ObserverLight exposes its finalized-data P2P and metrics surfaces;
+        # its compiled role profile intentionally does not start generic RPC.
+        text = re.sub(r"^enable_http = true$", "enable_http = false", text, flags=re.MULTILINE)
+        text = re.sub(r"^enable_ws = true$", "enable_ws = false", text, flags=re.MULTILINE)
     text = re.sub(
         r'^metrics_bind = ".*"$',
         f'metrics_bind = "{node_ip}:{ports["metrics"]}"',
@@ -356,6 +363,8 @@ def configured_listeners(path: pathlib.Path) -> tuple[str, dict[str, tuple[str, 
             "discovery_tcp": (discovery_bind, discovery_port),
         },
         {
+            "http_rpc": config_value(text, "rpc", "enable_http") == "true",
+            "websocket_rpc": config_value(text, "rpc", "enable_ws") == "true",
             "discovery_tcp": config_value(text, "p2p", "enable_discovery") == "true",
             "grpc": config_value(text, "rpc", "enable_grpc") == "true",
         },

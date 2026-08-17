@@ -1,0 +1,84 @@
+{
+  "classification": "MEASURED",
+  "environment_id": "macmini-m2-macos26.5.2-rust1.97.1-aarch64-20260814",
+  "captured_at_utc": "2026-08-14T22:57:16Z",
+  "host": {
+    "model": "Mac mini Mac14,3",
+    "chip": "Apple M2",
+    "architecture": "arm64",
+    "physical_cores": 8,
+    "logical_cores": 8,
+    "core_topology": "4 performance plus 4 efficiency cores",
+    "memory_bytes": 8589934592,
+    "virtualized": false,
+    "power_source": "AC",
+    "low_power_mode": false
+  },
+  "operating_system": {
+    "name": "macOS",
+    "version": "26.5.2",
+    "build": "25F84",
+    "kernel": "Darwin 25.5.0"
+  },
+  "toolchain": {
+    "rustc": "1.97.1 (8bab26f4f 2026-07-14)",
+    "cargo": "1.97.1 (c980f4866 2026-06-30)",
+    "llvm": "22.1.6",
+    "c_compiler": "Apple clang 21.0.0 (clang-2100.1.1.101)",
+    "target": "aarch64-apple-darwin"
+  },
+  "build": {
+    "profile": "release",
+    "opt_level": 3,
+    "debug": false,
+    "strip": "symbols",
+    "lto": false,
+    "codegen_units": 16,
+    "panic": "unwind",
+    "aegis_features": ["mlkem", "mldsa", "fndsa", "security"],
+    "aegis_neon_feature": false,
+    "note": "The compiler target exposes NEON, but the production aegis-pqvm dependency does not enable its neon feature; clean portable C symbols are measured."
+  },
+  "source": {
+    "repository": "testnet-v3",
+    "branch": "release/chain1266-consensus-invariants",
+    "commit": "9d3ab807a08ef4cf1077dbc23213e2314ce37c87",
+    "runtime_subtree_dirty": false,
+    "whole_worktree_dirty": true,
+    "whole_worktree_note": "Unrelated operator documents, release artifacts, Genesis contract, and control scripts were already modified or untracked and were preserved.",
+    "pqc_rs_sha256": "345e66f01783e12a50369442118ef4f7d9c2cf47ed14a1f375552bf414ef79a7",
+    "aegis_wrapper_sha256": "a34a98fc25c4bd1c6071e7bd0bbe7e8d12d5606d467f4f07622f91ee515edcba",
+    "runtime_lock_sha256": "f139fdd4e58e141b35eaefcb3b36c0814a646ef21b9315ae328b4c065917bf40"
+  },
+  "chain_binding": {
+    "chain_id": 1266,
+    "chain_incarnation": 4,
+    "genesis_path": "launch/chain1266-promotable-rc30/release/genesis.json",
+    "genesis_file_sha256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf"
+  },
+  "layout_shim": {
+    "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/synq-language",
+    "target": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/runtime/synq-language",
+    "tracked_source_changed": false,
+    "reason": "The workspace manifests retained their pre-consolidation sibling path."
+  },
+  "publication_runs": {
+    "primary": "publication-m2-20260815-v1",
+    "independent_load_replications": [
+      "publication-load-m2-20260815-v2",
+      "publication-load-m2-20260815-v3"
+    ],
+    "primary_environment_load_averages": {
+      "pre_build_one_minute": 2.55,
+      "pre_measurement_one_minute": 4.16,
+      "post_measurement_one_minute": 2.89
+    },
+    "environment_note": "Interactive desktop background load was present and is retained as a limitation."
+  },
+  "unmeasured_environment_fields": {
+    "cpu_frequency": "NOT_MEASURED: Apple Silicon does not expose a stable fixed frequency to this harness",
+    "temperature": "NOT_MEASURED: no non-privileged stable sensor interface",
+    "energy": "NOT_MEASURED: no authorized calibrated power counter",
+    "performance_counters": "NOT_MEASURED: no authorized PMU collection"
+  }
+}

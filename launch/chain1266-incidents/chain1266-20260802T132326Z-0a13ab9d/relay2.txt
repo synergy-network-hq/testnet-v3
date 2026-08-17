@@ -1,0 +1,15 @@
+SECTION=SYSTEMD
+MainPID=0
+NRestarts=0
+ExecMainStatus=0
+MemoryCurrent=[not set]
+CPUUsageNSec=[not set]
+ActiveState=inactive
+SubState=dead
+ConfigSHA256=deed4bf2da9f82f53005c5acac01722dd3da8d31aaaf4fb41147c91527ece54b
+GenesisSHA256=ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf
+SECTION=METRICS
+
+SECTION=JOURNAL
+
+SECTION=FAULTS

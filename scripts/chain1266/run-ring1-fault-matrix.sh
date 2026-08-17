@@ -55,7 +55,7 @@ import subprocess
 import sys
 
 runtime, log, test_name = sys.argv[1:]
-command = ["cargo", "test", "--lib", test_name, "--", "--exact", "--nocapture"]
+command = ["cargo", "test", "--release", "--lib", test_name, "--", "--exact", "--nocapture"]
 environment = dict(os.environ)
 environment["CARGO_BUILD_JOBS"] = "1"
 with pathlib.Path(log).open("ab") as output:
@@ -68,7 +68,7 @@ with pathlib.Path(log).open("ab") as output:
         start_new_session=True,
     )
     try:
-        return_code = process.wait(timeout=600)
+        return_code = process.wait(timeout=1800)
     except subprocess.TimeoutExpired:
         os.killpg(process.pid, signal.SIGTERM)
         try:
@@ -76,7 +76,7 @@ with pathlib.Path(log).open("ab") as output:
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait()
-        output.write(b"\nCHAIN1266_RING1_CASE_TIMEOUT_SECONDS=600\n")
+        output.write(b"\nCHAIN1266_RING1_CASE_TIMEOUT_SECONDS=1800\n")
         return_code = 124
 sys.exit(return_code)
 PY
