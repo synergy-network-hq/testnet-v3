@@ -21,6 +21,10 @@ use crate::consensus::legacy_canonical_lock::{
     verify_legacy_canonical_lock, verify_legacy_canonical_locks, write_legacy_canonical_lock,
     write_legacy_canonical_locks,
 };
+use crate::consensus::simplified_posy::{
+    dispatch_simplified_target_admission_package, dispatch_simplified_target_admission_vote,
+    AuthenticatedSimplifiedConsensusPeer, SimplifiedConsensusMessage,
+};
 use crate::consensus::testnet_v3_bootstrap::{
     authenticate_active_typed_consensus_peer, load_testnet_v3_genesis_bootstrap,
 };
@@ -42,9 +46,14 @@ use crate::genesis::canonical_genesis;
 use crate::p2p::messages::{
     validate_coordinated_consensus_message_size,
     validate_coordinated_finality_observer_message_size,
+    validate_simplified_consensus_message_size, validate_simplified_target_admission_message_size,
     validate_typed_finality_observer_message_size, CoordinatedConsensusMessage,
-    CoordinatedFinalityObserverMessage, NetworkMessage, TypedConsensusMessage,
-    TypedFinalityObserverMessage,
+    CoordinatedFinalityObserverMessage, NetworkMessage, SimplifiedTargetAdmissionMessage,
+    TypedConsensusMessage, TypedFinalityObserverMessage,
+    MAX_SIMPLIFIED_CONSENSUS_CERTIFICATE_FRAME_BYTES, MAX_SIMPLIFIED_CONSENSUS_CONTROL_FRAME_BYTES,
+    MAX_SIMPLIFIED_CONSENSUS_PROPOSAL_FRAME_BYTES, MAX_SIMPLIFIED_CONSENSUS_STATE_SYNC_FRAME_BYTES,
+    MAX_SIMPLIFIED_CONSENSUS_VOTE_FRAME_BYTES, MAX_SIMPLIFIED_TARGET_ADMISSION_PACKAGE_FRAME_BYTES,
+    MAX_SIMPLIFIED_TARGET_ADMISSION_VOTE_FRAME_BYTES,
 };
 #[cfg(not(test))]
 use crate::p2p::validator_transport_registry::refresh_validator_transports;
@@ -56,7 +65,7 @@ use crate::rpc::rpc_server::{
     SYNC_MANAGER, TX_POOL,
 };
 use crate::sync::SyncState;
-use crate::synergy_types::{AegisPqKeyId, AegisPqKeyRole, Epoch};
+use crate::synergy_types::{AegisPqKeyId, AegisPqKeyRole, Epoch, ValidatorId};
 use crate::transaction::Transaction;
 use crate::validator::{
     apply_validator_activation_transaction, canonical_active_validator_set_hash,
@@ -74,7 +83,7 @@ use serde_json;
 use socket2::{SockRef, TcpKeepalive};
 #[cfg(test)]
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
@@ -3289,6 +3298,37 @@ fn typed_consensus_peer_for_session(
         .cloned()
 }
 
+fn simplified_consensus_peer_for_session(
+    peer_address: &str,
+    session_id: u64,
+) -> Option<AuthenticatedSimplifiedConsensusPeer> {
+    typed_consensus_peer_for_session(peer_address, session_id).map(|peer| {
+        AuthenticatedSimplifiedConsensusPeer {
+            validator_id: peer.validator_id,
+            validator_uma_id: peer.validator_uma_id,
+            consensus_key_id: peer.consensus_key_id,
+        }
+    })
+}
+
+fn validate_simplified_consensus_target_identity(
+    identity: &AuthenticatedSimplifiedConsensusPeer,
+    expected_validator_id: &ValidatorId,
+    frozen_validator_ids: &BTreeSet<ValidatorId>,
+) -> Result<(), String> {
+    if !frozen_validator_ids.contains(&identity.validator_id) {
+        return Err(
+            "simplified consensus target peer is outside the frozen validator set".to_string(),
+        );
+    }
+    if &identity.validator_id != expected_validator_id {
+        return Err(
+            "simplified consensus target address was rebound to another validator".to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Converts the P2P handshake identity into the narrower ETDAG ingress
 /// identity.  It is intentionally derived from the same session-scoped,
 /// Genesis-bound authentication record as typed consensus traffic rather than
@@ -3304,6 +3344,21 @@ fn etdag_ingress_peer_for_session(
             consensus_key_id: peer.consensus_key_id,
         }
     })
+}
+
+fn dispatch_simplified_target_admission_ingress(
+    authenticated_peer: Option<EtdagAuthenticatedIngressPeer>,
+    message: SimplifiedTargetAdmissionMessage,
+) -> Result<(), String> {
+    match message {
+        SimplifiedTargetAdmissionMessage::Vote { request } => {
+            dispatch_simplified_target_admission_vote(authenticated_peer, request)?;
+        }
+        SimplifiedTargetAdmissionMessage::CertifiedPackage { package } => {
+            dispatch_simplified_target_admission_package(authenticated_peer, package)?;
+        }
+    }
+    Ok(())
 }
 
 fn current_peer_session_id(peer_address: &str) -> Option<u64> {
@@ -5733,9 +5788,79 @@ impl P2PNetwork {
         Ok(sent)
     }
 
+    /// Sends a PoSy v3 artifact only over the already authenticated validator
+    /// sessions. The simplified driver rebinds each peer to its dynamic frozen
+    /// epoch validator set before processing the message.
+    pub fn broadcast_simplified_consensus(
+        &self,
+        message: &SimplifiedConsensusMessage,
+        frozen_validator_ids: &BTreeSet<ValidatorId>,
+    ) -> Result<usize, String> {
+        if coordinated_consensus_active(&self.config) {
+            return Err(
+                "simplified PoSy egress is disabled while coordinated_round_robin_v1 is selected"
+                    .to_string(),
+            );
+        }
+        validate_simplified_consensus_message_size(message)?;
+        if frozen_validator_ids.is_empty() {
+            return Err("simplified consensus frozen egress set is empty".to_string());
+        }
+        let wire_message = NetworkMessage::SimplifiedConsensus {
+            chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+            genesis_hash: canonical_genesis_hash(),
+            message: message.clone(),
+        };
+        let targets = {
+            let peers = self.connected_peers.lock().unwrap();
+            peers
+                .iter()
+                .filter_map(|(address, peer)| {
+                    if peer.stream.is_none() {
+                        return None;
+                    }
+                    let session_id = current_peer_session_id(address)?;
+                    let identity = simplified_consensus_peer_for_session(address, session_id)?;
+                    frozen_validator_ids
+                        .contains(&identity.validator_id)
+                        .then(|| (address.clone(), session_id))
+                })
+                .collect::<Vec<_>>()
+        };
+        let send_results = run_with_bounded_parallelism(
+            &targets,
+            targets.len(),
+            "simplified consensus fanout",
+            |(address, session_id)| {
+                send_peer_message_for_session(
+                    &self.connected_peers,
+                    &self.peer_state_cache,
+                    address,
+                    *session_id,
+                    &wire_message,
+                    Duration::from_millis(CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                    "simplified-consensus",
+                )
+            },
+        );
+        let mut sent = 0usize;
+        for ((address, _), result) in targets.into_iter().zip(send_results) {
+            match result {
+                Ok(true) => sent += 1,
+                Ok(false) => {}
+                Err(error) => warn!(
+                    "p2p",
+                    "Failed to send simplified consensus message",
+                    "peer" => address,
+                    "error" => error
+                ),
+            }
+        }
+        Ok(sent)
+    }
+
     /// Sends a coordinated-mode artifact only to authenticated validator peers.
-    /// Its wire family and resource limits are independent from retired typed
-    /// PoSy traffic, so no certificate handler can reinterpret this message.
+    /// This retained compatibility surface is not selected by simplified PoSy.
     pub fn broadcast_coordinated_consensus(
         &self,
         message: &CoordinatedConsensusMessage,
@@ -5793,8 +5918,7 @@ impl P2PNetwork {
     }
 
     /// Sends an assigned producer block directly to the authenticated
-    /// coordinator. Unlike assignments and committed packages, producer
-    /// candidates are never broadcast to non-coordinator validators.
+    /// coordinator. Simplified PoSy never calls this compatibility path.
     pub fn send_coordinated_consensus_to_validator(
         &self,
         validator_id: &str,
@@ -5838,6 +5962,139 @@ impl P2PNetwork {
             ));
         }
         Ok(())
+    }
+
+    /// Broadcasts one bounded H+3 target-admission vote or certified package
+    /// only to authenticated sessions in the caller's frozen dynamic epoch.
+    pub fn broadcast_simplified_target_admission(
+        &self,
+        message: &SimplifiedTargetAdmissionMessage,
+        frozen_validator_ids: &BTreeSet<ValidatorId>,
+    ) -> Result<usize, String> {
+        if coordinated_consensus_active(&self.config) {
+            return Err(
+                "simplified target-admission egress is disabled while coordinated_round_robin_v1 is selected"
+                    .to_string(),
+            );
+        }
+        validate_simplified_target_admission_message_size(message)?;
+        if frozen_validator_ids.is_empty() {
+            return Err("simplified target-admission frozen egress set is empty".to_string());
+        }
+        let wire_message = NetworkMessage::SimplifiedTargetAdmission {
+            chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+            genesis_hash: canonical_genesis_hash(),
+            message: message.clone(),
+        };
+        let targets = {
+            let peers = self.connected_peers.lock().unwrap();
+            peers
+                .iter()
+                .filter_map(|(address, peer)| {
+                    if peer.stream.is_none() {
+                        return None;
+                    }
+                    let session_id = current_peer_session_id(address)?;
+                    let identity = etdag_ingress_peer_for_session(address, session_id)?;
+                    frozen_validator_ids
+                        .contains(&identity.validator_id)
+                        .then(|| (address.clone(), session_id))
+                })
+                .collect::<Vec<_>>()
+        };
+        let send_results = run_with_bounded_parallelism(
+            &targets,
+            targets.len(),
+            "simplified target-admission fanout",
+            |(address, session_id)| {
+                send_peer_message_for_session(
+                    &self.connected_peers,
+                    &self.peer_state_cache,
+                    address,
+                    *session_id,
+                    &wire_message,
+                    Duration::from_millis(CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                    "simplified-target-admission",
+                )
+            },
+        );
+        let mut sent = 0usize;
+        for ((address, _), result) in targets.into_iter().zip(send_results) {
+            match result {
+                Ok(true) => sent += 1,
+                Ok(false) => {}
+                Err(error) => warn!(
+                    "p2p",
+                    "Failed to send simplified target-admission message",
+                    "peer" => address,
+                    "error" => error
+                ),
+            }
+        }
+        Ok(sent)
+    }
+
+    /// Sends a simplified-consensus response only to the authenticated session
+    /// that requested it. State-sync chunks are request-correlated and must not
+    /// be amplified across the full validator ring.
+    pub fn send_simplified_consensus_to_peer(
+        &self,
+        peer_address: &str,
+        expected_validator_id: &ValidatorId,
+        message: &SimplifiedConsensusMessage,
+        frozen_validator_ids: &BTreeSet<ValidatorId>,
+    ) -> Result<usize, String> {
+        if coordinated_consensus_active(&self.config) {
+            return Err(
+                "simplified PoSy direct egress is disabled while coordinated_round_robin_v1 is selected"
+                    .to_string(),
+            );
+        }
+        validate_simplified_consensus_message_size(message)?;
+        if frozen_validator_ids.is_empty() {
+            return Err("simplified consensus frozen egress set is empty".to_string());
+        }
+        let session_id = {
+            let peers = self.connected_peers.lock().unwrap();
+            let peer = peers
+                .get(peer_address)
+                .ok_or_else(|| "simplified consensus target peer is disconnected".to_string())?;
+            if peer.stream.is_none() {
+                return Err("simplified consensus target peer has no live stream".to_string());
+            }
+            let session_id = current_peer_session_id(peer_address).ok_or_else(|| {
+                "simplified consensus target peer has no current session".to_string()
+            })?;
+            let identity = simplified_consensus_peer_for_session(peer_address, session_id)
+                .ok_or_else(|| {
+                    "simplified consensus target peer lacks an authenticated validator identity"
+                        .to_string()
+                })?;
+            validate_simplified_consensus_target_identity(
+                &identity,
+                expected_validator_id,
+                frozen_validator_ids,
+            )?;
+            session_id
+        };
+        let wire_message = NetworkMessage::SimplifiedConsensus {
+            chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+            genesis_hash: canonical_genesis_hash(),
+            message: message.clone(),
+        };
+        match send_peer_message_for_session(
+            &self.connected_peers,
+            &self.peer_state_cache,
+            peer_address,
+            session_id,
+            &wire_message,
+            Duration::from_millis(CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS),
+            "simplified-consensus-targeted",
+        ) {
+            Ok(true) => Ok(1),
+            Ok(false) => Ok(0),
+            Err(error) => Err(error),
+        }
     }
 
     /// Pulls the next bounded finalized-typed segment for an installed
@@ -6286,6 +6543,32 @@ impl P2PNetwork {
 
     pub fn get_status_ready_validator_addresses(&self) -> Vec<String> {
         status_ready_validator_addresses(&self.config, &self.connected_peers)
+    }
+
+    /// Returns only fresh session-authenticated validator identities from the
+    /// immutable v3 frozen set. Address counts or mutable membership cannot
+    /// satisfy simplified startup readiness.
+    pub fn get_status_ready_simplified_validator_ids(
+        &self,
+        frozen_validator_ids: &BTreeSet<ValidatorId>,
+    ) -> BTreeSet<ValidatorId> {
+        let now = current_timestamp();
+        let peers = self.connected_peers.lock().unwrap();
+        peers
+            .iter()
+            .filter_map(|(address, peer)| {
+                if peer.stream.is_none()
+                    || peer_readiness_exclusion_reason_at(peer, now, None).is_some()
+                {
+                    return None;
+                }
+                let session_id = current_peer_session_id(address)?;
+                let identity = simplified_consensus_peer_for_session(address, session_id)?;
+                frozen_validator_ids
+                    .contains(&identity.validator_id)
+                    .then_some(identity.validator_id)
+            })
+            .collect()
     }
 
     pub fn get_best_validator_peer_height(&self) -> u64 {
@@ -8134,6 +8417,8 @@ fn bypasses_shared_message_queue(message: &NetworkMessage) -> bool {
             | NetworkMessage::Vote { .. }
             | NetworkMessage::TypedConsensus { .. }
             | NetworkMessage::CoordinatedConsensus { .. }
+            | NetworkMessage::SimplifiedConsensus { .. }
+            | NetworkMessage::SimplifiedTargetAdmission { .. }
             | NetworkMessage::TypedFinalityObserver { .. }
             | NetworkMessage::CoordinatedFinalityObserver { .. }
             | NetworkMessage::EtdagCertifiedInput { .. }
@@ -8529,6 +8814,83 @@ fn dispatch_peer_message(
                 warn!(
                     "p2p",
                     "Rejected coordinated consensus message",
+                    "peer" => peer_address.to_string(),
+                    "error" => error
+                );
+            }
+            Ok(())
+        }
+        NetworkMessage::SimplifiedConsensus {
+            chain_incarnation,
+            genesis_hash,
+            message,
+        } => {
+            if coordinated_consensus_active(config) {
+                warn!(
+                    "p2p",
+                    "Rejected simplified consensus message while coordinated mode is selected",
+                    "peer" => peer_address.to_string()
+                );
+                return Ok(());
+            }
+            if chain_incarnation != crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
+                || genesis_hash != canonical_genesis_hash()
+            {
+                warn!(
+                    "p2p",
+                    "Rejected simplified consensus frame from a different chain incarnation",
+                    "peer" => peer_address.to_string(),
+                    "incarnation" => chain_incarnation
+                );
+                return Ok(());
+            }
+            if let Err(error) =
+                crate::consensus::simplified_posy::dispatch_simplified_consensus_message(
+                    peer_address,
+                    simplified_consensus_peer_for_session(peer_address, session_id),
+                    message,
+                )
+            {
+                warn!(
+                    "p2p",
+                    "Rejected simplified consensus message",
+                    "peer" => peer_address.to_string(),
+                    "error" => error
+                );
+            }
+            Ok(())
+        }
+        NetworkMessage::SimplifiedTargetAdmission {
+            chain_incarnation,
+            genesis_hash,
+            message,
+        } => {
+            if coordinated_consensus_active(config) {
+                warn!(
+                    "p2p",
+                    "Rejected simplified target-admission message while coordinated mode is selected",
+                    "peer" => peer_address.to_string()
+                );
+                return Ok(());
+            }
+            if chain_incarnation != crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
+                || genesis_hash != canonical_genesis_hash()
+            {
+                warn!(
+                    "p2p",
+                    "Rejected simplified target-admission frame from a different chain incarnation",
+                    "peer" => peer_address.to_string(),
+                    "incarnation" => chain_incarnation
+                );
+                return Ok(());
+            }
+            if let Err(error) = dispatch_simplified_target_admission_ingress(
+                etdag_ingress_peer_for_session(peer_address, session_id),
+                message,
+            ) {
+                warn!(
+                    "p2p",
+                    "Rejected simplified target-admission message",
                     "peer" => peer_address.to_string(),
                     "error" => error
                 );
@@ -9733,6 +10095,83 @@ fn handle_messages(
                             );
                         }
                     }
+                    NetworkMessage::SimplifiedConsensus {
+                        chain_incarnation,
+                        genesis_hash,
+                        message,
+                    } => {
+                        if coordinated_consensus_active(&config) {
+                            warn!(
+                                "p2p",
+                                "Rejected simplified consensus message while coordinated mode is selected",
+                                "peer" => peer_address.clone()
+                            );
+                            continue;
+                        }
+                        if chain_incarnation
+                            != crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
+                            || genesis_hash != canonical_genesis_hash()
+                        {
+                            warn!(
+                                "p2p",
+                                "Rejected old-incarnation simplified consensus message",
+                                "peer" => peer_address.clone(),
+                                "incarnation" => chain_incarnation
+                            );
+                            continue;
+                        }
+                        if let Err(error) =
+                            crate::consensus::simplified_posy::dispatch_simplified_consensus_message(
+                                &peer_address,
+                                simplified_consensus_peer_for_session(&peer_address, session_id),
+                                message,
+                            )
+                        {
+                            warn!(
+                                "p2p",
+                                "Rejected simplified consensus message",
+                                "peer" => peer_address.clone(),
+                                "error" => error
+                            );
+                        }
+                    }
+                    NetworkMessage::SimplifiedTargetAdmission {
+                        chain_incarnation,
+                        genesis_hash,
+                        message,
+                    } => {
+                        if coordinated_consensus_active(&config) {
+                            warn!(
+                                "p2p",
+                                "Rejected simplified target-admission message while coordinated mode is selected",
+                                "peer" => peer_address.clone()
+                            );
+                            continue;
+                        }
+                        if chain_incarnation
+                            != crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
+                            || genesis_hash != canonical_genesis_hash()
+                        {
+                            warn!(
+                                "p2p",
+                                "Rejected old-incarnation simplified target-admission message",
+                                "peer" => peer_address.clone(),
+                                "incarnation" => chain_incarnation
+                            );
+                            continue;
+                        }
+                        if let Err(error) = dispatch_simplified_target_admission_ingress(
+                            etdag_ingress_peer_for_session(&peer_address, session_id),
+                            message,
+                        ) {
+                            warn!(
+                                "p2p",
+                                "Rejected simplified target-admission message",
+                                "peer" => peer_address.clone(),
+                                "error" => error
+                            );
+                        }
+                    }
                     NetworkMessage::TypedFinalityObserver {
                         chain_incarnation,
                         genesis_hash,
@@ -10361,9 +10800,21 @@ fn receive_message(stream: &mut impl Read) -> Result<NetworkMessage, io::Error> 
         ));
     }
 
-    // Read message data
+    // Read a small envelope prefix before allocating the declared payload.
+    // Simplified consensus uses JSON's externally tagged enum representation,
+    // so its outer and inner kind are visible here. This prevents an
+    // authenticated peer from forcing a 64-MiB allocation before the tighter
+    // consensus-kind cap is known.
+    const PREDECODE_PREFIX_BYTES: usize = 4 * 1024;
+    let prefix_len = len.min(PREDECODE_PREFIX_BYTES);
+    let mut prefix = vec![0u8; prefix_len];
+    stream.read_exact(&mut prefix)?;
+    validate_simplified_predecode_frame_length(len, &prefix)?;
+
+    // Read the remainder after the predecode allocation gate.
     let mut data = vec![0u8; len];
-    stream.read_exact(&mut data)?;
+    data[..prefix_len].copy_from_slice(&prefix);
+    stream.read_exact(&mut data[prefix_len..])?;
 
     // Parse JSON message
     let json =
@@ -10372,6 +10823,164 @@ fn receive_message(stream: &mut impl Read) -> Result<NetworkMessage, io::Error> 
         serde_json::from_str(&json).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
     Ok(message)
+}
+
+fn validate_simplified_predecode_frame_length(len: usize, prefix: &[u8]) -> io::Result<()> {
+    let mut cursor = 0usize;
+    consume_json_byte(prefix, &mut cursor, b'{', "network envelope")?;
+    let outer_kind = consume_json_key(prefix, &mut cursor, "network envelope kind")?;
+    if outer_kind == b"SimplifiedTargetAdmission" {
+        consume_json_byte(prefix, &mut cursor, b':', "target-admission envelope")?;
+        consume_json_byte(prefix, &mut cursor, b'{', "target-admission body")?;
+        if consume_json_key(prefix, &mut cursor, "target-admission body field")? != b"message" {
+            return Err(invalid_predecode(
+                "target-admission message must be the first canonical body field",
+            ));
+        }
+        consume_json_byte(prefix, &mut cursor, b':', "target-admission message field")?;
+        consume_json_byte(prefix, &mut cursor, b'{', "target-admission message")?;
+        let message_kind = consume_json_key(prefix, &mut cursor, "target-admission message kind")?;
+        let (kind, maximum) = match message_kind {
+            b"Vote" => ("vote", MAX_SIMPLIFIED_TARGET_ADMISSION_VOTE_FRAME_BYTES),
+            b"CertifiedPackage" => (
+                "certified package",
+                MAX_SIMPLIFIED_TARGET_ADMISSION_PACKAGE_FRAME_BYTES,
+            ),
+            _ => {
+                return Err(invalid_predecode(
+                    "target-admission frame does not declare a bounded message kind in its predecode prefix",
+                ));
+            }
+        };
+        let frame_len = len
+            .checked_add(4)
+            .ok_or_else(|| invalid_predecode("target-admission frame length overflow"))?;
+        if frame_len > maximum {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "simplified target-admission {kind} frame length {frame_len} exceeds limit {maximum}"
+                ),
+            ));
+        }
+        return Ok(());
+    }
+    if outer_kind != b"SimplifiedConsensus" {
+        return Ok(());
+    }
+    consume_json_byte(prefix, &mut cursor, b':', "simplified consensus envelope")?;
+    consume_json_byte(prefix, &mut cursor, b'{', "simplified consensus body")?;
+    if consume_json_key(prefix, &mut cursor, "simplified consensus body field")? != b"message" {
+        return Err(invalid_predecode(
+            "simplified consensus message must be the first canonical body field",
+        ));
+    }
+    consume_json_byte(
+        prefix,
+        &mut cursor,
+        b':',
+        "simplified consensus message field",
+    )?;
+    consume_json_byte(prefix, &mut cursor, b'{', "simplified consensus message")?;
+    let message_kind = consume_json_key(prefix, &mut cursor, "simplified consensus message kind")?;
+    let (kind, maximum) = match message_kind {
+        b"Proposal" => ("proposal", MAX_SIMPLIFIED_CONSENSUS_PROPOSAL_FRAME_BYTES),
+        b"ReliableDelivery" | b"Vote" | b"TimeoutVote" => {
+            ("vote", MAX_SIMPLIFIED_CONSENSUS_VOTE_FRAME_BYTES)
+        }
+        b"QuorumCertificate" | b"TimeoutCertificate" => (
+            "certificate",
+            MAX_SIMPLIFIED_CONSENSUS_CERTIFICATE_FRAME_BYTES,
+        ),
+        b"StateSyncRequest" | b"MaterialRequest" => (
+            "state-sync request",
+            MAX_SIMPLIFIED_CONSENSUS_CONTROL_FRAME_BYTES,
+        ),
+        b"StateSyncChunk" | b"MaterialChunk" => (
+            "state-sync chunk",
+            MAX_SIMPLIFIED_CONSENSUS_STATE_SYNC_FRAME_BYTES,
+        ),
+        _ => {
+            return Err(invalid_predecode(
+                "simplified consensus frame does not declare a bounded message kind in its predecode prefix",
+            ));
+        }
+    };
+    let frame_len = len
+        .checked_add(4)
+        .ok_or_else(|| invalid_predecode("simplified consensus frame length overflow"))?;
+    if frame_len > maximum {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("simplified consensus {kind} frame length {frame_len} exceeds limit {maximum}"),
+        ));
+    }
+    Ok(())
+}
+
+fn consume_json_byte(
+    prefix: &[u8],
+    cursor: &mut usize,
+    expected: u8,
+    label: &str,
+) -> io::Result<()> {
+    skip_json_whitespace(prefix, cursor);
+    if prefix.get(*cursor) != Some(&expected) {
+        return Err(invalid_predecode(&format!(
+            "{label} is not visible in the bounded predecode prefix"
+        )));
+    }
+    *cursor = cursor
+        .checked_add(1)
+        .ok_or_else(|| invalid_predecode("predecode cursor overflow"))?;
+    Ok(())
+}
+
+fn consume_json_key<'a>(prefix: &'a [u8], cursor: &mut usize, label: &str) -> io::Result<&'a [u8]> {
+    consume_json_byte(prefix, cursor, b'"', label)?;
+    let start = *cursor;
+    while let Some(byte) = prefix.get(*cursor).copied() {
+        match byte {
+            b'"' => {
+                let key = &prefix[start..*cursor];
+                *cursor = cursor
+                    .checked_add(1)
+                    .ok_or_else(|| invalid_predecode("predecode cursor overflow"))?;
+                return Ok(key);
+            }
+            b'\\' => {
+                return Err(invalid_predecode(&format!(
+                    "{label} must use its canonical unescaped wire spelling"
+                )));
+            }
+            0x00..=0x1f | 0x80..=0xff => {
+                return Err(invalid_predecode(&format!(
+                    "{label} contains a non-ASCII tag byte"
+                )));
+            }
+            _ => {
+                *cursor = cursor
+                    .checked_add(1)
+                    .ok_or_else(|| invalid_predecode("predecode cursor overflow"))?;
+            }
+        }
+    }
+    Err(invalid_predecode(&format!(
+        "{label} is incomplete in the bounded predecode prefix"
+    )))
+}
+
+fn skip_json_whitespace(prefix: &[u8], cursor: &mut usize) {
+    while prefix
+        .get(*cursor)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\n' | b'\r' | b'\t'))
+    {
+        *cursor = cursor.saturating_add(1);
+    }
+}
+
+fn invalid_predecode(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
 fn current_timestamp() -> u64 {
@@ -12487,6 +13096,7 @@ mod tests {
         status_ready_validator_addresses_with_local_duty_gate, status_ready_validator_participants,
         status_sync_batch, support_peer_sync_request_is_too_deep, sync_batch_limit_for_role,
         typed_consensus_peer_for_session, validate_outbound_frame_length,
+        validate_simplified_consensus_target_identity, validate_simplified_predecode_frame_length,
         validate_vote_request_extends_local_tip, validator_status_genesis_grace_remaining_secs,
         validator_status_genesis_within_grace_window, verify_batch_with_bounded_parallelism,
         verify_handshake_pq_signature, vote_request_parent_sync_range,
@@ -12507,6 +13117,7 @@ mod tests {
     use crate::block::{Block, BlockChain};
     use crate::config::{NodeConfig, ValidatorVpnTransportConfig};
     use crate::consensus::dual_quorum::{DualQuorumConsensus, QuorumCertificate, Vote};
+    use crate::consensus::simplified_posy::AuthenticatedSimplifiedConsensusPeer;
     use crate::consensus::typed_coordinator::AuthenticatedTypedConsensusPeer;
     use crate::consensus::validator_keys::{
         consensus_algorithm_label, load_local_validator_keypair,
@@ -12523,6 +13134,14 @@ mod tests {
     use crate::crypto::aegis_pqvm::AegisPqvmSigner;
     use crate::crypto::pqc::{PQCAlgorithm, PQCManager, PQCSignature};
     use crate::p2p::messages::NetworkMessage;
+    use crate::p2p::messages::{
+        MAX_SIMPLIFIED_CONSENSUS_CERTIFICATE_FRAME_BYTES,
+        MAX_SIMPLIFIED_CONSENSUS_CONTROL_FRAME_BYTES,
+        MAX_SIMPLIFIED_CONSENSUS_PROPOSAL_FRAME_BYTES,
+        MAX_SIMPLIFIED_CONSENSUS_STATE_SYNC_FRAME_BYTES, MAX_SIMPLIFIED_CONSENSUS_VOTE_FRAME_BYTES,
+        MAX_SIMPLIFIED_TARGET_ADMISSION_PACKAGE_FRAME_BYTES,
+        MAX_SIMPLIFIED_TARGET_ADMISSION_VOTE_FRAME_BYTES,
+    };
     use crate::synergy_types::{AegisPqKeyId, AegisPqKeyRole, Epoch, UmaId, ValidatorId};
     use crate::transaction::Transaction;
     use crate::validator::{
@@ -12536,6 +13155,157 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::{mpsc, Arc, Barrier, Mutex, MutexGuard};
+
+    #[test]
+    fn simplified_vote_frame_is_bounded_before_full_payload_allocation() {
+        let prefix = br#"{"SimplifiedConsensus":{"message":{"Vote":{"vote":{}}}}}"#;
+        validate_simplified_predecode_frame_length(
+            MAX_SIMPLIFIED_CONSENSUS_VOTE_FRAME_BYTES - 4,
+            prefix,
+        )
+        .unwrap();
+        assert!(validate_simplified_predecode_frame_length(
+            MAX_SIMPLIFIED_CONSENSUS_VOTE_FRAME_BYTES - 3,
+            prefix,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn simplified_material_chunk_is_bounded_before_full_payload_allocation() {
+        let prefix = br#"{"SimplifiedConsensus":{"message":{"MaterialChunk":{"chunk":{}}}}}"#;
+        validate_simplified_predecode_frame_length(
+            MAX_SIMPLIFIED_CONSENSUS_STATE_SYNC_FRAME_BYTES - 4,
+            prefix,
+        )
+        .unwrap();
+        assert!(validate_simplified_predecode_frame_length(
+            MAX_SIMPLIFIED_CONSENSUS_STATE_SYNC_FRAME_BYTES - 3,
+            prefix,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn target_admission_variants_are_bounded_before_full_payload_allocation() {
+        let vote = br#"{"SimplifiedTargetAdmission":{"message":{"Vote":{"request":{}}}}}"#;
+        validate_simplified_predecode_frame_length(
+            MAX_SIMPLIFIED_TARGET_ADMISSION_VOTE_FRAME_BYTES - 4,
+            vote,
+        )
+        .unwrap();
+        assert!(validate_simplified_predecode_frame_length(
+            MAX_SIMPLIFIED_TARGET_ADMISSION_VOTE_FRAME_BYTES - 3,
+            vote,
+        )
+        .is_err());
+
+        let package =
+            br#"{"SimplifiedTargetAdmission":{"message":{"CertifiedPackage":{"package":{}}}}}"#;
+        validate_simplified_predecode_frame_length(
+            MAX_SIMPLIFIED_TARGET_ADMISSION_PACKAGE_FRAME_BYTES - 4,
+            package,
+        )
+        .unwrap();
+        assert!(validate_simplified_predecode_frame_length(
+            MAX_SIMPLIFIED_TARGET_ADMISSION_PACKAGE_FRAME_BYTES - 3,
+            package,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn simplified_predecode_applies_every_exact_kind_budget() {
+        let cases: &[(&[u8], usize)] = &[
+            (
+                br#"{"SimplifiedConsensus":{"message":{"Proposal":{}}}}"#,
+                MAX_SIMPLIFIED_CONSENSUS_PROPOSAL_FRAME_BYTES,
+            ),
+            (
+                br#"{"SimplifiedConsensus":{"message":{"ReliableDelivery":{}}}}"#,
+                MAX_SIMPLIFIED_CONSENSUS_VOTE_FRAME_BYTES,
+            ),
+            (
+                br#"{"SimplifiedConsensus":{"message":{"QuorumCertificate":{}}}}"#,
+                MAX_SIMPLIFIED_CONSENSUS_CERTIFICATE_FRAME_BYTES,
+            ),
+            (
+                br#"{"SimplifiedConsensus":{"message":{"MaterialRequest":{}}}}"#,
+                MAX_SIMPLIFIED_CONSENSUS_CONTROL_FRAME_BYTES,
+            ),
+            (
+                br#"{"SimplifiedConsensus":{"message":{"StateSyncChunk":{}}}}"#,
+                MAX_SIMPLIFIED_CONSENSUS_STATE_SYNC_FRAME_BYTES,
+            ),
+        ];
+
+        for &(prefix, maximum) in cases {
+            validate_simplified_predecode_frame_length(maximum - 4, prefix)
+                .expect("exact simplified wire budget must be accepted");
+            assert!(validate_simplified_predecode_frame_length(maximum - 3, prefix).is_err());
+        }
+    }
+
+    #[test]
+    fn simplified_predecode_rejects_padding_that_hides_the_outer_kind() {
+        let prefix = vec![b' '; 4 * 1024];
+
+        let error = validate_simplified_predecode_frame_length(
+            MAX_SIMPLIFIED_CONSENSUS_VOTE_FRAME_BYTES,
+            &prefix,
+        )
+        .expect_err("padded envelope must not bypass bounded kind discovery");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn simplified_predecode_uses_exact_kind_instead_of_payload_substrings() {
+        let prefix = br#"{"SimplifiedConsensus":{"message":{"MaterialChunk":{"note":"Vote"}}}}"#;
+
+        validate_simplified_predecode_frame_length(
+            MAX_SIMPLIFIED_CONSENSUS_VOTE_FRAME_BYTES - 3,
+            prefix,
+        )
+        .expect("payload text must not change the exact material-chunk bound");
+    }
+
+    #[test]
+    fn simplified_predecode_does_not_decode_unrelated_partial_utf8_payload() {
+        let mut prefix =
+            br#"{"SimplifiedConsensus":{"message":{"MaterialChunk":{"chunk":{"payload":"#.to_vec();
+        prefix.resize((4 * 1024) - 1, b'a');
+        prefix.push(0xc3);
+
+        validate_simplified_predecode_frame_length(
+            MAX_SIMPLIFIED_CONSENSUS_STATE_SYNC_FRAME_BYTES - 4,
+            &prefix,
+        )
+        .expect("bounded tag parsing must not reject a prefix ending inside UTF-8 payload");
+    }
+
+    #[test]
+    fn simplified_target_routing_rejects_an_address_rebound_to_another_validator() {
+        let expected_validator_id = ValidatorId("expected-validator".to_string());
+        let rebound_validator_id = ValidatorId("rebound-validator".to_string());
+        let identity = AuthenticatedSimplifiedConsensusPeer {
+            validator_id: rebound_validator_id.clone(),
+            validator_uma_id: UmaId("uma:rebound-validator".to_string()),
+            consensus_key_id: AegisPqKeyId("rebound-validator-key".to_string()),
+        };
+        let frozen = [expected_validator_id.clone(), rebound_validator_id]
+            .into_iter()
+            .collect();
+
+        let error = validate_simplified_consensus_target_identity(
+            &identity,
+            &expected_validator_id,
+            &frozen,
+        )
+        .expect_err("rebound address must not receive another validator's targeted response");
+
+        assert!(error.contains("rebound to another validator"));
+    }
     use std::thread;
     use std::time::{Duration, Instant};
 

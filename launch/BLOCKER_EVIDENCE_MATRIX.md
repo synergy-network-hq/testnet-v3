@@ -21,7 +21,20 @@ ingress, and fee-collector identity generation and the node credentials
 workbook. This workstream does not generate, replace, or record those
 identities.
 
-| ID | Priority | Control | Status | Implementation and current evidence | Test result | Evidence path | Evidence SHA-256 | Closure still required |
+## Historical snapshot boundary and current engine correction
+
+The table below preserves the implementation and hash snapshot recorded on
+2026-07-25. Its statements that the production role runtime did not own the
+typed worker lifecycle are superseded. The current role runtime owns the
+finalized typed v2.2 worker and the Genesis-bound initial simplified-v3 worker;
+the latter starts only while finalized ETDAG activation is deferred and uses
+authenticated P2P plus durable safety, material, signer, and finality stores.
+The parent engine gate remains `BLOCKED` for autonomous distributed
+qualification, the production protected-ETDAG adapter, and verified later-epoch
+transition authority. Historical evidence hashes below are not hashes of the
+current working tree and must not be presented as final-release hashes.
+
+| ID | Priority | Control | Status | Implementation evidence at 2026-07-25 snapshot | Test result | Evidence path | Evidence SHA-256 | Closure still required |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | POSY-CTX-01 | P0 | Canonical immutable height consensus context | PASS | Canonical serialization/root plus validator, key, weight, cluster, schedule, 512-bit parameter, cryptographic, and prior-transition bindings | Focused positive, mutation, restart, state-sync, and replay vectors pass | `runtime/src/synergy_types.rs` | `2b98cca9760cd2e4c598252150dede07bfa328bf5e84434d26f396bed215af21` | Parent operational-runtime gate remains blocked until the live engine exclusively uses it |
 | POSY-CRYPTO-01 | P0 | Candidate validator consensus profile matches the typed runtime | PASS | The candidate's six active and 21 preconfigured identities are ML-DSA-65; typed parsing, validator-set validation, local signing-key lookup, and consensus-domain signing/verification enforce ML-DSA-65 with exact 1,952-byte public keys. No FN-DSA compatibility path is available for Testnet-v3 consensus signatures. | Candidate public-key parser covers all 27 assigned identities; ML-DSA-65 sign/verify, consensus-domain FN-DSA rejection, genesis-root, and structure checks pass | `genesis.testnet-v3.identity-assigned.json`; `runtime/src/crypto/pqc.rs`; `runtime/src/crypto/aegis_pqvm.rs`; `runtime/src/synergy_types.rs`; `runtime/src/consensus/validator_keys.rs` | Candidate hash `ac5186cb4a95130d22986c73c20d0eedd73821a735d944184c94691860008407` | Qualify signing and verification across the final validator processes and their approved key stores; this does not close the separate typed-coordinator or deployment gates |

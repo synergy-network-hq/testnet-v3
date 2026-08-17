@@ -1725,6 +1725,7 @@ fn domain_requires_mldsa65(domain: &str) -> bool {
             | SYNERGY_QC_V1
             | SYNERGY_EPOCH_TRANSITION_V1
     ) || domain.starts_with("PoSy/ETDAG/")
+        || domain.starts_with("PoSy/Consensus/v3/")
 }
 
 fn domain_requires_chain_incarnation(domain: &str) -> bool {

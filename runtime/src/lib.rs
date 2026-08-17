@@ -29,6 +29,7 @@ pub mod genesis_deployment;
 pub mod logging;
 pub mod node;
 pub mod p2p;
+pub mod posy_simplified_parameters;
 pub mod recovery;
 pub mod rewards;
 pub mod role_profiles;

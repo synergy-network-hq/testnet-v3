@@ -73,7 +73,7 @@ Do not infer activation from peer count, a zero sync gap, a funded balance, a su
 
 Operators do not choose a validator cluster or change a quorum threshold manually. The runtime assigns a new eligible validator to the least-populated eligible cluster and recalculates the required threshold from the active set.
 
-At 10 active validators, the runtime creates two clusters of five validators with a 3-of-5 quorum in each cluster. At 21 active validators, it creates three clusters of seven with a 5-of-7 quorum. Later expansions add a cluster for each additional seven validators. Epoch boundaries are fixed at 1,000 blocks: blocks 1 through 1,000 are epoch 0, blocks 1,001 through 2,000 are epoch 1, and so on.
+At 10 active validators, the runtime creates two clusters of five validators with a strict 4-of-5 quorum in each cluster. At 21 active validators, it creates three clusters of seven with a 5-of-7 quorum. Later expansions add a cluster for each additional seven validators. Epoch boundaries are fixed at 1,000 blocks: blocks 1 through 1,000 are epoch 0, blocks 1,001 through 2,000 are epoch 1, and so on.
 
 Cluster rotation is disabled until three clusters exist. Once there are three or more, the runtime rotates the two lowest-scoring validators in each cluster at an epoch boundary and performs a full cluster shuffle every tenth epoch. These are protocol actions, not Control Panel tasks.
 

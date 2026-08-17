@@ -212,16 +212,13 @@ fn testnet_validator_quorum(total_validators: usize) -> usize {
     if total_validators == 0 {
         0
     } else {
-        (total_validators * 2).div_ceil(3)
+        // Smallest q satisfying 3*q > 2*n, without multiplication overflow.
+        total_validators - (total_validators - 1) / 3
     }
 }
 
 fn testnet_validator_cluster_quorum(cluster_size: usize) -> usize {
-    if cluster_size == 5 {
-        3
-    } else {
-        testnet_validator_quorum(cluster_size)
-    }
+    testnet_validator_quorum(cluster_size)
 }
 
 fn testnet_validator_cluster_count(total_validators: usize) -> usize {
@@ -30807,12 +30804,12 @@ mod tests {
     #[test]
     fn dynamic_quorum_and_cluster_size_follow_active_validator_count() {
         assert_eq!(testnet_validator_quorum(1), 1);
-        assert_eq!(testnet_validator_quorum(3), 2);
+        assert_eq!(testnet_validator_quorum(3), 3);
         assert_eq!(testnet_validator_quorum(5), 4);
-        assert_eq!(testnet_validator_quorum(6), 4);
+        assert_eq!(testnet_validator_quorum(6), 5);
         assert_eq!(testnet_validator_quorum(7), 5);
         assert_eq!(testnet_validator_quorum(10), 7);
-        assert_eq!(testnet_validator_cluster_quorum(5), 3);
+        assert_eq!(testnet_validator_cluster_quorum(5), 4);
         assert_eq!(testnet_validator_cluster_quorum(7), 5);
         assert_eq!(testnet_validator_cluster_size(6), 6);
         assert_eq!(testnet_validator_cluster_size(9), 9);
@@ -30866,7 +30863,7 @@ mod tests {
                     "cluster_id": 0,
                     "cluster_address": "syngrp1cluster0",
                     "validator_ids": active_validators[..5].to_vec(),
-                    "quorum_threshold": 3,
+                    "quorum_threshold": 4,
                     "fault_tolerance_f": 1,
                     "assignment_epoch": 12,
                     "assignment_effective_height": 12_002
@@ -30875,7 +30872,7 @@ mod tests {
                     "cluster_id": 1,
                     "cluster_address": "syngrp1cluster1",
                     "validator_ids": active_validators[5..].to_vec(),
-                    "quorum_threshold": 3,
+                    "quorum_threshold": 4,
                     "fault_tolerance_f": 1,
                     "assignment_epoch": 12,
                     "assignment_effective_height": 12_002
@@ -30884,14 +30881,14 @@ mod tests {
         });
 
         let validated = validate_cluster_membership_snapshot(&snapshot, &active_validators)
-            .expect("two balanced 3-of-5 clusters should validate");
+            .expect("two balanced strict 4-of-5 clusters should validate");
 
         assert_eq!(validated.cluster_count, 2);
         assert_eq!(validated.assignments.len(), 2);
         assert!(validated
             .assignments
             .iter()
-            .all(|assignment| assignment.quorum_threshold == 3));
+            .all(|assignment| assignment.quorum_threshold == 4));
     }
 
     #[test]

@@ -179,6 +179,14 @@ path = "bin/bind-testnet-v3-consensus-genesis.rs"
 name = "audit-testnet-v3-address-migration"
 path = "bin/audit-testnet-v3-address-migration.rs"
 
+[[bin]]
+name = "posy-simplified-five-node-harness"
+path = "bin/posy-simplified-five-node-harness.rs"
+
+[[bin]]
+name = "posy-simplified-five-driver-harness"
+path = "bin/posy-simplified-five-driver-harness.rs"
+
 [features]
 # Opt-in: the genesis ceremony links the Synergy Address Engine for its approved
 # custody decryptor. Kept behind a feature so the default library build and the

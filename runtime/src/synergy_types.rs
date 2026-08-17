@@ -975,6 +975,14 @@ pub enum VotePhase {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ConsensusSubjectPhase {
     Proposal,
+    /// Authenticated reliable-delivery transport evidence; never an ordinary
+    /// block vote or direct finality input.
+    ProposalEcho,
+    /// Authenticated reliable-delivery transport evidence; never an ordinary
+    /// block vote or direct finality input.
+    ProposalReady,
+    /// The sole ordinary block-vote phase in simplified PoSy.
+    Vote,
     Validate,
     Finality,
     Timeout,

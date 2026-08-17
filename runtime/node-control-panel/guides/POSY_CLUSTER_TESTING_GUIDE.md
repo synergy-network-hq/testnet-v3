@@ -69,7 +69,7 @@ Every 10th epoch with 3+ clusters:
 The canonical cluster policy is derived from the active validator set:
 
 - 1-9 active validators: one cluster.
-- 10-20 active validators: two clusters; at 10 validators these are two 5-member clusters with 3-of-5 quorum.
+- 10-20 active validators: two clusters; at 10 validators these are two 5-member clusters with strict 4-of-5 quorum.
 - 21-27 active validators: three clusters; at 21 validators these are three 7-member clusters with 5-of-7 quorum.
 - 28 or more active validators: one cluster per complete group of seven (`floor(active / 7)`).
 - New validators join the least-populated cluster unless a capacity expansion triggers a deterministic full rebalance.

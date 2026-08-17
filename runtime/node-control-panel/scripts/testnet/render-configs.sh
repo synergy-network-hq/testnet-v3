@@ -120,10 +120,9 @@ derive_validator_quorum() {
   local validator_count="$1"
   if (( validator_count == 0 )); then
     echo "0"
-  elif (( validator_count == 5 )); then
-    echo "3"
   else
-    echo $(((validator_count * 2 + 2) / 3))
+    # Smallest q satisfying 3*q > 2*n, without multiplication overflow.
+    echo $((validator_count - (validator_count - 1) / 3))
   fi
 }
 
@@ -137,8 +136,8 @@ if [[ "${SYNERGY_RENDER_CONFIGS_CLUSTER_POLICY_TEST:-false}" == "true" ]]; then
       exit 1
     }
   done
-  [[ "$(derive_validator_quorum 5)" == "3" ]]
-  [[ "$(derive_validator_quorum 6)" == "4" ]]
+  [[ "$(derive_validator_quorum 5)" == "4" ]]
+  [[ "$(derive_validator_quorum 6)" == "5" ]]
   [[ "$(derive_validator_quorum 7)" == "5" ]]
   echo "Dynamic validator cluster policy QA passed."
   exit 0
