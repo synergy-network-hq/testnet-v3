@@ -691,3 +691,482 @@ Copy this entire section to the end of the file before a mutating response:
 
 ### Source evidence
 ```
+
+---
+
+## C1266-2026-08-08-007 — Single-authority journal growth OOM stall
+
+**Status:** Monitoring; durable runtime fix in progress  
+**Severity:** P0  
+**Detected:** 2026-08-08 16:27:03 UTC  
+**First bad height:** 52,734  
+**Last agreed finalized height:** 52,733  
+**Last agreed finalized block ID:** `58d430e4e457c71174808abef1b360942c476040d0697d37d128ca9f34995bab`
+
+### Affected and responsible nodes
+
+- Affected: the sole `authority-node-01` validator on `synergy-val`, and all
+  Chain 1266 consumers while it was stopped.
+- Responsible component: the shared `single_authority_v1` signing-journal
+  persistence path. No host or operator action caused the runtime defect.
+
+### Symptoms and evidence
+
+- The chain progressed from roughly 1.5-second blocks to roughly 7-second
+  blocks, then stopped at height 52,733.
+- At 2026-08-08 06:21:32 UTC the kernel OOM killer terminated
+  `synergy-validator-node`: 21,798,056 KiB anonymous RSS; systemd recorded a
+  24,474,923,008-byte memory peak and `Result=oom-kill`.
+- The original service had `Restart=no`, so no process restarted after the
+  OOM kill.
+- The single-authority durable directory then contained a 279,665,771-byte
+  signing journal, a 290,675,620-byte finality log, and a
+  1,021,332,407-byte committed-block archive. The journal implementation
+  deserializes and atomically rewrites its complete JSON history for intent,
+  signature, and finalization of every new block.
+
+### Confirmed cause
+
+The signing journal has unbounded O(n) read/deserialize/search/serialize work
+and allocation per block. Its complete historical record is loaded repeatedly
+in the critical single-authority path, so work, lock hold time, and memory
+pressure rise with chain height until the host OOM-kills the validator. The
+`chain_tip_lock_unavailable` RPC warnings are a resulting contention symptom,
+not the initiating failure. The existing writable finality-store wrapper is
+already steady-state O(1); this incident requires a bounded, crash-safe
+signing-journal implementation and a release using it.
+
+### Recovery actions and outcomes
+
+1. **Captured systemd, kernel, service-log, and durable-finality evidence.**  
+   **Outcome:** proved an OOM kill rather than disk exhaustion, peer loss, or
+   a signing conflict; the validator had 368 GiB free disk and 22 GiB free
+   RAM after termination.
+2. **Attempted `systemctl set-property ... Restart=on-failure`.**  
+   **Outcome:** systemd rejected the unsupported property update; the failed
+   attempt changed no service state.
+3. **Installed a reversible systemd drop-in with `Restart=on-failure` and
+   `RestartSec=10s`, then reset the failed state and started the original
+   service.**  
+   **Outcome:** no chain data was changed. The durable head resumed through
+   height 52,993 by 2026-08-08 17:01:46 UTC with zero service restarts and no
+   new fatal journal entry. This restored availability but did not cure the
+   growing per-block journal cost.
+4. **Read this complete incident log and began the source-level bounded-
+   journal correction.**  
+   **Outcome:** pending targeted safety, migration, long-history, artifact,
+   and live sustained-block verification.
+
+### Final outcome
+
+Availability is restored, but this incident remains open until a validated
+runtime removes the unbounded signing-journal work and demonstrates sustained
+advancing finality without the prior memory growth.
+
+### Residual risks and next observation
+
+- The restarted pre-fix binary can still experience increasing block latency
+  and memory pressure until the fixed runtime is deployed.
+- Before declaring resolution, require an advancing finalized tip, zero new
+  fatal consensus/signing errors, bounded validator RSS, bounded per-block
+  journal work, and live Atlas visibility. The checkout operating rule also
+  requires equivalent advancing tips across all six validators before a full
+  Chain 1266 health declaration; the present single-authority configuration
+  therefore remains a controlled temporary exception rather than proof of a
+  six-validator healthy network.
+
+### Source evidence
+
+- `/etc/systemd/system/synergy-chain1266-authority.service` and its recovery
+  drop-in on `synergy-val`
+- `/var/log/synergy/chain1266-authority.log` and the 2026-08-08 kernel journal
+  on `synergy-val`
+- `runtime/src/consensus/single_authority_signing_journal.rs`
+- `runtime/src/consensus/single_authority_writable_store.rs`
+
+### 2026-08-08 17:35 UTC amendment — bounded journal hotfix deployed
+
+5. **Implemented and tested the bounded signing-journal migration.**
+   **Outcome:** `single_authority_signing_journal.json` keeps the V1 JSON
+   shape for rollback compatibility, archives the complete legacy V1 journal
+   before compaction, and uses a separate fsynced hot-state marker. Completed
+   entries are removed only after the finality head is durable; the
+   append-only finality record remains the exact public-signature audit
+   source. Startup fails closed on a finality/journal mismatch. Focused tests
+   passed for 19 journal cases (including a 52,733-entry migration), two
+   height-one/restart cases, two real-transaction/restart cases, and 13
+   startup cases. `cargo check -p synergy-testnet` passed. The unfiltered
+   integration-test command remains blocked by the pre-existing
+   `testnet_genesis_artifacts` missing-`crate::utils` compile error.
+6. **Built and verified the Linux validator artifact.**
+   **Outcome:** a locally built x86_64 Linux ELF from source base commit
+   `c3429743c3ff4e78b44e020672d23a10ac988172` plus source-diff digest
+   `4d0a2fec7f71d8da02e08a4082cd00326029e388bd468183b15e136e08aea617`
+   produced SHA-256
+   `5a3eddcc8d646305c8c44ddc9b982ada06a77a4dedf1cdc5422fd27f27c9d135`.
+   The legacy immutable-release workflow was not used because it still pins
+   the prior chain incarnation; this is a controlled temporary-authority
+   hotfix with the prior binary retained for rollback.
+7. **Staged the artifact, verified its host SHA-256 and Linux identity, then
+   performed a rollback-safe cutover on `synergy-val`.**
+   **Outcome:** at 2026-08-08 17:35:31 UTC the prior binary was retained as
+   `/usr/local/bin/synergy-validator-node.pre-journal-hotfix-20260808T173531Z`.
+   The new binary started successfully as service PID 160734 with zero
+   restarts. If it had failed the 20-second start gate, the procedure would
+   have restored and started the retained binary automatically; that rollback
+   was not invoked. No manual finality, journal, block-body, receipt, or
+   execution-state repair occurred.
+8. **Verified live migration and sustained durable finality.**
+   **Outcome:** the legacy journal was preserved as a 282,571,936-byte archive;
+   the active canonical journal compacted to 32 bytes when idle (one active
+   signing record is approximately 5 KiB while a block is being produced),
+   and its hot-state matched the durable finalized head. The head advanced
+   from 53,297 to 53,366 in approximately 74 seconds and then to 53,412;
+   no restart, fatal, panic, or OOM entry occurred. Post-cutover RSS remained
+   approximately 1.6--1.9 GiB, versus 5.6 GiB immediately before cutover and
+   the incident's 21.8 GiB OOM condition.
+
+### Final outcome amendment
+
+The single-authority chain-stall cause is resolved: the validator is running
+the bounded journal runtime, its existing historical journal is safely
+archived and compacted, and its durable finalized head is advancing at roughly
+the configured one-second cadence. This is evidence for the controlled
+temporary single-authority chain only, not a declaration that a six-validator
+network is healthy.
+
+### Residual risks and next observation amendment
+
+- The local `synergy_getBlockNumber` RPC request on port 5640 did not return
+  within the eight-second probe window both before and after cutover. Durable
+  finality remained the authoritative proof for this incident; investigate the
+  separate RPC responsiveness issue before using that endpoint as a health
+  gate or declaring public Atlas/API parity.
+- Continue observing finalized-head growth, RSS, and the compact journal. The
+  reversible `Restart=on-failure` systemd drop-in remains installed until the
+  temporary authority service definition is formally replaced.
+
+**Final observation for this response (2026-08-08 17:40:18 UTC):** durable
+head 53,534; hot-state 53,534; zero active canonical journal entries; 32-byte
+idle canonical journal; service active with zero restarts and zero new
+fatal/panic/OOM lines since cutover. Current RSS was 2,296,180,736 bytes and
+the migration/startup peak was 3,752,505,344 bytes.
+
+---
+
+## C1266-2026-08-09-008 — Single-authority RPC fan-out OOM recurrence
+
+**Status:** Open; immediate containment in progress
+**Severity:** P0
+**Detected:** 2026-08-08 21:19:44 UTC
+**First bad height:** 65,895
+**Last agreed finalized height:** 65,894
+**Last agreed finalized block ID:**
+`c7253fe96fbf5b041f861124923b0faf1df40ddc20be7093f3563d81b3d1017f`
+
+### Affected and responsible nodes
+
+- Affected: the temporary `authority-node-01` validator on `synergy-val`,
+  its local RPC listener, and all public consumers waiting on that listener.
+- Responsible components: the `single_authority_v1` RPC history reader and
+  the unbounded thread-per-connection RPC server. A persistent forwarded
+  client session amplified the defect but did not create it.
+- The bounded signing-journal implementation introduced in incident 007 is
+  not the source of this recurrence: its canonical journal remained 32 bytes
+  while this process exhausted memory.
+
+### Symptoms and evidence
+
+- The bounded-journal runtime (SHA-256
+  `5a3eddcc8d646305c8c44ddc9b982ada06a77a4dedf1cdc5422fd27f27c9d135`)
+  was kernel-OOM-killed at 2026-08-08 21:19:44 UTC after finalizing height
+  65,894. The automatic `Restart=on-failure` drop-in started it again at
+  21:19:57 UTC.
+- At diagnosis the restarted process had 811 tasks and 21.8 GiB anonymous
+  RSS on a 23 GiB host, with only 2.8 GiB available. It held hundreds of
+  `CLOSE-WAIT` connections on its local port 5640; the connecting forwarding
+  process had corresponding `FIN-WAIT-2` sockets.
+- The active signing journal was still a 32-byte zero-entry JSON document and
+  its hot-state reported `finalized_through=78,243`. The historical V1 journal
+  archive remained unchanged at 282,571,936 bytes.
+- At the same sample, `single-authority-finality.log` was 431,224,862 bytes
+  and `single-authority-committed-blocks.ndjson` was 1,516,136,727 bytes.
+  The local `synergy_getBlockNumber` request again timed out after eight
+  seconds, while durable finality itself continued through height 78,294.
+
+### Confirmed cause
+
+For every single-authority RPC request,
+`single_authority_entries_for_rpc` calls `SingleAuthorityFinalityStore::recover`
+to deserialize the entire finality log, then recovers and clones every
+committed block body into a map before constructing the response. The generic
+RPC listener spawns an unbounded operating-system thread for every accepted
+TCP connection. As those whole-history requests accumulated behind a forwarded
+local session, hundreds of concurrent 431 MB plus 1.5 GB recoveries retained
+anonymous allocations and starved the producer/RPC threads until the kernel
+OOM-killed the validator.
+
+### Recovery actions and outcomes
+
+1. **Captured durable-head, kernel, systemd, process, socket, file-size, and
+   application-log evidence before changing live state.**
+   **Outcome:** established that this is a second OOM mechanism after the
+   journal hotfix, not a regression to the old unbounded signing journal or a
+   disk, consensus, or safety conflict.
+
+2. **Stopped only Atlas's `synergy-chain1266-rpc-tunnel.service` and restarted
+   the authority service after its confirmed RPC backlog returned.**
+   **Outcome:** Atlas's PostgreSQL data and API/indexer services remained
+   running; the temporary tunnel stop prevented the 239 abandoned RPC clients
+   from immediately recreating the authority's 5.7 GiB RSS pressure while the
+   replacement was built.
+
+3. **Prepared a bounded-RPC runtime for controlled deployment.**
+   `synergy_getBlockNumber` reads the atomically committed finalized-head
+   pointer instead of reconstructing history; the authority publishes a
+   startup-reconciled, 8,192-block in-process tail for Atlas's 100-block range
+   requests; and the HTTP listener permits at most four concurrent handlers,
+   rejecting overload with HTTP 503. The target x86_64 Linux artifact has
+   SHA-256 `60a1736d74a938f0f0686c3f5b418be1dcc572a39d90a9727392f83a544d3a23`.
+   **Outcome:** `cargo check -p synergy-testnet --lib` and the focused
+   `http_rpc_connection_permits_are_capped_and_released` test passed before
+   this deployment step. The full source-diff digest for the runtime change is
+   `fef8bd3b65348949161368c2b5a39b86ec717b4d1a2c6d514ce2b5bfc8aa3387`.
+
+4. **Prepared a follow-up summary-RPC correction before reopening Atlas.**
+   Atlas caught up from 75,138 through 79,472 in nine seconds using the
+   bounded tail, but its parallel post-backfill `synergy_getNetworkStats`,
+   `synergy_getValidatorStats`, and `synergy_getValidatorActivity` calls
+   invoked the old full-history validator snapshot while holding the shared
+   chain lock. Four handlers therefore remained occupied and correctly
+   received HTTP 503 under the new cap. The follow-up makes those
+   single-authority summaries use the finalized head and Genesis-bound
+   authority instead. Its verified x86_64 Linux artifact SHA-256 is
+   `5017f7bfa32d4788e0585fcf98a581495c75ee1ab6511d0758aa22f8fd85d6a4`.
+   **Outcome:** Atlas tunnel paused and authority restarted to release the
+   stale handlers; `cargo check -p synergy-testnet --lib` passed before this
+   cutover.
+
+### Final outcome
+
+Pending containment, a restart with the connection backlog drained, and a
+bounded RPC implementation. The automatic restart restored durable block
+production temporarily but is not a resolution while unbounded public-history
+requests can recreate the same pressure.
+
+### Residual risks and next observation
+
+- Containment must prevent the current forwarded connection backlog from
+  recreating OOM before the source fix is ready.
+- The fixed runtime must cap concurrent RPC work and avoid whole-history
+  finality/body reconstruction for a height query. Verify exact durable-head
+  advance, bounded task count/RSS, responsive local RPC, and no new OOM after
+  deployment.
+
+### Source evidence
+
+- `/var/log/synergy/chain1266-authority.log`, kernel journal, and systemd
+  status on `synergy-val`
+- `runtime/src/rpc/single_authority_finality_rpc.rs`
+- `runtime/src/rpc/rpc_server.rs`
+- `runtime/src/consensus/single_authority_finality_store.rs`
+
+### Recovery completion amendment (2026-08-09 01:31 UTC)
+
+1. **Deployed the bounded RPC-tail runtime and then its summary-RPC follow-up
+   atomically on `synergy-val`.**
+   **Outcome:** the running binary SHA-256 is
+   `5017f7bfa32d4788e0585fcf98a581495c75ee1ab6511d0758aa22f8fd85d6a4`.
+   The preceding bounded-RPC binary remains at
+   `/usr/local/bin/synergy-validator-node.pre-summary-rpc-20260809`, and the
+   pre-incident binary remains at
+   `/usr/local/bin/synergy-validator-node.pre-rpc-tail-20260809`, providing
+   explicit rollback points without altering finality, committed bodies,
+   receipts, execution state, or signing history.
+
+2. **Validated the authority locally before re-enabling Atlas.**
+   **Outcome:** an Atlas-sized 100-block range returned HTTP 200 in 0.096 s;
+   the four simultaneous polling methods (`synergy_getBlockNumber`,
+   `synergy_getNetworkStats`, `synergy_getValidatorStats`, and
+   `synergy_getValidatorActivity`) returned HTTP 200 in 2--7 ms with no
+   lingering handler sockets.
+
+3. **Re-enabled `synergy-chain1266-rpc-tunnel.service` on `synergy-index`
+   (Atlas) and observed recovery.**
+   **Outcome:** Atlas caught up from its persisted block 75,138 to 79,472 in
+   nine seconds, and after the follow-up from 79,616 to the live head. At
+   2026-08-09 01:31 UTC the authority RPC, Atlas tunnel RPC, and Atlas public
+   API all independently reported block 79,848. The indexer journal showed
+   successful contiguous ranges through that height and ongoing one-to-two
+   block ranges, with no post-recovery 503 or timeout entry.
+
+4. **Observed post-recovery resource bounds.**
+   **Outcome:** authority service active with zero restarts, 10 threads, and
+   764,542,976 bytes cgroup memory (approximately 743 MiB RSS); only listener
+   and normal TIME-WAIT sockets remained. This replaces the 21.8 GiB / 811
+   task OOM condition.
+
+### Final outcome amendment
+
+Resolved. Atlas indexing and the temporary single-authority chain are both
+advancing. The cause was RPC design rather than consensus safety: full-history
+deserialization per request, unbounded handler creation, and summary methods
+that repeated the same work under the chain lock. The deployed path uses the
+durable finalized-head pointer for polling, a bounded 8,192-block reconciled
+tail for Atlas range reads, bounded handler admission, and fast
+single-authority summary calculations.
+
+### Residual risks and next observation amendment
+
+- Historical requests outside the 8,192-block hot window deliberately retain
+  the fail-closed durable-recovery path and may receive HTTP 503 while bounded
+  worker capacity is occupied. They cannot recreate the prior unbounded OOM
+  fan-out, but should receive a separately indexed durable query path before
+  relying on arbitrary deep-history public reads.
+- Continue observing durable-head growth, Atlas/API parity, RSS, handler
+  counts, and the bounded signing journal during the temporary authority
+  period.
+
+---
+
+## C1266-2026-08-16-009 — Single-authority full-history recovery OOM loop
+
+**Status:** Resolved for the temporary single-authority authority; monitoring
+**Severity:** P0
+**Detected:** 2026-08-16 12:10:17 UTC
+**First bad height:** 633,460 (Atlas's persisted tip is 633,459)
+**Last agreed finalized height:** 633,459 (Atlas evidence; authority durable
+head and block ID must be recovered without relying on the failing RPC path)
+**Last agreed finalized block ID:** Not yet recovered from durable storage
+
+### Affected and responsible nodes
+
+- Affected: the temporary sole authority on `synergy-val` and Atlas on
+  `synergy-index`.
+- Responsible component: the shared single-authority finality/body recovery
+  path. No host or operator action is implicated.
+
+### Symptoms and evidence
+
+- Atlas's public summary reports block 633,459 with `indexedAt`
+  `2026-08-15T22:24:06.409Z`; it is not merely presenting a cached current
+  chain tip.
+- At 2026-08-16 13:09 UTC the authority had restart count 566 and an active
+  process consuming 22.8 GiB on a 23 GiB host. The kernel repeatedly recorded
+  `oom-kill` after approximately 80--115 seconds of each startup.
+- The currently deployed authority binary is the verified bounded-RPC
+  follow-up, SHA-256
+  `5017f7bfa32d4788e0585fcf98a581495c75ee1ab6511d0758aa22f8fd85d6a4`.
+  Its handler cap returns HTTP 503 rather than preventing the process-wide
+  startup recovery from exhausting memory.
+- Atlas retries `synergy_getBlockNumber` at approximately one-second cadence
+  and its block-range requests repeatedly abort while the authority dies.
+
+### Confirmed cause
+
+The earlier bounded 8,192-record tail was applied only after complete durable
+history had already been reconstructed. Authority startup read every finality
+frame into a vector, then read the same log again; it also materialized every
+committed block body into a `BlockChain` and every receipt frame into a map.
+The RPC fallback repeated equivalent full finality/body recovery on cache
+misses. At more than 633,000 heights these transient whole-history allocations
+grew to 22.8 GiB anonymous RSS and caused the kernel OOM restart loop.
+
+### Recovery actions and outcomes
+
+1. **Captured authority service state, kernel OOM evidence, active-process
+memory, Atlas summary, and Atlas/tunnel failures without changing service
+state.**
+   **Outcome:** confirmed an active authority OOM restart loop and a stalled
+public indexer; no validator, Atlas, or chain-derived data was modified.
+
+2. **Implemented streaming, bounded authority recovery and verified the
+replacement runtime.**
+   **Outcome:** finality frames, committed block bodies, and receipt frames are
+now streamed and validated without reconstructing their complete histories;
+only an 8,192-block finality/body suffix and a compact greatest-nonce-per-
+sender index remain resident. The RPC fallback is likewise bounded to the
+startup-reconciled cache instead of reopening full history on a cache miss.
+`cargo check -p synergy-testnet --lib` passed, as did bounded finality-tail,
+bounded committed-body-tail, authority restart/no-resign, and real signed
+transaction restart tests. The verified Linux x86_64 artifact is SHA-256
+`d1336198df04301281fcaef327f1504298a37b215cf340e0ad745c20936eff1d`,
+built from base `c3429743c3ff4e78b44e020672d23a10ac988172` with runtime
+source-diff SHA-256
+`b6abb7a86f5d69d9710166ec726d4995df8b1ee97472d5b50ffc323f8caa6c5b`.
+
+3. **Prepared a rollback-safe authority cutover.**
+   **Outcome:** the artifact was staged through the approved `synergy-val`
+connection, where its SHA-256 and x86_64 Linux ELF identity matched exactly.
+The deployed `5017f7b...` binary was retained unchanged as the rollback
+target; no chain data reset or mutation occurred.
+
+4. **Observed the first guarded cutover and corrected its service-counter
+criterion before a second replacement.**
+   **Outcome:** the bounded runtime reached finalized height 633,460 with zero
+new failure and approximately 3.2 GiB RSS, but the guard compared
+`NRestarts` across an intentional `systemctl stop`. systemd resets that
+counter on an explicit stop, so the guard falsely restored the retained
+`5017f7b...` binary. This was a rollback-control defect, not a chain-data or
+runtime failure; the new binary, finality archive, committed blocks, receipts,
+and execution state remain intact. The second cutover will use service state,
+process identity, memory bound, and durable-head advance instead of that
+resettable counter.
+
+5. **Prepared corrected bounded-recovery cutover.**
+   **Outcome:** the mistakenly restored binary was stopped and the verified
+`d1336198...eff1d` replacement was atomically reinstalled at 13:35 UTC; the
+retained `5017f7b...` binary remains available at
+`/usr/local/bin/synergy-validator-node.pre-bounded-recovery-20260816T1332Z`.
+No finality, committed-body, receipt, execution-state, or signing data was
+modified. After one streaming recovery pass over the 3.3 GiB finality log,
+12 GiB committed-body archive, and 231 MiB receipt log, the durable head
+advanced from 633,460 to 633,479. The service has zero restarts, 10 threads,
+and approximately 2.9 GiB process RSS; the larger cgroup reading is file cache
+from the sequential archive scan rather than anonymous runtime allocation.
+
+6. **Prepared Atlas reconnect after sustained authority recovery.**
+   **Outcome:** started only `synergy-chain1266-rpc-tunnel.service` on
+`synergy-index`. The actual Atlas indexer,
+`synergy-testnet-v3-atlas-indexer.service`, remained active (the generic
+explorer-indexer units are intentionally inactive). It indexed contiguous
+ranges from 633,539 onward at roughly one-to-two blocks per poll with no new
+timeout or 503 entry.
+
+7. **Verified sustained authority and Atlas progress.**
+   **Outcome:** `synergy_getBlockNumber` returned height 633,588 directly on
+the authority; its durable head matched that height. Atlas's public summary
+reported 633,587 one sample later, and subsequent Atlas logs recorded through
+633,605. The authority stayed active with zero restarts, ten threads, and
+approximately 2.9 GiB RSS; no post-cutover OOM, panic, fatal, or safety-halt
+entry was present. Atlas indexer memory was approximately 44 MiB. The final
+live parity check reported exactly height 633,700 from both authority RPC and
+the Atlas public API; the tunnel and actual Atlas indexer were active.
+
+### Final outcome
+
+Resolved. The authority now streams and validates the complete durable archive
+while retaining only an 8,192-block hot body/finality suffix plus a compact
+nonce index. Its RPC path never reconstructs complete history on cache misses.
+This removed the OOM restart loop, restored block production, and allowed
+Atlas to catch up. This is evidence only for the temporary one-authority
+configuration, not a declaration that a six-validator chain is healthy.
+
+### Residual risks and next observation
+
+- Startup still performs a full sequential integrity scan of the 3.3 GiB
+  finality and 12 GiB body archives. It is bounded-memory but I/O-bound; an
+  indexed checkpoint would reduce recovery time in a future release.
+- Historical RPC queries outside the hot tail now fail closed rather than
+  rebuilding the archive in the authority process. They need a separate
+  durable/indexed historical-query path before being relied on publicly.
+
+### Source evidence
+
+- `synergy-chain1266-authority.service`, kernel journal, and
+  `/var/log/synergy/chain1266-authority.log` on `synergy-val`
+- Atlas API/indexer and RPC-tunnel journals on `synergy-index`
+- `runtime/src/consensus/single_authority_finality_store.rs`
+- `runtime/src/consensus/single_authority_execution.rs`
+- `runtime/src/consensus/single_authority_driver.rs`
+- `runtime/src/rpc/single_authority_finality_rpc.rs`

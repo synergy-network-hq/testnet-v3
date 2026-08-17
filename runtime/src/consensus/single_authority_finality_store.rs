@@ -16,8 +16,9 @@
 
 use crate::synergy_types::Hash;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
 pub const SINGLE_AUTHORITY_FINALITY_SCHEMA_VERSION: u32 = 1;
@@ -107,6 +108,22 @@ impl SingleAuthorityRecovery {
     }
 }
 
+/// Startup recovery result that retains only a bounded, already-validated
+/// finality tail. The log is still scanned from the beginning and every frame
+/// and parent link is verified; unlike `SingleAuthorityRecovery`, it never
+/// materializes the entire history in memory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SingleAuthorityStartupRecovery {
+    pub finalized: Option<SingleAuthorityFinalityRecord>,
+    pub next_height: u64,
+    pub head_advanced_during_recovery: bool,
+    pub truncated_trailing_frame: bool,
+    /// Offset one past the last intact, fully-verified frame.
+    pub durable_end_offset: u64,
+    /// Oldest-first bounded suffix of the validated finality log.
+    pub recent_records: Vec<SingleAuthorityFinalityRecord>,
+}
+
 fn frame_checksum(payload: &[u8]) -> Hash {
     Hash::from_domain_bytes(FRAME_CHECKSUM_DOMAIN, payload)
 }
@@ -190,6 +207,71 @@ fn read_frame_at(bytes: &[u8], offset: u64) -> Result<FrameRead, String> {
     Ok(FrameRead::Complete {
         record: Box::new(record),
         end_offset: frame_end as u64,
+    })
+}
+
+/// Reads one framed record without first loading the entire journal. A short
+/// read at EOF is deliberately reported as `IncompleteEof`; all complete
+/// malformed frames remain hard errors just as in `read_frame_at`.
+fn read_frame_from_reader<R: Read>(reader: &mut R, offset: u64) -> Result<FrameRead, String> {
+    fn read_exact_or_incomplete<R: Read>(reader: &mut R, buffer: &mut [u8]) -> Result<bool, String> {
+        let mut read = 0;
+        while read < buffer.len() {
+            match reader.read(&mut buffer[read..]) {
+                Ok(0) => return Ok(false),
+                Ok(count) => read += count,
+                Err(error) => return Err(format!("read single-authority finality frame: {error}")),
+            }
+        }
+        Ok(true)
+    }
+
+    let mut prefix = [0u8; FRAME_PREFIX_LEN];
+    if !read_exact_or_incomplete(reader, &mut prefix)? {
+        return Ok(FrameRead::IncompleteEof);
+    }
+    if prefix[..4] != FRAME_MAGIC {
+        return Err(format!(
+            "single-authority finality log frame magic mismatch at offset {offset}"
+        ));
+    }
+    let mut version_bytes = [0u8; 4];
+    version_bytes.copy_from_slice(&prefix[4..8]);
+    let frame_version = u32::from_be_bytes(version_bytes);
+    if frame_version != SINGLE_AUTHORITY_FRAME_VERSION {
+        return Err(format!(
+            "unsupported single-authority finality frame version {frame_version} at offset {offset}"
+        ));
+    }
+    let mut len_bytes = [0u8; 8];
+    len_bytes.copy_from_slice(&prefix[8..FRAME_PREFIX_LEN]);
+    let payload_len = u64::from_be_bytes(len_bytes);
+    if payload_len > MAX_FRAME_PAYLOAD_LEN {
+        return Err(format!(
+            "single-authority finality frame length {payload_len} exceeds maximum at offset {offset}"
+        ));
+    }
+
+    let mut payload = vec![0u8; payload_len as usize];
+    if !read_exact_or_incomplete(reader, &mut payload)? {
+        return Ok(FrameRead::IncompleteEof);
+    }
+    let mut checksum = [0u8; FRAME_CHECKSUM_LEN];
+    if !read_exact_or_incomplete(reader, &mut checksum)? {
+        return Ok(FrameRead::IncompleteEof);
+    }
+    if frame_checksum(&payload) != Hash(checksum) {
+        return Err(format!(
+            "single-authority finality frame checksum mismatch at offset {offset}: \
+             the frame is complete-length, so this is treated as corruption, not a torn tail"
+        ));
+    }
+    let record: SingleAuthorityFinalityRecord = serde_json::from_slice(&payload).map_err(|error| {
+        format!("decode single-authority finality record at offset {offset}: {error}")
+    })?;
+    Ok(FrameRead::Complete {
+        record: Box::new(record),
+        end_offset: offset + FRAME_PREFIX_LEN as u64 + payload_len + FRAME_CHECKSUM_LEN as u64,
     })
 }
 
@@ -398,6 +480,120 @@ impl SingleAuthorityFinalityStore {
             truncated_trailing_frame: truncated,
         })
     }
+
+    /// Validates the complete durable finality history with bounded memory and
+    /// returns only its latest `retain` records. This is the authority startup
+    /// path: it deliberately streams frames one at a time so a long-lived
+    /// chain cannot turn a restart into an allocation proportional to every
+    /// finalized height.
+    pub fn recover_startup_with_tail(
+        &self,
+        retain: usize,
+    ) -> Result<SingleAuthorityStartupRecovery, String> {
+        let head = self.load_head()?;
+        let mut offset = 0u64;
+        let mut truncated = false;
+        let mut previous: Option<SingleAuthorityFinalityRecord> = None;
+        let mut recent = VecDeque::with_capacity(retain);
+
+        if self.log_path.exists() {
+            let file = File::open(&self.log_path).map_err(|error| {
+                format!(
+                    "open single-authority finality log {}: {error}",
+                    self.log_path.display()
+                )
+            })?;
+            let log_len = file
+                .metadata()
+                .map_err(|error| format!("stat single-authority finality log: {error}"))?
+                .len();
+            let mut reader = BufReader::new(file);
+            loop {
+                match read_frame_from_reader(&mut reader, offset)? {
+                    FrameRead::IncompleteEof => {
+                        if let Some(head) = head.as_ref() {
+                            if head.finality_log_end_offset > offset {
+                                return Err(format!(
+                                    "single-authority finality log is truncated inside committed \
+                                     history: durable head commits to offset {} but the frame at \
+                                     offset {offset} is incomplete",
+                                    head.finality_log_end_offset
+                                ));
+                            }
+                        }
+                        truncated = offset < log_len;
+                        break;
+                    }
+                    FrameRead::Complete { record, end_offset } => {
+                        validate_record_shape(&record, &self.binding)?;
+                        validate_linkage(previous.as_ref(), &record, self.binding.first_authority_height)?;
+                        if retain > 0 {
+                            if recent.len() == retain {
+                                recent.pop_front();
+                            }
+                            recent.push_back((*record).clone());
+                        }
+                        previous = Some(*record);
+                        offset = end_offset;
+                    }
+                }
+            }
+        }
+
+        let latest = previous;
+        let mut head_advanced = false;
+        match (&head, &latest) {
+            (Some(head), None) => {
+                return Err(format!(
+                    "single-authority head claims height {} but the finality log is empty",
+                    head.height
+                ));
+            }
+            (Some(head), Some(latest)) => {
+                if head.chain_id != latest.chain_id
+                    || head.chain_incarnation != latest.chain_incarnation
+                {
+                    return Err(
+                        "single-authority head chain identity disagrees with the finality log"
+                            .to_string(),
+                    );
+                }
+                if head.height > latest.height {
+                    return Err(format!(
+                        "single-authority head height {} exceeds durable finality height {}",
+                        head.height, latest.height
+                    ));
+                }
+                if head.height == latest.height && head.block_hash != latest.block_hash {
+                    return Err(format!(
+                        "single-authority head hash disagrees with the finalized block at height {}",
+                        head.height
+                    ));
+                }
+                if head.height < latest.height {
+                    self.commit_head(latest, offset)?;
+                    head_advanced = true;
+                }
+            }
+            (None, Some(latest)) => {
+                self.commit_head(latest, offset)?;
+                head_advanced = true;
+            }
+            (None, None) => {}
+        }
+
+        Ok(SingleAuthorityStartupRecovery {
+            next_height: latest
+                .as_ref()
+                .map(|record| record.height + 1)
+                .unwrap_or(self.binding.first_authority_height),
+            finalized: latest,
+            head_advanced_during_recovery: head_advanced,
+            truncated_trailing_frame: truncated,
+            durable_end_offset: offset,
+            recent_records: recent.into_iter().collect(),
+        })
+    }
 }
 
 impl SingleAuthorityFinalityStore {
@@ -563,55 +759,11 @@ impl SingleAuthorityFinalityStore {
     /// authoritative there, and the head is rolled forward.
     /// Illegal: head ahead of the log (head must never outrun durable data).
     pub fn recover_startup_state(&self) -> Result<SingleAuthorityStartupState, String> {
-        let head = self.load_head()?;
-        let recovery = self.recover_with_head(head.as_ref())?;
-        let latest = recovery.records.last().cloned();
-        let mut head_advanced = false;
-
-        match (&head, &latest) {
-            (Some(head), None) => {
-                return Err(format!(
-                    "single-authority head claims height {} but the finality log is empty",
-                    head.height
-                ));
-            }
-            (Some(head), Some(latest)) => {
-                if head.chain_id != latest.chain_id
-                    || head.chain_incarnation != latest.chain_incarnation
-                {
-                    return Err(
-                        "single-authority head chain identity disagrees with the finality log"
-                            .to_string(),
-                    );
-                }
-                if head.height > latest.height {
-                    return Err(format!(
-                        "single-authority head height {} exceeds durable finality height {}",
-                        head.height, latest.height
-                    ));
-                }
-                if head.height == latest.height && head.block_hash != latest.block_hash {
-                    return Err(format!(
-                        "single-authority head hash disagrees with the finalized block at height {}",
-                        head.height
-                    ));
-                }
-                if head.height < latest.height {
-                    self.commit_head(latest, recovery.durable_end_offset)?;
-                    head_advanced = true;
-                }
-            }
-            (None, Some(latest)) => {
-                self.commit_head(latest, recovery.durable_end_offset)?;
-                head_advanced = true;
-            }
-            (None, None) => {}
-        }
-
+        let recovery = self.recover_startup_with_tail(0)?;
         Ok(SingleAuthorityStartupState {
-            next_height: recovery.next_height_or(self.binding.first_authority_height),
-            finalized: latest,
-            head_advanced_during_recovery: head_advanced,
+            next_height: recovery.next_height,
+            finalized: recovery.finalized,
+            head_advanced_during_recovery: recovery.head_advanced_during_recovery,
             truncated_trailing_frame: recovery.truncated_trailing_frame,
         })
     }

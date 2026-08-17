@@ -5,9 +5,10 @@
 
 use super::single_authority_finality_store::SINGLE_AUTHORITY_CONSENSUS_PROTOCOL;
 use super::single_authority_signing_journal::*;
+use crate::crypto::pqc::{PQCAlgorithm, PQCManager, PQCPrivateKey, PQCPublicKey};
 use crate::synergy_types::Hash;
 use base64::{engine::general_purpose, Engine as _};
-use crate::crypto::pqc::{PQCAlgorithm, PQCManager, PQCPrivateKey, PQCPublicKey};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
@@ -56,6 +57,18 @@ fn subject_at(height: u64) -> SingleAuthoritySigningSubject {
         canonical_block_hash: Hash([height as u8; 32]),
         canonical_signing_payload_digest: Hash([(height as u8).wrapping_add(64); 32]),
     }
+}
+
+fn historical_subject_at(height: u64) -> SingleAuthoritySigningSubject {
+    let mut subject = subject_at(height);
+    // `subject_at` intentionally uses one-byte fixtures for small tests; the
+    // historical fixture crosses that byte boundary, so keep its required
+    // digests nonzero for every represented height.
+    let marker = (height % 251) as u8 + 1;
+    subject.parent_hash = Hash([marker.saturating_sub(1).max(1); 32]);
+    subject.canonical_block_hash = Hash([marker; 32]);
+    subject.canonical_signing_payload_digest = Hash([marker % 250 + 1; 32]);
+    subject
 }
 
 /// Canonical signing bytes: the subject itself, serialized deterministically.
@@ -115,6 +128,18 @@ fn signature_record(sig: &[u8]) -> SingleAuthoritySignatureRecord {
         signature_base64: general_purpose::STANDARD.encode(sig),
         authority_public_key_fingerprint: "sha256:authority-node-01".to_string(),
     }
+}
+
+/// The canonical V1 shape, intentionally independent from the new runtime's
+/// private implementation.  Parsing this after migration proves a prior
+/// runtime can still decode the compact canonical journal during rollback.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyJournalFile {
+    #[serde(default)]
+    entries: Vec<SingleAuthorityJournalEntry>,
+    #[serde(default)]
+    safety_halts: Vec<SingleAuthoritySafetyHalt>,
 }
 
 #[test]
@@ -217,7 +242,10 @@ fn j12_different_payload_at_same_height_is_rejected() {
     let error = open(&dir)
         .authorize_before_signature(&different)
         .unwrap_err();
-    assert!(error.contains("already bound to a different signing subject"), "{error}");
+    assert!(
+        error.contains("already bound to a different signing subject"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -229,7 +257,9 @@ fn j13_signed_state_retains_the_exact_signature() {
     journal.authorize_before_signature(&subject).unwrap();
 
     let sig = sign_subject(&key, &subject);
-    journal.record_signature(&subject, &signature_record(&sig)).unwrap();
+    journal
+        .record_signature(&subject, &signature_record(&sig))
+        .unwrap();
 
     let entry = open(&dir).entry_for_height(1).unwrap().expect("entry");
     assert_eq!(entry.state, SingleAuthorityJournalState::Signed);
@@ -265,7 +295,9 @@ fn j15_signed_but_not_finalized_recovery_replays_exact_signature() {
     let journal = open(&dir);
     journal.authorize_before_signature(&subject).unwrap();
     let sig = sign_subject(&key, &subject);
-    journal.record_signature(&subject, &signature_record(&sig)).unwrap();
+    journal
+        .record_signature(&subject, &signature_record(&sig))
+        .unwrap();
 
     // Crash before finalization; restart must replay, never re-sign.
     match open(&dir).authorize_before_signature(&subject).unwrap() {
@@ -351,8 +383,89 @@ fn j18_journal_serialization_contains_no_bft_concepts() {
 
     let raw = fs::read_to_string(dir.journal()).unwrap();
     for forbidden in [
-        "quorum", "certificate", "vote", "cluster", "epoch", "round", "coordinator", "producer",
+        "quorum",
+        "certificate",
+        "vote",
+        "cluster",
+        "epoch",
+        "round",
+        "coordinator",
+        "producer",
     ] {
-        assert!(!raw.contains(forbidden), "journal leaked `{forbidden}`: {raw}");
+        assert!(
+            !raw.contains(forbidden),
+            "journal leaked `{forbidden}`: {raw}"
+        );
     }
+}
+
+#[test]
+fn j19_legacy_52733_height_journal_migrates_once_and_stays_bounded() {
+    let dir = TempDir::new("j19");
+    const FINALIZED_HEIGHT: u64 = 52_732;
+    const PENDING_HEIGHT: u64 = FINALIZED_HEIGHT + 1;
+
+    // This represents the exact number of entries present at the production
+    // stall.  The signatures are public, non-empty fixture data; signature
+    // cryptography is covered by the tests above, while this one exercises the
+    // migration's historical-size and crash-safety shape.
+    let entries = (1..=PENDING_HEIGHT)
+        .map(|height| SingleAuthorityJournalEntry {
+            subject: historical_subject_at(height),
+            state: SingleAuthorityJournalState::Signed,
+            signature: Some(SingleAuthoritySignatureRecord {
+                signature_algorithm: SINGLE_AUTHORITY_SIGNATURE_ALGORITHM.to_string(),
+                signature_base64: "AQ==".to_string(),
+                authority_public_key_fingerprint: "sha256:authority-node-01".to_string(),
+            }),
+        })
+        .collect();
+    let legacy = LegacyJournalFile {
+        entries,
+        safety_halts: Vec::new(),
+    };
+    fs::write(dir.journal(), serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+    let tip = historical_subject_at(FINALIZED_HEIGHT);
+    let journal = open(&dir);
+    journal
+        .reconcile_finalized_head(
+            &SingleAuthorityHaltNamespace::from_subject(&tip),
+            FINALIZED_HEIGHT,
+            Some(&tip.canonical_block_hash),
+        )
+        .unwrap();
+
+    let archive = PathBuf::from(format!(
+        "{}.legacy-v1-archive.json",
+        dir.journal().display()
+    ));
+    assert!(archive.exists(), "legacy journal must remain auditable");
+    assert!(fs::metadata(&archive).unwrap().len() > 10_000_000);
+    let compact: LegacyJournalFile =
+        serde_json::from_slice(&fs::read(dir.journal()).unwrap()).unwrap();
+    assert_eq!(compact.entries.len(), 1);
+    assert_eq!(compact.entries[0].subject.height, PENDING_HEIGHT);
+    assert!(fs::metadata(dir.journal()).unwrap().len() < 10_000);
+
+    // The active entry is removed after durable finality.  The following
+    // height writes only one V1-compatible entry, rather than re-growing the
+    // historical journal.
+    journal
+        .mark_finalized(&historical_subject_at(PENDING_HEIGHT))
+        .unwrap();
+    assert!(open(&dir).entries().unwrap().is_empty());
+    assert_eq!(
+        open(&dir)
+            .authorize_before_signature(&subject_at(PENDING_HEIGHT + 1))
+            .unwrap(),
+        SingleAuthoritySigningDecision::SignFresh
+    );
+    let rollback_compatible: LegacyJournalFile =
+        serde_json::from_slice(&fs::read(dir.journal()).unwrap()).unwrap();
+    assert_eq!(rollback_compatible.entries.len(), 1);
+    assert_eq!(
+        rollback_compatible.entries[0].subject.height,
+        PENDING_HEIGHT + 1
+    );
 }

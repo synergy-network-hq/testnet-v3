@@ -1,0 +1,105 @@
+# Chain 1266 incarnation 5 — single_authority_v1 authority node configuration
+# release_id chain1266-incarnation-5-single-authority-rc1
+# Genesis hash 2272fe2b48c6e2019b27223f61ba8d8a82b58656fe9daab50c81f224a301ca74
+# Public RPC and WebSocket ingress are disabled.
+
+[identity]
+node_id = "authority-node-01"
+role = "validator"
+role_display = "validator"
+address = "synv11n57gc4h9tnt3c78crncx46hnlg9vz8eu4lu"
+label = "Authority01"
+
+[role]
+compiled_profile = "validator_node"
+services = ["consensus"]
+
+[network]
+id = 1266
+network_id = "synergy-testnet-v3"
+name = "synergy-testnet-v3"
+p2p_port = 5622
+rpc_port = 5640
+ws_port = 5660
+max_peers = 0
+bootnodes = []
+seed_servers = []
+bootstrap_dns_records = []
+persistent_peers = []
+additional_dial_targets = []
+
+[blockchain]
+block_time = 1
+max_gas_limit = "0x1c9c380"
+chain_id = 1266
+
+[consensus]
+algorithm = "single_authority_v1"
+mode = "single_authority_v1"
+coordinator_id = ""
+producer_ids = []
+release_id = "chain1266-incarnation-5-single-authority-rc1"
+block_time_secs = 1
+epoch_length = 1000
+target_block_time_ms = 1000
+min_validators = 1
+validator_cluster_size = 1
+validator_vote_threshold = 1
+allow_genesis_status_bypass = false
+
+[p2p]
+listen_address = "127.0.0.1:5622"
+public_address = "127.0.0.1:5622"
+discovery_listen_address = "127.0.0.1:5680"
+discovery_public_address = "127.0.0.1:5680"
+node_name = "authority-node-01"
+enable_discovery = false
+enable_peer_exchange = false
+reject_private_advertise_addrs = false
+discovery_port = 5680
+heartbeat_interval = 10
+bootstrap_refresh_secs = 10
+
+[node]
+bootstrap_only = false
+auto_register_validator = false
+validator_address = "synv11n57gc4h9tnt3c78crncx46hnlg9vz8eu4lu"
+strict_validator_allowlist = true
+allowed_validator_addresses = ["synv11n57gc4h9tnt3c78crncx46hnlg9vz8eu4lu"]
+
+[validator]
+participation = "active"
+verify_quorum_certificates = false
+state_sync_before_join = false
+
+[logging]
+log_level = "info"
+log_file = "data/logs/synergy-node.log"
+enable_console = true
+max_file_size = 10485760
+max_files = 5
+
+# Loopback-only RPC and WebSocket. Public ingress stays closed; reach these
+# through an SSH tunnel.
+[rpc]
+bind_address = "127.0.0.1:5640"
+enable_http = true
+http_port = 5640
+enable_ws = true
+ws_port = 5660
+enable_grpc = false
+grpc_port = 5640
+cors_enabled = false
+cors_origins = []
+
+[storage]
+database = "rocksdb"
+path = "data/chain"
+enable_pruning = false
+pruning_interval = 86400
+
+[telemetry]
+enabled = false
+metrics_bind = "127.0.0.1:6030"
+structured_logs = true
+log_level = "info"

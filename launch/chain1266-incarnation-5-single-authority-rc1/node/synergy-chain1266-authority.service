@@ -1,0 +1,32 @@
+[Unit]
+Description=Synergy Chain 1266 incarnation 5 single-authority node (authority-node-01)
+Documentation=https://github.com/synergy-network-hq/testnet-v3
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=synergy
+Group=synergy
+WorkingDirectory=/var/lib/synergy/node
+EnvironmentFile=/etc/synergy/chain1266/authority-node-01.env
+ExecStart=/usr/local/bin/synergy-validator-node start --config /var/lib/synergy/node/config/node.toml
+Restart=no
+KillMode=mixed
+TimeoutStopSec=30
+LimitNOFILE=65536
+StandardOutput=append:/var/log/synergy/chain1266-authority.log
+StandardError=append:/var/log/synergy/chain1266-authority.log
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/synergy /var/log/synergy
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target

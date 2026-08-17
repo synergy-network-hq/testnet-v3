@@ -20,6 +20,9 @@ pub struct WritableSingleAuthorityStore {
     cached_tail: Option<SingleAuthorityFinalityRecord>,
     cached_end_offset: u64,
     cached_head: Option<SingleAuthorityFinalizedHead>,
+    /// Small, startup-validated tail retained so the RPC layer can serve the
+    /// explorer without independently materializing the entire journal.
+    recent_records: Vec<SingleAuthorityFinalityRecord>,
     stats: SingleAuthorityScanStats,
     poisoned: Option<String>,
 }
@@ -28,13 +31,12 @@ impl WritableSingleAuthorityStore {
     /// Exclusive writable open: one O(n) validation scan, then cached.
     pub fn open(store: SingleAuthorityFinalityStore) -> Result<Self, String> {
         let writer = SingleAuthorityWriterLock::acquire(store.log_path())?;
-        let startup = store.recover_startup_state()?;
-        let head = store.load_head()?;
-        let recovery = store.recover_with_head(head.as_ref())?;
+        let startup = store.recover_startup_with_tail(8_192)?;
         Ok(Self {
             cached_tail: startup.finalized,
-            cached_end_offset: recovery.durable_end_offset,
+            cached_end_offset: startup.durable_end_offset,
             cached_head: store.load_head()?,
+            recent_records: startup.recent_records,
             store,
             _writer: writer,
             stats: SingleAuthorityScanStats { full_scans: 1 },
@@ -52,6 +54,11 @@ impl WritableSingleAuthorityStore {
 
     pub fn cached_head(&self) -> Option<&SingleAuthorityFinalizedHead> {
         self.cached_head.as_ref()
+    }
+
+    /// The startup-validated bounded finality tail, oldest first.
+    pub fn recent_records(&self) -> &[SingleAuthorityFinalityRecord] {
+        &self.recent_records
     }
 
     pub fn next_height(&self) -> u64 {
@@ -122,6 +129,10 @@ impl WritableSingleAuthorityStore {
                 // Cache advances ONLY after a successful write+fsync.
                 self.cached_tail = Some(record.clone());
                 self.cached_end_offset = end_offset;
+                self.recent_records.push(record.clone());
+                if self.recent_records.len() > 8_192 {
+                    self.recent_records.remove(0);
+                }
                 Ok(end_offset)
             }
             Err(error) => {
@@ -134,10 +145,7 @@ impl WritableSingleAuthorityStore {
 
 impl WritableSingleAuthorityStore {
     /// Commits the durable head; the head cache advances only on success.
-    pub fn commit_head(
-        &mut self,
-        record: &SingleAuthorityFinalityRecord,
-    ) -> Result<(), String> {
+    pub fn commit_head(&mut self, record: &SingleAuthorityFinalityRecord) -> Result<(), String> {
         self.check_usable()?;
         match self.store.commit_head(record, self.cached_end_offset) {
             Ok(head) => {

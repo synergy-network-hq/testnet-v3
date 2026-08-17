@@ -3,13 +3,12 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, TryLockError};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::block::{Block, BlockChain, HOT_CHAIN_RETENTION_BLOCKS_ENV};
-use crate::rpc::single_authority_finality_rpc::SingleAuthorityRpcEntry;
 use crate::cluster::{fault_tolerance_f, quorum_threshold, EpochClusterAssignmentSnapshot};
 use crate::config::ResolvedConsensusMode;
 use crate::consensus::chain_durability::recover_chain_and_validate_canonical;
@@ -38,6 +37,7 @@ use crate::crypto::pqc::PQCManager;
 use crate::epoch::{epoch_for_block_height, TESTNET_EPOCH_LENGTH_BLOCKS};
 use crate::genesis::canonical_genesis;
 use crate::role_profiles::{resolve_configured_role, AuthorityPlane, RoleProfile};
+use crate::rpc::single_authority_finality_rpc::SingleAuthorityRpcEntry;
 use crate::sxcp;
 use crate::sync::{SyncManager, SyncState};
 use crate::synergy_types::{CanonicalSerialize, Hash, TxId};
@@ -145,11 +145,46 @@ static SUBSCRIPTION_COUNTER: AtomicU64 = AtomicU64::new(1);
 static QRPC_FALLBACK_COUNT: AtomicU64 = AtomicU64::new(0);
 const MAX_HTTP_HEADER_BYTES: usize = 32 * 1024;
 const MAX_HTTP_BODY_BYTES: usize = 4 * 1024 * 1024;
+/// Bound concurrent HTTP work so an unavailable or slow history read cannot
+/// create an unbounded number of OS threads and retained response buffers.
+const MAX_CONCURRENT_HTTP_RPC_CONNECTIONS: usize = 4;
 const QRPC_CHAIN_TIP_RETRY_ATTEMPTS: usize = 40;
 const QRPC_CHAIN_TIP_RETRY_DELAY_MILLIS: u64 = 25;
 const QRPC_STATUS_CHAIN_SNAPSHOT_RETRY_ATTEMPTS: usize = 8;
 const QRPC_STATUS_CHAIN_SNAPSHOT_RETRY_DELAY_MILLIS: u64 = 25;
 const QRPC_CHAIN_UNAVAILABLE_ERROR: &str = "consensus chain state unavailable without blocking";
+
+struct RpcConnectionPermit {
+    active: Arc<AtomicUsize>,
+}
+
+impl Drop for RpcConnectionPermit {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::Release);
+    }
+}
+
+fn try_acquire_rpc_connection_permit(active: &Arc<AtomicUsize>) -> Option<RpcConnectionPermit> {
+    let mut observed = active.load(Ordering::Acquire);
+    loop {
+        if observed >= MAX_CONCURRENT_HTTP_RPC_CONNECTIONS {
+            return None;
+        }
+        match active.compare_exchange_weak(
+            observed,
+            observed + 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => {
+                return Some(RpcConnectionPermit {
+                    active: Arc::clone(active),
+                });
+            }
+            Err(current) => observed = current,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 struct ChainTipSnapshot {
@@ -761,16 +796,33 @@ pub fn start_rpc_server(
         });
     }
 
+    let active_http_connections = Arc::new(AtomicUsize::new(0));
     for stream in TcpListener::bind(bind_address)
         .expect("Failed to bind RPC server")
         .incoming()
     {
+        let Some(connection_permit) = try_acquire_rpc_connection_permit(&active_http_connections)
+        else {
+            if let Ok(mut stream) = stream {
+                let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+                let response = format_http_response(
+                    "503 Service Unavailable",
+                    "application/json",
+                    r#"{"error":"RPC busy; retry later"}"#,
+                    cors_enabled,
+                    &cors_origins,
+                );
+                write_http_response_and_close(&mut stream, &response);
+            }
+            continue;
+        };
         let tx_pool = Arc::clone(&TX_POOL);
         let chain = Arc::clone(&CHAIN);
         let validator_manager = Arc::clone(&VALIDATOR_MANAGER);
         let cors_enabled_for_conn = cors_enabled;
         let cors_origins_for_conn = cors_origins.clone();
         thread::spawn(move || {
+            let _connection_permit = connection_permit;
             if let Ok(mut stream) = stream {
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
                 let mut buffer = [0; 16384];
@@ -1286,15 +1338,41 @@ fn network_validator_snapshot(
         });
     }
 
-    // Testnet-v3 finality lives in one durable finality store. The inherited
-    // `BlockChain` remains at Genesis on read-only roles, so deriving activity
-    // from it made every live validator appear to have produced zero blocks.
-    // Once a supported finality store exists it is the sole finalized
-    // authority, matching the block/explorer RPC paths below.
-    let finality_records = finality_records_for_rpc().ok().flatten();
-    let total_observed_blocks = finality_records
+    // For the single-authority chain, summary endpoints are polled together
+    // by Atlas.  They must not each reconstruct every finalized block while
+    // holding the shared chain lock.  The atomically committed head and its
+    // Genesis-bound authority identify the only active producer here; detailed
+    // historical APIs continue to use their dedicated journal path.
+    let single_authority_bound = canonical_genesis()
+        .map(crate::rpc::single_authority_finality_rpc::genesis_binds_single_authority)
+        .unwrap_or(false);
+    let single_authority_summary = canonical_genesis().ok().and_then(|genesis| {
+        if !crate::rpc::single_authority_finality_rpc::genesis_binds_single_authority(genesis) {
+            return None;
+        }
+        let head =
+            crate::rpc::single_authority_finality_rpc::single_authority_finalized_head_for_rpc(
+                genesis,
+            )
+            .ok()
+            .flatten()?;
+        let authority =
+            crate::rpc::single_authority_finality_rpc::genesis_authority_address(genesis).ok()?;
+        Some((head.height, authority))
+    });
+    let finality_records = if single_authority_bound {
+        None
+    } else {
+        finality_records_for_rpc().ok().flatten()
+    };
+    let total_observed_blocks = single_authority_summary
         .as_ref()
-        .map(|records| records.len() as u64)
+        .map(|(height, _)| *height)
+        .or_else(|| {
+            finality_records
+                .as_ref()
+                .map(|records| records.len() as u64)
+        })
         .unwrap_or_else(|| {
             chain
                 .chain
@@ -1303,29 +1381,44 @@ fn network_validator_snapshot(
                 .count() as u64
         });
     let activity_window = validators.len().max(10).saturating_mul(12);
-    let recent_active = finality_records
-        .as_ref()
-        .map(|records| {
-            records
-                .iter()
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .take(activity_window)
-                .map(|record| {
-                    let validator_id = record.proposer_validator_id();
-                    validator_id_to_address
-                        .get(validator_id.as_str())
-                        .cloned()
-                        .unwrap_or(validator_id)
-                })
-                .collect::<HashSet<_>>()
-        })
-        .unwrap_or_else(|| {
-            recent_active_validator_addresses(chain, validators.len(), &validator_id_to_address)
-        });
+    let recent_active = if let Some((_, authority)) = single_authority_summary.as_ref() {
+        HashSet::from([authority.clone()])
+    } else {
+        finality_records
+            .as_ref()
+            .map(|records| {
+                records
+                    .iter()
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .take(activity_window)
+                    .map(|record| {
+                        let validator_id = record.proposer_validator_id();
+                        validator_id_to_address
+                            .get(validator_id.as_str())
+                            .cloned()
+                            .unwrap_or(validator_id)
+                    })
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_else(|| {
+                recent_active_validator_addresses(chain, validators.len(), &validator_id_to_address)
+            })
+    };
 
-    if let Some(records) = finality_records.as_ref() {
+    if let Some((height, authority)) = single_authority_summary.as_ref() {
+        let validator = validators.entry(authority.clone()).or_insert_with(|| {
+            synthesize_validator(
+                authority.clone(),
+                String::new(),
+                format!("Validator-{}", &authority[..8.min(authority.len())]),
+                0,
+                genesis_timestamp,
+            )
+        });
+        validator.total_blocks_produced = *height;
+    } else if let Some(records) = finality_records.as_ref() {
         for record in records.iter() {
             let validator_id = record.proposer_validator_id();
             let address = validator_id_to_address
@@ -7000,6 +7093,25 @@ fn legacy_block_by_number(
 }
 
 fn block_by_number_json(chain: &Arc<Mutex<BlockChain>>, block_number: u64) -> Value {
+    let genesis = match crate::genesis::canonical_genesis() {
+        Ok(genesis) => genesis,
+        Err(error) => return finality_rpc_error(error),
+    };
+    if crate::rpc::single_authority_finality_rpc::genesis_binds_single_authority(genesis)
+        && block_number != 0
+    {
+        match crate::rpc::single_authority_finality_rpc::single_authority_cached_entry_for_rpc(
+            genesis,
+            block_number,
+        ) {
+            Ok(Some(entry)) => {
+                return crate::rpc::single_authority_finality_rpc::entry_to_explorer_json(&entry)
+                    .unwrap_or_else(|error| finality_rpc_error(error));
+            }
+            Ok(None) => {}
+            Err(error) => return finality_rpc_error(error),
+        }
+    }
     match finality_records_for_rpc() {
         Err(error) => finality_rpc_error(error),
         Ok(Some(records)) => {
@@ -7060,6 +7172,29 @@ fn block_by_hash_json(chain: &Arc<Mutex<BlockChain>>, block_hash: &str) -> Value
 }
 
 fn latest_block_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
+    let genesis = match crate::genesis::canonical_genesis() {
+        Ok(genesis) => genesis,
+        Err(error) => return finality_rpc_error(error),
+    };
+    if crate::rpc::single_authority_finality_rpc::genesis_binds_single_authority(genesis) {
+        match crate::rpc::single_authority_finality_rpc::single_authority_finalized_head_for_rpc(
+            genesis,
+        ) {
+            Ok(Some(head)) => match crate::rpc::single_authority_finality_rpc::single_authority_cached_entry_for_rpc(
+                genesis,
+                head.height,
+            ) {
+                Ok(Some(entry)) => {
+                    return crate::rpc::single_authority_finality_rpc::entry_to_explorer_json(&entry)
+                        .unwrap_or_else(|error| finality_rpc_error(error));
+                }
+                Ok(None) => {}
+                Err(error) => return finality_rpc_error(error),
+            },
+            Ok(None) => {}
+            Err(error) => return finality_rpc_error(error),
+        }
+    }
     match finality_records_for_rpc() {
         Err(error) => finality_rpc_error(error),
         Ok(Some(records)) => match records.iter().last() {
@@ -7078,6 +7213,33 @@ fn latest_block_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
 }
 
 fn block_range_json(chain: &Arc<Mutex<BlockChain>>, start: u64, end: u64) -> Value {
+    let genesis = match crate::genesis::canonical_genesis() {
+        Ok(genesis) => genesis,
+        Err(error) => return finality_rpc_error(error),
+    };
+    if crate::rpc::single_authority_finality_rpc::genesis_binds_single_authority(genesis) {
+        match crate::rpc::single_authority_finality_rpc::single_authority_cached_range_for_rpc(
+            genesis, start, end,
+        ) {
+            Ok(Some(entries)) => {
+                let mut blocks = Vec::new();
+                if start == 0 {
+                    if let Some(genesis) = legacy_block_by_number(chain, 0) {
+                        blocks.push(block_to_explorer_json(&genesis));
+                    }
+                }
+                for entry in &entries {
+                    match crate::rpc::single_authority_finality_rpc::entry_to_explorer_json(entry) {
+                        Ok(block) => blocks.push(block),
+                        Err(error) => return finality_rpc_error(error),
+                    }
+                }
+                return json!(blocks);
+            }
+            Ok(None) => {}
+            Err(error) => return finality_rpc_error(error),
+        }
+    }
     match finality_records_for_rpc() {
         Err(error) => finality_rpc_error(error),
         Ok(Some(records)) => {
@@ -7406,6 +7568,21 @@ fn chain_tip_snapshot_for_status(chain: &Arc<Mutex<BlockChain>>) -> ChainTipSnap
 }
 
 fn block_number_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
+    // Height polling is the dominant public RPC workload. For the signed
+    // single-authority binding, the atomically committed head is sufficient
+    // and avoids rebuilding the complete finality/body histories per poll.
+    let genesis = match canonical_genesis() {
+        Ok(genesis) => genesis,
+        Err(error) => return finality_rpc_error(error),
+    };
+    if crate::rpc::single_authority_finality_rpc::genesis_binds_single_authority(genesis) {
+        return match crate::rpc::single_authority_finality_rpc::single_authority_finalized_head_for_rpc(genesis) {
+            Ok(Some(head)) => json!(head.height),
+            Ok(None) => json!(0),
+            Err(error) => finality_rpc_error(error),
+        };
+    }
+
     match finality_records_for_rpc() {
         Err(error) => return finality_rpc_error(error),
         Ok(Some(records)) => {
@@ -10629,6 +10806,27 @@ mod tests {
         crate::validator::epoch_validator_sets_env_lock()
     }
 
+    #[test]
+    fn http_rpc_connection_permits_are_capped_and_released() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let mut permits = Vec::new();
+        for _ in 0..MAX_CONCURRENT_HTTP_RPC_CONNECTIONS {
+            permits.push(
+                try_acquire_rpc_connection_permit(&active)
+                    .expect("the configured number of permits must be admitted"),
+            );
+        }
+        assert!(
+            try_acquire_rpc_connection_permit(&active).is_none(),
+            "the listener must refuse work above the hard connection bound"
+        );
+        drop(permits.pop());
+        assert!(
+            try_acquire_rpc_connection_permit(&active).is_some(),
+            "a completed request must release capacity for the next client"
+        );
+    }
+
     fn typed_rpc_hash(label: &str) -> Hash {
         Hash::from_domain_bytes("SYNERGY_TYPED_FINALITY_RPC_TEST_V1", label.as_bytes())
     }
@@ -10916,8 +11114,14 @@ mod tests {
         let first = records.iter().find(|r| r.height() == 1).unwrap();
         let block_one = finality_record_to_explorer_json(first).unwrap();
         assert_eq!(block_one["height"], json!(1));
-        assert_eq!(block_one["hash"], json!(entries[0].record.block_hash.to_hex()));
-        assert_eq!(block_one["consensus_protocol"], json!("single_authority_v1"));
+        assert_eq!(
+            block_one["hash"],
+            json!(entries[0].record.block_hash.to_hex())
+        );
+        assert_eq!(
+            block_one["consensus_protocol"],
+            json!("single_authority_v1")
+        );
         assert_eq!(block_one["validator_id"], json!(SA_AUTHORITY_ADDRESS));
         assert_eq!(block_one["authority_address"], json!(SA_AUTHORITY_ADDRESS));
         assert_eq!(block_one["finality_status"], json!("finalized"));
@@ -10955,7 +11159,10 @@ mod tests {
                     "height {height} must extend its predecessor"
                 );
             }
-            assert_eq!(json_block["hash"], json!(entries[index].record.block_hash.to_hex()));
+            assert_eq!(
+                json_block["hash"],
+                json!(entries[index].record.block_hash.to_hex())
+            );
         }
     }
 
@@ -10990,7 +11197,10 @@ mod tests {
     #[test]
     fn r5_empty_single_authority_journal_fails_closed_without_legacy_fallback() {
         let empty = RpcFinalityRecords::SingleAuthority(Vec::new());
-        assert_eq!(authoritative_block_height(Some(&empty), Some(4_512)), Some(0));
+        assert_eq!(
+            authoritative_block_height(Some(&empty), Some(4_512)),
+            Some(0)
+        );
         assert_eq!(empty.iter().count(), 0);
     }
 

@@ -254,6 +254,42 @@ fn t28_no_quorum_types_are_reachable_from_this_store() {
     assert!(!encoded.contains("vote"), "{encoded}");
 }
 
+#[test]
+fn t29_startup_recovery_streams_history_and_retains_only_requested_tail() {
+    let dir = TempDir::new("t29");
+    let store = open_store(&dir);
+    let mut parent = Hash::zero();
+    let mut end = 0;
+    let mut latest = None;
+
+    // Use the O(1) append primitive so this is a real on-disk archive that is
+    // longer than the retained suffix without making the test quadratic.
+    for height in 0..32 {
+        let record = record_at(height, parent, hash_of(1u8.wrapping_add(height as u8)));
+        end = store
+            .append_frame_at(&record, end)
+            .expect("append durable frame");
+        parent = record.block_hash;
+        latest = Some(record);
+    }
+    let latest = latest.expect("last record");
+    store.commit_head(&latest, end).expect("commit head");
+
+    let recovery = open_store(&dir)
+        .recover_startup_with_tail(3)
+        .expect("stream startup recovery");
+    assert_eq!(recovery.finalized, Some(latest));
+    assert_eq!(recovery.next_height, 32);
+    assert_eq!(
+        recovery
+            .recent_records
+            .iter()
+            .map(|record| record.height)
+            .collect::<Vec<_>>(),
+        vec![29, 30, 31]
+    );
+}
+
 /// Appends raw bytes past the end of a healthy, head-committed log.
 fn append_raw(dir: &TempDir, bytes: &[u8]) {
     let mut file = OpenOptions::new().append(true).open(dir.log()).expect("open log");

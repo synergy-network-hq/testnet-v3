@@ -16,7 +16,7 @@
 use crate::synergy_types::Hash;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 /// Signing domain for single-authority block production.
@@ -59,7 +59,9 @@ impl SingleAuthoritySigningSubject {
         if self.schema_version != SINGLE_AUTHORITY_JOURNAL_SCHEMA_VERSION {
             return Err("single-authority signing subject schema is unsupported".to_string());
         }
-        if self.consensus_protocol != super::single_authority_finality_store::SINGLE_AUTHORITY_CONSENSUS_PROTOCOL {
+        if self.consensus_protocol
+            != super::single_authority_finality_store::SINGLE_AUTHORITY_CONSENSUS_PROTOCOL
+        {
             return Err("single-authority signing subject has a foreign protocol".to_string());
         }
         if self.height < FIRST_AUTHORITY_PRODUCED_HEIGHT {
@@ -159,6 +161,18 @@ struct JournalFile {
     safety_halts: Vec<SingleAuthoritySafetyHalt>,
 }
 
+/// Small, separate progress marker for the compact journal.  The canonical
+/// journal deliberately remains a V1 `JournalFile` so a verified emergency
+/// rollback can continue to decode it with the previous runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JournalHotState {
+    schema_version: u32,
+    finalized_through: u64,
+}
+
+const SINGLE_AUTHORITY_JOURNAL_HOT_STATE_SCHEMA_VERSION: u32 = 1;
+
 /// What the driver must do for a height after inspecting the journal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SingleAuthoritySigningDecision {
@@ -179,12 +193,165 @@ pub struct SingleAuthoritySigningJournal {
 }
 
 impl SingleAuthoritySigningJournal {
+    /// Reconcile the compact journal with the already-recovered durable
+    /// finality head.  Migration is ordered archive -> compact journal -> hot
+    /// state; every interrupted point can be recovered without authorizing a
+    /// second signature for a height.
+    pub fn reconcile_finalized_head(
+        &self,
+        namespace: &SingleAuthorityHaltNamespace,
+        finalized_height: u64,
+        finalized_hash: Option<&Hash>,
+    ) -> Result<(), String> {
+        let mut journal = self.load()?;
+        match self.load_hot_state()? {
+            Some(hot_state) => {
+                if finalized_height < hot_state.finalized_through {
+                    return Err(format!(
+                        "single-authority finalized head regressed from {} to {}",
+                        hot_state.finalized_through, finalized_height
+                    ));
+                }
+                let changed = Self::compact_entries_for_finality_head(
+                    &mut journal,
+                    namespace,
+                    finalized_height,
+                    finalized_hash,
+                )?;
+                if changed {
+                    self.persist(&journal)?;
+                }
+                if finalized_height != hot_state.finalized_through {
+                    self.persist_hot_state(finalized_height)?;
+                }
+            }
+            None => {
+                // A non-empty V1 journal must be bound to recovered finality
+                // before it can be used again.  Preserve its exact bytes first.
+                let archive_matches_canonical = self.archive_legacy_journal()?;
+                let changed = Self::compact_entries_for_finality_head(
+                    &mut journal,
+                    namespace,
+                    finalized_height,
+                    finalized_hash,
+                )?;
+
+                // If the archive already differed, a prior process completed
+                // the canonical compaction but crashed before writing hot
+                // state.  Validating the compact current file above makes it
+                // safe to complete that interrupted migration.
+                if changed || archive_matches_canonical {
+                    self.persist(&journal)?;
+                }
+                self.persist_hot_state(finalized_height)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn compact_entries_for_finality_head(
+        journal: &mut JournalFile,
+        namespace: &SingleAuthorityHaltNamespace,
+        finalized_height: u64,
+        finalized_hash: Option<&Hash>,
+    ) -> Result<bool, String> {
+        let mut retained = Vec::with_capacity(1);
+        let mut seen_heights = std::collections::BTreeSet::new();
+        let original_len = journal.entries.len();
+        for entry in std::mem::take(&mut journal.entries) {
+            entry.subject.validate()?;
+            if entry.subject.chain_id != namespace.chain_id
+                || entry.subject.chain_incarnation != namespace.chain_incarnation
+                || entry.subject.consensus_protocol != namespace.consensus_protocol
+                || entry.subject.authority_id != namespace.authority_id
+                || entry.subject.release_id != namespace.release_id
+            {
+                return Err(
+                    "signing journal contains an entry outside the active authority binding"
+                        .to_string(),
+                );
+            }
+            if !seen_heights.insert(entry.subject.height) {
+                return Err(format!(
+                    "signing journal contains multiple entries for height {}",
+                    entry.subject.height
+                ));
+            }
+            if entry.subject.height <= finalized_height {
+                if !matches!(
+                    entry.state,
+                    SingleAuthorityJournalState::Signed | SingleAuthorityJournalState::Finalized
+                ) || entry.signature.is_none()
+                {
+                    return Err(format!(
+                        "signing journal entry at finalized height {} is not a durable signature",
+                        entry.subject.height
+                    ));
+                }
+                if entry.subject.height == finalized_height
+                    && finalized_hash
+                        .is_some_and(|hash| entry.subject.canonical_block_hash != *hash)
+                {
+                    return Err(format!(
+                        "signing journal entry at finalized height {} disagrees with the durable finality head",
+                        finalized_height
+                    ));
+                }
+                continue;
+            }
+            if entry.subject.height != finalized_height.saturating_add(1) {
+                return Err(format!(
+                    "signing journal contains out-of-window height {} while durable finality is {}",
+                    entry.subject.height, finalized_height
+                ));
+            }
+            if entry.state == SingleAuthorityJournalState::Finalized {
+                return Err(format!(
+                    "signing journal marks height {} finalized but durable finality is still {}",
+                    entry.subject.height, finalized_height
+                ));
+            }
+            retained.push(entry);
+        }
+        let changed = retained.len() != original_len;
+        journal.entries = retained;
+        Ok(changed)
+    }
+
+    fn active_hot_state_for(&self, journal: &JournalFile) -> Result<JournalHotState, String> {
+        match self.load_hot_state()? {
+            Some(state) => Ok(state),
+            None if journal.entries.is_empty() => {
+                // Direct journal users (including an empty fresh installation)
+                // have no historical V1 state to migrate.  The driver performs
+                // the stricter finality-bound reconciliation before production.
+                self.persist_hot_state(0)?;
+                Ok(JournalHotState {
+                    schema_version: SINGLE_AUTHORITY_JOURNAL_HOT_STATE_SCHEMA_VERSION,
+                    finalized_through: 0,
+                })
+            }
+            None => Err(
+                "single-authority signing journal has legacy entries but no finalized-head reconciliation"
+                    .to_string(),
+            ),
+        }
+    }
+
     pub fn at_path(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    fn archive_path(&self) -> PathBuf {
+        PathBuf::from(format!("{}.legacy-v1-archive.json", self.path.display()))
+    }
+
+    fn hot_state_path(&self) -> PathBuf {
+        PathBuf::from(format!("{}.hot-state.json", self.path.display()))
     }
 
     fn load(&self) -> Result<JournalFile, String> {
@@ -198,28 +365,127 @@ impl SingleAuthoritySigningJournal {
     }
 
     fn persist(&self, journal: &JournalFile) -> Result<(), String> {
-        let bytes = serde_json::to_vec(journal)
-            .map_err(|error| format!("encode single-authority signing journal: {error}"))?;
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("create journal directory: {error}"))?;
+        self.atomic_write_json(&self.path, journal, "signing journal")
+    }
+
+    fn load_hot_state(&self) -> Result<Option<JournalHotState>, String> {
+        let path = self.hot_state_path();
+        if !path.exists() {
+            return Ok(None);
         }
-        let temp = self
-            .path
-            .with_extension(format!("tmp-{}", std::process::id()));
+        let bytes = fs::read(&path)
+            .map_err(|error| format!("read single-authority journal hot state: {error}"))?;
+        let state: JournalHotState = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("decode single-authority journal hot state: {error}"))?;
+        if state.schema_version != SINGLE_AUTHORITY_JOURNAL_HOT_STATE_SCHEMA_VERSION {
+            return Err(format!(
+                "single-authority journal hot state schema {} is unsupported",
+                state.schema_version
+            ));
+        }
+        Ok(Some(state))
+    }
+
+    fn persist_hot_state(&self, finalized_through: u64) -> Result<(), String> {
+        self.atomic_write_json(
+            &self.hot_state_path(),
+            &JournalHotState {
+                schema_version: SINGLE_AUTHORITY_JOURNAL_HOT_STATE_SCHEMA_VERSION,
+                finalized_through,
+            },
+            "journal hot state",
+        )
+    }
+
+    fn atomic_write_json<T: Serialize>(
+        &self,
+        path: &Path,
+        value: &T,
+        description: &str,
+    ) -> Result<(), String> {
+        let bytes = serde_json::to_vec(value)
+            .map_err(|error| format!("encode single-authority {description}: {error}"))?;
+        self.atomic_write_bytes(path, &bytes, description)
+    }
+
+    fn atomic_write_bytes(
+        &self,
+        path: &Path,
+        bytes: &[u8],
+        description: &str,
+    ) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("create {description} directory: {error}"))?;
+        }
+        let temp = path.with_extension(format!("tmp-{}", std::process::id()));
         {
             let mut file = File::create(&temp)
-                .map_err(|error| format!("create temporary journal: {error}"))?;
+                .map_err(|error| format!("create temporary {description}: {error}"))?;
             file.write_all(&bytes)
                 .and_then(|_| file.sync_all())
-                .map_err(|error| format!("write temporary journal: {error}"))?;
+                .map_err(|error| format!("write temporary {description}: {error}"))?;
         }
-        fs::rename(&temp, &self.path)
-            .map_err(|error| format!("replace signing journal: {error}"))?;
-        if let Some(parent) = self.path.parent() {
+        fs::rename(&temp, path).map_err(|error| format!("replace {description}: {error}"))?;
+        if let Some(parent) = path.parent() {
             let _ = File::open(parent).and_then(|dir| dir.sync_all());
         }
         Ok(())
+    }
+
+    /// Persist an immutable byte-for-byte V1 archive before compacting the
+    /// canonical journal.  Streaming copy/comparison avoids a second large
+    /// allocation during the one-time migration.
+    fn archive_legacy_journal(&self) -> Result<bool, String> {
+        if !self.path.exists() {
+            return Ok(false);
+        }
+        let archive = self.archive_path();
+        if archive.exists() {
+            return Self::files_equal(&self.path, &archive)
+                .map_err(|error| format!("compare single-authority journal archive: {error}"));
+        }
+
+        if let Some(parent) = archive.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("create journal archive directory: {error}"))?;
+        }
+        let temp = archive.with_extension(format!("tmp-{}", std::process::id()));
+        let mut source = File::open(&self.path)
+            .map_err(|error| format!("open legacy signing journal for archive: {error}"))?;
+        let mut destination = File::create(&temp)
+            .map_err(|error| format!("create temporary journal archive: {error}"))?;
+        io::copy(&mut source, &mut destination)
+            .and_then(|_| destination.sync_all())
+            .map_err(|error| format!("write journal archive: {error}"))?;
+        fs::rename(&temp, &archive).map_err(|error| format!("replace journal archive: {error}"))?;
+        if let Some(parent) = archive.parent() {
+            let _ = File::open(parent).and_then(|dir| dir.sync_all());
+        }
+        Ok(true)
+    }
+
+    fn files_equal(left: &Path, right: &Path) -> Result<bool, io::Error> {
+        if fs::metadata(left)?.len() != fs::metadata(right)?.len() {
+            return Ok(false);
+        }
+        let mut left = File::open(left)?;
+        let mut right = File::open(right)?;
+        let mut left_buf = [0u8; 64 * 1024];
+        let mut right_buf = [0u8; 64 * 1024];
+        loop {
+            let left_read = left.read(&mut left_buf)?;
+            let right_read = right.read(&mut right_buf)?;
+            if left_read != right_read {
+                return Ok(false);
+            }
+            if left_read == 0 {
+                return Ok(true);
+            }
+            if left_buf[..left_read] != right_buf[..right_read] {
+                return Ok(false);
+            }
+        }
     }
 }
 
@@ -241,11 +507,7 @@ impl SingleAuthoritySigningJournal {
             return Err(format!(
                 "SINGLE_AUTHORITY_SAFETY_HALT: signing disabled for chain {} incarnation {} \
                  authority {} at height {}: {}",
-                halt.chain_id,
-                halt.chain_incarnation,
-                halt.authority_id,
-                halt.height,
-                halt.reason
+                halt.chain_id, halt.chain_incarnation, halt.authority_id, halt.height, halt.reason
             ));
         }
         Ok(())
@@ -320,6 +582,14 @@ impl SingleAuthoritySigningJournal {
         subject.validate()?;
         self.require_signing_allowed(&SingleAuthorityHaltNamespace::from_subject(subject))?;
         let mut journal = self.load()?;
+        let hot_state = self.active_hot_state_for(&journal)?;
+        let expected_height = hot_state.finalized_through.saturating_add(1);
+        if subject.height != expected_height {
+            return Err(format!(
+                "single-authority signing subject height {} is outside the active slot {}; reconcile durable finality before signing",
+                subject.height, expected_height
+            ));
+        }
 
         if let Some(existing) = journal
             .entries
@@ -387,6 +657,13 @@ impl SingleAuthoritySigningJournal {
             return Err("single-authority signature record is empty".to_string());
         }
         let mut journal = self.load()?;
+        let hot_state = self.active_hot_state_for(&journal)?;
+        if subject.height != hot_state.finalized_through.saturating_add(1) {
+            return Err(format!(
+                "cannot record a signature outside the active height {}",
+                hot_state.finalized_through.saturating_add(1)
+            ));
+        }
         let entry = journal
             .entries
             .iter_mut()
@@ -417,18 +694,31 @@ impl SingleAuthoritySigningJournal {
     /// Step 12: mark the height finalized, after the durable head is committed.
     pub fn mark_finalized(&self, subject: &SingleAuthoritySigningSubject) -> Result<(), String> {
         let mut journal = self.load()?;
-        let entry = journal
+        let hot_state = self.active_hot_state_for(&journal)?;
+        if subject.height != hot_state.finalized_through.saturating_add(1) {
+            return Err(format!(
+                "cannot finalize height {} while durable journal is at {}",
+                subject.height, hot_state.finalized_through
+            ));
+        }
+        let entry_index = journal
             .entries
-            .iter_mut()
-            .find(|entry| entry.subject.slot_key() == subject.slot_key())
+            .iter()
+            .position(|entry| entry.subject.slot_key() == subject.slot_key())
             .ok_or_else(|| format!("cannot finalize unknown height {}", subject.height))?;
+        let entry = &journal.entries[entry_index];
         if &entry.subject != subject {
             return Err("finalized subject does not match the journal".to_string());
         }
         if entry.signature.is_none() {
             return Err("cannot finalize a height with no durable signature".to_string());
         }
-        entry.state = SingleAuthorityJournalState::Finalized;
-        self.persist(&journal)
+        // The exact signature is now durable in the finality record.  Removing
+        // this completed entry keeps the canonical V1 journal bounded.  If we
+        // crash before its hot-state marker is advanced, startup reconciliation
+        // observes the durable finality head and completes the same transition.
+        journal.entries.remove(entry_index);
+        self.persist(&journal)?;
+        self.persist_hot_state(subject.height)
     }
 }

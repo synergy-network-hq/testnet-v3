@@ -256,7 +256,11 @@ fn t01_real_signed_native_transfer_is_finalized_and_survives_restart() {
     // ---------------------------------------------------------------
     // 4-7. Real transaction: real key, real signing, real verification.
     // ---------------------------------------------------------------
-    let report = sign_real_transaction("chain1266-single-authority-account", 0, TRANSFER_AMOUNT_NWEI);
+    let report = sign_real_transaction(
+        "chain1266-single-authority-account",
+        0,
+        TRANSFER_AMOUNT_NWEI,
+    );
     let typed_tx = report.transaction.clone();
     let sender = typed_tx.sender_uma_or_account.clone();
     let recipient = typed_tx.receiver_uma_or_account.clone();
@@ -404,10 +408,9 @@ fn t01_real_signed_native_transfer_is_finalized_and_survives_restart() {
     // The pool id (`SYNERGY_TX_V1`) and the execution receipt id
     // (`SYNERGY_EXECUTION_TX_ID_V1`) are distinct canonical domains over the
     // SAME canonical transaction bytes. Bind both to this one transaction.
-    let execution_context = crate::execution::verified_context_for_block(std::slice::from_ref(
-        &typed_tx,
-    ))
-    .expect("canonical execution identity");
+    let execution_context =
+        crate::execution::verified_context_for_block(std::slice::from_ref(&typed_tx))
+            .expect("canonical execution identity");
     assert_eq!(execution_context.len(), 1);
     let (execution_tx_id, execution_canonical_bytes_hash) = execution_context
         .iter()
@@ -575,11 +578,17 @@ fn t01_real_signed_native_transfer_is_finalized_and_survives_restart() {
             "incarnation 4 must not be able to read an incarnation 5 finality log"
         );
 
-        // Signing journal state is Finalized.
+        // Completed entries are compacted from the journal.  The append-only
+        // finality record retains the exact public signature for audit.
         let journal = SingleAuthoritySigningJournal::at_path(dir.0.join("signing-journal.json"));
-        let entry = journal.entry_for_height(1).unwrap().expect("journal entry");
-        assert_eq!(entry.state, SingleAuthorityJournalState::Finalized);
-        assert!(entry.signature.is_some());
+        assert!(journal.entry_for_height(1).unwrap().is_none());
+        use base64::{engine::general_purpose, Engine as _};
+        assert_eq!(
+            general_purpose::STANDARD
+                .decode(&record.authority_signature_base64)
+                .unwrap(),
+            height_one_signature
+        );
     }
 
     // 18. Replay from the same parent state reproduces every root.
@@ -611,11 +620,7 @@ fn t01_real_signed_native_transfer_is_finalized_and_survives_restart() {
     assert_eq!(persisted.block_hash, block.hash);
 
     // 23. No BFT artifact exists in any durable single-authority file.
-    for file in [
-        "finality.log",
-        "finality.head.json",
-        "signing-journal.json",
-    ] {
+    for file in ["finality.log", "finality.head.json", "signing-journal.json"] {
         let raw = fs::read_to_string(dir.0.join(file)).unwrap_or_default();
         for forbidden in [
             "quorum",
@@ -712,15 +717,7 @@ fn t01_real_signed_native_transfer_is_finalized_and_survives_restart() {
         .expect("height 2 authority signature verifies");
 
     let journal = SingleAuthoritySigningJournal::at_path(dir.0.join("signing-journal.json"));
-    let entry_one = journal.entry_for_height(1).unwrap().expect("entry");
-    use base64::{engine::general_purpose, Engine as _};
-    assert_eq!(
-        general_purpose::STANDARD
-            .decode(&entry_one.signature.expect("signature").signature_base64)
-            .unwrap(),
-        height_one_signature,
-        "restart must not regenerate the height-1 signature"
-    );
+    assert!(journal.entry_for_height(1).unwrap().is_none());
 
     // No duplicate or conflicting height.
     let store = SingleAuthorityFinalityStore::at_paths(
@@ -732,6 +729,14 @@ fn t01_real_signed_native_transfer_is_finalized_and_survives_restart() {
     let recovery = store.recover().expect("recover");
     let heights: Vec<u64> = recovery.records.iter().map(|r| r.height).collect();
     assert_eq!(heights, vec![1, 2], "exactly heights 1 and 2, in order");
+    use base64::{engine::general_purpose, Engine as _};
+    assert_eq!(
+        general_purpose::STANDARD
+            .decode(&recovery.records[0].authority_signature_base64)
+            .unwrap(),
+        height_one_signature,
+        "restart must not regenerate the height-1 signature"
+    );
     // An empty height-2 body leaves the post-transaction state unchanged.
     assert_eq!(recovery.records[1].state_root, finalized_state_root);
 
@@ -770,7 +775,10 @@ fn t01_real_signed_native_transfer_is_finalized_and_survives_restart() {
         balance(&recovered, &recipient)
     );
     println!("  transfer_amount_nwei     = {TRANSFER_AMOUNT_NWEI}");
-    println!("  fee_total_nwei           = {}", fee.total_network_fee_nwei);
+    println!(
+        "  fee_total_nwei           = {}",
+        fee.total_network_fee_nwei
+    );
     println!("  fee_gas_nwei             = {}", fee.gas_fee_nwei);
     println!(
         "  fee_amount_protocol_nwei = {}",
@@ -781,7 +789,10 @@ fn t01_real_signed_native_transfer_is_finalized_and_survives_restart() {
     println!("  fee_collector            = {}", fee.fee_collector_address);
     println!("  block_height             = {}", block.block_index);
     println!("  block_hash               = {}", block.hash);
-    println!("  block_signature_alg      = {}", block.block_signature_algorithm);
+    println!(
+        "  block_signature_alg      = {}",
+        block.block_signature_algorithm
+    );
     println!(
         "  transaction_root         = {}",
         finalized_transaction_root.to_hex()

@@ -9,8 +9,10 @@
 
 use super::single_authority_execution::{
     append_receipt_frame, authorize_for_execution, genesis_anchor_block, load_execution_state,
-    persist_execution_state, recover_receipt_frames, require_state_root_agreement,
-    typed_transactions_for_block, SingleAuthorityReceiptFrame,
+    persist_execution_state, recover_receipt_tip,
+    recover_single_authority_committed_body_tail, record_committed_block_nonces,
+    require_state_root_agreement, typed_transactions_for_block_with_nonce_index,
+    SingleAuthorityReceiptFrame, SINGLE_AUTHORITY_RUNTIME_TAIL_CAPACITY,
 };
 use super::single_authority_finality_store::*;
 use super::single_authority_signing_journal::*;
@@ -18,11 +20,12 @@ use super::single_authority_writable_store::WritableSingleAuthorityStore;
 use crate::block::{Block, BlockChain};
 use crate::crypto::pqc::{PQCAlgorithm, PQCManager, PQCPrivateKey, PQCPublicKey};
 use crate::execution::{
-    execute_block_contents, compute_state_root_after, ExecutionBlockContext, ExecutionResult,
+    compute_state_root_after, execute_block_contents, ExecutionBlockContext, ExecutionResult,
     ExecutionState,
 };
 use crate::synergy_types::{Hash, Height};
 use crate::transaction::Transaction;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Everything the driver needs. Deliberately carries no coordinated fields.
@@ -87,6 +90,10 @@ pub struct SingleAuthorityDriver {
     store: WritableSingleAuthorityStore,
     parent: FinalizedParent,
     execution_state: ExecutionState,
+    /// The highest committed nonce per sender, rebuilt by streaming the
+    /// durable body archive at startup. This preserves canonical admission
+    /// without retaining every historical block body in memory.
+    committed_nonce_index: BTreeMap<String, u64>,
     chain: BlockChain,
 }
 
@@ -99,9 +106,6 @@ impl SingleAuthorityDriver {
                 inputs.authority_public_key.algorithm
             ));
         }
-        let journal = SingleAuthoritySigningJournal::at_path(inputs.signing_journal_path.clone());
-        journal.require_signing_allowed(&inputs.halt_namespace())?;
-
         let store = SingleAuthorityFinalityStore::at_paths(
             inputs.finality_log_path.clone(),
             inputs.finality_head_path.clone(),
@@ -125,17 +129,53 @@ impl SingleAuthorityDriver {
                 state_root: tail.state_root,
             },
         };
+        let finalized_hash = writable.cached_tail().map(|tail| tail.block_hash);
+        let journal = SingleAuthoritySigningJournal::at_path(inputs.signing_journal_path.clone());
+        // Reconcile the journal only after the finality log/head have been
+        // recovered.  This one-time migration compacts completed signature
+        // entries without ever allowing a second signature for a height.
+        journal.reconcile_finalized_head(
+            &inputs.halt_namespace(),
+            parent.height,
+            finalized_hash.as_ref(),
+        )?;
+        journal.require_signing_allowed(&inputs.halt_namespace())?;
 
-        // Recover the committed block bodies and reconcile them against the
-        // finality log, the durable execution state, and the receipt log. Any
-        // disagreement is a hard startup failure.
+        // Stream the committed-body archive to validate its entire linkage and
+        // rebuild the compact nonce index, retaining only the hot suffix that
+        // RPC and the next block need. Any disagreement is a hard startup
+        // failure.
         let mut chain = BlockChain::new();
         chain.add_block(genesis_anchor_block(&inputs.genesis_hash));
-        crate::consensus::chain_durability::recover_chain_from_committed_block_log_at(
+        let committed_nonce_index = recover_single_authority_committed_body_tail(
             &mut chain,
             &inputs.committed_block_log_path,
+            SINGLE_AUTHORITY_RUNTIME_TAIL_CAPACITY,
         )?;
         let execution_state = Self::reconcile_recovered_state(&inputs, &parent, &chain)?;
+
+        // The explorer's hot range is the recent finalized tail.  Publish it
+        // only after all body/finality/execution reconciliation succeeds, so
+        // RPC never sees an entry that startup has not accepted as canonical.
+        let rpc_tail = writable
+            .recent_records()
+            .iter()
+            .map(|record| {
+                let body = chain
+                    .chain
+                    .iter()
+                    .find(|body| body.block_index == record.height)
+                    .cloned()
+                    .ok_or_else(|| {
+                        format!(
+                            "single-authority RPC cache has no recovered body for finalized height {}",
+                            record.height
+                        )
+                    })?;
+                Ok((record.clone(), body))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        crate::rpc::single_authority_finality_rpc::replace_single_authority_rpc_cache(rpc_tail)?;
 
         Ok(Self {
             inputs,
@@ -143,6 +183,7 @@ impl SingleAuthorityDriver {
             store: writable,
             parent,
             execution_state,
+            committed_nonce_index,
             chain,
         })
     }
@@ -154,7 +195,8 @@ impl SingleAuthorityDriver {
         parent: &FinalizedParent,
         chain: &BlockChain,
     ) -> Result<ExecutionState, String> {
-        let receipts = recover_receipt_frames(&inputs.receipt_log_path)?;
+        let (receipt_tip, saw_receipts) =
+            recover_receipt_tip(&inputs.receipt_log_path, parent.height)?;
         let durable_state = load_execution_state(&inputs.execution_state_path)?;
 
         if parent.height == 0 {
@@ -163,9 +205,9 @@ impl SingleAuthorityDriver {
                     "committed block bodies exist but no authority height is finalized".to_string(),
                 );
             }
-            if !receipts.is_empty() {
+            if saw_receipts {
                 return Err(
-                    "durable receipts exist but no authority height is finalized".to_string()
+                    "durable receipts exist but no authority height is finalized".to_string(),
                 );
             }
             let state = durable_state.unwrap_or_else(|| inputs.genesis_execution_state.clone());
@@ -185,9 +227,9 @@ impl SingleAuthorityDriver {
                 tip.block_index, tip.hash, parent.height, parent.block_hash
             ));
         }
-        let frame = receipts.get(&parent.height).ok_or_else(|| {
-            format!("finalized height {} has no durable receipts", parent.height)
-        })?;
+        let frame = receipt_tip
+            .as_ref()
+            .ok_or_else(|| format!("finalized height {} has no durable receipts", parent.height))?;
         if frame.block_hash != parent.block_hash || frame.state_root_after != parent.state_root {
             return Err(format!(
                 "durable receipt frame at height {} disagrees with the finalized record",
@@ -229,10 +271,7 @@ impl SingleAuthorityDriver {
 
 impl SingleAuthorityDriver {
     /// Produce and finalize exactly one block at the next height.
-    pub fn produce_next_block(
-        &mut self,
-        transactions: Vec<Transaction>,
-    ) -> Result<Block, String> {
+    pub fn produce_next_block(&mut self, transactions: Vec<Transaction>) -> Result<Block, String> {
         let height = self.next_height();
 
         // 1. Canonical block construction on the DURABLE finalized parent.
@@ -315,16 +354,13 @@ impl SingleAuthorityDriver {
     /// reject can never be executed or finalized.
     pub fn execute_block_body(&self, block: &Block) -> Result<ExecutionResult, String> {
         let consensus_timestamp_unix = block.timestamp;
-        let typed = typed_transactions_for_block(
+        let typed = typed_transactions_for_block_with_nonce_index(
             &block.transactions,
-            &self.chain,
+            &self.committed_nonce_index,
             consensus_timestamp_unix,
         )?;
-        let authorized = authorize_for_execution(
-            &self.execution_state,
-            &typed,
-            consensus_timestamp_unix,
-        )?;
+        let authorized =
+            authorize_for_execution(&self.execution_state, &typed, consensus_timestamp_unix)?;
         execute_block_contents(
             &ExecutionBlockContext {
                 height: Height(block.block_index),
@@ -405,10 +441,7 @@ impl SingleAuthorityDriver {
             transaction_root,
             receipt_root,
             authority_id: self.inputs.authority_id.clone(),
-            authority_public_key_fingerprint: self
-                .inputs
-                .authority_public_key_fingerprint
-                .clone(),
+            authority_public_key_fingerprint: self.inputs.authority_public_key_fingerprint.clone(),
             authority_signature_base64: general_purpose::STANDARD.encode(&signature_bytes),
             finalized_timestamp_ms: block.timestamp.saturating_mul(1_000),
         };
@@ -418,9 +451,17 @@ impl SingleAuthorityDriver {
         self.store.commit_head(&record)?;
         self.journal.mark_finalized(&subject)?;
 
-        // 9. Only now may the parent, the in-memory chain, and the execution
-        // state advance (publication would happen here).
+        // 9. Only now may the parent, the bounded in-memory body tail, nonce
+        // index, and execution state advance (publication would happen here).
         self.chain.add_block_extending_tip(block.clone())?;
+        while self.chain.chain.len() > SINGLE_AUTHORITY_RUNTIME_TAIL_CAPACITY + 1 {
+            self.chain.chain.remove(1);
+        }
+        record_committed_block_nonces(&mut self.committed_nonce_index, block);
+        crate::rpc::single_authority_finality_rpc::push_single_authority_rpc_cache_entry(
+            record,
+            block.clone(),
+        );
         self.execution_state = execution.state;
         self.parent = FinalizedParent {
             height: subject.height,

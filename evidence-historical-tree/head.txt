@@ -1,0 +1,12 @@
+9d3ab80 Recover coordinated finality in bounded ranges
+a292680 Process queued coordinated proposals before timeout
+323e405 Unicast coordinated finality sync replies
+52ededa Allow pendingless coordinated recovery proposals
+d1c5c31 Drop stale coordinated proposals at the coordinator
+ CHAIN_1266_STALL_LOG.md                     | 3252 +++++++++++++++++++++++++++
+ genesis-contracts/contracts/SaleClaim.synq  |   20 -
+ scripts/chain1266/control-plane.py          |  160 +-
+ scripts/chain1266/prepare-ring2-configs.py  |   13 +-
+ scripts/chain1266/run-ring1-fault-matrix.sh |    6 +-
+ 5 files changed, 3393 insertions(+), 58 deletions(-)
+captured 2026-08-05T15:12:39Z

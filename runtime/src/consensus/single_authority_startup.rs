@@ -114,17 +114,16 @@ pub fn resolve_verified_consensus_startup(
     let desired_state = verify_canonical_and_signature(
         supplied_desired_state_bytes,
         signed,
-        |payload, signature| {
-            verify_mldsa87(&start_authority_public_key, payload, signature)
-        },
+        |payload, signature| verify_mldsa87(&start_authority_public_key, payload, signature),
         &signature_bytes,
     )?;
 
     // The signature must cover exactly the canonical payload of this state.
     let payload = canonical_signing_payload(&desired_state)?;
     if !verify_mldsa87(&start_authority_public_key, &payload, &signature_bytes)? {
-        return Err("ML-DSA-87 start authorization does not cover the canonical payload"
-            .to_string());
+        return Err(
+            "ML-DSA-87 start authorization does not cover the canonical payload".to_string(),
+        );
     }
 
     // 4. Release / chain / incarnation / namespace / authority binding.
@@ -135,9 +134,7 @@ pub fn resolve_verified_consensus_startup(
             chain_incarnation: expectation.genesis_chain_incarnation,
             release_id: expectation.release_id.clone(),
             genesis_hash: expectation.genesis_hash.clone(),
-            authority_public_key_fingerprint: expectation
-                .authority_public_key_fingerprint
-                .clone(),
+            authority_public_key_fingerprint: expectation.authority_public_key_fingerprint.clone(),
         },
     )?;
     if desired_state.network_id != expectation.genesis_network_id {
@@ -190,9 +187,8 @@ pub fn resolve_verified_consensus_startup(
                     desired_state.network_id
                 ));
             }
-            let expected_namespace = format!(
-                "chain-{LAUNCH_CHAIN_ID}/incarnation-{LAUNCH_CHAIN_INCARNATION}"
-            );
+            let expected_namespace =
+                format!("chain-{LAUNCH_CHAIN_ID}/incarnation-{LAUNCH_CHAIN_INCARNATION}");
             if desired_state.directory_namespace != expected_namespace {
                 return Err(format!(
                     "single-authority launch requires namespace {expected_namespace}, found {}",
@@ -317,7 +313,8 @@ pub fn require_durable_binding_agreement(
             );
         }
         match recovery.latest() {
-            Some(latest) if latest.height == head.height && latest.block_hash == head.block_hash => {}
+            Some(latest)
+                if latest.height == head.height && latest.block_hash == head.block_hash => {}
             Some(latest) => {
                 return Err(format!(
                     "durable head {} does not match the last finality record {}",
@@ -340,19 +337,27 @@ pub fn require_durable_binding_agreement(
         }
     }
 
-    // The signing journal must permit signing under this exact namespace.
+    // Bind and compact the signing journal only after the finality log/head
+    // have recovered.  This preserves the historical V1 journal as an audit
+    // archive while making every normal startup and block write bounded.
     let journal = SingleAuthoritySigningJournal::at_path(paths.signing_journal_path.clone());
-    journal.require_signing_allowed(
-        &super::single_authority_signing_journal::SingleAuthorityHaltNamespace {
-            chain_id: plan.chain_id,
-            chain_incarnation: plan.chain_incarnation,
-            consensus_protocol:
-                super::single_authority_finality_store::SINGLE_AUTHORITY_CONSENSUS_PROTOCOL
-                    .to_string(),
-            authority_id: plan.authority_id.clone(),
-            release_id: plan.release_id.clone(),
-        },
+    let namespace = super::single_authority_signing_journal::SingleAuthorityHaltNamespace {
+        chain_id: plan.chain_id,
+        chain_incarnation: plan.chain_incarnation,
+        consensus_protocol:
+            super::single_authority_finality_store::SINGLE_AUTHORITY_CONSENSUS_PROTOCOL.to_string(),
+        authority_id: plan.authority_id.clone(),
+        release_id: plan.release_id.clone(),
+    };
+    let finalized_tip = recovery
+        .latest()
+        .map(|record| (record.height, record.block_hash));
+    journal.reconcile_finalized_head(
+        &namespace,
+        finalized_tip.map(|(height, _)| height).unwrap_or(0),
+        finalized_tip.as_ref().map(|(_, hash)| hash),
     )?;
+    journal.require_signing_allowed(&namespace)?;
     for entry in journal.entries()? {
         if entry.subject.chain_incarnation != plan.chain_incarnation
             || entry.subject.chain_id != plan.chain_id

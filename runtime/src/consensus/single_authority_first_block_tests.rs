@@ -32,8 +32,7 @@ impl Drop for TempDir {
 }
 
 /// Real Genesis hashes are blake3 hex; the anchor must be the same shape.
-const GENESIS_HASH: &str =
-    "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e";
+const GENESIS_HASH: &str = "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e";
 
 fn inputs(dir: &TempDir) -> SingleAuthorityRuntimeInputs {
     let mut manager = PQCManager::new();
@@ -101,8 +100,8 @@ fn f01_height_one_finalizes_from_genesis() {
     assert!(bodies.contains(&block.hash), "block body is durable");
 
     // 5. Finality record and durable head agree at height 1.
-    let store = SingleAuthorityFinalityStore::at_paths(log_path, head_path, binding)
-        .expect("reopen store");
+    let store =
+        SingleAuthorityFinalityStore::at_paths(log_path, head_path, binding).expect("reopen store");
     let recovery = store.recover().expect("recover");
     assert_eq!(recovery.records.len(), 1);
     assert_eq!(recovery.records[0].height, 1);
@@ -110,16 +109,33 @@ fn f01_height_one_finalizes_from_genesis() {
     assert_eq!(head.height, 1);
     assert_eq!(head.block_hash, recovery.records[0].block_hash);
 
-    // 6. Signing journal marks height 1 Finalized.
+    // 6. Completed journal entries are compacted; the finality record keeps
+    // the exact public signature as the durable audit source.
     let journal = SingleAuthoritySigningJournal::at_path(journal_path);
-    let entry = journal.entry_for_height(1).unwrap().expect("journal entry");
-    assert_eq!(entry.state, SingleAuthorityJournalState::Finalized);
-    assert!(entry.signature.is_some());
+    assert!(journal.entry_for_height(1).unwrap().is_none());
+    use base64::{engine::general_purpose, Engine as _};
+    assert_eq!(
+        general_purpose::STANDARD
+            .decode(&recovery.records[0].authority_signature_base64)
+            .unwrap(),
+        block.block_signature
+    );
 
     // 7. No BFT concept anywhere in the durable artifacts.
     let finality_raw = fs::read_to_string(&store.log_path()).unwrap_or_default();
-    for forbidden in ["quorum", "certificate", "vote", "round", "cluster", "coordinator", "producer"] {
-        assert!(!finality_raw.contains(forbidden), "finality log leaked {forbidden}");
+    for forbidden in [
+        "quorum",
+        "certificate",
+        "vote",
+        "round",
+        "cluster",
+        "coordinator",
+        "producer",
+    ] {
+        assert!(
+            !finality_raw.contains(forbidden),
+            "finality log leaked {forbidden}"
+        );
     }
 }
 
@@ -142,11 +158,10 @@ fn f02_restart_resumes_at_height_two_without_resigning_height_one() {
     let mut cfg = inputs(&dir);
     // Reuse the SAME authority key, as a real restart would.
     let journal = SingleAuthoritySigningJournal::at_path(cfg.signing_journal_path.clone());
-    let recorded = journal
-        .entry_for_height(1)
-        .unwrap()
-        .expect("height 1 survives restart");
-    assert_eq!(recorded.state, SingleAuthorityJournalState::Finalized);
+    assert!(
+        journal.entry_for_height(1).unwrap().is_none(),
+        "completed entries are compacted before restart"
+    );
 
     cfg.authority_public_key_fingerprint = "sha256:authority-node-01".to_string();
     let mut driver = SingleAuthorityDriver::start(cfg).expect("restart");
@@ -160,16 +175,6 @@ fn f02_restart_resumes_at_height_two_without_resigning_height_one() {
     assert_eq!(
         block_two.previous_hash, height_one_hash,
         "height 2 extends the exact height-1 block"
-    );
-
-    // Height 1 was never re-signed: its durable signature is unchanged.
-    let after = journal.entry_for_height(1).unwrap().expect("entry");
-    let stored = after.signature.expect("signature");
-    use base64::{engine::general_purpose, Engine as _};
-    assert_eq!(
-        general_purpose::STANDARD.decode(&stored.signature_base64).unwrap(),
-        height_one_signature,
-        "restart must not regenerate the height-1 signature"
     );
 
     // No duplicate or conflicting heights.
@@ -188,4 +193,14 @@ fn f02_restart_resumes_at_height_two_without_resigning_height_one() {
     let recovery = store.recover().unwrap();
     let heights: Vec<u64> = recovery.records.iter().map(|r| r.height).collect();
     assert_eq!(heights, vec![1, 2], "exactly heights 1 and 2, in order");
+    // Height 1 was never re-signed: finality retains the exact durable
+    // signature while the compact journal carries only an unfinished slot.
+    use base64::{engine::general_purpose, Engine as _};
+    assert_eq!(
+        general_purpose::STANDARD
+            .decode(&recovery.records[0].authority_signature_base64)
+            .unwrap(),
+        height_one_signature,
+        "restart must not regenerate the height-1 signature"
+    );
 }
