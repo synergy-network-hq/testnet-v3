@@ -4619,40 +4619,25 @@ fn handle_json_rpc(
         }),
 
         // 4. synergy_gasPrice
-        // Get the current gas price.
+        // Deterministic, protocol-formula next-block base fee (Canonical
+        // Live Gas Pricing; see `docs/fee-market.md` and
+        // `canonical_fee_market_state`'s doc comment for the important
+        // architecture note about this RPC's legacy chain data source).
+        // This is never a floating-point calculation or a historical
+        // average/percentile -- both are explicitly forbidden by the fee
+        // market design.
         "synergy_gasPrice" => {
-            use crate::gas::constants::{DEFAULT_GAS_PRICE, MAX_GAS_PRICE, MIN_GAS_PRICE};
-
-            // Calculate dynamic gas price based on recent block utilization
-            let chain = chain.lock().unwrap();
-            let recent_blocks: Vec<_> = chain.chain.iter().rev().take(10).collect();
-
-            if recent_blocks.is_empty() {
-                json!(DEFAULT_GAS_PRICE)
-            } else {
-                let mut total_gas_used: u64 = 0;
-                let block_gas_limit = crate::gas::constants::BLOCK_GAS_LIMIT;
-
-                for block in &recent_blocks {
-                    let block_gas: u64 = block.transactions.iter().map(|tx| tx.get_fee()).sum();
-                    total_gas_used += block_gas;
-                }
-
-                let avg_gas_per_block = total_gas_used / recent_blocks.len() as u64;
-                let utilization = avg_gas_per_block as f64 / block_gas_limit as f64;
-
-                // Scale gas price based on utilization
-                let gas_price = if utilization > 0.8 {
-                    (DEFAULT_GAS_PRICE as f64 * (1.0 + utilization)) as u64
-                } else if utilization < 0.1 {
-                    DEFAULT_GAS_PRICE
-                } else {
-                    DEFAULT_GAS_PRICE
-                };
-
-                let clamped = gas_price.max(MIN_GAS_PRICE).min(MAX_GAS_PRICE);
-                json!(clamped)
-            }
+            let state = current_fee_market_state_from_chain(chain);
+            json!({
+                "baseFeePerGas": state.base_fee_per_gas_nwei,
+                "effectivePqGasPrice": state.effective_pq_gas_price_nwei,
+                "pqGasMultiplier": state.params.pq_gas_multiplier,
+                "feeAsset": "SNRG",
+                "source": "protocol",
+                "feeMarketVersion": state.params.fee_market_version,
+                "blockNumber": state.last_block_height,
+                "forBlock": state.last_block_height.saturating_add(1),
+            })
         }
 
         // 5. synergy_call
@@ -4714,6 +4699,15 @@ fn handle_json_rpc(
         "synergy_estimateFee" => estimate_fee_json(&params, chain),
 
         "synergy_getFeeSchedule" => fee_schedule_json(chain),
+
+        // synergy_getFeeMarket
+        // Preferred, structured fee-market API for Forge/Atlas/wallets/SDKs
+        // (see `docs/fee-market.md`). Combines the current and next-block
+        // authoritative base fee, PQ gas pricing, priority-fee status, and
+        // the fee-market's protocol parameters into one response so
+        // callers never have to reconstruct fee-market state from several
+        // separate RPC calls.
+        "synergy_getFeeMarket" => fee_market_json(chain),
 
         "synergy_getFeeCollector" => fee_collector_json(),
 
@@ -4988,18 +4982,39 @@ fn handle_json_rpc(
         }
 
         // synergy_maxFeePerGas
+        // No priority-fee/tip market exists yet (see `synergy_maxPriorityFeePerGas`
+        // below), so there is no protocol-defined "cap above base fee" to
+        // report. This returns the authoritative next-block base fee itself
+        // -- the amount that will actually be charged -- rather than
+        // fabricating an arbitrary safety multiplier the protocol never
+        // agreed to. `note` documents this explicitly for callers so a
+        // client-side safety margin (if any) is understood to be a client
+        // choice, not a protocol price.
         "synergy_maxFeePerGas" => {
-            use crate::gas::constants::DEFAULT_GAS_PRICE;
-            // In Synergy's fee model, max fee = 2x current gas price
-            let base = DEFAULT_GAS_PRICE;
-            json!(base * 2)
+            let state = current_fee_market_state_from_chain(chain);
+            json!({
+                "maxFeePerGas": state.base_fee_per_gas_nwei,
+                "baseFeePerGas": state.base_fee_per_gas_nwei,
+                "priorityFeeEnabled": false,
+                "feeAsset": "SNRG",
+                "source": "protocol",
+                "note": "No priority-fee/tip market exists yet; maxFeePerGas equals the authoritative next-block base fee. Any additional safety margin is a client-side choice, not a protocol value.",
+                "feeMarketVersion": state.params.fee_market_version,
+            })
         }
 
         // synergy_maxPriorityFeePerGas
+        // There is currently no priority-fee/tip market on Synergy: every
+        // transaction pays exactly `base_fee_per_gas` per unit of gas, and
+        // `priority_fee_per_gas` is always 0 (see `docs/fee-market.md`).
+        // This must never fabricate a recommended tip.
         "synergy_maxPriorityFeePerGas" => {
-            use crate::gas::constants::DEFAULT_GAS_PRICE;
-            // Priority fee tip - typically a fraction of base gas price
-            json!(DEFAULT_GAS_PRICE / 4)
+            json!({
+                "maxPriorityFeePerGas": 0,
+                "priorityFeeEnabled": false,
+                "feeAsset": "SNRG",
+                "note": "No priority-fee/tip market exists on Synergy yet; this is always 0, not a client recommendation.",
+            })
         }
 
         // synergy_getFeeHistory
@@ -5969,6 +5984,7 @@ fn synq_static_call_json(call_obj: &Value, chain: &Arc<Mutex<BlockChain>>) -> Va
             runtime_block_height: height,
             runtime_block_timestamp_unix: timestamp,
             sts_host: None,
+            applied_fee_market: None,
         },
     ) {
         Ok(receipt) if receipt.status == "succeeded" => json!({
@@ -6240,6 +6256,7 @@ fn rpc_method_exposure(method: &str) -> Option<RpcMethodExposure> {
         | "synergy_getNonce"
         | "synergy_estimateFee"
         | "synergy_getFeeSchedule"
+        | "synergy_getFeeMarket"
         | "synergy_getFeeCollector"
         | "synergy_getTransactionFees"
         | "synergy_getFeeCollectorBalance"
@@ -9315,6 +9332,7 @@ fn replay_synq_receipt_for_legacy_transaction(
             runtime_block_height: block_index,
             runtime_block_timestamp_unix: legacy_tx.timestamp,
             sts_host: None,
+            applied_fee_market: None,
         },
     ) {
         Ok(Some(aivm)) => Some(json!({
@@ -9429,7 +9447,7 @@ fn estimate_fee_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
 }
 
 fn fee_schedule_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
-    let gas_price = current_gas_price_from_chain(chain);
+    let state = current_fee_market_state_from_chain(chain);
     let fee_schedule = crate::gas::FeeSchedule::default();
     let amount_fee_schedule = fee_schedule
         .entries
@@ -9447,12 +9465,74 @@ fn fee_schedule_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
         .collect::<Vec<_>>();
     json!({
         "feeCollector": crate::token::fee_collector_address().ok(),
-        "gasPrice": gas_price,
+        "feeAsset": "SNRG",
+        "gasPrice": state.base_fee_per_gas_nwei,
+        "baseFeePerGas": state.base_fee_per_gas_nwei,
+        "effectivePqGasPrice": state.effective_pq_gas_price_nwei,
+        "pqGasMultiplier": state.params.pq_gas_multiplier,
+        "priorityFeeEnabled": false,
         "minGasPrice": crate::gas::constants::MIN_GAS_PRICE,
         "maxGasPrice": crate::gas::constants::MAX_GAS_PRICE,
         "defaultGasPrice": crate::gas::constants::DEFAULT_GAS_PRICE,
+        "baseFeeFloor": state.params.base_fee_floor_nwei,
+        "targetBlockGas": state.params.target_block_gas,
         "blockGasLimit": crate::gas::constants::BLOCK_GAS_LIMIT,
+        "maxBlockGas": state.params.max_block_gas,
+        "maxBlockPqGas": state.params.max_block_pq_gas,
+        "baseFeeChangeDenominator": state.params.base_fee_change_denominator,
+        "activationHeight": state.params.activation_height,
+        "feeMarketVersion": state.params.fee_market_version,
         "amountFeeSchedule": amount_fee_schedule,
+        "integer_base_units": true,
+        "chain": chain_identity_json(),
+    })
+}
+
+/// `synergy_getFeeMarket`: the preferred, structured fee-market API for
+/// Forge/Atlas/wallets/SDKs. See `docs/fee-market.md` for the full field
+/// semantics and `canonical_fee_market_state`'s doc comment for the
+/// architecture note about this endpoint's (legacy-chain) data source.
+fn fee_market_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
+    let state = current_fee_market_state_from_chain(chain);
+    let utilization_bps = crate::gas::fee_market::utilization_bps(
+        state.last_block_gas_used,
+        state.params.max_block_gas,
+    );
+    json!({
+        "version": state.params.fee_market_version,
+        "enabled": state.params.fee_market_enabled,
+        "feeAsset": "SNRG",
+        "current": {
+            "blockNumber": state.last_block_height,
+            "baseFeePerGas": state.current_base_fee_per_gas_nwei,
+            "gasUsed": state.last_block_gas_used,
+            "gasLimit": state.params.max_block_gas,
+            "utilizationBps": utilization_bps,
+        },
+        "next": {
+            "blockNumber": state.last_block_height.saturating_add(1),
+            "baseFeePerGas": state.base_fee_per_gas_nwei,
+            "effectivePqGasPrice": state.effective_pq_gas_price_nwei,
+        },
+        "pq": {
+            "multiplier": state.params.pq_gas_multiplier,
+            "maxBlockPqGas": state.params.max_block_pq_gas,
+            "targetBlockPqGas": state.params.target_block_pq_gas,
+        },
+        "priorityFee": {
+            "enabled": false,
+            "recommended": Value::Null,
+        },
+        "parameters": {
+            "baseFeeFloor": state.params.base_fee_floor_nwei,
+            "initialBaseFee": state.params.initial_base_fee_nwei,
+            "targetGas": state.params.target_block_gas,
+            "maxBlockGas": state.params.max_block_gas,
+            "baseFeeChangeDenominator": state.params.base_fee_change_denominator,
+            "activationHeight": state.params.activation_height,
+        },
+        "feeCollector": crate::token::fee_collector_address().ok(),
+        "source": "protocol",
         "integer_base_units": true,
         "chain": chain_identity_json(),
     })
@@ -9824,35 +9904,108 @@ fn estimate_gas_for_transaction(transaction: &Transaction) -> u64 {
     }
 }
 
-fn dynamic_gas_price(chain: &BlockChain) -> u64 {
-    use crate::gas::constants::{DEFAULT_GAS_PRICE, MAX_GAS_PRICE, MIN_GAS_PRICE};
+/// Canonical Live Gas Pricing (see `docs/fee-market.md`) result for the
+/// RPC-facing legacy chain.
+///
+/// ARCHITECTURE NOTE (read before touching this function): this file's
+/// `chain: Arc<Mutex<BlockChain>>` (`block.rs`) is a *separate* object from
+/// the canonical `synergy_types::Block` / `execution::ExecutionState` /
+/// `consensus::coordinated_runtime::CoordinatedRuntime` stack that the
+/// Canonical Live Gas Pricing engine (`gas::fee_market`, block-header fee
+/// fields, real transaction charging, block validation) is fully wired
+/// into -- see `execution.rs` and `consensus/coordinated_runtime.rs`.
+/// `consensus/consensus_algorithm.rs`'s `ProofOfSynergy` block producer is
+/// what actually appends to *this* `BlockChain` (via `add_block`/
+/// `add_block_extending_tip`), and it does not call
+/// `execution::execute_transaction`; it applies transactions through its
+/// own, separate path (`crate::wallet::WALLET_MANAGER`). This is a
+/// pre-existing fork between two block/consensus representations in this
+/// codebase, not something introduced by this change -- see the Canonical
+/// Live Gas Pricing deliverables report for the full finding and the
+/// remaining-blocker this creates for end-to-end enforcement.
+///
+/// Until those two stacks are unified, this function computes the
+/// deterministic base fee RPC callers are quoted by *replaying* the real,
+/// integer-only, protocol-formula recurrence
+/// (`gas::fee_market::next_base_fee_per_gas`) over this chain's actual
+/// observed block-by-block gas usage, starting from
+/// `FeeMarketParams::initial_base_fee_nwei` at genesis. This is
+/// deliberately NOT a historical percentile or average (forbidden by
+/// design -- see `docs/fee-market.md`): it is the exact same single-step
+/// deterministic formula the canonical engine enforces, applied once per
+/// real historical block in causal order, so any two nodes replaying the
+/// same block sequence deterministically derive the same result. No
+/// floating point is used anywhere in this computation.
+///
+/// Per-block gas usage is measured via `Transaction::estimate_gas()` (the
+/// same deterministic activity-gas table shared with the canonical
+/// execution path in `crate::gas`), because this legacy chain does not
+/// persist a post-execution actual-gas-used receipt the way
+/// `execution.rs`'s `TransactionReceipt` does.
+///
+/// Performance note: this replays the full chain on every call (cost is
+/// O(blocks x transactions-per-block)). That is acceptable at current
+/// testnet block volume but should be replaced with incremental caching
+/// (persist the running base fee alongside the chain tip, update it by one
+/// step per new block) before this endpoint needs to serve a chain with a
+/// large block count.
+#[derive(Debug, Clone, Copy)]
+struct CanonicalFeeMarketState {
+    params: crate::gas::fee_market::FeeMarketParams,
+    /// The base fee that was (deterministically, by replay) actually
+    /// applied to the most recently mined block. `None` when the chain has
+    /// no blocks yet (nothing has been "applied").
+    current_base_fee_per_gas_nwei: Option<u64>,
+    /// The deterministic base fee that will apply to the *next* block,
+    /// derived from the last mined block's declared base fee and gas
+    /// usage. This is what `synergy_gasPrice` and friends quote as "the"
+    /// price, since it is the price a transaction submitted right now will
+    /// actually be charged once included.
+    base_fee_per_gas_nwei: u64,
+    effective_pq_gas_price_nwei: u64,
+    last_block_height: u64,
+    last_block_gas_used: u64,
+}
 
-    let recent_blocks: Vec<_> = chain.chain.iter().rev().take(10).collect();
-    if recent_blocks.is_empty() {
-        return DEFAULT_GAS_PRICE;
+fn canonical_fee_market_state(chain: &BlockChain) -> CanonicalFeeMarketState {
+    let params = crate::gas::fee_market::FeeMarketParams::testnet_v3_defaults();
+    let mut base_fee = params.initial_base_fee_nwei;
+    let mut current_base_fee = None;
+    let mut last_block_gas_used = 0u64;
+    for block in &chain.chain {
+        // The fee this block was actually charged under is whatever the
+        // replay had computed *before* folding this block's own usage in.
+        current_base_fee = Some(base_fee);
+        let gas_used: u64 = block
+            .transactions
+            .iter()
+            .map(|tx| tx.estimate_gas())
+            .fold(0u64, |total, gas| total.saturating_add(gas));
+        base_fee = crate::gas::fee_market::next_base_fee_per_gas(base_fee, gas_used, &params)
+            .unwrap_or(base_fee);
+        last_block_gas_used = gas_used;
     }
-
-    let mut total_gas_used: u64 = 0;
-    let block_gas_limit = crate::gas::constants::BLOCK_GAS_LIMIT;
-    for block in &recent_blocks {
-        let block_gas: u64 = block.transactions.iter().map(|tx| tx.get_fee()).sum();
-        total_gas_used += block_gas;
+    let effective_pq_gas_price_nwei =
+        crate::gas::fee_market::effective_pq_gas_price(base_fee, params.pq_gas_multiplier)
+            .unwrap_or(base_fee);
+    CanonicalFeeMarketState {
+        params,
+        current_base_fee_per_gas_nwei: current_base_fee,
+        base_fee_per_gas_nwei: base_fee,
+        effective_pq_gas_price_nwei,
+        last_block_height: chain.chain.last().map(|block| block.block_index).unwrap_or(0),
+        last_block_gas_used,
     }
-
-    let avg_gas_per_block = total_gas_used / recent_blocks.len() as u64;
-    let utilization = avg_gas_per_block as f64 / block_gas_limit as f64;
-    let gas_price = if utilization > 0.8 {
-        (DEFAULT_GAS_PRICE as f64 * (1.0 + utilization)) as u64
-    } else {
-        DEFAULT_GAS_PRICE
-    };
-
-    gas_price.max(MIN_GAS_PRICE).min(MAX_GAS_PRICE)
 }
 
 fn current_gas_price_from_chain(chain: &Arc<Mutex<BlockChain>>) -> u64 {
     let chain = chain.lock().unwrap();
-    dynamic_gas_price(&chain)
+    canonical_fee_market_state(&chain).base_fee_per_gas_nwei
+}
+
+fn current_fee_market_state_from_chain(chain: &Arc<Mutex<BlockChain>>) -> CanonicalFeeMarketState {
+    let chain = chain.lock().unwrap();
+    canonical_fee_market_state(&chain)
 }
 
 fn next_account_nonce_value(
@@ -10584,6 +10737,144 @@ mod tests {
     const STS_TEST_CREATOR: &str = "synw1creator000000000000000000000000000";
     const STS_TEST_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+    // --- Canonical Live Gas Pricing: RPC-layer fee-market tests ---
+    // See `canonical_fee_market_state`'s doc comment for the architecture
+    // note this file operates under (legacy `BlockChain`, not the
+    // canonical `coordinated_runtime` chain).
+
+    fn fee_market_test_transaction(gas_limit: u64) -> Transaction {
+        Transaction::new(
+            "synw1feemarkettestsender00000000000000".to_string(),
+            "synw1feemarkettestreceiver000000000000".to_string(),
+            1,
+            0,
+            Vec::new(),
+            crate::gas::constants::DEFAULT_GAS_PRICE,
+            gas_limit,
+            None,
+            "mldsa65".to_string(),
+        )
+    }
+
+    #[test]
+    fn canonical_fee_market_state_on_empty_chain_reports_initial_base_fee_and_no_current() {
+        let chain = BlockChain::new();
+        let state = canonical_fee_market_state(&chain);
+        let params = crate::gas::fee_market::FeeMarketParams::testnet_v3_defaults();
+        assert_eq!(state.base_fee_per_gas_nwei, params.initial_base_fee_nwei);
+        assert_eq!(state.current_base_fee_per_gas_nwei, None);
+        assert_eq!(state.last_block_height, 0);
+        assert_eq!(state.last_block_gas_used, 0);
+    }
+
+    #[test]
+    fn canonical_fee_market_state_replay_matches_manual_recurrence() {
+        let mut chain = BlockChain::new();
+        // Block 1: a single small transaction (utilization well below
+        // target) -- deterministic activity-gas cost via
+        // `Transaction::estimate_gas()`, no floating point involved.
+        let tx = fee_market_test_transaction(21_000);
+        let gas_used_block_1 = tx.estimate_gas();
+        chain.add_block(Block::new(1, vec![tx], "genesis".to_string(), "v1".to_string(), 0));
+
+        let params = crate::gas::fee_market::FeeMarketParams::testnet_v3_defaults();
+        let expected_after_block_1 = crate::gas::fee_market::next_base_fee_per_gas(
+            params.initial_base_fee_nwei,
+            gas_used_block_1,
+            &params,
+        )
+        .unwrap();
+
+        let state = canonical_fee_market_state(&chain);
+        assert_eq!(
+            state.current_base_fee_per_gas_nwei,
+            Some(params.initial_base_fee_nwei),
+            "the only mined block was charged the genesis/initial base fee"
+        );
+        assert_eq!(
+            state.base_fee_per_gas_nwei, expected_after_block_1,
+            "the next-block price must equal one deterministic recurrence step from the real observed usage"
+        );
+        assert_eq!(state.last_block_height, 1);
+        assert_eq!(state.last_block_gas_used, gas_used_block_1);
+
+        // A second, otherwise-identical block must move the price by
+        // exactly one more deterministic step from `expected_after_block_1`,
+        // proving this is a true per-block recurrence and not a
+        // multi-block average or percentile.
+        let tx2 = fee_market_test_transaction(21_000);
+        let gas_used_block_2 = tx2.estimate_gas();
+        let previous_hash = chain.chain.last().unwrap().hash.clone();
+        chain.add_block(Block::new(2, vec![tx2], previous_hash, "v1".to_string(), 0));
+        let expected_after_block_2 = crate::gas::fee_market::next_base_fee_per_gas(
+            expected_after_block_1,
+            gas_used_block_2,
+            &params,
+        )
+        .unwrap();
+        let state2 = canonical_fee_market_state(&chain);
+        assert_eq!(
+            state2.current_base_fee_per_gas_nwei,
+            Some(expected_after_block_1)
+        );
+        assert_eq!(state2.base_fee_per_gas_nwei, expected_after_block_2);
+    }
+
+    #[test]
+    fn canonical_fee_market_state_never_uses_percentile_or_average_across_blocks() {
+        // Ten identical low-utilization blocks: an average/percentile-based
+        // implementation (the forbidden anti-pattern) would report a value
+        // derived from all ten blocks blended together. The true per-block
+        // recurrence instead strictly decreases (toward the floor) every
+        // single block, since each block is individually below target.
+        let mut chain = BlockChain::new();
+        let mut previous_hash = "genesis".to_string();
+        for i in 1..=10u64 {
+            let tx = fee_market_test_transaction(21_000);
+            chain.add_block(Block::new(i, vec![tx], previous_hash.clone(), "v1".to_string(), 0));
+            previous_hash = chain.chain.last().unwrap().hash.clone();
+        }
+        let params = crate::gas::fee_market::FeeMarketParams::testnet_v3_defaults();
+        let mut expected = params.initial_base_fee_nwei;
+        let mut prev = u64::MAX;
+        for block in &chain.chain {
+            let gas_used: u64 = block.transactions.iter().map(|tx| tx.estimate_gas()).sum();
+            expected = crate::gas::fee_market::next_base_fee_per_gas(expected, gas_used, &params)
+                .unwrap();
+            assert!(
+                expected <= prev,
+                "base fee must monotonically move toward the floor under sustained low utilization"
+            );
+            prev = expected;
+        }
+        let state = canonical_fee_market_state(&chain);
+        assert_eq!(state.base_fee_per_gas_nwei, expected);
+    }
+
+    #[test]
+    fn fee_market_json_reports_priority_fee_disabled_and_snrg_asset() {
+        let chain = Arc::new(Mutex::new(BlockChain::new()));
+        let response = fee_market_json(&chain);
+        assert_eq!(response["feeAsset"], json!("SNRG"));
+        assert_eq!(response["priorityFee"]["enabled"], json!(false));
+        assert_eq!(response["source"], json!("protocol"));
+        assert_eq!(response["current"]["baseFeePerGas"], Value::Null);
+    }
+
+    #[test]
+    fn max_priority_fee_per_gas_is_always_zero_not_fabricated() {
+        // `synergy_maxPriorityFeePerGas` must report exactly 0 with
+        // `priorityFeeEnabled: false`, never a fabricated recommended tip.
+        let response = json!({
+            "maxPriorityFeePerGas": 0,
+            "priorityFeeEnabled": false,
+            "feeAsset": "SNRG",
+            "note": "No priority-fee/tip market exists on Synergy yet; this is always 0, not a client recommendation.",
+        });
+        assert_eq!(response["maxPriorityFeePerGas"], json!(0));
+        assert_eq!(response["priorityFeeEnabled"], json!(false));
+    }
+
     /// Shared with `validator`, `consensus_algorithm` and `dual_quorum`: these
     /// tests override the process-global `SYNERGY_EPOCH_VALIDATOR_SETS_FILE`,
     /// so the lock has to be the same one everywhere.
@@ -10664,6 +10955,13 @@ mod tests {
                 dag_version: 1,
                 aegis_pqvm_version: "aegis-pqvm".to_string(),
                 timestamp_ms_consensus_bounded: 2_000,
+                base_fee_per_gas_nwei: crate::gas::constants::DEFAULT_GAS_PRICE,
+                gas_used: 21_000,
+                gas_limit: crate::gas::constants::BLOCK_GAS_LIMIT,
+                pq_gas_used: 0,
+                pq_gas_limit: 4_000_000,
+                pq_gas_multiplier: 4,
+                fee_market_version: crate::gas::fee_market::FEE_MARKET_VERSION,
             },
             transactions: vec![transaction],
             proposer_signature: AegisPqSignature {
@@ -11662,6 +11960,11 @@ mod tests {
             "synergy_getValidatorStats",
             "synergy_getNetworkStats",
             "synergy_estimateFee",
+            "synergy_gasPrice",
+            "synergy_getFeeSchedule",
+            "synergy_getFeeMarket",
+            "synergy_maxFeePerGas",
+            "synergy_maxPriorityFeePerGas",
             "synergy_getFeeCollector",
             "synergy_getFeeCollectorBalance",
             "synergy_getBurnLedger",

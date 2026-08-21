@@ -468,6 +468,7 @@ mod tests {
                 runtime_block_height: 1,
                 runtime_block_timestamp_unix: 1_785_000_000,
                 sts_host: None,
+                applied_fee_market: None,
             },
         )
         .expect("public view selector must execute against finalized Genesis state");

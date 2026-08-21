@@ -878,6 +878,49 @@ pub struct BlockHeader {
     pub dag_version: u32,
     pub aegis_pqvm_version: String,
     pub timestamp_ms_consensus_bounded: u64,
+    /// --- Canonical Live Gas Pricing (fee market) ---
+    /// Added under fee-market schema/activation version
+    /// `crate::gas::fee_market::FEE_MARKET_VERSION`. `#[serde(default)]`
+    /// so blocks persisted before this field existed continue to decode:
+    /// they implicitly carry `fee_market_version: 0`, which callers must
+    /// treat as "no protocol base fee enforced" (legacy pre-activation
+    /// block), never as `base_fee_per_gas_nwei: 0` being a real price.
+    ///
+    /// The protocol-authoritative base fee applied to every transaction in
+    /// this block, in nWei per ordinary gas unit. Deterministically derived
+    /// from the parent block's `base_fee_per_gas_nwei` and `gas_used` via
+    /// `crate::gas::fee_market::next_base_fee_per_gas`; never chosen by the
+    /// block producer.
+    #[serde(default)]
+    pub base_fee_per_gas_nwei: u64,
+    /// Total ordinary gas consumed by this block's transactions.
+    #[serde(default)]
+    pub gas_used: u64,
+    /// Ordinary gas capacity for this block (`FeeMarketParams::max_block_gas`
+    /// at the height this block was produced).
+    #[serde(default)]
+    pub gas_limit: u64,
+    /// Total PQ gas consumed by this block's transactions (AIVM
+    /// `PqGasMeter` output, summed across receipts). Tracked and reported
+    /// separately from ordinary `gas_used` at every layer -- never combined.
+    #[serde(default)]
+    pub pq_gas_used: u64,
+    /// PQ gas capacity for this block (`FeeMarketParams::max_block_pq_gas`).
+    #[serde(default)]
+    pub pq_gas_limit: u64,
+    /// The PQ gas price multiplier applied in this block
+    /// (`FeeMarketParams::pq_gas_multiplier`), persisted so historical
+    /// blocks remain interpretable even if the multiplier changes later.
+    #[serde(default)]
+    pub pq_gas_multiplier: u64,
+    /// Fee-market schema version in effect for this block. `0` means the
+    /// legacy pre-fee-market rules applied (block precedes
+    /// `FeeMarketParams::activation_height`); `>= 1` means
+    /// `base_fee_per_gas_nwei` is protocol-enforced and this block was
+    /// rejected by every validating node unless its declared value matched
+    /// `next_base_fee_per_gas(parent)` exactly.
+    #[serde(default)]
+    pub fee_market_version: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2248,6 +2291,13 @@ mod tests {
             dag_version: 1,
             aegis_pqvm_version: "aegis-pqvm-test".to_string(),
             timestamp_ms_consensus_bounded: 1000,
+            base_fee_per_gas_nwei: 40,
+            gas_used: 12_345,
+            gas_limit: 30_000_000,
+            pq_gas_used: 678,
+            pq_gas_limit: 4_000_000,
+            pq_gas_multiplier: 4,
+            fee_market_version: 1,
         };
         let a = header.canonical_bytes().expect("canonical bytes");
         let b = header.canonical_bytes().expect("canonical bytes");

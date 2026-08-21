@@ -678,6 +678,7 @@ fn deploy_one(
             runtime_block_height: GENESIS_BLOCK_HEIGHT,
             runtime_block_timestamp_unix: GENESIS_NOW_UNIX,
             sts_host: None,
+            applied_fee_market: None,
         },
     )?
     .ok_or_else(|| {
@@ -820,6 +821,7 @@ fn call_one(
             runtime_block_height: GENESIS_BLOCK_HEIGHT,
             runtime_block_timestamp_unix: GENESIS_NOW_UNIX,
             sts_host: None,
+            applied_fee_market: None,
         },
     )?
     .ok_or_else(|| format!("genesis {method} call produced no receipt"))?;

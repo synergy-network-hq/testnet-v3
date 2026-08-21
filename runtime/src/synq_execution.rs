@@ -98,6 +98,16 @@ pub struct SynQExecutionContext {
     pub runtime_block_timestamp_unix: u64,
     #[serde(default)]
     pub sts_host: Option<StsHostContext>,
+    /// The protocol-authoritative fee market applicable to the block being
+    /// built/executed, if the fee market is active at this height. `None`
+    /// means either the fee market has not activated yet (legacy blocks)
+    /// or this execution context is being used for a purpose that
+    /// intentionally has no live pricing (e.g. isolated unit tests). When
+    /// `None`, transaction charging falls back byte-for-byte to the
+    /// pre-fee-market behavior (sender-declared `max_fee_nwei` charged in
+    /// full) so existing behavior and tests are unaffected.
+    #[serde(default)]
+    pub applied_fee_market: Option<crate::gas::fee_market::AppliedFeeMarket>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

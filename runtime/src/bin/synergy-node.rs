@@ -1727,6 +1727,7 @@ fn execute_synq_replay_once(steps: &[SynqReplayStep]) -> Result<SynqReplayRun, S
                     aivm_core::synq_runtime::GENERIC_SYNQ_RUNTIME_ACTIVATION_HEIGHT,
                 runtime_block_timestamp_unix: 0,
                 sts_host: None,
+                applied_fee_market: None,
             },
         )?
         .ok_or_else(|| format!("{} did not execute as a SynQ transaction", step.label))?;

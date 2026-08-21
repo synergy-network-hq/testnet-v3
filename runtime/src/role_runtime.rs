@@ -1713,6 +1713,7 @@ fn build_finalized_coordinated_runtime_inputs(
         genesis_timestamp_ms,
         protocol_config_hash,
         cryptographic_profile_root: bootstrap.cryptographic_profile_root,
+        parent_fee_market: None,
     };
     block_context
         .validate()

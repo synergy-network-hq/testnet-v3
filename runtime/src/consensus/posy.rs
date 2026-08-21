@@ -378,6 +378,22 @@ impl ProofOfSynergyBft {
                 timestamp_ms_consensus_bounded: bounded_consensus_timestamp_ms(
                     context.latest_finalized_timestamp_ms,
                 )?,
+                // Canonical Live Gas Pricing (see `docs/fee-market.md`) is
+                // wired into the currently-active `coordinated_runtime`
+                // single-authority path only. The multi-validator PoSy
+                // consensus path here is not the active path per the
+                // testnet v3 architecture, so it deliberately keeps the
+                // legacy fee_market_version 0 marker rather than declaring
+                // a real base fee it cannot yet enforce. Wiring the fee
+                // market into PoSy block production/validation is tracked
+                // as follow-up work, not silently skipped.
+                base_fee_per_gas_nwei: 0,
+                gas_used: 0,
+                gas_limit: 0,
+                pq_gas_used: 0,
+                pq_gas_limit: 0,
+                pq_gas_multiplier: 0,
+                fee_market_version: 0,
             },
             transactions,
             proposer_signature: AegisPqSignature {
@@ -506,6 +522,22 @@ impl ProofOfSynergyBft {
                 timestamp_ms_consensus_bounded: bounded_consensus_timestamp_ms(
                     context.latest_finalized_timestamp_ms,
                 )?,
+                // Canonical Live Gas Pricing (see `docs/fee-market.md`) is
+                // wired into the currently-active `coordinated_runtime`
+                // single-authority path only. The multi-validator PoSy
+                // consensus path here is not the active path per the
+                // testnet v3 architecture, so it deliberately keeps the
+                // legacy fee_market_version 0 marker rather than declaring
+                // a real base fee it cannot yet enforce. Wiring the fee
+                // market into PoSy block production/validation is tracked
+                // as follow-up work, not silently skipped.
+                base_fee_per_gas_nwei: 0,
+                gas_used: 0,
+                gas_limit: 0,
+                pq_gas_used: 0,
+                pq_gas_limit: 0,
+                pq_gas_multiplier: 0,
+                fee_market_version: 0,
             },
             transactions: Vec::new(),
             proposer_signature: AegisPqSignature {
@@ -794,6 +826,22 @@ impl ProofOfSynergyBft {
                 timestamp_ms_consensus_bounded: bounded_consensus_timestamp_ms(
                     context.latest_finalized_timestamp_ms,
                 )?,
+                // Canonical Live Gas Pricing (see `docs/fee-market.md`) is
+                // wired into the currently-active `coordinated_runtime`
+                // single-authority path only. The multi-validator PoSy
+                // consensus path here is not the active path per the
+                // testnet v3 architecture, so it deliberately keeps the
+                // legacy fee_market_version 0 marker rather than declaring
+                // a real base fee it cannot yet enforce. Wiring the fee
+                // market into PoSy block production/validation is tracked
+                // as follow-up work, not silently skipped.
+                base_fee_per_gas_nwei: 0,
+                gas_used: 0,
+                gas_limit: 0,
+                pq_gas_used: 0,
+                pq_gas_limit: 0,
+                pq_gas_multiplier: 0,
+                fee_market_version: 0,
             },
             transactions,
             proposer_signature: AegisPqSignature {

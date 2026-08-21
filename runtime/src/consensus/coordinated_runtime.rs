@@ -35,6 +35,19 @@ use crate::synergy_types::{
     Epoch, Hash, Height, NetworkId, Round, ValidatorId, ValidatorSet,
 };
 
+/// The parent block's fee-market state, as needed to deterministically
+/// derive the next block's `base_fee_per_gas` via
+/// `crate::gas::fee_market::next_base_fee_per_gas`.
+/// `CoordinatedRuntime::parent_fee_market_state` derives this from real
+/// durable finality; see `CoordinatedBlockBuildContext::parent_fee_market`
+/// docs for the override/testing path and the consequence of both being
+/// `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParentFeeMarketState {
+    pub base_fee_per_gas_nwei: u64,
+    pub gas_used: u64,
+}
+
 /// Immutable, Genesis-bound data required to construct a P1 coordinated
 /// block.  It is deliberately smaller than the retired PoSy height context:
 /// it provides metadata and deterministic timing only, not an inherited
@@ -45,6 +58,23 @@ pub struct CoordinatedBlockBuildContext {
     pub genesis_timestamp_ms: u64,
     pub protocol_config_hash: ConsensusParameterRoot,
     pub cryptographic_profile_root: Hash,
+    /// An explicit override for the parent block's fee-market state (its
+    /// declared `base_fee_per_gas_nwei` and actual `gas_used`).
+    ///
+    /// `CoordinatedRuntime::build_assigned_block` prefers the **real**
+    /// parent state it reads from durable finality
+    /// (`CoordinatedRuntime::parent_fee_market_state`) over this field, so in
+    /// normal node operation this can be left `None` and the dynamic fee
+    /// market still responds to real congestion from the second coordinated
+    /// block onward. This field exists for callers that construct a
+    /// `CoordinatedBlockBuildContext` without a durable finality store behind
+    /// them (tests, offline tooling) and need to supply a parent state
+    /// explicitly. If both the durable read and this override are `None` —
+    /// only possible before any coordinated block has ever been finalized —
+    /// the block falls back to `FeeMarketParams::initial_base_fee_nwei`,
+    /// which is safe (never zero, never fabricated) but does not respond to
+    /// congestion; see `docs/fee-market.md`.
+    pub parent_fee_market: Option<ParentFeeMarketState>,
 }
 
 impl CoordinatedBlockBuildContext {
@@ -201,6 +231,24 @@ impl CoordinatedRuntime {
 
     pub fn execution_state(&self) -> &ExecutionState {
         &self.execution_state
+    }
+
+    /// Canonical Live Gas Pricing: the fee-market state declared on the most
+    /// recently durably-finalized coordinated block, used as the `parent` in
+    /// `execute_coordinated_block`'s independent base-fee re-derivation. This
+    /// is a real read of durable finality (not a fabricated/default value);
+    /// it returns `None` only when no coordinated block has been finalized
+    /// yet (i.e. the very first block after the migration/genesis anchor),
+    /// in which case the base-fee-matches-parent check is legitimately
+    /// skipped rather than guessed.
+    fn parent_fee_market_state(&self) -> Result<Option<ParentFeeMarketState>, String> {
+        Ok(self
+            .finality_store
+            .latest(&self.config)?
+            .map(|record| ParentFeeMarketState {
+                base_fee_per_gas_nwei: record.package.block.header.base_fee_per_gas_nwei,
+                gas_used: record.package.block.header.gas_used,
+            }))
     }
 
     pub fn is_local_coordinator(&self) -> bool {
@@ -413,7 +461,9 @@ impl CoordinatedRuntime {
 
         // Deterministic execution is required before signing so the producer
         // never authorizes header state or receipt roots it cannot reproduce.
-        let _next_execution_state = execute_coordinated_block(&self.execution_state, &block)?;
+        let parent_fee_market = self.parent_fee_market_state()?;
+        let _next_execution_state =
+            execute_coordinated_block(&self.execution_state, &block, parent_fee_market)?;
         let block_hash = Hash::from_hex(&block.block_id()?.0)
             .map_err(|error| format!("coordinated block ID is not a hash: {error}"))?;
         let authorization = CoordinatedSigningAuthorization {
@@ -598,6 +648,41 @@ impl CoordinatedRuntime {
             tx_order_root,
             transaction_admission_root,
         );
+        // --- Canonical Live Gas Pricing (fee market) ---
+        // Deterministically derive this block's base fee from the parent's
+        // declared base fee and gas usage. The parent state is read from
+        // real durable finality via `self.parent_fee_market_state()`
+        // whenever this runtime has one (i.e. any coordinated block beyond
+        // the very first). `context.parent_fee_market` is honored only as
+        // an explicit override — e.g. for tests/tools that construct a
+        // context without a durable finality store behind them — and is
+        // never preferred over the real durable value. Both being `None`
+        // (only possible before any coordinated block has been finalized)
+        // safely falls back to `initial_base_fee_nwei` rather than
+        // fabricating or zeroing the price; see `ParentFeeMarketState` docs.
+        let fee_market_params = crate::gas::fee_market::FeeMarketParams::testnet_v3_defaults();
+        let durable_parent_fee_market = self.parent_fee_market_state()?;
+        let effective_parent_fee_market =
+            durable_parent_fee_market.or(context.parent_fee_market);
+        let (block_base_fee_per_gas_nwei, block_fee_market_version) =
+            if fee_market_params.is_active_at(assignment.height) {
+                let base_fee = if assignment.height == fee_market_params.activation_height {
+                    fee_market_params.initial_base_fee_nwei
+                } else {
+                    match effective_parent_fee_market {
+                        Some(parent) => crate::gas::fee_market::next_base_fee_per_gas(
+                            parent.base_fee_per_gas_nwei.max(fee_market_params.base_fee_floor_nwei),
+                            parent.gas_used,
+                            &fee_market_params,
+                        )
+                        .unwrap_or(fee_market_params.initial_base_fee_nwei),
+                        None => fee_market_params.initial_base_fee_nwei,
+                    }
+                };
+                (base_fee, fee_market_params.fee_market_version)
+            } else {
+                (0, 0)
+            };
         let mut block = Block {
             header: BlockHeader {
                 version: 1,
@@ -641,6 +726,13 @@ impl CoordinatedRuntime {
                 dag_version: 1,
                 aegis_pqvm_version: "aegis-pqvm".to_string(),
                 timestamp_ms_consensus_bounded: assignment.intended_block_timestamp_ms,
+                base_fee_per_gas_nwei: block_base_fee_per_gas_nwei,
+                gas_used: 0,
+                gas_limit: fee_market_params.max_block_gas,
+                pq_gas_used: 0,
+                pq_gas_limit: fee_market_params.max_block_pq_gas,
+                pq_gas_multiplier: fee_market_params.pq_gas_multiplier,
+                fee_market_version: block_fee_market_version,
             },
             transactions,
             proposer_signature: AegisPqSignature {
@@ -658,6 +750,14 @@ impl CoordinatedRuntime {
         let execution = execute_block(&block, &authorized)?;
         block.header.state_root_after = execution.state_root_after;
         block.header.receipt_root = execution.receipt_root;
+        // Record the canonical, independently-recomputable gas usage for this
+        // block now that real execution has run. This is what
+        // `execute_coordinated_block`'s fee-market validation (see below)
+        // checks every other node will also derive, so a producer cannot
+        // declare an understated/overstated usage to manipulate the next
+        // block's base fee.
+        block.header.gas_used = execution.gas_used_total;
+        block.header.pq_gas_used = execution.pq_gas_used_total;
         Ok(block)
     }
 
@@ -685,7 +785,9 @@ impl CoordinatedRuntime {
         self.accept_assignment(assignment)?;
         self.verifier
             .verify_producer_block(assignment, proposal, block)?;
-        let next_execution_state = execute_coordinated_block(&self.execution_state, block)?;
+        let parent_fee_market = self.parent_fee_market_state()?;
+        let next_execution_state =
+            execute_coordinated_block(&self.execution_state, block, parent_fee_market)?;
         let template = self
             .coordinator_state
             .commit_template(&self.config, proposal)?;
@@ -770,8 +872,9 @@ impl CoordinatedRuntime {
         }
         self.accept_assignment(&package.assignment)?;
         self.verifier.verify_committed_block_package(&package)?;
+        let parent_fee_market = self.parent_fee_market_state()?;
         let next_execution_state =
-            execute_coordinated_block(&self.execution_state, &package.block)?;
+            execute_coordinated_block(&self.execution_state, &package.block, parent_fee_market)?;
         self.finalize_verified_package(package, next_execution_state)
     }
 
@@ -1022,15 +1125,42 @@ fn replay_finality_from_execution_state(
                 .to_string(),
         );
     };
-    for record in records.iter().skip(start_index) {
-        execution_state = execute_coordinated_block(&execution_state, &record.package.block)?;
+    for (index, record) in records.iter().enumerate().skip(start_index) {
+        let parent_fee_market = index
+            .checked_sub(1)
+            .and_then(|parent_index| records.get(parent_index))
+            .map(|parent_record| ParentFeeMarketState {
+                base_fee_per_gas_nwei: parent_record.package.block.header.base_fee_per_gas_nwei,
+                gas_used: parent_record.package.block.header.gas_used,
+            });
+        execution_state = execute_coordinated_block(
+            &execution_state,
+            &record.package.block,
+            parent_fee_market,
+        )?;
     }
     Ok(execution_state)
 }
 
+/// Independently validates and applies a coordinated block.
+///
+/// `parent_fee_market` is the previous canonical block's declared fee-market
+/// state (`base_fee_per_gas_nwei`, `gas_used`), used to independently
+/// recompute the base fee this block was *required* to declare via
+/// [`crate::gas::fee_market::next_base_fee_per_gas`]. When `None` — because
+/// the caller has not yet wired chain-store access to the parent header
+/// (see [`ParentFeeMarketState`] and [`CoordinatedBlockBuildContext::parent_fee_market`])
+/// — the base-fee-matches-protocol-formula check is skipped rather than
+/// fabricating an expected value; this is a known, documented integration
+/// gap, not a silent pass. The declared `gas_used`/`pq_gas_used` totals are
+/// always independently re-derived from real execution and checked against
+/// the header regardless of `parent_fee_market`, since that check needs no
+/// external state — a producer can never understate/overstate usage to
+/// manipulate the next block's fee without the block being rejected here.
 fn execute_coordinated_block(
     state: &ExecutionState,
     block: &Block,
+    parent_fee_market: Option<ParentFeeMarketState>,
 ) -> Result<ExecutionState, String> {
     if compute_state_root_after(state)? != block.header.state_root_before {
         return Err(
@@ -1052,6 +1182,44 @@ fn execute_coordinated_block(
         || execution.receipt_root != block.header.receipt_root
     {
         return Err("coordinated block execution roots do not match its header".to_string());
+    }
+    // Canonical Live Gas Pricing: a block's declared gas usage must equal
+    // what real execution actually produced. This is independently
+    // re-derivable by every node and requires no external state, so it is
+    // always enforced (not gated on `parent_fee_market`).
+    if block.header.fee_market_version != 0 {
+        if block.header.gas_used != execution.gas_used_total
+            || block.header.pq_gas_used != execution.pq_gas_used_total
+        {
+            return Err(
+                "coordinated block declared gas_used/pq_gas_used does not match actual execution"
+                    .to_string(),
+            );
+        }
+        let fee_market_params = crate::gas::fee_market::FeeMarketParams::testnet_v3_defaults();
+        if let Some(parent) = parent_fee_market {
+            let expected_base_fee = if block.header.height.0 == fee_market_params.activation_height
+            {
+                fee_market_params.initial_base_fee_nwei
+            } else {
+                crate::gas::fee_market::next_base_fee_per_gas(
+                    parent
+                        .base_fee_per_gas_nwei
+                        .max(fee_market_params.base_fee_floor_nwei),
+                    parent.gas_used,
+                    &fee_market_params,
+                )
+                .map_err(|error| {
+                    format!("recompute expected coordinated block base fee: {error}")
+                })?
+            };
+            if block.header.base_fee_per_gas_nwei != expected_base_fee {
+                return Err(format!(
+                    "coordinated block declared base_fee_per_gas_nwei {} does not match the protocol-required fee {expected_base_fee}",
+                    block.header.base_fee_per_gas_nwei
+                ));
+            }
+        }
     }
     Ok(execution.state)
 }
@@ -1224,6 +1392,18 @@ mod tests {
                 dag_version: 1,
                 aegis_pqvm_version: "aegis-pqvm".to_string(),
                 timestamp_ms_consensus_bounded: assignment.intended_block_timestamp_ms,
+                // Test helper builds a pre-fee-market-activation-style empty
+                // block directly (bypassing `build_assigned_block`), so it
+                // uses the legacy fee_market_version 0 marker; this keeps
+                // `execute_coordinated_block`'s fee-market validation a
+                // no-op for these tests, matching prior test behavior.
+                base_fee_per_gas_nwei: 0,
+                gas_used: 0,
+                gas_limit: 0,
+                pq_gas_used: 0,
+                pq_gas_limit: 0,
+                pq_gas_multiplier: 0,
+                fee_market_version: 0,
             },
             transactions: Vec::new(),
             proposer_signature: crate::synergy_types::AegisPqSignature {
@@ -1269,6 +1449,7 @@ mod tests {
                 b"coordinated-runtime-test-parameters",
             ),
             cryptographic_profile_root: hash("cryptographic-profile"),
+            parent_fee_market: None,
         }
     }
 

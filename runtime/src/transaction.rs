@@ -496,6 +496,12 @@ impl Transaction {
                 gas_fee_nwei,
                 storage_fee_nwei: 0,
                 priority_fee_nwei: 0,
+                pq_gas_used: 0,
+                pq_gas_multiplier: 0,
+                effective_pq_gas_price_nwei: 0,
+                pq_execution_fee_nwei: 0,
+                fee_market_active: false,
+                fee_market_version: 0,
             },
             &FeeSchedule::default(),
         )

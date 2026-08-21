@@ -6,6 +6,10 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// Canonical live gas pricing (protocol-authoritative dynamic base fee).
+/// See `fee_market` module docs for the full design and formula.
+pub mod fee_market;
+
 pub mod constants {
     pub const SNRG_DECIMALS: u32 = 9;
     pub const NWEI_PER_SNRG: u128 = 1_000_000_000;
@@ -808,9 +812,38 @@ pub struct NetworkFeeInput {
     pub valuation_status: ValuationStatus,
     pub gas_used: u64,
     pub base_fee_per_gas_nwei: u64,
+    /// Ordinary-gas execution fee: `gas_used * base_fee_per_gas_nwei` when
+    /// the fee market is active for this transaction's block, or the legacy
+    /// activity-gas fee when it is not (see `fee_market_active`). Never
+    /// includes the PQ execution fee -- that is itemized separately below
+    /// and only combined into `total_network_fee_nwei` at the end.
     pub gas_fee_nwei: u128,
     pub storage_fee_nwei: u128,
     pub priority_fee_nwei: u128,
+    /// --- Canonical Live Gas Pricing (fee market) additions ---
+    /// PQ gas consumed (AIVM `PqGasMeter`), reported independently of
+    /// ordinary `gas_used`. `0` for transactions with no PQ execution
+    /// component (e.g. plain native transfers).
+    #[serde(default)]
+    pub pq_gas_used: u64,
+    #[serde(default)]
+    pub pq_gas_multiplier: u64,
+    #[serde(default)]
+    pub effective_pq_gas_price_nwei: u64,
+    /// `pq_gas_used * effective_pq_gas_price_nwei`, checked by the caller
+    /// (`crate::gas::fee_market::calculate_execution_fee`) before being
+    /// passed in here.
+    #[serde(default)]
+    pub pq_execution_fee_nwei: u128,
+    /// Whether `base_fee_per_gas_nwei` / the PQ fields above came from the
+    /// protocol-authoritative fee market (`true`) or from legacy
+    /// pre-activation / sender-declared pricing (`false`). Surfaced on the
+    /// breakdown so RPC/Atlas/Forge never mistake a legacy value for a
+    /// live protocol price.
+    #[serde(default)]
+    pub fee_market_active: bool,
+    #[serde(default)]
+    pub fee_market_version: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -826,12 +859,34 @@ pub struct NetworkFeeBreakdown {
     pub amount_fee_bps: u64,
     pub gas_used: u64,
     pub base_fee_per_gas_nwei: u64,
+    /// Ordinary-gas execution fee only (`gas_used * base_fee_per_gas_nwei`).
+    /// Kept under its historical name for backward compatibility; equal to
+    /// `base_execution_fee_nwei`.
     pub gas_fee_nwei: u128,
     pub amount_protocol_fee_nwei: u128,
     pub storage_fee_nwei: u128,
     pub priority_fee_nwei: u128,
+    /// `total_network_fee_nwei = execution_fee_total_nwei +
+    /// amount_protocol_fee_nwei + storage_fee_nwei + priority_fee_nwei`.
+    /// Protocol fees (amount-based) are never labeled as gas.
     pub total_network_fee_nwei: u128,
     pub fee_collector_address: String,
+    /// --- Canonical Live Gas Pricing (fee market) additions ---
+    pub pq_gas_used: u64,
+    pub pq_gas_multiplier: u64,
+    pub effective_pq_gas_price_nwei: u64,
+    /// Alias of `gas_fee_nwei`, spelled out for API clarity per the
+    /// documented receipt schema.
+    pub base_execution_fee_nwei: u128,
+    pub pq_execution_fee_nwei: u128,
+    /// `base_execution_fee_nwei + pq_execution_fee_nwei`. Ordinary and PQ
+    /// gas fees are always available individually above; this is provided
+    /// purely as the auditable sum, never as a replacement for the
+    /// itemized values.
+    pub execution_fee_total_nwei: u128,
+    pub fee_asset: String,
+    pub fee_market_active: bool,
+    pub fee_market_version: u32,
 }
 
 pub fn calculate_network_fee(
@@ -856,8 +911,12 @@ pub fn calculate_network_fee(
                 .min(entry.max_amount_fee_nwei)
         };
 
-    let total_network_fee = input
+    let execution_fee_total = input
         .gas_fee_nwei
+        .checked_add(input.pq_execution_fee_nwei)
+        .ok_or_else(|| "execution fee total overflow".to_string())?;
+
+    let total_network_fee = execution_fee_total
         .checked_add(amount_protocol_fee)
         .and_then(|value| value.checked_add(input.storage_fee_nwei))
         .and_then(|value| value.checked_add(input.priority_fee_nwei))
@@ -881,6 +940,15 @@ pub fn calculate_network_fee(
         priority_fee_nwei: input.priority_fee_nwei,
         total_network_fee_nwei: total_network_fee,
         fee_collector_address: crate::token::fee_collector_address()?,
+        pq_gas_used: input.pq_gas_used,
+        pq_gas_multiplier: input.pq_gas_multiplier,
+        effective_pq_gas_price_nwei: input.effective_pq_gas_price_nwei,
+        base_execution_fee_nwei: input.gas_fee_nwei,
+        pq_execution_fee_nwei: input.pq_execution_fee_nwei,
+        execution_fee_total_nwei: execution_fee_total,
+        fee_asset: "SNRG".to_string(),
+        fee_market_active: input.fee_market_active,
+        fee_market_version: input.fee_market_version,
     })
 }
 
@@ -1192,6 +1260,12 @@ mod tests {
                 gas_fee_nwei: 77_000,
                 storage_fee_nwei: 11,
                 priority_fee_nwei: 7,
+                pq_gas_used: 0,
+                pq_gas_multiplier: 0,
+                effective_pq_gas_price_nwei: 0,
+                pq_execution_fee_nwei: 0,
+                fee_market_active: false,
+                fee_market_version: 0,
             },
             &FeeSchedule::default(),
         )
@@ -1217,6 +1291,12 @@ mod tests {
                 gas_fee_nwei: 40_000,
                 storage_fee_nwei: 0,
                 priority_fee_nwei: 0,
+                pq_gas_used: 0,
+                pq_gas_multiplier: 0,
+                effective_pq_gas_price_nwei: 0,
+                pq_execution_fee_nwei: 0,
+                fee_market_active: false,
+                fee_market_version: 0,
             },
             &FeeSchedule::default(),
         )

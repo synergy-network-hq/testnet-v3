@@ -279,6 +279,7 @@ pub struct FeeChargedEvent {
     pub tx_id: TxId,
     pub payer: String,
     pub fee_collector_address: String,
+    /// Ordinary-gas execution fee (`gas_used * base_fee_per_gas`).
     pub gas_fee_nwei: u128,
     pub amount_protocol_fee_nwei: u128,
     pub storage_fee_nwei: u128,
@@ -286,6 +287,17 @@ pub struct FeeChargedEvent {
     pub total_network_fee_nwei: u128,
     pub block_height: u64,
     pub success: bool,
+    /// --- Canonical Live Gas Pricing (fee market) additions, additive and
+    /// `#[serde(default)]` so events recorded before this change continue
+    /// to decode (as zero-valued / inactive fee-market accounting). ---
+    #[serde(default)]
+    pub pq_gas_used: u64,
+    #[serde(default)]
+    pub pq_execution_fee_nwei: u128,
+    #[serde(default)]
+    pub fee_market_active: bool,
+    #[serde(default)]
+    pub fee_market_version: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -321,7 +333,19 @@ pub struct TransactionReceipt {
     pub synq_aivm: Option<SynQAivmReceiptSummary>,
     pub synq_error_code: Option<String>,
     pub synq_error_message: Option<String>,
+    /// Auditable fee breakdown for this transaction. When
+    /// `fee_breakdown.fee_market_active` is `true`, `base_execution_fee_nwei`
+    /// / `pq_execution_fee_nwei` / `execution_fee_total_nwei` on this
+    /// breakdown were computed from real `gas_used` /
+    /// `TransactionReceipt::pq_gas_used` against the protocol
+    /// `base_fee_per_gas`, per `crate::gas::fee_market`. When `false`, this
+    /// is legacy pre-fee-market pricing (sender-declared `max_fee_nwei`).
     pub fee_breakdown: Option<crate::gas::NetworkFeeBreakdown>,
+    /// PQ gas consumed by this transaction (AIVM `PqGasMeter`), tracked
+    /// independently of `gas_used` at every layer. `0` for transactions
+    /// with no PQ execution component.
+    #[serde(default)]
+    pub pq_gas_used: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -330,13 +354,41 @@ pub struct ExecutionResult {
     pub receipts: Vec<TransactionReceipt>,
     pub state_root_after: Hash,
     pub receipt_root: Hash,
+    /// Sum of `TransactionReceipt::gas_used` across every receipt in this
+    /// block. The block builder writes this into
+    /// `BlockHeader::gas_used`; independent replay (block validation)
+    /// recomputes it the same way and must match the declared value.
+    pub gas_used_total: u64,
+    /// Sum of `TransactionReceipt::pq_gas_used` across every receipt,
+    /// tracked independently of `gas_used_total` (never combined).
+    pub pq_gas_used_total: u64,
+    /// The fee market this execution actually charged under, derived from
+    /// `block.header` (see `execute_block`). `None` means this block predates
+    /// fee-market activation (`fee_market_version == 0`).
+    pub applied_fee_market: Option<crate::gas::fee_market::AppliedFeeMarket>,
 }
 
+/// Executes every transaction in `block` against a clone of `state`.
+///
+/// The block's declared `base_fee_per_gas_nwei` / `pq_gas_multiplier` /
+/// `fee_market_version` (`block.header`) are treated as authoritative input
+/// here -- this function does not itself recompute or validate that the
+/// declared base fee is correct; it charges transactions against whatever
+/// the header declares. That is intentional and safe as long as every
+/// caller that accepts a block from a peer *also* independently verifies
+/// `block.header.base_fee_per_gas_nwei ==
+/// fee_market::next_base_fee_per_gas(parent_header)` before or alongside
+/// calling this function (see
+/// `consensus::coordinated_runtime::verify_producer_block` /
+/// `execute_coordinated_block`) -- otherwise two nodes that disagreed on the
+/// header's correctness would still agree on its *execution*, which is not
+/// sufficient to reject a dishonest proposer.
 pub fn execute_block(block: &Block, state: &ExecutionState) -> Result<ExecutionResult, String> {
     let graph = build_execution_graph(&block.transactions)?;
     let batches = split_into_parallel_batches(&graph);
     let mut working_state = state.clone();
     let mut receipts = Vec::new();
+    let applied_fee_market = fee_market_from_header(&block.header);
     let synq_context = SynQExecutionContext {
         runtime_block_height: block.header.height.0,
         runtime_block_timestamp_unix: block
@@ -344,6 +396,7 @@ pub fn execute_block(block: &Block, state: &ExecutionState) -> Result<ExecutionR
             .timestamp_ms_consensus_bounded
             .saturating_div(1_000),
         sts_host: None,
+        applied_fee_market,
     };
     for batch in batches {
         let mut batch_receipts = execute_batch_parallel(
@@ -357,11 +410,47 @@ pub fn execute_block(block: &Block, state: &ExecutionState) -> Result<ExecutionR
     receipts = merge_results_in_canonical_order(receipts);
     let state_root_after = compute_state_root_after(&working_state)?;
     let receipt_root = compute_receipt_root(&receipts)?;
+    let gas_used_total = receipts
+        .iter()
+        .try_fold(0u64, |total, receipt| total.checked_add(receipt.gas_used))
+        .ok_or_else(|| "block gas_used_total overflow".to_string())?;
+    let pq_gas_used_total = receipts
+        .iter()
+        .try_fold(0u64, |total, receipt| total.checked_add(receipt.pq_gas_used))
+        .ok_or_else(|| "block pq_gas_used_total overflow".to_string())?;
     Ok(ExecutionResult {
         state: working_state,
         receipts,
         state_root_after,
         receipt_root,
+        gas_used_total,
+        pq_gas_used_total,
+        applied_fee_market,
+    })
+}
+
+/// Derives the fee market a block's header declares, or `None` if the
+/// header predates activation (`fee_market_version == 0`) or is malformed
+/// (e.g. `pq_gas_multiplier` overflow) -- a malformed declared fee market is
+/// never silently treated as "active with a fabricated price"; it falls
+/// back to legacy charging, and the separate header-validation check (see
+/// `execute_block` docs) is responsible for rejecting the block outright.
+fn fee_market_from_header(
+    header: &crate::synergy_types::BlockHeader,
+) -> Option<crate::gas::fee_market::AppliedFeeMarket> {
+    if header.fee_market_version == 0 {
+        return None;
+    }
+    let effective_pq_gas_price_nwei = crate::gas::fee_market::effective_pq_gas_price(
+        header.base_fee_per_gas_nwei,
+        header.pq_gas_multiplier,
+    )
+    .ok()?;
+    Some(crate::gas::fee_market::AppliedFeeMarket {
+        base_fee_per_gas_nwei: header.base_fee_per_gas_nwei,
+        pq_gas_multiplier: header.pq_gas_multiplier,
+        effective_pq_gas_price_nwei,
+        fee_market_version: header.fee_market_version,
     })
 }
 
@@ -504,10 +593,17 @@ fn execute_transaction(
     let synq_verification = state.synq_verifications.get(&id).cloned();
     let synq_error = state.synq_errors.get(&id).cloned();
     let payload = std::str::from_utf8(&tx.payload).unwrap_or_default();
+    let applied_fee_market = synq_context.applied_fee_market;
 
     if crate::address::is_network_burn_address(&sender) {
-        let estimated_fee =
-            canonical_network_fee_breakdown(tx, tx.gas_limit.min(21_000), tx.max_fee_nwei, true)?;
+        let estimated_fee = canonical_network_fee_breakdown(
+            tx,
+            tx.gas_limit.min(21_000),
+            0,
+            tx.max_fee_nwei,
+            true,
+            applied_fee_market.as_ref(),
+        )?;
         return Ok(TransactionReceipt {
             tx_id: id,
             status: ReceiptStatus::Failed,
@@ -519,6 +615,7 @@ fn execute_transaction(
             synq_error_code: synq_error.as_ref().map(|(code, _)| code.clone()),
             synq_error_message: synq_error.map(|(_, message)| message),
             fee_breakdown: Some(estimated_fee),
+            pq_gas_used: 0,
         });
     }
 
@@ -526,8 +623,14 @@ fn execute_transaction(
         Ok(burn) => burn,
         Err(error) => {
             let gas_used = tx.gas_limit.min(21_000);
-            let fee_breakdown =
-                canonical_network_fee_breakdown(tx, gas_used, tx.max_fee_nwei, false)?;
+            let fee_breakdown = canonical_network_fee_breakdown(
+                tx,
+                gas_used,
+                0,
+                tx.max_fee_nwei,
+                false,
+                applied_fee_market.as_ref(),
+            )?;
             if state.balances_nwei.get(&sender).copied().unwrap_or(0)
                 >= fee_breakdown.total_network_fee_nwei
             {
@@ -552,6 +655,7 @@ fn execute_transaction(
                 synq_error_code: synq_error.as_ref().map(|(code, _)| code.clone()),
                 synq_error_message: synq_error.map(|(_, message)| message),
                 fee_breakdown: Some(fee_breakdown),
+                pq_gas_used: 0,
             });
         }
     };
@@ -559,8 +663,14 @@ fn execute_transaction(
         .as_ref()
         .map(|burn| burn.amount_nwei)
         .unwrap_or(tx.amount_nwei);
-    let estimated_fee =
-        canonical_network_fee_breakdown(tx, tx.gas_limit.min(21_000), tx.max_fee_nwei, true)?;
+    let estimated_fee = canonical_network_fee_breakdown(
+        tx,
+        tx.gas_limit.min(21_000),
+        0,
+        tx.max_fee_nwei,
+        true,
+        applied_fee_market.as_ref(),
+    )?;
     let sender_balance = state.balances_nwei.get(&sender).copied().unwrap_or(0);
     let total_debit = transfer_amount_nwei
         .checked_add(estimated_fee.total_network_fee_nwei)
@@ -577,6 +687,7 @@ fn execute_transaction(
             synq_error_code: synq_error.as_ref().map(|(code, _)| code.clone()),
             synq_error_message: synq_error.map(|(_, message)| message),
             fee_breakdown: Some(estimated_fee),
+            pq_gas_used: 0,
         });
     }
 
@@ -605,12 +716,42 @@ fn execute_transaction(
         .as_ref()
         .map(|receipt| receipt.gas_used)
         .unwrap_or_else(|| tx.gas_limit.min(21_000));
+    // PQ gas is tracked independently of ordinary gas at every layer (never
+    // combined before reporting): AIVM's `PqGasMeter` output on the SynQ
+    // receipt, or `0` for transactions with no PQ execution component
+    // (e.g. plain native transfers, which are not run through AIVM).
+    let pq_gas_used = synq_aivm
+        .as_ref()
+        .map(|receipt| receipt.pqc_gas_used)
+        .unwrap_or(0);
 
     if synq_aivm
         .as_ref()
         .is_some_and(|receipt| receipt.status != "succeeded")
     {
-        let fee_breakdown = canonical_network_fee_breakdown(tx, gas_used, tx.max_fee_nwei, false)?;
+        let fee_breakdown = canonical_network_fee_breakdown(
+            tx,
+            gas_used,
+            pq_gas_used,
+            tx.max_fee_nwei,
+            false,
+            applied_fee_market.as_ref(),
+        )?;
+        if let Some(cap_error) = max_fee_cap_violation(&fee_breakdown, tx.max_fee_nwei) {
+            return Ok(TransactionReceipt {
+                tx_id: id,
+                status: ReceiptStatus::Failed,
+                gas_used,
+                error: cap_error,
+                state_root_after: compute_state_root_after(state)?,
+                synq_verification,
+                synq_aivm,
+                synq_error_code: synq_error.as_ref().map(|(code, _)| code.clone()),
+                synq_error_message: synq_error.map(|(_, message)| message),
+                fee_breakdown: Some(fee_breakdown),
+                pq_gas_used,
+            });
+        }
         charge_fee_to_collector(state, &sender, fee_breakdown.total_network_fee_nwei)?;
         record_fee_event(
             state,
@@ -635,10 +776,33 @@ fn execute_transaction(
             synq_error_code: synq_error.as_ref().map(|(code, _)| code.clone()),
             synq_error_message: synq_error.map(|(_, message)| message),
             fee_breakdown: Some(fee_breakdown),
+            pq_gas_used,
         });
     }
 
-    let fee_breakdown = canonical_network_fee_breakdown(tx, gas_used, tx.max_fee_nwei, true)?;
+    let fee_breakdown = canonical_network_fee_breakdown(
+        tx,
+        gas_used,
+        pq_gas_used,
+        tx.max_fee_nwei,
+        true,
+        applied_fee_market.as_ref(),
+    )?;
+    if let Some(cap_error) = max_fee_cap_violation(&fee_breakdown, tx.max_fee_nwei) {
+        return Ok(TransactionReceipt {
+            tx_id: id,
+            status: ReceiptStatus::Failed,
+            gas_used,
+            error: cap_error,
+            state_root_after: compute_state_root_after(state)?,
+            synq_verification,
+            synq_aivm,
+            synq_error_code: synq_error.as_ref().map(|(code, _)| code.clone()),
+            synq_error_message: synq_error.map(|(_, message)| message),
+            fee_breakdown: Some(fee_breakdown),
+            pq_gas_used,
+        });
+    }
     let total_debit = transfer_amount_nwei
         .checked_add(fee_breakdown.total_network_fee_nwei)
         .ok_or_else(|| "transaction total debit overflow".to_string())?;
@@ -655,6 +819,7 @@ fn execute_transaction(
             synq_error_code: synq_error.as_ref().map(|(code, _)| code.clone()),
             synq_error_message: synq_error.map(|(_, message)| message),
             fee_breakdown: Some(fee_breakdown),
+            pq_gas_used,
         });
     }
 
@@ -740,7 +905,27 @@ fn execute_transaction(
         synq_error_code: synq_error.as_ref().map(|(code, _)| code.clone()),
         synq_error_message: synq_error.map(|(_, message)| message),
         fee_breakdown: Some(fee_breakdown),
+        pq_gas_used,
     })
+}
+
+/// Returns a receipt-ready error string when the protocol-computed
+/// execution fee would exceed the sender's declared `max_fee_nwei` cap.
+/// Only meaningful once the fee market is active (`fee_breakdown
+/// .fee_market_active`); before activation the legacy path always charges
+/// exactly `max_fee_nwei`, so it can never exceed itself.
+fn max_fee_cap_violation(
+    fee_breakdown: &crate::gas::NetworkFeeBreakdown,
+    max_fee_nwei: u128,
+) -> Option<String> {
+    if fee_breakdown.fee_market_active && fee_breakdown.execution_fee_total_nwei > max_fee_nwei {
+        Some(format!(
+            "MAX_FEE_PER_GAS_TOO_LOW: protocol execution fee {} nWei exceeds declared max_fee_nwei {} nWei",
+            fee_breakdown.execution_fee_total_nwei, max_fee_nwei
+        ))
+    } else {
+        None
+    }
 }
 
 fn execute_sts_transaction(
@@ -757,7 +942,10 @@ fn execute_sts_transaction(
         .gas_limit
         .min(crate::sts::estimate_sts_gas(&sts_payload.tx));
     let synq_error = state.synq_errors.get(&id).cloned();
-    let fee_breakdown = canonical_network_fee_breakdown(tx, gas_used, fee_nwei, false)?;
+    // STS payloads do not execute through AIVM: no PQ gas component, and
+    // (for now, out of scope for this change) STS fees stay on the legacy
+    // flat `max_fee_nwei` charge regardless of fee-market activation.
+    let fee_breakdown = canonical_network_fee_breakdown(tx, gas_used, 0, fee_nwei, false, None)?;
 
     if sender_balance < fee_nwei {
         return Ok(TransactionReceipt {
@@ -771,6 +959,7 @@ fn execute_sts_transaction(
             synq_error_code: synq_error.as_ref().map(|(code, _)| code.clone()),
             synq_error_message: synq_error.map(|(_, message)| message),
             fee_breakdown: Some(fee_breakdown),
+            pq_gas_used: 0,
         });
     }
 
@@ -800,6 +989,7 @@ fn execute_sts_transaction(
                 synq_error_code: synq_error.as_ref().map(|(code, _)| code.clone()),
                 synq_error_message: synq_error.map(|(_, message)| message),
                 fee_breakdown: Some(fee_breakdown),
+                pq_gas_used: 0,
             })
         }
         Err(error) => {
@@ -822,6 +1012,7 @@ fn execute_sts_transaction(
                 synq_error_code: synq_error.as_ref().map(|(code, _)| code.clone()),
                 synq_error_message: synq_error.map(|(_, message)| message),
                 fee_breakdown: Some(fee_breakdown),
+                pq_gas_used: 0,
             })
         }
     }
@@ -872,6 +1063,10 @@ fn record_fee_event(
         total_network_fee_nwei: fee_breakdown.total_network_fee_nwei,
         block_height,
         success,
+        pq_gas_used: fee_breakdown.pq_gas_used,
+        pq_execution_fee_nwei: fee_breakdown.pq_execution_fee_nwei,
+        fee_market_active: fee_breakdown.fee_market_active,
+        fee_market_version: fee_breakdown.fee_market_version,
     });
     if fee_breakdown.total_network_fee_nwei > 0 {
         if let Ok(mut ledger) = crate::rewards::REWARD_LEDGER.lock() {
@@ -887,11 +1082,31 @@ fn record_fee_event(
     }
 }
 
+/// Computes the auditable, itemized fee breakdown for a transaction.
+///
+/// When `applied_fee_market` is `Some` (the fee market is active at this
+/// block's height), the ordinary-gas and PQ-gas execution fees are computed
+/// from *actual* `gas_used` / `pq_gas_used` against the protocol
+/// `base_fee_per_gas`, via `crate::gas::fee_market::calculate_execution_fee`
+/// -- exactly `gas_used * base_fee_per_gas` and
+/// `pq_gas_used * effective_pq_gas_price`, itemized and never combined
+/// before being reported. `gas_fee_cap_nwei` (the sender's declared
+/// `max_fee_nwei`) is *not* charged directly in this branch; it is only
+/// enforced as an affordability ceiling by the caller
+/// (`max_fee_cap_violation`), so unused gas is naturally "refunded" by
+/// simply never being charged.
+///
+/// When `applied_fee_market` is `None` (legacy / pre-fee-market blocks),
+/// behavior is preserved byte-for-byte from before this change: the
+/// sender's `gas_fee_cap_nwei` is charged in full, with an implied
+/// "base fee" derived only for display (`gas_fee_cap_nwei / gas_used`).
 fn canonical_network_fee_breakdown(
     tx: &Transaction,
     gas_used: u64,
-    gas_fee_nwei: u128,
+    pq_gas_used: u64,
+    gas_fee_cap_nwei: u128,
     include_amount_fee: bool,
+    applied_fee_market: Option<&crate::gas::fee_market::AppliedFeeMarket>,
 ) -> Result<crate::gas::NetworkFeeBreakdown, String> {
     use crate::gas::{calculate_network_fee, FeeSchedule, NetworkFeeInput, ValuationStatus};
 
@@ -904,10 +1119,49 @@ fn canonical_network_fee_breakdown(
     } else {
         ValuationStatus::NotRequired
     };
-    let base_fee_per_gas_nwei = if gas_used == 0 {
-        0
-    } else {
-        u64::try_from(gas_fee_nwei / (gas_used as u128)).unwrap_or(u64::MAX)
+
+    let (
+        gas_fee_nwei,
+        base_fee_per_gas_nwei,
+        pq_gas_multiplier,
+        effective_pq_gas_price_nwei,
+        pq_execution_fee_nwei,
+        fee_market_active,
+        fee_market_version,
+    ) = match applied_fee_market {
+        Some(applied) => {
+            let breakdown = crate::gas::fee_market::calculate_execution_fee(
+                gas_used,
+                pq_gas_used,
+                applied,
+            )
+            .map_err(|error| error.to_string())?;
+            (
+                breakdown.base_execution_fee_nwei,
+                applied.base_fee_per_gas_nwei,
+                applied.pq_gas_multiplier,
+                applied.effective_pq_gas_price_nwei,
+                breakdown.pq_execution_fee_nwei,
+                true,
+                applied.fee_market_version,
+            )
+        }
+        None => {
+            let derived_base_fee_per_gas = if gas_used == 0 {
+                0
+            } else {
+                u64::try_from(gas_fee_cap_nwei / (gas_used as u128)).unwrap_or(u64::MAX)
+            };
+            (
+                gas_fee_cap_nwei,
+                derived_base_fee_per_gas,
+                0u64,
+                0u64,
+                0u128,
+                false,
+                0u32,
+            )
+        }
     };
 
     calculate_network_fee(
@@ -923,6 +1177,12 @@ fn canonical_network_fee_breakdown(
             gas_fee_nwei,
             storage_fee_nwei: 0,
             priority_fee_nwei: 0,
+            pq_gas_used,
+            pq_gas_multiplier,
+            effective_pq_gas_price_nwei,
+            pq_execution_fee_nwei,
+            fee_market_active,
+            fee_market_version,
         },
         &FeeSchedule::default(),
     )
@@ -1217,6 +1477,13 @@ mod tests {
                 dag_version: 1,
                 aegis_pqvm_version: "aegis-pqvm".to_string(),
                 timestamp_ms_consensus_bounded: 0,
+                base_fee_per_gas_nwei: 0,
+                gas_used: 0,
+                gas_limit: 0,
+                pq_gas_used: 0,
+                pq_gas_limit: 0,
+                pq_gas_multiplier: 0,
+                fee_market_version: 0,
             },
             transactions,
             proposer_signature: AegisPqSignature {
