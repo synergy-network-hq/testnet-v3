@@ -32,6 +32,17 @@ pub struct Block {
     pub block_signature: Vec<u8>,
     #[serde(default)]
     pub block_signature_algorithm: String,
+    /// Versioned fee-market fields for the legacy block carrier.  Historical
+    /// blocks deserialize as version 0 and retain their original hash format;
+    /// the first post-activation block commits these fields in its signed hash.
+    #[serde(default)]
+    pub base_fee_per_gas_nwei: u64,
+    #[serde(default)]
+    pub gas_used: u64,
+    #[serde(default)]
+    pub gas_limit: u64,
+    #[serde(default)]
+    pub fee_market_version: u32,
 }
 
 impl Block {
@@ -84,6 +95,10 @@ impl Block {
             proposer_public_key: Vec::new(),
             block_signature: Vec::new(),
             block_signature_algorithm: String::new(),
+            base_fee_per_gas_nwei: 0,
+            gas_used: 0,
+            gas_limit: 0,
+            fee_market_version: 0,
         }
     }
 
@@ -114,6 +129,7 @@ impl Block {
 
         self.transactions_root == compute_merkle_root(&self.transactions)
             && self.hash == self.recompute_hash()
+            && self.validate_fee_market_fields().is_ok()
     }
 
     pub fn verify_proposer_signature(&self) -> Result<(), String> {
@@ -160,16 +176,159 @@ impl Block {
     }
 
     pub fn recompute_hash(&self) -> String {
-        let data = format!(
-            "{:?}{}{}{}{}{}",
-            self.block_index,
-            self.previous_hash,
-            self.validator_id,
-            self.nonce,
-            self.timestamp,
-            self.transactions_root
-        );
+        // Version 0 is the frozen legacy encoding.  Do not append defaults to
+        // this branch: doing so would invalidate the hashes of every existing
+        // persisted block.  Activated blocks commit all fee-market fields.
+        let data = if self.fee_market_version == 0 {
+            format!(
+                "{:?}{}{}{}{}{}",
+                self.block_index,
+                self.previous_hash,
+                self.validator_id,
+                self.nonce,
+                self.timestamp,
+                self.transactions_root
+            )
+        } else {
+            format!(
+                "{:?}{}{}{}{}{}{}{}{}{}",
+                self.block_index,
+                self.previous_hash,
+                self.validator_id,
+                self.nonce,
+                self.timestamp,
+                self.transactions_root,
+                self.base_fee_per_gas_nwei,
+                self.gas_used,
+                self.gas_limit,
+                self.fee_market_version
+            )
+        };
         blake3::hash(data.as_bytes()).to_hex().to_string()
+    }
+
+    /// Populate the consensus-bound legacy fee-market fields from the exact
+    /// parent that this block extends.  This is called before the proposer
+    /// signs the block; validators independently recompute the same values.
+    pub fn apply_fee_market_from_parent(&mut self, parent: &Block) -> Result<(), String> {
+        let params = crate::gas::fee_market::FeeMarketParams::testnet_v3_defaults();
+        if !params.is_active_at(self.block_index) {
+            return Ok(());
+        }
+        let base_fee_per_gas_nwei = if parent.fee_market_version == params.fee_market_version {
+            crate::gas::fee_market::next_base_fee_per_gas(
+                parent.base_fee_per_gas_nwei,
+                parent.gas_used,
+                &params,
+            )
+            .map_err(|error| format!("derive legacy block base fee: {error}"))?
+        } else {
+            params.initial_base_fee_nwei
+        };
+        self.base_fee_per_gas_nwei = base_fee_per_gas_nwei;
+        self.gas_used = self.estimated_gas_used()?;
+        self.gas_limit = params.max_block_gas;
+        self.fee_market_version = params.fee_market_version;
+        self.hash = self.recompute_hash();
+        Ok(())
+    }
+
+    /// Return the base fee applied to this block, if it is an activated
+    /// legacy fee-market block.
+    pub fn applied_fee_market_base_fee(&self) -> Option<u64> {
+        (self.fee_market_version == crate::gas::fee_market::FEE_MARKET_VERSION)
+            .then_some(self.base_fee_per_gas_nwei)
+    }
+
+    /// Validate self-contained fee-market commitments.  Parent-dependent
+    /// validation lives in `validate_fee_market_against_parent` below.
+    fn validate_fee_market_fields(&self) -> Result<(), String> {
+        if self.fee_market_version == 0 {
+            if self.base_fee_per_gas_nwei != 0 || self.gas_used != 0 || self.gas_limit != 0 {
+                return Err("legacy fee-market version 0 block contains active fee fields".to_string());
+            }
+            return Ok(());
+        }
+        let params = crate::gas::fee_market::FeeMarketParams::testnet_v3_defaults();
+        if self.fee_market_version != params.fee_market_version {
+            return Err("unsupported legacy fee-market version".to_string());
+        }
+        if !params.is_active_at(self.block_index) {
+            return Err("legacy fee-market block precedes activation height".to_string());
+        }
+        if self.base_fee_per_gas_nwei < params.base_fee_floor_nwei {
+            return Err("legacy block base fee is below the protocol floor".to_string());
+        }
+        if self.gas_limit != params.max_block_gas {
+            return Err("legacy block gas limit does not match the protocol limit".to_string());
+        }
+        let estimated = self.estimated_gas_used()?;
+        if self.gas_used != estimated {
+            return Err("legacy block declared gas used does not match transaction gas".to_string());
+        }
+        if self.gas_used > self.gas_limit {
+            return Err("legacy block gas used exceeds its gas limit".to_string());
+        }
+        for transaction in &self.transactions {
+            let estimated_gas = transaction.estimate_gas();
+            if transaction.get_gas_limit() < estimated_gas {
+                return Err("transaction gas limit is below deterministic gas use".to_string());
+            }
+            if transaction.get_gas_price() < self.base_fee_per_gas_nwei {
+                return Err("transaction max fee per gas is below the block base fee".to_string());
+            }
+            let actual_fee = transaction
+                .network_fee_breakdown_with_gas(estimated_gas, self.base_fee_per_gas_nwei)
+                .map_err(|error| format!("calculate active transaction fee: {error}"))?
+                .total_network_fee_nwei;
+            let reserved_fee = transaction
+                .network_fee_breakdown_with_gas(transaction.get_gas_limit(), transaction.get_gas_price())
+                .map_err(|error| format!("calculate transaction maximum fee: {error}"))?
+                .total_network_fee_nwei;
+            if actual_fee > reserved_fee {
+                return Err("active transaction fee exceeds the sender's maximum reserve".to_string());
+            }
+        }
+        Ok(())
+    }
+
+    fn estimated_gas_used(&self) -> Result<u64, String> {
+        self.transactions.iter().try_fold(0u64, |total, transaction| {
+            total
+                .checked_add(transaction.estimate_gas())
+                .ok_or_else(|| "legacy block gas accounting overflow".to_string())
+        })
+    }
+
+    /// Validate all fee-market commitments that depend on the exact parent.
+    pub fn validate_fee_market_against_parent(&self, parent: &Block) -> Result<(), String> {
+        // The legacy chain has already persisted version-0 blocks above the
+        // canonical stack's genesis activation height.  Accepting an
+        // all-version-0 historical run is required for snapshot/sync
+        // compatibility; the first version-1 block establishes the durable
+        // boundary, after which a version-0 successor is rejected below.
+        if parent.fee_market_version == 0 && self.fee_market_version == 0 {
+            return Ok(());
+        }
+        self.validate_fee_market_fields()?;
+        let params = crate::gas::fee_market::FeeMarketParams::testnet_v3_defaults();
+        if !params.is_active_at(self.block_index) {
+            return Ok(());
+        }
+        let expected = if parent.fee_market_version == params.fee_market_version {
+            crate::gas::fee_market::next_base_fee_per_gas(
+                parent.base_fee_per_gas_nwei,
+                parent.gas_used,
+                &params,
+            )
+            .map_err(|error| format!("derive expected legacy block base fee: {error}"))?
+        } else {
+            params.initial_base_fee_nwei
+        };
+        if self.base_fee_per_gas_nwei != expected {
+            return Err("legacy block base fee does not match the parent-derived protocol value".to_string());
+        }
+        Ok(())
     }
 
     pub fn header(&self) -> BlockHeader {
@@ -253,6 +412,8 @@ impl BlockChain {
                     block.previous_hash, tip.hash, tip.block_index
                 ));
             }
+
+            block.validate_fee_market_against_parent(tip)?;
         }
 
         self.chain.push(block);
@@ -334,6 +495,10 @@ impl BlockChain {
             proposer_public_key: Vec::new(),
             block_signature: Vec::new(),
             block_signature_algorithm: String::new(),
+            base_fee_per_gas_nwei: 0,
+            gas_used: 0,
+            gas_limit: 0,
+            fee_market_version: 0,
         };
         self.chain.clear();
         self.chain.push(genesis_block);
@@ -468,6 +633,7 @@ pub fn configured_hot_chain_retention_blocks() -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::{Block, BlockChain};
+    use crate::transaction::Transaction;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -610,5 +776,43 @@ mod tests {
         );
         let next = block(11, previous.hash.clone(), "validator-1");
         assert_eq!(chain.add_block_extending_tip(next), Ok(true));
+    }
+
+    #[test]
+    fn activated_legacy_block_commits_and_enforces_parent_derived_fee_market() {
+        let parent = block(50, "parent".to_string(), "validator-1");
+        let transaction = Transaction::new(
+            "synw1fee-market-sender".to_string(),
+            "synw1fee-market-receiver".to_string(),
+            1,
+            1,
+            Vec::new(),
+            crate::gas::fee_market::FeeMarketParams::testnet_v3_defaults()
+                .initial_base_fee_nwei,
+            30_000_000,
+            None,
+            "mldsa87".to_string(),
+        );
+        let mut child = Block::new_with_timestamp(
+            parent.block_index + 1,
+            vec![transaction],
+            parent.hash.clone(),
+            "validator-2".to_string(),
+            51,
+            151,
+        );
+        child.apply_fee_market_from_parent(&parent).unwrap();
+        assert_eq!(
+            child.base_fee_per_gas_nwei,
+            crate::gas::fee_market::FeeMarketParams::testnet_v3_defaults().initial_base_fee_nwei
+        );
+        assert!(child.validate_fee_market_against_parent(&parent).is_ok());
+
+        child.base_fee_per_gas_nwei = child.base_fee_per_gas_nwei.saturating_add(1);
+        child.hash = child.recompute_hash();
+        assert!(child
+            .validate_fee_market_against_parent(&parent)
+            .unwrap_err()
+            .contains("does not match the parent-derived"));
     }
 }

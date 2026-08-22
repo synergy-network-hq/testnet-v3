@@ -2084,6 +2084,32 @@ impl TokenManager {
         block_height: u64,
         block_hash: &str,
     ) -> Result<String, String> {
+        self.process_transaction_in_finalized_block_with_fee_market(
+            tx,
+            block_height,
+            block_hash,
+            None,
+        )
+    }
+
+    /// Apply a finalized transaction using the consensus-bound base fee of
+    /// its containing block.  `None` is retained only for replay of
+    /// pre-activation version-0 blocks.
+    pub fn process_transaction_in_finalized_block_with_fee_market(
+        &self,
+        tx: &Transaction,
+        block_height: u64,
+        block_hash: &str,
+        applied_base_fee_per_gas_nwei: Option<u64>,
+    ) -> Result<String, String> {
+        let fee = match applied_base_fee_per_gas_nwei {
+            Some(base_fee_per_gas_nwei) => tx
+                .network_fee_breakdown_with_gas(tx.estimate_gas(), base_fee_per_gas_nwei)?
+                .total_network_fee_nwei,
+            None => tx.get_total_network_fee_nwei(),
+        };
+        let fee = u64::try_from(fee)
+            .map_err(|_| "finalized transaction fee exceeds u64".to_string())?;
         if let Some(data_str) = tx.data.as_deref() {
             if crate::sts::transaction_data_may_contain_sts_payload(data_str) {
                 let tx_hash = tx.hash();
@@ -2091,7 +2117,6 @@ impl TokenManager {
                     return Ok("STS transaction already processed".to_string());
                 }
 
-                let fee = tx.get_total_network_fee_u64()?;
                 self.charge_snrg_fee(&tx.sender, fee)?;
                 let report = crate::sts::process_finalized_sts_transaction_data(
                     &tx.sender,
@@ -2129,7 +2154,6 @@ impl TokenManager {
                         ) {
                             let tx_hash = tx.hash();
                             let already_processed = self.transfer_hash_exists(&tx_hash);
-                            let fee = tx.get_total_network_fee_u64()?;
                             let result = self.transfer_tokens_with_metadata(
                                 &tx.sender,
                                 to,
@@ -2163,7 +2187,6 @@ impl TokenManager {
                             stake_info.get("token").and_then(|v| v.as_str()),
                             stake_info.get("amount").and_then(|v| v.as_u64()),
                         ) {
-                            let fee = tx.get_total_network_fee_u64()?;
                             self.charge_snrg_fee(&tx.sender, fee)?;
                             let result =
                                 self.stake_tokens(&tx.sender, validator, token_symbol, amount)?;
@@ -2191,7 +2214,6 @@ impl TokenManager {
                                 .and_then(|v| v.as_str()),
                             burn_info.get("amount").and_then(|v| v.as_u64()),
                         ) {
-                            let fee = tx.get_total_network_fee_u64()?;
                             self.charge_snrg_fee(&tx.sender, fee)?;
                             let result = self.burn_tokens_with_metadata(
                                 &tx.sender,
@@ -2212,7 +2234,6 @@ impl TokenManager {
         if tx.amount > 0 && !tx.receiver.trim().is_empty() {
             let tx_hash = tx.hash();
             let already_processed = self.transfer_hash_exists(&tx_hash);
-            let fee = tx.get_total_network_fee_u64()?;
             let result = self.transfer_tokens_with_metadata(
                 &tx.sender,
                 &tx.receiver,
@@ -2315,7 +2336,12 @@ impl TokenManager {
                     continue;
                 }
 
-                match self.process_transaction_in_block(tx, block.block_index) {
+                match self.process_transaction_in_finalized_block_with_fee_market(
+                    tx,
+                    block.block_index,
+                    &block.hash,
+                    block.applied_fee_market_base_fee(),
+                ) {
                     Ok(_) => applied += 1,
                     Err(_) => failed += 1,
                 }

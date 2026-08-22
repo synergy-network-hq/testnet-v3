@@ -9969,6 +9969,34 @@ struct CanonicalFeeMarketState {
 
 fn canonical_fee_market_state(chain: &BlockChain) -> CanonicalFeeMarketState {
     let params = crate::gas::fee_market::FeeMarketParams::testnet_v3_defaults();
+    // Once the legacy producer has crossed the fee-market activation
+    // boundary, the latest signed block header is authoritative.  Retaining
+    // the replay below only for historical version-0 chains preserves the
+    // existing read-only migration behavior without allowing it to override
+    // a consensus-bound price.
+    if let Some(tip) = chain.chain.last().filter(|block| {
+        block.fee_market_version == params.fee_market_version
+    }) {
+        let next_base_fee = crate::gas::fee_market::next_base_fee_per_gas(
+            tip.base_fee_per_gas_nwei,
+            tip.gas_used,
+            &params,
+        )
+        .unwrap_or(tip.base_fee_per_gas_nwei);
+        let effective_pq_gas_price_nwei = crate::gas::fee_market::effective_pq_gas_price(
+            next_base_fee,
+            params.pq_gas_multiplier,
+        )
+        .unwrap_or(next_base_fee);
+        return CanonicalFeeMarketState {
+            params,
+            current_base_fee_per_gas_nwei: Some(tip.base_fee_per_gas_nwei),
+            base_fee_per_gas_nwei: next_base_fee,
+            effective_pq_gas_price_nwei,
+            last_block_height: tip.block_index,
+            last_block_gas_used: tip.gas_used,
+        };
+    }
     let mut base_fee = params.initial_base_fee_nwei;
     let mut current_base_fee = None;
     let mut last_block_gas_used = 0u64;

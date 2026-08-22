@@ -12169,10 +12169,11 @@ fn apply_token_state_for_blocks(blocks: &[Block]) -> Result<(), String> {
 
     for block in blocks {
         for tx in &block.transactions {
-            match token_manager.process_transaction_in_finalized_block(
+            match token_manager.process_transaction_in_finalized_block_with_fee_market(
                 tx,
                 block.block_index,
                 &block.hash,
+                block.applied_fee_market_base_fee(),
             ) {
                 Ok(_) => applied_txs += 1,
                 Err(error) => {

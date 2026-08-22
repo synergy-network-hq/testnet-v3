@@ -1849,10 +1849,11 @@ impl ProofOfSynergy {
                                 let mut failed_txs = 0u64;
                                 for tx in &new_block.transactions {
                                     match token_manager
-                                        .process_transaction_in_finalized_block(
+                                        .process_transaction_in_finalized_block_with_fee_market(
                                             tx,
                                             new_block.block_index,
                                             &new_block.hash,
+                                            new_block.applied_fee_market_base_fee(),
                                         )
                                     {
                                         Ok(_) => applied_txs += 1,
@@ -4146,6 +4147,9 @@ impl ProofOfSynergy {
             previous_block.nonce + 1, // Simple nonce increment
             consensus_timestamp,
         );
+        block
+            .apply_fee_market_from_parent(previous_block)
+            .unwrap_or_else(|error| panic!("legacy fee-market proposal construction failed: {error}"));
 
         let (leader_public_key, leader_private_key) = load_local_validator_keypair_for_height(
             block.block_index,
@@ -4496,14 +4500,8 @@ impl ProofOfSynergy {
             return false;
         }
 
-        let recalculated = Block::new_with_timestamp(
-            block.block_index,
-            block.transactions.clone(),
-            block.previous_hash.clone(),
-            block.validator_id.clone(),
-            block.nonce,
-            block.timestamp,
-        );
+        let mut recalculated = block.clone();
+        recalculated.hash = recalculated.recompute_hash();
         recalculated.hash == block.hash && recalculated.transactions_root == block.transactions_root
     }
 
