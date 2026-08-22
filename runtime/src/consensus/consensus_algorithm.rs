@@ -5380,6 +5380,10 @@ mod tests {
                 proposer_public_key: Vec::new(),
                 block_signature: Vec::new(),
                 block_signature_algorithm: "fndsa".to_string(),
+                base_fee_per_gas_nwei: 0,
+                gas_used: 0,
+                gas_limit: 0,
+                fee_market_version: 0,
             });
             let qc = QuorumCertificate {
                 block_hash: block_hash.clone(),
@@ -6200,6 +6204,10 @@ mod tests {
             proposer_public_key: Vec::new(),
             block_signature: vec![1, 2, 6],
             block_signature_algorithm: "fndsa".to_string(),
+            base_fee_per_gas_nwei: 0,
+            gas_used: 0,
+            gas_limit: 0,
+            fee_market_version: 0,
         });
 
         let previous_qc =
@@ -6306,6 +6314,10 @@ mod tests {
             proposer_public_key: Vec::new(),
             block_signature: vec![9, 9, 9],
             block_signature_algorithm: "fndsa".to_string(),
+            base_fee_per_gas_nwei: 0,
+            gas_used: 0,
+            gas_limit: 0,
+            fee_market_version: 0,
         });
         DualQuorumConsensus::record_committed_qc_checked(QuorumCertificate {
             block_hash: "future-boundary-after-cutoff".to_string(),
@@ -6349,6 +6361,10 @@ mod tests {
             proposer_public_key: Vec::new(),
             block_signature: vec![1, 2, 6],
             block_signature_algorithm: "fndsa".to_string(),
+            base_fee_per_gas_nwei: 0,
+            gas_used: 0,
+            gas_limit: 0,
+            fee_market_version: 0,
         });
 
         let evidence =

@@ -788,7 +788,8 @@ mod tests {
             1,
             Vec::new(),
             crate::gas::fee_market::FeeMarketParams::testnet_v3_defaults()
-                .initial_base_fee_nwei,
+                .initial_base_fee_nwei
+                .saturating_add(2),
             30_000_000,
             None,
             "mldsa87".to_string(),
