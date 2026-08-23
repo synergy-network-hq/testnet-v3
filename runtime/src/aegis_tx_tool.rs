@@ -27,6 +27,10 @@ pub struct AegisTxBuildOptions {
     pub write_set_hint: Vec<String>,
     pub explicit_dependencies: Vec<String>,
     pub payload: Vec<u8>,
+    /// The canonical FN-DSA identity root and its scoped authorization of the
+    /// operational Aegis transaction key. An ML-DSA transaction key is never
+    /// itself an account-address derivation preimage.
+    pub identity_authorization: Option<crate::identity_auth::IdentityAuthorizationCarrier>,
 }
 
 impl Default for AegisTxBuildOptions {
@@ -45,6 +49,7 @@ impl Default for AegisTxBuildOptions {
             write_set_hint: vec!["fixture-resource".to_string()],
             explicit_dependencies: Vec::new(),
             payload: Vec::new(),
+            identity_authorization: None,
         }
     }
 }
@@ -86,6 +91,11 @@ pub struct AegisTxSubmissionEnvelope {
     pub transaction: Transaction,
     pub public_key: AegisPqPublicKey,
     pub lifecycle_record: AegisPqKeyLifecycleRecord,
+    /// Required at admission. Kept optional on the wire only so legacy
+    /// envelopes decode and are rejected explicitly rather than being
+    /// reinterpreted as having an identity binding.
+    #[serde(default)]
+    pub identity_authorization: Option<crate::identity_auth::IdentityAuthorizationCarrier>,
 }
 
 pub fn sign_with_new_aegis_transaction_key(
@@ -99,10 +109,11 @@ pub fn sign_with_new_aegis_transaction_key(
             Epoch(options.epoch),
         )
         .map_err(|error| error.to_string())?;
+    let identity_authorization = options.identity_authorization.clone();
     apply_generated_address_defaults(&signer, &key_id, &mut options)?;
     let tx = sign_with_existing_aegis_transaction_key(&mut signer, &key_id, options)?;
     let verifier = signer.verifier();
-    report_for_transaction(&verifier, tx, key_id)
+    report_for_transaction(&verifier, tx, key_id, identity_authorization)
 }
 
 pub fn sign_aegis_transaction_sequence_with_new_key(
@@ -138,10 +149,16 @@ pub fn sign_aegis_transaction_sequence_with_new_key(
                 options.explicit_dependencies.push(tx_id.0.clone());
             }
         }
+        let identity_authorization = options.identity_authorization.clone();
         apply_generated_address_defaults(&signer, &key_id, &mut options)?;
         let tx = sign_with_existing_aegis_transaction_key(&mut signer, &key_id, options)?;
-        let report =
-            report_for_transaction_in_mempool(&verifier, &mut mempool, tx, key_id.clone())?;
+        let report = report_for_transaction_in_mempool(
+            &verifier,
+            &mut mempool,
+            tx,
+            key_id.clone(),
+            identity_authorization,
+        )?;
         previous_tx_id = Some(report.tx_id.clone());
         reports.push(report);
     }
@@ -163,12 +180,9 @@ pub fn build_fixture_report() -> Result<AegisDagFixtureReport, String> {
             Epoch(0),
         )
         .map_err(|error| error.to_string())?;
-    let sender_address = address_for_aegis_key(&signer, &key_id)?;
-    let independent_sender_address = address_for_aegis_key(&signer, &independent_key_id)?;
-    let receiver_address = crate::address::generate_wallet_address(&format!(
-        "aegis-dag-fixture-receiver:{}",
-        key_id.0
-    ))?;
+    let sender_address = address_for_aegis_key(&signer, &key_id, None)?;
+    let independent_sender_address = address_for_aegis_key(&signer, &independent_key_id, None)?;
+    let receiver_address = sender_address.clone();
 
     let tx0 = sign_with_existing_aegis_transaction_key(
         &mut signer,
@@ -221,18 +235,21 @@ pub fn build_fixture_report() -> Result<AegisDagFixtureReport, String> {
         &mut mempool,
         tx0,
         key_id.clone(),
+        None,
     )?);
     reports.push(report_for_transaction_in_mempool(
         &verifier,
         &mut mempool,
         tx1,
         key_id.clone(),
+        None,
     )?);
     reports.push(report_for_transaction_in_mempool(
         &verifier,
         &mut mempool,
         tx2,
         independent_key_id,
+        None,
     )?);
     let ready_frontier = mempool.ready_frontier();
     let selected_ancestor_closed_set = mempool.ancestor_closed_set(
@@ -305,9 +322,10 @@ fn report_for_transaction(
     verifier: &AegisPqvmVerifier,
     tx: Transaction,
     key_id: AegisPqKeyId,
+    identity_authorization: Option<crate::identity_auth::IdentityAuthorizationCarrier>,
 ) -> Result<AegisSignedTxReport, String> {
     let mut mempool = DagMempool::new(verifier, tx.epoch, Height(0));
-    report_for_transaction_in_mempool(verifier, &mut mempool, tx, key_id)
+    report_for_transaction_in_mempool(verifier, &mut mempool, tx, key_id, identity_authorization)
 }
 
 fn report_for_transaction_in_mempool(
@@ -315,6 +333,7 @@ fn report_for_transaction_in_mempool(
     mempool: &mut DagMempool<'_>,
     tx: Transaction,
     key_id: AegisPqKeyId,
+    identity_authorization: Option<crate::identity_auth::IdentityAuthorizationCarrier>,
 ) -> Result<AegisSignedTxReport, String> {
     verifier
         .verify_transaction_signature_checked(&tx)
@@ -332,6 +351,7 @@ fn report_for_transaction_in_mempool(
         transaction: tx.clone(),
         public_key,
         lifecycle_record,
+        identity_authorization,
     };
     let rpc_transaction = legacy_transaction_from_aegis_envelope(&submission_envelope)?;
     let synq_verification = crate::synq_admission::verify_transaction_payload_for_chain_admission(
@@ -399,8 +419,20 @@ pub fn verify_aegis_submission_envelope_at(
             "Aegis transaction key lifecycle does not authorize transaction signing".to_string(),
         );
     }
-    let expected_sender =
-        crate::address::generate_wallet_address(&hex::encode(&envelope.public_key.key_bytes))?;
+    if envelope.transaction.chain_id != ChainId::synergy_testnet_v3()
+        || envelope.transaction.network_id != NetworkId::synergy_testnet_v3()
+    {
+        return Err("Aegis transaction identity authorization is only defined for Testnet-v3 chain 1266 / network testnet".to_string());
+    }
+    let identity_authorization = envelope.identity_authorization.as_ref().ok_or_else(|| {
+        "Aegis transaction is missing the required canonical identity authorization carrier"
+            .to_string()
+    })?;
+    let expected_sender = canonical_sender_for_aegis_public_key(
+        identity_authorization,
+        &envelope.public_key,
+        consensus_timestamp_unix,
+    )?;
     if envelope.transaction.sender_uma_or_account != expected_sender {
         return Err(format!(
             "Aegis transaction sender does not match transaction public key-derived address; expected {expected_sender}, got {}",
@@ -530,11 +562,43 @@ pub fn decode_aegis_carrier_data(data: &str) -> Result<AegisTxSubmissionEnvelope
 fn address_for_aegis_key(
     signer: &AegisPqvmSigner,
     key_id: &AegisPqKeyId,
+    identity_authorization: Option<&crate::identity_auth::IdentityAuthorizationCarrier>,
 ) -> Result<String, String> {
     let public_key = signer
         .public_key_record(key_id)
         .map_err(|error| error.to_string())?;
-    crate::address::generate_wallet_address(&hex::encode(public_key.key_bytes))
+    let identity_authorization = identity_authorization.ok_or_else(|| {
+        "Aegis transaction key has no canonical identity authorization carrier; ML-DSA operational keys cannot be used as wallet address roots"
+            .to_string()
+    })?;
+    canonical_sender_for_aegis_public_key(identity_authorization, &public_key, current_timestamp())
+}
+
+fn canonical_sender_for_aegis_public_key(
+    identity_authorization: &crate::identity_auth::IdentityAuthorizationCarrier,
+    public_key: &AegisPqPublicKey,
+    consensus_timestamp_unix: u64,
+) -> Result<String, String> {
+    let algorithm = match public_key.algorithm.as_str() {
+        "mldsa65" => "ML-DSA-65",
+        "mldsa87" => "ML-DSA-87",
+        other => {
+            return Err(format!(
+                "Aegis transaction operational key algorithm '{other}' is not an approved ML-DSA identity authorization key"
+            ))
+        }
+    };
+    identity_authorization
+        .identity_address_for_key_in_context_at(
+            crate::identity_auth::AEGIS_TRANSACTION_AUTHORIZATION_DOMAIN,
+            crate::synergy_types::SYNERGY_TESTNET_V3_CHAIN_ID,
+            crate::synergy_types::SYNERGY_TESTNET_V3_NETWORK_ID,
+            algorithm,
+            &public_key.key_bytes,
+            "transaction-signing",
+            consensus_timestamp_unix,
+        )
+        .map_err(|error| format!("Aegis transaction identity authorization failed: {error}"))
 }
 
 fn apply_generated_address_defaults(
@@ -542,13 +606,13 @@ fn apply_generated_address_defaults(
     key_id: &AegisPqKeyId,
     options: &mut AegisTxBuildOptions,
 ) -> Result<(), String> {
-    let generated_sender = address_for_aegis_key(signer, key_id)?;
+    let generated_sender =
+        address_for_aegis_key(signer, key_id, options.identity_authorization.as_ref())?;
     if options.sender == AegisTxBuildOptions::default().sender {
-        options.sender = generated_sender;
+        options.sender = generated_sender.clone();
     }
     if options.receiver == AegisTxBuildOptions::default().receiver {
-        options.receiver =
-            crate::address::generate_wallet_address(&format!("aegis-receiver:{}", key_id.0))?;
+        options.receiver = generated_sender;
     }
     Ok(())
 }
@@ -563,10 +627,66 @@ fn current_timestamp() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::pqc::{PQCAlgorithm, PQCManager};
+    use crate::identity_auth::{
+        create_single_key_binding_with_scopes, AuthorizationScope, IdentityAuthorizationCarrier,
+        AEGIS_TRANSACTION_AUTHORIZATION_DOMAIN,
+    };
+
+    fn bound_transaction_signer() -> (AegisPqvmSigner, AegisPqKeyId, IdentityAuthorizationCarrier) {
+        let mut manager = PQCManager::new();
+        let (identity_public, identity_private) = manager
+            .generate_keypair(PQCAlgorithm::FNDSA)
+            .expect("generate FN-DSA identity root");
+        let (authorization_public, authorization_private) = manager
+            .generate_keypair(PQCAlgorithm::MLDSA65)
+            .expect("generate ML-DSA transaction authorization key");
+        let binding = create_single_key_binding_with_scopes(
+            "aegis-tx-test-identity",
+            "syna",
+            &identity_public,
+            &identity_private,
+            "aegis-tx-test-key",
+            &authorization_public,
+            &authorization_private,
+            &[AuthorizationScope::testnet(
+                AEGIS_TRANSACTION_AUTHORIZATION_DOMAIN,
+                "transaction-signing",
+            )],
+            "2026-01-01T00:00:00Z",
+        )
+        .expect("create scoped transaction authorization binding");
+        let carrier =
+            IdentityAuthorizationCarrier::new(AEGIS_TRANSACTION_AUTHORIZATION_DOMAIN, binding)
+                .expect("create Aegis transaction authorization carrier");
+        let mut signer = AegisPqvmSigner::initialize_required().expect("Aegis signer");
+        let key_id = signer
+            .register_existing_keypair(
+                "aegis-tx-test-uma",
+                authorization_public,
+                authorization_private,
+                vec![AegisPqKeyRole::Transaction],
+                Epoch(0),
+            )
+            .expect("register pre-bound Aegis transaction key");
+        (signer, key_id, carrier)
+    }
+
+    fn report_for_bound_transaction(mut options: AegisTxBuildOptions) -> AegisSignedTxReport {
+        let (mut signer, key_id, carrier) = bound_transaction_signer();
+        options.signer_uma_id = "aegis-tx-test-uma".to_string();
+        options.identity_authorization = Some(carrier.clone());
+        apply_generated_address_defaults(&signer, &key_id, &mut options)
+            .expect("derive bound sender address");
+        let tx = sign_with_existing_aegis_transaction_key(&mut signer, &key_id, options)
+            .expect("sign transaction with bound operational key");
+        report_for_transaction(&signer.verifier(), tx, key_id, Some(carrier))
+            .expect("verify transaction through its identity authorization carrier")
+    }
 
     #[test]
     fn real_aegis_transaction_key_signs_verifies_and_admits_to_dag() {
-        let report = sign_with_new_aegis_transaction_key(AegisTxBuildOptions::default()).unwrap();
+        let report = report_for_bound_transaction(AegisTxBuildOptions::default());
         assert_eq!(report.key_role, AegisPqKeyRole::Transaction);
         assert_eq!(
             report.signature_verification_result,
@@ -577,7 +697,13 @@ mod tests {
         ));
         assert_eq!(
             report.transaction.sender_uma_or_account,
-            crate::address::generate_wallet_address(&hex::encode(&report.public_key.key_bytes))
+            report
+                .submission_envelope
+                .identity_authorization
+                .as_ref()
+                .expect("bound authorization carrier")
+                .binding
+                .identity_address
         );
         assert!(report.admission_result.ready);
         assert!(!report.canonical_tx_bytes_hex.is_empty());
@@ -591,7 +717,7 @@ mod tests {
         );
         let payload = crate::synq_admission::encode_synq_admission_carrier(&synq_carrier)
             .expect("encode SynQ carrier");
-        let report = sign_with_new_aegis_transaction_key(AegisTxBuildOptions {
+        let report = report_for_bound_transaction(AegisTxBuildOptions {
             payload,
             gas_limit: 150_000,
             write_set_hint: vec!["synq-contract-deploy".to_string()],
@@ -612,24 +738,49 @@ mod tests {
 
     #[test]
     fn aegis_transaction_sequence_links_dependencies_in_shared_mempool() {
-        let reports = sign_aegis_transaction_sequence_with_new_key(
-            vec![
-                AegisTxBuildOptions {
-                    nonce: 0,
-                    payload: b"deploy".to_vec(),
-                    write_set_hint: vec!["synq-counter".to_string()],
-                    ..AegisTxBuildOptions::default()
-                },
-                AegisTxBuildOptions {
-                    nonce: 1,
-                    payload: b"increment".to_vec(),
-                    write_set_hint: vec!["synq-counter".to_string()],
-                    ..AegisTxBuildOptions::default()
-                },
-            ],
-            true,
+        let (mut signer, key_id, carrier) = bound_transaction_signer();
+        let verifier = signer.verifier();
+        let mut mempool = DagMempool::new(&verifier, Epoch(0), Height(0));
+        let mut first_options = AegisTxBuildOptions {
+            signer_uma_id: "aegis-tx-test-uma".to_string(),
+            nonce: 0,
+            payload: b"deploy".to_vec(),
+            write_set_hint: vec!["synq-counter".to_string()],
+            identity_authorization: Some(carrier.clone()),
+            ..AegisTxBuildOptions::default()
+        };
+        apply_generated_address_defaults(&signer, &key_id, &mut first_options).unwrap();
+        let first_tx =
+            sign_with_existing_aegis_transaction_key(&mut signer, &key_id, first_options).unwrap();
+        let first = report_for_transaction_in_mempool(
+            &verifier,
+            &mut mempool,
+            first_tx,
+            key_id.clone(),
+            Some(carrier.clone()),
         )
         .unwrap();
+        let mut second_options = AegisTxBuildOptions {
+            signer_uma_id: "aegis-tx-test-uma".to_string(),
+            nonce: 1,
+            payload: b"increment".to_vec(),
+            write_set_hint: vec!["synq-counter".to_string()],
+            explicit_dependencies: vec![first.tx_id.0.clone()],
+            identity_authorization: Some(carrier.clone()),
+            ..AegisTxBuildOptions::default()
+        };
+        apply_generated_address_defaults(&signer, &key_id, &mut second_options).unwrap();
+        let second_tx =
+            sign_with_existing_aegis_transaction_key(&mut signer, &key_id, second_options).unwrap();
+        let second = report_for_transaction_in_mempool(
+            &verifier,
+            &mut mempool,
+            second_tx,
+            key_id,
+            Some(carrier),
+        )
+        .unwrap();
+        let reports = vec![first, second];
 
         assert_eq!(reports.len(), 2);
         assert!(reports[0].admission_result.ready);
@@ -646,20 +797,10 @@ mod tests {
 
     #[test]
     fn fixture_uses_dependencies_and_no_wallet_cli_path() {
-        let report = build_fixture_report().unwrap();
-        assert_eq!(report.chain_id, 1266);
-        assert_eq!(report.network_id, "synergy-testnet-v3");
-        assert_eq!(report.transactions.len(), 3);
-        assert!(report
-            .transactions
-            .iter()
-            .all(|tx| tx.signature_verification_result == "verified_through_aegis_pqvm"));
-        assert!(report.transactions.iter().any(|tx| !tx
-            .admission_result
-            .missing_dependencies
-            .is_empty()
-            || tx.transaction.account_nonce_or_sequence > 0));
-        assert!(report.atlas_ingestion_status.contains("not_attempted"));
+        let error = build_fixture_report().expect_err(
+            "auto-generated operational keys must not be reinterpreted as identity roots",
+        );
+        assert!(error.contains("identity authorization carrier"));
     }
 
     #[test]
@@ -685,7 +826,7 @@ mod tests {
 
     #[test]
     fn aegis_submission_envelope_rejects_wrong_chain_and_carrier_tampering() {
-        let report = sign_with_new_aegis_transaction_key(AegisTxBuildOptions::default()).unwrap();
+        let report = report_for_bound_transaction(AegisTxBuildOptions::default());
         let mut wrong_chain = report.submission_envelope.clone();
         wrong_chain.transaction.chain_id = ChainId(999);
         assert!(verify_aegis_submission_envelope(&wrong_chain).is_err());

@@ -16878,8 +16878,14 @@ mod tests {
             0,
             100,
         );
+        // Address Engine v1 accepts only a canonical raw FN-DSA-1024 identity
+        // root. Keep this fixture deterministic while exercising the unfunded
+        // activation path; an arbitrary text label must not be treated as a
+        // public key.
+        let activation_public_key_hex = "42".repeat(crate::address::FN_DSA_1024_PUBLIC_KEY_BYTES);
         let activation_address =
-            crate::address::generate_validator_address("activation-application-failure-key", 1);
+            crate::address::generate_validator_address(&activation_public_key_hex, 1)
+                .expect("deterministic FN-DSA fixture derives a validator address");
         let activation_tx = crate::transaction::Transaction::new(
             activation_address.clone(),
             activation_address,
@@ -16889,8 +16895,9 @@ mod tests {
             1,
             21_000,
             Some(format!(
-                "validator_activation:{{\"validator\":\"{}\",\"public_key\":\"activation-application-failure-key\",\"name\":\"Unfunded Validator\",\"stake_amount_nwei\":{}}}",
-                crate::address::generate_validator_address("activation-application-failure-key", 1),
+                "validator_activation:{{\"validator\":\"{}\",\"public_key\":\"{}\",\"name\":\"Unfunded Validator\",\"stake_amount_nwei\":{}}}",
+                activation_address,
+                activation_public_key_hex,
                 crate::validator::TESTNET_MIN_VALIDATOR_STAKE_NWEI
             )),
             "fndsa".to_string(),
