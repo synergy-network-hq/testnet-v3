@@ -213,7 +213,7 @@ impl SimplifiedEpochContext {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        self.chain_id.require_fresh_posy_testnet_v3()?;
+        self.chain_id.require_testnet_v3()?;
         self.network_id.require_fresh_posy_testnet_v3()?;
         if self.schema_version != POSY_SIMPLIFIED_CONTEXT_SCHEMA_VERSION {
             return Err(format!(

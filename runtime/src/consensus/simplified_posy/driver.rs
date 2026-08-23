@@ -11,12 +11,12 @@ use super::{
     GenesisBoundSimplifiedActivation, QuorumCertificateReference, ReliableDeliveryPhase,
     ReliableDeliveryState, ReliableDeliveryStatement, SimplifiedConsensusStateMachine,
     SimplifiedEpochContext, SimplifiedFinalityParent, SimplifiedMaterialChunk,
-    SimplifiedMaterialStager, SimplifiedProposal, SimplifiedQuorumCertificate,
-    SimplifiedSafetyState, SimplifiedStateSyncChunk, SimplifiedStateSyncStager,
-    SimplifiedTimeoutCertificate, TimeoutVote, VerifiedSimplifiedEpochTransition,
-    VerifiedSimplifiedProposalMaterial, POSY_SIMPLIFIED_BLOCK_VOTE_DOMAIN,
-    POSY_SIMPLIFIED_PROPOSAL_ECHO_DOMAIN, POSY_SIMPLIFIED_PROPOSAL_READY_DOMAIN,
-    POSY_SIMPLIFIED_TIMEOUT_VOTE_DOMAIN,
+    SimplifiedMaterialStager, SimplifiedParentFeeMarketState, SimplifiedProposal,
+    SimplifiedQuorumCertificate, SimplifiedSafetyState, SimplifiedStateSyncChunk,
+    SimplifiedStateSyncStager, SimplifiedTimeoutCertificate, TimeoutVote,
+    VerifiedSimplifiedEpochTransition, VerifiedSimplifiedProposalMaterial,
+    POSY_SIMPLIFIED_BLOCK_VOTE_DOMAIN, POSY_SIMPLIFIED_PROPOSAL_ECHO_DOMAIN,
+    POSY_SIMPLIFIED_PROPOSAL_READY_DOMAIN, POSY_SIMPLIFIED_TIMEOUT_VOTE_DOMAIN,
 };
 use crate::consensus::signing_authority::{
     ConsensusSigningAuthorization, ConsensusSigningPhase, DurableConsensusSigningAuthority,
@@ -2842,6 +2842,19 @@ mod tests {
         }
     }
 
+    fn anchor_parent() -> SimplifiedFinalityParent {
+        SimplifiedFinalityParent::quorum_certificate(anchor()).unwrap()
+    }
+
+    fn anchor_fee_market() -> SimplifiedParentFeeMarketState {
+        let parameters = crate::gas::fee_market_params_for_runtime().unwrap();
+        SimplifiedParentFeeMarketState {
+            base_fee_per_gas_nwei: parameters.initial_base_fee_nwei,
+            gas_used: 0,
+            fee_market_version: parameters.fee_market_version,
+        }
+    }
+
     fn unique_driver_paths(label: &str) -> (PathBuf, PathBuf) {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2873,6 +2886,7 @@ mod tests {
             }
             .canonicalized(),
             execution_state: ExecutionState::new(),
+            parent_fee_market: Some(anchor_fee_market()),
             cryptographic_profile_root: Hash::from_domain_bytes(
                 "driver-material-test",
                 b"cryptographic-profile",
@@ -3104,7 +3118,7 @@ mod tests {
             local_validator_id,
             local_key_id,
             DurableSimplifiedPosyStore::at_path(state_path.clone()),
-            anchor(),
+            anchor_parent(),
             DurableConsensusSigningAuthority::at_path(signer_journal_path.clone()),
             signer,
             verifier,
@@ -4323,7 +4337,7 @@ mod tests {
             local_validator_id,
             local_key_id,
             DurableSimplifiedPosyStore::at_path(fixture.state_path),
-            anchor(),
+            anchor_parent(),
             DurableConsensusSigningAuthority::at_path(fixture.signer_journal_path),
             restart_signer,
             restart_verifier,
@@ -4417,7 +4431,7 @@ mod tests {
             proposal_context,
             BlockId("takeover-carried-block".to_string()),
             anchor().block_id,
-            anchor(),
+            anchor_parent(),
             Hash::from_domain_bytes("driver-protected-execution", b"takeover-carried-block"),
         )
         .expect("mandatory carry candidate");
@@ -4710,7 +4724,7 @@ mod tests {
             target_validator_id,
             target_key_id,
             DurableSimplifiedPosyStore::at_path(target_state_path),
-            anchor(),
+            anchor_parent(),
             DurableConsensusSigningAuthority::at_path(target_journal_path),
             target_signer,
             target_verifier,

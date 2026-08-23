@@ -168,7 +168,7 @@ pub fn build_fixture_report() -> Result<AegisDagFixtureReport, String> {
     let receiver_address = crate::address::generate_wallet_address(&format!(
         "aegis-dag-fixture-receiver:{}",
         key_id.0
-    ));
+    ))?;
 
     let tx0 = sign_with_existing_aegis_transaction_key(
         &mut signer,
@@ -400,7 +400,7 @@ pub fn verify_aegis_submission_envelope_at(
         );
     }
     let expected_sender =
-        crate::address::generate_wallet_address(&hex::encode(&envelope.public_key.key_bytes));
+        crate::address::generate_wallet_address(&hex::encode(&envelope.public_key.key_bytes))?;
     if envelope.transaction.sender_uma_or_account != expected_sender {
         return Err(format!(
             "Aegis transaction sender does not match transaction public key-derived address; expected {expected_sender}, got {}",
@@ -534,9 +534,7 @@ fn address_for_aegis_key(
     let public_key = signer
         .public_key_record(key_id)
         .map_err(|error| error.to_string())?;
-    Ok(crate::address::generate_wallet_address(&hex::encode(
-        public_key.key_bytes,
-    )))
+    crate::address::generate_wallet_address(&hex::encode(public_key.key_bytes))
 }
 
 fn apply_generated_address_defaults(
@@ -550,7 +548,7 @@ fn apply_generated_address_defaults(
     }
     if options.receiver == AegisTxBuildOptions::default().receiver {
         options.receiver =
-            crate::address::generate_wallet_address(&format!("aegis-receiver:{}", key_id.0));
+            crate::address::generate_wallet_address(&format!("aegis-receiver:{}", key_id.0))?;
     }
     Ok(())
 }

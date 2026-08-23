@@ -533,7 +533,7 @@ fn active_validator<'a>(
 mod tests {
     use super::*;
     use crate::consensus::simplified_posy::{
-        QuorumCertificateReference, POSY_SIMPLIFIED_PROTOCOL_VERSION,
+        QuorumCertificateReference, SimplifiedFinalityParent, POSY_SIMPLIFIED_PROTOCOL_VERSION,
     };
     use crate::consensus_parameters::ConsensusParameterRoot;
     use crate::synergy_types::{
@@ -618,11 +618,12 @@ mod tests {
             context.clone(),
             BlockId(format!("delivery-block-{label}")),
             BlockId("delivery-anchor".to_string()),
-            QuorumCertificateReference {
+            SimplifiedFinalityParent::quorum_certificate(QuorumCertificateReference {
                 height: Height(4_000),
                 block_id: BlockId("delivery-anchor".to_string()),
                 qc_id: Hash::from_domain_bytes("delivery-anchor", b"qc"),
-            },
+            })
+            .unwrap(),
             Hash::from_domain_bytes("delivery-protected", label.as_bytes()),
         )
         .unwrap()

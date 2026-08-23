@@ -872,7 +872,7 @@ impl SimplifiedStateSyncStager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::consensus::simplified_posy::ParticipantSignature;
+    use crate::consensus::simplified_posy::{ParticipantSignature, QuorumCertificateReference};
     use crate::consensus_parameters::ConsensusParameterRoot;
     use crate::synergy_types::{
         AegisPqKeyId, AegisPqPublicKey, AegisPqSignature, BlockId, ClusterId, Epoch, Height, UmaId,

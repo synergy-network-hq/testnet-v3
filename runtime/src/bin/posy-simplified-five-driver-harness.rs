@@ -709,6 +709,7 @@ fn run_worker(validator_index: usize, generation: u64, work_dir: &Path) -> Resul
             validator_set: validators.clone(),
             cluster_map: cluster_map.clone(),
             execution_state: execution_state.clone(),
+            parent_fee_market: None,
             cryptographic_profile_root: Hash::from_domain_bytes(
                 "SYNERGY_POSY_AUTONOMOUS_HARNESS_CRYPTO_PROFILE_V1",
                 b"mldsa65-core",
@@ -742,6 +743,7 @@ fn run_worker(validator_index: usize, generation: u64, work_dir: &Path) -> Resul
             consensus_verifier: verifier.clone(),
             etdag_verifier: verifier.clone(),
             anchor_finalized,
+            anchor_finalized_fee_market: None,
             boundary_execution_state: execution_state,
         },
     )?;

@@ -35,7 +35,7 @@ use crate::consensus::typed_finality_observer::{
     canonical_typed_finality_snapshot_from, import_typed_finality_observer_records,
     typed_finality_observer_next_missing_height, typed_finality_observer_snapshot_from,
 };
-use crate::consensus::validator_keys::load_local_validator_keypair;
+use crate::consensus::validator_keys::{consensus_algorithm_label, load_local_validator_keypair};
 use crate::crypto::aegis_pqvm::{
     AegisPqvmKeyRegistry, AegisPqvmSigner, AegisPqvmVerifier, SYNERGY_P2P_HANDSHAKE_V1,
 };
@@ -14474,12 +14474,10 @@ mod tests {
     }
 
     #[test]
-    fn simplified_validator_handshake_requirement_excludes_bootstrap_and_legacy_profiles() {
+    fn simplified_validator_handshake_requirement_is_exact_and_excludes_bootstrap() {
         let mut config = NodeConfig::default();
         config.node.validator_address = "synv1validator".to_string();
-        config.consensus.algorithm = "legacy-posy".to_string();
-        assert!(!local_consensus_handshake_required(&config));
-        config.consensus.algorithm = "posy/2.2".to_string();
+        config.consensus.algorithm = "unsupported-consensus-profile".to_string();
         assert!(!local_consensus_handshake_required(&config));
         config.consensus.algorithm = POSY_SIMPLIFIED_PROTOCOL_VERSION.to_string();
         assert!(local_consensus_handshake_required(&config));
@@ -14492,17 +14490,13 @@ mod tests {
     }
 
     #[test]
-    fn simplified_validator_capability_is_distinct_from_retired_typed_posy() {
+    fn simplified_validator_capability_is_the_only_posy_capability() {
         assert_eq!(
             validator_consensus_capability(POSY_SIMPLIFIED_PROTOCOL_VERSION)
                 .expect("simplified PoSy must have a validator capability"),
             "posy-simplified-v3-validator"
         );
-        assert_ne!(
-            SIMPLIFIED_POSY_VALIDATOR_CAPABILITY,
-            RETIRED_TYPED_POSY_VALIDATOR_CAPABILITY
-        );
-        assert!(validator_consensus_capability("posy/2.2").is_err());
+        assert!(validator_consensus_capability("unsupported-posy-profile").is_err());
     }
 
     #[test]

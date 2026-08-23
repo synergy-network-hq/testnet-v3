@@ -1,14 +1,14 @@
 {
   "addressing": {
-    "burn_address": "syn00000000000000000000000000000000000000",
+    "burn_address": "syn0000000000000000000000000000000",
     "default_wallet_prefix": "synw",
     "encoding": "bech32m",
     "global_prefix_family": "syn",
-    "payload_length_bytes": 20,
+    "payload_derivation": "sha3-256 digest encoded as the canonical leading 5-bit data-word sequence for the selected address namespace",
     "prefix_count": {
-      "active": 34,
-      "reserved_inactive": 3,
-      "total": 37
+      "active": 29,
+      "reserved_inactive": 4,
+      "total": 33
     },
     "prefix_included_in_total_length": true,
     "prefix_separator": "1",
@@ -33,13 +33,9 @@
         "active": true,
         "type": "CustomContract"
       },
-      "syndao": {
-        "active": true,
-        "type": "DAOProposal"
-      },
       "syne": {
-        "active": true,
-        "type": "BurnAddress"
+        "active": false,
+        "type": "ReservedE"
       },
       "synf": {
         "active": true,
@@ -68,10 +64,6 @@
       "syni": {
         "active": false,
         "type": "ReservedI"
-      },
-      "synixn": {
-        "active": true,
-        "type": "TransactionInternal"
       },
       "synj": {
         "active": true,
@@ -117,10 +109,6 @@
         "active": true,
         "type": "WalletSecondary"
       },
-      "syntxn": {
-        "active": true,
-        "type": "TransactionStandard"
-      },
       "synu": {
         "active": true,
         "type": "MultisigTreasury"
@@ -149,10 +137,6 @@
         "active": true,
         "type": "WalletPrimary"
       },
-      "synxxn": {
-        "active": true,
-        "type": "TransactionCrossChain"
-      },
       "syny": {
         "active": true,
         "type": "DAOCommittee"
@@ -163,6 +147,23 @@
       }
     },
     "standard_total_length": 41
+  },
+  "typed_identifiers": {
+    "dao_proposal": {
+      "prefix": "syndao-",
+      "status": "active",
+      "type": "DAOProposal"
+    },
+    "standard_transaction": {
+      "prefix": "syntxn-",
+      "status": "active",
+      "type": "TransactionStandard"
+    },
+    "sxcp_transaction": {
+      "prefix": "synxxn-",
+      "status": "active",
+      "type": "TransactionCrossChain"
+    }
   },
   "chain_identifiers": {
     "caip2_identifiers": {
@@ -175,16 +176,16 @@
       },
       "canonical_native": {
         "namespace": "synergy",
-        "reference": "testnet-v3",
+        "reference": "testnet",
         "status": "active_internal",
-        "value": "synergy:testnet-v3"
+        "value": "synergy:testnet"
       },
       "cosmos": {
         "activation_condition": "Activate only if Cosmos SDK/IBC compatibility is implemented.",
         "namespace": "cosmos",
-        "reference": "synergy-testnet-v3-1",
+        "reference": null,
         "status": "reserved",
-        "value": "cosmos:synergy-testnet-v3-1"
+        "value": null
       },
       "eip155": {
         "activation_condition": "Activate only when EVM/EIP-155 compatibility is implemented and publicly supported.",
@@ -200,25 +201,24 @@
       "start": 1261
     },
     "synergy_native": {
-      "canonical_caip2": "synergy:testnet-v3",
+      "canonical_caip2": "synergy:testnet",
       "decimal": 1266,
-      "hex": "0x4f2",
       "status": "active_planned",
       "type": "uint64"
     }
   },
   "cryptographic_identity": {
-    "genesis_file": "/Volumes/xcode/Synergy-Network-Projects/network-components/01-Testnetv3/genesis.testnet-v3.identity-assigned.json",
-    "genesis_hash": "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",
+    "genesis_file": "launch/posy-v3-genesis-inputs/fresh-p3-genesis-with-executed-deployment.json",
+    "genesis_hash": null,
     "genesis_hash_algorithm": "blake3-256",
     "genesis_hash_format": "lowercase_hex_without_0x",
-    "genesis_hash_status": "deployment_bound_pending_release_approval",
+    "genesis_hash_status": "pending_fresh_p3_executed_genesis",
     "network_magic_bytes": {
-      "derivation": "first_4_bytes(blake3('synergy-network-magic-v1' || 'synergy:testnet-v3' || final_genesis_hash))",
+      "derivation": "first_4_bytes(blake3('synergy-network-magic-v1' || 'synergy:testnet' || final_genesis_hash))",
       "format": "lowercase_hex_without_0x",
       "length_bytes": 4,
-      "status": "deployment_bound_pending_release_approval",
-      "value": "7661a387"
+      "status": "pending_fresh_p3_genesis_hash",
+      "value": null
     }
   },
   "endpoints": {
@@ -252,20 +252,16 @@
   "generated_identifier_policy": {
     "completed": [
       "Generated all Testnet-v3 wallet and custody addresses",
-      "Generated 21 validator operator addresses and full node key sets",
-      "Generated 13 operational node addresses and full node key sets",
-      "Generated fresh validator consensus, identity, entropy, account, and P2P keys",
-      "Generated fresh peer IDs",
-      "Assigned and artifact-bound eight native genesis contract addresses",
-      "Recomputed candidate allocation, contract, validator, state, and genesis hashes",
-      "Bound nine deployed contract instances and applied Track-H address migration"
+      "Defined the 21-validator PoSy v3 identity roster",
+      "Defined validator-02 through validator-06 as the five active Genesis validators",
+      "Defined validator-01 and validator-07 through validator-21 as inactive until governed onboarding"
     ],
-    "completed_at": "2026-07-25T23:18:29.548Z",
+    "completed_at": null,
     "pending_external_approval": [
-      "Approve the native contract artifact bindings and constructor authorities",
-      "Deploy the generated contract identities",
+      "Generate and custody-bind all 21 fresh validator identity/key bundles",
+      "Execute the fresh PoSy v3 Genesis deployment",
       "Approve custody signer assignments and contract authorities",
-      "Sign the candidate genesis hash"
+      "Sign the fresh PoSy v3 candidate Genesis hash"
     ],
     "required_before_final_genesis": [],
     "reuse_prior_genesis_hash": false,
@@ -273,7 +269,7 @@
     "reuse_prior_peer_ids": false,
     "reuse_prior_validator_addresses": false,
     "reuse_prior_validator_keys": false,
-    "testnet_v3_regeneration_required": false
+    "testnet_v3_regeneration_required": true
   },
   "governance": {
     "change_authority": "Synergy DAO",
@@ -287,7 +283,7 @@
   "interoperability": {
     "bridge_domain_ids": {
       "axelar": {
-        "chain_name": "synergy-testnet-v3",
+        "chain_name": null,
         "status": "reserved"
       },
       "hyperlane": {
@@ -295,7 +291,7 @@
         "status": "reserved"
       },
       "ibc": {
-        "chain_id": "synergy-testnet-v3-1",
+        "chain_id": null,
         "channels": [],
         "client_id": null,
         "connection_id": null,
@@ -311,10 +307,10 @@
       }
     },
     "sxcp": {
-      "chain_reference": "synergy:testnet-v3",
+      "chain_reference": "synergy:testnet",
       "domain_id": 1266,
       "status": "planned_or_active_depending_on_module_activation",
-      "transaction_prefix": "synxxn"
+      "transaction_prefix": "synxxn-"
     }
   },
   "native_currency": {
@@ -334,18 +330,20 @@
     "environment": "testnet",
     "environment_family": "public_test_network",
     "network_short_name": "synergy",
-    "network_slug": "synergy-testnet-v3",
+    "network_slug": "testnet",
     "network_uuid": {
       "consensus_critical": false,
-      "derivation": "uuidv5(uuidv5(NAMESPACE_DNS, 'synergy-network.io'), 'synergy:testnet-v3')",
+      "derivation": "uuidv5(uuidv5(NAMESPACE_DNS, 'synergy-network.io'), 'synergy:testnet')",
       "format": "uuid",
       "immutable": true,
-      "value": "82d1a7e2-e8dd-5693-803c-211ff31e3bf9"
+      "value": "c6ad8633-38c8-5c24-823e-3ffe80793c85"
     },
     "production": false,
     "public": true,
-    "status": "contract_deployment_executed_pending_release_approval",
-    "technical_identifier": "testnet-v3"
+    "protocol_version": "posy/3.0",
+    "release_id": "testnet-v3",
+    "status": "fresh_p3_inputs_pending_executed_genesis",
+    "technical_identifier": "testnet"
   },
   "registries": {
     "address_prefix_registry": {
@@ -376,10 +374,10 @@
   },
   "schema": {
     "canonical_file": "network-identifiers.testnet-v3.json",
-    "last_updated_at": "2026-07-24T00:00:00Z",
+    "last_updated_at": "2026-08-23T00:00:00Z",
     "name": "synergy.network.identifiers",
-    "status": "finalized_release_candidate",
-    "version": "1.0.0"
+    "status": "fresh_p3_source_staged",
+    "version": "2.0.0"
   },
   "synid_namespace": {
     "canonical_namespace": "syn",
@@ -391,23 +389,15 @@
   },
   "system_reserved_addresses": {
     "burn_address": {
-      "address": "syn00000000000000000000000000000000000000",
+      "address": "syn0000000000000000000000000000000",
       "purpose": "Canonical irreversible token destruction address.",
       "receive_policy": "accept_burn_only",
       "spend_policy": "impossible",
       "status": "active",
       "type": "BurnAddress"
     },
-    "named_addresses": {
-      "address_prefix_registry": "syn00000000000000000000000000000000000101",
-      "asset_registry": "syn00000000000000000000000000000000000102",
-      "governance_registry": "syn00000000000000000000000000000000000106",
-      "protocol_registry": "syn00000000000000000000000000000000000100",
-      "sxcp_registry": "syn00000000000000000000000000000000000105",
-      "synid_registry": "syn00000000000000000000000000000000000103",
-      "uma_registry": "syn00000000000000000000000000000000000104",
-      "validator_registry": "syn00000000000000000000000000000000000107"
-    },
+    "named_addresses": {},
+    "named_address_status": "pending fresh generated synq object identities",
     "policy": {
       "address_length": 41,
       "contract_deployable": false,
@@ -422,49 +412,28 @@
       "status": "canonical_proposed",
       "user_assignable": false
     },
-    "reserved_ranges": [
-      {
-        "default_policy": "reject_unless_explicitly_allowlisted",
-        "end": "syn000000000000000000000000000000000000ff",
-        "name": "system_null_burn_sentinel_range",
-        "start": "syn00000000000000000000000000000000000000"
-      },
-      {
-        "default_policy": "reserved_for_protocol_registries",
-        "end": "syn000000000000000000000000000000000001ff",
-        "name": "protocol_registry_range",
-        "start": "syn00000000000000000000000000000000000100"
-      },
-      {
-        "default_policy": "reserved_for_synthetic_protocol_origins",
-        "end": "syn000000000000000000000000000000000002ff",
-        "name": "protocol_sentinel_range",
-        "start": "syn00000000000000000000000000000000000200"
-      },
-      {
-        "default_policy": "reserved_for_emergency_governance_aliases",
-        "end": "syn000000000000000000000000000000000003ff",
-        "name": "emergency_governance_range",
-        "start": "syn00000000000000000000000000000000000300"
-      },
-      {
-        "default_policy": "reserved_for_migration_and_quarantine",
-        "end": "syn000000000000000000000000000000000004ff",
-        "name": "migration_sink_range",
-        "start": "syn00000000000000000000000000000000000400"
-      }
-    ]
+    "reserved_ranges": []
   },
   "testnet_v3_identity_registry": {
-    "candidate_genesis_hash": "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",
+    "candidate_genesis_hash": null,
     "custody_signer_identity_count": 7,
     "funded_account_count": 32,
     "genesis_contract_identity_count": 8,
-    "identity_count": 64,
+    "future_inactive_validator_identity_count": 16,
+    "identity_count": null,
+    "initial_active_validator_count": 5,
+    "initial_active_validator_ids": [
+      "validator-02",
+      "validator-03",
+      "validator-04",
+      "validator-05",
+      "validator-06"
+    ],
     "operational_node_identity_count": 13,
-    "public_registry_path": "/Volumes/xcode/Synergy-Network-Projects/network-components/01-Testnetv3/testnet-v3-identity-files/identity-registry.public.json",
+    "public_registry_path": "testnet-v3-identity-files/identity-registry.public.json",
     "specification_account_count": 36,
     "validator_identity_count": 21,
+    "validator_identity_status": "five active identities plus sixteen inactive identities pending one canonical all-21 custody ceremony",
     "zero_balance_protocol_account_count": 4
   },
   "wallet_derivation": {

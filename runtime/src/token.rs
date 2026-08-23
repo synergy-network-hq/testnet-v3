@@ -1333,19 +1333,22 @@ impl TokenManager {
             }
             return crate::address::generate_validator_cluster_address(&format!(
                 "reward-escrow:{address}"
-            ));
+            ))
+            .expect("non-empty reward-escrow seed must derive a cluster address");
         }
 
         if let Some(cluster_id) = validator.cluster_id {
             return crate::address::generate_validator_cluster_address(&format!(
                 "reward-escrow:cluster:{cluster_id}"
-            ));
+            ))
+            .expect("non-empty reward-escrow seed must derive a cluster address");
         }
 
         crate::address::generate_validator_cluster_address(&format!(
             "reward-escrow:validator:{}",
             validator.address
         ))
+        .expect("non-empty reward-escrow seed must derive a cluster address")
     }
 
     fn score_after_unit_penalty(units: u64, penalty_per_unit_bps: u64) -> u64 {

@@ -343,6 +343,7 @@ pub fn canonical_validator_cluster_address(cluster_id: u64, members: &[Validator
     validator_addresses.sort();
     let cluster_seed = format!("cluster-{cluster_id}-{}", validator_addresses.join("-"));
     generate_cluster_address(&cluster_seed, cluster_group)
+        .expect("non-empty canonical cluster seed must derive a cluster address")
 }
 
 pub fn canonical_validator_clusters_digest(active_validators: &[Validator], epoch: u64) -> String {

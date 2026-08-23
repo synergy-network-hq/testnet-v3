@@ -5,17 +5,11 @@ on:
     paths:
       - ".github/workflows/posy-v3-pr-verification.yml"
       - "docs/posy-v3/**"
-      - "launch/POSY_V3_PR_READINESS_CROSSWALK.md"
-      - "launch/PoSy_Consensus_Parameter_Control_Workbook_v3_PROPOSAL.xlsx"
-      - "launch/POSY_V3_PR_DEPENDENCIES.lock.json"
-      - "launch/TESTNET_V3_POSY_SIMPLIFIED_PARAMETER_*.json"
-      - "launch/posy-v3-etdag-governance-inputs/**"
-      - "runtime/config/testnet/posy-v3-five-validator/**"
-      - "runtime/docs/architecture/posy-v3-simplified-consensus.md"
-      - "runtime/docs/runbooks/posy-v3-*.md"
-      - "runtime/scripts/testnet/run-posy-simplified-five-*-harness.sh"
-      - "runtime/scripts/testnet/verify-posy-v3-pr.sh"
-      - "runtime/src/**"
+      - "genesis-contracts/**"
+      - "launch/**"
+      - "network-identifiers.testnet-v3.identity-assigned.json"
+      - "runtime/**"
+      - "scripts/**"
   workflow_dispatch:
 
 concurrency:

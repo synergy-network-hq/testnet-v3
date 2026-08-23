@@ -104,7 +104,7 @@ impl WalletManager {
         let (sign_public, sign_private) = pqc_manager.generate_keypair(PQCAlgorithm::MLDSA87)?;
         let (kem_public, kem_private) = pqc_manager.generate_keypair(PQCAlgorithm::MLKEM1024)?;
 
-        let address = generate_wallet_address(&hex::encode(&sign_public.key_data));
+        let address = generate_wallet_address(&hex::encode(&sign_public.key_data))?;
 
         Ok((
             address,
@@ -124,7 +124,7 @@ impl WalletManager {
         ))
     }
 
-    pub fn generate_address(public_key: &str) -> String {
+    pub fn generate_address(public_key: &str) -> Result<String, String> {
         // Delegate wallet address generation to the address module for
         // consistent formatting.
         generate_wallet_address(public_key)
@@ -152,7 +152,7 @@ impl WalletManager {
         public_key: String,
         private_key: String,
     ) -> Result<String, String> {
-        let address = Self::generate_address(&public_key);
+        let address = Self::generate_address(&public_key)?;
         let (kem_public, kem_private) = Self::generate_mlkem_keypair()?;
 
         let mut wallet =
@@ -565,7 +565,7 @@ impl WalletManager {
 
         // Generate public key from private key (simplified)
         let public_key = hex::encode(format!("pub_{}", private_key).as_bytes());
-        let address = Self::generate_address(&public_key);
+        let address = Self::generate_address(&public_key)?;
 
         // Create wallet from imported keypair
         self.create_wallet_from_keypair(public_key, private_key.to_string())?;

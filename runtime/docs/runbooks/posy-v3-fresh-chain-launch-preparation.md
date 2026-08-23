@@ -12,8 +12,13 @@ authorize signing, deployment, identity generation, or live-node changes.
 - Genesis boundary: `fresh_genesis_block_zero`
 - Initial epoch: `0`
 - First consensus block: `1`
-- Initial validators: exactly five approved public identities; the protocol
-  derives later epoch counts and quorum dynamically.
+- Initial validators: exactly `validator-02` through `validator-06`; the
+  protocol derives later epoch counts and quorum dynamically.
+
+The public enrollment inventory contains 21 sequentially named validator slots,
+but it is not consensus authority. `validator-01` and `validator-07` through
+`validator-21` are inactive at Genesis and may join only through a separately
+governed, finalized epoch transition.
 
 The new Genesis must not reuse a retired-chain block, state root, QC, validator
 identity, deployment receipt, parameter root, or data directory. The public P3

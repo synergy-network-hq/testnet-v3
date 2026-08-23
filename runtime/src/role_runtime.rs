@@ -55,7 +55,7 @@ use crate::consensus::simplified_posy::{
     P2pSimplifiedConsensusEgress, QuorumCertificateReference, SimplifiedActivatedMaterialAdapter,
     SimplifiedCoreMaterialAdapter, SimplifiedCoreMaterialConfiguration, SimplifiedDriverTiming,
     SimplifiedEpochContext, SimplifiedFinalityEnvironment, SimplifiedFinalityParent,
-    SimplifiedPosyDriver, SimplifiedPreviousEpochFinalityReplay,
+    SimplifiedParentFeeMarketState, SimplifiedPosyDriver, SimplifiedPreviousEpochFinalityReplay,
     SimplifiedProtectedMaterialAdapter, SimplifiedProtectedMaterialConfiguration,
     SimplifiedTargetAdmissionConfiguration, SimplifiedTargetAdmissionOutput,
     SimplifiedTargetAdmissionProducer, SimplifiedTransitionAuthorityVerifier,
@@ -1684,9 +1684,11 @@ where
     };
     set_typed_consensus_startup_phase("MAILBOX_READY");
     let required_remote_validators = driver.required_remote_validator_count();
-    if let Err(error) =
-        wait_for_finalized_typed_peer_readiness(&readiness_network, required_remote_validators)
-    {
+    if let Err(error) = wait_for_finalized_typed_peer_readiness(
+        &readiness_network,
+        required_remote_validators,
+        None,
+    ) {
         let _ = remove_typed_coordinator_ingress();
         let _ = remove_etdag_certified_input_ingress();
         remove_finalized_execution_state_snapshot();
@@ -3083,6 +3085,7 @@ fn build_simplified_v3_transition_runtime_finality_at_depth(
             consensus_verifier: previous_consensus_verifier.clone(),
             etdag_verifier: previous_consensus_verifier.clone(),
             anchor_finalized: previous_anchor_finalized,
+            anchor_finalized_fee_market: None,
             boundary_execution_state: typed_boundary_execution_state,
         };
         DurableSimplifiedFinalitySink::for_epoch(
@@ -3102,13 +3105,30 @@ fn build_simplified_v3_transition_runtime_finality_at_depth(
                 .to_string(),
         );
     }
+    let finalized_seed_material =
+        previous_material_store.load(transition.finalized_seed().qc_id)?;
+    if finalized_seed_material.candidate_subject.context.height
+        != transition.finalized_seed().height
+        || finalized_seed_material.candidate_subject.block_id
+            != transition.finalized_seed().block_id
+        || finalized_seed_material.canonical_block.candidate_id()?
+            != transition.finalized_seed().block_id
+    {
+        return Err(
+            "previous material store does not contain the transition's exact finalized fee boundary"
+                .to_string(),
+        );
+    }
+    let anchor_finalized_fee_market = Some(SimplifiedParentFeeMarketState::from_verified_header(
+        &finalized_seed_material.canonical_block.header,
+    )?);
     let certified_parent_material =
         previous_material_store.load(transition.certified_parent().qc_id)?;
     if certified_parent_material.candidate_subject.context.height
         != transition.certified_parent().height
         || certified_parent_material.candidate_subject.block_id
             != transition.certified_parent().block_id
-        || certified_parent_material.canonical_block.block_id()?
+        || certified_parent_material.canonical_block.candidate_id()?
             != transition.certified_parent().block_id
     {
         return Err(
@@ -3126,6 +3146,7 @@ fn build_simplified_v3_transition_runtime_finality_at_depth(
         consensus_verifier: consensus_verifier.clone(),
         etdag_verifier: consensus_verifier,
         anchor_finalized: expected_finalized,
+        anchor_finalized_fee_market,
         boundary_execution_state: boundary_execution_state.clone(),
     };
     let previous_replay = SimplifiedPreviousEpochFinalityReplay {
@@ -3192,6 +3213,7 @@ fn spawn_finalized_simplified_posy_driver(
         "simplified driver requires finalized Genesis consensus parameters".to_string()
     })?;
     consensus_parameters.require_genesis_binding()?;
+    let simplified_parameters = consensus_parameters.require_simplified_posy_manifest()?;
     let governed_etdag = load_genesis_bound_etdag_governance(genesis.value())?;
     let etdag_activation_permit = resolve_finalized_etdag_startup_activation(
         &consensus_parameters,
@@ -3279,7 +3301,7 @@ fn spawn_finalized_simplified_posy_driver(
         }
         let epoch_start_timestamp_ms = header
             .timestamp_ms_consensus_bounded
-            .checked_add(consensus_parameters.manifest.target_block_time_ms)
+            .checked_add(simplified_parameters.target_block_time_ms)
             .ok_or_else(|| "simplified epoch start timestamp overflows".to_string())?;
         (
             anchor_parent,
@@ -3301,12 +3323,13 @@ fn spawn_finalized_simplified_posy_driver(
             consensus_verifier: crypto.verifier.clone(),
             etdag_verifier: crypto.verifier.clone(),
             anchor_finalized: anchor_finalized.clone(),
+            anchor_finalized_fee_market: None,
             boundary_execution_state: genesis_execution_state.clone(),
         };
         let sink =
             DurableSimplifiedFinalitySink::for_epoch(material_store.clone(), finality_environment)?;
         let epoch_start_timestamp_ms = genesis_timestamp_ms
-            .checked_add(consensus_parameters.manifest.target_block_time_ms)
+            .checked_add(simplified_parameters.target_block_time_ms)
             .ok_or_else(|| "fresh simplified epoch start timestamp overflows".to_string())?;
         (
             anchor_parent,
@@ -3320,17 +3343,45 @@ fn spawn_finalized_simplified_posy_driver(
     };
     let protected_authority_configuration = (material_mode == SimplifiedMaterialMode::Protected)
         .then(
-            || DurableSimplifiedProtectedMaterialAuthorityConfiguration {
-                epoch_context: epoch_context.clone(),
-                validator_set: validator_set.clone(),
-                cluster_map: cluster_map.clone(),
-                etdag_parameters: etdag_parameters.clone(),
-                consensus_verifier: crypto.verifier.clone(),
-                etdag_verifier: crypto.verifier.clone(),
-                anchor_finalized: anchor_finalized.clone(),
-                boundary_execution_state: finality_boundary_execution_state,
+            || -> Result<DurableSimplifiedProtectedMaterialAuthorityConfiguration, String> {
+                let anchor_finalized_fee_market =
+                    match anchor_finalized.quorum_certificate_reference() {
+                        None => None,
+                        Some(reference) => {
+                            let previous = previous_finality_replay.as_ref().ok_or_else(|| {
+                            "non-Genesis simplified boundary has no previous-epoch fee authority"
+                                .to_string()
+                        })?;
+                            let material = previous.material_store.load(reference.qc_id)?;
+                            if material.stable_candidate_id != reference.qc_id
+                                || material.candidate_subject.context.height != reference.height
+                                || material.candidate_subject.block_id != reference.block_id
+                                || material.canonical_block.candidate_id()? != reference.block_id
+                            {
+                                return Err(
+                                "simplified boundary fee material does not match its finalized QC"
+                                    .to_string(),
+                            );
+                            }
+                            Some(SimplifiedParentFeeMarketState::from_verified_header(
+                                &material.canonical_block.header,
+                            )?)
+                        }
+                    };
+                Ok(DurableSimplifiedProtectedMaterialAuthorityConfiguration {
+                    epoch_context: epoch_context.clone(),
+                    validator_set: validator_set.clone(),
+                    cluster_map: cluster_map.clone(),
+                    etdag_parameters: etdag_parameters.clone(),
+                    consensus_verifier: crypto.verifier.clone(),
+                    etdag_verifier: crypto.verifier.clone(),
+                    anchor_finalized: anchor_finalized.clone(),
+                    anchor_finalized_fee_market,
+                    boundary_execution_state: finality_boundary_execution_state,
+                })
             },
-        );
+        )
+        .transpose()?;
     let protected_authority = protected_authority_configuration
         .map(
             |configuration| match (transition_for_protected_authority, previous_finality_replay) {
@@ -3356,7 +3407,7 @@ fn spawn_finalized_simplified_posy_driver(
         )
         .transpose()?;
     let initial_execution_state = finalization_sink.execution_state().clone();
-    let target_block_time_ms = consensus_parameters.manifest.target_block_time_ms;
+    let target_block_time_ms = simplified_parameters.target_block_time_ms;
     let consensus_parameter_root =
         ConsensusParameterRoot::from_hex(&epoch_context.consensus_parameter_root)?;
     let protected_inputs = EtdagProtectedInputCoordinator::process_wide();
@@ -3392,6 +3443,7 @@ fn spawn_finalized_simplified_posy_driver(
                 validator_set: validator_set.clone(),
                 cluster_map: cluster_map.clone(),
                 execution_state: initial_execution_state.clone(),
+                parent_fee_market: None,
                 cryptographic_profile_root,
                 epoch_start_timestamp_ms,
                 target_block_time_ms,
@@ -4099,6 +4151,7 @@ fn print_usage(binary_name: &str, expected_profile: Option<&RoleProfile>) {
     eprintln!();
     eprintln!("SUBCOMMANDS:");
     eprintln!("    init                  Initialize configuration directory");
+    eprintln!("    preflight-release     Verify the complete signed release binding without opening state");
     eprintln!("    start                 Start the node");
     eprintln!("    stop                  Stop the running node");
     eprintln!("    restart               Restart the node");
@@ -5014,7 +5067,8 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                 println!("Config directory already exists.");
             }
         }
-        "start" => {
+        "start" | "preflight-release" => {
+            let preflight_only = subcommand == "preflight-release";
             let mut node_type: Option<String> = None;
             let mut config_path: Option<String> = None;
 
@@ -5111,6 +5165,51 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                 eprintln!("Failed to validate Chain 1266 desired state: {error}");
                 process::exit(1);
             });
+
+            if preflight_only {
+                let genesis = canonical_genesis().unwrap_or_else(|error| {
+                    eprintln!("Release preflight cannot load canonical Genesis: {error}");
+                    process::exit(1);
+                });
+                ensure_node_config_matches_finalized_consensus_parameters(&config, genesis)
+                    .unwrap_or_else(|error| {
+                        eprintln!(
+                            "Release preflight configuration disagrees with Genesis: {error}"
+                        );
+                        process::exit(1);
+                    });
+                resolved_consensus_runtime_preflight(&config).unwrap_or_else(|error| {
+                    eprintln!("Release preflight consensus profile failed closed: {error}");
+                    process::exit(1);
+                });
+                ensure_genesis_validator_membership_available().unwrap_or_else(|error| {
+                    eprintln!("Release preflight cannot load Genesis membership: {error}");
+                    process::exit(1);
+                });
+                if !local_validator_is_consensus_authorized(&config) {
+                    eprintln!(
+                        "Release preflight local validator is not active in the Genesis-bound set"
+                    );
+                    process::exit(1);
+                }
+                let validator_address = resolve_local_validator_address(&config);
+                crate::consensus::validator_keys::load_local_validator_keypair(
+                    &validator_address,
+                    &VALIDATOR_MANAGER,
+                )
+                .unwrap_or_else(|error| {
+                    eprintln!("Release preflight consensus custody check failed: {error}");
+                    process::exit(1);
+                });
+                println!(
+                    "CHAIN1266_ROLE_RELEASE_PREFLIGHT_VERIFIED release_id={} node_id={} validator_address={} profile={}",
+                    release_id,
+                    config.identity.node_id,
+                    validator_address,
+                    desired_role_profile.compiled_profile
+                );
+                return;
+            }
 
             raise_runtime_nofile_limit(8192);
 
@@ -5870,7 +5969,13 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
             let private_key_b64 = general_purpose::STANDARD.encode(sk.as_bytes());
 
             let address = if let Some(class) = node_class {
-                generate_class_based_address(pk.as_bytes(), class)
+                match generate_class_based_address(pk.as_bytes(), class) {
+                    Ok(address) => address,
+                    Err(error) => {
+                        eprintln!("Error: generated key cannot own a canonical validator address: {error}");
+                        process::exit(1);
+                    }
+                }
             } else {
                 String::new()
             };
@@ -6660,6 +6765,25 @@ mod tests {
         )
         .expect_err("consensus startup with invalid finalized inputs must fail closed");
         assert!(invalid_finalized_inputs.contains("missing canonical finality context"));
+    }
+
+    #[test]
+    fn fresh_runtime_rejects_coordinator_mode_before_genesis_io() {
+        let mut config = NodeConfig::default();
+        config.consensus.mode =
+            crate::consensus::coordinated_round_robin::COORDINATED_ROUND_ROBIN_V1.to_string();
+        config.consensus.coordinator_id = "validator-01".to_string();
+        config.consensus.producer_ids = vec![
+            "validator-02".to_string(),
+            "validator-03".to_string(),
+            "validator-04".to_string(),
+            "validator-05".to_string(),
+            "validator-06".to_string(),
+        ];
+
+        let error = resolved_consensus_runtime_preflight(&config)
+            .expect_err("fresh Testnet-v3 must reject coordinator mode before Genesis I/O");
+        assert!(error.contains("refuses coordinated-round-robin runtime selection"));
     }
 
     #[test]
@@ -7536,38 +7660,6 @@ mod tests {
             .expect_err("validator without canonical record must fail preflight");
 
         assert!(error.contains("not present in finalized validator registry"));
-    }
-
-    #[test]
-    fn coordinated_mode_selects_its_own_worker_not_typed_posy() {
-        let coordinated = crate::consensus::coordinated_round_robin::CoordinatedRoundRobinConfig {
-            chain_id: 1266,
-            network_id: "testnet".to_string(),
-            consensus_version:
-                crate::consensus::coordinated_round_robin::COORDINATED_ROUND_ROBIN_V1.to_string(),
-            coordinator_id: "validator-1".to_string(),
-            producer_ids: vec![
-                "validator-2".to_string(),
-                "validator-3".to_string(),
-                "validator-4".to_string(),
-                "validator-5".to_string(),
-                "validator-6".to_string(),
-            ],
-            target_block_interval_ms: 2_000,
-            producer_turn_timeout_ms: 4_000,
-        };
-        let startup = select_finalized_consensus_driver_startup(
-            true,
-            true,
-            Some(Ok(ResolvedConsensusMode::CoordinatedRoundRobinV1(
-                coordinated,
-            ))),
-        )
-        .expect("a coordinated configuration must select its dedicated worker");
-        assert_eq!(
-            startup,
-            FinalizedConsensusDriverStartup::SpawnCoordinatedRoundRobinDriver
-        );
     }
 
     #[test]

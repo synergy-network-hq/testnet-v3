@@ -657,8 +657,6 @@ pub fn load_node_config_from_template(node_type: &str) -> Result<NodeConfig, Box
 }
 
 fn enforce_consensus_config_invariants(config: &NodeConfig) -> Result<(), Box<dyn Error>> {
-    use crate::consensus::coordinated_round_robin::COORDINATED_ROUND_ROBIN_V1;
-
     if config.blockchain.chain_id != 1266 || config.network.id != 1266 {
         return Err(format!(
             "Synergy Testnet v3 requires chain_id/network id 1266, found blockchain.chain_id={} network.id={}",
@@ -2194,31 +2192,23 @@ validator_address = "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5"
     }
 
     #[test]
-    fn coordinated_mode_requires_explicit_canonical_configuration() {
-        let mut consensus = NodeConfig::default().consensus;
-        consensus.mode =
+    fn fresh_testnet_v3_rejects_coordinator_mode_and_local_ring() {
+        let mut config = NodeConfig::default();
+        config.consensus.mode =
             crate::consensus::coordinated_round_robin::COORDINATED_ROUND_ROBIN_V1.to_string();
-        consensus.coordinator_id = "validator-1".to_string();
-        consensus.producer_ids = vec![
-            "validator-2".to_string(),
-            "validator-3".to_string(),
-            "validator-4".to_string(),
-            "validator-5".to_string(),
-            "validator-6".to_string(),
-        ];
-        let resolved = consensus
-            .resolve_mode(1266, "synergy-testnet-v3")
-            .expect("complete coordinated configuration should resolve");
-        match resolved {
-            ResolvedConsensusMode::CoordinatedRoundRobinV1(config) => {
-                assert_eq!(config.producer_turn_timeout_ms, 4_000);
-            }
-            ResolvedConsensusMode::PosySimplifiedV3 => {
-                panic!("coordinated configuration resolved to simplified PoSy")
-            }
-        }
+        let error = enforce_consensus_config_invariants(&config)
+            .expect_err("fresh Testnet-v3 must reject the retired coordinator mode");
+        assert!(error
+            .to_string()
+            .contains("only accepts consensus algorithm posy/3.0 and mode posy_simplified_v3"));
 
-        consensus.producer_ids.pop();
-        assert!(consensus.resolve_mode(1266, "synergy-testnet-v3").is_err());
+        config.consensus.mode = "posy_simplified_v3".to_string();
+        config.consensus.coordinator_id = "validator-01".to_string();
+        config.consensus.producer_ids = vec!["validator-02".to_string()];
+        let error = enforce_consensus_config_invariants(&config)
+            .expect_err("fresh Testnet-v3 must reject a locally configured leader ring");
+        assert!(error
+            .to_string()
+            .contains("does not accept a locally configured coordinator or producer ring"));
     }
 }

@@ -223,8 +223,8 @@ fn production_parameters(genesis: &Value) -> GenesisParameters {
             .map(s)
             .collect(),
         team_vesting_start_time: "1775044800".to_string(),
-        team_allocation_nwei: s(&contracts["team_vesting"]["init_params"]["total_allocation_nwei"]),
-        support_allocation_nwei: "200000000000000000".to_string(),
+        team_allocation_nwei: "60000000000000000".to_string(),
+        support_allocation_nwei: "10000000000000000".to_string(),
         team_count: "5".to_string(),
         support_count: "4".to_string(),
     }
@@ -386,9 +386,9 @@ fn artifact_record(root: &Path, contract: GenesisContract, expected: &Value) -> 
         "bytecode_version": manifest["bytecode_version"],
         "compiler_version": manifest["compiler_version"],
         "required_chain_id": 1266,
-        "runtime_network_id": "synergy-testnet-v3",
+        "runtime_network_id": "testnet",
         "required_network_id": "synergy-testnet",
-        "network_id_normalization": "runtime synergy-testnet-v3 normalizes to the canonical SynQ domain synergy-testnet",
+        "network_id_normalization": "runtime testnet binds to the canonical SynQ domain synergy-testnet",
         "required_signature_algorithm": "ML-DSA-87"
     })
 }
@@ -853,7 +853,7 @@ fn build_candidate(root: &Path) -> Value {
         "schema_version": 1,
         "status": "EXECUTED_AND_BOUND",
         "chain_id": 1266,
-        "runtime_network_id": "synergy-testnet-v3",
+        "runtime_network_id": "testnet",
         "synq_network_id": "synergy-testnet",
         "candidate_input_id": execution["candidate_input_id"],
         "deployer_address": frozen_contracts["deployer_address"],

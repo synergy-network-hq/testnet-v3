@@ -848,11 +848,11 @@ mod tests {
             initial_consensus_parameter_root: EtdagGovernedRoot::from_hex(&"cd".repeat(64))
                 .expect("fixed SHA3-512 root"),
             initial_validator_set: EtdagInitialValidatorSet {
-                validators: (1..=5)
+                validators: (2..=6)
                     .map(|index| EtdagMembershipValidator {
-                        validator_id: format!("posy-validator-{index:02}"),
+                        validator_id: format!("validator-{index:02}"),
                         consensus_public_key: EtdagMembershipConsensusPublicKey {
-                            key_id: format!("posy-validator-{index:02}-consensus"),
+                            key_id: format!("validator-{index:02}-consensus"),
                             algorithm: TESTNET_V3_CONSENSUS_SIGNATURE_ALGORITHM.to_string(),
                             key_bytes: vec![index as u8; TESTNET_V3_MLDSA65_PUBLIC_KEY_BYTES],
                         },

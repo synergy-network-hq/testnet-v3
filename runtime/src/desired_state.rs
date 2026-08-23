@@ -5,8 +5,12 @@
 //! process then independently verifies the installed manifest digest and all
 //! local release inputs before it can open consensus or observer state.
 
+use crate::consensus::simplified_posy::load_genesis_bound_simplified_activation;
 use crate::consensus::testnet_v3_bootstrap::load_testnet_v3_genesis_bootstrap;
 use crate::genesis::canonical_genesis;
+use crate::posy_simplified_parameters::{
+    POSY_SIMPLIFIED_CHAIN_INCARNATION, POSY_SIMPLIFIED_CONSENSUS_STATE_SCHEMA_VERSION,
+};
 use crate::role_profiles::RoleProfile;
 use crate::synergy_types::{
     Epoch, SYNERGY_TESTNET_V3_CHAIN_ID, TESTNET_V3_CHAIN_INCARNATION,
@@ -41,6 +45,15 @@ pub const CHAIN1266_P1_PRODUCER_IDS: [&str; 5] = [
     "validator-6",
 ];
 pub const CHAIN1266_P1_PRODUCER_TURN_TIMEOUT_MS: u64 = 4_000;
+pub const CHAIN1266_P3_CONSENSUS_MODE: &str = "posy_simplified_v3";
+pub const CHAIN1266_P3_CONSENSUS_ALGORITHM: &str = "posy/3.0";
+pub const CHAIN1266_P3_INITIAL_VALIDATOR_IDS: [&str; 5] = [
+    "validator-02",
+    "validator-03",
+    "validator-04",
+    "validator-05",
+    "validator-06",
+];
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -73,7 +86,7 @@ struct DesiredSource {
     aegis_revision: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DesiredConsensusState {
     consensus_schema_version: u32,
@@ -173,7 +186,11 @@ fn required_lower_hex(name: &str, value: &str, bytes: usize) -> Result<(), Strin
 }
 
 fn required_source_revision(name: &str, value: &str) -> Result<(), String> {
-    required_lower_hex(name, value, 20)
+    required_lower_hex(name, value, 20)?;
+    if value.bytes().all(|byte| byte == b'0') {
+        return Err(format!("{name} must not be the all-zero Git revision"));
+    }
+    Ok(())
 }
 
 /// Rejects every consensus profile except the exact, temporary Chain 1266 P1
@@ -209,6 +226,52 @@ fn validate_desired_state_p1_consensus(state: &DesiredConsensusState) -> Result<
         &state.producer_ids,
         state.producer_turn_timeout_ms,
     )
+}
+
+/// Accepts exactly one of the two signed Chain-1266 release profiles.  P1 is
+/// retained only so already-issued coordinated releases remain independently
+/// verifiable.  Fresh P3 releases have no coordinator, producer ring, or
+/// locally configurable producer timeout; all voting authority comes from the
+/// Genesis-bound simplified activation.
+fn validate_desired_state_consensus(state: &DesiredConsensusState) -> Result<(), String> {
+    match state.mode.as_str() {
+        CHAIN1266_P1_CONSENSUS_MODE => validate_desired_state_p1_consensus(state),
+        CHAIN1266_P3_CONSENSUS_MODE => {
+            if !state.coordinator_id.is_empty()
+                || !state.producer_ids.is_empty()
+                || state.producer_turn_timeout_ms != 0
+            {
+                return Err(
+                    "fresh P3 desired state must not carry a coordinator, producer ring, or producer-turn timeout"
+                        .to_string(),
+                );
+            }
+            Ok(())
+        }
+        mode => Err(format!(
+            "desired-state consensus mode {mode} is neither the isolated P1 profile nor fresh P3"
+        )),
+    }
+}
+
+fn expected_chain_profile(state: &DesiredConsensusState) -> Result<(u64, u32, String), String> {
+    match state.mode.as_str() {
+        CHAIN1266_P1_CONSENSUS_MODE => Ok((
+            TESTNET_V3_CHAIN_INCARNATION,
+            TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION,
+            format!(
+                "chain-{SYNERGY_TESTNET_V3_CHAIN_ID}/incarnation-{TESTNET_V3_CHAIN_INCARNATION}"
+            ),
+        )),
+        CHAIN1266_P3_CONSENSUS_MODE => Ok((
+            POSY_SIMPLIFIED_CHAIN_INCARNATION,
+            POSY_SIMPLIFIED_CONSENSUS_STATE_SCHEMA_VERSION,
+            format!(
+                "chain-{SYNERGY_TESTNET_V3_CHAIN_ID}/incarnation-{POSY_SIMPLIFIED_CHAIN_INCARNATION}"
+            ),
+        )),
+        mode => Err(format!("unsupported desired-state consensus mode {mode}")),
+    }
 }
 
 fn compiled_revision(name: &str, value: Option<&'static str>) -> Result<&'static str, String> {
@@ -315,19 +378,21 @@ pub fn verify_signed_desired_state_file(
         .map_err(|error| format!("read desired-state signature: {error}"))?;
     let manifest: DesiredStateManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|error| format!("parse strict desired-state manifest: {error}"))?;
+    validate_desired_state_consensus(&manifest.state)?;
+    let (expected_incarnation, expected_consensus_schema, expected_namespace) =
+        expected_chain_profile(&manifest.state)?;
     if manifest.schema_version != EXPECTED_SCHEMA_VERSION
         || manifest.chain.chain_id != SYNERGY_TESTNET_V3_CHAIN_ID
-        || manifest.chain.incarnation != TESTNET_V3_CHAIN_INCARNATION
-        || manifest.state.consensus_schema_version != TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION
-        || manifest.state.directory_namespace != "chain-1266/incarnation-4"
+        || manifest.chain.incarnation != expected_incarnation
+        || manifest.state.consensus_schema_version != expected_consensus_schema
+        || manifest.state.directory_namespace != expected_namespace
         || manifest.start_authority.public_key_fingerprint != PRODUCTION_GOVERNANCE_FINGERPRINT
     {
         return Err(
-            "signed desired state is outside the production Chain 1266 incarnation-4 profile"
+            "signed desired state is outside its production Chain 1266 consensus profile"
                 .to_string(),
         );
     }
-    validate_desired_state_p1_consensus(&manifest.state)?;
     if manifest.start_authority.signature_algorithm != "ML-DSA-87"
         || manifest.start_authority.signature_domain
             != crate::consensus_start::CHAIN1266_START_SIGNATURE_DOMAIN
@@ -382,10 +447,16 @@ pub fn verify_chain1266_desired_state(
             manifest.schema_version
         ));
     }
+    validate_desired_state_consensus(&manifest.state)?;
+    let (expected_incarnation, expected_consensus_schema, expected_namespace) =
+        expected_chain_profile(&manifest.state)?;
+    let release_prefix = format!("chain1266-incarnation-{expected_incarnation}-");
     let release_sequence = manifest
         .release_id
-        .strip_prefix("chain1266-incarnation-4-")
-        .ok_or_else(|| "desired-state release ID is outside incarnation 4".to_string())?;
+        .strip_prefix(&release_prefix)
+        .ok_or_else(|| {
+            format!("desired-state release ID is outside incarnation {expected_incarnation}")
+        })?;
     let tag_sequence = manifest
         .release_tag
         .strip_prefix("chain1266-v20.0.0-")
@@ -395,20 +466,15 @@ pub fn verify_chain1266_desired_state(
         return Err("desired-state release ID/tag binding is invalid".to_string());
     }
     if manifest.chain.chain_id != SYNERGY_TESTNET_V3_CHAIN_ID
-        || manifest.chain.incarnation != TESTNET_V3_CHAIN_INCARNATION
+        || manifest.chain.incarnation != expected_incarnation
     {
         return Err("desired-state Chain 1266 domain is invalid".to_string());
     }
-    if manifest.state.consensus_schema_version != TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION
-        || manifest.state.directory_namespace
-            != format!(
-                "chain-{}/incarnation-{}",
-                SYNERGY_TESTNET_V3_CHAIN_ID, TESTNET_V3_CHAIN_INCARNATION
-            )
+    if manifest.state.consensus_schema_version != expected_consensus_schema
+        || manifest.state.directory_namespace != expected_namespace
     {
         return Err("desired-state consensus schema or state namespace is invalid".to_string());
     }
-    validate_desired_state_p1_consensus(&manifest.state)?;
     let qualification_mode = env::var(CHAIN1266_QUALIFICATION_MODE_ENV).as_deref() == Ok("1");
     let state_root = env::var("SYNERGY_DATA_PATH")
         .map(PathBuf::from)
@@ -476,17 +542,55 @@ pub fn verify_chain1266_desired_state(
     }
     required_lower_hex("chain.genesis_hash", &manifest.chain.genesis_hash, 32)?;
 
-    let bootstrap = load_testnet_v3_genesis_bootstrap(genesis)?;
-    let active_root = bootstrap
-        .validator_set
-        .active_for_epoch(Epoch(0))
-        .hash()?
-        .to_hex();
+    let active_root = if manifest.state.mode == CHAIN1266_P3_CONSENSUS_MODE {
+        load_genesis_bound_simplified_activation(genesis.value())?
+            .ok_or_else(|| {
+                "fresh P3 desired state requires a Genesis-bound simplified activation".to_string()
+            })?
+            .frozen_validator_set
+            .active_for_epoch(Epoch(0))
+            .hash()?
+            .to_hex()
+    } else {
+        load_testnet_v3_genesis_bootstrap(genesis)?
+            .validator_set
+            .active_for_epoch(Epoch(0))
+            .hash()?
+            .to_hex()
+    };
     if active_root != manifest.chain.validator_set_root {
         return Err(format!(
             "active validator-set root mismatch: expected {}, found {active_root}",
             manifest.chain.validator_set_root
         ));
+    }
+    if manifest.state.mode == CHAIN1266_P3_CONSENSUS_MODE {
+        let activation =
+            load_genesis_bound_simplified_activation(genesis.value())?.ok_or_else(|| {
+                "fresh P3 desired state requires a Genesis-bound simplified activation".to_string()
+            })?;
+        let active_set = activation.frozen_validator_set.active_for_epoch(Epoch(0));
+        let active_ids = active_set
+            .validators
+            .iter()
+            .map(|validator| validator.validator_id.0.clone())
+            .collect::<Vec<_>>();
+        if active_ids
+            != CHAIN1266_P3_INITIAL_VALIDATOR_IDS
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect::<Vec<_>>()
+        {
+            return Err(format!(
+                "fresh P3 desired state requires initial validators validator-02 through validator-06, found {active_ids:?}"
+            ));
+        }
+        if active_set.hash()?.to_hex() != manifest.chain.validator_set_root {
+            return Err(
+                "fresh P3 desired-state validator root differs from its Genesis activation"
+                    .to_string(),
+            );
+        }
     }
 
     for (name, revision) in [
@@ -641,6 +745,39 @@ mod tests {
         )
         .expect_err("producer order must be bound by desired state");
         assert!(error.contains("canonical Chain 1266 P1"), "{error}");
+    }
+
+    #[test]
+    fn p3_desired_state_rejects_every_local_authority_field() {
+        let canonical = DesiredConsensusState {
+            consensus_schema_version: POSY_SIMPLIFIED_CONSENSUS_STATE_SCHEMA_VERSION,
+            directory_namespace: "chain-1266/incarnation-5".to_string(),
+            mode: CHAIN1266_P3_CONSENSUS_MODE.to_string(),
+            coordinator_id: String::new(),
+            producer_ids: Vec::new(),
+            producer_turn_timeout_ms: 0,
+        };
+        validate_desired_state_consensus(&canonical).expect("canonical P3 binding");
+        assert_eq!(
+            expected_chain_profile(&canonical).expect("fresh P3 chain profile"),
+            (
+                POSY_SIMPLIFIED_CHAIN_INCARNATION,
+                POSY_SIMPLIFIED_CONSENSUS_STATE_SCHEMA_VERSION,
+                "chain-1266/incarnation-5".to_string()
+            )
+        );
+
+        let mut with_coordinator = canonical.clone();
+        with_coordinator.coordinator_id = "validator-01".to_string();
+        assert!(validate_desired_state_consensus(&with_coordinator).is_err());
+
+        let mut with_producer = canonical.clone();
+        with_producer.producer_ids.push("validator-02".to_string());
+        assert!(validate_desired_state_consensus(&with_producer).is_err());
+
+        let mut with_timeout = canonical;
+        with_timeout.producer_turn_timeout_ms = 4_000;
+        assert!(validate_desired_state_consensus(&with_timeout).is_err());
     }
 
     #[test]

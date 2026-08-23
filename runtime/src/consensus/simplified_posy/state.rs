@@ -261,7 +261,7 @@ impl SimplifiedSafetyState {
             || certified_parent.qc_id != anchor.certified_parent_qc_id
             || finalized_seed.height != anchor.finalized_seed_height
             || finalized_seed.block_id != anchor.finalized_seed_block_id
-            || finalized_seed.finality_reference_id() != anchor.finalized_seed_qc_id
+            || finalized_seed.qc_id != anchor.finalized_seed_qc_id
             || transition.transition_tail().len() != 3
         {
             return Err("verified transition pointers do not match the epoch anchor".to_string());
@@ -361,7 +361,7 @@ impl SimplifiedSafetyState {
             let certified = self.epoch_transition_tail_qcs[2].reference()?;
             if finalized.height != expected.finalized_seed_height
                 || finalized.block_id != expected.finalized_seed_block_id
-                || finalized.finality_reference_id() != expected.finalized_seed_qc_id
+                || finalized.qc_id != expected.finalized_seed_qc_id
                 || self.anchor_parent.quorum_certificate_reference() != Some(&certified)
             {
                 return Err("persisted v3 transition proof pointers do not match".to_string());

@@ -17,8 +17,8 @@ use crate::crypto::aegis_pqvm::AegisPqvmVerifier;
 use crate::etdag::{EtdagDigest, EtdagParameters, ProtectedBlockInput, TargetAdmissionContext};
 use crate::execution::{compute_state_root_after, execute_block, ExecutionState};
 use crate::synergy_types::{
-    AegisPqKeyId, AegisPqSignature, Block, BlockId, CanonicalSerialize, ClusterMap, Hash, Round,
-    UmaId, ValidatorId, ValidatorSet,
+    AegisPqKeyId, AegisPqSignature, Block, BlockHeader, BlockId, CanonicalSerialize, ClusterMap,
+    Hash, Height, Round, UmaId, ValidatorId, ValidatorSet,
 };
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
@@ -30,6 +30,129 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const POSY_SIMPLIFIED_MATERIAL_FORMAT: &str = "synergy-posy-simplified-protected-material-v2";
 pub const MAX_POSY_SIMPLIFIED_MATERIAL_RECORD_BYTES: usize = 16 * 1024 * 1024;
 const POSY_SIMPLIFIED_MATERIAL_DIRECTORY: &str = "data/posy-v3-protected-material";
+
+/// The exact fee-market state committed by the certified parent block.
+///
+/// This is deliberately small, typed, and copied only after the parent
+/// material has been loaded by its QC identity and independently verified.
+/// It is therefore authority for the deterministic next-base-fee formula,
+/// not a caller-provided estimate or local RPC observation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SimplifiedParentFeeMarketState {
+    pub base_fee_per_gas_nwei: u64,
+    pub gas_used: u64,
+    pub fee_market_version: u32,
+}
+
+impl SimplifiedParentFeeMarketState {
+    pub fn from_verified_header(header: &BlockHeader) -> Result<Self, String> {
+        validate_simplified_fee_market_header(header)?;
+        Ok(Self {
+            base_fee_per_gas_nwei: header.base_fee_per_gas_nwei,
+            gas_used: header.gas_used,
+            fee_market_version: header.fee_market_version,
+        })
+    }
+}
+
+/// Complete governed fee fields to write before protected execution begins.
+/// Execution subsequently replaces the two usage counters with independently
+/// measured totals before the block identity is computed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SimplifiedFeeMarketHeaderFields {
+    pub base_fee_per_gas_nwei: u64,
+    pub gas_limit: u64,
+    pub pq_gas_limit: u64,
+    pub pq_gas_multiplier: u64,
+    pub fee_market_version: u32,
+}
+
+pub fn simplified_fee_market_header_fields(
+    height: Height,
+    parent: Option<SimplifiedParentFeeMarketState>,
+) -> Result<SimplifiedFeeMarketHeaderFields, String> {
+    let parameters = *crate::gas::fee_market_params_for_runtime()?;
+    parameters
+        .validate()
+        .map_err(|error| format!("invalid governed simplified fee market: {error}"))?;
+    if !parameters.is_active_at(height.0) {
+        return Err(
+            "fresh simplified PoSy block precedes governed fee-market activation".to_string(),
+        );
+    }
+    let base_fee_per_gas_nwei = if height.0 == parameters.activation_height {
+        if parent.is_some() {
+            return Err(
+                "fee-market activation block must extend the distinct Genesis authority"
+                    .to_string(),
+            );
+        }
+        parameters.initial_base_fee_nwei
+    } else {
+        let parent = parent.ok_or_else(|| {
+            "simplified PoSy child above activation has no certified parent fee authority"
+                .to_string()
+        })?;
+        if parent.fee_market_version != parameters.fee_market_version {
+            return Err(
+                "certified simplified parent has another governed fee-market version".to_string(),
+            );
+        }
+        crate::gas::fee_market::next_base_fee_per_gas(
+            parent.base_fee_per_gas_nwei,
+            parent.gas_used,
+            &parameters,
+        )
+        .map_err(|error| format!("derive simplified child base fee: {error}"))?
+    };
+    Ok(SimplifiedFeeMarketHeaderFields {
+        base_fee_per_gas_nwei,
+        gas_limit: parameters.max_block_gas,
+        pq_gas_limit: parameters.max_block_pq_gas,
+        pq_gas_multiplier: parameters.pq_gas_multiplier,
+        fee_market_version: parameters.fee_market_version,
+    })
+}
+
+pub fn validate_simplified_fee_market_header_against_parent(
+    header: &BlockHeader,
+    parent: Option<SimplifiedParentFeeMarketState>,
+) -> Result<(), String> {
+    validate_simplified_fee_market_header(header)?;
+    let expected = simplified_fee_market_header_fields(header.height, parent)?;
+    if header.base_fee_per_gas_nwei != expected.base_fee_per_gas_nwei
+        || header.gas_limit != expected.gas_limit
+        || header.pq_gas_limit != expected.pq_gas_limit
+        || header.pq_gas_multiplier != expected.pq_gas_multiplier
+        || header.fee_market_version != expected.fee_market_version
+    {
+        return Err(
+            "simplified block fee market does not match its certified parent and governed parameters"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_simplified_fee_market_header(header: &BlockHeader) -> Result<(), String> {
+    let parameters = *crate::gas::fee_market_params_for_runtime()?;
+    parameters
+        .validate()
+        .map_err(|error| format!("invalid governed simplified fee market: {error}"))?;
+    if !parameters.is_active_at(header.height.0)
+        || header.fee_market_version != parameters.fee_market_version
+        || header.base_fee_per_gas_nwei < parameters.base_fee_floor_nwei
+        || header.gas_limit != parameters.max_block_gas
+        || header.pq_gas_limit != parameters.max_block_pq_gas
+        || header.pq_gas_multiplier != parameters.pq_gas_multiplier
+        || header.gas_used > header.gas_limit
+        || header.pq_gas_used > header.pq_gas_limit
+    {
+        return Err("invalid governed simplified fee-market header".to_string());
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -68,12 +191,14 @@ impl VerifiedSimplifiedProposalMaterial {
         proposal: &SimplifiedProposal,
         block: Block,
         parent_execution_state: &ExecutionState,
+        parent_fee_market: Option<SimplifiedParentFeeMarketState>,
     ) -> Result<(Self, ExecutionState), String> {
         Self::verify_core_with_transition_subject(
             epoch_context,
             proposal,
             block,
             parent_execution_state,
+            parent_fee_market,
             None,
         )
     }
@@ -85,6 +210,7 @@ impl VerifiedSimplifiedProposalMaterial {
         proposal: &SimplifiedProposal,
         block: Block,
         parent_execution_state: &ExecutionState,
+        parent_fee_market: Option<SimplifiedParentFeeMarketState>,
         transition_subject_root: Option<Hash>,
     ) -> Result<(Self, ExecutionState), String> {
         if !block.transactions.is_empty() || block.header.protected_batch.is_some() {
@@ -93,6 +219,7 @@ impl VerifiedSimplifiedProposalMaterial {
                     .to_string(),
             );
         }
+        validate_simplified_fee_market_header_against_parent(&block.header, parent_fee_market)?;
         let next_state = verify_block_execution(parent_execution_state, &block)?;
         Self::finish_verified(
             epoch_context,
@@ -113,6 +240,7 @@ impl VerifiedSimplifiedProposalMaterial {
         target_context: TargetAdmissionContext,
         protected_input: ProtectedBlockInput,
         parent_execution_state: &ExecutionState,
+        parent_fee_market: Option<SimplifiedParentFeeMarketState>,
         verifier: &AegisPqvmVerifier,
         validator_set: &ValidatorSet,
         cluster_map: &ClusterMap,
@@ -125,6 +253,7 @@ impl VerifiedSimplifiedProposalMaterial {
             target_context,
             protected_input,
             parent_execution_state,
+            parent_fee_market,
             verifier,
             validator_set,
             cluster_map,
@@ -143,6 +272,7 @@ impl VerifiedSimplifiedProposalMaterial {
         target_context: TargetAdmissionContext,
         protected_input: ProtectedBlockInput,
         parent_execution_state: &ExecutionState,
+        parent_fee_market: Option<SimplifiedParentFeeMarketState>,
         verifier: &AegisPqvmVerifier,
         validator_set: &ValidatorSet,
         cluster_map: &ClusterMap,
@@ -164,6 +294,7 @@ impl VerifiedSimplifiedProposalMaterial {
                     .to_string(),
             );
         }
+        validate_simplified_fee_market_header_against_parent(&block.header, parent_fee_market)?;
         let (next_state, receipts) =
             verify_block_execution_with_receipts(parent_execution_state, &block)?;
         let manifest = protected_input.build_execution_manifest(&transactions, &receipts)?;
@@ -228,12 +359,17 @@ impl VerifiedSimplifiedProposalMaterial {
         &self,
         epoch_context: &SimplifiedEpochContext,
         parent_execution_state: &ExecutionState,
+        parent_fee_market: Option<SimplifiedParentFeeMarketState>,
         verifier: &AegisPqvmVerifier,
         validator_set: &ValidatorSet,
         cluster_map: &ClusterMap,
         parameters: &EtdagParameters,
     ) -> Result<ExecutionState, String> {
         self.validate(epoch_context.root()?)?;
+        validate_simplified_fee_market_header_against_parent(
+            &self.canonical_block.header,
+            parent_fee_market,
+        )?;
         epoch_context.validate_against(&validator_set.active_for_epoch(epoch_context.epoch))?;
         match (&self.target_context, &self.protected_input) {
             (None, None) => verify_block_execution(parent_execution_state, &self.canonical_block),
@@ -288,6 +424,7 @@ impl VerifiedSimplifiedProposalMaterial {
         &self,
         epoch_context: &SimplifiedEpochContext,
         parent_execution_state: &ExecutionState,
+        parent_fee_market: Option<SimplifiedParentFeeMarketState>,
     ) -> Result<ExecutionState, String> {
         self.validate(epoch_context.root()?)?;
         if self.target_context.is_some() || self.protected_input.is_some() {
@@ -295,6 +432,10 @@ impl VerifiedSimplifiedProposalMaterial {
                 "protected simplified material cannot use the core-only replay path".to_string(),
             );
         }
+        validate_simplified_fee_market_header_against_parent(
+            &self.canonical_block.header,
+            parent_fee_market,
+        )?;
         verify_block_execution(parent_execution_state, &self.canonical_block)
     }
 
@@ -560,6 +701,7 @@ fn verify_block_execution_with_receipts(
     state: &ExecutionState,
     block: &Block,
 ) -> Result<(ExecutionState, Vec<crate::execution::TransactionReceipt>), String> {
+    validate_simplified_fee_market_header(&block.header)?;
     let state_root_before = compute_state_root_after(state)?;
     if block.header.state_root_before != state_root_before
         || block.header.parent_state_root != state_root_before
@@ -579,8 +721,10 @@ fn verify_block_execution_with_receipts(
     let execution = execute_block(block, &authorized)?;
     if execution.state_root_after != block.header.state_root_after
         || execution.receipt_root != block.header.receipt_root
+        || execution.gas_used_total != block.header.gas_used
+        || execution.pq_gas_used_total != block.header.pq_gas_used
     {
-        return Err("simplified protected block execution roots mismatch".to_string());
+        return Err("simplified protected block execution roots or fee usage mismatch".to_string());
     }
     Ok((execution.state, execution.receipts))
 }
@@ -946,7 +1090,7 @@ fn sync_directory(directory: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::super::{
-        DurableSimplifiedProtectedExecutionTransitionAuthorityVerifier,
+        DurableSimplifiedProtectedExecutionTransitionAuthorityVerifier, QuorumCertificateReference,
         SimplifiedFinalizedTransitionAuthorityEvidence, SimplifiedMaterialChunk,
         SimplifiedMaterialStager, SimplifiedQuorumCertificate,
         SimplifiedTransitionAuthorityVerifier, POSY_SIMPLIFIED_MATERIAL_CHUNK_FORMAT,
@@ -1017,6 +1161,17 @@ mod tests {
             qc_id: Hash::from_domain_bytes("material-test-parent-qc", b"height-3999"),
         };
         let parent = SimplifiedFinalityParent::quorum_certificate(parent_qc.clone()).unwrap();
+        let parent_fee_market = SimplifiedParentFeeMarketState {
+            base_fee_per_gas_nwei: crate::gas::fee_market_params_for_runtime()
+                .unwrap()
+                .initial_base_fee_nwei,
+            gas_used: 0,
+            fee_market_version: crate::gas::fee_market_params_for_runtime()
+                .unwrap()
+                .fee_market_version,
+        };
+        let fee_market =
+            simplified_fee_market_header_fields(Height(4_000), Some(parent_fee_market)).unwrap();
         let state = ExecutionState::new();
         let state_root = compute_state_root_after(&state).unwrap();
         let block = Block {
@@ -1070,6 +1225,13 @@ mod tests {
                 dag_version: 2,
                 aegis_pqvm_version: "aegis-pqvm".to_string(),
                 timestamp_ms_consensus_bounded: 1_000,
+                base_fee_per_gas_nwei: fee_market.base_fee_per_gas_nwei,
+                gas_used: 0,
+                gas_limit: fee_market.gas_limit,
+                pq_gas_used: 0,
+                pq_gas_limit: fee_market.pq_gas_limit,
+                pq_gas_multiplier: fee_market.pq_gas_multiplier,
+                fee_market_version: fee_market.fee_market_version,
             },
             transactions: Vec::new(),
             proposer_signature: AegisPqSignature {
@@ -1105,6 +1267,7 @@ mod tests {
             &proposal,
             block,
             &state,
+            Some(parent_fee_market),
             transition_subject_root,
         )
         .unwrap()
@@ -1130,6 +1293,15 @@ mod tests {
                 .replay_and_verify(
                     &context(),
                     &ExecutionState::new(),
+                    Some(SimplifiedParentFeeMarketState {
+                        base_fee_per_gas_nwei: crate::gas::fee_market_params_for_runtime()
+                            .unwrap()
+                            .initial_base_fee_nwei,
+                        gas_used: 0,
+                        fee_market_version: crate::gas::fee_market_params_for_runtime()
+                            .unwrap()
+                            .fee_market_version,
+                    }),
                     &AegisPqvmVerifier::unavailable_for_startup_tests(),
                     &validators(),
                     &ClusterMap {

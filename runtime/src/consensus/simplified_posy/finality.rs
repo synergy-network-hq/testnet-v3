@@ -6,10 +6,11 @@
 //! layers and re-executes every block from the pinned activation boundary.
 
 use super::{
-    DurableSimplifiedProposalMaterialStore, FinalizedBlockRecord, SimplifiedEpochContext,
-    SimplifiedFinalityParent, SimplifiedFinalizationReceipt, SimplifiedFinalizationSink,
-    SimplifiedFinalizationSinkError, SimplifiedFinalizationTransaction,
-    SimplifiedQuorumCertificate, VerifiedSimplifiedEpochTransition,
+    simplified_fee_market_header_fields, DurableSimplifiedProposalMaterialStore,
+    FinalizedBlockRecord, SimplifiedEpochContext, SimplifiedFinalityParent,
+    SimplifiedFinalizationReceipt, SimplifiedFinalizationSink, SimplifiedFinalizationSinkError,
+    SimplifiedFinalizationTransaction, SimplifiedParentFeeMarketState, SimplifiedQuorumCertificate,
+    VerifiedSimplifiedEpochTransition,
 };
 use crate::crypto::aegis_pqvm::AegisPqvmVerifier;
 use crate::etdag::EtdagParameters;
@@ -151,6 +152,7 @@ pub struct SimplifiedFinalityEnvironment {
     pub consensus_verifier: AegisPqvmVerifier,
     pub etdag_verifier: AegisPqvmVerifier,
     pub anchor_finalized: FinalizedBlockRecord,
+    pub anchor_finalized_fee_market: Option<SimplifiedParentFeeMarketState>,
     pub boundary_execution_state: ExecutionState,
 }
 
@@ -165,6 +167,27 @@ impl SimplifiedFinalityEnvironment {
                 .active_for_epoch(self.epoch_context.epoch),
         )?;
         self.etdag_parameters.validate()?;
+        match self.anchor_finalized.quorum_certificate_reference() {
+            None if self.anchor_finalized_fee_market.is_some() => {
+                return Err("Genesis finality boundary cannot carry a block fee state".to_string())
+            }
+            Some(reference) => {
+                let parent = self.anchor_finalized_fee_market.ok_or_else(|| {
+                    "non-Genesis finality boundary has no governed fee state".to_string()
+                })?;
+                simplified_fee_market_header_fields(
+                    crate::synergy_types::Height(
+                        reference
+                            .height
+                            .0
+                            .checked_add(1)
+                            .ok_or_else(|| "finality boundary height overflowed".to_string())?,
+                    ),
+                    Some(parent),
+                )?;
+            }
+            None => {}
+        }
         if self.cluster_map.epoch != self.epoch_context.epoch {
             return Err("simplified finality cluster map names another epoch".to_string());
         }
@@ -413,6 +436,7 @@ impl DurableSimplifiedFinalitySink {
             return Err("finality transaction does not extend the durable epoch head".to_string());
         }
         let mut state = self.execution_state.clone();
+        let mut parent_fee_market = self.fee_market_state_for_finalized(&self.current_finalized)?;
         for certificate in &transaction.finality_witness {
             self.verify_certificate_for_replay(certificate)?;
         }
@@ -444,6 +468,7 @@ impl DurableSimplifiedFinalitySink {
                 material.replay_and_verify(
                     transition.transition.previous_epoch_context(),
                     &state,
+                    parent_fee_market,
                     &transition.previous.etdag_verifier,
                     transition.transition.previous_validator_set(),
                     &transition.previous.cluster_map,
@@ -453,14 +478,60 @@ impl DurableSimplifiedFinalitySink {
                 material.replay_and_verify(
                     &self.environment.epoch_context,
                     &state,
+                    parent_fee_market,
                     &self.environment.etdag_verifier,
                     &self.environment.validator_set,
                     &self.environment.cluster_map,
                     &self.environment.etdag_parameters,
                 )?
             };
+            parent_fee_market = Some(SimplifiedParentFeeMarketState::from_verified_header(
+                &material.canonical_block.header,
+            )?);
         }
         Ok(state)
+    }
+
+    fn fee_market_state_for_finalized(
+        &self,
+        finalized: &FinalizedBlockRecord,
+    ) -> Result<Option<SimplifiedParentFeeMarketState>, String> {
+        let Some(reference) = finalized.quorum_certificate_reference() else {
+            return Ok(None);
+        };
+        if finalized == &self.environment.anchor_finalized {
+            return self
+                .environment
+                .anchor_finalized_fee_market
+                .map(Some)
+                .ok_or_else(|| {
+                    "durable finality boundary has no governed fee authority".to_string()
+                });
+        }
+        let store = if reference.height.0 < self.environment.epoch_context.epoch_start_height.0 {
+            &self
+                .epoch_transition
+                .as_ref()
+                .ok_or_else(|| {
+                    "previous-epoch finalized fee authority lacks a verified transition".to_string()
+                })?
+                .previous
+                .material_store
+        } else {
+            &self.material_store
+        };
+        let material = store.load(reference.qc_id)?;
+        if material.stable_candidate_id != reference.qc_id
+            || material.candidate_subject.context.height != reference.height
+            || material.candidate_subject.block_id != reference.block_id
+            || material.canonical_block.candidate_id()? != reference.block_id
+        {
+            return Err(
+                "durable finalized fee authority does not match its quorum certificate".to_string(),
+            );
+        }
+        SimplifiedParentFeeMarketState::from_verified_header(&material.canonical_block.header)
+            .map(Some)
     }
 
     fn is_previous_transition_certificate(
@@ -716,6 +787,15 @@ mod tests {
         transaction: SimplifiedFinalizationTransaction,
     }
 
+    fn test_parent_fee_market() -> SimplifiedParentFeeMarketState {
+        let parameters = crate::gas::fee_market_params_for_runtime().unwrap();
+        SimplifiedParentFeeMarketState {
+            base_fee_per_gas_nwei: parameters.initial_base_fee_nwei,
+            gas_used: 0,
+            fee_market_version: parameters.fee_market_version,
+        }
+    }
+
     #[derive(Debug, Clone, Copy)]
     struct TestTransitionAuthorityVerifier;
 
@@ -791,6 +871,10 @@ mod tests {
         let object_context =
             ConsensusObjectContext::for_height(&epoch_context, Height(4_000), Round(0)).unwrap();
         let proposer = &validators.validators[0];
+        let parent_fee_market = test_parent_fee_market();
+        let fee_market =
+            simplified_fee_market_header_fields(object_context.height, Some(parent_fee_market))
+                .unwrap();
         let block = Block {
             header: BlockHeader {
                 version: 3,
@@ -839,6 +923,13 @@ mod tests {
                 dag_version: 2,
                 aegis_pqvm_version: "aegis-pqvm".to_string(),
                 timestamp_ms_consensus_bounded: 1_000,
+                base_fee_per_gas_nwei: fee_market.base_fee_per_gas_nwei,
+                gas_used: 0,
+                gas_limit: fee_market.gas_limit,
+                pq_gas_used: 0,
+                pq_gas_limit: fee_market.pq_gas_limit,
+                pq_gas_multiplier: fee_market.pq_gas_multiplier,
+                fee_market_version: fee_market.fee_market_version,
             },
             transactions: Vec::new(),
             proposer_signature: AegisPqSignature {
@@ -872,6 +963,7 @@ mod tests {
             &proposal,
             block,
             &state,
+            Some(parent_fee_market),
         )
         .unwrap();
         let qc0 = signed_qc(
@@ -975,6 +1067,7 @@ mod tests {
         state: &ExecutionState,
         height: Height,
         parent_qc: QuorumCertificateReference,
+        parent_fee_market: SimplifiedParentFeeMarketState,
         last_finalized_qc_id: Hash,
     ) -> (
         VerifiedSimplifiedProposalMaterial,
@@ -984,6 +1077,8 @@ mod tests {
             ConsensusObjectContext::for_height(epoch_context, height, Round(0)).unwrap();
         let proposer = &validators.validators[0];
         let state_root = compute_state_root_after(state).unwrap();
+        let fee_market =
+            simplified_fee_market_header_fields(height, Some(parent_fee_market)).unwrap();
         let block = Block {
             header: BlockHeader {
                 version: 3,
@@ -1039,6 +1134,13 @@ mod tests {
                 dag_version: 2,
                 aegis_pqvm_version: "aegis-pqvm".to_string(),
                 timestamp_ms_consensus_bounded: 10_000 + height.0,
+                base_fee_per_gas_nwei: fee_market.base_fee_per_gas_nwei,
+                gas_used: 0,
+                gas_limit: fee_market.gas_limit,
+                pq_gas_used: 0,
+                pq_gas_limit: fee_market.pq_gas_limit,
+                pq_gas_multiplier: fee_market.pq_gas_multiplier,
+                fee_market_version: fee_market.fee_market_version,
             },
             transactions: Vec::new(),
             proposer_signature: AegisPqSignature {
@@ -1067,9 +1169,14 @@ mod tests {
             proposer_key_id: proposer.consensus_public_key.key_id.clone(),
             proposer_signature: block.proposer_signature.clone(),
         };
-        let (material, _) =
-            VerifiedSimplifiedProposalMaterial::verify_core(epoch_context, &proposal, block, state)
-                .unwrap();
+        let (material, _) = VerifiedSimplifiedProposalMaterial::verify_core(
+            epoch_context,
+            &proposal,
+            block,
+            state,
+            Some(parent_fee_market),
+        )
+        .unwrap();
         let qc = signed_qc(
             signer,
             validators,
@@ -1102,6 +1209,7 @@ mod tests {
             consensus_verifier: verifier.clone(),
             etdag_verifier: verifier,
             anchor_finalized: fixture.anchor.clone(),
+            anchor_finalized_fee_market: Some(test_parent_fee_market()),
             boundary_execution_state: fixture.state.clone(),
         }
     }
@@ -1217,6 +1325,7 @@ mod tests {
             &fixture.state,
             Height(4_000),
             preceding_anchor.clone(),
+            test_parent_fee_market(),
             preceding_anchor.qc_id,
         );
         let (material_4001, qc_4001) = core_material_and_qc(
@@ -1227,6 +1336,10 @@ mod tests {
             &fixture.state,
             Height(4_001),
             qc_4000.reference().unwrap(),
+            SimplifiedParentFeeMarketState::from_verified_header(
+                &material_4000.canonical_block.header,
+            )
+            .unwrap(),
             preceding_anchor.qc_id,
         );
         let (material_4002, qc_4002) = core_material_and_qc(
@@ -1237,11 +1350,15 @@ mod tests {
             &fixture.state,
             Height(4_002),
             qc_4001.reference().unwrap(),
+            SimplifiedParentFeeMarketState::from_verified_header(
+                &material_4001.canonical_block.header,
+            )
+            .unwrap(),
             qc_4000.id().unwrap(),
         );
-        // The finalized seed is 4000. Materials 4001 and 4002 remain needed
-        // after the boundary; 4000 is intentionally not installed below.
-        let _ = material_4000;
+        // The finalized seed is 4000. Its compact material record remains
+        // required as the durable parent fee-market authority; 4001 and 4002
+        // remain required for the certified execution tail.
 
         let mut next_records = previous_validators.validators.clone();
         for index in 5..7 {
@@ -1315,6 +1432,10 @@ mod tests {
             &fixture.state,
             Height(4_003),
             qc_4002.reference().unwrap(),
+            SimplifiedParentFeeMarketState::from_verified_header(
+                &material_4002.canonical_block.header,
+            )
+            .unwrap(),
             qc_4000.id().unwrap(),
         );
         let qc_4004 = signed_qc(
@@ -1382,6 +1503,9 @@ mod tests {
         )
         .unwrap();
         previous_material_store
+            .install_verified(&material_4000)
+            .unwrap();
+        previous_material_store
             .install_verified(&material_4001)
             .unwrap();
         previous_material_store
@@ -1406,6 +1530,12 @@ mod tests {
                 consensus_verifier: verifier.clone(),
                 etdag_verifier: verifier,
                 anchor_finalized: finalized_seed.clone(),
+                anchor_finalized_fee_market: Some(
+                    SimplifiedParentFeeMarketState::from_verified_header(
+                        &material_4000.canonical_block.header,
+                    )
+                    .unwrap(),
+                ),
                 boundary_execution_state: fixture.state.clone(),
             }
         };
@@ -1468,6 +1598,12 @@ mod tests {
                 consensus_verifier: verifier.clone(),
                 etdag_verifier: verifier,
                 anchor_finalized: finalized_seed.clone(),
+                anchor_finalized_fee_market: Some(
+                    SimplifiedParentFeeMarketState::from_verified_header(
+                        &material_4000.canonical_block.header,
+                    )
+                    .unwrap(),
+                ),
                 boundary_execution_state: fixture.state.clone(),
             }
         };

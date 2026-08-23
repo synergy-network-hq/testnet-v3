@@ -306,11 +306,92 @@ pub fn load_frozen_governance_authority(
     let bundle_dir = value_string(entry, "bundle_dir", "governance bundle directory")?;
     let bundle_dir = safe_relative_path(&bundle_dir, "governance bundle directory")?;
     let bundle = repo_root.join(bundle_dir);
+    let identity_root_encrypted_sha256 = value_string(
+        entry,
+        "identity_root_encrypted_sha256",
+        "governance encrypted identity-root custody SHA-256",
+    )?;
+    if !is_lower_hex(&identity_root_encrypted_sha256, 32)
+        || sha256_hex(&read_file(
+            &bundle.join("identity-root.enc.json"),
+            "governance encrypted identity-root custody",
+        )?) != identity_root_encrypted_sha256
+    {
+        return Err(
+            "governance encrypted identity-root custody does not match the frozen authority entry"
+                .to_string(),
+        );
+    }
+    if sha256_hex(&read_file(
+        &bundle.join("identity.enc.json"),
+        "governance encrypted authorization custody",
+    )?) != authorization_encrypted_sha256
+    {
+        return Err(
+            "governance encrypted authorization custody does not match the frozen authority entry"
+                .to_string(),
+        );
+    }
+    let identity_root_bytes = read_file(
+        &bundle.join("identity-root.pub.json"),
+        "governance identity-root public identity",
+    )?;
+    let identity_root = parse_json(
+        &identity_root_bytes,
+        "governance identity-root public identity",
+    )?;
+    if identity_root.get("schema_version").and_then(Value::as_str)
+        != Some("synergy-native-public-identity-v3")
+        || identity_root.get("binary_encoding").and_then(Value::as_str) != Some("lowercase-hex")
+        || identity_root.get("identity_id").and_then(Value::as_str) != Some(role.as_str())
+        || identity_root.get("address_type").and_then(Value::as_str) != Some("WalletAccount")
+        || identity_root.get("algorithm").and_then(Value::as_str) != Some("FN-DSA-1024")
+        || identity_root.get("address").and_then(Value::as_str)
+            != Some(standard_account_address.as_str())
+    {
+        return Err(
+            "governance FN-DSA identity root does not match the frozen authority entry".to_string(),
+        );
+    }
+    let identity_root_public_sha256 = value_string(
+        entry,
+        "identity_root_public_sha256",
+        "governance identity-root public identity SHA-256",
+    )?;
+    if !is_lower_hex(&identity_root_public_sha256, 32)
+        || identity_root_public_sha256 != sha256_hex(&identity_root_bytes)
+    {
+        return Err(
+            "governance identity-root public identity does not match the frozen authority entry"
+                .to_string(),
+        );
+    }
+    let identity_root_public_key_hex = value_string(
+        &identity_root,
+        "public_key",
+        "governance FN-DSA identity-root public key",
+    )?;
+    let identity_root_public_key = decode_lower_hex(
+        &identity_root_public_key_hex,
+        "governance FN-DSA identity-root public key",
+    )?;
+    if identity_root_public_key.len() != 1_793 {
+        return Err(format!(
+            "governance FN-DSA identity-root public key is {} bytes; expected 1793",
+            identity_root_public_key.len()
+        ));
+    }
+    if derive_standard_account_address(&identity_root_public_key)? != standard_account_address {
+        return Err(
+            "governance standard-account address is not rooted in its frozen FN-DSA identity"
+                .to_string(),
+        );
+    }
     let public_bytes = read_file(
         &bundle.join("identity.pub.json"),
-        "governance public identity",
+        "governance authorization public key",
     )?;
-    let public_document = parse_json(&public_bytes, "governance public identity")?;
+    let public_document = parse_json(&public_bytes, "governance authorization public key")?;
     if public_document
         .get("binary_encoding")
         .and_then(Value::as_str)
@@ -322,34 +403,15 @@ pub fn load_frozen_governance_authority(
             "governance public bundle does not match the frozen authority entry".to_string(),
         );
     }
-    match public_document
+    if public_document
         .get("schema_version")
         .and_then(Value::as_str)
+        != Some("synergy-governance-authorization-public-key-v1")
     {
-        // Rotation documents intentionally contain no address field.  The
-        // immutable authority record is still checked against the key-derived
-        // Standard Account address below.
-        Some("synergy-governance-authorization-public-key-v1") => {}
-        // Preservation retains the immutable key in the V3 document shape.
-        // Its legacy-address evidence must agree with the record as well as
-        // the key-derived Standard Account address checked below.
-        Some("synergy-authority-public-identity-v3") => {
-            if public_document.get("address_type").and_then(Value::as_str) != Some("WalletAccount")
-                || public_document.get("address").and_then(Value::as_str)
-                    != Some(standard_account_address.as_str())
-            {
-                return Err(
-                    "preserved governance public bundle does not match the frozen authority entry"
-                        .to_string(),
-                );
-            }
-        }
-        _ => {
-            return Err(
-                "governance public bundle has an unsupported or mixed binary-text schema"
-                    .to_string(),
-            )
-        }
+        return Err(
+            "governance authorization public key is not the canonical SNTS-v1.3 rotation schema"
+                .to_string(),
+        );
     }
     let public_key_hex = value_string(&public_document, "public_key", "governance public key")?;
     let public_key = decode_lower_hex(&public_key_hex, "governance public key")?;
@@ -378,9 +440,90 @@ pub fn load_frozen_governance_authority(
             "governance public-key fingerprint does not match frozen authority entry".to_string(),
         );
     }
-    if derive_standard_account_address(&public_key) != standard_account_address {
+    let release_binding_bytes = read_file(
+        &bundle.join("release-authorization-binding.json"),
+        "governance release authorization binding",
+    )?;
+    if sha256_hex(&release_binding_bytes) != release_authorization_binding_sha256 {
         return Err(
-            "governance public key does not derive the frozen standard-account address".to_string(),
+            "governance release authorization binding does not match the frozen authority entry"
+                .to_string(),
+        );
+    }
+    let release_binding = parse_json(
+        &release_binding_bytes,
+        "governance release authorization binding",
+    )?;
+    if release_binding
+        .get("schema_version")
+        .and_then(Value::as_str)
+        != Some("synergy-identity-authorization-binding-v1")
+        || release_binding
+            .get("binary_encoding")
+            .and_then(Value::as_str)
+            != Some("lowercase-hex")
+        || release_binding.get("identity_id").and_then(Value::as_str) != Some(role.as_str())
+        || release_binding
+            .get("identity_address")
+            .and_then(Value::as_str)
+            != Some(standard_account_address.as_str())
+        || release_binding
+            .pointer("/identity_root/algorithm")
+            .and_then(Value::as_str)
+            != Some("FN-DSA-1024")
+        || release_binding
+            .pointer("/identity_root/public_key")
+            .and_then(Value::as_str)
+            != Some(identity_root_public_key_hex.as_str())
+        || release_binding
+            .pointer("/authorization_policy/policy_type")
+            .and_then(Value::as_str)
+            != Some("single-key")
+        || release_binding
+            .pointer("/authorization_policy/threshold")
+            .and_then(Value::as_u64)
+            != Some(1)
+        || release_binding
+            .pointer("/authorization_policy/principals/0/algorithm")
+            .and_then(Value::as_str)
+            != Some(EXPECTED_ALGORITHM)
+        || release_binding
+            .pointer("/authorization_policy/principals/0/public_key")
+            .and_then(Value::as_str)
+            != Some(public_key_hex.as_str())
+        || release_binding
+            .pointer("/authorization_policy/principals/0/status")
+            .and_then(Value::as_str)
+            != Some("active")
+        || release_binding
+            .pointer("/authorization_scopes/0/signature_domain")
+            .and_then(Value::as_str)
+            != Some(TESTNET_V3_GENESIS_RELEASE_APPROVAL_DOMAIN)
+        || release_binding
+            .pointer("/authorization_scopes/0/chain_id")
+            .and_then(Value::as_u64)
+            != Some(EXPECTED_CHAIN_ID)
+        || release_binding
+            .pointer("/authorization_scopes/0/network_id")
+            .and_then(Value::as_str)
+            != Some(EXPECTED_NETWORK_ID)
+        || release_binding
+            .pointer("/authorization_scopes/0/purpose")
+            .and_then(Value::as_str)
+            != Some("testnet-v3-genesis-release-approval")
+        || release_binding
+            .get("authorization_scopes")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            != Some(1)
+        || release_binding
+            .get("binding_payload_sha3_256")
+            .and_then(Value::as_str)
+            != Some(governance_identity_authorization_binding_sha3_256.as_str())
+    {
+        return Err(
+            "governance release authorization binding does not bind the exact v1.3 identity, key, and V4 scope"
+                .to_string(),
         );
     }
 
@@ -801,8 +944,28 @@ mod tests {
         ));
         let bundle = root.join("test-fixture/governance");
         fs::create_dir_all(&bundle).expect("create test governance bundle");
+        let identity_root_public_key = vec![0x42; 1_793];
+        let standard_account_address = derive_standard_account_address(&identity_root_public_key)
+            .expect("test FN-DSA root derives a canonical account address");
+        let identity_root = serde_json::to_vec(&json!({
+            "schema_version": "synergy-native-public-identity-v3",
+            "binary_encoding": "lowercase-hex",
+            "identity_id": TESTNET_V3_GOVERNANCE_AUTHORITY_ROLE,
+            "address": standard_account_address,
+            "address_type": "WalletAccount",
+            "algorithm": "FN-DSA-1024",
+            "public_key": hex::encode(&identity_root_public_key),
+        }))
+        .expect("encode identity root");
+        fs::write(bundle.join("identity-root.pub.json"), &identity_root)
+            .expect("write identity root");
+        let identity_root_encrypted = b"test encrypted FN custody";
+        fs::write(
+            bundle.join("identity-root.enc.json"),
+            identity_root_encrypted,
+        )
+        .expect("write encrypted identity root");
         let public_key_fingerprint = format!("sha256:{}", sha256_hex(public_key));
-        let standard_account_address = derive_standard_account_address(public_key);
         let public_identity = serde_json::to_vec(&if preserved_v3 {
             json!({
                 "schema_version": "synergy-authority-public-identity-v3",
@@ -826,6 +989,44 @@ mod tests {
         .expect("encode public identity");
         fs::write(bundle.join("identity.pub.json"), &public_identity)
             .expect("write public identity");
+        let authorization_encrypted = b"test encrypted ML custody";
+        fs::write(bundle.join("identity.enc.json"), authorization_encrypted)
+            .expect("write encrypted authorization key");
+        let release_binding = serde_json::to_vec(&json!({
+            "schema_version": "synergy-identity-authorization-binding-v1",
+            "binary_encoding": "lowercase-hex",
+            "identity_id": TESTNET_V3_GOVERNANCE_AUTHORITY_ROLE,
+            "identity_address": standard_account_address,
+            "identity_root": {
+                "algorithm": "FN-DSA-1024",
+                "public_key": hex::encode(&identity_root_public_key),
+            },
+            "authorization_policy": {
+                "policy_type": "single-key",
+                "threshold": 1,
+                "principals": [{
+                    "principal_id": TESTNET_V3_GOVERNANCE_AUTHORITY_ROLE,
+                    "principal_type": "public-key",
+                    "algorithm": EXPECTED_ALGORITHM,
+                    "public_key": hex::encode(public_key),
+                    "status": "active",
+                    "purposes": ["testnet-v3-genesis-release-approval"],
+                }],
+            },
+            "authorization_scopes": [{
+                "signature_domain": TESTNET_V3_GENESIS_RELEASE_APPROVAL_DOMAIN,
+                "chain_id": EXPECTED_CHAIN_ID,
+                "network_id": EXPECTED_NETWORK_ID,
+                "purpose": "testnet-v3-genesis-release-approval",
+            }],
+            "binding_payload_sha3_256": "aa".repeat(32),
+        }))
+        .expect("encode release binding");
+        fs::write(
+            bundle.join("release-authorization-binding.json"),
+            &release_binding,
+        )
+        .expect("write release binding");
         let authorities = root.join("authorities.json");
         let authority_value = json!({
             "artifact": EXPECTED_AUTHORITIES_ARTIFACT,
@@ -840,9 +1041,11 @@ mod tests {
                 "authorization_algorithm": EXPECTED_ALGORITHM,
                 "standard_account_address": standard_account_address,
                 "public_key_fingerprint": public_key_fingerprint,
+                "identity_root_public_sha256": sha256_hex(&identity_root),
+                "identity_root_encrypted_sha256": sha256_hex(identity_root_encrypted),
                 "authorization_public_sha256": sha256_hex(&public_identity),
-                "authorization_encrypted_sha256": "bb".repeat(32),
-                "release_authorization_binding_sha256": "cc".repeat(32),
+                "authorization_encrypted_sha256": sha256_hex(authorization_encrypted),
+                "release_authorization_binding_sha256": sha256_hex(&release_binding),
                 "release_authorization_binding_payload_sha3_256": "aa".repeat(32),
                 "bundle_dir": "test-fixture/governance",
             }]
@@ -966,11 +1169,11 @@ mod tests {
             initial_consensus_parameter_root: EtdagGovernedRoot::from_hex(&"77".repeat(64))
                 .expect("fixed parameter digest"),
             initial_validator_set: EtdagInitialValidatorSet {
-                validators: (1..=5)
+                validators: (2..=6)
                     .map(|index| EtdagMembershipValidator {
-                        validator_id: format!("posy-validator-{index:02}"),
+                        validator_id: format!("validator-{index:02}"),
                         consensus_public_key: EtdagMembershipConsensusPublicKey {
-                            key_id: format!("posy-validator-{index:02}-consensus"),
+                            key_id: format!("validator-{index:02}-consensus"),
                             algorithm: TESTNET_V3_CONSENSUS_SIGNATURE_ALGORITHM.to_string(),
                             key_bytes: vec![index as u8; TESTNET_V3_MLDSA65_PUBLIC_KEY_BYTES],
                         },
@@ -1070,13 +1273,13 @@ mod tests {
     }
 
     #[test]
-    fn authority_loader_accepts_the_canonical_preserved_v3_public_shape() {
+    fn authority_loader_rejects_the_superseded_key_derived_v3_public_shape() {
         let (public_key, _) = test_authority_keypair();
         let repository = test_repository_with_governance_schema(&public_key, true);
 
-        assert!(
-            load_frozen_governance_authority(&repository.root, &repository.authorities).is_ok()
-        );
+        let error = load_frozen_governance_authority(&repository.root, &repository.authorities)
+            .expect_err("superseded key-derived authority schema must be rejected");
+        assert!(error.contains("canonical SNTS-v1.3 rotation schema"));
     }
 
     #[test]

@@ -27,16 +27,23 @@ const GENESIS_CRYPTO_PROFILE_DOMAIN: &str = "SYNERGY_TESTNET_V3_GENESIS_CRYPTO_P
 const GENESIS_HEIGHT_SCHEDULE_DOMAIN: &str = "SYNERGY_TESTNET_V3_GENESIS_HEIGHT_SCHEDULE_V1";
 const TRANSITION_HEIGHT_SCHEDULE_DOMAIN: &str =
     "SYNERGY_TESTNET_V3_FINALIZED_TRANSITION_HEIGHT_SCHEDULE_V1";
+const INITIAL_ACTIVE_VALIDATOR_IDS: [&str; 5] = [
+    "validator-02",
+    "validator-03",
+    "validator-04",
+    "validator-05",
+    "validator-06",
+];
 
 /// Fully public, integrity-bound starting inputs for the typed PoSy runtime.
 #[derive(Debug, Clone)]
 pub struct TestnetV3GenesisBootstrap {
-    /// Includes the six active Genesis validators and the fifteen explicitly
+    /// Includes the five active Genesis validators and the sixteen explicitly
     /// preconfigured-but-pending validators.  Pending records cannot vote or
     /// join a cluster until an authenticated activation transition changes
     /// their status.
     pub validator_set: ValidatorSet,
-    /// The deterministic epoch-zero assignment for the six active validators.
+    /// The deterministic epoch-zero assignment for the five active validators.
     pub cluster_map: ClusterMap,
     /// Verification-only Aegis registry for the active consensus keys.
     pub verifier: AegisPqvmVerifier,
@@ -139,10 +146,10 @@ impl TestnetV3GenesisBootstrap {
     }
 
     /// Derives the only permissible Testnet-v3 topology after activating a
-    /// non-empty subset of the 15 Genesis-preconfigured pending validators.
+    /// non-empty subset of the 16 Genesis-preconfigured pending validators.
     /// It cannot add new identities, reactivate an already-active validator,
-    /// or alter any public key or voting weight.  In particular, activating
-    /// validators 7 through 10 yields ten active validators and therefore two
+    /// or alter any public key or voting weight. In particular, activating
+    /// five pending validators yields ten active validators and therefore two
     /// dynamically derived clusters.
     pub fn derive_activation_plan(
         &self,
@@ -197,9 +204,9 @@ impl TestnetV3GenesisBootstrap {
                 .collect(),
         };
         active_set.validate_unique_validator_and_key_ids()?;
-        if active_set.validators.len() < 6 {
+        if active_set.validators.len() < 5 {
             return Err(
-                "Testnet-v3 activation would violate the six-validator minimum".to_string(),
+                "Testnet-v3 activation would violate the five-validator minimum".to_string(),
             );
         }
         let cluster_map =
@@ -379,17 +386,44 @@ fn load_genesis_bootstrap(
         .iter()
         .map(parse_genesis_validator_record)
         .collect::<Result<Vec<_>, _>>()?;
+    let validator_ids = validators
+        .iter()
+        .map(|validator| validator.validator_id.0.clone())
+        .collect::<BTreeSet<_>>();
+    let expected_validator_ids = (1..=21)
+        .map(|ordinal| format!("validator-{ordinal:02}"))
+        .collect::<BTreeSet<_>>();
+    if validator_ids != expected_validator_ids {
+        return Err(
+            "Testnet-v3 Genesis validator IDs must be exactly validator-01 through validator-21"
+                .to_string(),
+        );
+    }
+    let active_validator_ids = validators
+        .iter()
+        .filter(|validator| validator.status == ValidatorStatus::Active)
+        .map(|validator| validator.validator_id.0.as_str())
+        .collect::<BTreeSet<_>>();
+    let expected_active_validator_ids = INITIAL_ACTIVE_VALIDATOR_IDS
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if active_validator_ids != expected_active_validator_ids {
+        return Err(
+            "Testnet-v3 Genesis active validator IDs must be exactly validator-02 through validator-06"
+                .to_string(),
+        );
+    }
     let active_count = validators
         .iter()
         .filter(|validator| validator.status == ValidatorStatus::Active)
         .count();
-    if active_count != 6 {
+    if active_count != 5 {
         return Err(format!(
-            "Testnet-v3 Genesis must activate exactly six validators; found {active_count}"
+            "Testnet-v3 Genesis must activate exactly five validators; found {active_count}"
         ));
     }
-    if validators.len().saturating_sub(active_count) != 15 {
-        return Err("Testnet-v3 Genesis must retain fifteen pending validator records".to_string());
+    if validators.len().saturating_sub(active_count) != 16 {
+        return Err("Testnet-v3 Genesis must retain sixteen pending validator records".to_string());
     }
 
     let epoch = Epoch(0);
@@ -405,14 +439,14 @@ fn load_genesis_bootstrap(
     };
     let cluster_map =
         ClusterMap::derive_from_finalized_epoch_seed(&active_set, finalized_epoch_seed_root)?;
-    if cluster_map.assignments.len() != 6
+    if cluster_map.assignments.len() != 5
         || cluster_map
             .assignments
             .iter()
             .any(|assignment| assignment.cluster_id != ClusterId(0))
     {
         return Err(
-            "six-validator Testnet-v3 Genesis must derive exactly one cluster (cluster 0)"
+            "five-validator Testnet-v3 Genesis must derive exactly one cluster (cluster 0)"
                 .to_string(),
         );
     }
@@ -620,7 +654,7 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn identity_assigned_genesis_derives_six_active_validators_one_cluster_and_aegis_registry() {
+    fn identity_assigned_genesis_derives_five_active_validators_one_cluster_and_aegis_registry() {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
@@ -637,15 +671,25 @@ mod tests {
                 .iter()
                 .filter(|validator| validator.status == ValidatorStatus::Active)
                 .count(),
-            6
+            5
         );
-        assert_eq!(bootstrap.cluster_map.assignments.len(), 6);
+        assert_eq!(
+            bootstrap
+                .validator_set
+                .validators
+                .iter()
+                .filter(|validator| validator.status == ValidatorStatus::Active)
+                .map(|validator| validator.validator_id.0.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(INITIAL_ACTIVE_VALIDATOR_IDS)
+        );
+        assert_eq!(bootstrap.cluster_map.assignments.len(), 5);
         assert!(bootstrap
             .cluster_map
             .assignments
             .iter()
             .all(|assignment| assignment.cluster_id == ClusterId(0)));
-        assert_eq!(bootstrap.verifier.registry.lifecycle.records.len(), 6);
+        assert_eq!(bootstrap.verifier.registry.lifecycle.records.len(), 5);
         assert!(bootstrap
             .verifier
             .registry
@@ -657,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    fn activating_the_tenth_validator_derives_the_second_dynamic_cluster() {
+    fn activating_five_pending_validators_derives_the_second_dynamic_cluster() {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
@@ -671,7 +715,7 @@ mod tests {
             .validators
             .iter()
             .filter(|validator| validator.status == ValidatorStatus::PendingActivation)
-            .take(4)
+            .take(5)
             .map(|validator| validator.validator_id.clone())
             .collect::<Vec<_>>();
         let plan = bootstrap
@@ -776,7 +820,7 @@ mod tests {
         assert_eq!(context.latest_finalized_block_hash, anchor);
         assert_eq!(context.latest_finalized_state_root, deployed_state);
         assert_eq!(context.height_context.assigned_cluster_id, ClusterId(0));
-        assert_eq!(context.height_context.assigned_cluster_validator_count, 6);
+        assert_eq!(context.height_context.assigned_cluster_validator_count, 5);
         assert!(bootstrap
             .initial_local_consensus_context(&protocol, Hash::zero(), deployed_state)
             .is_err());

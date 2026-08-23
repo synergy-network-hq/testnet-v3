@@ -11,6 +11,7 @@ use std::{cell::RefCell, collections::BTreeMap};
 use crate::consensus_parameters::{
     load_genesis_bound_consensus_parameters, LoadedConsensusParameters,
     CONSENSUS_PARAMETER_GENESIS_BINDING_SCHEMA_VERSION, CONSENSUS_PARAMETER_GENESIS_BINDING_STATUS,
+    CONSENSUS_PARAMETER_MANIFEST_RELEASE_ID,
 };
 use crate::etdag_governance::{EtdagGovernedGenesisBinding, EtdagGovernedMembershipAnchor};
 use crate::synergy_types::{
@@ -261,7 +262,8 @@ fn load_canonical_genesis_from_path(path: PathBuf) -> Result<GenesisDocument, St
             "Genesis consensus state namespace does not match its chain domain".to_string(),
         );
     }
-    let network_id = required_u64(&value, &["network", "network_id"])?;
+    let network_id =
+        parse_runtime_numeric_network_id(&value, chain_id, is_fresh_simplified_genesis)?;
     let protocol_version = required_string(&value, &["network", "protocol_version"])?;
     let consensus_version = required_string(&value, &["network", "consensus_version"])?;
     let balances = parse_balances(&value)?;
@@ -308,6 +310,42 @@ fn load_canonical_genesis_from_path(path: PathBuf) -> Result<GenesisDocument, St
         .map_err(|error| format!("validate finalized Genesis execution state: {error}"))?;
     }
     Ok(document)
+}
+
+/// Validates Genesis' canonical network identity while preserving the numeric
+/// compatibility value used by existing internal wire structures. Fresh P3
+/// Genesis remains string-identified as `testnet`; only the in-memory legacy
+/// compatibility field is derived as 1266.
+fn parse_runtime_numeric_network_id(
+    value: &Value,
+    chain_id: u64,
+    is_fresh_simplified_genesis: bool,
+) -> Result<u64, String> {
+    if is_fresh_simplified_genesis {
+        if chain_id != crate::synergy_types::SYNERGY_TESTNET_V3_CHAIN_ID {
+            return Err(format!(
+                "fresh P3 network.chain_id must be {}, found {chain_id}",
+                crate::synergy_types::SYNERGY_TESTNET_V3_CHAIN_ID
+            ));
+        }
+        if required_string(value, &["network", "network_id"])?
+            != crate::synergy_types::TESTNET_V3_CANONICAL_NETWORK_ID
+        {
+            return Err(
+                "fresh P3 network.network_id must be the canonical string testnet".to_string(),
+            );
+        }
+        if required_string(value, &["network", "release_id"])?
+            != CONSENSUS_PARAMETER_MANIFEST_RELEASE_ID
+        {
+            return Err(
+                "fresh P3 network.release_id must be the canonical string testnet-v3".to_string(),
+            );
+        }
+        return Ok(crate::synergy_types::SYNERGY_TESTNET_V3_CHAIN_ID);
+    }
+
+    required_u64(value, &["network", "network_id"])
 }
 
 /// Loads and fully validates a genesis document from an explicit path.
@@ -1325,7 +1363,7 @@ pub fn bind_testnet_v3_genesis_simplified_posy_authorities(
     activation.validate()?;
     if activation.manifest != *manifest
         || activation.parameter_root_sha3_512 != loaded.root.to_hex()
-        || activation.governance_decision_id != manifest.governance_approval_id()?
+        || activation.governance_decision_id != manifest.finalized_governance_approval_id()?
     {
         return Err(
             "fresh simplified PoSy activation does not exactly match the finalized consensus manifest"
@@ -1416,7 +1454,8 @@ fn bind_testnet_v3_genesis_consensus_parameters_inner(
             activation.validate()?;
             if activation.manifest != *manifest
                 || activation.parameter_root_sha3_512 != loaded.root.to_hex()
-                || activation.governance_decision_id != manifest.governance_approval_id()?
+                || activation.governance_decision_id
+                    != manifest.finalized_governance_approval_id()?
             {
                 return Err(
                     "fresh simplified PoSy activation does not exactly match the finalized consensus manifest"
@@ -1487,14 +1526,16 @@ fn bind_testnet_v3_genesis_consensus_parameters_inner(
     value["integrity"]["consensus_parameter_decision_id"] =
         Value::String(manifest.governance_approval_id()?.to_string());
 
-    let hash_inputs = value["canonicalization"]["genesis_hash_inputs"]
-        .as_array_mut()
-        .ok_or_else(|| "canonicalization.genesis_hash_inputs is not an array".to_string())?;
-    if !hash_inputs
-        .iter()
-        .any(|entry| entry.as_str() == Some("consensus_parameters"))
     {
-        hash_inputs.push(Value::String("consensus_parameters".to_string()));
+        let hash_inputs = value["canonicalization"]["genesis_hash_inputs"]
+            .as_array_mut()
+            .ok_or_else(|| "canonicalization.genesis_hash_inputs is not an array".to_string())?;
+        if !hash_inputs
+            .iter()
+            .any(|entry| entry.as_str() == Some("consensus_parameters"))
+        {
+            hash_inputs.push(Value::String("consensus_parameters".to_string()));
+        }
     }
     if let Some(etdag_binding) = etdag_binding {
         value["etdag_governance"] = serde_json::to_value(etdag_binding)
@@ -1511,6 +1552,9 @@ fn bind_testnet_v3_genesis_consensus_parameters_inner(
                 .etdag_fee_schedule_root_sha3_512
                 .to_hex(),
         );
+        let hash_inputs = value["canonicalization"]["genesis_hash_inputs"]
+            .as_array_mut()
+            .ok_or_else(|| "canonicalization.genesis_hash_inputs is not an array".to_string())?;
         if !hash_inputs
             .iter()
             .any(|entry| entry.as_str() == Some("etdag_governance"))
@@ -2084,6 +2128,57 @@ mod tests {
     }
 
     #[test]
+    fn fresh_p3_network_identity_maps_to_numeric_runtime_compatibility() {
+        let value = json!({
+            "network": {
+                "chain_id": 1266,
+                "network_id": "testnet",
+                "release_id": "testnet-v3",
+                "consensus_version": "posy/3.0",
+            }
+        });
+
+        assert_eq!(
+            parse_runtime_numeric_network_id(&value, 1266, true).unwrap(),
+            1266
+        );
+    }
+
+    #[test]
+    fn fresh_p3_network_identity_rejects_noncanonical_fields() {
+        let canonical = json!({
+            "network": {
+                "chain_id": 1266,
+                "network_id": "testnet",
+                "release_id": "testnet-v3",
+                "consensus_version": "posy/3.0",
+            }
+        });
+
+        let error = parse_runtime_numeric_network_id(&canonical, 1267, true).unwrap_err();
+        assert!(error.contains("network.chain_id"));
+
+        let mut wrong_network = canonical.clone();
+        wrong_network["network"]["network_id"] = Value::String("synergy-testnet-v3".to_string());
+        let error = parse_runtime_numeric_network_id(&wrong_network, 1266, true).unwrap_err();
+        assert!(error.contains("network.network_id"));
+
+        let mut wrong_release = canonical;
+        wrong_release["network"]["release_id"] = Value::String("testnet-v4".to_string());
+        let error = parse_runtime_numeric_network_id(&wrong_release, 1266, true).unwrap_err();
+        assert!(error.contains("network.release_id"));
+    }
+
+    #[test]
+    fn legacy_network_identity_retains_numeric_loader_contract() {
+        let value = json!({ "network": { "network_id": 1266 } });
+        assert_eq!(
+            parse_runtime_numeric_network_id(&value, 1266, false).unwrap(),
+            1266
+        );
+    }
+
+    #[test]
     fn testnet_v3_candidate_schema_recomputes_all_bound_roots() {
         let candidate = testnet_v3_candidate();
         assert!(is_testnet_v3_candidate_schema(&candidate));
@@ -2093,7 +2188,7 @@ mod tests {
         );
         assert_eq!(
             candidate["consensus"]["initial_active_validator_count"].as_u64(),
-            Some(6)
+            Some(5)
         );
         assert_eq!(
             candidate["consensus"]["initial_cluster_count"].as_u64(),
@@ -2101,16 +2196,16 @@ mod tests {
         );
         assert_eq!(
             candidate["consensus"]["min_validator_count"].as_u64(),
-            Some(6)
+            Some(5)
         );
         assert_eq!(
             candidate["consensus"]["min_quorum_threshold"].as_u64(),
-            Some(5)
+            Some(4)
         );
         let validators = candidate["validators"]
             .as_array()
             .expect("candidate validators must be an array");
-        assert_eq!(validators.len(), 6);
+        assert_eq!(validators.len(), 5);
         for validator in validators {
             assert_eq!(validator["consensus_key_type"].as_str(), Some("ML-DSA-65"));
             let bytes = base64::engine::general_purpose::STANDARD

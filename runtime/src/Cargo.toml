@@ -13,6 +13,7 @@ bincode = { workspace = true }
 hex = { workspace = true }
 sha3 = { workspace = true }
 lazy_static = { workspace = true }
+zeroize = { workspace = true }
 sha2 = "0.10"
 
 # Additional dependencies
@@ -200,6 +201,9 @@ path = "bin/posy-simplified-five-driver-harness.rs"
 # custody decryptor. Kept behind a feature so the default library build and the
 # release five-run gate are unaffected.
 ceremony = []
+# Development-only escape hatch for exercising the ceremony against an
+# uninstalled Address Engine. Production ceremony builds must not enable this.
+ceremony-dev-engine-override = ["ceremony"]
 
 [[bin]]
 name = "synergy-genesis-ceremony"

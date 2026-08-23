@@ -46,8 +46,8 @@ if [[ "${SYNERGY_CHAIN1266_QUALIFICATION_MODE:-}" == "1" ]]; then
     exit 1
   }
 else
-  [[ "$SYNERGY_DATA_PATH" == */chain-1266/incarnation-4/data ]] || {
-    echo "Chain-derived state is outside the incarnation-4 namespace" >&2
+  [[ "$SYNERGY_DATA_PATH" =~ /chain-1266/incarnation-(4|5)/data$ ]] || {
+    echo "Chain-derived state is outside an authorized Chain-1266 incarnation namespace" >&2
     exit 1
   }
 fi

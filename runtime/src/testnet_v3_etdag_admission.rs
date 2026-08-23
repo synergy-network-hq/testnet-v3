@@ -17,7 +17,9 @@ use crate::etdag::{
     INGRESS_KEM_REGISTRY_VERSION,
 };
 use crate::genesis::{load_genesis_from_path, GenesisDocument};
-use crate::synergy_types::{ClusterId, Epoch, Hash, Height, ValidatorId};
+use crate::synergy_types::{
+    ClusterId, Epoch, Hash, Height, ValidatorId, TESTNET_V3_CANONICAL_NETWORK_ID,
+};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as Sha2Digest, Sha256};
@@ -38,6 +40,9 @@ pub const TARGET_ADMISSION_PACKAGE_ARTIFACT_TYPE: &str =
     "testnet-v3-etdag-target-admission-package";
 pub const FIRST_ETDAG_TARGET_HEIGHT: u64 = 3;
 const INGRESS_KEY_ID_DOMAIN: &[u8] = b"SYNERGY_TESTNET_V3_ETDAG_INGRESS_KEY_ID_V1";
+const INITIAL_ACTIVE_VALIDATOR_COUNT: usize = 5;
+const INITIAL_TARGET_ADMISSION_QUORUM: usize = 4;
+const TESTNET_V3_POSY_PROTOCOL_VERSION: &str = "posy/3.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -126,7 +131,7 @@ struct PublicIngressAdmissionBinding {
     runtime_registry_domain: String,
     certificate_domain: String,
     required_consensus_algorithm: String,
-    minimum_signers_for_six_validator_cluster: u8,
+    minimum_signers_for_five_validator_cluster: u8,
     requirement: String,
 }
 
@@ -233,8 +238,8 @@ fn load_public_ingress_registry(
         || artifact.artifact_type != "testnet-v3-etdag-ingress-key-records"
         || artifact.status != "generated_pending_target_admission_certificate"
         || artifact.chain_id != 1266
-        || artifact.runtime_network_id != "synergy-testnet-v3"
-        || artifact.protocol_version != "posy/2.2"
+        || artifact.runtime_network_id != TESTNET_V3_CANONICAL_NETWORK_ID
+        || artifact.protocol_version != TESTNET_V3_POSY_PROTOCOL_VERSION
         || artifact.genesis_candidate_sha256 != applied_genesis_sha256
         || artifact.genesis_hash != genesis.hash()
         || artifact.admission_binding.runtime_registry_type != "IngressKemKeyRegistry/v2"
@@ -244,9 +249,9 @@ fn load_public_ingress_registry(
         || artifact.admission_binding.required_consensus_algorithm != "ML-DSA-65"
         || artifact
             .admission_binding
-            .minimum_signers_for_six_validator_cluster
-            != 5
-        || artifact.records.len() != 6
+            .minimum_signers_for_five_validator_cluster
+            != INITIAL_TARGET_ADMISSION_QUORUM as u8
+        || artifact.records.len() != INITIAL_ACTIVE_VALIDATOR_COUNT
     {
         return Err("public ingress artifact is not bound to the applied Testnet-v3 Genesis runtime profile".to_string());
     }
@@ -359,14 +364,17 @@ fn load_public_ingress_registry(
             .then_with(|| left.share_index.cmp(&right.share_index))
             .then_with(|| left.ingress_key_id.cmp(&right.ingress_key_id))
     });
-    if seen_validator_ids.len() != 6 || seen_shares.len() != 6 || seen_key_ids.len() != 6 {
-        return Err("public ingress artifact does not contain six unique authorities".to_string());
+    if seen_validator_ids.len() != INITIAL_ACTIVE_VALIDATOR_COUNT
+        || seen_shares.len() != INITIAL_ACTIVE_VALIDATOR_COUNT
+        || seen_key_ids.len() != INITIAL_ACTIVE_VALIDATOR_COUNT
+    {
+        return Err("public ingress artifact does not contain five unique authorities".to_string());
     }
     let registry = IngressKemKeyRegistry {
         registry_version: INGRESS_KEM_REGISTRY_VERSION,
         chain_id: crate::synergy_types::ChainId::synergy_testnet_v3(),
         network_id: crate::synergy_types::NetworkId::fresh_posy_testnet_v3(),
-        protocol_version: "posy/2.2".to_string(),
+        protocol_version: TESTNET_V3_POSY_PROTOCOL_VERSION.to_string(),
         epoch: Epoch(0),
         target_height,
         assigned_cluster_id: ClusterId(0),
@@ -425,7 +433,7 @@ pub fn prepare_first_target_admission_request(
     )?;
     let context = TargetAdmissionContext::derive(
         TargetAdmissionContextSpec {
-            protocol_version: "posy/2.2".to_string(),
+            protocol_version: TESTNET_V3_POSY_PROTOCOL_VERSION.to_string(),
             epoch: Epoch(0),
             target_height,
             source_finalized_height: Height(0),
@@ -448,7 +456,7 @@ pub fn prepare_first_target_admission_request(
         ingress_kem_registry_root: context.ingress_kem_registry_root.clone(),
         source_finalized_height: context.source_finalized_height,
         source_finality_context_root: context.source_finality_context_root,
-        signer_count: 5,
+        signer_count: INITIAL_TARGET_ADMISSION_QUORUM as u64,
         signed_weight: 0,
         votes: Vec::new(),
     };
@@ -479,16 +487,16 @@ pub fn prepare_first_target_admission_request(
         })
         .collect::<Result<Vec<_>, String>>()?;
     signer_requests.sort_by(|left, right| left.validator_id.cmp(&right.validator_id));
-    if signer_requests.len() != 6 {
+    if signer_requests.len() != INITIAL_ACTIVE_VALIDATOR_COUNT {
         return Err(
-            "first ETDAG admission must have exactly six active eligible signers".to_string(),
+            "first ETDAG admission must have exactly five active eligible signers".to_string(),
         );
     }
     Ok(TestnetV3TargetAdmissionRequest {
         schema_version: TARGET_ADMISSION_REQUEST_SCHEMA_VERSION,
         artifact_type: TARGET_ADMISSION_REQUEST_ARTIFACT_TYPE.to_string(),
         chain_id: 1266,
-        runtime_network_id: "synergy-testnet-v3".to_string(),
+        runtime_network_id: TESTNET_V3_CANONICAL_NETWORK_ID.to_string(),
         applied_genesis_sha256,
         applied_genesis_hash: genesis.hash().to_string(),
         source_finalized_height: Height(0),
@@ -567,7 +575,7 @@ pub fn write_first_target_admission_request(
     Ok((request, request_sha256))
 }
 
-/// Rebuild the request from current applied inputs, verify five detached
+/// Rebuild the request from current applied inputs, verify four detached
 /// ML-DSA-65 votes using the production Aegis verifier, and return the runtime
 /// `TargetAdmissionPackage` that a node may install.
 pub fn verify_first_target_admission_votes(
@@ -587,10 +595,10 @@ pub fn verify_first_target_admission_votes(
         || votes.artifact_type != TARGET_ADMISSION_VOTES_ARTIFACT_TYPE
         || votes.request_sha256 != request_sha256
         || votes.signature_domain != DOMAIN_TARGET_ADMISSION
-        || votes.votes.len() != 5
+        || votes.votes.len() != INITIAL_TARGET_ADMISSION_QUORUM
     {
         return Err(
-            "target admission vote artifact is not an exact 5-of-6 Testnet-v3 certificate"
+            "target admission vote artifact is not an exact 4-of-5 Testnet-v3 certificate"
                 .to_string(),
         );
     }
@@ -609,7 +617,7 @@ pub fn verify_first_target_admission_votes(
         ingress_kem_registry_root: request.context.ingress_kem_registry_root.clone(),
         source_finalized_height: request.context.source_finalized_height,
         source_finality_context_root: request.context.source_finality_context_root,
-        signer_count: 5,
+        signer_count: INITIAL_TARGET_ADMISSION_QUORUM as u64,
         signed_weight: 0,
         votes: Vec::new(),
     };
@@ -620,7 +628,7 @@ pub fn verify_first_target_admission_votes(
         .iter()
         .map(|entry| (entry.validator_id.clone(), entry))
         .collect::<BTreeMap<_, _>>();
-    if expected_signers.len() != 6
+    if expected_signers.len() != INITIAL_ACTIVE_VALIDATOR_COUNT
         || request.signer_requests.iter().any(|entry| {
             entry.signature_algorithm != "ML-DSA-65"
                 || entry.signature_domain != DOMAIN_TARGET_ADMISSION
@@ -757,8 +765,8 @@ mod tests {
     fn ingress_key_id_changes_when_the_applied_genesis_changes() {
         let key = vec![7; 1568];
         assert_ne!(
-            ingress_key_id(&"a".repeat(64), "validator-1", &key),
-            ingress_key_id(&"b".repeat(64), "validator-1", &key)
+            ingress_key_id(&"a".repeat(64), "validator-02", &key),
+            ingress_key_id(&"b".repeat(64), "validator-02", &key)
         );
     }
 }

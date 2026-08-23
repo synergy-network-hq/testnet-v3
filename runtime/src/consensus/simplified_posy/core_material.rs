@@ -4,9 +4,11 @@
 //! startup is governed-ETDAG-only and never selects this adapter as a fallback.
 
 use super::{
-    compute_simplified_protected_execution_root, FinalizedBlockRecord, SimplifiedEpochContext,
-    SimplifiedMaterialAdapter, SimplifiedProposal, SimplifiedProposalDirective,
-    VerifiedSimplifiedProposalMaterial, POSY_SIMPLIFIED_PROTOCOL_VERSION,
+    compute_simplified_protected_execution_root, simplified_fee_market_header_fields,
+    validate_simplified_fee_market_header_against_parent, FinalizedBlockRecord,
+    SimplifiedEpochContext, SimplifiedMaterialAdapter, SimplifiedParentFeeMarketState,
+    SimplifiedProposal, SimplifiedProposalDirective, VerifiedSimplifiedProposalMaterial,
+    POSY_SIMPLIFIED_PROTOCOL_VERSION,
 };
 use crate::consensus_parameters::ConsensusParameterRoot;
 use crate::dag_mempool::compute_tx_order_root;
@@ -25,6 +27,11 @@ pub struct SimplifiedCoreMaterialConfiguration {
     pub validator_set: ValidatorSet,
     pub cluster_map: ClusterMap,
     pub execution_state: ExecutionState,
+    /// Explicit certified-parent fee authority for this historical adapter.
+    /// Fresh block one uses `None`; every later height fails closed without
+    /// the exact parent values. Production P3 uses the protected adapter,
+    /// which derives this state from QC-keyed durable material.
+    pub parent_fee_market: Option<SimplifiedParentFeeMarketState>,
     pub cryptographic_profile_root: Hash,
     pub epoch_start_timestamp_ms: u64,
     pub target_block_time_ms: u64,
@@ -50,6 +57,10 @@ impl SimplifiedCoreMaterialConfiguration {
         {
             return Err("invalid simplified core-material configuration".to_string());
         }
+        simplified_fee_market_header_fields(
+            epoch_context.epoch_start_height,
+            self.parent_fee_market,
+        )?;
         let active = self.validator_set.active_for_epoch(epoch_context.epoch);
         let expected_ids = active
             .validators
@@ -91,6 +102,7 @@ impl SimplifiedCoreMaterialConfiguration {
 pub struct SimplifiedCoreMaterialAdapter {
     epoch_context: SimplifiedEpochContext,
     configuration: SimplifiedCoreMaterialConfiguration,
+    certified_parent_fee_markets: std::collections::BTreeMap<Hash, SimplifiedParentFeeMarketState>,
 }
 
 impl SimplifiedCoreMaterialAdapter {
@@ -102,7 +114,39 @@ impl SimplifiedCoreMaterialAdapter {
         Ok(Self {
             epoch_context,
             configuration,
+            certified_parent_fee_markets: std::collections::BTreeMap::new(),
         })
+    }
+
+    fn parent_fee_market(
+        &self,
+        parent: &super::SimplifiedFinalityParent,
+        child_height: crate::synergy_types::Height,
+    ) -> Result<Option<SimplifiedParentFeeMarketState>, String> {
+        if parent.quorum_certificate_reference().is_none() {
+            return Ok(None);
+        }
+        if child_height == self.epoch_context.epoch_start_height {
+            return self
+                .configuration
+                .parent_fee_market
+                .map(Some)
+                .ok_or_else(|| {
+                    "core adapter epoch boundary has no explicit certified parent fee authority"
+                        .to_string()
+                });
+        }
+        let reference = parent.quorum_certificate_reference().ok_or_else(|| {
+            "core adapter child above block one has no quorum-certified parent".to_string()
+        })?;
+        self.certified_parent_fee_markets
+            .get(&reference.qc_id)
+            .copied()
+            .map(Some)
+            .ok_or_else(|| {
+                "core adapter has no verified material for the certified parent fee authority"
+                    .to_string()
+            })
     }
 
     fn cluster_members(&self) -> Result<(ClusterId, Vec<ValidatorRecord>, u64, Hash), String> {
@@ -243,6 +287,10 @@ impl SimplifiedMaterialAdapter for SimplifiedCoreMaterialAdapter {
         }
         let (cluster_id, members, total_weight, membership_root) = self.cluster_members()?;
         let state_root = compute_state_root_after(&self.configuration.execution_state)?;
+        let parent_fee_market =
+            self.parent_fee_market(&directive.parent, directive.context.height)?;
+        let fee_market =
+            simplified_fee_market_header_fields(directive.context.height, parent_fee_market)?;
         let block = Block {
             header: BlockHeader {
                 version: 3,
@@ -289,6 +337,13 @@ impl SimplifiedMaterialAdapter for SimplifiedCoreMaterialAdapter {
                 aegis_pqvm_version: self.configuration.aegis_pqvm_version.clone(),
                 timestamp_ms_consensus_bounded: self
                     .timestamp_for_height(directive.context.height)?,
+                base_fee_per_gas_nwei: fee_market.base_fee_per_gas_nwei,
+                gas_used: 0,
+                gas_limit: fee_market.gas_limit,
+                pq_gas_used: 0,
+                pq_gas_limit: fee_market.pq_gas_limit,
+                pq_gas_multiplier: fee_market.pq_gas_multiplier,
+                fee_market_version: fee_market.fee_market_version,
             },
             transactions: Vec::new(),
             proposer_signature: AegisPqSignature {
@@ -324,11 +379,16 @@ impl SimplifiedMaterialAdapter for SimplifiedCoreMaterialAdapter {
             &proposal,
             block,
             &self.configuration.execution_state,
+            parent_fee_market,
         )?;
         if next_state != self.configuration.execution_state {
             return Err("core-only simplified block changed execution state".to_string());
         }
         self.verify_static_header(&proposal, &directive.finalized, &material)?;
+        self.certified_parent_fee_markets.insert(
+            material.stable_candidate_id,
+            SimplifiedParentFeeMarketState::from_verified_header(&material.canonical_block.header)?,
+        );
         Ok(Some((proposal, material)))
     }
 
@@ -342,12 +402,25 @@ impl SimplifiedMaterialAdapter for SimplifiedCoreMaterialAdapter {
         if epoch_context.root()? != self.epoch_context.root()? {
             return Err("received core material names another epoch".to_string());
         }
+        let parent_fee_market =
+            self.parent_fee_market(&proposal.parent, proposal.context.height)?;
         self.verify_static_header(proposal, expected_finalized, material)?;
-        let next_state =
-            material.replay_core(epoch_context, &self.configuration.execution_state)?;
+        let next_state = material.replay_core(
+            epoch_context,
+            &self.configuration.execution_state,
+            parent_fee_market,
+        )?;
+        validate_simplified_fee_market_header_against_parent(
+            &material.canonical_block.header,
+            parent_fee_market,
+        )?;
         if next_state != self.configuration.execution_state {
             return Err("received core-only block changed execution state".to_string());
         }
+        self.certified_parent_fee_markets.insert(
+            material.stable_candidate_id,
+            SimplifiedParentFeeMarketState::from_verified_header(&material.canonical_block.header)?,
+        );
         Ok(material.candidate_subject.protected_execution_root)
     }
 }
@@ -355,6 +428,7 @@ impl SimplifiedMaterialAdapter for SimplifiedCoreMaterialAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::consensus::simplified_posy::QuorumCertificateReference;
     use crate::synergy_types::{
         AegisPqKeyId, AegisPqPublicKey, BlockId, ClusterAssignment, Epoch, Height, Round, UmaId,
         ValidatorId, ValidatorStatus, TESTNET_V3_CONSENSUS_SIGNATURE_ALGORITHM,
@@ -387,6 +461,15 @@ mod tests {
         }
     }
 
+    fn parent_fee_market() -> SimplifiedParentFeeMarketState {
+        let parameters = crate::gas::fee_market_params_for_runtime().unwrap();
+        SimplifiedParentFeeMarketState {
+            base_fee_per_gas_nwei: parameters.initial_base_fee_nwei,
+            gas_used: 0,
+            fee_market_version: parameters.fee_market_version,
+        }
+    }
+
     #[test]
     fn core_adapter_builds_and_replays_a_dynamic_epoch_empty_block() {
         let validators = validators();
@@ -412,7 +495,7 @@ mod tests {
                 .collect(),
         }
         .canonicalized();
-        let parent_qc = super::super::QuorumCertificateReference {
+        let parent_qc = QuorumCertificateReference {
             height: Height(999),
             block_id: BlockId::from_hash(Hash::from_domain_bytes(
                 "core-material-test",
@@ -451,6 +534,7 @@ mod tests {
             validator_set: validators,
             cluster_map,
             execution_state: ExecutionState::new(),
+            parent_fee_market: Some(parent_fee_market()),
             cryptographic_profile_root: Hash::from_domain_bytes(
                 "core-material-test",
                 b"crypto-profile",

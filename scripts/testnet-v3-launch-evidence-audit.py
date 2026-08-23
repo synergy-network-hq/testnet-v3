@@ -28,8 +28,8 @@ from typing import Any
 
 
 CHAIN_ID = 1266
-NETWORK_ID = "synergy-testnet-v3"
-GENERATOR_VERSION = "testnet-v3-node-configs/v6"
+NETWORK_ID = "testnet"
+GENERATOR_VERSION = "testnet-v3-node-configs/v8-posy-simplified-v3"
 PHASE7_STATUS = "PHASE_7_8_APPLIED_PENDING_RELEASE_GATES"
 EXPECTED_INNERNET_NETWORK = "synergy-innernet-membership-v1"
 # The user-authorized fresh peer reset deliberately retained this pinned V3
@@ -37,8 +37,9 @@ EXPECTED_INNERNET_NETWORK = "synergy-innernet-membership-v1"
 # an explicit runtime/config rebind and a fresh qualification pass; do not
 # infer one merely because the Innernet peer state was rebuilt.
 EXPECTED_INNERNET_MIGRATION_ID = "synergy-testnet-innernet-v19-14450ae4d67455c7"
-EXPECTED_VALIDATOR_IDS = tuple(f"validator-{number}" for number in range(1, 7))
-EXPECTED_IDENTITY_IDS = tuple(f"VNS-A{number:02d}" for number in range(2, 8))
+EXPECTED_VALIDATOR_IDS = tuple(f"validator-{number:02d}" for number in range(2, 7))
+EXPECTED_IDENTITY_IDS = tuple(f"VNS-A{number:02d}" for number in range(3, 8))
+EXPECTED_TARGET_ADMISSION_VOTES = 4
 HEX_LENGTHS = {64, 128}
 
 
@@ -158,8 +159,8 @@ def active_validators(genesis: dict[str, Any]) -> list[dict[str, Any]]:
         for index, entry in enumerate(validators)
         if isinstance(entry, dict) and entry.get("status") == "active_at_genesis"
     ]
-    if len(active) != 6:
-        raise ValueError(f"Genesis must contain exactly six active_at_genesis validators, found {len(active)}")
+    if len(active) != 5:
+        raise ValueError(f"Genesis must contain exactly five active_at_genesis validators, found {len(active)}")
     by_id: dict[str, dict[str, Any]] = {}
     for entry in active:
         validator_id = require_string(entry.get("validator_id"), "Genesis validator_id")
@@ -168,7 +169,7 @@ def active_validators(genesis: dict[str, Any]) -> list[dict[str, Any]]:
         by_id[validator_id] = entry
     if tuple(sorted(by_id)) != EXPECTED_VALIDATOR_IDS:
         raise ValueError(
-            "Genesis active validator IDs must be validator-1 through validator-6; found "
+            "Genesis active validator IDs must be validator-02 through validator-06; found "
             + ", ".join(sorted(by_id))
         )
     return [by_id[validator_id] for validator_id in EXPECTED_VALIDATOR_IDS]
@@ -192,7 +193,7 @@ def audit_genesis(audit: Audit, genesis_path: Path) -> dict[str, Any] | None:
         validators = active_validators(genesis)
         audit.passed(
             gate,
-            f"sha256={sha256_bytes(raw)} genesis_hash={genesis_hash} active_validators=6",
+            f"sha256={sha256_bytes(raw)} genesis_hash={genesis_hash} active_validators=5",
         )
         return {
             "object": genesis,
@@ -341,7 +342,7 @@ def audit_consensus_parameters(
 def audit_identity_correspondence(
     audit: Audit, genesis: dict[str, Any] | None, identity_root: Path
 ) -> dict[str, dict[str, Any]]:
-    gate = "six validator identity correspondence"
+    gate = "five validator identity correspondence"
     if genesis is None:
         audit.failed(gate, "cannot bind identity files without a valid Genesis")
         return {}
@@ -405,7 +406,7 @@ def audit_identity_correspondence(
                 "public_sha256": public_sha256,
                 "encrypted_sha256": encrypted_sha256,
             }
-        audit.passed(gate, "VNS-A02 through VNS-A07 exactly match the six active Genesis validators")
+        audit.passed(gate, "VNS-A03 through VNS-A07 exactly match validator-02 through validator-06")
         return result
     except ValueError as error:
         audit.failed(gate, str(error))
@@ -439,8 +440,8 @@ def audit_ingress_and_admission(
         audit.passed(f"{votes_gate} (future activation)", detail)
         audit.passed(f"{package_gate} (future activation)", detail)
         return
-    if genesis is None or len(identities) != 6:
-        audit.failed(ingress_gate, "cannot bind ingress records without six verified validator identities")
+    if genesis is None or len(identities) != 5:
+        audit.failed(ingress_gate, "cannot bind ingress records without five verified validator identities")
         audit.failed(request_gate, "cannot bind target-admission request without ingress verification")
         audit.missing(votes_gate, "not evaluated because preceding ingress identity gate failed")
         audit.missing(package_gate, "not evaluated because preceding ingress identity gate failed")
@@ -460,7 +461,7 @@ def audit_ingress_and_admission(
             ("status", "generated_pending_target_admission_certificate"),
             ("chain_id", CHAIN_ID),
             ("runtime_network_id", NETWORK_ID),
-            ("protocol_version", "posy/2.2"),
+            ("protocol_version", "posy/3.0"),
             ("genesis_candidate_sha256", genesis["sha256"]),
             ("genesis_hash", genesis["hash"]),
         )
@@ -470,17 +471,17 @@ def audit_ingress_and_admission(
         binding = require_object(ingress.get("admission_binding"), "ingress admission_binding")
         binding_fields = (
             ("runtime_registry_type", "IngressKemKeyRegistry/v2"),
-            ("runtime_registry_domain", "PoSy/ETDAG/IngressKemKeyRegistry/v2"),
+            ("runtime_registry_domain", "PoSy/ETDAG/IngressKemKeyRegistry/v3"),
             ("certificate_domain", "PoSy/ETDAG/TargetAdmission/v2"),
             ("required_consensus_algorithm", "ML-DSA-65"),
-            ("minimum_signers_for_six_validator_cluster", 5),
+            ("minimum_signers_for_five_validator_cluster", EXPECTED_TARGET_ADMISSION_VOTES),
         )
         for field, expected in binding_fields:
             if binding.get(field) != expected:
                 raise ValueError(f"ingress admission_binding.{field} is not {expected!r}")
         records = require_list(ingress.get("records"), "ingress records")
-        if len(records) != 6:
-            raise ValueError(f"ingress records must contain six validators, found {len(records)}")
+        if len(records) != 5:
+            raise ValueError(f"ingress records must contain five validators, found {len(records)}")
         by_validator: dict[str, dict[str, Any]] = {}
         for index, raw_record in enumerate(records):
             record = require_object(raw_record, f"ingress records[{index}]")
@@ -489,7 +490,7 @@ def audit_ingress_and_admission(
                 raise ValueError(f"ingress records duplicate {validator_id}")
             by_validator[validator_id] = record
         if tuple(sorted(by_validator)) != EXPECTED_VALIDATOR_IDS:
-            raise ValueError("ingress records do not map exactly validator-1 through validator-6")
+            raise ValueError("ingress records do not map exactly validator-02 through validator-06")
         for share_index, validator_id in enumerate(EXPECTED_VALIDATOR_IDS, start=1):
             record = by_validator[validator_id]
             identity = identities[validator_id]
@@ -517,7 +518,7 @@ def audit_ingress_and_admission(
                 raise ValueError(f"{validator_id} encrypted ingress custody sidecar is missing")
             if record.get("private_custody_sha3_256") != sha3_256_file(private_path):
                 raise ValueError(f"{validator_id} ingress custody sidecar SHA3-256 disagrees with record")
-        audit.passed(ingress_gate, "six ML-KEM-1024 sidecars bind exactly VNS-A02 through VNS-A07")
+        audit.passed(ingress_gate, "five ML-KEM-1024 sidecars bind exactly VNS-A03 through VNS-A07")
     except ValueError as error:
         audit.failed(ingress_gate, str(error))
         audit.missing(request_gate, "not evaluated because ingress-record verification failed")
@@ -556,17 +557,17 @@ def audit_ingress_and_admission(
             if context.get("ingress_kem_registry_root") is None:
                 raise ValueError("target-admission context omits ingress KEM registry root")
             signers = require_list(request.get("signer_requests"), "target-admission signer_requests")
-            if len(signers) != 6:
-                raise ValueError("target-admission request must contain six eligible signer requests")
+            if len(signers) != 5:
+                raise ValueError("target-admission request must contain five eligible signer requests")
             signer_ids = {require_string(require_object(item, "signer request").get("validator_id"), "signer validator_id") for item in signers}
             if tuple(sorted(signer_ids)) != EXPECTED_VALIDATOR_IDS:
-                raise ValueError("target-admission signer requests do not exactly match the six validators")
+                raise ValueError("target-admission signer requests do not exactly match validator-02 through validator-06")
             audit.passed(request_gate, f"H=3 request SHA-256={request_sha256} binds applied Genesis and parameter root")
         except ValueError as error:
             audit.failed(request_gate, str(error))
 
     if not votes_path.is_file():
-        audit.missing(votes_gate, f"missing required five-of-six vote artifact: {votes_path}")
+        audit.missing(votes_gate, f"missing required four-of-five vote artifact: {votes_path}")
     elif request is None:
         audit.failed(votes_gate, "cannot bind votes because target-admission request is invalid or missing")
     else:
@@ -582,14 +583,14 @@ def audit_ingress_and_admission(
                 if votes.get(field) != expected:
                     raise ValueError(f"target-admission votes {field} disagrees with current request")
             entries = require_list(votes.get("votes"), "target-admission votes.votes")
-            if len(entries) != 5:
-                raise ValueError("target-admission votes must contain exactly five detached signatures")
+            if len(entries) != EXPECTED_TARGET_ADMISSION_VOTES:
+                raise ValueError("target-admission votes must contain exactly four detached signatures")
             vote_ids = [require_string(require_object(entry, "target-admission vote").get("validator_id"), "vote validator_id") for entry in entries]
-            if len(set(vote_ids)) != 5 or not set(vote_ids).issubset(set(EXPECTED_VALIDATOR_IDS)):
-                raise ValueError("target-admission votes are not five unique active validator signatures")
+            if len(set(vote_ids)) != EXPECTED_TARGET_ADMISSION_VOTES or not set(vote_ids).issubset(set(EXPECTED_VALIDATOR_IDS)):
+                raise ValueError("target-admission votes are not four unique active validator signatures")
             if any(require_object(entry, "target-admission vote").get("signature_algorithm") != "ML-DSA-65" for entry in entries):
                 raise ValueError("target-admission votes use a non-ML-DSA-65 signature algorithm")
-            audit.passed(votes_gate, "five unique ML-DSA-65 signer records bind the exact request")
+            audit.passed(votes_gate, "four unique ML-DSA-65 signer records bind the exact request")
         except ValueError as error:
             audit.failed(votes_gate, str(error))
 
@@ -634,7 +635,7 @@ def audit_ingress_and_admission(
                 raise ValueError("runtime admission verifier did not report TARGET_ADMISSION_PACKAGE_VERIFIED")
             if not rebuilt_path.is_file() or sha256_file(rebuilt_path) != sha256_bytes(package_raw):
                 raise ValueError("runtime-rebuilt package does not byte-match supplied admission package")
-        audit.passed(package_gate, f"runtime re-verifies five-of-six ML-DSA-65 certificate; sha256={sha256_bytes(package_raw)}")
+        audit.passed(package_gate, f"runtime re-verifies four-of-five ML-DSA-65 certificate; sha256={sha256_bytes(package_raw)}")
     except (ValueError, json.JSONDecodeError) as error:
         audit.failed(package_gate, str(error))
 
@@ -652,8 +653,8 @@ def audit_static_vpn_registry(audit: Audit, genesis: dict[str, Any] | None, regi
         if registry.get("chain_id") != CHAIN_ID or registry.get("network_id") != NETWORK_ID:
             raise ValueError("public VPN registry is not Testnet-v3")
         participants = require_list(registry.get("participants"), "public VPN registry participants")
-        if len(participants) != 9:
-            raise ValueError(f"fresh VPN registry must contain exactly nine peers (six validators/three relayers), found {len(participants)}")
+        if len(participants) != 8:
+            raise ValueError(f"fresh VPN registry must contain exactly eight peers (five validators/three relayers), found {len(participants)}")
         validators = [
             require_object(entry, "VPN participant")
             for entry in participants
@@ -666,11 +667,11 @@ def audit_static_vpn_registry(audit: Audit, genesis: dict[str, Any] | None, regi
         ]
         expected_addresses = {require_string(entry.get("operator_address"), "Genesis validator operator_address") for entry in genesis["validators"]}
         registry_addresses = {require_string(entry.get("synv_address"), "VPN validator synv_address") for entry in validators}
-        if len(validators) != 6 or registry_addresses != expected_addresses:
-            raise ValueError("fresh VPN registry validator transports do not exactly match the six applied Genesis validators")
+        if len(validators) != 5 or registry_addresses != expected_addresses:
+            raise ValueError("fresh VPN registry validator transports do not exactly match validator-02 through validator-06")
         if len(relayers) != 3:
             raise ValueError("fresh VPN registry must contain exactly three active relayer transports")
-        audit.passed(gate, f"sha256={sha256_file(registry_path)} validators=6 relayers=3 peers=9")
+        audit.passed(gate, f"sha256={sha256_file(registry_path)} validators=5 relayers=3 peers=8")
         return sha256_file(registry_path)
     except ValueError as error:
         audit.failed(gate, str(error))
@@ -729,11 +730,11 @@ def audit_signed_transport_snapshot(
         snapshot, _ = read_object(snapshot_path, "coordinator transport snapshot")
         generation = snapshot.get("configuration_version")
         transports = require_list(snapshot.get("transports"), "coordinator transports")
-        if not isinstance(generation, int) or generation < minimum_generation or len(transports) != 6:
-            raise ValueError("snapshot does not have six transports at the required generation")
+        if not isinstance(generation, int) or generation < minimum_generation or len(transports) != 5:
+            raise ValueError("snapshot does not have five transports at the required generation")
         audit.passed(
             gate,
-            f"existing signature/schema verifier passed; generation={generation} transports=6 migration_id={expected_migration_id}",
+            f"existing signature/schema verifier passed; generation={generation} transports=5 migration_id={expected_migration_id}",
         )
     except (ValueError, json.JSONDecodeError) as error:
         audit.failed(gate, str(error))

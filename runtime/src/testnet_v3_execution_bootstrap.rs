@@ -81,6 +81,8 @@ pub fn prepare_testnet_v3_genesis_execution_state(
         .path()
         .parent()
         .ok_or_else(|| "Genesis path has no parent directory".to_string())?;
+    let (required_network_id, required_signature_algorithm) =
+        contract_artifact_requirements(genesis.consensus_version());
     let mut execution_state = ExecutionState::new();
     for balance in genesis.balances() {
         if execution_state
@@ -97,8 +99,20 @@ pub fn prepare_testnet_v3_genesis_execution_state(
         let contract = contracts
             .get(genesis_key)
             .ok_or_else(|| format!("Genesis contracts.{genesis_key} is missing"))?;
-        verify_pre_approval_contract_record(contract, genesis_key, contract_name)?;
-        let artifact = load_committed_artifact(root, contract, contract_name)?;
+        verify_pre_approval_contract_record(
+            contract,
+            genesis_key,
+            contract_name,
+            required_network_id,
+            required_signature_algorithm,
+        )?;
+        let artifact = load_committed_artifact(
+            root,
+            contract,
+            contract_name,
+            required_network_id,
+            required_signature_algorithm,
+        )?;
         let artifact_key = register_synq_artifact(&mut execution_state.synq_artifacts, artifact)
             .map_err(|error| format!("validate Genesis SynQ artifact {contract_name}: {error}"))?;
         artifact_keys.insert(genesis_key.to_string(), artifact_key);
@@ -115,6 +129,14 @@ pub fn prepare_testnet_v3_genesis_execution_state(
         artifact_keys,
         pre_deployment_state_root,
     })
+}
+
+fn contract_artifact_requirements(consensus_version: &str) -> (&'static str, &'static str) {
+    if consensus_version == crate::consensus::simplified_posy::POSY_SIMPLIFIED_PROTOCOL_VERSION {
+        ("synergy-testnet", "ML-DSA-87")
+    } else {
+        ("synergy-testnet-v3", "ML-DSA-65")
+    }
 }
 
 /// Restores the exact post-ceremony execution state embedded in a finalized
@@ -246,6 +268,8 @@ fn verify_pre_approval_contract_record(
     contract: &Value,
     genesis_key: &str,
     contract_name: &str,
+    required_network_id: &str,
+    required_signature_algorithm: &str,
 ) -> Result<(), String> {
     if required_string(contract, "status")? != PRE_APPROVAL_STATUS {
         return Err(format!(
@@ -263,11 +287,12 @@ fn verify_pre_approval_contract_record(
         ));
     }
     if artifact.get("required_chain_id").and_then(Value::as_u64) != Some(1266)
-        || required_string(artifact, "required_network_id")? != "synergy-testnet-v3"
-        || required_string(artifact, "required_signature_algorithm")? != "ML-DSA-65"
+        || required_string(artifact, "required_network_id")? != required_network_id
+        || required_string(artifact, "required_signature_algorithm")?
+            != required_signature_algorithm
     {
         return Err(format!(
-            "Genesis contracts.{genesis_key} artifact is not bound to Testnet-v3 ML-DSA-65"
+            "Genesis contracts.{genesis_key} artifact is not bound to Chain 1266 {required_network_id} {required_signature_algorithm}"
         ));
     }
     Ok(())
@@ -277,6 +302,8 @@ fn load_committed_artifact(
     root: &Path,
     contract: &Value,
     contract_name: &str,
+    required_network_id: &str,
+    required_signature_algorithm: &str,
 ) -> Result<SynQContractArtifact, String> {
     let artifact = required_value_object(contract, "artifact")?;
     let base = format!("genesis-contracts/contracts/{contract_name}");
@@ -322,8 +349,9 @@ fn load_committed_artifact(
             .get("required_chain_id")
             .and_then(Value::as_u64)
             != Some(1266)
-        || required_string(&manifest_value, "required_network_id")? != "synergy-testnet-v3"
-        || required_string(&manifest_value, "required_signature_algorithm")? != "ML-DSA-65"
+        || required_string(&manifest_value, "required_network_id")? != required_network_id
+        || required_string(&manifest_value, "required_signature_algorithm")?
+            != required_signature_algorithm
     {
         return Err(format!(
             "{contract_name} SynQ manifest is not Testnet-v3 compatible"
@@ -425,6 +453,20 @@ mod tests {
             .join("../..")
             .join("launch/production-node-configs/canonical-genesis/genesis.json");
         load_genesis_from_path_for_test(path).expect("finalized production Genesis must validate")
+    }
+
+    #[test]
+    fn artifact_bindings_follow_genesis_consensus_generation() {
+        assert_eq!(
+            contract_artifact_requirements(
+                crate::consensus::simplified_posy::POSY_SIMPLIFIED_PROTOCOL_VERSION,
+            ),
+            ("synergy-testnet", "ML-DSA-87")
+        );
+        assert_eq!(
+            contract_artifact_requirements("posy/2.2"),
+            ("synergy-testnet-v3", "ML-DSA-65")
+        );
     }
 
     #[test]

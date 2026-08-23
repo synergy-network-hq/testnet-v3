@@ -7,15 +7,20 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 pub const SYNERGY_TESTNET_V3_CHAIN_ID: u64 = 1266;
-/// SNTS-09's canonical technical environment identifier for the fresh PoSy
-/// Testnet (v3) network.  User-facing copy may say "Testnet (v3)"; protocol
-/// and signed artifacts must use this exact lowercase identifier.
-pub const TESTNET_V3_CANONICAL_NETWORK_ID: &str = "testnet";
-/// Historical pre-P3 identifier retained only to parse archived records.
-pub const SYNERGY_TESTNET_V3_NETWORK_ID: &str = "synergy-testnet-v3";
+/// Canonical SNTS-09 technical network identifier. Newly emitted, signed, or
+/// consensus-bound material must use this value.
+pub const SYNERGY_TESTNET_V3_NETWORK_ID: &str = "testnet";
+/// Versioned release identity, kept separate from the technical network ID.
+pub const SYNERGY_TESTNET_V3_RELEASE_ID: &str = "testnet-v3";
+/// Retired single-authority-chain identifier. Explicit migration readers may
+/// consume it, but fresh PoSy artifacts must never emit it.
+pub const SYNERGY_TESTNET_V3_LEGACY_NETWORK_ID: &str = "synergy-testnet-v3";
+/// Compatibility spelling retained for existing fresh-P3 loaders.
+pub const TESTNET_V3_CANONICAL_NETWORK_ID: &str = SYNERGY_TESTNET_V3_NETWORK_ID;
 pub const TESTNET_V3_CHAIN_INCARNATION: u64 = 4;
 pub const TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION: u32 = 4;
-pub const POSY_PROTOCOL_VERSION: &str = "posy/2.2";
+/// The sole active Testnet-v3 consensus wire/version identifier.
+pub const POSY_PROTOCOL_VERSION: &str = "posy/3.0";
 pub const TESTNET_V3_CONSENSUS_SIGNATURE_ALGORITHM: &str = "mldsa65";
 pub const TESTNET_V3_MLDSA65_PUBLIC_KEY_BYTES: usize = 1_952;
 pub const HEIGHT_CONSENSUS_CONTEXT_VERSION: u32 = 1;
@@ -70,7 +75,7 @@ impl NetworkId {
     }
 
     pub fn fresh_posy_testnet_v3() -> Self {
-        Self(TESTNET_V3_CANONICAL_NETWORK_ID.to_string())
+        Self(SYNERGY_TESTNET_V3_NETWORK_ID.to_string())
     }
 
     pub fn require_testnet_v3(&self) -> Result<(), String> {
@@ -85,12 +90,12 @@ impl NetworkId {
     }
 
     pub fn require_fresh_posy_testnet_v3(&self) -> Result<(), String> {
-        if self.0 == TESTNET_V3_CANONICAL_NETWORK_ID {
+        if self.0 == SYNERGY_TESTNET_V3_NETWORK_ID {
             Ok(())
         } else {
             Err(format!(
                 "wrong fresh PoSy network_id: expected {}, found {}",
-                TESTNET_V3_CANONICAL_NETWORK_ID, self.0
+                SYNERGY_TESTNET_V3_NETWORK_ID, self.0
             ))
         }
     }

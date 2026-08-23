@@ -175,11 +175,20 @@ RAM limit. Those gates remain open.
 The verification entrypoint never contacts a node or creates/replaces
 identities, trust values, release signatures, Wallet packages, or deployment
 artifacts. Static mode is appropriate for the constrained workstation. Full
-mode must run on a host with adequate disk and memory headroom; it forces one
-Cargo build job and one test thread, runs eleven focused test families covering
-consensus, both parameter loaders, governance, Genesis, ETDAG admission/bootstrap,
-production role startup, and simplified P2P framing, then runs both distinct
+mode validates the frozen fresh-P3 identity inventory and pinned SNTS-01
+Address Engine registry/vector hashes. Full mode must run on a host with
+adequate disk and memory headroom; it forces one Cargo build job and one test
+thread, runs sixteen focused test families covering consensus, both parameter
+loaders, governance, Genesis, ETDAG admission/bootstrap, fresh-chain
+configuration rejection, canonical SNTS-01 Address Engine/registry/standards,
+identity authorization, production role startup, and simplified P2P framing,
+then runs both distinct
 five-node harnesses.
+
+The PR workflow is path-gated over all P3-relevant runtime, launch,
+fresh-Genesis, Address Engine standards, deployment-builder, and Genesis-contract
+sources. A change to any such input triggers the same serial verifier; a green
+run does not authorize activation.
 
 ```bash
 runtime/scripts/testnet/verify-posy-v3-pr.sh static
@@ -233,7 +242,7 @@ After source review and successful bounded tests, the release-only sequence is:
       covered by focused tests.
 - [ ] Role runtime, two harnesses, finality/material/state-sync fixtures, and
       public configuration templates compile against the parent union.
-- [ ] `PoSy V3 PR Verification` passes all eleven focused test families and
+- [ ] `PoSy V3 PR Verification` passes all sixteen focused test families and
       uploads distinct state-machine and production-driver harness evidence.
 - [ ] The schema-4 proposal remains non-authoritative; the canonical release
       input becomes authority only as part of the complete signed P3 artifact

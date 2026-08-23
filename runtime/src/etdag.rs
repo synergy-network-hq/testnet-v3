@@ -6,13 +6,14 @@
 //! and ordering are certified under the immutable target-height context, and
 //! plaintext is released only after the BOC/VC reveal gate.
 
+use crate::consensus::simplified_posy::POSY_SIMPLIFIED_PROTOCOL_VERSION;
 use crate::consensus_parameters::{ConsensusParameterRoot, EtdagActivationPermit};
 use crate::crypto::aegis_pqvm::{AegisPqKeyLifecycleRecord, AegisPqvmSigner, AegisPqvmVerifier};
 use crate::synergy_types::{
     AegisPqKeyId, AegisPqKeyRole, AegisPqPublicKey, AegisPqSignature, CanonicalSerialize, ChainId,
     ClusterId, ClusterMap, Epoch, Hash, Height, HeightConsensusContext, NetworkId,
     ProtectedBatchCommitment, ProtocolConfig, QuorumCertificate, Round, Transaction, UmaId,
-    ValidatorId, ValidatorRecord, ValidatorSet, ValidatorStatus, VotePhase, POSY_PROTOCOL_VERSION,
+    ValidatorId, ValidatorRecord, ValidatorSet, ValidatorStatus, VotePhase,
     TESTNET_V3_CLUSTER_SCHEDULE_VERSION,
 };
 use aes_gcm::aead::{Aead, KeyInit, Payload};
@@ -255,7 +256,7 @@ impl TargetAdmissionContext {
         cluster_map: &ClusterMap,
         protocol_config: &ProtocolConfig,
     ) -> Result<Self, String> {
-        protocol_config.chain_id.require_fresh_posy_testnet_v3()?;
+        protocol_config.chain_id.require_testnet_v3()?;
         protocol_config.network_id.require_fresh_posy_testnet_v3()?;
         Self::derive_with_parameter_root(spec, validator_set, cluster_map, protocol_config.hash()?)
     }
@@ -356,10 +357,10 @@ impl TargetAdmissionContext {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        self.chain_id.require_fresh_posy_testnet_v3()?;
+        self.chain_id.require_testnet_v3()?;
         self.network_id.require_fresh_posy_testnet_v3()?;
         if self.context_version != TARGET_ADMISSION_CONTEXT_VERSION
-            || self.protocol_version != POSY_PROTOCOL_VERSION
+            || self.protocol_version != POSY_SIMPLIFIED_PROTOCOL_VERSION
             || self.cluster_schedule_version != TESTNET_V3_CLUSTER_SCHEDULE_VERSION
         {
             return Err("unsupported target admission context version".to_string());
@@ -527,7 +528,7 @@ impl TargetAdmissionContext {
 }
 
 fn validate_target_admission_spec(spec: &TargetAdmissionContextSpec) -> Result<(), String> {
-    if spec.protocol_version != POSY_PROTOCOL_VERSION
+    if spec.protocol_version != POSY_SIMPLIFIED_PROTOCOL_VERSION
         || spec.cluster_schedule_version != TESTNET_V3_CLUSTER_SCHEDULE_VERSION
     {
         return Err("unsupported target admission context specification".to_string());
@@ -582,7 +583,7 @@ impl InnerTransactionV2 {
         if self.lane_id != ETDAG_LANE_ID {
             return Err("wrong ETDAG lane".to_string());
         }
-        self.transaction.chain_id.require_fresh_posy_testnet_v3()?;
+        self.transaction.chain_id.require_testnet_v3()?;
         self.transaction
             .network_id
             .require_fresh_posy_testnet_v3()?;
@@ -688,10 +689,10 @@ impl IngressKemKeyRegistry {
     }
 
     pub fn validate_shape(&self) -> Result<(), String> {
-        self.chain_id.require_fresh_posy_testnet_v3()?;
+        self.chain_id.require_testnet_v3()?;
         self.network_id.require_fresh_posy_testnet_v3()?;
         if self.registry_version != INGRESS_KEM_REGISTRY_VERSION
-            || self.protocol_version != POSY_PROTOCOL_VERSION
+            || self.protocol_version != POSY_SIMPLIFIED_PROTOCOL_VERSION
             || self.target_height.0 == 0
             || self.records.is_empty()
         {
@@ -902,11 +903,11 @@ impl EncryptedTransactionEnvelope {
     ) -> Result<(), String> {
         parameters.validate()?;
         height_context.validate()?;
-        self.chain_id.require_fresh_posy_testnet_v3()?;
+        self.chain_id.require_testnet_v3()?;
         self.network_id.require_fresh_posy_testnet_v3()?;
         if self.envelope_version != 2
             || self.profile_id != ETDAG_PROFILE_ID
-            || self.protocol_version != POSY_PROTOCOL_VERSION
+            || self.protocol_version != POSY_SIMPLIFIED_PROTOCOL_VERSION
             || self.lane_id != ETDAG_LANE_ID
         {
             return Err("unsupported ETDAG envelope version/profile".to_string());
@@ -1588,7 +1589,7 @@ pub struct EtdagVoteTranscript {
 impl EtdagVoteTranscript {
     pub fn validate_against(&self, context: &TargetAdmissionContext) -> Result<(), String> {
         context.validate()?;
-        self.chain_id.require_fresh_posy_testnet_v3()?;
+        self.chain_id.require_testnet_v3()?;
         self.network_id.require_fresh_posy_testnet_v3()?;
         self.candidate_digest.validate("ETDAG candidate digest")?;
         if self
@@ -1598,7 +1599,7 @@ impl EtdagVoteTranscript {
         {
             return Err("highest prepared BVC digest cannot be zero".to_string());
         }
-        if self.protocol_version != POSY_PROTOCOL_VERSION
+        if self.protocol_version != POSY_SIMPLIFIED_PROTOCOL_VERSION
             || self.profile_id != ETDAG_PROFILE_ID
             || self.lane_id != ETDAG_LANE_ID
             || self.chain_id != context.chain_id
@@ -2919,7 +2920,7 @@ impl TransactionVertex {
         context.validate()?;
         if self.vertex_version != 2
             || self.profile_id != ETDAG_PROFILE_ID
-            || self.protocol_version != POSY_PROTOCOL_VERSION
+            || self.protocol_version != POSY_SIMPLIFIED_PROTOCOL_VERSION
             || self.chain_id != context.chain_id
             || self.network_id != context.network_id
             || self.epoch != context.epoch
@@ -5685,7 +5686,7 @@ pub(crate) mod tests {
             registry_version: INGRESS_KEM_REGISTRY_VERSION,
             chain_id: ChainId::synergy_testnet_v3(),
             network_id: NetworkId::fresh_posy_testnet_v3(),
-            protocol_version: POSY_PROTOCOL_VERSION.to_string(),
+            protocol_version: POSY_SIMPLIFIED_PROTOCOL_VERSION.to_string(),
             epoch,
             target_height: height_context.height,
             assigned_cluster_id: height_context.assigned_cluster_id,
@@ -5693,7 +5694,7 @@ pub(crate) mod tests {
         };
         let context = TargetAdmissionContext::derive(
             TargetAdmissionContextSpec {
-                protocol_version: POSY_PROTOCOL_VERSION.to_string(),
+                protocol_version: POSY_SIMPLIFIED_PROTOCOL_VERSION.to_string(),
                 epoch,
                 target_height: height_context.height,
                 source_finalized_height: Height(height_context.height.0 - 3),

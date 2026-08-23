@@ -8,7 +8,7 @@ Status: preparation checklist; all activation/launch controls are open unless ba
 - [ ] Governance approval ID, fresh-Genesis boundary, epoch `0`, and first block height `1` are present and authorized.
 - [ ] Exact manifest SHA3-512 root matches every node, the Genesis activation, and the signed V4 release record.
 - [ ] Exactly five approved public validator identities are active in one cluster.
-- [ ] Their canonical IDs are exactly `posy-validator-01` through `posy-validator-05`; machine aliases are transport metadata, not validator IDs.
+- [ ] Their canonical IDs are exactly `validator-02` through `validator-06`; machine aliases are transport metadata, not validator IDs.
 - [ ] Validator, ML-DSA-65 consensus key, frozen-weight, epoch-context, and leader-ring roots match on all five nodes.
 - [ ] Each validator has a unique active consensus key with the correct Aegis vote/proposer roles.
 - [ ] No boot/seed/relay/archive/RPC/explorer/observer role has implicit vote weight.

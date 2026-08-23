@@ -133,7 +133,8 @@ fn main() {
 
     // Sanity: the frozen account address must be the one this key derives to.
     let recomputed =
-        synergy_testnet::address::derive_standard_account_address(&deployer_public_key);
+        synergy_testnet::address::derive_standard_account_address(&deployer_public_key)
+            .expect("canonical deployer FN-DSA public key derives an account address");
     assert_eq!(
         recomputed, deployer_account,
         "deployer account address mismatch"
@@ -227,8 +228,8 @@ fn production_parameters() -> GenesisParameters {
             .map(s)
             .collect(),
         team_vesting_start_time: "1775044800".to_string(),
-        team_allocation_nwei: s(&c["team_vesting"]["init_params"]["total_allocation_nwei"]),
-        support_allocation_nwei: "200000000000000000".to_string(),
+        team_allocation_nwei: "60000000000000000".to_string(),
+        support_allocation_nwei: "10000000000000000".to_string(),
         team_count: "5".to_string(),
         support_count: "4".to_string(),
     }

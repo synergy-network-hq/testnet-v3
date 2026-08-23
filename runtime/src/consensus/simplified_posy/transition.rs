@@ -1031,7 +1031,8 @@ pub(crate) mod tests {
             .verify_and_reconstruct(
                 verified.next_epoch_context(),
                 verified.next_validator_set(),
-                verified.certified_parent(),
+                &SimplifiedFinalityParent::quorum_certificate(verified.certified_parent().clone())
+                    .unwrap(),
                 &DeterministicVerifier,
                 None,
                 None,

@@ -18,6 +18,7 @@ bincode = "2.0.1"
 hex = "0.4.3"
 sha3 = "0.10"
 lazy_static = "1.4"
+zeroize = "1.8.2"
 
 # Post-Quantum Cryptography
 pqcrypto = "0.18"
