@@ -1,6 +1,6 @@
 {
   "addressing": {
-    "burn_address": "syn0000000000000000000000000000000",
+    "burn_address": "syn00000000000000000000000000000000000000",
     "default_wallet_prefix": "synw",
     "encoding": "bech32m",
     "global_prefix_family": "syn",
@@ -320,7 +320,7 @@
     "gas_fee_formula": "fee_nWei = gas_limit * gas_price_nWei",
     "gas_unit": "nWei",
     "mainnet_name": "Synergy Token",
-    "name": "Synergy Testnet v3 Token",
+    "name": "Synergy Testnet Coin",
     "nwei_per_snrg": "1000000000",
     "symbol": "SNRG"
   },
@@ -389,21 +389,28 @@
   },
   "system_reserved_addresses": {
     "burn_address": {
-      "address": "syn0000000000000000000000000000000",
+      "address": "syn00000000000000000000000000000000000000",
       "purpose": "Canonical irreversible token destruction address.",
       "receive_policy": "accept_burn_only",
       "spend_policy": "impossible",
       "status": "active",
       "type": "BurnAddress"
     },
-    "named_addresses": {},
-    "named_address_status": "pending fresh generated synq object identities",
+    "named_addresses": {
+      "address_prefix_registry": "syn00000000000000000000000000000000000101",
+      "asset_registry": "syn00000000000000000000000000000000000102",
+      "governance_registry": "syn00000000000000000000000000000000000106",
+      "protocol_registry": "syn00000000000000000000000000000000000100",
+      "sxcp_registry": "syn00000000000000000000000000000000000105",
+      "synid_registry": "syn00000000000000000000000000000000000103",
+      "uma_registry": "syn00000000000000000000000000000000000104",
+      "validator_registry": "syn00000000000000000000000000000000000107"
+    },
     "policy": {
       "address_length": 41,
       "contract_deployable": false,
       "derivable": false,
       "governance_rule": "Any addition, removal, activation, or semantic reassignment requires DAO approval and SNTS amendment.",
-      "private_key_exists": false,
       "requires_consensus_reservation": true,
       "requires_explorer_label": true,
       "requires_indexer_classification": true,
@@ -412,7 +419,38 @@
       "status": "canonical_proposed",
       "user_assignable": false
     },
-    "reserved_ranges": []
+    "reserved_ranges": [
+      {
+        "default_policy": "reject_unless_explicitly_allowlisted",
+        "end": "syn000000000000000000000000000000000000ff",
+        "name": "system_null_burn_sentinel_range",
+        "start": "syn00000000000000000000000000000000000000"
+      },
+      {
+        "default_policy": "reserved_for_protocol_registries",
+        "end": "syn000000000000000000000000000000000001ff",
+        "name": "protocol_registry_range",
+        "start": "syn00000000000000000000000000000000000100"
+      },
+      {
+        "default_policy": "reserved_for_synthetic_protocol_origins",
+        "end": "syn000000000000000000000000000000000002ff",
+        "name": "protocol_sentinel_range",
+        "start": "syn00000000000000000000000000000000000200"
+      },
+      {
+        "default_policy": "reserved_for_emergency_governance_aliases",
+        "end": "syn000000000000000000000000000000000003ff",
+        "name": "emergency_governance_range",
+        "start": "syn00000000000000000000000000000000000300"
+      },
+      {
+        "default_policy": "reserved_for_migration_and_quarantine",
+        "end": "syn000000000000000000000000000000000004ff",
+        "name": "migration_sink_range",
+        "start": "syn00000000000000000000000000000000000400"
+      }
+    ]
   },
   "testnet_v3_identity_registry": {
     "candidate_genesis_hash": null,
@@ -497,7 +535,7 @@
       "chainName": "Synergy Testnet v3",
       "nativeCurrency": {
         "decimals": 9,
-        "name": "Synergy Testnet v3 Token",
+        "name": "Synergy Testnet Coin",
         "symbol": "SNRG"
       },
       "rpcUrls": [

@@ -37,6 +37,7 @@ printf '+ cargo metadata --locked --manifest-path %q --no-deps --format-version 
   "$runtime_manifest"
 cargo metadata --locked --manifest-path "$runtime_manifest" --no-deps \
   --format-version 1 >/dev/null
+run python3 scripts/validate-fresh-testnet-v3-network-identifiers.py
 printf '+ unzip -t %q\n' \
   launch/PoSy_Consensus_Parameter_Control_Workbook_v3_PROPOSAL.xlsx
 unzip -t launch/PoSy_Consensus_Parameter_Control_Workbook_v3_PROPOSAL.xlsx \

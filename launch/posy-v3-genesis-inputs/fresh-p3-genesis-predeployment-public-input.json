@@ -26107,7 +26107,6 @@
       "contract_deployable": false,
       "derivable": false,
       "governance_rule": "Any addition, removal, activation, or semantic reassignment requires DAO approval and SNTS amendment.",
-      "private_key_exists": false,
       "requires_consensus_reservation": true,
       "requires_explorer_label": true,
       "requires_indexer_classification": true,
@@ -26172,7 +26171,7 @@
     "decimals": 9,
     "initial_circulating_nwei": "1000000000000000",
     "minting_policy": "fixed_cap",
-    "name": "Synergy Token",
+    "name": "Synergy Testnet Coin",
     "smallest_unit": "nwei",
     "symbol": "SNRG",
     "total_supply_cap_nwei": "12000000000000000000"
