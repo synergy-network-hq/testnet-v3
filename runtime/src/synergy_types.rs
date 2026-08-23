@@ -7,6 +7,11 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 pub const SYNERGY_TESTNET_V3_CHAIN_ID: u64 = 1266;
+/// SNTS-09's canonical technical environment identifier for the fresh PoSy
+/// Testnet (v3) network.  User-facing copy may say "Testnet (v3)"; protocol
+/// and signed artifacts must use this exact lowercase identifier.
+pub const TESTNET_V3_CANONICAL_NETWORK_ID: &str = "testnet";
+/// Historical pre-P3 identifier retained only to parse archived records.
 pub const SYNERGY_TESTNET_V3_NETWORK_ID: &str = "synergy-testnet-v3";
 pub const TESTNET_V3_CHAIN_INCARNATION: u64 = 4;
 pub const TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION: u32 = 4;
@@ -64,6 +69,10 @@ impl NetworkId {
         Self(SYNERGY_TESTNET_V3_NETWORK_ID.to_string())
     }
 
+    pub fn fresh_posy_testnet_v3() -> Self {
+        Self(TESTNET_V3_CANONICAL_NETWORK_ID.to_string())
+    }
+
     pub fn require_testnet_v3(&self) -> Result<(), String> {
         if self.0 == SYNERGY_TESTNET_V3_NETWORK_ID {
             Ok(())
@@ -71,6 +80,17 @@ impl NetworkId {
             Err(format!(
                 "wrong network_id: expected {}, found {}",
                 SYNERGY_TESTNET_V3_NETWORK_ID, self.0
+            ))
+        }
+    }
+
+    pub fn require_fresh_posy_testnet_v3(&self) -> Result<(), String> {
+        if self.0 == TESTNET_V3_CANONICAL_NETWORK_ID {
+            Ok(())
+        } else {
+            Err(format!(
+                "wrong fresh PoSy network_id: expected {}, found {}",
+                TESTNET_V3_CANONICAL_NETWORK_ID, self.0
             ))
         }
     }

@@ -8,11 +8,12 @@
 //! proof that the transition subject was committed by that finalized block.
 
 use super::{
-    ConsensusSignatureVerifier, QuorumCertificateReference, SimplifiedEpochContext,
-    SimplifiedQuorumCertificate, SimplifiedV3EpochTransitionAnchor,
+    ConsensusSignatureVerifier, DurableSimplifiedProposalMaterialStore, QuorumCertificateReference,
+    SimplifiedEpochContext, SimplifiedFinalityParent, SimplifiedQuorumCertificate,
+    SimplifiedV3EpochTransitionAnchor,
 };
 use crate::consensus_parameters::ConsensusParameterRoot;
-use crate::synergy_types::{CanonicalSerialize, Epoch, Hash, Height, ValidatorSet};
+use crate::synergy_types::{BlockId, CanonicalSerialize, Epoch, Hash, Height, ValidatorSet};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -24,6 +25,10 @@ pub const POSY_SIMPLIFIED_EPOCH_TRANSITION_FORMAT: &str =
 pub const POSY_SIMPLIFIED_EPOCH_TRANSITION_SCHEMA_VERSION: u32 = 2;
 pub const MAX_SIMPLIFIED_EPOCH_TRANSITION_PROOF_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_SIMPLIFIED_EPOCH_TRANSITION_AUTHORITY_BYTES: usize = 1024 * 1024;
+pub const POSY_SIMPLIFIED_FINALIZED_TRANSITION_AUTHORITY_EVIDENCE_FORMAT: &str =
+    "synergy-posy-simplified-finalized-transition-authority-evidence-v1";
+pub const POSY_SIMPLIFIED_FINALIZED_TRANSITION_AUTHORITY_EVIDENCE_SCHEMA_VERSION: u32 = 1;
+pub const MAX_SIMPLIFIED_FINALIZED_TRANSITION_AUTHORITY_EVIDENCE_BYTES: usize = 64 * 1024;
 
 /// Signer-independent next-epoch decision that must be proven part of the
 /// finalized execution at `finalized_height`.
@@ -87,6 +92,104 @@ pub trait SimplifiedTransitionAuthorityVerifier {
     ) -> Result<(), String>;
 }
 
+/// Public, non-secret locator for the verified protected material that
+/// committed an epoch-transition subject.  This is deliberately not a
+/// signature or a local-registry assertion: the verifier independently loads
+/// the receiver-owned, canonical material record named by the finalized QC.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SimplifiedFinalizedTransitionAuthorityEvidence {
+    pub format: String,
+    pub schema_version: u32,
+    pub finalized_epoch_context_root: Hash,
+    pub finalized_height: Height,
+    pub finalized_block_id: BlockId,
+    /// The signer-independent certified-candidate ID, which is also the
+    /// durable protected-material record key.
+    pub finalized_candidate_id: Hash,
+    pub finalized_protected_execution_root: Hash,
+    pub transition_subject_root: Hash,
+}
+
+impl SimplifiedFinalizedTransitionAuthorityEvidence {
+    pub fn from_finalized_qc(
+        finalized_qc: &SimplifiedQuorumCertificate,
+        transition_subject_root: Hash,
+    ) -> Result<Self, String> {
+        let evidence = Self {
+            format: POSY_SIMPLIFIED_FINALIZED_TRANSITION_AUTHORITY_EVIDENCE_FORMAT.to_string(),
+            schema_version: POSY_SIMPLIFIED_FINALIZED_TRANSITION_AUTHORITY_EVIDENCE_SCHEMA_VERSION,
+            finalized_epoch_context_root: finalized_qc.context.epoch_context_root,
+            finalized_height: finalized_qc.context.height,
+            finalized_block_id: finalized_qc.block_id.clone(),
+            finalized_candidate_id: finalized_qc.id()?,
+            finalized_protected_execution_root: finalized_qc.protected_execution_root,
+            transition_subject_root,
+        };
+        evidence.validate_against(finalized_qc, transition_subject_root)?;
+        Ok(evidence)
+    }
+
+    pub fn canonical_record_bytes(&self) -> Result<Vec<u8>, String> {
+        self.validate_shape()?;
+        let bytes = self.canonical_bytes()?;
+        if bytes.len() > MAX_SIMPLIFIED_FINALIZED_TRANSITION_AUTHORITY_EVIDENCE_BYTES {
+            return Err("finalized transition authority evidence is oversized".to_string());
+        }
+        Ok(bytes)
+    }
+
+    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.is_empty()
+            || bytes.len() > MAX_SIMPLIFIED_FINALIZED_TRANSITION_AUTHORITY_EVIDENCE_BYTES
+        {
+            return Err(
+                "finalized transition authority evidence violates its decode bound".to_string(),
+            );
+        }
+        let evidence = Self::assert_canonical_bytes(bytes)?;
+        evidence.validate_shape()?;
+        Ok(evidence)
+    }
+
+    fn validate_shape(&self) -> Result<(), String> {
+        if self.format != POSY_SIMPLIFIED_FINALIZED_TRANSITION_AUTHORITY_EVIDENCE_FORMAT
+            || self.schema_version
+                != POSY_SIMPLIFIED_FINALIZED_TRANSITION_AUTHORITY_EVIDENCE_SCHEMA_VERSION
+            || self.finalized_epoch_context_root.is_zero()
+            || self.finalized_height.0 == 0
+            || self.finalized_block_id.0.trim().is_empty()
+            || self.finalized_candidate_id.is_zero()
+            || self.finalized_protected_execution_root.is_zero()
+            || self.transition_subject_root.is_zero()
+        {
+            return Err("invalid finalized transition authority evidence".to_string());
+        }
+        Ok(())
+    }
+
+    fn validate_against(
+        &self,
+        finalized_qc: &SimplifiedQuorumCertificate,
+        transition_subject_root: Hash,
+    ) -> Result<(), String> {
+        self.validate_shape()?;
+        if self.finalized_epoch_context_root != finalized_qc.context.epoch_context_root
+            || self.finalized_height != finalized_qc.context.height
+            || self.finalized_block_id != finalized_qc.block_id
+            || self.finalized_candidate_id != finalized_qc.id()?
+            || self.finalized_protected_execution_root != finalized_qc.protected_execution_root
+            || self.transition_subject_root != transition_subject_root
+        {
+            return Err(
+                "finalized transition authority evidence does not name the exact finalized QC"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FailClosedSimplifiedTransitionAuthorityVerifier;
 
@@ -101,6 +204,66 @@ impl SimplifiedTransitionAuthorityVerifier for FailClosedSimplifiedTransitionAut
             "v3 epoch transition is disabled until finalized execution supplies a transition-commitment proof"
                 .to_string(),
         )
+    }
+}
+
+/// Production verifier for dynamic membership transitions.
+///
+/// It accepts only a canonical evidence locator, then reloads the exact
+/// receiver-owned verified material record whose stable candidate ID is
+/// certified by the finalized QC. The material's protected-execution root
+/// must include the exact transition subject root. No unsigned local
+/// validator list, mutable process state, or private payload participates in
+/// this decision.
+#[derive(Debug, Clone)]
+pub struct DurableSimplifiedProtectedExecutionTransitionAuthorityVerifier {
+    material_store: DurableSimplifiedProposalMaterialStore,
+}
+
+impl DurableSimplifiedProtectedExecutionTransitionAuthorityVerifier {
+    pub fn new(material_store: DurableSimplifiedProposalMaterialStore) -> Self {
+        Self { material_store }
+    }
+
+    pub fn material_store(&self) -> &DurableSimplifiedProposalMaterialStore {
+        &self.material_store
+    }
+}
+
+impl SimplifiedTransitionAuthorityVerifier
+    for DurableSimplifiedProtectedExecutionTransitionAuthorityVerifier
+{
+    fn verify_finalized_transition_authority(
+        &self,
+        finalized_qc: &SimplifiedQuorumCertificate,
+        transition_subject_root: Hash,
+        authority_evidence: &[u8],
+    ) -> Result<(), String> {
+        if transition_subject_root.is_zero()
+            || self.material_store.epoch_context_root() != finalized_qc.context.epoch_context_root
+        {
+            return Err(
+                "transition authority verifier material store does not name the finalized epoch"
+                    .to_string(),
+            );
+        }
+        let evidence = SimplifiedFinalizedTransitionAuthorityEvidence::from_canonical_bytes(
+            authority_evidence,
+        )?;
+        evidence.validate_against(finalized_qc, transition_subject_root)?;
+
+        let material = self.material_store.load(evidence.finalized_candidate_id)?;
+        if material.candidate_subject != finalized_qc.subject()?
+            || material.candidate_subject.protected_execution_root
+                != evidence.finalized_protected_execution_root
+            || material.transition_subject_root != Some(transition_subject_root)
+        {
+            return Err(
+                "finalized protected material does not commit the exact epoch-transition subject"
+                    .to_string(),
+            );
+        }
+        Ok(())
     }
 }
 
@@ -214,13 +377,14 @@ impl SimplifiedEpochTransitionProof {
                 &self.previous_validator_set,
                 consensus_verifier,
             )?;
-            if offset > 0
-                && certificate.parent_qc != self.finality_witness[offset - 1].reference()?
-            {
-                return Err(
-                    "transition finality witness does not form one consecutive QC chain"
-                        .to_string(),
-                );
+            if offset > 0 {
+                let expected_parent = self.finality_witness[offset - 1].reference()?;
+                if certificate.parent.quorum_certificate_reference() != Some(&expected_parent) {
+                    return Err(
+                        "transition finality witness does not form one consecutive QC chain"
+                            .to_string(),
+                    );
+                }
             }
         }
 
@@ -597,7 +761,8 @@ pub(crate) mod tests {
                     context: object_context.clone(),
                     block_id: block_id.clone(),
                     parent_block_id: parent_qc.block_id.clone(),
-                    parent_qc: parent_qc.clone(),
+                    parent: SimplifiedFinalityParent::quorum_certificate(parent_qc.clone())
+                        .unwrap(),
                     takeover_tc_id: None,
                     protected_execution_root,
                     validator_id: validator.validator_id.clone(),
@@ -624,7 +789,7 @@ pub(crate) mod tests {
             context: object_context,
             block_id,
             parent_block_id: parent_qc.block_id.clone(),
-            parent_qc,
+            parent: SimplifiedFinalityParent::quorum_certificate(parent_qc).unwrap(),
             takeover_tc_id: None,
             protected_execution_root,
             participants,
@@ -734,7 +899,8 @@ pub(crate) mod tests {
 
         assert!(SimplifiedSafetyState::new(
             verified.next_epoch_context(),
-            verified.certified_parent().clone(),
+            SimplifiedFinalityParent::quorum_certificate(verified.certified_parent().clone())
+                .unwrap(),
         )
         .is_err());
         let state = SimplifiedSafetyState::new_from_verified_v3_transition(
@@ -743,7 +909,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(state.finalized.height, Height(1_008));
-        assert_eq!(state.highest_qc.height, Height(1_010));
+        assert_eq!(state.highest_parent.height(), Height(1_010));
 
         let state_path = temp_path("state-continuity").with_file_name("state.json");
         let store = super::super::DurableSimplifiedPosyStore::at_path(state_path);
@@ -779,6 +945,29 @@ pub(crate) mod tests {
             .verify(&DeterministicVerifier, &DeterministicAuthorityVerifier)
             .unwrap_err();
         assert!(error.contains("exactly three"));
+    }
+
+    #[test]
+    fn finalized_transition_authority_evidence_is_canonical_and_qc_bound() {
+        let transition = proof();
+        let finalized_qc = &transition.finality_witness[0];
+        let transition_subject_root = transition.authorization.root().unwrap();
+        let evidence = SimplifiedFinalizedTransitionAuthorityEvidence::from_finalized_qc(
+            finalized_qc,
+            transition_subject_root,
+        )
+        .unwrap();
+        let bytes = evidence.canonical_record_bytes().unwrap();
+        assert_eq!(
+            SimplifiedFinalizedTransitionAuthorityEvidence::from_canonical_bytes(&bytes).unwrap(),
+            evidence
+        );
+
+        let mut substituted = evidence;
+        substituted.finalized_block_id = BlockId("another-finalized-block".to_string());
+        assert!(substituted
+            .validate_against(finalized_qc, transition_subject_root)
+            .is_err());
     }
 
     #[test]
@@ -828,14 +1017,14 @@ pub(crate) mod tests {
         let bundle = SimplifiedStateSyncBundle {
             format: POSY_SIMPLIFIED_STATE_SYNC_FORMAT.to_string(),
             epoch_context: verified.next_epoch_context().clone(),
-            anchor_qc: verified.certified_parent().clone(),
+            anchor_parent: SimplifiedFinalityParent::quorum_certificate(
+                verified.certified_parent().clone(),
+            )
+            .unwrap(),
             certified_qcs: vec![first_new_qc],
             certified_tcs: BTreeMap::new(),
-            claimed_finalized: FinalizedBlockRecord {
-                height: newly_finalized.height,
-                block_id: newly_finalized.block_id,
-                qc_id: newly_finalized.qc_id,
-            },
+            claimed_finalized: FinalizedBlockRecord::from_quorum_certificate(newly_finalized)
+                .unwrap(),
         };
 
         let plain_error = bundle
@@ -858,7 +1047,7 @@ pub(crate) mod tests {
                 None,
             )
             .unwrap();
-        assert_eq!(reconstructed.highest_qc.height, Height(1_011));
+        assert_eq!(reconstructed.highest_parent.height(), Height(1_011));
         assert_eq!(reconstructed.finalized.height, Height(1_009));
         assert_eq!(reconstructed.epoch_transition_tail_qcs.len(), 3);
 
@@ -893,7 +1082,7 @@ pub(crate) mod tests {
                 &signing_authority,
             )
             .unwrap();
-        assert_eq!(target.state().highest_qc.height, Height(1_011));
+        assert_eq!(target.state().highest_parent.height(), Height(1_011));
         assert_eq!(target.state().finalized.height, Height(1_009));
         drop(target);
         let restarted = SimplifiedConsensusStateMachine::open_from_verified_v3_transition(
@@ -901,12 +1090,17 @@ pub(crate) mod tests {
             super::super::DurableSimplifiedPosyStore::at_path(&state_path),
         )
         .unwrap();
-        assert_eq!(restarted.state().highest_qc.height, Height(1_011));
+        assert_eq!(restarted.state().highest_parent.height(), Height(1_011));
         assert_eq!(restarted.state().finalized.height, Height(1_009));
 
         let mut substituted = bundle;
-        substituted.claimed_finalized.qc_id =
-            Hash::from_domain_bytes("transition-state-sync", b"substituted-finality");
+        substituted.claimed_finalized =
+            FinalizedBlockRecord::from_quorum_certificate(QuorumCertificateReference {
+                height: substituted.claimed_finalized.height,
+                block_id: substituted.claimed_finalized.block_id.clone(),
+                qc_id: Hash::from_domain_bytes("transition-state-sync", b"substituted-finality"),
+            })
+            .unwrap();
         let request_id = Hash::from_domain_bytes("transition-state-sync", b"request-2");
         let chunks = build_state_sync_chunks(&substituted, request_id).unwrap();
         let mut stager = SimplifiedStateSyncStager::new_from_verified_v3_transition(&verified)

@@ -1,5 +1,11 @@
 # Validator State-Sync Runbook
 
+Status: **historical pre-P3 operational tooling with a P3 design note.** The
+Chain `1264` / `synergy-testnet-v3` command examples below are not valid P3
+commands. Fresh Chain `1266` / network `testnet` state sync must use the typed
+Genesis parent and P3 QC/TC/transition proof path and needs a dedicated
+qualification runbook before live use.
+
 This runbook describes the Prompt 2 protocol-native state-sync flow. It is not a
 live repair authorization.
 

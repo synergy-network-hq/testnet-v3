@@ -134,6 +134,10 @@ fn anchor() -> QuorumCertificateReference {
     }
 }
 
+fn anchor_parent() -> SimplifiedFinalityParent {
+    SimplifiedFinalityParent::quorum_certificate(anchor()).unwrap()
+}
+
 fn temp_path(label: &str) -> PathBuf {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -146,7 +150,7 @@ fn temp_path(label: &str) -> PathBuf {
 }
 
 #[test]
-fn exact_v2_boundary_anchor_is_committed_and_cannot_be_substituted_on_restart() {
+fn historical_v2_boundary_record_cannot_be_substituted_during_audit_decode() {
     let validators = validator_set([1, 1, 1, 1, 1]);
     let expected = anchor();
     let context = SimplifiedEpochContext::derive_from_v2_boundary(
@@ -167,12 +171,20 @@ fn exact_v2_boundary_anchor_is_committed_and_cannot_be_substituted_on_restart() 
     let path = temp_path("exact-v2-boundary-anchor");
     let store = DurableSimplifiedPosyStore::at_path(path);
     store
-        .initialize(&context, expected.clone())
+        .initialize(
+            &context,
+            SimplifiedFinalityParent::quorum_certificate(expected.clone()).unwrap(),
+        )
         .expect("exact boundary anchor initializes durable state");
 
     let mut substituted = expected;
     substituted.block_id = BlockId("substituted-boundary-block".to_string());
-    assert!(store.initialize(&context, substituted).is_err());
+    assert!(store
+        .initialize(
+            &context,
+            SimplifiedFinalityParent::quorum_certificate(substituted).unwrap(),
+        )
+        .is_err());
 }
 
 fn authority(label: &str) -> DurableConsensusSigningAuthority {
@@ -218,7 +230,7 @@ fn state_machine(
         context.clone(),
         validators.clone(),
         DurableSimplifiedPosyStore::at_path(temp_path(label)),
-        anchor(),
+        anchor_parent(),
     )
     .expect("open simplified state machine")
 }
@@ -229,16 +241,20 @@ fn startup_reconciles_a_journaled_vote_from_durable_delivery_evidence() {
     let context = epoch_context(&validators, 1_030);
     let state_path = temp_path("journal-delivery-reconciliation");
     let store = DurableSimplifiedPosyStore::at_path(state_path.clone());
-    let mut machine =
-        SimplifiedConsensusStateMachine::open(context.clone(), validators.clone(), store, anchor())
-            .unwrap();
+    let mut machine = SimplifiedConsensusStateMachine::open(
+        context.clone(),
+        validators.clone(),
+        store,
+        anchor_parent(),
+    )
+    .unwrap();
     let object_context =
         ConsensusObjectContext::for_height(&context, Height(1_000), Round(0)).unwrap();
     let candidate = CertifiedCandidateSubject::new(
         object_context.clone(),
         BlockId("journaled-delivered-candidate".to_string()),
         anchor().block_id,
-        anchor(),
+        anchor_parent(),
         Hash::from_domain_bytes("protected", b"journaled-delivered-candidate"),
     )
     .unwrap();
@@ -302,7 +318,7 @@ fn startup_reconciles_a_journaled_vote_from_durable_delivery_evidence() {
         context,
         validators,
         DurableSimplifiedPosyStore::at_path(state_path),
-        anchor(),
+        anchor_parent(),
     )
     .unwrap();
     restarted
@@ -330,7 +346,7 @@ fn qc(
             context: object_context.clone(),
             block_id: BlockId(block.to_string()),
             parent_block_id: parent.block_id.clone(),
-            parent_qc: parent.clone(),
+            parent: SimplifiedFinalityParent::quorum_certificate(parent.clone()).unwrap(),
             takeover_tc_id,
             protected_execution_root: Hash::from_domain_bytes(
                 "test-protected-execution",
@@ -375,7 +391,7 @@ fn tc(
             context: object_context.clone(),
             lease_index,
             timed_out_proposer: timed_out_proposer.clone(),
-            highest_qc: machine.state().highest_qc.clone(),
+            highest_parent: machine.state().highest_parent.clone(),
             previous_tc_id,
             last_voted_candidate: machine
                 .state()
@@ -400,8 +416,9 @@ fn tc(
     }
     let proofs = machine
         .state()
-        .certified_qcs
-        .get(&machine.state().highest_qc.height.0)
+        .highest_parent
+        .quorum_certificate_reference()
+        .and_then(|parent| machine.state().certified_qcs.get(&parent.height.0))
         .cloned()
         .into_iter()
         .collect();
@@ -414,7 +431,7 @@ fn timeout_vote(
     height: Height,
     round: Round,
     previous_tc_id: Option<Hash>,
-    highest_qc: QuorumCertificateReference,
+    highest_parent: SimplifiedFinalityParent,
     last_voted_candidate: Option<CertifiedCandidateSubject>,
     signer_index: usize,
 ) -> TimeoutVote {
@@ -427,7 +444,7 @@ fn timeout_vote(
             .authorized_proposer(height, round.0)
             .unwrap()
             .clone(),
-        highest_qc,
+        highest_parent,
         previous_tc_id,
         last_voted_candidate,
         validator_id: validator.validator_id.clone(),
@@ -474,7 +491,12 @@ fn accept_next_qc(
     block_label: &str,
 ) -> SimplifiedQuorumCertificate {
     let height = machine.state().next_height().unwrap();
-    let parent = machine.state().highest_qc.clone();
+    let parent = machine
+        .state()
+        .highest_parent
+        .quorum_certificate_reference()
+        .cloned()
+        .expect("test chain after its anchor has a QC parent");
     let (round, takeover_tc_id) = machine
         .state()
         .takeover_for_height(context, height)
@@ -547,6 +569,17 @@ fn leader_identity_depends_only_on_epoch_height_and_verified_tc_offset() {
         context.scheduled_owner(Height(1_024)).unwrap(),
         "a partial final lease retains one deterministic owner"
     );
+}
+
+#[test]
+fn leader_schedule_rejects_takeover_offset_overflow() {
+    let validators = validator_set([1, 1, 1, 1, 1]);
+    let context = epoch_context(&validators, 1_020);
+
+    let error = context
+        .authorized_proposer(Height(1_010), u64::MAX)
+        .unwrap_err();
+    assert_eq!(error, "leader index overflow");
 }
 
 #[test]
@@ -701,7 +734,7 @@ fn timeout_closure_id_is_independent_of_every_valid_four_of_five_report_subset()
                 Height(1_000),
                 Round(0),
                 None,
-                anchor(),
+                anchor_parent(),
                 None,
                 signer_index,
             )
@@ -770,7 +803,7 @@ fn heterogeneous_timeout_reports_choose_one_maximum_and_require_every_qc_proof()
             Height(1_002),
             Round(0),
             None,
-            highest_qc,
+            SimplifiedFinalityParent::quorum_certificate(highest_qc).unwrap(),
             None,
             signer_index,
         )
@@ -801,7 +834,10 @@ fn heterogeneous_timeout_reports_choose_one_maximum_and_require_every_qc_proof()
     complete
         .verify(&context, &validators, &DeterministicTestVerifier)
         .unwrap();
-    assert_eq!(complete.highest_qc().unwrap(), higher_reference);
+    assert_eq!(
+        complete.highest_parent().unwrap(),
+        SimplifiedFinalityParent::quorum_certificate(higher_reference).unwrap()
+    );
 
     let reversed = SimplifiedTimeoutCertificate::from_votes_with_qc_proofs(
         reports.into_iter().rev().collect(),
@@ -809,8 +845,8 @@ fn heterogeneous_timeout_reports_choose_one_maximum_and_require_every_qc_proof()
     )
     .unwrap();
     assert_eq!(
-        reversed.highest_qc().unwrap(),
-        complete.highest_qc().unwrap()
+        reversed.highest_parent().unwrap(),
+        complete.highest_parent().unwrap()
     );
 }
 
@@ -843,7 +879,7 @@ fn every_valid_timeout_subset_carries_the_candidate_with_a_hidden_qc() {
                 Height(1_000),
                 Round(0),
                 None,
-                anchor(),
+                anchor_parent(),
                 last_voted_candidate,
                 signer_index,
             )
@@ -896,7 +932,7 @@ fn every_dynamic_seven_validator_timeout_quorum_carries_a_possible_hidden_qc() {
                 Height(1_000),
                 Round(0),
                 None,
-                anchor(),
+                anchor_parent(),
                 last_voted_candidate,
                 signer_index,
             )
@@ -933,7 +969,7 @@ fn all_timeout_subsets_carry_every_possible_hidden_qc_and_unlock_only_nonquorate
         ConsensusObjectContext::for_height(&context, Height(1_000), Round(0)).unwrap(),
         BlockId("timeout-subset-candidate".to_string()),
         anchor().block_id,
-        anchor(),
+        anchor_parent(),
         Hash::from_domain_bytes("protected", b"timeout-subset-candidate"),
     )
     .unwrap();
@@ -951,7 +987,7 @@ fn all_timeout_subsets_carry_every_possible_hidden_qc_and_unlock_only_nonquorate
                     Height(1_000),
                     Round(0),
                     None,
-                    anchor(),
+                    anchor_parent(),
                     reports_candidate.then(|| candidate.clone()),
                     signer_index,
                 )
@@ -1130,7 +1166,7 @@ fn replacement_can_certify_then_time_out_later_in_the_same_lease() {
         context.clone(),
         validators.clone(),
         DurableSimplifiedPosyStore::at_path(path.clone()),
-        anchor(),
+        anchor_parent(),
     )
     .unwrap();
 
@@ -1168,7 +1204,7 @@ fn replacement_can_certify_then_time_out_later_in_the_same_lease() {
         context,
         validators,
         DurableSimplifiedPosyStore::at_path(path),
-        anchor(),
+        anchor_parent(),
     )
     .unwrap();
     assert_eq!(restarted.state(), &expected);
@@ -1248,7 +1284,7 @@ fn timeout_takeover_never_erases_or_bypasses_the_qc_lock() {
         proposer_id: proposer.clone(),
         block_id: BlockId("unsafe-fork".to_string()),
         parent_block_id: anchor().block_id,
-        parent_qc: anchor(),
+        parent: SimplifiedFinalityParent::quorum_certificate(anchor()).unwrap(),
         takeover_tc_id: machine
             .state()
             .takeover_for_height(&context, Height(1_002))
@@ -1326,9 +1362,13 @@ fn restart_restores_lock_vote_takeover_and_finalized_state() {
     let context = epoch_context(&validators, 1_030);
     let path = temp_path("restart");
     let store = DurableSimplifiedPosyStore::at_path(path.clone());
-    let mut machine =
-        SimplifiedConsensusStateMachine::open(context.clone(), validators.clone(), store, anchor())
-            .unwrap();
+    let mut machine = SimplifiedConsensusStateMachine::open(
+        context.clone(),
+        validators.clone(),
+        store,
+        anchor_parent(),
+    )
+    .unwrap();
     let signer_journal = authority("restart");
     accept_next_qc(
         &mut machine,
@@ -1347,7 +1387,7 @@ fn restart_restores_lock_vote_takeover_and_finalized_state() {
         context,
         validators,
         DurableSimplifiedPosyStore::at_path(path),
-        anchor(),
+        anchor_parent(),
     )
     .unwrap();
     assert_eq!(restarted.state(), &before);
@@ -1366,7 +1406,7 @@ fn timeout_certificate_persist_failure_keeps_live_state_unchanged() {
         context.clone(),
         validators.clone(),
         DurableSimplifiedPosyStore::at_path(path.clone()),
-        anchor(),
+        anchor_parent(),
     )
     .unwrap();
     let certificate = tc(&machine, &context, &validators, &[0, 1, 2, 3]);
@@ -1390,7 +1430,7 @@ fn quorum_certificate_persist_failure_keeps_live_state_unchanged() {
         context.clone(),
         validators.clone(),
         DurableSimplifiedPosyStore::at_path(path.clone()),
-        anchor(),
+        anchor_parent(),
     )
     .unwrap();
     let signing_authority = authority("qc-persist-failure");
@@ -1414,7 +1454,11 @@ fn quorum_certificate_persist_failure_keeps_live_state_unchanged() {
         1_002,
         0,
         "unpersisted-block-1002",
-        &machine.state().highest_qc,
+        machine
+            .state()
+            .highest_parent
+            .quorum_certificate_reference()
+            .expect("test chain after its anchor has a QC parent"),
         None,
         &[0, 1, 2, 3],
     );
@@ -1456,8 +1500,8 @@ fn verified_state_sync_reconstructs_qc_tc_lock_and_finality_state() {
         candidate: CertifiedCandidateSubject::new(
             ConsensusObjectContext::for_height(&context, Height(1_003), Round(0)).unwrap(),
             BlockId("locally-signed-before-sync".to_string()),
-            source.state().highest_qc.block_id.clone(),
-            source.state().highest_qc.clone(),
+            source.state().highest_parent.block_id().clone(),
+            source.state().highest_parent.clone(),
             Hash::from_domain_bytes("local-protected-execution", b"do-not-overwrite"),
         )
         .unwrap(),
@@ -1467,13 +1511,13 @@ fn verified_state_sync_reconstructs_qc_tc_lock_and_finality_state() {
         .verify_and_reconstruct(
             &context,
             &validators,
-            &anchor(),
+            &anchor_parent(),
             &DeterministicTestVerifier,
             Some(local_vote.clone()),
             None,
         )
         .unwrap();
-    assert_eq!(reconstructed.highest_qc, source.state().highest_qc);
+    assert_eq!(reconstructed.highest_parent, source.state().highest_parent);
     assert_eq!(reconstructed.locked_qc, source.state().locked_qc);
     assert_eq!(reconstructed.finalized, source.state().finalized);
     assert_eq!(reconstructed.takeover, source.state().takeover);
@@ -1484,7 +1528,7 @@ fn verified_state_sync_reconstructs_qc_tc_lock_and_finality_state() {
     target
         .install_state_sync_bundle(&bundle, &DeterministicTestVerifier, &target_authority)
         .unwrap();
-    assert_eq!(target.state().highest_qc, source.state().highest_qc);
+    assert_eq!(target.state().highest_parent, source.state().highest_parent);
     assert_eq!(target.state().takeover, source.state().takeover);
 
     let mut tampered = bundle;
@@ -1493,7 +1537,7 @@ fn verified_state_sync_reconstructs_qc_tc_lock_and_finality_state() {
         .verify_and_reconstruct(
             &context,
             &validators,
-            &anchor(),
+            &anchor_parent(),
             &DeterministicTestVerifier,
             None,
             None,
@@ -1626,7 +1670,7 @@ fn last_vote_prohibits_a_different_candidate_across_takeover_rounds() {
         ConsensusObjectContext::for_height(&context, Height(1_000), Round(0)).unwrap(),
         BlockId("hidden-block-a".to_string()),
         anchor().block_id,
-        anchor(),
+        anchor_parent(),
         Hash::from_domain_bytes("protected", b"hidden-block-a"),
     )
     .unwrap();
@@ -1639,7 +1683,7 @@ fn last_vote_prohibits_a_different_candidate_across_takeover_rounds() {
                     Height(1_000),
                     Round(0),
                     None,
-                    anchor(),
+                    anchor_parent(),
                     Some(prior_candidate.clone()),
                     index,
                 )
@@ -1649,7 +1693,7 @@ fn last_vote_prohibits_a_different_candidate_across_takeover_rounds() {
     .unwrap();
     let path = temp_path("cross-round-vote");
     let store = DurableSimplifiedPosyStore::at_path(path.clone());
-    let mut state = SimplifiedSafetyState::new(&context, anchor()).unwrap();
+    let mut state = SimplifiedSafetyState::new(&context, anchor_parent()).unwrap();
     state.takeover = Some(LeaseTakeoverState {
         lease_index: 0,
         effective_height: Height(1_000),
@@ -1668,7 +1712,7 @@ fn last_vote_prohibits_a_different_candidate_across_takeover_rounds() {
         context.clone(),
         validators.clone(),
         DurableSimplifiedPosyStore::at_path(path),
-        anchor(),
+        anchor_parent(),
     )
     .unwrap();
     let proposer_id = context
@@ -1685,7 +1729,7 @@ fn last_vote_prohibits_a_different_candidate_across_takeover_rounds() {
         proposer_id: proposer_id.clone(),
         block_id: BlockId("hidden-block-b".to_string()),
         parent_block_id: anchor().block_id,
-        parent_qc: anchor(),
+        parent: SimplifiedFinalityParent::quorum_certificate(anchor()).unwrap(),
         takeover_tc_id: Some(takeover.id().unwrap()),
         protected_execution_root: Hash::from_domain_bytes("protected", b"hidden-block-b"),
         proposer_key_id: proposer.consensus_public_key.key_id.clone(),
@@ -1783,7 +1827,7 @@ fn four_real_mldsa65_signatures_form_a_qc() {
             context: object_context.clone(),
             block_id: BlockId("real-pqc-block".to_string()),
             parent_block_id: anchor().block_id,
-            parent_qc: anchor(),
+            parent: SimplifiedFinalityParent::quorum_certificate(anchor()).unwrap(),
             takeover_tc_id: None,
             protected_execution_root: Hash::from_domain_bytes(
                 "real-protected-execution",
@@ -1857,7 +1901,7 @@ fn proposal_uses_real_mldsa65_and_the_durable_proposal_journal() {
         proposer_id,
         block_id: BlockId("real-proposal-block".to_string()),
         parent_block_id: anchor().block_id,
-        parent_qc: anchor(),
+        parent: SimplifiedFinalityParent::quorum_certificate(anchor()).unwrap(),
         takeover_tc_id: None,
         protected_execution_root: Hash::from_domain_bytes("protected", b"real-proposal"),
         proposer_key_id: proposer.consensus_public_key.key_id.clone(),
@@ -1923,7 +1967,7 @@ fn proposal_journal_restart_binds_the_complete_stable_candidate_subject() {
         proposer_id,
         block_id: BlockId("restart-stable-subject-block".to_string()),
         parent_block_id: anchor().block_id,
-        parent_qc: anchor(),
+        parent: SimplifiedFinalityParent::quorum_certificate(anchor()).unwrap(),
         takeover_tc_id: None,
         protected_execution_root: Hash::from_domain_bytes(
             "protected",
@@ -1939,7 +1983,7 @@ fn proposal_journal_restart_binds_the_complete_stable_candidate_subject() {
         context.clone(),
         validators.clone(),
         DurableSimplifiedPosyStore::at_path(state_path.clone()),
-        anchor(),
+        anchor_parent(),
     )
     .unwrap();
     let journal = DurableConsensusSigningAuthority::at_path(journal_path.clone());
@@ -1953,7 +1997,7 @@ fn proposal_journal_restart_binds_the_complete_stable_candidate_subject() {
         context.clone(),
         validators.clone(),
         DurableSimplifiedPosyStore::at_path(state_path),
-        anchor(),
+        anchor_parent(),
     )
     .unwrap();
     let restarted_journal = DurableConsensusSigningAuthority::at_path(journal_path.clone());
@@ -1978,12 +2022,13 @@ fn proposal_journal_restart_binds_the_complete_stable_candidate_subject() {
         context,
         validators,
         DurableSimplifiedPosyStore::at_path(temp_path("proposal-subject-alternate-parent")),
-        alternate_parent.clone(),
+        SimplifiedFinalityParent::quorum_certificate(alternate_parent.clone()).unwrap(),
     )
     .unwrap();
     let mut parent_conflict = proposal;
     parent_conflict.parent_block_id = alternate_parent.block_id.clone();
-    parent_conflict.parent_qc = alternate_parent;
+    parent_conflict.parent =
+        SimplifiedFinalityParent::quorum_certificate(alternate_parent).unwrap();
     assert!(alternate_machine
         .sign_proposal(parent_conflict, &restarted_journal, &mut signer)
         .unwrap_err()

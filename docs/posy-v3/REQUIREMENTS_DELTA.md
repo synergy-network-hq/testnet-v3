@@ -1,14 +1,14 @@
 # PoSy simplified consensus requirements delta
 
-Status: proposed for implementation and test evidence; not active and not launch-qualified.
+Status: implemented in the current branch; current build, release, and launch qualification remain open.
 
-This delta is the implementation contract for the Testnet-v3 simplified consensus profile. It records the intentional differences from the coordinated PoSy v2.2-rc1 publication set before runtime code changes are made. POSY-00C continues to control every safety rule not explicitly replaced here. POSY-00D continues to control ETDAG admission, ordering, reveal, and protected execution; an ETDAG certificate never becomes a block-finality certificate.
+This delta is the implementation contract for the fresh block-zero Testnet-v3 simplified consensus profile. The coordinated PoSy v2.2-rc1 column is comparison-only historical context and supplies no P3 Genesis or runtime authority. POSY-00C continues to control every safety rule not explicitly replaced here. POSY-00D continues to control ETDAG admission, ordering, reveal, and protected execution; an ETDAG certificate never becomes a block-finality certificate.
 
 ## Activation and compatibility boundary
 
-- The existing `posy/2.2` schema-2 canonical manifest, decision record, bytes, hashes, and parameter root remain unchanged.
-- The simplified profile is `posy/3.0` and requires a new canonical manifest proposal, governance decision, declared activation epoch and activation height, initial five-validator active-set and weight roots, leader-ring root, binary hash, and all-node preflight evidence. Five is the first epoch's hardware-backed set, not a permanent protocol limit; later additions become authoritative only through a finalized v3 epoch transition.
-- A height uses exactly one activated profile. Historical `posy/2.2` objects remain parseable for synchronization and evidence, but no object may mix v2.2 and v3 fields, domains, signer phases, or certificate semantics.
+- Retired manifests, decision records, bytes, hashes, parameter roots, and state are historical evidence only and are not P3 inputs.
+- The simplified profile is `posy/3.0` and requires a canonical fresh-Genesis manifest, governance decision, epoch `0`/first height `1`, initial five-validator active-set and weight roots, leader-ring root, binary hash, governed ETDAG binding, and all-node preflight evidence. Five is the first epoch's hardware-backed set, not a permanent protocol limit; later additions become authoritative only through a finalized v3 epoch transition.
+- Every P3 height uses only P3 objects. Historical `posy/2.2` objects may exist in explicitly versioned audit code, but cannot supply synchronization, recovery, or authority to the fresh chain.
 - Implementation and test completion do not activate the profile or satisfy deployment, performance, operations, governance, or launch gates.
 
 ## Intentional replacements
@@ -81,4 +81,4 @@ authorized      = ring[(scheduled_index + takeover_offset) mod validator_count]
 
 ## Required evidence before activation
 
-Activation remains fail-closed until deterministic vectors, unit/property tests, five-independent-process fault tests, restart/state-sync tests, complete canonical-manifest/root verification, all-five-node preflight agreement, signer/key readiness, release/binary hashes, migration rehearsal, rollback criteria, and the existing launch controls are reviewed. Performance evidence must include proposal, vote, QC, chained-finality, TC/takeover, PQC verification, certificate-size, and restart/rejoin measurements. The public launch state remains blocked until those separate gates pass.
+Launch remains fail-closed until deterministic vectors, unit/property tests, five-independent-process fault tests, restart/state-sync tests, complete canonical-manifest/root verification, all-five-node preflight agreement, signer/key readiness, release/binary hashes, fresh-chain staging rehearsal, abort criteria, governed ETDAG artifacts, and the existing launch controls are reviewed. Performance evidence must include proposal, vote, QC, chained-finality, TC/takeover, PQC verification, certificate-size, and restart/rejoin measurements. The public launch state remains blocked until those separate gates pass.

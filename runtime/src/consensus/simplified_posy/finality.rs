@@ -6,8 +6,8 @@
 //! layers and re-executes every block from the pinned activation boundary.
 
 use super::{
-    DurableSimplifiedProposalMaterialStore, FinalizedBlockRecord, QuorumCertificateReference,
-    SimplifiedEpochContext, SimplifiedFinalizationReceipt, SimplifiedFinalizationSink,
+    DurableSimplifiedProposalMaterialStore, FinalizedBlockRecord, SimplifiedEpochContext,
+    SimplifiedFinalityParent, SimplifiedFinalizationReceipt, SimplifiedFinalizationSink,
     SimplifiedFinalizationSinkError, SimplifiedFinalizationTransaction,
     SimplifiedQuorumCertificate, VerifiedSimplifiedEpochTransition,
 };
@@ -24,8 +24,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const POSY_SIMPLIFIED_FINALITY_METADATA_FORMAT: &str =
-    "synergy-posy-simplified-finality-metadata-v2";
-const POSY_SIMPLIFIED_FINALITY_WAL_FORMAT: &str = "synergy-posy-simplified-finality-wal-record-v1";
+    "synergy-posy-simplified-finality-metadata-v3";
+const POSY_SIMPLIFIED_FINALITY_WAL_FORMAT: &str = "synergy-posy-simplified-finality-wal-record-v2";
 const POSY_SIMPLIFIED_FINALITY_DIRECTORY: &str = "data/posy-v3-finality";
 const POSY_SIMPLIFIED_FINALITY_METADATA_FILE: &str = "metadata.json";
 pub const MAX_POSY_SIMPLIFIED_FINALITY_WAL_RECORD_BYTES: usize = 64 * 1024 * 1024;
@@ -35,7 +35,7 @@ pub const MAX_POSY_SIMPLIFIED_FINALITY_WAL_RECORD_BYTES: usize = 64 * 1024 * 102
 struct SimplifiedFinalityMetadata {
     format: String,
     epoch_context_root: Hash,
-    certified_parent: QuorumCertificateReference,
+    certified_parent: SimplifiedFinalityParent,
     finalized_seed: FinalizedBlockRecord,
     transition_subject_root: Option<Hash>,
     boundary_execution_state_root: Hash,
@@ -46,24 +46,28 @@ impl SimplifiedFinalityMetadata {
         if self.format != POSY_SIMPLIFIED_FINALITY_METADATA_FORMAT
             || self.epoch_context_root != epoch_context.root()?
             || self.boundary_execution_state_root.is_zero()
-            || self.certified_parent.height.0.checked_add(1)
-                != Some(epoch_context.epoch_start_height.0)
-            || self.certified_parent.block_id.0.trim().is_empty()
-            || self.certified_parent.qc_id.is_zero()
-            || self.finalized_seed.block_id.0.trim().is_empty()
-            || self.finalized_seed.qc_id.is_zero()
-            || self.finalized_seed.height.0 > self.certified_parent.height.0
+            || self
+                .certified_parent
+                .validate_for_child_height(epoch_context.epoch_start_height)
+                .is_err()
+            || self.finalized_seed.validate().is_err()
+            || self.finalized_seed.height.0 > self.certified_parent.height().0
             || self.transition_subject_root.is_some_and(Hash::is_zero)
         {
             return Err("invalid simplified finality metadata".to_string());
         }
         if let Some(anchor) = &epoch_context.v2_boundary_anchor {
-            if self.certified_parent.height != anchor.height
-                || self.certified_parent.block_id != anchor.block_id
-                || self.certified_parent.qc_id != anchor.qc_finality_context_root
+            if self
+                .certified_parent
+                .quorum_certificate_reference()
+                .is_none_or(|reference| {
+                    reference.height != anchor.height
+                        || reference.block_id != anchor.block_id
+                        || reference.qc_id != anchor.qc_finality_context_root
+                })
                 || self.finalized_seed.height != anchor.height
                 || self.finalized_seed.block_id != anchor.block_id
-                || self.finalized_seed.qc_id != anchor.qc_finality_context_root
+                || self.finalized_seed.finality_reference_id() != anchor.qc_finality_context_root
                 || self.transition_subject_root.is_some()
             {
                 return Err(
@@ -72,12 +76,17 @@ impl SimplifiedFinalityMetadata {
             }
         }
         if let Some(anchor) = &epoch_context.v3_transition_anchor {
-            if self.certified_parent.height != anchor.certified_parent_height
-                || self.certified_parent.block_id != anchor.certified_parent_block_id
-                || self.certified_parent.qc_id != anchor.certified_parent_qc_id
+            if self
+                .certified_parent
+                .quorum_certificate_reference()
+                .is_none_or(|reference| {
+                    reference.height != anchor.certified_parent_height
+                        || reference.block_id != anchor.certified_parent_block_id
+                        || reference.qc_id != anchor.certified_parent_qc_id
+                })
                 || self.finalized_seed.height != anchor.finalized_seed_height
                 || self.finalized_seed.block_id != anchor.finalized_seed_block_id
-                || self.finalized_seed.qc_id != anchor.finalized_seed_qc_id
+                || self.finalized_seed.finality_reference_id() != anchor.finalized_seed_qc_id
                 || self.transition_subject_root != Some(anchor.transition_subject_root)
             {
                 return Err(
@@ -86,13 +95,11 @@ impl SimplifiedFinalityMetadata {
                 );
             }
         } else if epoch_context.v2_boundary_anchor.is_none()
-            && (self.certified_parent.height != self.finalized_seed.height
-                || self.certified_parent.block_id != self.finalized_seed.block_id
-                || self.certified_parent.qc_id != self.finalized_seed.qc_id
+            && (self.certified_parent != self.finalized_seed.finality_parent
                 || self.transition_subject_root.is_some())
         {
             return Err(
-                "synthetic simplified finality metadata split its unverified anchor".to_string(),
+                "fresh simplified finality metadata split its canonical anchor".to_string(),
             );
         }
         Ok(())
@@ -167,7 +174,8 @@ impl SimplifiedFinalityEnvironment {
                     || self.validator_set != *transition.next_validator_set()
                     || self.anchor_finalized.height != transition.finalized_seed().height
                     || self.anchor_finalized.block_id != transition.finalized_seed().block_id
-                    || self.anchor_finalized.qc_id != transition.finalized_seed().qc_id
+                    || self.anchor_finalized.finality_reference_id()
+                        != transition.finalized_seed().qc_id
                 {
                     return Err(
                         "simplified finality environment does not match the verified v3 transition"
@@ -175,7 +183,9 @@ impl SimplifiedFinalityEnvironment {
                     );
                 }
                 (
-                    transition.certified_parent().clone(),
+                    SimplifiedFinalityParent::quorum_certificate(
+                        transition.certified_parent().clone(),
+                    )?,
                     Some(transition.transition_subject_root()),
                 )
             }
@@ -186,14 +196,7 @@ impl SimplifiedFinalityEnvironment {
                             .to_string(),
                     );
                 }
-                (
-                    QuorumCertificateReference {
-                        height: self.anchor_finalized.height,
-                        block_id: self.anchor_finalized.block_id.clone(),
-                        qc_id: self.anchor_finalized.qc_id,
-                    },
-                    None,
-                )
+                (self.anchor_finalized.finality_parent.clone(), None)
             }
         };
         let metadata = SimplifiedFinalityMetadata {
@@ -687,10 +690,11 @@ mod tests {
         DurableSimplifiedProposalMaterialStore, DurableSimplifiedProtectedMaterialAuthority,
         DurableSimplifiedProtectedMaterialAuthorityConfiguration, QuorumCertificateReference,
         SimplifiedEpochTransitionAuthorization, SimplifiedEpochTransitionProof,
-        SimplifiedFinalizedCommitment, SimplifiedProposal, SimplifiedQuorumCertificate,
-        SimplifiedTransitionAuthorityVerifier, VerifiedSimplifiedProposalMaterial,
-        POSY_SIMPLIFIED_BLOCK_VOTE_DOMAIN, POSY_SIMPLIFIED_EPOCH_TRANSITION_FORMAT,
-        POSY_SIMPLIFIED_EPOCH_TRANSITION_SCHEMA_VERSION, POSY_SIMPLIFIED_PROTOCOL_VERSION,
+        SimplifiedFinalityParent, SimplifiedFinalizedCommitment, SimplifiedProposal,
+        SimplifiedQuorumCertificate, SimplifiedTransitionAuthorityVerifier,
+        VerifiedSimplifiedProposalMaterial, POSY_SIMPLIFIED_BLOCK_VOTE_DOMAIN,
+        POSY_SIMPLIFIED_EPOCH_TRANSITION_FORMAT, POSY_SIMPLIFIED_EPOCH_TRANSITION_SCHEMA_VERSION,
+        POSY_SIMPLIFIED_PROTOCOL_VERSION,
     };
     use crate::consensus_parameters::ConsensusParameterRoot;
     use crate::crypto::aegis_pqvm::AegisPqvmSigner;
@@ -771,7 +775,7 @@ mod tests {
         )
         .unwrap();
         let cluster_map = ClusterMap::derive_from_finalized_epoch_seed(&validators, seed).unwrap();
-        let anchor = FinalizedBlockRecord {
+        let anchor_qc = QuorumCertificateReference {
             height: Height(3_999),
             block_id: BlockId::from_hash(Hash::from_domain_bytes(
                 "finality-test-anchor-block",
@@ -779,11 +783,9 @@ mod tests {
             )),
             qc_id: Hash::from_domain_bytes("finality-test-anchor-qc", b"3999"),
         };
-        let anchor_qc = QuorumCertificateReference {
-            height: anchor.height,
-            block_id: anchor.block_id.clone(),
-            qc_id: anchor.qc_id,
-        };
+        let anchor = FinalizedBlockRecord::from_quorum_certificate(anchor_qc.clone()).unwrap();
+        let anchor_parent =
+            SimplifiedFinalityParent::quorum_certificate(anchor_qc.clone()).unwrap();
         let state = ExecutionState::new();
         let state_root = compute_state_root_after(&state).unwrap();
         let object_context =
@@ -802,7 +804,7 @@ mod tests {
                 height_context_root: object_context.epoch_context_root,
                 parent_block_hash: Hash::from_hex(&anchor.block_id.0).unwrap(),
                 parent_state_root: state_root,
-                last_finalized_qc_hash: anchor.qc_id,
+                last_finalized_qc_hash: anchor.finality_reference_id(),
                 proposer_validator_id: proposer.validator_id.clone(),
                 proposer_uma_id: proposer.validator_uma_id.clone(),
                 proposer_key_id: proposer.consensus_public_key.key_id.clone(),
@@ -849,7 +851,7 @@ mod tests {
             &object_context,
             &block,
             &anchor.block_id,
-            &anchor_qc,
+            &anchor_parent,
             None,
             None,
         )
@@ -858,7 +860,7 @@ mod tests {
             context: object_context,
             block_id: block_id.clone(),
             parent_block_id: anchor.block_id.clone(),
-            parent_qc: anchor_qc.clone(),
+            parent: anchor_parent,
             takeover_tc_id: None,
             protected_execution_root,
             proposer_id: proposer.validator_id.clone(),
@@ -896,16 +898,13 @@ mod tests {
             qc1.reference().unwrap(),
             Hash::from_domain_bytes("finality-test-execution", b"4002"),
         );
-        let target = FinalizedBlockRecord {
-            height: qc0.context.height,
-            block_id: qc0.block_id.clone(),
-            qc_id: qc0.id().unwrap(),
-        };
+        let target =
+            FinalizedBlockRecord::from_quorum_certificate(qc0.reference().unwrap()).unwrap();
         let commitment = SimplifiedFinalizedCommitment {
             height: target.height,
             block_id: target.block_id.clone(),
             parent_block_id: anchor.block_id.clone(),
-            qc_id: target.qc_id,
+            qc_id: target.finality_reference_id(),
             protected_execution_root,
             certificate: qc0.clone(),
         };
@@ -946,7 +945,7 @@ mod tests {
                 context: context.clone(),
                 block_id: block_id.clone(),
                 parent_block_id: parent_qc.block_id.clone(),
-                parent_qc: parent_qc.clone(),
+                parent: SimplifiedFinalityParent::quorum_certificate(parent_qc.clone()).unwrap(),
                 takeover_tc_id: None,
                 protected_execution_root,
                 validator_id: validator.validator_id.clone(),
@@ -1052,7 +1051,7 @@ mod tests {
             &object_context,
             &block,
             &parent_qc.block_id,
-            &parent_qc,
+            &SimplifiedFinalityParent::quorum_certificate(parent_qc.clone()).unwrap(),
             None,
             None,
         )
@@ -1062,7 +1061,7 @@ mod tests {
             proposer_id: proposer.validator_id.clone(),
             block_id: block_id.clone(),
             parent_block_id: parent_qc.block_id.clone(),
-            parent_qc: parent_qc.clone(),
+            parent: SimplifiedFinalityParent::quorum_certificate(parent_qc.clone()).unwrap(),
             takeover_tc_id: None,
             protected_execution_root,
             proposer_key_id: proposer.consensus_public_key.key_id.clone(),
@@ -1168,8 +1167,13 @@ mod tests {
         assert_eq!(sink.current_finalized(), &fixture.anchor);
 
         let mut wrong_environment = environment(&fixture);
-        wrong_environment.anchor_finalized.qc_id =
-            Hash::from_domain_bytes("wrong-finality-anchor", b"3999");
+        wrong_environment.anchor_finalized =
+            FinalizedBlockRecord::from_quorum_certificate(QuorumCertificateReference {
+                height: wrong_environment.anchor_finalized.height,
+                block_id: wrong_environment.anchor_finalized.block_id.clone(),
+                qc_id: Hash::from_domain_bytes("wrong-finality-anchor", b"3999"),
+            })
+            .unwrap();
         assert!(DurableSimplifiedFinalitySink::at_directory(
             &finality_directory,
             material_store,
@@ -1339,21 +1343,12 @@ mod tests {
                 protected_execution_root: certificate.protected_execution_root,
                 certificate: certificate.clone(),
             };
-        let target = FinalizedBlockRecord {
-            height: qc_4003.context.height,
-            block_id: qc_4003.block_id.clone(),
-            qc_id: qc_4003.id().unwrap(),
-        };
-        let first_boundary_target = FinalizedBlockRecord {
-            height: qc_4001.context.height,
-            block_id: qc_4001.block_id.clone(),
-            qc_id: qc_4001.id().unwrap(),
-        };
-        let finalized_seed = FinalizedBlockRecord {
-            height: qc_4000.context.height,
-            block_id: qc_4000.block_id.clone(),
-            qc_id: qc_4000.id().unwrap(),
-        };
+        let target =
+            FinalizedBlockRecord::from_quorum_certificate(qc_4003.reference().unwrap()).unwrap();
+        let first_boundary_target =
+            FinalizedBlockRecord::from_quorum_certificate(qc_4001.reference().unwrap()).unwrap();
+        let finalized_seed =
+            FinalizedBlockRecord::from_quorum_certificate(qc_4000.reference().unwrap()).unwrap();
         let mut first_boundary_transaction = SimplifiedFinalizationTransaction {
             format: "synergy-posy-simplified-finalization-transaction-v3".to_string(),
             transaction_id: Hash::zero(),

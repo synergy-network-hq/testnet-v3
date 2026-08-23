@@ -233,6 +233,11 @@ fn require_supported_execution_genesis_protocol(
             .ok_or_else(|| format!("{context} requires a finalized coordinated P1 manifest"))?
             .require_coordinated_round_robin_manifest()
             .map(|_| ()),
+        crate::consensus::simplified_posy::POSY_SIMPLIFIED_PROTOCOL_VERSION => genesis
+            .consensus_parameters()
+            .ok_or_else(|| format!("{context} requires a finalized simplified PoSy v3 manifest"))?
+            .require_simplified_posy_manifest()
+            .map(|_| ()),
         _ => Err(format!("{context} has invalid protocol binding")),
     }
 }

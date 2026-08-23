@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://synergy-network.io/schemas/testnet-v3-posy-simplified-parameters-v4.json",
   "title": "Testnet-v3 PoSy simplified consensus parameter manifest",
-  "description": "Governance proposal schema. Schema validity does not authorize activation; the runtime additionally requires canonical byte encoding, FINALIZED status, approval, and an epoch boundary.",
+  "description": "Governance proposal schema for a separate block-zero PoSy v3 chain. Schema validity does not authorize activation; the runtime additionally requires canonical byte encoding, FINALIZED status, approval, and the fresh Genesis block-one boundary.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -19,7 +19,7 @@
     "allow_local_leader_election", "require_single_validator_failure_liveness",
     "signer_journal_required", "safety_halt_on_conflicting_valid_qcs",
     "etdag_finality_separation_required", "protected_execution_binding_required",
-    "initial_etdag_activation", "proposal_timeout_ms", "vote_timeout_ms",
+    "initial_etdag_activation", "target_block_time_ms", "proposal_timeout_ms", "vote_timeout_ms",
     "max_round_timeout_ms", "performance_targets"
   ],
   "properties": {
@@ -28,10 +28,10 @@
     "status": {"enum": ["PROPOSED_NOT_ACTIVATED", "FINALIZED"]},
     "governance_approval_id": {"type": ["string", "null"], "minLength": 1},
     "chain_id": {"const": 1266},
-    "network_id": {"const": "synergy-testnet-v3"},
+    "network_id": {"const": "testnet"},
     "protocol_version": {"const": "posy/3.0"},
-    "activation_boundary": {"const": "declared_epoch_boundary_only"},
-    "activation_epoch": {"type": ["integer", "null"], "minimum": 1},
+    "activation_boundary": {"const": "fresh_genesis_block_zero"},
+    "activation_epoch": {"type": ["integer", "null"], "minimum": 0},
     "activation_height": {"type": ["integer", "null"], "minimum": 1},
     "epoch_length_blocks": {"type": "integer", "minimum": 1},
     "active_validator_count": {
@@ -63,7 +63,8 @@
     "safety_halt_on_conflicting_valid_qcs": {"const": true},
     "etdag_finality_separation_required": {"const": true},
     "protected_execution_binding_required": {"const": true},
-    "initial_etdag_activation": {"const": "preserve_current_finalized_manifest_state"},
+    "initial_etdag_activation": {"const": "governed_genesis_binding_required"},
+    "target_block_time_ms": {"type": "integer", "minimum": 1},
     "proposal_timeout_ms": {"type": "integer", "minimum": 1},
     "vote_timeout_ms": {"type": "integer", "minimum": 1},
     "max_round_timeout_ms": {"type": "integer", "minimum": 1},
@@ -101,8 +102,8 @@
       "then": {
         "properties": {
           "governance_approval_id": {"type": "string", "minLength": 1},
-          "activation_epoch": {"type": "integer", "minimum": 1},
-          "activation_height": {"type": "integer", "minimum": 1}
+          "activation_epoch": {"const": 0},
+          "activation_height": {"const": 1}
         }
       }
     }

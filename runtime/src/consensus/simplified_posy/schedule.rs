@@ -112,10 +112,10 @@ pub struct SimplifiedEpochContext {
     pub epoch_start_height: Height,
     pub epoch_end_height: Height,
     pub finalized_epoch_seed_root: Hash,
-    /// Present only for the first Genesis-activated v3 epoch. Later v3 epochs
-    /// use `v3_transition_anchor`; older synthetic test/harness contexts use
-    /// neither and are rejected by activation/runtime validation before
-    /// production startup.
+    /// Historical typed-PoSy boundary evidence retained only for strict
+    /// decoding and audit of older durable records. Fresh Genesis P3 startup
+    /// requires this to be absent, and the production driver rejects it;
+    /// later P3 epochs use `v3_transition_anchor` instead.
     #[serde(default)]
     pub v2_boundary_anchor: Option<SimplifiedEpochAnchor>,
     /// Present only after a fully verified v3-to-v3 transition proof.  This
@@ -151,7 +151,8 @@ impl SimplifiedEpochContext {
         )
     }
 
-    pub fn derive_from_v2_boundary(
+    #[cfg(test)]
+    pub(crate) fn derive_from_v2_boundary(
         epoch: Epoch,
         epoch_start_height: Height,
         epoch_end_height: Height,
@@ -191,7 +192,7 @@ impl SimplifiedEpochContext {
         let context = Self {
             schema_version: POSY_SIMPLIFIED_CONTEXT_SCHEMA_VERSION,
             chain_id: ChainId::synergy_testnet_v3(),
-            network_id: NetworkId::synergy_testnet_v3(),
+            network_id: NetworkId::fresh_posy_testnet_v3(),
             protocol_version: POSY_SIMPLIFIED_PROTOCOL_VERSION.to_string(),
             epoch,
             epoch_start_height,
@@ -212,8 +213,8 @@ impl SimplifiedEpochContext {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        self.chain_id.require_testnet_v3()?;
-        self.network_id.require_testnet_v3()?;
+        self.chain_id.require_fresh_posy_testnet_v3()?;
+        self.network_id.require_fresh_posy_testnet_v3()?;
         if self.schema_version != POSY_SIMPLIFIED_CONTEXT_SCHEMA_VERSION {
             return Err(format!(
                 "unsupported simplified context schema {}, expected {}",

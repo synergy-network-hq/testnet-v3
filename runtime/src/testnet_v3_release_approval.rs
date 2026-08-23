@@ -7,7 +7,8 @@
 //! signatures; it deliberately has no access to custody material and cannot
 //! sign or apply a release.
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use aegis_pqvm::pqc::signatures::mldsa::mldsa87;
+use pqrust_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -18,7 +19,7 @@ use crate::address::derive_standard_account_address;
 
 /// The exact ML-DSA context used for Testnet-v3 genesis release approval.
 pub const TESTNET_V3_GENESIS_RELEASE_APPROVAL_DOMAIN: &str =
-    "SYNERGY_TESTNET_V3_GENESIS_RELEASE_APPROVAL_V1";
+    "SYNERGY_TESTNET_V3_GENESIS_RELEASE_APPROVAL_V4";
 /// The only frozen role permitted to approve the Testnet-v3 genesis release.
 pub const TESTNET_V3_GOVERNANCE_AUTHORITY_ROLE: &str = "SNRG-TESTNET-V3-GOVERNANCE-AUTHORITY";
 /// The artifact type accepted by the final Genesis release gate.
@@ -27,11 +28,16 @@ pub const TESTNET_V3_GENESIS_RELEASE_APPROVAL_ARTIFACT_TYPE: &str =
 /// The exact action that the designated governance authority approves.
 pub const TESTNET_V3_GENESIS_RELEASE_ACTION: &str = "APPROVE_FINAL_TESTNET_V3_GENESIS_CANDIDATE";
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 4;
 const EXPECTED_CHAIN_ID: u64 = 1266;
-const EXPECTED_RUNTIME_NETWORK_ID: &str = "synergy-testnet-v3";
+/// SNTS-09's canonical *technical* environment identifier.  It is deliberately
+/// distinct from the human release identifier below.
+const EXPECTED_NETWORK_ID: &str = "testnet";
+const EXPECTED_RELEASE_ID: &str = "testnet-v3";
 const EXPECTED_SYNQ_NETWORK_ID: &str = "synergy-testnet";
 const EXPECTED_ALGORITHM: &str = "ML-DSA-87";
+const EXPECTED_AUTHORITIES_ARTIFACT: &str = "TESTNET_V3_PRODUCTION_AUTHORITIES";
+const ETDAG_MEMBERSHIP_ANCHOR_SCHEMA: &str = "synergy-etdag-governed-membership-proof-v1";
 
 /// The immutable facts a governance signature authorizes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -45,10 +51,12 @@ pub struct TestnetV3GenesisReleaseApprovalRequest {
     pub governance_authority_role: String,
     pub governance_standard_account_address: String,
     pub governance_public_key_fingerprint: String,
+    pub governance_identity_authorization_binding_sha3_256: String,
     pub candidate_sha256: String,
     pub genesis_hash: String,
     pub chain_id: u64,
-    pub runtime_network_id: String,
+    pub network_id: String,
+    pub release_id: String,
     pub synq_network_id: String,
     pub candidate_input_id: String,
     pub post_deployment_execution_state_root: String,
@@ -57,6 +65,15 @@ pub struct TestnetV3GenesisReleaseApprovalRequest {
     pub consensus_parameter_manifest_sha256: String,
     pub consensus_parameter_root_sha3_512: String,
     pub consensus_parameter_decision_id: String,
+    /// Root of the exact governed ETDAG parameter artifact committed by this
+    /// authorization.  It must never be a placeholder or an all-zero digest.
+    pub etdag_parameter_root_sha3_512: String,
+    /// Root of the fee schedule chained to `etdag_parameter_root_sha3_512`.
+    pub etdag_fee_schedule_root_sha3_512: String,
+    /// Digest of the public, strictly canonical validator membership anchor.
+    /// The anchor is post-Genesis because it contains the finalized Genesis
+    /// hash, but this approval commits the anchor digest before activation.
+    pub etdag_membership_anchor_digest_sha3_512: String,
     pub frozen_authority_record_sha256: String,
 }
 
@@ -76,7 +93,7 @@ pub struct SignedTestnetV3GenesisReleaseApproval {
     pub schema_version: u32,
     pub artifact_type: String,
     pub request: TestnetV3GenesisReleaseApprovalRequest,
-    pub signature_base64: String,
+    pub signature_hex: String,
 }
 
 /// The authority facts pinned from the candidate-bound frozen authority file.
@@ -85,6 +102,7 @@ pub struct FrozenGovernanceAuthority {
     pub role: String,
     pub standard_account_address: String,
     pub public_key_fingerprint: String,
+    pub governance_identity_authorization_binding_sha3_256: String,
     pub public_key: Vec<u8>,
     pub frozen_authority_record_sha256: String,
 }
@@ -114,6 +132,9 @@ pub fn build_release_approval_request(
                 .to_string(),
         );
     }
+    validate_candidate_release_state(&candidate)?;
+    let etdag_binding = load_candidate_etdag_governance(&candidate)?;
+    let etdag_membership_anchor = load_candidate_etdag_membership_anchor(&candidate)?;
 
     let request = TestnetV3GenesisReleaseApprovalRequest {
         schema_version: SCHEMA_VERSION,
@@ -124,6 +145,8 @@ pub fn build_release_approval_request(
         governance_authority_role: authority.role,
         governance_standard_account_address: authority.standard_account_address,
         governance_public_key_fingerprint: authority.public_key_fingerprint,
+        governance_identity_authorization_binding_sha3_256: authority
+            .governance_identity_authorization_binding_sha3_256,
         candidate_sha256: sha256_hex(&candidate_bytes),
         genesis_hash: json_string(
             &candidate,
@@ -131,10 +154,15 @@ pub fn build_release_approval_request(
             "candidate genesis hash",
         )?,
         chain_id: json_u64(&candidate, "/network/chain_id", "candidate chain id")?,
-        runtime_network_id: json_string(
+        network_id: json_string(
             &candidate,
-            "/genesis_deployment/runtime_network_id",
-            "candidate runtime network id",
+            "/genesis_deployment/network_id",
+            "candidate canonical network id",
+        )?,
+        release_id: json_string(
+            &candidate,
+            "/genesis_deployment/release_id",
+            "candidate release id",
         )?,
         synq_network_id: json_string(
             &candidate,
@@ -176,9 +204,17 @@ pub fn build_release_approval_request(
             "/consensus_parameters/decision_id",
             "candidate consensus parameter decision id",
         )?,
+        etdag_parameter_root_sha3_512: etdag_binding
+            .parameter_artifact
+            .etdag_parameter_root_sha3_512
+            .to_hex(),
+        etdag_fee_schedule_root_sha3_512: etdag_binding
+            .fee_schedule_artifact
+            .etdag_fee_schedule_root_sha3_512
+            .to_hex(),
+        etdag_membership_anchor_digest_sha3_512: etdag_membership_anchor.anchor_digest.to_hex(),
         frozen_authority_record_sha256: candidate_authority_sha,
     };
-    validate_candidate_release_state(&candidate)?;
     request.canonical_bytes()?;
     Ok(request)
 }
@@ -191,17 +227,32 @@ pub fn load_frozen_governance_authority(
 ) -> Result<FrozenGovernanceAuthority, String> {
     let authority_bytes = read_file(authorities_path, "frozen authority record")?;
     let authorities = parse_json(&authority_bytes, "frozen authority record")?;
-    if authorities.pointer("/status").and_then(Value::as_str) != Some("FROZEN")
+    if authorities.pointer("/artifact").and_then(Value::as_str)
+        != Some(EXPECTED_AUTHORITIES_ARTIFACT)
+        || authorities.pointer("/status").and_then(Value::as_str) != Some("FROZEN")
         || authorities
             .pointer("/test_fixture")
             .and_then(Value::as_bool)
             != Some(false)
-        || authorities.pointer("/algorithm").and_then(Value::as_str) != Some(EXPECTED_ALGORITHM)
+        || authorities
+            .pointer("/current_release_authority")
+            .and_then(Value::as_bool)
+            != Some(false)
         || authorities.pointer("/chain_id").and_then(Value::as_u64) != Some(EXPECTED_CHAIN_ID)
-        || authorities.pointer("/network_id").and_then(Value::as_str)
-            != Some(EXPECTED_RUNTIME_NETWORK_ID)
+        || authorities.pointer("/network_id").and_then(Value::as_str) != Some(EXPECTED_NETWORK_ID)
+        || authorities.pointer("/release_id").and_then(Value::as_str) != Some(EXPECTED_RELEASE_ID)
+        || [
+            "technical_network_id",
+            "runtime_network_id",
+            "network_slug",
+            "network_native_id",
+        ]
+        .iter()
+        .any(|retired_alias| authorities.get(retired_alias).is_some())
     {
-        return Err("authority record is not the frozen Testnet-v3 ML-DSA-87 record".to_string());
+        return Err(
+            "authority record is not the canonical frozen Testnet-v3 V4 record".to_string(),
+        );
     }
 
     let entries = authorities
@@ -227,42 +278,94 @@ pub fn load_frozen_governance_authority(
         "public_key_fingerprint",
         "governance public-key fingerprint",
     )?;
+    let governance_identity_authorization_binding_sha3_256 = value_string(
+        entry,
+        "release_authorization_binding_payload_sha3_256",
+        "governance release authorization binding payload SHA3-256",
+    )?;
+    let authorization_encrypted_sha256 = value_string(
+        entry,
+        "authorization_encrypted_sha256",
+        "governance encrypted custody SHA-256",
+    )?;
+    let release_authorization_binding_sha256 = value_string(
+        entry,
+        "release_authorization_binding_sha256",
+        "governance release authorization binding SHA-256",
+    )?;
+    if entry.get("authorization_algorithm").and_then(Value::as_str) != Some(EXPECTED_ALGORITHM)
+        || !is_lower_hex(&governance_identity_authorization_binding_sha3_256, 32)
+        || !is_lower_hex(&authorization_encrypted_sha256, 32)
+        || !is_lower_hex(&release_authorization_binding_sha256, 32)
+    {
+        return Err(
+            "governance authority entry has an invalid V4 algorithm, custody, or authorization binding"
+                .to_string(),
+        );
+    }
     let bundle_dir = value_string(entry, "bundle_dir", "governance bundle directory")?;
     let bundle_dir = safe_relative_path(&bundle_dir, "governance bundle directory")?;
     let bundle = repo_root.join(bundle_dir);
-    let public_document = parse_json(
-        &read_file(
-            &bundle.join("identity.pub.json"),
-            "governance public identity",
-        )?,
+    let public_bytes = read_file(
+        &bundle.join("identity.pub.json"),
         "governance public identity",
     )?;
-    let bundle_manifest = parse_json(
-        &read_file(&bundle.join("manifest.json"), "governance bundle manifest")?,
-        "governance bundle manifest",
-    )?;
-    if bundle_manifest.get("role_id").and_then(Value::as_str) != Some(role.as_str())
-        || bundle_manifest.get("algorithm").and_then(Value::as_str) != Some(EXPECTED_ALGORITHM)
-        || bundle_manifest.get("chain_id").and_then(Value::as_u64) != Some(EXPECTED_CHAIN_ID)
-        || bundle_manifest.get("network_id").and_then(Value::as_str)
-            != Some(EXPECTED_RUNTIME_NETWORK_ID)
-        || bundle_manifest.get("test_fixture").and_then(Value::as_bool) != Some(false)
-        || bundle_manifest
-            .get("public_key_fingerprint")
-            .and_then(Value::as_str)
-            != Some(public_key_fingerprint.as_str())
+    let public_document = parse_json(&public_bytes, "governance public identity")?;
+    if public_document
+        .get("binary_encoding")
+        .and_then(Value::as_str)
+        != Some("lowercase-hex")
+        || public_document.get("role_id").and_then(Value::as_str) != Some(role.as_str())
         || public_document.get("algorithm").and_then(Value::as_str) != Some(EXPECTED_ALGORITHM)
-        || public_document.get("address").and_then(Value::as_str)
-            != Some(standard_account_address.as_str())
     {
         return Err(
             "governance public bundle does not match the frozen authority entry".to_string(),
         );
     }
-    let public_key_base64 = value_string(&public_document, "public_key", "governance public key")?;
-    let public_key = BASE64
-        .decode(public_key_base64)
-        .map_err(|error| format!("decode governance public key: {error}"))?;
+    match public_document
+        .get("schema_version")
+        .and_then(Value::as_str)
+    {
+        // Rotation documents intentionally contain no address field.  The
+        // immutable authority record is still checked against the key-derived
+        // Standard Account address below.
+        Some("synergy-governance-authorization-public-key-v1") => {}
+        // Preservation retains the immutable key in the V3 document shape.
+        // Its legacy-address evidence must agree with the record as well as
+        // the key-derived Standard Account address checked below.
+        Some("synergy-authority-public-identity-v3") => {
+            if public_document.get("address_type").and_then(Value::as_str) != Some("WalletAccount")
+                || public_document.get("address").and_then(Value::as_str)
+                    != Some(standard_account_address.as_str())
+            {
+                return Err(
+                    "preserved governance public bundle does not match the frozen authority entry"
+                        .to_string(),
+                );
+            }
+        }
+        _ => {
+            return Err(
+                "governance public bundle has an unsupported or mixed binary-text schema"
+                    .to_string(),
+            )
+        }
+    }
+    let public_key_hex = value_string(&public_document, "public_key", "governance public key")?;
+    let public_key = decode_lower_hex(&public_key_hex, "governance public key")?;
+    let expected_public_sha256 = value_string(
+        entry,
+        "authorization_public_sha256",
+        "governance authorization public identity SHA-256",
+    )?;
+    if !is_lower_hex(&expected_public_sha256, 32)
+        || expected_public_sha256 != sha256_hex(&public_bytes)
+    {
+        return Err(
+            "governance authorization public identity does not match the frozen authority entry"
+                .to_string(),
+        );
+    }
     if public_key.len() != 2_592 {
         return Err(format!(
             "governance public key is {} bytes; expected ML-DSA-87 length 2592",
@@ -285,6 +388,7 @@ pub fn load_frozen_governance_authority(
         role,
         standard_account_address,
         public_key_fingerprint,
+        governance_identity_authorization_binding_sha3_256,
         public_key,
         frozen_authority_record_sha256: sha256_hex(&authority_bytes),
     })
@@ -321,24 +425,22 @@ pub fn verify_release_approval_file(
                 .to_string(),
         );
     }
-    let signature = BASE64
-        .decode(&approval.signature_base64)
-        .map_err(|error| format!("decode release-approval signature: {error}"))?;
+    let signature = decode_lower_hex(&approval.signature_hex, "release-approval signature")?;
     if signature.is_empty() {
         return Err("release-approval signature is empty".to_string());
     }
     let payload = approval.request.canonical_bytes()?;
-    let verified = pqsynq::Sign::mldsa87()
-        .verify_ctx(
-            &payload,
-            &signature,
-            &authority.public_key,
-            TESTNET_V3_GENESIS_RELEASE_APPROVAL_DOMAIN.as_bytes(),
-        )
-        .map_err(|error| format!("verify ML-DSA-87 release-approval signature: {error}"))?;
-    if !verified {
-        return Err("ML-DSA-87 release-approval signature verification failed".to_string());
-    }
+    let public_key = mldsa87::PublicKey::from_bytes(&authority.public_key)
+        .map_err(|_| "frozen governance ML-DSA-87 public key is malformed".to_string())?;
+    let signature = mldsa87::DetachedSignature::from_bytes(&signature)
+        .map_err(|_| "release-approval ML-DSA-87 signature is malformed".to_string())?;
+    mldsa87::verify_detached_signature_ctx(
+        &signature,
+        &payload,
+        TESTNET_V3_GENESIS_RELEASE_APPROVAL_DOMAIN.as_bytes(),
+        &public_key,
+    )
+    .map_err(|_| "ML-DSA-87 release-approval signature verification failed".to_string())?;
     Ok(approval.request)
 }
 
@@ -354,11 +456,128 @@ fn validate_candidate_release_state(candidate: &Value) -> Result<(), String> {
         || candidate
             .pointer("/network/network_slug")
             .and_then(Value::as_str)
-            != Some(EXPECTED_RUNTIME_NETWORK_ID)
+            != Some(EXPECTED_NETWORK_ID)
+        || candidate
+            .pointer("/genesis_deployment/network_id")
+            .and_then(Value::as_str)
+            != Some(EXPECTED_NETWORK_ID)
+        || candidate
+            .pointer("/genesis_deployment/release_id")
+            .and_then(Value::as_str)
+            != Some(EXPECTED_RELEASE_ID)
     {
         return Err("candidate is not the executed Testnet-v3 release-approval stage".to_string());
     }
     Ok(())
+}
+
+fn load_candidate_etdag_governance(
+    candidate: &Value,
+) -> Result<crate::etdag_governance::EtdagGovernedGenesisBinding, String> {
+    let binding: crate::etdag_governance::EtdagGovernedGenesisBinding = serde_json::from_value(
+        candidate
+            .pointer("/etdag_governance")
+            .cloned()
+            .ok_or_else(|| "candidate ETDAG governed binding is missing".to_string())?,
+    )
+    .map_err(|error| format!("parse candidate ETDAG governed binding: {error}"))?;
+    binding.validate()?;
+    let parameter_root = binding
+        .parameter_artifact
+        .etdag_parameter_root_sha3_512
+        .to_hex();
+    let fee_root = binding
+        .fee_schedule_artifact
+        .etdag_fee_schedule_root_sha3_512
+        .to_hex();
+    if json_string(
+        candidate,
+        "/integrity/etdag_parameter_root_sha3_512",
+        "candidate ETDAG parameter root",
+    )? != parameter_root
+        || json_string(
+            candidate,
+            "/integrity/etdag_fee_schedule_root_sha3_512",
+            "candidate ETDAG fee schedule root",
+        )? != fee_root
+    {
+        return Err("candidate ETDAG integrity roots disagree with governed artifacts".to_string());
+    }
+    Ok(binding)
+}
+
+fn load_candidate_etdag_membership_anchor(
+    candidate: &Value,
+) -> Result<crate::etdag_governance::EtdagGovernedMembershipAnchor, String> {
+    const ANCHOR_PATH: &str = "/etdag_membership_anchor";
+    let anchor: crate::etdag_governance::EtdagGovernedMembershipAnchor = serde_json::from_value(
+        candidate
+            .pointer(ANCHOR_PATH)
+            .cloned()
+            .ok_or_else(|| "candidate ETDAG membership anchor is missing".to_string())?,
+    )
+    .map_err(|error| format!("parse candidate ETDAG membership anchor: {error}"))?;
+    anchor.validate()?;
+    if anchor.schema != ETDAG_MEMBERSHIP_ANCHOR_SCHEMA
+        || anchor.genesis_hash
+            != json_string(
+                candidate,
+                "/integrity/genesis_hash",
+                "candidate genesis hash",
+            )?
+        || anchor.deployed_execution_state_root
+            != json_string(
+                candidate,
+                "/genesis_deployment/post_deployment_execution_state_root",
+                "candidate post-deployment execution root",
+            )?
+        || anchor.initial_consensus_parameter_root.to_hex()
+            != json_string(
+                candidate,
+                "/consensus_parameters/parameter_root_sha3_512",
+                "candidate consensus parameter SHA3-512 root",
+            )?
+    {
+        return Err(
+            "candidate ETDAG membership anchor is not bound to the staged Genesis inputs"
+                .to_string(),
+        );
+    }
+    let genesis_hash_inputs = candidate
+        .pointer("/canonicalization/genesis_hash_inputs")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "candidate canonical Genesis hash inputs are missing".to_string())?;
+    if genesis_hash_inputs
+        .iter()
+        .any(|entry| entry.as_str() == Some("etdag_membership_anchor"))
+    {
+        return Err(
+            "post-Genesis ETDAG membership anchor must not be included in the Genesis hash"
+                .to_string(),
+        );
+    }
+    if !candidate
+        .pointer("/canonicalization/excluded_from_genesis_hash")
+        .and_then(Value::as_array)
+        .is_some_and(|excluded| {
+            excluded
+                .iter()
+                .any(|entry| entry.as_str() == Some("etdag_membership_anchor"))
+        })
+    {
+        return Err(
+            "post-Genesis ETDAG membership anchor must be explicitly excluded from the Genesis hash"
+                .to_string(),
+        );
+    }
+    let binding = load_candidate_etdag_governance(candidate)?;
+    if anchor.governance_decision_id != binding.parameter_artifact.manifest.governance_decision_id {
+        return Err(
+            "ETDAG membership anchor governance decision does not match the parameter and fee artifacts"
+                .to_string(),
+        );
+    }
+    Ok(anchor)
 }
 
 fn validate_request_shape(request: &TestnetV3GenesisReleaseApprovalRequest) -> Result<(), String> {
@@ -369,7 +588,8 @@ fn validate_request_shape(request: &TestnetV3GenesisReleaseApprovalRequest) -> R
         || request.signature_domain != TESTNET_V3_GENESIS_RELEASE_APPROVAL_DOMAIN
         || request.governance_authority_role != TESTNET_V3_GOVERNANCE_AUTHORITY_ROLE
         || request.chain_id != EXPECTED_CHAIN_ID
-        || request.runtime_network_id != EXPECTED_RUNTIME_NETWORK_ID
+        || request.network_id != EXPECTED_NETWORK_ID
+        || request.release_id != EXPECTED_RELEASE_ID
         || request.synq_network_id != EXPECTED_SYNQ_NETWORK_ID
     {
         return Err(
@@ -406,6 +626,21 @@ fn validate_request_shape(request: &TestnetV3GenesisReleaseApprovalRequest) -> R
             64,
         ),
         (
+            "etdag_parameter_root_sha3_512",
+            &request.etdag_parameter_root_sha3_512,
+            64,
+        ),
+        (
+            "etdag_fee_schedule_root_sha3_512",
+            &request.etdag_fee_schedule_root_sha3_512,
+            64,
+        ),
+        (
+            "etdag_membership_anchor_digest_sha3_512",
+            &request.etdag_membership_anchor_digest_sha3_512,
+            64,
+        ),
+        (
             "frozen_authority_record_sha256",
             &request.frozen_authority_record_sha256,
             32,
@@ -421,12 +656,36 @@ fn validate_request_shape(request: &TestnetV3GenesisReleaseApprovalRequest) -> R
         .governance_public_key_fingerprint
         .starts_with("sha256:")
         || !is_lower_hex(&request.governance_public_key_fingerprint[7..], 32)
+        || !is_lower_hex(
+            &request.governance_identity_authorization_binding_sha3_256,
+            32,
+        )
         || request.governance_standard_account_address.is_empty()
         || request.consensus_parameter_decision_id.is_empty()
     {
         return Err(
             "release-approval request has invalid governance or consensus bindings".to_string(),
         );
+    }
+    for (label, root) in [
+        (
+            "etdag_parameter_root_sha3_512",
+            &request.etdag_parameter_root_sha3_512,
+        ),
+        (
+            "etdag_fee_schedule_root_sha3_512",
+            &request.etdag_fee_schedule_root_sha3_512,
+        ),
+        (
+            "etdag_membership_anchor_digest_sha3_512",
+            &request.etdag_membership_anchor_digest_sha3_512,
+        ),
+    ] {
+        if root.bytes().all(|byte| byte == b'0') {
+            return Err(format!(
+                "release-approval request {label} must not be all zero"
+            ));
+        }
     }
     Ok(())
 }
@@ -484,6 +743,20 @@ fn is_lower_hex(value: &str, expected_bytes: usize) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+fn decode_lower_hex(value: &str, label: &str) -> Result<Vec<u8>, String> {
+    if value.is_empty()
+        || value.len() % 2 != 0
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(format!(
+            "{label} must be non-empty lowercase hexadecimal without a 0x prefix"
+        ));
+    }
+    hex::decode(value).map_err(|error| format!("decode {label}: {error}"))
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
@@ -491,7 +764,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pqsynq::traits::DigitalSignature as _;
+    use pqrust_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
     use serde_json::json;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -503,13 +776,24 @@ mod tests {
         authorities: PathBuf,
     }
 
+    fn test_authority_keypair() -> (Vec<u8>, Vec<u8>) {
+        let (public_key, signing_key) = mldsa87::keypair();
+        (
+            public_key.as_bytes().to_vec(),
+            signing_key.as_bytes().to_vec(),
+        )
+    }
+
     impl Drop for TestRepository {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
     }
 
-    fn test_repository(public_key: &[u8]) -> TestRepository {
+    fn test_repository_with_governance_schema(
+        public_key: &[u8],
+        preserved_v3: bool,
+    ) -> TestRepository {
         let sequence = TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
             "synergy-testnet-v3-release-approval-{}-{sequence}",
@@ -519,55 +803,69 @@ mod tests {
         fs::create_dir_all(&bundle).expect("create test governance bundle");
         let public_key_fingerprint = format!("sha256:{}", sha256_hex(public_key));
         let standard_account_address = derive_standard_account_address(public_key);
-        fs::write(
-            bundle.join("identity.pub.json"),
-            serde_json::to_vec(&json!({
-                "algorithm": EXPECTED_ALGORITHM,
+        let public_identity = serde_json::to_vec(&if preserved_v3 {
+            json!({
+                "schema_version": "synergy-authority-public-identity-v3",
+                "binary_encoding": "lowercase-hex",
                 "address": standard_account_address,
-                "public_key": BASE64.encode(public_key),
-            }))
-            .expect("encode public identity"),
-        )
-        .expect("write public identity");
-        fs::write(
-            bundle.join("manifest.json"),
-            serde_json::to_vec(&json!({
+                "address_type": "WalletAccount",
+                "algorithm": EXPECTED_ALGORITHM,
+                "created_at": "2026-08-23T00:00:00Z",
+                "public_key": hex::encode(public_key),
+                "role_id": TESTNET_V3_GOVERNANCE_AUTHORITY_ROLE,
+            })
+        } else {
+            json!({
+                "schema_version": "synergy-governance-authorization-public-key-v1",
+                "binary_encoding": "lowercase-hex",
                 "role_id": TESTNET_V3_GOVERNANCE_AUTHORITY_ROLE,
                 "algorithm": EXPECTED_ALGORITHM,
-                "chain_id": EXPECTED_CHAIN_ID,
-                "network_id": EXPECTED_RUNTIME_NETWORK_ID,
-                "test_fixture": false,
-                "public_key_fingerprint": public_key_fingerprint,
-            }))
-            .expect("encode governance manifest"),
-        )
-        .expect("write governance manifest");
+                "public_key": hex::encode(public_key),
+            })
+        })
+        .expect("encode public identity");
+        fs::write(bundle.join("identity.pub.json"), &public_identity)
+            .expect("write public identity");
         let authorities = root.join("authorities.json");
         let authority_value = json!({
+            "artifact": EXPECTED_AUTHORITIES_ARTIFACT,
             "status": "FROZEN",
             "test_fixture": false,
-            "algorithm": EXPECTED_ALGORITHM,
+            "current_release_authority": false,
             "chain_id": EXPECTED_CHAIN_ID,
-            "network_id": EXPECTED_RUNTIME_NETWORK_ID,
+            "network_id": EXPECTED_NETWORK_ID,
+            "release_id": EXPECTED_RELEASE_ID,
             "authorities": [{
                 "role_id": TESTNET_V3_GOVERNANCE_AUTHORITY_ROLE,
+                "authorization_algorithm": EXPECTED_ALGORITHM,
                 "standard_account_address": standard_account_address,
                 "public_key_fingerprint": public_key_fingerprint,
+                "authorization_public_sha256": sha256_hex(&public_identity),
+                "authorization_encrypted_sha256": "bb".repeat(32),
+                "release_authorization_binding_sha256": "cc".repeat(32),
+                "release_authorization_binding_payload_sha3_256": "aa".repeat(32),
                 "bundle_dir": "test-fixture/governance",
             }]
         });
         let authority_bytes = serde_json::to_vec(&authority_value).expect("encode authorities");
         fs::write(&authorities, &authority_bytes).expect("write authorities");
+        let etdag_binding = test_etdag_binding();
+        let etdag_membership_anchor = test_etdag_membership_anchor();
         let candidate = root.join("candidate.json");
         let candidate_value = json!({
-            "network": {"chain_id": EXPECTED_CHAIN_ID, "network_slug": EXPECTED_RUNTIME_NETWORK_ID},
+            "network": {"chain_id": EXPECTED_CHAIN_ID, "network_slug": EXPECTED_NETWORK_ID},
             "integrity": {
                 "status": "candidate_deployment_bound_pending_release_approval",
                 "genesis_hash": "11".repeat(32),
+                "etdag_parameter_root_sha3_512":
+                    etdag_binding.parameter_artifact.etdag_parameter_root_sha3_512.to_hex(),
+                "etdag_fee_schedule_root_sha3_512":
+                    etdag_binding.fee_schedule_artifact.etdag_fee_schedule_root_sha3_512.to_hex(),
             },
             "genesis_deployment": {
                 "status": "EXECUTED_AND_BOUND",
-                "runtime_network_id": EXPECTED_RUNTIME_NETWORK_ID,
+                "network_id": EXPECTED_NETWORK_ID,
+                "release_id": EXPECTED_RELEASE_ID,
                 "synq_network_id": EXPECTED_SYNQ_NETWORK_ID,
                 "candidate_input_id": "22".repeat(32),
                 "authority_record_sha256": sha256_hex(&authority_bytes),
@@ -579,7 +877,13 @@ mod tests {
                 "canonical_manifest_sha256": "66".repeat(32),
                 "parameter_root_sha3_512": "77".repeat(64),
                 "decision_id": "TV3-POSY-PARAMS-UNIT-TEST",
-            }
+            },
+            "canonicalization": {
+                "genesis_hash_inputs": ["etdag_governance"],
+                "excluded_from_genesis_hash": ["etdag_membership_anchor"],
+            },
+            "etdag_governance": etdag_binding,
+            "etdag_membership_anchor": etdag_membership_anchor,
         });
         fs::write(
             &candidate,
@@ -593,6 +897,96 @@ mod tests {
         }
     }
 
+    fn test_repository(public_key: &[u8]) -> TestRepository {
+        test_repository_with_governance_schema(public_key, false)
+    }
+
+    fn test_etdag_binding() -> crate::etdag_governance::EtdagGovernedGenesisBinding {
+        use crate::etdag::EtdagParameters;
+        use crate::etdag_governance::{
+            EtdagFeeScheduleArtifact, EtdagFeeScheduleManifest, EtdagGovernedGenesisBinding,
+            EtdagParameterArtifact, EtdagParameterManifest, ETDAG_FEE_SCHEDULE_MANIFEST_SCHEMA,
+            ETDAG_GOVERNED_GENESIS_BINDING_SCHEMA_VERSION, ETDAG_GOVERNED_GENESIS_BINDING_STATUS,
+            ETDAG_PARAMETER_MANIFEST_SCHEMA,
+        };
+        use crate::gas::{fee_market::FeeMarketParams, FeeSchedule};
+        use crate::synergy_types::{ChainId, NetworkId};
+
+        let parameter_artifact = EtdagParameterArtifact::from_manifest(EtdagParameterManifest {
+            schema: ETDAG_PARAMETER_MANIFEST_SCHEMA.to_string(),
+            governance_decision_id: "GOV-ETDAG-20260823-UNIT".to_string(),
+            chain_id: ChainId::synergy_testnet_v3(),
+            network_id: NetworkId::fresh_posy_testnet_v3(),
+            consensus_protocol_version:
+                crate::consensus::simplified_posy::POSY_SIMPLIFIED_PROTOCOL_VERSION.to_string(),
+            parameters: EtdagParameters::default(),
+        })
+        .expect("construct ETDAG parameter artifact");
+        let fee_schedule_artifact =
+            EtdagFeeScheduleArtifact::from_manifest(EtdagFeeScheduleManifest {
+                schema: ETDAG_FEE_SCHEDULE_MANIFEST_SCHEMA.to_string(),
+                governance_decision_id: "GOV-ETDAG-20260823-UNIT".to_string(),
+                chain_id: ChainId::synergy_testnet_v3(),
+                network_id: NetworkId::fresh_posy_testnet_v3(),
+                consensus_protocol_version:
+                    crate::consensus::simplified_posy::POSY_SIMPLIFIED_PROTOCOL_VERSION.to_string(),
+                etdag_parameter_root_sha3_512: parameter_artifact
+                    .etdag_parameter_root_sha3_512
+                    .clone(),
+                fee_schedule: FeeSchedule::default(),
+                fee_market_params: FeeMarketParams::testnet_v3_defaults(),
+            })
+            .expect("construct ETDAG fee artifact");
+        EtdagGovernedGenesisBinding {
+            schema_version: ETDAG_GOVERNED_GENESIS_BINDING_SCHEMA_VERSION,
+            status: ETDAG_GOVERNED_GENESIS_BINDING_STATUS.to_string(),
+            parameter_artifact,
+            fee_schedule_artifact,
+        }
+    }
+
+    fn test_etdag_membership_anchor() -> crate::etdag_governance::EtdagGovernedMembershipAnchor {
+        use crate::etdag_governance::{
+            EtdagGovernedMembershipAnchor, EtdagGovernedRoot, EtdagInitialValidatorSet,
+            EtdagMembershipConsensusPublicKey, EtdagMembershipValidator,
+            ETDAG_GOVERNED_MEMBERSHIP_PROOF_SCHEMA,
+        };
+        use crate::synergy_types::{
+            TESTNET_V3_CONSENSUS_SIGNATURE_ALGORITHM, TESTNET_V3_MLDSA65_PUBLIC_KEY_BYTES,
+        };
+
+        let mut anchor = EtdagGovernedMembershipAnchor {
+            schema: ETDAG_GOVERNED_MEMBERSHIP_PROOF_SCHEMA.to_string(),
+            governance_decision_id: "GOV-ETDAG-20260823-UNIT".to_string(),
+            genesis_hash: "11".repeat(32),
+            deployed_execution_state_root: "33".repeat(32),
+            genesis_activation_binding_digest: EtdagGovernedRoot::from_hex(&"88".repeat(64))
+                .expect("fixed activation digest"),
+            initial_epoch: 0,
+            initial_consensus_parameter_root: EtdagGovernedRoot::from_hex(&"77".repeat(64))
+                .expect("fixed parameter digest"),
+            initial_validator_set: EtdagInitialValidatorSet {
+                validators: (1..=5)
+                    .map(|index| EtdagMembershipValidator {
+                        validator_id: format!("posy-validator-{index:02}"),
+                        consensus_public_key: EtdagMembershipConsensusPublicKey {
+                            key_id: format!("posy-validator-{index:02}-consensus"),
+                            algorithm: TESTNET_V3_CONSENSUS_SIGNATURE_ALGORITHM.to_string(),
+                            key_bytes: vec![index as u8; TESTNET_V3_MLDSA65_PUBLIC_KEY_BYTES],
+                        },
+                        voting_weight: 1,
+                    })
+                    .collect(),
+            },
+            anchor_digest: EtdagGovernedRoot::from_hex(&"99".repeat(64))
+                .expect("fixed placeholder digest"),
+        };
+        anchor.anchor_digest = anchor
+            .expected_anchor_digest()
+            .expect("derive anchor digest");
+        anchor
+    }
+
     fn signed_approval(
         repository: &TestRepository,
         signing_key: &[u8],
@@ -603,26 +997,24 @@ mod tests {
             &repository.authorities,
         )
         .expect("build request");
-        let signature = pqsynq::Sign::mldsa87()
-            .sign_ctx(
-                &request.canonical_bytes().expect("canonical request"),
-                signing_key,
-                TESTNET_V3_GENESIS_RELEASE_APPROVAL_DOMAIN.as_bytes(),
-            )
-            .expect("sign test request");
+        let signing_key =
+            mldsa87::SecretKey::from_bytes(signing_key).expect("parse ML-DSA-87 test signing key");
+        let signature = mldsa87::detached_sign_ctx(
+            &request.canonical_bytes().expect("canonical request"),
+            TESTNET_V3_GENESIS_RELEASE_APPROVAL_DOMAIN.as_bytes(),
+            &signing_key,
+        );
         SignedTestnetV3GenesisReleaseApproval {
             schema_version: SCHEMA_VERSION,
             artifact_type: TESTNET_V3_GENESIS_RELEASE_APPROVAL_ARTIFACT_TYPE.to_string(),
             request,
-            signature_base64: BASE64.encode(signature),
+            signature_hex: hex::encode(signature.as_bytes()),
         }
     }
 
     #[test]
     fn signed_approval_verifies_only_against_the_frozen_governance_key() {
-        let (public_key, signing_key) = pqsynq::Sign::mldsa87()
-            .keygen()
-            .expect("generate ML-DSA-87 test authority");
+        let (public_key, signing_key) = test_authority_keypair();
         let repository = test_repository(&public_key);
         let approval = signed_approval(&repository, &signing_key);
         let approval_path = repository.root.join("approval.json");
@@ -645,12 +1037,8 @@ mod tests {
 
     #[test]
     fn approval_rejects_a_signature_from_an_unfrozen_key() {
-        let (frozen_public_key, _) = pqsynq::Sign::mldsa87()
-            .keygen()
-            .expect("generate frozen ML-DSA-87 authority");
-        let (_, attacker_key) = pqsynq::Sign::mldsa87()
-            .keygen()
-            .expect("generate untrusted ML-DSA-87 authority");
+        let (frozen_public_key, _) = test_authority_keypair();
+        let (_, attacker_key) = test_authority_keypair();
         let repository = test_repository(&frozen_public_key);
         let approval = signed_approval(&repository, &attacker_key);
         let approval_path = repository.root.join("approval.json");
@@ -672,10 +1060,28 @@ mod tests {
     }
 
     #[test]
+    fn authority_loader_accepts_the_canonical_v1_rotation_public_shape() {
+        let (public_key, _) = test_authority_keypair();
+        let repository = test_repository(&public_key);
+
+        assert!(
+            load_frozen_governance_authority(&repository.root, &repository.authorities).is_ok()
+        );
+    }
+
+    #[test]
+    fn authority_loader_accepts_the_canonical_preserved_v3_public_shape() {
+        let (public_key, _) = test_authority_keypair();
+        let repository = test_repository_with_governance_schema(&public_key, true);
+
+        assert!(
+            load_frozen_governance_authority(&repository.root, &repository.authorities).is_ok()
+        );
+    }
+
+    #[test]
     fn approval_rejects_a_changed_candidate_before_signature_verification() {
-        let (public_key, signing_key) = pqsynq::Sign::mldsa87()
-            .keygen()
-            .expect("generate ML-DSA-87 test authority");
+        let (public_key, signing_key) = test_authority_keypair();
         let repository = test_repository(&public_key);
         let approval = signed_approval(&repository, &signing_key);
         let approval_path = repository.root.join("approval.json");
@@ -703,5 +1109,58 @@ mod tests {
         .expect_err("changed candidate must be rejected");
 
         assert!(error.contains("does not exactly match the staged candidate"));
+    }
+
+    #[test]
+    fn request_commits_nonzero_governed_etdag_roots_and_membership_anchor() {
+        let (public_key, _) = test_authority_keypair();
+        let repository = test_repository(&public_key);
+
+        let request = build_release_approval_request(
+            &repository.root,
+            &repository.candidate,
+            &repository.authorities,
+        )
+        .expect("build governed V4 request");
+
+        assert_eq!(request.schema_version, 4);
+        assert_eq!(request.network_id, EXPECTED_NETWORK_ID);
+        assert_eq!(request.release_id, EXPECTED_RELEASE_ID);
+        assert!(is_lower_hex(&request.etdag_parameter_root_sha3_512, 64));
+        assert!(is_lower_hex(&request.etdag_fee_schedule_root_sha3_512, 64));
+        assert!(is_lower_hex(
+            &request.etdag_membership_anchor_digest_sha3_512,
+            64
+        ));
+        assert_ne!(request.etdag_parameter_root_sha3_512, "0".repeat(128));
+        assert_ne!(request.etdag_fee_schedule_root_sha3_512, "0".repeat(128));
+        assert_ne!(
+            request.etdag_membership_anchor_digest_sha3_512,
+            "0".repeat(128)
+        );
+    }
+
+    #[test]
+    fn request_rejects_etdag_roots_that_do_not_match_the_governed_artifacts() {
+        let (public_key, _) = test_authority_keypair();
+        let repository = test_repository(&public_key);
+        let mut candidate: Value =
+            serde_json::from_slice(&fs::read(&repository.candidate).expect("read candidate"))
+                .expect("parse candidate");
+        candidate["integrity"]["etdag_fee_schedule_root_sha3_512"] = Value::String("00".repeat(64));
+        fs::write(
+            &repository.candidate,
+            serde_json::to_vec(&candidate).expect("encode changed candidate"),
+        )
+        .expect("write changed candidate");
+
+        let error = build_release_approval_request(
+            &repository.root,
+            &repository.candidate,
+            &repository.authorities,
+        )
+        .expect_err("tampered ETDAG root must be rejected");
+
+        assert!(error.contains("ETDAG integrity roots disagree"));
     }
 }

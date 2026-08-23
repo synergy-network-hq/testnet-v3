@@ -1,4 +1,7 @@
-//! Canonical core-only proposal material while finalized ETDAG activation is absent.
+//! Canonical core-side proposal material shared by protected execution.
+//!
+//! The adapter remains available for historical typed-PoSy fixtures. Fresh P3
+//! startup is governed-ETDAG-only and never selects this adapter as a fallback.
 
 use super::{
     compute_simplified_protected_execution_root, FinalizedBlockRecord, SimplifiedEpochContext,
@@ -16,7 +19,7 @@ use crate::synergy_types::{
 pub const POSY_SIMPLIFIED_CORE_CLUSTER_SCHEDULE_VERSION: &str =
     "posy-v3-single-consensus-cluster-v1";
 
-/// Frozen block-construction inputs for the ETDAG-deferred part of an epoch.
+/// Frozen consensus-side block-construction inputs for one epoch.
 #[derive(Debug, Clone)]
 pub struct SimplifiedCoreMaterialConfiguration {
     pub validator_set: ValidatorSet,
@@ -82,7 +85,9 @@ impl SimplifiedCoreMaterialConfiguration {
     }
 }
 
-/// Empty-block adapter used only while the finalized ETDAG permit is absent.
+/// Historical empty-block adapter retained for typed-PoSy compatibility tests.
+/// Fresh P3 role-runtime startup fails before adapter selection if its governed
+/// ETDAG permit is absent.
 pub struct SimplifiedCoreMaterialAdapter {
     epoch_context: SimplifiedEpochContext,
     configuration: SimplifiedCoreMaterialConfiguration,
@@ -153,7 +158,7 @@ impl SimplifiedCoreMaterialAdapter {
             &serde_json::to_vec(&(
                 directive.context.epoch_context_root,
                 directive.context.height,
-                &directive.highest_qc,
+                &directive.parent,
             ))
             .map_err(|error| format!("serialize simplified core DAG frontier: {error}"))?,
         ))
@@ -165,7 +170,7 @@ impl SimplifiedCoreMaterialAdapter {
     ) -> Result<Hash, String> {
         Ok(Hash::from_domain_bytes(
             "SYNERGY_POSY_SIMPLIFIED_CORE_EVIDENCE_V1",
-            &serde_json::to_vec(&(&directive.highest_qc, &directive.finalized))
+            &serde_json::to_vec(&(&directive.parent, &directive.finalized))
                 .map_err(|error| format!("serialize simplified core evidence: {error}"))?,
         ))
     }
@@ -180,7 +185,7 @@ impl SimplifiedCoreMaterialAdapter {
         let header = &material.canonical_block.header;
         let directive = SimplifiedProposalDirective {
             context: proposal.context.clone(),
-            highest_qc: proposal.parent_qc.clone(),
+            parent: proposal.parent.clone(),
             finalized: expected_finalized.clone(),
             proposer_id: proposal.proposer_id.clone(),
             proposer_key_id: proposal.proposer_key_id.clone(),
@@ -200,7 +205,7 @@ impl SimplifiedCoreMaterialAdapter {
             || header.dag_frontier_root != self.expected_dag_frontier(&directive)?
             || header.tx_order_root != compute_tx_order_root(&[])?
             || header.evidence_root != self.expected_evidence_root(&directive)?
-            || header.last_finalized_qc_hash != expected_finalized.qc_id
+            || header.last_finalized_qc_hash != expected_finalized.finality_reference_id()
             || header.timestamp_ms_consensus_bounded
                 != self.timestamp_for_height(proposal.context.height)?
             || header.app_version != self.configuration.app_version
@@ -249,9 +254,9 @@ impl SimplifiedMaterialAdapter for SimplifiedCoreMaterialAdapter {
                 epoch: directive.context.epoch,
                 cluster_id,
                 height_context_root: directive.context.epoch_context_root,
-                parent_block_hash: Hash::from_hex(&directive.highest_qc.block_id.0)?,
+                parent_block_hash: Hash::from_hex(&directive.parent.block_id().0)?,
                 parent_state_root: state_root,
-                last_finalized_qc_hash: directive.finalized.qc_id,
+                last_finalized_qc_hash: directive.finalized.finality_reference_id(),
                 proposer_validator_id: proposer.validator_id.clone(),
                 proposer_uma_id: proposer.validator_uma_id.clone(),
                 proposer_key_id: proposer.consensus_public_key.key_id.clone(),
@@ -295,16 +300,16 @@ impl SimplifiedMaterialAdapter for SimplifiedCoreMaterialAdapter {
         let protected_execution_root = compute_simplified_protected_execution_root(
             &directive.context,
             &block,
-            &directive.highest_qc.block_id,
-            &directive.highest_qc,
+            directive.parent.block_id(),
+            &directive.parent,
             None,
             None,
         )?;
         let proposal = SimplifiedProposal {
             context: directive.context.clone(),
             block_id,
-            parent_block_id: directive.highest_qc.block_id.clone(),
-            parent_qc: directive.highest_qc.clone(),
+            parent_block_id: directive.parent.block_id().clone(),
+            parent: directive.parent.clone(),
             takeover_tc_id: directive.takeover_tc_id,
             protected_execution_root,
             proposer_id: proposer.validator_id,
@@ -407,7 +412,7 @@ mod tests {
                 .collect(),
         }
         .canonicalized();
-        let anchor = FinalizedBlockRecord {
+        let parent_qc = super::super::QuorumCertificateReference {
             height: Height(999),
             block_id: BlockId::from_hash(Hash::from_domain_bytes(
                 "core-material-test",
@@ -415,11 +420,7 @@ mod tests {
             )),
             qc_id: Hash::from_domain_bytes("core-material-test", b"anchor-qc"),
         };
-        let parent_qc = super::super::QuorumCertificateReference {
-            height: anchor.height,
-            block_id: anchor.block_id.clone(),
-            qc_id: anchor.qc_id,
-        };
+        let anchor = FinalizedBlockRecord::from_quorum_certificate(parent_qc.clone()).unwrap();
         let proposer_id = epoch_context
             .authorized_proposer(Height(1_000), 0)
             .unwrap()
@@ -439,7 +440,7 @@ mod tests {
                 Round(0),
             )
             .unwrap(),
-            highest_qc: parent_qc,
+            parent: anchor.finality_parent.clone(),
             finalized: anchor.clone(),
             proposer_id,
             proposer_key_id,
@@ -502,7 +503,7 @@ mod tests {
             context: carry_context,
             block_id: proposal.block_id.clone(),
             parent_block_id: proposal.parent_block_id.clone(),
-            parent_qc: proposal.parent_qc.clone(),
+            parent: proposal.parent.clone(),
             takeover_tc_id: Some(Hash::from_domain_bytes(
                 "core-material-test",
                 b"takeover-tc",
@@ -520,7 +521,7 @@ mod tests {
                 carry_proposal.context.clone(),
                 carry_proposal.block_id.clone(),
                 carry_proposal.parent_block_id.clone(),
-                carry_proposal.parent_qc.clone(),
+                carry_proposal.parent.clone(),
                 carry_proposal.protected_execution_root,
             )
             .unwrap(),
@@ -533,9 +534,13 @@ mod tests {
             proposal.protected_execution_root
         );
 
-        let mut substituted_finality = anchor;
-        substituted_finality.qc_id =
-            Hash::from_domain_bytes("core-material-test", b"wrong-finality");
+        let substituted_finality =
+            FinalizedBlockRecord::from_quorum_certificate(QuorumCertificateReference {
+                height: anchor.height,
+                block_id: anchor.block_id.clone(),
+                qc_id: Hash::from_domain_bytes("core-material-test", b"wrong-finality"),
+            })
+            .unwrap();
         assert!(adapter
             .verify_received(&epoch_context, &proposal, &substituted_finality, &material,)
             .is_err());

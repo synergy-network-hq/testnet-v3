@@ -1,7 +1,12 @@
 # Consensus Migration Runbook
 
-Status: **pre-deployment**. This runbook describes required order; it is not
-authorization to modify a live node.
+Status: **historical coordinated-consensus migration record; not a PoSy v3
+runbook.** This document preserves the former six-validator
+`synergy-testnet-v3` procedure for audit only. It must not be used to prepare,
+start, recover, or extend the fresh Chain `1266` / network `testnet` /
+`posy/3.0` chain. Use
+`runtime/docs/runbooks/posy-v3-fresh-chain-launch-preparation.md` for the P3
+source-preparation sequence.
 
 ## Release gates before a fresh start
 

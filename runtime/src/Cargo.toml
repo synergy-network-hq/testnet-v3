@@ -164,6 +164,14 @@ name = "testnet-v3-genesis-release-approval"
 path = "bin/testnet-v3-genesis-release-approval.rs"
 
 [[bin]]
+name = "testnet-v3-etdag-governed-artifacts"
+path = "bin/testnet-v3-etdag-governed-artifacts.rs"
+
+[[bin]]
+name = "prepare-fresh-posy-v3-genesis"
+path = "bin/prepare-fresh-posy-v3-genesis.rs"
+
+[[bin]]
 name = "testnet-v3-etdag-admission"
 path = "bin/testnet-v3-etdag-admission.rs"
 

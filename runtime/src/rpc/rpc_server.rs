@@ -6630,7 +6630,7 @@ fn coordinated_finality_records_for_rpc() -> Result<Option<Vec<CoordinatedFinali
         &node_config.network.network_id,
     ) {
         Ok(ResolvedConsensusMode::CoordinatedRoundRobinV1(config)) => config,
-        Ok(ResolvedConsensusMode::PosyV2_2) => {
+        Ok(ResolvedConsensusMode::PosySimplifiedV3) => {
             return Err(
                 "coordinated finality journal exists while the selected consensus mode is not coordinated_round_robin_v1"
                     .to_string(),
@@ -9448,7 +9448,16 @@ fn estimate_fee_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
 
 fn fee_schedule_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
     let state = current_fee_market_state_from_chain(chain);
-    let fee_schedule = crate::gas::FeeSchedule::default();
+    let fee_schedule = match crate::gas::fee_schedule_for_runtime() {
+        Ok(schedule) => schedule,
+        Err(error) => {
+            return json!({
+                "error": error,
+                "code": "GOVERNED_FEE_SCHEDULE_UNAVAILABLE",
+                "chain": chain_identity_json(),
+            });
+        }
+    };
     let amount_fee_schedule = fee_schedule
         .entries
         .iter()
@@ -9968,26 +9977,28 @@ struct CanonicalFeeMarketState {
 }
 
 fn canonical_fee_market_state(chain: &BlockChain) -> CanonicalFeeMarketState {
-    let params = crate::gas::fee_market::FeeMarketParams::testnet_v3_defaults();
+    let params = *crate::gas::fee_market_params_for_runtime().expect(
+        "fee RPC must not run before verified fresh-P3 Genesis installs governed fee-market parameters",
+    );
     // Once the legacy producer has crossed the fee-market activation
     // boundary, the latest signed block header is authoritative.  Retaining
     // the replay below only for historical version-0 chains preserves the
     // existing read-only migration behavior without allowing it to override
     // a consensus-bound price.
-    if let Some(tip) = chain.chain.last().filter(|block| {
-        block.fee_market_version == params.fee_market_version
-    }) {
+    if let Some(tip) = chain
+        .chain
+        .last()
+        .filter(|block| block.fee_market_version == params.fee_market_version)
+    {
         let next_base_fee = crate::gas::fee_market::next_base_fee_per_gas(
             tip.base_fee_per_gas_nwei,
             tip.gas_used,
             &params,
         )
         .unwrap_or(tip.base_fee_per_gas_nwei);
-        let effective_pq_gas_price_nwei = crate::gas::fee_market::effective_pq_gas_price(
-            next_base_fee,
-            params.pq_gas_multiplier,
-        )
-        .unwrap_or(next_base_fee);
+        let effective_pq_gas_price_nwei =
+            crate::gas::fee_market::effective_pq_gas_price(next_base_fee, params.pq_gas_multiplier)
+                .unwrap_or(next_base_fee);
         return CanonicalFeeMarketState {
             params,
             current_base_fee_per_gas_nwei: Some(tip.base_fee_per_gas_nwei),
@@ -10021,7 +10032,11 @@ fn canonical_fee_market_state(chain: &BlockChain) -> CanonicalFeeMarketState {
         current_base_fee_per_gas_nwei: current_base_fee,
         base_fee_per_gas_nwei: base_fee,
         effective_pq_gas_price_nwei,
-        last_block_height: chain.chain.last().map(|block| block.block_index).unwrap_or(0),
+        last_block_height: chain
+            .chain
+            .last()
+            .map(|block| block.block_index)
+            .unwrap_or(0),
         last_block_gas_used,
     }
 }
@@ -10803,7 +10818,13 @@ mod tests {
         // `Transaction::estimate_gas()`, no floating point involved.
         let tx = fee_market_test_transaction(21_000);
         let gas_used_block_1 = tx.estimate_gas();
-        chain.add_block(Block::new(1, vec![tx], "genesis".to_string(), "v1".to_string(), 0));
+        chain.add_block(Block::new(
+            1,
+            vec![tx],
+            "genesis".to_string(),
+            "v1".to_string(),
+            0,
+        ));
 
         let params = crate::gas::fee_market::FeeMarketParams::testnet_v3_defaults();
         let expected_after_block_1 = crate::gas::fee_market::next_base_fee_per_gas(
@@ -10859,7 +10880,13 @@ mod tests {
         let mut previous_hash = "genesis".to_string();
         for i in 1..=10u64 {
             let tx = fee_market_test_transaction(21_000);
-            chain.add_block(Block::new(i, vec![tx], previous_hash.clone(), "v1".to_string(), 0));
+            chain.add_block(Block::new(
+                i,
+                vec![tx],
+                previous_hash.clone(),
+                "v1".to_string(),
+                0,
+            ));
             previous_hash = chain.chain.last().unwrap().hash.clone();
         }
         let params = crate::gas::fee_market::FeeMarketParams::testnet_v3_defaults();
@@ -10867,8 +10894,8 @@ mod tests {
         let mut prev = u64::MAX;
         for block in &chain.chain {
             let gas_used: u64 = block.transactions.iter().map(|tx| tx.estimate_gas()).sum();
-            expected = crate::gas::fee_market::next_base_fee_per_gas(expected, gas_used, &params)
-                .unwrap();
+            expected =
+                crate::gas::fee_market::next_base_fee_per_gas(expected, gas_used, &params).unwrap();
             assert!(
                 expected <= prev,
                 "base fee must monotonically move toward the floor under sustained low utilization"

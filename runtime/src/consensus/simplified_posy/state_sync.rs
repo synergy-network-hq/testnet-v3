@@ -7,7 +7,7 @@
 //! back into the bundle consumed by full signature/ancestry verification.
 
 use super::{
-    FinalizedBlockRecord, QuorumCertificateReference, SimplifiedEpochContext,
+    FinalizedBlockRecord, SimplifiedEpochContext, SimplifiedFinalityParent,
     SimplifiedQuorumCertificate, SimplifiedStateSyncBundle, SimplifiedTimeoutCertificate,
     POSY_SIMPLIFIED_STATE_SYNC_FORMAT,
 };
@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
 pub const POSY_SIMPLIFIED_STATE_SYNC_CHUNK_FORMAT: &str =
-    "synergy-posy-simplified-state-sync-chunk-v1";
+    "synergy-posy-simplified-state-sync-chunk-v2";
 pub const MAX_SIMPLIFIED_STATE_SYNC_CHUNK_PAYLOAD_BYTES: usize = 192 * 1024;
 pub const MAX_SIMPLIFIED_STATE_SYNC_SESSION_STAGED_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_SIMPLIFIED_STATE_SYNC_PEER_STAGED_BYTES: usize = 16 * 1024 * 1024;
@@ -43,7 +43,7 @@ pub struct SimplifiedStateSyncChunk {
     pub request_id: Hash,
     pub session_root: Hash,
     pub epoch_context_root: Hash,
-    pub anchor_qc: QuorumCertificateReference,
+    pub anchor_parent: SimplifiedFinalityParent,
     pub sequence: u32,
     pub previous_chunk_root: Option<Hash>,
     pub evidence: Vec<SimplifiedStateSyncEvidence>,
@@ -59,7 +59,7 @@ struct ChunkSubject {
     request_id: Hash,
     session_root: Hash,
     epoch_context_root: Hash,
-    anchor_qc: QuorumCertificateReference,
+    anchor_parent: SimplifiedFinalityParent,
     sequence: u32,
     previous_chunk_root: Option<Hash>,
     evidence: Vec<SimplifiedStateSyncEvidence>,
@@ -74,7 +74,7 @@ impl SimplifiedStateSyncChunk {
             request_id: self.request_id,
             session_root: self.session_root,
             epoch_context_root: self.epoch_context_root,
-            anchor_qc: self.anchor_qc.clone(),
+            anchor_parent: self.anchor_parent.clone(),
             sequence: self.sequence,
             previous_chunk_root: self.previous_chunk_root,
             evidence: self.evidence.clone(),
@@ -101,7 +101,7 @@ impl SimplifiedStateSyncChunk {
         {
             return Err("invalid simplified state-sync chunk envelope".to_string());
         }
-        self.anchor_qc.validate()?;
+        self.anchor_parent.validate()?;
         if self.sequence == 0 && self.previous_chunk_root.is_some()
             || self.sequence > 0
                 && self
@@ -133,21 +133,21 @@ impl SimplifiedStateSyncChunk {
 #[derive(Debug, Clone)]
 struct EvidenceSequence {
     next_height: u64,
-    expected_parent_qc: QuorumCertificateReference,
+    expected_parent: SimplifiedFinalityParent,
     next_timeout_round: u64,
     previous_tc_id: Option<Hash>,
 }
 
 impl EvidenceSequence {
-    fn new(anchor_qc: QuorumCertificateReference) -> Result<Self, String> {
-        let next_height = anchor_qc
-            .height
+    fn new(anchor_parent: SimplifiedFinalityParent) -> Result<Self, String> {
+        let next_height = anchor_parent
+            .height()
             .0
             .checked_add(1)
             .ok_or_else(|| "state-sync anchor height overflows".to_string())?;
         Ok(Self {
             next_height,
-            expected_parent_qc: anchor_qc,
+            expected_parent: anchor_parent,
             next_timeout_round: 0,
             previous_tc_id: None,
         })
@@ -164,7 +164,7 @@ impl EvidenceSequence {
                 let certified_lease = epoch_context.lease_index(qc.context.height)?;
                 if qc.context.height.0 != self.next_height
                     || qc.context.round.0 != self.next_timeout_round
-                    || qc.parent_qc != self.expected_parent_qc
+                    || qc.parent != self.expected_parent
                     || qc.takeover_tc_id != self.previous_tc_id
                 {
                     return Err(
@@ -172,7 +172,8 @@ impl EvidenceSequence {
                             .to_string(),
                     );
                 }
-                self.expected_parent_qc = qc.reference()?;
+                self.expected_parent =
+                    SimplifiedFinalityParent::quorum_certificate(qc.reference()?)?;
                 self.next_height = self
                     .next_height
                     .checked_add(1)
@@ -224,7 +225,7 @@ impl EvidenceSequence {
 struct SessionSubject {
     request_id: Hash,
     epoch_context_root: Hash,
-    anchor_qc: QuorumCertificateReference,
+    anchor_parent: SimplifiedFinalityParent,
     evidence_transcript_root: Hash,
     evidence_count: u64,
     claimed_finalized: FinalizedBlockRecord,
@@ -232,12 +233,12 @@ struct SessionSubject {
 
 fn evidence_transcript_root(
     epoch_context_root: Hash,
-    anchor_qc: &QuorumCertificateReference,
+    anchor_parent: &SimplifiedFinalityParent,
     evidence: &[SimplifiedStateSyncEvidence],
 ) -> Result<Hash, String> {
     let mut root = Hash::from_domain_bytes(
         "SYNERGY_POSY_SIMPLIFIED_STATE_SYNC_TRANSCRIPT_START_V1",
-        &(epoch_context_root, anchor_qc.clone()).canonical_bytes()?,
+        &(epoch_context_root, anchor_parent.clone()).canonical_bytes()?,
     );
     for item in evidence {
         root = Hash::from_domain_bytes(
@@ -251,7 +252,7 @@ fn evidence_transcript_root(
 fn session_root(
     request_id: Hash,
     epoch_context_root: Hash,
-    anchor_qc: &QuorumCertificateReference,
+    anchor_parent: &SimplifiedFinalityParent,
     evidence: &[SimplifiedStateSyncEvidence],
     claimed_finalized: &FinalizedBlockRecord,
 ) -> Result<Hash, String> {
@@ -262,10 +263,10 @@ fn session_root(
         &SessionSubject {
             request_id,
             epoch_context_root,
-            anchor_qc: anchor_qc.clone(),
+            anchor_parent: anchor_parent.clone(),
             evidence_transcript_root: evidence_transcript_root(
                 epoch_context_root,
-                anchor_qc,
+                anchor_parent,
                 evidence,
             )?,
             evidence_count,
@@ -302,7 +303,7 @@ fn ordered_evidence(
         .iter()
         .map(|qc| qc.context.height.0)
         .max()
-        .unwrap_or(bundle.anchor_qc.height.0)
+        .unwrap_or(bundle.anchor_parent.height().0)
         .checked_add(1)
         .ok_or_else(|| "state-sync export height overflows".to_string())?;
     if let Some(tcs) = bundle.certified_tcs.get(&next_height) {
@@ -331,62 +332,77 @@ fn ordered_evidence(
     if evidence.len() > MAX_SIMPLIFIED_STATE_SYNC_EVIDENCE {
         return Err("state-sync export evidence limit exceeded".to_string());
     }
-    let mut sequence = EvidenceSequence::new(bundle.anchor_qc.clone())?;
+    let mut sequence = EvidenceSequence::new(bundle.anchor_parent.clone())?;
     sequence.observe_all(&bundle.epoch_context, &evidence)?;
     Ok(evidence)
 }
 
 fn validate_export_envelope(bundle: &SimplifiedStateSyncBundle) -> Result<(), String> {
     bundle.epoch_context.validate()?;
-    bundle.anchor_qc.validate()?;
-    if bundle.anchor_qc.height.0.checked_add(1) != Some(bundle.epoch_context.epoch_start_height.0) {
+    bundle
+        .anchor_parent
+        .validate_for_child_height(bundle.epoch_context.epoch_start_height)?;
+    if bundle.anchor_parent.height().0.checked_add(1)
+        != Some(bundle.epoch_context.epoch_start_height.0)
+    {
         return Err("state-sync export anchor does not precede the epoch".to_string());
     }
     if let Some(expected) = &bundle.epoch_context.v2_boundary_anchor {
-        if bundle.anchor_qc.height != expected.height
-            || bundle.anchor_qc.block_id != expected.block_id
-            || bundle.anchor_qc.qc_id != expected.qc_finality_context_root
+        if bundle
+            .anchor_parent
+            .quorum_certificate_reference()
+            .is_none_or(|reference| {
+                reference.height != expected.height
+                    || reference.block_id != expected.block_id
+                    || reference.qc_id != expected.qc_finality_context_root
+            })
         {
             return Err("state-sync export substituted the pinned v2 boundary anchor".to_string());
         }
     }
     let transition_seed = if let Some(expected) = &bundle.epoch_context.v3_transition_anchor {
-        if bundle.anchor_qc.height != expected.certified_parent_height
-            || bundle.anchor_qc.block_id != expected.certified_parent_block_id
-            || bundle.anchor_qc.qc_id != expected.certified_parent_qc_id
+        if bundle
+            .anchor_parent
+            .quorum_certificate_reference()
+            .is_none_or(|reference| {
+                reference.height != expected.certified_parent_height
+                    || reference.block_id != expected.certified_parent_block_id
+                    || reference.qc_id != expected.certified_parent_qc_id
+            })
         {
             return Err("state-sync export substituted the pinned v3 certified parent".to_string());
         }
-        Some(FinalizedBlockRecord {
-            height: expected.finalized_seed_height,
-            block_id: expected.finalized_seed_block_id.clone(),
-            qc_id: expected.finalized_seed_qc_id,
-        })
+        Some(FinalizedBlockRecord::from_quorum_certificate(
+            super::QuorumCertificateReference {
+                height: expected.finalized_seed_height,
+                block_id: expected.finalized_seed_block_id.clone(),
+                qc_id: expected.finalized_seed_qc_id,
+            },
+        )?)
     } else {
         None
     };
     let minimum_finalized_height = transition_seed
         .as_ref()
-        .map_or(bundle.anchor_qc.height.0, |seed| seed.height.0);
-    if bundle.claimed_finalized.block_id.0.trim().is_empty()
-        || bundle.claimed_finalized.qc_id.is_zero()
+        .map_or(bundle.anchor_parent.height().0, |seed| seed.height.0);
+    if bundle.claimed_finalized.validate().is_err()
+        || bundle.claimed_finalized.block_id.0.trim().is_empty()
         || bundle.claimed_finalized.height.0 < minimum_finalized_height
     {
         return Err("state-sync export finalized claim is invalid".to_string());
     }
-    let finalized_is_anchor = bundle.claimed_finalized.height == bundle.anchor_qc.height
-        && bundle.claimed_finalized.block_id == bundle.anchor_qc.block_id
-        && bundle.claimed_finalized.qc_id == bundle.anchor_qc.qc_id;
+    let finalized_is_anchor = bundle.claimed_finalized.finality_parent == bundle.anchor_parent;
     let finalized_is_supplied_qc = bundle.certified_qcs.iter().any(|qc| {
         qc.context.height == bundle.claimed_finalized.height
             && qc.block_id == bundle.claimed_finalized.block_id
-            && qc.id().ok() == Some(bundle.claimed_finalized.qc_id)
+            && qc.id().ok() == Some(bundle.claimed_finalized.finality_reference_id())
     });
     // Intermediate previous-epoch tail claims cannot be authenticated from
     // the context alone. The proof-aware receiver checks their exact IDs
     // against its independently verified transition tail before install.
     let finalized_is_transition_tail = transition_seed.as_ref().is_some_and(|seed| {
-        (seed.height.0..=bundle.anchor_qc.height.0).contains(&bundle.claimed_finalized.height.0)
+        (seed.height.0..=bundle.anchor_parent.height().0)
+            .contains(&bundle.claimed_finalized.height.0)
     });
     if !finalized_is_anchor && !finalized_is_transition_tail && !finalized_is_supplied_qc {
         return Err("state-sync finalized claim names no supplied certificate".to_string());
@@ -410,7 +426,7 @@ pub fn build_state_sync_chunks(
     let session_root = session_root(
         request_id,
         epoch_context_root,
-        &bundle.anchor_qc,
+        &bundle.anchor_parent,
         &evidence,
         &bundle.claimed_finalized,
     )?;
@@ -423,7 +439,7 @@ pub fn build_state_sync_chunks(
             request_id,
             session_root,
             epoch_context_root,
-            anchor_qc: bundle.anchor_qc.clone(),
+            anchor_parent: bundle.anchor_parent.clone(),
             sequence: MAX_SIMPLIFIED_STATE_SYNC_CHUNKS - 1,
             previous_chunk_root: Some(Hash::from_domain_bytes(
                 "SYNERGY_POSY_SIMPLIFIED_STATE_SYNC_SIZE_PROBE_V1",
@@ -466,7 +482,7 @@ pub fn build_state_sync_chunks(
             request_id,
             session_root,
             epoch_context_root,
-            anchor_qc: bundle.anchor_qc.clone(),
+            anchor_parent: bundle.anchor_parent.clone(),
             sequence: u32::try_from(index)
                 .map_err(|_| "state-sync chunk sequence exceeds u32".to_string())?,
             previous_chunk_root: previous,
@@ -487,7 +503,7 @@ struct StagedSession {
     request_id: Hash,
     session_root: Hash,
     epoch_context_root: Hash,
-    anchor_qc: QuorumCertificateReference,
+    anchor_parent: SimplifiedFinalityParent,
     next_sequence: u32,
     previous_chunk_root: Option<Hash>,
     evidence: Vec<SimplifiedStateSyncEvidence>,
@@ -506,7 +522,7 @@ pub struct CompletedSimplifiedStateSync {
 pub struct SimplifiedStateSyncStager {
     expected_epoch_context: SimplifiedEpochContext,
     expected_epoch_context_root: Hash,
-    expected_anchor_qc: QuorumCertificateReference,
+    expected_anchor_parent: SimplifiedFinalityParent,
     transition_finality_records: BTreeMap<u64, FinalizedBlockRecord>,
     max_active_sessions: usize,
     outstanding_requests: BTreeMap<Hash, Instant>,
@@ -517,7 +533,7 @@ pub struct SimplifiedStateSyncStager {
 impl SimplifiedStateSyncStager {
     pub fn new(
         expected_epoch_context: SimplifiedEpochContext,
-        expected_anchor_qc: QuorumCertificateReference,
+        expected_anchor_parent: SimplifiedFinalityParent,
     ) -> Result<Self, String> {
         if expected_epoch_context.v3_transition_anchor.is_some() {
             return Err(
@@ -525,7 +541,11 @@ impl SimplifiedStateSyncStager {
                     .to_string(),
             );
         }
-        Self::new_internal(expected_epoch_context, expected_anchor_qc, BTreeMap::new())
+        Self::new_internal(
+            expected_epoch_context,
+            expected_anchor_parent,
+            BTreeMap::new(),
+        )
     }
 
     pub fn new_from_verified_v3_transition(
@@ -537,45 +557,50 @@ impl SimplifiedStateSyncStager {
             .map(|certificate| {
                 Ok((
                     certificate.context.height.0,
-                    FinalizedBlockRecord {
-                        height: certificate.context.height,
-                        block_id: certificate.block_id.clone(),
-                        qc_id: certificate.id()?,
-                    },
+                    FinalizedBlockRecord::from_quorum_certificate(certificate.reference()?)?,
                 ))
             })
             .collect::<Result<BTreeMap<_, _>, String>>()?;
         Self::new_internal(
             transition.next_epoch_context().clone(),
-            transition.certified_parent().clone(),
+            SimplifiedFinalityParent::quorum_certificate(transition.certified_parent().clone())?,
             transition_finality_records,
         )
     }
 
     fn new_internal(
         expected_epoch_context: SimplifiedEpochContext,
-        expected_anchor_qc: QuorumCertificateReference,
+        expected_anchor_parent: SimplifiedFinalityParent,
         transition_finality_records: BTreeMap<u64, FinalizedBlockRecord>,
     ) -> Result<Self, String> {
         expected_epoch_context.validate()?;
-        expected_anchor_qc.validate()?;
-        if expected_anchor_qc.height.0.checked_add(1)
+        expected_anchor_parent
+            .validate_for_child_height(expected_epoch_context.epoch_start_height)?;
+        if expected_anchor_parent.height().0.checked_add(1)
             != Some(expected_epoch_context.epoch_start_height.0)
         {
             return Err("state-sync stager anchor does not precede the epoch".to_string());
         }
         if let Some(expected) = &expected_epoch_context.v2_boundary_anchor {
-            if expected_anchor_qc.height != expected.height
-                || expected_anchor_qc.block_id != expected.block_id
-                || expected_anchor_qc.qc_id != expected.qc_finality_context_root
+            if expected_anchor_parent
+                .quorum_certificate_reference()
+                .is_none_or(|reference| {
+                    reference.height != expected.height
+                        || reference.block_id != expected.block_id
+                        || reference.qc_id != expected.qc_finality_context_root
+                })
             {
                 return Err("state-sync stager anchor differs from the pinned boundary".to_string());
             }
         }
         if let Some(expected) = &expected_epoch_context.v3_transition_anchor {
-            if expected_anchor_qc.height != expected.certified_parent_height
-                || expected_anchor_qc.block_id != expected.certified_parent_block_id
-                || expected_anchor_qc.qc_id != expected.certified_parent_qc_id
+            if expected_anchor_parent
+                .quorum_certificate_reference()
+                .is_none_or(|reference| {
+                    reference.height != expected.certified_parent_height
+                        || reference.block_id != expected.certified_parent_block_id
+                        || reference.qc_id != expected.certified_parent_qc_id
+                })
             {
                 return Err(
                     "state-sync stager anchor differs from the pinned v3 certified parent"
@@ -591,7 +616,7 @@ impl SimplifiedStateSyncStager {
         Ok(Self {
             expected_epoch_context_root: expected_epoch_context.root()?,
             expected_epoch_context,
-            expected_anchor_qc,
+            expected_anchor_parent,
             transition_finality_records,
             max_active_sessions,
             outstanding_requests: BTreeMap::new(),
@@ -658,7 +683,7 @@ impl SimplifiedStateSyncStager {
             return Err("completed state-sync session replay rejected".to_string());
         }
         if chunk.epoch_context_root != self.expected_epoch_context_root
-            || chunk.anchor_qc != self.expected_anchor_qc
+            || chunk.anchor_parent != self.expected_anchor_parent
         {
             return Err("state-sync chunk names another epoch or anchor".to_string());
         }
@@ -687,11 +712,11 @@ impl SimplifiedStateSyncStager {
                     request_id: chunk.request_id,
                     session_root: chunk.session_root,
                     epoch_context_root: chunk.epoch_context_root,
-                    anchor_qc: chunk.anchor_qc.clone(),
+                    anchor_parent: chunk.anchor_parent.clone(),
                     next_sequence: 0,
                     previous_chunk_root: None,
                     evidence: Vec::new(),
-                    evidence_sequence: EvidenceSequence::new(chunk.anchor_qc.clone())?,
+                    evidence_sequence: EvidenceSequence::new(chunk.anchor_parent.clone())?,
                     staged_bytes: 0,
                     expires_at,
                 },
@@ -704,7 +729,7 @@ impl SimplifiedStateSyncStager {
         if staged.request_id != chunk.request_id
             || staged.session_root != chunk.session_root
             || staged.epoch_context_root != chunk.epoch_context_root
-            || staged.anchor_qc != chunk.anchor_qc
+            || staged.anchor_parent != chunk.anchor_parent
         {
             return Err("state-sync session peer or immutable identity equivocated".to_string());
         }
@@ -778,7 +803,7 @@ impl SimplifiedStateSyncStager {
         }
         let claimed_finalized = claimed_finalized
             .ok_or_else(|| "final state-sync chunk omits finalized claim".to_string())?;
-        if claimed_finalized.height.0 <= self.expected_anchor_qc.height.0
+        if claimed_finalized.height.0 <= self.expected_anchor_parent.height().0
             && !self.transition_finality_records.is_empty()
             && self
                 .transition_finality_records
@@ -798,7 +823,7 @@ impl SimplifiedStateSyncStager {
         let expected_session_root = session_root(
             completed.request_id,
             completed.epoch_context_root,
-            &completed.anchor_qc,
+            &completed.anchor_parent,
             &completed.evidence,
             &claimed_finalized,
         )?;
@@ -818,7 +843,7 @@ impl SimplifiedStateSyncStager {
         let bundle = SimplifiedStateSyncBundle {
             format: POSY_SIMPLIFIED_STATE_SYNC_FORMAT.to_string(),
             epoch_context: self.expected_epoch_context.clone(),
-            anchor_qc: self.expected_anchor_qc.clone(),
+            anchor_parent: self.expected_anchor_parent.clone(),
             certified_qcs: qcs,
             certified_tcs: tcs,
             claimed_finalized,
@@ -901,20 +926,19 @@ mod tests {
         }
     }
 
+    fn anchor_parent() -> SimplifiedFinalityParent {
+        SimplifiedFinalityParent::quorum_certificate(anchor_qc()).unwrap()
+    }
+
     fn anchor_finalized() -> FinalizedBlockRecord {
-        let anchor = anchor_qc();
-        FinalizedBlockRecord {
-            height: anchor.height,
-            block_id: anchor.block_id,
-            qc_id: anchor.qc_id,
-        }
+        FinalizedBlockRecord::from_quorum_certificate(anchor_qc()).unwrap()
     }
 
     fn empty_bundle() -> SimplifiedStateSyncBundle {
         SimplifiedStateSyncBundle {
             format: POSY_SIMPLIFIED_STATE_SYNC_FORMAT.to_string(),
             epoch_context: epoch_context(),
-            anchor_qc: anchor_qc(),
+            anchor_parent: anchor_parent(),
             certified_qcs: Vec::new(),
             certified_tcs: BTreeMap::new(),
             claimed_finalized: anchor_finalized(),
@@ -945,7 +969,7 @@ mod tests {
             .expect("test QC context should be valid"),
             block_id: BlockId(format!("state-sync-block-{height}")),
             parent_block_id: parent_qc.block_id.clone(),
-            parent_qc,
+            parent: SimplifiedFinalityParent::quorum_certificate(parent_qc).unwrap(),
             takeover_tc_id: None,
             protected_execution_root: Hash::from_domain_bytes(
                 "state-sync-test-execution",
@@ -957,11 +981,12 @@ mod tests {
 
     fn two_chunk_stream() -> (
         SimplifiedEpochContext,
-        QuorumCertificateReference,
+        SimplifiedFinalityParent,
         Vec<SimplifiedStateSyncChunk>,
     ) {
         let context = epoch_context();
         let anchor = anchor_qc();
+        let anchor_parent = SimplifiedFinalityParent::quorum_certificate(anchor.clone()).unwrap();
         let evidence = vec![SimplifiedStateSyncEvidence::QuorumCertificate(
             uncertified_qc(&context, 1_000, anchor.clone()),
         )];
@@ -970,7 +995,7 @@ mod tests {
         let session_root = session_root(
             request_id,
             context_root,
-            &anchor,
+            &anchor_parent,
             &evidence,
             &anchor_finalized(),
         )
@@ -980,7 +1005,7 @@ mod tests {
             request_id,
             session_root,
             epoch_context_root: context_root,
-            anchor_qc: anchor.clone(),
+            anchor_parent: anchor_parent.clone(),
             sequence: 0,
             previous_chunk_root: None,
             evidence,
@@ -994,7 +1019,7 @@ mod tests {
             request_id,
             session_root,
             epoch_context_root: context_root,
-            anchor_qc: anchor.clone(),
+            anchor_parent: anchor_parent.clone(),
             sequence: 1,
             previous_chunk_root: Some(first.chunk_root),
             evidence: Vec::new(),
@@ -1005,7 +1030,7 @@ mod tests {
         final_chunk.chunk_root = final_chunk
             .computed_root()
             .expect("final chunk should hash");
-        (context, anchor, vec![first, final_chunk])
+        (context, anchor_parent, vec![first, final_chunk])
     }
 
     #[test]
@@ -1013,7 +1038,7 @@ mod tests {
         let bundle = empty_bundle();
         let chunks =
             build_state_sync_chunks(&bundle, test_request_id()).expect("empty bundle should chunk");
-        let mut stager = SimplifiedStateSyncStager::new(epoch_context(), anchor_qc())
+        let mut stager = SimplifiedStateSyncStager::new(epoch_context(), anchor_parent())
             .expect("stager should initialize");
         let now = Instant::now();
         register_test_request(&mut stager, now);
@@ -1060,7 +1085,7 @@ mod tests {
         let bundle = SimplifiedStateSyncBundle {
             format: POSY_SIMPLIFIED_STATE_SYNC_FORMAT.to_string(),
             epoch_context: context,
-            anchor_qc: anchor_qc(),
+            anchor_parent: anchor_parent(),
             certified_qcs: vec![first, second],
             certified_tcs: BTreeMap::from([(1_000, vec![timeout])]),
             claimed_finalized: anchor_finalized(),
@@ -1081,7 +1106,7 @@ mod tests {
             .expect("final claim should exist")
             .block_id = BlockId("tampered-finalized-block".to_string());
         chunk.chunk_root = chunk.computed_root().expect("tampered chunk should hash");
-        let mut stager = SimplifiedStateSyncStager::new(epoch_context(), anchor_qc())
+        let mut stager = SimplifiedStateSyncStager::new(epoch_context(), anchor_parent())
             .expect("stager should initialize");
         let now = Instant::now();
         register_test_request(&mut stager, now);
@@ -1097,7 +1122,7 @@ mod tests {
         let chunk = build_state_sync_chunks(&empty_bundle(), test_request_id())
             .expect("empty bundle should chunk")
             .remove(0);
-        let mut stager = SimplifiedStateSyncStager::new(epoch_context(), anchor_qc())
+        let mut stager = SimplifiedStateSyncStager::new(epoch_context(), anchor_parent())
             .expect("stager should initialize");
         let peer = ValidatorId("state-sync-peer".to_string());
         let now = Instant::now();
@@ -1117,7 +1142,7 @@ mod tests {
         let chunk = build_state_sync_chunks(&empty_bundle(), test_request_id())
             .expect("empty bundle should chunk")
             .remove(0);
-        let mut stager = SimplifiedStateSyncStager::new(epoch_context(), anchor_qc())
+        let mut stager = SimplifiedStateSyncStager::new(epoch_context(), anchor_parent())
             .expect("stager should initialize");
         let peer = ValidatorId("state-sync-peer".to_string());
         let now = Instant::now();
@@ -1162,7 +1187,7 @@ mod tests {
             request_id: test_request_id(),
             session_root: Hash::from_domain_bytes("state-sync-large-session", b"large"),
             epoch_context_root: context.root().expect("test context should hash"),
-            anchor_qc: anchor,
+            anchor_parent: SimplifiedFinalityParent::quorum_certificate(anchor).unwrap(),
             sequence: 0,
             previous_chunk_root: None,
             evidence: vec![SimplifiedStateSyncEvidence::QuorumCertificate(qc)],
@@ -1200,7 +1225,7 @@ mod tests {
         let bundle = SimplifiedStateSyncBundle {
             format: POSY_SIMPLIFIED_STATE_SYNC_FORMAT.to_string(),
             epoch_context: context,
-            anchor_qc: anchor,
+            anchor_parent: SimplifiedFinalityParent::quorum_certificate(anchor).unwrap(),
             certified_qcs: vec![qc],
             certified_tcs: BTreeMap::new(),
             claimed_finalized: anchor_finalized(),
@@ -1311,7 +1336,11 @@ mod tests {
         bundle.certified_qcs.push(uncertified_qc(
             &bundle.epoch_context,
             1_001,
-            bundle.anchor_qc.clone(),
+            bundle
+                .anchor_parent
+                .quorum_certificate_reference()
+                .cloned()
+                .expect("test state-sync anchor is a QC"),
         ));
         let error = build_state_sync_chunks(&bundle, test_request_id())
             .expect_err("nonconsecutive QC evidence must not be chunked");
@@ -1326,16 +1355,22 @@ mod tests {
             .epoch_context
             .root()
             .expect("test context should hash");
-        let bad_finalized = FinalizedBlockRecord {
-            height: bundle.anchor_qc.height,
-            block_id: BlockId("unanchored-finalized-block".to_string()),
-            qc_id: bundle.anchor_qc.qc_id,
-        };
+        let anchor_qc = bundle
+            .anchor_parent
+            .quorum_certificate_reference()
+            .expect("test state-sync anchor is a QC");
+        let bad_finalized =
+            FinalizedBlockRecord::from_quorum_certificate(QuorumCertificateReference {
+                height: anchor_qc.height,
+                block_id: BlockId("unanchored-finalized-block".to_string()),
+                qc_id: anchor_qc.qc_id,
+            })
+            .unwrap();
         let request_id = test_request_id();
         let session_root = session_root(
             request_id,
             context_root,
-            &bundle.anchor_qc,
+            &bundle.anchor_parent,
             &[],
             &bad_finalized,
         )
@@ -1345,7 +1380,7 @@ mod tests {
             request_id,
             session_root,
             epoch_context_root: context_root,
-            anchor_qc: bundle.anchor_qc.clone(),
+            anchor_parent: bundle.anchor_parent.clone(),
             sequence: 0,
             previous_chunk_root: None,
             evidence: Vec::new(),
@@ -1354,7 +1389,7 @@ mod tests {
             chunk_root: Hash::zero(),
         };
         chunk.chunk_root = chunk.computed_root().expect("test chunk should hash");
-        let mut stager = SimplifiedStateSyncStager::new(bundle.epoch_context, bundle.anchor_qc)
+        let mut stager = SimplifiedStateSyncStager::new(bundle.epoch_context, bundle.anchor_parent)
             .expect("stager should initialize");
         let now = Instant::now();
         register_test_request(&mut stager, now);

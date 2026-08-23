@@ -20,9 +20,9 @@ use synergy_testnet::consensus::simplified_posy::{
     BlockVote, CertifiedCandidateSubject, ConsensusObjectContext, FinalizedBlockRecord,
     LastVoteRecord, MetricSummary, QuorumCertificateReference, ReliableDeliveryPhase,
     ReliableDeliveryState, ReliableDeliveryStatement, SimplifiedConsensusStateMachine,
-    SimplifiedEpochContext, SimplifiedProposal, SimplifiedQuorumCertificate,
-    SimplifiedStateSyncBundle, SimplifiedTimeoutCertificate, TimeoutVote,
-    POSY_SIMPLIFIED_PROPOSAL_ECHO_DOMAIN, POSY_SIMPLIFIED_PROPOSAL_READY_DOMAIN,
+    SimplifiedEpochContext, SimplifiedFinalityParent, SimplifiedProposal,
+    SimplifiedQuorumCertificate, SimplifiedStateSyncBundle, SimplifiedTimeoutCertificate,
+    TimeoutVote, POSY_SIMPLIFIED_PROPOSAL_ECHO_DOMAIN, POSY_SIMPLIFIED_PROPOSAL_READY_DOMAIN,
     POSY_SIMPLIFIED_TIMEOUT_VOTE_DOMAIN,
 };
 use synergy_testnet::consensus_parameters::ConsensusParameterRoot;
@@ -142,7 +142,7 @@ struct WorkerSnapshot {
     epoch_context_root: String,
     leader_ring: Vec<String>,
     next_height: u64,
-    highest_qc: QuorumCertificateReference,
+    highest_parent: SimplifiedFinalityParent,
     locked_qc: Option<QuorumCertificateReference>,
     finalized: FinalizedBlockRecord,
     takeover_offset: u64,
@@ -322,7 +322,7 @@ fn run_qualification(
         ));
     }
     let partitioned_view = initial_or_live(workers, PARTITIONED_VALIDATOR)?;
-    if partitioned_view.highest_qc.height != Height(EPOCH_START_HEIGHT - 1) {
+    if partitioned_view.highest_parent.height() != Height(EPOCH_START_HEIGHT - 1) {
         return Err(
             "partitioned worker unexpectedly learned an uncertified local view".to_string(),
         );
@@ -351,7 +351,7 @@ fn run_qualification(
         })?,
         "strict distinct-signer quorum failed",
     )?;
-    if initial_or_live(workers, 0)?.highest_qc != four_node_view.highest_qc {
+    if initial_or_live(workers, 0)?.highest_parent != four_node_view.highest_parent {
         return Err("rejected three-of-five QC mutated durable safety state".to_string());
     }
     let mut invalid_signature_qc = collect_unverified_qc(
@@ -393,7 +393,7 @@ fn run_qualification(
     let second_tc = collect_tc(workers, &QUORUM_SIGNERS, &qc_proofs)?;
     let mut wrong_highest = second_tc.clone();
     for report in &mut wrong_highest.reports {
-        report.highest_qc = anchor_qc();
+        report.highest_parent = anchor_parent()?;
     }
     wrong_highest.highest_qc_proofs.clear();
     resign_tc(workers, &mut wrong_highest, validators)?;
@@ -568,7 +568,7 @@ fn run_qualification(
         "ephemeral_private_keys_removed": true,
         "durable_signer_restart_verified": true,
         "quorum": "exact 4-of-5 and strict 3*signed_weight > 2*total_weight",
-        "highest_certified_height": final_view.highest_qc.height.0,
+        "highest_certified_height": final_view.highest_parent.height().0,
         "finalized_height": final_view.finalized.height.0,
         "repeated_failure_rounds": repeated_failure_rounds,
         "final_takeover_offset": final_view.takeover_offset,
@@ -579,7 +579,7 @@ fn run_qualification(
             "invalid_certificate_signature_fail_closed",
             "three_qc_chained_finality",
             "stale_tc_rejection",
-            "wrong_highest_qc_tc_rejection",
+            "wrong_highest_parent_tc_rejection",
             "two_sequential_tc_lease_inheritance",
             "verified_state_sync_partition_heal",
             "restart_preserves_verified_takeover",
@@ -624,7 +624,7 @@ fn run_worker(
         context.clone(),
         validators.clone(),
         store,
-        anchor_qc(),
+        anchor_parent()?,
     )?;
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
@@ -791,7 +791,7 @@ fn snapshot(
             .map(|validator| validator.0.clone())
             .collect(),
         next_height: next_height.0,
-        highest_qc: state.highest_qc.clone(),
+        highest_parent: state.highest_parent.clone(),
         locked_qc: state.locked_qc.clone(),
         finalized: state.finalized.clone(),
         takeover_offset,
@@ -934,12 +934,12 @@ fn proposal_from_snapshot(
         |candidate| candidate.block_id.clone(),
     );
     let parent_block_id = view.mandatory_carry_candidate.as_ref().map_or_else(
-        || view.highest_qc.block_id.clone(),
+        || view.highest_parent.block_id().clone(),
         |candidate| candidate.parent_block_id.clone(),
     );
-    let parent_qc = view.mandatory_carry_candidate.as_ref().map_or_else(
-        || view.highest_qc.clone(),
-        |candidate| candidate.parent_qc.clone(),
+    let parent = view.mandatory_carry_candidate.as_ref().map_or_else(
+        || view.highest_parent.clone(),
+        |candidate| candidate.parent.clone(),
     );
     let protected_execution_root = view.mandatory_carry_candidate.as_ref().map_or_else(
         || {
@@ -959,7 +959,7 @@ fn proposal_from_snapshot(
         proposer_id,
         block_id,
         parent_block_id,
-        parent_qc,
+        parent,
         takeover_tc_id: view.takeover_tc_id,
         protected_execution_root,
         proposer_key_id: proposer.consensus_public_key.key_id.clone(),
@@ -1028,7 +1028,7 @@ fn exercise_reliable_delivery(
         proposal.context.clone(),
         proposal.block_id.clone(),
         proposal.parent_block_id.clone(),
-        proposal.parent_qc.clone(),
+        proposal.parent.clone(),
         proposal.protected_execution_root,
     )?;
     let mut delivery = ReliableDeliveryState::new(proposal.context.clone(), context)?;
@@ -1109,22 +1109,28 @@ fn collect_tc(
             other => return Err(format!("expected timeout vote, found {other:?}")),
         }
     }
-    let anchor = anchor_qc();
+    let anchor = anchor_parent()?;
     let mut proof_ids = BTreeSet::new();
     let mut proofs = Vec::new();
     for report in &votes {
-        if report.highest_qc == anchor {
+        if report.highest_parent == anchor {
             continue;
         }
+        let reference = report
+            .highest_parent
+            .quorum_certificate_reference()
+            .ok_or_else(|| {
+                "late-epoch harness timeout report unexpectedly used a Genesis parent".to_string()
+            })?;
         let proof = known_qc_proofs
             .iter()
-            .find(|proof| proof.reference().ok().as_ref() == Some(&report.highest_qc))
+            .find(|proof| proof.reference().ok().as_ref() == Some(reference))
             .cloned()
             .ok_or_else(|| {
                 format!(
                     "timeout report references unresolved non-anchor QC {} at height {}",
-                    report.highest_qc.qc_id.to_hex(),
-                    report.highest_qc.height.0
+                    reference.qc_id.to_hex(),
+                    reference.height.0
                 )
             })?;
         if proof_ids.insert(proof.id()?) {
@@ -1422,6 +1428,13 @@ fn anchor_qc() -> QuorumCertificateReference {
     }
 }
 
+/// This qualification starts at a later epoch height, so its pre-existing
+/// parent is a real QC.  Fresh block one is exercised separately by the
+/// autonomous-driver harness using `GenesisFinalityReference`.
+fn anchor_parent() -> Result<SimplifiedFinalityParent, String> {
+    SimplifiedFinalityParent::quorum_certificate(anchor_qc())
+}
+
 fn worker_state_path(work_dir: &Path, index: usize) -> PathBuf {
     work_dir.join(format!("validator-{index}-state.json"))
 }
@@ -1531,7 +1544,7 @@ fn consensus_view(
     &str,
     &[String],
     u64,
-    &QuorumCertificateReference,
+    &SimplifiedFinalityParent,
     &Option<QuorumCertificateReference>,
     &FinalizedBlockRecord,
     u64,
@@ -1544,7 +1557,7 @@ fn consensus_view(
         &snapshot.epoch_context_root,
         &snapshot.leader_ring,
         snapshot.next_height,
-        &snapshot.highest_qc,
+        &snapshot.highest_parent,
         &snapshot.locked_qc,
         &snapshot.finalized,
         snapshot.takeover_offset,

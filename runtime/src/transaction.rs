@@ -471,7 +471,9 @@ impl Transaction {
         gas_used: u64,
         base_fee_per_gas_nwei: u64,
     ) -> Result<crate::gas::NetworkFeeBreakdown, String> {
-        use crate::gas::{calculate_network_fee, FeeSchedule, NetworkFeeInput, TransactionFeeType};
+        use crate::gas::{
+            calculate_network_fee, fee_schedule_for_runtime, NetworkFeeInput, TransactionFeeType,
+        };
 
         let gas_fee_nwei = crate::gas::calculate_total_fee_nwei(gas_used, base_fee_per_gas_nwei)?;
         let (tx_type, asset_id, amount_raw, amount_snrgequivalent_nwei, valuation_status) =
@@ -503,7 +505,7 @@ impl Transaction {
                 fee_market_active: false,
                 fee_market_version: 0,
             },
-            &FeeSchedule::default(),
+            fee_schedule_for_runtime()?,
         )
     }
 

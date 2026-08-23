@@ -1,0 +1,15 @@
+{
+  "schema": "synergy-etdag-parameter-manifest-v1",
+  "governance_decision_id": "SNRG-GOV-ETDAG-P3-GENESIS-20260823-01",
+  "chain_id": 1266,
+  "network_id": "testnet",
+  "consensus_protocol_version": "posy/3.0",
+  "parameters": {
+    "profile_id": "POSY-ETDAG-v3.0",
+    "target_height_offset_default": 3,
+    "max_outstanding_nonce_slots": 4,
+    "max_protected_gas": 30000000,
+    "max_protected_bytes": 8388608,
+    "ciphertext_size_classes": [512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
+  }
+}

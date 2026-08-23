@@ -660,10 +660,9 @@ impl CoordinatedRuntime {
         // (only possible before any coordinated block has been finalized)
         // safely falls back to `initial_base_fee_nwei` rather than
         // fabricating or zeroing the price; see `ParentFeeMarketState` docs.
-        let fee_market_params = crate::gas::fee_market::FeeMarketParams::testnet_v3_defaults();
+        let fee_market_params = *crate::gas::fee_market_params_for_runtime()?;
         let durable_parent_fee_market = self.parent_fee_market_state()?;
-        let effective_parent_fee_market =
-            durable_parent_fee_market.or(context.parent_fee_market);
+        let effective_parent_fee_market = durable_parent_fee_market.or(context.parent_fee_market);
         let (block_base_fee_per_gas_nwei, block_fee_market_version) =
             if fee_market_params.is_active_at(assignment.height) {
                 let base_fee = if assignment.height == fee_market_params.activation_height {
@@ -671,7 +670,9 @@ impl CoordinatedRuntime {
                 } else {
                     match effective_parent_fee_market {
                         Some(parent) => crate::gas::fee_market::next_base_fee_per_gas(
-                            parent.base_fee_per_gas_nwei.max(fee_market_params.base_fee_floor_nwei),
+                            parent
+                                .base_fee_per_gas_nwei
+                                .max(fee_market_params.base_fee_floor_nwei),
                             parent.gas_used,
                             &fee_market_params,
                         )
@@ -1133,11 +1134,8 @@ fn replay_finality_from_execution_state(
                 base_fee_per_gas_nwei: parent_record.package.block.header.base_fee_per_gas_nwei,
                 gas_used: parent_record.package.block.header.gas_used,
             });
-        execution_state = execute_coordinated_block(
-            &execution_state,
-            &record.package.block,
-            parent_fee_market,
-        )?;
+        execution_state =
+            execute_coordinated_block(&execution_state, &record.package.block, parent_fee_market)?;
     }
     Ok(execution_state)
 }
@@ -1196,7 +1194,7 @@ fn execute_coordinated_block(
                     .to_string(),
             );
         }
-        let fee_market_params = crate::gas::fee_market::FeeMarketParams::testnet_v3_defaults();
+        let fee_market_params = *crate::gas::fee_market_params_for_runtime()?;
         if let Some(parent) = parent_fee_market {
             let expected_base_fee = if block.header.height.0 == fee_market_params.activation_height
             {

@@ -10,12 +10,13 @@ use super::{
     ConsensusSignatureVerifier, DurableSimplifiedPosyStore, FinalizedBlockRecord,
     GenesisBoundSimplifiedActivation, QuorumCertificateReference, ReliableDeliveryPhase,
     ReliableDeliveryState, ReliableDeliveryStatement, SimplifiedConsensusStateMachine,
-    SimplifiedEpochContext, SimplifiedMaterialChunk, SimplifiedMaterialStager, SimplifiedProposal,
-    SimplifiedQuorumCertificate, SimplifiedSafetyState, SimplifiedStateSyncChunk,
-    SimplifiedStateSyncStager, SimplifiedTimeoutCertificate, TimeoutVote,
-    VerifiedSimplifiedEpochTransition, VerifiedSimplifiedProposalMaterial,
-    POSY_SIMPLIFIED_BLOCK_VOTE_DOMAIN, POSY_SIMPLIFIED_PROPOSAL_ECHO_DOMAIN,
-    POSY_SIMPLIFIED_PROPOSAL_READY_DOMAIN, POSY_SIMPLIFIED_TIMEOUT_VOTE_DOMAIN,
+    SimplifiedEpochContext, SimplifiedFinalityParent, SimplifiedMaterialChunk,
+    SimplifiedMaterialStager, SimplifiedProposal, SimplifiedQuorumCertificate,
+    SimplifiedSafetyState, SimplifiedStateSyncChunk, SimplifiedStateSyncStager,
+    SimplifiedTimeoutCertificate, TimeoutVote, VerifiedSimplifiedEpochTransition,
+    VerifiedSimplifiedProposalMaterial, POSY_SIMPLIFIED_BLOCK_VOTE_DOMAIN,
+    POSY_SIMPLIFIED_PROPOSAL_ECHO_DOMAIN, POSY_SIMPLIFIED_PROPOSAL_READY_DOMAIN,
+    POSY_SIMPLIFIED_TIMEOUT_VOTE_DOMAIN,
 };
 use crate::consensus::signing_authority::{
     ConsensusSigningAuthorization, ConsensusSigningPhase, DurableConsensusSigningAuthority,
@@ -362,7 +363,7 @@ pub trait SimplifiedProtectedProposalSource: Send {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimplifiedProposalDirective {
     pub context: super::ConsensusObjectContext,
-    pub highest_qc: QuorumCertificateReference,
+    pub parent: SimplifiedFinalityParent,
     pub finalized: FinalizedBlockRecord,
     pub proposer_id: ValidatorId,
     pub proposer_key_id: AegisPqKeyId,
@@ -432,15 +433,11 @@ impl SimplifiedFinalizationTransaction {
             .0
             .checked_add(1)
             .ok_or_else(|| "finalization transaction height overflowed".to_string())?;
-        let mut expected_parent = &self.expected_previous_finalized.block_id;
-        let mut expected_parent_qc = QuorumCertificateReference {
-            height: self.expected_previous_finalized.height,
-            block_id: self.expected_previous_finalized.block_id.clone(),
-            qc_id: self.expected_previous_finalized.qc_id,
-        };
+        let mut expected_parent_block_id = &self.expected_previous_finalized.block_id;
+        let mut expected_parent = self.expected_previous_finalized.finality_parent.clone();
         for commitment in &self.commitments {
             if commitment.height.0 != expected_height
-                || &commitment.parent_block_id != expected_parent
+                || &commitment.parent_block_id != expected_parent_block_id
                 || commitment.block_id.0.trim().is_empty()
                 || commitment.qc_id.is_zero()
                 || commitment.protected_execution_root.is_zero()
@@ -450,7 +447,7 @@ impl SimplifiedFinalizationTransaction {
                 || commitment.certificate.protected_execution_root
                     != commitment.protected_execution_root
                 || commitment.certificate.id()? != commitment.qc_id
-                || commitment.certificate.parent_qc != expected_parent_qc
+                || commitment.certificate.parent != expected_parent
             {
                 return Err(
                     "simplified finalization commitments are not consecutive and protected"
@@ -460,12 +457,13 @@ impl SimplifiedFinalizationTransaction {
             expected_height = expected_height
                 .checked_add(1)
                 .ok_or_else(|| "finalization transaction height overflowed".to_string())?;
-            expected_parent = &commitment.block_id;
-            expected_parent_qc = QuorumCertificateReference {
-                height: commitment.height,
-                block_id: commitment.block_id.clone(),
-                qc_id: commitment.qc_id,
-            };
+            expected_parent_block_id = &commitment.block_id;
+            expected_parent =
+                SimplifiedFinalityParent::quorum_certificate(QuorumCertificateReference {
+                    height: commitment.height,
+                    block_id: commitment.block_id.clone(),
+                    qc_id: commitment.qc_id,
+                })?;
         }
         let last = self
             .commitments
@@ -473,7 +471,7 @@ impl SimplifiedFinalizationTransaction {
             .ok_or_else(|| "finalization transaction path is empty".to_string())?;
         if last.height != self.target_finalized.height
             || last.block_id != self.target_finalized.block_id
-            || last.qc_id != self.target_finalized.qc_id
+            || last.qc_id != self.target_finalized.finality_reference_id()
             || self.transaction_id != self.recompute_id()?
         {
             return Err("simplified finalization target or transaction id is invalid".to_string());
@@ -481,11 +479,14 @@ impl SimplifiedFinalizationTransaction {
         let target = &self.finality_witness[0];
         let child = &self.finality_witness[1];
         let grandchild = &self.finality_witness[2];
+        let target_reference = target.reference()?;
+        let child_reference = child.reference()?;
         if target.context.height != self.target_finalized.height
             || target.block_id != self.target_finalized.block_id
-            || target.id()? != self.target_finalized.qc_id
-            || child.parent_qc != target.reference()?
-            || grandchild.parent_qc != child.reference()?
+            || target.id()? != self.target_finalized.finality_reference_id()
+            || self.target_finalized.quorum_certificate_reference() != Some(&target_reference)
+            || child.parent != SimplifiedFinalityParent::quorum_certificate(target_reference)?
+            || grandchild.parent != SimplifiedFinalityParent::quorum_certificate(child_reference)?
             || target.context.height.0.checked_add(1) != Some(child.context.height.0)
             || child.context.height.0.checked_add(1) != Some(grandchild.context.height.0)
         {
@@ -656,7 +657,7 @@ impl<
         local_validator_id: ValidatorId,
         local_key_id: AegisPqKeyId,
         state_store: DurableSimplifiedPosyStore,
-        anchor_qc: QuorumCertificateReference,
+        anchor_parent: SimplifiedFinalityParent,
         signing_authority: DurableConsensusSigningAuthority,
         signer: AegisPqvmSigner,
         verifier: AegisPqvmVerifier,
@@ -671,7 +672,7 @@ impl<
             local_validator_id,
             local_key_id,
             state_store,
-            Some(anchor_qc),
+            Some(anchor_parent),
             None,
             signing_authority,
             signer,
@@ -724,7 +725,7 @@ impl<
         local_validator_id: ValidatorId,
         local_key_id: AegisPqKeyId,
         state_store: DurableSimplifiedPosyStore,
-        anchor_qc: Option<QuorumCertificateReference>,
+        anchor_parent: Option<SimplifiedFinalityParent>,
         epoch_transition: Option<VerifiedSimplifiedEpochTransition>,
         signing_authority: DurableConsensusSigningAuthority,
         signer: AegisPqvmSigner,
@@ -738,7 +739,7 @@ impl<
         if let Some(transition) = &epoch_transition {
             if epoch_context != *transition.next_epoch_context()
                 || validator_set != *transition.next_validator_set()
-                || anchor_qc.is_some()
+                || anchor_parent.is_some()
             {
                 return Err(
                     "simplified driver inputs do not match the verified v3 transition".to_string(),
@@ -784,8 +785,8 @@ impl<
                 epoch_context.clone(),
                 validator_set.clone(),
                 state_store,
-                anchor_qc.ok_or_else(|| {
-                    "simplified driver startup lacks its certified anchor".to_string()
+                anchor_parent.ok_or_else(|| {
+                    "simplified driver startup lacks its finality parent".to_string()
                 })?,
             )?,
         };
@@ -812,7 +813,7 @@ impl<
             }
             None => SimplifiedStateSyncStager::new(
                 epoch_context.clone(),
-                state_machine.state().anchor_qc.clone(),
+                state_machine.state().anchor_parent.clone(),
             )?,
         };
         let material_stager = SimplifiedMaterialStager::new(epoch_context.root()?)?;
@@ -902,7 +903,7 @@ impl<
                 height,
                 crate::synergy_types::Round(round),
             )?,
-            highest_qc: self.state_machine.state().highest_qc.clone(),
+            parent: self.state_machine.state().highest_parent.clone(),
             finalized: self.state_machine.state().finalized.clone(),
             proposer_id: self.local_validator_id.clone(),
             proposer_key_id: self.local_key_id.clone(),
@@ -1058,7 +1059,7 @@ impl<
                         None => bundle.verify_and_reconstruct(
                             &self.epoch_context,
                             &self.validator_set,
-                            &self.state_machine.state().anchor_qc,
+                            &self.state_machine.state().anchor_parent,
                             &self.verifier,
                             self.state_machine.state().last_vote.clone(),
                             self.state_machine.state().safety_halt.clone(),
@@ -1465,15 +1466,21 @@ impl<
             let mut proof_ids = BTreeSet::new();
             let mut proofs = Vec::new();
             for report in &reports {
-                if report.highest_qc == self.state_machine.state().anchor_qc {
+                if report.highest_parent == self.state_machine.state().anchor_parent {
                     continue;
                 }
+                let reference = report
+                    .highest_parent
+                    .quorum_certificate_reference()
+                    .ok_or_else(|| {
+                        "timeout report attempts to serialize Genesis as a QC".to_string()
+                    })?;
                 let proof = self
                     .state_machine
                     .state()
                     .certified_qcs
-                    .get(&report.highest_qc.height.0)
-                    .filter(|proof| proof.reference().ok().as_ref() == Some(&report.highest_qc))
+                    .get(&reference.height.0)
+                    .filter(|proof| proof.reference().ok().as_ref() == Some(reference))
                     .cloned()
                     .ok_or_else(|| {
                         "timeout report highest QC lacks a verified local proof".to_string()
@@ -1542,17 +1549,20 @@ impl<
         {
             return Err("timeout vote is not the active canonical timeout statement".to_string());
         }
-        let known_highest_qc = vote.highest_qc == self.state_machine.state().anchor_qc
-            || self
-                .state_machine
-                .state()
-                .certified_qcs
-                .get(&vote.highest_qc.height.0)
-                .map(SimplifiedQuorumCertificate::reference)
-                .transpose()?
-                .is_some_and(|reference| reference == vote.highest_qc);
-        if !known_highest_qc || vote.highest_qc.height.0 >= height.0 {
-            return Err("timeout vote highest QC is not verified local evidence".to_string());
+        let known_highest_parent = vote.highest_parent == self.state_machine.state().anchor_parent
+            || vote
+                .highest_parent
+                .quorum_certificate_reference()
+                .is_some_and(|reference| {
+                    self.state_machine
+                        .state()
+                        .certified_qcs
+                        .get(&reference.height.0)
+                        .and_then(|proof| proof.reference().ok())
+                        .is_some_and(|known| known == *reference)
+                });
+        if !known_highest_parent || vote.highest_parent.height().0 >= height.0 {
+            return Err("timeout vote highest parent is not verified local evidence".to_string());
         }
         Ok(())
     }
@@ -1657,7 +1667,7 @@ impl<
             context: certificate.context.clone(),
             block_id: certificate.block_id.clone(),
             parent_block_id: certificate.parent_block_id.clone(),
-            parent_qc: certificate.parent_qc.clone(),
+            parent: certificate.parent.clone(),
             takeover_tc_id: certificate.takeover_tc_id,
             protected_execution_root: certificate.protected_execution_root,
             proposer_id,
@@ -1691,8 +1701,8 @@ impl<
                 ),
             };
         }
-        if pending.reconstructed.highest_qc.height.0
-            < self.state_machine.state().highest_qc.height.0
+        if pending.reconstructed.highest_parent.height().0
+            < self.state_machine.state().highest_parent.height().0
             || pending.reconstructed.finalized.height.0
                 < self.state_machine.state().finalized.height.0
         {
@@ -2145,7 +2155,7 @@ fn build_finalization_transaction(
         .ok_or_else(|| "finalization transaction path is empty".to_string())?;
     if last.height != target_finalized.height
         || last.block_id != target_finalized.block_id
-        || last.qc_id != target_finalized.qc_id
+        || last.qc_id != target_finalized.finality_reference_id()
     {
         return Err("finalization target does not match its certified commitment".to_string());
     }
@@ -2220,11 +2230,7 @@ fn build_finalization_transactions(
                         "finalization transaction sequence lacks target QC {batch_target_height}"
                     )
                 })?;
-        let batch_target = FinalizedBlockRecord {
-            height: certificate.context.height,
-            block_id: certificate.block_id.clone(),
-            qc_id: certificate.id()?,
-        };
+        let batch_target = FinalizedBlockRecord::from_quorum_certificate(certificate.reference()?)?;
         let transaction = build_finalization_transaction(
             epoch_context_root,
             &previous,
@@ -2255,7 +2261,8 @@ fn validate_finalization_transition_capability(
         (false, Some(transition))
             if transition.next_epoch_context().root()? == epoch_context_root
                 && evidence.epoch_context_root == epoch_context_root
-                && evidence.anchor_qc == *transition.certified_parent()
+                && evidence.anchor_parent.quorum_certificate_reference()
+                    == Some(transition.certified_parent())
                 && evidence.epoch_transition_tail_qcs == transition.transition_tail() =>
         {
             Ok(())
@@ -2297,7 +2304,7 @@ fn candidate_for_proposal(
         proposal.context.clone(),
         proposal.block_id.clone(),
         proposal.parent_block_id.clone(),
-        proposal.parent_qc.clone(),
+        proposal.parent.clone(),
         proposal.protected_execution_root,
     )
 }
@@ -2311,16 +2318,15 @@ fn expected_finalized_before_candidate(
     height: Height,
 ) -> Result<FinalizedBlockRecord, String> {
     let base = if let Some(seed) = evidence.epoch_transition_tail_qcs.first() {
-        FinalizedBlockRecord {
-            height: seed.context.height,
-            block_id: seed.block_id.clone(),
-            qc_id: seed.id()?,
-        }
+        FinalizedBlockRecord::from_quorum_certificate(seed.reference()?)?
     } else {
-        FinalizedBlockRecord {
-            height: evidence.anchor_qc.height,
-            block_id: evidence.anchor_qc.block_id.clone(),
-            qc_id: evidence.anchor_qc.qc_id,
+        match &evidence.anchor_parent {
+            SimplifiedFinalityParent::Genesis(reference) => {
+                FinalizedBlockRecord::from_genesis(reference.clone())?
+            }
+            SimplifiedFinalityParent::QuorumCertificate(reference) => {
+                FinalizedBlockRecord::from_quorum_certificate(reference.clone())?
+            }
         }
     };
     if height.0 <= base.height.0 {
@@ -2342,11 +2348,7 @@ fn expected_finalized_before_candidate(
         .ok_or_else(|| {
             format!("proposal-time finality evidence lacks certified height {target_height}")
         })?;
-    Ok(FinalizedBlockRecord {
-        height: certificate.context.height,
-        block_id: certificate.block_id.clone(),
-        qc_id: certificate.id()?,
-    })
+    FinalizedBlockRecord::from_quorum_certificate(certificate.reference()?)
 }
 
 fn active_validator<'a>(
@@ -2544,7 +2546,8 @@ pub fn validate_simplified_driver_activation(
         || epoch_context.consensus_parameter_root != activation.parameter_root_sha3_512
         || epoch_context.epoch.0 != activation.activation_epoch
         || epoch_context.epoch_start_height.0 != activation.activation_height
-        || epoch_context.v2_boundary_anchor.is_none()
+        || epoch_context.v2_boundary_anchor.is_some()
+        || epoch_context.v3_transition_anchor.is_some()
     {
         return Err("simplified driver inputs do not match the finalized activation".to_string());
     }
@@ -2605,14 +2608,14 @@ mod tests {
                 .lock()
                 .expect("proposal directive lock")
                 .push(directive.clone());
-            let (block_id, parent_block_id, parent_qc, protected_execution_root) = directive
+            let (block_id, parent_block_id, parent, protected_execution_root) = directive
                 .mandatory_carry_candidate
                 .as_ref()
                 .map(|candidate| {
                     (
                         candidate.block_id.clone(),
                         candidate.parent_block_id.clone(),
-                        candidate.parent_qc.clone(),
+                        candidate.parent.clone(),
                         candidate.protected_execution_root,
                     )
                 })
@@ -2622,8 +2625,8 @@ mod tests {
                             "{}-{}",
                             self.block_id.0, directive.context.height.0
                         )),
-                        directive.highest_qc.block_id.clone(),
-                        directive.highest_qc.clone(),
+                        directive.parent.block_id().clone(),
+                        directive.parent.clone(),
                         self.protected_execution_root,
                     )
                 });
@@ -2632,7 +2635,7 @@ mod tests {
                 proposer_id: directive.proposer_id.clone(),
                 block_id,
                 parent_block_id,
-                parent_qc,
+                parent,
                 takeover_tc_id: directive.takeover_tc_id,
                 protected_execution_root,
                 proposer_key_id: directive.proposer_key_id.clone(),
@@ -2920,16 +2923,13 @@ mod tests {
         };
         let epoch_context = context(&validator_set);
         let anchor_hash = Hash::from_domain_bytes("driver-material-test", b"anchor-block");
-        let finalized = FinalizedBlockRecord {
+        let anchor_qc = QuorumCertificateReference {
             height: Height(3_000),
             block_id: BlockId::from_hash(anchor_hash),
             qc_id: Hash::from_domain_bytes("driver-material-test", b"anchor-qc"),
         };
-        let anchor_qc = QuorumCertificateReference {
-            height: finalized.height,
-            block_id: finalized.block_id.clone(),
-            qc_id: finalized.qc_id,
-        };
+        let finalized = FinalizedBlockRecord::from_quorum_certificate(anchor_qc.clone())
+            .expect("durable material finalized anchor");
         let proposer_id = epoch_context
             .authorized_proposer(Height(3_001), 0)
             .expect("scheduled durable material proposer")
@@ -2946,7 +2946,8 @@ mod tests {
         let directive = SimplifiedProposalDirective {
             context: ConsensusObjectContext::for_height(&epoch_context, Height(3_001), Round(0))
                 .expect("durable material proposal context"),
-            highest_qc: anchor_qc.clone(),
+            parent: SimplifiedFinalityParent::quorum_certificate(anchor_qc.clone())
+                .expect("durable material QC parent"),
             finalized: finalized.clone(),
             proposer_id,
             proposer_key_id,
@@ -3017,7 +3018,8 @@ mod tests {
             local.validator_id.clone(),
             local.consensus_public_key.key_id.clone(),
             DurableSimplifiedPosyStore::at_path(state_path),
-            anchor_qc,
+            SimplifiedFinalityParent::quorum_certificate(anchor_qc)
+                .expect("durable material driver anchor"),
             DurableConsensusSigningAuthority::at_path(signer_journal_path),
             signer,
             verifier,
@@ -3150,7 +3152,8 @@ mod tests {
                     context: context.clone(),
                     block_id: block_id.clone(),
                     parent_block_id: parent_qc.block_id.clone(),
-                    parent_qc: parent_qc.clone(),
+                    parent: SimplifiedFinalityParent::quorum_certificate(parent_qc.clone())
+                        .expect("transition certificate QC parent"),
                     takeover_tc_id: None,
                     protected_execution_root,
                     validator_id: validator.validator_id,
@@ -3511,7 +3514,7 @@ mod tests {
             context: proposal.context.clone(),
             block_id: proposal.block_id.clone(),
             parent_block_id: proposal.parent_block_id.clone(),
-            parent_qc: proposal.parent_qc.clone(),
+            parent: proposal.parent.clone(),
             takeover_tc_id: proposal.takeover_tc_id,
             protected_execution_root: proposal.protected_execution_root,
             validator_id: validator.validator_id,
@@ -3604,7 +3607,7 @@ mod tests {
                 .expect("timed-out proposer")
                 .clone(),
             previous_tc_id,
-            highest_qc: driver.state_machine.state().highest_qc.clone(),
+            highest_parent: driver.state_machine.state().highest_parent.clone(),
             last_voted_candidate,
             validator_id: validator.validator_id,
             key_id: validator.consensus_public_key.key_id,
@@ -3674,7 +3677,7 @@ mod tests {
             context: ConsensusObjectContext::for_height(context, Height(3_001), Round(0)).unwrap(),
             block_id: BlockId("driver-block-3001".to_string()),
             parent_block_id: BlockId("driver-block-3000".to_string()),
-            parent_qc: anchor(),
+            parent: SimplifiedFinalityParent::quorum_certificate(anchor()).unwrap(),
             takeover_tc_id: None,
             protected_execution_root: Hash::from_domain_bytes(
                 "driver-protected-execution",
@@ -3725,7 +3728,7 @@ mod tests {
                     .unwrap(),
                 block_id: BlockId("driver-block-3001".to_string()),
                 parent_block_id: BlockId("driver-block-3000".to_string()),
-                parent_qc: vote(&context, first).parent_qc,
+                parent: vote(&context, first).parent,
                 takeover_tc_id: None,
                 protected_execution_root: Hash::from_domain_bytes(
                     "driver-protected-execution",
@@ -3800,7 +3803,7 @@ mod tests {
                 Round(round),
             )
             .unwrap(),
-            highest_qc: fixture.driver.state_machine.state().highest_qc.clone(),
+            parent: fixture.driver.state_machine.state().highest_parent.clone(),
             finalized: fixture.driver.state_machine.state().finalized.clone(),
             proposer_id: fixture.driver.local_validator_id.clone(),
             proposer_key_id: fixture.driver.local_key_id.clone(),
@@ -4573,7 +4576,7 @@ mod tests {
             Height(3_999)
         );
         assert_eq!(
-            restarted.state_machine.state().highest_qc.height,
+            restarted.state_machine.state().highest_parent.height(),
             Height(4_001)
         );
     }
@@ -4582,7 +4585,7 @@ mod tests {
     fn finalization_sink_failure_does_not_advance_consensus_and_retry_commits_once() {
         let mut fixture = provision_driver("finalization-precommit-retry");
         let finalizing_qc = prepare_finalizing_certificate(&mut fixture.driver);
-        let highest_before = fixture.driver.state_machine.state().highest_qc.clone();
+        let highest_before = fixture.driver.state_machine.state().highest_parent.clone();
         let finalized_before = fixture.driver.state_machine.state().finalized.clone();
         fixture
             .driver
@@ -4601,7 +4604,7 @@ mod tests {
             SimplifiedEnvelopeFailure::FatalLocal(_)
         ));
         assert_eq!(
-            fixture.driver.state_machine.state().highest_qc,
+            fixture.driver.state_machine.state().highest_parent,
             highest_before
         );
         assert_eq!(
@@ -4640,7 +4643,7 @@ mod tests {
     fn crash_after_sink_commit_retries_same_transaction_without_duplicate_commit() {
         let mut fixture = provision_driver("finalization-postcommit-crash");
         let finalizing_qc = prepare_finalizing_certificate(&mut fixture.driver);
-        let highest_before = fixture.driver.state_machine.state().highest_qc.clone();
+        let highest_before = fixture.driver.state_machine.state().highest_parent.clone();
         fixture
             .driver
             .finalization_sink
@@ -4655,7 +4658,7 @@ mod tests {
             .expect_err("injected post-commit crash must stop consensus mutation");
         assert!(error.contains("SIMPLIFIED_LOCAL_FINALIZATION_FAILURE"));
         assert_eq!(
-            fixture.driver.state_machine.state().highest_qc,
+            fixture.driver.state_machine.state().highest_parent,
             highest_before
         );
         {
@@ -4777,7 +4780,14 @@ mod tests {
         let proposal_3002 = drive_proposal(&mut fixture.driver);
         certify_proposal(&mut fixture.driver, &proposal_3002);
 
-        let parent_qc = fixture.driver.state_machine.state().highest_qc.clone();
+        let parent_qc = fixture
+            .driver
+            .state_machine
+            .state()
+            .highest_parent
+            .quorum_certificate_reference()
+            .cloned()
+            .expect("invalid finalizing QC test follows a certified parent");
         let context = ConsensusObjectContext::for_height(
             &fixture.driver.epoch_context,
             Height(3_003),
@@ -4790,7 +4800,7 @@ mod tests {
                 context: context.clone(),
                 block_id: BlockId("invalid-finalizing-block-3003".to_string()),
                 parent_block_id: parent_qc.block_id.clone(),
-                parent_qc: parent_qc.clone(),
+                parent: SimplifiedFinalityParent::quorum_certificate(parent_qc.clone()).unwrap(),
                 takeover_tc_id: None,
                 protected_execution_root: Hash::from_domain_bytes(
                     "driver-protected-execution",
@@ -4858,11 +4868,10 @@ mod tests {
             .certified_qcs
             .get(&3_001)
             .expect("height-3001 QC");
-        bundle.claimed_finalized = FinalizedBlockRecord {
-            height: qc_3001.context.height,
-            block_id: qc_3001.block_id.clone(),
-            qc_id: qc_3001.id().expect("height-3001 QC id"),
-        };
+        bundle.claimed_finalized = FinalizedBlockRecord::from_quorum_certificate(
+            qc_3001.reference().expect("height-3001 QC reference"),
+        )
+        .unwrap();
         let request_id =
             Hash::from_domain_bytes("driver-state-sync-request", b"underived-finality");
         fixture

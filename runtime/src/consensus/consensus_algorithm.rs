@@ -4149,7 +4149,9 @@ impl ProofOfSynergy {
         );
         block
             .apply_fee_market_from_parent(previous_block)
-            .unwrap_or_else(|error| panic!("legacy fee-market proposal construction failed: {error}"));
+            .unwrap_or_else(|error| {
+                panic!("legacy fee-market proposal construction failed: {error}")
+            });
 
         let (leader_public_key, leader_private_key) = load_local_validator_keypair_for_height(
             block.block_index,

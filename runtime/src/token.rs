@@ -2103,13 +2103,14 @@ impl TokenManager {
         applied_base_fee_per_gas_nwei: Option<u64>,
     ) -> Result<String, String> {
         let fee = match applied_base_fee_per_gas_nwei {
-            Some(base_fee_per_gas_nwei) => tx
-                .network_fee_breakdown_with_gas(tx.estimate_gas(), base_fee_per_gas_nwei)?
-                .total_network_fee_nwei,
+            Some(base_fee_per_gas_nwei) => {
+                tx.network_fee_breakdown_with_gas(tx.estimate_gas(), base_fee_per_gas_nwei)?
+                    .total_network_fee_nwei
+            }
             None => tx.get_total_network_fee_nwei(),
         };
-        let fee = u64::try_from(fee)
-            .map_err(|_| "finalized transaction fee exceeds u64".to_string())?;
+        let fee =
+            u64::try_from(fee).map_err(|_| "finalized transaction fee exceeds u64".to_string())?;
         if let Some(data_str) = tx.data.as_deref() {
             if crate::sts::transaction_data_may_contain_sts_payload(data_str) {
                 let tx_hash = tx.hash();

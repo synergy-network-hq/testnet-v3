@@ -1,3 +1,4 @@
+use crate::posy_simplified_parameters::SimplifiedConsensusParameterManifest;
 use crate::synergy_types::{
     ChainId, Epoch, NetworkId, ProtocolConfig, POSY_PROTOCOL_VERSION,
     TESTNET_V3_CLUSTER_SCHEDULE_VERSION, TESTNET_V3_CONSENSUS_SIGNATURE_ALGORITHM,
@@ -11,11 +12,10 @@ use std::fs;
 use std::path::Path;
 
 pub const CONSENSUS_PARAMETER_MANIFEST_SCHEMA_VERSION: u32 = 2;
-/// Schema version 3 is reserved for the first finalized manifest that may
-/// explicitly authorize ETDAG.  The applied Testnet-v3 Genesis is schema 2;
-/// its omission of an ETDAG activation record is intentionally a hard
-/// deferral, rather than implicit activation from the presence of ETDAG
-/// cryptographic parameters.
+/// Schema version 3 is reserved for the historical P2.2 manifest family that
+/// may explicitly authorize ETDAG at a later epoch.  It does not govern the
+/// separate fresh PoSy v3 chain: that chain requires its ETDAG parameter and
+/// fee artifacts atomically at Genesis through `etdag_governance`.
 pub const CONSENSUS_PARAMETER_MANIFEST_ETDAG_ACTIVATION_SCHEMA_VERSION: u32 = 3;
 /// Schema version 4 is the deliberately narrow P1 coordinated-round-robin
 /// manifest. It is structurally separate from typed-PoSy manifests so a P1
@@ -151,11 +151,10 @@ impl HealthyNetworkPerformanceTargets {
     }
 }
 
-/// An explicit, consensus-bound authorization for the encrypted transaction
-/// DAG.  ETDAG cryptographic parameters alone are deliberately not an
-/// activation signal: Testnet-v3 starts with ETDAG deferred.  A future
-/// finalized schema-v3 manifest may activate it only at a non-genesis epoch
-/// boundary.
+/// A legacy P2.2 consensus-bound authorization for the encrypted transaction
+/// DAG. ETDAG cryptographic parameters alone are not an activation signal in
+/// that historical profile. Fresh PoSy v3 uses the distinct, governed
+/// Genesis-binding path instead.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum EtdagActivation {
@@ -180,6 +179,17 @@ impl EtdagActivation {
 /// the current epoch.
 #[derive(Debug)]
 pub(crate) struct EtdagActivationPermit(());
+
+/// Issues the only P3 ETDAG capability after the caller has loaded the
+/// complete canonical Genesis binding.  The binding validates both governed
+/// SHA3-512 roots and their chain/P3 relationships; neither a node flag nor
+/// an ETDAG default can construct this capability.
+pub(crate) fn issue_etdag_governed_genesis_permit(
+    binding: &crate::etdag_governance::EtdagGovernedGenesisBinding,
+) -> Result<EtdagActivationPermit, String> {
+    binding.validate()?;
+    Ok(EtdagActivationPermit(()))
+}
 
 #[cfg(test)]
 impl EtdagActivationPermit {
@@ -586,6 +596,7 @@ impl CoordinatedRoundRobinParameterManifest {
 pub enum FinalizedConsensusParameterManifest {
     PosyV2_2(ConsensusParameterManifest),
     CoordinatedRoundRobinV1(CoordinatedRoundRobinParameterManifest),
+    SimplifiedPoSyV3(SimplifiedConsensusParameterManifest),
 }
 
 impl<'de> Deserialize<'de> for FinalizedConsensusParameterManifest {
@@ -607,6 +618,11 @@ impl<'de> Deserialize<'de> for FinalizedConsensusParameterManifest {
             COORDINATED_ROUND_ROBIN_V1_PROTOCOL_VERSION => serde_json::from_value(value)
                 .map(Self::CoordinatedRoundRobinV1)
                 .map_err(serde::de::Error::custom),
+            crate::consensus::simplified_posy::POSY_SIMPLIFIED_PROTOCOL_VERSION => {
+                serde_json::from_value(value)
+                    .map(Self::SimplifiedPoSyV3)
+                    .map_err(serde::de::Error::custom)
+            }
             other => Err(serde::de::Error::custom(format!(
                 "unsupported consensus parameter protocol version {other}"
             ))),
@@ -619,6 +635,7 @@ impl FinalizedConsensusParameterManifest {
         match self {
             Self::PosyV2_2(manifest) => manifest.validate_finalized(),
             Self::CoordinatedRoundRobinV1(manifest) => manifest.validate_finalized(),
+            Self::SimplifiedPoSyV3(manifest) => manifest.require_activatable(),
         }
     }
 
@@ -626,6 +643,10 @@ impl FinalizedConsensusParameterManifest {
         match self {
             Self::PosyV2_2(manifest) => manifest.canonical_bytes(),
             Self::CoordinatedRoundRobinV1(manifest) => manifest.canonical_bytes(),
+            Self::SimplifiedPoSyV3(manifest) => {
+                manifest.require_activatable()?;
+                manifest.canonical_bytes()
+            }
         }
     }
 
@@ -635,10 +656,11 @@ impl FinalizedConsensusParameterManifest {
         ))
     }
 
-    pub fn governance_approval_id(&self) -> &str {
+    pub fn governance_approval_id(&self) -> Result<&str, String> {
         match self {
-            Self::PosyV2_2(manifest) => &manifest.governance_approval_id,
-            Self::CoordinatedRoundRobinV1(manifest) => &manifest.governance_approval_id,
+            Self::PosyV2_2(manifest) => Ok(&manifest.governance_approval_id),
+            Self::CoordinatedRoundRobinV1(manifest) => Ok(&manifest.governance_approval_id),
+            Self::SimplifiedPoSyV3(manifest) => manifest.finalized_governance_approval_id(),
         }
     }
 
@@ -646,6 +668,7 @@ impl FinalizedConsensusParameterManifest {
         match self {
             Self::PosyV2_2(manifest) => manifest.chain_id,
             Self::CoordinatedRoundRobinV1(manifest) => manifest.chain_id,
+            Self::SimplifiedPoSyV3(manifest) => manifest.chain_id,
         }
     }
 
@@ -653,6 +676,7 @@ impl FinalizedConsensusParameterManifest {
         match self {
             Self::PosyV2_2(manifest) => &manifest.network_id,
             Self::CoordinatedRoundRobinV1(manifest) => &manifest.network_id,
+            Self::SimplifiedPoSyV3(manifest) => &manifest.network_id,
         }
     }
 
@@ -660,6 +684,7 @@ impl FinalizedConsensusParameterManifest {
         match self {
             Self::PosyV2_2(manifest) => &manifest.protocol_version,
             Self::CoordinatedRoundRobinV1(manifest) => &manifest.protocol_version,
+            Self::SimplifiedPoSyV3(manifest) => &manifest.protocol_version,
         }
     }
 
@@ -667,6 +692,7 @@ impl FinalizedConsensusParameterManifest {
         match self {
             Self::PosyV2_2(manifest) => &manifest.consensus_signature_algorithm,
             Self::CoordinatedRoundRobinV1(manifest) => &manifest.consensus_signature_algorithm,
+            Self::SimplifiedPoSyV3(manifest) => &manifest.consensus_signature_algorithm,
         }
     }
 
@@ -677,6 +703,9 @@ impl FinalizedConsensusParameterManifest {
                 "typed PoSy startup rejects a coordinated_round_robin_v1 Genesis binding"
                     .to_string(),
             ),
+            Self::SimplifiedPoSyV3(_) => {
+                Err("typed PoSy startup rejects a simplified PoSy v3 Genesis binding".to_string())
+            }
         }
     }
 
@@ -688,6 +717,10 @@ impl FinalizedConsensusParameterManifest {
                 Err("coordinated P1 startup rejects a PoSy Genesis parameter binding".to_string())
             }
             Self::CoordinatedRoundRobinV1(manifest) => Ok(manifest),
+            Self::SimplifiedPoSyV3(_) => Err(
+                "coordinated P1 startup rejects a simplified PoSy v3 Genesis parameter binding"
+                    .to_string(),
+            ),
         }
     }
 
@@ -728,6 +761,42 @@ impl FinalizedConsensusParameterManifest {
                 config.seal_runtime_binding()?;
                 Ok(config)
             }
+            Self::SimplifiedPoSyV3(manifest) => {
+                manifest.require_activatable()?;
+                // This sealed compatibility object exists only for generic
+                // Genesis/P2P plumbing that carries a parameter root. The
+                // simplified driver never consumes its legacy vote-phase or
+                // anti-divergence fields; its authority is the v3 manifest
+                // and Genesis activation binding directly.
+                let mut config = ProtocolConfig {
+                    chain_id: manifest.chain_id,
+                    network_id: manifest.network_id.clone(),
+                    consensus_parameter_root: manifest.root()?,
+                    runtime_config_commitment: crate::synergy_types::Hash::zero(),
+                    shadow_epochs_required: 0,
+                    activation_delay_epochs: 0,
+                    minimum_shadow_blocks: 0,
+                    max_finalized_lag_blocks: 2,
+                    required_vote_match_rate_ppm: 0,
+                    required_validator_stake_nwei: 0,
+                    allow_over_staking: false,
+                    anti_divergence_enabled: false,
+                    auto_reconciliation_enabled: false,
+                    self_quarantine_on_local_divergence: false,
+                    peer_quarantine_on_invalid_finality_claim: false,
+                    require_quorum_peer_confirmation_for_reconciliation: true,
+                    min_canonical_sync_peers: manifest.required_distinct_signers,
+                    max_rejoin_lag_blocks: 0,
+                    rejoin_only_at_round_boundary: false,
+                    allow_quorum_reduction: false,
+                    proposal_timeout_ms: manifest.proposal_timeout_ms,
+                    prevote_timeout_ms: manifest.vote_timeout_ms,
+                    precommit_timeout_ms: manifest.vote_timeout_ms,
+                    max_round_timeout_ms: manifest.max_round_timeout_ms,
+                };
+                config.seal_runtime_binding()?;
+                Ok(config)
+            }
         }
     }
 
@@ -739,6 +808,9 @@ impl FinalizedConsensusParameterManifest {
             Self::PosyV2_2(manifest) => manifest.require_etdag_activation_at_epoch(current_epoch),
             Self::CoordinatedRoundRobinV1(_) => Err(format!(
                 "{ERR_ETDAG_DEFERRED}: coordinated P1 has no ETDAG vote or aggregation path"
+            )),
+            Self::SimplifiedPoSyV3(_) => Err(format!(
+                "{ERR_ETDAG_DEFERRED}: simplified PoSy requires separately governed ETDAG parameter and fee artifacts"
             )),
         }
     }
@@ -779,6 +851,19 @@ impl LoadedConsensusParameters {
     ) -> Result<&CoordinatedRoundRobinParameterManifest, String> {
         self.require_genesis_binding()?;
         self.manifest.coordinated_round_robin()
+    }
+
+    pub fn require_simplified_posy_manifest(
+        &self,
+    ) -> Result<&SimplifiedConsensusParameterManifest, String> {
+        self.require_genesis_binding()?;
+        match &self.manifest {
+            FinalizedConsensusParameterManifest::SimplifiedPoSyV3(manifest) => {
+                manifest.require_activatable()?;
+                Ok(manifest)
+            }
+            _ => Err("Genesis binding does not carry a simplified PoSy v3 manifest".to_string()),
+        }
     }
 
     pub(crate) fn require_etdag_activation_at_epoch(
@@ -889,11 +974,11 @@ pub fn load_genesis_bound_consensus_parameters(
         ));
     }
 
-    if binding.decision_id != loaded.manifest.governance_approval_id() {
+    let approval = loaded.manifest.governance_approval_id()?;
+    if binding.decision_id != approval {
         return Err(format!(
             "Genesis consensus parameter Decision ID mismatch: expected {}, found {}",
-            loaded.manifest.governance_approval_id(),
-            binding.decision_id
+            approval, binding.decision_id
         ));
     }
     if binding.release_decision_sha256.len() != 64
@@ -1054,7 +1139,7 @@ mod tests {
     }
 
     #[test]
-    fn etdag_is_deferred_by_the_genesis_schema_and_cannot_activate_early() {
+    fn legacy_etdag_schema_defers_activation_and_cannot_activate_early() {
         let manifest = finalized_fixture();
         assert_eq!(
             manifest.schema_version,
@@ -1153,6 +1238,28 @@ mod tests {
         assert_eq!(
             loaded.root.to_hex(),
             "2e6760bed60c8f8e44b3b693254367f0da9a8aa9efae46c517856fb78be7402cf232c064083116b805278e95a952660f7a92e16ca9cd9349aa74467d577127cd"
+        );
+    }
+
+    #[test]
+    fn fresh_p3_for_release_manifest_is_canonical_and_etdag_governed() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+            "../../launch/posy-v3-etdag-governance-inputs/posy-simplified-parameter-manifest.for-release.json",
+        );
+        let loaded = load_finalized_consensus_parameters(&path)
+            .expect("canonical fresh P3 release manifest");
+        let manifest = loaded
+            .require_simplified_posy_manifest()
+            .expect("fresh P3 release manifest");
+        assert_eq!(
+            manifest.governance_approval_id.as_deref(),
+            Some("SNRG-GOV-POSY-P3-GENESIS-20260823-01")
+        );
+        assert_eq!(manifest.activation_epoch, Some(0));
+        assert_eq!(manifest.activation_height, Some(1));
+        assert_eq!(
+            loaded.root.to_hex(),
+            "655ce5e10e15f4ab4fd06c7ce33518197d59d0e0930c088538bbe8abb5b39a9a2abb3f6efd765e918513c3fd13c4fc0540fe6930dba5699eaeb24a7cebd5a2bb"
         );
     }
 

@@ -23,7 +23,8 @@ use crate::consensus::legacy_canonical_lock::{
 };
 use crate::consensus::simplified_posy::{
     dispatch_simplified_target_admission_package, dispatch_simplified_target_admission_vote,
-    AuthenticatedSimplifiedConsensusPeer, SimplifiedConsensusMessage,
+    load_genesis_bound_simplified_activation, AuthenticatedSimplifiedConsensusPeer,
+    GenesisBoundSimplifiedActivation, SimplifiedConsensusMessage, POSY_SIMPLIFIED_PROTOCOL_VERSION,
 };
 use crate::consensus::testnet_v3_bootstrap::{
     authenticate_active_typed_consensus_peer, load_testnet_v3_genesis_bootstrap,
@@ -136,7 +137,12 @@ const PUBLIC_RELAYER_DIAL_ADDRESSES: &[&str] = &[
     "relay3.synergynode.xyz:5622",
 ];
 const MAX_BLOCK_SYNC_RESPONSE_BLOCKS: u32 = 64;
-const TYPED_POSY_VALIDATOR_CAPABILITY: &str = "typed-posy-v2.2-validator";
+/// A simplified-PoSy validator has a distinct capability so peers cannot
+/// confuse the fresh v3 Genesis authority with the retired typed PoSy engine.
+const SIMPLIFIED_POSY_VALIDATOR_CAPABILITY: &str = "posy-simplified-v3-validator";
+/// This capability is never accepted. Retaining an explicit reject value keeps
+/// pre-v3 peers from silently degrading to a generic authenticated session.
+const RETIRED_TYPED_POSY_VALIDATOR_CAPABILITY: &str = "typed-posy-v2.2-validator";
 const COORDINATED_VALIDATOR_CAPABILITY: &str = "coordinated-round-robin-v1-validator";
 // Identity bindings are session-scoped and bounded.  A socket address is not a
 // consensus identity, so this registry exists solely to carry the result of a
@@ -187,8 +193,8 @@ const BLOCK_SYNC_RECONCILIATION_LOOKBACK: u64 = 8;
 const BLOCK_SYNC_PROGRESS_OVERLAP: u64 = 2;
 const TESTNET_NATIVE_CAIP2: &str = "synergy:testnet";
 const TESTNET_RESERVED_EIP155: &str = "eip155:1266";
-const TESTNET_NETWORK_ID_TEXT: &str = "synergy-testnet-v3";
-const TESTNET_AEGIS_PQVM_VERSION: &str = "aegis-pqvm";
+const TESTNET_NETWORK_ID_TEXT: &str = "testnet";
+const TESTNET_AEGIS_PQVM_VERSION: &str = "aegis-pqvm-v3";
 const DEFAULT_MAX_CHAIN_SNAPSHOT_CLONE_HEIGHT: u64 = 50_000;
 
 static VERIFIED_MLDSA65_HANDSHAKES: AtomicU64 = AtomicU64::new(0);
@@ -532,6 +538,21 @@ fn canonical_genesis_hash() -> String {
         .unwrap_or_default()
 }
 
+/// P2P replay separation is part of the canonical Genesis identity. Do not
+/// freeze the former chain-incarnation value into wire messages: a fresh
+/// block-zero Testnet-v3 Genesis deliberately owns a new value.
+fn canonical_chain_incarnation() -> u64 {
+    canonical_genesis()
+        .map(|genesis| genesis.chain_incarnation())
+        .unwrap_or(crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION)
+}
+
+fn canonical_consensus_state_schema_version() -> u32 {
+    canonical_genesis()
+        .map(|genesis| genesis.consensus_state_schema_version())
+        .unwrap_or(crate::synergy_types::TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION)
+}
+
 fn canonical_network_magic_bytes() -> String {
     canonical_genesis()
         .map(|genesis| genesis.network_magic_bytes().to_string())
@@ -557,8 +578,10 @@ fn local_protocol_version(config: &NodeConfig) -> String {
 }
 
 fn local_consensus_version(config: &NodeConfig) -> String {
-    if config.consensus.algorithm.trim() == COORDINATED_ROUND_ROBIN_V1 {
-        return COORDINATED_ROUND_ROBIN_V1.to_string();
+    match config.consensus.algorithm.trim() {
+        COORDINATED_ROUND_ROBIN_V1 => return COORDINATED_ROUND_ROBIN_V1.to_string(),
+        POSY_SIMPLIFIED_PROTOCOL_VERSION => return POSY_SIMPLIFIED_PROTOCOL_VERSION.to_string(),
+        _ => {}
     }
     canonical_genesis()
         .map(|genesis| genesis.consensus_version().to_string())
@@ -734,7 +757,7 @@ fn build_local_handshake_with_extra_capabilities(
         .unwrap_or_else(|| config.p2p.node_name.trim());
     let key_id = if local_consensus_handshake_required(config) {
         let validator_address = announced_validator_address(config).ok_or_else(|| {
-            "typed PoSy validator handshake requires a configured validator address".to_string()
+            "validator consensus handshake requires a configured validator address".to_string()
         })?;
         let (public_key, private_key) = load_local_validator_keypair(
             &validator_address,
@@ -742,9 +765,33 @@ fn build_local_handshake_with_extra_capabilities(
         )
         .map_err(|error| {
             format!(
-                "typed PoSy validator handshake cannot load the assigned ML-DSA-65 consensus key: {error}"
+                "validator consensus handshake cannot load the assigned ML-DSA-65 consensus key: {error}"
             )
         })?;
+        if config.consensus.algorithm.trim() == POSY_SIMPLIFIED_PROTOCOL_VERSION {
+            let genesis = canonical_genesis().map_err(|error| {
+                format!(
+                    "simplified PoSy validator handshake cannot load canonical Genesis: {error}"
+                )
+            })?;
+            let activation = load_genesis_bound_simplified_activation(genesis.value())?
+                .ok_or_else(|| {
+                    "simplified PoSy validator handshake requires a Genesis-bound v3 activation"
+                        .to_string()
+                })?;
+            authenticate_fresh_simplified_posy_peer(
+                &activation,
+                &validator_address,
+                &public_key.key_id,
+                consensus_algorithm_label(&public_key.algorithm),
+                &public_key.key_data,
+            )
+            .map_err(|error| {
+                format!(
+                    "simplified PoSy local validator key is not authorized by Genesis activation: {error}"
+                )
+            })?;
+        }
         register_validator_consensus_handshake_key(
             &mut signer,
             &validator_address,
@@ -761,11 +808,7 @@ fn build_local_handshake_with_extra_capabilities(
         .map_err(|error| format!("aegis-pqvm P2P public key loading failed: {error}"))?;
     let mut capabilities = vec!["blocks".to_string(), "transactions".to_string()];
     if local_consensus_handshake_required(config) {
-        let capability = if config.consensus.algorithm.trim() == COORDINATED_ROUND_ROBIN_V1 {
-            COORDINATED_VALIDATOR_CAPABILITY
-        } else {
-            TYPED_POSY_VALIDATOR_CAPABILITY
-        };
+        let capability = validator_consensus_capability(config.consensus.algorithm.trim())?;
         capabilities.push(capability.to_string());
     }
     for capability in extra_capabilities {
@@ -779,10 +822,8 @@ fn build_local_handshake_with_extra_capabilities(
         version: "1.0.0".to_string(),
         capabilities,
         chain_id: Some(local_chain_id(config)),
-        chain_incarnation: Some(crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION),
-        consensus_state_schema_version: Some(
-            crate::synergy_types::TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION,
-        ),
+        chain_incarnation: Some(canonical_chain_incarnation()),
+        consensus_state_schema_version: Some(canonical_consensus_state_schema_version()),
         network_id: Some(local_network_id(config)),
         network_id_text: Some(TESTNET_NETWORK_ID_TEXT.to_string()),
         genesis_hash: canonical_genesis_hash(),
@@ -818,15 +859,24 @@ fn build_local_handshake_with_extra_capabilities(
 }
 
 /// A validator consensus handshake proves possession of the exact
-/// Genesis-assigned ML-DSA-65 key. Both the retired typed engine and the active
-/// coordinated engine require this identity binding; neither may fall back to
-/// an ephemeral P2P key.
+/// Genesis-assigned ML-DSA-65 key. No validator may fall back to an ephemeral
+/// P2P key.
 fn local_consensus_handshake_required(config: &NodeConfig) -> bool {
     matches!(
         config.consensus.algorithm.trim(),
-        "posy/2.2" | COORDINATED_ROUND_ROBIN_V1
+        POSY_SIMPLIFIED_PROTOCOL_VERSION | COORDINATED_ROUND_ROBIN_V1
     ) && !config.node.bootstrap_only
         && !config.node.validator_address.trim().is_empty()
+}
+
+fn validator_consensus_capability(algorithm: &str) -> Result<&'static str, String> {
+    match algorithm.trim() {
+        COORDINATED_ROUND_ROBIN_V1 => Ok(COORDINATED_VALIDATOR_CAPABILITY),
+        POSY_SIMPLIFIED_PROTOCOL_VERSION => Ok(SIMPLIFIED_POSY_VALIDATOR_CAPABILITY),
+        algorithm => Err(format!(
+            "validator consensus handshake does not support algorithm {algorithm}"
+        )),
+    }
 }
 
 fn register_validator_consensus_handshake_key(
@@ -837,7 +887,7 @@ fn register_validator_consensus_handshake_key(
 ) -> Result<AegisPqKeyId, String> {
     if public_key.algorithm != PQCAlgorithm::MLDSA65 {
         return Err(
-            "typed PoSy validator handshake requires an ML-DSA-65 consensus key".to_string(),
+            "validator consensus handshake requires an ML-DSA-65 consensus key".to_string(),
         );
     }
     signer
@@ -853,7 +903,55 @@ fn register_validator_consensus_handshake_key(
             ],
             Epoch(0),
         )
-        .map_err(|error| format!("register typed PoSy validator handshake key: {error}"))
+        .map_err(|error| format!("register validator consensus handshake key: {error}"))
+}
+
+/// Authenticates a simplified-PoSy validator against the frozen set embedded
+/// in the canonical fresh-Genesis activation. The generic P2P signature was
+/// verified before this function is reached; this second binding ensures that
+/// its ML-DSA-65 public material belongs to one exact Genesis validator.
+fn authenticate_fresh_simplified_posy_peer(
+    activation: &GenesisBoundSimplifiedActivation,
+    validator_operator_address: &str,
+    advertised_key_id: &str,
+    advertised_algorithm: &str,
+    advertised_public_key: &[u8],
+) -> Result<AuthenticatedTypedConsensusPeer, String> {
+    activation.validate()?;
+    if !matches!(
+        advertised_algorithm.trim(),
+        "ML-DSA-65" | "ml-dsa-65" | "mldsa65"
+    ) {
+        return Err("simplified PoSy peer handshake key algorithm must be ML-DSA-65".to_string());
+    }
+    let operator = validator_operator_address.trim();
+    if operator.is_empty() {
+        return Err("simplified PoSy peer handshake omits validator operator address".to_string());
+    }
+    let validator = activation
+        .frozen_validator_set
+        .validators
+        .iter()
+        .find(|validator| validator.validator_uma_id.0 == operator)
+        .ok_or_else(|| {
+            "simplified PoSy peer is not in the Genesis-frozen validator set".to_string()
+        })?;
+    if !validator.is_active_for_epoch(crate::synergy_types::Epoch(activation.activation_epoch)) {
+        return Err("simplified PoSy peer is not active for the Genesis epoch".to_string());
+    }
+    if validator.consensus_public_key.key_id.0 != advertised_key_id.trim()
+        || validator.consensus_public_key.key_bytes != advertised_public_key
+    {
+        return Err(
+            "simplified PoSy peer handshake key does not match the Genesis-frozen validator consensus key"
+                .to_string(),
+        );
+    }
+    Ok(AuthenticatedTypedConsensusPeer {
+        validator_id: validator.validator_id.clone(),
+        validator_uma_id: validator.validator_uma_id.clone(),
+        consensus_key_id: validator.consensus_public_key.key_id.clone(),
+    })
 }
 
 fn verify_handshake_pq_signature(
@@ -877,21 +975,26 @@ fn verify_handshake_pq_signature(
         return Err("P2P handshake verification requested for non-handshake".to_string());
     };
 
-    if *chain_id != Some(1266) {
-        return Err("Aegis PQC handshake must bind chain_id 1266".to_string());
-    }
-    if *chain_incarnation != Some(crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION) {
+    let genesis = canonical_genesis()
+        .map_err(|error| format!("Aegis PQC handshake cannot load canonical Genesis: {error}"))?;
+    let expected_chain_id = genesis.chain_id();
+    let expected_chain_incarnation = genesis.chain_incarnation();
+    let expected_state_schema_version = genesis.consensus_state_schema_version();
+    if *chain_id != Some(expected_chain_id) {
         return Err(format!(
-            "Aegis PQC handshake must bind Chain 1266 incarnation {}",
-            crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
+            "Aegis PQC handshake must bind chain_id {expected_chain_id}"
         ));
     }
-    if *consensus_state_schema_version
-        != Some(crate::synergy_types::TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION)
-    {
+    if *chain_incarnation != Some(expected_chain_incarnation) {
+        return Err(format!(
+            "Aegis PQC handshake must bind Chain 1266 incarnation {}",
+            expected_chain_incarnation
+        ));
+    }
+    if *consensus_state_schema_version != Some(expected_state_schema_version) {
         return Err(format!(
             "Aegis PQC handshake must bind consensus state schema {}",
-            crate::synergy_types::TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION
+            expected_state_schema_version
         ));
     }
     if network_id_text.as_deref() != Some(TESTNET_NETWORK_ID_TEXT) {
@@ -953,20 +1056,54 @@ fn verify_handshake_pq_signature(
         _ => {}
     }
 
-    if capabilities.iter().any(|capability| {
-        capability == TYPED_POSY_VALIDATOR_CAPABILITY
-            || capability == COORDINATED_VALIDATOR_CAPABILITY
-    }) {
+    if capabilities
+        .iter()
+        .any(|capability| capability == RETIRED_TYPED_POSY_VALIDATOR_CAPABILITY)
+    {
+        return Err(
+            "retired typed PoSy validator capability is forbidden; use the fresh simplified PoSy v3 capability"
+                .to_string(),
+        );
+    }
+    let advertises_simplified_posy = capabilities
+        .iter()
+        .any(|capability| capability == SIMPLIFIED_POSY_VALIDATOR_CAPABILITY);
+    let advertises_coordinated = capabilities
+        .iter()
+        .any(|capability| capability == COORDINATED_VALIDATOR_CAPABILITY);
+    if advertises_simplified_posy && advertises_coordinated {
+        return Err(
+            "validator handshake cannot advertise both simplified PoSy and coordinated capabilities"
+                .to_string(),
+        );
+    }
+    if advertises_simplified_posy || advertises_coordinated {
         let validator_address = validator_address
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| "typed PoSy validator handshake omits validator_address".to_string())?;
-        let genesis = canonical_genesis().map_err(|error| {
-            format!("typed PoSy peer handshake cannot load canonical Genesis: {error}")
-        })?;
-        let bootstrap = load_testnet_v3_genesis_bootstrap(genesis).map_err(|error| {
-            format!("typed PoSy peer handshake canonical Genesis is not a valid bootstrap: {error}")
+            .ok_or_else(|| "validator consensus handshake omits validator_address".to_string())?;
+        if advertises_simplified_posy {
+            let activation = load_genesis_bound_simplified_activation(genesis.value())?
+                .ok_or_else(|| {
+                    "simplified PoSy peer handshake requires a Genesis-bound v3 activation"
+                        .to_string()
+                })?;
+            let identity = authenticate_fresh_simplified_posy_peer(
+                &activation,
+                validator_address,
+                key_id.0.as_str(),
+                aegis_pq_public_key_algorithm.as_deref().unwrap_or_default(),
+                aegis_pq_public_key,
+            )
+            .map_err(|error| {
+                format!("simplified PoSy validator handshake identity binding failed: {error}")
+            })?;
+            return Ok(Some(identity));
+        }
+
+        let bootstrap = load_testnet_v3_genesis_bootstrap(&genesis).map_err(|error| {
+            format!("coordinated validator handshake canonical Genesis is not a valid bootstrap: {error}")
         })?;
         let validator = authenticate_active_typed_consensus_peer(
             &bootstrap,
@@ -976,7 +1113,7 @@ fn verify_handshake_pq_signature(
             aegis_pq_public_key,
         )
         .map_err(|error| {
-            format!("typed PoSy validator handshake identity binding failed: {error}")
+            format!("coordinated validator handshake identity binding failed: {error}")
         })?;
         return Ok(Some(AuthenticatedTypedConsensusPeer {
             validator_id: validator.validator_id,
@@ -1017,20 +1154,18 @@ fn handshake_mismatch_reason(
         None => return Some(format!("chain_id missing: expected {expected_chain_id}")),
     }
 
-    if chain_incarnation != Some(crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION) {
+    let expected_chain_incarnation = canonical_chain_incarnation();
+    if chain_incarnation != Some(expected_chain_incarnation) {
         return Some(format!(
             "chain_incarnation differs: expected {}, remote {:?}",
-            crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
-            chain_incarnation
+            expected_chain_incarnation, chain_incarnation
         ));
     }
-    if consensus_state_schema_version
-        != Some(crate::synergy_types::TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION)
-    {
+    let expected_state_schema_version = canonical_consensus_state_schema_version();
+    if consensus_state_schema_version != Some(expected_state_schema_version) {
         return Some(format!(
             "consensus state schema differs: expected {}, remote {:?}",
-            crate::synergy_types::TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION,
-            consensus_state_schema_version
+            expected_state_schema_version, consensus_state_schema_version
         ));
     }
 
@@ -4738,7 +4873,7 @@ fn local_coordinated_finality_observer_config(
         .ok()?
     {
         ResolvedConsensusMode::CoordinatedRoundRobinV1(coordinated) => Some(coordinated),
-        ResolvedConsensusMode::PosyV2_2 => None,
+        ResolvedConsensusMode::PosySimplifiedV3 => None,
     }
 }
 
@@ -5738,7 +5873,7 @@ impl P2PNetwork {
         }
         crate::p2p::messages::validate_typed_consensus_message_size(message)?;
         let wire_message = NetworkMessage::TypedConsensus {
-            chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+            chain_incarnation: canonical_chain_incarnation(),
             genesis_hash: canonical_genesis_hash(),
             message: message.clone(),
         };
@@ -5807,7 +5942,7 @@ impl P2PNetwork {
             return Err("simplified consensus frozen egress set is empty".to_string());
         }
         let wire_message = NetworkMessage::SimplifiedConsensus {
-            chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+            chain_incarnation: canonical_chain_incarnation(),
             genesis_hash: canonical_genesis_hash(),
             message: message.clone(),
         };
@@ -5867,7 +6002,7 @@ impl P2PNetwork {
     ) -> Result<usize, String> {
         validate_coordinated_consensus_message_size(message)?;
         let wire_message = NetworkMessage::CoordinatedConsensus {
-            chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+            chain_incarnation: canonical_chain_incarnation(),
             genesis_hash: canonical_genesis_hash(),
             message: message.clone(),
         };
@@ -5926,7 +6061,7 @@ impl P2PNetwork {
     ) -> Result<(), String> {
         validate_coordinated_consensus_message_size(message)?;
         let wire_message = NetworkMessage::CoordinatedConsensus {
-            chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+            chain_incarnation: canonical_chain_incarnation(),
             genesis_hash: canonical_genesis_hash(),
             message: message.clone(),
         };
@@ -5982,7 +6117,7 @@ impl P2PNetwork {
             return Err("simplified target-admission frozen egress set is empty".to_string());
         }
         let wire_message = NetworkMessage::SimplifiedTargetAdmission {
-            chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+            chain_incarnation: canonical_chain_incarnation(),
             genesis_hash: canonical_genesis_hash(),
             message: message.clone(),
         };
@@ -6078,7 +6213,7 @@ impl P2PNetwork {
             session_id
         };
         let wire_message = NetworkMessage::SimplifiedConsensus {
-            chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+            chain_incarnation: canonical_chain_incarnation(),
             genesis_hash: canonical_genesis_hash(),
             message: message.clone(),
         };
@@ -6115,7 +6250,7 @@ impl P2PNetwork {
             );
         }
         let wire_message = NetworkMessage::TypedFinalityObserver {
-            chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+            chain_incarnation: canonical_chain_incarnation(),
             genesis_hash: canonical_genesis_hash(),
             message: TypedFinalityObserverMessage::Request { next_height },
         };
@@ -6196,7 +6331,7 @@ impl P2PNetwork {
             );
         }
         let wire_message = NetworkMessage::CoordinatedFinalityObserver {
-            chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+            chain_incarnation: canonical_chain_incarnation(),
             genesis_hash: canonical_genesis_hash(),
             message: CoordinatedFinalityObserverMessage::Request { next_height },
         };
@@ -8499,7 +8634,7 @@ fn handle_typed_finality_observer_message(
                 peer_address,
                 session_id,
                 &NetworkMessage::TypedFinalityObserver {
-                    chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+                    chain_incarnation: canonical_chain_incarnation(),
                     genesis_hash: canonical_genesis_hash(),
                     message: response,
                 },
@@ -8623,7 +8758,7 @@ fn handle_coordinated_finality_observer_message(
                 peer_address,
                 session_id,
                 &NetworkMessage::CoordinatedFinalityObserver {
-                    chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+                    chain_incarnation: canonical_chain_incarnation(),
                     genesis_hash: canonical_genesis_hash(),
                     message: response,
                 },
@@ -8755,7 +8890,7 @@ fn dispatch_peer_message(
                 );
                 return Ok(());
             }
-            if chain_incarnation != crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
+            if chain_incarnation != canonical_chain_incarnation()
                 || genesis_hash != canonical_genesis_hash()
             {
                 warn!(
@@ -8787,7 +8922,7 @@ fn dispatch_peer_message(
             genesis_hash,
             message,
         } => {
-            if chain_incarnation != crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
+            if chain_incarnation != canonical_chain_incarnation()
                 || genesis_hash != canonical_genesis_hash()
             {
                 warn!(
@@ -8833,7 +8968,7 @@ fn dispatch_peer_message(
                 );
                 return Ok(());
             }
-            if chain_incarnation != crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
+            if chain_incarnation != canonical_chain_incarnation()
                 || genesis_hash != canonical_genesis_hash()
             {
                 warn!(
@@ -8873,7 +9008,7 @@ fn dispatch_peer_message(
                 );
                 return Ok(());
             }
-            if chain_incarnation != crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
+            if chain_incarnation != canonical_chain_incarnation()
                 || genesis_hash != canonical_genesis_hash()
             {
                 warn!(
@@ -8902,7 +9037,7 @@ fn dispatch_peer_message(
             genesis_hash,
             message,
         } => {
-            if chain_incarnation != crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
+            if chain_incarnation != canonical_chain_incarnation()
                 || genesis_hash != canonical_genesis_hash()
             {
                 warn!(
@@ -8935,7 +9070,7 @@ fn dispatch_peer_message(
             genesis_hash,
             message,
         } => {
-            if chain_incarnation != crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
+            if chain_incarnation != canonical_chain_incarnation()
                 || genesis_hash != canonical_genesis_hash()
             {
                 warn!(
@@ -10032,7 +10167,7 @@ fn handle_messages(
                         genesis_hash,
                         message,
                     } => {
-                        if chain_incarnation != crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
+                        if chain_incarnation != canonical_chain_incarnation()
                             || genesis_hash != canonical_genesis_hash()
                         {
                             warn!(
@@ -10063,7 +10198,7 @@ fn handle_messages(
                         genesis_hash,
                         message,
                     } => {
-                        if chain_incarnation != crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
+                        if chain_incarnation != canonical_chain_incarnation()
                             || genesis_hash != canonical_genesis_hash()
                         {
                             warn!(
@@ -10108,7 +10243,7 @@ fn handle_messages(
                             );
                             continue;
                         }
-                        if chain_incarnation != crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
+                        if chain_incarnation != canonical_chain_incarnation()
                             || genesis_hash != canonical_genesis_hash()
                         {
                             warn!(
@@ -10147,7 +10282,7 @@ fn handle_messages(
                             );
                             continue;
                         }
-                        if chain_incarnation != crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
+                        if chain_incarnation != canonical_chain_incarnation()
                             || genesis_hash != canonical_genesis_hash()
                         {
                             warn!(
@@ -10175,7 +10310,7 @@ fn handle_messages(
                         genesis_hash,
                         message,
                     } => {
-                        if chain_incarnation != crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
+                        if chain_incarnation != canonical_chain_incarnation()
                             || genesis_hash != canonical_genesis_hash()
                         {
                             warn!(
@@ -13058,7 +13193,7 @@ mod tests {
         block_sync_response_policy, build_local_handshake,
         build_local_handshake_with_extra_capabilities, build_local_status_message,
         bypasses_shared_message_queue, cache_peer_state, cache_pending_block,
-        canonical_genesis_hash, canonical_validator_address_for_slot,
+        canonical_chain_incarnation, canonical_genesis_hash, canonical_validator_address_for_slot,
         canonical_validator_public_address, chain_has_block_sync_overlap,
         chain_snapshot_clone_allowed, claim_status_rate_limit, collect_known_peer_addresses,
         configured_public_address_for_validator_in_set, configured_seed_server_dial_targets,
@@ -13095,7 +13230,8 @@ mod tests {
         status_sync_batch, support_peer_sync_request_is_too_deep, sync_batch_limit_for_role,
         typed_consensus_peer_for_session, validate_outbound_frame_length,
         validate_simplified_consensus_target_identity, validate_simplified_predecode_frame_length,
-        validate_vote_request_extends_local_tip, validator_status_genesis_grace_remaining_secs,
+        validate_vote_request_extends_local_tip, validator_consensus_capability,
+        validator_status_genesis_grace_remaining_secs,
         validator_status_genesis_within_grace_window, verify_batch_with_bounded_parallelism,
         verify_handshake_pq_signature, vote_request_parent_sync_range,
         with_peer_stream_outside_peers_lock, ConnectionDirection, DialTargetsArc,
@@ -13105,8 +13241,9 @@ mod tests {
         DEFAULT_BOOTSTRAP_REFRESH_SECS, DUTY_DISABLED_TTL_SECS, IMMEDIATE_STATUS_SYNC_BATCH,
         MAX_P2P_FRAME_BYTES, MAX_STATUS_SYNC_BATCH, MAX_SUPPORT_NODE_BLOCK_SYNC_RESPONSE_BLOCKS,
         MAX_VALIDATOR_SUPPORT_SYNC_RESPONSE_BLOCKS, NORMAL_BOOTSTRAP_REFRESH_SECS,
-        PEER_SESSION_IDS, PEER_WRITE_GATES, PENDING_BLOCKS, QUARANTINE_STATUS_TTL_SECS,
-        SERVICE_BLOCK_SYNC_RESPONSE_TIMEOUT_SECS, SERVICE_SYNC_COORDINATOR,
+        PEER_SESSION_IDS, PEER_WRITE_GATES, PENDING_BLOCKS, POSY_SIMPLIFIED_PROTOCOL_VERSION,
+        QUARANTINE_STATUS_TTL_SECS, SERVICE_BLOCK_SYNC_RESPONSE_TIMEOUT_SECS,
+        SERVICE_SYNC_COORDINATOR, SIMPLIFIED_POSY_VALIDATOR_CAPABILITY,
         STALE_UNIDENTIFIED_PEER_SECS, STALE_VALIDATOR_STATUS_SECS, STATUS_READY_TTL_SECS,
         STATUS_REQUEST_MIN_INTERVAL_SECS, STATUS_RESPONSE_MIN_INTERVAL_SECS,
         SUPPORT_NODE_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS, TEST_COMMIT_VERIFIER_VALIDATOR_MANAGER,
@@ -13508,7 +13645,7 @@ mod tests {
     fn typed_finality_observer_messages_bypass_background_queue() {
         assert!(bypasses_shared_message_queue(
             &NetworkMessage::TypedFinalityObserver {
-                chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+                chain_incarnation: canonical_chain_incarnation(),
                 genesis_hash: canonical_genesis_hash(),
                 message: TypedFinalityObserverMessage::Request {
                     next_height: crate::synergy_types::Height(1),
@@ -14120,7 +14257,7 @@ mod tests {
     /// validator's Genesis-assigned ML-DSA-65 consensus key. A validator whose
     /// custody key is unavailable must fail closed rather than quietly
     /// generating a weaker non-consensus identity and still advertising the
-    /// typed PoSy validator capability.
+    /// simplified PoSy validator capability.
     ///
     /// Live ML-DSA-65 handshake verification is proven separately by Ring 1
     /// case `real_mldsa_six_validator_burn_in` and by the Ring 2
@@ -14160,8 +14297,7 @@ mod tests {
             chain_incarnation, ..
         } = &mut handshake
         {
-            *chain_incarnation =
-                Some(crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION.saturating_sub(1));
+            *chain_incarnation = Some(canonical_chain_incarnation().saturating_sub(1));
         }
 
         let requests_before =
@@ -14206,13 +14342,16 @@ mod tests {
     }
 
     #[test]
-    fn handshake_rejects_stale_posy_consensus_version() {
-        let error =
-            handshake_version_mismatch_reason("consensus_version", "posy/2.2", Some("posy/1.0.0"))
-                .expect("stale PoSy peers must be rejected");
+    fn handshake_rejects_retired_posy_consensus_version() {
+        let error = handshake_version_mismatch_reason(
+            "consensus_version",
+            POSY_SIMPLIFIED_PROTOCOL_VERSION,
+            Some("posy/2.2"),
+        )
+        .expect("retired PoSy peers must be rejected");
 
         assert!(error.contains("consensus_version differs"), "{error}");
-        assert!(error.contains("posy/2.2"));
+        assert!(error.contains(POSY_SIMPLIFIED_PROTOCOL_VERSION));
     }
 
     #[test]
@@ -14292,11 +14431,11 @@ mod tests {
         let err = verify_handshake_pq_signature(&handshake)
             .expect_err("missing network name must fail closed");
 
-        assert!(err.contains("network_id synergy-testnet-v3"));
+        assert!(err.contains("network_id testnet"));
     }
 
     #[test]
-    fn typed_validator_handshake_uses_the_assigned_mldsa65_key_only() {
+    fn simplified_validator_handshake_uses_the_assigned_mldsa65_key_only() {
         let mut key_manager = PQCManager::new();
         let (public_key, private_key) = key_manager
             .generate_keypair(PQCAlgorithm::MLDSA65)
@@ -14330,17 +14469,19 @@ mod tests {
             wrong_public,
             wrong_private,
         )
-        .expect_err("typed validator handshake must reject FN-DSA");
+        .expect_err("simplified validator handshake must reject FN-DSA");
         assert!(error.contains("ML-DSA-65"));
     }
 
     #[test]
-    fn typed_validator_handshake_requirement_excludes_bootstrap_and_legacy_profiles() {
+    fn simplified_validator_handshake_requirement_excludes_bootstrap_and_legacy_profiles() {
         let mut config = NodeConfig::default();
         config.node.validator_address = "synv1validator".to_string();
         config.consensus.algorithm = "legacy-posy".to_string();
         assert!(!local_consensus_handshake_required(&config));
         config.consensus.algorithm = "posy/2.2".to_string();
+        assert!(!local_consensus_handshake_required(&config));
+        config.consensus.algorithm = POSY_SIMPLIFIED_PROTOCOL_VERSION.to_string();
         assert!(local_consensus_handshake_required(&config));
         config.node.bootstrap_only = true;
         assert!(!local_consensus_handshake_required(&config));
@@ -14348,6 +14489,20 @@ mod tests {
         config.consensus.algorithm = COORDINATED_ROUND_ROBIN_V1.to_string();
         assert!(local_consensus_handshake_required(&config));
         assert_eq!(local_consensus_version(&config), COORDINATED_ROUND_ROBIN_V1);
+    }
+
+    #[test]
+    fn simplified_validator_capability_is_distinct_from_retired_typed_posy() {
+        assert_eq!(
+            validator_consensus_capability(POSY_SIMPLIFIED_PROTOCOL_VERSION)
+                .expect("simplified PoSy must have a validator capability"),
+            "posy-simplified-v3-validator"
+        );
+        assert_ne!(
+            SIMPLIFIED_POSY_VALIDATOR_CAPABILITY,
+            RETIRED_TYPED_POSY_VALIDATOR_CAPABILITY
+        );
+        assert!(validator_consensus_capability("posy/2.2").is_err());
     }
 
     #[test]

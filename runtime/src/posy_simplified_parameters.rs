@@ -4,7 +4,7 @@ use crate::consensus::simplified_posy::{
 };
 use crate::consensus_parameters::{ConsensusParameterRoot, MAX_CONSENSUS_PARAMETER_MANIFEST_BYTES};
 use crate::synergy_types::{
-    ChainId, NetworkId, SYNERGY_TESTNET_V3_CHAIN_ID, SYNERGY_TESTNET_V3_NETWORK_ID,
+    ChainId, NetworkId, SYNERGY_TESTNET_V3_CHAIN_ID, TESTNET_V3_CANONICAL_NETWORK_ID,
     TESTNET_V3_CONSENSUS_SIGNATURE_ALGORITHM,
 };
 use serde::{Deserialize, Serialize};
@@ -14,6 +14,20 @@ use std::path::Path;
 pub const POSY_SIMPLIFIED_PARAMETER_SCHEMA_VERSION: u32 = 4;
 pub const POSY_SIMPLIFIED_PARAMETER_PROPOSAL_STATUS: &str = "PROPOSED_NOT_ACTIVATED";
 pub const POSY_SIMPLIFIED_PARAMETER_FINALIZED_STATUS: &str = "FINALIZED";
+/// A separate Testnet-v3 chain may start simplified PoSy immediately after
+/// its height-zero Genesis block. This is deliberately distinct from the
+/// historical v2-to-v3 boundary path so no old finality is imported.
+pub const POSY_SIMPLIFIED_FRESH_GENESIS_BOUNDARY: &str = "fresh_genesis_block_zero";
+/// ETDAG is independently governed.  A fresh P3 Genesis must carry the
+/// exact parameter and fee artifacts before protected admission can start;
+/// cryptographic defaults and node-local configuration are never authority.
+pub const POSY_SIMPLIFIED_ETDAG_GOVERNED_GENESIS_BINDING_REQUIRED: &str =
+    "governed_genesis_binding_required";
+/// A block-zero PoSy v3 chain deliberately occupies a new P2P/state domain.
+/// These values prevent any v2/P1 handshake, WAL, or state-sync history from
+/// being replayed as fresh-chain material.
+pub const POSY_SIMPLIFIED_CHAIN_INCARNATION: u64 = 5;
+pub const POSY_SIMPLIFIED_CONSENSUS_STATE_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -67,6 +81,10 @@ pub struct SimplifiedConsensusParameterManifest {
     pub etdag_finality_separation_required: bool,
     pub protected_execution_binding_required: bool,
     pub initial_etdag_activation: String,
+    /// Immutable block cadence for the first fresh epoch.  This lives in the
+    /// Genesis-bound manifest rather than a node TOML so every validator
+    /// derives identical proposal timestamps.
+    pub target_block_time_ms: u64,
     pub proposal_timeout_ms: u64,
     pub vote_timeout_ms: u64,
     pub max_round_timeout_ms: u64,
@@ -78,9 +96,9 @@ impl SimplifiedConsensusParameterManifest {
         if self.schema_version != POSY_SIMPLIFIED_PARAMETER_SCHEMA_VERSION
             || self.release_id != "testnet-v3"
             || self.chain_id.0 != SYNERGY_TESTNET_V3_CHAIN_ID
-            || self.network_id.0 != SYNERGY_TESTNET_V3_NETWORK_ID
+            || self.network_id.0 != TESTNET_V3_CANONICAL_NETWORK_ID
             || self.protocol_version != POSY_SIMPLIFIED_PROTOCOL_VERSION
-            || self.activation_boundary != "declared_epoch_boundary_only"
+            || self.activation_boundary != POSY_SIMPLIFIED_FRESH_GENESIS_BOUNDARY
         {
             return Err(
                 "simplified manifest identity or activation boundary is invalid".to_string(),
@@ -138,11 +156,16 @@ impl SimplifiedConsensusParameterManifest {
         }
         if !self.etdag_finality_separation_required
             || !self.protected_execution_binding_required
-            || self.initial_etdag_activation != "preserve_current_finalized_manifest_state"
+            || self.initial_etdag_activation
+                != POSY_SIMPLIFIED_ETDAG_GOVERNED_GENESIS_BINDING_REQUIRED
         {
-            return Err("simplified manifest weakens the PoSy v2.2 ETDAG boundary".to_string());
+            return Err(
+                "simplified manifest must require a separately governed ETDAG Genesis binding"
+                    .to_string(),
+            );
         }
         for (name, value) in [
+            ("target_block_time_ms", self.target_block_time_ms),
             ("proposal_timeout_ms", self.proposal_timeout_ms),
             ("vote_timeout_ms", self.vote_timeout_ms),
             ("max_round_timeout_ms", self.max_round_timeout_ms),
@@ -172,6 +195,14 @@ impl SimplifiedConsensusParameterManifest {
         if self.performance_targets.finality_p95_ms > self.performance_targets.finality_p99_ms {
             return Err("simplified finality p95 target exceeds p99".to_string());
         }
+        if self.proposal_timeout_ms > self.max_round_timeout_ms
+            || self.vote_timeout_ms > self.max_round_timeout_ms
+        {
+            return Err(
+                "simplified proposal and vote timeouts must not exceed the bounded round timeout"
+                    .to_string(),
+            );
+        }
         Ok(())
     }
 
@@ -197,16 +228,32 @@ impl SimplifiedConsensusParameterManifest {
         ))
     }
 
+    pub fn finalized_governance_approval_id(&self) -> Result<&str, String> {
+        self.require_activation_fields()?;
+        self.governance_approval_id.as_deref().ok_or_else(|| {
+            "finalized simplified manifest requires a governance approval ID".to_string()
+        })
+    }
+
     fn require_activation_fields(&self) -> Result<(), String> {
         if self
             .governance_approval_id
             .as_ref()
             .is_none_or(|approval| approval.trim().is_empty())
-            || self.activation_epoch.is_none_or(|epoch| epoch == 0)
-            || self.activation_height.is_none_or(|height| height == 0)
         {
             return Err(
-                "finalized simplified manifest requires approval ID, activation epoch, and activation height"
+                "finalized simplified manifest requires a governance approval ID".to_string(),
+            );
+        }
+        let coordinates_are_valid = match self.activation_boundary.as_str() {
+            POSY_SIMPLIFIED_FRESH_GENESIS_BOUNDARY => {
+                self.activation_epoch == Some(0) && self.activation_height == Some(1)
+            }
+            _ => false,
+        };
+        if !coordinates_are_valid {
+            return Err(
+                "finalized simplified manifest activation coordinates do not match its boundary"
                     .to_string(),
             );
         }
@@ -267,9 +314,9 @@ mod tests {
             status: POSY_SIMPLIFIED_PARAMETER_PROPOSAL_STATUS.to_string(),
             governance_approval_id: None,
             chain_id: ChainId::synergy_testnet_v3(),
-            network_id: NetworkId::synergy_testnet_v3(),
+            network_id: NetworkId::fresh_posy_testnet_v3(),
             protocol_version: "posy/3.0".to_string(),
-            activation_boundary: "declared_epoch_boundary_only".to_string(),
+            activation_boundary: POSY_SIMPLIFIED_FRESH_GENESIS_BOUNDARY.to_string(),
             activation_epoch: None,
             activation_height: None,
             epoch_length_blocks: 1_000,
@@ -296,7 +343,9 @@ mod tests {
             safety_halt_on_conflicting_valid_qcs: true,
             etdag_finality_separation_required: true,
             protected_execution_binding_required: true,
-            initial_etdag_activation: "preserve_current_finalized_manifest_state".to_string(),
+            initial_etdag_activation: POSY_SIMPLIFIED_ETDAG_GOVERNED_GENESIS_BINDING_REQUIRED
+                .to_string(),
+            target_block_time_ms: 2_000,
             proposal_timeout_ms: 1_500,
             vote_timeout_ms: 1_500,
             max_round_timeout_ms: 10_000,
@@ -331,7 +380,7 @@ mod tests {
         let loaded = load_simplified_consensus_parameter_proposal(&path).unwrap();
         assert_eq!(
             loaded.root.to_hex(),
-            "2c8be6837fa49c160887cc1fcf2b741eadd72172bdeed27c9645c08ebe88be5fb562ca82e89af7cbe821157aba6d0e20a7727f0ff9e191a14dff5744fd4de101"
+            "91bbdd0101d5a6e9c6e72a5cc1160e85c074573f45b2a460d0b1487c9097b07504340768ff65365ccded5e5e96483ccb8cac00d025a457d8c1d4ee2fb547ba42"
         );
         assert!(loaded.manifest.require_activatable().is_err());
     }

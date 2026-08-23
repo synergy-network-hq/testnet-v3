@@ -12,6 +12,9 @@ pub const POSY_SIMPLIFIED_OBJECT_SCHEMA_VERSION: u32 = 1;
 pub const POSY_SIMPLIFIED_PROPOSAL_DOMAIN: &str = "PoSy/Consensus/v3/Proposal";
 pub const POSY_SIMPLIFIED_BLOCK_VOTE_DOMAIN: &str = "PoSy/Consensus/v3/BlockVote";
 pub const POSY_SIMPLIFIED_TIMEOUT_VOTE_DOMAIN: &str = "PoSy/Consensus/v3/TimeoutVote";
+pub const POSY_SIMPLIFIED_GENESIS_FINALITY_REFERENCE_SCHEMA_VERSION: u32 = 1;
+pub const POSY_SIMPLIFIED_GENESIS_FINALITY_REFERENCE_DOMAIN: &str =
+    "SYNERGY_POSY_SIMPLIFIED_GENESIS_FINALITY_REFERENCE_V1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -95,6 +98,138 @@ impl QuorumCertificateReference {
     }
 }
 
+/// The non-QC parent of fresh chain block one.
+///
+/// Genesis has no proposal/vote/QC history.  Treating its hash as a quorum
+/// certificate would falsely claim that validators signed a certificate that
+/// never existed.  This separately tagged reference is instead derived from
+/// the canonical Genesis hash and may be used only as the parent of height
+/// one.  Every later parent is a real `QuorumCertificateReference`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GenesisFinalityReference {
+    pub schema_version: u32,
+    pub genesis_hash: Hash,
+    pub block_id: BlockId,
+    pub reference_id: Hash,
+}
+
+impl GenesisFinalityReference {
+    pub fn from_canonical_genesis_hash(genesis_hash: Hash) -> Self {
+        let block_id = BlockId::from_hash(genesis_hash);
+        let reference_id = Hash::from_domain_bytes(
+            POSY_SIMPLIFIED_GENESIS_FINALITY_REFERENCE_DOMAIN,
+            &genesis_hash.0,
+        );
+        Self {
+            schema_version: POSY_SIMPLIFIED_GENESIS_FINALITY_REFERENCE_SCHEMA_VERSION,
+            genesis_hash,
+            block_id,
+            reference_id,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != POSY_SIMPLIFIED_GENESIS_FINALITY_REFERENCE_SCHEMA_VERSION
+            || self.genesis_hash.is_zero()
+            || self.block_id != BlockId::from_hash(self.genesis_hash)
+            || self.reference_id
+                != Hash::from_domain_bytes(
+                    POSY_SIMPLIFIED_GENESIS_FINALITY_REFERENCE_DOMAIN,
+                    &self.genesis_hash.0,
+                )
+        {
+            return Err("invalid Genesis finality reference".to_string());
+        }
+        Ok(())
+    }
+
+    pub const fn height(&self) -> Height {
+        Height(0)
+    }
+}
+
+/// The only admissible parent identities for simplified PoSy proposals.
+///
+/// The genesis variant is deliberately not convertible to a quorum-certificate
+/// reference.  It can anchor block one of a fresh chain, while every later
+/// block must name a verified QC.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "reference", rename_all = "snake_case")]
+pub enum SimplifiedFinalityParent {
+    Genesis(GenesisFinalityReference),
+    QuorumCertificate(QuorumCertificateReference),
+}
+
+impl SimplifiedFinalityParent {
+    pub fn genesis(reference: GenesisFinalityReference) -> Result<Self, String> {
+        reference.validate()?;
+        Ok(Self::Genesis(reference))
+    }
+
+    pub fn quorum_certificate(reference: QuorumCertificateReference) -> Result<Self, String> {
+        reference.validate()?;
+        Ok(Self::QuorumCertificate(reference))
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Genesis(reference) => reference.validate(),
+            Self::QuorumCertificate(reference) => reference.validate(),
+        }
+    }
+
+    pub fn height(&self) -> Height {
+        match self {
+            Self::Genesis(reference) => reference.height(),
+            Self::QuorumCertificate(reference) => reference.height,
+        }
+    }
+
+    pub fn block_id(&self) -> &BlockId {
+        match self {
+            Self::Genesis(reference) => &reference.block_id,
+            Self::QuorumCertificate(reference) => &reference.block_id,
+        }
+    }
+
+    pub fn reference_id(&self) -> Hash {
+        match self {
+            Self::Genesis(reference) => reference.reference_id,
+            Self::QuorumCertificate(reference) => reference.qc_id,
+        }
+    }
+
+    pub fn quorum_certificate_reference(&self) -> Option<&QuorumCertificateReference> {
+        match self {
+            Self::Genesis(_) => None,
+            Self::QuorumCertificate(reference) => Some(reference),
+        }
+    }
+
+    pub fn validate_for_child_height(&self, child_height: Height) -> Result<(), String> {
+        self.validate()?;
+        match self {
+            Self::Genesis(_) if child_height == Height(1) => Ok(()),
+            Self::Genesis(_) => {
+                Err("Genesis finality reference may only parent fresh chain block one".to_string())
+            }
+            Self::QuorumCertificate(_) if child_height == Height(1) => Err(
+                "fresh chain block one must use the distinct Genesis finality reference"
+                    .to_string(),
+            ),
+            Self::QuorumCertificate(reference)
+                if reference.height.0.checked_add(1) == Some(child_height.0) =>
+            {
+                Ok(())
+            }
+            Self::QuorumCertificate(_) => {
+                Err("quorum-certificate parent does not precede its child".to_string())
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ParticipantSignature {
@@ -108,7 +243,7 @@ struct BlockVoteSigningPayload<'a> {
     context: &'a ConsensusObjectContext,
     block_id: &'a BlockId,
     parent_block_id: &'a BlockId,
-    parent_qc: &'a QuorumCertificateReference,
+    parent: &'a SimplifiedFinalityParent,
     takeover_tc_id: Option<Hash>,
     protected_execution_root: Hash,
     validator_id: &'a ValidatorId,
@@ -121,7 +256,7 @@ pub struct BlockVote {
     pub context: ConsensusObjectContext,
     pub block_id: BlockId,
     pub parent_block_id: BlockId,
-    pub parent_qc: QuorumCertificateReference,
+    pub parent: SimplifiedFinalityParent,
     pub takeover_tc_id: Option<Hash>,
     /// Exact BOC/reveal/protected-execution outcome validated before voting.
     pub protected_execution_root: Hash,
@@ -136,7 +271,7 @@ impl BlockVote {
             context: &self.context,
             block_id: &self.block_id,
             parent_block_id: &self.parent_block_id,
-            parent_qc: &self.parent_qc,
+            parent: &self.parent,
             takeover_tc_id: self.takeover_tc_id,
             protected_execution_root: self.protected_execution_root,
             validator_id: &self.validator_id,
@@ -152,7 +287,7 @@ pub struct SimplifiedQuorumCertificate {
     pub context: ConsensusObjectContext,
     pub block_id: BlockId,
     pub parent_block_id: BlockId,
-    pub parent_qc: QuorumCertificateReference,
+    pub parent: SimplifiedFinalityParent,
     pub takeover_tc_id: Option<Hash>,
     pub protected_execution_root: Hash,
     pub participants: Vec<ParticipantSignature>,
@@ -171,7 +306,7 @@ pub struct CertifiedCandidateSubject {
     pub context: ConsensusObjectContext,
     pub block_id: BlockId,
     pub parent_block_id: BlockId,
-    pub parent_qc: QuorumCertificateReference,
+    pub parent: SimplifiedFinalityParent,
     pub protected_execution_root: Hash,
 }
 
@@ -180,7 +315,7 @@ impl CertifiedCandidateSubject {
         mut context: ConsensusObjectContext,
         block_id: BlockId,
         parent_block_id: BlockId,
-        parent_qc: QuorumCertificateReference,
+        parent: SimplifiedFinalityParent,
         protected_execution_root: Hash,
     ) -> Result<Self, String> {
         context.round = Round(0);
@@ -188,7 +323,7 @@ impl CertifiedCandidateSubject {
             context,
             block_id,
             parent_block_id,
-            parent_qc,
+            parent,
             protected_execution_root,
         };
         subject.validate()?;
@@ -196,11 +331,10 @@ impl CertifiedCandidateSubject {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        self.parent_qc.validate()?;
+        self.parent.validate_for_child_height(self.context.height)?;
         if self.context.round != Round(0)
             || self.block_id.0.trim().is_empty()
-            || self.parent_block_id != self.parent_qc.block_id
-            || self.parent_qc.height.0.checked_add(1) != Some(self.context.height.0)
+            || self.parent_block_id != *self.parent.block_id()
             || self.protected_execution_root.is_zero()
         {
             return Err("invalid stable certified-candidate subject".to_string());
@@ -234,7 +368,7 @@ impl SimplifiedQuorumCertificate {
             vote.context != first.context
                 || vote.block_id != first.block_id
                 || vote.parent_block_id != first.parent_block_id
-                || vote.parent_qc != first.parent_qc
+                || vote.parent != first.parent
                 || vote.takeover_tc_id != first.takeover_tc_id
                 || vote.protected_execution_root != first.protected_execution_root
         }) {
@@ -253,7 +387,7 @@ impl SimplifiedQuorumCertificate {
             context: first.context,
             block_id: first.block_id,
             parent_block_id: first.parent_block_id,
-            parent_qc: first.parent_qc,
+            parent: first.parent,
             takeover_tc_id: first.takeover_tc_id,
             protected_execution_root: first.protected_execution_root,
             participants,
@@ -273,7 +407,7 @@ impl SimplifiedQuorumCertificate {
             self.context.clone(),
             self.block_id.clone(),
             self.parent_block_id.clone(),
-            self.parent_qc.clone(),
+            self.parent.clone(),
             self.protected_execution_root,
         )
     }
@@ -297,11 +431,10 @@ impl SimplifiedQuorumCertificate {
         verifier: &V,
     ) -> Result<VerifiedQuorum, String> {
         self.context.validate_against(epoch_context)?;
-        self.parent_qc.validate()?;
+        self.parent.validate_for_child_height(self.context.height)?;
         if self.block_id.0.trim().is_empty()
             || self.parent_block_id.0.trim().is_empty()
-            || self.parent_block_id != self.parent_qc.block_id
-            || self.parent_qc.height.0.checked_add(1) != Some(self.context.height.0)
+            || self.parent_block_id != *self.parent.block_id()
             || self.takeover_tc_id.is_some_and(Hash::is_zero)
             || self.protected_execution_root.is_zero()
         {
@@ -323,7 +456,7 @@ impl SimplifiedQuorumCertificate {
                 context: self.context.clone(),
                 block_id: self.block_id.clone(),
                 parent_block_id: self.parent_block_id.clone(),
-                parent_qc: self.parent_qc.clone(),
+                parent: self.parent.clone(),
                 takeover_tc_id: self.takeover_tc_id,
                 protected_execution_root: self.protected_execution_root,
                 validator_id: participant.validator_id.clone(),
@@ -356,7 +489,7 @@ struct TimeoutVoteSigningPayload<'a> {
     context: &'a ConsensusObjectContext,
     lease_index: u64,
     timed_out_proposer: &'a ValidatorId,
-    highest_qc: &'a QuorumCertificateReference,
+    highest_parent: &'a SimplifiedFinalityParent,
     previous_tc_id: Option<Hash>,
     last_voted_candidate: &'a Option<CertifiedCandidateSubject>,
     validator_id: &'a ValidatorId,
@@ -369,7 +502,10 @@ pub struct TimeoutVote {
     pub context: ConsensusObjectContext,
     pub lease_index: u64,
     pub timed_out_proposer: ValidatorId,
-    pub highest_qc: QuorumCertificateReference,
+    /// The highest locally verified finality parent. At fresh chain height
+    /// one this is the canonical Genesis reference; after the first QC it is
+    /// always a real quorum certificate.
+    pub highest_parent: SimplifiedFinalityParent,
     pub previous_tc_id: Option<Hash>,
     /// Stable candidate this signer has durably voted for at this height, if
     /// any. A heterogeneous TC uses these signed reports to carry forward any
@@ -386,7 +522,7 @@ impl TimeoutVote {
             context: &self.context,
             lease_index: self.lease_index,
             timed_out_proposer: &self.timed_out_proposer,
-            highest_qc: &self.highest_qc,
+            highest_parent: &self.highest_parent,
             previous_tc_id: self.previous_tc_id,
             last_voted_candidate: &self.last_voted_candidate,
             validator_id: &self.validator_id,
@@ -406,7 +542,7 @@ pub struct SimplifiedTimeoutCertificate {
     /// Canonical signed reports. Unlike the old homogeneous TC, replicas with
     /// different highest QCs can form one proof after a partial QC delivery.
     pub reports: Vec<TimeoutVote>,
-    /// Deduplicated full proofs for every non-anchor highest-QC reference in
+    /// Deduplicated full proofs for every non-Genesis highest-QC reference in
     /// `reports`. This makes a TC self-verifying for a lagging receiver.
     pub highest_qc_proofs: Vec<SimplifiedQuorumCertificate>,
 }
@@ -480,12 +616,13 @@ impl SimplifiedTimeoutCertificate {
         certificate
     }
 
-    pub fn highest_qc(&self) -> Result<QuorumCertificateReference, String> {
+    pub fn highest_parent(&self) -> Result<SimplifiedFinalityParent, String> {
         self.reports
             .iter()
-            .map(|report| report.highest_qc.clone())
+            .map(|report| report.highest_parent.clone())
             .max_by(|left, right| {
-                (left.height.0, left.qc_id.0).cmp(&(right.height.0, right.qc_id.0))
+                (left.height().0, left.reference_id().0)
+                    .cmp(&(right.height().0, right.reference_id().0))
             })
             .ok_or_else(|| "timeout certificate has no signed reports".to_string())
     }
@@ -563,7 +700,12 @@ impl SimplifiedTimeoutCertificate {
         let referenced_proof_ids = self
             .reports
             .iter()
-            .map(|report| report.highest_qc.qc_id)
+            .filter_map(|report| {
+                report
+                    .highest_parent
+                    .quorum_certificate_reference()
+                    .map(|reference| reference.qc_id)
+            })
             .collect::<BTreeSet<_>>();
         if self.highest_qc_proofs.iter().any(|proof| {
             proof
@@ -581,9 +723,9 @@ impl SimplifiedTimeoutCertificate {
             {
                 return Err("TC report does not match the timeout closure".to_string());
             }
-            report.highest_qc.validate()?;
-            if report.highest_qc.height.0 >= self.context.height.0 {
-                return Err("timeout report carries a future highest QC".to_string());
+            report.highest_parent.validate()?;
+            if report.highest_parent.height().0 >= self.context.height.0 {
+                return Err("timeout report carries a future highest finality parent".to_string());
             }
             if let Some(candidate) = &report.last_voted_candidate {
                 candidate.validate()?;
@@ -595,23 +737,32 @@ impl SimplifiedTimeoutCertificate {
                     );
                 }
             }
-            let is_epoch_anchor = report.highest_qc.height.0.checked_add(1)
-                == Some(epoch_context.epoch_start_height.0)
-                && epoch_context
-                    .v2_boundary_anchor
-                    .as_ref()
-                    .is_none_or(|anchor| {
-                        report.highest_qc.block_id == anchor.block_id
-                            && report.highest_qc.qc_id == anchor.qc_finality_context_root
-                    });
-            let has_proof = self
-                .highest_qc_proofs
-                .iter()
-                .any(|proof| proof.reference().ok().as_ref() == Some(&report.highest_qc));
+            let is_epoch_anchor = match &report.highest_parent {
+                SimplifiedFinalityParent::Genesis(reference) => {
+                    reference.height().0.checked_add(1) == Some(epoch_context.epoch_start_height.0)
+                }
+                SimplifiedFinalityParent::QuorumCertificate(reference) => {
+                    reference.height.0.checked_add(1) == Some(epoch_context.epoch_start_height.0)
+                        && epoch_context
+                            .v2_boundary_anchor
+                            .as_ref()
+                            .is_none_or(|anchor| {
+                                reference.block_id == anchor.block_id
+                                    && reference.qc_id == anchor.qc_finality_context_root
+                            })
+                }
+            };
+            let has_proof = self.highest_qc_proofs.iter().any(|proof| {
+                report
+                    .highest_parent
+                    .quorum_certificate_reference()
+                    .is_some_and(|reference| proof.reference().ok().as_ref() == Some(reference))
+            });
             // `verify` has no durable-state resolver, so every non-anchor
             // reference must be self-contained. Callers that already hold a
-            // proof still supply it here; anchor references are committed by
-            // the frozen epoch context and need no embedded QC.
+            // proof still supply it here; the Genesis reference is committed
+            // by the fresh-chain activation and can never be represented by
+            // an embedded QC.
             if !is_epoch_anchor && !has_proof {
                 return Err("TC omits a full proof for a reported highest QC".to_string());
             }
@@ -640,6 +791,39 @@ impl SimplifiedTimeoutCertificate {
             signed_weight,
             total_weight(&active_set)?,
         )
+    }
+}
+
+#[cfg(test)]
+mod genesis_finality_reference_tests {
+    use super::*;
+
+    #[test]
+    fn genesis_parent_is_domain_bound_and_not_a_quorum_certificate() {
+        let genesis_hash = Hash::from_domain_bytes("simplified-genesis-test", b"block-zero");
+        let reference = GenesisFinalityReference::from_canonical_genesis_hash(genesis_hash);
+        reference.validate().expect("canonical Genesis reference");
+        let parent = SimplifiedFinalityParent::genesis(reference.clone())
+            .expect("Genesis reference is a valid distinct parent");
+        parent
+            .validate_for_child_height(Height(1))
+            .expect("Genesis may parent block one");
+        assert!(parent.validate_for_child_height(Height(2)).is_err());
+        assert!(parent.quorum_certificate_reference().is_none());
+        let fabricated_genesis_qc =
+            SimplifiedFinalityParent::quorum_certificate(QuorumCertificateReference {
+                height: Height(0),
+                block_id: reference.block_id.clone(),
+                qc_id: reference.reference_id,
+            })
+            .expect("well-formed QC-shaped reference");
+        assert!(fabricated_genesis_qc
+            .validate_for_child_height(Height(1))
+            .is_err());
+
+        let mut forged = reference.clone();
+        forged.reference_id = Hash::from_domain_bytes("simplified-genesis-test", b"forged");
+        assert!(forged.validate().is_err());
     }
 }
 

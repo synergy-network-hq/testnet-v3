@@ -1,17 +1,20 @@
 # PoSy v3 simplified consensus architecture
 
-PoSy v3 is an epoch-gated candidate engine. For the Genesis-bound initial
-epoch, the validator role runtime constructs and spawns the authenticated
-simplified driver after replaying the exact v2 boundary and opening the durable
-safety, proposal-material, signer-journal, and finality-WAL authorities. A
-deferred ETDAG decision selects the deterministic core adapter; a finalized
-permit selects the protected adapter, durable WAL/material authority, and
-authenticated schedule-neutral ETDAG ingress. Ingress installation and cleanup
-are transactional with the execution snapshot and simplified driver lifecycle.
-The applied Genesis currently defers ETDAG. An unverified later-epoch transition
-still fails closed. The inherited legacy engine remains disabled, and the v2.2
-canonical parameter record remains authoritative until a separately finalized
-schema-4 manifest and transition activate v3.
+PoSy v3 is the Genesis consensus engine for the separate block-zero Testnet-v3
+chain (Chain ID 1266, technical network ID `testnet`). For the Genesis-bound
+initial epoch, the validator role runtime constructs the authenticated
+simplified driver directly from the signed P3 Genesis activation, then opens
+the durable safety, proposal-material, signer-journal, and finality-WAL
+authorities. The initial finality parent is the typed Genesis reference; it is
+not a synthetic height-zero QC and does not replay a P2 boundary.
+
+P3 startup requires the separately governed ETDAG parameter and fee artifacts
+to be bound into Genesis. That binding issues the protected-adapter capability,
+installs the governed fee schedule and fee-market parameters, and enables the
+authenticated schedule-neutral ETDAG ingress. No deferred/default P3 adapter
+path exists. Ingress installation and cleanup remain transactional with the
+execution snapshot and simplified-driver lifecycle. Unverified later-epoch
+transitions fail closed, and inherited consensus engines remain disabled.
 
 The runtime implementation is split into:
 
@@ -30,8 +33,8 @@ The runtime implementation is split into:
   certificates, and authenticated process-wide ingress;
 - `finality.rs`: immutable finality WAL with complete QC witnesses and startup
   re-execution, including verified-transition previous-tail replay;
-- `transition.rs`: exact previous-epoch three-QC tail and dynamic next-set
-  proof boundary, still fail-closed until executed state proves authorization;
+- `transition.rs`: exact previous-P3-epoch three-QC tail and dynamic next-set
+  proof boundary, bound to durable finalized execution authority;
 - `activation.rs`: Genesis-bound, finalized-boundary profile selection with no
   environment/configuration activation fallback;
 - `driver.rs`: authenticated peer envelopes, bounded ingress, proposal/vote/TC
@@ -66,12 +69,12 @@ execution with provisioned public KEM registries, production identity and
 deployment bundles, real socket churn/backpressure, node-database convergence,
 Byzantine/model review, and performance/soak evidence.
 
-For a finalized protected profile, role-runtime now constructs the dynamic H+3
+For the governed P3 profile, role-runtime constructs the dynamic H+3
 target-admission producer, requires the exact externally provisioned public
 ML-KEM registry before activation, broadcasts its journaled vote/certificate
 traffic only to the frozen validator set, and tears the auxiliary worker down
 with the consensus lifecycle. It never derives next-epoch H+3 inputs before a
-verified transition. Future v3 startup still stops at the production
-finalized-execution transition-authority proof boundary.
+verified transition. Later-epoch startup requires the durable
+finalized-execution transition-authority proof for the exact next set.
 
 See `docs/posy-v3/ARCHITECTURE.md` for diagrams and POSY-00E for normative rules.

@@ -4,17 +4,17 @@
 //! is never an activation authority. The only initial activation input is a
 //! schema-v1 record embedded in the canonical Genesis `consensus` object. The
 //! Genesis hash therefore commits to the exact finalized schema-v4 manifest
-//! and initial frozen validator set. The last finalized PoSy v2.2 certificate
-//! supplies the epoch seed at the declared height boundary.
+//! and initial frozen validator set. This block-zero chain derives its epoch
+//! seed from that immutable binding; it never imports legacy-chain finality.
 
-use super::{SimplifiedEpochAnchor, SimplifiedEpochContext, VerifiedSimplifiedEpochTransition};
+use super::{SimplifiedEpochContext, VerifiedSimplifiedEpochTransition};
 use crate::consensus_parameters::ConsensusParameterRoot;
 use crate::posy_simplified_parameters::{
-    SimplifiedConsensusParameterManifest, POSY_SIMPLIFIED_PARAMETER_FINALIZED_STATUS,
+    SimplifiedConsensusParameterManifest, POSY_SIMPLIFIED_FRESH_GENESIS_BOUNDARY,
+    POSY_SIMPLIFIED_PARAMETER_FINALIZED_STATUS,
 };
 use crate::synergy_types::{
-    BlockId, Epoch, Hash, Height, Round, ValidatorSet, POSY_PROTOCOL_VERSION,
-    SYNERGY_TESTNET_V3_CHAIN_ID, SYNERGY_TESTNET_V3_NETWORK_ID,
+    Epoch, Hash, Height, ValidatorSet, SYNERGY_TESTNET_V3_CHAIN_ID, TESTNET_V3_CANONICAL_NETWORK_ID,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -42,6 +42,10 @@ pub struct GenesisBoundSimplifiedActivation {
 }
 
 impl GenesisBoundSimplifiedActivation {
+    fn starts_fresh_genesis(&self) -> bool {
+        self.manifest.activation_boundary == POSY_SIMPLIFIED_FRESH_GENESIS_BOUNDARY
+    }
+
     /// Validates every immutable authority without consulting process-local
     /// configuration, health observations, time, or environment variables.
     pub fn validate(&self) -> Result<(), String> {
@@ -71,21 +75,15 @@ impl GenesisBoundSimplifiedActivation {
         }
         if self.manifest.activation_epoch != Some(self.activation_epoch)
             || self.manifest.activation_height != Some(self.activation_height)
-            || self.activation_epoch == 0
-            || self.activation_height <= 1
         {
             return Err(
                 "simplified activation coordinates do not match the finalized manifest".to_string(),
             );
         }
-        let expected_activation_height = self
-            .activation_epoch
-            .checked_mul(self.manifest.epoch_length_blocks)
-            .and_then(|height| height.checked_add(1))
-            .ok_or_else(|| "simplified activation epoch boundary overflows".to_string())?;
-        if self.activation_height != expected_activation_height {
+        if !self.starts_fresh_genesis() || self.activation_epoch != 0 || self.activation_height != 1
+        {
             return Err(
-                "simplified activation height is not the declared epoch boundary".to_string(),
+                "simplified activation must be the fresh-genesis block-one authority".to_string(),
             );
         }
         if self.frozen_validator_set != self.frozen_validator_set.canonicalized() {
@@ -140,24 +138,28 @@ impl GenesisBoundSimplifiedActivation {
             .ok_or_else(|| "simplified activation epoch end height overflows".to_string())
     }
 
-    /// Freezes the first v3 epoch from the Genesis-bound set and the
-    /// deterministic subject root of the last finalized v2.2 QC.
-    pub fn derive_epoch_context(
-        &self,
-        boundary: &FinalizedV2BoundaryEvidence,
-    ) -> Result<SimplifiedEpochContext, String> {
+    /// Derives block one's epoch context for a separate Testnet-v3 chain.
+    /// The seed commits to the complete finalized activation record (including
+    /// public membership and parameter root) under a domain distinct from the
+    /// legacy v2-boundary transition. There is no old-chain data dependency.
+    pub fn derive_fresh_genesis_epoch_context(&self) -> Result<SimplifiedEpochContext, String> {
         self.validate()?;
-        boundary.validate_for(self)?;
-        SimplifiedEpochContext::derive_from_v2_boundary(
-            Epoch(self.activation_epoch),
-            Height(self.activation_height),
+        if !self.starts_fresh_genesis() {
+            return Err(
+                "only a fresh-genesis activation can derive a genesis epoch context".into(),
+            );
+        }
+        let canonical_binding = serde_json::to_vec(self)
+            .map_err(|error| format!("serialize fresh simplified activation seed: {error}"))?;
+        let seed = Hash::from_domain_bytes(
+            "SYNERGY_POSY_SIMPLIFIED_FRESH_GENESIS_EPOCH_SEED_V1",
+            &canonical_binding,
+        );
+        SimplifiedEpochContext::derive(
+            Epoch(0),
+            Height(1),
             self.epoch_end_height()?,
-            SimplifiedEpochAnchor {
-                height: boundary.height,
-                round: boundary.round,
-                block_id: boundary.block_id.clone(),
-                qc_finality_context_root: boundary.qc_finality_context_root,
-            },
+            seed,
             self.manifest.root()?,
             &self.frozen_validator_set,
         )
@@ -166,42 +168,11 @@ impl GenesisBoundSimplifiedActivation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConsensusProfileAtHeight {
-    /// The existing finalized typed PoSy v2.2 driver remains authoritative.
-    PosyV2_2,
-    /// The boundary has been reached and the frozen v3 epoch is fully proven.
+    /// The fresh Genesis has selected the frozen initial simplified epoch.
     PosySimplifiedV3 {
         epoch_context: SimplifiedEpochContext,
         validator_set: ValidatorSet,
     },
-}
-
-/// Already-verified, durable authority from the last finalized v2.2 block.
-/// The subject root is independent of the valid QC signer arrival subset and
-/// therefore every validator derives the same first v3 epoch seed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FinalizedV2BoundaryEvidence {
-    pub height: Height,
-    pub round: Round,
-    pub block_id: BlockId,
-    pub qc_finality_context_root: Hash,
-}
-
-impl FinalizedV2BoundaryEvidence {
-    pub fn validate_for(
-        &self,
-        activation: &GenesisBoundSimplifiedActivation,
-    ) -> Result<(), String> {
-        if self.height.0.checked_add(1) != Some(activation.activation_height)
-            || self.block_id.0.trim().is_empty()
-            || self.qc_finality_context_root.is_zero()
-        {
-            return Err(
-                "finalized v2.2 boundary evidence does not immediately precede v3 activation"
-                    .to_string(),
-            );
-        }
-        Ok(())
-    }
 }
 
 /// Reads the optional activation authority from an already integrity-checked
@@ -220,14 +191,10 @@ pub fn load_genesis_bound_simplified_activation(
         || canonical_genesis
             .pointer("/network/network_slug")
             .and_then(Value::as_str)
-            != Some(SYNERGY_TESTNET_V3_NETWORK_ID)
-        || canonical_genesis
-            .pointer("/network/consensus_version")
-            .and_then(Value::as_str)
-            != Some(POSY_PROTOCOL_VERSION)
+            != Some(TESTNET_V3_CANONICAL_NETWORK_ID)
     {
         return Err(
-            "simplified activation binding is not attached to the canonical PoSy v2.2 Testnet-v3 Genesis identity"
+            "simplified activation binding is not attached to the canonical Testnet-v3 Genesis identity"
                 .to_string(),
         );
     }
@@ -248,47 +215,38 @@ pub fn load_genesis_bound_simplified_activation(
     let binding: GenesisBoundSimplifiedActivation = serde_json::from_value(raw.clone())
         .map_err(|error| format!("parse Genesis-bound simplified activation: {error}"))?;
     binding.validate()?;
-    Ok(Some(binding))
-}
-
-/// Chooses a consensus profile from only canonical height and finalized
-/// activation evidence. It contains no fallback from a selected v3 profile
-/// to either v2.2 or the inherited engines.
-pub fn select_consensus_profile_at_height(
-    next_height: Height,
-    activation: Option<&GenesisBoundSimplifiedActivation>,
-    finalized_v2_2_boundary: Option<&FinalizedV2BoundaryEvidence>,
-) -> Result<ConsensusProfileAtHeight, String> {
-    let Some(activation) = activation else {
-        return Ok(ConsensusProfileAtHeight::PosyV2_2);
-    };
-    // Validate even before the boundary. Nodes must discover a malformed or
-    // incomplete future authority consistently rather than diverge when the
-    // switch height arrives.
-    activation.validate()?;
-    if next_height.0 < activation.activation_height {
-        if finalized_v2_2_boundary.is_some() {
-            return Err(
-                "simplified activation boundary evidence was supplied before its declared height"
-                    .to_string(),
-            );
-        }
-        return Ok(ConsensusProfileAtHeight::PosyV2_2);
-    }
-    let epoch_end = activation.epoch_end_height()?;
-    if next_height.0 > epoch_end.0 {
+    if canonical_genesis
+        .pointer("/network/consensus_version")
+        .and_then(Value::as_str)
+        != Some(super::POSY_SIMPLIFIED_PROTOCOL_VERSION)
+    {
         return Err(
-            "simplified activation restart is beyond the Genesis-bound epoch; a verified v3 epoch-transition context is required"
+            "fresh simplified activation does not match the canonical Genesis consensus version"
                 .to_string(),
         );
     }
-    let boundary = finalized_v2_2_boundary.ok_or_else(|| {
-        "simplified activation reached its boundary without finalized v2.2 QC evidence".to_string()
+    Ok(Some(binding))
+}
+
+/// Chooses the only consensus profile from canonical fresh-Genesis authority.
+/// Missing or malformed authority is a startup error, never a legacy fallback.
+pub fn select_consensus_profile_at_height(
+    next_height: Height,
+    activation: Option<&GenesisBoundSimplifiedActivation>,
+) -> Result<ConsensusProfileAtHeight, String> {
+    let activation = activation.ok_or_else(|| {
+        "fresh Testnet-v3 Genesis is missing its simplified PoSy activation".to_string()
     })?;
-    boundary.validate_for(activation)?;
-    let epoch_context = activation.derive_epoch_context(boundary)?;
+    activation.validate()?;
+    if next_height.0 == 0 {
+        return Err("simplified consensus cannot select a block-zero execution height".into());
+    }
+    let epoch_context = activation.derive_fresh_genesis_epoch_context()?;
     if !epoch_context.contains_height(next_height) {
-        return Err("simplified activation height is outside its frozen epoch".to_string());
+        return Err(
+            "simplified fresh-genesis restart is beyond its frozen epoch; a verified v3 epoch-transition context is required"
+                .to_string(),
+        );
     }
     Ok(ConsensusProfileAtHeight::PosySimplifiedV3 {
         epoch_context,
@@ -297,9 +255,9 @@ pub fn select_consensus_profile_at_height(
 }
 
 /// Selects a later v3 epoch only from a previously verified transition
-/// capability.  This is deliberately separate from the one-time
-/// Genesis/v2-boundary selector: passing a validator set, height, or process
-/// flag alone can never authorize onboarding.
+/// capability. This is deliberately separate from the one-time fresh-Genesis
+/// selector: passing a validator set, height, or process flag alone can never
+/// authorize onboarding.
 pub fn select_consensus_profile_from_verified_v3_transition(
     next_height: Height,
     transition: &VerifiedSimplifiedEpochTransition,
@@ -322,7 +280,8 @@ mod tests {
     use super::*;
     use crate::consensus::simplified_posy::POSY_SIMPLIFIED_PROTOCOL_VERSION;
     use crate::posy_simplified_parameters::{
-        SimplifiedPerformanceTargets, POSY_SIMPLIFIED_PARAMETER_FINALIZED_STATUS,
+        SimplifiedPerformanceTargets, POSY_SIMPLIFIED_FRESH_GENESIS_BOUNDARY,
+        POSY_SIMPLIFIED_PARAMETER_FINALIZED_STATUS,
     };
     use crate::synergy_types::{
         AegisPqKeyId, AegisPqPublicKey, ChainId, ClusterId, NetworkId, UmaId, ValidatorId,
@@ -333,7 +292,7 @@ mod tests {
 
     fn validator_set() -> ValidatorSet {
         ValidatorSet {
-            epoch: Epoch(9),
+            epoch: Epoch(0),
             validators: (0..5)
                 .map(|index| {
                     let key = AegisPqPublicKey {
@@ -350,7 +309,7 @@ mod tests {
                         voting_weight: 1,
                         status: ValidatorStatus::Active,
                         cluster_id: ClusterId(0),
-                        activation_epoch: Epoch(9),
+                        activation_epoch: Epoch(0),
                     }
                 })
                 .collect(),
@@ -364,11 +323,11 @@ mod tests {
             status: POSY_SIMPLIFIED_PARAMETER_FINALIZED_STATUS.to_string(),
             governance_approval_id: Some("TV3-POSY-V3-UNIT-TEST".to_string()),
             chain_id: ChainId::synergy_testnet_v3(),
-            network_id: NetworkId::synergy_testnet_v3(),
+            network_id: NetworkId::fresh_posy_testnet_v3(),
             protocol_version: POSY_SIMPLIFIED_PROTOCOL_VERSION.to_string(),
-            activation_boundary: "declared_epoch_boundary_only".to_string(),
-            activation_epoch: Some(9),
-            activation_height: Some(9_001),
+            activation_boundary: POSY_SIMPLIFIED_FRESH_GENESIS_BOUNDARY.to_string(),
+            activation_epoch: Some(0),
+            activation_height: Some(1),
             epoch_length_blocks: 1_000,
             active_validator_count: 5,
             consensus_cluster_count: 1,
@@ -393,7 +352,10 @@ mod tests {
             safety_halt_on_conflicting_valid_qcs: true,
             etdag_finality_separation_required: true,
             protected_execution_binding_required: true,
-            initial_etdag_activation: "preserve_current_finalized_manifest_state".to_string(),
+            initial_etdag_activation:
+                crate::posy_simplified_parameters::POSY_SIMPLIFIED_ETDAG_GOVERNED_GENESIS_BINDING_REQUIRED
+                    .to_string(),
+            target_block_time_ms: 2_000,
             proposal_timeout_ms: 1_500,
             vote_timeout_ms: 1_500,
             max_round_timeout_ms: 10_000,
@@ -415,8 +377,8 @@ mod tests {
             binding_status: POSY_SIMPLIFIED_ACTIVATION_BINDING_STATUS.to_string(),
             governance_decision_id: manifest.governance_approval_id.clone().unwrap(),
             parameter_root_sha3_512: manifest.root().unwrap().to_hex(),
-            activation_epoch: 9,
-            activation_height: 9_001,
+            activation_epoch: 0,
+            activation_height: 1,
             manifest,
             frozen_validator_set: validator_set(),
         }
@@ -426,8 +388,8 @@ mod tests {
         json!({
             "network": {
                 "chain_id": SYNERGY_TESTNET_V3_CHAIN_ID,
-                "network_slug": SYNERGY_TESTNET_V3_NETWORK_ID,
-                "consensus_version": POSY_PROTOCOL_VERSION
+                "network_slug": TESTNET_V3_CANONICAL_NETWORK_ID,
+                "consensus_version": POSY_SIMPLIFIED_PROTOCOL_VERSION
             },
             "canonicalization": {"genesis_hash_inputs": ["network", "consensus"]},
             "consensus": {"posy_v3_activation": binding}
@@ -435,58 +397,25 @@ mod tests {
     }
 
     #[test]
-    fn no_binding_keeps_v2_2_authoritative() {
-        assert_eq!(
-            select_consensus_profile_at_height(Height(50_000), None, None).unwrap(),
-            ConsensusProfileAtHeight::PosyV2_2
-        );
-    }
-
-    #[test]
-    fn finalized_binding_keeps_v2_2_before_declared_boundary() {
+    fn fresh_genesis_selects_frozen_v3_context_at_block_one() {
         let activation = activation();
-        assert_eq!(
-            select_consensus_profile_at_height(Height(9_000), Some(&activation), None).unwrap(),
-            ConsensusProfileAtHeight::PosyV2_2
-        );
-    }
-
-    #[test]
-    fn exact_boundary_selects_frozen_v3_context() {
-        let activation = activation();
-        let seed = Hash::from_domain_bytes("test-v2.2-finality-subject", b"height-9000");
-        let selected = select_consensus_profile_at_height(
-            Height(9_001),
-            Some(&activation),
-            Some(&FinalizedV2BoundaryEvidence {
-                height: Height(9_000),
-                round: Round(0),
-                block_id: BlockId("block-9000".to_string()),
-                qc_finality_context_root: seed,
-            }),
-        )
-        .unwrap();
+        let selected = select_consensus_profile_at_height(Height(1), Some(&activation)).unwrap();
         let ConsensusProfileAtHeight::PosySimplifiedV3 {
             epoch_context,
             validator_set,
         } = selected
         else {
-            panic!("declared boundary must select v3");
+            panic!("fresh Genesis must select simplified v3");
         };
-        assert_eq!(epoch_context.epoch, Epoch(9));
-        assert_eq!(epoch_context.epoch_start_height, Height(9_001));
-        assert_eq!(epoch_context.epoch_end_height, Height(10_000));
-        assert_eq!(epoch_context.finalized_epoch_seed_root, seed);
-        assert_eq!(
-            epoch_context.v2_boundary_anchor,
-            Some(SimplifiedEpochAnchor {
-                height: Height(9_000),
-                round: Round(0),
-                block_id: BlockId("block-9000".to_string()),
-                qc_finality_context_root: seed,
-            })
-        );
+        assert_eq!(epoch_context.epoch, Epoch(0));
+        assert_eq!(epoch_context.epoch_start_height, Height(1));
+        assert_eq!(epoch_context.epoch_end_height, Height(1_000));
+        assert_eq!(epoch_context.v2_boundary_anchor, None);
         assert_eq!(validator_set.validators.len(), 5);
+        assert_eq!(
+            epoch_context,
+            activation.derive_fresh_genesis_epoch_context().unwrap()
+        );
     }
 
     #[test]
@@ -496,7 +425,7 @@ mod tests {
         proposed.manifest.governance_approval_id = None;
         proposed.manifest.activation_epoch = None;
         proposed.manifest.activation_height = None;
-        assert!(select_consensus_profile_at_height(Height(1), Some(&proposed), None).is_err());
+        assert!(select_consensus_profile_at_height(Height(1), Some(&proposed)).is_err());
 
         let mut wrong_root = activation();
         wrong_root.parameter_root_sha3_512 = "00".repeat(64);
@@ -512,15 +441,9 @@ mod tests {
     }
 
     #[test]
-    fn boundary_requires_finalized_seed_and_never_falls_back() {
-        let activation = activation();
-        let error = select_consensus_profile_at_height(
-            Height(activation.activation_height),
-            Some(&activation),
-            None,
-        )
-        .unwrap_err();
-        assert!(error.contains("without finalized v2.2 QC evidence"));
+    fn missing_activation_never_falls_back() {
+        let error = select_consensus_profile_at_height(Height(1), None).unwrap_err();
+        assert!(error.contains("missing its simplified PoSy activation"));
     }
 
     #[test]
@@ -529,7 +452,7 @@ mod tests {
         let loaded = load_genesis_bound_simplified_activation(&genesis_with(binding.clone()))
             .unwrap()
             .unwrap();
-        assert_eq!(loaded.activation_height, 9_001);
+        assert_eq!(loaded.activation_height, 1);
 
         let mut partial = binding;
         partial
@@ -548,10 +471,12 @@ mod tests {
         let activation = activation();
         std::env::set_var("SYNERGY_POSY_V3_FORCE_ACTIVATE", "true");
         std::env::set_var("SYNERGY_POSY_V3_ACTIVATION_HEIGHT", "1");
-        let selected =
-            select_consensus_profile_at_height(Height(9_000), Some(&activation), None).unwrap();
+        let selected = select_consensus_profile_at_height(Height(1), Some(&activation)).unwrap();
         std::env::remove_var("SYNERGY_POSY_V3_FORCE_ACTIVATE");
         std::env::remove_var("SYNERGY_POSY_V3_ACTIVATION_HEIGHT");
-        assert_eq!(selected, ConsensusProfileAtHeight::PosyV2_2);
+        assert!(matches!(
+            selected,
+            ConsensusProfileAtHeight::PosySimplifiedV3 { .. }
+        ));
     }
 }

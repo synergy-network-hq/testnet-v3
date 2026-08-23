@@ -4,14 +4,17 @@ Status: preparation checklist; all activation/launch controls are open unless ba
 
 ## Immutable inputs
 
-- [ ] Canonical manifest status is `FINALIZED`, not `PROPOSED_NOT_ACTIVATED`.
-- [ ] Governance approval ID, activation epoch, and activation height are present and authorized.
-- [ ] Exact manifest SHA3-512 root matches every node and the transition certificate.
+- [ ] Canonical manifest status is `FINALIZED`, its V4 release request is signed, and the signature verifies against the frozen governance public authority.
+- [ ] Governance approval ID, fresh-Genesis boundary, epoch `0`, and first block height `1` are present and authorized.
+- [ ] Exact manifest SHA3-512 root matches every node, the Genesis activation, and the signed V4 release record.
 - [ ] Exactly five approved public validator identities are active in one cluster.
+- [ ] Their canonical IDs are exactly `posy-validator-01` through `posy-validator-05`; machine aliases are transport metadata, not validator IDs.
 - [ ] Validator, ML-DSA-65 consensus key, frozen-weight, epoch-context, and leader-ring roots match on all five nodes.
 - [ ] Each validator has a unique active consensus key with the correct Aegis vote/proposer roles.
 - [ ] No boot/seed/relay/archive/RPC/explorer/observer role has implicit vote weight.
-- [ ] Chain ID 1266 and network ID `synergy-testnet-v3` match every artifact.
+- [ ] Chain ID 1266, technical network ID `testnet`, release ID `testnet-v3`, and protocol `posy/3.0` match every artifact.
+- [ ] Genesis carries the governed ETDAG parameter and fee roots; no deferred/default ETDAG path is reachable.
+- [ ] The public ETDAG membership anchor matches the exact Genesis hash, deployment root, consensus root, and five-validator activation.
 
 ## Quorum and failure model
 
@@ -25,7 +28,7 @@ Status: preparation checklist; all activation/launch controls are open unless ba
 ## Safety and persistence
 
 - [ ] Signer journal is readable, canonical, and fsync-before-signature; no reset/delete recovery path exists.
-- [ ] Rooted v3 state restores anchor/highest/locked QC, last vote, TC chain, finalized head, and SafetyHalt.
+- [ ] Rooted v3 state restores typed anchor/highest/locked finality parents, last vote, TC chain, finalized head, and SafetyHalt; Genesis is never decoded as a QC.
 - [ ] Sequential TC verification explains the current takeover owner after restart.
 - [ ] State sync reconstructs the same state from certified evidence on all five nodes.
 - [ ] Conflicting valid QC evidence enters irreversible SafetyHalt.
@@ -44,11 +47,11 @@ Status: preparation checklist; all activation/launch controls are open unless ba
 
 ## Release, operations, and launch
 
-- [ ] Signed reproducible binary hash matches the migration record on all five nodes.
+- [ ] Signed reproducible binary hash matches the fresh-P3 release record on all five nodes.
 - [ ] Full tests, lints, format checks, deterministic vectors, fuzz/property/model tests pass.
 - [ ] 10,000-block proposal/vote/QC/finality/takeover/PQC/size/restart evidence meets approved targets.
 - [ ] Dashboards and alerts expose every `posy_v3_*` metric and SafetyHalt/root divergence.
-- [ ] Migration and fail-closed exercises are witnessed and linked.
+- [ ] Fresh-chain staging and fail-closed exercises are witnessed and linked; no retired-chain state is accepted as a P3 input.
 - [ ] Existing security, ETDAG, governance, topology, genesis, operations, release, and launch gates pass.
 - [ ] Go/no-go record is approved. Until then `launch-readiness.json` remains `blocked_prelaunch`.
 
@@ -56,10 +59,10 @@ Status: preparation checklist; all activation/launch controls are open unless ba
 
 ```bash
 cd runtime
-cargo test -p synergy-testnet --lib consensus::simplified_posy::tests --no-fail-fast
-cargo test -p synergy-testnet --lib posy_simplified_parameters::tests
+CARGO_BUILD_JOBS=1 cargo test -p synergy-testnet --lib consensus::simplified_posy::tests --no-fail-fast
+CARGO_BUILD_JOBS=1 cargo test -p synergy-testnet --lib posy_simplified_parameters::tests
 scripts/testnet/run-posy-simplified-five-node-harness.sh
+scripts/testnet/run-posy-simplified-five-driver-harness.sh
 ```
 
 These commands create local evidence only. They do not deploy, activate, rotate keys, regenerate identities, or modify live infrastructure.
-

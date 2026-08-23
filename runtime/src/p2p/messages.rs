@@ -328,7 +328,7 @@ pub fn validate_typed_consensus_message_size(
         TypedConsensusMessage::Vote { .. } => return Ok(()),
     };
     let encoded = NetworkMessage::TypedConsensus {
-        chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+        chain_incarnation: crate::genesis::canonical_genesis()?.chain_incarnation(),
         genesis_hash: crate::genesis::canonical_genesis()?.hash().to_string(),
         message: message.clone(),
     };
@@ -353,7 +353,7 @@ pub fn validate_typed_finality_observer_message_size(
         return Err("typed finality observer record segment cannot be empty".to_string());
     }
     let encoded = NetworkMessage::TypedFinalityObserver {
-        chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+        chain_incarnation: crate::genesis::canonical_genesis()?.chain_incarnation(),
         genesis_hash: crate::genesis::canonical_genesis()?.hash().to_string(),
         message: message.clone(),
     };
@@ -384,7 +384,7 @@ pub fn validate_coordinated_finality_observer_message_size(
         return Err("coordinated finality observer record segment has an invalid record count".to_string());
     }
     let encoded = NetworkMessage::CoordinatedFinalityObserver {
-        chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+        chain_incarnation: crate::genesis::canonical_genesis()?.chain_incarnation(),
         genesis_hash: crate::genesis::canonical_genesis()?.hash().to_string(),
         message: message.clone(),
     };
@@ -435,7 +435,7 @@ pub fn validate_coordinated_consensus_message_size(
         }
     };
     let encoded = NetworkMessage::CoordinatedConsensus {
-        chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+        chain_incarnation: crate::genesis::canonical_genesis()?.chain_incarnation(),
         genesis_hash: crate::genesis::canonical_genesis()?.hash().to_string(),
         message: message.clone(),
     };
@@ -665,7 +665,7 @@ pub fn validate_simplified_consensus_message_size(
         ),
     };
     let encoded = NetworkMessage::SimplifiedConsensus {
-        chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+        chain_incarnation: crate::genesis::canonical_genesis()?.chain_incarnation(),
         genesis_hash: crate::genesis::canonical_genesis()?.hash().to_string(),
         message: message.clone(),
     };
@@ -691,7 +691,7 @@ pub fn validate_simplified_target_admission_message_size(
         ),
     };
     let encoded = NetworkMessage::SimplifiedTargetAdmission {
-        chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+        chain_incarnation: crate::genesis::canonical_genesis()?.chain_incarnation(),
         genesis_hash: crate::genesis::canonical_genesis()?.hash().to_string(),
         message: message.clone(),
     };

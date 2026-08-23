@@ -1,14 +1,16 @@
 # PoSy v3 simplified consensus architecture
 
-Status: proposed, not active. For the Genesis-bound initial epoch, the
-production validator role runtime now constructs and spawns this authenticated
-driver with the deterministic core adapter when ETDAG is deferred or the
-protected adapter when a finalized ETDAG permit is present. The applied Genesis
-still defers ETDAG, so the checked-in runtime path selects the core adapter. None
-of this activates the proposal or satisfies launch qualification. Future v3
-role startup loads and re-verifies the durable transition chain and prior replay
-inputs, then fails closed at the still-missing finalized-execution authority
-proof.
+Status: implemented for a fresh block-zero P3 candidate, but not launch
+qualified. The production validator role runtime constructs the authenticated
+driver from the Genesis-bound five-validator activation. Its initial finality
+parent is the typed Genesis reference, not a P2 boundary or synthetic QC.
+
+P3 Genesis must atomically bind the finalized consensus manifest and separately
+governed ETDAG parameter and fee artifacts. That validated binding selects the
+protected adapter and installs the governed fee policy; a deferred/default core
+adapter is not a valid P3 startup mode. Later-epoch startup loads and re-verifies
+the durable P3 transition chain and its finalized-execution authority proof.
+None of this marks the unsigned candidate or launch gates complete.
 
 ## State machine
 
@@ -46,10 +48,8 @@ or VOTE. A validator first obtains the exact content-addressed proposal material
 record, reconstructs it through a bounded request-correlated hash chain when it
 is absent, independently replays the block/protected execution, and durably
 installs the verified record. Only then may authenticated reliable delivery
-begin. The current durable core adapter can construct and replay deterministic
-empty blocks while no finalized ETDAG activation permit exists. A production
-protected-ETDAG material adapter and schedule-neutral verified coordinator APIs
-are now implemented and tested: they consume the certified target-admission
+begin. The production protected-ETDAG material adapter and schedule-neutral
+verified coordinator APIs consume the certified target-admission
 context and protected input without importing a proposer schedule, execute the
 exact candidate, and independently replay received material. The validator role
 runtime now selects this adapter from a finalized permit, derives its authority
@@ -107,12 +107,12 @@ Proposal material is stored separately by stable candidate ID so a finality WAL
 record can remain bounded while still referring to immutable full block/body
 and protected-execution inputs. Startup replay rejects a missing, substituted,
 noncanonical, wrong-context, or non-replayable material record and rejects any
-invalid or nonconsecutive finality witness. For either initial-epoch material
-mode, role-runtime wiring installs the durable safety, material, and finality
-stores, replays the v2 boundary state, and publishes the reconstructed execution
-snapshot. A finalized ETDAG permit additionally installs the protected
-authority, schedule-neutral ingress, and H+3 producer lifecycle; the applied
-Genesis currently supplies no such permit. The autonomous five-driver harness
+invalid or nonconsecutive finality witness. For the governed initial-epoch
+mode, role-runtime installs the durable safety, material, and finality stores
+from the typed Genesis parent and publishes the reconstructed execution
+snapshot. The Genesis ETDAG binding supplies the protected authority,
+schedule-neutral ingress, governed fees, and H+3 producer lifecycle. The
+autonomous five-driver harness
 now proves restart, material recovery, state-sync healing, takeover, and
 finality across five OS processes. Five full `synergy-node` deployments,
 protected execution, and node-database convergence qualification remain

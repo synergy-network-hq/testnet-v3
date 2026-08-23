@@ -8,11 +8,10 @@
 use super::{
     compute_simplified_protected_execution_root, ConsensusObjectContext,
     DurableSimplifiedFinalitySink, DurableSimplifiedProposalMaterialStore, FinalizedBlockRecord,
-    QuorumCertificateReference, SimplifiedCoreMaterialAdapter, SimplifiedEpochContext,
-    SimplifiedFinalityEnvironment, SimplifiedMaterialAdapter,
-    SimplifiedPreviousEpochFinalityReplay, SimplifiedProposal, SimplifiedProposalDirective,
-    VerifiedSimplifiedEpochTransition, VerifiedSimplifiedProposalMaterial,
-    POSY_SIMPLIFIED_PROTOCOL_VERSION,
+    SimplifiedCoreMaterialAdapter, SimplifiedEpochContext, SimplifiedFinalityEnvironment,
+    SimplifiedFinalityParent, SimplifiedMaterialAdapter, SimplifiedPreviousEpochFinalityReplay,
+    SimplifiedProposal, SimplifiedProposalDirective, VerifiedSimplifiedEpochTransition,
+    VerifiedSimplifiedProposalMaterial, POSY_SIMPLIFIED_PROTOCOL_VERSION,
 };
 use crate::consensus_parameters::ConsensusParameterRoot;
 use crate::crypto::aegis_pqvm::AegisPqvmVerifier;
@@ -47,7 +46,7 @@ pub trait SimplifiedProtectedMaterialAuthority: Send {
     fn authority_for_candidate(
         &mut self,
         context: &ConsensusObjectContext,
-        parent_qc: &QuorumCertificateReference,
+        parent: &SimplifiedFinalityParent,
         finalized: &FinalizedBlockRecord,
     ) -> Result<SimplifiedProtectedMaterialAuthoritySnapshot, String>;
 }
@@ -98,7 +97,7 @@ pub fn simplified_protected_finality_context_digest_from_state_root(
     cluster_map: &ClusterMap,
 ) -> Result<EtdagDigest, String> {
     epoch_context.validate_against(&validator_set.active_for_epoch(epoch_context.epoch))?;
-    if finalized.qc_id.is_zero()
+    if finalized.validate().is_err()
         || finalized.block_id.0.trim().is_empty()
         || finalized_execution_state_root.is_zero()
     {
@@ -189,7 +188,8 @@ impl DurableSimplifiedProtectedMaterialAuthority {
             || configuration.validator_set != *transition.next_validator_set()
             || configuration.anchor_finalized.height != transition.finalized_seed().height
             || configuration.anchor_finalized.block_id != transition.finalized_seed().block_id
-            || configuration.anchor_finalized.qc_id != transition.finalized_seed().qc_id
+            || configuration.anchor_finalized.finality_reference_id()
+                != transition.finalized_seed().qc_id
         {
             return Err(
                 "protected material authority configuration does not match the verified v3 transition"
@@ -283,16 +283,11 @@ impl DurableSimplifiedProtectedMaterialAuthority {
     fn durable_snapshot(
         &self,
         context: &ConsensusObjectContext,
-        parent_qc: &QuorumCertificateReference,
+        parent: &SimplifiedFinalityParent,
         finalized: &FinalizedBlockRecord,
     ) -> Result<SimplifiedProtectedMaterialAuthoritySnapshot, String> {
         context.validate_against(&self.configuration.epoch_context)?;
-        parent_qc.validate()?;
-        if parent_qc.height.0.checked_add(1) != Some(context.height.0)
-            || parent_qc.block_id.0.trim().is_empty()
-        {
-            return Err("protected material parent QC does not precede its candidate".to_string());
-        }
+        parent.validate_for_child_height(context.height)?;
         let (durable_finalized, mut parent_execution_state) = self.recover_finalized()?;
         if &durable_finalized != finalized {
             return Err(
@@ -307,39 +302,38 @@ impl DurableSimplifiedProtectedMaterialAuthority {
             &self.configuration.validator_set,
             &self.configuration.cluster_map,
         )?;
-        let durable_reference = QuorumCertificateReference {
-            height: durable_finalized.height,
-            block_id: durable_finalized.block_id.clone(),
-            qc_id: durable_finalized.qc_id,
-        };
-        if parent_qc.height.0 < durable_reference.height.0 {
+        let durable_parent = durable_finalized.finality_parent.clone();
+        if parent.height().0 < durable_parent.height().0 {
             return Err("protected material parent precedes durable finality".to_string());
         }
-        let distance = parent_qc
-            .height
+        let distance = parent
+            .height()
             .0
-            .checked_sub(durable_reference.height.0)
+            .checked_sub(durable_parent.height().0)
             .ok_or_else(|| "protected material parent distance underflowed".to_string())?;
         if distance > MAX_SIMPLIFIED_PROTECTED_UNFINALIZED_ANCESTORS as u64 {
             return Err("protected material certified tail exceeds its replay bound".to_string());
         }
 
-        let mut cursor = parent_qc.clone();
+        let mut cursor = parent.clone();
         let mut reverse_tail = Vec::new();
-        while cursor.height.0 > durable_reference.height.0 {
-            let material = self.material_store.load(cursor.qc_id)?;
-            if material.stable_candidate_id != cursor.qc_id
-                || material.candidate_subject.context.height != cursor.height
-                || material.candidate_subject.block_id != cursor.block_id
+        while cursor.height().0 > durable_parent.height().0 {
+            let reference = cursor.quorum_certificate_reference().ok_or_else(|| {
+                "Genesis reference cannot appear above the durable finality seed".to_string()
+            })?;
+            let material = self.material_store.load(reference.qc_id)?;
+            if material.stable_candidate_id != reference.qc_id
+                || material.candidate_subject.context.height != reference.height
+                || material.candidate_subject.block_id != reference.block_id
             {
                 return Err(
                     "protected material certified tail does not match its parent QC".to_string(),
                 );
             }
-            cursor = material.candidate_subject.parent_qc.clone();
+            cursor = material.candidate_subject.parent.clone();
             reverse_tail.push(material);
         }
-        if cursor != durable_reference {
+        if cursor != durable_parent {
             return Err(
                 "protected material certified tail does not extend durable finality".to_string(),
             );
@@ -365,10 +359,10 @@ impl SimplifiedProtectedMaterialAuthority for DurableSimplifiedProtectedMaterial
     fn authority_for_candidate(
         &mut self,
         context: &ConsensusObjectContext,
-        parent_qc: &QuorumCertificateReference,
+        parent: &SimplifiedFinalityParent,
         finalized: &FinalizedBlockRecord,
     ) -> Result<SimplifiedProtectedMaterialAuthoritySnapshot, String> {
-        self.durable_snapshot(context, parent_qc, finalized)
+        self.durable_snapshot(context, parent, finalized)
     }
 }
 
@@ -623,12 +617,12 @@ impl<A: SimplifiedProtectedMaterialAuthority> SimplifiedProtectedMaterialAdapter
     }
 
     fn evidence_root(
-        parent_qc: &QuorumCertificateReference,
+        parent: &SimplifiedFinalityParent,
         finalized: &FinalizedBlockRecord,
     ) -> Result<Hash, String> {
         Ok(Hash::from_domain_bytes(
             "SYNERGY_POSY_SIMPLIFIED_PROTECTED_EVIDENCE_V1",
-            &serde_json::to_vec(&(parent_qc, finalized))
+            &serde_json::to_vec(&(parent, finalized))
                 .map_err(|error| format!("serialize simplified protected evidence: {error}"))?,
         ))
     }
@@ -667,8 +661,8 @@ impl<A: SimplifiedProtectedMaterialAuthority> SimplifiedProtectedMaterialAdapter
             || header.cryptographic_profile_root != self.configuration.cryptographic_profile_root
             || header.dag_frontier_root != expected_dag_frontier
             || header.tx_order_root != compute_tx_order_root(&transaction_ids)?
-            || header.evidence_root != Self::evidence_root(&proposal.parent_qc, expected_finalized)?
-            || header.last_finalized_qc_hash != expected_finalized.qc_id
+            || header.evidence_root != Self::evidence_root(&proposal.parent, expected_finalized)?
+            || header.last_finalized_qc_hash != expected_finalized.finality_reference_id()
             || header.timestamp_ms_consensus_bounded
                 != self.timestamp_for_height(proposal.context.height)?
             || header.app_version != self.configuration.app_version
@@ -712,9 +706,9 @@ impl<A: SimplifiedProtectedMaterialAuthority> SimplifiedProtectedMaterialAdapter
                 epoch: directive.context.epoch,
                 cluster_id: target_context.assigned_cluster_id,
                 height_context_root: directive.context.epoch_context_root,
-                parent_block_hash: Hash::from_hex(&directive.highest_qc.block_id.0)?,
+                parent_block_hash: Hash::from_hex(&directive.parent.block_id().0)?,
                 parent_state_root: state_root_before,
-                last_finalized_qc_hash: directive.finalized.qc_id,
+                last_finalized_qc_hash: directive.finalized.finality_reference_id(),
                 proposer_validator_id: proposer.validator_id.clone(),
                 proposer_uma_id: proposer.validator_uma_id.clone(),
                 proposer_key_id: proposer.consensus_public_key.key_id.clone(),
@@ -746,7 +740,7 @@ impl<A: SimplifiedProtectedMaterialAuthority> SimplifiedProtectedMaterialAdapter
                 tx_count: u64::try_from(transactions.len())
                     .map_err(|_| "protected transaction count exceeds u64".to_string())?,
                 protected_batch: None,
-                evidence_root: Self::evidence_root(&directive.highest_qc, &directive.finalized)?,
+                evidence_root: Self::evidence_root(&directive.parent, &directive.finalized)?,
                 state_root_before,
                 state_root_after: Hash::zero(),
                 receipt_root: Hash::zero(),
@@ -796,7 +790,7 @@ impl<A: SimplifiedProtectedMaterialAuthority> SimplifiedMaterialAdapter
         }
         let authority = self.authority.authority_for_candidate(
             &directive.context,
-            &directive.highest_qc,
+            &directive.parent,
             &directive.finalized,
         )?;
         let ready = self
@@ -829,8 +823,8 @@ impl<A: SimplifiedProtectedMaterialAuthority> SimplifiedMaterialAdapter
             context: directive.context.clone(),
             proposer_id: directive.proposer_id.clone(),
             block_id: BlockId(String::new()),
-            parent_block_id: directive.highest_qc.block_id.clone(),
-            parent_qc: directive.highest_qc.clone(),
+            parent_block_id: directive.parent.block_id().clone(),
+            parent: directive.parent.clone(),
             takeover_tc_id: directive.takeover_tc_id,
             protected_execution_root: Hash::zero(),
             proposer_key_id: directive.proposer_key_id.clone(),
@@ -851,8 +845,8 @@ impl<A: SimplifiedProtectedMaterialAuthority> SimplifiedMaterialAdapter
         let protected_execution_root = compute_simplified_protected_execution_root(
             &directive.context,
             &block,
-            &directive.highest_qc.block_id,
-            &directive.highest_qc,
+            directive.parent.block_id(),
+            &directive.parent,
             Some(&target_context),
             Some(&protected_input),
         )?;
@@ -903,7 +897,7 @@ impl<A: SimplifiedProtectedMaterialAuthority> SimplifiedMaterialAdapter
         }
         let authority = self.authority.authority_for_candidate(
             &proposal.context,
-            &proposal.parent_qc,
+            &proposal.parent,
             expected_finalized,
         )?;
         let target_context = material.target_context.as_ref().ok_or_else(|| {
@@ -971,7 +965,7 @@ mod tests {
     #[derive(Clone)]
     struct ExactAuthority {
         expected_context: ConsensusObjectContext,
-        expected_parent: QuorumCertificateReference,
+        expected_parent: SimplifiedFinalityParent,
         expected_finalized: FinalizedBlockRecord,
         snapshot: SimplifiedProtectedMaterialAuthoritySnapshot,
     }
@@ -980,11 +974,11 @@ mod tests {
         fn authority_for_candidate(
             &mut self,
             context: &ConsensusObjectContext,
-            parent_qc: &QuorumCertificateReference,
+            parent: &SimplifiedFinalityParent,
             finalized: &FinalizedBlockRecord,
         ) -> Result<SimplifiedProtectedMaterialAuthoritySnapshot, String> {
             if context != &self.expected_context
-                || parent_qc != &self.expected_parent
+                || parent != &self.expected_parent
                 || finalized != &self.expected_finalized
             {
                 return Err("test durable authority rejected substituted pointers".to_string());
@@ -1033,7 +1027,7 @@ mod tests {
             &etdag_fixture.validator_set,
         )
         .unwrap();
-        let parent = QuorumCertificateReference {
+        let parent_qc = QuorumCertificateReference {
             height: Height(target_context.target_height.0 - 1),
             block_id: BlockId::from_hash(Hash::from_domain_bytes(
                 "simplified-protected-test",
@@ -1041,7 +1035,7 @@ mod tests {
             )),
             qc_id: Hash::from_domain_bytes("simplified-protected-test", b"parent-qc"),
         };
-        let finalized = FinalizedBlockRecord {
+        let finalized_qc = QuorumCertificateReference {
             height: target_context.source_finalized_height,
             block_id: BlockId::from_hash(Hash::from_domain_bytes(
                 "simplified-protected-test",
@@ -1049,6 +1043,8 @@ mod tests {
             )),
             qc_id: Hash::from_domain_bytes("simplified-protected-test", b"finalized-qc"),
         };
+        let finalized = FinalizedBlockRecord::from_quorum_certificate(finalized_qc).unwrap();
+        let parent = SimplifiedFinalityParent::quorum_certificate(parent_qc).unwrap();
         let context = ConsensusObjectContext::for_height(
             &epoch_context,
             target_context.target_height,
@@ -1070,7 +1066,7 @@ mod tests {
             .clone();
         let directive = SimplifiedProposalDirective {
             context: context.clone(),
-            highest_qc: parent.clone(),
+            parent: parent.clone(),
             finalized: finalized.clone(),
             proposer_id,
             proposer_key_id,
@@ -1258,9 +1254,13 @@ mod tests {
             )
             .is_err());
 
-        let mut wrong_finalized = setup.directive.finalized;
-        wrong_finalized.qc_id =
-            Hash::from_domain_bytes("simplified-protected-test", b"wrong-finality");
+        let wrong_finalized =
+            FinalizedBlockRecord::from_quorum_certificate(QuorumCertificateReference {
+                height: setup.directive.finalized.height,
+                block_id: setup.directive.finalized.block_id.clone(),
+                qc_id: Hash::from_domain_bytes("simplified-protected-test", b"wrong-finality"),
+            })
+            .unwrap();
         assert!(adapter
             .verify_received(&setup.epoch_context, &proposal, &wrong_finalized, &material,)
             .is_err());
@@ -1295,7 +1295,7 @@ mod tests {
             &etdag_fixture.validator_set,
         )
         .unwrap();
-        let finalized = FinalizedBlockRecord {
+        let anchor_qc = QuorumCertificateReference {
             height: Height(5),
             block_id: BlockId::from_hash(Hash::from_domain_bytes(
                 "simplified-protected-durable-test",
@@ -1306,11 +1306,7 @@ mod tests {
                 b"finalized-five-qc",
             ),
         };
-        let anchor_qc = QuorumCertificateReference {
-            height: finalized.height,
-            block_id: finalized.block_id.clone(),
-            qc_id: finalized.qc_id,
-        };
+        let finalized = FinalizedBlockRecord::from_quorum_certificate(anchor_qc.clone()).unwrap();
         let execution_state = ExecutionState::new();
         let mut core = SimplifiedCoreMaterialAdapter::new(
             epoch_context.clone(),
@@ -1346,7 +1342,7 @@ mod tests {
                 .clone();
             SimplifiedProposalDirective {
                 context,
-                highest_qc: parent_qc,
+                parent: SimplifiedFinalityParent::quorum_certificate(parent_qc).unwrap(),
                 finalized: finalized.clone(),
                 proposer_id,
                 proposer_key_id,
@@ -1426,8 +1422,10 @@ mod tests {
         .unwrap();
         let target =
             ConsensusObjectContext::for_height(&epoch_context, Height(8), Round(0)).unwrap();
+        let qc_seven_parent =
+            SimplifiedFinalityParent::quorum_certificate(qc_seven.clone()).unwrap();
         let snapshot = authority
-            .authority_for_candidate(&target, &qc_seven, &finalized)
+            .authority_for_candidate(&target, &qc_seven_parent, &finalized)
             .unwrap();
         assert_eq!(snapshot.parent_execution_state, execution_state);
         assert_eq!(
@@ -1435,11 +1433,18 @@ mod tests {
             expected_finality_digest
         );
 
-        let mut wrong_finalized = finalized.clone();
-        wrong_finalized.qc_id =
-            Hash::from_domain_bytes("simplified-protected-durable-test", b"wrong-finality");
+        let wrong_finalized =
+            FinalizedBlockRecord::from_quorum_certificate(QuorumCertificateReference {
+                height: finalized.height,
+                block_id: finalized.block_id.clone(),
+                qc_id: Hash::from_domain_bytes(
+                    "simplified-protected-durable-test",
+                    b"wrong-finality",
+                ),
+            })
+            .unwrap();
         assert!(authority
-            .authority_for_candidate(&target, &qc_seven, &wrong_finalized)
+            .authority_for_candidate(&target, &qc_seven_parent, &wrong_finalized)
             .unwrap_err()
             .contains("durable finality WAL"));
 
@@ -1453,6 +1458,7 @@ mod tests {
         };
         let far_target =
             ConsensusObjectContext::for_height(&epoch_context, Height(10), Round(0)).unwrap();
+        let far_parent = SimplifiedFinalityParent::quorum_certificate(far_parent).unwrap();
         assert!(authority
             .authority_for_candidate(&far_target, &far_parent, &finalized)
             .unwrap_err()

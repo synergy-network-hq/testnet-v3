@@ -1,6 +1,13 @@
 # Simplified PoSy v1 Gate
 
-Status: **not implemented and not authorized to begin.**
+Status: **historical Phase-One proposal; not a PoSy v3 specification or
+operator runbook.**
+
+Do not use this document for the fresh Chain `1266` / network `testnet` /
+`posy/3.0` chain. Its coordinated six-validator assumptions, message phases,
+and activation sequence are retained only as historical design evidence. The
+authoritative P3 candidate documentation starts at
+`docs/posy-v3/POSY-00E-SIMPLIFIED-CONSENSUS-AMENDMENT.md`.
 
 This page records the post-Phase-One gate only. It does not introduce a second
 engine, wire any messages, or activate a consensus schedule.

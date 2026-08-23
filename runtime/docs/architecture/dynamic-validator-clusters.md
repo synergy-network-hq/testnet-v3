@@ -1,14 +1,12 @@
 # Dynamic Validator Clusters
 
-> Profile precedence: this document describes the current v2.2/dynamic
-> topology source. If and only if the proposed `posy/3.0` profile is finalized
-> and activated at a declared epoch boundary,
-> `docs/posy-v3/POSY-00E-SIMPLIFIED-CONSENSUS-AMENDMENT.md` governs consensus
-> for the initial activation epoch, whose hardware-backed proposal contains
-> exactly five ACTIVE validators in one cluster. It uses strict `4-of-5` count
-> quorum, frozen-weight quorum, and an unweighted ten-block leader ring. Five is
-> not a protocol limit: later finalized v3 epoch contexts derive membership,
-> cluster topology, quorum, and the leader ring from their complete frozen set.
+> Historical scope: this document records the v2.2/dynamic topology source and
+> its migration-era fixtures. It is not a PoSy v3 topology or activation
+> authority, and its commands must not be run against the fresh P3 chain. The
+> P3 chain starts at block zero with Chain `1266`, technical network `testnet`,
+> protocol `posy/3.0`, and five initial validators. Later P3 membership is
+> derived from finalized v3-to-v3 epoch transitions as specified by
+> `docs/posy-v3/POSY-00E-SIMPLIFIED-CONSENSUS-AMENDMENT.md`.
 
 Dynamic validator cluster handling must derive quorum and liveness from the
 planned validator count in the evidence being evaluated. Current six-validator

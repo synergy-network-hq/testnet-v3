@@ -239,7 +239,7 @@ fn load_public_ingress_registry(
         || artifact.genesis_hash != genesis.hash()
         || artifact.admission_binding.runtime_registry_type != "IngressKemKeyRegistry/v2"
         || artifact.admission_binding.runtime_registry_domain
-            != "PoSy/ETDAG/IngressKemKeyRegistry/v2"
+            != "PoSy/ETDAG/IngressKemKeyRegistry/v3"
         || artifact.admission_binding.certificate_domain != DOMAIN_TARGET_ADMISSION
         || artifact.admission_binding.required_consensus_algorithm != "ML-DSA-65"
         || artifact
@@ -365,7 +365,7 @@ fn load_public_ingress_registry(
     let registry = IngressKemKeyRegistry {
         registry_version: INGRESS_KEM_REGISTRY_VERSION,
         chain_id: crate::synergy_types::ChainId::synergy_testnet_v3(),
-        network_id: crate::synergy_types::NetworkId::synergy_testnet_v3(),
+        network_id: crate::synergy_types::NetworkId::fresh_posy_testnet_v3(),
         protocol_version: "posy/2.2".to_string(),
         epoch: Epoch(0),
         target_height,

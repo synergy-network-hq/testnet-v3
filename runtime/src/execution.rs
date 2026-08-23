@@ -416,7 +416,9 @@ pub fn execute_block(block: &Block, state: &ExecutionState) -> Result<ExecutionR
         .ok_or_else(|| "block gas_used_total overflow".to_string())?;
     let pq_gas_used_total = receipts
         .iter()
-        .try_fold(0u64, |total, receipt| total.checked_add(receipt.pq_gas_used))
+        .try_fold(0u64, |total, receipt| {
+            total.checked_add(receipt.pq_gas_used)
+        })
         .ok_or_else(|| "block pq_gas_used_total overflow".to_string())?;
     Ok(ExecutionResult {
         state: working_state,
@@ -1108,7 +1110,9 @@ fn canonical_network_fee_breakdown(
     include_amount_fee: bool,
     applied_fee_market: Option<&crate::gas::fee_market::AppliedFeeMarket>,
 ) -> Result<crate::gas::NetworkFeeBreakdown, String> {
-    use crate::gas::{calculate_network_fee, FeeSchedule, NetworkFeeInput, ValuationStatus};
+    use crate::gas::{
+        calculate_network_fee, fee_schedule_for_runtime, NetworkFeeInput, ValuationStatus,
+    };
 
     let payload = std::str::from_utf8(&tx.payload).unwrap_or_default();
     let (tx_type, asset_id, amount_raw, amount_equiv, valuation_status) =
@@ -1130,12 +1134,9 @@ fn canonical_network_fee_breakdown(
         fee_market_version,
     ) = match applied_fee_market {
         Some(applied) => {
-            let breakdown = crate::gas::fee_market::calculate_execution_fee(
-                gas_used,
-                pq_gas_used,
-                applied,
-            )
-            .map_err(|error| error.to_string())?;
+            let breakdown =
+                crate::gas::fee_market::calculate_execution_fee(gas_used, pq_gas_used, applied)
+                    .map_err(|error| error.to_string())?;
             (
                 breakdown.base_execution_fee_nwei,
                 applied.base_fee_per_gas_nwei,
@@ -1184,7 +1185,7 @@ fn canonical_network_fee_breakdown(
             fee_market_active,
             fee_market_version,
         },
-        &FeeSchedule::default(),
+        fee_schedule_for_runtime()?,
     )
 }
 

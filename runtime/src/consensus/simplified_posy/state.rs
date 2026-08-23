@@ -1,7 +1,8 @@
 use super::certificates::{
     BlockVote, CertifiedCandidateSubject, ConsensusObjectContext, ConsensusSignatureVerifier,
-    QuorumCertificateReference, SimplifiedQuorumCertificate, SimplifiedTimeoutCertificate,
-    TimeoutVote, POSY_SIMPLIFIED_BLOCK_VOTE_DOMAIN, POSY_SIMPLIFIED_PROPOSAL_DOMAIN,
+    GenesisFinalityReference, QuorumCertificateReference, SimplifiedFinalityParent,
+    SimplifiedQuorumCertificate, SimplifiedTimeoutCertificate, TimeoutVote,
+    POSY_SIMPLIFIED_BLOCK_VOTE_DOMAIN, POSY_SIMPLIFIED_PROPOSAL_DOMAIN,
     POSY_SIMPLIFIED_TIMEOUT_VOTE_DOMAIN,
 };
 use super::schedule::SimplifiedEpochContext;
@@ -24,8 +25,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const POSY_SIMPLIFIED_STATE_FORMAT: &str = "synergy-posy-simplified-state-v1";
-pub const POSY_SIMPLIFIED_STATE_SYNC_FORMAT: &str = "synergy-posy-simplified-state-sync-v1";
+pub const POSY_SIMPLIFIED_STATE_FORMAT: &str = "synergy-posy-simplified-state-v2";
+pub const POSY_SIMPLIFIED_STATE_SYNC_FORMAT: &str = "synergy-posy-simplified-state-sync-v2";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -34,7 +35,7 @@ pub struct SimplifiedProposal {
     pub proposer_id: ValidatorId,
     pub block_id: BlockId,
     pub parent_block_id: BlockId,
-    pub parent_qc: QuorumCertificateReference,
+    pub parent: SimplifiedFinalityParent,
     pub takeover_tc_id: Option<Hash>,
     /// Commits the BOC/reveal/manifest/protected execution validation result.
     /// The simplified finality path does not weaken the v2.2 execution boundary.
@@ -49,7 +50,7 @@ struct SimplifiedProposalSigningPayload<'a> {
     proposer_id: &'a ValidatorId,
     block_id: &'a BlockId,
     parent_block_id: &'a BlockId,
-    parent_qc: &'a QuorumCertificateReference,
+    parent: &'a SimplifiedFinalityParent,
     takeover_tc_id: Option<Hash>,
     protected_execution_root: Hash,
     proposer_key_id: &'a AegisPqKeyId,
@@ -62,7 +63,7 @@ impl SimplifiedProposal {
             proposer_id: &self.proposer_id,
             block_id: &self.block_id,
             parent_block_id: &self.parent_block_id,
-            parent_qc: &self.parent_qc,
+            parent: &self.parent,
             takeover_tc_id: self.takeover_tc_id,
             protected_execution_root: self.protected_execution_root,
             proposer_key_id: &self.proposer_key_id,
@@ -103,7 +104,47 @@ impl LeaseTakeoverState {
 pub struct FinalizedBlockRecord {
     pub height: Height,
     pub block_id: BlockId,
-    pub qc_id: Hash,
+    /// Genesis is final by definition but has no QC. Every other finalized
+    /// record is bound to the QC that certified its block.
+    pub finality_parent: SimplifiedFinalityParent,
+}
+
+impl FinalizedBlockRecord {
+    pub fn from_genesis(reference: GenesisFinalityReference) -> Result<Self, String> {
+        let finality_parent = SimplifiedFinalityParent::genesis(reference)?;
+        Ok(Self {
+            height: finality_parent.height(),
+            block_id: finality_parent.block_id().clone(),
+            finality_parent,
+        })
+    }
+
+    pub fn from_quorum_certificate(reference: QuorumCertificateReference) -> Result<Self, String> {
+        let finality_parent = SimplifiedFinalityParent::quorum_certificate(reference)?;
+        Ok(Self {
+            height: finality_parent.height(),
+            block_id: finality_parent.block_id().clone(),
+            finality_parent,
+        })
+    }
+
+    pub fn finality_reference_id(&self) -> Hash {
+        self.finality_parent.reference_id()
+    }
+
+    pub fn quorum_certificate_reference(&self) -> Option<&QuorumCertificateReference> {
+        self.finality_parent.quorum_certificate_reference()
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        self.finality_parent.validate()?;
+        if self.height != self.finality_parent.height()
+            || self.block_id != *self.finality_parent.block_id()
+        {
+            return Err("finalized block record does not match its finality parent".to_string());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -111,8 +152,11 @@ pub struct FinalizedBlockRecord {
 pub struct SimplifiedSafetyState {
     pub state_version: u32,
     pub epoch_context_root: Hash,
-    pub anchor_qc: QuorumCertificateReference,
-    pub highest_qc: QuorumCertificateReference,
+    /// Fresh genesis is a non-QC anchor; transition epochs carry a real QC.
+    pub anchor_parent: SimplifiedFinalityParent,
+    /// The highest certified parent is Genesis before block one receives a
+    /// QC. Genesis is never coerced into a quorum-certificate reference.
+    pub highest_parent: SimplifiedFinalityParent,
     pub locked_qc: Option<QuorumCertificateReference>,
     pub last_vote: Option<LastVoteRecord>,
     /// Local authenticated proposal-delivery evidence for the active slot.
@@ -122,8 +166,8 @@ pub struct SimplifiedSafetyState {
     pub reliable_delivery: Option<ReliableDeliveryState>,
     pub takeover: Option<LeaseTakeoverState>,
     pub finalized: FinalizedBlockRecord,
-    /// Fully verified previous-epoch three-QC tail.  Empty for the one-time
-    /// v2 boundary and synthetic contexts.  At a v3-to-v3 transition this
+    /// Fully verified previous-epoch three-QC tail. Empty for the fresh
+    /// Genesis epoch. At a v3-to-v3 transition this
     /// retains the two certified-but-not-yet-finalized tail blocks so new
     /// epoch QCs can continue (rather than reset) three-chain finality.
     #[serde(default)]
@@ -139,7 +183,7 @@ pub struct SimplifiedSafetyState {
 impl SimplifiedSafetyState {
     pub fn new(
         epoch_context: &SimplifiedEpochContext,
-        anchor_qc: QuorumCertificateReference,
+        anchor_parent: SimplifiedFinalityParent,
     ) -> Result<Self, String> {
         epoch_context.validate()?;
         if epoch_context.v3_transition_anchor.is_some() {
@@ -148,34 +192,45 @@ impl SimplifiedSafetyState {
                     .to_string(),
             );
         }
-        anchor_qc.validate()?;
-        if anchor_qc.height.0.checked_add(1) != Some(epoch_context.epoch_start_height.0) {
-            return Err("simplified epoch anchor must certify the preceding height".to_string());
-        }
-        if let Some(expected) = &epoch_context.v2_boundary_anchor {
-            if anchor_qc.height != expected.height
-                || anchor_qc.block_id != expected.block_id
-                || anchor_qc.qc_id != expected.qc_finality_context_root
-            {
+        anchor_parent.validate_for_child_height(epoch_context.epoch_start_height)?;
+        match (&anchor_parent, &epoch_context.v2_boundary_anchor) {
+            (SimplifiedFinalityParent::Genesis(_), None)
+                if epoch_context.epoch_start_height == Height(1) => {}
+            (SimplifiedFinalityParent::Genesis(_), _) => {
+                return Err(
+                    "Genesis finality parent is valid only for fresh block-zero activation"
+                        .to_string(),
+                );
+            }
+            (SimplifiedFinalityParent::QuorumCertificate(anchor_qc), Some(expected))
+                if anchor_qc.height == expected.height
+                    && anchor_qc.block_id == expected.block_id
+                    && anchor_qc.qc_id == expected.qc_finality_context_root => {}
+            (SimplifiedFinalityParent::QuorumCertificate(_), Some(_)) => {
                 return Err(
                     "simplified state anchor does not match the exact v2 boundary QC".to_string(),
                 );
             }
+            (SimplifiedFinalityParent::QuorumCertificate(_), None) => {}
         }
+        let finalized = match &anchor_parent {
+            SimplifiedFinalityParent::Genesis(reference) => {
+                FinalizedBlockRecord::from_genesis(reference.clone())?
+            }
+            SimplifiedFinalityParent::QuorumCertificate(reference) => {
+                FinalizedBlockRecord::from_quorum_certificate(reference.clone())?
+            }
+        };
         Ok(Self {
-            state_version: 1,
+            state_version: 2,
             epoch_context_root: epoch_context.root()?,
-            highest_qc: anchor_qc.clone(),
+            highest_parent: anchor_parent.clone(),
             locked_qc: None,
             last_vote: None,
             reliable_delivery: None,
             takeover: None,
-            finalized: FinalizedBlockRecord {
-                height: anchor_qc.height,
-                block_id: anchor_qc.block_id.clone(),
-                qc_id: anchor_qc.qc_id,
-            },
-            anchor_qc,
+            finalized,
+            anchor_parent,
             epoch_transition_tail_qcs: Vec::new(),
             certified_qcs: BTreeMap::new(),
             certified_tcs: BTreeMap::new(),
@@ -206,7 +261,7 @@ impl SimplifiedSafetyState {
             || certified_parent.qc_id != anchor.certified_parent_qc_id
             || finalized_seed.height != anchor.finalized_seed_height
             || finalized_seed.block_id != anchor.finalized_seed_block_id
-            || finalized_seed.qc_id != anchor.finalized_seed_qc_id
+            || finalized_seed.finality_reference_id() != anchor.finalized_seed_qc_id
             || transition.transition_tail().len() != 3
         {
             return Err("verified transition pointers do not match the epoch anchor".to_string());
@@ -217,19 +272,15 @@ impl SimplifiedSafetyState {
             .ok_or_else(|| "verified transition lacks its parent lock".to_string())?
             .reference()?;
         let state = Self {
-            state_version: 1,
+            state_version: 2,
             epoch_context_root: epoch_context.root()?,
-            anchor_qc: certified_parent.clone(),
-            highest_qc: certified_parent,
+            anchor_parent: SimplifiedFinalityParent::quorum_certificate(certified_parent.clone())?,
+            highest_parent: SimplifiedFinalityParent::quorum_certificate(certified_parent)?,
             locked_qc: Some(locked_qc),
             last_vote: None,
             reliable_delivery: None,
             takeover: None,
-            finalized: FinalizedBlockRecord {
-                height: finalized_seed.height,
-                block_id: finalized_seed.block_id,
-                qc_id: finalized_seed.qc_id,
-            },
+            finalized: FinalizedBlockRecord::from_quorum_certificate(finalized_seed)?,
             epoch_transition_tail_qcs: transition.transition_tail().to_vec(),
             certified_qcs: BTreeMap::new(),
             certified_tcs: BTreeMap::new(),
@@ -241,24 +292,42 @@ impl SimplifiedSafetyState {
 
     pub fn validate(&self, epoch_context: &SimplifiedEpochContext) -> Result<(), String> {
         epoch_context.validate()?;
-        if self.state_version != 1 || self.epoch_context_root != epoch_context.root()? {
+        if self.state_version != 2 || self.epoch_context_root != epoch_context.root()? {
             return Err("simplified safety state does not match the activated epoch".to_string());
         }
-        self.anchor_qc.validate()?;
-        if let Some(expected) = &epoch_context.v2_boundary_anchor {
-            if self.anchor_qc.height != expected.height
-                || self.anchor_qc.block_id != expected.block_id
-                || self.anchor_qc.qc_id != expected.qc_finality_context_root
-            {
+        self.anchor_parent
+            .validate_for_child_height(epoch_context.epoch_start_height)?;
+        self.finalized.validate()?;
+        match (&self.anchor_parent, &epoch_context.v2_boundary_anchor) {
+            (SimplifiedFinalityParent::Genesis(reference), None)
+                if epoch_context.epoch_start_height == Height(1)
+                    && self.finalized == FinalizedBlockRecord::from_genesis(reference.clone())? => {
+            }
+            (SimplifiedFinalityParent::Genesis(_), _) => {
+                return Err(
+                    "persisted state uses Genesis outside fresh block-zero activation".to_string(),
+                );
+            }
+            (SimplifiedFinalityParent::QuorumCertificate(anchor_qc), Some(expected))
+                if anchor_qc.height == expected.height
+                    && anchor_qc.block_id == expected.block_id
+                    && anchor_qc.qc_id == expected.qc_finality_context_root => {}
+            (SimplifiedFinalityParent::QuorumCertificate(_), Some(_)) => {
                 return Err(
                     "persisted simplified state substituted another v2 boundary anchor".to_string(),
                 );
             }
+            (SimplifiedFinalityParent::QuorumCertificate(_), None) => {}
         }
         let minimum_finalized_height = if let Some(expected) = &epoch_context.v3_transition_anchor {
-            if self.anchor_qc.height != expected.certified_parent_height
-                || self.anchor_qc.block_id != expected.certified_parent_block_id
-                || self.anchor_qc.qc_id != expected.certified_parent_qc_id
+            if self
+                .anchor_parent
+                .quorum_certificate_reference()
+                .is_none_or(|anchor_qc| {
+                    anchor_qc.height != expected.certified_parent_height
+                        || anchor_qc.block_id != expected.certified_parent_block_id
+                        || anchor_qc.qc_id != expected.certified_parent_qc_id
+                })
                 || self.epoch_transition_tail_qcs.len() != 3
             {
                 return Err(
@@ -277,8 +346,10 @@ impl SimplifiedSafetyState {
                         != expected.previous_epoch_context_root
                     || certificate.context.height != Height(expected_height)
                     || (index > 0
-                        && certificate.parent_qc
-                            != self.epoch_transition_tail_qcs[index - 1].reference()?)
+                        && certificate.parent
+                            != SimplifiedFinalityParent::quorum_certificate(
+                                self.epoch_transition_tail_qcs[index - 1].reference()?,
+                            )?)
                 {
                     return Err(
                         "persisted v3 transition tail is not the exact consecutive prior-epoch proof"
@@ -290,8 +361,8 @@ impl SimplifiedSafetyState {
             let certified = self.epoch_transition_tail_qcs[2].reference()?;
             if finalized.height != expected.finalized_seed_height
                 || finalized.block_id != expected.finalized_seed_block_id
-                || finalized.qc_id != expected.finalized_seed_qc_id
-                || certified != self.anchor_qc
+                || finalized.finality_reference_id() != expected.finalized_seed_qc_id
+                || self.anchor_parent.quorum_certificate_reference() != Some(&certified)
             {
                 return Err("persisted v3 transition proof pointers do not match".to_string());
             }
@@ -300,18 +371,21 @@ impl SimplifiedSafetyState {
             if !self.epoch_transition_tail_qcs.is_empty() {
                 return Err("non-transition state carries a v3 transition proof tail".to_string());
             }
-            self.anchor_qc.height.0
+            self.anchor_parent.height().0
         };
-        self.highest_qc.validate()?;
-        if self.highest_qc.height.0 < self.anchor_qc.height.0
+        self.highest_parent.validate()?;
+        if !self.known_parent(&self.highest_parent)? {
+            return Err("highest finality parent is not backed by durable evidence".to_string());
+        }
+        if self.highest_parent.height().0 < self.anchor_parent.height().0
             || self.finalized.height.0 < minimum_finalized_height
-            || self.finalized.height.0 > self.highest_qc.height.0
+            || self.finalized.height.0 > self.highest_parent.height().0
         {
             return Err("simplified safety pointers are not monotonic".to_string());
         }
         if let Some(lock) = &self.locked_qc {
             lock.validate()?;
-            if lock.height.0 > self.highest_qc.height.0 {
+            if lock.height.0 > self.highest_parent.height().0 {
                 return Err("locked QC is higher than highest QC".to_string());
             }
         }
@@ -400,8 +474,8 @@ impl SimplifiedSafetyState {
     }
 
     pub fn next_height(&self) -> Result<Height, String> {
-        self.highest_qc
-            .height
+        self.highest_parent
+            .height()
             .0
             .checked_add(1)
             .map(Height)
@@ -454,8 +528,8 @@ impl SimplifiedSafetyState {
         let view = ConsensusAuthorityView {
             state_version: self.state_version,
             epoch_context_root: self.epoch_context_root,
-            anchor_qc: self.anchor_qc.clone(),
-            highest_qc: self.highest_qc.clone(),
+            anchor_parent: self.anchor_parent.clone(),
+            highest_parent: self.highest_parent.clone(),
             locked_qc: self.locked_qc.clone(),
             takeover,
             finalized: self.finalized.clone(),
@@ -485,10 +559,13 @@ impl SimplifiedSafetyState {
         }
     }
 
-    fn known_qc(&self, reference: &QuorumCertificateReference) -> Result<bool, String> {
-        if &self.anchor_qc == reference {
+    fn known_parent(&self, parent: &SimplifiedFinalityParent) -> Result<bool, String> {
+        if &self.anchor_parent == parent {
             return Ok(true);
         }
+        let Some(reference) = parent.quorum_certificate_reference() else {
+            return Ok(false);
+        };
         self.certified_qcs
             .get(&reference.height.0)
             .map(|qc| qc.reference().map(|known| known == *reference))
@@ -504,12 +581,12 @@ impl SimplifiedSafetyState {
         })
     }
 
-    fn proposal_extends_lock(
-        &self,
-        parent_qc: &QuorumCertificateReference,
-    ) -> Result<bool, String> {
+    fn proposal_extends_lock(&self, parent: &SimplifiedFinalityParent) -> Result<bool, String> {
         let Some(lock) = &self.locked_qc else {
             return Ok(true);
+        };
+        let Some(parent_qc) = parent.quorum_certificate_reference() else {
+            return Ok(false);
         };
         if parent_qc == lock {
             return Ok(true);
@@ -522,7 +599,10 @@ impl SimplifiedSafetyState {
             if qc.reference()? != cursor {
                 break;
             }
-            cursor = qc.parent_qc.clone();
+            let Some(next) = qc.parent.quorum_certificate_reference() else {
+                return Ok(false);
+            };
+            cursor = next.clone();
             if &cursor == lock {
                 return Ok(true);
             }
@@ -545,8 +625,8 @@ struct ConsensusAuthorityTakeover {
 struct ConsensusAuthorityView {
     state_version: u32,
     epoch_context_root: Hash,
-    anchor_qc: QuorumCertificateReference,
-    highest_qc: QuorumCertificateReference,
+    anchor_parent: SimplifiedFinalityParent,
+    highest_parent: SimplifiedFinalityParent,
     locked_qc: Option<QuorumCertificateReference>,
     takeover: Option<ConsensusAuthorityTakeover>,
     finalized: FinalizedBlockRecord,
@@ -562,7 +642,7 @@ struct ConsensusAuthorityView {
 pub struct SimplifiedStateSyncBundle {
     pub format: String,
     pub epoch_context: SimplifiedEpochContext,
-    pub anchor_qc: QuorumCertificateReference,
+    pub anchor_parent: SimplifiedFinalityParent,
     pub certified_qcs: Vec<SimplifiedQuorumCertificate>,
     pub certified_tcs: BTreeMap<u64, Vec<SimplifiedTimeoutCertificate>>,
     pub claimed_finalized: FinalizedBlockRecord,
@@ -577,7 +657,7 @@ impl SimplifiedStateSyncBundle {
         Ok(Self {
             format: POSY_SIMPLIFIED_STATE_SYNC_FORMAT.to_string(),
             epoch_context: epoch_context.clone(),
-            anchor_qc: state.anchor_qc.clone(),
+            anchor_parent: state.anchor_parent.clone(),
             certified_qcs: state.certified_qcs.values().cloned().collect(),
             certified_tcs: state.certified_tcs.clone(),
             claimed_finalized: state.finalized.clone(),
@@ -590,12 +670,12 @@ impl SimplifiedStateSyncBundle {
         &self,
         expected_epoch_context: &SimplifiedEpochContext,
         validator_set: &ValidatorSet,
-        expected_anchor_qc: &QuorumCertificateReference,
+        expected_anchor_parent: &SimplifiedFinalityParent,
         verifier: &V,
         local_last_vote: Option<LastVoteRecord>,
         local_safety_halt: Option<SafetyHaltIncident>,
     ) -> Result<SimplifiedSafetyState, String> {
-        self.validate_pinned_envelope(expected_epoch_context, expected_anchor_qc)?;
+        self.validate_pinned_envelope(expected_epoch_context, expected_anchor_parent)?;
         expected_epoch_context.validate_against(validator_set)?;
         if expected_epoch_context.v3_transition_anchor.is_some() {
             return Err(
@@ -603,7 +683,8 @@ impl SimplifiedStateSyncBundle {
                     .to_string(),
             );
         }
-        let state = SimplifiedSafetyState::new(expected_epoch_context, expected_anchor_qc.clone())?;
+        let state =
+            SimplifiedSafetyState::new(expected_epoch_context, expected_anchor_parent.clone())?;
         self.reconstruct_from_initial_state(
             expected_epoch_context,
             validator_set,
@@ -625,7 +706,9 @@ impl SimplifiedStateSyncBundle {
         local_safety_halt: Option<SafetyHaltIncident>,
     ) -> Result<SimplifiedSafetyState, String> {
         let epoch_context = transition.next_epoch_context();
-        self.validate_pinned_envelope(epoch_context, transition.certified_parent())?;
+        let expected_anchor_parent =
+            SimplifiedFinalityParent::quorum_certificate(transition.certified_parent().clone())?;
+        self.validate_pinned_envelope(epoch_context, &expected_anchor_parent)?;
         epoch_context.validate_against(transition.next_validator_set())?;
         let state =
             SimplifiedSafetyState::new_from_verified_v3_transition(epoch_context, transition)?;
@@ -642,11 +725,11 @@ impl SimplifiedStateSyncBundle {
     fn validate_pinned_envelope(
         &self,
         expected_epoch_context: &SimplifiedEpochContext,
-        expected_anchor_qc: &QuorumCertificateReference,
+        expected_anchor_parent: &SimplifiedFinalityParent,
     ) -> Result<(), String> {
         if self.format != POSY_SIMPLIFIED_STATE_SYNC_FORMAT
             || &self.epoch_context != expected_epoch_context
-            || &self.anchor_qc != expected_anchor_qc
+            || &self.anchor_parent != expected_anchor_parent
         {
             return Err("state-sync bundle does not match the pinned epoch anchor".to_string());
         }
@@ -674,7 +757,7 @@ impl SimplifiedStateSyncBundle {
         for certificate in certificates {
             let expected_height = state.next_height()?;
             if certificate.context.height != expected_height
-                || certificate.parent_qc != state.highest_qc
+                || certificate.parent != state.highest_parent
             {
                 return Err("state-sync QCs do not form one consecutive anchored chain".to_string());
             }
@@ -698,8 +781,8 @@ impl SimplifiedStateSyncBundle {
             state
                 .certified_qcs
                 .insert(expected_height.0, certificate.clone());
-            state.highest_qc = reference;
-            state.locked_qc = Some(certificate.parent_qc.clone());
+            state.highest_parent = SimplifiedFinalityParent::quorum_certificate(reference)?;
+            state.locked_qc = certificate.parent.quorum_certificate_reference().cloned();
             reconstruct_three_chain_commit(&mut state, &certificate)?;
         }
 
@@ -756,7 +839,7 @@ fn install_state_sync_tcs_for_height<V: ConsensusSignatureVerifier>(
         if certificate.context.height != height
             || certificate.context.round.0 != expected_round
             || certificate.previous_tc_id != expected_previous
-            || certificate.highest_qc()? != state.highest_qc
+            || certificate.highest_parent()? != state.highest_parent
         {
             return Err("state-sync TC evidence is stale or non-sequential".to_string());
         }
@@ -785,27 +868,29 @@ fn reconstruct_three_chain_commit(
     state: &mut SimplifiedSafetyState,
     newest: &SimplifiedQuorumCertificate,
 ) -> Result<(), String> {
-    let Some(parent) = state.certificate_at(newest.parent_qc.height) else {
+    let Some(parent_reference) = newest.parent.quorum_certificate_reference() else {
         return Ok(());
     };
-    if parent.reference()? != newest.parent_qc {
+    let Some(parent) = state.certificate_at(parent_reference.height) else {
+        return Ok(());
+    };
+    if parent.reference()? != *parent_reference {
         return Err("state-sync newest QC does not extend its certified parent".to_string());
     }
-    let Some(grandparent) = state.certificate_at(parent.parent_qc.height) else {
+    let Some(grandparent_reference) = parent.parent.quorum_certificate_reference() else {
         return Ok(());
     };
-    if grandparent.reference()? != parent.parent_qc
+    let Some(grandparent) = state.certificate_at(grandparent_reference.height) else {
+        return Ok(());
+    };
+    if grandparent.reference()? != *grandparent_reference
         || grandparent.context.height.0.checked_add(1) != Some(parent.context.height.0)
         || parent.context.height.0.checked_add(1) != Some(newest.context.height.0)
     {
         return Err("state-sync certificates do not form a consecutive three-chain".to_string());
     }
     if grandparent.context.height.0 > state.finalized.height.0 {
-        state.finalized = FinalizedBlockRecord {
-            height: grandparent.context.height,
-            block_id: grandparent.block_id.clone(),
-            qc_id: grandparent.id()?,
-        };
+        state.finalized = FinalizedBlockRecord::from_quorum_certificate(grandparent.reference()?)?;
     }
     Ok(())
 }
@@ -835,7 +920,7 @@ impl DurableSimplifiedPosyStore {
     pub fn initialize(
         &self,
         epoch_context: &SimplifiedEpochContext,
-        anchor_qc: QuorumCertificateReference,
+        anchor_parent: SimplifiedFinalityParent,
     ) -> Result<SimplifiedSafetyState, String> {
         if epoch_context.v3_transition_anchor.is_some() {
             return Err(
@@ -844,7 +929,7 @@ impl DurableSimplifiedPosyStore {
         }
         if self.path.exists() {
             let state = self.load(epoch_context)?;
-            if state.anchor_qc != anchor_qc {
+            if state.anchor_parent != anchor_parent {
                 return Err(
                     "simplified restart supplied a different epoch anchor than durable state"
                         .to_string(),
@@ -852,7 +937,7 @@ impl DurableSimplifiedPosyStore {
             }
             return Ok(state);
         }
-        let state = SimplifiedSafetyState::new(epoch_context, anchor_qc)?;
+        let state = SimplifiedSafetyState::new(epoch_context, anchor_parent)?;
         self.persist(epoch_context, &state)?;
         Ok(state)
     }
@@ -864,7 +949,10 @@ impl DurableSimplifiedPosyStore {
         let epoch_context = transition.next_epoch_context();
         if self.path.exists() {
             let state = self.load(epoch_context)?;
-            if state.anchor_qc != *transition.certified_parent()
+            if state.anchor_parent
+                != SimplifiedFinalityParent::quorum_certificate(
+                    transition.certified_parent().clone(),
+                )?
                 || state.epoch_transition_tail_qcs != transition.transition_tail()
             {
                 return Err(
@@ -988,12 +1076,12 @@ impl SimplifiedConsensusStateMachine {
         epoch_context: SimplifiedEpochContext,
         validator_set: ValidatorSet,
         store: DurableSimplifiedPosyStore,
-        anchor_qc: QuorumCertificateReference,
+        anchor_parent: SimplifiedFinalityParent,
     ) -> Result<Self, String> {
         let restart = store.path().exists();
         let opened_at = Instant::now();
         epoch_context.validate_against(&validator_set)?;
-        let state = store.initialize(&epoch_context, anchor_qc)?;
+        let state = store.initialize(&epoch_context, anchor_parent)?;
         state.validate(&epoch_context)?;
         let mut machine = Self {
             epoch_context,
@@ -1190,7 +1278,7 @@ impl SimplifiedConsensusStateMachine {
             context: delivery.context.clone(),
             block_id: candidate.block_id.clone(),
             parent_block_id: candidate.parent_block_id.clone(),
-            parent_qc: candidate.parent_qc.clone(),
+            parent: candidate.parent.clone(),
             takeover_tc_id,
             protected_execution_root: candidate.protected_execution_root,
             validator_id: validator_id.clone(),
@@ -1254,16 +1342,22 @@ impl SimplifiedConsensusStateMachine {
         &self,
         newest: &SimplifiedQuorumCertificate,
     ) -> Result<Option<FinalizedBlockRecord>, String> {
-        let Some(parent) = self.state.certificate_at(newest.parent_qc.height) else {
+        let Some(parent_reference) = newest.parent.quorum_certificate_reference() else {
             return Ok(None);
         };
-        if parent.reference()? != newest.parent_qc {
+        let Some(parent) = self.state.certificate_at(parent_reference.height) else {
+            return Ok(None);
+        };
+        if parent.reference()? != *parent_reference {
             return Err("candidate QC does not extend its claimed certified parent".to_string());
         }
-        let Some(grandparent) = self.state.certificate_at(parent.parent_qc.height) else {
+        let Some(grandparent_reference) = parent.parent.quorum_certificate_reference() else {
             return Ok(None);
         };
-        if grandparent.reference()? != parent.parent_qc
+        let Some(grandparent) = self.state.certificate_at(grandparent_reference.height) else {
+            return Ok(None);
+        };
+        if grandparent.reference()? != *grandparent_reference
             || grandparent.context.height.0.checked_add(1) != Some(parent.context.height.0)
             || parent.context.height.0.checked_add(1) != Some(newest.context.height.0)
         {
@@ -1272,11 +1366,9 @@ impl SimplifiedConsensusStateMachine {
         if grandparent.context.height.0 <= self.state.finalized.height.0 {
             return Ok(None);
         }
-        Ok(Some(FinalizedBlockRecord {
-            height: grandparent.context.height,
-            block_id: grandparent.block_id.clone(),
-            qc_id: grandparent.id()?,
-        }))
+        Ok(Some(FinalizedBlockRecord::from_quorum_certificate(
+            grandparent.reference()?,
+        )?))
     }
 
     pub fn metrics(&self) -> &SimplifiedConsensusMetrics {
@@ -1308,7 +1400,7 @@ impl SimplifiedConsensusStateMachine {
             None => bundle.verify_and_reconstruct(
                 &self.epoch_context,
                 &self.validator_set,
-                &self.state.anchor_qc,
+                &self.state.anchor_parent,
                 verifier,
                 self.state.last_vote.clone(),
                 self.state.safety_halt.clone(),
@@ -1325,7 +1417,8 @@ impl SimplifiedConsensusStateMachine {
                     .to_string(),
             );
         }
-        if qc_order(&reconstructed.highest_qc) < qc_order(&self.state.highest_qc)
+        if finality_parent_order(&reconstructed.highest_parent)
+            < finality_parent_order(&self.state.highest_parent)
             || reconstructed.finalized.height.0 < self.state.finalized.height.0
         {
             return Err(
@@ -1433,7 +1526,8 @@ impl SimplifiedConsensusStateMachine {
         validator_id: &ValidatorId,
         key_id: &AegisPqKeyId,
     ) -> Result<(), String> {
-        self.active_signer_cluster_id(validator_id, key_id).map(|_| ())
+        self.active_signer_cluster_id(validator_id, key_id)
+            .map(|_| ())
     }
 
     fn active_signer_cluster_id(
@@ -1467,8 +1561,11 @@ impl SimplifiedConsensusStateMachine {
             ));
         }
         if proposal.block_id.0.trim().is_empty()
-            || proposal.parent_block_id != proposal.parent_qc.block_id
-            || proposal.parent_qc.height.0.checked_add(1) != Some(proposal.context.height.0)
+            || proposal.parent_block_id != *proposal.parent.block_id()
+            || proposal
+                .parent
+                .validate_for_child_height(proposal.context.height)
+                .is_err()
             || proposal.protected_execution_root.is_zero()
             || proposal.takeover_tc_id.is_some_and(Hash::is_zero)
         {
@@ -1476,8 +1573,8 @@ impl SimplifiedConsensusStateMachine {
                 "proposal has invalid ancestry or protected-execution commitment".to_string(),
             );
         }
-        if !self.state.known_qc(&proposal.parent_qc)? {
-            return Err("proposal parent QC is not verified local safety state".to_string());
+        if !self.state.known_parent(&proposal.parent)? {
+            return Err("proposal parent is not verified local safety state".to_string());
         }
         let (expected_round, expected_tc_id) = self
             .state
@@ -1506,7 +1603,7 @@ impl SimplifiedConsensusStateMachine {
                     proposal.context.clone(),
                     proposal.block_id.clone(),
                     proposal.parent_block_id.clone(),
-                    proposal.parent_qc.clone(),
+                    proposal.parent.clone(),
                     proposal.protected_execution_root,
                 )?;
                 if let Some(mandatory) = certificate.mandatory_carry_candidate()? {
@@ -1516,7 +1613,7 @@ impl SimplifiedConsensusStateMachine {
                                 .to_string(),
                         );
                     }
-                } else if proposal.parent_qc != certificate.highest_qc()? {
+                } else if proposal.parent != certificate.highest_parent()? {
                     return Err(
                         "fresh takeover proposal does not extend the TC maximum verified QC"
                             .to_string(),
@@ -1538,12 +1635,12 @@ impl SimplifiedConsensusStateMachine {
         // proposal must still extend the durable lock, or be justified by a
         // strictly higher *verified QC*. This is the core chained-QC safety
         // boundary that prevents timeout-driven forks.
-        let extends_lock = self.state.proposal_extends_lock(&proposal.parent_qc)?;
+        let extends_lock = self.state.proposal_extends_lock(&proposal.parent)?;
         let higher_qc_unlock = self
             .state
             .locked_qc
             .as_ref()
-            .is_some_and(|lock| proposal.parent_qc.height.0 > lock.height.0);
+            .is_some_and(|lock| proposal.parent.height().0 > lock.height.0);
         if !extends_lock && !higher_qc_unlock {
             return Err("proposal conflicts with the durable QC lock".to_string());
         }
@@ -1602,7 +1699,7 @@ impl SimplifiedConsensusStateMachine {
             proposal.context.clone(),
             proposal.block_id.clone(),
             proposal.parent_block_id.clone(),
-            proposal.parent_qc.clone(),
+            proposal.parent.clone(),
             proposal.protected_execution_root,
         )?;
         signing_authority.authorize_before_signature(&ConsensusSigningAuthorization {
@@ -1646,7 +1743,7 @@ impl SimplifiedConsensusStateMachine {
             context: proposal.context.clone(),
             block_id: proposal.block_id.clone(),
             parent_block_id: proposal.parent_block_id.clone(),
-            parent_qc: proposal.parent_qc.clone(),
+            parent: proposal.parent.clone(),
             takeover_tc_id: proposal.takeover_tc_id,
             protected_execution_root: proposal.protected_execution_root,
             validator_id: validator_id.clone(),
@@ -1662,7 +1759,7 @@ impl SimplifiedConsensusStateMachine {
             proposal.context.clone(),
             proposal.block_id.clone(),
             proposal.parent_block_id.clone(),
-            proposal.parent_qc.clone(),
+            proposal.parent.clone(),
             proposal.protected_execution_root,
         )?;
         let mut conflict_unlock_tc_id = None;
@@ -1815,7 +1912,7 @@ impl SimplifiedConsensusStateMachine {
                 .epoch_context
                 .authorized_proposer(height, round)?
                 .clone(),
-            highest_qc: self.state.highest_qc.clone(),
+            highest_parent: self.state.highest_parent.clone(),
             previous_tc_id,
             last_voted_candidate: carry_candidate,
             validator_id: validator_id.clone(),
@@ -1844,7 +1941,7 @@ impl SimplifiedConsensusStateMachine {
                 "posy-v3-timeout:{}",
                 timeout_subject_root.to_hex()
             ))),
-            highest_prepared_vc_root: Some(vote.highest_qc.qc_id),
+            highest_prepared_vc_root: Some(vote.highest_parent.reference_id()),
             conflict_unlock_tc_id: None,
         })?;
         vote.signature = signer
@@ -1889,7 +1986,7 @@ impl SimplifiedConsensusStateMachine {
         if certificate.context.height != expected_height
             || certificate.context.round.0 != expected_round
             || certificate.previous_tc_id != expected_previous
-            || certificate.highest_qc()? != self.state.highest_qc
+            || certificate.highest_parent()? != self.state.highest_parent
         {
             return Err("stale, skipped, or non-sequential timeout certificate".to_string());
         }
@@ -2010,7 +2107,7 @@ impl SimplifiedConsensusStateMachine {
         {
             return Err("QC does not match the active lease takeover state".to_string());
         }
-        if !self.state.known_qc(&certificate.parent_qc)? {
+        if !self.state.known_parent(&certificate.parent)? {
             return Err("QC parent is not verified local safety state".to_string());
         }
         let reference = certificate.reference()?;
@@ -2018,20 +2115,25 @@ impl SimplifiedConsensusStateMachine {
         staged_state
             .certified_qcs
             .insert(certificate.context.height.0, certificate.clone());
-        if qc_order(&reference) > qc_order(&staged_state.highest_qc) {
-            staged_state.highest_qc = reference.clone();
+        if finality_parent_order(&SimplifiedFinalityParent::quorum_certificate(
+            reference.clone(),
+        )?) > finality_parent_order(&staged_state.highest_parent)
+        {
+            staged_state.highest_parent =
+                SimplifiedFinalityParent::quorum_certificate(reference.clone())?;
         }
 
         // A certified child proves its parent remains on the safe chain. The
         // lock advances monotonically to that parent; it is never cleared by a
         // timeout, restart, or operator action.
-        let parent = certificate.parent_qc.clone();
-        if staged_state
-            .locked_qc
-            .as_ref()
-            .is_none_or(|lock| qc_order(&parent) > qc_order(lock))
-        {
-            staged_state.locked_qc = Some(parent.clone());
+        if let Some(parent) = certificate.parent.quorum_certificate_reference() {
+            if staged_state
+                .locked_qc
+                .as_ref()
+                .is_none_or(|lock| qc_order(parent) > qc_order(lock))
+            {
+                staged_state.locked_qc = Some(parent.clone());
+            }
         }
 
         let finalized = Self::try_three_chain_commit(&mut staged_state, &certificate)?;
@@ -2045,16 +2147,22 @@ impl SimplifiedConsensusStateMachine {
         state: &mut SimplifiedSafetyState,
         newest: &SimplifiedQuorumCertificate,
     ) -> Result<Option<FinalizedBlockRecord>, String> {
-        let Some(parent) = state.certificate_at(newest.parent_qc.height) else {
+        let Some(parent_reference) = newest.parent.quorum_certificate_reference() else {
             return Ok(None);
         };
-        if parent.reference()? != newest.parent_qc {
+        let Some(parent) = state.certificate_at(parent_reference.height) else {
+            return Ok(None);
+        };
+        if parent.reference()? != *parent_reference {
             return Err("newest QC does not extend its claimed certified parent".to_string());
         }
-        let Some(grandparent) = state.certificate_at(parent.parent_qc.height) else {
+        let Some(grandparent_reference) = parent.parent.quorum_certificate_reference() else {
             return Ok(None);
         };
-        if grandparent.reference()? != parent.parent_qc
+        let Some(grandparent) = state.certificate_at(grandparent_reference.height) else {
+            return Ok(None);
+        };
+        if grandparent.reference()? != *grandparent_reference
             || grandparent.context.height.0.checked_add(1) != Some(parent.context.height.0)
             || parent.context.height.0.checked_add(1) != Some(newest.context.height.0)
         {
@@ -2063,11 +2171,7 @@ impl SimplifiedConsensusStateMachine {
         if grandparent.context.height.0 <= state.finalized.height.0 {
             return Ok(None);
         }
-        let committed = FinalizedBlockRecord {
-            height: grandparent.context.height,
-            block_id: grandparent.block_id.clone(),
-            qc_id: grandparent.id()?,
-        };
+        let committed = FinalizedBlockRecord::from_quorum_certificate(grandparent.reference()?)?;
         state.finalized = committed.clone();
         Ok(Some(committed))
     }
@@ -2075,6 +2179,10 @@ impl SimplifiedConsensusStateMachine {
 
 fn qc_order(reference: &QuorumCertificateReference) -> (u64, [u8; 32]) {
     (reference.height.0, reference.qc_id.0)
+}
+
+fn finality_parent_order(reference: &SimplifiedFinalityParent) -> (u64, [u8; 32]) {
+    (reference.height().0, reference.reference_id().0)
 }
 
 fn simplified_vote_authorization_candidate(

@@ -8,8 +8,8 @@
 //! not require rewriting or deserializing a multi-gigabyte monolith.
 
 use super::{
-    CertifiedCandidateSubject, FinalizedBlockRecord, QuorumCertificateReference,
-    SimplifiedEpochContext, SimplifiedProposal, SimplifiedProposalDirective,
+    CertifiedCandidateSubject, FinalizedBlockRecord, SimplifiedEpochContext,
+    SimplifiedFinalityParent, SimplifiedProposal, SimplifiedProposalDirective,
     SimplifiedProtectedProposalSource, POSY_SIMPLIFIED_PROTOCOL_VERSION,
 };
 use crate::consensus_parameters::ConsensusParameterRoot;
@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const POSY_SIMPLIFIED_MATERIAL_FORMAT: &str = "synergy-posy-simplified-protected-material-v1";
+pub const POSY_SIMPLIFIED_MATERIAL_FORMAT: &str = "synergy-posy-simplified-protected-material-v2";
 pub const MAX_POSY_SIMPLIFIED_MATERIAL_RECORD_BYTES: usize = 16 * 1024 * 1024;
 const POSY_SIMPLIFIED_MATERIAL_DIRECTORY: &str = "data/posy-v3-protected-material";
 
@@ -43,6 +43,10 @@ pub struct VerifiedSimplifiedProposalMaterial {
     pub canonical_block: Block,
     pub target_context: Option<TargetAdmissionContext>,
     pub protected_input: Option<ProtectedBlockInput>,
+    /// Optional signer-independent dynamic-membership subject. When present,
+    /// it is part of the protected-execution root certified by the QC and can
+    /// therefore be used only by the durable transition-authority verifier.
+    pub transition_subject_root: Option<Hash>,
 }
 
 #[derive(Serialize)]
@@ -50,11 +54,12 @@ struct ProtectedExecutionRootSubject<'a> {
     context: &'a super::ConsensusObjectContext,
     block_id: &'a BlockId,
     parent_block_id: &'a BlockId,
-    parent_qc: &'a QuorumCertificateReference,
+    parent: &'a SimplifiedFinalityParent,
     canonical_block_header: &'a crate::synergy_types::BlockHeader,
     transactions: &'a [crate::synergy_types::Transaction],
     target_context_root: Option<Hash>,
     protected_input_digest: Option<&'a EtdagDigest>,
+    transition_subject_root: Option<Hash>,
 }
 
 impl VerifiedSimplifiedProposalMaterial {
@@ -64,6 +69,24 @@ impl VerifiedSimplifiedProposalMaterial {
         block: Block,
         parent_execution_state: &ExecutionState,
     ) -> Result<(Self, ExecutionState), String> {
+        Self::verify_core_with_transition_subject(
+            epoch_context,
+            proposal,
+            block,
+            parent_execution_state,
+            None,
+        )
+    }
+
+    /// As [`Self::verify_core`], but binds an already-validated dynamic
+    /// membership subject into the QC-covered protected-execution root.
+    pub fn verify_core_with_transition_subject(
+        epoch_context: &SimplifiedEpochContext,
+        proposal: &SimplifiedProposal,
+        block: Block,
+        parent_execution_state: &ExecutionState,
+        transition_subject_root: Option<Hash>,
+    ) -> Result<(Self, ExecutionState), String> {
         if !block.transactions.is_empty() || block.header.protected_batch.is_some() {
             return Err(
                 "simplified core material must be an empty block without ETDAG commitment"
@@ -71,7 +94,15 @@ impl VerifiedSimplifiedProposalMaterial {
             );
         }
         let next_state = verify_block_execution(parent_execution_state, &block)?;
-        Self::finish_verified(epoch_context, proposal, block, None, None, next_state)
+        Self::finish_verified(
+            epoch_context,
+            proposal,
+            block,
+            None,
+            None,
+            transition_subject_root,
+            next_state,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -86,6 +117,37 @@ impl VerifiedSimplifiedProposalMaterial {
         validator_set: &ValidatorSet,
         cluster_map: &ClusterMap,
         parameters: &EtdagParameters,
+    ) -> Result<(Self, ExecutionState), String> {
+        Self::verify_protected_with_transition_subject(
+            epoch_context,
+            proposal,
+            block,
+            target_context,
+            protected_input,
+            parent_execution_state,
+            verifier,
+            validator_set,
+            cluster_map,
+            parameters,
+            None,
+        )
+    }
+
+    /// As [`Self::verify_protected`], but binds an already-validated dynamic
+    /// membership subject into the QC-covered protected-execution root.
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_protected_with_transition_subject(
+        epoch_context: &SimplifiedEpochContext,
+        proposal: &SimplifiedProposal,
+        block: Block,
+        target_context: TargetAdmissionContext,
+        protected_input: ProtectedBlockInput,
+        parent_execution_state: &ExecutionState,
+        verifier: &AegisPqvmVerifier,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        parameters: &EtdagParameters,
+        transition_subject_root: Option<Hash>,
     ) -> Result<(Self, ExecutionState), String> {
         proposal.context.validate_against(epoch_context)?;
         validate_target_context_for_epoch(&target_context, epoch_context, proposal.context.height)?;
@@ -118,6 +180,7 @@ impl VerifiedSimplifiedProposalMaterial {
             block,
             Some(target_context),
             Some(protected_input),
+            transition_subject_root,
             next_state,
         )
     }
@@ -128,14 +191,18 @@ impl VerifiedSimplifiedProposalMaterial {
         block: Block,
         target_context: Option<TargetAdmissionContext>,
         protected_input: Option<ProtectedBlockInput>,
+        transition_subject_root: Option<Hash>,
         next_state: ExecutionState,
     ) -> Result<(Self, ExecutionState), String> {
-        validate_block_binding(epoch_context, proposal, &block)?;
+        if transition_subject_root.is_some_and(Hash::is_zero) {
+            return Err("simplified transition subject root is zero".to_string());
+        }
+        validate_block_binding(epoch_context, proposal, &block, transition_subject_root)?;
         let candidate_subject = CertifiedCandidateSubject::new(
             proposal.context.clone(),
             proposal.block_id.clone(),
             proposal.parent_block_id.clone(),
-            proposal.parent_qc.clone(),
+            proposal.parent.clone(),
             proposal.protected_execution_root,
         )?;
         let stable_candidate_id = candidate_subject.id()?;
@@ -148,6 +215,7 @@ impl VerifiedSimplifiedProposalMaterial {
             canonical_block,
             target_context,
             protected_input,
+            transition_subject_root,
         };
         record.validate(epoch_context.root()?)?;
         Ok((record, next_state))
@@ -235,6 +303,7 @@ impl VerifiedSimplifiedProposalMaterial {
             || expected_epoch_context_root.is_zero()
             || self.epoch_context_root != expected_epoch_context_root
             || self.stable_candidate_id != self.candidate_subject.id()?
+            || self.transition_subject_root.is_some_and(Hash::is_zero)
             || self.canonical_block.candidate_id()? != self.candidate_subject.block_id
             || self.canonical_block.header.round != Round(0)
             || !self
@@ -311,13 +380,14 @@ impl VerifiedSimplifiedProposalMaterial {
                 );
             }
         }
-        let recomputed = compute_simplified_protected_execution_root(
+        let recomputed = compute_simplified_protected_execution_root_with_transition_subject(
             &self.candidate_subject.context,
             &self.canonical_block,
             &self.candidate_subject.parent_block_id,
-            &self.candidate_subject.parent_qc,
+            &self.candidate_subject.parent,
             self.target_context.as_ref(),
             self.protected_input.as_ref(),
+            self.transition_subject_root,
         )?;
         if recomputed != self.candidate_subject.protected_execution_root {
             return Err("simplified protected-execution root mismatch".to_string());
@@ -371,9 +441,32 @@ pub fn compute_simplified_protected_execution_root(
     context: &super::ConsensusObjectContext,
     block: &Block,
     parent_block_id: &BlockId,
-    parent_qc: &QuorumCertificateReference,
+    parent: &SimplifiedFinalityParent,
     target_context: Option<&TargetAdmissionContext>,
     protected_input: Option<&ProtectedBlockInput>,
+) -> Result<Hash, String> {
+    compute_simplified_protected_execution_root_with_transition_subject(
+        context,
+        block,
+        parent_block_id,
+        parent,
+        target_context,
+        protected_input,
+        None,
+    )
+}
+
+/// Computes the exact QC-covered root for a proposal that optionally carries
+/// a dynamic-membership transition subject. The root, rather than a mutable
+/// side channel, is the only authority carried forward to epoch transition.
+pub fn compute_simplified_protected_execution_root_with_transition_subject(
+    context: &super::ConsensusObjectContext,
+    block: &Block,
+    parent_block_id: &BlockId,
+    parent: &SimplifiedFinalityParent,
+    target_context: Option<&TargetAdmissionContext>,
+    protected_input: Option<&ProtectedBlockInput>,
+    transition_subject_root: Option<Hash>,
 ) -> Result<Hash, String> {
     if (target_context.is_some()) != (protected_input.is_some()) {
         return Err(
@@ -395,16 +488,17 @@ pub fn compute_simplified_protected_execution_root(
         context: &stable_context,
         block_id: &block_id,
         parent_block_id,
-        parent_qc,
+        parent,
         canonical_block_header: &canonical_block.header,
         transactions: &canonical_block.transactions,
         target_context_root,
         protected_input_digest: protected_input_digest.as_ref(),
+        transition_subject_root,
     };
     let bytes = serde_json::to_vec(&subject)
         .map_err(|error| format!("serialize simplified protected-execution transcript: {error}"))?;
     Ok(Hash::from_domain_bytes(
-        "SYNERGY_POSY_SIMPLIFIED_PROTECTED_EXECUTION_V1",
+        "SYNERGY_POSY_SIMPLIFIED_PROTECTED_EXECUTION_V2",
         &bytes,
     ))
 }
@@ -413,6 +507,7 @@ fn validate_block_binding(
     epoch_context: &SimplifiedEpochContext,
     proposal: &SimplifiedProposal,
     block: &Block,
+    transition_subject_root: Option<Hash>,
 ) -> Result<(), String> {
     proposal.context.validate_against(epoch_context)?;
     let parameter_root = ConsensusParameterRoot::from_hex(&epoch_context.consensus_parameter_root)?;
@@ -440,13 +535,14 @@ fn validate_block_binding(
     {
         return Err("simplified proposal and protected block material disagree".to_string());
     }
-    let recomputed = compute_simplified_protected_execution_root(
+    let recomputed = compute_simplified_protected_execution_root_with_transition_subject(
         &proposal.context,
         block,
         &proposal.parent_block_id,
-        &proposal.parent_qc,
+        &proposal.parent,
         None,
         None,
+        transition_subject_root,
     );
     if block.transactions.is_empty() && block.header.protected_batch.is_none() {
         if recomputed? != proposal.protected_execution_root {
@@ -731,7 +827,7 @@ impl<A: SimplifiedMaterialAdapter> DurableVerifiedSimplifiedProposalSource<A> {
             proposal.context.clone(),
             proposal.block_id.clone(),
             proposal.parent_block_id.clone(),
-            proposal.parent_qc.clone(),
+            proposal.parent.clone(),
             proposal.protected_execution_root,
         )?
         .id()
@@ -750,7 +846,7 @@ impl<A: SimplifiedMaterialAdapter> DurableVerifiedSimplifiedProposalSource<A> {
                     proposal.context.clone(),
                     proposal.block_id.clone(),
                     proposal.parent_block_id.clone(),
-                    proposal.parent_qc.clone(),
+                    proposal.parent.clone(),
                     proposal.protected_execution_root,
                 )?
         {
@@ -788,7 +884,7 @@ impl<A: SimplifiedMaterialAdapter> SimplifiedProtectedProposalSource
                 context: directive.context.clone(),
                 block_id: candidate.block_id.clone(),
                 parent_block_id: candidate.parent_block_id.clone(),
-                parent_qc: candidate.parent_qc.clone(),
+                parent: candidate.parent.clone(),
                 takeover_tc_id: directive.takeover_tc_id,
                 protected_execution_root: candidate.protected_execution_root,
                 proposer_id: directive.proposer_id.clone(),
@@ -850,7 +946,10 @@ fn sync_directory(directory: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::super::{
-        SimplifiedMaterialChunk, SimplifiedMaterialStager, POSY_SIMPLIFIED_MATERIAL_CHUNK_FORMAT,
+        DurableSimplifiedProtectedExecutionTransitionAuthorityVerifier,
+        SimplifiedFinalizedTransitionAuthorityEvidence, SimplifiedMaterialChunk,
+        SimplifiedMaterialStager, SimplifiedQuorumCertificate,
+        SimplifiedTransitionAuthorityVerifier, POSY_SIMPLIFIED_MATERIAL_CHUNK_FORMAT,
     };
     use super::*;
     use crate::consensus_parameters::ConsensusParameterRoot;
@@ -900,6 +999,12 @@ mod tests {
     }
 
     fn core_material() -> (VerifiedSimplifiedProposalMaterial, ExecutionState) {
+        core_material_with_transition_subject(None)
+    }
+
+    fn core_material_with_transition_subject(
+        transition_subject_root: Option<Hash>,
+    ) -> (VerifiedSimplifiedProposalMaterial, ExecutionState) {
         let context = context();
         let object_context =
             super::super::ConsensusObjectContext::for_height(&context, Height(4_000), Round(0))
@@ -911,13 +1016,14 @@ mod tests {
             block_id: parent_block_id.clone(),
             qc_id: Hash::from_domain_bytes("material-test-parent-qc", b"height-3999"),
         };
+        let parent = SimplifiedFinalityParent::quorum_certificate(parent_qc.clone()).unwrap();
         let state = ExecutionState::new();
         let state_root = compute_state_root_after(&state).unwrap();
         let block = Block {
             header: crate::synergy_types::BlockHeader {
                 version: 3,
                 chain_id: ChainId::synergy_testnet_v3(),
-                network_id: NetworkId::synergy_testnet_v3(),
+                network_id: NetworkId::fresh_posy_testnet_v3(),
                 protocol_version: POSY_SIMPLIFIED_PROTOCOL_VERSION.to_string(),
                 height: Height(4_000),
                 round: Round(0),
@@ -972,27 +1078,36 @@ mod tests {
             },
         };
         let block_id = block.candidate_id().unwrap();
-        let protected_execution_root = compute_simplified_protected_execution_root(
-            &object_context,
-            &block,
-            &parent_block_id,
-            &parent_qc,
-            None,
-            None,
-        )
-        .unwrap();
+        let protected_execution_root =
+            compute_simplified_protected_execution_root_with_transition_subject(
+                &object_context,
+                &block,
+                &parent_block_id,
+                &parent,
+                None,
+                None,
+                transition_subject_root,
+            )
+            .unwrap();
         let proposal = SimplifiedProposal {
             context: object_context,
             block_id,
             parent_block_id,
-            parent_qc,
+            parent,
             takeover_tc_id: None,
             protected_execution_root,
             proposer_id: block.header.proposer_validator_id.clone(),
             proposer_key_id: block.header.proposer_key_id.clone(),
             proposer_signature: block.proposer_signature.clone(),
         };
-        VerifiedSimplifiedProposalMaterial::verify_core(&context, &proposal, block, &state).unwrap()
+        VerifiedSimplifiedProposalMaterial::verify_core_with_transition_subject(
+            &context,
+            &proposal,
+            block,
+            &state,
+            transition_subject_root,
+        )
+        .unwrap()
     }
 
     fn unique_directory(name: &str) -> PathBuf {
@@ -1079,12 +1194,81 @@ mod tests {
             &later_round,
             &record.canonical_block,
             &record.candidate_subject.parent_block_id,
-            &record.candidate_subject.parent_qc,
+            &record.candidate_subject.parent,
             None,
             None,
         )
         .unwrap();
         assert_eq!(root, record.candidate_subject.protected_execution_root);
+    }
+
+    fn certificate_for_material(
+        material: &VerifiedSimplifiedProposalMaterial,
+    ) -> SimplifiedQuorumCertificate {
+        SimplifiedQuorumCertificate {
+            context: material.candidate_subject.context.clone(),
+            block_id: material.candidate_subject.block_id.clone(),
+            parent_block_id: material.candidate_subject.parent_block_id.clone(),
+            parent: material.candidate_subject.parent.clone(),
+            takeover_tc_id: None,
+            protected_execution_root: material.candidate_subject.protected_execution_root,
+            participants: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn durable_transition_authority_requires_qc_bound_material_subject() {
+        let transition_subject_root =
+            Hash::from_domain_bytes("material-transition-subject", b"epoch-10-membership");
+        let (material, _) = core_material_with_transition_subject(Some(transition_subject_root));
+        let certificate = certificate_for_material(&material);
+        let directory = unique_directory("transition-authority");
+        let store = DurableSimplifiedProposalMaterialStore::at_directory(
+            &directory,
+            material.epoch_context_root,
+        )
+        .unwrap();
+        store.install_verified(&material).unwrap();
+        let verifier = DurableSimplifiedProtectedExecutionTransitionAuthorityVerifier::new(store);
+        let evidence = SimplifiedFinalizedTransitionAuthorityEvidence::from_finalized_qc(
+            &certificate,
+            transition_subject_root,
+        )
+        .unwrap()
+        .canonical_record_bytes()
+        .unwrap();
+        verifier
+            .verify_finalized_transition_authority(&certificate, transition_subject_root, &evidence)
+            .unwrap();
+
+        let (unbound_material, _) = core_material();
+        let unbound_certificate = certificate_for_material(&unbound_material);
+        let unbound_directory = unique_directory("transition-authority-unbound");
+        let unbound_store = DurableSimplifiedProposalMaterialStore::at_directory(
+            &unbound_directory,
+            unbound_material.epoch_context_root,
+        )
+        .unwrap();
+        unbound_store.install_verified(&unbound_material).unwrap();
+        let unbound_verifier =
+            DurableSimplifiedProtectedExecutionTransitionAuthorityVerifier::new(unbound_store);
+        let unbound_evidence = SimplifiedFinalizedTransitionAuthorityEvidence::from_finalized_qc(
+            &unbound_certificate,
+            transition_subject_root,
+        )
+        .unwrap()
+        .canonical_record_bytes()
+        .unwrap();
+        assert!(unbound_verifier
+            .verify_finalized_transition_authority(
+                &unbound_certificate,
+                transition_subject_root,
+                &unbound_evidence,
+            )
+            .is_err());
+
+        let _ = fs::remove_dir_all(directory);
+        let _ = fs::remove_dir_all(unbound_directory);
     }
 
     fn two_material_chunks(
@@ -1174,7 +1358,7 @@ mod tests {
                     proposal.context.clone(),
                     proposal.block_id.clone(),
                     proposal.parent_block_id.clone(),
-                    proposal.parent_qc.clone(),
+                    proposal.parent.clone(),
                     proposal.protected_execution_root,
                 )?
                 .id()?
@@ -1204,7 +1388,7 @@ mod tests {
             context: material.candidate_subject.context.clone(),
             block_id: material.candidate_subject.block_id.clone(),
             parent_block_id: material.candidate_subject.parent_block_id.clone(),
-            parent_qc: material.candidate_subject.parent_qc.clone(),
+            parent: material.candidate_subject.parent.clone(),
             takeover_tc_id: None,
             protected_execution_root: material.candidate_subject.protected_execution_root,
             proposer_id,
@@ -1223,12 +1407,15 @@ mod tests {
         let proposal = proposal_for_material(&epoch_context, &material);
         let directive = SimplifiedProposalDirective {
             context: proposal.context.clone(),
-            highest_qc: proposal.parent_qc.clone(),
-            finalized: FinalizedBlockRecord {
-                height: proposal.parent_qc.height,
-                block_id: proposal.parent_qc.block_id.clone(),
-                qc_id: proposal.parent_qc.qc_id,
-            },
+            parent: proposal.parent.clone(),
+            finalized: FinalizedBlockRecord::from_quorum_certificate(
+                proposal
+                    .parent
+                    .quorum_certificate_reference()
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap(),
             proposer_id: proposal.proposer_id.clone(),
             proposer_key_id: proposal.proposer_key_id.clone(),
             takeover_tc_id: None,

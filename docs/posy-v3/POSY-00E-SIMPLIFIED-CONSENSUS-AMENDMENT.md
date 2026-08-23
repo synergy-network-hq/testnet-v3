@@ -2,16 +2,16 @@
 
 ## POSY-00E — PoSy v3 simplified chained-QC consensus amendment
 
-Status: proposed and implementation-aligned at component scope, but not activated or launch-qualified until every gate in §15 passes.  
+Status: implemented in the current branch, but not release-authorized or launch-qualified until every gate in §15 passes.
 Prepared: 12 August 2026.  
 Protocol profile: `posy/3.0`.  
-Precedence: this amendment supersedes conflicting POSY-00C block-finality, ordinary block-vote, and leader-scheduling language only after a finalized epoch-boundary activation. POSY-00D continues to control ETDAG, BOC, reveal, and protected execution.
+Precedence: this amendment is the Genesis consensus profile for the separate fresh Testnet-v3 P3 chain. POSY-00D continues to control ETDAG, BOC, reveal, and protected execution.
 
 ### 1. Scope and non-regression boundary
 
 PoSy v3 replaces the repeated normal-path `VALIDATE -> VC -> FINALITY -> QC` ceremony with `PROPOSAL -> VOTE -> QC`, commits through a chained three-QC rule, and assigns proposals through an immutable epoch leader ring with fixed ten-block leases. It does not alter transaction validity, the frozen finality-weight source, validator key policy, ETDAG isolation, protected execution, or emergency governance.
 
-The finalized `posy/2.2` schema-2 manifest and its canonical root are historical consensus facts and MUST remain byte-for-byte unchanged. A v3 node MUST NOT activate from a proposed manifest, infer an activation height, or mix v2.2 and v3 objects at one height.
+Retired-chain manifests and roots are historical evidence only and MUST NOT be imported into the fresh P3 Genesis or runtime state. A v3 node MUST NOT activate from an unsigned candidate, infer an activation boundary, or mix retired consensus objects with P3 authority at one height.
 
 ### 2. Non-negotiable invariants
 
@@ -34,11 +34,12 @@ The finalized epoch transition commits:
 - the complete active validator identities for the epoch (exactly five for the initial Testnet-v3 v3 activation, with later additions admitted only by finalized epoch transition);
 - active-set, consensus-key, frozen-weight, and leader-ring roots;
 - the full ordered leader ring;
-- exact certified-parent QC and separately proven finalized-seed QC, or the
-  one-time finalized v2.2 boundary anchor;
+- the typed fresh-Genesis finality reference for epoch zero, or the exact
+  certified-parent QC and separately proven finalized-seed QC for a later P3
+  epoch;
 - activation epoch and height.
 
-Every validator MUST reconstruct identical canonical context bytes and roots before activation. Validator count is derived from the finalized set, not a protocol constant. Membership and the leader ring are immutable within an epoch; onboarding becomes authoritative only in a later finalized epoch context. A first v3 height references the finalized v2.2 transition/anchor. A v3-to-v3 transition retains the exact three-QC tail at heights `E-2`, `E-1`, and `E` of the preceding epoch: `QC(E)` is the certified parent extended by the first next-epoch block, while `QC(E-2)` is the latest finalized seed. The next context commits both identities plus the transition-subject root; it MUST NOT promote `QC(E)` to finality merely because the epoch changed.
+Every validator MUST reconstruct identical canonical context bytes and roots before activation. Validator count is derived from the finalized set, not a protocol constant. Membership and the leader ring are immutable within an epoch; onboarding becomes authoritative only in a later finalized epoch context. The first P3 block extends the typed fresh-Genesis finality reference. A v3-to-v3 transition retains the exact three-QC tail at heights `E-2`, `E-1`, and `E` of the preceding epoch: `QC(E)` is the certified parent extended by the first next-epoch block, while `QC(E-2)` is the latest finalized seed. The next context commits both identities plus the transition-subject root; it MUST NOT promote `QC(E)` to finality merely because the epoch changed.
 
 The schema-v2 transition subject binds the adjacent epoch number and height range, the previous epoch-context root, the exact committing height, the next canonical parameter root, and the complete next active-validator, consensus-key, and frozen-weight roots. It deliberately excludes the finalized block and QC identifiers: those identifiers are derived from the protected-execution commitment that contains the subject, so including either would create an impossible cryptographic fixed point. A production transition verifier MUST separately bind the exact finalized QC and prove that the schema-v2 subject was authorized by the protected execution finalized at `E-2`. An unsigned validator list, local registry snapshot, operator flag, or single boundary QC is insufficient.
 
@@ -155,7 +156,7 @@ State sync supplies a certified anchor plus the contiguous QC chain and any sequ
 
 ### 13. Canonical schemas and domains
 
-Normative schema details are in `CONSENSUS_OBJECT_SCHEMAS.md`. Consensus domains begin with `PoSy/Consensus/v3/`; the leader rank domain is exactly `PoSy/LeaderSchedule/v3`. Unknown fields and noncanonical encodings are rejected. Historical v2.2 parsing is read/sync compatibility only and never changes active v3 semantics.
+Normative schema details are in `CONSENSUS_OBJECT_SCHEMAS.md`. Consensus domains begin with `PoSy/Consensus/v3/`; the leader rank domain is exactly `PoSy/LeaderSchedule/v3`. Unknown fields and noncanonical encodings are rejected. Historical v2.2 parsing is confined to explicitly versioned audit/test paths and never supplies fresh-chain synchronization, recovery, or authority.
 
 ### 14. Required observability
 
@@ -164,14 +165,14 @@ Implementations expose bounded, non-consensus measurements for proposal latency,
 ### 15. Activation gates
 
 1. Specification and cross-repository publication are ratified.
-2. The canonical v3 manifest is finalized with approval ID, activation epoch/height, and exact root.
+2. The canonical v3 manifest is finalized for `fresh_genesis_block_zero` with approval ID, epoch `0`, first block height `1`, and exact root; the V4 release request is signed by the frozen governance authority.
 3. Five approved public validator identities, ML-DSA-65 keys, active-set/key/weight/ring roots, and identical all-node preflight are evidenced.
 4. Signer-journal, lock, chained-finality, TC, restart, state-sync, fork, and SafetyHalt tests pass, including property/model analysis.
 5. Five independent OS processes, each owning the production driver, real timers, real ML-DSA-65 authority, and distinct durable safety/signing/material/finality stores, pass 4/5 progress, 3/5 fail-closed, partition-heal, restart, takeover, and chained-finality scenarios. The parent MAY substitute only bounded authenticated routing and fault injection; it MUST NOT construct consensus evidence. A state-machine worker harness alone does not satisfy this gate.
 6. Five complete node processes using the production role-runtime and socket stack, protected execution, atomic application commit, and production identities pass disconnect/rejoin, backpressure, Byzantine, and node-database convergence qualification.
 7. Full runtime suites pass; no inherited production engine is enabled.
 8. At least 10,000 representative blocks establish proposal/vote/QC/finality/takeover/PQC/certificate/rejoin distributions.
-9. Migration and abort/fail-closed procedures are rehearsed with every validator in the frozen activation set at one certified state.
+9. Fresh-chain staging and abort/fail-closed procedures are rehearsed with every validator in the frozen Genesis set; retired-chain data is absent and rejected as input.
 10. ETDAG, security, operations, release, governance, and all existing Testnet-v3 launch controls pass.
 
 Until then the profile remains a proposal and Testnet-v3 launch status remains blocked.

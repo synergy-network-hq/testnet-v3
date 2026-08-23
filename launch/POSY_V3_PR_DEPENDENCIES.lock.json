@@ -1,0 +1,22 @@
+{
+  "schema": "synergy-posy-v3-pr-dependencies-v1",
+  "status": "PR_QUALIFICATION_INPUT_NOT_RELEASE_APPROVAL",
+  "chain_id": 1266,
+  "network_id": "testnet",
+  "release_id": "testnet-v3",
+  "protocol_version": "posy/3.0",
+  "core": {
+    "repository": "synergy-network-hq/testnet-v3",
+    "source_base_revision": "63a96a533fa3cad14d21671d5528e1162a4dbd6c"
+  },
+  "synq": {
+    "repository": "synergy-network-hq/synq-language",
+    "revision": "3006fcc5f572ee5a3fd85ac4543e4bf45e021c85",
+    "aegis_pqsynq_submodule_revision": "377c160405cb50166087edf102d7341cf8a812b5"
+  },
+  "aegis": {
+    "source_kind": "vendored_git_tree",
+    "path": "runtime/aegis-pqvm",
+    "revision": "b51884a661e3aed4bb242ecbced47f3d8777b313"
+  }
+}

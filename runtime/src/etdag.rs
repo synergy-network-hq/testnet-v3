@@ -1,4 +1,4 @@
-//! PoSy v2.2 encrypted transaction DAG (ETDAG).
+//! PoSy v3 governed encrypted transaction DAG (ETDAG).
 //!
 //! This module is the consensus-critical sealed-ingress and protected-ordering
 //! implementation.  It intentionally does not reuse the legacy plaintext
@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const ETDAG_PROFILE_ID: &str = "POSY-ETDAG-v2.2-rc1";
+pub const ETDAG_PROFILE_ID: &str = "POSY-ETDAG-v3.0";
 pub const ETDAG_LANE_ID: &str = "ordinary-user";
 pub const ERR_PLAINTEXT_USER_TX_DISABLED: &str = "ERR_PLAINTEXT_USER_TX_DISABLED";
 pub const ETDAG_JOURNAL_FORMAT: &str = "synergy-etdag-safety-journal-v1";
@@ -59,23 +59,23 @@ pub const MAX_CALL_DEPTH: usize = 64;
 pub const CIPHERTEXT_SIZE_CLASSES: &[usize] =
     &[512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072];
 
-pub const DOMAIN_ETE_OUTER: &str = "PoSy/ETDAG/ETE/Outer/v2";
-pub const DOMAIN_VERTEX: &str = "PoSy/ETDAG/Vertex/v2";
-pub const DOMAIN_VAC: &str = "PoSy/ETDAG/VAC/v2";
-pub const DOMAIN_DCC: &str = "PoSy/ETDAG/DCC/v2";
-pub const DOMAIN_BATCH_VALIDATE: &str = "PoSy/ETDAG/BatchValidate/v2";
-pub const DOMAIN_BATCH_FINALITY: &str = "PoSy/ETDAG/BatchFinality/v2";
-pub const DOMAIN_BATCH_TIMEOUT: &str = "PoSy/ETDAG/BatchTimeout/v2";
-pub const DOMAIN_DECRYPT_SHARE: &str = "PoSy/ETDAG/DecryptShare/v2";
-pub const DOMAIN_TARGET_ADMISSION: &str = "PoSy/ETDAG/TargetAdmission/v2";
+pub const DOMAIN_ETE_OUTER: &str = "PoSy/ETDAG/ETE/Outer/v3";
+pub const DOMAIN_VERTEX: &str = "PoSy/ETDAG/Vertex/v3";
+pub const DOMAIN_VAC: &str = "PoSy/ETDAG/VAC/v3";
+pub const DOMAIN_DCC: &str = "PoSy/ETDAG/DCC/v3";
+pub const DOMAIN_BATCH_VALIDATE: &str = "PoSy/ETDAG/BatchValidate/v3";
+pub const DOMAIN_BATCH_FINALITY: &str = "PoSy/ETDAG/BatchFinality/v3";
+pub const DOMAIN_BATCH_TIMEOUT: &str = "PoSy/ETDAG/BatchTimeout/v3";
+pub const DOMAIN_DECRYPT_SHARE: &str = "PoSy/ETDAG/DecryptShare/v3";
+pub const DOMAIN_TARGET_ADMISSION: &str = "PoSy/ETDAG/TargetAdmission/v3";
 /// Commits the 512-bit canonical finalized-context digest into the 256-bit
 /// root field used by the target-admission context.  The domain prevents a
 /// raw 32-byte consensus hash from being substituted for the full ETDAG
 /// finality context.
 pub const DOMAIN_TARGET_ADMISSION_SOURCE_FINALITY: &str =
-    "PoSy/ETDAG/TargetAdmission/SourceFinality/v2";
-pub const DOMAIN_ORDER_SEED: &str = "PoSy/ETDAG/OrderSeed/v2";
-pub const DOMAIN_ORDER_KEY: &str = "PoSy/ETDAG/Order/v2";
+    "PoSy/ETDAG/TargetAdmission/SourceFinality/v3";
+pub const DOMAIN_ORDER_SEED: &str = "PoSy/ETDAG/OrderSeed/v3";
+pub const DOMAIN_ORDER_KEY: &str = "PoSy/ETDAG/Order/v3";
 
 fn require_process_wide_consensus_signing_allowed() -> Result<(), String> {
     #[cfg(test)]
@@ -189,14 +189,14 @@ impl EtdagParameters {
             .map(|value| *value as u64)
             .collect::<Vec<_>>();
         if self.ciphertext_size_classes != expected {
-            return Err("ETDAG ciphertext size classes do not match v2.2".to_string());
+            return Err("ETDAG ciphertext size classes do not match v3.0".to_string());
         }
         Ok(())
     }
 
     pub fn root(&self) -> Result<EtdagDigest, String> {
         self.validate()?;
-        EtdagDigest::from_canonical("PoSy/ETDAG/Parameters/v2", self)
+        EtdagDigest::from_canonical("PoSy/ETDAG/Parameters/v3", self)
     }
 }
 
@@ -255,8 +255,8 @@ impl TargetAdmissionContext {
         cluster_map: &ClusterMap,
         protocol_config: &ProtocolConfig,
     ) -> Result<Self, String> {
-        protocol_config.chain_id.require_testnet_v3()?;
-        protocol_config.network_id.require_testnet_v3()?;
+        protocol_config.chain_id.require_fresh_posy_testnet_v3()?;
+        protocol_config.network_id.require_fresh_posy_testnet_v3()?;
         Self::derive_with_parameter_root(spec, validator_set, cluster_map, protocol_config.hash()?)
     }
 
@@ -322,7 +322,7 @@ impl TargetAdmissionContext {
         let context = Self {
             context_version: TARGET_ADMISSION_CONTEXT_VERSION,
             chain_id: ChainId::synergy_testnet_v3(),
-            network_id: NetworkId::synergy_testnet_v3(),
+            network_id: NetworkId::fresh_posy_testnet_v3(),
             protocol_version: spec.protocol_version,
             epoch: spec.epoch,
             target_height: spec.target_height,
@@ -356,8 +356,8 @@ impl TargetAdmissionContext {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        self.chain_id.require_testnet_v3()?;
-        self.network_id.require_testnet_v3()?;
+        self.chain_id.require_fresh_posy_testnet_v3()?;
+        self.network_id.require_fresh_posy_testnet_v3()?;
         if self.context_version != TARGET_ADMISSION_CONTEXT_VERSION
             || self.protocol_version != POSY_PROTOCOL_VERSION
             || self.cluster_schedule_version != TESTNET_V3_CLUSTER_SCHEDULE_VERSION
@@ -582,8 +582,10 @@ impl InnerTransactionV2 {
         if self.lane_id != ETDAG_LANE_ID {
             return Err("wrong ETDAG lane".to_string());
         }
-        self.transaction.chain_id.require_testnet_v3()?;
-        self.transaction.network_id.require_testnet_v3()?;
+        self.transaction.chain_id.require_fresh_posy_testnet_v3()?;
+        self.transaction
+            .network_id
+            .require_fresh_posy_testnet_v3()?;
         if self.transaction.epoch.0 == u64::MAX {
             return Err("inner transaction epoch is invalid".to_string());
         }
@@ -671,7 +673,7 @@ impl IngressKemKeyRegistry {
     pub fn root(&self) -> Result<EtdagDigest, String> {
         self.validate_shape()?;
         EtdagDigest::from_canonical(
-            "PoSy/ETDAG/IngressKemKeyRegistry/v2",
+            "PoSy/ETDAG/IngressKemKeyRegistry/v3",
             &(
                 self.registry_version,
                 self.chain_id,
@@ -686,8 +688,8 @@ impl IngressKemKeyRegistry {
     }
 
     pub fn validate_shape(&self) -> Result<(), String> {
-        self.chain_id.require_testnet_v3()?;
-        self.network_id.require_testnet_v3()?;
+        self.chain_id.require_fresh_posy_testnet_v3()?;
+        self.network_id.require_fresh_posy_testnet_v3()?;
         if self.registry_version != INGRESS_KEM_REGISTRY_VERSION
             || self.protocol_version != POSY_PROTOCOL_VERSION
             || self.target_height.0 == 0
@@ -778,7 +780,7 @@ pub struct ShareCapsule {
 
 impl ShareCapsule {
     pub fn digest(&self) -> Result<EtdagDigest, String> {
-        EtdagDigest::from_canonical("PoSy/ETDAG/ShareCapsule/v2", self)
+        EtdagDigest::from_canonical("PoSy/ETDAG/ShareCapsule/v3", self)
     }
 }
 
@@ -890,7 +892,7 @@ impl EncryptedTransactionEnvelope {
     }
 
     pub fn recompute_commitment(&self) -> Result<EtdagDigest, String> {
-        EtdagDigest::from_canonical("PoSy/ETDAG/TxCommitment/v2", &self.unsigned())
+        EtdagDigest::from_canonical("PoSy/ETDAG/TxCommitment/v3", &self.unsigned())
     }
 
     pub fn validate_structure(
@@ -900,8 +902,8 @@ impl EncryptedTransactionEnvelope {
     ) -> Result<(), String> {
         parameters.validate()?;
         height_context.validate()?;
-        self.chain_id.require_testnet_v3()?;
-        self.network_id.require_testnet_v3()?;
+        self.chain_id.require_fresh_posy_testnet_v3()?;
+        self.network_id.require_fresh_posy_testnet_v3()?;
         if self.envelope_version != 2
             || self.profile_id != ETDAG_PROFILE_ID
             || self.protocol_version != POSY_PROTOCOL_VERSION
@@ -996,9 +998,9 @@ impl SealedTransactionBundle {
             }
         }
         let commitment_root =
-            EtdagDigest::from_canonical("PoSy/ETDAG/ShareCommitmentRoot/v2", &commitments)?;
+            EtdagDigest::from_canonical("PoSy/ETDAG/ShareCommitmentRoot/v3", &commitments)?;
         let capsule_root =
-            EtdagDigest::from_canonical("PoSy/ETDAG/ShareCapsuleRoot/v2", &capsules)?;
+            EtdagDigest::from_canonical("PoSy/ETDAG/ShareCapsuleRoot/v3", &capsules)?;
         if commitment_root != self.envelope.share_commitment_root
             || capsule_root != self.envelope.share_capsule_root
         {
@@ -1150,9 +1152,9 @@ pub fn seal_transaction<R: RngCore + CryptoRng>(
     share_commitments.sort_by(|left, right| left.validator_id.cmp(&right.validator_id));
     share_capsules.sort_by(|left, right| left.validator_id.cmp(&right.validator_id));
     let share_commitment_root =
-        EtdagDigest::from_canonical("PoSy/ETDAG/ShareCommitmentRoot/v2", &share_commitments)?;
+        EtdagDigest::from_canonical("PoSy/ETDAG/ShareCommitmentRoot/v3", &share_commitments)?;
     let share_capsule_root =
-        EtdagDigest::from_canonical("PoSy/ETDAG/ShareCapsuleRoot/v2", &share_capsules)?;
+        EtdagDigest::from_canonical("PoSy/ETDAG/ShareCapsuleRoot/v3", &share_capsules)?;
 
     let mut envelope = EncryptedTransactionEnvelope {
         envelope_version: 2,
@@ -1229,7 +1231,7 @@ fn key_commitment(key: &[u8; 32], aad: &[u8]) -> EtdagDigest {
     let mut bytes = Vec::with_capacity(32 + aad.len());
     bytes.extend_from_slice(key);
     bytes.extend_from_slice(aad);
-    EtdagDigest::from_domain_bytes("PoSy/ETDAG/KeyCommitment/v2", &bytes)
+    EtdagDigest::from_domain_bytes("PoSy/ETDAG/KeyCommitment/v3", &bytes)
 }
 
 fn share_commitment(
@@ -1239,7 +1241,7 @@ fn share_commitment(
     target_height: Height,
 ) -> Result<EtdagDigest, String> {
     EtdagDigest::from_canonical(
-        "PoSy/ETDAG/ShareCommitment/v2",
+        "PoSy/ETDAG/ShareCommitment/v3",
         &(
             validator_id.clone(),
             share.clone(),
@@ -1352,7 +1354,7 @@ pub fn decrypt_share_capsule(
 
 fn derive_capsule_key(shared_secret: &[u8], context: &[u8]) -> [u8; 32] {
     let mut hasher = Sha3_512::new();
-    hasher.update(b"PoSy/ETDAG/CapsuleKey/v2");
+    hasher.update(b"PoSy/ETDAG/CapsuleKey/v3");
     hasher.update((shared_secret.len() as u64).to_be_bytes());
     hasher.update(shared_secret);
     hasher.update((context.len() as u64).to_be_bytes());
@@ -1586,8 +1588,8 @@ pub struct EtdagVoteTranscript {
 impl EtdagVoteTranscript {
     pub fn validate_against(&self, context: &TargetAdmissionContext) -> Result<(), String> {
         context.validate()?;
-        self.chain_id.require_testnet_v3()?;
-        self.network_id.require_testnet_v3()?;
+        self.chain_id.require_fresh_posy_testnet_v3()?;
+        self.network_id.require_fresh_posy_testnet_v3()?;
         self.candidate_digest.validate("ETDAG candidate digest")?;
         if self
             .highest_prepared_bvc_digest
@@ -1619,7 +1621,7 @@ impl EtdagVoteTranscript {
     }
 
     pub fn digest(&self) -> Result<EtdagDigest, String> {
-        EtdagDigest::from_canonical("PoSy/ETDAG/VoteTranscript/v2", self)
+        EtdagDigest::from_canonical("PoSy/ETDAG/VoteTranscript/v3", self)
     }
 }
 
@@ -1882,7 +1884,7 @@ impl TargetAdmissionPackage {
     }
 
     pub fn package_digest(&self) -> Result<EtdagDigest, String> {
-        EtdagDigest::from_canonical("PoSy/ETDAG/TargetAdmissionPackage/v2", self)
+        EtdagDigest::from_canonical("PoSy/ETDAG/TargetAdmissionPackage/v3", self)
     }
 }
 
@@ -1897,7 +1899,7 @@ pub struct EtdagCertificate {
 
 impl EtdagCertificate {
     pub fn digest(&self) -> Result<EtdagDigest, String> {
-        EtdagDigest::from_canonical("PoSy/ETDAG/Certificate/v2", self)
+        EtdagDigest::from_canonical("PoSy/ETDAG/Certificate/v3", self)
     }
 
     pub fn verify(
@@ -2905,7 +2907,7 @@ impl TransactionVertex {
     }
 
     pub fn digest(&self) -> Result<EtdagDigest, String> {
-        EtdagDigest::from_canonical("PoSy/ETDAG/TransactionVertex/v2", &self.unsigned())
+        EtdagDigest::from_canonical("PoSy/ETDAG/TransactionVertex/v3", &self.unsigned())
     }
 
     pub fn validate(
@@ -2964,7 +2966,7 @@ impl TransactionVertex {
             }
         }
         let computed_envelope_root =
-            EtdagDigest::from_canonical("PoSy/ETDAG/VertexEnvelopeRoot/v2", &envelopes)?;
+            EtdagDigest::from_canonical("PoSy/ETDAG/VertexEnvelopeRoot/v3", &envelopes)?;
         let gas = envelopes.iter().try_fold(0u64, |sum, envelope| {
             sum.checked_add(envelope.gas_class_units)
                 .ok_or_else(|| "ETDAG vertex gas overflow".to_string())
@@ -3023,7 +3025,7 @@ pub fn sign_vertex(
     parents.dedup();
     envelopes.sort_by(|left, right| left.tx_commitment.cmp(&right.tx_commitment));
     let envelope_root =
-        EtdagDigest::from_canonical("PoSy/ETDAG/VertexEnvelopeRoot/v2", &envelopes)?;
+        EtdagDigest::from_canonical("PoSy/ETDAG/VertexEnvelopeRoot/v3", &envelopes)?;
     let declared_gas_units = envelopes.iter().try_fold(0u64, |sum, envelope| {
         sum.checked_add(envelope.gas_class_units)
             .ok_or_else(|| "ETDAG vertex gas overflow".to_string())
@@ -3111,7 +3113,7 @@ pub struct DagCutCandidate {
 
 impl DagCutCandidate {
     pub fn digest(&self) -> Result<EtdagDigest, String> {
-        EtdagDigest::from_canonical("PoSy/ETDAG/DagCutCandidate/v2", self)
+        EtdagDigest::from_canonical("PoSy/ETDAG/DagCutCandidate/v3", self)
     }
 
     pub fn validate(&self, context: &TargetAdmissionContext) -> Result<(), String> {
@@ -3155,11 +3157,11 @@ impl DagCutCandidate {
             prior = Some(&envelope.tx_commitment);
         }
         let causal_closure_root = EtdagDigest::from_canonical(
-            "PoSy/ETDAG/CausalClosureRoot/v2",
+            "PoSy/ETDAG/CausalClosureRoot/v3",
             &self.causal_closure_digests,
         )?;
         let eligible_commitment_root = EtdagDigest::from_canonical(
-            "PoSy/ETDAG/EligibleCommitmentRoot/v2",
+            "PoSy/ETDAG/EligibleCommitmentRoot/v3",
             &self.eligible_envelopes,
         )?;
         if self.causal_closure_root != causal_closure_root
@@ -3179,7 +3181,7 @@ pub struct DagCutCertificate {
 
 impl DagCutCertificate {
     pub fn digest(&self) -> Result<EtdagDigest, String> {
-        EtdagDigest::from_canonical("PoSy/ETDAG/DCC/v2", self)
+        EtdagDigest::from_canonical("PoSy/ETDAG/DCC/v3", self)
     }
 
     pub fn verify(
@@ -3304,9 +3306,9 @@ pub fn build_dag_cut_candidate(
     }
     let eligible_envelopes = eligible.into_values().collect::<Vec<_>>();
     let causal_closure_root =
-        EtdagDigest::from_canonical("PoSy/ETDAG/CausalClosureRoot/v2", &closure_digests)?;
+        EtdagDigest::from_canonical("PoSy/ETDAG/CausalClosureRoot/v3", &closure_digests)?;
     let eligible_commitment_root =
-        EtdagDigest::from_canonical("PoSy/ETDAG/EligibleCommitmentRoot/v2", &eligible_envelopes)?;
+        EtdagDigest::from_canonical("PoSy/ETDAG/EligibleCommitmentRoot/v3", &eligible_envelopes)?;
     Ok(DagCutCandidate {
         target_height: context.target_height,
         target_context_root: context.root()?,
@@ -3402,7 +3404,7 @@ pub fn canonical_finality_context_digest<T: CanonicalSerialize>(
     canonical_finality_context_without_signatures: &T,
 ) -> Result<EtdagDigest, String> {
     EtdagDigest::from_canonical(
-        "PoSy/ETDAG/CanonicalFinalityContext/v2",
+        "PoSy/ETDAG/CanonicalFinalityContext/v3",
         canonical_finality_context_without_signatures,
     )
 }
@@ -3597,7 +3599,7 @@ pub struct BatchCandidate {
 
 impl BatchCandidate {
     pub fn digest(&self) -> Result<EtdagDigest, String> {
-        EtdagDigest::from_canonical("PoSy/ETDAG/BatchCandidate/v2", self)
+        EtdagDigest::from_canonical("PoSy/ETDAG/BatchCandidate/v3", self)
     }
 
     pub fn validate(&self, dcc: &DagCutCandidate) -> Result<(), String> {
@@ -3614,7 +3616,7 @@ impl BatchCandidate {
             return Err("ETDAG batch candidate contains duplicate commitments".to_string());
         }
         let root = EtdagDigest::from_canonical(
-            "PoSy/ETDAG/OrderedCommitmentRoot/v2",
+            "PoSy/ETDAG/OrderedCommitmentRoot/v3",
             &self.ordered_commitments,
         )?;
         if root != self.ordered_commitment_root {
@@ -3694,15 +3696,15 @@ pub fn build_batch_candidate(
         canonical_finality_context_digest,
         order_seed,
         ordered_commitment_root: EtdagDigest::from_canonical(
-            "PoSy/ETDAG/OrderedCommitmentRoot/v2",
+            "PoSy/ETDAG/OrderedCommitmentRoot/v3",
             &ordered_commitments,
         )?,
         deferred_commitment_root: EtdagDigest::from_canonical(
-            "PoSy/ETDAG/DeferredCommitmentRoot/v2",
+            "PoSy/ETDAG/DeferredCommitmentRoot/v3",
             &deferred,
         )?,
         dependency_graph_root: EtdagDigest::from_canonical(
-            "PoSy/ETDAG/DependencyGraphRoot/v2",
+            "PoSy/ETDAG/DependencyGraphRoot/v3",
             &dcc.eligible_envelopes,
         )?,
         ordered_commitments,
@@ -3727,7 +3729,7 @@ pub struct BatchValidationCertificate {
 
 impl BatchValidationCertificate {
     pub fn digest(&self) -> Result<EtdagDigest, String> {
-        EtdagDigest::from_canonical("PoSy/ETDAG/BVC/v2", self)
+        EtdagDigest::from_canonical("PoSy/ETDAG/BVC/v3", self)
     }
 
     pub fn verify(
@@ -3755,7 +3757,7 @@ pub struct BatchOrderCertificate {
 
 impl BatchOrderCertificate {
     pub fn digest(&self) -> Result<EtdagDigest, String> {
-        EtdagDigest::from_canonical("PoSy/ETDAG/BOC/v2", self)
+        EtdagDigest::from_canonical("PoSy/ETDAG/BOC/v3", self)
     }
 
     pub fn verify(
@@ -3857,7 +3859,7 @@ pub struct ExecutionManifest {
 
 impl ExecutionManifest {
     pub fn root(&self) -> Result<EtdagDigest, String> {
-        EtdagDigest::from_canonical("PoSy/ETDAG/ExecutionManifest/v2", self)
+        EtdagDigest::from_canonical("PoSy/ETDAG/ExecutionManifest/v3", self)
     }
 
     pub fn validate_exact(&self, batch_candidate: &BatchCandidate) -> Result<(), String> {
@@ -3970,7 +3972,7 @@ pub fn release_decrypt_share(
         context.root()?,
         context.target_height,
     )?;
-    let share_digest = EtdagDigest::from_canonical("PoSy/ETDAG/ReleasedShare/v2", &share)?;
+    let share_digest = EtdagDigest::from_canonical("PoSy/ETDAG/ReleasedShare/v3", &share)?;
     journal.authorize_decrypt_release(
         gate,
         &validator.validator_id,
@@ -4189,7 +4191,7 @@ pub fn decrypt_share_transcript_root(
         }
         canonical.push((commitment.clone(), messages));
     }
-    EtdagDigest::from_canonical("PoSy/ETDAG/PublicDecryptShareTranscript/v2", &canonical)
+    EtdagDigest::from_canonical("PoSy/ETDAG/PublicDecryptShareTranscript/v3", &canonical)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -4371,7 +4373,7 @@ impl ProtectedBlockInput {
             encrypted_set_root: self.dcc.candidate.eligible_commitment_root.0.clone(),
             protected_order_root: batch.ordered_commitment_root.0.clone(),
             public_reveal_transcript_root: EtdagDigest::from_canonical(
-                "PoSy/ETDAG/PublicOrderedReveal/v2",
+                "PoSy/ETDAG/PublicOrderedReveal/v3",
                 &self.reveal,
             )?
             .0,
@@ -4764,7 +4766,7 @@ impl EtdagProtectedInputStore {
 
 fn protected_input_digest(protected_input: &ProtectedBlockInput) -> Result<EtdagDigest, String> {
     EtdagDigest::from_canonical(
-        "PoSy/ETDAG/CertifiedProtectedBlockInput/v2",
+        "PoSy/ETDAG/CertifiedProtectedBlockInput/v3",
         protected_input,
     )
 }
@@ -5682,7 +5684,7 @@ pub(crate) mod tests {
         let ingress_registry = IngressKemKeyRegistry {
             registry_version: INGRESS_KEM_REGISTRY_VERSION,
             chain_id: ChainId::synergy_testnet_v3(),
-            network_id: NetworkId::synergy_testnet_v3(),
+            network_id: NetworkId::fresh_posy_testnet_v3(),
             protocol_version: POSY_PROTOCOL_VERSION.to_string(),
             epoch,
             target_height: height_context.height,
@@ -5766,7 +5768,7 @@ pub(crate) mod tests {
         let mut transaction = Transaction {
             version: 2,
             chain_id: ChainId::synergy_testnet_v3(),
-            network_id: NetworkId::synergy_testnet_v3(),
+            network_id: NetworkId::fresh_posy_testnet_v3(),
             epoch: Epoch(0),
             sender_uma_or_account: sender.validator_uma_id.0.clone(),
             receiver_uma_or_account: "recipient".to_string(),
@@ -6964,7 +6966,7 @@ pub(crate) mod tests {
             canonical_finality_context_digest: EtdagDigest::from_domain_bytes("finality", b"six"),
             order_seed: EtdagDigest::from_domain_bytes("seed", b"eight"),
             ordered_commitment_root: EtdagDigest::from_canonical(
-                "PoSy/ETDAG/OrderedCommitmentRoot/v2",
+                "PoSy/ETDAG/OrderedCommitmentRoot/v3",
                 &commitments,
             )
             .unwrap(),

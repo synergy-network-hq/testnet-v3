@@ -1,0 +1,13 @@
+{
+  "schema": "synergy-etdag-governance-input-derivations-v1",
+  "status": "UNSIGNED_INPUTS_AWAITING_FROZEN_AUTHORITY_RELEASE_APPROVAL",
+  "consensus_governance_decision_id": "SNRG-GOV-POSY-P3-GENESIS-20260823-01",
+  "consensus_parameter_manifest_sha256": "da2b6fa43c9818059ebf899020d3b283d11f689a4a901438a4d67baa7665e932",
+  "consensus_parameter_root_sha3_512": "655ce5e10e15f4ab4fd06c7ce33518197d59d0e0930c088538bbe8abb5b39a9a2abb3f6efd765e918513c3fd13c4fc0540fe6930dba5699eaeb24a7cebd5a2bb",
+  "governance_decision_id": "SNRG-GOV-ETDAG-P3-GENESIS-20260823-01",
+  "etdag_parameter_root_sha3_512": "732e970816589c4eabc7a9c71facb6d73b4805e599c7fccee081ce2d75a7a5ff9ba8f46c7f04dc6ff42ffdb9468e7f18b554ed233cdb8555d5207894fba3dd25",
+  "etdag_fee_schedule_root_sha3_512": "827e1f426a80e7b2687852c5c5cc083e41b96158c155938370b5840bd283e07c121d982be27ac36e3860065ac4aeb87d358ce6287d83bf84325308c31ca605e1",
+  "etdag_membership_anchor_digest_sha3_512": null,
+  "membership_anchor_derivation": "requires the final fresh-P3 Genesis hash, post-deployment execution-state root, and exact Genesis-bound five-validator activation set",
+  "release_gate": "the V4 frozen-authority approval must commit to all three non-null SHA3-512 roots before activation or wallet publication"
+}

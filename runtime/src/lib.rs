@@ -21,6 +21,7 @@ pub mod dag_mempool;
 pub mod desired_state;
 pub mod epoch;
 pub mod etdag;
+pub mod etdag_governance;
 pub mod execution;
 pub mod fleet_status;
 pub mod gas;

@@ -37,6 +37,8 @@ use crate::consensus::self_realign::{
     expected_genesis_hash, persisted_recovery_state, RealignmentState,
 };
 use crate::consensus::signing_authority::DurableConsensusSigningAuthority;
+#[cfg(test)]
+use crate::consensus::simplified_posy::FailClosedSimplifiedTransitionAuthorityVerifier;
 use crate::consensus::simplified_posy::{
     install_simplified_consensus_ingress, install_simplified_target_admission_producer_handler,
     load_genesis_bound_simplified_activation, prepare_simplified_target_admission_h3,
@@ -46,13 +48,14 @@ use crate::consensus::simplified_posy::{
     ConsensusProfileAtHeight, ConsensusSignatureVerifier, DurableSimplifiedEpochTransitionStore,
     DurableSimplifiedFinalitySink, DurableSimplifiedIngressKemRegistrySource,
     DurableSimplifiedPosyStore, DurableSimplifiedProposalMaterialStore,
+    DurableSimplifiedProtectedExecutionTransitionAuthorityVerifier,
     DurableSimplifiedProtectedMaterialAuthority,
     DurableSimplifiedProtectedMaterialAuthorityConfiguration,
-    DurableVerifiedSimplifiedProposalSource, FailClosedSimplifiedTransitionAuthorityVerifier,
-    FinalizedBlockRecord, FinalizedV2BoundaryEvidence, P2pSimplifiedConsensusEgress,
-    QuorumCertificateReference, SimplifiedActivatedMaterialAdapter, SimplifiedCoreMaterialAdapter,
-    SimplifiedCoreMaterialConfiguration, SimplifiedDriverTiming, SimplifiedEpochContext,
-    SimplifiedFinalityEnvironment, SimplifiedPosyDriver, SimplifiedPreviousEpochFinalityReplay,
+    DurableVerifiedSimplifiedProposalSource, FinalizedBlockRecord, GenesisFinalityReference,
+    P2pSimplifiedConsensusEgress, QuorumCertificateReference, SimplifiedActivatedMaterialAdapter,
+    SimplifiedCoreMaterialAdapter, SimplifiedCoreMaterialConfiguration, SimplifiedDriverTiming,
+    SimplifiedEpochContext, SimplifiedFinalityEnvironment, SimplifiedFinalityParent,
+    SimplifiedPosyDriver, SimplifiedPreviousEpochFinalityReplay,
     SimplifiedProtectedMaterialAdapter, SimplifiedProtectedMaterialConfiguration,
     SimplifiedTargetAdmissionConfiguration, SimplifiedTargetAdmissionOutput,
     SimplifiedTargetAdmissionProducer, SimplifiedTransitionAuthorityVerifier,
@@ -92,7 +95,10 @@ use crate::execution::{
     install_finalized_execution_state_snapshot, publish_finalized_execution_state_snapshot,
     remove_finalized_execution_state_snapshot,
 };
-use crate::genesis::{canonical_genesis, GenesisDocument};
+use crate::genesis::{
+    canonical_genesis, load_genesis_bound_etdag_governance, simplified_genesis_runtime_metadata,
+    GenesisDocument, SimplifiedGenesisRuntimeMetadata,
+};
 use crate::logging::{init_logger, LogLevel};
 use crate::p2p;
 use crate::role_profiles::{resolve_configured_role, NodeRole, RoleProfile};
@@ -103,7 +109,7 @@ use crate::sync::SyncManager;
 use crate::synergy_types::{
     AegisPqKeyId, AegisPqKeyRole, BlockHeader, CanonicalSerialize, ClusterMap, Hash, Height,
     ValidatorId, ValidatorSet, POSY_PROTOCOL_VERSION, SYNERGY_TESTNET_V3_CHAIN_ID,
-    SYNERGY_TESTNET_V3_NETWORK_ID,
+    TESTNET_V3_CANONICAL_NETWORK_ID,
 };
 use crate::telemetry;
 use crate::testnet_v3_execution_bootstrap::load_finalized_testnet_v3_genesis_execution_state;
@@ -410,10 +416,10 @@ fn require_testnet_v3_operator_args(args: &[String]) -> Result<(), String> {
         ));
     }
     let network_id = arg_value(args, "--network-id")
-        .ok_or_else(|| "missing --network-id synergy-testnet-v3".to_string())?;
-    if network_id != SYNERGY_TESTNET_V3_NETWORK_ID {
+        .ok_or_else(|| format!("missing --network-id {TESTNET_V3_CANONICAL_NETWORK_ID}"))?;
+    if network_id != TESTNET_V3_CANONICAL_NETWORK_ID {
         return Err(format!(
-            "wrong network_id {network_id}; expected {SYNERGY_TESTNET_V3_NETWORK_ID}"
+            "wrong network_id {network_id}; expected {TESTNET_V3_CANONICAL_NETWORK_ID}"
         ));
     }
     let genesis_hash = arg_value(args, "--genesis-hash")
@@ -1230,10 +1236,6 @@ fn select_finalized_consensus_driver_startup(
     }
 
     match finalized_input_validation {
-        Some(Ok(ConsensusProfileAtHeight::PosyV2_2)) => Err(
-            "retired PoSy v2 profile selected; Testnet-v3 requires the immutable simplified PoSy v3 profile"
-                .to_string(),
-        ),
         Some(Ok(ConsensusProfileAtHeight::PosySimplifiedV3 {
             epoch_context,
             validator_set,
@@ -1411,7 +1413,61 @@ fn ensure_node_config_matches_finalized_consensus_parameters(
         crate::consensus_parameters::FinalizedConsensusParameterManifest::CoordinatedRoundRobinV1(
             manifest,
         ) => ensure_node_config_matches_coordinated_p1_parameters(config, manifest),
+        crate::consensus_parameters::FinalizedConsensusParameterManifest::SimplifiedPoSyV3(
+            manifest,
+        ) => ensure_node_config_matches_simplified_posy_parameters(config, manifest),
     }
+}
+
+fn ensure_node_config_matches_simplified_posy_parameters(
+    config: &NodeConfig,
+    manifest: &crate::posy_simplified_parameters::SimplifiedConsensusParameterManifest,
+) -> Result<(), String> {
+    use crate::consensus::simplified_posy::POSY_SIMPLIFIED_PROTOCOL_VERSION;
+
+    manifest.require_activatable()?;
+    let target_block_time_ms = config
+        .blockchain
+        .block_time
+        .checked_mul(1_000)
+        .ok_or_else(|| "node blockchain block time overflows milliseconds".to_string())?;
+    let consensus_block_time_ms = config
+        .consensus
+        .block_time_secs
+        .checked_mul(1_000)
+        .ok_or_else(|| "node consensus block time overflows milliseconds".to_string())?;
+    if config.blockchain.chain_id != manifest.chain_id.0
+        || config.network.id != manifest.chain_id.0
+        || config.network.network_id != manifest.network_id.0
+        || config.consensus.algorithm != POSY_SIMPLIFIED_PROTOCOL_VERSION
+        || config.consensus.mode != "posy_simplified_v3"
+        || !config.consensus.coordinator_id.is_empty()
+        || !config.consensus.producer_ids.is_empty()
+        || target_block_time_ms != manifest.target_block_time_ms
+        || consensus_block_time_ms != manifest.target_block_time_ms
+        || config.consensus.target_block_time_ms != manifest.target_block_time_ms
+        || config.consensus.epoch_length != manifest.epoch_length_blocks
+        || config.consensus.vrf_seed_epoch_interval != manifest.epoch_length_blocks
+        || u64::try_from(config.consensus.validator_cluster_size).ok()
+            != Some(manifest.active_validator_count)
+        || u64::try_from(config.consensus.min_validators).ok()
+            != Some(manifest.active_validator_count)
+        || u64::try_from(config.consensus.validator_vote_threshold).ok()
+            != Some(manifest.required_distinct_signers)
+        || config.consensus.proposal_timeout_ms != manifest.proposal_timeout_ms
+        // Legacy TOML exposes two vote-phase fields.  Fresh simplified PoSy
+        // has exactly one VOTE phase, so both aliases must agree with the one
+        // immutable manifest timeout and are never used as separate stages.
+        || config.consensus.prevote_timeout_ms != manifest.vote_timeout_ms
+        || config.consensus.precommit_timeout_ms != manifest.vote_timeout_ms
+        || config.consensus.max_round_timeout_ms != manifest.max_round_timeout_ms
+    {
+        return Err(
+            "node configuration disagrees with the finalized fresh simplified PoSy manifest"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn ensure_node_config_matches_posy_parameters(
@@ -2419,7 +2475,21 @@ impl TypedNextHeightContextSource for ActivationGuardedTypedNextHeightSource {
 fn resolve_finalized_etdag_startup_activation(
     consensus_parameters: &crate::consensus_parameters::LoadedConsensusParameters,
     epoch: crate::synergy_types::Epoch,
+    governed_genesis_binding: Option<&crate::etdag_governance::EtdagGovernedGenesisBinding>,
 ) -> Result<Option<EtdagActivationPermit>, String> {
+    if consensus_parameters
+        .require_simplified_posy_manifest()
+        .is_ok()
+    {
+        let binding = governed_genesis_binding.ok_or_else(|| {
+            "fresh simplified PoSy ETDAG startup requires its governed Genesis binding".to_string()
+        })?;
+        return crate::consensus_parameters::issue_etdag_governed_genesis_permit(binding)
+            .map(Some)
+            .map_err(|error| {
+                format!("fresh simplified PoSy ETDAG Genesis binding is invalid: {error}")
+            });
+    }
     match consensus_parameters.require_etdag_activation_at_epoch(epoch) {
         Ok(permit) => Ok(Some(permit)),
         Err(error)
@@ -2500,6 +2570,7 @@ fn build_finalized_typed_posy_runtime_inputs(
     let etdag_activation_permit = resolve_finalized_etdag_startup_activation(
         &consensus_parameters,
         local_context.height_context.epoch,
+        None,
     )?;
 
     // Construct independent provider values for the read-only ETDAG digest
@@ -2816,24 +2887,43 @@ fn build_simplified_crypto_authority(
     })
 }
 
-fn simplified_anchor_authorities(
+fn fresh_simplified_genesis_anchor_authorities(
     epoch_context: &SimplifiedEpochContext,
-) -> Result<(QuorumCertificateReference, FinalizedBlockRecord), String> {
-    let anchor = epoch_context.v2_boundary_anchor.as_ref().ok_or_else(|| {
-        "initial simplified runtime requires the exact finalized v2 boundary anchor".to_string()
+) -> Result<(SimplifiedFinalityParent, FinalizedBlockRecord), String> {
+    let genesis = canonical_genesis().map_err(|error| {
+        format!("fresh simplified finality cannot load canonical Genesis: {error}")
     })?;
-    let reference = QuorumCertificateReference {
-        height: anchor.height,
-        block_id: anchor.block_id.clone(),
-        qc_id: anchor.qc_finality_context_root,
-    };
-    reference.validate()?;
-    let finalized = FinalizedBlockRecord {
-        height: anchor.height,
-        block_id: anchor.block_id.clone(),
-        qc_id: anchor.qc_finality_context_root,
-    };
-    Ok((reference, finalized))
+    let activation = load_genesis_bound_simplified_activation(genesis.value())?
+        .ok_or_else(|| "fresh simplified finality has no Genesis activation binding".to_string())?;
+    if activation.derive_fresh_genesis_epoch_context()? != *epoch_context {
+        return Err(
+            "fresh simplified finality context does not equal the canonical Genesis activation"
+                .to_string(),
+        );
+    }
+    let genesis_hash = Hash::from_hex(genesis.hash())
+        .map_err(|error| format!("fresh simplified Genesis hash is invalid: {error}"))?;
+    let reference = GenesisFinalityReference::from_canonical_genesis_hash(genesis_hash);
+    let parent = SimplifiedFinalityParent::genesis(reference.clone())?;
+    let finalized = FinalizedBlockRecord::from_genesis(reference)?;
+    Ok((parent, finalized))
+}
+
+fn fresh_simplified_genesis_cryptographic_profile_root(
+    genesis: &GenesisDocument,
+    metadata: &SimplifiedGenesisRuntimeMetadata,
+) -> Result<Hash, String> {
+    let payload = serde_json::to_vec(&json!({
+        "genesis_hash": genesis.hash(),
+        "consensus_signature_algorithm": crate::synergy_types::TESTNET_V3_CONSENSUS_SIGNATURE_ALGORITHM,
+        "aegis_pqvm_version": metadata.aegis_pqvm_version,
+        "dag_version": metadata.dag_version,
+    }))
+    .map_err(|error| format!("serialize fresh simplified cryptographic profile: {error}"))?;
+    Ok(Hash::from_domain_bytes(
+        "SYNERGY_POSY_SIMPLIFIED_FRESH_GENESIS_CRYPTOGRAPHIC_PROFILE_V1",
+        &payload,
+    ))
 }
 
 struct SimplifiedV3TransitionRuntimeFinality {
@@ -2912,18 +3002,14 @@ fn run_simplified_target_admission_worker(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_simplified_v3_transition_runtime_finality<A>(
+fn build_simplified_v3_transition_runtime_finality(
     transition: VerifiedSimplifiedEpochTransition,
     material_store: DurableSimplifiedProposalMaterialStore,
     cluster_map: ClusterMap,
     consensus_verifier: AegisPqvmVerifier,
     etdag_parameters: EtdagParameters,
     typed_boundary_execution_state: crate::execution::ExecutionState,
-    authority_verifier: &A,
-) -> Result<SimplifiedV3TransitionRuntimeFinality, String>
-where
-    A: SimplifiedTransitionAuthorityVerifier,
-{
+) -> Result<SimplifiedV3TransitionRuntimeFinality, String> {
     build_simplified_v3_transition_runtime_finality_at_depth(
         transition,
         material_store,
@@ -2931,25 +3017,20 @@ where
         consensus_verifier,
         etdag_parameters,
         typed_boundary_execution_state,
-        authority_verifier,
         0,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_simplified_v3_transition_runtime_finality_at_depth<A>(
+fn build_simplified_v3_transition_runtime_finality_at_depth(
     transition: VerifiedSimplifiedEpochTransition,
     material_store: DurableSimplifiedProposalMaterialStore,
     cluster_map: ClusterMap,
     consensus_verifier: AegisPqvmVerifier,
     etdag_parameters: EtdagParameters,
     typed_boundary_execution_state: crate::execution::ExecutionState,
-    authority_verifier: &A,
     depth: usize,
-) -> Result<SimplifiedV3TransitionRuntimeFinality, String>
-where
-    A: SimplifiedTransitionAuthorityVerifier,
-{
+) -> Result<SimplifiedV3TransitionRuntimeFinality, String> {
     if depth >= 1_024 {
         return Err("durable v3 transition replay chain exceeds 1024 epochs".to_string());
     }
@@ -2964,10 +3045,21 @@ where
     let previous_material_store =
         DurableSimplifiedProposalMaterialStore::for_epoch(previous_context.root()?)?;
     let previous_sink = if previous_context.v3_transition_anchor.is_some() {
+        let previous_anchor = previous_context
+            .v3_transition_anchor
+            .as_ref()
+            .ok_or_else(|| {
+                "transition context unexpectedly lost its previous-epoch anchor".to_string()
+            })?;
+        let authority_store = DurableSimplifiedProposalMaterialStore::for_epoch(
+            previous_anchor.previous_epoch_context_root,
+        )?;
+        let authority_verifier =
+            DurableSimplifiedProtectedExecutionTransitionAuthorityVerifier::new(authority_store);
         let previous_transition = load_local_verified_simplified_transition(
             previous_context,
             previous_set,
-            authority_verifier,
+            &authority_verifier,
             build_simplified_consensus_verifier,
         )?;
         build_simplified_v3_transition_runtime_finality_at_depth(
@@ -2977,12 +3069,12 @@ where
             previous_consensus_verifier.clone(),
             etdag_parameters.clone(),
             typed_boundary_execution_state,
-            authority_verifier,
             depth.saturating_add(1),
         )?
         .sink
     } else {
-        let (_, previous_anchor_finalized) = simplified_anchor_authorities(previous_context)?;
+        let (_, previous_anchor_finalized) =
+            fresh_simplified_genesis_anchor_authorities(previous_context)?;
         let previous_environment = SimplifiedFinalityEnvironment {
             epoch_context: previous_context.clone(),
             validator_set: previous_set.clone(),
@@ -2998,11 +3090,12 @@ where
             previous_environment,
         )?
     };
-    let expected_finalized = FinalizedBlockRecord {
-        height: transition.finalized_seed().height,
-        block_id: transition.finalized_seed().block_id.clone(),
-        qc_id: transition.finalized_seed().qc_id,
-    };
+    let expected_finalized =
+        FinalizedBlockRecord::from_quorum_certificate(QuorumCertificateReference {
+            height: transition.finalized_seed().height,
+            block_id: transition.finalized_seed().block_id.clone(),
+            qc_id: transition.finalized_seed().qc_id,
+        })?;
     if previous_sink.current_finalized() != &expected_finalized {
         return Err(
             "previous simplified finality WAL does not reach the transition's exact finalized seed"
@@ -3057,10 +3150,9 @@ where
 }
 
 /// Starts the authenticated simplified v3 driver from finalized activation
-/// state. A deferred ETDAG decision selects the deterministic core adapter; a
-/// finalized activation permit selects the protected adapter and its
-/// schedule-neutral authenticated ingress. Both paths share the same durable
-/// material/finality authority and expose ingress only after reconciliation.
+/// state. The Genesis-committed governed ETDAG artifacts issue the protected
+/// adapter capability; no default or deferred compatibility path exists.
+/// Consensus and ingress share the same durable material/finality authority.
 fn spawn_finalized_simplified_posy_driver(
     config: &NodeConfig,
     epoch_context: SimplifiedEpochContext,
@@ -3073,65 +3165,62 @@ fn spawn_finalized_simplified_posy_driver(
     })?;
     let activation = load_genesis_bound_simplified_activation(genesis.value())?
         .ok_or_else(|| "simplified driver selected without a Genesis activation".to_string())?;
+    let transition_authority_verifier = epoch_context
+        .v3_transition_anchor
+        .as_ref()
+        .map(|anchor| {
+            DurableSimplifiedProposalMaterialStore::for_epoch(anchor.previous_epoch_context_root)
+                .map(DurableSimplifiedProtectedExecutionTransitionAuthorityVerifier::new)
+        })
+        .transpose()?;
     let verified_transition = if epoch_context.v3_transition_anchor.is_some() {
         epoch_context.validate_against(&validator_set)?;
         Some(load_local_verified_simplified_transition(
             &epoch_context,
             &validator_set,
-            &FailClosedSimplifiedTransitionAuthorityVerifier,
+            transition_authority_verifier.as_ref().ok_or_else(|| {
+                "simplified transition has no durable finalized-execution authority verifier"
+                    .to_string()
+            })?,
             build_simplified_consensus_verifier,
         )?)
     } else {
         validate_simplified_driver_activation(&activation, &epoch_context, &validator_set)?;
         None
     };
-    let bootstrap = load_testnet_v3_genesis_bootstrap(genesis).map_err(|error| {
-        format!("simplified driver cannot derive finalized Genesis bootstrap: {error}")
-    })?;
     let consensus_parameters = genesis.consensus_parameters().cloned().ok_or_else(|| {
         "simplified driver requires finalized Genesis consensus parameters".to_string()
     })?;
     consensus_parameters.require_genesis_binding()?;
-    let etdag_activation_permit =
-        resolve_finalized_etdag_startup_activation(&consensus_parameters, epoch_context.epoch)?;
+    let governed_etdag = load_genesis_bound_etdag_governance(genesis.value())?;
+    let etdag_activation_permit = resolve_finalized_etdag_startup_activation(
+        &consensus_parameters,
+        epoch_context.epoch,
+        Some(&governed_etdag),
+    )?;
+    crate::gas::install_governed_fee_schedule(
+        governed_etdag
+            .fee_schedule_artifact
+            .manifest
+            .fee_schedule
+            .clone(),
+    )?;
+    crate::gas::install_governed_fee_market_params(
+        governed_etdag
+            .fee_schedule_artifact
+            .manifest
+            .fee_market_params,
+    )?;
     let material_mode = select_simplified_material_mode(etdag_activation_permit.as_ref());
-
-    let genesis_anchor = Hash::from_hex(genesis.hash())
-        .map_err(|error| format!("canonical Genesis hash is not a typed anchor: {error}"))?;
-    let typed_store = TypedFinalityStore::for_genesis_anchor(genesis_anchor)
-        .map_err(|error| format!("open typed boundary finality: {error}"))?;
-    let typed_records = typed_store
-        .recover()
-        .map_err(|error| format!("recover typed boundary finality: {error}"))?;
-    let boundary = typed_records
-        .last()
-        .ok_or_else(|| "simplified activation has no finalized v2 boundary record".to_string())?;
-    let boundary_evidence = FinalizedV2BoundaryEvidence {
-        height: boundary.height,
-        round: boundary.quorum_certificate.round,
-        block_id: boundary.block_id.clone(),
-        qc_finality_context_root: boundary.quorum_certificate.finality_context_root()?,
-    };
-    let initial_epoch_context = activation.derive_epoch_context(&boundary_evidence)?;
-    let expected_anchor = initial_epoch_context
-        .v2_boundary_anchor
-        .as_ref()
-        .ok_or_else(|| "simplified activation context omits its v2 boundary".to_string())?;
-    if boundary.height != expected_anchor.height
-        || boundary.block_id != expected_anchor.block_id
-        || boundary.quorum_certificate.round != expected_anchor.round
-        || boundary.quorum_certificate.finality_context_root()?
-            != expected_anchor.qc_finality_context_root
-    {
-        return Err(
-            "durable v2 finality does not equal the simplified activation anchor".to_string(),
-        );
-    }
     let genesis_execution_state = load_finalized_testnet_v3_genesis_execution_state(genesis)
         .map_err(|error| format!("load finalized Genesis execution state: {error}"))?;
-    let boundary_execution_state =
-        replay_finalized_execution_state(genesis_execution_state, &typed_records)
-            .map_err(|error| format!("replay simplified activation execution boundary: {error}"))?;
+    let genesis_runtime_metadata = simplified_genesis_runtime_metadata(genesis.value())?;
+    let cryptographic_profile_root =
+        fresh_simplified_genesis_cryptographic_profile_root(genesis, &genesis_runtime_metadata)?;
+    let genesis_timestamp_ms = genesis
+        .timestamp()
+        .checked_mul(1_000)
+        .ok_or_else(|| "fresh simplified Genesis timestamp milliseconds overflow".to_string())?;
 
     let active_set = validator_set.active_for_epoch(epoch_context.epoch);
     let cluster_map = ClusterMap::derive_from_finalized_epoch_seed(
@@ -3140,42 +3229,70 @@ fn spawn_finalized_simplified_posy_driver(
     )?;
     let crypto = build_simplified_crypto_authority(config, &epoch_context, &validator_set)?;
     let material_store = DurableSimplifiedProposalMaterialStore::for_epoch(epoch_context.root()?)?;
-    let etdag_parameters = EtdagParameters::default();
+    // The runtime executes the exact canonical parameters whose SHA3-512
+    // root is bound into Genesis; a Rust default is never an activation
+    // authority and cannot silently substitute for governance policy.
+    let etdag_parameters = governed_etdag
+        .parameter_artifact
+        .manifest
+        .parameters
+        .clone();
     let transition_for_driver = verified_transition.clone();
     let transition_for_protected_authority = verified_transition.clone();
     let (
-        anchor_qc,
+        anchor_parent,
         anchor_finalized,
         finalization_sink,
-        certified_parent_header,
         finality_boundary_execution_state,
         previous_finality_replay,
+        epoch_start_timestamp_ms,
+        runtime_metadata,
     ) = if let Some(transition) = verified_transition {
-        let anchor_qc = transition.certified_parent().clone();
-        let anchor_finalized = FinalizedBlockRecord {
-            height: transition.finalized_seed().height,
-            block_id: transition.finalized_seed().block_id.clone(),
-            qc_id: transition.finalized_seed().qc_id,
-        };
+        let anchor_parent =
+            SimplifiedFinalityParent::quorum_certificate(transition.certified_parent().clone())?;
+        let anchor_finalized =
+            FinalizedBlockRecord::from_quorum_certificate(QuorumCertificateReference {
+                height: transition.finalized_seed().height,
+                block_id: transition.finalized_seed().block_id.clone(),
+                qc_id: transition.finalized_seed().qc_id,
+            })?;
         let runtime_finality = build_simplified_v3_transition_runtime_finality(
             transition,
             material_store.clone(),
             cluster_map.clone(),
             crypto.verifier.clone(),
             etdag_parameters.clone(),
-            boundary_execution_state.clone(),
-            &FailClosedSimplifiedTransitionAuthorityVerifier,
+            genesis_execution_state.clone(),
         )?;
+        let header = runtime_finality.certified_parent_header;
+        let runtime_metadata = SimplifiedGenesisRuntimeMetadata {
+            app_version: header.app_version,
+            execution_version: header.execution_version,
+            dag_version: header.dag_version,
+            aegis_pqvm_version: header.aegis_pqvm_version.clone(),
+        };
+        if runtime_metadata != genesis_runtime_metadata {
+            return Err(
+                "simplified v3 transition parent header does not match the frozen Genesis runtime versions"
+                    .to_string(),
+            );
+        }
+        let epoch_start_timestamp_ms = header
+            .timestamp_ms_consensus_bounded
+            .checked_add(consensus_parameters.manifest.target_block_time_ms)
+            .ok_or_else(|| "simplified epoch start timestamp overflows".to_string())?;
         (
-            anchor_qc,
+            anchor_parent,
             anchor_finalized,
             runtime_finality.sink,
-            runtime_finality.certified_parent_header,
             runtime_finality.boundary_execution_state,
             Some(runtime_finality.previous_replay),
+            epoch_start_timestamp_ms,
+            runtime_metadata,
         )
     } else {
-        let (anchor_qc, anchor_finalized) = simplified_anchor_authorities(&epoch_context)?;
+        let (anchor_parent, anchor_finalized) =
+            fresh_simplified_genesis_anchor_authorities(&epoch_context)?;
         let finality_environment = SimplifiedFinalityEnvironment {
             epoch_context: epoch_context.clone(),
             validator_set: validator_set.clone(),
@@ -3184,17 +3301,21 @@ fn spawn_finalized_simplified_posy_driver(
             consensus_verifier: crypto.verifier.clone(),
             etdag_verifier: crypto.verifier.clone(),
             anchor_finalized: anchor_finalized.clone(),
-            boundary_execution_state: boundary_execution_state.clone(),
+            boundary_execution_state: genesis_execution_state.clone(),
         };
         let sink =
             DurableSimplifiedFinalitySink::for_epoch(material_store.clone(), finality_environment)?;
+        let epoch_start_timestamp_ms = genesis_timestamp_ms
+            .checked_add(consensus_parameters.manifest.target_block_time_ms)
+            .ok_or_else(|| "fresh simplified epoch start timestamp overflows".to_string())?;
         (
-            anchor_qc,
+            anchor_parent,
             anchor_finalized,
             sink,
-            boundary.block.header.clone(),
-            boundary_execution_state.clone(),
+            genesis_execution_state,
             None,
+            epoch_start_timestamp_ms,
+            genesis_runtime_metadata,
         )
     };
     let protected_authority_configuration = (material_mode == SimplifiedMaterialMode::Protected)
@@ -3236,10 +3357,6 @@ fn spawn_finalized_simplified_posy_driver(
         .transpose()?;
     let initial_execution_state = finalization_sink.execution_state().clone();
     let target_block_time_ms = consensus_parameters.manifest.target_block_time_ms;
-    let epoch_start_timestamp_ms = certified_parent_header
-        .timestamp_ms_consensus_bounded
-        .checked_add(target_block_time_ms)
-        .ok_or_else(|| "simplified epoch start timestamp overflows".to_string())?;
     let consensus_parameter_root =
         ConsensusParameterRoot::from_hex(&epoch_context.consensus_parameter_root)?;
     let protected_inputs = EtdagProtectedInputCoordinator::process_wide();
@@ -3255,13 +3372,13 @@ fn spawn_finalized_simplified_posy_driver(
                 etdag_cluster_map: cluster_map.clone(),
                 consensus_parameter_root,
                 etdag_parameters: etdag_parameters.clone(),
-                cryptographic_profile_root: bootstrap.cryptographic_profile_root,
+                cryptographic_profile_root,
                 epoch_start_timestamp_ms,
                 target_block_time_ms,
-                app_version: certified_parent_header.app_version,
-                execution_version: certified_parent_header.execution_version,
-                dag_version: certified_parent_header.dag_version,
-                aegis_pqvm_version: certified_parent_header.aegis_pqvm_version.clone(),
+                app_version: runtime_metadata.app_version,
+                execution_version: runtime_metadata.execution_version,
+                dag_version: runtime_metadata.dag_version,
+                aegis_pqvm_version: runtime_metadata.aegis_pqvm_version.clone(),
             },
             protected_authority
                 .as_ref()
@@ -3275,13 +3392,13 @@ fn spawn_finalized_simplified_posy_driver(
                 validator_set: validator_set.clone(),
                 cluster_map: cluster_map.clone(),
                 execution_state: initial_execution_state.clone(),
-                cryptographic_profile_root: bootstrap.cryptographic_profile_root,
+                cryptographic_profile_root,
                 epoch_start_timestamp_ms,
                 target_block_time_ms,
-                app_version: certified_parent_header.app_version,
-                execution_version: certified_parent_header.execution_version,
-                dag_version: certified_parent_header.dag_version,
-                aegis_pqvm_version: certified_parent_header.aegis_pqvm_version.clone(),
+                app_version: runtime_metadata.app_version,
+                execution_version: runtime_metadata.execution_version,
+                dag_version: runtime_metadata.dag_version,
+                aegis_pqvm_version: runtime_metadata.aegis_pqvm_version.clone(),
             },
         )?)
     };
@@ -3309,7 +3426,7 @@ fn spawn_finalized_simplified_posy_driver(
             validator_set: validator_set.clone(),
             cluster_map: cluster_map.clone(),
             verifier: crypto.verifier.clone(),
-            cryptographic_profile_root: bootstrap.cryptographic_profile_root,
+            cryptographic_profile_root,
         };
         let frozen_validator_ids = validator_set
             .active_for_epoch(epoch_context.epoch)
@@ -3370,7 +3487,7 @@ fn spawn_finalized_simplified_posy_driver(
             crypto.local_validator_id,
             crypto.local_key_id,
             state_store,
-            anchor_qc,
+            anchor_parent,
             DurableConsensusSigningAuthority::process_wide(),
             crypto.signer,
             crypto.verifier,
@@ -3517,59 +3634,25 @@ fn spawn_finalized_simplified_posy_driver(
 }
 
 /// Resolves the only consensus profile authorized for the durable next
-/// height. Canonical Genesis supplies an optional future v3 binding; the
-/// typed-finality store supplies the last verified v2.2 authority. Nothing in
-/// this path reads an activation environment variable, wall clock, or local
-/// preference.
+/// height. Fresh canonical Genesis supplies the complete block-one authority;
+/// restart advancement is derived only from verified simplified finality.
+/// Nothing in this path reads an activation environment variable, wall clock,
+/// typed-finality store, or local preference.
 fn resolve_finalized_consensus_profile() -> Result<ConsensusProfileAtHeight, String> {
     let genesis = canonical_genesis()
         .map_err(|error| format!("consensus profile cannot load canonical Genesis: {error}"))?;
-    let activation = load_genesis_bound_simplified_activation(genesis.value())?;
-    let genesis_anchor = Hash::from_hex(genesis.hash())
-        .map_err(|error| format!("canonical Genesis hash is not a consensus anchor: {error}"))?;
-    let finality_store = TypedFinalityStore::for_genesis_anchor(genesis_anchor)
-        .map_err(|error| format!("consensus profile cannot open typed finality: {error}"))?;
-    let latest = finality_store
-        .latest()
-        .map_err(|error| format!("consensus profile cannot recover typed finality: {error}"))?;
-    let next_height = latest
-        .as_ref()
-        .map(|record| {
-            record
-                .height
-                .0
-                .checked_add(1)
-                .map(Height)
-                .ok_or_else(|| "durable typed finality height overflows".to_string())
-        })
-        .transpose()?
-        .unwrap_or(Height(1));
-    let boundary = match (activation.as_ref(), latest.as_ref()) {
-        (Some(activation), Some(record)) if next_height.0 >= activation.activation_height => {
-            Some(FinalizedV2BoundaryEvidence {
-                height: record.height,
-                round: record.quorum_certificate.round,
-                block_id: record.block_id.clone(),
-                qc_finality_context_root: record.quorum_certificate.finality_context_root()?,
-            })
-        }
-        _ => None,
-    };
-    let selected =
-        select_consensus_profile_at_height(next_height, activation.as_ref(), boundary.as_ref())?;
+    let activation = load_genesis_bound_simplified_activation(genesis.value())?
+        .ok_or_else(|| "canonical Genesis is missing simplified PoSy activation".to_string())?;
+    let selected = select_consensus_profile_at_height(Height(1), Some(&activation))?;
     let ConsensusProfileAtHeight::PosySimplifiedV3 {
         mut epoch_context,
         mut validator_set,
-    } = selected
-    else {
-        return Ok(selected);
-    };
+    } = selected;
 
-    // Typed finality deliberately stops at the v2 boundary. Once simplified
-    // safety state exists, its fully verified durable QC head is the only
-    // authority for the next consensus height. Walk only adjacent, fully
-    // verified transitions so an old typed boundary cannot pin restarts to
-    // the first v3 epoch forever.
+    // Once simplified safety state exists, its fully verified durable QC head
+    // is the only authority for the next consensus height. Walk only adjacent,
+    // fully verified v3 transitions; a fresh chain never imports an earlier
+    // consensus engine's finality.
     for _ in 0..1_024 {
         let state_store =
             DurableSimplifiedPosyStore::at_path(simplified_epoch_state_path(epoch_context.root()?));
@@ -3601,11 +3684,15 @@ fn resolve_finalized_consensus_profile() -> Result<ConsensusProfileAtHeight, Str
 
         let consensus_verifier =
             build_simplified_consensus_verifier(&epoch_context, &validator_set)?;
+        let authority_store =
+            DurableSimplifiedProposalMaterialStore::for_epoch(epoch_context.root()?)?;
+        let authority_verifier =
+            DurableSimplifiedProtectedExecutionTransitionAuthorityVerifier::new(authority_store);
         let transition = load_next_local_verified_simplified_transition(
             &epoch_context,
             &validator_set,
             &consensus_verifier,
-            &FailClosedSimplifiedTransitionAuthorityVerifier,
+            &authority_verifier,
         )?;
         let next = select_consensus_profile_from_verified_v3_transition(
             simplified_next_height,
@@ -3701,61 +3788,52 @@ fn ensure_finalized_consensus_profile_ready(
     config: &NodeConfig,
 ) -> Result<ConsensusProfileAtHeight, String> {
     let profile = resolve_finalized_consensus_profile()?;
-    match &profile {
-        ConsensusProfileAtHeight::PosyV2_2 => ensure_consensus_pqc_runtime_ready(config)?,
-        ConsensusProfileAtHeight::PosySimplifiedV3 {
+    let ConsensusProfileAtHeight::PosySimplifiedV3 {
+        epoch_context,
+        validator_set,
+    } = &profile;
+    if epoch_context.v3_transition_anchor.is_some() {
+        validate_simplified_frozen_identity_authority(
             epoch_context,
             validator_set,
-        } => {
-            if epoch_context.v3_transition_anchor.is_some() {
-                validate_simplified_frozen_identity_authority(
-                    epoch_context,
-                    validator_set,
-                    None,
-                    p2p::validator_transport_registry::validator_transport_for,
-                )?;
-            } else {
-                let genesis = canonical_genesis().map_err(|error| {
-                    format!("simplified PoSy startup cannot load canonical Genesis: {error}")
-                })?;
-                let bootstrap = load_testnet_v3_genesis_bootstrap(genesis).map_err(|error| {
-                    format!("simplified PoSy startup cannot validate transport identities: {error}")
-                })?;
-                validate_simplified_frozen_identity_authority(
-                    epoch_context,
-                    validator_set,
-                    Some(&bootstrap.validator_set),
-                    |_| None,
-                )?;
-            }
-            let validator_address = resolve_local_validator_address(config);
-            ensure_local_validator_record_available(&validator_address)?;
-            let (_, local_private_key) = load_local_validator_keypair_for_height(
-                epoch_context.epoch_start_height.0,
-                &validator_address,
-                &VALIDATOR_MANAGER,
+            None,
+            p2p::validator_transport_registry::validator_transport_for,
+        )?;
+    } else {
+        // The initial membership authority is the activation record already
+        // committed by canonical Genesis.  It must not be reinterpreted
+        // through the retired Testnet-v3 bootstrap (which carries an old
+        // chain's membership and transport topology).
+        validate_simplified_frozen_identity_authority(
+            epoch_context,
+            validator_set,
+            Some(validator_set),
+            |_| None,
+        )?;
+    }
+    let validator_address = resolve_local_validator_address(config);
+    ensure_local_validator_record_available(&validator_address)?;
+    let (_, local_private_key) = load_local_validator_keypair_for_height(
+        epoch_context.epoch_start_height.0,
+        &validator_address,
+        &VALIDATOR_MANAGER,
+    )
+    .map_err(|error| {
+        format!("simplified PoSy startup cannot load the canonical local ML-DSA-65 key: {error}")
+    })?;
+    let local = validator_set
+        .validators
+        .iter()
+        .find(|validator| validator.validator_uma_id.0 == validator_address)
+        .ok_or_else(|| {
+            format!(
+                "local validator {validator_address} is absent from the frozen v3 epoch context"
             )
-            .map_err(|error| {
-                format!(
-                    "simplified PoSy startup cannot load the canonical local ML-DSA-65 key: {error}"
-                )
-            })?;
-            let local = validator_set
-                .validators
-                .iter()
-                .find(|validator| validator.validator_uma_id.0 == validator_address)
-                .ok_or_else(|| {
-                    format!(
-                        "local validator {validator_address} is absent from the frozen v3 epoch context"
-                    )
-                })?;
-            if local_private_key.public_key_id != local.consensus_public_key.key_id.0 {
-                return Err(
-                    "local validator private key does not match the frozen v3 consensus key"
-                        .to_string(),
-                );
-            }
-        }
+        })?;
+    if local_private_key.public_key_id != local.consensus_public_key.key_id.0 {
+        return Err(
+            "local validator private key does not match the frozen v3 consensus key".to_string(),
+        );
     }
     Ok(profile)
 }
@@ -3767,10 +3845,10 @@ fn ensure_consensus_pqc_runtime_ready(config: &NodeConfig) -> Result<(), String>
             config.blockchain.chain_id, config.network.id
         ));
     }
-    if config.network.network_id != "synergy-testnet-v3" {
+    if config.network.network_id != TESTNET_V3_CANONICAL_NETWORK_ID {
         return Err(format!(
-            "validator consensus requires network_id synergy-testnet-v3, found {}",
-            config.network.network_id
+            "validator consensus requires network_id {TESTNET_V3_CANONICAL_NETWORK_ID}, found {}",
+            config.network.network_id,
         ));
     }
     let mode = config
@@ -3779,24 +3857,27 @@ fn ensure_consensus_pqc_runtime_ready(config: &NodeConfig) -> Result<(), String>
     if config.consensus.allow_genesis_status_bypass {
         return Err("validator consensus refuses genesis status bypass configuration".to_string());
     }
-    let genesis = canonical_genesis()
-        .map_err(|error| format!("validator consensus cannot load canonical Genesis: {error}"))?;
-    load_testnet_v3_genesis_bootstrap(genesis).map_err(|error| {
-        format!(
-            "validator consensus canonical Genesis is not a valid Testnet-v3 bootstrap: {error}"
-        )
-    })?;
-    ensure_local_validator_consensus_key_bound(config)?;
     match mode {
-        ResolvedConsensusMode::PosyV2_2 => {
-            // Constructing the coordinator proves the local key, immutable
-            // Genesis anchor, parameter root, ceremony execution snapshot,
-            // and typed finality boundary agree before it requests signing.
-            let _coordinator = build_finalized_typed_posy_coordinator(config)?;
+        ResolvedConsensusMode::PosySimplifiedV3 => {
+            let genesis = canonical_genesis().map_err(|error| {
+                format!("validator consensus cannot load canonical Genesis: {error}")
+            })?;
+            let activation = load_genesis_bound_simplified_activation(genesis.value())?
+                .ok_or_else(|| {
+                    "validator consensus canonical Genesis lacks fresh simplified activation"
+                        .to_string()
+                })?;
+            if activation.manifest.protocol_version
+                != crate::consensus::simplified_posy::POSY_SIMPLIFIED_PROTOCOL_VERSION
+            {
+                return Err("validator consensus activation does not select posy/3.0".to_string());
+            }
         }
         ResolvedConsensusMode::CoordinatedRoundRobinV1(_) => {
-            // P1 has its own separate runtime, finality, and signing journals.
-            // Do not construct typed PoSy as a preflight side effect.
+            return Err(
+                "fresh Testnet-v3 consensus refuses coordinated-round-robin runtime selection"
+                    .to_string(),
+            );
         }
     }
     Ok(())
@@ -4060,7 +4141,7 @@ fn print_usage(binary_name: &str, expected_profile: Option<&RoleProfile>) {
     eprintln!();
     eprintln!("SNAPSHOT OPTIONS:");
     eprintln!(
-        "    --chain-id 1266 --network-id synergy-testnet-v3 --genesis-hash {}",
+        "    --chain-id 1266 --network-id testnet --genesis-hash {}",
         expected_genesis_hash()
     );
     eprintln!("    --source-workspace <PATH>  Source workspace for offline create/list/verify");
@@ -5273,7 +5354,7 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                     Ok(ResolvedConsensusMode::CoordinatedRoundRobinV1(coordinated_config)) => {
                         coordinated_config
                     }
-                    Ok(ResolvedConsensusMode::PosyV2_2) | Err(_) => {
+                    Ok(ResolvedConsensusMode::PosySimplifiedV3) | Err(_) => {
                         eprintln!(
                             "Service startup failed closed: coordinated finality observer selected without a valid P1 configuration"
                         );
@@ -6563,40 +6644,11 @@ mod tests {
     }
 
     #[test]
-    fn authorized_validator_with_p2p_rejects_retired_v2_profile() {
-        let address = "synv1typeddriverstarttest";
-        let _ = VALIDATOR_MANAGER.register_validator(ValidatorRegistration {
-            address: address.to_string(),
-            public_key: "test-typed-driver-start-key".to_string(),
-            name: "typed driver startup gate".to_string(),
-            stake_amount: 50_000_000_000_000,
-            submitted_at: now_ts(),
-            registration_tx_hash: "test-typed-driver-start".to_string(),
-        });
-        let _ = VALIDATOR_MANAGER.approve_validator(address);
-        VALIDATOR_MANAGER.update_validator_stake(address, 50_000_000_000_000);
-
-        let mut config = NodeConfig::default();
-        config.node.validator_address = address.to_string();
-
-        let consensus_enabled =
-            should_start_consensus(&config, Some(NodeRole::Validator.profile()));
-        let error = select_finalized_consensus_driver_startup(
-            consensus_enabled,
-            true,
-            Some(Ok(ConsensusProfileAtHeight::PosyV2_2)),
-        )
-        .expect_err("the fresh simplified release must reject the retired v2 profile");
-
-        assert!(error.contains("retired PoSy v2 profile"));
-    }
-
-    #[test]
-    fn finalized_typed_driver_startup_fails_closed_without_p2p_or_finalized_inputs() {
+    fn finalized_simplified_driver_startup_fails_closed_without_p2p_or_finalized_inputs() {
         let no_p2p = select_finalized_consensus_driver_startup(
             true,
             false,
-            Some(Ok(ConsensusProfileAtHeight::PosyV2_2)),
+            Some(Err("missing canonical fresh-genesis authority".to_string())),
         )
         .expect_err("consensus startup without P2P must fail closed");
         assert!(no_p2p.contains("active P2P network"));
@@ -6608,20 +6660,6 @@ mod tests {
         )
         .expect_err("consensus startup with invalid finalized inputs must fail closed");
         assert!(invalid_finalized_inputs.contains("missing canonical finality context"));
-    }
-
-    #[test]
-    fn running_v2_driver_cannot_install_the_declared_v3_height() {
-        ensure_v2_successor_precedes_simplified_activation(Height(8_999), Some(Height(9_001)))
-            .expect("v2.2 remains authoritative strictly before the boundary");
-
-        let error =
-            ensure_v2_successor_precedes_simplified_activation(Height(9_000), Some(Height(9_001)))
-                .expect_err("the live v2.2 worker must stop at the declared v3 boundary");
-        assert!(error.contains("POSY_V3_ACTIVATION_BOUNDARY_REACHED"));
-
-        ensure_v2_successor_precedes_simplified_activation(Height(9_000), None)
-            .expect("without a Genesis-bound activation v2.2 remains authoritative");
     }
 
     #[test]
@@ -6847,9 +6885,12 @@ mod tests {
         let parameters = genesis
             .consensus_parameters()
             .expect("applied Genesis must retain its consensus parameter binding");
-        let permit =
-            resolve_finalized_etdag_startup_activation(parameters, crate::synergy_types::Epoch(0))
-                .unwrap();
+        let permit = resolve_finalized_etdag_startup_activation(
+            parameters,
+            crate::synergy_types::Epoch(0),
+            None,
+        )
+        .unwrap();
         assert!(permit.is_none());
         assert_eq!(
             select_simplified_material_mode(permit.as_ref()),
@@ -6873,7 +6914,7 @@ mod tests {
             "--chain-id".to_string(),
             "1266".to_string(),
             "--network-id".to_string(),
-            "synergy-testnet-v3".to_string(),
+            "testnet".to_string(),
             "--genesis-hash".to_string(),
             expected_genesis_hash(),
         ];
@@ -6888,7 +6929,7 @@ mod tests {
             "--chain-id".to_string(),
             "1266".to_string(),
             "--network-id".to_string(),
-            "synergy-testnet-v3".to_string(),
+            "testnet".to_string(),
             "--genesis-hash".to_string(),
             expected_genesis_hash(),
         ];
@@ -6903,7 +6944,7 @@ mod tests {
             "--chain-id".to_string(),
             "1266".to_string(),
             "--network-id".to_string(),
-            "synergy-testnet-v3".to_string(),
+            "testnet".to_string(),
             "--genesis-hash".to_string(),
             expected_genesis_hash(),
         ];
@@ -6917,7 +6958,7 @@ mod tests {
             "synergy-testnet".to_string(),
             "create-snapshot".to_string(),
             "--network-id".to_string(),
-            "synergy-testnet-v3".to_string(),
+            "testnet".to_string(),
         ];
         let error =
             require_testnet_v3_operator_args(&missing).expect_err("chain id must be required");
@@ -6929,7 +6970,7 @@ mod tests {
             "--chain-id".to_string(),
             "1263".to_string(),
             "--network-id".to_string(),
-            "synergy-testnet-v3".to_string(),
+            "testnet".to_string(),
         ];
         let error = require_testnet_v3_operator_args(&wrong).expect_err("wrong chain id must fail");
         assert!(error.contains("expected 1266"));
@@ -6949,7 +6990,7 @@ mod tests {
         ];
         let error =
             require_testnet_v3_operator_args(&args).expect_err("wrong network must fail closed");
-        assert!(error.contains("expected synergy-testnet-v3"));
+        assert!(error.contains("expected testnet"));
     }
 
     #[test]
@@ -6960,7 +7001,7 @@ mod tests {
             "--chain-id".to_string(),
             "1266".to_string(),
             "--network-id".to_string(),
-            "synergy-testnet-v3".to_string(),
+            "testnet".to_string(),
             "--genesis-hash".to_string(),
             "wrong".to_string(),
         ];
@@ -6977,7 +7018,7 @@ mod tests {
             "synergy-testnet".to_string(),
             "create-snapshot".to_string(),
             "--chain-id=1266".to_string(),
-            "--network-id=synergy-testnet-v3".to_string(),
+            "--network-id=testnet".to_string(),
             format!("--genesis-hash={}", expected_genesis_hash()),
         ];
         require_testnet_v3_operator_args(&args).expect("equals form should be accepted");
@@ -7501,7 +7542,7 @@ mod tests {
     fn coordinated_mode_selects_its_own_worker_not_typed_posy() {
         let coordinated = crate::consensus::coordinated_round_robin::CoordinatedRoundRobinConfig {
             chain_id: 1266,
-            network_id: "synergy-testnet-v3".to_string(),
+            network_id: "testnet".to_string(),
             consensus_version:
                 crate::consensus::coordinated_round_robin::COORDINATED_ROUND_ROBIN_V1.to_string(),
             coordinator_id: "validator-1".to_string(),

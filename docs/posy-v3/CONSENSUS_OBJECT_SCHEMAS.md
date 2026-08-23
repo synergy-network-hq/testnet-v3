@@ -82,7 +82,15 @@ The TC closure ID hashes only context, lease, abandoned proposer, and predecesso
 
 ## Persistent safety record
 
-The rooted atomic record contains `anchor_qc`, `highest_qc`, optional `locked_qc`, optional `last_vote`, optional authenticated reliable-delivery evidence for the active slot, optional current `takeover` with the complete sequential TC chain, `finalized`, indexed certified QCs and TCs, and optional `safety_halt`. Reliable-delivery and participant-proof bytes are local evidence and are excluded from the stable authority root. The format exposes no reset/delete/unlock API.
+The rooted atomic record contains typed `anchor_parent` and `highest_parent`
+values, optional `locked_qc`, optional `last_vote`, authenticated
+reliable-delivery evidence for the active slot, optional current `takeover`
+with the complete sequential TC chain, `finalized`, indexed certified QCs and
+TCs, and optional `safety_halt`. For epoch zero, the two parent values may be
+the canonical `GenesisFinalityReference`; Genesis is never encoded as a QC.
+Reliable-delivery and participant-proof bytes are local evidence and are
+excluded from the stable authority root. The format exposes no
+reset/delete/unlock API.
 
 ## FINALIZATION_TRANSACTION and finality WAL
 
@@ -102,7 +110,7 @@ context drift, invalid signatures, discontinuity, or execution mismatch fails
 closed. Repeating the exact transaction returns its prior receipt; different
 bytes for an occupied target height are rejected. The production role runtime
 now installs this sink as the v3 restart execution authority and publishes
-execution snapshots for the Genesis-bound deferred-ETDAG path. The autonomous
+execution snapshots for the Genesis-bound governed-ETDAG path. The autonomous
 five-driver harness proves distinct WAL/material durability across restart;
 full node-database convergence remains open.
 

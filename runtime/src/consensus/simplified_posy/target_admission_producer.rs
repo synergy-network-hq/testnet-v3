@@ -1,8 +1,11 @@
 //! Durable schedule-neutral H+3 target-admission production for simplified PoSy.
 
+#[cfg(test)]
+use super::QuorumCertificateReference;
 use super::{
     simplified_protected_finality_context_digest_from_state_root,
     DurableSimplifiedProtectedMaterialAuthority, FinalizedBlockRecord, SimplifiedEpochContext,
+    POSY_SIMPLIFIED_PROTOCOL_VERSION,
 };
 use crate::consensus_parameters::ConsensusParameterRoot;
 use crate::crypto::aegis_pqvm::{AegisPqvmSigner, AegisPqvmVerifier};
@@ -15,7 +18,7 @@ use crate::etdag::{
 };
 use crate::synergy_types::{
     CanonicalSerialize, ClusterId, ClusterMap, Hash, Height, ValidatorId, ValidatorRecord,
-    ValidatorSet, ValidatorStatus, POSY_PROTOCOL_VERSION, TESTNET_V3_CLUSTER_SCHEDULE_VERSION,
+    ValidatorSet, ValidatorStatus, TESTNET_V3_CLUSTER_SCHEDULE_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use sha3::{Digest as _, Sha3_512};
@@ -731,7 +734,7 @@ impl SimplifiedTargetAdmissionProducer {
             .ok_or_else(|| "SIMPLIFIED_TARGET_ADMISSION_MISSING_INGRESS_REGISTRY".to_string())?;
         let context = TargetAdmissionContext::derive_schedule_neutral(
             TargetAdmissionContextSpec {
-                protocol_version: POSY_PROTOCOL_VERSION.to_string(),
+                protocol_version: POSY_SIMPLIFIED_PROTOCOL_VERSION.to_string(),
                 epoch: self.configuration.epoch_context.epoch,
                 target_height,
                 source_finalized_height: authority.finalized.height,
@@ -1134,7 +1137,7 @@ mod tests {
             &etdag_fixture.validator_set,
         )
         .unwrap();
-        let finalized = FinalizedBlockRecord {
+        let finalized = FinalizedBlockRecord::from_quorum_certificate(QuorumCertificateReference {
             height: Height(5),
             block_id: BlockId::from_hash(Hash::from_domain_bytes(
                 "simplified-target-admission-test",
@@ -1144,7 +1147,8 @@ mod tests {
                 "simplified-target-admission-test",
                 b"finalized-five-qc",
             ),
-        };
+        })
+        .unwrap();
         let finalized_execution_state_root = Hash::from_domain_bytes(
             "simplified-target-admission-test",
             b"finalized-five-execution-state",
@@ -1192,8 +1196,8 @@ mod tests {
         let registry = IngressKemKeyRegistry {
             registry_version: INGRESS_KEM_REGISTRY_VERSION,
             chain_id: crate::synergy_types::ChainId::synergy_testnet_v3(),
-            network_id: NetworkId::synergy_testnet_v3(),
-            protocol_version: POSY_PROTOCOL_VERSION.to_string(),
+            network_id: NetworkId::fresh_posy_testnet_v3(),
+            protocol_version: POSY_SIMPLIFIED_PROTOCOL_VERSION.to_string(),
             epoch: Epoch(0),
             target_height,
             assigned_cluster_id,
@@ -1340,10 +1344,16 @@ mod tests {
             .contains("FINALITY_AUTHORITY_MISMATCH"));
 
         let mut wrong_finalized_record = environment.snapshot.clone();
-        wrong_finalized_record.finalized.qc_id = Hash::from_domain_bytes(
-            "simplified-target-admission-test-wrong-finality",
-            b"substituted-qc",
-        );
+        wrong_finalized_record.finalized =
+            FinalizedBlockRecord::from_quorum_certificate(QuorumCertificateReference {
+                height: wrong_finalized_record.finalized.height,
+                block_id: wrong_finalized_record.finalized.block_id.clone(),
+                qc_id: Hash::from_domain_bytes(
+                    "simplified-target-admission-test-wrong-finality",
+                    b"substituted-qc",
+                ),
+            })
+            .unwrap();
         assert!(environment
             .producer(wrong_finalized_record, Some(environment.registry.clone()),)
             .prepare_h3()

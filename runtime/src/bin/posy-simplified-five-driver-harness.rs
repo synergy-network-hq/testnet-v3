@@ -22,10 +22,10 @@ use synergy_testnet::consensus::simplified_posy::{
     run_simplified_posy_driver_with_peer_rejection_observer, AuthenticatedSimplifiedConsensusPeer,
     DurableSimplifiedFinalitySink, DurableSimplifiedPosyStore,
     DurableSimplifiedProposalMaterialStore, DurableVerifiedSimplifiedProposalSource,
-    FinalizedBlockRecord, FinalizedV2BoundaryEvidence, GenesisBoundSimplifiedActivation,
-    QuorumCertificateReference, SimplifiedConsensusEgress, SimplifiedConsensusEnvelope,
-    SimplifiedConsensusMessage, SimplifiedCoreMaterialAdapter, SimplifiedCoreMaterialConfiguration,
-    SimplifiedDriverTiming, SimplifiedEpochContext, SimplifiedFinalityEnvironment,
+    FinalizedBlockRecord, GenesisBoundSimplifiedActivation, GenesisFinalityReference,
+    SimplifiedConsensusEgress, SimplifiedConsensusEnvelope, SimplifiedConsensusMessage,
+    SimplifiedCoreMaterialAdapter, SimplifiedCoreMaterialConfiguration, SimplifiedDriverTiming,
+    SimplifiedEpochContext, SimplifiedFinalityEnvironment, SimplifiedFinalityParent,
     SimplifiedPosyDriver, SimplifiedSafetyState, POSY_SIMPLIFIED_ACTIVATION_BINDING_SCHEMA_VERSION,
     POSY_SIMPLIFIED_ACTIVATION_BINDING_STATUS, POSY_SIMPLIFIED_PROTOCOL_VERSION,
 };
@@ -38,18 +38,19 @@ use synergy_testnet::execution::ExecutionState;
 use synergy_testnet::p2p::messages::validate_simplified_consensus_message_size;
 use synergy_testnet::posy_simplified_parameters::{
     SimplifiedConsensusParameterManifest, SimplifiedPerformanceTargets,
-    POSY_SIMPLIFIED_PARAMETER_FINALIZED_STATUS,
+    POSY_SIMPLIFIED_ETDAG_GOVERNED_GENESIS_BINDING_REQUIRED,
+    POSY_SIMPLIFIED_FRESH_GENESIS_BOUNDARY, POSY_SIMPLIFIED_PARAMETER_FINALIZED_STATUS,
 };
 use synergy_testnet::synergy_types::{
-    AegisPqKeyRole, BlockId, ChainId, ClusterId, ClusterMap, Epoch, Hash, Height, NetworkId, Round,
-    UmaId, ValidatorId, ValidatorRecord, ValidatorSet, ValidatorStatus,
+    AegisPqKeyRole, ChainId, ClusterId, ClusterMap, Epoch, Hash, Height, NetworkId, Round, UmaId,
+    ValidatorId, ValidatorRecord, ValidatorSet, ValidatorStatus,
     TESTNET_V3_CONSENSUS_SIGNATURE_ALGORITHM,
 };
 
 const VALIDATOR_COUNT: usize = 5;
-const ACTIVATION_EPOCH: u64 = 1;
+const ACTIVATION_EPOCH: u64 = 0;
 const EPOCH_LENGTH: u64 = 1_000;
-const EPOCH_START_HEIGHT: u64 = ACTIVATION_EPOCH * EPOCH_LENGTH + 1;
+const EPOCH_START_HEIGHT: u64 = 1;
 const ROUTER_CAPACITY: usize = 4_096;
 const DRIVER_INGRESS_CAPACITY: usize = 512;
 const MAX_ROUTED_FRAME_BYTES: usize = 1024 * 1024;
@@ -67,7 +68,9 @@ const MAX_ROUND_TIMEOUT_MS: u64 = 16_000;
 struct PublicConfiguration {
     activation: GenesisBoundSimplifiedActivation,
     epoch_context: SimplifiedEpochContext,
-    anchor_qc: QuorumCertificateReference,
+    /// Fresh-chain block one extends this distinct Genesis reference.  It is
+    /// intentionally not a fabricated quorum certificate.
+    genesis_finality_reference: GenesisFinalityReference,
     pqc_public_keys: Vec<PQCPublicKey>,
 }
 
@@ -433,7 +436,7 @@ fn run_qualification(
                 .collect::<Result<Vec<_>, _>>();
             states.is_ok_and(|states| {
                 states.iter().all(|state| {
-                    state.highest_qc.height.0 >= EPOCH_START_HEIGHT + 2
+                    state.highest_parent.height().0 >= EPOCH_START_HEIGHT + 2
                         && state.finalized.height.0 >= EPOCH_START_HEIGHT
                 })
             })
@@ -441,7 +444,7 @@ fn run_qualification(
     )?;
     require_same_view(work_dir, context, &active)?;
     let active_state = load_state(work_dir, sync_source, context)?;
-    if active_state.highest_qc.height.0 < EPOCH_START_HEIGHT + 2
+    if active_state.highest_parent.height().0 < EPOCH_START_HEIGHT + 2
         || active_state.finalized.height.0 < EPOCH_START_HEIGHT
     {
         return Err("four-of-five drivers did not produce three-chain finality".to_string());
@@ -475,7 +478,7 @@ fn run_qualification(
         policy,
         |_, current_policy| {
             load_state(work_dir, current_policy.lagger, context).is_ok_and(|state| {
-                state.highest_qc.height == active_state.highest_qc.height
+                state.highest_parent.height() == active_state.highest_parent.height()
                     && state.finalized == active_state.finalized
             })
         },
@@ -545,7 +548,7 @@ fn run_qualification(
     let failed_leader =
         validator_index(validators, context.authorized_proposer(next_height, round)?)?;
     policy.isolate(failed_leader);
-    let prior_highest = source_state.highest_qc.height;
+    let prior_highest = source_state.highest_parent.height();
     let takeover_observed = Arc::new(AtomicBool::new(false));
     let takeover_flag = Arc::clone(&takeover_observed);
     wait_until(
@@ -569,7 +572,7 @@ fn run_qualification(
                 .filter(|index| *index != failed_leader && *index != current_policy.lagger)
                 .any(|index| {
                     load_state(work_dir, index, context)
-                        .is_ok_and(|state| state.highest_qc.height.0 > prior_highest.0)
+                        .is_ok_and(|state| state.highest_parent.height().0 > prior_highest.0)
                 })
         },
     )?;
@@ -617,7 +620,7 @@ fn run_qualification(
         .map(|index| load_state(work_dir, *index, context))
         .collect::<Result<Vec<_>, _>>()?;
     for (before, after) in before_three.iter().zip(&after_three) {
-        if before.highest_qc != after.highest_qc
+        if before.highest_parent != after.highest_parent
             || before.finalized != after.finalized
             || before.takeover != after.takeover
         {
@@ -638,7 +641,7 @@ fn run_qualification(
         "bounded_authenticated_router": true,
         "initial_validator_count": VALIDATOR_COUNT,
         "one_unavailable_finalized_height": active_state.finalized.height.0,
-        "state_sync_healed_height": after_restart.highest_qc.height.0,
+        "state_sync_healed_height": after_restart.highest_parent.height().0,
         "restart_authority": {
             "signer_journal_byte_root": signer_journal_root.to_hex(),
             "proposal_material_tree_root": material_authority_root.to_hex(),
@@ -646,7 +649,7 @@ fn run_qualification(
             "exact_bytes_unchanged": true
         },
         "failed_leader": failed_leader,
-        "three_of_five_fail_closed_height": after_three[0].highest_qc.height.0,
+        "three_of_five_fail_closed_height": after_three[0].highest_parent.height().0,
         "router_counters": {
             "proposals": policy.counters.proposals,
             "votes": policy.counters.votes,
@@ -711,7 +714,7 @@ fn run_worker(validator_index: usize, generation: u64, work_dir: &Path) -> Resul
                 b"mldsa65-core",
             ),
             epoch_start_timestamp_ms: 1_000_000,
-            target_block_time_ms: 1_000,
+            target_block_time_ms: 2_000,
             app_version: 1,
             execution_version: 1,
             dag_version: 2,
@@ -723,11 +726,11 @@ fn run_worker(validator_index: usize, generation: u64, work_dir: &Path) -> Resul
         material_store.clone(),
         core_adapter,
     )?;
-    let anchor_finalized = FinalizedBlockRecord {
-        height: configuration.anchor_qc.height,
-        block_id: configuration.anchor_qc.block_id.clone(),
-        qc_id: configuration.anchor_qc.qc_id,
-    };
+    let genesis_parent =
+        SimplifiedFinalityParent::genesis(configuration.genesis_finality_reference.clone())?;
+    genesis_parent.validate_for_child_height(Height(EPOCH_START_HEIGHT))?;
+    let anchor_finalized =
+        FinalizedBlockRecord::from_genesis(configuration.genesis_finality_reference.clone())?;
     let finalization_sink = DurableSimplifiedFinalitySink::at_directory(
         worker_finality_directory(work_dir, validator_index),
         material_store,
@@ -760,7 +763,7 @@ fn run_worker(validator_index: usize, generation: u64, work_dir: &Path) -> Resul
         local.validator_id.clone(),
         local.consensus_public_key.key_id.clone(),
         DurableSimplifiedPosyStore::at_path(worker_state_path(work_dir, validator_index)),
-        configuration.anchor_qc,
+        genesis_parent,
         DurableConsensusSigningAuthority::at_path(worker_signer_journal_path(
             work_dir,
             validator_index,
@@ -1295,17 +1298,12 @@ fn provision_configuration(work_dir: &Path) -> Result<PublicConfiguration, Strin
         frozen_validator_set: validator_set,
     };
     activation.validate()?;
-    let anchor_qc = anchor_qc();
-    let epoch_context = activation.derive_epoch_context(&FinalizedV2BoundaryEvidence {
-        height: anchor_qc.height,
-        round: Round(0),
-        block_id: anchor_qc.block_id.clone(),
-        qc_finality_context_root: anchor_qc.qc_id,
-    })?;
+    let genesis_finality_reference = harness_genesis_finality_reference(&activation)?;
+    let epoch_context = activation.derive_fresh_genesis_epoch_context()?;
     let configuration = PublicConfiguration {
         activation,
         epoch_context,
-        anchor_qc,
+        genesis_finality_reference,
         pqc_public_keys: public_keys,
     };
     write_message_pack(&public_configuration_path(work_dir), &configuration, false)?;
@@ -1321,9 +1319,9 @@ fn finalized_manifest() -> SimplifiedConsensusParameterManifest {
         chain_id: ChainId::synergy_testnet_v3(),
         network_id: NetworkId::synergy_testnet_v3(),
         protocol_version: POSY_SIMPLIFIED_PROTOCOL_VERSION.to_string(),
-        activation_boundary: "declared_epoch_boundary_only".to_string(),
-        activation_epoch: Some(ACTIVATION_EPOCH),
-        activation_height: Some(EPOCH_START_HEIGHT),
+        activation_boundary: POSY_SIMPLIFIED_FRESH_GENESIS_BOUNDARY.to_string(),
+        activation_epoch: Some(0),
+        activation_height: Some(1),
         epoch_length_blocks: EPOCH_LENGTH,
         active_validator_count: VALIDATOR_COUNT as u64,
         consensus_cluster_count: 1,
@@ -1348,7 +1346,9 @@ fn finalized_manifest() -> SimplifiedConsensusParameterManifest {
         safety_halt_on_conflicting_valid_qcs: true,
         etdag_finality_separation_required: true,
         protected_execution_binding_required: true,
-        initial_etdag_activation: "preserve_current_finalized_manifest_state".to_string(),
+        initial_etdag_activation: POSY_SIMPLIFIED_ETDAG_GOVERNED_GENESIS_BINDING_REQUIRED
+            .to_string(),
+        target_block_time_ms: 2_000,
         proposal_timeout_ms: PROPOSAL_TIMEOUT_MS,
         vote_timeout_ms: VOTE_TIMEOUT_MS,
         max_round_timeout_ms: MAX_ROUND_TIMEOUT_MS,
@@ -1363,19 +1363,25 @@ fn finalized_manifest() -> SimplifiedConsensusParameterManifest {
     }
 }
 
-fn anchor_qc() -> QuorumCertificateReference {
-    let block_hash = Hash::from_domain_bytes(
-        "SYNERGY_POSY_AUTONOMOUS_HARNESS_ANCHOR_BLOCK_V1",
-        &(EPOCH_START_HEIGHT - 1).to_be_bytes(),
-    );
-    QuorumCertificateReference {
-        height: Height(EPOCH_START_HEIGHT - 1),
-        block_id: BlockId::from_hash(block_hash),
-        qc_id: Hash::from_domain_bytes(
-            "SYNERGY_POSY_AUTONOMOUS_HARNESS_ANCHOR_QC_V1",
-            &block_hash.0,
-        ),
+fn harness_genesis_finality_reference(
+    activation: &GenesisBoundSimplifiedActivation,
+) -> Result<GenesisFinalityReference, String> {
+    // This models the canonical fresh-Genesis binding the production runtime
+    // receives from GenesisDocument.  It deliberately creates a tagged
+    // Genesis parent rather than treating the block-zero hash as a QC.
+    if activation.activation_epoch != 0 || activation.activation_height != 1 {
+        return Err(
+            "fresh Genesis harness activation must start at epoch zero, height one".to_string(),
+        );
     }
+    let genesis_hash = Hash::from_domain_bytes(
+        "SYNERGY_POSY_AUTONOMOUS_HARNESS_CANONICAL_GENESIS_V1",
+        &serde_json::to_vec(activation)
+            .map_err(|error| format!("serialize harness fresh Genesis anchor: {error}"))?,
+    );
+    let reference = GenesisFinalityReference::from_canonical_genesis_hash(genesis_hash);
+    reference.validate()?;
+    Ok(reference)
 }
 
 fn harness_signer(

@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::OnceLock;
 
 /// Canonical live gas pricing (protocol-authoritative dynamic base fee).
 /// See `fee_market` module docs for the full design and formula.
@@ -689,6 +690,116 @@ pub struct FeeScheduleEntry {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FeeSchedule {
     pub entries: Vec<FeeScheduleEntry>,
+}
+
+/// The schedule committed by the fresh P3 Genesis ETDAG fee artifact.
+///
+/// It is populated exactly once during verified Genesis startup.  Generic
+/// Rust defaults remain available for isolated historical/unit utilities,
+/// but live P3 transaction execution and RPC must obtain this value through
+/// [`governed_fee_schedule`].
+static GOVERNED_FEE_SCHEDULE: OnceLock<FeeSchedule> = OnceLock::new();
+
+/// The dynamic base-fee policy committed by the fresh P3 Genesis ETDAG fee
+/// artifact.  It shares the same governed artifact root as the transaction
+/// schedule, so Wallet pricing never falls back to a code default.
+static GOVERNED_FEE_MARKET_PARAMS: OnceLock<fee_market::FeeMarketParams> = OnceLock::new();
+
+pub(crate) fn install_governed_fee_schedule(schedule: FeeSchedule) -> Result<(), String> {
+    if schedule.entries.is_empty() {
+        return Err("governed fee schedule must contain at least one entry".to_string());
+    }
+    if let Some(existing) = GOVERNED_FEE_SCHEDULE.get() {
+        if existing == &schedule {
+            return Ok(());
+        }
+        return Err(
+            "a different governed fee schedule is already installed in this process".to_string(),
+        );
+    }
+    GOVERNED_FEE_SCHEDULE.set(schedule).map_err(|_| {
+        "governed fee schedule installation raced with another initializer".to_string()
+    })
+}
+
+pub(crate) fn install_governed_fee_market_params(
+    params: fee_market::FeeMarketParams,
+) -> Result<(), String> {
+    params
+        .validate()
+        .map_err(|error| format!("invalid governed fee-market parameters: {error}"))?;
+    if !params.fee_market_enabled || params.activation_height != 1 {
+        return Err("governed fresh-P3 fee market must be enabled from block one".to_string());
+    }
+    if params.initial_base_fee_nwei < params.base_fee_floor_nwei {
+        return Err("governed fee-market initial base fee is below its floor".to_string());
+    }
+    if let Some(existing) = GOVERNED_FEE_MARKET_PARAMS.get() {
+        if existing == &params {
+            return Ok(());
+        }
+        return Err(
+            "different governed fee-market parameters are already installed in this process"
+                .to_string(),
+        );
+    }
+    GOVERNED_FEE_MARKET_PARAMS.set(params).map_err(|_| {
+        "governed fee-market parameter installation raced with another initializer".to_string()
+    })
+}
+
+/// Returns the only fee schedule permitted for a live fresh-P3 process.
+/// Startup must install it from the integrity-checked governed Genesis
+/// binding before accepting transactions or serving fee RPCs.
+pub fn governed_fee_schedule() -> Result<&'static FeeSchedule, String> {
+    GOVERNED_FEE_SCHEDULE.get().ok_or_else(|| {
+        "governed fee schedule is unavailable; fresh PoSy startup has not verified Genesis"
+            .to_string()
+    })
+}
+
+/// Returns the only dynamic base-fee parameters permitted for a live fresh-P3
+/// process. Startup installs these from the same ETDAG fee artifact as the
+/// transaction schedule before a node may produce, validate, or quote blocks.
+pub fn governed_fee_market_params() -> Result<&'static fee_market::FeeMarketParams, String> {
+    GOVERNED_FEE_MARKET_PARAMS.get().ok_or_else(|| {
+        "governed fee-market parameters are unavailable; fresh PoSy startup has not verified Genesis"
+            .to_string()
+    })
+}
+
+/// Internal runtime accessor.  Production is always fail-closed; isolated
+/// unit tests retain an in-memory default only so historical fee-math tests
+/// do not need to construct a full signed Genesis process.
+pub(crate) fn fee_schedule_for_runtime() -> Result<&'static FeeSchedule, String> {
+    #[cfg(not(test))]
+    {
+        governed_fee_schedule()
+    }
+    #[cfg(test)]
+    {
+        static TEST_FEE_SCHEDULE: OnceLock<FeeSchedule> = OnceLock::new();
+        Ok(GOVERNED_FEE_SCHEDULE
+            .get()
+            .unwrap_or_else(|| TEST_FEE_SCHEDULE.get_or_init(FeeSchedule::default)))
+    }
+}
+
+/// Internal dynamic-fee accessor. Production never falls back to inherited
+/// defaults; isolated unit tests retain a local deterministic fixture.
+pub(crate) fn fee_market_params_for_runtime() -> Result<&'static fee_market::FeeMarketParams, String>
+{
+    #[cfg(not(test))]
+    {
+        governed_fee_market_params()
+    }
+    #[cfg(test)]
+    {
+        static TEST_FEE_MARKET_PARAMS: OnceLock<fee_market::FeeMarketParams> = OnceLock::new();
+        Ok(GOVERNED_FEE_MARKET_PARAMS.get().unwrap_or_else(|| {
+            TEST_FEE_MARKET_PARAMS.get_or_init(fee_market::FeeMarketParams::testnet_v3_defaults)
+        }))
+    }
 }
 
 impl FeeSchedule {
