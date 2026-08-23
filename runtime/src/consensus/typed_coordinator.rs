@@ -5281,6 +5281,19 @@ mod tests {
                 dag_version: 1,
                 aegis_pqvm_version: "aegis-pqvm".to_string(),
                 timestamp_ms_consensus_bounded: 1,
+                // The typed/PoSy multi-validator coordinator path is not
+                // wired to Canonical Live Gas Pricing in this change (only
+                // the active single-authority `coordinated_runtime` path
+                // is); these fields use the legacy fee_market_version 0
+                // marker purely so this test helper compiles. See
+                // `docs/fee-market.md` for the scoping decision.
+                base_fee_per_gas_nwei: 0,
+                gas_used: 0,
+                gas_limit: 0,
+                pq_gas_used: 0,
+                pq_gas_limit: 0,
+                pq_gas_multiplier: 0,
+                fee_market_version: 0,
             },
             transactions: Vec::new(),
             proposer_signature: AegisPqSignature {
