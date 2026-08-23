@@ -390,6 +390,75 @@ for label, artifact in (("parameter", parameter), ("fee", fee)):
     if artifact.get("consensus_protocol_version") != "posy/3.0":
         raise SystemExit(f"{label} artifact protocol is not posy/3.0")
 
+# The release generator serializes these typed manifests in Rust struct-field
+# order before taking SHA3-512.  Reconstruct that ordering here rather than
+# trusting a checked-in expected value: the fee manifest is deliberately bound
+# to the parameter root, and either root changing must force a new unsigned
+# release set and V4 approval request.
+def canonical_json_bytes(value):
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+parameter_canonical = {
+    "schema": parameter["schema"],
+    "governance_decision_id": parameter["governance_decision_id"],
+    "chain_id": parameter["chain_id"],
+    "network_id": parameter["network_id"],
+    "consensus_protocol_version": parameter["consensus_protocol_version"],
+    "parameters": {
+        "profile_id": parameter["parameters"]["profile_id"],
+        "target_height_offset_default": parameter["parameters"]["target_height_offset_default"],
+        "max_outstanding_nonce_slots": parameter["parameters"]["max_outstanding_nonce_slots"],
+        "max_protected_gas": parameter["parameters"]["max_protected_gas"],
+        "max_protected_bytes": parameter["parameters"]["max_protected_bytes"],
+        "ciphertext_size_classes": parameter["parameters"]["ciphertext_size_classes"],
+    },
+}
+parameter_root = hashlib.sha3_512(canonical_json_bytes(parameter_canonical)).hexdigest()
+if parameter_root != derivations.get("etdag_parameter_root_sha3_512"):
+    raise SystemExit("ETDAG parameter root is not derived from the canonical typed manifest")
+
+fee_canonical = {
+    "schema": fee["schema"],
+    "governance_decision_id": fee["governance_decision_id"],
+    "chain_id": fee["chain_id"],
+    "network_id": fee["network_id"],
+    "consensus_protocol_version": fee["consensus_protocol_version"],
+    "etdag_parameter_root_sha3_512": fee["etdag_parameter_root_sha3_512"],
+    "fee_schedule": {
+        "entries": [
+            {
+                "tx_type": entry["tx_type"],
+                "amount_fee_bps": entry["amount_fee_bps"],
+                "min_amount_fee_nwei": entry["min_amount_fee_nwei"],
+                "max_amount_fee_nwei": entry["max_amount_fee_nwei"],
+                "valuation_required": entry["valuation_required"],
+                "storage_fee_enabled": entry["storage_fee_enabled"],
+            }
+            for entry in fee["fee_schedule"]["entries"]
+        ]
+    },
+    "fee_market_params": {
+        "fee_market_enabled": fee["fee_market_params"]["fee_market_enabled"],
+        "base_fee_floor_nwei": fee["fee_market_params"]["base_fee_floor_nwei"],
+        "initial_base_fee_nwei": fee["fee_market_params"]["initial_base_fee_nwei"],
+        "target_block_gas": fee["fee_market_params"]["target_block_gas"],
+        "max_block_gas": fee["fee_market_params"]["max_block_gas"],
+        "base_fee_change_denominator": fee["fee_market_params"]["base_fee_change_denominator"],
+        "pq_gas_multiplier": fee["fee_market_params"]["pq_gas_multiplier"],
+        "max_block_pq_gas": fee["fee_market_params"]["max_block_pq_gas"],
+        "target_block_pq_gas": fee["fee_market_params"]["target_block_pq_gas"],
+        "activation_height": fee["fee_market_params"]["activation_height"],
+        "fee_market_version": fee["fee_market_params"]["fee_market_version"],
+    },
+}
+if fee["etdag_parameter_root_sha3_512"] != parameter_root:
+    raise SystemExit("ETDAG fee manifest is not bound to the canonical parameter root")
+fee_root = hashlib.sha3_512(canonical_json_bytes(fee_canonical)).hexdigest()
+if fee_root != derivations.get("etdag_fee_schedule_root_sha3_512"):
+    raise SystemExit("ETDAG fee root is not derived from the canonical typed manifest")
+if fee.get("governance_decision_id") != parameter.get("governance_decision_id"):
+    raise SystemExit("ETDAG parameter and fee manifests disagree on their governance decision")
+
 if derivations.get("status") != "UNSIGNED_INPUTS_AWAITING_FROZEN_AUTHORITY_RELEASE_APPROVAL":
     raise SystemExit("ETDAG derivations must remain explicitly unsigned before approval")
 
