@@ -2081,7 +2081,8 @@ mod tests {
         };
         let deploy_payload = fixture.deploy_payload(true);
         let contract_address = fixture.contract_address();
-        let contract_address_text = synergy_contract_address_from_pqsynq_address(&contract_address);
+        let contract_address_text = synergy_contract_address_from_pqsynq_address(&contract_address)
+            .expect("canonical SynQ contract address derives from the deterministic fixture");
         assert_ne!(
             contract_address_text,
             crate::address::derive_standard_account_address(&fixture.public_key.bytes)
