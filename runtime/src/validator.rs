@@ -2478,6 +2478,32 @@ mod tests {
             .expect("validator test env mutex should lock")
     }
 
+    /// Produces deterministic raw FN-DSA-1024-shaped test material for the
+    /// Address Engine boundary. Consensus ML-DSA keys are deliberately never
+    /// used as account or validator address roots.
+    fn fndsa_identity_root_hex(label: &str) -> String {
+        let mut public_key = Vec::with_capacity(crate::address::FN_DSA_1024_PUBLIC_KEY_BYTES);
+        let mut counter = 0u64;
+        while public_key.len() < crate::address::FN_DSA_1024_PUBLIC_KEY_BYTES {
+            let mut hasher = Sha3_256::new();
+            hasher.update(b"synergy-validator-test-fndsa-1024-identity-root-v1");
+            hasher.update((label.len() as u64).to_be_bytes());
+            hasher.update(label.as_bytes());
+            hasher.update(counter.to_be_bytes());
+            public_key.extend_from_slice(&hasher.finalize());
+            counter = counter
+                .checked_add(1)
+                .expect("test key counter cannot overflow");
+        }
+        public_key.truncate(crate::address::FN_DSA_1024_PUBLIC_KEY_BYTES);
+        hex::encode(public_key)
+    }
+
+    fn validator_address_from_identity_root(public_key: &str) -> String {
+        crate::address::generate_validator_address(public_key, 1)
+            .expect("1793-byte FN-DSA identity root must derive a validator address")
+    }
+
     fn pending_registration(index: usize) -> ValidatorRegistration {
         ValidatorRegistration {
             address: format!("validator-{}", index),
@@ -2636,7 +2662,7 @@ mod tests {
         public_key: &str,
         tx_bytes: Vec<u8>,
     ) -> (crate::token::TokenManager, String, Transaction) {
-        let validator_address = crate::address::generate_validator_address(public_key, 1);
+        let validator_address = validator_address_from_identity_root(public_key);
         let bonded_stake = TESTNET_MIN_VALIDATOR_STAKE_NWEI;
         let funding_source = funded_test_address(bonded_stake);
         let token_manager = crate::token::TokenManager::new();
@@ -3289,8 +3315,8 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
 
     #[test]
     fn chain_activation_registers_bonded_validator_with_activation_hash() {
-        let public_key = "activation-public-key";
-        let validator_address = crate::address::generate_validator_address(public_key, 1);
+        let public_key = fndsa_identity_root_hex("activation-public-key");
+        let validator_address = validator_address_from_identity_root(&public_key);
         let bonded_stake = TESTNET_MIN_VALIDATOR_STAKE_NWEI;
         let funding_source = funded_test_address(bonded_stake);
         let token_manager = crate::token::TokenManager::new();
@@ -3362,8 +3388,8 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
 
     #[test]
     fn replay_validator_activations_restores_registry_from_chain() {
-        let public_key = "replay-public-key";
-        let validator_address = crate::address::generate_validator_address(public_key, 1);
+        let public_key = fndsa_identity_root_hex("replay-public-key");
+        let validator_address = validator_address_from_identity_root(&public_key);
         let bonded_stake = TESTNET_MIN_VALIDATOR_STAKE_NWEI;
         let funding_source = funded_test_address(bonded_stake);
         let token_manager = crate::token::TokenManager::new();
@@ -3437,8 +3463,10 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
     fn service_activation_replay_promotes_effective_shadow_without_consensus_duties() {
         // Same reason as the sequential-activation replay test below.
         let _env_lock = validator_test_env_lock();
-        let (token_manager, validator_address, activation_tx) =
-            funded_activation_fixture("service-replay-public-key", vec![17, 18, 19]);
+        let (token_manager, validator_address, activation_tx) = funded_activation_fixture(
+            &fndsa_identity_root_hex("service-replay-public-key"),
+            vec![17, 18, 19],
+        );
         let activation_height = 1;
         let recorded_height = activation_height + VALIDATOR_SHADOW_PHASE_BLOCKS;
         let effective_height = recorded_height + 1;
@@ -3517,9 +3545,10 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
         let activation_steps = [(7usize, 10u64), (8, 1_020), (9, 2_030), (10, 3_040)]
             .into_iter()
             .map(|(slot, activation_height)| {
-                let public_key = format!("sequential-validator-{slot}-key");
-                let validator_address =
-                    crate::address::generate_validator_address(&public_key, 1);
+                let public_key = fndsa_identity_root_hex(&format!(
+                    "sequential-validator-{slot}-key"
+                ));
+                let validator_address = validator_address_from_identity_root(&public_key);
                 token_manager
                     .transfer_tokens(
                         &funding_source,
@@ -3619,9 +3648,9 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
 
     #[test]
     fn replay_validator_activation_restores_existing_inactive_validator() {
-        let public_key = "inactive-replay-public-key";
+        let public_key = fndsa_identity_root_hex("inactive-replay-public-key");
         let (token_manager, validator_address, activation_tx) =
-            funded_activation_fixture(public_key, vec![13, 14, 15]);
+            funded_activation_fixture(&public_key, vec![13, 14, 15]);
         let activation_hash = activation_tx.hash();
         let activation_height = 42;
         let recorded_height = activation_height + VALIDATOR_SHADOW_PHASE_BLOCKS;
@@ -3693,8 +3722,8 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
 
     #[test]
     fn replay_validator_activation_keeps_shadow_through_recorded_boundary() {
-        let public_key = "replay-shadow-public-key";
-        let validator_address = crate::address::generate_validator_address(public_key, 1);
+        let public_key = fndsa_identity_root_hex("replay-shadow-public-key");
+        let validator_address = validator_address_from_identity_root(&public_key);
         let bonded_stake = TESTNET_MIN_VALIDATOR_STAKE_NWEI;
         let funding_source = funded_test_address(bonded_stake);
         let token_manager = crate::token::TokenManager::new();
@@ -3759,8 +3788,10 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
 
     #[test]
     fn repeated_activation_application_is_idempotent_and_restart_safe() {
-        let (token_manager, validator_address, activation_tx) =
-            funded_activation_fixture("idempotent-activation-public-key", vec![10, 11, 12]);
+        let (token_manager, validator_address, activation_tx) = funded_activation_fixture(
+            &fndsa_identity_root_hex("idempotent-activation-public-key"),
+            vec![10, 11, 12],
+        );
         let activation_hash = activation_tx.hash();
         let activation_height = 25;
         let recorded_height = activation_height + VALIDATOR_SHADOW_PHASE_BLOCKS;
@@ -4209,9 +4240,9 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
         let _snapshot_env =
             EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
 
-        let public_key = "replay-tenth-public-key";
+        let public_key = fndsa_identity_root_hex("replay-tenth-public-key");
         let (token_manager, tenth_address, activation_tx) =
-            funded_activation_fixture(public_key, vec![31, 32, 33]);
+            funded_activation_fixture(&public_key, vec![31, 32, 33]);
         let validator_manager = Arc::new(ValidatorManager::new());
         {
             let mut registry = validator_manager.registry.lock().unwrap();
