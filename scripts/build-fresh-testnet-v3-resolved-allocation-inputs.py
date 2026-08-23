@@ -27,6 +27,8 @@ TOTAL_SUPPLY_NWEI = 12_000_000_000_000_000_000
 VALIDATOR_IDS = [f"validator-{ordinal:02d}" for ordinal in range(1, 22)]
 VALIDATOR_ACCOUNT_IDS = [f"VNS-A{ordinal:02d}" for ordinal in range(2, 23)]
 ACTIVE_VALIDATOR_IDS = [f"validator-{ordinal:02d}" for ordinal in range(2, 7)]
+CANONICAL_BURN_ACCOUNT_ID = "SYS-04"
+CANONICAL_BURN_ADDRESS = "syn" + "0" * 38
 ADDRESS_RE = re.compile(r"^[a-z0-9]{41}$")
 HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -93,6 +95,27 @@ def identity_directory(root: Path, account_id: str) -> Path:
 def validate_public_bundle(
     identity_root: Path, account_id: str, approved_amount: str
 ) -> tuple[str, dict[str, Any]]:
+    # SYS-04 is the protocol's fixed, unspendable all-zero sentinel.  It is
+    # intentionally not a custody identity and therefore must not require a
+    # directory, public key, or private bundle.  Keep this exception exact so
+    # every other allocation remains fail-closed on missing identity material.
+    if account_id == CANONICAL_BURN_ACCOUNT_ID:
+        if approved_amount != "0":
+            fail(f"{account_id} canonical burn allocation must be zero")
+        return CANONICAL_BURN_ADDRESS, {
+            "provenance_type": "protocol-canonical-burn-sentinel",
+            "canonical_burn_address": CANONICAL_BURN_ADDRESS,
+            "no_private_bundle_required": True,
+            "identity_directory": None,
+            "manifest_sha256": None,
+            "public_identity_sha256": None,
+            "encrypted_bundle_sha256": None,
+            "address_correspondence_verified": True,
+            "bundle_checksum_verified": True,
+            "embedded_genesis_amount_nwei": "0",
+            "embedded_amount_matches_approved_plan": True,
+        }
+
     directory = identity_directory(identity_root, account_id)
     manifest, manifest_raw = read_json(directory / "manifest.json", f"{account_id} manifest")
     public, public_raw = read_json(
@@ -117,11 +140,7 @@ def validate_public_bundle(
         encrypted_sha = sha256(read_bytes(encrypted_path, f"{account_id} encrypted bundle"))
         if manifest.get("encrypted_file_sha256") != encrypted_sha:
             fail(f"{account_id} encrypted bundle SHA-256 mismatch")
-    elif manifest.get("key_bundle") != "multisig-policy-only-no-shared-private-key" and not (
-        account_id == "SYS-04"
-        and address == "syn00000000000000000000000000000000000000"
-        and manifest.get("encrypted_file_sha256") is None
-    ):
+    elif manifest.get("key_bundle") != "multisig-policy-only-no-shared-private-key":
         fail(f"{account_id} encrypted bundle is missing")
 
     embedded_amount = manifest.get("genesis_amount_nwei")
@@ -248,7 +267,11 @@ def main() -> None:
                 "account_id": account_id,
                 "address": address,
                 "amount_nwei": amount,
-                "address_source": "canonical-testnet-v3-custody-public-identity",
+                "address_source": (
+                    "protocol-canonical-burn-sentinel"
+                    if account_id == CANONICAL_BURN_ACCOUNT_ID
+                    else "canonical-testnet-v3-custody-public-identity"
+                ),
                 "identity_provenance": provenance,
             }
             if account_id == "TEM-A01":
