@@ -16,6 +16,7 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use synergy_testnet::execution::{ExecutionState, GenesisExecutionSnapshot};
 use synergy_testnet::genesis_deployment::*;
+use synergy_testnet::posy_simplified_parameters::POSY_SIMPLIFIED_FRESH_GENESIS_BOUNDARY;
 use synergy_testnet::synq_execution::SynQContractArtifact;
 use zeroize::Zeroize;
 
@@ -864,7 +865,7 @@ fn run() -> Result<(), String> {
     require_clean_genesis_launch_profile(&source_genesis_document)?;
     if frozen["artifact_type"] != json!("fresh-testnet-v3-genesis-authority-public-freeze")
         || frozen["schema_version"] != json!("synergy-testnet-v3-genesis-authority-freeze-v1")
-        || frozen["genesis_boundary"] != json!("fresh-block-0")
+        || frozen["genesis_boundary"] != json!(POSY_SIMPLIFIED_FRESH_GENESIS_BOUNDARY)
         || frozen["authority_count"] != json!(3)
         || frozen["authorities"].as_array().map(Vec::len) != Some(3)
     {

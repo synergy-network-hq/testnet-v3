@@ -7,6 +7,67 @@ authority record and the nine canonical contract artifact quadruples in
 `genesis-contracts/contracts` (`.synq`, `.compiled.synq`, `.abi.json`, and
 `.manifest.json`).
 
+## Exact ceremony boundary
+
+This is a new block-zero deployment, not a continuation of any earlier chain.
+The execution driver is the release-built `synergy-genesis-ceremony` binary.
+It consumes the canonical public freeze
+`fresh-genesis-authority-freeze.json` (not the V4 release-approval authority
+view), the P3 predeployment input, the resolved 36-account allocation input,
+the 21-validator source input, and the nine canonical contract artifacts.
+
+Before execution, an authorized higher-memory builder must have produced the
+release binaries from the CI-verified revision, and the Address Engine binary
+must be pinned by its SHA-256.  The ceremony output directories must be new
+and empty.  Passphrases are prompted for interactively by the existing
+ceremony binary; they must never be passed in a command, environment variable,
+or file.
+
+```bash
+REPO=/absolute/path/to/testnet-v3
+RELEASE=/absolute/path/to/new-ci-verified-p3-release
+INPUT="$REPO/launch/posy-v3-genesis-inputs"
+ENGINE=/absolute/path/to/synergy-address-engine
+ENGINE_SHA256=<sha256-of-that-exact-engine-binary>
+IDENTITY_ROOT=/absolute/path/to/testnet-v3-identity-files
+
+"$RELEASE/bin/synergy-genesis-ceremony" \
+  --dry-run \
+  --authorities-file "$INPUT/fresh-genesis-authority-freeze.json" \
+  --allocation-manifest "$REPO/runtime/testnet-allocation-manifest.json" \
+  --resolved-allocations "$INPUT/fresh-resolved-allocation-inputs.json" \
+  --validator-inputs "$INPUT/fresh-validator-genesis-source-inputs.json" \
+  --contracts-dir "$REPO/genesis-contracts/contracts" \
+  --source-genesis "$INPUT/fresh-p3-genesis-predeployment-public-input.json" \
+  --identity-root "$IDENTITY_ROOT" \
+  --address-engine-binary "$ENGINE" \
+  --address-engine-sha256 "$ENGINE_SHA256" \
+  --output-dir "$RELEASE/fresh-p3-ceremony-dry-run"
+```
+
+Only after that status is `DRY_RUN_PASSED`, the same exact inputs and engine
+hash may be used with a separate empty execution directory and the dry-run
+status path:
+
+```bash
+"$RELEASE/bin/synergy-genesis-ceremony" \
+  --execute \
+  --prior-dry-run-status "$RELEASE/fresh-p3-ceremony-dry-run/dry-run-status.json" \
+  --authorities-file "$INPUT/fresh-genesis-authority-freeze.json" \
+  --allocation-manifest "$REPO/runtime/testnet-allocation-manifest.json" \
+  --resolved-allocations "$INPUT/fresh-resolved-allocation-inputs.json" \
+  --validator-inputs "$INPUT/fresh-validator-genesis-source-inputs.json" \
+  --contracts-dir "$REPO/genesis-contracts/contracts" \
+  --source-genesis "$INPUT/fresh-p3-genesis-predeployment-public-input.json" \
+  --identity-root "$IDENTITY_ROOT" \
+  --address-engine-binary "$ENGINE" \
+  --address-engine-sha256 "$ENGINE_SHA256" \
+  --output-dir "$RELEASE/fresh-p3-ceremony-executed"
+```
+
+The second command creates the four evidence files named below. It does not
+write a canonical Genesis, sign a release, or mutate any node.
+
 The ceremony writes four public files into a new empty directory:
 
 - `execution-status.json`
