@@ -11594,13 +11594,19 @@ mod tests {
         path
     }
 
-    fn admission_valid_but_runtime_invalid_transaction() -> Transaction {
+    fn unbound_operational_key_transaction() -> Transaction {
         let mut manager = PQCManager::new();
         let (public_key, private_key) = manager
             .generate_keypair(PQCAlgorithm::MLDSA87)
             .expect("test keypair should generate");
-        let sender = crate::address::generate_wallet_address(&hex::encode(&public_key.key_data));
-        let receiver = crate::address::generate_wallet_address(&hex::encode([7u8; 32]));
+        let sender = crate::address::generate_wallet_address(&hex::encode(
+            vec![1u8; crate::address::FN_DSA_1024_PUBLIC_KEY_BYTES],
+        ))
+        .expect("canonical FN-DSA test root derives a wallet address");
+        let receiver = crate::address::generate_wallet_address(&hex::encode(
+            vec![2u8; crate::address::FN_DSA_1024_PUBLIC_KEY_BYTES],
+        ))
+        .expect("canonical FN-DSA test root derives a wallet address");
         let mut transaction = Transaction::new(
             sender,
             receiver,
@@ -12219,7 +12225,8 @@ mod tests {
         };
         let deploy = aegis_synq_legacy_transaction(fixture.deploy_payload(), 0);
         let contract_address = fixture.contract_address();
-        let contract_address_text = synergy_contract_address_from_pqsynq_address(&contract_address);
+        let contract_address_text = synergy_contract_address_from_pqsynq_address(&contract_address)
+            .expect("canonical SynQ contract address derives");
         let increment = aegis_synq_legacy_transaction(
             fixture.call_payload(contract_address, [0x58, 0x42, 0xf1, 0xbe], 502),
             1,
@@ -12280,7 +12287,8 @@ mod tests {
         let deploy = aegis_synq_legacy_transaction(fixture.deploy_payload(), 0);
         let deploy_hash = deploy.hash();
         let contract_address = fixture.contract_address();
-        let contract_address_text = synergy_contract_address_from_pqsynq_address(&contract_address);
+        let contract_address_text = synergy_contract_address_from_pqsynq_address(&contract_address)
+            .expect("canonical SynQ contract address derives");
         let increment = aegis_synq_legacy_transaction(
             fixture.call_payload(contract_address, [0x58, 0x42, 0xf1, 0xbe], 502),
             1,
@@ -12639,18 +12647,14 @@ mod tests {
     }
 
     #[test]
-    fn prune_invalid_transactions_from_pool_removes_runtime_invalid_entries() {
-        let transaction = admission_valid_but_runtime_invalid_transaction();
+    fn prune_invalid_transactions_from_pool_removes_unbound_operational_key_entries() {
+        let transaction = unbound_operational_key_transaction();
         assert!(
-            transaction.validate_for_admission().is_valid,
-            "transaction must pass ingress admission first"
+            !transaction.validate_for_admission().is_valid,
+            "an ML-DSA operational key must not be accepted as an FN-DSA address root"
         );
-        let error = ProofOfSynergy::validate_transaction_for_mempool(&transaction)
-            .expect_err("unfunded transaction must fail runtime validation");
-        assert!(
-            error.starts_with("insufficient SNRG balance for transaction"),
-            "embedded sender key must pass signature verification before the balance check: {error}"
-        );
+        ProofOfSynergy::validate_transaction_for_mempool(&transaction)
+            .expect_err("unbound operational key must fail runtime validation");
 
         {
             let mut pool = TX_POOL.lock().unwrap();
@@ -12819,8 +12823,9 @@ mod tests {
 
     #[test]
     fn startup_replay_restores_stale_registry_before_membership_and_reconciliation() {
-        let public_key = "startup-replay-public-key";
-        let validator_address = crate::address::generate_validator_address(public_key, 1);
+        let public_key = hex::encode(vec![3u8; crate::address::FN_DSA_1024_PUBLIC_KEY_BYTES]);
+        let validator_address = crate::address::generate_validator_address(&public_key, 1)
+            .expect("canonical FN-DSA test root derives a validator address");
         let bonded_stake = TESTNET_MIN_VALIDATOR_STAKE_NWEI;
         let funding_source = canonical_genesis()
             .expect("canonical genesis should load")

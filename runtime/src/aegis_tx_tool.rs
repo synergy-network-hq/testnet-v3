@@ -722,8 +722,7 @@ mod tests {
             gas_limit: 150_000,
             write_set_hint: vec!["synq-contract-deploy".to_string()],
             ..AegisTxBuildOptions::default()
-        })
-        .unwrap();
+        });
 
         let summary = report
             .synq_verification

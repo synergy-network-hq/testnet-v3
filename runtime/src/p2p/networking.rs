@@ -16888,7 +16888,7 @@ mod tests {
                 .expect("deterministic FN-DSA fixture derives a validator address");
         let activation_tx = crate::transaction::Transaction::new(
             activation_address.clone(),
-            activation_address,
+            activation_address.clone(),
             0,
             0,
             vec![1, 2, 3],
