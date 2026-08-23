@@ -14,7 +14,6 @@ use synergy_testnet::desired_state::{
     validate_chain1266_p1_consensus_binding, CHAIN1266_P1_CONSENSUS_MODE,
     CHAIN1266_P1_COORDINATOR_ID, CHAIN1266_P1_PRODUCER_TURN_TIMEOUT_MS,
     CHAIN1266_P3_CONSENSUS_ALGORITHM, CHAIN1266_P3_CONSENSUS_MODE,
-    CHAIN1266_P3_INITIAL_VALIDATOR_IDS,
 };
 use synergy_testnet::genesis::load_genesis_from_path;
 use synergy_testnet::posy_simplified_parameters::{
@@ -99,8 +98,6 @@ const REQUIRED_P1_CONFIGURATION_ROLES: [&str; 12] = [
     "explorer-indexer",
     "observer",
 ];
-
-const REQUIRED_P3_CONFIGURATION_ROLES: [&str; 5] = CHAIN1266_P3_INITIAL_VALIDATOR_IDS;
 
 const RETIRED_POSY_CONSENSUS_KEYS: [&str; 23] = [
     "proposal_timeout_ms",
@@ -248,6 +245,7 @@ fn parse_consensus_binding(role: &str, path: &Path) -> Result<ConsensusBinding, 
 
 fn require_all_configurations_bind_the_same_consensus(
     configurations: &BTreeMap<String, PathBuf>,
+    expected_p3_configuration_roles: &BTreeSet<String>,
 ) -> Result<ConsensusBinding, String> {
     let mut binding = None;
     for (role, path) in configurations {
@@ -273,8 +271,9 @@ fn require_all_configurations_bind_the_same_consensus(
         CHAIN1266_P1_CONSENSUS_MODE => REQUIRED_P1_CONFIGURATION_ROLES
             .into_iter()
             .collect::<BTreeSet<_>>(),
-        CHAIN1266_P3_CONSENSUS_MODE => REQUIRED_P3_CONFIGURATION_ROLES
-            .into_iter()
+        CHAIN1266_P3_CONSENSUS_MODE => expected_p3_configuration_roles
+            .iter()
+            .map(String::as_str)
             .collect::<BTreeSet<_>>(),
         _ => unreachable!("parse_consensus_binding already rejects unknown modes"),
     };
@@ -306,8 +305,25 @@ fn main() {
     ] {
         require_revision(name, revision);
     }
-    let consensus = require_all_configurations_bind_the_same_consensus(&configurations)
-        .unwrap_or_else(|error| fail(error));
+    let genesis = load_genesis_from_path(&genesis_path)
+        .unwrap_or_else(|error| fail(format!("load canonical Genesis: {error}")));
+    let expected_p3_configuration_roles = load_genesis_bound_simplified_activation(genesis.value())
+        .unwrap_or_else(|error| fail(format!("load fresh P3 Genesis activation: {error}")))
+        .map(|activation| {
+            activation
+                .frozen_validator_set
+                .active_for_epoch(Epoch(0))
+                .validators
+                .into_iter()
+                .map(|validator| validator.validator_id.0)
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    let consensus = require_all_configurations_bind_the_same_consensus(
+        &configurations,
+        &expected_p3_configuration_roles,
+    )
+    .unwrap_or_else(|error| fail(error));
     if consensus.mode == CHAIN1266_P3_CONSENSUS_MODE
         && (artifacts.len() != 1 || !artifacts.contains_key("validator_node"))
     {
@@ -325,8 +341,6 @@ fn main() {
         _ => unreachable!("configuration parser rejects unsupported modes"),
     };
 
-    let genesis = load_genesis_from_path(&genesis_path)
-        .unwrap_or_else(|error| fail(format!("load canonical Genesis: {error}")));
     let validator_set_root = if consensus.mode == CHAIN1266_P3_CONSENSUS_MODE {
         load_genesis_bound_simplified_activation(genesis.value())
             .unwrap_or_else(|error| fail(format!("load fresh P3 Genesis activation: {error}")))
@@ -483,5 +497,36 @@ mod tests {
             .expect_err("P3 must reject a local coordinator");
         assert!(error.contains("no coordinator"), "{error}");
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn p3_configuration_roles_follow_the_genesis_bound_active_set() {
+        let root = std::env::temp_dir().join(format!(
+            "chain1266-p3-dynamic-config-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("create temporary configuration directory");
+        let mut configurations = BTreeMap::new();
+        for role in ["validator-02", "validator-08"] {
+            let path = root.join(format!("{role}.toml"));
+            fs::write(
+                &path,
+                format!(
+                    "[identity]\nnode_id = \"{role}\"\n[network]\nid = 1266\nnetwork_id = \"testnet\"\n[blockchain]\nchain_id = 1266\n[consensus]\nalgorithm = \"posy/3.0\"\nmode = \"posy_simplified_v3\"\ncoordinator_id = \"\"\nproducer_ids = []\nproducer_turn_timeout_ms = 0\n"
+                ),
+            )
+            .expect("write temporary P3 configuration");
+            configurations.insert(role.to_string(), path);
+        }
+        let expected = ["validator-02".to_string(), "validator-08".to_string()]
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+
+        let binding =
+            require_all_configurations_bind_the_same_consensus(&configurations, &expected)
+                .expect("the exact Genesis-bound P3 active set must define configuration roles");
+        assert_eq!(binding.mode, CHAIN1266_P3_CONSENSUS_MODE);
+
+        let _ = fs::remove_dir_all(root);
     }
 }

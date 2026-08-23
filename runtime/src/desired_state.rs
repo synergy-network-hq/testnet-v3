@@ -47,13 +47,6 @@ pub const CHAIN1266_P1_PRODUCER_IDS: [&str; 5] = [
 pub const CHAIN1266_P1_PRODUCER_TURN_TIMEOUT_MS: u64 = 4_000;
 pub const CHAIN1266_P3_CONSENSUS_MODE: &str = "posy_simplified_v3";
 pub const CHAIN1266_P3_CONSENSUS_ALGORITHM: &str = "posy/3.0";
-pub const CHAIN1266_P3_INITIAL_VALIDATOR_IDS: [&str; 5] = [
-    "validator-02",
-    "validator-03",
-    "validator-04",
-    "validator-05",
-    "validator-06",
-];
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -570,20 +563,11 @@ pub fn verify_chain1266_desired_state(
                 "fresh P3 desired state requires a Genesis-bound simplified activation".to_string()
             })?;
         let active_set = activation.frozen_validator_set.active_for_epoch(Epoch(0));
-        let active_ids = active_set
-            .validators
-            .iter()
-            .map(|validator| validator.validator_id.0.clone())
-            .collect::<Vec<_>>();
-        if active_ids
-            != CHAIN1266_P3_INITIAL_VALIDATOR_IDS
-                .iter()
-                .map(|value| (*value).to_string())
-                .collect::<Vec<_>>()
-        {
-            return Err(format!(
-                "fresh P3 desired state requires initial validators validator-02 through validator-06, found {active_ids:?}"
-            ));
+        if active_set.validators.is_empty() {
+            return Err(
+                "fresh P3 desired state has no active validator in its Genesis activation"
+                    .to_string(),
+            );
         }
         if active_set.hash()?.to_hex() != manifest.chain.validator_set_root {
             return Err(
