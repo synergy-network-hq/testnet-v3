@@ -30,14 +30,20 @@ fn authority(doc: &Value, role: &str, field: &str) -> String {
         .to_string()
 }
 
-fn governance_public_key_hex() -> String {
+fn role_identity_authorization(
+    role: &str,
+) -> synergy_testnet::identity_auth::IdentityAuthorizationCarrier {
     let path = repo()
-        .join("testnet-v3-identity-files/SNRG-TESTNET-V3-GOVERNANCE-AUTHORITY/identity.pub.json");
-    let doc: Value = serde_json::from_slice(&std::fs::read(&path).expect("read gov pub")).unwrap();
-    let b64 = doc["public_key"].as_str().unwrap();
-    let bytes = base64_decode(b64);
-    assert_eq!(bytes.len(), 2592, "governance key must be ML-DSA-87");
-    format!("0x{}", hex::encode(bytes))
+        .join("testnet-v3-identity-files")
+        .join(role)
+        .join("genesis-authorization-binding.json");
+    let binding = serde_json::from_slice(&std::fs::read(&path).expect("read identity binding"))
+        .expect("parse canonical identity binding");
+    synergy_testnet::identity_auth::IdentityAuthorizationCarrier::new(
+        synergy_testnet::identity_auth::GENESIS_CEREMONY_AUTHORIZATION_DOMAIN,
+        binding,
+    )
+    .expect("construct canonical genesis identity authorization carrier")
 }
 
 fn base64_decode(input: &str) -> Vec<u8> {
@@ -88,12 +94,18 @@ fn main() {
 
     let authorities = GenesisAuthorities {
         genesis_deployer: GenesisSigner {
-            public_key: Vec::new(),
+            public_key: deployer_public_key.clone(),
             private_key: Vec::new(),
+            identity_authorization: Some(role_identity_authorization(
+                "SNRG-TESTNET-V3-GENESIS-DEPLOYER",
+            )),
         },
         governance: GenesisSigner {
-            public_key: hex::decode(governance_public_key_hex().trim_start_matches("0x")).unwrap(),
+            public_key: role_public_key("SNRG-TESTNET-V3-GOVERNANCE-AUTHORITY"),
             private_key: Vec::new(),
+            identity_authorization: Some(role_identity_authorization(
+                "SNRG-TESTNET-V3-GOVERNANCE-AUTHORITY",
+            )),
         },
         emergency_slashing_authority: authority(
             &frozen,
@@ -106,8 +118,11 @@ fn main() {
             "standard_account_address",
         ),
         validator_registry_authority_key: GenesisSigner {
-            public_key: Vec::new(),
+            public_key: role_public_key("SNRG-TESTNET-V3-VALIDATOR-REGISTRY-AUTHORITY"),
             private_key: Vec::new(),
+            identity_authorization: Some(role_identity_authorization(
+                "SNRG-TESTNET-V3-VALIDATOR-REGISTRY-AUTHORITY",
+            )),
         },
         reward_distributor_authority: authority(
             &frozen,
