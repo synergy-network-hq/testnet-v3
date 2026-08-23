@@ -10108,8 +10108,7 @@ fn handle_messages(
                             );
                             continue;
                         }
-                        if chain_incarnation
-                            != crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
+                        if chain_incarnation != crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
                             || genesis_hash != canonical_genesis_hash()
                         {
                             warn!(
@@ -10148,8 +10147,7 @@ fn handle_messages(
                             );
                             continue;
                         }
-                        if chain_incarnation
-                            != crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
+                        if chain_incarnation != crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
                             || genesis_hash != canonical_genesis_hash()
                         {
                             warn!(

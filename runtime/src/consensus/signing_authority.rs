@@ -998,9 +998,7 @@ impl DurableConsensusSigningAuthority {
     /// Returns the complete durable authorization set for restart-time
     /// reconciliation by the simplified PoSy state machine. This does not
     /// authorize, mutate, or relax any signing slot.
-    pub fn recorded_authorizations(
-        &self,
-    ) -> Result<Vec<ConsensusSigningAuthorization>, String> {
+    pub fn recorded_authorizations(&self) -> Result<Vec<ConsensusSigningAuthorization>, String> {
         let lock = PROCESS_WIDE_SIGNING_LOCK.get_or_init(|| Mutex::new(()));
         let _guard = lock
             .lock()

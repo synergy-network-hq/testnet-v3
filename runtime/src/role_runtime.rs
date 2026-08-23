@@ -68,9 +68,8 @@ use crate::consensus::typed_coordinator::{
     import_local_genesis_bound_typed_signer, install_typed_coordinator_ingress,
     remove_typed_coordinator_ingress, replay_finalized_execution_state, run_typed_posy_driver,
     set_typed_consensus_startup_phase, P2pTypedConsensusEgress, TypedFinalityContextDigestSource,
-    TypedNextHeightAuthority,
-    TypedNextHeightContextSource, TypedPosyCoordinator, TypedPosyCoordinatorStartup,
-    TypedPosyDriver,
+    TypedNextHeightAuthority, TypedNextHeightContextSource, TypedPosyCoordinator,
+    TypedPosyCoordinatorStartup, TypedPosyDriver,
 };
 use crate::consensus::typed_finality_observer::{
     install_typed_finality_observer, remove_typed_finality_observer, TypedFinalityObserver,

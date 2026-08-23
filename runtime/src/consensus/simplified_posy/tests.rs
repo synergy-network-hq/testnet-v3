@@ -275,6 +275,7 @@ fn startup_reconciles_a_journaled_vote_from_durable_delivery_evidence() {
             epoch: object_context.epoch,
             height: object_context.height,
             round: object_context.round,
+            cluster_id: ClusterId(0),
             height_context_root: object_context.epoch_context_root,
             validator_id: validator_id.clone(),
             key_id: validator_key_id.clone(),

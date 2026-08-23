@@ -1433,6 +1433,14 @@ impl SimplifiedConsensusStateMachine {
         validator_id: &ValidatorId,
         key_id: &AegisPqKeyId,
     ) -> Result<(), String> {
+        self.active_signer_cluster_id(validator_id, key_id).map(|_| ())
+    }
+
+    fn active_signer_cluster_id(
+        &self,
+        validator_id: &ValidatorId,
+        key_id: &AegisPqKeyId,
+    ) -> Result<crate::synergy_types::ClusterId, String> {
         let validator = self
             .validator_set
             .active_for_epoch(self.epoch_context.epoch)
@@ -1443,7 +1451,7 @@ impl SimplifiedConsensusStateMachine {
         if &validator.consensus_public_key.key_id != key_id {
             return Err("local signer key does not match the frozen consensus key".to_string());
         }
-        Ok(())
+        Ok(validator.cluster_id)
     }
 
     fn validate_proposal_safety(&self, proposal: &SimplifiedProposal) -> Result<(), String> {
@@ -1604,6 +1612,7 @@ impl SimplifiedConsensusStateMachine {
             epoch: proposal.context.epoch,
             height: proposal.context.height,
             round: proposal.context.round,
+            cluster_id: validator.cluster_id,
             height_context_root: proposal.context.epoch_context_root,
             validator_id: proposal.proposer_id.clone(),
             key_id: proposal.proposer_key_id.clone(),
@@ -1632,7 +1641,7 @@ impl SimplifiedConsensusStateMachine {
         signer: &mut AegisPqvmSigner,
     ) -> Result<BlockVote, String> {
         self.validate_proposal(proposal, proposal_verifier)?;
-        self.require_active_signer(&validator_id, &key_id)?;
+        let cluster_id = self.active_signer_cluster_id(&validator_id, &key_id)?;
         let mut vote = BlockVote {
             context: proposal.context.clone(),
             block_id: proposal.block_id.clone(),
@@ -1699,6 +1708,7 @@ impl SimplifiedConsensusStateMachine {
             epoch: proposal.context.epoch,
             height: proposal.context.height,
             round: proposal.context.round,
+            cluster_id,
             height_context_root: proposal.context.epoch_context_root,
             validator_id: validator_id.clone(),
             key_id: key_id.clone(),
@@ -1723,6 +1733,7 @@ impl SimplifiedConsensusStateMachine {
             epoch: proposal.context.epoch,
             height: proposal.context.height,
             round: proposal.context.round,
+            cluster_id,
             height_context_root: proposal.context.epoch_context_root,
             validator_id,
             key_id: key_id.clone(),
@@ -1762,7 +1773,7 @@ impl SimplifiedConsensusStateMachine {
         if self.state.safety_halt.is_some() {
             return Err("CONSENSUS_SAFETY_HALT: timeout signing is disabled".to_string());
         }
-        self.require_active_signer(&validator_id, &key_id)?;
+        let cluster_id = self.active_signer_cluster_id(&validator_id, &key_id)?;
         let height = self.state.next_height()?;
         let (round, previous_tc_id) = self
             .state
@@ -1824,6 +1835,7 @@ impl SimplifiedConsensusStateMachine {
             epoch: vote.context.epoch,
             height: vote.context.height,
             round: vote.context.round,
+            cluster_id,
             height_context_root: vote.context.epoch_context_root,
             validator_id,
             key_id: key_id.clone(),

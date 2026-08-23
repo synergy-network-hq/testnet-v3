@@ -869,6 +869,7 @@ fn sign_reliable_delivery_statement(
         epoch: statement.context.epoch,
         height: statement.context.height,
         round: statement.context.round,
+        cluster_id: ClusterId(0),
         height_context_root: statement.context.epoch_context_root,
         validator_id: statement.validator_id.clone(),
         key_id: statement.key_id.clone(),
