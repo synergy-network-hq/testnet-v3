@@ -2,9 +2,10 @@
 """Verify fresh public deployment evidence and compose its source Genesis.
 
 This command performs no deployment and has no custody access.  It refuses any
-evidence not bound to the exact fresh P3 predeployment input, authority record,
-allocation plan, resolved allocation artifact, validator adapter, and staged
-contract artifact set.  Derived receipt and Genesis integrity roots are
+evidence not bound to the exact fresh P3 predeployment input, ceremony
+authority freeze, matching V4 release authority record, allocation plan,
+resolved allocation artifact, validator adapter, and staged contract artifact
+set.  Derived receipt and Genesis integrity roots are
 recomputed locally; no root is copied from a historical Genesis document.
 """
 
@@ -48,6 +49,11 @@ CONTRACT_KEYS = {
     "TeamVesting": "team_vesting",
     "SynergyOracle": "synergy_oracle",
 }
+GENESIS_AUTHORITY_ROLES = [
+    "SNRG-TESTNET-V3-GENESIS-DEPLOYER",
+    "SNRG-TESTNET-V3-GOVERNANCE-AUTHORITY",
+    "SNRG-TESTNET-V3-VALIDATOR-REGISTRY-AUTHORITY",
+]
 RETIRED = {"posy/2.2", "posy/v2.2", "synergy-testnet-v3", "ProofOfSynergy"}
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -146,6 +152,121 @@ def has_retired(value: Any) -> bool:
     if isinstance(value, list):
         return any(has_retired(entry) for entry in value)
     return isinstance(value, str) and (value in RETIRED or "synixn" in value.lower())
+
+
+def require_equal(actual: Any, expected: Any, label: str) -> None:
+    if actual != expected:
+        fail(f"{label} differs from the canonical fresh-P3 value")
+
+
+def require_object(value: Any, label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        fail(f"{label} must be an object")
+    return value
+
+
+def require_array(value: Any, label: str) -> list[Any]:
+    if not isinstance(value, list):
+        fail(f"{label} must be an array")
+    return value
+
+
+def validate_authority_cross_binding(
+    ceremony_freeze: dict[str, Any], release_authorities: dict[str, Any]
+) -> None:
+    """Bind ceremony custody evidence to the distinct V4 release authority view."""
+    expected_freeze = {
+        "schema_version": "synergy-testnet-v3-genesis-authority-freeze-v1",
+        "artifact_type": "fresh-testnet-v3-genesis-authority-public-freeze",
+        "chain_id": CHAIN_ID,
+        "network_id": NETWORK_ID,
+        "release_id": RELEASE_ID,
+        "consensus_protocol": PROTOCOL_VERSION,
+        "genesis_boundary": "fresh_genesis_block_zero",
+        "authority_count": len(GENESIS_AUTHORITY_ROLES),
+        "authority_role_ids": GENESIS_AUTHORITY_ROLES,
+    }
+    for field, expected in expected_freeze.items():
+        require_equal(ceremony_freeze.get(field), expected, f"ceremony freeze {field}")
+    freeze_entries = require_array(ceremony_freeze.get("authorities"), "ceremony freeze authorities")
+    if [entry.get("role_id") if isinstance(entry, dict) else None for entry in freeze_entries] != GENESIS_AUTHORITY_ROLES:
+        fail("ceremony freeze authority role order is not canonical")
+
+    expected_release = {
+        "version": 4,
+        "artifact": "TESTNET_V3_PRODUCTION_AUTHORITIES",
+        "status": "FROZEN",
+        "test_fixture": False,
+        "current_release_authority": False,
+        "chain_id": CHAIN_ID,
+        "network_id": NETWORK_ID,
+        "release_id": RELEASE_ID,
+        "canonical_synergy_address_model": True,
+        "active_address_field": "standard_account_address",
+    }
+    for field, expected in expected_release.items():
+        require_equal(release_authorities.get(field), expected, f"V4 release authority {field}")
+    if any(field in release_authorities for field in [
+        "technical_network_id", "runtime_network_id", "network_slug", "network_native_id"
+    ]):
+        fail("V4 release authority record contains a retired network field")
+    release_entries = require_array(release_authorities.get("authorities"), "V4 release authorities")
+    if [entry.get("role_id") if isinstance(entry, dict) else None for entry in release_entries] != GENESIS_AUTHORITY_ROLES:
+        fail("V4 release authority role order is not canonical")
+
+    for freeze_entry_raw, release_entry_raw in zip(freeze_entries, release_entries):
+        freeze_entry = require_object(freeze_entry_raw, "ceremony freeze authority entry")
+        release_entry = require_object(release_entry_raw, "V4 release authority entry")
+        role = freeze_entry["role_id"]
+        source_hashes = require_object(
+            freeze_entry.get("source_artifact_sha256"), f"{role} ceremony source hashes"
+        )
+        custody = require_object(freeze_entry.get("custody_inputs"), f"{role} ceremony custody inputs")
+        authorization = require_object(
+            freeze_entry.get("authorization_public"), f"{role} ceremony authorization public key"
+        )
+        public_key = authorization.get("public_key")
+        if not isinstance(public_key, str):
+            fail(f"{role} ceremony authorization public key is missing")
+        try:
+            public_key_bytes = bytes.fromhex(public_key)
+        except ValueError:
+            fail(f"{role} ceremony authorization public key is not lowercase hex")
+        expected_entry = {
+            "role_id": role,
+            "standard_account_address": freeze_entry.get("identity_address"),
+            "identity_root_algorithm": require_object(
+                freeze_entry.get("identity_root_public"), f"{role} ceremony identity root"
+            ).get("algorithm"),
+            "identity_root_public_sha256": source_hashes.get("identity_root_public"),
+            "identity_root_encrypted_sha256": custody.get("identity_root_encrypted_sha256"),
+            "authorization_algorithm": authorization.get("algorithm"),
+            "authorization_public_sha256": source_hashes.get("authorization_public"),
+            "authorization_encrypted_sha256": custody.get("authorization_encrypted_sha256"),
+            "public_key_fingerprint": f"sha256:{sha256(public_key_bytes)}",
+            "genesis_authorization_binding_sha256": source_hashes.get("binding"),
+            "genesis_authorization_binding_payload_sha3_256": require_object(
+                freeze_entry.get("identity_authorization_binding"),
+                f"{role} ceremony authorization binding",
+            ).get("binding_payload_sha3_256"),
+        }
+        for field, expected in expected_entry.items():
+            if expected is None:
+                fail(f"{role} ceremony freeze is missing {field}")
+            require_equal(release_entry.get(field), expected, f"{role} V4 release authority {field}")
+        if not isinstance(release_entry.get("bundle_dir"), str) or not release_entry["bundle_dir"]:
+            fail(f"{role} V4 release authority has no bundle_dir")
+        if role == "SNRG-TESTNET-V3-GOVERNANCE-AUTHORITY":
+            release_binding = freeze_entry.get("release_authorization_binding")
+            if not isinstance(release_binding, dict):
+                fail("governance ceremony freeze has no release authorization binding")
+            for field, expected in {
+                "release_authorization_binding_sha256": source_hashes.get("release_binding"),
+                "release_authorization_binding_payload_sha3_256": release_binding.get("binding_payload_sha3_256"),
+            }.items():
+                if expected is None:
+                    fail(f"governance ceremony freeze is missing {field}")
+                require_equal(release_entry.get(field), expected, f"governance V4 release authority {field}")
 
 
 def account_map(entries: Any, label: str) -> dict[str, dict[str, Any]]:
@@ -272,6 +393,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resolved-allocations", type=Path, required=True)
     parser.add_argument("--validator-inputs", type=Path, required=True)
     parser.add_argument("--authority-record", type=Path, required=True)
+    parser.add_argument("--release-authority-record", type=Path, required=True)
     parser.add_argument("--contracts-dir", type=Path, required=True)
     parser.add_argument("--execution-status", type=Path, required=True)
     parser.add_argument("--deployment-receipts", type=Path, required=True)
@@ -287,13 +409,21 @@ def main() -> None:
     allocation, allocation_raw = read_json(args.allocation_manifest, "allocation plan")
     resolved, resolved_raw = read_json(args.resolved_allocations, "resolved allocations")
     validator, validator_raw = read_json(args.validator_inputs, "validator inputs")
-    authority, authority_raw = read_json(args.authority_record, "fresh authority record")
+    authority, authority_raw = read_json(args.authority_record, "ceremony authority freeze")
+    release_authority, release_authority_raw = read_json(
+        args.release_authority_record, "V4 release authority record"
+    )
     status, status_raw = read_json(args.execution_status, "execution status")
     deployments_value, deployments_raw = read_json(args.deployment_receipts, "deployment receipts")
     initializations_value, initializations_raw = read_json(args.initialization_receipts, "initialization receipts")
     snapshot, snapshot_raw = read_json(args.execution_state, "execution snapshot")
-    if not all(isinstance(value, dict) for value in [source, allocation, resolved, validator, authority, status, snapshot]):
+    if not all(
+        isinstance(value, dict)
+        for value in [source, allocation, resolved, validator, authority, release_authority, status, snapshot]
+    ):
         fail("object input decoded to a non-object")
+
+    validate_authority_cross_binding(authority, release_authority)
 
     if source.get("network", {}).get("chain_id") != CHAIN_ID or source.get("network", {}).get("network_id") != NETWORK_ID:
         fail("source Genesis is not Chain 1266 / technical network testnet")
@@ -447,6 +577,8 @@ def main() -> None:
         "execution_state_snapshot_canonical_sha256": expected_evidence_files[
             "execution_state_canonical_sha256"
         ],
+        "ceremony_authority_freeze_sha256": sha256(authority_raw),
+        "authority_record_sha256": sha256(release_authority_raw),
         "contracts": deployment_bindings,
         "deployment_receipts": deployments,
         "initialization_receipts": initializations,

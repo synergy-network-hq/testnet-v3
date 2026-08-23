@@ -144,6 +144,29 @@ path. The canonical output path is:
 
 `launch/posy-v3-genesis-inputs/fresh-p3-genesis-with-executed-deployment.json`
 
+The composer takes both authority records intentionally. The ceremony freeze
+is the record whose digest is included in the executed evidence; the separate
+V4 authority view is the record whose digest must occupy
+`/genesis_deployment/authority_record_sha256` for the later release-approval
+verifier. The composer rejects mismatched entries rather than treating either
+record as interchangeable.
+
+```bash
+python3 "$REPO/scripts/compose-fresh-posy-v3-executed-genesis.py" \
+  --source-genesis "$INPUT/fresh-p3-genesis-predeployment-public-input.json" \
+  --allocation-manifest "$REPO/runtime/testnet-allocation-manifest.json" \
+  --resolved-allocations "$INPUT/fresh-resolved-allocation-inputs.json" \
+  --validator-inputs "$INPUT/fresh-validator-genesis-source-inputs.json" \
+  --authority-record "$INPUT/fresh-genesis-authority-freeze.json" \
+  --release-authority-record "$INPUT/TESTNET_V3_PRODUCTION_AUTHORITIES.fresh.json" \
+  --contracts-dir "$REPO/genesis-contracts/contracts" \
+  --execution-status "$RELEASE/fresh-p3-ceremony-executed/execution-status.json" \
+  --deployment-receipts "$RELEASE/fresh-p3-ceremony-executed/deployment-receipts.json" \
+  --initialization-receipts "$RELEASE/fresh-p3-ceremony-executed/initialization-receipts.json" \
+  --execution-state "$RELEASE/fresh-p3-ceremony-executed/execution-state.json" \
+  --output "$RELEASE/fresh-p3-genesis-with-executed-deployment.json"
+```
+
 That source then goes to `prepare-fresh-posy-v3-genesis`, which atomically
 binds the finalized P3 consensus decision, exact five-validator activation,
 and governed ETDAG parameter/fee artifacts into the new pre-anchor output
