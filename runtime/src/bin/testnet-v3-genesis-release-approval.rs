@@ -15,7 +15,10 @@ use synergy_testnet::testnet_v3_release_approval::{
 
 const DEFAULT_CANDIDATE: &str =
     "launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json";
-const DEFAULT_AUTHORITIES: &str = "launch/TESTNET_V3_PRODUCTION_AUTHORITIES.json";
+/// Retained solely for reproducible verification of the superseded launch
+/// ceremony.  A caller must opt into it with `--legacy-authorities`; new P3
+/// release work must name the dated, fresh authority record explicitly.
+const LEGACY_AUTHORITIES: &str = "launch/TESTNET_V3_PRODUCTION_AUTHORITIES.json";
 const DEFAULT_REQUEST: &str =
     "launch/production-genesis-ceremony/testnet-v3-genesis-release-approval-request.json";
 
@@ -25,7 +28,7 @@ fn repo() -> PathBuf {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  testnet-v3-genesis-release-approval --write-request [--candidate PATH] [--authorities PATH] [--output PATH]\n  testnet-v3-genesis-release-approval --verify --approval PATH [--candidate PATH] [--authorities PATH]\n\nThe request is the exact payload for ML-DSA-87 context signing. This tool never decrypts, signs, or loads private material. Signature context: {TESTNET_V3_GENESIS_RELEASE_APPROVAL_DOMAIN}"
+        "usage:\n  testnet-v3-genesis-release-approval --write-request (--authorities PATH | --legacy-authorities) [--candidate PATH] [--output PATH]\n  testnet-v3-genesis-release-approval --verify --approval PATH (--authorities PATH | --legacy-authorities) [--candidate PATH]\n\nNew P3 work must pass the dated fresh V4 authority record explicitly. --legacy-authorities is only for reproducing the superseded launch ceremony. The request is the exact payload for ML-DSA-87 context signing. This tool never decrypts, signs, or loads private material. Signature context: {TESTNET_V3_GENESIS_RELEASE_APPROVAL_DOMAIN}"
     );
     std::process::exit(2);
 }
@@ -100,7 +103,8 @@ fn main() {
     let mut write = false;
     let mut verify_mode = false;
     let mut candidate = root.join(DEFAULT_CANDIDATE);
-    let mut authorities = root.join(DEFAULT_AUTHORITIES);
+    let mut authorities = None;
+    let mut legacy_authorities = false;
     let mut output = root.join(DEFAULT_REQUEST);
     let mut approval = None;
     let mut index = 0;
@@ -119,8 +123,21 @@ fn main() {
                 index += 2;
             }
             "--authorities" => {
-                authorities = resolve(&root, args.get(index + 1).unwrap_or_else(|| usage()));
+                if legacy_authorities || authorities.is_some() {
+                    usage();
+                }
+                authorities = Some(resolve(
+                    &root,
+                    args.get(index + 1).unwrap_or_else(|| usage()),
+                ));
                 index += 2;
+            }
+            "--legacy-authorities" => {
+                if legacy_authorities || authorities.is_some() {
+                    usage();
+                }
+                legacy_authorities = true;
+                index += 1;
             }
             "--output" => {
                 output = resolve(&root, args.get(index + 1).unwrap_or_else(|| usage()));
@@ -139,6 +156,11 @@ fn main() {
     if write == verify_mode {
         usage();
     }
+    let authorities = if legacy_authorities {
+        root.join(LEGACY_AUTHORITIES)
+    } else {
+        authorities.unwrap_or_else(|| usage())
+    };
     if write {
         if approval.is_some() {
             usage();
