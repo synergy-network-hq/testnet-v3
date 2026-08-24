@@ -299,22 +299,26 @@ impl SimplifiedSafetyState {
             .validate_for_child_height(epoch_context.epoch_start_height)?;
         self.finalized.validate()?;
         match (&self.anchor_parent, &epoch_context.v2_boundary_anchor) {
+            // Genesis remains the fixed epoch anchor after ordinary
+            // three-chain finality advances.  A fresh state may therefore be
+            // at block zero or at a later locally certified QC; requiring it
+            // to remain equal to the Genesis record would reject the first
+            // valid finalized block.
             (SimplifiedFinalityParent::Genesis(reference), None)
                 if epoch_context.epoch_start_height == Height(1)
-                    && self.finalized == FinalizedBlockRecord::from_genesis(reference.clone())? => {
-            }
+                    && (self.finalized
+                        == FinalizedBlockRecord::from_genesis(reference.clone())?
+                        || self.finalized.quorum_certificate_reference().is_some_and(
+                            |finalized_reference| {
+                                self.certified_qcs
+                                    .get(&finalized_reference.height.0)
+                                    .and_then(|certificate| certificate.reference().ok())
+                                    .is_some_and(|known| known == *finalized_reference)
+                            },
+                        )) => {}
             (SimplifiedFinalityParent::Genesis(_), _) => {
                 return Err(
-                    format!(
-                        "persisted state uses Genesis outside fresh block-zero activation (epoch_start_height={}, has_v2_anchor={}, finalized_matches_anchor={})",
-                        epoch_context.epoch_start_height.0,
-                        epoch_context.v2_boundary_anchor.is_some(),
-                        self.finalized
-                            == FinalizedBlockRecord::from_genesis(match &self.anchor_parent {
-                                SimplifiedFinalityParent::Genesis(reference) => reference.clone(),
-                                SimplifiedFinalityParent::QuorumCertificate(_) => unreachable!(),
-                            })?
-                    ),
+                    "persisted state uses Genesis outside fresh block-zero activation".to_string(),
                 );
             }
             (SimplifiedFinalityParent::QuorumCertificate(anchor_qc), Some(expected))
