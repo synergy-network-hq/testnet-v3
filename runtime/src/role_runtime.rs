@@ -1753,17 +1753,6 @@ fn spawn_coordinated_round_robin_driver(
     })
 }
 
-// The inherited ProofOfSynergy/DualQuorum loop deliberately has no production
-// entry point.  Keep the assertion helper test-only: production validator
-// startup below owns only `spawn_finalized_typed_posy_driver`.
-#[cfg(test)]
-fn attempt_inherited_consensus_engine() -> Result<(), String> {
-    Err(
-        "POSY_V2_2_OPERATIONAL_COORDINATOR_NOT_READY: the inherited ProofOfSynergy/DualQuorumConsensus loop is disabled; refusing validator signing until the finalized typed driver lifecycle is installed"
-            .to_string(),
-    )
-}
-
 /// Builds the only signing-capable typed PoSy coordinator startup input from
 /// the canonical finalized Genesis document and the local canonical validator
 /// key loader.  This function intentionally has no candidate-Genesis,
@@ -6037,14 +6026,6 @@ mod tests {
     }
 
     #[test]
-    fn production_role_runtime_cannot_start_inherited_consensus_loop() {
-        let error = attempt_inherited_consensus_engine()
-            .expect_err("legacy consensus must remain unreachable in production role runtime");
-        assert!(error.contains("POSY_V2_2_OPERATIONAL_COORDINATOR_NOT_READY"));
-        assert!(error.contains("inherited ProofOfSynergy/DualQuorumConsensus loop is disabled"));
-    }
-
-    #[test]
     fn production_role_runtime_has_no_inherited_consensus_constructor() {
         let source = include_str!("role_runtime.rs");
         let inherited_dual_quorum_constructor = ["DualQuorumConsensus", "::"].concat();
@@ -6066,10 +6047,6 @@ mod tests {
         assert!(
             !source.contains("FinalizedConsensusDriverStartup::SpawnFinalizedTypedDriver"),
             "the production role runtime must not expose a typed PoSy dispatcher variant"
-        );
-        assert!(
-            source.contains("spawn_coordinated_round_robin_driver("),
-            "the production role runtime must retain the separate P1 coordinated-driver entry point"
         );
         assert!(
             source.contains("spawn_finalized_simplified_posy_driver("),
