@@ -405,14 +405,28 @@ pub struct SimplifiedFinalizationTransaction {
     pub finality_witness: Vec<SimplifiedQuorumCertificate>,
 }
 
+/// Stable commitment to one finalized certificate.  The embedded certificate
+/// remains part of the transaction and is fully verified at replay time, but
+/// its particular quorum-proof subset is not consensus identity: honest
+/// nodes may observe different valid 4-of-5 subsets for the same certified
+/// candidate.
+#[derive(Debug, Clone, Serialize)]
+struct SimplifiedFinalizedCommitmentSubject<'a> {
+    height: Height,
+    block_id: &'a BlockId,
+    parent_block_id: &'a BlockId,
+    qc_id: Hash,
+    protected_execution_root: Hash,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct SimplifiedFinalizationTransactionSubject<'a> {
     format: &'a str,
     epoch_context_root: Hash,
     expected_previous_finalized: &'a FinalizedBlockRecord,
-    commitments: &'a [SimplifiedFinalizedCommitment],
+    commitments: Vec<SimplifiedFinalizedCommitmentSubject<'a>>,
     target_finalized: &'a FinalizedBlockRecord,
-    finality_witness: &'a [SimplifiedQuorumCertificate],
+    finality_witness: Vec<QuorumCertificateReference>,
 }
 
 impl SimplifiedFinalizationTransaction {
@@ -520,20 +534,52 @@ impl SimplifiedFinalizationTransaction {
     }
 
     pub fn recompute_id(&self) -> Result<Hash, String> {
-        let subject = SimplifiedFinalizationTransactionSubject {
-            format: &self.format,
-            epoch_context_root: self.epoch_context_root,
-            expected_previous_finalized: &self.expected_previous_finalized,
-            commitments: &self.commitments,
-            target_finalized: &self.target_finalized,
-            finality_witness: &self.finality_witness,
-        };
-        Ok(Hash::from_domain_bytes(
-            "SYNERGY_POSY_SIMPLIFIED_FINALIZATION_TRANSACTION_V3",
-            &serde_json::to_vec(&subject)
-                .map_err(|error| format!("serialize finalization transaction: {error}"))?,
-        ))
+        finalization_transaction_id(
+            &self.format,
+            self.epoch_context_root,
+            &self.expected_previous_finalized,
+            &self.commitments,
+            &self.target_finalized,
+            &self.finality_witness,
+        )
     }
+}
+
+fn finalization_transaction_id(
+    format: &str,
+    epoch_context_root: Hash,
+    expected_previous_finalized: &FinalizedBlockRecord,
+    commitments: &[SimplifiedFinalizedCommitment],
+    target_finalized: &FinalizedBlockRecord,
+    finality_witness: &[SimplifiedQuorumCertificate],
+) -> Result<Hash, String> {
+    let commitments = commitments
+        .iter()
+        .map(|commitment| SimplifiedFinalizedCommitmentSubject {
+            height: commitment.height,
+            block_id: &commitment.block_id,
+            parent_block_id: &commitment.parent_block_id,
+            qc_id: commitment.qc_id,
+            protected_execution_root: commitment.protected_execution_root,
+        })
+        .collect();
+    let finality_witness = finality_witness
+        .iter()
+        .map(SimplifiedQuorumCertificate::reference)
+        .collect::<Result<Vec<_>, _>>()?;
+    let subject = SimplifiedFinalizationTransactionSubject {
+        format,
+        epoch_context_root,
+        expected_previous_finalized,
+        commitments,
+        target_finalized,
+        finality_witness,
+    };
+    Ok(Hash::from_domain_bytes(
+        "SYNERGY_POSY_SIMPLIFIED_FINALIZATION_TRANSACTION_V3",
+        &serde_json::to_vec(&subject)
+            .map_err(|error| format!("serialize finalization transaction: {error}"))?,
+    ))
 }
 
 /// Durable acknowledgement returned by a finalization sink.
@@ -2246,19 +2292,14 @@ fn build_finalization_transaction(
         })?;
         finality_witness.push(certificate.clone());
     }
-    let subject = SimplifiedFinalizationTransactionSubject {
-        format: FORMAT,
+    let transaction_id = finalization_transaction_id(
+        FORMAT,
         epoch_context_root,
         expected_previous_finalized,
-        commitments: &commitments,
+        &commitments,
         target_finalized,
-        finality_witness: &finality_witness,
-    };
-    let transaction_id = Hash::from_domain_bytes(
-        "SYNERGY_POSY_SIMPLIFIED_FINALIZATION_TRANSACTION_V3",
-        &serde_json::to_vec(&subject)
-            .map_err(|error| format!("serialize finalization transaction: {error}"))?,
-    );
+        &finality_witness,
+    )?;
     let transaction = SimplifiedFinalizationTransaction {
         format: FORMAT.to_string(),
         transaction_id,
