@@ -147,7 +147,6 @@ impl SimplifiedCoreMaterialAdapter {
                     .to_string(),
             );
         }
-        validate_simplified_fee_market_header(&material.canonical_block.header)?;
         self.certified_parent_fee_markets.insert(
             candidate_id,
             SimplifiedParentFeeMarketState::from_verified_header(&material.canonical_block.header)?,
