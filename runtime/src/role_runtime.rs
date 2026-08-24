@@ -18,10 +18,6 @@ use crate::config::{
 };
 use crate::consensus::cartel_detection::{CartelDetectionEngine, WhistleblowerSystem};
 use crate::consensus::consensus_fork;
-use crate::consensus::coordinated_finality_observer::{
-    coordinated_finality_observer_from_canonical_finalized_genesis,
-    install_coordinated_finality_observer, remove_coordinated_finality_observer,
-};
 use crate::consensus::coordinated_finality_store::CoordinatedFinalityStore;
 use crate::consensus::coordinated_round_robin::{
     install_coordinated_consensus_ingress, remove_coordinated_consensus_ingress,
@@ -1175,32 +1171,7 @@ fn should_start_typed_finality_observer(
     config: &NodeConfig,
     profile: Option<&RoleProfile>,
 ) -> bool {
-    !matches!(
-        config
-            .consensus
-            .resolve_mode(config.blockchain.chain_id, &config.network.network_id),
-        Ok(ResolvedConsensusMode::CoordinatedRoundRobinV1(_))
-    ) && !config.node.bootstrap_only
-        && matches!(
-            profile.map(|value| value.role),
-            Some(NodeRole::Relayer | NodeRole::RpcGateway | NodeRole::IndexerExplorer)
-        )
-}
-
-/// P1 support roles replay the same finalized packages as validators but never
-/// construct a coordinator, producer, or signing authority. Keep this mode
-/// gate separate from the retired typed observer to prevent an observer from
-/// accepting evidence for the wrong finality protocol.
-fn should_start_coordinated_finality_observer(
-    config: &NodeConfig,
-    profile: Option<&RoleProfile>,
-) -> bool {
-    matches!(
-        config
-            .consensus
-            .resolve_mode(config.blockchain.chain_id, &config.network.network_id),
-        Ok(ResolvedConsensusMode::CoordinatedRoundRobinV1(_))
-    ) && !config.node.bootstrap_only
+    !config.node.bootstrap_only
         && matches!(
             profile.map(|value| value.role),
             Some(NodeRole::Relayer | NodeRole::RpcGateway | NodeRole::IndexerExplorer)
@@ -5190,14 +5161,7 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
 
             let process_start_time = SystemTime::now();
             let consensus_enabled = should_start_consensus(&config, role_profile);
-            let coordinated_mode_selected = matches!(
-                config
-                    .consensus
-                    .resolve_mode(config.blockchain.chain_id, &config.network.network_id),
-                Ok(ResolvedConsensusMode::CoordinatedRoundRobinV1(_))
-            );
-            if consensus_enabled && is_validator_profile(role_profile) && !coordinated_mode_selected
-            {
+            if consensus_enabled && is_validator_profile(role_profile) {
                 begin_typed_consensus_startup_buffer(TYPED_POSY_INGRESS_CAPACITY)
                     .unwrap_or_else(|error| {
                         eprintln!(
@@ -5211,11 +5175,7 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
             let p2p_enabled = should_start_p2p(&config, role_profile);
             let typed_finality_observer_enabled =
                 should_start_typed_finality_observer(&config, role_profile);
-            let coordinated_finality_observer_enabled =
-                should_start_coordinated_finality_observer(&config, role_profile);
-            if (typed_finality_observer_enabled || coordinated_finality_observer_enabled)
-                && !p2p_enabled
-            {
+            if typed_finality_observer_enabled && !p2p_enabled {
                 eprintln!(
                     "Service startup failed closed: finalized-only observer roles require active P2P"
                 );
@@ -5232,37 +5192,6 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                 install_typed_finality_observer(observer).unwrap_or_else(|error| {
                     eprintln!(
                         "Service startup failed closed: cannot install typed finality observer ingress: {error}"
-                    );
-                    process::exit(1);
-                });
-            }
-            if coordinated_finality_observer_enabled {
-                let coordinated_config = match config
-                    .consensus
-                    .resolve_mode(config.blockchain.chain_id, &config.network.network_id)
-                {
-                    Ok(ResolvedConsensusMode::CoordinatedRoundRobinV1(coordinated_config)) => {
-                        coordinated_config
-                    }
-                    Ok(ResolvedConsensusMode::PosySimplifiedV3) | Err(_) => {
-                        eprintln!(
-                            "Service startup failed closed: coordinated finality observer selected without a valid P1 configuration"
-                        );
-                        process::exit(1);
-                    }
-                };
-                let observer = coordinated_finality_observer_from_canonical_finalized_genesis(
-                    coordinated_config,
-                )
-                .unwrap_or_else(|error| {
-                    eprintln!(
-                        "Service startup failed closed: cannot initialize verified coordinated finality observer: {error}"
-                    );
-                    process::exit(1);
-                });
-                install_coordinated_finality_observer(observer).unwrap_or_else(|error| {
-                    eprintln!(
-                        "Service startup failed closed: cannot install coordinated finality observer ingress: {error}"
                     );
                     process::exit(1);
                 });
@@ -5424,28 +5353,7 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
             let sync_required_before_join =
                 should_require_state_sync_before_join(&config, role_profile);
 
-            if coordinated_mode_selected && consensus_enabled && is_validator_profile(role_profile)
-            {
-                if should_sync {
-                    info!(
-                        "main",
-                        "Skipping generic legacy sync for coordinated consensus; the signed coordinated finality store is the only recovery authority"
-                    );
-                } else {
-                    ensure_fresh_genesis_reset_state(&blockchain).unwrap_or_else(|error| {
-                        eprintln!(
-                            "Fresh-genesis reset failed closed before coordinated consensus startup: {error}"
-                        );
-                        process::exit(1);
-                    });
-                    std::fs::remove_file(&reset_flag_path).ok();
-                    info!(
-                        "main",
-                        "Starting coordinated consensus from the verified block-0 Genesis reset",
-                        "height" => 0
-                    );
-                }
-            } else if !should_start_sync(&config, role_profile) {
+            if !should_start_sync(&config, role_profile) {
                 info!("main", "Chain sync disabled for this node profile");
             } else if should_sync {
                 let mut sync_attempt = 1_u64;
@@ -5691,15 +5599,6 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                     warn!(
                         "main",
                         "Could not remove typed finality observer ingress during shutdown",
-                        "error" => error
-                    );
-                }
-            }
-            if coordinated_finality_observer_enabled {
-                if let Err(error) = remove_coordinated_finality_observer() {
-                    warn!(
-                        "main",
-                        "Could not remove coordinated finality observer ingress during shutdown",
                         "error" => error
                     );
                 }
@@ -6511,31 +6410,6 @@ mod tests {
         assert!(!should_start_typed_finality_observer(
             &config,
             Some(NodeRole::ArchiveValidator.profile())
-        ));
-    }
-
-    #[test]
-    fn only_support_roles_start_non_signing_coordinated_finality_observer() {
-        let mut config = NodeConfig::default();
-        config.consensus.mode =
-            crate::consensus::coordinated_round_robin::COORDINATED_ROUND_ROBIN_V1.to_string();
-        config.consensus.coordinator_id = "validator-1".to_string();
-        config.consensus.producer_ids = (2..=6).map(|index| format!("validator-{index}")).collect();
-        assert!(should_start_coordinated_finality_observer(
-            &config,
-            Some(NodeRole::Relayer.profile())
-        ));
-        assert!(should_start_coordinated_finality_observer(
-            &config,
-            Some(NodeRole::RpcGateway.profile())
-        ));
-        assert!(should_start_coordinated_finality_observer(
-            &config,
-            Some(NodeRole::IndexerExplorer.profile())
-        ));
-        assert!(!should_start_coordinated_finality_observer(
-            &config,
-            Some(NodeRole::Validator.profile())
         ));
     }
 
