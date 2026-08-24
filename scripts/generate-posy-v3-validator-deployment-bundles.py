@@ -223,13 +223,28 @@ def validate_public_inputs(
         require(record.get("address") == validator.get("validator_uma_id"),
                 f"{validator_id} Genesis identity differs from the completed ceremony")
 
+    # Only the new, public NetBird desired-state adapter may supply fresh P3
+    # validator routes.  The older Innernet registry has a different identity
+    # lineage and must not be substituted merely because its IP range looks
+    # similar.
+    require(vpn.get("schema_version") == "synergy-testnet-v3-fresh-vpn-provider-plan-v1",
+            "VPN registry is not the fresh Testnet-v3 provider plan")
+    require(vpn.get("artifact_type") == "testnet-v3-fresh-validator-vpn-provider-plan",
+            "VPN registry has the wrong fresh provider artifact type")
     require(vpn.get("chain_id") == CHAIN_ID and vpn.get("network_id") == NETWORK_ID,
             "VPN registry has the wrong network identity")
     require(vpn.get("release_id") == RELEASE_ID and vpn.get("protocol_version") == PROTOCOL,
             "VPN registry has the wrong release or protocol")
+    require(vpn.get("genesis_boundary") == "fresh_genesis_block_zero",
+            "VPN registry is not bound to fresh block zero")
     require(vpn.get("private_material_present") is False, "VPN public registry declares private material")
-    require(isinstance(vpn.get("status"), str) and "PENDING" not in vpn["status"].upper(),
-            "VPN public registry is still pending fresh identity binding")
+    provider = object_at(vpn, "provider")
+    require(provider.get("kind") == "netbird" and provider.get("mode") == "external_authenticated_reconciliation",
+            "VPN registry does not use the approved fresh NetBird provider mode")
+    require(provider.get("hub_udp_port") == 51820, "VPN registry has the wrong public hub UDP port")
+    hub = object_at(vpn, "hub")
+    require(hub == {"vpn_ip": "10.69.0.1", "public_endpoint": "68.183.139.56:51820", "udp_port": 51820},
+            "VPN registry hub assignment is not canonical")
     participants = vpn.get("participants")
     require(isinstance(participants, list), "VPN registry participants are missing")
     vpn_by_id = {
@@ -237,7 +252,8 @@ def validate_public_inputs(
         for item in participants
         if isinstance(item, dict) and item.get("role") == "validator"
     }
-    require(set(vpn_by_id) == set(ACTIVE_IDS), "VPN registry validator participants are not exactly validator-02 through validator-06")
+    require(set(vpn_by_id) == set(ALL_IDS),
+            "VPN registry must carry the full pre-generated validator-01 through validator-21 transport pool")
     for validator_id in ACTIVE_IDS:
         participant = vpn_by_id[validator_id]
         require(participant.get("vpn_ip") == VPN_IPS[validator_id], f"{validator_id} VPN IP is not canonical")
@@ -245,6 +261,20 @@ def validate_public_inputs(
         declared_address = participant.get("synv_address")
         require(declared_address == ceremony_by_id[validator_id]["address"],
                 f"{validator_id} VPN registry identity is absent or conflicts with ceremony")
+        require(participant.get("activation_status") == "GENESIS_ACTIVE_PROVIDER_ENROLLMENT_REQUIRED",
+                f"{validator_id} VPN registry activation state is not fresh Genesis-active")
+    for validator_id in ALL_IDS:
+        participant = vpn_by_id[validator_id]
+        ordinal = int(validator_id.rsplit("-", 1)[1])
+        require(participant.get("vpn_ip") == f"10.69.10.{ordinal}",
+                f"{validator_id} VPN IP is not its canonical dynamic slot")
+    dynamic = object_at(vpn, "dynamic_onboarding")
+    require(dynamic.get("governed_extension_allowed") is True,
+            "VPN registry does not support governed dynamic validator onboarding")
+    require(dynamic.get("usable_validator_vpn_ordinal_range") == {"first": 1, "last": 254},
+            "VPN registry has an invalid dynamic validator VPN range")
+    require(dynamic.get("transport_not_consensus_authority") is True,
+            "VPN registry incorrectly treats transport as consensus authority")
     return manifest, ceremony_by_id, vpn_by_id
 
 

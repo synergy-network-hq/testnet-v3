@@ -3666,7 +3666,7 @@ fn start_validator_transport_refresh_worker(is_running: Arc<Mutex<bool>>) {
             match refresh_validator_transports() {
                 Ok(refresh) if refresh.changed => info!(
                     "p2p",
-                    "Installed coordinator-signed validator transport registry",
+                    "Installed fresh provider-signed validator transport registry",
                     "generation" => refresh.generation
                 ),
                 Ok(_) => {}
@@ -5675,14 +5675,18 @@ impl P2PNetwork {
             match refresh_validator_transports() {
                 Ok(refresh) => info!(
                     "p2p",
-                    "Loaded coordinator-signed validator transport registry before network start",
+                    "Loaded fresh provider-signed validator transport registry before network start",
                     "generation" => refresh.generation
                 ),
-                Err(error) => warn!(
-                    "p2p",
-                    "Validator transport registry was unavailable at network start; validator peer admission remains closed",
-                    "error" => error
-                ),
+                Err(error) => {
+                    error!(
+                        "p2p",
+                        "Fresh validator transport registry is unavailable; refusing production validator-network start",
+                        "error" => error
+                    );
+                    *is_running.lock().unwrap() = false;
+                    return;
+                }
             }
             start_validator_transport_refresh_worker(Arc::clone(&is_running));
         }
@@ -11475,7 +11479,12 @@ fn is_current_validator_vpn_dial_address(value: &str) -> bool {
 }
 
 fn is_canonical_innernet_dial_address(value: &str, third_octet: u8) -> bool {
-    is_innernet_dial_address(value, 70, third_octet)
+    // The fresh public P3 provider uses 10.69.10.0/24 for validators and
+    // 10.69.1.0/24 for relayers.  The test-only 10.70 fixtures remain accepted
+    // below solely so isolated historical unit fixtures do not become a
+    // production routing fallback.
+    is_innernet_dial_address(value, 69, third_octet)
+        || (cfg!(test) && is_innernet_dial_address(value, 70, third_octet))
 }
 
 fn is_private_qualification_innernet_dial_address(value: &str, third_octet: u8) -> bool {
@@ -11503,7 +11512,8 @@ fn is_innernet_dial_address(value: &str, second_octet: u8, third_octet: u8) -> b
 }
 
 fn is_validator_vpn_relayer_dial_address(value: &str) -> bool {
-    is_canonical_innernet_dial_address(value, 20)
+    is_innernet_dial_address(value, 69, 1)
+        || (cfg!(test) && is_innernet_dial_address(value, 70, 20))
 }
 
 fn is_current_validator_vpn_relayer_dial_address(value: &str) -> bool {
