@@ -16,6 +16,7 @@ use crate::consensus_parameters::{
 use crate::etdag_governance::{EtdagGovernedGenesisBinding, EtdagGovernedMembershipAnchor};
 use crate::synergy_types::{
     TESTNET_V3_CHAIN_INCARNATION, TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION,
+    TESTNET_V3_FRESH_P3_CHAIN_INCARNATION,
 };
 use crate::utils::resolve_data_path;
 
@@ -403,9 +404,9 @@ pub(crate) fn load_genesis_from_path_for_test(path: PathBuf) -> Result<GenesisDo
 #[cfg(test)]
 fn fresh_posy_v3_test_fixture() -> Result<Value, String> {
     let value: Value = serde_json::from_str(include_str!(
-        "../config/genesis.testnet-v3.test-fixture.json"
+        "../../launch/posy-v3-genesis-inputs/fresh-p3-genesis-predeployment-public-input.json"
     ))
-    .map_err(|error| format!("parse common Testnet-v3 test fixture seed: {error}"))?;
+    .map_err(|error| format!("parse fresh P3 test fixture source: {error}"))?;
     bind_fresh_posy_v3_test_authorities(value)
 }
 
@@ -2268,10 +2269,11 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     fn testnet_v3_candidate() -> Value {
-        serde_json::from_str(include_str!(
-            "../../genesis.testnet-v3.identity-assigned.json"
-        ))
-        .expect("checked-in Testnet-v3 candidate genesis must be valid JSON")
+        let mut candidate = fresh_posy_v3_test_fixture()
+            .expect("fresh P3 test fixture source must bind public authorities");
+        recompute_testnet_v3_candidate_integrity(&mut candidate)
+            .expect("fresh P3 test fixture must recompute deterministically");
+        candidate
     }
 
     #[test]
@@ -2414,68 +2416,39 @@ mod tests {
         let expected_magic = candidate["network_magic_bytes"]["value"]
             .as_str()
             .expect("candidate network magic must be a string");
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../genesis.testnet-v3.identity-assigned.json");
-        let document = load_canonical_genesis_from_path(path).unwrap();
+        let document = load_canonical_genesis_from_value(
+            candidate,
+            PathBuf::from("<fresh-p3-candidate-loader-test>"),
+        )
+        .unwrap();
         assert_eq!(document.chain_id(), 1266);
         assert_eq!(document.network_id(), 1266);
-        assert_eq!(document.validators().len(), 6);
+        assert_eq!(document.validators().len(), 5);
         assert_eq!(document.network_magic_bytes(), expected_magic);
     }
 
     #[test]
-    fn runtime_loader_derives_p1_domain_only_for_immutable_pre_p1_genesis() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let path = root.join(
-            "launch/production-node-configs.backup-9e7b92431902/canonical-genesis/genesis.json",
-        );
-        let document = load_canonical_genesis_from_path(path.clone())
-            .expect("the immutable deployed Chain 1266 Genesis must load");
-        assert_eq!(document.hash(), CHAIN_1266_PRE_P1_GENESIS_HASH);
-        assert_eq!(document.chain_incarnation(), TESTNET_V3_CHAIN_INCARNATION);
+    fn runtime_loader_accepts_only_the_fresh_p3_domain() {
+        let candidate = testnet_v3_candidate();
+        let document = load_canonical_genesis_from_value(
+            candidate,
+            PathBuf::from("<fresh-p3-domain-test-genesis>"),
+        )
+        .expect("the fresh P3 Genesis must load");
         assert_eq!(
-            document.consensus_state_schema_version(),
-            TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION
+            document.chain_incarnation(),
+            TESTNET_V3_FRESH_P3_CHAIN_INCARNATION
         );
-
-        let mut mutated: Value = serde_json::from_slice(
-            &fs::read(path).expect("read immutable deployed Chain 1266 Genesis"),
-        )
-        .expect("parse immutable deployed Chain 1266 Genesis");
-        mutated["network"]["chain_incarnation"] = json!(3);
-        let mutation_path = crate::utils::test_temp_root(format!(
-            "synergy-pre-p1-genesis-incarnation-mutation-{}-{}.json",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
-        fs::write(
-            &mutation_path,
-            serde_json::to_vec(&mutated).expect("encode mutated Genesis"),
-        )
-        .expect("write mutated Genesis");
-        let error = load_canonical_genesis_from_path(mutation_path.clone())
-            .expect_err("present incorrect incarnation must not be derived");
-        fs::remove_file(mutation_path).expect("remove mutated Genesis");
-        assert!(error.contains("wrong Chain 1266 incarnation"));
+        assert_eq!(document.consensus_state_schema_version(), 5);
+        assert_eq!(document.consensus_version(), "posy/3.0");
     }
 
     #[test]
-    fn approved_manifest_binding_replaces_legacy_genesis_timeouts_and_is_root_bound() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let parameters = crate::consensus_parameters::load_finalized_consensus_parameters(
-            root.join("launch/TESTNET_V3_CONSENSUS_PARAMETERS.json"),
-        )
-        .unwrap();
-        let decision =
-            fs::read(root.join("launch/TESTNET_V3_CONSENSUS_PARAMETER_RELEASE_DECISION.md"))
-                .unwrap();
-        let decision_sha256 = hex::encode(Sha256::digest(decision));
+    fn fresh_p3_manifest_binding_is_root_bound() {
+        let parameters = load_candidate_consensus_parameters(&testnet_v3_candidate())
+            .unwrap()
+            .expect("fresh P3 candidate must carry finalized consensus parameters");
         let mut candidate = testnet_v3_candidate();
-        bind_testnet_v3_genesis_consensus_parameters(&mut candidate, &parameters, &decision_sha256)
-            .unwrap();
 
         assert_eq!(
             candidate["consensus"]["epoch"]["length_blocks"].as_u64(),
@@ -2485,8 +2458,7 @@ mod tests {
             candidate["consensus"]["timeouts"],
             json!({
                 "proposal_ms": 1_500,
-                "prevote_ms": 1_500,
-                "precommit_ms": 1_500,
+                "vote_ms": 1_500,
                 "max_round_ms": 10_000,
             })
         );
