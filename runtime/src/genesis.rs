@@ -401,20 +401,39 @@ pub(crate) fn load_genesis_from_path_for_test(path: PathBuf) -> Result<GenesisDo
 /// validation rule: it installs a canonical P3 manifest, the exact five
 /// public validator activation, and governed ETDAG parameter/fee binding
 /// before invoking the ordinary Genesis integrity recomputation.
-#[cfg(test)]
-fn fresh_posy_v3_test_fixture() -> Result<Value, String> {
+/// Builds an ephemeral, complete fresh-P3 Genesis from the governed public
+/// source inputs for qualification only. It never reads custody material,
+/// never writes a release artifact, and leaves production Genesis loading on
+/// its explicit on-disk path.
+pub fn build_fresh_posy_v3_qualification_genesis() -> Result<Value, String> {
     let value: Value = serde_json::from_str(include_str!(
         "../../launch/posy-v3-genesis-inputs/fresh-p3-genesis-predeployment-public-input.json"
     ))
-    .map_err(|error| format!("parse fresh P3 test fixture source: {error}"))?;
-    bind_fresh_posy_v3_test_authorities(value)
+    .map_err(|error| format!("parse fresh P3 qualification genesis source: {error}"))?;
+    let mut value = bind_fresh_posy_v3_test_authorities(value)?;
+    value["env"] = Value::String("testnet".to_string());
+    value
+        .as_object_mut()
+        .ok_or_else(|| "fresh P3 qualification Genesis is not an object".to_string())?
+        .remove("test_fixture");
+    recompute_testnet_v3_candidate_integrity(&mut value)?;
+    Ok(value)
+}
+
+#[cfg(test)]
+fn fresh_posy_v3_test_fixture() -> Result<Value, String> {
+    let mut value = build_fresh_posy_v3_qualification_genesis()?;
+    value["env"] = Value::String("test-fixture".to_string());
+    value["test_fixture"] = json!({
+        "fixture_consensus_profile": crate::consensus::simplified_posy::POSY_SIMPLIFIED_PROTOCOL_VERSION,
+    });
+    Ok(value)
 }
 
 /// Applies the public P3 authority records to any isolated test Genesis
 /// seed.  Both the historical structural fixture and the fresh public source
 /// input use this exact path, so consensus-domain tests never obtain a
 /// partially-bound candidate.
-#[cfg(test)]
 fn bind_fresh_posy_v3_test_authorities(mut value: Value) -> Result<Value, String> {
     use crate::consensus::simplified_posy::GenesisBoundSimplifiedActivation;
     use crate::consensus_parameters::{
@@ -536,11 +555,7 @@ fn fresh_p3_unit_test_genesis_path() -> PathBuf {
 /// the retired 2.2 fixture while retaining production's on-disk-only loader.
 #[cfg(test)]
 fn fresh_p3_unit_test_genesis() -> Result<GenesisDocument, String> {
-    let value: Value = serde_json::from_str(include_str!(
-        "../../launch/posy-v3-genesis-inputs/fresh-p3-genesis-predeployment-public-input.json"
-    ))
-    .map_err(|error| format!("parse fresh P3 unit-test genesis input: {error}"))?;
-    let mut value = bind_fresh_posy_v3_test_authorities(value)?;
+    let mut value = fresh_posy_v3_test_fixture()?;
     recompute_testnet_v3_candidate_integrity(&mut value)?;
     load_canonical_genesis_from_value(value, fresh_p3_unit_test_genesis_path())
 }
@@ -2421,6 +2436,26 @@ mod tests {
         assert_eq!(document.network_id(), 1266);
         assert_eq!(document.validators().len(), 5);
         assert_eq!(document.network_magic_bytes(), expected_magic);
+    }
+
+    #[test]
+    fn qualification_harness_genesis_is_complete_fresh_p3_and_runtime_loadable() {
+        let candidate = build_fresh_posy_v3_qualification_genesis().unwrap();
+        assert_eq!(candidate["env"], "testnet");
+        assert!(candidate.get("test_fixture").is_none());
+        assert!(candidate["header"]["timestamp"].as_u64().is_some());
+        let document = load_canonical_genesis_from_value(
+            candidate,
+            PathBuf::from("<fresh-p3-qualification-harness-genesis>"),
+        )
+        .expect("qualification Genesis must use the ordinary runtime loader");
+        assert_eq!(document.chain_id(), 1266);
+        assert_eq!(
+            document.chain_incarnation(),
+            TESTNET_V3_FRESH_P3_CHAIN_INCARNATION
+        );
+        assert_eq!(document.consensus_state_schema_version(), 5);
+        assert_eq!(document.validators().len(), 5);
     }
 
     #[test]

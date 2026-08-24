@@ -221,6 +221,28 @@ fn run() -> Result<(), String> {
 fn run_parent(work_dir: &Path) -> Result<(), String> {
     fs::create_dir_all(work_dir)
         .map_err(|error| format!("create harness directory {}: {error}", work_dir.display()))?;
+    let qualification_genesis_path = work_dir.join("fresh-p3-qualification-genesis.json");
+    if qualification_genesis_path.exists() {
+        return Err(format!(
+            "refusing to reuse qualification Genesis {}; choose a fresh --work-dir",
+            qualification_genesis_path.display()
+        ));
+    }
+    let qualification_genesis =
+        synergy_testnet::genesis::build_fresh_posy_v3_qualification_genesis()?;
+    fs::write(
+        &qualification_genesis_path,
+        serde_json::to_vec_pretty(&qualification_genesis)
+            .map_err(|error| format!("serialize qualification Genesis: {error}"))?,
+    )
+    .map_err(|error| {
+        format!(
+            "write qualification Genesis {}: {error}",
+            qualification_genesis_path.display()
+        )
+    })?;
+    synergy_testnet::genesis::load_genesis_from_path(&qualification_genesis_path)?;
+    env::set_var("SYNERGY_GENESIS_FILE", &qualification_genesis_path);
     for path in std::iter::once(public_configuration_path(work_dir)).chain(
         (0..VALIDATOR_COUNT).flat_map(|index| {
             [
