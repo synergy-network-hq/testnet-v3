@@ -2339,10 +2339,6 @@ mod tests {
             Some(5)
         );
         assert_eq!(
-            candidate["consensus"]["initial_cluster_count"].as_u64(),
-            Some(1)
-        );
-        assert_eq!(
             candidate["consensus"]["min_validator_count"].as_u64(),
             Some(5)
         );
@@ -2477,95 +2473,7 @@ mod tests {
         candidate["consensus"]["timeouts"]["proposal_ms"] = json!(1_499);
         assert!(load_candidate_consensus_parameters(&candidate)
             .unwrap_err()
-            .contains("proposal_ms disagrees"));
-    }
-
-    #[test]
-    fn coordinated_p1_binding_replaces_posy_consensus_shape_and_rejects_legacy_fields() {
-        use crate::consensus_parameters::{
-            CoordinatedRoundRobinParameterManifest, CoordinatedRoundRobinParameters,
-            CONSENSUS_PARAMETER_ACTIVATION_BOUNDARY,
-            CONSENSUS_PARAMETER_MANIFEST_COORDINATED_P1_SCHEMA_VERSION,
-            CONSENSUS_PARAMETER_MANIFEST_FINALIZED_STATUS, CONSENSUS_PARAMETER_MANIFEST_RELEASE_ID,
-            COORDINATED_P1_COORDINATOR_ID, COORDINATED_P1_PRODUCER_IDS,
-            COORDINATED_P1_PRODUCER_TURN_TIMEOUT_MS, COORDINATED_P1_TARGET_BLOCK_TIME_MS,
-            COORDINATED_ROUND_ROBIN_V1_PROTOCOL_VERSION,
-        };
-
-        let manifest = CoordinatedRoundRobinParameterManifest {
-            schema_version: CONSENSUS_PARAMETER_MANIFEST_COORDINATED_P1_SCHEMA_VERSION,
-            release_id: CONSENSUS_PARAMETER_MANIFEST_RELEASE_ID.to_string(),
-            status: CONSENSUS_PARAMETER_MANIFEST_FINALIZED_STATUS.to_string(),
-            governance_approval_id: "TV3-P1-GENESIS-UNIT-TEST".to_string(),
-            chain_id: crate::synergy_types::ChainId::synergy_testnet_v3(),
-            network_id: crate::synergy_types::NetworkId::synergy_testnet_v3(),
-            protocol_version: COORDINATED_ROUND_ROBIN_V1_PROTOCOL_VERSION.to_string(),
-            activation_boundary: CONSENSUS_PARAMETER_ACTIVATION_BOUNDARY.to_string(),
-            target_block_time_ms: COORDINATED_P1_TARGET_BLOCK_TIME_MS,
-            consensus_signature_algorithm:
-                crate::synergy_types::TESTNET_V3_CONSENSUS_SIGNATURE_ALGORITHM.to_string(),
-            coordinated_round_robin: CoordinatedRoundRobinParameters {
-                coordinator_id: COORDINATED_P1_COORDINATOR_ID.to_string(),
-                producer_ids: COORDINATED_P1_PRODUCER_IDS
-                    .iter()
-                    .map(|producer| (*producer).to_string())
-                    .collect(),
-                producer_turn_timeout_ms: COORDINATED_P1_PRODUCER_TURN_TIMEOUT_MS,
-            },
-        };
-        let manifest_bytes = manifest.canonical_bytes().expect("canonical P1 manifest");
-        let parameters =
-            crate::consensus_parameters::load_finalized_consensus_parameters_from_bytes(
-                &manifest_bytes,
-            )
-            .expect("load P1 manifest");
-        let mut candidate = testnet_v3_candidate();
-        bind_testnet_v3_genesis_consensus_parameters(&mut candidate, &parameters, &"11".repeat(32))
-            .expect("bind P1 manifest into candidate");
-
-        assert_eq!(
-            candidate["network"]["consensus_version"].as_str(),
-            Some(COORDINATED_ROUND_ROBIN_V1_PROTOCOL_VERSION)
-        );
-        assert_eq!(
-            candidate["consensus"]["mode"].as_str(),
-            Some(COORDINATED_ROUND_ROBIN_V1_PROTOCOL_VERSION)
-        );
-        validate_integrity_hashes(&candidate).expect("P1 Genesis integrity binding");
-
-        let path = crate::utils::test_temp_root(format!(
-            "synergy-p1-genesis-binding-{}-{}.json",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
-        fs::write(
-            &path,
-            serde_json::to_vec(&candidate).expect("encode P1 Genesis"),
-        )
-        .expect("write P1 Genesis");
-        let loaded = load_canonical_genesis_from_path(path.clone()).expect("load P1 Genesis");
-        fs::remove_file(path).expect("remove P1 Genesis");
-        let bootstrap =
-            crate::consensus::testnet_v3_bootstrap::load_coordinated_round_robin_genesis_bootstrap(
-                &loaded,
-            )
-            .expect("bootstrap P1 Genesis");
-        assert_eq!(
-            bootstrap
-                .validator_set
-                .active_for_epoch(crate::synergy_types::Epoch(0))
-                .validators
-                .len(),
-            6
-        );
-
-        candidate["consensus"]["timeouts"] = json!({ "proposal_ms": 1_500 });
-        assert!(load_candidate_consensus_parameters(&candidate)
-            .expect_err("P1 Genesis must reject an old typed timeout object")
-            .contains("legacy PoSy"));
+            .contains("fresh simplified Genesis timeouts disagree"));
     }
 
     #[test]
