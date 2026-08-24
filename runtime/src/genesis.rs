@@ -1342,8 +1342,8 @@ fn validate_testnet_v3_candidate_integrity_hashes(value: &Value) -> Result<(), S
         &expected_genesis_hash,
         "integrity.genesis_hash",
     )?;
-    let caip2 = "synergy:testnet-v3";
-    let network_magic_bytes = network_magic_bytes_for(caip2, &expected_genesis_hash);
+    let caip2 = required_string(value, &["network_identity", "canonical_caip2", "value"])?;
+    let network_magic_bytes = network_magic_bytes_for(&caip2, &expected_genesis_hash);
     compare_hash(
         value,
         &["network_magic_bytes", "value"],
