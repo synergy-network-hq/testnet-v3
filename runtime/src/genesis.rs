@@ -1249,6 +1249,30 @@ pub fn load_genesis_bound_etdag_governance(
     Ok(binding)
 }
 
+/// Installs the fee authorities carried by an already ordinary-loader-validated
+/// fresh-P3 Genesis document.  Runtime entry points and qualification workers
+/// use this one path so neither can substitute code defaults for the
+/// Genesis-bound ETDAG schedule or dynamic fee policy.
+pub fn install_genesis_bound_etdag_fee_authorities(
+    genesis: &GenesisDocument,
+) -> Result<EtdagGovernedGenesisBinding, String> {
+    let governed_etdag = load_genesis_bound_etdag_governance(genesis.value())?;
+    crate::gas::install_governed_fee_schedule(
+        governed_etdag
+            .fee_schedule_artifact
+            .manifest
+            .fee_schedule
+            .clone(),
+    )?;
+    crate::gas::install_governed_fee_market_params(
+        governed_etdag
+            .fee_schedule_artifact
+            .manifest
+            .fee_market_params,
+    )?;
+    Ok(governed_etdag)
+}
+
 fn validate_testnet_v3_candidate_integrity_hashes(value: &Value) -> Result<(), String> {
     load_candidate_consensus_parameters(value)?;
     let empty_hash = hash_bytes(&[]);
