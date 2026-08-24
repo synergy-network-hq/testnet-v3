@@ -305,7 +305,16 @@ impl SimplifiedSafetyState {
             }
             (SimplifiedFinalityParent::Genesis(_), _) => {
                 return Err(
-                    "persisted state uses Genesis outside fresh block-zero activation".to_string(),
+                    format!(
+                        "persisted state uses Genesis outside fresh block-zero activation (epoch_start_height={}, has_v2_anchor={}, finalized_matches_anchor={})",
+                        epoch_context.epoch_start_height.0,
+                        epoch_context.v2_boundary_anchor.is_some(),
+                        self.finalized
+                            == FinalizedBlockRecord::from_genesis(match &self.anchor_parent {
+                                SimplifiedFinalityParent::Genesis(reference) => reference.clone(),
+                                SimplifiedFinalityParent::QuorumCertificate(_) => unreachable!(),
+                            })?
+                    ),
                 );
             }
             (SimplifiedFinalityParent::QuorumCertificate(anchor_qc), Some(expected))
