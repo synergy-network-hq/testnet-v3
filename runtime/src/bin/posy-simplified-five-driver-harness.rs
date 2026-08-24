@@ -234,10 +234,18 @@ impl NetworkPolicy {
             SimplifiedConsensusMessage::Proposal { proposal } => {
                 to == self.lagger && self.material_height == Some(proposal.context.height.0)
             }
-            SimplifiedConsensusMessage::MaterialRequest { .. } => from == self.lagger,
-            SimplifiedConsensusMessage::MaterialChunk { .. } => to == self.lagger,
-            SimplifiedConsensusMessage::StateSyncRequest { .. } => from == self.lagger,
-            SimplifiedConsensusMessage::StateSyncChunk { .. } => to == self.lagger,
+            SimplifiedConsensusMessage::MaterialRequest { .. } => {
+                self.material_height.is_some() && from == self.lagger
+            }
+            SimplifiedConsensusMessage::MaterialChunk { .. } => {
+                self.material_height.is_some() && to == self.lagger
+            }
+            SimplifiedConsensusMessage::StateSyncRequest { .. } => {
+                self.sync_source == Some(to) && from == self.lagger
+            }
+            SimplifiedConsensusMessage::StateSyncChunk { .. } => {
+                self.sync_source == Some(from) && to == self.lagger
+            }
             _ => false,
         }
     }
@@ -625,11 +633,24 @@ fn run_qualification(
         return Err("leader-takeover phase left fewer than three healthy drivers".to_string());
     }
     three.truncate(3);
+    policy.freeze_all();
+    // Cut the preceding four-of-five phase before taking the three-node
+    // checkpoint.  Messages already queued in a worker's ingress were
+    // legitimately routed under the preceding topology; drain those with all
+    // links disabled so the fail-closed observation starts from an exact
+    // partition boundary.
+    pump_for(
+        Duration::from_millis(MAX_ROUND_TIMEOUT_MS + 500),
+        event_rx,
+        workers,
+        generations,
+        validators,
+        policy,
+    )?;
     let before_three = three
         .iter()
         .map(|index| load_state(work_dir, *index, context))
         .collect::<Result<Vec<_>, _>>()?;
-    policy.freeze_all();
     for from in &three {
         for to in &three {
             policy.links[*from][*to] = from != to;
