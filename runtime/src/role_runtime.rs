@@ -5765,7 +5765,6 @@ mod tests {
         test_simplified_transition_proof, TestSimplifiedConsensusVerifier,
         TestSimplifiedTransitionAuthorityVerifier,
     };
-    use crate::genesis::load_genesis_from_path;
     use std::fs;
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -6039,6 +6038,13 @@ mod tests {
         let inherited_dual_quorum_constructor = ["DualQuorumConsensus", "::"].concat();
         let inherited_posy_constructor = ["ProofOfSynergy", "::new"].concat();
         let inherited_role_startup = ["spawn_consensus_engine", "("].concat();
+        let retired_typed_dispatcher = [
+            "FinalizedConsensusDriverStartup",
+            "::",
+            "SpawnFinalizedTypedDriver",
+        ]
+        .concat();
+        let finalized_simplified_startup = ["spawn_finalized_simplified_posy_driver", "("].concat();
 
         assert!(
             !source.contains(&inherited_dual_quorum_constructor),
@@ -6053,11 +6059,11 @@ mod tests {
             "the production role runtime must not retain the legacy consensus startup path"
         );
         assert!(
-            !source.contains("FinalizedConsensusDriverStartup::SpawnFinalizedTypedDriver"),
+            !source.contains(&retired_typed_dispatcher),
             "the production role runtime must not expose a typed PoSy dispatcher variant"
         );
         assert!(
-            source.contains("spawn_finalized_simplified_posy_driver("),
+            source.contains(&finalized_simplified_startup),
             "the production role runtime must retain the finalized simplified-driver entry point"
         );
     }
@@ -6285,79 +6291,81 @@ mod tests {
 
     #[test]
     fn node_config_must_match_the_genesis_bound_parameter_manifest() {
-        let genesis = load_genesis_from_path(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../genesis.testnet-v3.identity-assigned.json"),
-        )
-        .unwrap();
+        let genesis = canonical_genesis()
+            .expect("canonical unit-test Genesis must carry the fresh P3 parameter manifest");
         let config = NodeConfig::default();
-        ensure_node_config_matches_finalized_consensus_parameters(&config, &genesis).unwrap();
+        ensure_node_config_matches_finalized_consensus_parameters(&config, genesis).unwrap();
 
         let mut wrong_epoch = config.clone();
         wrong_epoch.consensus.epoch_length = 1_001;
         assert!(
-            ensure_node_config_matches_finalized_consensus_parameters(&wrong_epoch, &genesis)
+            ensure_node_config_matches_finalized_consensus_parameters(&wrong_epoch, genesis)
                 .unwrap_err()
-                .contains("epoch configuration")
+                .contains("node configuration disagrees with the finalized fresh simplified PoSy manifest")
         );
 
         let mut wrong_block_time = config.clone();
         wrong_block_time.consensus.block_time_secs = 3;
         assert!(ensure_node_config_matches_finalized_consensus_parameters(
             &wrong_block_time,
-            &genesis
+            genesis
         )
         .unwrap_err()
-        .contains("block-time configuration"));
+        .contains(
+            "node configuration disagrees with the finalized fresh simplified PoSy manifest"
+        ));
 
         let mut wrong_protocol = config.clone();
         wrong_protocol.consensus.algorithm = "ProofOfSynergy".to_string();
         assert!(ensure_node_config_matches_finalized_consensus_parameters(
             &wrong_protocol,
-            &genesis
+            genesis
         )
         .unwrap_err()
-        .contains("protocol identifier"));
+        .contains(
+            "node configuration disagrees with the finalized fresh simplified PoSy manifest"
+        ));
 
         let mut wrong_stage_timeout = config.clone();
         wrong_stage_timeout.consensus.precommit_timeout_ms = 1_501;
         assert!(ensure_node_config_matches_finalized_consensus_parameters(
             &wrong_stage_timeout,
-            &genesis
+            genesis
         )
         .unwrap_err()
-        .contains("stage-timeout configuration"));
+        .contains(
+            "node configuration disagrees with the finalized fresh simplified PoSy manifest"
+        ));
 
         let mut wrong_cluster = config;
         wrong_cluster.consensus.validator_cluster_size = 7;
         assert!(ensure_node_config_matches_finalized_consensus_parameters(
             &wrong_cluster,
-            &genesis
+            genesis
         )
         .unwrap_err()
-        .contains("cluster size"));
+        .contains("node configuration disagrees with the finalized fresh simplified PoSy manifest"));
     }
 
     #[test]
-    fn applied_genesis_selects_core_only_driver_with_etdag_inactive() {
-        let genesis = load_genesis_from_path(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../genesis.testnet-v3.identity-assigned.json"),
-        )
-        .unwrap();
+    fn applied_genesis_selects_protected_driver_with_governed_etdag() {
+        let genesis = canonical_genesis()
+            .expect("canonical unit-test Genesis must carry the fresh P3 ETDAG binding");
         let parameters = genesis
             .consensus_parameters()
             .expect("applied Genesis must retain its consensus parameter binding");
+        let governed_etdag = load_genesis_bound_etdag_governance(genesis.value())
+            .expect("applied Genesis must retain its governed ETDAG binding");
         let permit = resolve_finalized_etdag_startup_activation(
             parameters,
             crate::synergy_types::Epoch(0),
-            None,
+            Some(&governed_etdag),
         )
         .unwrap();
-        assert!(permit.is_none());
+        assert!(permit.is_some());
         assert_eq!(
             select_simplified_material_mode(permit.as_ref()),
-            SimplifiedMaterialMode::Core
+            SimplifiedMaterialMode::Protected
         );
     }
 
