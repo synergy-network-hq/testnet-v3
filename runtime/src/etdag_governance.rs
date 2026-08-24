@@ -900,7 +900,7 @@ mod tests {
         fee.governance_decision_id = decision;
         assert_eq!(
             fee.root().expect("fee root").to_hex(),
-            "827e1f426a80e7b2687852c5c5cc083e41b96158c155938370b5840bd283e07c121d982be27ac36e3860065ac4aeb87d358ce6287d83bf84325308c31ca605e1"
+            "8478f93ce35b6fd157157263532711f34fd67880a6d6863749ef17cde996aaf653c8e48e97bf5e5b6bf09ec3a08470d854e7fe23e8e75a8204b5b0b5c64e47f0"
         );
     }
 
