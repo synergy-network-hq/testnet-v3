@@ -1218,6 +1218,7 @@
     "genesis_hash_inputs": [
       "header",
       "network",
+      "network_identity",
       "token",
       "accounts",
       "allocations",
@@ -25257,6 +25258,28 @@
     "protocol_version": "1.0.0",
     "release_id": "testnet-v3",
     "status": "FRESH_P3_PUBLIC_INPUT_READY_FOR_CUSTODY_DEPLOYMENT"
+  },
+  "network_identity": {
+    "canonical_caip2": {
+      "namespace": "synergy",
+      "reference": "testnet",
+      "status": "active_internal",
+      "value": "synergy:testnet"
+    },
+    "eip155": {
+      "activation_condition": "Activate only when EVM/EIP-155 compatibility is implemented and publicly supported.",
+      "namespace": "eip155",
+      "reference": "1266",
+      "status": "reserved",
+      "value": "eip155:1266"
+    },
+    "network_uuid": {
+      "consensus_critical": false,
+      "derivation": "uuidv5(uuidv5(NAMESPACE_DNS, 'synergy-network.io'), 'synergy:testnet')",
+      "format": "uuid",
+      "immutable": true,
+      "value": "c6ad8633-38c8-5c24-823e-3ffe80793c85"
+    }
   },
   "network_magic_bytes": {
     "status": "RECOMPUTE_ONLY_AFTER_FRESH_DEPLOYMENT_EXECUTION",

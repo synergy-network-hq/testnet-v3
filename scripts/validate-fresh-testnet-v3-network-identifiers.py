@@ -20,6 +20,29 @@ PROTOCOL_VERSION = "posy/3.0"
 NATIVE_ASSET_NAME = "Synergy Testnet Coin"
 BURN_ADDRESS = "syn00000000000000000000000000000000000000"
 
+CANONICAL_NETWORK_IDENTITY = {
+    "canonical_caip2": {
+        "namespace": "synergy",
+        "reference": "testnet",
+        "status": "active_internal",
+        "value": "synergy:testnet",
+    },
+    "eip155": {
+        "activation_condition": "Activate only when EVM/EIP-155 compatibility is implemented and publicly supported.",
+        "namespace": "eip155",
+        "reference": "1266",
+        "status": "reserved",
+        "value": "eip155:1266",
+    },
+    "network_uuid": {
+        "consensus_critical": False,
+        "derivation": "uuidv5(uuidv5(NAMESPACE_DNS, 'synergy-network.io'), 'synergy:testnet')",
+        "format": "uuid",
+        "immutable": True,
+        "value": "c6ad8633-38c8-5c24-823e-3ffe80793c85",
+    },
+}
+
 SYSTEM_RESERVED_ADDRESSES = {
     "burn_address": {
         "address": BURN_ADDRESS,
@@ -132,6 +155,12 @@ def main() -> int:
                   "identifiers system_reserved_addresses")
     require_equal(fresh_genesis.get("system_reserved_addresses"), SYSTEM_RESERVED_ADDRESSES,
                   "fresh Genesis system_reserved_addresses")
+    require_equal(fresh_genesis.get("network_identity"), CANONICAL_NETWORK_IDENTITY,
+                  "fresh Genesis network_identity")
+    if "network_identity" not in fresh_genesis.get("canonicalization", {}).get(
+        "genesis_hash_inputs", []
+    ):
+        raise ValueError("fresh Genesis canonical hash inputs omit network_identity")
 
     require_equal(identifiers.get("native_currency", {}).get("name"), NATIVE_ASSET_NAME,
                   "identifiers native_currency.name")

@@ -119,7 +119,12 @@ pub fn canonical_genesis() -> Result<&'static GenesisDocument, String> {
         if let Some(cached) = cache.borrow().get(&path) {
             return cached.clone();
         }
-        let loaded = load_genesis_from_path_for_test(path.clone()).map(|document| {
+        let loaded = if path == fresh_p3_unit_test_genesis_path() {
+            fresh_p3_unit_test_genesis()
+        } else {
+            load_genesis_from_path_for_test(path.clone())
+        }
+        .map(|document| {
             // The test executable owns this object until process exit, which
             // preserves the established `&'static GenesisDocument` API.
             Box::leak(Box::new(document)) as &'static GenesisDocument
@@ -490,20 +495,43 @@ fn genesis_path() -> PathBuf {
     }
 
     // Test cases that construct an isolated runtime root install their own
-    // complete `config/genesis.json`; preserve that behavior. The checked-in
-    // root file is a historical blocked stub, so test runs from the repository
-    // instead use the deterministic V3 fixture.
+    // complete fresh P3 `config/genesis.json`; preserve that behavior.
     let local = resolve_data_path("config/genesis.json");
-    let has_header = fs::read(&local)
+    let local_is_fresh_p3 = fs::read(&local)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .and_then(|value| value.get("header").cloned())
-        .is_some();
-    if has_header {
+        .is_some_and(|value| {
+            value.pointer("/network/chain_id").and_then(Value::as_u64) == Some(1266)
+                && value.pointer("/network/network_id").and_then(Value::as_str) == Some("testnet")
+                && value
+                    .pointer("/network/consensus_version")
+                    .and_then(Value::as_str)
+                    == Some(crate::consensus::simplified_posy::POSY_SIMPLIFIED_PROTOCOL_VERSION)
+        });
+    if local_is_fresh_p3 {
         local
     } else {
-        resolve_data_path("config/genesis.testnet-v3.test-fixture.json")
+        fresh_p3_unit_test_genesis_path()
     }
+}
+
+#[cfg(test)]
+fn fresh_p3_unit_test_genesis_path() -> PathBuf {
+    PathBuf::from("<fresh-p3-unit-test-genesis>")
+}
+
+/// Builds the sole implicit test Genesis from the current fresh-P3 public
+/// input. Tests which need a different Genesis still set `SYNERGY_GENESIS_FILE`
+/// explicitly. This keeps P3 signature-domain tests from silently consuming
+/// the retired 2.2 fixture while retaining production's on-disk-only loader.
+#[cfg(test)]
+fn fresh_p3_unit_test_genesis() -> Result<GenesisDocument, String> {
+    let mut value: Value = serde_json::from_str(include_str!(
+        "../../launch/posy-v3-genesis-inputs/fresh-p3-genesis-predeployment-public-input.json"
+    ))
+    .map_err(|error| format!("parse fresh P3 unit-test genesis input: {error}"))?;
+    recompute_testnet_v3_candidate_integrity(&mut value)?;
+    load_canonical_genesis_from_value(value, fresh_p3_unit_test_genesis_path())
 }
 
 fn parse_balances(value: &Value) -> Result<Vec<GenesisBalance>, String> {
