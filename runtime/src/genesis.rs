@@ -2266,7 +2266,6 @@ fn canonical_json(value: &Value) -> String {
 mod tests {
     use super::*;
     use base64::Engine as _;
-    use sha2::{Digest, Sha256};
 
     fn testnet_v3_candidate() -> Value {
         let mut candidate = fresh_posy_v3_test_fixture()
@@ -2415,7 +2414,8 @@ mod tests {
         let candidate = testnet_v3_candidate();
         let expected_magic = candidate["network_magic_bytes"]["value"]
             .as_str()
-            .expect("candidate network magic must be a string");
+            .expect("candidate network magic must be a string")
+            .to_string();
         let document = load_canonical_genesis_from_value(
             candidate,
             PathBuf::from("<fresh-p3-candidate-loader-test>"),
