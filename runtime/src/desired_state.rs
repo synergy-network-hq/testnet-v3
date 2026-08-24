@@ -32,6 +32,11 @@ pub const DESIRED_STATE_SHA256_ENV: &str = "SYNERGY_DESIRED_STATE_MANIFEST_SHA25
 pub const DESIRED_STATE_SIGNATURE_ENV: &str = "SYNERGY_DESIRED_STATE_SIGNATURE";
 pub const TESTNET_V3_RELEASE_APPROVAL_ENV: &str = "SYNERGY_TESTNET_V3_RELEASE_APPROVAL";
 pub const TESTNET_V3_AUTHORITY_RECORD_ENV: &str = "SYNERGY_TESTNET_V3_AUTHORITY_RECORD";
+/// Immutable V4 release candidate covered by the fresh P3 approval.  This is
+/// deliberately distinct from `SYNERGY_GENESIS_FILE`: the candidate carries
+/// release-state/authority bindings while the latter is the block-zero
+/// Genesis consumed by the node.
+pub const TESTNET_V3_RELEASE_CANDIDATE_ENV: &str = "SYNERGY_TESTNET_V3_RELEASE_CANDIDATE";
 pub const CHAIN1266_DESIRED_STATE_SIGNATURE_DOMAIN: &str = "SYNERGY_CHAIN1266_DESIRED_STATE_V1";
 pub const CHAIN1266_QUALIFICATION_MODE_ENV: &str = "SYNERGY_CHAIN1266_QUALIFICATION_MODE";
 const PRODUCTION_GOVERNANCE_FINGERPRINT: &str =
@@ -338,6 +343,12 @@ fn configured_authority_record_path() -> Result<PathBuf, String> {
         .map_err(|_| format!("{TESTNET_V3_AUTHORITY_RECORD_ENV} is required for fresh P3 startup"))
 }
 
+fn configured_release_candidate_path() -> Result<PathBuf, String> {
+    env::var(TESTNET_V3_RELEASE_CANDIDATE_ENV)
+        .map(PathBuf::from)
+        .map_err(|_| format!("{TESTNET_V3_RELEASE_CANDIDATE_ENV} is required for fresh P3 startup"))
+}
+
 fn state_root_matches_namespace(
     state_root: &Path,
     qualification_mode: bool,
@@ -605,14 +616,10 @@ pub fn verify_chain1266_desired_state(
         let trust_root = authority_record_path
             .parent()
             .ok_or_else(|| "fresh P3 authority record has no parent trust directory".to_string())?;
-        let genesis_path = env::var("SYNERGY_GENESIS_FILE")
-            .map(PathBuf::from)
-            .map_err(|_| {
-                "SYNERGY_GENESIS_FILE is required for fresh P3 release approval".to_string()
-            })?;
+        let candidate_path = configured_release_candidate_path()?;
         crate::testnet_v3_release_approval::verify_release_approval_file_public(
             trust_root,
-            &genesis_path,
+            &candidate_path,
             &authority_record_path,
             &manifest_path,
             &approval_path,

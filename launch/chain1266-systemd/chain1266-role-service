@@ -33,7 +33,8 @@ done
 for optional_path_name in \
   SYNERGY_DESIRED_STATE_SIGNATURE \
   SYNERGY_TESTNET_V3_RELEASE_APPROVAL \
-  SYNERGY_TESTNET_V3_AUTHORITY_RECORD
+  SYNERGY_TESTNET_V3_AUTHORITY_RECORD \
+  SYNERGY_TESTNET_V3_RELEASE_CANDIDATE
 do
   if [[ -n "${!optional_path_name:-}" ]]; then
     [[ "${!optional_path_name}" == /* ]] || {

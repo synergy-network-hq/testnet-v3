@@ -1594,6 +1594,45 @@ mod tests {
     }
 
     #[test]
+    fn public_verifier_accepts_only_the_staged_public_authority_bundle() {
+        let (public_key, signing_key) = test_authority_keypair();
+        let repository = test_repository(&public_key);
+        let approval = signed_approval(&repository, &signing_key);
+        let approval_path = repository.root.join("approval.json");
+        fs::write(
+            &approval_path,
+            serde_json::to_vec(&approval).expect("encode approval"),
+        )
+        .expect("write approval");
+
+        // Deployment packages must not carry governance custody material. The
+        // public verifier still has to validate every V4 binding and signature.
+        fs::remove_file(
+            repository
+                .root
+                .join("test-fixture/governance/identity-root.enc.json"),
+        )
+        .expect("remove encrypted FN custody");
+        fs::remove_file(
+            repository
+                .root
+                .join("test-fixture/governance/identity.enc.json"),
+        )
+        .expect("remove encrypted ML custody");
+
+        let verified = verify_release_approval_file_public(
+            &repository.root,
+            &repository.candidate,
+            &repository.authorities,
+            &repository.desired_state,
+            &approval_path,
+        )
+        .expect("verify public-only release approval");
+
+        assert_eq!(verified, approval.request);
+    }
+
+    #[test]
     fn approval_rejects_a_signature_from_an_unfrozen_key() {
         let (frozen_public_key, _) = test_authority_keypair();
         let (_, attacker_key) = test_authority_keypair();
