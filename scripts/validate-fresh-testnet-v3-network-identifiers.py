@@ -17,6 +17,8 @@ CHAIN_ID = 1266
 TECHNICAL_NETWORK_ID = "testnet"
 RELEASE_ID = "testnet-v3"
 PROTOCOL_VERSION = "posy/3.0"
+FRESH_P3_CHAIN_INCARNATION = 5
+FRESH_P3_CONSENSUS_STATE_SCHEMA_VERSION = 5
 NATIVE_ASSET_NAME = "Synergy Testnet Coin"
 BURN_ADDRESS = "syn00000000000000000000000000000000000000"
 
@@ -174,11 +176,26 @@ def main() -> int:
     genesis_network = fresh_genesis.get("network", {})
     for key, expected in {
         "chain_id": CHAIN_ID,
+        "chain_incarnation": FRESH_P3_CHAIN_INCARNATION,
         "network_id": TECHNICAL_NETWORK_ID,
         "release_id": RELEASE_ID,
         "consensus_version": PROTOCOL_VERSION,
     }.items():
         require_equal(genesis_network.get(key), expected, f"fresh Genesis network.{key}")
+
+    consensus = fresh_genesis.get("consensus")
+    if not isinstance(consensus, dict):
+        raise ValueError("fresh Genesis consensus is missing")
+    require_equal(
+        consensus.get("state_directory_namespace"),
+        f"chain-{CHAIN_ID}/incarnation-{FRESH_P3_CHAIN_INCARNATION}",
+        "fresh Genesis consensus.state_directory_namespace",
+    )
+    require_equal(
+        consensus.get("state_schema_version"),
+        FRESH_P3_CONSENSUS_STATE_SCHEMA_VERSION,
+        "fresh Genesis consensus.state_schema_version",
+    )
 
     print("fresh Testnet-v3 network-identifier integrity: PASS")
     return 0
