@@ -1595,6 +1595,56 @@ impl<
                 );
             }
         }
+        let state = self.state_machine.state();
+        let (expected_round, expected_tc_id) =
+            state.takeover_for_height(&self.epoch_context, certificate.context.height)?;
+        if certificate.context.round.0 < expected_round {
+            let latest_tc = state
+                .takeover
+                .as_ref()
+                .and_then(|takeover| takeover.certificates.last())
+                .filter(|tc| tc.context.height == certificate.context.height)
+                .ok_or_else(|| {
+                    "older-round QC has no active same-height TC evidence".to_string()
+                })?;
+            if latest_tc
+                .mandatory_carry_candidate()?
+                .as_ref()
+                .map(CertifiedCandidateSubject::id)
+                .transpose()?
+                != Some(certificate.id()?)
+            {
+                // Preserve the state machine's durable safety-halt path for
+                // genuinely contradictory timeout and QC evidence.
+                self.state_machine.accept_quorum_certificate(
+                    certificate,
+                    &self.verifier,
+                    &self.signing_authority,
+                )?;
+                return Err(
+                    "contradictory timeout/QC admission unexpectedly completed without a safety halt"
+                        .to_string(),
+                );
+            }
+        } else if certificate.context.round.0 > expected_round
+            || certificate.takeover_tc_id != expected_tc_id
+        {
+            return Err("QC does not match the active lease takeover state".to_string());
+        }
+        let known_parent = certificate.parent == state.anchor_parent
+            || certificate
+                .parent
+                .quorum_certificate_reference()
+                .is_some_and(|reference| {
+                    state
+                        .certified_qcs
+                        .get(&reference.height.0)
+                        .and_then(|known| known.reference().ok())
+                        .is_some_and(|known| known == *reference)
+                });
+        if !known_parent {
+            return Err("QC parent is not verified local safety state".to_string());
+        }
         if let Some(target) = self.state_machine.preview_finalized_with_qc(&certificate)? {
             let transaction = build_finalization_transaction(
                 self.epoch_context.root()?,
