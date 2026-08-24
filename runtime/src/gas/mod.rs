@@ -7,6 +7,39 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::OnceLock;
 
+/// Canonical JSON transport for consensus-facing nWei bounds.
+///
+/// JSON numbers cannot represent the full `u128` domain without either a
+/// serializer failure or precision loss in common consumers.  Fresh P3 binds
+/// these values into ETDAG artifacts, so encode them as canonical decimal
+/// strings and reject alternate spellings on input.
+mod canonical_u128_decimal {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &u128, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&value.to_string())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<u128, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let decimal = String::deserialize(deserializer)?;
+        if decimal.is_empty()
+            || (decimal.len() > 1 && decimal.starts_with('0'))
+            || !decimal.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Err(serde::de::Error::custom(
+                "u128 values must be canonical unsigned decimal strings",
+            ));
+        }
+        decimal.parse::<u128>().map_err(serde::de::Error::custom)
+    }
+}
+
 /// Canonical live gas pricing (protocol-authoritative dynamic base fee).
 /// See `fee_market` module docs for the full design and formula.
 pub mod fee_market;
@@ -681,7 +714,9 @@ impl ValuationStatus {
 pub struct FeeScheduleEntry {
     pub tx_type: TransactionFeeType,
     pub amount_fee_bps: u64,
+    #[serde(with = "canonical_u128_decimal")]
     pub min_amount_fee_nwei: u128,
+    #[serde(with = "canonical_u128_decimal")]
     pub max_amount_fee_nwei: u128,
     pub valuation_required: bool,
     pub storage_fee_enabled: bool,
@@ -1236,6 +1271,27 @@ fn checked_mul(left: u64, right: u64) -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fee_schedule_u128_bounds_use_canonical_decimal_json() {
+        let schedule = FeeSchedule::default();
+        let encoded = serde_json::to_value(&schedule).expect("fee schedule serializes");
+        let first = &encoded["entries"][0];
+        assert_eq!(first["min_amount_fee_nwei"], "0");
+        assert_eq!(first["max_amount_fee_nwei"], u128::MAX.to_string());
+        assert_eq!(
+            serde_json::from_value::<FeeSchedule>(encoded).expect("canonical fee schedule parses"),
+            schedule
+        );
+    }
+
+    #[test]
+    fn fee_schedule_rejects_noncanonical_u128_json() {
+        let mut encoded =
+            serde_json::to_value(FeeSchedule::default()).expect("fee schedule serializes");
+        encoded["entries"][0]["max_amount_fee_nwei"] = serde_json::json!("00");
+        assert!(serde_json::from_value::<FeeSchedule>(encoded).is_err());
+    }
 
     #[test]
     fn nwei_formats_without_floating_point() {
