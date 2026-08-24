@@ -111,6 +111,32 @@ fn base64_public_key(root: &Path, role: &str) -> Vec<u8> {
     bytes
 }
 
+/// Loads the role's public, Genesis-scoped dual-key authorization binding.
+///
+/// The finalizer only needs the public binding to derive the canonical
+/// identity address for each signer.  It intentionally never reads an
+/// encrypted envelope or any other private custody material.
+fn role_identity_authorization(
+    root: &Path,
+    role: &str,
+) -> synergy_testnet::identity_auth::IdentityAuthorizationCarrier {
+    let path = root
+        .join("testnet-v3-identity-files")
+        .join(role)
+        .join("genesis-authorization-binding.json");
+    let binding = serde_json::from_slice(&read_bytes(&path))
+        .unwrap_or_else(|error| fail(format!("parse {}: {error}", path.display())));
+    synergy_testnet::identity_auth::IdentityAuthorizationCarrier::new(
+        synergy_testnet::identity_auth::GENESIS_CEREMONY_AUTHORIZATION_DOMAIN,
+        binding,
+    )
+    .unwrap_or_else(|error| {
+        fail(format!(
+            "construct canonical Genesis identity authorization carrier for {role}: {error}"
+        ))
+    })
+}
+
 fn authority_record<'a>(authorities: &'a Value, role: &str) -> &'a Value {
     authorities["authorities"]
         .as_array()
@@ -235,10 +261,18 @@ fn authorities(root: &Path, frozen: &Value) -> GenesisAuthorities {
         genesis_deployer: GenesisSigner {
             public_key: base64_public_key(root, "SNRG-TESTNET-V3-GENESIS-DEPLOYER"),
             private_key: Vec::new(),
+            identity_authorization: Some(role_identity_authorization(
+                root,
+                "SNRG-TESTNET-V3-GENESIS-DEPLOYER",
+            )),
         },
         governance: GenesisSigner {
             public_key: base64_public_key(root, "SNRG-TESTNET-V3-GOVERNANCE-AUTHORITY"),
             private_key: Vec::new(),
+            identity_authorization: Some(role_identity_authorization(
+                root,
+                "SNRG-TESTNET-V3-GOVERNANCE-AUTHORITY",
+            )),
         },
         emergency_slashing_authority: authority_address(
             frozen,
@@ -251,6 +285,10 @@ fn authorities(root: &Path, frozen: &Value) -> GenesisAuthorities {
         validator_registry_authority_key: GenesisSigner {
             public_key: base64_public_key(root, "SNRG-TESTNET-V3-VALIDATOR-REGISTRY-AUTHORITY"),
             private_key: Vec::new(),
+            identity_authorization: Some(role_identity_authorization(
+                root,
+                "SNRG-TESTNET-V3-VALIDATOR-REGISTRY-AUTHORITY",
+            )),
         },
         reward_distributor_authority: authority_address(
             frozen,
