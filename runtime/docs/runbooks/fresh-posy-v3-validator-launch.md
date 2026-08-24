@@ -18,7 +18,9 @@ Do not proceed until all of these exist and their own validators report final:
 - the validator VPN public registry;
 - one reproducible release build of `synergy-validator-node` with its three
   source-revision build bindings set;
-- a Governance Authority signature over the desired-state file.
+- a V4 Governance Authority release approval that binds the exact Genesis
+  candidate, fresh authority record, desired-state bytes, and final validator
+  binary/configuration hashes.
 
 The no-clobber Genesis sequence is:
 
@@ -56,7 +58,7 @@ The only generated node files are public TOML configurations and their hash
 manifest. No encrypted bundle, passphrase, private key, or VPN private key is
 copied into this output.
 
-## 3. Build and sign the desired state
+## 3. Build the desired state and obtain the V4 release approval
 
 Use a release ID/tag pair whose suffixes match, for example
 `chain1266-incarnation-5-rc34` and `chain1266-v20.0.0-rc.34`. Supply the exact
@@ -70,7 +72,6 @@ build-chain1266-desired-state \
   --synq-revision 0000000000000000000000000000000000000000 \
   --aegis-revision 0000000000000000000000000000000000000000 \
   --genesis "$P3_GENESIS" \
-  --start-authority launch/TESTNET_V3_CHAIN_START_AUTHORITY.json \
   --artifact validator_node="$P3_RELEASE/bin/synergy-validator-node" \
   --configuration validator-02="$P3_RELEASE/validator-public-bundles/validator-02/config.toml" \
   --configuration validator-03="$P3_RELEASE/validator-public-bundles/validator-03/config.toml" \
@@ -81,21 +82,45 @@ build-chain1266-desired-state \
 ```
 
 Replace the three all-zero revision examples; the builder rejects them unless
-they are real full lowercase Git revisions. Sign through the frozen Governance
-Authority's interactive encrypted-bundle workflow. Never use the plaintext-key
-development signer and never place the passphrase in a command, environment
-variable, file, or log.
+they are real full lowercase Git revisions. Fresh P3 deliberately has **no**
+detached desired-state signature and no `--start-authority`: its sole
+production authorization is a V4 approval over the exact generated
+desired-state and Genesis candidate.
+
+Use the dated fresh authority record and the fresh Governance Authority
+custody bundle. The signer prompts for the passphrase interactively. Never use
+the retired `sign_chain1266_release_authorization` tool, the P1 start authority,
+the plaintext-key development signer, or a passphrase in a command,
+environment variable, file, or log.
 
 ```bash
-sign_chain1266_release_authorization \
-  --authorize-desired-state \
-  --desired-state "$P3_RELEASE/desired-state.json" \
-  --authority-bundle /absolute/path/to/SNRG-TESTNET-V3-GOVERNANCE-AUTHORITY \
-  --output "$P3_RELEASE/desired-state.signature.json"
+P3_AUTHORITIES="$PWD/launch/posy-v3-genesis-inputs/authority-rotation-20260823/TESTNET_V3_PRODUCTION_AUTHORITIES.fresh.json"
+P3_AUTHORITY_RECORD="$PWD/launch/posy-v3-genesis-inputs/authority-rotation-20260823/fresh-genesis-authority-freeze.json"
+P3_GOVERNANCE_BUNDLE=/absolute/path/to/SNRG-TESTNET-V3-GOVERNANCE-AUTHORITY
+P3_AUTHORIZATION_BINDING="$P3_GOVERNANCE_BUNDLE/release-authorization-binding.json"
+P3_REQUEST="$P3_RELEASE/testnet-v3-genesis-release-approval-request.json"
+P3_APPROVAL="$P3_RELEASE/testnet-v3-genesis-release-approval.json"
 
-verify-chain1266-release-authorization \
+testnet-v3-genesis-release-approval \
+  --write-request \
+  --candidate "$P3_GENESIS" \
+  --authorities "$P3_AUTHORITIES" \
   --desired-state "$P3_RELEASE/desired-state.json" \
-  --desired-state-signature "$P3_RELEASE/desired-state.signature.json"
+  --output "$P3_REQUEST"
+
+sign_testnet_v3_genesis_release_approval \
+  --request "$P3_REQUEST" \
+  --authorities-file "$P3_AUTHORITIES" \
+  --authority-bundle "$P3_GOVERNANCE_BUNDLE" \
+  --authorization-binding "$P3_AUTHORIZATION_BINDING" \
+  --output "$P3_APPROVAL"
+
+testnet-v3-genesis-release-approval \
+  --verify \
+  --approval "$P3_APPROVAL" \
+  --candidate "$P3_GENESIS" \
+  --authorities "$P3_AUTHORITIES" \
+  --desired-state "$P3_RELEASE/desired-state.json"
 ```
 
 Fresh P3 does not use the P1 consensus-activation file. Its only initial
@@ -109,10 +134,14 @@ Stage byte-identical copies of these public release files on all five hosts:
 - `/opt/synergy/chain1266/releases/<release>/bin/synergy-validator-node`;
 - `/etc/synergy/chain1266/genesis.json`;
 - `/etc/synergy/chain1266/desired-state.json`;
-- `/etc/synergy/chain1266/desired-state.signature.json`;
+- `/etc/synergy/chain1266/testnet-v3-genesis-release-approval.json`;
+- `/etc/synergy/chain1266/fresh-genesis-authority-freeze.json`;
 - that host's `/etc/synergy/chain1266/validator-NN.toml`.
 
-Install the systemd unit and launcher from `launch/chain1266-systemd/`. Install
+Install only the generic `synergy-chain1266-role@.service` unit and
+`chain1266-role-service` launcher from `launch/chain1266-systemd/`. Do **not**
+install `validator/50-chain1266-incarnation-4.conf`; it is a P1-only drop-in.
+Install
 only that validator's decrypted ML-DSA-65 consensus key, through the authorized
 local custody workflow, at
 `/etc/synergy/chain1266/private/validator-NN/mldsa65-consensus.private.key`.
@@ -130,9 +159,14 @@ SYNERGY_DATA_PATH=/var/lib/synergy/validator/chain-1266/incarnation-5/data
 SYNERGY_GENESIS_FILE=/etc/synergy/chain1266/genesis.json
 SYNERGY_DESIRED_STATE_MANIFEST=/etc/synergy/chain1266/desired-state.json
 SYNERGY_DESIRED_STATE_MANIFEST_SHA256=<sha256-of-exact-installed-desired-state>
-SYNERGY_DESIRED_STATE_SIGNATURE=/etc/synergy/chain1266/desired-state.signature.json
+SYNERGY_TESTNET_V3_RELEASE_APPROVAL=/etc/synergy/chain1266/testnet-v3-genesis-release-approval.json
+SYNERGY_TESTNET_V3_AUTHORITY_RECORD=/etc/synergy/chain1266/fresh-genesis-authority-freeze.json
+SYNERGY_TESTNET_V3_RELEASE_CANDIDATE=/etc/synergy/chain1266/genesis.json
 SYNERGY_VALIDATOR_MLDSA65_CONSENSUS_PRIVATE_KEY_FILE=/etc/synergy/chain1266/private/validator-NN/mldsa65-consensus.private.key
 ```
+
+Do not set `SYNERGY_DESIRED_STATE_SIGNATURE` for fresh P3. Its presence is a
+stop condition because it indicates the retired detached-signature path.
 
 Do not create or reuse an incarnation-4 state directory. Before staging, the
 incarnation-5 project/data directories must either be absent or newly empty.
@@ -145,7 +179,9 @@ state, frozen Governance Authority, Genesis hash/incarnation/schema, active-set
 root, exact binary hash, exact node-config hash, source revisions, and isolated
 state namespace without opening chain state or networking. It also loads the
 host-local ML-DSA-65 key, proves it corresponds to that validator's public key
-in Genesis, and then exits; the key itself is never printed.
+in Genesis, and then exits; the key itself is never printed. It also verifies
+the V4 approval, fresh authority record, and release-candidate path from the
+environment above.
 
 ```bash
 set -a

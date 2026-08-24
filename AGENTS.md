@@ -6,6 +6,6 @@ node. Append the incident and every recovery attempt, including unsuccessful
 attempts and exact outcomes, using the required format in that log.
 
 Never declare the chain healthy from an active service alone. Require an
-advancing, identical finalized tip across all six validators, zero new fatal
+advancing, identical finalized tip across all five initial validators, zero new fatal
 consensus/signing conflicts, bounded observer/public-tier lag, and live Atlas
 data.
