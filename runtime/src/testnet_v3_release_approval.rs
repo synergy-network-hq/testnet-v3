@@ -1220,7 +1220,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pqrust_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _};
     use serde_json::json;
     use std::sync::atomic::{AtomicU64, Ordering};
 
