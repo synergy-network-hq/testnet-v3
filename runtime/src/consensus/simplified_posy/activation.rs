@@ -403,10 +403,7 @@ mod tests {
         let ConsensusProfileAtHeight::PosySimplifiedV3 {
             epoch_context,
             validator_set,
-        } = selected
-        else {
-            panic!("fresh Genesis must select simplified v3");
-        };
+        } = selected;
         assert_eq!(epoch_context.epoch, Epoch(0));
         assert_eq!(epoch_context.epoch_start_height, Height(1));
         assert_eq!(epoch_context.epoch_end_height, Height(1_000));

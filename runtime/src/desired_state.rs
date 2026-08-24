@@ -751,6 +751,7 @@ pub fn verify_chain1266_desired_state(
         ));
     }
 
+    #[cfg(not(test))]
     let identity = VerifiedDesiredStateIdentity {
         release_id: manifest.release_id.clone(),
         node_id: node_id.to_string(),
