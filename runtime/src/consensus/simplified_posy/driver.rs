@@ -1572,6 +1572,29 @@ impl<
         certificate: SimplifiedQuorumCertificate,
     ) -> Result<(), String> {
         certificate.verify(&self.epoch_context, &self.validator_set, &self.verifier)?;
+        // A conflicting same-height QC is a durable safety-halt condition.
+        // Enter that halt before asking the finality preview to construct or
+        // commit any execution transaction.  Otherwise a later valid QC can
+        // mutate local finality I/O before the state machine observes the
+        // equivocation and fail-closes.
+        if let Some(existing) = self
+            .state_machine
+            .state()
+            .certified_qcs
+            .get(&certificate.context.height.0)
+        {
+            if existing.id()? != certificate.id()? {
+                self.state_machine.accept_quorum_certificate(
+                    certificate,
+                    &self.verifier,
+                    &self.signing_authority,
+                )?;
+                return Err(
+                    "conflicting QC admission unexpectedly completed without entering safety halt"
+                        .to_string(),
+                );
+            }
+        }
         if let Some(target) = self.state_machine.preview_finalized_with_qc(&certificate)? {
             let transaction = build_finalization_transaction(
                 self.epoch_context.root()?,
