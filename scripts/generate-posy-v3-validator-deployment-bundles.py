@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import tomllib
@@ -272,7 +273,6 @@ def render_config(validator_id: str, address: str, manifest: dict[str, Any], cer
     vpn_ip = VPN_IPS[validator_id]
     all_addresses = [ceremony_by_id[item]["address"] for item in ACTIVE_IDS]
     peer_addresses = [value for value in all_addresses if value != address]
-    peer_dials = [f"{VPN_IPS[item]}:5622" for item in ACTIVE_IDS if item != validator_id]
     transports = "\n".join(
         "[[network.validator_vpn_transports]]\n"
         f"validator_address = {toml_string(ceremony_by_id[item]['address'])}\n"
@@ -306,7 +306,11 @@ bootnodes = []
 seed_servers = []
 bootstrap_dns_records = []
 persistent_peers = {toml_array(peer_addresses)}
-additional_dial_targets = {toml_array(peer_dials)}
+# A validator target is always an authenticated `synv...` identity.  The
+# separately signed/public transport registry resolves that identity to the
+# canonical Validator VPN address; raw endpoint targets are deliberately not
+# release inputs.
+additional_dial_targets = []
 
 {transports}
 
@@ -366,7 +370,7 @@ http_port = 5640
 enable_ws = true
 ws_port = 5660
 enable_grpc = true
-grpc_port = 5641
+grpc_port = 5640
 cors_enabled = false
 cors_origins = []
 
@@ -376,7 +380,7 @@ public_address = {toml_string(vpn_ip + ':5622')}
 discovery_listen_address = {toml_string(vpn_ip + ':5680')}
 discovery_public_address = {toml_string(vpn_ip + ':5680')}
 node_name = {toml_string(validator_id)}
-enable_discovery = true
+enable_discovery = false
 enable_peer_exchange = false
 reject_private_advertise_addrs = true
 discovery_port = 5680
@@ -410,6 +414,63 @@ log_level = "info"
     return text.encode("utf-8")
 
 
+def validate_with_runtime_parser(runtime_validator: Path, files: dict[str, bytes], output_root: Path) -> bytes:
+    """Use the release runtime's actual TOML parser before publishing a bundle.
+
+    This deliberately invokes only the parser-validation subcommand.  It does
+    not start a node, open custody material, bind a socket, or load release
+    state.  The command is supplied by the exact validator binary that will be
+    recorded in the desired state, so a Python TOML parse cannot become a
+    substitute for runtime acceptance.
+    """
+    require(runtime_validator.is_file(), f"runtime config validator is not a file: {runtime_validator}")
+    require(os.access(runtime_validator, os.X_OK),
+            f"runtime config validator is not executable: {runtime_validator}")
+    sanitized_environment = {
+        key: value for key, value in os.environ.items() if not key.startswith("SYNERGY_")
+    }
+    parsed_configs: dict[str, str] = {}
+    for validator_id in ACTIVE_IDS:
+        relative = f"{validator_id}/config.toml"
+        destination = output_root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(files[relative])
+        os.chmod(destination, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
+        try:
+            result = subprocess.run(
+                [str(runtime_validator), "validate-config", "--config", str(destination)],
+                check=False,
+                cwd=output_root,
+                env=sanitized_environment,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            fail(f"cannot run runtime config validator for {validator_id}: {error}")
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            fail(f"runtime config parser rejected {validator_id}: {detail or 'no diagnostic'}")
+        expected = f"CHAIN1266_VALIDATOR_CONFIG_PARSED validator_id={validator_id}"
+        require(expected in result.stdout,
+                f"runtime config validator did not attest {validator_id}")
+        parsed_configs[validator_id] = sha256_bytes(files[relative])
+    evidence = {
+        "schema_version": 1,
+        "artifact_type": "testnet-v3-posy-validator-runtime-parser-validation",
+        "status": "RUNTIME_PARSER_ACCEPTED",
+        "chain_id": CHAIN_ID,
+        "network_id": NETWORK_ID,
+        "release_id": RELEASE_ID,
+        "protocol_version": PROTOCOL,
+        "runtime_validator_sha256": sha256_file(runtime_validator),
+        "validated_configuration_sha256": parsed_configs,
+    }
+    return (json.dumps(evidence, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
 def write_new_root(output_root: Path, files: dict[str, bytes], manifest: dict[str, Any]) -> None:
     require(not output_root.exists(), f"output root already exists: {output_root}")
     output_root.parent.mkdir(parents=True, exist_ok=True)
@@ -436,6 +497,8 @@ def main() -> None:
     parser.add_argument("--ceremony-index", required=True, type=Path)
     parser.add_argument("--ceremony-completion", required=True, type=Path)
     parser.add_argument("--vpn-registry", required=True, type=Path)
+    parser.add_argument("--runtime-config-validator", required=True, type=Path,
+                        help="exact freshly built synergy-validator-node with validate-config support")
     parser.add_argument("--output-root", required=True, type=Path)
     args = parser.parse_args()
 
@@ -468,6 +531,19 @@ def main() -> None:
             "vpn_ip": vpn_by_id[validator_id]["vpn_ip"],
             "config": relative,
         })
+    # The runtime parser needs concrete files.  It receives a private staging
+    # directory that is atomically promoted only after every config is accepted.
+    output_root = args.output_root.resolve()
+    require(not output_root.exists(), f"output root already exists: {output_root}")
+    output_root.parent.mkdir(parents=True, exist_ok=True)
+    parser_staging = Path(tempfile.mkdtemp(prefix=f".{output_root.name}.parser.", dir=output_root.parent))
+    try:
+        files["runtime-parser-validation.json"] = validate_with_runtime_parser(
+            args.runtime_config_validator.resolve(), files, parser_staging
+        )
+    finally:
+        shutil.rmtree(parser_staging, ignore_errors=True)
+
     output_manifest = {
         "schema_version": 1,
         "artifact_type": "testnet-v3-posy-validator-public-deployment-bundle",
@@ -490,8 +566,8 @@ def main() -> None:
         "deployments": deployments,
         "outputs": {relative: sha256_bytes(content) for relative, content in sorted(files.items())},
     }
-    write_new_root(args.output_root.resolve(), files, output_manifest)
-    print(f"POSY_V3_VALIDATOR_PUBLIC_BUNDLES_READY {args.output_root.resolve()}")
+    write_new_root(output_root, files, output_manifest)
+    print(f"POSY_V3_VALIDATOR_PUBLIC_BUNDLES_READY {output_root}")
 
 
 if __name__ == "__main__":
