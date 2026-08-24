@@ -1,7 +1,7 @@
 use crate::posy_simplified_parameters::SimplifiedConsensusParameterManifest;
 use crate::synergy_types::{
-    ChainId, Epoch, NetworkId, ProtocolConfig, POSY_PROTOCOL_VERSION,
-    TESTNET_V3_CLUSTER_SCHEDULE_VERSION, TESTNET_V3_CONSENSUS_SIGNATURE_ALGORITHM,
+    ChainId, Epoch, NetworkId, ProtocolConfig, TESTNET_V3_CLUSTER_SCHEDULE_VERSION,
+    TESTNET_V3_CONSENSUS_SIGNATURE_ALGORITHM,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
@@ -31,6 +31,9 @@ pub const ERR_ETDAG_DEFERRED: &str = "ETDAG_DEFERRED_UNTIL_FINALIZED_EPOCH_MANIF
 pub const ERR_ETDAG_PREMATURE_ACTIVATION: &str =
     "ETDAG_PREMATURE_ACTIVATION_BEFORE_DECLARED_EPOCH_BOUNDARY";
 pub const COORDINATED_ROUND_ROBIN_V1_PROTOCOL_VERSION: &str = "coordinated_round_robin_v1";
+/// Retained solely to deserialize historical P2.2 parameter records. Fresh
+/// Testnet-v3 Genesis always uses the separately typed `posy/3.0` manifest.
+const LEGACY_POSY_V2_2_PROTOCOL_VERSION: &str = "posy/2.2";
 pub const COORDINATED_P1_COORDINATOR_ID: &str = "validator-1";
 pub const COORDINATED_P1_PRODUCER_IDS: [&str; 5] = [
     "validator-2",
@@ -284,9 +287,9 @@ impl ConsensusParameterManifest {
         }
         self.chain_id.require_testnet_v3()?;
         self.network_id.require_testnet_v3()?;
-        if self.protocol_version != POSY_PROTOCOL_VERSION {
+        if self.protocol_version != LEGACY_POSY_V2_2_PROTOCOL_VERSION {
             return Err(format!(
-                "wrong PoSy protocol version: expected {POSY_PROTOCOL_VERSION}, found {}",
+                "wrong legacy PoSy protocol version: expected {LEGACY_POSY_V2_2_PROTOCOL_VERSION}, found {}",
                 self.protocol_version
             ));
         }
@@ -612,7 +615,7 @@ impl<'de> Deserialize<'de> for FinalizedConsensusParameterManifest {
                 serde::de::Error::custom("consensus parameter manifest has no protocol_version")
             })?;
         match protocol_version {
-            POSY_PROTOCOL_VERSION => serde_json::from_value(value)
+            LEGACY_POSY_V2_2_PROTOCOL_VERSION => serde_json::from_value(value)
                 .map(Self::PosyV2_2)
                 .map_err(serde::de::Error::custom),
             COORDINATED_ROUND_ROBIN_V1_PROTOCOL_VERSION => serde_json::from_value(value)
@@ -1010,7 +1013,7 @@ mod tests {
             governance_approval_id: "unit-test-only-approval".to_string(),
             chain_id: ChainId::synergy_testnet_v3(),
             network_id: NetworkId::synergy_testnet_v3(),
-            protocol_version: POSY_PROTOCOL_VERSION.to_string(),
+            protocol_version: LEGACY_POSY_V2_2_PROTOCOL_VERSION.to_string(),
             activation_boundary: CONSENSUS_PARAMETER_ACTIVATION_BOUNDARY.to_string(),
             epoch_length_slots: Some(1_000),
             target_block_time_ms: 2_000,
@@ -1088,6 +1091,18 @@ mod tests {
             loaded.protocol_config.chain_id,
             ChainId::synergy_testnet_v3()
         );
+    }
+
+    #[test]
+    fn fresh_posy_v3_manifest_dispatches_to_its_typed_schema() {
+        let parsed: FinalizedConsensusParameterManifest = serde_json::from_slice(include_bytes!(
+            "../../launch/TESTNET_V3_POSY_SIMPLIFIED_PARAMETER_PROPOSAL.json"
+        ))
+        .expect("fresh PoSy v3 manifest must not be parsed as a legacy PoSy record");
+        assert!(matches!(
+            parsed,
+            FinalizedConsensusParameterManifest::SimplifiedPoSyV3(_)
+        ));
     }
 
     #[test]
