@@ -1482,7 +1482,19 @@ mod tests {
     fn producer_defers_next_epoch_h3_until_transition_authority_exists() {
         let environment = environment(5, "next-epoch-h3");
         let mut snapshot = environment.snapshot.clone();
-        snapshot.finalized.height = Height(98);
+        snapshot.finalized =
+            FinalizedBlockRecord::from_quorum_certificate(QuorumCertificateReference {
+                height: Height(98),
+                block_id: BlockId::from_hash(Hash::from_domain_bytes(
+                    "simplified-target-admission-test",
+                    b"finalized-ninety-eight",
+                )),
+                qc_id: Hash::from_domain_bytes(
+                    "simplified-target-admission-test",
+                    b"finalized-ninety-eight-qc",
+                ),
+            })
+            .unwrap();
         snapshot.canonical_finality_context_digest =
             simplified_protected_finality_context_digest_from_state_root(
                 &environment.configuration.epoch_context,
