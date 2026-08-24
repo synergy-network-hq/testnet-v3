@@ -33,8 +33,12 @@ use synergy_testnet::crypto::aegis_pqvm::{
     AegisPqvmKeyRegistry, AegisPqvmSigner, AegisPqvmVerifier,
 };
 use synergy_testnet::crypto::pqc::{PQCPrivateKey, PQCPublicKey};
-use synergy_testnet::etdag::EtdagParameters;
+use synergy_testnet::etdag_governance::EtdagGovernedGenesisBinding;
 use synergy_testnet::execution::ExecutionState;
+use synergy_testnet::genesis::{
+    build_fresh_posy_v3_qualification_genesis, load_genesis_bound_etdag_governance,
+    load_genesis_from_path,
+};
 use synergy_testnet::p2p::messages::validate_simplified_consensus_message_size;
 use synergy_testnet::posy_simplified_parameters::{
     SimplifiedConsensusParameterManifest, SimplifiedPerformanceTargets,
@@ -85,6 +89,10 @@ struct PublicConfiguration {
     /// intentionally not a fabricated quorum certificate.
     genesis_finality_reference: GenesisFinalityReference,
     pqc_public_keys: Vec<PQCPublicKey>,
+    /// The exact public ETDAG authorities from the ordinary-loader-validated
+    /// fresh-P3 qualification Genesis.  The harness may provision ephemeral
+    /// signing keys, but it must never use default ETDAG or fee-market policy.
+    governed_etdag: EtdagGovernedGenesisBinding,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -343,7 +351,28 @@ fn run_parent(work_dir: &Path, require_r11: bool) -> Result<(), String> {
     }
     fs::create_dir_all(work_dir)
         .map_err(|error| format!("create harness directory {}: {error}", work_dir.display()))?;
-    let configuration = provision_configuration(work_dir)?;
+    let qualification_genesis_path = work_dir.join("fresh-p3-qualification-genesis.json");
+    if qualification_genesis_path.exists() {
+        return Err(format!(
+            "refusing to reuse qualification Genesis {}; choose a fresh --work-dir",
+            qualification_genesis_path.display()
+        ));
+    }
+    let qualification_genesis = build_fresh_posy_v3_qualification_genesis()?;
+    fs::write(
+        &qualification_genesis_path,
+        serde_json::to_vec_pretty(&qualification_genesis)
+            .map_err(|error| format!("serialize qualification Genesis: {error}"))?,
+    )
+    .map_err(|error| {
+        format!(
+            "write qualification Genesis {}: {error}",
+            qualification_genesis_path.display()
+        )
+    })?;
+    let qualification_genesis = load_genesis_from_path(&qualification_genesis_path)?;
+    let governed_etdag = load_genesis_bound_etdag_governance(qualification_genesis.value())?;
+    let configuration = provision_configuration(work_dir, governed_etdag)?;
     let initial_leader = validator_index(
         &configuration.activation.frozen_validator_set,
         configuration
@@ -725,6 +754,22 @@ fn run_worker(validator_index: usize, generation: u64, work_dir: &Path) -> Resul
     }
     let configuration: PublicConfiguration =
         read_message_pack(&public_configuration_path(work_dir))?;
+    configuration.governed_etdag.validate()?;
+    synergy_testnet::gas::install_governed_fee_schedule(
+        configuration
+            .governed_etdag
+            .fee_schedule_artifact
+            .manifest
+            .fee_schedule
+            .clone(),
+    )?;
+    synergy_testnet::gas::install_governed_fee_market_params(
+        configuration
+            .governed_etdag
+            .fee_schedule_artifact
+            .manifest
+            .fee_market_params,
+    )?;
     let private_key: PrivateKeyRecord =
         read_message_pack(&worker_private_key_path(work_dir, validator_index))?;
     let validators = configuration.activation.frozen_validator_set.clone();
@@ -776,7 +821,12 @@ fn run_worker(validator_index: usize, generation: u64, work_dir: &Path) -> Resul
             epoch_context: context.clone(),
             validator_set: validators.clone(),
             cluster_map,
-            etdag_parameters: EtdagParameters::default(),
+            etdag_parameters: configuration
+                .governed_etdag
+                .parameter_artifact
+                .manifest
+                .parameters
+                .clone(),
             consensus_verifier: verifier.clone(),
             etdag_verifier: verifier.clone(),
             anchor_finalized,
@@ -1263,7 +1313,10 @@ fn pump_for(
     Ok(())
 }
 
-fn provision_configuration(work_dir: &Path) -> Result<PublicConfiguration, String> {
+fn provision_configuration(
+    work_dir: &Path,
+    governed_etdag: EtdagGovernedGenesisBinding,
+) -> Result<PublicConfiguration, String> {
     if public_configuration_path(work_dir).exists() {
         return Err("refusing to reuse an existing autonomous harness directory".to_string());
     }
@@ -1344,6 +1397,7 @@ fn provision_configuration(work_dir: &Path) -> Result<PublicConfiguration, Strin
         epoch_context,
         genesis_finality_reference,
         pqc_public_keys: public_keys,
+        governed_etdag,
     };
     write_message_pack(&public_configuration_path(work_dir), &configuration, false)?;
     Ok(configuration)
