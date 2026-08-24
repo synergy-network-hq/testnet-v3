@@ -36,6 +36,12 @@ fn arg_value(args: &[String], flag: &str) -> String {
         .unwrap_or_else(|| fail(format!("missing {flag} <VALUE>")))
 }
 
+fn optional_arg_value(args: &[String], flag: &str) -> Option<String> {
+    args.windows(2)
+        .find(|pair| pair[0] == flag)
+        .map(|pair| pair[1].clone())
+}
+
 fn repeated_bindings(args: &[String], flag: &str) -> BTreeMap<String, PathBuf> {
     let mut bindings = BTreeMap::new();
     let mut index = 0usize;
@@ -294,7 +300,7 @@ fn main() {
     let synq_revision = arg_value(&args, "--synq-revision");
     let aegis_revision = arg_value(&args, "--aegis-revision");
     let genesis_path = PathBuf::from(arg_value(&args, "--genesis"));
-    let start_authority_path = PathBuf::from(arg_value(&args, "--start-authority"));
+    let start_authority_path = optional_arg_value(&args, "--start-authority").map(PathBuf::from);
     let output_path = PathBuf::from(arg_value(&args, "--output"));
     let artifacts = repeated_bindings(&args, "--artifact");
     let configurations = repeated_bindings(&args, "--configuration");
@@ -359,24 +365,34 @@ fn main() {
             .unwrap_or_else(|error| fail(format!("derive P1 validator-set root: {error}")))
             .to_hex()
     };
-    let start_authority: Value =
-        serde_json::from_slice(&fs::read(&start_authority_path).unwrap_or_else(|error| {
-            fail(format!(
-                "read start authority {}: {error}",
-                start_authority_path.display()
-            ))
-        }))
-        .unwrap_or_else(|error| fail(format!("parse start authority: {error}")));
-    if start_authority["signature_algorithm"] != "ML-DSA-87"
-        || start_authority["signature_domain"]
-            != synergy_testnet::consensus_start::CHAIN1266_START_SIGNATURE_DOMAIN
-        || !start_authority["public_key_fingerprint"]
-            .as_str()
-            .is_some_and(|value| value.starts_with("sha256:"))
-        || !start_authority["public_key_base64"].is_string()
-    {
-        fail("start authority has an invalid ML-DSA-87 profile");
-    }
+    let start_authority = match consensus.mode.as_str() {
+        CHAIN1266_P1_CONSENSUS_MODE => {
+            let path = start_authority_path
+                .unwrap_or_else(|| fail("P1 desired state requires --start-authority PATH"));
+            let value: Value = serde_json::from_slice(&fs::read(&path).unwrap_or_else(|error| {
+                fail(format!("read start authority {}: {error}", path.display()))
+            }))
+            .unwrap_or_else(|error| fail(format!("parse start authority: {error}")));
+            if value["signature_algorithm"] != "ML-DSA-87"
+                || value["signature_domain"]
+                    != synergy_testnet::consensus_start::CHAIN1266_START_SIGNATURE_DOMAIN
+                || !value["public_key_fingerprint"]
+                    .as_str()
+                    .is_some_and(|value| value.starts_with("sha256:"))
+                || !value["public_key_base64"].is_string()
+            {
+                fail("start authority has an invalid ML-DSA-87 profile");
+            }
+            Some(value)
+        }
+        CHAIN1266_P3_CONSENSUS_MODE => {
+            if start_authority_path.is_some() {
+                fail("fresh P3 desired state must not carry a detached start authority");
+            }
+            None
+        }
+        _ => unreachable!("configuration parser rejects unsupported modes"),
+    };
 
     let artifact_hashes = artifacts
         .iter()
@@ -386,7 +402,7 @@ fn main() {
         .iter()
         .map(|(role, path)| (role.clone(), Value::String(sha256_file(path))))
         .collect::<serde_json::Map<_, _>>();
-    let manifest = json!({
+    let mut manifest = json!({
         "schema_version": 1,
         "release_id": release_id,
         "release_tag": release_tag,
@@ -413,10 +429,12 @@ fn main() {
             "producer_ids": consensus.producer_ids,
             "producer_turn_timeout_ms": consensus.producer_turn_timeout_ms,
         },
-        "start_authority": start_authority,
         "artifacts": artifact_hashes,
         "configuration": configuration_hashes
     });
+    if let Some(start_authority) = start_authority {
+        manifest["start_authority"] = start_authority;
+    }
     let mut encoded = serde_json::to_vec_pretty(&manifest)
         .unwrap_or_else(|error| fail(format!("serialize desired state: {error}")));
     encoded.push(b'\n');

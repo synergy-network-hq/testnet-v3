@@ -30,6 +30,8 @@ use std::sync::OnceLock;
 pub const DESIRED_STATE_ENV: &str = "SYNERGY_DESIRED_STATE_MANIFEST";
 pub const DESIRED_STATE_SHA256_ENV: &str = "SYNERGY_DESIRED_STATE_MANIFEST_SHA256";
 pub const DESIRED_STATE_SIGNATURE_ENV: &str = "SYNERGY_DESIRED_STATE_SIGNATURE";
+pub const TESTNET_V3_RELEASE_APPROVAL_ENV: &str = "SYNERGY_TESTNET_V3_RELEASE_APPROVAL";
+pub const TESTNET_V3_AUTHORITY_RECORD_ENV: &str = "SYNERGY_TESTNET_V3_AUTHORITY_RECORD";
 pub const CHAIN1266_DESIRED_STATE_SIGNATURE_DOMAIN: &str = "SYNERGY_CHAIN1266_DESIRED_STATE_V1";
 pub const CHAIN1266_QUALIFICATION_MODE_ENV: &str = "SYNERGY_CHAIN1266_QUALIFICATION_MODE";
 const PRODUCTION_GOVERNANCE_FINGERPRINT: &str =
@@ -57,7 +59,8 @@ struct DesiredStateManifest {
     chain: DesiredChain,
     source: DesiredSource,
     state: DesiredConsensusState,
-    start_authority: DesiredStartAuthority,
+    #[serde(default)]
+    start_authority: Option<DesiredStartAuthority>,
     artifacts: BTreeMap<String, String>,
     configuration: BTreeMap<String, String>,
 }
@@ -323,6 +326,18 @@ fn configured_manifest_signature_path() -> Result<PathBuf, String> {
         .map_err(|_| format!("{DESIRED_STATE_SIGNATURE_ENV} is required for Chain 1266 startup"))
 }
 
+fn configured_release_approval_path() -> Result<PathBuf, String> {
+    env::var(TESTNET_V3_RELEASE_APPROVAL_ENV)
+        .map(PathBuf::from)
+        .map_err(|_| format!("{TESTNET_V3_RELEASE_APPROVAL_ENV} is required for fresh P3 startup"))
+}
+
+fn configured_authority_record_path() -> Result<PathBuf, String> {
+    env::var(TESTNET_V3_AUTHORITY_RECORD_ENV)
+        .map(PathBuf::from)
+        .map_err(|_| format!("{TESTNET_V3_AUTHORITY_RECORD_ENV} is required for fresh P3 startup"))
+}
+
 fn state_root_matches_namespace(
     state_root: &Path,
     qualification_mode: bool,
@@ -355,6 +370,9 @@ fn verify_desired_state_signature(
     manifest_sha256: &str,
     signature_bytes: &[u8],
 ) -> Result<(), String> {
+    let start_authority = manifest.start_authority.as_ref().ok_or_else(|| {
+        "legacy desired-state signature requires an explicit start authority".to_string()
+    })?;
     let signed: SignedDesiredStateManifest = serde_json::from_slice(signature_bytes)
         .map_err(|error| format!("parse strict signed desired-state manifest: {error}"))?;
     let expected = DesiredStateSignatureRequest {
@@ -367,13 +385,13 @@ fn verify_desired_state_signature(
         desired_state_sha256: manifest_sha256.to_string(),
         signature_algorithm: "ML-DSA-87".to_string(),
         signature_domain: CHAIN1266_DESIRED_STATE_SIGNATURE_DOMAIN.to_string(),
-        authority_public_key_fingerprint: manifest.start_authority.public_key_fingerprint.clone(),
+        authority_public_key_fingerprint: start_authority.public_key_fingerprint.clone(),
     };
     if signed.request != expected {
         return Err("signed desired-state request disagrees with the local manifest".to_string());
     }
     let public_key = general_purpose::STANDARD
-        .decode(&manifest.start_authority.public_key_base64)
+        .decode(&start_authority.public_key_base64)
         .map_err(|error| format!("decode desired-state signing public key: {error}"))?;
     let signature = general_purpose::STANDARD
         .decode(&signed.signature_base64)
@@ -405,6 +423,15 @@ pub fn verify_signed_desired_state_file(
     let manifest: DesiredStateManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|error| format!("parse strict desired-state manifest: {error}"))?;
     validate_desired_state_consensus(&manifest.state)?;
+    if manifest.state.mode == CHAIN1266_P3_CONSENSUS_MODE {
+        return Err(
+            "fresh P3 desired state must be verified through its V4 release approval".to_string(),
+        );
+    }
+    let start_authority = manifest
+        .start_authority
+        .as_ref()
+        .ok_or_else(|| "signed desired state omits its legacy start authority".to_string())?;
     let (expected_incarnation, expected_consensus_schema, expected_namespace) =
         expected_chain_profile(&manifest.state)?;
     if manifest.schema_version != EXPECTED_SCHEMA_VERSION
@@ -412,15 +439,15 @@ pub fn verify_signed_desired_state_file(
         || manifest.chain.incarnation != expected_incarnation
         || manifest.state.consensus_schema_version != expected_consensus_schema
         || manifest.state.directory_namespace != expected_namespace
-        || manifest.start_authority.public_key_fingerprint != PRODUCTION_GOVERNANCE_FINGERPRINT
+        || start_authority.public_key_fingerprint != PRODUCTION_GOVERNANCE_FINGERPRINT
     {
         return Err(
             "signed desired state is outside its production Chain 1266 consensus profile"
                 .to_string(),
         );
     }
-    if manifest.start_authority.signature_algorithm != "ML-DSA-87"
-        || manifest.start_authority.signature_domain
+    if start_authority.signature_algorithm != "ML-DSA-87"
+        || start_authority.signature_domain
             != crate::consensus_start::CHAIN1266_START_SIGNATURE_DOMAIN
     {
         return Err(
@@ -428,13 +455,13 @@ pub fn verify_signed_desired_state_file(
         );
     }
     let governance_public_key = general_purpose::STANDARD
-        .decode(&manifest.start_authority.public_key_base64)
+        .decode(&start_authority.public_key_base64)
         .map_err(|error| format!("decode Governance Authority public key: {error}"))?;
     if governance_public_key.len() != 2_592 {
         return Err("Governance Authority public key is not ML-DSA-87".to_string());
     }
     if format!("sha256:{}", sha256_bytes(&governance_public_key))
-        != manifest.start_authority.public_key_fingerprint
+        != start_authority.public_key_fingerprint
     {
         return Err("Governance Authority public key fingerprint mismatch".to_string());
     }
@@ -515,32 +542,46 @@ pub fn verify_chain1266_desired_state(
             manifest.state.directory_namespace,
         ));
     }
-    if manifest.start_authority.signature_algorithm != "ML-DSA-87"
-        || manifest.start_authority.signature_domain
-            != crate::consensus_start::CHAIN1266_START_SIGNATURE_DOMAIN
-    {
-        return Err(
-            "desired-state start authority uses an unsupported signature profile".to_string(),
-        );
-    }
-    let start_public_key = general_purpose::STANDARD
-        .decode(&manifest.start_authority.public_key_base64)
-        .map_err(|error| format!("decode desired-state start authority public key: {error}"))?;
-    if start_public_key.len() != 2_592 {
-        return Err("desired-state start authority is not an ML-DSA-87 public key".to_string());
-    }
-    let start_fingerprint = format!("sha256:{}", sha256_bytes(&start_public_key));
-    if start_fingerprint != manifest.start_authority.public_key_fingerprint {
-        return Err("desired-state start authority fingerprint mismatch".to_string());
-    }
-    let signature_path = configured_manifest_signature_path()?;
-    let signature_bytes = fs::read(&signature_path).map_err(|error| {
-        format!(
-            "read signed desired state {}: {error}",
-            signature_path.display()
-        )
-    })?;
-    verify_desired_state_signature(&manifest, &manifest_sha256, &signature_bytes)?;
+    let is_fresh_p3 = manifest.state.mode == CHAIN1266_P3_CONSENSUS_MODE;
+    let p1_signature_bytes = if is_fresh_p3 {
+        if manifest.start_authority.is_some() {
+            return Err(
+                "fresh P3 desired state must not carry a legacy detached start authority"
+                    .to_string(),
+            );
+        }
+        None
+    } else {
+        let start_authority = manifest.start_authority.as_ref().ok_or_else(|| {
+            "desired-state start authority is required for the isolated P1 release path".to_string()
+        })?;
+        if start_authority.signature_algorithm != "ML-DSA-87"
+            || start_authority.signature_domain
+                != crate::consensus_start::CHAIN1266_START_SIGNATURE_DOMAIN
+        {
+            return Err(
+                "desired-state start authority uses an unsupported signature profile".to_string(),
+            );
+        }
+        let start_public_key = general_purpose::STANDARD
+            .decode(&start_authority.public_key_base64)
+            .map_err(|error| format!("decode desired-state start authority public key: {error}"))?;
+        if start_public_key.len() != 2_592
+            || format!("sha256:{}", sha256_bytes(&start_public_key))
+                != start_authority.public_key_fingerprint
+        {
+            return Err("desired-state start authority fingerprint mismatch".to_string());
+        }
+        let signature_path = configured_manifest_signature_path()?;
+        let signature_bytes = fs::read(&signature_path).map_err(|error| {
+            format!(
+                "read signed desired state {}: {error}",
+                signature_path.display()
+            )
+        })?;
+        verify_desired_state_signature(&manifest, &manifest_sha256, &signature_bytes)?;
+        Some(signature_bytes)
+    };
 
     let genesis = canonical_genesis()?;
     let private_qualification = qualification_mode
@@ -552,13 +593,52 @@ pub fn verify_chain1266_desired_state(
     if qualification_mode != private_qualification {
         return Err("qualification mode requires the private qualification Genesis".to_string());
     }
-    if !private_qualification
-        && manifest.start_authority.public_key_fingerprint != PRODUCTION_GOVERNANCE_FINGERPRINT
-    {
-        return Err(
-            "production desired state is not signed by the frozen Governance Authority".to_string(),
-        );
-    }
+    let authorization_bytes = if is_fresh_p3 {
+        if private_qualification {
+            return Err(
+                "fresh P3 release approval cannot be replaced by qualification material"
+                    .to_string(),
+            );
+        }
+        let approval_path = configured_release_approval_path()?;
+        let authority_record_path = configured_authority_record_path()?;
+        let trust_root = authority_record_path
+            .parent()
+            .ok_or_else(|| "fresh P3 authority record has no parent trust directory".to_string())?;
+        let genesis_path = env::var("SYNERGY_GENESIS_FILE")
+            .map(PathBuf::from)
+            .map_err(|_| {
+                "SYNERGY_GENESIS_FILE is required for fresh P3 release approval".to_string()
+            })?;
+        crate::testnet_v3_release_approval::verify_release_approval_file_public(
+            trust_root,
+            &genesis_path,
+            &authority_record_path,
+            &manifest_path,
+            &approval_path,
+        )
+        .map_err(|error| format!("fresh P3 V4 release approval: {error}"))?;
+        fs::read(&approval_path).map_err(|error| {
+            format!(
+                "read fresh P3 release approval {}: {error}",
+                approval_path.display()
+            )
+        })?
+    } else {
+        let start_authority = manifest
+            .start_authority
+            .as_ref()
+            .expect("P1 authority checked above");
+        if !private_qualification
+            && start_authority.public_key_fingerprint != PRODUCTION_GOVERNANCE_FINGERPRINT
+        {
+            return Err(
+                "production desired state is not signed by the frozen Governance Authority"
+                    .to_string(),
+            );
+        }
+        p1_signature_bytes.expect("P1 signature checked above")
+    };
     if genesis.chain_id() != manifest.chain.chain_id
         || genesis.chain_incarnation() != manifest.chain.incarnation
         || genesis.consensus_state_schema_version() != manifest.state.consensus_schema_version
@@ -680,7 +760,7 @@ pub fn verify_chain1266_desired_state(
         binary_sha256: actual_binary,
         configuration_sha256: actual_config,
         desired_state_sha256: manifest_sha256,
-        desired_state_signature_sha256: sha256_bytes(&signature_bytes),
+        desired_state_signature_sha256: sha256_bytes(&authorization_bytes),
         state_root: state_root.display().to_string(),
     };
     #[cfg(not(test))]
@@ -840,13 +920,13 @@ mod tests {
                     .collect(),
                 producer_turn_timeout_ms: CHAIN1266_P1_PRODUCER_TURN_TIMEOUT_MS,
             },
-            start_authority: DesiredStartAuthority {
+            start_authority: Some(DesiredStartAuthority {
                 signature_algorithm: "ML-DSA-87".to_string(),
                 signature_domain: crate::consensus_start::CHAIN1266_START_SIGNATURE_DOMAIN
                     .to_string(),
                 public_key_fingerprint: fingerprint.clone(),
                 public_key_base64: general_purpose::STANDARD.encode(&public.key_data),
-            },
+            }),
             artifacts: BTreeMap::new(),
             configuration: BTreeMap::new(),
         };

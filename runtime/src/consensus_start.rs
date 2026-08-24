@@ -98,6 +98,12 @@ pub fn verify_signed_start_command(
         desired.state.producer_turn_timeout_ms,
     )
     .map_err(|error| format!("start barrier desired state: {error}"))?;
+    if desired.state.mode == crate::desired_state::CHAIN1266_P3_CONSENSUS_MODE {
+        return Err(
+            "fresh P3 must start only after V4 release-approval verification; detached start commands are retired"
+                .to_string(),
+        );
+    }
     let command: SignedChain1266StartCommand = serde_json::from_slice(
         &fs::read(command_path)
             .map_err(|error| format!("read signed consensus start command: {error}"))?,

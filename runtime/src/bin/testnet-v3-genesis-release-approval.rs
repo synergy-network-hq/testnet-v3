@@ -28,7 +28,7 @@ fn repo() -> PathBuf {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  testnet-v3-genesis-release-approval --write-request (--authorities PATH | --legacy-authorities) [--candidate PATH] [--output PATH]\n  testnet-v3-genesis-release-approval --verify --approval PATH (--authorities PATH | --legacy-authorities) [--candidate PATH]\n\nNew P3 work must pass the dated fresh V4 authority record explicitly. --legacy-authorities is only for reproducing the superseded launch ceremony. The request is the exact payload for ML-DSA-87 context signing. This tool never decrypts, signs, or loads private material. Signature context: {TESTNET_V3_GENESIS_RELEASE_APPROVAL_DOMAIN}"
+        "usage:\n  testnet-v3-genesis-release-approval --write-request --desired-state PATH (--authorities PATH | --legacy-authorities) [--candidate PATH] [--output PATH]\n  testnet-v3-genesis-release-approval --verify --approval PATH --desired-state PATH (--authorities PATH | --legacy-authorities) [--candidate PATH]\n\nNew P3 work must pass the dated fresh V4 authority record explicitly. --legacy-authorities is only for reproducing the superseded launch ceremony. The request is the exact payload for ML-DSA-87 context signing. This tool never decrypts, signs, or loads private material. Signature context: {TESTNET_V3_GENESIS_RELEASE_APPROVAL_DOMAIN}"
     );
     std::process::exit(2);
 }
@@ -52,8 +52,14 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     Ok(hex::encode(Sha256::digest(bytes)))
 }
 
-fn write_request(root: &Path, candidate: &Path, authorities: &Path, output: &Path) {
-    let request = build_release_approval_request(root, candidate, authorities)
+fn write_request(
+    root: &Path,
+    candidate: &Path,
+    authorities: &Path,
+    desired_state: &Path,
+    output: &Path,
+) {
+    let request = build_release_approval_request(root, candidate, authorities, desired_state)
         .unwrap_or_else(|error| fail(format!("build canonical request: {error}")));
     let canonical = request
         .canonical_bytes()
@@ -78,9 +84,16 @@ fn write_request(root: &Path, candidate: &Path, authorities: &Path, output: &Pat
     );
 }
 
-fn verify(root: &Path, candidate: &Path, authorities: &Path, approval: &Path) {
-    let request = verify_release_approval_file(root, candidate, authorities, approval)
-        .unwrap_or_else(|error| fail(format!("release approval rejected: {error}")));
+fn verify(
+    root: &Path,
+    candidate: &Path,
+    authorities: &Path,
+    desired_state: &Path,
+    approval: &Path,
+) {
+    let request =
+        verify_release_approval_file(root, candidate, authorities, desired_state, approval)
+            .unwrap_or_else(|error| fail(format!("release approval rejected: {error}")));
     let approval_sha256 =
         sha256_file(approval).unwrap_or_else(|error| fail(format!("hash approval: {error}")));
     println!(
@@ -107,6 +120,7 @@ fn main() {
     let mut legacy_authorities = false;
     let mut output = root.join(DEFAULT_REQUEST);
     let mut approval = None;
+    let mut desired_state = None;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -150,6 +164,13 @@ fn main() {
                 ));
                 index += 2;
             }
+            "--desired-state" => {
+                desired_state = Some(resolve(
+                    &root,
+                    args.get(index + 1).unwrap_or_else(|| usage()),
+                ));
+                index += 2;
+            }
             _ => usage(),
         }
     }
@@ -161,13 +182,14 @@ fn main() {
     } else {
         authorities.unwrap_or_else(|| usage())
     };
+    let desired_state = desired_state.unwrap_or_else(|| usage());
     if write {
         if approval.is_some() {
             usage();
         }
-        write_request(&root, &candidate, &authorities, &output);
+        write_request(&root, &candidate, &authorities, &desired_state, &output);
     } else {
         let approval = approval.unwrap_or_else(|| usage());
-        verify(&root, &candidate, &authorities, &approval);
+        verify(&root, &candidate, &authorities, &desired_state, &approval);
     }
 }

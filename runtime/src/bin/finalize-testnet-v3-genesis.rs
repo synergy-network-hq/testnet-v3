@@ -1241,6 +1241,7 @@ fn main() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let mut output = repo().join(DEFAULT_OUTPUT);
     let mut approval_path = repo().join(DEFAULT_RELEASE_APPROVAL);
+    let mut desired_state_path = None;
     let mut authorities_path = None;
     let mut legacy_authorities = false;
     let mut apply = false;
@@ -1260,6 +1261,13 @@ fn main() {
                     args.get(index + 1)
                         .unwrap_or_else(|| fail("--approval requires a path")),
                 );
+                index += 2;
+            }
+            "--desired-state" => {
+                desired_state_path = Some(PathBuf::from(
+                    args.get(index + 1)
+                        .unwrap_or_else(|| fail("--desired-state requires a path")),
+                ));
                 index += 2;
             }
             "--authorities" => {
@@ -1284,7 +1292,7 @@ fn main() {
                 index += 1;
             }
             flag => fail(format!(
-                "unknown argument {flag}; use --prepare|--apply (--authorities PATH|--legacy-authorities) [--output PATH] [--approval PATH]"
+                "unknown argument {flag}; use --prepare|--apply (--authorities PATH|--legacy-authorities) [--output PATH] [--approval PATH] [--desired-state PATH]"
             )),
         }
     }
@@ -1364,11 +1372,17 @@ fn main() {
             .unwrap()
     );
     if apply {
-        let approval =
-            verify_release_approval_file(&root, &output, &authorities_path, &approval_path)
-                .unwrap_or_else(|error| {
-                    fail(format!("release approval gate rejected apply: {error}"))
-                });
+        let desired_state_path = desired_state_path.unwrap_or_else(|| {
+            fail("--apply requires --desired-state PATH bound by the V4 approval")
+        });
+        let approval = verify_release_approval_file(
+            &root,
+            &output,
+            &authorities_path,
+            &desired_state_path,
+            &approval_path,
+        )
+        .unwrap_or_else(|error| fail(format!("release approval gate rejected apply: {error}")));
         let approval_sha256 = sha256_file(&approval_path);
         apply_finalized_release(
             &root,

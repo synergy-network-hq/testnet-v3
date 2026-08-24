@@ -12,6 +12,7 @@ use pqrust_traits::sign::{DetachedSignature as _, PublicKey as _, SecretKey as _
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -75,6 +76,24 @@ pub struct TestnetV3GenesisReleaseApprovalRequest {
     /// hash, but this approval commits the anchor digest before activation.
     pub etdag_membership_anchor_digest_sha3_512: String,
     pub frozen_authority_record_sha256: String,
+    /// Exact P3 desired-state bytes that every initial validator must install.
+    /// The V4 approval is the only production authorization for this binding.
+    pub desired_state_sha256: String,
+    pub desired_state_testnet_v3_revision: String,
+    pub desired_state_synq_revision: String,
+    pub desired_state_aegis_revision: String,
+    pub desired_state_role_binary_sha256: BTreeMap<String, String>,
+    pub desired_state_role_configuration_sha256: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FreshP3DesiredStateBinding {
+    pub desired_state_sha256: String,
+    pub testnet_v3_revision: String,
+    pub synq_revision: String,
+    pub aegis_revision: String,
+    pub role_binary_sha256: BTreeMap<String, String>,
+    pub role_configuration_sha256: BTreeMap<String, String>,
 }
 
 impl TestnetV3GenesisReleaseApprovalRequest {
@@ -116,10 +135,31 @@ pub fn build_release_approval_request(
     repo_root: &Path,
     candidate_path: &Path,
     authorities_path: &Path,
+    desired_state_path: &Path,
+) -> Result<TestnetV3GenesisReleaseApprovalRequest, String> {
+    build_release_approval_request_inner(
+        repo_root,
+        candidate_path,
+        authorities_path,
+        desired_state_path,
+        true,
+    )
+}
+
+fn build_release_approval_request_inner(
+    repo_root: &Path,
+    candidate_path: &Path,
+    authorities_path: &Path,
+    desired_state_path: &Path,
+    require_custody_hashes: bool,
 ) -> Result<TestnetV3GenesisReleaseApprovalRequest, String> {
     let candidate_bytes = read_file(candidate_path, "release candidate")?;
     let candidate = parse_json(&candidate_bytes, "release candidate")?;
-    let authority = load_frozen_governance_authority(repo_root, authorities_path)?;
+    let authority = load_frozen_governance_authority_inner(
+        repo_root,
+        authorities_path,
+        require_custody_hashes,
+    )?;
 
     let candidate_authority_sha = json_string(
         &candidate,
@@ -133,6 +173,14 @@ pub fn build_release_approval_request(
         );
     }
     validate_candidate_release_state(&candidate)?;
+    let desired_state = load_fresh_p3_desired_state_binding(
+        desired_state_path,
+        &json_string(
+            &candidate,
+            "/integrity/genesis_hash",
+            "candidate genesis hash",
+        )?,
+    )?;
     let etdag_binding = load_candidate_etdag_governance(&candidate)?;
     let etdag_membership_anchor = load_candidate_etdag_membership_anchor(&candidate)?;
 
@@ -214,6 +262,12 @@ pub fn build_release_approval_request(
             .to_hex(),
         etdag_membership_anchor_digest_sha3_512: etdag_membership_anchor.anchor_digest.to_hex(),
         frozen_authority_record_sha256: candidate_authority_sha,
+        desired_state_sha256: desired_state.desired_state_sha256,
+        desired_state_testnet_v3_revision: desired_state.testnet_v3_revision,
+        desired_state_synq_revision: desired_state.synq_revision,
+        desired_state_aegis_revision: desired_state.aegis_revision,
+        desired_state_role_binary_sha256: desired_state.role_binary_sha256,
+        desired_state_role_configuration_sha256: desired_state.role_configuration_sha256,
     };
     request.canonical_bytes()?;
     Ok(request)
@@ -224,6 +278,24 @@ pub fn build_release_approval_request(
 pub fn load_frozen_governance_authority(
     repo_root: &Path,
     authorities_path: &Path,
+) -> Result<FrozenGovernanceAuthority, String> {
+    load_frozen_governance_authority_inner(repo_root, authorities_path, true)
+}
+
+/// Node-side trust loading validates only public identity material.  The V4
+/// signature binds the authority-record bytes, so nodes must never receive an
+/// encrypted governance custody envelope merely to verify a release.
+pub fn load_frozen_governance_authority_public(
+    repo_root: &Path,
+    authorities_path: &Path,
+) -> Result<FrozenGovernanceAuthority, String> {
+    load_frozen_governance_authority_inner(repo_root, authorities_path, false)
+}
+
+fn load_frozen_governance_authority_inner(
+    repo_root: &Path,
+    authorities_path: &Path,
+    require_custody_hashes: bool,
 ) -> Result<FrozenGovernanceAuthority, String> {
     let authority_bytes = read_file(authorities_path, "frozen authority record")?;
     let authorities = parse_json(&authority_bytes, "frozen authority record")?;
@@ -311,25 +383,24 @@ pub fn load_frozen_governance_authority(
         "identity_root_encrypted_sha256",
         "governance encrypted identity-root custody SHA-256",
     )?;
-    if !is_lower_hex(&identity_root_encrypted_sha256, 32)
-        || sha256_hex(&read_file(
-            &bundle.join("identity-root.enc.json"),
-            "governance encrypted identity-root custody",
-        )?) != identity_root_encrypted_sha256
-    {
+    if !is_lower_hex(&identity_root_encrypted_sha256, 32) {
         return Err(
             "governance encrypted identity-root custody does not match the frozen authority entry"
                 .to_string(),
         );
     }
-    if sha256_hex(&read_file(
-        &bundle.join("identity.enc.json"),
-        "governance encrypted authorization custody",
-    )?) != authorization_encrypted_sha256
+    if require_custody_hashes
+        && (sha256_hex(&read_file(
+            &bundle.join("identity-root.enc.json"),
+            "governance encrypted identity-root custody",
+        )?) != identity_root_encrypted_sha256
+            || sha256_hex(&read_file(
+                &bundle.join("identity.enc.json"),
+                "governance encrypted authorization custody",
+            )?) != authorization_encrypted_sha256)
     {
         return Err(
-            "governance encrypted authorization custody does not match the frozen authority entry"
-                .to_string(),
+            "governance encrypted custody does not match the frozen authority entry".to_string(),
         );
     }
     let identity_root_bytes = read_file(
@@ -546,10 +617,71 @@ pub fn verify_release_approval_file(
     repo_root: &Path,
     candidate_path: &Path,
     authorities_path: &Path,
+    desired_state_path: &Path,
     approval_path: &Path,
 ) -> Result<TestnetV3GenesisReleaseApprovalRequest, String> {
-    let expected = build_release_approval_request(repo_root, candidate_path, authorities_path)?;
+    let expected = build_release_approval_request(
+        repo_root,
+        candidate_path,
+        authorities_path,
+        desired_state_path,
+    )?;
     let authority = load_frozen_governance_authority(repo_root, authorities_path)?;
+    let approval: SignedTestnetV3GenesisReleaseApproval = serde_json::from_slice(&read_file(
+        approval_path,
+        "signed release-approval artifact",
+    )?)
+    .map_err(|error| format!("parse signed release-approval artifact: {error}"))?;
+    if approval.schema_version != SCHEMA_VERSION
+        || approval.artifact_type != TESTNET_V3_GENESIS_RELEASE_APPROVAL_ARTIFACT_TYPE
+    {
+        return Err(
+            "signed release-approval artifact has an unsupported schema or type".to_string(),
+        );
+    }
+    if approval.request != expected {
+        return Err(
+            "signed release-approval request does not exactly match the staged candidate"
+                .to_string(),
+        );
+    }
+    let signature = decode_lower_hex(&approval.signature_hex, "release-approval signature")?;
+    if signature.is_empty() {
+        return Err("release-approval signature is empty".to_string());
+    }
+    let payload = approval.request.canonical_bytes()?;
+    let public_key = mldsa87::PublicKey::from_bytes(&authority.public_key)
+        .map_err(|_| "frozen governance ML-DSA-87 public key is malformed".to_string())?;
+    let signature = mldsa87::DetachedSignature::from_bytes(&signature)
+        .map_err(|_| "release-approval ML-DSA-87 signature is malformed".to_string())?;
+    mldsa87::verify_detached_signature_ctx(
+        &signature,
+        &payload,
+        TESTNET_V3_GENESIS_RELEASE_APPROVAL_DOMAIN.as_bytes(),
+        &public_key,
+    )
+    .map_err(|_| "ML-DSA-87 release-approval signature verification failed".to_string())?;
+    Ok(approval.request)
+}
+
+/// Verifies a deployed V4 approval using only the explicit frozen authority
+/// record and its public bundle.  This is the production P3 node path: it is
+/// intentionally unable to read encrypted governance custody material.
+pub fn verify_release_approval_file_public(
+    trust_root: &Path,
+    candidate_path: &Path,
+    authorities_path: &Path,
+    desired_state_path: &Path,
+    approval_path: &Path,
+) -> Result<TestnetV3GenesisReleaseApprovalRequest, String> {
+    let expected = build_release_approval_request_inner(
+        trust_root,
+        candidate_path,
+        authorities_path,
+        desired_state_path,
+        false,
+    )?;
+    let authority = load_frozen_governance_authority_public(trust_root, authorities_path)?;
     let approval: SignedTestnetV3GenesisReleaseApproval = serde_json::from_slice(&read_file(
         approval_path,
         "signed release-approval artifact",
@@ -723,6 +855,125 @@ fn load_candidate_etdag_membership_anchor(
     Ok(anchor)
 }
 
+/// Reads the P3 desired-state document that is itself covered by the V4
+/// approval.  This deliberately accepts no P1 coordinator or detached
+/// start-authority fields: a fresh P3 node must derive release authority from
+/// the verified V4 approval, not from a second legacy signing domain.
+pub fn load_fresh_p3_desired_state_binding(
+    desired_state_path: &Path,
+    expected_genesis_hash: &str,
+) -> Result<FreshP3DesiredStateBinding, String> {
+    let bytes = read_file(desired_state_path, "fresh P3 desired state")?;
+    let value = parse_json(&bytes, "fresh P3 desired state")?;
+    if value.pointer("/schema_version").and_then(Value::as_u64) != Some(1)
+        || value.pointer("/chain/chain_id").and_then(Value::as_u64) != Some(EXPECTED_CHAIN_ID)
+        || value.pointer("/chain/incarnation").and_then(Value::as_u64) != Some(5)
+        || value.pointer("/chain/genesis_hash").and_then(Value::as_str)
+            != Some(expected_genesis_hash)
+        || value
+            .pointer("/state/consensus_schema_version")
+            .and_then(Value::as_u64)
+            != Some(5)
+        || value
+            .pointer("/state/directory_namespace")
+            .and_then(Value::as_str)
+            != Some("chain-1266/incarnation-5")
+        || value.pointer("/state/mode").and_then(Value::as_str) != Some("posy_simplified_v3")
+        || value
+            .pointer("/state/coordinator_id")
+            .and_then(Value::as_str)
+            != Some("")
+        || value
+            .pointer("/state/producer_ids")
+            .and_then(Value::as_array)
+            .is_none_or(|ids| !ids.is_empty())
+        || value
+            .pointer("/state/producer_turn_timeout_ms")
+            .and_then(Value::as_u64)
+            != Some(0)
+        || value.get("start_authority").is_some()
+    {
+        return Err("desired state is not the canonical fresh P3 release profile".to_string());
+    }
+    let source = value
+        .get("source")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "fresh P3 desired state omits source revisions".to_string())?;
+    let source_revision = |name: &str| -> Result<String, String> {
+        let value = source
+            .get(name)
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("fresh P3 desired state omits source.{name}"))?;
+        if !is_lower_hex(value, 20) {
+            return Err(format!(
+                "fresh P3 desired state source.{name} is not a Git revision"
+            ));
+        }
+        Ok(value.to_string())
+    };
+    let role_binary_sha256 =
+        required_sha256_map(value.get("artifacts"), "fresh P3 desired-state role binary")?;
+    if role_binary_sha256.len() != 1 || !role_binary_sha256.contains_key("validator_node") {
+        return Err(
+            "fresh P3 desired state must bind exactly the validator_node binary".to_string(),
+        );
+    }
+    let role_configuration_sha256 = required_sha256_map(
+        value.get("configuration"),
+        "fresh P3 desired-state role configuration",
+    )?;
+    let expected_roles = [
+        "validator-02",
+        "validator-03",
+        "validator-04",
+        "validator-05",
+        "validator-06",
+    ];
+    if role_configuration_sha256
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        != expected_roles
+    {
+        return Err(
+            "fresh P3 desired state must bind exactly validator-02 through validator-06"
+                .to_string(),
+        );
+    }
+    Ok(FreshP3DesiredStateBinding {
+        desired_state_sha256: sha256_hex(&bytes),
+        testnet_v3_revision: source_revision("testnet_v3_revision")?,
+        synq_revision: source_revision("synq_revision")?,
+        aegis_revision: source_revision("aegis_revision")?,
+        role_binary_sha256,
+        role_configuration_sha256,
+    })
+}
+
+fn required_sha256_map(
+    value: Option<&Value>,
+    label: &str,
+) -> Result<BTreeMap<String, String>, String> {
+    let object = value
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("{label} must be an object"))?;
+    if object.is_empty() {
+        return Err(format!("{label} must not be empty"));
+    }
+    let mut output = BTreeMap::new();
+    for (name, digest) in object {
+        let digest = digest
+            .as_str()
+            .filter(|digest| is_lower_hex(digest, 32))
+            .ok_or_else(|| format!("{label} {name} is not a SHA-256 digest"))?;
+        if name.trim().is_empty() {
+            return Err(format!("{label} has an empty role"));
+        }
+        output.insert(name.clone(), digest.to_string());
+    }
+    Ok(output)
+}
+
 fn validate_request_shape(request: &TestnetV3GenesisReleaseApprovalRequest) -> Result<(), String> {
     if request.schema_version != SCHEMA_VERSION
         || request.artifact_type != TESTNET_V3_GENESIS_RELEASE_APPROVAL_ARTIFACT_TYPE
@@ -788,6 +1039,22 @@ fn validate_request_shape(request: &TestnetV3GenesisReleaseApprovalRequest) -> R
             &request.frozen_authority_record_sha256,
             32,
         ),
+        ("desired_state_sha256", &request.desired_state_sha256, 32),
+        (
+            "desired_state_testnet_v3_revision",
+            &request.desired_state_testnet_v3_revision,
+            20,
+        ),
+        (
+            "desired_state_synq_revision",
+            &request.desired_state_synq_revision,
+            20,
+        ),
+        (
+            "desired_state_aegis_revision",
+            &request.desired_state_aegis_revision,
+            20,
+        ),
     ] {
         if !is_lower_hex(value, bytes) {
             return Err(format!(
@@ -809,6 +1076,52 @@ fn validate_request_shape(request: &TestnetV3GenesisReleaseApprovalRequest) -> R
         return Err(
             "release-approval request has invalid governance or consensus bindings".to_string(),
         );
+    }
+    if request.desired_state_role_binary_sha256.len() != 1
+        || !request
+            .desired_state_role_binary_sha256
+            .contains_key("validator_node")
+    {
+        return Err(
+            "release-approval request must bind exactly the fresh P3 validator binary".to_string(),
+        );
+    }
+    let expected_roles = [
+        "validator-02",
+        "validator-03",
+        "validator-04",
+        "validator-05",
+        "validator-06",
+    ];
+    if request
+        .desired_state_role_configuration_sha256
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        != expected_roles
+    {
+        return Err(
+            "release-approval request must bind exactly validator-02 through validator-06 configurations"
+                .to_string(),
+        );
+    }
+    for (label, bindings) in [
+        (
+            "desired_state_role_binary_sha256",
+            &request.desired_state_role_binary_sha256,
+        ),
+        (
+            "desired_state_role_configuration_sha256",
+            &request.desired_state_role_configuration_sha256,
+        ),
+    ] {
+        for (role, digest) in bindings {
+            if role.trim().is_empty() || !is_lower_hex(digest, 32) {
+                return Err(format!(
+                    "release-approval request {label} has an invalid role binding"
+                ));
+            }
+        }
     }
     for (label, root) in [
         (
@@ -917,6 +1230,7 @@ mod tests {
         root: PathBuf,
         candidate: PathBuf,
         authorities: PathBuf,
+        desired_state: PathBuf,
     }
 
     fn test_authority_keypair() -> (Vec<u8>, Vec<u8>) {
@@ -1093,10 +1407,49 @@ mod tests {
             serde_json::to_vec(&candidate_value).expect("encode candidate"),
         )
         .expect("write candidate");
+        let desired_state = root.join("desired-state.json");
+        fs::write(
+            &desired_state,
+            serde_json::to_vec(&json!({
+                "schema_version": 1,
+                "release_id": "chain1266-incarnation-5-rc1",
+                "release_tag": "chain1266-v20.0.0-rc.1",
+                "chain": {
+                    "chain_id": 1266,
+                    "incarnation": 5,
+                    "genesis_hash": "11".repeat(32),
+                    "validator_set_root": "22".repeat(32),
+                },
+                "source": {
+                    "testnet_v3_revision": "33".repeat(20),
+                    "synq_revision": "44".repeat(20),
+                    "aegis_revision": "55".repeat(20),
+                },
+                "state": {
+                    "consensus_schema_version": 5,
+                    "directory_namespace": "chain-1266/incarnation-5",
+                    "mode": "posy_simplified_v3",
+                    "coordinator_id": "",
+                    "producer_ids": [],
+                    "producer_turn_timeout_ms": 0,
+                },
+                "artifacts": {"validator_node": "66".repeat(32)},
+                "configuration": {
+                    "validator-02": "67".repeat(32),
+                    "validator-03": "68".repeat(32),
+                    "validator-04": "69".repeat(32),
+                    "validator-05": "6a".repeat(32),
+                    "validator-06": "6b".repeat(32),
+                },
+            }))
+            .expect("encode desired state"),
+        )
+        .expect("write desired state");
         TestRepository {
             root,
             candidate,
             authorities,
+            desired_state,
         }
     }
 
@@ -1198,6 +1551,7 @@ mod tests {
             &repository.root,
             &repository.candidate,
             &repository.authorities,
+            &repository.desired_state,
         )
         .expect("build request");
         let signing_key =
@@ -1231,6 +1585,7 @@ mod tests {
             &repository.root,
             &repository.candidate,
             &repository.authorities,
+            &repository.desired_state,
             &approval_path,
         )
         .expect("verify signed approval");
@@ -1255,6 +1610,7 @@ mod tests {
             &repository.root,
             &repository.candidate,
             &repository.authorities,
+            &repository.desired_state,
             &approval_path,
         )
         .expect_err("unfrozen signer must be rejected");
@@ -1307,6 +1663,7 @@ mod tests {
             &repository.root,
             &repository.candidate,
             &repository.authorities,
+            &repository.desired_state,
             &approval_path,
         )
         .expect_err("changed candidate must be rejected");
@@ -1323,6 +1680,7 @@ mod tests {
             &repository.root,
             &repository.candidate,
             &repository.authorities,
+            &repository.desired_state,
         )
         .expect("build governed V4 request");
 
@@ -1361,6 +1719,7 @@ mod tests {
             &repository.root,
             &repository.candidate,
             &repository.authorities,
+            &repository.desired_state,
         )
         .expect_err("tampered ETDAG root must be rejected");
 

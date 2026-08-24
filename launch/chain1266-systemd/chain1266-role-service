@@ -9,7 +9,6 @@ required=(
   SYNERGY_GENESIS_FILE
   SYNERGY_DESIRED_STATE_MANIFEST
   SYNERGY_DESIRED_STATE_MANIFEST_SHA256
-  SYNERGY_DESIRED_STATE_SIGNATURE
 )
 for name in "${required[@]}"; do
   [[ -n "${!name:-}" ]] || {
@@ -23,14 +22,25 @@ for path_name in \
   SYNERGY_PROJECT_ROOT \
   SYNERGY_DATA_PATH \
   SYNERGY_GENESIS_FILE \
-  SYNERGY_DESIRED_STATE_MANIFEST \
-  SYNERGY_DESIRED_STATE_SIGNATURE
+  SYNERGY_DESIRED_STATE_MANIFEST
 do
   path="${!path_name}"
   [[ "$path" == /* ]] || {
     echo "$path_name must be absolute" >&2
     exit 1
   }
+done
+for optional_path_name in \
+  SYNERGY_DESIRED_STATE_SIGNATURE \
+  SYNERGY_TESTNET_V3_RELEASE_APPROVAL \
+  SYNERGY_TESTNET_V3_AUTHORITY_RECORD
+do
+  if [[ -n "${!optional_path_name:-}" ]]; then
+    [[ "${!optional_path_name}" == /* ]] || {
+      echo "$optional_path_name must be absolute when set" >&2
+      exit 1
+    }
+  fi
 done
 [[ -x "$CHAIN1266_ROLE_BINARY" ]] || {
   echo "Role binary is not executable: $CHAIN1266_ROLE_BINARY" >&2
