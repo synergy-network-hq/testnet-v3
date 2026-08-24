@@ -24357,8 +24357,8 @@
       "invalid_block_slash_pct": 5,
       "jail_duration_seconds": 86400
     },
-    "state_directory_namespace": "chain-1266/incarnation-4",
-    "state_schema_version": 4,
+    "state_directory_namespace": "chain-1266/incarnation-5",
+    "state_schema_version": 5,
     "target_block_time_ms": 2000,
     "timeouts": {
       "max_round_ms": 10000,
