@@ -437,22 +437,56 @@ fn required_string<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::genesis::load_genesis_from_path_for_test;
-    use crate::synq_execution::{execute_synq_static_call, SynQExecutionContext};
+    use crate::synergy_types::TxId;
+    use crate::synq_execution::{
+        execute_synq_static_call, SynQContractArtifact, SynQDeploymentRecord, SynQExecutionContext,
+    };
+    use aivm_core::execution::{ExecutionContext, ExecutionStatus};
+    use aivm_core::state::ContractState;
+    use aivm_core::synq_runtime::{deploy_synq_contract, synq_execution_request};
 
-    fn archived_preapproval_identity_assigned_candidate() -> GenesisDocument {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .join("launch/production-genesis-ceremony/source-genesis.identity-assigned.json");
-        load_genesis_from_path_for_test(path)
-            .expect("archived pre-approval identity-assigned candidate must validate")
-    }
+    const STATIC_COUNTER_ADDRESS: &str = "sync1p3staticcounterfixture00000000000000000";
 
-    fn finalized_production_genesis() -> GenesisDocument {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .join("launch/production-node-configs/canonical-genesis/genesis.json");
-        load_genesis_from_path_for_test(path).expect("finalized production Genesis must validate")
+    fn deployed_fresh_p3_static_counter() -> (
+        ContractState,
+        BTreeMap<SynQArtifactKey, SynQContractArtifact>,
+        BTreeMap<String, SynQDeploymentRecord>,
+    ) {
+        let artifact_root =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../synq-language/contracts");
+        let artifact = SynQContractArtifact::new(
+            fs::read(artifact_root.join("Counter.compiled.synq"))
+                .expect("checked-in P3 Counter bytecode must exist"),
+            fs::read_to_string(artifact_root.join("Counter.abi.json"))
+                .expect("checked-in P3 Counter ABI must exist"),
+            fs::read_to_string(artifact_root.join("Counter.manifest.json"))
+                .expect("checked-in P3 Counter manifest must exist"),
+        );
+        let artifact_key = artifact.key();
+        let request = synq_execution_request(
+            STATIC_COUNTER_ADDRESS,
+            artifact.to_aivm_artifact(),
+            ExecutionContext::testnet_1266_for_contract(STATIC_COUNTER_ADDRESS, 1_000_000),
+            Vec::new(),
+        );
+        let mut state = ContractState::default();
+        let deployment = deploy_synq_contract(&request, &mut state);
+        assert_eq!(deployment.status, ExecutionStatus::Succeeded);
+
+        let mut artifacts = BTreeMap::new();
+        artifacts.insert(artifact_key.clone(), artifact);
+        let mut deployments = BTreeMap::new();
+        deployments.insert(
+            STATIC_COUNTER_ADDRESS.to_string(),
+            SynQDeploymentRecord {
+                contract_address: STATIC_COUNTER_ADDRESS.to_string(),
+                deployer: "fresh-p3-static-test".to_string(),
+                artifact_key,
+                deploy_tx_id: TxId::from("fresh-p3-static-test-deployment"),
+                deploy_receipt_hash: "fresh-p3-static-test-receipt".to_string(),
+            },
+        );
+        (state, artifacts, deployments)
     }
 
     #[test]
@@ -470,11 +504,16 @@ mod tests {
     }
 
     #[test]
-    fn archived_preapproval_candidate_cannot_be_loaded_as_finalized_execution_state() {
-        let error = load_finalized_testnet_v3_genesis_execution_state(
-            &archived_preapproval_identity_assigned_candidate(),
-        )
-        .expect_err("an archived pre-approval candidate must not be accepted as finalized Genesis");
+    fn fresh_predeployment_candidate_cannot_be_loaded_as_finalized_execution_state() {
+        let genesis = crate::genesis::canonical_genesis()
+            .expect("canonical unit-test Genesis must be the fresh P3 public input");
+        assert_eq!(
+            genesis.consensus_version(),
+            crate::consensus::simplified_posy::POSY_SIMPLIFIED_PROTOCOL_VERSION
+        );
+        let error = load_finalized_testnet_v3_genesis_execution_state(genesis).expect_err(
+            "a fresh predeployment candidate must not be accepted as finalized Genesis",
+        );
         assert!(error.contains("missing genesis_deployment"));
     }
 
@@ -491,26 +530,17 @@ mod tests {
     }
 
     #[test]
-    fn finalized_genesis_supports_real_public_synq_view_calls_without_mutation() {
-        let state =
-            load_finalized_testnet_v3_genesis_execution_state(&finalized_production_genesis())
-                .expect("finalized production Genesis must restore its AIVM state");
-        let contract_address = "sync1q2s4w0h2q98e2hv9rjycf4th4zwu7r9wxtmz";
-        let validator_address = "synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu";
-        let mut calldata = hex::decode("fb221343").expect("ABI selector must be hex");
-        calldata.extend_from_slice(
-            &serde_json::to_vec(&serde_json::json!([validator_address]))
-                .expect("ABI arguments must encode"),
-        );
-        let state_root_before = state.synq_aivm_state.state_root();
+    fn fresh_p3_static_synq_view_calls_do_not_mutate_state() {
+        let (state, artifacts, deployments) = deployed_fresh_p3_static_counter();
+        let state_root_before = state.state_root();
 
         let receipt = execute_synq_static_call(
-            contract_address,
+            STATIC_COUNTER_ADDRESS,
             "synq-static-test-caller",
-            &calldata,
-            &state.synq_aivm_state,
-            &state.synq_artifacts,
-            &state.synq_contracts,
+            &hex::decode("75b70457").expect("Counter get selector must be hex"),
+            &state,
+            &artifacts,
+            &deployments,
             SynQExecutionContext {
                 runtime_block_height: 1,
                 runtime_block_timestamp_unix: 1_785_000_000,
@@ -518,28 +548,28 @@ mod tests {
                 applied_fee_market: None,
             },
         )
-        .expect("public view selector must execute against finalized Genesis state");
+        .expect("public P3 Counter view selector must execute against deployed state");
 
         assert_eq!(receipt.status, "succeeded");
         assert!(!receipt.return_data_hex.is_empty());
-        assert_eq!(state.synq_aivm_state.state_root(), state_root_before);
+        assert_eq!(state.state_root(), state_root_before);
     }
 
     #[test]
-    fn finalized_genesis_rejects_synq_write_selector_from_static_call_boundary() {
-        let state =
-            load_finalized_testnet_v3_genesis_execution_state(&finalized_production_genesis())
-                .expect("finalized production Genesis must restore its AIVM state");
+    fn fresh_p3_static_synq_rejects_write_selector_before_execution() {
+        let (state, artifacts, deployments) = deployed_fresh_p3_static_counter();
+        let state_root_before = state.state_root();
         let error = execute_synq_static_call(
-            "sync1q2s4w0h2q98e2hv9rjycf4th4zwu7r9wxtmz",
+            STATIC_COUNTER_ADDRESS,
             "synq-static-test-caller",
-            &hex::decode("26d190af").expect("ABI selector must be hex"),
-            &state.synq_aivm_state,
-            &state.synq_artifacts,
-            &state.synq_contracts,
+            &hex::decode("5842f1be").expect("Counter increment selector must be hex"),
+            &state,
+            &artifacts,
+            &deployments,
             SynQExecutionContext::default(),
         )
         .expect_err("static boundary must reject a public write selector");
         assert!(error.contains("view ABI methods"));
+        assert_eq!(state.state_root(), state_root_before);
     }
 }
