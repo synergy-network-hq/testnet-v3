@@ -5,27 +5,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{self, Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::aegis_tx_tool::{
-    decode_aegis_carrier_data, is_legacy_aegis_carrier_transaction, AegisTxSubmissionEnvelope,
-};
 use crate::config::{
     list_available_templates, load_node_config, load_node_config_from_template, NodeConfig,
     ResolvedConsensusMode,
 };
 use crate::consensus::cartel_detection::{CartelDetectionEngine, WhistleblowerSystem};
 use crate::consensus::consensus_fork;
-use crate::consensus::coordinated_finality_store::CoordinatedFinalityStore;
-use crate::consensus::coordinated_round_robin::{
-    install_coordinated_consensus_ingress, remove_coordinated_consensus_ingress,
-    CoordinatedConsensusEnvelope, CoordinatorState, CoordinatorStateStore,
-};
-use crate::consensus::coordinated_runtime::{
-    CoordinatedBlockBuildContext, CoordinatedRuntime, CoordinatedRuntimeAction,
-};
 use crate::consensus::dao_governance::{DAOGovernance, SynergyOracle};
 use crate::consensus::dual_quorum::{EntropyBeacon, ValidatorRotation};
 use crate::consensus::posy::LocalConsensusContext;
@@ -58,17 +47,15 @@ use crate::consensus::simplified_posy::{
     VerifiedSimplifiedEpochTransition,
 };
 use crate::consensus::synergy_score::SynergyScoreCalculator;
-use crate::consensus::testnet_v3_bootstrap::{
-    load_coordinated_round_robin_activation_bootstrap, load_testnet_v3_genesis_bootstrap,
-};
+use crate::consensus::testnet_v3_bootstrap::load_testnet_v3_genesis_bootstrap;
 use crate::consensus::testnet_v3_finality_context::FinalizedTypedContextProvider;
 use crate::consensus::typed_coordinator::{
-    begin_typed_consensus_startup_buffer, import_local_genesis_bound_coordinated_signer,
-    import_local_genesis_bound_typed_signer, install_typed_coordinator_ingress,
-    remove_typed_coordinator_ingress, replay_finalized_execution_state, run_typed_posy_driver,
-    set_typed_consensus_startup_phase, P2pTypedConsensusEgress, TypedFinalityContextDigestSource,
-    TypedNextHeightAuthority, TypedNextHeightContextSource, TypedPosyCoordinator,
-    TypedPosyCoordinatorStartup, TypedPosyDriver,
+    begin_typed_consensus_startup_buffer, import_local_genesis_bound_typed_signer,
+    install_typed_coordinator_ingress, remove_typed_coordinator_ingress,
+    replay_finalized_execution_state, run_typed_posy_driver, set_typed_consensus_startup_phase,
+    P2pTypedConsensusEgress, TypedFinalityContextDigestSource, TypedNextHeightAuthority,
+    TypedNextHeightContextSource, TypedPosyCoordinator, TypedPosyCoordinatorStartup,
+    TypedPosyDriver,
 };
 use crate::consensus::typed_finality_observer::{
     install_typed_finality_observer, remove_typed_finality_observer, TypedFinalityObserver,
@@ -88,8 +75,7 @@ use crate::etdag::{
     EtdagProtectedInputCoordinator, EtdagScheduleNeutralCertifiedInputIngress,
 };
 use crate::execution::{
-    install_finalized_execution_state_snapshot, publish_finalized_execution_state_snapshot,
-    remove_finalized_execution_state_snapshot,
+    install_finalized_execution_state_snapshot, remove_finalized_execution_state_snapshot,
 };
 use crate::genesis::{
     canonical_genesis, load_genesis_bound_etdag_governance, simplified_genesis_runtime_metadata,
