@@ -1212,6 +1212,17 @@ fn select_finalized_consensus_driver_startup(
 fn resolved_consensus_runtime_preflight(
     config: &NodeConfig,
 ) -> Result<ResolvedConsensusMode, String> {
+    // Reject the retired mode before asking its legacy configuration parser to
+    // validate coordinator-era fields. That parser has a retired network-ID
+    // contract and must not decide the fresh P3 runtime's admission result.
+    if config.consensus.mode
+        == crate::consensus::coordinated_round_robin::COORDINATED_ROUND_ROBIN_V1
+    {
+        return Err(
+            "fresh Testnet-v3 consensus refuses coordinated-round-robin runtime selection"
+                .to_string(),
+        );
+    }
     ensure_consensus_pqc_runtime_ready(config)?;
     match config
         .consensus
