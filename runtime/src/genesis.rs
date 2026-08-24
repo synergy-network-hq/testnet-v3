@@ -402,6 +402,19 @@ pub(crate) fn load_genesis_from_path_for_test(path: PathBuf) -> Result<GenesisDo
 /// before invoking the ordinary Genesis integrity recomputation.
 #[cfg(test)]
 fn fresh_posy_v3_test_fixture() -> Result<Value, String> {
+    let value: Value = serde_json::from_str(include_str!(
+        "../config/genesis.testnet-v3.test-fixture.json"
+    ))
+    .map_err(|error| format!("parse common Testnet-v3 test fixture seed: {error}"))?;
+    bind_fresh_posy_v3_test_authorities(value)
+}
+
+/// Applies the public P3 authority records to any isolated test Genesis
+/// seed.  Both the historical structural fixture and the fresh public source
+/// input use this exact path, so consensus-domain tests never obtain a
+/// partially-bound candidate.
+#[cfg(test)]
+fn bind_fresh_posy_v3_test_authorities(mut value: Value) -> Result<Value, String> {
     use crate::consensus::simplified_posy::GenesisBoundSimplifiedActivation;
     use crate::consensus_parameters::{
         load_finalized_consensus_parameters_from_bytes, FinalizedConsensusParameterManifest,
@@ -412,10 +425,6 @@ fn fresh_posy_v3_test_fixture() -> Result<Value, String> {
         ETDAG_GOVERNED_GENESIS_BINDING_SCHEMA_VERSION, ETDAG_GOVERNED_GENESIS_BINDING_STATUS,
     };
 
-    let mut value: Value = serde_json::from_str(include_str!(
-        "../config/genesis.testnet-v3.test-fixture.json"
-    ))
-    .map_err(|error| format!("parse common Testnet-v3 test fixture seed: {error}"))?;
     let manifest: FinalizedConsensusParameterManifest = serde_json::from_slice(include_bytes!(
         "../../launch/posy-v3-etdag-governance-inputs/posy-simplified-parameter-manifest.for-release.json"
     ))
@@ -526,10 +535,11 @@ fn fresh_p3_unit_test_genesis_path() -> PathBuf {
 /// the retired 2.2 fixture while retaining production's on-disk-only loader.
 #[cfg(test)]
 fn fresh_p3_unit_test_genesis() -> Result<GenesisDocument, String> {
-    let mut value: Value = serde_json::from_str(include_str!(
+    let value: Value = serde_json::from_str(include_str!(
         "../../launch/posy-v3-genesis-inputs/fresh-p3-genesis-predeployment-public-input.json"
     ))
     .map_err(|error| format!("parse fresh P3 unit-test genesis input: {error}"))?;
+    let mut value = bind_fresh_posy_v3_test_authorities(value)?;
     recompute_testnet_v3_candidate_integrity(&mut value)?;
     load_canonical_genesis_from_value(value, fresh_p3_unit_test_genesis_path())
 }
