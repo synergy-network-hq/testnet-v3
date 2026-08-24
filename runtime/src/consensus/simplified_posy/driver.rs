@@ -2303,9 +2303,15 @@ fn finalization_certificate_at<'a>(
     newest: Option<&'a SimplifiedQuorumCertificate>,
     epoch_transition: Option<&'a VerifiedSimplifiedEpochTransition>,
 ) -> Option<&'a SimplifiedQuorumCertificate> {
-    newest
-        .filter(|certificate| certificate.context.height.0 == height)
-        .or_else(|| evidence.certified_qcs.get(&height))
+    // Once a QC has been admitted, its durable state evidence is the
+    // canonical finality witness.  Equivalent retransmitted proofs may carry
+    // another signer subset or round detail while retaining the same stable
+    // candidate identity; using such a `newest` proof here would derive a
+    // different finality transaction for an already-owned WAL height.
+    evidence
+        .certified_qcs
+        .get(&height)
+        .or_else(|| newest.filter(|certificate| certificate.context.height.0 == height))
         .or_else(|| {
             epoch_transition.and_then(|transition| {
                 transition
