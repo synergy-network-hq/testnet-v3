@@ -732,7 +732,7 @@ fn run_worker(validator_index: usize, generation: u64, work_dir: &Path) -> Resul
         worker_material_directory(work_dir, validator_index),
         context.root()?,
     )?;
-    let core_adapter = SimplifiedCoreMaterialAdapter::new(
+    let mut core_adapter = SimplifiedCoreMaterialAdapter::new(
         context.clone(),
         SimplifiedCoreMaterialConfiguration {
             validator_set: validators.clone(),
@@ -751,6 +751,19 @@ fn run_worker(validator_index: usize, generation: u64, work_dir: &Path) -> Resul
             aegis_pqvm_version: "aegis-pqvm-autonomous-harness-v1".to_string(),
         },
     )?;
+    // The core adapter's fee-parent cache is intentionally derived only from
+    // verified material. Rebuild that cache from the durable records before
+    // reopening a restarted worker, so the next certified parent cannot be
+    // mistaken for an absent authority.
+    let state_store =
+        DurableSimplifiedPosyStore::at_path(worker_state_path(work_dir, validator_index));
+    if state_store.path().exists() {
+        let recovered = state_store.load(&context)?;
+        for certificate in recovered.certified_qcs.values() {
+            let material = material_store.load(certificate.id()?)?;
+            core_adapter.restore_certified_parent_fee_authority(certificate, &material)?;
+        }
+    }
     let proposal_source = DurableVerifiedSimplifiedProposalSource::new(
         context.clone(),
         material_store.clone(),
@@ -793,7 +806,7 @@ fn run_worker(validator_index: usize, generation: u64, work_dir: &Path) -> Resul
         validators.clone(),
         local.validator_id.clone(),
         local.consensus_public_key.key_id.clone(),
-        DurableSimplifiedPosyStore::at_path(worker_state_path(work_dir, validator_index)),
+        state_store,
         genesis_parent,
         DurableConsensusSigningAuthority::at_path(worker_signer_journal_path(
             work_dir,
