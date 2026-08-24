@@ -1375,7 +1375,13 @@ fn provision_configuration(work_dir: &Path) -> Result<PublicConfiguration, Strin
         frozen_validator_set: validator_set,
     };
     activation.validate()?;
-    let genesis_finality_reference = harness_genesis_finality_reference(&activation)?;
+    // Bind the harness state machine to the exact ordinary-loaded fresh
+    // Genesis. A look-alike reference derived from disposable harness keys is
+    // not a valid block-zero authority for P3 state-sync validation.
+    let genesis_hash = Hash::from_hex(canonical_genesis()?.hash())
+        .map_err(|error| format!("qualification Genesis hash is invalid: {error}"))?;
+    let genesis_finality_reference =
+        GenesisFinalityReference::from_canonical_genesis_hash(genesis_hash);
     let epoch_context = activation.derive_fresh_genesis_epoch_context()?;
     let configuration = PublicConfiguration {
         activation,
@@ -1438,27 +1444,6 @@ fn finalized_manifest() -> SimplifiedConsensusParameterManifest {
             finality_p99_ms: 9_000,
         },
     }
-}
-
-fn harness_genesis_finality_reference(
-    activation: &GenesisBoundSimplifiedActivation,
-) -> Result<GenesisFinalityReference, String> {
-    // This models the canonical fresh-Genesis binding the production runtime
-    // receives from GenesisDocument.  It deliberately creates a tagged
-    // Genesis parent rather than treating the block-zero hash as a QC.
-    if activation.activation_epoch != 0 || activation.activation_height != 1 {
-        return Err(
-            "fresh Genesis harness activation must start at epoch zero, height one".to_string(),
-        );
-    }
-    let genesis_hash = Hash::from_domain_bytes(
-        "SYNERGY_POSY_AUTONOMOUS_HARNESS_CANONICAL_GENESIS_V1",
-        &serde_json::to_vec(activation)
-            .map_err(|error| format!("serialize harness fresh Genesis anchor: {error}"))?,
-    );
-    let reference = GenesisFinalityReference::from_canonical_genesis_hash(genesis_hash);
-    reference.validate()?;
-    Ok(reference)
 }
 
 fn harness_signer(
