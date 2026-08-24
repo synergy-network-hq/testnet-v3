@@ -1118,6 +1118,15 @@ fn route_event(
                 "validator-{validator_index} rejected state-sync traffic: {message}"
             ));
         }
+        WorkerEvent::PeerRejected {
+            validator_index,
+            message,
+            ..
+        } if !policy.freeze_triggered => {
+            return Err(format!(
+                "validator-{validator_index} rejected pre-finality consensus traffic: {message}"
+            ));
+        }
         _ => {}
     }
     Ok(Some(event))
