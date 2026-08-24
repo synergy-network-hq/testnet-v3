@@ -108,8 +108,7 @@ use crate::sxcp;
 use crate::sync::SyncManager;
 use crate::synergy_types::{
     AegisPqKeyId, AegisPqKeyRole, BlockHeader, CanonicalSerialize, ClusterMap, Hash, Height,
-    ValidatorId, ValidatorSet, POSY_PROTOCOL_VERSION, SYNERGY_TESTNET_V3_CHAIN_ID,
-    TESTNET_V3_CANONICAL_NETWORK_ID,
+    ValidatorId, ValidatorSet, SYNERGY_TESTNET_V3_CHAIN_ID, TESTNET_V3_CANONICAL_NETWORK_ID,
 };
 use crate::telemetry;
 use crate::testnet_v3_execution_bootstrap::load_finalized_testnet_v3_genesis_execution_state;
@@ -1253,38 +1252,6 @@ fn select_finalized_consensus_driver_startup(
     }
 }
 
-fn announce_chain1266_coordinated_runtime(config: &NodeConfig) -> Result<(), String> {
-    let ResolvedConsensusMode::CoordinatedRoundRobinV1(mode) = config
-        .consensus
-        .resolve_mode(config.blockchain.chain_id, &config.network.network_id)?
-    else {
-        return Err("this Chain 1266 release only starts coordinated_round_robin_v1".to_string());
-    };
-    if mode.coordinator_id != "validator-1"
-        || mode.producer_ids
-            != [
-                "validator-2",
-                "validator-3",
-                "validator-4",
-                "validator-5",
-                "validator-6",
-            ]
-    {
-        return Err(
-            "coordinated runtime identities do not match Val1 and ordered Val2-Val6".to_string(),
-        );
-    }
-    println!("CHAIN1266_CONSENSUS_ENGINE=coordinated_round_robin_v1");
-    println!("CHAIN1266_COORDINATOR=validator-node-01");
-    println!(
-        "CHAIN1266_PRODUCERS=validator-node-02,validator-node-03,validator-node-04,validator-node-05,validator-node-06"
-    );
-    println!("CHAIN1266_VOTING_ENABLED=false");
-    println!("CHAIN1266_QUORUM_ENABLED=false");
-    println!("CHAIN1266_QC_ENABLED=false");
-    Ok(())
-}
-
 fn resolved_consensus_runtime_preflight(
     config: &NodeConfig,
 ) -> Result<ResolvedConsensusMode, String> {
@@ -1374,48 +1341,17 @@ fn ensure_node_config_matches_finalized_consensus_parameters(
     config: &NodeConfig,
     genesis: &GenesisDocument,
 ) -> Result<(), String> {
-    if let ResolvedConsensusMode::CoordinatedRoundRobinV1(mode) = config
-        .consensus
-        .resolve_mode(config.blockchain.chain_id, &config.network.network_id)?
-    {
-        let activation = crate::consensus_activation::load_installed_consensus_activation(genesis)
-            .map_err(|error| {
-                format!("coordinated P1 configuration requires its signed activation: {error}")
-            })?;
-        let target_block_time_ms = config
-            .blockchain
-            .block_time
-            .checked_mul(1_000)
-            .ok_or_else(|| "node blockchain block time overflows milliseconds".to_string())?;
-        if config.consensus.algorithm != mode.consensus_version
-            || config.consensus.block_time_secs.saturating_mul(1_000)
-                != mode.target_block_interval_ms
-            || target_block_time_ms != mode.target_block_interval_ms
-            || activation.manifest.consensus_mode != mode.consensus_version
-            || activation.manifest.coordinator_id != mode.coordinator_id
-            || activation.manifest.producer_ids != mode.producer_ids
-            || activation.manifest.producer_turn_timeout_ms != mode.producer_turn_timeout_ms
-        {
-            return Err(
-                "node coordinated P1 configuration disagrees with its signed activation"
-                    .to_string(),
-            );
-        }
-        return Ok(());
-    }
     let parameters = genesis.consensus_parameters().ok_or_else(|| {
         "canonical Testnet-v3 Genesis has no finalized consensus parameter manifest".to_string()
     })?;
     match &parameters.manifest {
-        crate::consensus_parameters::FinalizedConsensusParameterManifest::PosyV2_2(manifest) => {
-            ensure_node_config_matches_posy_parameters(config, manifest)
-        }
-        crate::consensus_parameters::FinalizedConsensusParameterManifest::CoordinatedRoundRobinV1(
-            manifest,
-        ) => ensure_node_config_matches_coordinated_p1_parameters(config, manifest),
         crate::consensus_parameters::FinalizedConsensusParameterManifest::SimplifiedPoSyV3(
             manifest,
         ) => ensure_node_config_matches_simplified_posy_parameters(config, manifest),
+        _ => Err(
+            "this release accepts only the finalized fresh testnet-v3 posy/3.0 manifest"
+                .to_string(),
+        ),
     }
 }
 
@@ -1464,148 +1400,6 @@ fn ensure_node_config_matches_simplified_posy_parameters(
     {
         return Err(
             "node configuration disagrees with the finalized fresh simplified PoSy manifest"
-                .to_string(),
-        );
-    }
-    Ok(())
-}
-
-fn ensure_node_config_matches_posy_parameters(
-    config: &NodeConfig,
-    manifest: &crate::consensus_parameters::ConsensusParameterManifest,
-) -> Result<(), String> {
-    let epoch_length = manifest
-        .epoch_length_slots
-        .ok_or_else(|| "finalized consensus parameters have no epoch length".to_string())?;
-    let block_time_ms = config
-        .consensus
-        .block_time_secs
-        .checked_mul(1_000)
-        .ok_or_else(|| "node consensus block time overflows milliseconds".to_string())?;
-    let blockchain_block_time_ms = config
-        .blockchain
-        .block_time
-        .checked_mul(1_000)
-        .ok_or_else(|| "node blockchain block time overflows milliseconds".to_string())?;
-    if config.blockchain.chain_id != manifest.chain_id.0
-        || config.network.id != manifest.chain_id.0
-        || config.network.network_id != manifest.network_id.0
-    {
-        return Err(
-            "node chain or network configuration disagrees with finalized consensus parameters"
-                .to_string(),
-        );
-    }
-    if config.consensus.algorithm.trim() != manifest.protocol_version
-        || config.consensus.algorithm.trim() != POSY_PROTOCOL_VERSION
-    {
-        return Err(
-            "node consensus protocol identifier disagrees with finalized consensus parameters"
-                .to_string(),
-        );
-    }
-    if block_time_ms != manifest.target_block_time_ms
-        || blockchain_block_time_ms != manifest.target_block_time_ms
-        || config.consensus.target_block_time_ms != manifest.target_block_time_ms
-    {
-        return Err(format!(
-            "node block-time configuration disagrees with finalized {} ms target",
-            manifest.target_block_time_ms
-        ));
-    }
-    if config.consensus.epoch_length != epoch_length
-        || config.consensus.vrf_seed_epoch_interval != epoch_length
-    {
-        return Err(format!(
-            "node epoch configuration disagrees with finalized {epoch_length}-slot epoch"
-        ));
-    }
-    if u64::try_from(config.consensus.validator_cluster_size).ok()
-        != Some(manifest.initial_cluster_validator_count)
-        || u64::try_from(config.consensus.min_validators).ok()
-            != Some(manifest.initial_cluster_validator_count)
-        || u64::try_from(config.consensus.validator_vote_threshold).ok()
-            != Some(manifest.initial_availability_quorum)
-    {
-        return Err(format!(
-            "node validator cluster size disagrees with finalized initial cluster size {}",
-            manifest.initial_cluster_validator_count
-        ));
-    }
-    let configured_stage_timeouts = (
-        config.consensus.proposal_timeout_ms,
-        config.consensus.prevote_timeout_ms,
-        config.consensus.precommit_timeout_ms,
-        config.consensus.max_round_timeout_ms,
-    );
-    let finalized_stage_timeouts = (
-        manifest.proposal_timeout_ms,
-        manifest.prevote_timeout_ms,
-        manifest.precommit_timeout_ms,
-        manifest.max_round_timeout_ms,
-    );
-    if configured_stage_timeouts != finalized_stage_timeouts {
-        return Err(
-            "node stage-timeout configuration disagrees with finalized consensus parameters"
-                .to_string(),
-        );
-    }
-    Ok(())
-}
-
-fn ensure_node_config_matches_coordinated_p1_parameters(
-    config: &NodeConfig,
-    manifest: &crate::consensus_parameters::CoordinatedRoundRobinParameterManifest,
-) -> Result<(), String> {
-    manifest.validate_finalized()?;
-    let block_time_ms = config
-        .consensus
-        .block_time_secs
-        .checked_mul(1_000)
-        .ok_or_else(|| "node consensus block time overflows milliseconds".to_string())?;
-    let blockchain_block_time_ms = config
-        .blockchain
-        .block_time
-        .checked_mul(1_000)
-        .ok_or_else(|| "node blockchain block time overflows milliseconds".to_string())?;
-    if config.blockchain.chain_id != manifest.chain_id.0
-        || config.network.id != manifest.chain_id.0
-        || config.network.network_id != manifest.network_id.0
-    {
-        return Err(
-            "node chain or network configuration disagrees with finalized coordinated P1 parameters"
-                .to_string(),
-        );
-    }
-    if config.consensus.algorithm.trim() != manifest.protocol_version
-        || config.consensus.mode.trim() != manifest.protocol_version
-    {
-        return Err(
-            "node consensus protocol identifier or mode disagrees with finalized coordinated P1 parameters"
-                .to_string(),
-        );
-    }
-    if block_time_ms != manifest.target_block_time_ms
-        || blockchain_block_time_ms != manifest.target_block_time_ms
-        || config.consensus.target_block_time_ms != manifest.target_block_time_ms
-    {
-        return Err(format!(
-            "node block-time configuration disagrees with finalized {} ms coordinated P1 target",
-            manifest.target_block_time_ms
-        ));
-    }
-    let resolved = config
-        .consensus
-        .coordinated_round_robin_config(config.blockchain.chain_id, &config.network.network_id)?;
-    let bound = &manifest.coordinated_round_robin;
-    if resolved.consensus_version != manifest.protocol_version
-        || resolved.coordinator_id != bound.coordinator_id
-        || resolved.producer_ids != bound.producer_ids
-        || resolved.producer_turn_timeout_ms != bound.producer_turn_timeout_ms
-        || resolved.target_block_interval_ms != manifest.target_block_time_ms
-    {
-        return Err(
-            "node coordinated P1 rotation configuration disagrees with the finalized Genesis parameters"
                 .to_string(),
         );
     }
