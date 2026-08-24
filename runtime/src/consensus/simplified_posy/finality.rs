@@ -617,7 +617,14 @@ impl SimplifiedFinalizationSink for DurableSimplifiedFinalitySink {
             let existing: SimplifiedFinalityWalRecord =
                 read_canonical_bounded(&path, MAX_POSY_SIMPLIFIED_FINALITY_WAL_RECORD_BYTES)
                     .map_err(SimplifiedFinalizationSinkError::Unavailable)?;
-            if existing.transaction == *transaction {
+            // Finality transaction identity commits to the stable certified
+            // statements, not an arbitrary valid quorum-proof subset.  Keep
+            // the full proofs in the WAL for replay verification, but accept
+            // a different valid representation of that same transaction as
+            // the exact idempotent retry it is.
+            if existing.transaction.transaction_id == transaction.transaction_id
+                && existing.receipt.target_finalized == transaction.target_finalized
+            {
                 return Ok(existing.receipt);
             }
             return Err(SimplifiedFinalizationSinkError::CommitRejected(
