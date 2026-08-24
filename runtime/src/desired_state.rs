@@ -267,6 +267,39 @@ fn expected_chain_profile(state: &DesiredConsensusState) -> Result<(u64, u32, St
     }
 }
 
+/// Validates the consensus-facing fields that a startup barrier is allowed to
+/// consume from a signed desired-state manifest.  Keeping this check here
+/// prevents the startup path from reintroducing a P1-only interpretation of a
+/// manifest that the desired-state verifier accepts as fresh P3.
+pub(crate) fn validate_chain1266_desired_state_profile(
+    chain_incarnation: u64,
+    consensus_schema_version: u32,
+    directory_namespace: &str,
+    mode: &str,
+    coordinator_id: &str,
+    producer_ids: &[String],
+    producer_turn_timeout_ms: u64,
+) -> Result<(), String> {
+    let state = DesiredConsensusState {
+        consensus_schema_version,
+        directory_namespace: directory_namespace.to_string(),
+        mode: mode.to_string(),
+        coordinator_id: coordinator_id.to_string(),
+        producer_ids: producer_ids.to_vec(),
+        producer_turn_timeout_ms,
+    };
+    validate_desired_state_consensus(&state)?;
+    let (expected_incarnation, expected_consensus_schema, expected_namespace) =
+        expected_chain_profile(&state)?;
+    if chain_incarnation != expected_incarnation
+        || state.consensus_schema_version != expected_consensus_schema
+        || state.directory_namespace != expected_namespace
+    {
+        return Err("desired-state consensus schema or state namespace is invalid".to_string());
+    }
+    Ok(())
+}
+
 fn compiled_revision(name: &str, value: Option<&'static str>) -> Result<&'static str, String> {
     value
         .filter(|revision| !revision.trim().is_empty())
@@ -750,6 +783,16 @@ mod tests {
                 "chain-1266/incarnation-5".to_string()
             )
         );
+        validate_chain1266_desired_state_profile(
+            POSY_SIMPLIFIED_CHAIN_INCARNATION,
+            canonical.consensus_schema_version,
+            &canonical.directory_namespace,
+            &canonical.mode,
+            &canonical.coordinator_id,
+            &canonical.producer_ids,
+            canonical.producer_turn_timeout_ms,
+        )
+        .expect("fresh P3 start profile");
 
         let mut with_coordinator = canonical.clone();
         with_coordinator.coordinator_id = "validator-01".to_string();
