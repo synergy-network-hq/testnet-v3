@@ -394,6 +394,15 @@ def validate_fresh_boundaries(
             fail(f"fresh authority record {field} differs from {expected!r}")
     if candidate.get("network", {}).get("chain_incarnation") != CHAIN_INCARNATION:
         fail("candidate chain_incarnation is not 5")
+    consensus = candidate.get("consensus")
+    if not isinstance(consensus, dict):
+        fail("candidate consensus must be an object")
+    expected_state_namespace = f"chain-{CHAIN_ID}/incarnation-{CHAIN_INCARNATION}"
+    if (
+        consensus.get("state_directory_namespace") != expected_state_namespace
+        or consensus.get("state_schema_version") != CHAIN_INCARNATION
+    ):
+        fail("candidate consensus state domain is not the fresh P3 incarnation-5 domain")
     if set(candidate.get("contracts", {})) != set(CONTRACT_KEYS.values()):
         fail("candidate does not contain the exact nine fresh Genesis contracts")
     if candidate.get("contract_identities") != []:
@@ -514,6 +523,10 @@ def main() -> None:
     candidate["consensus"].update(
         {
             "algorithm": "SimplifiedPoSy",
+            # The schema template is policy-only. Never carry a predecessor
+            # chain's state domain into a fresh block-zero P3 candidate.
+            "state_directory_namespace": f"chain-{CHAIN_ID}/incarnation-{CHAIN_INCARNATION}",
+            "state_schema_version": CHAIN_INCARNATION,
             "dynamic_validator_membership": True,
             "epoch": 0,
             "initial_active_validator_count": 5,

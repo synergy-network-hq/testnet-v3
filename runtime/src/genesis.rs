@@ -119,7 +119,7 @@ pub fn canonical_genesis() -> Result<&'static GenesisDocument, String> {
         if let Some(cached) = cache.borrow().get(&path) {
             return cached.clone();
         }
-        let loaded = load_canonical_genesis_from_path(path.clone()).map(|document| {
+        let loaded = load_genesis_from_path_for_test(path.clone()).map(|document| {
             // The test executable owns this object until process exit, which
             // preserves the established `&'static GenesisDocument` API.
             Box::leak(Box::new(document)) as &'static GenesisDocument
@@ -206,6 +206,17 @@ fn load_canonical_genesis_from_path(path: PathBuf) -> Result<GenesisDocument, St
     let value: Value = serde_json::from_slice(&bytes)
         .map_err(|error| format!("parse canonical genesis {}: {error}", path.display()))?;
 
+    load_canonical_genesis_from_value(value, path)
+}
+
+/// Parse an already-decoded canonical Genesis candidate through exactly the
+/// same loader and integrity gates used for on-disk Genesis.  The test-only
+/// P3 fixture adapter below uses this to avoid allowing the checked-in
+/// historical fixture to select an obsolete consensus profile.
+fn load_canonical_genesis_from_value(
+    value: Value,
+    path: PathBuf,
+) -> Result<GenesisDocument, String> {
     validate_no_placeholders(&value)?;
     reject_test_fixture_genesis(&value, &path)?;
 
@@ -359,7 +370,98 @@ pub fn load_genesis_from_path(path: impl Into<PathBuf>) -> Result<GenesisDocumen
 
 #[cfg(test)]
 pub(crate) fn load_genesis_from_path_for_test(path: PathBuf) -> Result<GenesisDocument, String> {
+    if path
+        .file_name()
+        .is_some_and(|name| name == "genesis.testnet-v3.test-fixture.json")
+    {
+        return load_canonical_genesis_from_value(fresh_posy_v3_test_fixture()?, path);
+    }
     load_genesis_from_path(path)
+}
+
+/// Construct the common unit-test Genesis through the same fresh-P3 public
+/// authorities used by the release path.  The file with this name predates
+/// P3 and remains only as a non-production structural seed while historical
+/// tests are being retired; tests must never deserialize its P2.2 binding.
+///
+/// This deliberately uses no private material and does not relax a single
+/// validation rule: it installs a canonical P3 manifest, the exact five
+/// public validator activation, and governed ETDAG parameter/fee binding
+/// before invoking the ordinary Genesis integrity recomputation.
+#[cfg(test)]
+fn fresh_posy_v3_test_fixture() -> Result<Value, String> {
+    use crate::consensus::simplified_posy::GenesisBoundSimplifiedActivation;
+    use crate::consensus_parameters::{
+        load_finalized_consensus_parameters_from_bytes, FinalizedConsensusParameterManifest,
+    };
+    use crate::etdag_governance::{
+        EtdagFeeScheduleArtifact, EtdagFeeScheduleManifest, EtdagGovernedGenesisBinding,
+        EtdagParameterArtifact, EtdagParameterManifest,
+        ETDAG_GOVERNED_GENESIS_BINDING_SCHEMA_VERSION, ETDAG_GOVERNED_GENESIS_BINDING_STATUS,
+    };
+
+    let mut value: Value = serde_json::from_str(include_str!(
+        "../config/genesis.testnet-v3.test-fixture.json"
+    ))
+    .map_err(|error| format!("parse common Testnet-v3 test fixture seed: {error}"))?;
+    let manifest: FinalizedConsensusParameterManifest = serde_json::from_slice(include_bytes!(
+        "../../launch/posy-v3-etdag-governance-inputs/posy-simplified-parameter-manifest.for-release.json"
+    ))
+    .map_err(|error| format!("parse fresh P3 test manifest: {error}"))?;
+    let canonical_manifest = manifest.canonical_bytes()?;
+    let parameters = load_finalized_consensus_parameters_from_bytes(&canonical_manifest)?;
+    let activation: GenesisBoundSimplifiedActivation = serde_json::from_slice(include_bytes!(
+        "../../launch/posy-v3-genesis-inputs/five-validator-genesis-activation.json"
+    ))
+    .map_err(|error| format!("parse fresh P3 test activation: {error}"))?;
+    let parameter_manifest: EtdagParameterManifest = serde_json::from_slice(include_bytes!(
+        "../../launch/posy-v3-etdag-governance-inputs/etdag-parameter-manifest.input.json"
+    ))
+    .map_err(|error| format!("parse governed ETDAG parameter test input: {error}"))?;
+    let fee_schedule_manifest: EtdagFeeScheduleManifest = serde_json::from_slice(include_bytes!(
+        "../../launch/posy-v3-etdag-governance-inputs/etdag-fee-schedule-manifest.input.json"
+    ))
+    .map_err(|error| format!("parse governed ETDAG fee test input: {error}"))?;
+    let etdag_binding = EtdagGovernedGenesisBinding {
+        schema_version: ETDAG_GOVERNED_GENESIS_BINDING_SCHEMA_VERSION,
+        status: ETDAG_GOVERNED_GENESIS_BINDING_STATUS.to_string(),
+        parameter_artifact: EtdagParameterArtifact::from_manifest(parameter_manifest)?,
+        fee_schedule_artifact: EtdagFeeScheduleArtifact::from_manifest(fee_schedule_manifest)?,
+    };
+    etdag_binding.validate()?;
+
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| "common Testnet-v3 test fixture seed is not an object".to_string())?;
+    object.remove("genesis_deployment");
+    object.remove("contract_address_migration");
+    object.remove("etdag_membership_anchor");
+    value["env"] = Value::String("test-fixture".to_string());
+    value["network"]["chain_incarnation"] =
+        json!(crate::posy_simplified_parameters::POSY_SIMPLIFIED_CHAIN_INCARNATION);
+    value["network"]["network_id"] = Value::String("testnet".to_string());
+    value["network"]["network_slug"] = Value::String("testnet".to_string());
+    value["network"]["release_id"] =
+        Value::String(CONSENSUS_PARAMETER_MANIFEST_RELEASE_ID.to_string());
+    value["network"]["consensus_version"] = Value::String(
+        crate::consensus::simplified_posy::POSY_SIMPLIFIED_PROTOCOL_VERSION.to_string(),
+    );
+    value["header"]["consensus_fields"]["engine_id"] = Value::String(
+        crate::consensus::simplified_posy::POSY_SIMPLIFIED_PROTOCOL_VERSION.to_string(),
+    );
+
+    let decision_sha256 = hex::encode(sha2::Sha256::digest(&canonical_manifest));
+    bind_testnet_v3_genesis_simplified_posy_authorities(
+        &mut value,
+        &parameters,
+        &decision_sha256,
+        &activation,
+        &etdag_binding,
+    )?;
+    value["test_fixture"]["fixture_consensus_profile"] = Value::String(
+        crate::consensus::simplified_posy::POSY_SIMPLIFIED_PROTOCOL_VERSION.to_string(),
+    );
+    Ok(value)
 }
 
 #[cfg(not(test))]
@@ -2450,43 +2552,27 @@ mod tests {
     }
 
     #[test]
-    fn production_source_and_explicit_test_fixture_share_the_exact_finalized_manifest_and_bind_the_applied_genesis(
-    ) {
+    fn explicit_test_fixture_loads_the_complete_fresh_p3_authority_binding() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let source_path = root.join("genesis.testnet-v3.identity-assigned.json");
         let fixture_path = root.join("runtime/config/genesis.testnet-v3.test-fixture.json");
-        let source = load_genesis_from_path(&source_path).unwrap();
-        let fixture = load_genesis_from_path(&fixture_path).unwrap();
-        let source_parameters = source.consensus_parameters().unwrap();
+        let fixture = load_genesis_from_path_for_test(fixture_path).unwrap();
         let fixture_parameters = fixture.consensus_parameters().unwrap();
-        source_parameters.require_genesis_binding().unwrap();
         fixture_parameters.require_genesis_binding().unwrap();
-        assert_eq!(source_parameters.root, fixture_parameters.root);
-        assert_eq!(source_parameters.manifest, fixture_parameters.manifest);
-        assert_eq!(
-            source_parameters.canonical_bytes,
-            fixture_parameters.canonical_bytes
-        );
-
-        let source_bytes = fs::read(source_path).unwrap();
-        let source_json: Value = serde_json::from_slice(&source_bytes).unwrap();
-        let fixture_json: Value = serde_json::from_slice(&fs::read(fixture_path).unwrap()).unwrap();
-        assert_eq!(
-            fixture_json["test_fixture"]["applied_canonical_genesis_hash"],
-            source_json["integrity"]["genesis_hash"]
-        );
-        assert_eq!(
-            fixture_json["test_fixture"]["applied_canonical_genesis_sha256"],
-            hex::encode(Sha256::digest(&source_bytes))
-        );
-        assert_eq!(
-            fixture_json["test_fixture"]["applied_canonical_genesis_source"],
-            "genesis.testnet-v3.identity-assigned.json"
-        );
-        assert_ne!(
-            source_json["integrity"]["genesis_hash"],
-            fixture_json["integrity"]["genesis_hash"],
-            "the explicit test fixture keeps its independently derived pre-deployment integrity hash"
+        let manifest = fixture_parameters
+            .require_simplified_posy_manifest()
+            .unwrap();
+        assert_eq!(fixture.consensus_version(), "posy/3.0");
+        assert_eq!(fixture.chain_incarnation(), 5);
+        assert_eq!(fixture.consensus_state_schema_version(), 5);
+        assert_eq!(manifest.active_validator_count, 5);
+        assert_eq!(manifest.required_distinct_signers, 4);
+        assert!(load_genesis_bound_etdag_governance(fixture.value()).is_ok());
+        assert!(
+            crate::consensus::simplified_posy::load_genesis_bound_simplified_activation(
+                fixture.value()
+            )
+            .unwrap()
+            .is_some()
         );
     }
 }
