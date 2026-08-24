@@ -2343,7 +2343,7 @@ mod tests {
             Some(5)
         );
         assert_eq!(
-            candidate["consensus"]["min_quorum_threshold"].as_u64(),
+            candidate["consensus"]["minimum_distinct_signers"].as_u64(),
             Some(4)
         );
         let validators = candidate["validators"]
