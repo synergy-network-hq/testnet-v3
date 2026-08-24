@@ -5,9 +5,10 @@
 
 use super::{
     compute_simplified_protected_execution_root, simplified_fee_market_header_fields,
-    validate_simplified_fee_market_header_against_parent, FinalizedBlockRecord,
-    SimplifiedEpochContext, SimplifiedMaterialAdapter, SimplifiedParentFeeMarketState,
-    SimplifiedProposal, SimplifiedProposalDirective, VerifiedSimplifiedProposalMaterial,
+    validate_simplified_fee_market_header_against_parent, CertifiedCandidateSubject,
+    FinalizedBlockRecord, SimplifiedEpochContext, SimplifiedMaterialAdapter,
+    SimplifiedParentFeeMarketState, SimplifiedProposal, SimplifiedProposalDirective,
+    SimplifiedQuorumCertificate, VerifiedSimplifiedProposalMaterial,
     POSY_SIMPLIFIED_PROTOCOL_VERSION,
 };
 use crate::consensus_parameters::ConsensusParameterRoot;
@@ -116,6 +117,42 @@ impl SimplifiedCoreMaterialAdapter {
             configuration,
             certified_parent_fee_markets: std::collections::BTreeMap::new(),
         })
+    }
+
+    /// Restores the fee authority for already verified, durable certified
+    /// material after a process restart. The historical core adapter keeps
+    /// this cache only to derive the next header; it must never treat an
+    /// unbound file as authority.
+    pub fn restore_certified_parent_fee_authority(
+        &mut self,
+        certificate: &SimplifiedQuorumCertificate,
+        material: &VerifiedSimplifiedProposalMaterial,
+    ) -> Result<(), String> {
+        material.validate(self.epoch_context.root()?)?;
+        let candidate = CertifiedCandidateSubject::new(
+            certificate.context.clone(),
+            certificate.block_id.clone(),
+            certificate.parent_block_id.clone(),
+            certificate.parent.clone(),
+            certificate.protected_execution_root,
+        )?;
+        let candidate_id = candidate.id()?;
+        if certificate.id()? != candidate_id
+            || material.stable_candidate_id != candidate_id
+            || material.candidate_subject != candidate
+            || material.canonical_block.candidate_id()? != certificate.block_id
+        {
+            return Err(
+                "durable core material does not bind its certified parent fee authority"
+                    .to_string(),
+            );
+        }
+        validate_simplified_fee_market_header(&material.canonical_block.header)?;
+        self.certified_parent_fee_markets.insert(
+            candidate_id,
+            SimplifiedParentFeeMarketState::from_verified_header(&material.canonical_block.header)?,
+        );
+        Ok(())
     }
 
     fn parent_fee_market(
