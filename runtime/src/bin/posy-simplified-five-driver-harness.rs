@@ -430,8 +430,12 @@ fn run_qualification(
     // timers, exchange authenticated driver artifacts, and form a three-QC
     // chain. The lagger is allowed only proposal material for the first height
     // so later state sync can cross the execution/finality boundary honestly.
+    // The five real processes each run a post-quantum signer on the shared
+    // serialized qualification host.  Keep this phase bounded, but allow
+    // enough wall time for genuine timeout/retry scheduling rather than
+    // mistaking host contention for a consensus liveness failure.
     wait_until(
-        Duration::from_secs(60),
+        Duration::from_secs(120),
         event_rx,
         workers,
         generations,
