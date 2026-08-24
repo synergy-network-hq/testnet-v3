@@ -646,6 +646,10 @@ pub fn verify_chain1266_desired_state(
         }
         p1_signature_bytes.expect("P1 signature checked above")
     };
+    // Test builds exercise the verification path above but deliberately do
+    // not install the process-global desired-state identity below.
+    #[cfg(test)]
+    let _ = &authorization_bytes;
     if genesis.chain_id() != manifest.chain.chain_id
         || genesis.chain_incarnation() != manifest.chain.incarnation
         || genesis.consensus_state_schema_version() != manifest.state.consensus_schema_version

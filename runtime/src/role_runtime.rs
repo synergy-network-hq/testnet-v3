@@ -3753,10 +3753,7 @@ fn resolve_finalized_consensus_profile() -> Result<ConsensusProfileAtHeight, Str
         let ConsensusProfileAtHeight::PosySimplifiedV3 {
             epoch_context: next_context,
             validator_set: next_set,
-        } = next
-        else {
-            return Err("verified v3 transition selected a non-v3 profile".to_string());
-        };
+        } = next;
         epoch_context = next_context;
         validator_set = next_set;
     }
@@ -5793,7 +5790,7 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                     process::exit(1);
                 });
             }
-            let mut consensus_worker = match initial_consensus_startup {
+            let consensus_worker = match initial_consensus_startup {
                 Ok(FinalizedConsensusDriverStartup::Disabled) => {
                     info!(
                         "main",
