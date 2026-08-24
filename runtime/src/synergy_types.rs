@@ -18,6 +18,8 @@ pub const SYNERGY_TESTNET_V3_LEGACY_NETWORK_ID: &str = "synergy-testnet-v3";
 /// Compatibility spelling retained for existing fresh-P3 loaders.
 pub const TESTNET_V3_CANONICAL_NETWORK_ID: &str = SYNERGY_TESTNET_V3_NETWORK_ID;
 pub const TESTNET_V3_CHAIN_INCARNATION: u64 = 4;
+/// Fresh block-zero PoSy P3 must not share the P1 consensus-signing domain.
+pub const TESTNET_V3_FRESH_P3_CHAIN_INCARNATION: u64 = 5;
 pub const TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION: u32 = 4;
 /// The sole active Testnet-v3 consensus wire/version identifier.
 pub const POSY_PROTOCOL_VERSION: &str = "posy/3.0";
@@ -1076,7 +1078,9 @@ pub struct ConsensusDomain {
 impl ConsensusDomain {
     pub fn validate(&self) -> Result<(), String> {
         self.chain_id.require_testnet_v3()?;
-        if self.chain_incarnation != TESTNET_V3_CHAIN_INCARNATION || self.genesis_hash.is_zero() {
+        if self.chain_incarnation != TESTNET_V3_FRESH_P3_CHAIN_INCARNATION
+            || self.genesis_hash.is_zero()
+        {
             return Err("wrong or incomplete Chain 1266 consensus domain".to_string());
         }
         Ok(())
@@ -2226,6 +2230,20 @@ mod tests {
             algorithm: "fndsa".to_string(),
             signature_bytes: vec![1, 2, 3],
         }
+    }
+
+    #[test]
+    fn consensus_domain_accepts_only_the_fresh_p3_incarnation() {
+        let fresh = ConsensusDomain {
+            chain_id: ChainId::synergy_testnet_v3(),
+            chain_incarnation: TESTNET_V3_FRESH_P3_CHAIN_INCARNATION,
+            genesis_hash: root("fresh-p3-genesis"),
+        };
+        assert!(fresh.validate().is_ok());
+
+        let mut retired = fresh;
+        retired.chain_incarnation = TESTNET_V3_CHAIN_INCARNATION;
+        assert!(retired.validate().is_err());
     }
 
     #[test]
