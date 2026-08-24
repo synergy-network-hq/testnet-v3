@@ -339,9 +339,7 @@ impl DurableSimplifiedProtectedMaterialAuthority {
             &self.configuration.validator_set,
             &self.configuration.cluster_map,
         )?;
-        let parent_fee_market = self.parent_fee_market_state(parent)?;
         let durable_parent = durable_finalized.finality_parent.clone();
-        let mut replay_parent_fee_market = self.parent_fee_market_state(&durable_parent)?;
         if parent.height().0 < durable_parent.height().0 {
             return Err("protected material parent precedes durable finality".to_string());
         }
@@ -353,6 +351,11 @@ impl DurableSimplifiedProtectedMaterialAuthority {
         if distance > MAX_SIMPLIFIED_PROTECTED_UNFINALIZED_ANCESTORS as u64 {
             return Err("protected material certified tail exceeds its replay bound".to_string());
         }
+        // Refuse an unbounded parent before looking up its material or fee
+        // authority. A remote parent reference must not induce arbitrary
+        // durable-store reads beyond the certified replay window.
+        let parent_fee_market = self.parent_fee_market_state(parent)?;
+        let mut replay_parent_fee_market = self.parent_fee_market_state(&durable_parent)?;
 
         let mut cursor = parent.clone();
         let mut reverse_tail = Vec::new();
