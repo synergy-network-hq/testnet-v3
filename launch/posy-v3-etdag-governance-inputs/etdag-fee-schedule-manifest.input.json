@@ -7,18 +7,18 @@
   "etdag_parameter_root_sha3_512": "732e970816589c4eabc7a9c71facb6d73b4805e599c7fccee081ce2d75a7a5ff9ba8f46c7f04dc6ff42ffdb9468e7f18b554ed233cdb8555d5207894fba3dd25",
   "fee_schedule": {
     "entries": [
-      {"tx_type": "native_snrg_send", "amount_fee_bps": 2, "min_amount_fee_nwei": 0, "max_amount_fee_nwei": 340282366920938463463374607431768211455, "valuation_required": false, "storage_fee_enabled": false},
-      {"tx_type": "token_send", "amount_fee_bps": 3, "min_amount_fee_nwei": 0, "max_amount_fee_nwei": 340282366920938463463374607431768211455, "valuation_required": true, "storage_fee_enabled": false},
-      {"tx_type": "swap", "amount_fee_bps": 10, "min_amount_fee_nwei": 0, "max_amount_fee_nwei": 340282366920938463463374607431768211455, "valuation_required": true, "storage_fee_enabled": false},
-      {"tx_type": "burn", "amount_fee_bps": 1, "min_amount_fee_nwei": 0, "max_amount_fee_nwei": 340282366920938463463374607431768211455, "valuation_required": false, "storage_fee_enabled": false},
-      {"tx_type": "mint", "amount_fee_bps": 5, "min_amount_fee_nwei": 0, "max_amount_fee_nwei": 340282366920938463463374607431768211455, "valuation_required": true, "storage_fee_enabled": false},
-      {"tx_type": "stake", "amount_fee_bps": 0, "min_amount_fee_nwei": 0, "max_amount_fee_nwei": 0, "valuation_required": false, "storage_fee_enabled": false},
-      {"tx_type": "unstake", "amount_fee_bps": 0, "min_amount_fee_nwei": 0, "max_amount_fee_nwei": 0, "valuation_required": false, "storage_fee_enabled": false},
-      {"tx_type": "contract_call", "amount_fee_bps": 2, "min_amount_fee_nwei": 0, "max_amount_fee_nwei": 340282366920938463463374607431768211455, "valuation_required": false, "storage_fee_enabled": false},
-      {"tx_type": "contract_deploy", "amount_fee_bps": 0, "min_amount_fee_nwei": 0, "max_amount_fee_nwei": 0, "valuation_required": false, "storage_fee_enabled": true},
-      {"tx_type": "ai_job_payment", "amount_fee_bps": 5, "min_amount_fee_nwei": 0, "max_amount_fee_nwei": 340282366920938463463374607431768211455, "valuation_required": true, "storage_fee_enabled": false},
-      {"tx_type": "sxcp_cross_chain_value_action", "amount_fee_bps": 5, "min_amount_fee_nwei": 0, "max_amount_fee_nwei": 340282366920938463463374607431768211455, "valuation_required": true, "storage_fee_enabled": false},
-      {"tx_type": "unknown", "amount_fee_bps": 0, "min_amount_fee_nwei": 0, "max_amount_fee_nwei": 0, "valuation_required": false, "storage_fee_enabled": false}
+      {"tx_type": "native_snrg_send", "amount_fee_bps": 2, "min_amount_fee_nwei": "0", "max_amount_fee_nwei": "340282366920938463463374607431768211455", "valuation_required": false, "storage_fee_enabled": false},
+      {"tx_type": "token_send", "amount_fee_bps": 3, "min_amount_fee_nwei": "0", "max_amount_fee_nwei": "340282366920938463463374607431768211455", "valuation_required": true, "storage_fee_enabled": false},
+      {"tx_type": "swap", "amount_fee_bps": 10, "min_amount_fee_nwei": "0", "max_amount_fee_nwei": "340282366920938463463374607431768211455", "valuation_required": true, "storage_fee_enabled": false},
+      {"tx_type": "burn", "amount_fee_bps": 1, "min_amount_fee_nwei": "0", "max_amount_fee_nwei": "340282366920938463463374607431768211455", "valuation_required": false, "storage_fee_enabled": false},
+      {"tx_type": "mint", "amount_fee_bps": 5, "min_amount_fee_nwei": "0", "max_amount_fee_nwei": "340282366920938463463374607431768211455", "valuation_required": true, "storage_fee_enabled": false},
+      {"tx_type": "stake", "amount_fee_bps": 0, "min_amount_fee_nwei": "0", "max_amount_fee_nwei": "0", "valuation_required": false, "storage_fee_enabled": false},
+      {"tx_type": "unstake", "amount_fee_bps": 0, "min_amount_fee_nwei": "0", "max_amount_fee_nwei": "0", "valuation_required": false, "storage_fee_enabled": false},
+      {"tx_type": "contract_call", "amount_fee_bps": 2, "min_amount_fee_nwei": "0", "max_amount_fee_nwei": "340282366920938463463374607431768211455", "valuation_required": false, "storage_fee_enabled": false},
+      {"tx_type": "contract_deploy", "amount_fee_bps": 0, "min_amount_fee_nwei": "0", "max_amount_fee_nwei": "0", "valuation_required": false, "storage_fee_enabled": true},
+      {"tx_type": "ai_job_payment", "amount_fee_bps": 5, "min_amount_fee_nwei": "0", "max_amount_fee_nwei": "340282366920938463463374607431768211455", "valuation_required": true, "storage_fee_enabled": false},
+      {"tx_type": "sxcp_cross_chain_value_action", "amount_fee_bps": 5, "min_amount_fee_nwei": "0", "max_amount_fee_nwei": "340282366920938463463374607431768211455", "valuation_required": true, "storage_fee_enabled": false},
+      {"tx_type": "unknown", "amount_fee_bps": 0, "min_amount_fee_nwei": "0", "max_amount_fee_nwei": "0", "valuation_required": false, "storage_fee_enabled": false}
     ]
   },
   "fee_market_params": {
