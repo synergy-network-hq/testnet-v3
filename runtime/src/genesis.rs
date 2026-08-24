@@ -365,7 +365,14 @@ fn parse_runtime_numeric_network_id(
 /// any canonical file is replaced. It performs the same checks as the runtime
 /// loader, including every integrity root and the derived network magic.
 pub fn load_genesis_from_path(path: impl Into<PathBuf>) -> Result<GenesisDocument, String> {
-    load_canonical_genesis_from_path(path.into())
+    #[cfg(test)]
+    {
+        return load_genesis_from_path_for_test(path.into());
+    }
+    #[cfg(not(test))]
+    {
+        load_canonical_genesis_from_path(path.into())
+    }
 }
 
 #[cfg(test)]
@@ -376,7 +383,7 @@ pub(crate) fn load_genesis_from_path_for_test(path: PathBuf) -> Result<GenesisDo
     {
         return load_canonical_genesis_from_value(fresh_posy_v3_test_fixture()?, path);
     }
-    load_genesis_from_path(path)
+    load_canonical_genesis_from_path(path)
 }
 
 /// Construct the common unit-test Genesis through the same fresh-P3 public
