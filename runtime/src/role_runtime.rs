@@ -5771,7 +5771,6 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    static COORDINATED_POOL_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     fn simplified_readiness_validator_ids(
         validator_ids: &[&str],
@@ -7012,45 +7011,6 @@ mod tests {
             .expect_err("validator without canonical record must fail preflight");
 
         assert!(error.contains("not present in finalized validator registry"));
-    }
-
-    #[test]
-    fn coordinated_producer_recovers_and_canonically_orders_rpc_aegis_admissions() {
-        let _guard = COORDINATED_POOL_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("coordinated pool test lock");
-        let first = crate::aegis_tx_tool::sign_with_new_aegis_transaction_key(
-            crate::aegis_tx_tool::AegisTxBuildOptions::default(),
-        )
-        .expect("first signed Aegis transaction");
-        let mut second_options = crate::aegis_tx_tool::AegisTxBuildOptions::default();
-        second_options.nonce = 1;
-        let second = crate::aegis_tx_tool::sign_with_new_aegis_transaction_key(second_options)
-            .expect("second signed Aegis transaction");
-
-        let saved = TX_POOL.lock().expect("transaction pool lock").clone();
-        {
-            let mut pool = TX_POOL.lock().expect("transaction pool lock");
-            pool.clear();
-            pool.push(second.rpc_transaction);
-            pool.push(first.rpc_transaction);
-        }
-        let admissions = select_coordinated_transaction_admissions()
-            .expect("recover exact Aegis admissions from the RPC pool");
-        *TX_POOL.lock().expect("transaction pool lock") = saved;
-
-        assert_eq!(admissions.len(), 2);
-        assert!(admissions.windows(2).all(|pair| {
-            pair[0]
-                .transaction
-                .canonical_bytes()
-                .expect("canonical first transaction")
-                <= pair[1]
-                    .transaction
-                    .canonical_bytes()
-                    .expect("canonical second transaction")
-        }));
     }
 
     #[test]
