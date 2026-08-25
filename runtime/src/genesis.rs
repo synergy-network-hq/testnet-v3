@@ -1756,6 +1756,19 @@ fn bind_testnet_v3_genesis_consensus_parameters_inner(
             Value::String("candidate_parameter_bound_pending_deployment".to_string());
         value["testnet_v3_initialization"]["finalization_status"] =
             Value::String("consensus_parameters_bound_pending_contract_deployment".to_string());
+    } else if etdag_binding.is_some() && simplified_activation.is_some() {
+        // The candidate is now bound to executed deployment evidence, the
+        // finalized simplified-PoSy parameters, and governed ETDAG policy.
+        // Advance before its Genesis hash is used to derive the post-Genesis
+        // membership anchor; otherwise an anchor-stage status update would
+        // invalidate the already-bound Genesis integrity roots.
+        value["network"]["status"] =
+            Value::String("contract_deployment_executed_pending_release_approval".to_string());
+        value["integrity"]["status"] =
+            Value::String("candidate_deployment_bound_pending_release_approval".to_string());
+        value["testnet_v3_initialization"]["finalization_status"] = Value::String(
+            "production_contract_deployment_executed_and_bound_pending_release_approval".to_string(),
+        );
     }
     recompute_testnet_v3_candidate_integrity(value)
 }
@@ -1895,18 +1908,6 @@ pub fn bind_testnet_v3_genesis_etdag_membership_anchor(
     }
     value["etdag_membership_anchor"] = serde_json::to_value(anchor)
         .map_err(|error| format!("serialize ETDAG membership anchor: {error}"))?;
-    // Attaching the governed membership anchor completes every public binding
-    // required before V4 approval.  Advance the candidate only here, after
-    // the anchor's Genesis/execution/validator-set checks above have passed,
-    // so the approval request builder can distinguish it from the pre-anchor
-    // execution stage.
-    value["network"]["status"] =
-        Value::String("contract_deployment_executed_pending_release_approval".to_string());
-    value["integrity"]["status"] =
-        Value::String("candidate_deployment_bound_pending_release_approval".to_string());
-    value["testnet_v3_initialization"]["finalization_status"] = Value::String(
-        "production_contract_deployment_executed_and_bound_pending_release_approval".to_string(),
-    );
     Ok(())
 }
 
