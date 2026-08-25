@@ -35,8 +35,8 @@ CONTRACT_ORDER = [
     "Treasury",
     "Slashing",
     "RewardDistributor",
-    "TeamVesting",
     "SynergyOracle",
+    "TeamVesting",
 ]
 CONTRACT_KEYS = {
     "Identity": "identity",
