@@ -9,7 +9,7 @@ target_aivm_version = "0.1"
 
 [network]
 chain_id = 1266
-network_id = "synergy-testnet-v3"
+network_id = "synergy-testnet"
 address_hrp = "tsynq"
 
 [security]

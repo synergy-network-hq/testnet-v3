@@ -2426,6 +2426,87 @@ mod tests {
     }
 
     #[test]
+    fn zero_validator_maximum_is_unbounded_and_allows_a_post_genesis_admission() {
+        let plan = staged_plan();
+        let authorities = test_authorities();
+        let mut parameters = test_parameters();
+        // ABI zero is the canonical representation of the public Genesis
+        // policy `max_validator_count: null`: a dynamic, uncapped set.
+        parameters.validator_max_count = "0".to_string();
+
+        let mut state = ExecutionState::new();
+        let outcome = execute_genesis_deployment(&mut state, &plan, &authorities, &parameters)
+            .expect("unbounded registry accepts the five canonical Genesis validators");
+        let registry_address = outcome.addresses[&GenesisContract::ValidatorRegistry].clone();
+        assert_eq!(
+            read_contract_uint(&state, &registry_address, "maxValidatorCount").unwrap(),
+            0,
+            "Genesis preserves the zero/unbounded ABI sentinel"
+        );
+        assert_eq!(
+            read_contract_uint(&state, &registry_address, "validatorCount").unwrap(),
+            5,
+            "the canonical Genesis contains exactly validators 02 through 06"
+        );
+
+        let derived = derive_genesis_addresses(
+            &plan,
+            &authorities.genesis_deployer.public_key,
+            &authorities,
+            &parameters,
+        )
+        .expect("derive Genesis contract addresses");
+        let registry_synq: SynQAddress = serde_json::from_value(serde_json::Value::String(
+            derived
+                .iter()
+                .find(|entry| entry.contract == "ValidatorRegistry")
+                .expect("registry address")
+                .synq_contract_address
+                .clone(),
+        ))
+        .expect("decode registry SynQ address");
+        let later = test_validator(5);
+        call_one(
+            &mut state,
+            &staged_artifact(GenesisContract::ValidatorRegistry),
+            &registry_address,
+            registry_synq,
+            "registerValidator",
+            vec![
+                serde_json::Value::String(later.id_hash),
+                serde_json::Value::String(later.operator_address),
+                serde_json::Value::String(later.reward_address),
+                serde_json::Value::String(later.voting_power),
+                serde_json::Value::String(later.self_stake_nwei),
+                serde_json::Value::String(later.metadata_hash),
+                serde_json::Value::String(later.key_bundle_hash),
+            ],
+            &authorities.validator_registry_authority_key,
+            50,
+        )
+        .expect("a sixth validator is admitted under the unbounded policy");
+        assert_eq!(
+            read_contract_uint(&state, &registry_address, "validatorCount").unwrap(),
+            6
+        );
+    }
+
+    #[test]
+    fn nonzero_validator_maximum_remains_a_hard_membership_limit() {
+        let plan = staged_plan();
+        let authorities = test_authorities();
+        let mut parameters = test_parameters();
+        parameters.validator_max_count = "5".to_string();
+        parameters.validators.push(test_validator(5));
+
+        let mut state = ExecutionState::new();
+        let error = execute_genesis_deployment(&mut state, &plan, &authorities, &parameters)
+            .expect_err("a sixth validator must exceed a nonzero maximum");
+        assert!(error.contains("Validator limit reached"), "unexpected error: {error}");
+        assert!(state.synq_contracts.is_empty(), "failed Genesis remains atomic");
+    }
+
+    #[test]
     fn genesis_rejects_conflicting_preexisting_identity_binding_without_committing() {
         let plan = staged_plan();
         let authorities = test_authorities();
