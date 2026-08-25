@@ -989,10 +989,10 @@ fn run() -> Result<(), String> {
     };
     let emergency_slashing_authority = source_account("SYS-03")?;
     let reward_distributor_authority = source_genesis_document["contracts"]["reward_distributor"]
-        ["init_params"]["pool_address"]
+        ["init_params"]["distributor_authority"]
         .as_str()
         .map(ToOwned::to_owned)
-        .ok_or_else(|| "fresh reward-distributor pool address is missing".to_string())?;
+        .ok_or_else(|| "fresh reward-distributor authority is missing".to_string())?;
     let identity_fee_collector = source_account("SYS-01")?;
     let team_vesting_admin = source_genesis_document["contracts"]["team_vesting"]["init_params"]
         ["admin_authority"]
