@@ -237,9 +237,13 @@ def replace_validators(candidate: dict[str, Any], validator: dict[str, Any]) -> 
         fail("preconfigured validator set must contain exactly 21 records")
     candidate["validators"] = copy.deepcopy(validators)
     candidate["preconfigured_validators"] = copy.deepcopy(preconfigured)
-    candidate["contracts"]["validator_registry"]["init_params"] = copy.deepcopy(
-        fields["validator_registry_init_params"]
+    registry_init_params = copy.deepcopy(
+        candidate["contracts"]["validator_registry"]["init_params"]
     )
+    registry_init_params.update(
+        copy.deepcopy(fields["validator_registry_init_params"])
+    )
+    candidate["contracts"]["validator_registry"]["init_params"] = registry_init_params
     candidate["validator_metadata"] = copy.deepcopy(fields["validator_metadata"])
     candidate["node_identities"] = []
 
