@@ -22,9 +22,10 @@ use crate::consensus::legacy_canonical_lock::{
     write_legacy_canonical_locks,
 };
 use crate::consensus::simplified_posy::{
-    dispatch_simplified_target_admission_package, dispatch_simplified_target_admission_vote,
-    load_genesis_bound_simplified_activation, AuthenticatedSimplifiedConsensusPeer,
-    GenesisBoundSimplifiedActivation, SimplifiedConsensusMessage, POSY_SIMPLIFIED_PROTOCOL_VERSION,
+    dispatch_simplified_empty_etdag_message, dispatch_simplified_target_admission_package,
+    dispatch_simplified_target_admission_vote, load_genesis_bound_simplified_activation,
+    AuthenticatedSimplifiedConsensusPeer, GenesisBoundSimplifiedActivation,
+    SimplifiedConsensusMessage, SimplifiedEmptyEtdagMessage, POSY_SIMPLIFIED_PROTOCOL_VERSION,
 };
 use crate::consensus::testnet_v3_bootstrap::{
     authenticate_active_typed_consensus_peer, load_testnet_v3_genesis_bootstrap,
@@ -47,13 +48,16 @@ use crate::genesis::canonical_genesis;
 use crate::p2p::messages::{
     validate_coordinated_consensus_message_size,
     validate_coordinated_finality_observer_message_size,
-    validate_simplified_consensus_message_size, validate_simplified_target_admission_message_size,
+    validate_simplified_consensus_message_size, validate_simplified_empty_etdag_message_size,
+    validate_simplified_target_admission_message_size,
     validate_typed_finality_observer_message_size, CoordinatedConsensusMessage,
     CoordinatedFinalityObserverMessage, NetworkMessage, SimplifiedTargetAdmissionMessage,
     TypedConsensusMessage, TypedFinalityObserverMessage,
     MAX_SIMPLIFIED_CONSENSUS_CERTIFICATE_FRAME_BYTES, MAX_SIMPLIFIED_CONSENSUS_CONTROL_FRAME_BYTES,
     MAX_SIMPLIFIED_CONSENSUS_PROPOSAL_FRAME_BYTES, MAX_SIMPLIFIED_CONSENSUS_STATE_SYNC_FRAME_BYTES,
-    MAX_SIMPLIFIED_CONSENSUS_VOTE_FRAME_BYTES, MAX_SIMPLIFIED_TARGET_ADMISSION_PACKAGE_FRAME_BYTES,
+    MAX_SIMPLIFIED_CONSENSUS_VOTE_FRAME_BYTES, MAX_SIMPLIFIED_ETDAG_ASSEMBLY_CANDIDATE_FRAME_BYTES,
+    MAX_SIMPLIFIED_ETDAG_ASSEMBLY_CONTROL_FRAME_BYTES,
+    MAX_SIMPLIFIED_TARGET_ADMISSION_PACKAGE_FRAME_BYTES,
     MAX_SIMPLIFIED_TARGET_ADMISSION_VOTE_FRAME_BYTES,
 };
 #[cfg(not(test))]
@@ -3496,6 +3500,14 @@ fn dispatch_simplified_target_admission_ingress(
     Ok(())
 }
 
+fn dispatch_simplified_empty_etdag_ingress(
+    authenticated_peer: Option<EtdagAuthenticatedIngressPeer>,
+    message: SimplifiedEmptyEtdagMessage,
+) -> Result<(), String> {
+    validate_simplified_empty_etdag_message_size(&message)?;
+    dispatch_simplified_empty_etdag_message(authenticated_peer, message)
+}
+
 fn current_peer_session_id(peer_address: &str) -> Option<u64> {
     PEER_SESSION_IDS.lock().unwrap().get(peer_address).copied()
 }
@@ -6173,6 +6185,76 @@ impl P2PNetwork {
         Ok(sent)
     }
 
+    /// Broadcasts one bounded empty-ETDAG assembly artifact only to
+    /// authenticated validator sessions in the caller's frozen dynamic epoch.
+    pub fn broadcast_simplified_empty_etdag(
+        &self,
+        message: &SimplifiedEmptyEtdagMessage,
+        frozen_validator_ids: &BTreeSet<ValidatorId>,
+    ) -> Result<usize, String> {
+        if coordinated_consensus_active(&self.config) {
+            return Err(
+                "simplified empty-ETDAG egress is disabled while coordinated_round_robin_v1 is selected"
+                    .to_string(),
+            );
+        }
+        validate_simplified_empty_etdag_message_size(message)?;
+        if frozen_validator_ids.is_empty() {
+            return Err("simplified empty-ETDAG frozen egress set is empty".to_string());
+        }
+        let wire_message = NetworkMessage::SimplifiedEtdagAssembly {
+            message: message.clone(),
+            chain_incarnation: canonical_chain_incarnation(),
+            genesis_hash: canonical_genesis_hash(),
+        };
+        let targets = {
+            let peers = self.connected_peers.lock().unwrap();
+            peers
+                .iter()
+                .filter_map(|(address, peer)| {
+                    if peer.stream.is_none() {
+                        return None;
+                    }
+                    let session_id = current_peer_session_id(address)?;
+                    let identity = etdag_ingress_peer_for_session(address, session_id)?;
+                    frozen_validator_ids
+                        .contains(&identity.validator_id)
+                        .then(|| (address.clone(), session_id))
+                })
+                .collect::<Vec<_>>()
+        };
+        let send_results = run_with_bounded_parallelism(
+            &targets,
+            targets.len(),
+            "simplified empty-ETDAG fanout",
+            |(address, session_id)| {
+                send_peer_message_for_session(
+                    &self.connected_peers,
+                    &self.peer_state_cache,
+                    address,
+                    *session_id,
+                    &wire_message,
+                    Duration::from_millis(CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                    "simplified-empty-etdag",
+                )
+            },
+        );
+        let mut sent = 0usize;
+        for ((address, _), result) in targets.into_iter().zip(send_results) {
+            match result {
+                Ok(true) => sent += 1,
+                Ok(false) => {}
+                Err(error) => warn!(
+                    "p2p",
+                    "Failed to send simplified empty-ETDAG message",
+                    "peer" => address,
+                    "error" => error
+                ),
+            }
+        }
+        Ok(sent)
+    }
+
     /// Sends a simplified-consensus response only to the authenticated session
     /// that requested it. State-sync chunks are request-correlated and must not
     /// be amplified across the full validator ring.
@@ -8558,6 +8640,7 @@ fn bypasses_shared_message_queue(message: &NetworkMessage) -> bool {
             | NetworkMessage::CoordinatedConsensus { .. }
             | NetworkMessage::SimplifiedConsensus { .. }
             | NetworkMessage::SimplifiedTargetAdmission { .. }
+            | NetworkMessage::SimplifiedEtdagAssembly { .. }
             | NetworkMessage::TypedFinalityObserver { .. }
             | NetworkMessage::CoordinatedFinalityObserver { .. }
             | NetworkMessage::EtdagCertifiedInput { .. }
@@ -9030,6 +9113,43 @@ fn dispatch_peer_message(
                 warn!(
                     "p2p",
                     "Rejected simplified target-admission message",
+                    "peer" => peer_address.to_string(),
+                    "error" => error
+                );
+            }
+            Ok(())
+        }
+        NetworkMessage::SimplifiedEtdagAssembly {
+            chain_incarnation,
+            genesis_hash,
+            message,
+        } => {
+            if coordinated_consensus_active(config) {
+                warn!(
+                    "p2p",
+                    "Rejected simplified empty-ETDAG message while coordinated mode is selected",
+                    "peer" => peer_address.to_string()
+                );
+                return Ok(());
+            }
+            if chain_incarnation != canonical_chain_incarnation()
+                || genesis_hash != canonical_genesis_hash()
+            {
+                warn!(
+                    "p2p",
+                    "Rejected simplified empty-ETDAG frame from a different chain incarnation",
+                    "peer" => peer_address.to_string(),
+                    "incarnation" => chain_incarnation
+                );
+                return Ok(());
+            }
+            if let Err(error) = dispatch_simplified_empty_etdag_ingress(
+                etdag_ingress_peer_for_session(peer_address, session_id),
+                message,
+            ) {
+                warn!(
+                    "p2p",
+                    "Rejected simplified empty-ETDAG message",
                     "peer" => peer_address.to_string(),
                     "error" => error
                 );
@@ -10309,6 +10429,42 @@ fn handle_messages(
                             );
                         }
                     }
+                    NetworkMessage::SimplifiedEtdagAssembly {
+                        chain_incarnation,
+                        genesis_hash,
+                        message,
+                    } => {
+                        if coordinated_consensus_active(&config) {
+                            warn!(
+                                "p2p",
+                                "Rejected simplified empty-ETDAG message while coordinated mode is selected",
+                                "peer" => peer_address.clone()
+                            );
+                            continue;
+                        }
+                        if chain_incarnation != canonical_chain_incarnation()
+                            || genesis_hash != canonical_genesis_hash()
+                        {
+                            warn!(
+                                "p2p",
+                                "Rejected old-incarnation simplified empty-ETDAG message",
+                                "peer" => peer_address.clone(),
+                                "incarnation" => chain_incarnation
+                            );
+                            continue;
+                        }
+                        if let Err(error) = dispatch_simplified_empty_etdag_ingress(
+                            etdag_ingress_peer_for_session(&peer_address, session_id),
+                            message,
+                        ) {
+                            warn!(
+                                "p2p",
+                                "Rejected simplified empty-ETDAG message",
+                                "peer" => peer_address.clone(),
+                                "error" => error
+                            );
+                        }
+                    }
                     NetworkMessage::TypedFinalityObserver {
                         chain_incarnation,
                         genesis_hash,
@@ -11019,6 +11175,50 @@ fn validate_simplified_predecode_frame_length(len: usize, prefix: &[u8]) -> io::
                 io::ErrorKind::InvalidData,
                 format!(
                     "simplified target-admission {kind} frame length {frame_len} exceeds limit {maximum}"
+                ),
+            ));
+        }
+        return Ok(());
+    }
+    if outer_kind == b"SimplifiedEtdagAssembly" {
+        consume_json_byte(prefix, &mut cursor, b':', "empty-ETDAG assembly envelope")?;
+        consume_json_byte(prefix, &mut cursor, b'{', "empty-ETDAG assembly body")?;
+        if consume_json_key(prefix, &mut cursor, "empty-ETDAG assembly body field")? != b"message" {
+            return Err(invalid_predecode(
+                "empty-ETDAG assembly message must be the first canonical body field",
+            ));
+        }
+        consume_json_byte(
+            prefix,
+            &mut cursor,
+            b':',
+            "empty-ETDAG assembly message field",
+        )?;
+        consume_json_byte(prefix, &mut cursor, b'{', "empty-ETDAG assembly message")?;
+        let message_kind =
+            consume_json_key(prefix, &mut cursor, "empty-ETDAG assembly message kind")?;
+        let (kind, maximum) = match message_kind {
+            b"Marker" | b"VacVote" | b"DccVote" | b"BvcVote" | b"BocVote" => {
+                ("control", MAX_SIMPLIFIED_ETDAG_ASSEMBLY_CONTROL_FRAME_BYTES)
+            }
+            b"DccCandidate" | b"BvcCandidate" | b"BocCandidate" => (
+                "candidate",
+                MAX_SIMPLIFIED_ETDAG_ASSEMBLY_CANDIDATE_FRAME_BYTES,
+            ),
+            _ => {
+                return Err(invalid_predecode(
+                    "empty-ETDAG assembly frame does not declare a bounded message kind in its predecode prefix",
+                ));
+            }
+        };
+        let frame_len = len
+            .checked_add(4)
+            .ok_or_else(|| invalid_predecode("empty-ETDAG assembly frame length overflow"))?;
+        if frame_len > maximum {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "simplified empty-ETDAG assembly {kind} frame length {frame_len} exceeds limit {maximum}",
                 ),
             ));
         }
@@ -13234,19 +13434,20 @@ mod tests {
         connected_endpoint_matches_configured_address, connected_peer_key_for_address,
         connected_validator_participants, current_bootstrap_refresh_interval, current_timestamp,
         dial_with_timeout, disconnect_peer_after_poisoned_write, disconnect_peer_entry,
-        dispatch_peer_message, ensure_peer_status_allows_chain_data, handle_get_blocks_message,
-        handle_status_message, handshake_version_mismatch_reason, hydrate_peer_from_cache,
-        insert_seed_server_target, is_validator_vpn_dial_address,
-        is_validator_vpn_relayer_dial_address, local_consensus_handshake_required,
-        local_consensus_version, local_is_typed_finality_relayer,
-        local_is_typed_finality_service_observer, local_node_runs_validator_consensus,
-        local_node_uses_service_batch_durability, local_peer_identity,
-        merge_peer_state_from_existing, normalize_peer_target, parse_block_sync_busy_retry,
-        parse_bootnode_dial_address, peer_has_identifying_metadata, peer_identity_key,
-        peer_is_authorized_block_sync_requester, peer_is_designated_support_sync_source,
-        peer_is_eligible_block_sync_source, peer_is_eligible_block_sync_source_for_local,
-        peer_is_validator_vpn_relayer, peer_matches_address, peer_readiness_exclusion_reason_at,
-        peer_write_gate, pending_incoming_connections_from_host, preferred_connection_direction,
+        dispatch_peer_message, ensure_peer_status_allows_chain_data,
+        etdag_ingress_peer_for_session, handle_get_blocks_message, handle_status_message,
+        handshake_version_mismatch_reason, hydrate_peer_from_cache, insert_seed_server_target,
+        is_validator_vpn_dial_address, is_validator_vpn_relayer_dial_address,
+        local_consensus_handshake_required, local_consensus_version,
+        local_is_typed_finality_relayer, local_is_typed_finality_service_observer,
+        local_node_runs_validator_consensus, local_node_uses_service_batch_durability,
+        local_peer_identity, merge_peer_state_from_existing, normalize_peer_target,
+        parse_block_sync_busy_retry, parse_bootnode_dial_address, peer_has_identifying_metadata,
+        peer_identity_key, peer_is_authorized_block_sync_requester,
+        peer_is_designated_support_sync_source, peer_is_eligible_block_sync_source,
+        peer_is_eligible_block_sync_source_for_local, peer_is_validator_vpn_relayer,
+        peer_matches_address, peer_readiness_exclusion_reason_at, peer_write_gate,
+        pending_incoming_connections_from_host, preferred_connection_direction,
         preflight_validator_activation_transactions, receive_message,
         recover_peer_validator_address_for_vote_target, register_typed_consensus_peer_session,
         register_validator_consensus_handshake_key, release_block_sync_apply_slot_after_worker,
@@ -13306,6 +13507,8 @@ mod tests {
         MAX_SIMPLIFIED_CONSENSUS_CONTROL_FRAME_BYTES,
         MAX_SIMPLIFIED_CONSENSUS_PROPOSAL_FRAME_BYTES,
         MAX_SIMPLIFIED_CONSENSUS_STATE_SYNC_FRAME_BYTES, MAX_SIMPLIFIED_CONSENSUS_VOTE_FRAME_BYTES,
+        MAX_SIMPLIFIED_ETDAG_ASSEMBLY_CANDIDATE_FRAME_BYTES,
+        MAX_SIMPLIFIED_ETDAG_ASSEMBLY_CONTROL_FRAME_BYTES,
         MAX_SIMPLIFIED_TARGET_ADMISSION_PACKAGE_FRAME_BYTES,
         MAX_SIMPLIFIED_TARGET_ADMISSION_VOTE_FRAME_BYTES,
     };
@@ -13379,6 +13582,71 @@ mod tests {
             package,
         )
         .is_err());
+    }
+
+    #[test]
+    fn empty_etdag_assembly_variants_are_bounded_before_full_payload_allocation() {
+        let cases: &[(&[u8], usize)] = &[
+            (
+                br#"{"SimplifiedEtdagAssembly":{"message":{"Marker":{}}}}"#,
+                MAX_SIMPLIFIED_ETDAG_ASSEMBLY_CONTROL_FRAME_BYTES,
+            ),
+            (
+                br#"{"SimplifiedEtdagAssembly":{"message":{"VacVote":{}}}}"#,
+                MAX_SIMPLIFIED_ETDAG_ASSEMBLY_CONTROL_FRAME_BYTES,
+            ),
+            (
+                br#"{"SimplifiedEtdagAssembly":{"message":{"DccVote":{}}}}"#,
+                MAX_SIMPLIFIED_ETDAG_ASSEMBLY_CONTROL_FRAME_BYTES,
+            ),
+            (
+                br#"{"SimplifiedEtdagAssembly":{"message":{"BvcVote":{}}}}"#,
+                MAX_SIMPLIFIED_ETDAG_ASSEMBLY_CONTROL_FRAME_BYTES,
+            ),
+            (
+                br#"{"SimplifiedEtdagAssembly":{"message":{"BocVote":{}}}}"#,
+                MAX_SIMPLIFIED_ETDAG_ASSEMBLY_CONTROL_FRAME_BYTES,
+            ),
+            (
+                br#"{"SimplifiedEtdagAssembly":{"message":{"DccCandidate":{}}}}"#,
+                MAX_SIMPLIFIED_ETDAG_ASSEMBLY_CANDIDATE_FRAME_BYTES,
+            ),
+            (
+                br#"{"SimplifiedEtdagAssembly":{"message":{"BvcCandidate":{}}}}"#,
+                MAX_SIMPLIFIED_ETDAG_ASSEMBLY_CANDIDATE_FRAME_BYTES,
+            ),
+            (
+                br#"{"SimplifiedEtdagAssembly":{"message":{"BocCandidate":{}}}}"#,
+                MAX_SIMPLIFIED_ETDAG_ASSEMBLY_CANDIDATE_FRAME_BYTES,
+            ),
+        ];
+
+        for &(prefix, maximum) in cases {
+            validate_simplified_predecode_frame_length(maximum - 4, prefix)
+                .expect("empty-ETDAG assembly frame at the exact cap must pass");
+            assert!(validate_simplified_predecode_frame_length(maximum - 3, prefix).is_err());
+        }
+    }
+
+    #[test]
+    fn empty_etdag_assembly_rejects_unknown_inner_variant_before_allocation() {
+        let prefix = br#"{"SimplifiedEtdagAssembly":{"message":{"Unbounded":{}}}}"#;
+
+        let error = validate_simplified_predecode_frame_length(1024, prefix)
+            .expect_err("unknown empty-ETDAG assembly variants must fail closed");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn empty_etdag_assembly_requires_canonical_message_first_encoding() {
+        let prefix =
+            br#"{"SimplifiedEtdagAssembly":{"chain_incarnation":5,"message":{"Marker":{}}}}"#;
+
+        let error = validate_simplified_predecode_frame_length(1024, prefix)
+            .expect_err("assembly envelope must expose its bounded kind before other fields");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
@@ -14382,6 +14650,34 @@ mod tests {
         assert_ne!(replacement_session, first_session);
         assert!(typed_consensus_peer_for_session(&peer_address, first_session).is_none());
         assert!(typed_consensus_peer_for_session(&peer_address, replacement_session).is_none());
+        PEER_SESSION_IDS.lock().unwrap().remove(&peer_address);
+        TYPED_CONSENSUS_PEER_SESSIONS
+            .lock()
+            .unwrap()
+            .retain(|(address, _), _| address != &peer_address);
+    }
+
+    #[test]
+    fn empty_etdag_assembly_identity_is_derived_only_from_live_authenticated_session() {
+        let peer_address = format!("empty-etdag-identity-test-{}", std::process::id());
+        let session_id = begin_peer_session(&peer_address);
+        assert!(etdag_ingress_peer_for_session(&peer_address, session_id).is_none());
+
+        let typed_identity = AuthenticatedTypedConsensusPeer {
+            validator_id: ValidatorId("validator-test".to_string()),
+            validator_uma_id: UmaId("uma-test".to_string()),
+            consensus_key_id: AegisPqKeyId("consensus-key-test".to_string()),
+        };
+        register_typed_consensus_peer_session(&peer_address, session_id, typed_identity.clone())
+            .expect("authenticated live session should accept its validator identity");
+
+        let assembly_identity = etdag_ingress_peer_for_session(&peer_address, session_id)
+            .expect("assembly ingress must derive from the authenticated session");
+        assert_eq!(assembly_identity.validator_id, typed_identity.validator_id);
+
+        let replacement_session = begin_peer_session(&peer_address);
+        assert!(etdag_ingress_peer_for_session(&peer_address, session_id).is_none());
+        assert!(etdag_ingress_peer_for_session(&peer_address, replacement_session).is_none());
         PEER_SESSION_IDS.lock().unwrap().remove(&peer_address);
         TYPED_CONSENSUS_PEER_SESSIONS
             .lock()

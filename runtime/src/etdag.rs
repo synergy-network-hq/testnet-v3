@@ -365,14 +365,10 @@ impl TargetAdmissionContext {
         {
             return Err("unsupported target admission context version".to_string());
         }
-        let minimum_target = self
-            .source_finalized_height
-            .0
-            .checked_add(3)
-            .ok_or_else(|| "target admission look-ahead overflow".to_string())?;
-        if self.target_height.0 < minimum_target {
-            return Err("target admission height must be at least finalized H+3".to_string());
-        }
+        validate_target_admission_height_relation(
+            self.source_finalized_height,
+            self.target_height,
+        )?;
         for (name, root) in [
             (
                 "source_finality_context_root",
@@ -533,14 +529,7 @@ fn validate_target_admission_spec(spec: &TargetAdmissionContextSpec) -> Result<(
     {
         return Err("unsupported target admission context specification".to_string());
     }
-    let minimum_target = spec
-        .source_finalized_height
-        .0
-        .checked_add(3)
-        .ok_or_else(|| "target admission look-ahead overflow".to_string())?;
-    if spec.target_height.0 < minimum_target {
-        return Err("target admission height must be at least finalized H+3".to_string());
-    }
+    validate_target_admission_height_relation(spec.source_finalized_height, spec.target_height)?;
     for (name, root) in [
         (
             "source_finality_context_root",
@@ -564,6 +553,31 @@ fn validate_target_admission_spec(spec: &TargetAdmissionContextSpec) -> Result<(
         .validate("target admission ingress KEM registry root")?;
     if spec.ingress_kem_registry_root.is_zero() {
         return Err("target admission ingress KEM registry root is zero".to_string());
+    }
+    Ok(())
+}
+
+/// Validate the source/target height relation without deciding whether the
+/// named source is authoritative. Fresh Testnet-v3 has no negative heights
+/// from which to express H+3 for blocks one and two, so height zero is the
+/// sole bootstrap sentinel for targets one and two. Target three is the first
+/// normal H+3 target sourced from finalized Genesis; target four is produced
+/// normally after height one finalizes. Production
+/// ingress and protected-material adapters independently require that sentinel
+/// to equal their exact durable canonical Genesis finality authority.
+fn validate_target_admission_height_relation(
+    source_finalized_height: Height,
+    target_height: Height,
+) -> Result<(), String> {
+    if source_finalized_height.0 == 0 && (1..=2).contains(&target_height.0) {
+        return Ok(());
+    }
+    let exact_target = source_finalized_height
+        .0
+        .checked_add(3)
+        .ok_or_else(|| "target admission look-ahead overflow".to_string())?;
+    if target_height.0 != exact_target {
+        return Err("target admission height must equal finalized H+3".to_string());
     }
     Ok(())
 }
@@ -2719,6 +2733,41 @@ pub fn sign_etdag_vote(
         signer_key_id: validator.consensus_public_key.key_id.clone(),
         signature,
     })
+}
+
+/// Verify one ETDAG phase vote before it enters a bounded distributed
+/// certificate-assembly store. Quorum formation remains exclusively in
+/// [`form_etdag_certificate`]; this helper grants no certificate authority.
+pub fn verify_etdag_vote(
+    vote: &EtdagSignedVote,
+    transcript: &EtdagVoteTranscript,
+    verifier: &AegisPqvmVerifier,
+    context: &TargetAdmissionContext,
+    validator_set: &ValidatorSet,
+    cluster_map: &ClusterMap,
+) -> Result<(), String> {
+    transcript.validate_against(context)?;
+    context.validate_validator_and_cluster_bindings(validator_set, cluster_map)?;
+    let member = validator_set
+        .active_for_epoch(context.epoch)
+        .active_for_cluster(context.assigned_cluster_id)
+        .into_iter()
+        .find(|member| member.validator_id == vote.signer_validator_id)
+        .ok_or_else(|| "ETDAG vote signer is outside assigned cluster".to_string())?;
+    if member.consensus_public_key.key_id != vote.signer_key_id {
+        return Err("ETDAG vote signer key does not match frozen key".to_string());
+    }
+    verifier
+        .verify_domain_signature(
+            transcript.phase.signature_domain(),
+            &transcript.canonical_bytes()?,
+            &member.validator_uma_id.0,
+            &vote.signer_key_id,
+            context.epoch,
+            AegisPqKeyRole::ConsensusVote,
+            &vote.signature,
+        )
+        .map_err(|error| error.to_string())
 }
 
 pub fn sign_target_admission_vote(
@@ -5503,6 +5552,38 @@ impl EtdagProtectedInputCoordinator {
         Ok(admission_package.context)
     }
 
+    /// Re-verify and return the complete certified admission package for a
+    /// schedule-neutral worker that must construct the matching public ETDAG
+    /// proof. Returning the certificate evidence here does not grant proposal
+    /// authority; the protected input must still pass the independent full
+    /// coordinator verification before it becomes proposal-ready.
+    pub fn load_verified_admission_package_schedule_neutral(
+        &self,
+        target_height: Height,
+        verifier: &AegisPqvmVerifier,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        consensus_parameter_root: ConsensusParameterRoot,
+    ) -> Result<TargetAdmissionPackage, String> {
+        let admission_package = self
+            .admission_store
+            .get(target_height)?
+            .ok_or_else(|| {
+                "ETDAG_PROTECTED_INPUT_NOT_READY: no certified target-admission package for target height"
+                    .to_string()
+            })?;
+        admission_package.verify_against_parameter_root(
+            verifier,
+            validator_set,
+            cluster_map,
+            consensus_parameter_root,
+        )?;
+        if admission_package.context.target_height != target_height {
+            return Err("ETDAG_PROTECTED_INPUT_TARGET_HEIGHT_MISMATCH".to_string());
+        }
+        Ok(admission_package)
+    }
+
     /// Re-verify and load the exact durable protected material paired with its
     /// certified admission context, while leaving consensus scheduling to the
     /// simplified protocol.
@@ -6324,7 +6405,33 @@ pub(crate) mod tests {
         assert!(too_near
             .validate()
             .unwrap_err()
-            .contains("at least finalized H+3"));
+            .contains("equal finalized H+3"));
+    }
+
+    #[test]
+    fn fresh_genesis_bootstraps_only_h1_h2_then_uses_normal_h3_relation() {
+        validate_target_admission_height_relation(Height(0), Height(1)).unwrap();
+        validate_target_admission_height_relation(Height(0), Height(2)).unwrap();
+        validate_target_admission_height_relation(Height(0), Height(3)).unwrap();
+        assert!(
+            validate_target_admission_height_relation(Height(0), Height(0))
+                .unwrap_err()
+                .contains("equal finalized H+3")
+        );
+        assert!(
+            validate_target_admission_height_relation(Height(0), Height(4))
+                .unwrap_err()
+                .contains("equal finalized H+3")
+        );
+        // H4 is normal steady-state material. The producer obtains it from
+        // finalized H1 rather than treating it as a Genesis bootstrap target.
+        validate_target_admission_height_relation(Height(1), Height(4)).unwrap();
+
+        assert!(
+            validate_target_admission_height_relation(Height(1), Height(3))
+                .unwrap_err()
+                .contains("equal finalized H+3")
+        );
     }
 
     #[test]

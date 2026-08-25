@@ -35,7 +35,7 @@ INGRESS_RECORDS_STATUS = "generated_pending_target_admission_certificate"
 INGRESS_REGISTRY_FORMAT = "synergy-posy-simplified-ingress-kem-registry-v1"
 INGRESS_REGISTRY_DOMAIN = "PoSy/ETDAG/IngressKemKeyRegistry/v3"
 INGRESS_REGISTRY_VERSION = 1
-FIRST_ETDAG_TARGET_HEIGHT = 3
+BOOTSTRAP_ETDAG_TARGET_HEIGHTS = (1, 2, 3)
 INITIAL_CLUSTER_ID = 0
 
 
@@ -105,11 +105,12 @@ def etdag_domain_digest(domain: str, payload: bytes) -> str:
     return hasher.hexdigest()
 
 
-def validate_etdag_ingress_artifacts(
+def validate_one_etdag_ingress_artifact(
     ingress_records_path: Path,
     ingress_registry_path: Path,
     genesis_sha256: str,
     genesis_hash: str,
+    target_height: int,
 ) -> dict[str, Any]:
     reject_symlink(ingress_records_path, "ETDAG ingress records")
     reject_symlink(ingress_registry_path, "ETDAG ingress registry")
@@ -147,15 +148,15 @@ def validate_etdag_ingress_artifacts(
     epoch_context_root = bytes(epoch_context_bytes).hex()
     require(epoch_context_root != "0" * 64,
             "ETDAG ingress registry epoch-context root must not be zero")
-    expected_filename = "epoch-0-height-3-cluster-0.json"
+    expected_filename = f"epoch-0-height-{target_height}-cluster-0.json"
     require(ingress_registry_path.name == expected_filename
             and ingress_registry_path.parent.name == epoch_context_root,
             f"ETDAG ingress registry must end in {epoch_context_root}/{expected_filename}")
     require(wrapper.get("format") == INGRESS_REGISTRY_FORMAT
             and wrapper.get("epoch") == 0
-            and wrapper.get("target_height") == FIRST_ETDAG_TARGET_HEIGHT
+            and wrapper.get("target_height") == target_height
             and wrapper.get("assigned_cluster_id") == INITIAL_CLUSTER_ID,
-            "ETDAG ingress registry wrapper target context is not epoch 0/height 3/cluster 0")
+            "ETDAG ingress registry wrapper target context is not canonical")
 
     registry = wrapper.get("registry")
     require(isinstance(registry, dict), "ETDAG ingress registry payload must be an object")
@@ -241,7 +242,7 @@ def validate_etdag_ingress_artifacts(
         "network_id": NETWORK_ID,
         "protocol_version": PROTOCOL,
         "epoch": 0,
-        "target_height": FIRST_ETDAG_TARGET_HEIGHT,
+        "target_height": target_height,
         "assigned_cluster_id": INITIAL_CLUSTER_ID,
         "records": canonical_registry_records,
     }
@@ -249,7 +250,7 @@ def validate_etdag_ingress_artifacts(
         INGRESS_REGISTRY_DOMAIN,
         canonical_json([
             INGRESS_REGISTRY_VERSION, CHAIN_ID, NETWORK_ID, PROTOCOL, 0,
-            FIRST_ETDAG_TARGET_HEIGHT, INITIAL_CLUSTER_ID, canonical_registry_records,
+            target_height, INITIAL_CLUSTER_ID, canonical_registry_records,
         ]),
     )
     require(require_sha3_512(wrapper.get("registry_root"), "ETDAG ingress registry root")
@@ -259,7 +260,7 @@ def validate_etdag_ingress_artifacts(
         "format": INGRESS_REGISTRY_FORMAT,
         "epoch_context_root": epoch_context_bytes,
         "epoch": 0,
-        "target_height": FIRST_ETDAG_TARGET_HEIGHT,
+        "target_height": target_height,
         "assigned_cluster_id": INITIAL_CLUSTER_ID,
         "registry_root": registry_root,
         "registry": canonical_registry,
@@ -269,9 +270,43 @@ def validate_etdag_ingress_artifacts(
     return {
         "epoch_context_root": epoch_context_root,
         "epoch": 0,
-        "target_height": FIRST_ETDAG_TARGET_HEIGHT,
+        "target_height": target_height,
         "assigned_cluster_id": INITIAL_CLUSTER_ID,
         "registry_root_sha3_512": registry_root,
+    }
+
+
+def validate_etdag_ingress_artifacts(
+    ingress_records_path: Path,
+    ingress_registry_directory: Path,
+    genesis_sha256: str,
+    genesis_hash: str,
+) -> dict[str, Any]:
+    require(ingress_registry_directory.is_dir() and not ingress_registry_directory.is_symlink(),
+            "ETDAG ingress registry directory must be a real directory")
+    contexts: dict[str, dict[str, Any]] = {}
+    epoch_context_root: str | None = None
+    for target_height in BOOTSTRAP_ETDAG_TARGET_HEIGHTS:
+        path = ingress_registry_directory / f"epoch-0-height-{target_height}-cluster-0.json"
+        context = validate_one_etdag_ingress_artifact(
+            ingress_records_path, path, genesis_sha256, genesis_hash, target_height,
+        )
+        if epoch_context_root is None:
+            epoch_context_root = context["epoch_context_root"]
+            require(ingress_registry_directory.name == epoch_context_root,
+                    "ETDAG ingress registry directory does not match its epoch-context root")
+        else:
+            require(context["epoch_context_root"] == epoch_context_root,
+                    "ETDAG bootstrap ingress registries disagree on epoch-context root")
+        contexts[str(target_height)] = {
+            "sha256": sha256_file(path),
+            "registry_root_sha3_512": context["registry_root_sha3_512"],
+        }
+    return {
+        "epoch_context_root": epoch_context_root,
+        "epoch": 0,
+        "assigned_cluster_id": INITIAL_CLUSTER_ID,
+        "registries": contexts,
     }
 
 
@@ -430,7 +465,7 @@ def main() -> None:
     parser.add_argument("--validator-binary", required=True, type=Path)
     parser.add_argument("--validator-bundle-root", required=True, type=Path)
     parser.add_argument("--etdag-ingress-records", required=True, type=Path)
-    parser.add_argument("--etdag-ingress-registry", required=True, type=Path)
+    parser.add_argument("--etdag-ingress-registries", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
 
@@ -441,8 +476,7 @@ def main() -> None:
                         (args.desired_state, "desired state"), (args.genesis, "Genesis"),
                         (args.release_approval, "V4 approval"),
                         (args.validator_binary, "validator binary"),
-                        (args.etdag_ingress_records, "ETDAG ingress records"),
-                        (args.etdag_ingress_registry, "ETDAG ingress registry")]:
+                        (args.etdag_ingress_records, "ETDAG ingress records")]:
         reject_symlink(path, label)
 
     verifier_line = verify_release_approval(
@@ -463,7 +497,7 @@ def main() -> None:
     genesis_sha256 = sha256_file(args.genesis)
     ingress_context = validate_etdag_ingress_artifacts(
         args.etdag_ingress_records.resolve(),
-        args.etdag_ingress_registry.resolve(),
+        args.etdag_ingress_registries.resolve(),
         genesis_sha256,
         genesis_hash,
     )
@@ -521,12 +555,10 @@ def main() -> None:
             "runtime_parser_validation_sha256": sha256_file(args.validator_bundle_root / "runtime-parser-validation.json"),
             "validator_configuration_sha256": config_hashes,
             "etdag_ingress_records_sha256": sha256_file(args.etdag_ingress_records),
-            "etdag_ingress_registry_sha256": sha256_file(args.etdag_ingress_registry),
             "etdag_ingress_registry_epoch_context_root": ingress_context["epoch_context_root"],
             "etdag_ingress_registry_epoch": ingress_context["epoch"],
-            "etdag_ingress_registry_target_height": ingress_context["target_height"],
             "etdag_ingress_registry_assigned_cluster_id": ingress_context["assigned_cluster_id"],
-            "etdag_ingress_registry_root_sha3_512": ingress_context["registry_root_sha3_512"],
+            "etdag_ingress_bootstrap_registries": ingress_context["registries"],
         },
     }
     output.parent.mkdir(parents=True, exist_ok=True)

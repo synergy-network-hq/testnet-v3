@@ -1,7 +1,7 @@
 //! Durable schedule-neutral H+3 target-admission production for simplified PoSy.
 
 #[cfg(test)]
-use super::QuorumCertificateReference;
+use super::{GenesisFinalityReference, QuorumCertificateReference};
 use super::{
     simplified_protected_finality_context_digest_from_state_root,
     DurableSimplifiedProtectedMaterialAuthority, FinalizedBlockRecord, SimplifiedEpochContext,
@@ -783,13 +783,23 @@ impl SimplifiedTargetAdmissionProducer {
     pub fn prepare_h3(&mut self) -> Result<Vec<SimplifiedTargetAdmissionOutput>, String> {
         let authority = self.finality_authority.current_finalized_authority()?;
         self.validate_finality_authority(&authority)?;
-        let target_height = authority
-            .finalized
-            .height
-            .0
-            .checked_add(3)
-            .map(Height)
-            .ok_or_else(|| "simplified target-admission H+3 height overflows".to_string())?;
+        let target_heights = simplified_target_admission_target_heights(
+            &authority.finalized,
+            &self.configuration.epoch_context,
+        )?;
+
+        let mut outputs = Vec::new();
+        for target_height in target_heights {
+            outputs.extend(self.prepare_target(&authority, target_height)?);
+        }
+        Ok(outputs)
+    }
+
+    fn prepare_target(
+        &mut self,
+        authority: &SimplifiedTargetAdmissionFinalitySnapshot,
+        target_height: Height,
+    ) -> Result<Vec<SimplifiedTargetAdmissionOutput>, String> {
         if target_height.0 > self.configuration.epoch_context.epoch_end_height.0 {
             // Three-chain finality naturally reaches E-2 while the certified
             // head is E. H+3 is then the next epoch's first height, whose
@@ -1076,6 +1086,31 @@ impl SimplifiedTargetAdmissionProducer {
     }
 }
 
+fn simplified_target_admission_target_heights(
+    finalized: &FinalizedBlockRecord,
+    epoch_context: &SimplifiedEpochContext,
+) -> Result<Vec<Height>, String> {
+    finalized.validate()?;
+    epoch_context.validate()?;
+    let target_height = finalized
+        .height
+        .0
+        .checked_add(3)
+        .map(Height)
+        .ok_or_else(|| "simplified target-admission H+3 height overflows".to_string())?;
+    if finalized.height == Height(0)
+        && finalized.quorum_certificate_reference().is_none()
+        && epoch_context.epoch_start_height == Height(1)
+    {
+        // Fresh Genesis cannot name negative finalized heights for H1/H2.
+        // Those two heights are the complete bootstrap exception. H3 remains
+        // the first normal H+3 target sourced from finalized Genesis H0.
+        Ok(vec![Height(1), Height(2), target_height])
+    } else {
+        Ok(vec![target_height])
+    }
+}
+
 fn has_strict_target_admission_quorum(
     context: &TargetAdmissionContext,
     votes: &[EtdagSignedVote],
@@ -1304,6 +1339,43 @@ mod tests {
                 root.join("protected.json"),
             ),
         }
+    }
+
+    #[test]
+    fn fresh_genesis_prepares_bootstrap_h1_h2_and_first_normal_h3() {
+        let environment = environment(5, "genesis-bootstrap-targets");
+        let epoch_context = SimplifiedEpochContext::derive(
+            Epoch(0),
+            Height(1),
+            Height(100),
+            environment
+                .configuration
+                .epoch_context
+                .finalized_epoch_seed_root,
+            environment.snapshot.consensus_parameter_root,
+            &environment.configuration.validator_set,
+        )
+        .unwrap();
+        let genesis = FinalizedBlockRecord::from_genesis(
+            GenesisFinalityReference::from_canonical_genesis_hash(Hash::from_domain_bytes(
+                "simplified-target-admission-test",
+                b"fresh-genesis",
+            )),
+        )
+        .unwrap();
+        assert_eq!(
+            simplified_target_admission_target_heights(&genesis, &epoch_context).unwrap(),
+            vec![Height(1), Height(2), Height(3)]
+        );
+
+        assert_eq!(
+            simplified_target_admission_target_heights(
+                &environment.snapshot.finalized,
+                &environment.configuration.epoch_context,
+            )
+            .unwrap(),
+            vec![Height(8)]
+        );
     }
 
     fn vote_request(

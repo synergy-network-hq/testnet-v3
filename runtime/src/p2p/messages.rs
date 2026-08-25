@@ -10,7 +10,7 @@ use crate::consensus::coordinated_round_robin::{
 };
 use crate::consensus::dual_quorum::{QuorumCertificate, Vote};
 use crate::consensus::simplified_posy::{
-    SimplifiedConsensusMessage, SimplifiedTargetAdmissionVoteRequest,
+    SimplifiedConsensusMessage, SimplifiedEmptyEtdagMessage, SimplifiedTargetAdmissionVoteRequest,
 };
 use crate::consensus::typed_finality_store::TypedFinalityRecord;
 use crate::dag_mempool::compute_tx_order_root;
@@ -67,6 +67,15 @@ pub const MAX_SIMPLIFIED_TARGET_ADMISSION_VOTE_FRAME_BYTES: usize = 128 * 1024;
 /// set of ML-DSA-65 signatures. It remains bounded independently of the 64 MiB
 /// generic transport ceiling.
 pub const MAX_SIMPLIFIED_TARGET_ADMISSION_PACKAGE_FRAME_BYTES: usize = 512 * 1024;
+/// Empty-ETDAG assembly votes and marker vertices are small, authenticated
+/// control artifacts. They are bounded separately from candidate packages so
+/// an authenticated validator cannot force candidate-sized allocations for
+/// every phase message.
+pub const MAX_SIMPLIFIED_ETDAG_ASSEMBLY_CONTROL_FRAME_BYTES: usize = 128 * 1024;
+/// Empty-ETDAG DCC/BVC/BOC candidates can carry a bounded certified-vertex
+/// graph. The final protected-input artifact continues to use the existing
+/// certified-input wire family and its independent cap.
+pub const MAX_SIMPLIFIED_ETDAG_ASSEMBLY_CANDIDATE_FRAME_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -556,6 +565,16 @@ pub enum NetworkMessage {
         chain_incarnation: u64,
         genesis_hash: String,
     },
+    /// Authenticated, validator-only phase traffic used to assemble the
+    /// deterministic empty ETDAG protected input required by simplified PoSy.
+    /// The completed artifact is relayed through `EtdagCertifiedInput`.
+    SimplifiedEtdagAssembly {
+        /// First in canonical JSON so predecode can enforce the exact inner
+        /// control/candidate allocation cap before reading the full frame.
+        message: SimplifiedEmptyEtdagMessage,
+        chain_incarnation: u64,
+        genesis_hash: String,
+    },
     /// Verified, non-signing finalized-chain replication between the
     /// validator-VPN relayer tier and public RPC/indexer observer roles.
     TypedFinalityObserver {
@@ -694,6 +713,38 @@ pub fn validate_simplified_target_admission_message_size(
         chain_incarnation: crate::genesis::canonical_genesis()?.chain_incarnation(),
         genesis_hash: crate::genesis::canonical_genesis()?.hash().to_string(),
         message: message.clone(),
+    };
+    let frame_bytes = serde_json::to_vec(&encoded)
+        .map_err(|error| format!("serialize {kind} frame: {error}"))?
+        .len()
+        .checked_add(4)
+        .ok_or_else(|| format!("{kind} frame length overflow"))?;
+    validate_typed_consensus_frame_length(kind, frame_bytes, maximum)
+}
+
+pub fn validate_simplified_empty_etdag_message_size(
+    message: &SimplifiedEmptyEtdagMessage,
+) -> Result<(), String> {
+    let (kind, maximum) = match message {
+        SimplifiedEmptyEtdagMessage::Marker { .. }
+        | SimplifiedEmptyEtdagMessage::VacVote { .. }
+        | SimplifiedEmptyEtdagMessage::DccVote { .. }
+        | SimplifiedEmptyEtdagMessage::BvcVote { .. }
+        | SimplifiedEmptyEtdagMessage::BocVote { .. } => (
+            "simplified empty-ETDAG assembly control",
+            MAX_SIMPLIFIED_ETDAG_ASSEMBLY_CONTROL_FRAME_BYTES,
+        ),
+        SimplifiedEmptyEtdagMessage::DccCandidate { .. }
+        | SimplifiedEmptyEtdagMessage::BvcCandidate { .. }
+        | SimplifiedEmptyEtdagMessage::BocCandidate { .. } => (
+            "simplified empty-ETDAG assembly candidate",
+            MAX_SIMPLIFIED_ETDAG_ASSEMBLY_CANDIDATE_FRAME_BYTES,
+        ),
+    };
+    let encoded = NetworkMessage::SimplifiedEtdagAssembly {
+        message: message.clone(),
+        chain_incarnation: crate::genesis::canonical_genesis()?.chain_incarnation(),
+        genesis_hash: crate::genesis::canonical_genesis()?.hash().to_string(),
     };
     let frame_bytes = serde_json::to_vec(&encoded)
         .map_err(|error| format!("serialize {kind} frame: {error}"))?

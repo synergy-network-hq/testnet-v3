@@ -25,20 +25,23 @@ use crate::consensus::signing_authority::DurableConsensusSigningAuthority;
 #[cfg(test)]
 use crate::consensus::simplified_posy::FailClosedSimplifiedTransitionAuthorityVerifier;
 use crate::consensus::simplified_posy::{
-    install_simplified_consensus_ingress, install_simplified_target_admission_producer_handler,
-    load_genesis_bound_simplified_activation, prepare_simplified_target_admission_h3,
-    remove_simplified_consensus_ingress, remove_simplified_target_admission_producer_handler,
-    run_simplified_posy_driver, select_consensus_profile_at_height,
-    select_consensus_profile_from_verified_v3_transition, validate_simplified_driver_activation,
-    ConsensusProfileAtHeight, ConsensusSignatureVerifier, DurableSimplifiedEpochTransitionStore,
-    DurableSimplifiedFinalitySink, DurableSimplifiedIngressKemRegistrySource,
-    DurableSimplifiedPosyStore, DurableSimplifiedProposalMaterialStore,
+    install_simplified_consensus_ingress, install_simplified_empty_etdag_producer_handler,
+    install_simplified_target_admission_producer_handler, load_genesis_bound_simplified_activation,
+    prepare_simplified_empty_etdag, prepare_simplified_target_admission_h3,
+    remove_simplified_consensus_ingress, remove_simplified_empty_etdag_producer_handler,
+    remove_simplified_target_admission_producer_handler, run_simplified_posy_driver,
+    select_consensus_profile_at_height, select_consensus_profile_from_verified_v3_transition,
+    validate_simplified_driver_activation, ConsensusProfileAtHeight, ConsensusSignatureVerifier,
+    DurableSimplifiedEpochTransitionStore, DurableSimplifiedFinalitySink,
+    DurableSimplifiedIngressKemRegistrySource, DurableSimplifiedPosyStore,
+    DurableSimplifiedProposalMaterialStore,
     DurableSimplifiedProtectedExecutionTransitionAuthorityVerifier,
     DurableSimplifiedProtectedMaterialAuthority,
     DurableSimplifiedProtectedMaterialAuthorityConfiguration,
     DurableVerifiedSimplifiedProposalSource, FinalizedBlockRecord, GenesisFinalityReference,
     P2pSimplifiedConsensusEgress, QuorumCertificateReference, SimplifiedActivatedMaterialAdapter,
     SimplifiedCoreMaterialAdapter, SimplifiedCoreMaterialConfiguration, SimplifiedDriverTiming,
+    SimplifiedEmptyEtdagConfiguration, SimplifiedEmptyEtdagOutput, SimplifiedEmptyEtdagProducer,
     SimplifiedEpochContext, SimplifiedFinalityEnvironment, SimplifiedFinalityParent,
     SimplifiedParentFeeMarketState, SimplifiedPosyDriver, SimplifiedPreviousEpochFinalityReplay,
     SimplifiedProtectedMaterialAdapter, SimplifiedProtectedMaterialConfiguration,
@@ -2098,6 +2101,7 @@ fn spawn_finalized_typed_posy_driver(
 struct SimplifiedCryptoAuthority {
     signer: AegisPqvmSigner,
     target_admission_signer: AegisPqvmSigner,
+    empty_etdag_signer: AegisPqvmSigner,
     verifier: AegisPqvmVerifier,
     local_validator_id: ValidatorId,
     local_key_id: AegisPqKeyId,
@@ -2303,6 +2307,8 @@ fn build_simplified_crypto_authority(
         .map_err(|error| format!("initialize simplified Aegis signer: {error}"))?;
     let mut target_admission_signer = AegisPqvmSigner::initialize_required()
         .map_err(|error| format!("initialize simplified target-admission signer: {error}"))?;
+    let mut empty_etdag_signer = AegisPqvmSigner::initialize_required()
+        .map_err(|error| format!("initialize simplified empty-ETDAG signer: {error}"))?;
     let target_admission_key_id = target_admission_signer
         .register_existing_keypair(
             &local.validator_uma_id.0,
@@ -2312,6 +2318,15 @@ fn build_simplified_crypto_authority(
             epoch_context.epoch,
         )
         .map_err(|error| format!("import simplified target-admission key: {error}"))?;
+    let empty_etdag_key_id = empty_etdag_signer
+        .register_existing_keypair(
+            &local.validator_uma_id.0,
+            public_key.clone(),
+            private_key.clone(),
+            roles.clone(),
+            epoch_context.epoch,
+        )
+        .map_err(|error| format!("import simplified empty-ETDAG key: {error}"))?;
     let local_key_id = signer
         .register_existing_keypair(
             &local.validator_uma_id.0,
@@ -2329,12 +2344,18 @@ fn build_simplified_crypto_authority(
             "simplified target-admission signer registered a different frozen key ID".to_string(),
         );
     }
+    if empty_etdag_key_id != local_key_id {
+        return Err(
+            "simplified empty-ETDAG signer registered a different frozen key ID".to_string(),
+        );
+    }
 
     let verifier = build_simplified_consensus_verifier(epoch_context, validator_set)?;
 
     Ok(SimplifiedCryptoAuthority {
         signer,
         target_admission_signer,
+        empty_etdag_signer,
         verifier,
         local_validator_id: local.validator_id.clone(),
         local_key_id,
@@ -2448,6 +2469,36 @@ fn run_simplified_target_admission_worker(
                 network.broadcast_simplified_target_admission(&message, frozen_validator_ids)?;
             if sent > 0 {
                 last_broadcast.insert((target_height, message_id), now);
+            }
+        }
+        thread::sleep(PREPARE_INTERVAL);
+    }
+    Ok(())
+}
+
+fn run_simplified_empty_etdag_worker(
+    network: &p2p::networking::P2PNetwork,
+    frozen_validator_ids: &std::collections::BTreeSet<ValidatorId>,
+    running: &AtomicBool,
+) -> Result<(), String> {
+    const PREPARE_INTERVAL: Duration = Duration::from_millis(250);
+    while running.load(Ordering::Acquire) {
+        let outputs = match prepare_simplified_empty_etdag() {
+            Ok(outputs) => outputs,
+            Err(error) if error.contains("producer is busy; ingress rejected") => {
+                thread::sleep(PREPARE_INTERVAL);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        for output in outputs {
+            match output {
+                SimplifiedEmptyEtdagOutput::Assembly(message) => {
+                    network.broadcast_simplified_empty_etdag(&message, frozen_validator_ids)?;
+                }
+                SimplifiedEmptyEtdagOutput::CertifiedInput(artifact) => {
+                    network.broadcast_etdag_certified_input(&artifact)?;
+                }
             }
         }
         thread::sleep(PREPARE_INTERVAL);
@@ -2960,6 +3011,35 @@ fn spawn_finalized_simplified_posy_driver(
     } else {
         None
     };
+    let empty_etdag_runtime = if material_mode == SimplifiedMaterialMode::Protected {
+        let frozen_validator_ids = validator_set
+            .active_for_epoch(epoch_context.epoch)
+            .validators
+            .into_iter()
+            .map(|validator| validator.validator_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        let producer = SimplifiedEmptyEtdagProducer::new_process_wide(
+            SimplifiedEmptyEtdagConfiguration {
+                epoch_context: epoch_context.clone(),
+                validator_set: validator_set.clone(),
+                cluster_map: cluster_map.clone(),
+                verifier: crypto.verifier.clone(),
+                etdag_parameters: etdag_parameters.clone(),
+                consensus_parameter_root,
+            },
+            crypto.local_validator_id.clone(),
+            Arc::new(Mutex::new(crypto.empty_etdag_signer)),
+            Box::new(
+                protected_authority
+                    .as_ref()
+                    .ok_or_else(|| "protected material authority is unavailable".to_string())?
+                    .clone(),
+            ),
+        )?;
+        Some((producer, frozen_validator_ids))
+    } else {
+        None
+    };
     let proposal_source = DurableVerifiedSimplifiedProposalSource::new(
         epoch_context.clone(),
         material_store,
@@ -3090,6 +3170,66 @@ fn spawn_finalized_simplified_posy_driver(
         auxiliary_handles.push(target_handle);
     }
 
+    if let Some((producer, frozen_validator_ids)) = empty_etdag_runtime {
+        if let Err(error) = install_simplified_empty_etdag_producer_handler(producer) {
+            running.store(false, Ordering::Release);
+            for auxiliary_handle in auxiliary_handles.drain(..) {
+                let _ = auxiliary_handle.join();
+            }
+            let _ = remove_simplified_consensus_ingress();
+            if etdag_ingress_installed {
+                let _ = remove_etdag_certified_input_ingress();
+            }
+            remove_finalized_execution_state_snapshot();
+            return Err(format!("install simplified empty-ETDAG producer: {error}"));
+        }
+        let empty_worker_error = Arc::clone(&fatal_error);
+        let empty_worker_running = Arc::clone(&running);
+        let empty_network = Arc::clone(&network);
+        let empty_handle = match thread::Builder::new()
+            .name("simplified-posy-empty-etdag".to_string())
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run_simplified_empty_etdag_worker(
+                        &empty_network,
+                        &frozen_validator_ids,
+                        &empty_worker_running,
+                    )
+                }));
+                let failure = match result {
+                    Ok(Ok(_)) => None,
+                    Ok(Err(error)) => Some(error),
+                    Err(_) => Some("simplified empty-ETDAG worker panicked".to_string()),
+                };
+                if let Some(error) = failure {
+                    eprintln!("Simplified empty-ETDAG worker failed closed: {error}");
+                    if let Ok(mut slot) = empty_worker_error.lock() {
+                        if slot.is_none() {
+                            *slot = Some(error);
+                        }
+                    }
+                    empty_worker_running.store(false, Ordering::Release);
+                }
+                let _ = remove_simplified_empty_etdag_producer_handler();
+            }) {
+            Ok(handle) => handle,
+            Err(error) => {
+                let _ = remove_simplified_empty_etdag_producer_handler();
+                running.store(false, Ordering::Release);
+                for auxiliary_handle in auxiliary_handles.drain(..) {
+                    let _ = auxiliary_handle.join();
+                }
+                let _ = remove_simplified_consensus_ingress();
+                if etdag_ingress_installed {
+                    let _ = remove_etdag_certified_input_ingress();
+                }
+                remove_finalized_execution_state_snapshot();
+                return Err(format!("spawn simplified empty-ETDAG worker: {error}"));
+            }
+        };
+        auxiliary_handles.push(empty_handle);
+    }
+
     let worker_error = Arc::clone(&fatal_error);
     let worker_running = Arc::clone(&running);
     let handle = match thread::Builder::new()
@@ -3111,6 +3251,7 @@ fn spawn_finalized_simplified_posy_driver(
                 worker_running.store(false, Ordering::Release);
             }
             let _ = remove_simplified_consensus_ingress();
+            let _ = remove_simplified_empty_etdag_producer_handler();
             if etdag_ingress_installed {
                 let _ = remove_etdag_certified_input_ingress();
             }
@@ -3123,6 +3264,7 @@ fn spawn_finalized_simplified_posy_driver(
                 let _ = auxiliary_handle.join();
             }
             let _ = remove_simplified_consensus_ingress();
+            let _ = remove_simplified_empty_etdag_producer_handler();
             if etdag_ingress_installed {
                 let _ = remove_etdag_certified_input_ingress();
             }
