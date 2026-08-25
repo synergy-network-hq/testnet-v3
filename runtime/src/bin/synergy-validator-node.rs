@@ -20,7 +20,7 @@ fn main() {
                 std::process::exit(1);
             });
             if config.identity.role != "validator"
-                || config.role.compiled_profile != NodeRole::Validator.profile()
+                || config.role.compiled_profile != NodeRole::Validator.profile().compiled_profile
                 || config.identity.node_id.trim().is_empty()
             {
                 eprintln!(
