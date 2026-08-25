@@ -181,7 +181,14 @@ fn main() {
                 fail(error)
             }
         };
-        let durable_sha256 = sha256_file(&durable_output).unwrap_or_else(|error| fail(error));
+        let durable_sha256 = match sha256_file(&durable_output) {
+            Ok(sha256) => sha256,
+            Err(error) => {
+                let _ = std::fs::remove_file(&durable_output);
+                let _ = std::fs::remove_file(&output);
+                fail(error)
+            }
+        };
         println!(
             "{{\n  \"result\": \"TARGET_ADMISSION_REQUEST_AND_DURABLE_REGISTRY_WRITTEN\",\n  \"request_path\": \"{}\",\n  \"request_sha256\": \"{}\",\n  \"durable_registry_path\": \"{}\",\n  \"durable_registry_sha256\": \"{}\",\n  \"epoch_context_root\": \"{}\",\n  \"ingress_kem_registry_root\": \"{}\",\n  \"applied_genesis_hash\": \"{}\",\n  \"target_height\": {},\n  \"signature_algorithm\": \"{}\",\n  \"signature_domain\": \"{}\",\n  \"required_signers\": 4\n}}",
             output.display(),

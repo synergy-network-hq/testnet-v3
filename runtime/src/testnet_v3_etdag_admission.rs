@@ -542,14 +542,19 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .create_new(true)
         .open(path)
         .map_err(|error| format!("create {}: {error}", path.display()))?;
-    file.write_all(bytes)
-        .and_then(|_| file.sync_all())
-        .map_err(|error| format!("write {}: {error}", path.display()))?;
+    if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(format!("write {}: {error}", path.display()));
+    }
+    drop(file);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o644))
-            .map_err(|error| format!("set permissions {}: {error}", path.display()))?;
+        if let Err(error) = fs::set_permissions(path, fs::Permissions::from_mode(0o644)) {
+            let _ = fs::remove_file(path);
+            return Err(format!("set permissions {}: {error}", path.display()));
+        }
     }
     Ok(())
 }
