@@ -1887,6 +1887,25 @@ impl TargetAdmissionPackage {
     pub fn package_digest(&self) -> Result<EtdagDigest, String> {
         EtdagDigest::from_canonical("PoSy/ETDAG/TargetAdmissionPackage/v3", self)
     }
+
+    /// Consensus identity of the immutable target context and ingress
+    /// registry. Different independently verified strict-quorum certificates
+    /// can authorize this same binding without changing protected-input keys.
+    pub fn admission_binding_digest(&self) -> Result<EtdagDigest, String> {
+        let context_root = self.context.root()?;
+        let registry_root = self.ingress_kem_registry.root()?;
+        if registry_root != self.context.ingress_kem_registry_root {
+            return Err("target admission package registry-root mismatch".to_string());
+        }
+        EtdagDigest::from_canonical(
+            "PoSy/ETDAG/TargetAdmissionPackageIdentity/v3",
+            &(context_root, registry_root),
+        )
+    }
+
+    fn has_same_admission_identity(&self, other: &Self) -> bool {
+        self.context == other.context && self.ingress_kem_registry == other.ingress_kem_registry
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2155,6 +2174,7 @@ impl EtdagAdmissionPackageStore {
 
     fn install_preverified(&self, package: &TargetAdmissionPackage) -> Result<EtdagDigest, String> {
         let package_digest = package.package_digest()?;
+        let admission_binding_digest = package.admission_binding_digest()?;
         let _guard = ETDAG_ADMISSION_STORE_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
@@ -2162,8 +2182,10 @@ impl EtdagAdmissionPackageStore {
         let mut store = self.load_unlocked()?;
         let height = package.context.target_height;
         if let Some(existing) = store.packages.get(&height) {
-            if existing.package == *package && existing.package_digest == package_digest {
-                return Ok(package_digest);
+            if existing.package.admission_binding_digest()? == admission_binding_digest
+                && existing.package.has_same_admission_identity(package)
+            {
+                return Ok(admission_binding_digest);
             }
             return Err("ETDAG_ADMISSION_PACKAGE_CONFLICT".to_string());
         }
@@ -2175,7 +2197,7 @@ impl EtdagAdmissionPackageStore {
             },
         );
         self.persist_unlocked(&store)?;
-        Ok(package_digest)
+        Ok(admission_binding_digest)
     }
 
     pub fn get(&self, height: Height) -> Result<Option<TargetAdmissionPackage>, String> {
@@ -5439,7 +5461,7 @@ impl EtdagProtectedInputCoordinator {
         admission_package
             .context
             .validate_height_context_compatibility(height_context)?;
-        let admission_digest = admission_package.package_digest()?;
+        let admission_digest = admission_package.admission_binding_digest()?;
         self.protected_input_store.load_verified(
             &admission_digest,
             &admission_package.context,
@@ -5512,7 +5534,7 @@ impl EtdagProtectedInputCoordinator {
         if admission_package.context != target_context {
             return Err("ETDAG_ADMISSION_PACKAGE_CONFLICT".to_string());
         }
-        let admission_digest = admission_package.package_digest()?;
+        let admission_digest = admission_package.admission_binding_digest()?;
         let protected_input = self.protected_input_store.load_verified_schedule_neutral(
             &admission_digest,
             &target_context,
@@ -5863,6 +5885,48 @@ pub(crate) mod tests {
             .take(quorum)
             .map(|member| member.voting_weight)
             .sum();
+        TargetAdmissionPackage {
+            context,
+            ingress_kem_registry: fixture.ingress_registry.clone(),
+            certificate,
+        }
+    }
+
+    fn target_admission_package_with_alternate_quorum(
+        fixture: &mut Fixture,
+        context: TargetAdmissionContext,
+    ) -> TargetAdmissionPackage {
+        let members = fixture
+            .validator_set
+            .active_for_epoch(context.epoch)
+            .active_for_cluster(context.assigned_cluster_id);
+        let certificate = TargetAdmissionCertificate::without_votes(&context).unwrap();
+        let transcript = certificate.signing_bytes(&context).unwrap();
+        let quorum = certificate_quorum(members.len()).unwrap();
+        let votes = members
+            .iter()
+            .skip(members.len() - quorum)
+            .map(|member| EtdagSignedVote {
+                signer_validator_id: member.validator_id.clone(),
+                signer_key_id: member.consensus_public_key.key_id.clone(),
+                signature: fixture
+                    .signer
+                    .sign_domain(
+                        DOMAIN_TARGET_ADMISSION,
+                        &transcript,
+                        &member.consensus_public_key.key_id,
+                    )
+                    .unwrap(),
+            })
+            .collect();
+        let certificate = form_target_admission_certificate(
+            &context,
+            votes,
+            &fixture.signer.verifier(),
+            &fixture.validator_set,
+            &fixture.cluster_map,
+        )
+        .unwrap();
         TargetAdmissionPackage {
             context,
             ingress_kem_registry: fixture.ingress_registry.clone(),
@@ -6426,6 +6490,107 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn target_admission_package_binding_digest_is_stable_across_valid_quorum_subsets() {
+        let mut fixture = fixture(5, None);
+        let context = fixture.context.clone();
+        let first_quorum = target_admission_package(&mut fixture, context.clone());
+        let alternate_quorum =
+            target_admission_package_with_alternate_quorum(&mut fixture, context);
+
+        assert_eq!(
+            first_quorum.admission_binding_digest().unwrap(),
+            alternate_quorum.admission_binding_digest().unwrap()
+        );
+    }
+
+    #[test]
+    fn target_admission_package_digest_commits_to_quorum_certificate_evidence() {
+        let mut fixture = fixture(5, None);
+        let context = fixture.context.clone();
+        let first_quorum = target_admission_package(&mut fixture, context.clone());
+        let alternate_quorum =
+            target_admission_package_with_alternate_quorum(&mut fixture, context);
+
+        assert_ne!(
+            first_quorum.package_digest().unwrap(),
+            alternate_quorum.package_digest().unwrap()
+        );
+    }
+
+    #[test]
+    fn target_admission_package_store_accepts_alternate_quorum_and_retains_first_evidence() {
+        let mut fixture = fixture(5, None);
+        let store = temp_admission_store("alternate-quorum");
+        let context = fixture.context.clone();
+        let first_quorum = target_admission_package(&mut fixture, context.clone());
+        let alternate_quorum =
+            target_admission_package_with_alternate_quorum(&mut fixture, context);
+        let verifier = fixture.signer.verifier();
+        let protocol = ProtocolConfig::testnet_v3();
+        let first_digest = store
+            .install_verified(
+                &first_quorum,
+                &verifier,
+                &fixture.validator_set,
+                &fixture.cluster_map,
+                &protocol,
+            )
+            .unwrap();
+
+        let alternate_digest = store
+            .install_verified(
+                &alternate_quorum,
+                &verifier,
+                &fixture.validator_set,
+                &fixture.cluster_map,
+                &protocol,
+            )
+            .unwrap();
+
+        assert_eq!(
+            (
+                alternate_digest,
+                store.get(first_quorum.context.target_height).unwrap()
+            ),
+            (first_digest, Some(first_quorum))
+        );
+    }
+
+    #[test]
+    fn target_admission_package_store_rejects_invalid_alternate_quorum_subset() {
+        let mut fixture = fixture(5, None);
+        let store = temp_admission_store("invalid-alternate-quorum");
+        let context = fixture.context.clone();
+        let first_quorum = target_admission_package(&mut fixture, context.clone());
+        let mut invalid_alternate =
+            target_admission_package_with_alternate_quorum(&mut fixture, context);
+        invalid_alternate.certificate.votes[0]
+            .signature
+            .signature_bytes[0] ^= 1;
+        let verifier = fixture.signer.verifier();
+        let protocol = ProtocolConfig::testnet_v3();
+        store
+            .install_verified(
+                &first_quorum,
+                &verifier,
+                &fixture.validator_set,
+                &fixture.cluster_map,
+                &protocol,
+            )
+            .unwrap();
+
+        assert!(store
+            .install_verified(
+                &invalid_alternate,
+                &verifier,
+                &fixture.validator_set,
+                &fixture.cluster_map,
+                &protocol,
+            )
+            .is_err());
+    }
+
+    #[test]
     fn certified_target_admission_package_store_is_append_only_and_restart_safe() {
         let mut fixture = fixture(6, None);
         let store = temp_admission_store("append-only");
@@ -6442,7 +6607,7 @@ pub(crate) mod tests {
                 &protocol,
             )
             .unwrap();
-        assert_eq!(digest, package.package_digest().unwrap());
+        assert_eq!(digest, package.admission_binding_digest().unwrap());
         assert_eq!(
             store
                 .install_verified(

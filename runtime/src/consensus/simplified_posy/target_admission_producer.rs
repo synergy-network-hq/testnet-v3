@@ -518,7 +518,7 @@ impl DurableSimplifiedTargetAdmissionStore {
                 return Err("SIMPLIFIED_TARGET_ADMISSION_PACKAGE_CONFLICT".to_string());
             }
             if let Some(existing) = &entry.certified_package {
-                if existing == package {
+                if existing.admission_binding_digest()? == package.admission_binding_digest()? {
                     return Ok((existing.clone(), false));
                 }
                 return Err("SIMPLIFIED_TARGET_ADMISSION_PACKAGE_CONFLICT".to_string());
@@ -558,6 +558,10 @@ impl DurableSimplifiedTargetAdmissionStore {
                     .votes
                     .windows(2)
                     .any(|votes| votes[0].signer_validator_id >= votes[1].signer_validator_id)
+                || entry.certified_package.as_ref().is_some_and(|package| {
+                    package.context != entry.context
+                        || package.ingress_kem_registry != entry.ingress_kem_registry
+                })
             {
                 return Err("corrupt simplified target-admission store entry".to_string());
             }
@@ -1394,6 +1398,103 @@ mod tests {
                 package.context
             );
         }
+    }
+
+    #[test]
+    fn producer_accepts_competing_valid_quorum_subsets_and_retains_first_evidence() {
+        let environment = environment(5, "competing-valid-quorums");
+        let mut producer = environment.producer(
+            environment.snapshot.clone(),
+            Some(environment.registry.clone()),
+        );
+        let initial = vote_request(&producer.prepare_h3().unwrap());
+        let members = environment
+            .configuration
+            .validator_set
+            .active_for_epoch(initial.context.epoch)
+            .active_for_cluster(initial.context.assigned_cluster_id);
+        let mut votes = vec![initial.vote.clone()];
+        for member in members
+            .iter()
+            .filter(|member| member.validator_id != environment.local_validator_id)
+        {
+            votes.push(
+                sign_target_admission_vote(
+                    &mut environment.signer.lock().unwrap(),
+                    &environment.remote_journal,
+                    &initial.context,
+                    member,
+                )
+                .unwrap(),
+            );
+        }
+        votes.sort_by(|left, right| left.signer_validator_id.cmp(&right.signer_validator_id));
+        let quorum = usize::try_from(
+            initial
+                .context
+                .assigned_cluster_validator_count
+                .checked_mul(2)
+                .unwrap()
+                / 3
+                + 1,
+        )
+        .unwrap();
+        let make_package = |subset: Vec<EtdagSignedVote>| TargetAdmissionPackage {
+            context: initial.context.clone(),
+            ingress_kem_registry: initial.ingress_kem_registry.clone(),
+            certificate: form_target_admission_certificate(
+                &initial.context,
+                subset,
+                &environment.configuration.verifier,
+                &environment.configuration.validator_set,
+                &environment.configuration.cluster_map,
+            )
+            .unwrap(),
+        };
+        let first = make_package(votes[..quorum].to_vec());
+        let alternate = make_package(votes[votes.len() - quorum..].to_vec());
+        assert_ne!(
+            first.package_digest().unwrap(),
+            alternate.package_digest().unwrap()
+        );
+        assert_eq!(
+            first.admission_binding_digest().unwrap(),
+            alternate.admission_binding_digest().unwrap()
+        );
+        let peer_member = &members[1];
+        let peer = EtdagAuthenticatedIngressPeer {
+            validator_id: peer_member.validator_id.clone(),
+            validator_uma_id: peer_member.validator_uma_id.clone(),
+            consensus_key_id: peer_member.consensus_public_key.key_id.clone(),
+        };
+
+        let installed = match producer
+            .handle_authenticated_package(&peer, &first)
+            .unwrap()
+        {
+            SimplifiedTargetAdmissionOutput::CertifiedPackage(package) => package,
+            SimplifiedTargetAdmissionOutput::Vote(_) => panic!("expected certified package"),
+        };
+        assert_eq!(installed, first);
+        let retained = match producer
+            .handle_authenticated_package(&peer, &alternate)
+            .unwrap()
+        {
+            SimplifiedTargetAdmissionOutput::CertifiedPackage(package) => package,
+            SimplifiedTargetAdmissionOutput::Vote(_) => panic!("expected certified package"),
+        };
+        assert_eq!(retained, first);
+
+        drop(producer);
+        let mut restarted = environment.producer(
+            environment.snapshot.clone(),
+            Some(environment.registry.clone()),
+        );
+        let outputs = restarted.prepare_h3().unwrap();
+        assert!(outputs.iter().any(|output| matches!(
+            output,
+            SimplifiedTargetAdmissionOutput::CertifiedPackage(package) if package == &first
+        )));
     }
 
     #[test]
