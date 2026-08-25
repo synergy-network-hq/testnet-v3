@@ -169,7 +169,10 @@ const BLOCK_SYNC_SERVE_QUEUE_CAPACITY: usize = 128;
 const BLOCK_SYNC_APPLY_QUEUE_CAPACITY: usize = 64;
 const BLOCK_SYNC_BUSY_QUEUE_CAPACITY: usize = 128;
 const BLOCK_SYNC_BUSY_RETRY_MILLIS: u64 = 1_000;
-const CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS: u64 = 500;
+// Protected ETDAG and admission frames can legitimately exceed a 500 ms drain
+// window over the validator VPN.  Keep the write bounded, but allow one
+// normal TCP retransmission window before treating a framed send as failed.
+const CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS: u64 = 5_000;
 const CONSENSUS_DIRECT_VOTE_DIAL_TIMEOUT_MILLIS: u64 = 1_200;
 const VOTE_REQUEST_PARENT_SYNC_WAIT_MILLIS: u64 = 900;
 const VOTE_REQUEST_PARENT_SYNC_POLL_MILLIS: u64 = 25;
