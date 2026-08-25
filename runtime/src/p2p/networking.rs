@@ -11724,16 +11724,60 @@ fn send_message_with_write_timeout(
     message: &NetworkMessage,
     timeout: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let json = serde_json::to_string(message)?;
+    let data = json.as_bytes();
+    let len = validate_outbound_frame_length(data.len())?;
+    let mut frame = Vec::with_capacity(std::mem::size_of_val(&len) + data.len());
+    frame.extend_from_slice(&len.to_le_bytes());
+    frame.extend_from_slice(data);
+
     let previous_timeout = stream.write_timeout()?;
     stream.set_write_timeout(Some(timeout))?;
-    let send_result = send_message(stream, message);
+    let deadline = Instant::now() + timeout;
+    let send_result = write_frame_until_deadline(stream, &frame, deadline);
     let restore_result = stream.set_write_timeout(previous_timeout);
 
     match (send_result, restore_result) {
-        (Err(error), _) => Err(error),
+        (Err(error), _) => Err(Box::new(error)),
         (Ok(_), Err(error)) => Err(Box::new(error)),
         (Ok(_), Ok(_)) => Ok(()),
     }
+}
+
+/// Writes one already-framed consensus message without turning a transient
+/// nonblocking backpressure signal into a peer-disconnect event.  Retrying is
+/// performed from the exact byte offset, so a partial frame is never replayed
+/// from its prefix.
+fn write_frame_until_deadline(
+    stream: &mut impl Write,
+    frame: &[u8],
+    deadline: Instant,
+) -> io::Result<()> {
+    let mut offset = 0usize;
+    while offset < frame.len() {
+        match stream.write(&frame[offset..]) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "consensus peer accepted a zero-length framed write",
+                ));
+            }
+            Ok(written) => offset = offset.saturating_add(written),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "consensus framed write exceeded its deadline",
+                    ));
+                }
+                thread::sleep(remaining.min(Duration::from_millis(1)));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    stream.flush()
 }
 
 fn receive_message(stream: &mut impl Read) -> Result<NetworkMessage, io::Error> {
@@ -14181,8 +14225,8 @@ mod tests {
         validator_status_genesis_grace_remaining_secs,
         validator_status_genesis_within_grace_window, verify_batch_with_bounded_parallelism,
         verify_handshake_pq_signature, vote_request_parent_sync_range,
-        with_peer_stream_outside_peers_lock, ConnectionDirection, DialTargetsArc,
-        DuplicateResolution, P2PNetwork, PeerConnection, PeerEntryGuard,
+        with_peer_stream_outside_peers_lock, write_frame_until_deadline, ConnectionDirection,
+        DialTargetsArc, DuplicateResolution, P2PNetwork, PeerConnection, PeerEntryGuard,
         TypedFinalityObserverMessage, BACKGROUND_SYNC_POLL_MILLIS, BLOCK_SYNC_APPLY_ACTIVE,
         BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS, COORDINATED_ROUND_ROBIN_V1,
         DEFAULT_BOOTSTRAP_REFRESH_SECS, DUTY_DISABLED_TTL_SECS, IMMEDIATE_STATUS_SYNC_BATCH,
@@ -14244,10 +14288,48 @@ mod tests {
     use lazy_static::lazy_static;
     use std::collections::{BTreeSet, HashMap, HashSet};
     use std::fs;
-    use std::io;
+    use std::io::{self, Write};
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::{mpsc, Arc, Barrier, Mutex, MutexGuard};
+
+    struct WouldBlockOnceWriter {
+        bytes: Vec<u8>,
+        blocked: bool,
+    }
+
+    impl Write for WouldBlockOnceWriter {
+        fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+            if !self.blocked {
+                self.blocked = true;
+                return Err(io::Error::from(io::ErrorKind::WouldBlock));
+            }
+            self.bytes.extend_from_slice(data);
+            Ok(data.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn framed_consensus_write_retries_transient_nonblocking_backpressure() {
+        let expected = b"canonical-consensus-frame";
+        let mut writer = WouldBlockOnceWriter {
+            bytes: Vec::new(),
+            blocked: false,
+        };
+
+        write_frame_until_deadline(
+            &mut writer,
+            expected,
+            Instant::now() + Duration::from_millis(50),
+        )
+        .unwrap();
+
+        assert_eq!(writer.bytes, expected);
+    }
 
     #[test]
     fn simplified_vote_frame_is_bounded_before_full_payload_allocation() {
