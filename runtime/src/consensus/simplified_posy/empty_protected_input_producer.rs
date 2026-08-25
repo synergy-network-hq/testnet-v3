@@ -1327,6 +1327,13 @@ impl SimplifiedEmptyEtdagProducer {
         };
         let is_assembler = self.assembler_for(target_height)? == &self.local_validator_id;
         if !is_assembler {
+            // Assembly messages are intentionally accepted through a
+            // non-blocking ingress handler.  A peer can therefore miss a
+            // one-shot broadcast while the local durable producer is doing a
+            // short store operation.  Re-emit this member's already-signed
+            // phase vote from durable state until the phase certificate is
+            // present; never sign a second vote or change a candidate.
+            self.replay_local_phase_votes(state, target_height, &binding)?;
             return Ok(());
         }
 
@@ -1398,6 +1405,8 @@ impl SimplifiedEmptyEtdagProducer {
         }
 
         if state.entries[&target_height].dcc.is_none() {
+            self.replay_dcc_candidate(state, target_height, &binding)?;
+            self.replay_local_phase_votes(state, target_height, &binding)?;
             let entry = &state.entries[&target_height];
             if entry.dcc_votes.len() < quorum {
                 return Ok(());
@@ -1456,6 +1465,8 @@ impl SimplifiedEmptyEtdagProducer {
         }
 
         if state.entries[&target_height].bvc.is_none() {
+            self.replay_bvc_candidate(state, target_height, &binding)?;
+            self.replay_local_phase_votes(state, target_height, &binding)?;
             let entry = &state.entries[&target_height];
             if entry.bvc_votes.len() < quorum {
                 return Ok(());
@@ -1481,6 +1492,8 @@ impl SimplifiedEmptyEtdagProducer {
         }
 
         if state.entries[&target_height].boc.is_none() {
+            self.replay_boc_candidate(state, target_height, &binding)?;
+            self.replay_local_phase_votes(state, target_height, &binding)?;
             let entry = &state.entries[&target_height];
             let bvc = entry.bvc.clone().unwrap();
             let dcc = entry.dcc.clone().unwrap();
@@ -1566,6 +1579,156 @@ impl SimplifiedEmptyEtdagProducer {
                 .certified_artifact = Some(artifact.clone());
             self.pending_outputs
                 .push(SimplifiedEmptyEtdagOutput::CertifiedInput(artifact));
+        }
+        Ok(())
+    }
+
+    fn replay_dcc_candidate(
+        &mut self,
+        state: &EmptyEtdagFile,
+        target_height: Height,
+        binding: &EtdagDigest,
+    ) -> Result<(), String> {
+        let entry = state
+            .entries
+            .get(&target_height)
+            .ok_or_else(|| "EMPTY_ETDAG_ADMISSION_NOT_READY".to_string())?;
+        if entry.dcc.is_some() {
+            return Ok(());
+        }
+        let Some(candidate) = entry.dcc_candidate.clone() else {
+            return Ok(());
+        };
+        self.pending_outputs
+            .push(SimplifiedEmptyEtdagOutput::Assembly(
+                SimplifiedEmptyEtdagMessage::DccCandidate {
+                    target_height,
+                    admission_binding_digest: binding.clone(),
+                    certified_vertices: entry.certified_vertices.clone(),
+                    marker_digests: candidate.cutoff_marker_digests.clone(),
+                    candidate,
+                },
+            ));
+        Ok(())
+    }
+
+    fn replay_bvc_candidate(
+        &mut self,
+        state: &EmptyEtdagFile,
+        target_height: Height,
+        binding: &EtdagDigest,
+    ) -> Result<(), String> {
+        let entry = state
+            .entries
+            .get(&target_height)
+            .ok_or_else(|| "EMPTY_ETDAG_ADMISSION_NOT_READY".to_string())?;
+        if entry.bvc.is_some() {
+            return Ok(());
+        }
+        let (Some(dcc), Some(batch_candidate)) = (entry.dcc.clone(), entry.batch_candidate.clone())
+        else {
+            return Ok(());
+        };
+        self.pending_outputs
+            .push(SimplifiedEmptyEtdagOutput::Assembly(
+                SimplifiedEmptyEtdagMessage::BvcCandidate {
+                    target_height,
+                    admission_binding_digest: binding.clone(),
+                    certified_vertices: entry.certified_vertices.clone(),
+                    dcc,
+                    batch_candidate,
+                },
+            ));
+        Ok(())
+    }
+
+    fn replay_boc_candidate(
+        &mut self,
+        state: &EmptyEtdagFile,
+        target_height: Height,
+        binding: &EtdagDigest,
+    ) -> Result<(), String> {
+        let entry = state
+            .entries
+            .get(&target_height)
+            .ok_or_else(|| "EMPTY_ETDAG_ADMISSION_NOT_READY".to_string())?;
+        if entry.boc.is_some() {
+            return Ok(());
+        }
+        let (Some(dcc), Some(bvc)) = (entry.dcc.clone(), entry.bvc.clone()) else {
+            return Ok(());
+        };
+        self.pending_outputs
+            .push(SimplifiedEmptyEtdagOutput::Assembly(
+                SimplifiedEmptyEtdagMessage::BocCandidate {
+                    target_height,
+                    admission_binding_digest: binding.clone(),
+                    certified_vertices: entry.certified_vertices.clone(),
+                    dcc,
+                    bvc,
+                },
+            ));
+        Ok(())
+    }
+
+    fn replay_local_phase_votes(
+        &mut self,
+        state: &mut EmptyEtdagFile,
+        target_height: Height,
+        binding: &EtdagDigest,
+    ) -> Result<(), String> {
+        let (dcc, bvc, boc) = {
+            let entry = state
+                .entries
+                .get(&target_height)
+                .ok_or_else(|| "EMPTY_ETDAG_ADMISSION_NOT_READY".to_string())?;
+            (
+                entry
+                    .dcc_candidate
+                    .as_ref()
+                    .filter(|_| entry.dcc.is_none())
+                    .map(DagCutCandidate::digest)
+                    .transpose()?,
+                entry
+                    .batch_candidate
+                    .as_ref()
+                    .filter(|_| entry.bvc.is_none())
+                    .map(BatchCandidate::digest)
+                    .transpose()?,
+                entry
+                    .bvc
+                    .as_ref()
+                    .filter(|_| entry.boc.is_none())
+                    .map(|certificate| certificate.batch_candidate.digest())
+                    .transpose()?,
+            )
+        };
+        if let Some(candidate_digest) = dcc {
+            self.ensure_local_phase_vote(
+                state,
+                target_height,
+                binding,
+                EtdagPhase::Dcc,
+                candidate_digest,
+            )?;
+        }
+        if let Some(candidate_digest) = bvc {
+            self.ensure_local_phase_vote(
+                state,
+                target_height,
+                binding,
+                EtdagPhase::BatchValidate,
+                candidate_digest,
+            )?;
+        }
+        if let Some(candidate_digest) = boc {
+            self.ensure_local_phase_vote(
+                state,
+                target_height,
+                binding,
+                EtdagPhase::BatchFinality,
+                candidate_digest,
+            )?;
         }
         Ok(())
     }
