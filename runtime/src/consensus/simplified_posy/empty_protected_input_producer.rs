@@ -2019,12 +2019,33 @@ mod tests {
             }
         }
 
+        // Drain the initial one-shot DCC broadcast as though every peer was
+        // busy, then prove the durable producer re-emits the exact candidate
+        // and its existing local vote on the next worker pass.
+        producer.prepare().unwrap();
+        let mut replayed_dcc_outputs = producer.drain_outputs();
+        assert!(replayed_dcc_outputs.iter().any(|output| matches!(
+            output,
+            SimplifiedEmptyEtdagOutput::Assembly(SimplifiedEmptyEtdagMessage::DccCandidate { .. })
+        )));
+        assert!(replayed_dcc_outputs.iter().any(|output| matches!(
+            output,
+            SimplifiedEmptyEtdagOutput::Assembly(SimplifiedEmptyEtdagMessage::DccVote {
+                vote,
+                ..
+            }) if vote.signer_validator_id == local_id
+        )));
+
         for phase in [
             EtdagPhase::Dcc,
             EtdagPhase::BatchValidate,
             EtdagPhase::BatchFinality,
         ] {
-            let outputs = producer.drain_outputs();
+            let outputs = if phase == EtdagPhase::Dcc {
+                std::mem::take(&mut replayed_dcc_outputs)
+            } else {
+                producer.drain_outputs()
+            };
             let candidate_digest = outputs
                 .iter()
                 .find_map(|output| match (phase, output) {
