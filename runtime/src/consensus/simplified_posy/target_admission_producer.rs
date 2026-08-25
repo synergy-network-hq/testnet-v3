@@ -115,6 +115,81 @@ impl SimplifiedIngressKemRegistryArtifact {
     }
 }
 
+/// Publish the exact canonical public ML-KEM registry artifact consumed by
+/// [`DurableSimplifiedIngressKemRegistrySource`]. The destination is strictly
+/// no-clobber: an existing artifact is never replaced, and an incomplete new
+/// file is removed if publication fails.
+pub fn write_simplified_ingress_kem_registry_artifact(
+    path: &Path,
+    epoch_context_root: Hash,
+    registry: &IngressKemKeyRegistry,
+) -> Result<SimplifiedIngressKemRegistryArtifact, String> {
+    if path.exists() {
+        return Err(format!(
+            "refusing to overwrite simplified ingress KEM registry artifact {}",
+            path.display()
+        ));
+    }
+    let artifact = SimplifiedIngressKemRegistryArtifact {
+        format: SIMPLIFIED_INGRESS_KEM_REGISTRY_ARTIFACT_FORMAT.to_string(),
+        epoch_context_root,
+        epoch: registry.epoch,
+        target_height: registry.target_height,
+        assigned_cluster_id: registry.assigned_cluster_id,
+        registry_root: registry.root()?,
+        registry: registry.clone(),
+    };
+    artifact.validate(epoch_context_root)?;
+    let bytes = serde_json::to_vec(&artifact)
+        .map_err(|error| format!("serialize simplified ingress KEM registry: {error}"))?;
+    if bytes.is_empty() || bytes.len() > MAX_SIMPLIFIED_INGRESS_KEM_REGISTRY_ARTIFACT_BYTES {
+        return Err(
+            "simplified ingress KEM registry artifact violates its encode bound".to_string(),
+        );
+    }
+    let parent = path.parent().ok_or_else(|| {
+        format!(
+            "simplified ingress KEM registry output has no parent: {}",
+            path.display()
+        )
+    })?;
+    if !parent.is_dir() {
+        return Err(format!(
+            "simplified ingress KEM registry output directory does not exist: {}",
+            parent.display()
+        ));
+    }
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o644);
+    }
+    let mut file = options.open(path).map_err(|error| {
+        format!(
+            "create simplified ingress KEM registry artifact {}: {error}",
+            path.display()
+        )
+    })?;
+    let result = (|| {
+        file.write_all(&bytes)
+            .map_err(|error| format!("write simplified ingress KEM registry: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("fsync simplified ingress KEM registry: {error}"))?;
+        OpenOptions::new()
+            .read(true)
+            .open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| format!("fsync simplified ingress KEM registry directory: {error}"))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(path);
+    }
+    result?;
+    Ok(artifact)
+}
+
 /// Deterministic, read-only source for public ML-KEM registries issued by the
 /// identity/custody workstream. Missing artifacts return `None`; malformed,
 /// noncanonical, substituted, or oversized artifacts fail closed.
@@ -1476,6 +1551,51 @@ mod tests {
             .registry_for_target(epoch, target_height, assigned_cluster_id)
             .unwrap_err()
             .contains("invalid simplified ingress KEM registry artifact"));
+    }
+
+    #[test]
+    fn durable_public_registry_writer_is_canonical_and_no_clobber() {
+        let environment = environment(5, "durable-registry-writer");
+        let root = temp_root("durable-registry-writer");
+        let epoch_root = environment.configuration.epoch_context.root().unwrap();
+        let mut source =
+            DurableSimplifiedIngressKemRegistrySource::at_directory(&root, epoch_root).unwrap();
+        let path = source.artifact_path(
+            environment.registry.epoch,
+            environment.registry.target_height,
+            environment.registry.assigned_cluster_id,
+        );
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        let artifact = write_simplified_ingress_kem_registry_artifact(
+            &path,
+            epoch_root,
+            &environment.registry,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            serde_json::to_vec(&artifact).unwrap()
+        );
+        assert_eq!(
+            source
+                .registry_for_target(
+                    environment.registry.epoch,
+                    environment.registry.target_height,
+                    environment.registry.assigned_cluster_id,
+                )
+                .unwrap(),
+            Some(environment.registry.clone())
+        );
+        assert!(write_simplified_ingress_kem_registry_artifact(
+            &path,
+            epoch_root,
+            &environment.registry,
+        )
+        .unwrap_err()
+        .contains("refusing to overwrite"));
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

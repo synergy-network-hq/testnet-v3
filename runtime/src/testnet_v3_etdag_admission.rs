@@ -118,8 +118,6 @@ struct PublicIngressRecord {
     algorithm: String,
     public_key_base64: String,
     public_key_sha3_256: String,
-    validator_public_identity_sha256: String,
-    validator_encrypted_identity_sha256: String,
     private_custody_file: String,
     private_custody_sha3_256: String,
 }
@@ -294,16 +292,6 @@ fn load_public_ingress_registry(
         )?;
         require_lower_hex(&record.public_key_sha3_256, 64, "public_key_sha3_256")?;
         require_lower_hex(
-            &record.validator_public_identity_sha256,
-            64,
-            "validator_public_identity_sha256",
-        )?;
-        require_lower_hex(
-            &record.validator_encrypted_identity_sha256,
-            64,
-            "validator_encrypted_identity_sha256",
-        )?;
-        require_lower_hex(
             &record.private_custody_sha3_256,
             64,
             "private_custody_sha3_256",
@@ -314,6 +302,8 @@ fn load_public_ingress_registry(
             || record.validator_identity_id.trim().is_empty()
             || record.operator_address.trim().is_empty()
             || record.private_custody_file.trim().is_empty()
+            || record.private_custody_file
+                != format!("{}/etdag-ingress-kem.enc.json", record.validator_id)
         {
             return Err("public ingress record contains an invalid identity binding".to_string());
         }
@@ -328,6 +318,10 @@ fn load_public_ingress_registry(
             .get(&record.validator_id)
             .ok_or_else(|| format!("Genesis validator record missing {}", record.validator_id))?;
         if validator.validator_uma_id.0 != record.operator_address
+            || genesis_record
+                .get("allocation_account_id")
+                .and_then(serde_json::Value::as_str)
+                != Some(record.validator_identity_id.as_str())
             || genesis_record
                 .get("key_bundle_hash")
                 .and_then(serde_json::Value::as_str)
