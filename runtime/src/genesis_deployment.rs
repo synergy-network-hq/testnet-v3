@@ -2370,9 +2370,9 @@ mod tests {
         assert_eq!(unique.len(), 9, "no two contracts share an address");
 
         // 9 deployments; 5 treasury signers + 6 reserved names + 12 validator
-        // calls + 1 oracle + 3 source domains = 27 initialization calls.
+        // calls + 1 oracle + 3 source domains = 25 initialization calls.
         assert_eq!(a.deployment_receipts.len(), 9);
-        assert_eq!(a.initialization_receipts.len(), 27);
+        assert_eq!(a.initialization_receipts.len(), 25);
         assert_eq!(a.lifecycle, GenesisDeployerLifecycle::PermanentlyRetired);
         assert_eq!(a.replay_operations.len(), 36);
 

@@ -591,7 +591,7 @@ def main() -> None:
         "signed_replay_operations": replay_operations_value,
         "execution_state": snapshot,
         "deployment_count": 9,
-        "initialization_count": 27,
+        "initialization_count": 25,
         "receipt_root": computed_receipt_root,
         "post_deployment_execution_state_root": status["post_deployment_execution_state_root"],
         "post_deployment_aivm_state_root": status["post_deployment_aivm_state_root"],

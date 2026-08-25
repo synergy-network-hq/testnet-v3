@@ -108,8 +108,8 @@ def validate_public_inputs(
     deployment = object_at(genesis, "genesis_deployment")
     require(deployment.get("status") == "EXECUTED_AND_BOUND",
             "Genesis deployment is not EXECUTED_AND_BOUND")
-    require(deployment.get("deployment_count") == 9 and deployment.get("initialization_count") == 27,
-            "Genesis deployment does not contain nine deployments and 27 initializations")
+    require(deployment.get("deployment_count") == 9 and deployment.get("initialization_count") == 25,
+            "Genesis deployment does not contain nine deployments and 25 initializations")
     require(deployment.get("genesis_deployer_lifecycle") == "PermanentlyRetired",
             "Genesis deployment authority is not permanently retired")
     for field in ("receipt_root", "post_deployment_execution_state_root",
