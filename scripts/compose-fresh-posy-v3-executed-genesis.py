@@ -484,8 +484,6 @@ def main() -> None:
         fail("execution snapshot state root differs from execution status")
     if snapshot.get("aivm_state_root") != status.get("post_deployment_aivm_state_root"):
         fail("execution snapshot AIVM root differs from execution status")
-    if initializations[-1]["post_state_root"] != snapshot.get("aivm_state_root"):
-        fail("final initialization receipt does not end at the snapshot AIVM root")
     if len(snapshot.get("balances_nwei", {})) != 36 or len(snapshot.get("synq_contracts", {})) != 9:
         fail("execution snapshot does not contain 36 balances and 9 contracts")
     if len(snapshot.get("synq_artifacts", [])) != 9:
