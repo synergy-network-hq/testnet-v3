@@ -21,6 +21,7 @@ use crate::synergy_types::{
 use crate::utils::resolve_data_path;
 
 const ZERO_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+const TESTNET_V3_CANONICAL_CAIP2: &str = "synergy:testnet-v3";
 /// The only deployed Chain 1266 Genesis record that predates the explicit
 /// incarnation/schema fields. This semantic hash is immutable: the loader
 /// derives the P1 state domain for this one record, but never rewrites Genesis
@@ -749,8 +750,7 @@ fn validate_integrity_hashes(value: &Value) -> Result<(), String> {
         &expected_genesis_hash,
         "integrity.genesis_hash",
     )?;
-    let caip2 = required_string(value, &["network_identity", "canonical_caip2", "value"])?;
-    let network_magic_bytes = network_magic_bytes_for(&caip2, &expected_genesis_hash);
+    let network_magic_bytes = network_magic_bytes_for(TESTNET_V3_CANONICAL_CAIP2, &expected_genesis_hash);
     compare_hash(
         value,
         &["p2p_identity", "network_magic_bytes"],
@@ -1412,8 +1412,7 @@ fn validate_testnet_v3_candidate_integrity_hashes(value: &Value) -> Result<(), S
         &expected_genesis_hash,
         "integrity.genesis_hash",
     )?;
-    let caip2 = required_string(value, &["network_identity", "canonical_caip2", "value"])?;
-    let network_magic_bytes = network_magic_bytes_for(&caip2, &expected_genesis_hash);
+    let network_magic_bytes = network_magic_bytes_for(TESTNET_V3_CANONICAL_CAIP2, &expected_genesis_hash);
     compare_hash(
         value,
         &["network_magic_bytes", "value"],
@@ -1517,9 +1516,8 @@ pub fn recompute_testnet_v3_candidate_integrity(value: &mut Value) -> Result<(),
     // The header roots above are inputs to the final Genesis hash.
     let genesis_hash = hash_json(&genesis_hash_payload(value));
     value["integrity"]["genesis_hash"] = Value::String(genesis_hash.clone());
-    let caip2 = required_string(value, &["network_identity", "canonical_caip2", "value"])?;
     value["network_magic_bytes"]["value"] =
-        Value::String(network_magic_bytes_for(&caip2, &genesis_hash));
+        Value::String(network_magic_bytes_for(TESTNET_V3_CANONICAL_CAIP2, &genesis_hash));
 
     validate_testnet_v3_candidate_integrity_hashes(value)
 }
