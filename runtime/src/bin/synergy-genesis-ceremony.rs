@@ -1230,6 +1230,15 @@ fn production_parameters(source_genesis: &Path) -> Result<GenesisParameters, Str
             activation_height: n(&v["activation_height"]),
         })
         .collect();
+    // The dynamic P3 registry has no separate minimum-self-stake field.  Its
+    // active Genesis validators are created from the approved, equal stake
+    // allocation, so bind the deployment ABI value to that public record.
+    let validator_min_self_stake_nwei = c["validator_registry"]["init_params"]["validators"]
+        .as_array()
+        .and_then(|validators| validators.first())
+        .and_then(|validator| validator["stake_nwei"].as_str())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| "fresh P3 validator registry has no initial stake".to_string())?;
     Ok(GenesisParameters {
         identity_registration_fee_nwei: s(&c["identity"]["init_params"]["registration_fee_nwei"]),
         identity_reserved_names: c["identity"]["init_params"]["reserved_names"]
@@ -1238,11 +1247,15 @@ fn production_parameters(source_genesis: &Path) -> Result<GenesisParameters, Str
             .iter()
             .map(s)
             .collect(),
-        validator_max_count: n(&c["validator_registry"]["init_params"]["max_validator_count"]),
+        // Fresh P3 deliberately represents an uncapped validator set as null
+        // in the public Genesis policy.  The deployment ABI is numeric-only;
+        // zero is its canonical unbounded sentinel.
+        validator_max_count: c["validator_registry"]["init_params"]["max_validator_count"]
+            .as_u64()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "0".to_string()),
         validator_min_count: n(&c["validator_registry"]["init_params"]["min_validator_count"]),
-        validator_min_self_stake_nwei: s(
-            &c["validator_registry"]["init_params"]["min_self_stake_nwei"]
-        ),
+        validator_min_self_stake_nwei,
         validators,
         staking_min_stake_nwei: s(&c["staking"]["init_params"]["min_stake_nwei"]),
         staking_max_stake_nwei: s(&c["staking"]["init_params"]["max_stake_nwei"]),
