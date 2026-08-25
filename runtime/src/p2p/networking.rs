@@ -10964,6 +10964,28 @@ fn receive_message(stream: &mut impl Read) -> Result<NetworkMessage, io::Error> 
 
 fn validate_simplified_predecode_frame_length(len: usize, prefix: &[u8]) -> io::Result<()> {
     let mut cursor = 0usize;
+    // Serde encodes unit `NetworkMessage` variants as JSON strings. These
+    // control frames occur immediately after the initial handshake/status
+    // exchange, so treating every frame as an externally-tagged object tears
+    // down otherwise authenticated validator sessions before consensus can
+    // establish peer readiness. Keep the predecode gate fail-closed by
+    // admitting only the complete, known unit control variants.
+    skip_json_whitespace(prefix, &mut cursor);
+    if prefix.get(cursor) == Some(&b'"') {
+        let unit_kind = consume_json_key(prefix, &mut cursor, "network control frame")?;
+        if !matches!(unit_kind, b"GetPeers" | b"Ping" | b"Pong" | b"GetStatus") {
+            return Err(invalid_predecode(
+                "network control frame is not an allowed unit NetworkMessage variant",
+            ));
+        }
+        skip_json_whitespace(prefix, &mut cursor);
+        if cursor != prefix.len() || len != prefix.len() {
+            return Err(invalid_predecode(
+                "network control frame must be fully visible in the bounded predecode prefix",
+            ));
+        }
+        return Ok(());
+    }
     consume_json_byte(prefix, &mut cursor, b'{', "network envelope")?;
     let outer_kind = consume_json_key(prefix, &mut cursor, "network envelope kind")?;
     if outer_kind == b"SimplifiedTargetAdmission" {
@@ -13389,6 +13411,22 @@ mod tests {
                 .expect("exact simplified wire budget must be accepted");
             assert!(validate_simplified_predecode_frame_length(maximum - 3, prefix).is_err());
         }
+    }
+
+    #[test]
+    fn simplified_predecode_accepts_only_complete_unit_control_frames() {
+        for frame in [
+            br#""GetPeers""#.as_slice(),
+            br#""Ping""#,
+            br#""Pong""#,
+            br#""GetStatus""#,
+        ] {
+            validate_simplified_predecode_frame_length(frame.len(), frame)
+                .expect("known unit NetworkMessage control frame must pass");
+        }
+
+        assert!(validate_simplified_predecode_frame_length(9, br#""Unknown""#).is_err());
+        assert!(validate_simplified_predecode_frame_length(13, br#""GetStatus" x"#).is_err());
     }
 
     #[test]
