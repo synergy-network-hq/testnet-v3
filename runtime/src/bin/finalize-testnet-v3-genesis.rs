@@ -602,7 +602,7 @@ fn build_candidate(root: &Path, authorities_path: &Path) -> Value {
         || execution["mode"] != "execute"
         || execution["address_mismatches"] != json!([])
         || execution["deployment_receipts"] != 9
-        || execution["initialization_receipts"] != 27
+        || execution["initialization_receipts"] != 25
         || execution["execution_state_balance_count"] != 36
         || execution["execution_state_contract_count"] != 9
         || execution["execution_state_artifact_count"] != 9
@@ -668,8 +668,8 @@ fn build_candidate(root: &Path, authorities_path: &Path) -> Value {
             ));
         }
     }
-    if deployments.len() != 9 || initializations.len() != 27 {
-        fail("ceremony receipt counts do not match 9 deployments and 27 initializations");
+    if deployments.len() != 9 || initializations.len() != 25 {
+        fail("ceremony receipt counts do not match 9 deployments and 25 initializations");
     }
     validate_receipt_chain(&deployments, "deployment");
     validate_receipt_chain(&initializations, "initialization");
@@ -912,7 +912,7 @@ fn build_candidate(root: &Path, authorities_path: &Path) -> Value {
         "initialization_receipts": initialization_values,
         "execution_state": execution_state_value,
         "deployment_count": 9,
-        "initialization_count": 27,
+        "initialization_count": 25,
         "receipt_root": receipt_root,
         "post_deployment_execution_state_root": execution["post_deployment_execution_state_root"],
         "post_deployment_aivm_state_root": execution["post_deployment_aivm_state_root"],

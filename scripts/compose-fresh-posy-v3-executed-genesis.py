@@ -460,7 +460,7 @@ def main() -> None:
         fail("execution evidence contract artifact inventory differs")
 
     deployments = validate_receipts(deployments_value, 9, "deployment receipts")
-    initializations = validate_receipts(initializations_value, 27, "initialization receipts")
+    initializations = validate_receipts(initializations_value, 25, "initialization receipts")
     if deployments[-1]["post_state_root"] != initializations[0]["pre_state_root"]:
         fail("deployment and initialization receipt chains are discontinuous")
     computed_receipt_root = receipt_root(deployments, initializations)
@@ -584,7 +584,7 @@ def main() -> None:
         "initialization_receipts": initializations,
         "execution_state": snapshot,
         "deployment_count": 9,
-        "initialization_count": 27,
+        "initialization_count": 25,
         "receipt_root": computed_receipt_root,
         "post_deployment_execution_state_root": status["post_deployment_execution_state_root"],
         "post_deployment_aivm_state_root": status["post_deployment_aivm_state_root"],

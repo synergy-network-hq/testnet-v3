@@ -160,7 +160,7 @@ pub fn load_finalized_testnet_v3_genesis_execution_state(
         || deployment
             .get("initialization_count")
             .and_then(Value::as_u64)
-            != Some(27)
+            != Some(25)
         || required_string(deployment, "genesis_deployer_lifecycle")? != "PermanentlyRetired"
     {
         return Err("finalized Genesis deployment boundary is incomplete".to_string());
