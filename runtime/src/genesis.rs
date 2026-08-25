@@ -1895,6 +1895,18 @@ pub fn bind_testnet_v3_genesis_etdag_membership_anchor(
     }
     value["etdag_membership_anchor"] = serde_json::to_value(anchor)
         .map_err(|error| format!("serialize ETDAG membership anchor: {error}"))?;
+    // Attaching the governed membership anchor completes every public binding
+    // required before V4 approval.  Advance the candidate only here, after
+    // the anchor's Genesis/execution/validator-set checks above have passed,
+    // so the approval request builder can distinguish it from the pre-anchor
+    // execution stage.
+    value["network"]["status"] =
+        Value::String("contract_deployment_executed_pending_release_approval".to_string());
+    value["integrity"]["status"] =
+        Value::String("candidate_deployment_bound_pending_release_approval".to_string());
+    value["testnet_v3_initialization"]["finalization_status"] = Value::String(
+        "production_contract_deployment_executed_and_bound_pending_release_approval".to_string(),
+    );
     Ok(())
 }
 
