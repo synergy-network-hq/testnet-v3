@@ -1,12 +1,12 @@
 //! Durable schedule-neutral H+3 target-admission production for simplified PoSy.
 
-#[cfg(test)]
-use super::{GenesisFinalityReference, QuorumCertificateReference};
 use super::{
     simplified_protected_finality_context_digest_from_state_root,
     DurableSimplifiedProtectedMaterialAuthority, FinalizedBlockRecord, SimplifiedEpochContext,
     POSY_SIMPLIFIED_PROTOCOL_VERSION,
 };
+#[cfg(test)]
+use super::{GenesisFinalityReference, QuorumCertificateReference};
 use crate::consensus_parameters::ConsensusParameterRoot;
 use crate::crypto::aegis_pqvm::{AegisPqvmSigner, AegisPqvmVerifier};
 use crate::etdag::{
@@ -26,7 +26,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::TryLockError;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -636,8 +635,8 @@ fn target_admission_handler_slot() -> &'static Mutex<Option<SimplifiedTargetAdmi
 }
 
 /// Installs exactly one process-wide target-admission handler. Ingress is
-/// handled under a nonblocking mutex rather than queued, so authenticated peers
-/// cannot create an unbounded backlog of signature verification or disk work.
+/// handled under one serialized mutex so authenticated, bounded validator
+/// traffic is never silently discarded during durable producer work.
 pub fn install_simplified_target_admission_producer_handler(
     producer: SimplifiedTargetAdmissionProducer,
 ) -> Result<(), String> {
@@ -710,15 +709,8 @@ pub fn dispatch_simplified_target_admission_package(
 fn try_lock_target_admission_handler(
 ) -> Result<std::sync::MutexGuard<'static, Option<SimplifiedTargetAdmissionProducer>>, String> {
     target_admission_handler_slot()
-        .try_lock()
-        .map_err(|error| match error {
-            TryLockError::WouldBlock => {
-                "simplified target-admission producer is busy; ingress rejected".to_string()
-            }
-            TryLockError::Poisoned(_) => {
-                "simplified target-admission producer lock is poisoned".to_string()
-            }
-        })
+        .lock()
+        .map_err(|_| "simplified target-admission producer lock is poisoned".to_string())
 }
 
 impl SimplifiedTargetAdmissionProducer {

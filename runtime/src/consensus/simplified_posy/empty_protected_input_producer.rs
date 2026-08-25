@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, TryLockError};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const SIMPLIFIED_EMPTY_ETDAG_STORE_FORMAT: &str =
@@ -1743,15 +1743,9 @@ fn empty_etdag_handler_slot() -> &'static Mutex<Option<SimplifiedEmptyEtdagProdu
 
 fn try_lock_empty_etdag_handler(
 ) -> Result<std::sync::MutexGuard<'static, Option<SimplifiedEmptyEtdagProducer>>, String> {
-    match empty_etdag_handler_slot().try_lock() {
-        Ok(slot) => Ok(slot),
-        Err(TryLockError::WouldBlock) => {
-            Err("simplified empty-ETDAG producer is busy; ingress rejected".to_string())
-        }
-        Err(TryLockError::Poisoned(_)) => {
-            Err("simplified empty-ETDAG producer lock poisoned".to_string())
-        }
-    }
+    empty_etdag_handler_slot()
+        .lock()
+        .map_err(|_| "simplified empty-ETDAG producer lock poisoned".to_string())
 }
 
 pub fn install_simplified_empty_etdag_producer_handler(
