@@ -196,7 +196,7 @@ fn main() {
             durable_output.display(),
             durable_sha256,
             epoch_context_root.to_hex(),
-            durable_artifact.registry_root.to_hex(),
+            durable_artifact.registry_root.0,
             request.applied_genesis_hash,
             request.target_height.0,
             request.signature_algorithm,

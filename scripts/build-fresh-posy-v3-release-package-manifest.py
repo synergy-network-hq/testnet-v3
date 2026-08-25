@@ -11,9 +11,11 @@ manifest.  It neither reads custody material nor contacts a host.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
+import struct
 import subprocess
 import sys
 import tomllib
@@ -27,6 +29,14 @@ RELEASE_ID = "testnet-v3"
 PROTOCOL = "posy/3.0"
 ACTIVE_IDS = [f"validator-{ordinal:02d}" for ordinal in range(2, 7)]
 HEX_64 = "0123456789abcdef"
+HEX_128 = HEX_64
+INGRESS_RECORDS_ARTIFACT_TYPE = "testnet-v3-etdag-ingress-key-records"
+INGRESS_RECORDS_STATUS = "generated_pending_target_admission_certificate"
+INGRESS_REGISTRY_FORMAT = "synergy-posy-simplified-ingress-kem-registry-v1"
+INGRESS_REGISTRY_DOMAIN = "PoSy/ETDAG/IngressKemKeyRegistry/v3"
+INGRESS_REGISTRY_VERSION = 1
+FIRST_ETDAG_TARGET_HEIGHT = 3
+INITIAL_CLUSTER_ID = 0
 
 
 def fail(message: str) -> "NoReturn":
@@ -64,6 +74,12 @@ def require_sha256(value: Any, label: str) -> str:
     return value
 
 
+def require_sha3_512(value: Any, label: str) -> str:
+    require(isinstance(value, str) and len(value) == 128 and set(value) <= set(HEX_128),
+            f"{label} is not a lowercase SHA3-512 digest")
+    return value
+
+
 def object_value(value: dict[str, Any], key: str, label: str) -> dict[str, Any]:
     nested = value.get(key)
     require(isinstance(nested, dict), f"{label} must be an object")
@@ -73,6 +89,190 @@ def object_value(value: dict[str, Any], key: str, label: str) -> dict[str, Any]:
 def reject_symlink(path: Path, label: str) -> None:
     require(not path.is_symlink(), f"{label} must not be a symlink")
     require(path.is_file(), f"{label} is not a regular file")
+
+
+def canonical_json(value: Any) -> bytes:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def etdag_domain_digest(domain: str, payload: bytes) -> str:
+    hasher = hashlib.sha3_512()
+    domain_bytes = domain.encode("utf-8")
+    hasher.update(struct.pack(">Q", len(domain_bytes)))
+    hasher.update(domain_bytes)
+    hasher.update(struct.pack(">Q", len(payload)))
+    hasher.update(payload)
+    return hasher.hexdigest()
+
+
+def validate_etdag_ingress_artifacts(
+    ingress_records_path: Path,
+    ingress_registry_path: Path,
+    genesis_sha256: str,
+    genesis_hash: str,
+) -> dict[str, Any]:
+    reject_symlink(ingress_records_path, "ETDAG ingress records")
+    reject_symlink(ingress_registry_path, "ETDAG ingress registry")
+    records_artifact = read_json(ingress_records_path)
+    require(records_artifact.get("schema_version") == 1
+            and records_artifact.get("artifact_type") == INGRESS_RECORDS_ARTIFACT_TYPE
+            and records_artifact.get("status") == INGRESS_RECORDS_STATUS
+            and records_artifact.get("chain_id") == CHAIN_ID
+            and records_artifact.get("runtime_network_id") == NETWORK_ID
+            and records_artifact.get("protocol_version") == PROTOCOL
+            and records_artifact.get("genesis_candidate_sha256") == genesis_sha256
+            and records_artifact.get("genesis_hash") == genesis_hash,
+            "ETDAG ingress records are not bound to this exact Testnet-v3 Genesis")
+    public_records = records_artifact.get("records")
+    require(isinstance(public_records, list) and len(public_records) == len(ACTIVE_IDS),
+            "ETDAG ingress records must contain exactly validator-02 through validator-06")
+
+    wrapper_bytes = read_bytes(ingress_registry_path)
+    try:
+        wrapper = json.loads(wrapper_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        fail(f"cannot parse strict JSON {ingress_registry_path}: {error}")
+    require(isinstance(wrapper, dict), "ETDAG ingress registry is not a JSON object")
+    expected_wrapper_fields = {
+        "format", "epoch_context_root", "epoch", "target_height",
+        "assigned_cluster_id", "registry_root", "registry",
+    }
+    require(set(wrapper) == expected_wrapper_fields,
+            "ETDAG ingress registry wrapper fields are not canonical")
+    epoch_context_bytes = wrapper.get("epoch_context_root")
+    require(isinstance(epoch_context_bytes, list) and len(epoch_context_bytes) == 32
+            and all(isinstance(value, int) and not isinstance(value, bool)
+                    and 0 <= value <= 255 for value in epoch_context_bytes),
+            "ETDAG ingress registry epoch-context root is not exactly 32 bytes")
+    epoch_context_root = bytes(epoch_context_bytes).hex()
+    require(epoch_context_root != "0" * 64,
+            "ETDAG ingress registry epoch-context root must not be zero")
+    expected_filename = "epoch-0-height-3-cluster-0.json"
+    require(ingress_registry_path.name == expected_filename
+            and ingress_registry_path.parent.name == epoch_context_root,
+            f"ETDAG ingress registry must end in {epoch_context_root}/{expected_filename}")
+    require(wrapper.get("format") == INGRESS_REGISTRY_FORMAT
+            and wrapper.get("epoch") == 0
+            and wrapper.get("target_height") == FIRST_ETDAG_TARGET_HEIGHT
+            and wrapper.get("assigned_cluster_id") == INITIAL_CLUSTER_ID,
+            "ETDAG ingress registry wrapper target context is not epoch 0/height 3/cluster 0")
+
+    registry = wrapper.get("registry")
+    require(isinstance(registry, dict), "ETDAG ingress registry payload must be an object")
+    expected_registry_fields = {
+        "registry_version", "chain_id", "network_id", "protocol_version",
+        "epoch", "target_height", "assigned_cluster_id", "records",
+    }
+    require(set(registry) == expected_registry_fields,
+            "ETDAG ingress registry payload fields are not canonical")
+    require(registry.get("registry_version") == INGRESS_REGISTRY_VERSION
+            and registry.get("chain_id") == CHAIN_ID
+            and registry.get("network_id") == NETWORK_ID
+            and registry.get("protocol_version") == PROTOCOL
+            and registry.get("epoch") == wrapper.get("epoch")
+            and registry.get("target_height") == wrapper.get("target_height")
+            and registry.get("assigned_cluster_id") == wrapper.get("assigned_cluster_id"),
+            "ETDAG ingress registry payload context disagrees with its wrapper")
+    registry_records = registry.get("records")
+    require(isinstance(registry_records, list) and len(registry_records) == len(ACTIVE_IDS),
+            "ETDAG ingress registry must contain exactly five records")
+
+    canonical_registry_records: list[dict[str, Any]] = []
+    registry_by_validator: dict[str, dict[str, Any]] = {}
+    for record in registry_records:
+        require(isinstance(record, dict)
+                and set(record) == {"validator_id", "ingress_key_id", "share_index", "key_bytes"},
+                "ETDAG ingress registry record fields are not canonical")
+        validator_id = record.get("validator_id")
+        ingress_key_id = record.get("ingress_key_id")
+        share_index = record.get("share_index")
+        key_bytes = record.get("key_bytes")
+        require(validator_id in ACTIVE_IDS and validator_id not in registry_by_validator,
+                "ETDAG ingress registry validators are not exactly validator-02 through validator-06")
+        require(isinstance(ingress_key_id, str) and ingress_key_id.strip() != ""
+                and isinstance(share_index, int) and not isinstance(share_index, bool)
+                and 1 <= share_index <= 255
+                and isinstance(key_bytes, list) and key_bytes
+                and all(isinstance(value, int) and not isinstance(value, bool)
+                        and 0 <= value <= 255 for value in key_bytes),
+                f"ETDAG ingress registry record is invalid for {validator_id}")
+        canonical_record = {
+            "validator_id": validator_id,
+            "ingress_key_id": ingress_key_id,
+            "share_index": share_index,
+            "key_bytes": key_bytes,
+        }
+        canonical_registry_records.append(canonical_record)
+        registry_by_validator[validator_id] = canonical_record
+    expected_order = sorted(
+        canonical_registry_records,
+        key=lambda record: (record["validator_id"], record["share_index"], record["ingress_key_id"]),
+    )
+    require(canonical_registry_records == expected_order
+            and list(registry_by_validator) == ACTIVE_IDS
+            and len({record["share_index"] for record in canonical_registry_records}) == len(ACTIVE_IDS)
+            and len({record["ingress_key_id"] for record in canonical_registry_records}) == len(ACTIVE_IDS),
+            "ETDAG ingress registry records are not unique and canonically ordered")
+
+    public_by_validator: dict[str, dict[str, Any]] = {}
+    for record in public_records:
+        require(isinstance(record, dict), "ETDAG public ingress record must be an object")
+        validator_id = record.get("validator_id")
+        require(validator_id in ACTIVE_IDS and validator_id not in public_by_validator,
+                "ETDAG public ingress validators are not exactly validator-02 through validator-06")
+        public_by_validator[validator_id] = record
+    require(list(public_by_validator) == ACTIVE_IDS,
+            "ETDAG public ingress records are not canonically ordered")
+    for validator_id in ACTIVE_IDS:
+        public = public_by_validator[validator_id]
+        runtime = registry_by_validator[validator_id]
+        try:
+            public_key = base64.b64decode(public.get("public_key_base64"), validate=True)
+        except (TypeError, ValueError) as error:
+            fail(f"ETDAG public ingress key is not canonical base64 for {validator_id}: {error}")
+        require(public.get("ingress_key_id") == runtime["ingress_key_id"]
+                and public.get("share_index") == runtime["share_index"]
+                and list(public_key) == runtime["key_bytes"],
+                f"ETDAG public ingress record disagrees with runtime registry for {validator_id}")
+
+    canonical_registry = {
+        "registry_version": INGRESS_REGISTRY_VERSION,
+        "chain_id": CHAIN_ID,
+        "network_id": NETWORK_ID,
+        "protocol_version": PROTOCOL,
+        "epoch": 0,
+        "target_height": FIRST_ETDAG_TARGET_HEIGHT,
+        "assigned_cluster_id": INITIAL_CLUSTER_ID,
+        "records": canonical_registry_records,
+    }
+    registry_root = etdag_domain_digest(
+        INGRESS_REGISTRY_DOMAIN,
+        canonical_json([
+            INGRESS_REGISTRY_VERSION, CHAIN_ID, NETWORK_ID, PROTOCOL, 0,
+            FIRST_ETDAG_TARGET_HEIGHT, INITIAL_CLUSTER_ID, canonical_registry_records,
+        ]),
+    )
+    require(require_sha3_512(wrapper.get("registry_root"), "ETDAG ingress registry root")
+            == registry_root,
+            "ETDAG ingress registry root does not match its canonical registry")
+    canonical_wrapper = {
+        "format": INGRESS_REGISTRY_FORMAT,
+        "epoch_context_root": epoch_context_bytes,
+        "epoch": 0,
+        "target_height": FIRST_ETDAG_TARGET_HEIGHT,
+        "assigned_cluster_id": INITIAL_CLUSTER_ID,
+        "registry_root": registry_root,
+        "registry": canonical_registry,
+    }
+    require(wrapper_bytes == canonical_json(canonical_wrapper),
+            "ETDAG ingress registry is not exact canonical compact JSON")
+    return {
+        "epoch_context_root": epoch_context_root,
+        "epoch": 0,
+        "target_height": FIRST_ETDAG_TARGET_HEIGHT,
+        "assigned_cluster_id": INITIAL_CLUSTER_ID,
+        "registry_root_sha3_512": registry_root,
+    }
 
 
 def verify_release_approval(
@@ -229,6 +429,8 @@ def main() -> None:
     parser.add_argument("--release-approval", required=True, type=Path)
     parser.add_argument("--validator-binary", required=True, type=Path)
     parser.add_argument("--validator-bundle-root", required=True, type=Path)
+    parser.add_argument("--etdag-ingress-records", required=True, type=Path)
+    parser.add_argument("--etdag-ingress-registry", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
 
@@ -238,7 +440,9 @@ def main() -> None:
                         (args.authority_record, "public authority record"),
                         (args.desired_state, "desired state"), (args.genesis, "Genesis"),
                         (args.release_approval, "V4 approval"),
-                        (args.validator_binary, "validator binary")]:
+                        (args.validator_binary, "validator binary"),
+                        (args.etdag_ingress_records, "ETDAG ingress records"),
+                        (args.etdag_ingress_registry, "ETDAG ingress registry")]:
         reject_symlink(path, label)
 
     verifier_line = verify_release_approval(
@@ -256,6 +460,13 @@ def main() -> None:
     require(network.get("chain_id") == CHAIN_ID and network.get("network_id") == NETWORK_ID,
             "Genesis does not bind Chain 1266/testnet")
     genesis_hash = require_sha256(integrity.get("genesis_hash"), "Genesis hash")
+    genesis_sha256 = sha256_file(args.genesis)
+    ingress_context = validate_etdag_ingress_artifacts(
+        args.etdag_ingress_records.resolve(),
+        args.etdag_ingress_registry.resolve(),
+        genesis_sha256,
+        genesis_hash,
+    )
     desired_state_bytes = read_bytes(args.desired_state)
     desired_state = read_json(args.desired_state)
     approval = read_json(args.release_approval)
@@ -302,13 +513,20 @@ def main() -> None:
             "release_candidate_sha256": sha256_file(args.release_candidate),
             "public_authority_record_sha256": sha256_file(args.authority_record),
             "desired_state_sha256": hashlib.sha256(desired_state_bytes).hexdigest(),
-            "genesis_sha256": sha256_file(args.genesis),
+            "genesis_sha256": genesis_sha256,
             "genesis_hash": genesis_hash,
             "release_approval_sha256": sha256_file(args.release_approval),
             "validator_binary_sha256": binary_hash,
             "validator_bundle_manifest_sha256": sha256_file(args.validator_bundle_root / "manifest.json"),
             "runtime_parser_validation_sha256": sha256_file(args.validator_bundle_root / "runtime-parser-validation.json"),
             "validator_configuration_sha256": config_hashes,
+            "etdag_ingress_records_sha256": sha256_file(args.etdag_ingress_records),
+            "etdag_ingress_registry_sha256": sha256_file(args.etdag_ingress_registry),
+            "etdag_ingress_registry_epoch_context_root": ingress_context["epoch_context_root"],
+            "etdag_ingress_registry_epoch": ingress_context["epoch"],
+            "etdag_ingress_registry_target_height": ingress_context["target_height"],
+            "etdag_ingress_registry_assigned_cluster_id": ingress_context["assigned_cluster_id"],
+            "etdag_ingress_registry_root_sha3_512": ingress_context["registry_root_sha3_512"],
         },
     }
     output.parent.mkdir(parents=True, exist_ok=True)
