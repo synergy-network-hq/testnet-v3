@@ -27,6 +27,7 @@ CHAIN_ID = 1266
 NETWORK_ID = "testnet"
 RELEASE_ID = "testnet-v3"
 PROTOCOL_VERSION = "posy/3.0"
+CANONICAL_CAIP2 = "synergy:testnet-v3"
 CONTRACT_ORDER = [
     "Identity",
     "ValidatorRegistry",
@@ -368,8 +369,7 @@ def recompute_integrity(candidate: dict[str, Any]) -> None:
         remove_dotted_path(payload, path)
     genesis_hash = hash_json(payload)
     candidate["integrity"]["genesis_hash"] = genesis_hash
-    caip2 = candidate["network_identity"]["canonical_caip2"]["value"]
-    magic_material = b"synergy-network-magic-v1" + caip2.encode() + genesis_hash.encode()
+    magic_material = b"synergy-network-magic-v1" + CANONICAL_CAIP2.encode() + genesis_hash.encode()
     candidate["network_magic_bytes"]["value"] = blake3.blake3(magic_material).digest()[:4].hex()
     candidate["network_magic_bytes"]["status"] = "FRESH_P3_DEPLOYMENT_BOUND"
 
