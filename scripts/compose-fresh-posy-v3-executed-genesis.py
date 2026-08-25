@@ -478,7 +478,7 @@ def main() -> None:
     if status.get("receipt_root") != computed_receipt_root:
         fail("fresh deployment receipt root failed independent recomputation")
 
-    if snapshot.get("chain_id") != CHAIN_ID or snapshot.get("runtime_network_id") != NETWORK_ID:
+    if snapshot.get("chain_id") != CHAIN_ID or snapshot.get("network_id") != NETWORK_ID:
         fail("execution snapshot has the wrong chain/network")
     if snapshot.get("state_root") != status.get("post_deployment_execution_state_root"):
         fail("execution snapshot state root differs from execution status")
