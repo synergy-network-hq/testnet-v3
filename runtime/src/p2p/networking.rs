@@ -3482,10 +3482,12 @@ fn etdag_ingress_peer_for_session(
 
 const MAX_PROTECTED_PIPELINE_DEDUP_OBJECTS: usize = 4_096;
 const MAX_PROTECTED_PIPELINE_PENDING_REVEAL_SHARES: usize = 256;
+const MAX_PROTECTED_PIPELINE_STARTUP_STAGING: usize = 256;
 
-/// One bounded handoff from authenticated P2P ingress to ProtectedPipeline.
-/// The runtime consumer performs full VAC/VC/share verification against its
-/// frozen target authority before any durable state transition.
+/// One authenticated semantic evidence delivery from P2P to the authoritative
+/// ProtectedPipeline runtime coordinator.  This envelope is intentionally
+/// transport-scoped: it carries the session-authenticated peer and validated
+/// wire message, but it does not own any durable pipeline state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtectedPipelineEvidenceEnvelope {
     pub peer_address: String,
@@ -3493,8 +3495,21 @@ pub struct ProtectedPipelineEvidenceEnvelope {
     pub message: ProtectedPipelineEvidenceMessage,
 }
 
+/// The only P2P-to-runtime mutation boundary for protected evidence.
+///
+/// The coordinator installs one process-wide handle during startup and must
+/// durably, idempotently merge the envelope before it reports success.  P2P
+/// has no alternate durable writer and never synthesizes a pipeline transition.
+pub trait ProtectedPipelineCoordinatorIngress: Send + Sync {
+    fn ingest_protected_pipeline_evidence(
+        &self,
+        envelope: ProtectedPipelineEvidenceEnvelope,
+    ) -> Result<(), String>;
+}
+
 struct ProtectedPipelineEvidenceIngress {
-    sender: mpsc::SyncSender<ProtectedPipelineEvidenceEnvelope>,
+    coordinator: Option<Arc<dyn ProtectedPipelineCoordinatorIngress>>,
+    startup_staging: VecDeque<ProtectedPipelineEvidenceEnvelope>,
     seen_objects: BTreeMap<EtdagDigest, ProtectedPipelineSemanticObject>,
     seen_order: VecDeque<EtdagDigest>,
     seen_messages: BTreeSet<EtdagDigest>,
@@ -3513,20 +3528,14 @@ fn protected_pipeline_evidence_ingress() -> &'static Mutex<Option<ProtectedPipel
 }
 
 pub fn install_protected_pipeline_evidence_ingress(
-    capacity: usize,
-) -> Result<mpsc::Receiver<ProtectedPipelineEvidenceEnvelope>, String> {
-    if capacity == 0 {
-        return Err("protected-pipeline evidence ingress capacity must be nonzero".to_string());
-    }
-    let (sender, receiver) = mpsc::sync_channel(capacity);
+    coordinator: Arc<dyn ProtectedPipelineCoordinatorIngress>,
+) -> Result<usize, String> {
     let mut slot = protected_pipeline_evidence_ingress()
         .lock()
         .map_err(|_| "protected-pipeline evidence ingress lock is poisoned".to_string())?;
-    if slot.is_some() {
-        return Err("protected-pipeline evidence ingress is already installed".to_string());
-    }
-    *slot = Some(ProtectedPipelineEvidenceIngress {
-        sender,
+    let ingress = slot.get_or_insert_with(|| ProtectedPipelineEvidenceIngress {
+        coordinator: None,
+        startup_staging: VecDeque::new(),
         seen_objects: BTreeMap::new(),
         seen_order: VecDeque::new(),
         seen_messages: BTreeSet::new(),
@@ -3534,9 +3543,30 @@ pub fn install_protected_pipeline_evidence_ingress(
         reveal_authorizations: BTreeSet::new(),
         pending_reveal_shares: BTreeMap::new(),
     });
-    Ok(receiver)
+    if ingress.coordinator.is_some() {
+        return Err("protected-pipeline coordinator ingress is already installed".to_string());
+    }
+    ingress.coordinator = Some(coordinator);
+    flush_protected_pipeline_startup_staging(ingress)
 }
 
+/// Retries bounded evidence accepted before the runtime coordinator completed
+/// startup.  The coordinator is never replaced: this only replays the exact
+/// queued envelopes to the same installed handle.
+pub fn flush_protected_pipeline_evidence_ingress() -> Result<usize, String> {
+    let mut slot = protected_pipeline_evidence_ingress()
+        .lock()
+        .map_err(|_| "protected-pipeline evidence ingress lock is poisoned".to_string())?;
+    let ingress = slot
+        .as_mut()
+        .ok_or_else(|| "protected-pipeline coordinator ingress is not installed".to_string())?;
+    if ingress.coordinator.is_none() {
+        return Err("protected-pipeline coordinator ingress is not installed".to_string());
+    }
+    flush_protected_pipeline_startup_staging(ingress)
+}
+
+#[cfg(test)]
 pub fn remove_protected_pipeline_evidence_ingress() -> Result<(), String> {
     *protected_pipeline_evidence_ingress()
         .lock()
@@ -3565,9 +3595,16 @@ pub fn dispatch_protected_pipeline_evidence_message(
     let mut slot = protected_pipeline_evidence_ingress()
         .lock()
         .map_err(|_| "protected-pipeline evidence ingress lock is poisoned".to_string())?;
-    let ingress = slot.as_mut().ok_or_else(|| {
-        "ProtectedPipeline is not running; refusing semantic evidence".to_string()
-    })?;
+    let ingress = slot.get_or_insert_with(|| ProtectedPipelineEvidenceIngress {
+        coordinator: None,
+        startup_staging: VecDeque::new(),
+        seen_objects: BTreeMap::new(),
+        seen_order: VecDeque::new(),
+        seen_messages: BTreeSet::new(),
+        message_order: VecDeque::new(),
+        reveal_authorizations: BTreeSet::new(),
+        pending_reveal_shares: BTreeMap::new(),
+    });
 
     for object in message_objects(&envelope.message) {
         let (chain_id, network_id) = object.chain_binding();
@@ -3714,17 +3751,14 @@ fn enqueue_protected_pipeline_envelope(
         return Ok(());
     }
 
-    ingress
-        .sender
-        .try_send(envelope.clone())
-        .map_err(|error| match error {
-            mpsc::TrySendError::Full(_) => {
-                "protected-pipeline evidence ingress is full".to_string()
-            }
-            mpsc::TrySendError::Disconnected(_) => {
-                "protected-pipeline evidence ingress is disconnected".to_string()
-            }
-        })?;
+    if let Some(coordinator) = ingress.coordinator.as_ref() {
+        coordinator.ingest_protected_pipeline_evidence(envelope.clone())?;
+    } else {
+        if ingress.startup_staging.len() >= MAX_PROTECTED_PIPELINE_STARTUP_STAGING {
+            return Err("protected-pipeline startup staging capacity is exhausted".to_string());
+        }
+        ingress.startup_staging.push_back(envelope.clone());
+    }
 
     remember_message_id(ingress, dedup_id);
     for object in message_objects(&envelope.message) {
@@ -3739,6 +3773,22 @@ fn enqueue_protected_pipeline_envelope(
         }
     }
     Ok(())
+}
+
+fn flush_protected_pipeline_startup_staging(
+    ingress: &mut ProtectedPipelineEvidenceIngress,
+) -> Result<usize, String> {
+    let coordinator = ingress
+        .coordinator
+        .as_ref()
+        .ok_or_else(|| "protected-pipeline coordinator ingress is not installed".to_string())?;
+    let mut flushed = 0usize;
+    while let Some(envelope) = ingress.startup_staging.front().cloned() {
+        coordinator.ingest_protected_pipeline_evidence(envelope)?;
+        ingress.startup_staging.pop_front();
+        flushed = flushed.saturating_add(1);
+    }
+    Ok(flushed)
 }
 
 fn remember_message_id(ingress: &mut ProtectedPipelineEvidenceIngress, id: EtdagDigest) {
@@ -14293,6 +14343,24 @@ mod tests {
         static ref TEST_PROTECTED_EVIDENCE_LOCK: Mutex<()> = Mutex::new(());
     }
 
+    #[derive(Default)]
+    struct RecordingProtectedPipelineCoordinatorIngress {
+        received: Mutex<Vec<super::ProtectedPipelineEvidenceEnvelope>>,
+    }
+
+    impl super::ProtectedPipelineCoordinatorIngress for RecordingProtectedPipelineCoordinatorIngress {
+        fn ingest_protected_pipeline_evidence(
+            &self,
+            envelope: super::ProtectedPipelineEvidenceEnvelope,
+        ) -> Result<(), String> {
+            self.received
+                .lock()
+                .map_err(|_| "recording protected-pipeline ingress lock is poisoned".to_string())?
+                .push(envelope);
+            Ok(())
+        }
+    }
+
     fn protected_ingress_fixture() -> (
         EtdagAuthenticatedIngressPeer,
         ProtectedPipelineSemanticObject,
@@ -14394,7 +14462,8 @@ mod tests {
     fn protected_ingress_deduplicates_and_releases_reordered_reveal_after_authorization() {
         let _guard = TEST_PROTECTED_EVIDENCE_LOCK.lock().unwrap();
         super::remove_protected_pipeline_evidence_ingress().unwrap();
-        let receiver = super::install_protected_pipeline_evidence_ingress(8).unwrap();
+        let ingress = Arc::new(RecordingProtectedPipelineCoordinatorIngress::default());
+        super::install_protected_pipeline_evidence_ingress(ingress.clone()).unwrap();
         let (peer, transaction, authorization, share) = protected_ingress_fixture();
 
         let transaction_message = ProtectedPipelineEvidenceMessage::Evidence {
@@ -14413,10 +14482,10 @@ mod tests {
         )
         .expect("duplicate semantic evidence is idempotent");
         assert!(matches!(
-            receiver.try_recv().unwrap().message,
+            &ingress.received.lock().unwrap()[0].message,
             ProtectedPipelineEvidenceMessage::Evidence { .. }
         ));
-        assert!(receiver.try_recv().is_err());
+        assert_eq!(ingress.received.lock().unwrap().len(), 1);
 
         super::dispatch_protected_pipeline_evidence_message(
             "peer-a",
@@ -14426,7 +14495,7 @@ mod tests {
             },
         )
         .expect("reordered reveal share is held pending");
-        assert!(receiver.try_recv().is_err());
+        assert_eq!(ingress.received.lock().unwrap().len(), 1);
 
         super::dispatch_protected_pipeline_evidence_message(
             "peer-a",
@@ -14437,13 +14506,13 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            receiver.try_recv().unwrap().message,
+            &ingress.received.lock().unwrap()[1].message,
             ProtectedPipelineEvidenceMessage::Evidence {
                 object: ProtectedPipelineSemanticObject::RevealAuthorization { .. }
             }
         ));
         assert!(matches!(
-            receiver.try_recv().unwrap().message,
+            &ingress.received.lock().unwrap()[2].message,
             ProtectedPipelineEvidenceMessage::Evidence {
                 object: ProtectedPipelineSemanticObject::RevealShare { .. }
             }
@@ -14455,7 +14524,7 @@ mod tests {
             ProtectedPipelineEvidenceMessage::Evidence { object: share },
         )
         .expect("late reveal duplicate is idempotent");
-        assert!(receiver.try_recv().is_err());
+        assert_eq!(ingress.received.lock().unwrap().len(), 3);
         super::remove_protected_pipeline_evidence_ingress().unwrap();
     }
 
@@ -14463,7 +14532,8 @@ mod tests {
     fn protected_ingress_accepts_response_reordering_and_rejects_unauthenticated_evidence() {
         let _guard = TEST_PROTECTED_EVIDENCE_LOCK.lock().unwrap();
         super::remove_protected_pipeline_evidence_ingress().unwrap();
-        let receiver = super::install_protected_pipeline_evidence_ingress(4).unwrap();
+        let ingress = Arc::new(RecordingProtectedPipelineCoordinatorIngress::default());
+        super::install_protected_pipeline_evidence_ingress(ingress.clone()).unwrap();
         let (peer, _transaction, authorization, share) = protected_ingress_fixture();
         let (target_height, target_context_root) = share.target_binding();
         let response = ProtectedPipelineEvidenceMessage::MissingObjectsResponse {
@@ -14474,7 +14544,7 @@ mod tests {
         super::dispatch_protected_pipeline_evidence_message("peer-a", Some(peer), response)
             .expect("share-before-authorization object order is accepted as one response");
         assert!(matches!(
-            receiver.try_recv().unwrap().message,
+            &ingress.received.lock().unwrap()[0].message,
             ProtectedPipelineEvidenceMessage::MissingObjectsResponse { .. }
         ));
 
@@ -14488,6 +14558,43 @@ mod tests {
         )
         .expect_err("unauthenticated evidence must fail closed");
         assert!(error.contains("authenticated validator peer"));
+        super::remove_protected_pipeline_evidence_ingress().unwrap();
+    }
+
+    #[test]
+    fn protected_ingress_stages_early_evidence_and_flushes_to_one_coordinator() {
+        let _guard = TEST_PROTECTED_EVIDENCE_LOCK.lock().unwrap();
+        super::remove_protected_pipeline_evidence_ingress().unwrap();
+        let (peer, transaction, _, _) = protected_ingress_fixture();
+        let message = ProtectedPipelineEvidenceMessage::Evidence {
+            object: transaction,
+        };
+
+        super::dispatch_protected_pipeline_evidence_message(
+            "peer-a",
+            Some(peer.clone()),
+            message.clone(),
+        )
+        .expect("valid early evidence stages before coordinator startup");
+        super::dispatch_protected_pipeline_evidence_message("peer-a", Some(peer), message)
+            .expect("duplicate staged evidence is idempotent");
+
+        let first = Arc::new(RecordingProtectedPipelineCoordinatorIngress::default());
+        assert_eq!(
+            super::install_protected_pipeline_evidence_ingress(first.clone()).unwrap(),
+            1
+        );
+        assert_eq!(first.received.lock().unwrap().len(), 1);
+        assert_eq!(
+            super::flush_protected_pipeline_evidence_ingress().unwrap(),
+            0
+        );
+
+        let replacement = Arc::new(RecordingProtectedPipelineCoordinatorIngress::default());
+        let error = super::install_protected_pipeline_evidence_ingress(replacement)
+            .expect_err("a process may not replace the authoritative coordinator ingress");
+        assert!(error.contains("already installed"));
+        assert_eq!(first.received.lock().unwrap().len(), 1);
         super::remove_protected_pipeline_evidence_ingress().unwrap();
     }
 
