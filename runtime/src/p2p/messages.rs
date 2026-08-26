@@ -15,14 +15,14 @@ use crate::consensus::simplified_posy::{
 use crate::consensus::typed_finality_store::TypedFinalityRecord;
 use crate::dag_mempool::compute_tx_order_root;
 use crate::etdag::{
-    CertifiedProtectedInputArtifact, ProtectedBlockInput, TargetAdmissionContext,
-    TargetAdmissionPackage,
+    CertifiedProtectedInputArtifact, CertifiedVertex, DecryptShareMessage, EtdagDigest,
+    ProtectedBlockInput, TargetAdmissionContext, TargetAdmissionPackage, VertexKind,
 };
 use crate::synergy_types::AegisPqSignature;
 use crate::synergy_types::{
-    Block as TypedBlock, CanonicalSerialize, Hash, HeightConsensusContext,
-    QuorumCertificate as TypedQuorumCertificate, TimeoutCertificate, TxId, ValidationCertificate,
-    Vote as TypedVote,
+    Block as TypedBlock, CanonicalSerialize, ChainId, Epoch, Hash, Height, HeightConsensusContext,
+    NetworkId, QuorumCertificate as TypedQuorumCertificate, TimeoutCertificate, TxId,
+    ValidationCertificate, Vote as TypedVote,
 };
 use crate::transaction::Transaction;
 
@@ -67,6 +67,17 @@ pub const MAX_SIMPLIFIED_TARGET_ADMISSION_VOTE_FRAME_BYTES: usize = 128 * 1024;
 /// set of ML-DSA-65 signatures. It remains bounded independently of the 64 MiB
 /// generic transport ceiling.
 pub const MAX_SIMPLIFIED_TARGET_ADMISSION_PACKAGE_FRAME_BYTES: usize = 512 * 1024;
+/// A single semantic protected-pipeline object is bounded independently from
+/// proposals and from the retired whole-input artifact.
+pub const MAX_PROTECTED_PIPELINE_EVIDENCE_FRAME_BYTES: usize = 2 * 1024 * 1024;
+/// Missing-object requests carry only fixed-width semantic identifiers.
+pub const MAX_PROTECTED_PIPELINE_REQUEST_FRAME_BYTES: usize = 32 * 1024;
+/// A response may return several independently verifiable semantic objects,
+/// but never an unbounded graph or complete DCC/BVC/BOC protected input.
+pub const MAX_PROTECTED_PIPELINE_RESPONSE_FRAME_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_PROTECTED_PIPELINE_REQUEST_IDS: usize = 64;
+pub const MAX_PROTECTED_PIPELINE_RESPONSE_OBJECTS: usize = 32;
+pub const DOMAIN_PROTECTED_PIPELINE_EVIDENCE_ID: &str = "PoSy/ProtectedPipeline/WireEvidenceId/v1";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -76,6 +87,222 @@ pub enum SimplifiedTargetAdmissionMessage {
     },
     CertifiedPackage {
         package: TargetAdmissionPackage,
+    },
+}
+
+/// Authenticated PoSy proof that opens the reveal gate for one exact parent
+/// proposal commitment. Cryptographic VC verification remains the
+/// ProtectedPipeline consumer's responsibility; the P2P layer binds this
+/// object to a Genesis-authenticated validator session and immutable target.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProtectedRevealAuthorization {
+    pub chain_id: ChainId,
+    pub network_id: NetworkId,
+    pub epoch: Epoch,
+    pub target_height: Height,
+    pub target_context_root: Hash,
+    pub proposal_id: EtdagDigest,
+    pub vc_root: EtdagDigest,
+    pub commitment_root: EtdagDigest,
+    pub evidence_root: EtdagDigest,
+}
+
+impl ProtectedRevealAuthorization {
+    pub fn semantic_id(&self) -> Result<EtdagDigest, String> {
+        EtdagDigest::from_canonical(DOMAIN_PROTECTED_PIPELINE_EVIDENCE_ID, self)
+    }
+
+    pub fn validate_shape(&self) -> Result<(), String> {
+        if self.target_height.0 == 0 || self.target_context_root.is_zero() {
+            return Err("protected reveal authorization has invalid target binding".to_string());
+        }
+        for (label, root) in [
+            ("proposal", &self.proposal_id),
+            ("VC", &self.vc_root),
+            ("commitment", &self.commitment_root),
+            ("evidence", &self.evidence_root),
+        ] {
+            root.validate(&format!("protected reveal {label} root"))?;
+            if root.is_zero() {
+                return Err(format!("protected reveal {label} root is zero"));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// One independently identifiable object consumed by ProtectedPipeline.
+/// Transaction vertices and cutoff markers are distinct variants so a marker
+/// cannot be reinterpreted as encrypted transaction availability evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
+pub enum ProtectedPipelineSemanticObject {
+    CertifiedVertex {
+        semantic_id: EtdagDigest,
+        certified_vertex: CertifiedVertex,
+    },
+    CutoffMarker {
+        semantic_id: EtdagDigest,
+        certified_vertex: CertifiedVertex,
+    },
+    RevealAuthorization {
+        semantic_id: EtdagDigest,
+        authorization: ProtectedRevealAuthorization,
+    },
+    RevealShare {
+        semantic_id: EtdagDigest,
+        authorization_id: EtdagDigest,
+        share: DecryptShareMessage,
+    },
+}
+
+#[derive(Serialize)]
+struct RevealShareSemantic<'a> {
+    authorization_id: &'a EtdagDigest,
+    target_context_root: Hash,
+    batch_candidate_digest: &'a EtdagDigest,
+    tx_commitment: &'a EtdagDigest,
+    validator_id: &'a crate::synergy_types::ValidatorId,
+    share_commitment: &'a EtdagDigest,
+}
+
+impl ProtectedPipelineSemanticObject {
+    pub fn declared_semantic_id(&self) -> &EtdagDigest {
+        match self {
+            Self::CertifiedVertex { semantic_id, .. }
+            | Self::CutoffMarker { semantic_id, .. }
+            | Self::RevealAuthorization { semantic_id, .. }
+            | Self::RevealShare { semantic_id, .. } => semantic_id,
+        }
+    }
+
+    pub fn computed_semantic_id(&self) -> Result<EtdagDigest, String> {
+        match self {
+            Self::CertifiedVertex {
+                certified_vertex, ..
+            }
+            | Self::CutoffMarker {
+                certified_vertex, ..
+            } => certified_vertex.vertex.digest(),
+            Self::RevealAuthorization { authorization, .. } => authorization.semantic_id(),
+            Self::RevealShare {
+                authorization_id,
+                share,
+                ..
+            } => EtdagDigest::from_canonical(
+                DOMAIN_PROTECTED_PIPELINE_EVIDENCE_ID,
+                &RevealShareSemantic {
+                    authorization_id,
+                    target_context_root: share.target_context_root,
+                    batch_candidate_digest: &share.batch_candidate_digest,
+                    tx_commitment: &share.tx_commitment,
+                    validator_id: &share.validator_id,
+                    share_commitment: &share.share_commitment,
+                },
+            ),
+        }
+    }
+
+    pub fn validate_shape(&self) -> Result<(), String> {
+        self.declared_semantic_id()
+            .validate("protected evidence semantic id")?;
+        let expected = self.computed_semantic_id()?;
+        if self.declared_semantic_id() != &expected || expected.is_zero() {
+            return Err("protected evidence semantic id mismatch".to_string());
+        }
+        match self {
+            Self::CertifiedVertex {
+                certified_vertex, ..
+            } if certified_vertex.vertex.kind != VertexKind::Transactions => Err(
+                "protected certified-vertex object does not contain a transaction vertex"
+                    .to_string(),
+            ),
+            Self::CutoffMarker {
+                certified_vertex, ..
+            } if certified_vertex.vertex.kind != VertexKind::CutoffMarker => {
+                Err("protected cutoff-marker object does not contain a cutoff marker".to_string())
+            }
+            Self::RevealAuthorization { authorization, .. } => authorization.validate_shape(),
+            Self::RevealShare {
+                authorization_id,
+                share,
+                ..
+            } => {
+                authorization_id.validate("protected reveal authorization id")?;
+                if authorization_id.is_zero()
+                    || share.target_height.0 == 0
+                    || share.target_context_root.is_zero()
+                    || share.validator_id.0.trim().is_empty()
+                    || share.key_id.0.trim().is_empty()
+                    || share.signature.signature_bytes.is_empty()
+                {
+                    return Err(
+                        "protected reveal share has invalid authenticated shape".to_string()
+                    );
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    pub fn target_binding(&self) -> (Height, Hash) {
+        match self {
+            Self::CertifiedVertex {
+                certified_vertex, ..
+            }
+            | Self::CutoffMarker {
+                certified_vertex, ..
+            } => (
+                certified_vertex.vertex.target_height,
+                certified_vertex.vertex.target_context_root,
+            ),
+            Self::RevealAuthorization { authorization, .. } => (
+                authorization.target_height,
+                authorization.target_context_root,
+            ),
+            Self::RevealShare { share, .. } => (share.target_height, share.target_context_root),
+        }
+    }
+
+    pub fn chain_binding(&self) -> (ChainId, &NetworkId) {
+        match self {
+            Self::CertifiedVertex {
+                certified_vertex, ..
+            }
+            | Self::CutoffMarker {
+                certified_vertex, ..
+            } => (
+                certified_vertex.vertex.chain_id,
+                &certified_vertex.vertex.network_id,
+            ),
+            Self::RevealAuthorization { authorization, .. } => {
+                (authorization.chain_id, &authorization.network_id)
+            }
+            Self::RevealShare { share, .. } => (share.chain_id, &share.network_id),
+        }
+    }
+}
+
+/// One bounded semantic evidence propagation family. Missing-object recovery
+/// refers only to canonical semantic IDs; responses are validated object by
+/// object and may arrive in any order.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
+pub enum ProtectedPipelineEvidenceMessage {
+    Evidence {
+        object: ProtectedPipelineSemanticObject,
+    },
+    MissingObjectsRequest {
+        target_height: Height,
+        target_context_root: Hash,
+        semantic_ids: Vec<EtdagDigest>,
+    },
+    MissingObjectsResponse {
+        target_height: Height,
+        target_context_root: Hash,
+        objects: Vec<ProtectedPipelineSemanticObject>,
     },
 }
 
@@ -556,6 +783,15 @@ pub enum NetworkMessage {
         chain_incarnation: u64,
         genesis_hash: String,
     },
+    /// Canonical PoSy v3 protected-pipeline evidence and semantic-object
+    /// recovery. This is the only active ETDAG progression carrier.
+    ProtectedPipelineEvidence {
+        /// First in canonical JSON so the predecode allocation gate can apply
+        /// the exact per-kind cap before allocating the full frame.
+        message: ProtectedPipelineEvidenceMessage,
+        chain_incarnation: u64,
+        genesis_hash: String,
+    },
     /// Verified, non-signing finalized-chain replication between the
     /// validator-VPN relayer tier and public RPC/indexer observer roles.
     TypedFinalityObserver {
@@ -570,9 +806,8 @@ pub enum NetworkMessage {
         genesis_hash: String,
         message: CoordinatedFinalityObserverMessage,
     },
-    /// A complete, already-certified ETDAG proof package. The P2P receiver
-    /// binds it to local height/finality authority before durable admission;
-    /// no consensus context is accepted from this wire message.
+    /// Compatibility-only decoder for the retired whole DCC/BVC/BOC carrier.
+    /// Networking must never route this variant into active progression.
     EtdagCertifiedInput {
         artifact: CertifiedProtectedInputArtifact,
     },
@@ -703,10 +938,104 @@ pub fn validate_simplified_target_admission_message_size(
     validate_typed_consensus_frame_length(kind, frame_bytes, maximum)
 }
 
+pub fn validate_protected_pipeline_evidence_message(
+    message: &ProtectedPipelineEvidenceMessage,
+) -> Result<(), String> {
+    let (kind, maximum) = match message {
+        ProtectedPipelineEvidenceMessage::Evidence { object } => {
+            object.validate_shape()?;
+            (
+                "protected-pipeline semantic evidence",
+                MAX_PROTECTED_PIPELINE_EVIDENCE_FRAME_BYTES,
+            )
+        }
+        ProtectedPipelineEvidenceMessage::MissingObjectsRequest {
+            target_height,
+            target_context_root,
+            semantic_ids,
+        } => {
+            validate_protected_target_binding(*target_height, target_context_root)?;
+            if semantic_ids.is_empty() || semantic_ids.len() > MAX_PROTECTED_PIPELINE_REQUEST_IDS {
+                return Err(
+                    "protected-pipeline missing-object request has invalid count".to_string(),
+                );
+            }
+            let mut unique = std::collections::BTreeSet::new();
+            for semantic_id in semantic_ids {
+                semantic_id.validate("protected requested semantic id")?;
+                if semantic_id.is_zero() || !unique.insert(semantic_id) {
+                    return Err(
+                        "protected-pipeline missing-object request has duplicate or zero id"
+                            .to_string(),
+                    );
+                }
+            }
+            (
+                "protected-pipeline missing-object request",
+                MAX_PROTECTED_PIPELINE_REQUEST_FRAME_BYTES,
+            )
+        }
+        ProtectedPipelineEvidenceMessage::MissingObjectsResponse {
+            target_height,
+            target_context_root,
+            objects,
+        } => {
+            validate_protected_target_binding(*target_height, target_context_root)?;
+            if objects.is_empty() || objects.len() > MAX_PROTECTED_PIPELINE_RESPONSE_OBJECTS {
+                return Err(
+                    "protected-pipeline missing-object response has invalid count".to_string(),
+                );
+            }
+            let mut unique = std::collections::BTreeMap::new();
+            for object in objects {
+                object.validate_shape()?;
+                if object.target_binding() != (*target_height, *target_context_root) {
+                    return Err(
+                        "protected-pipeline response object target binding mismatch".to_string()
+                    );
+                }
+                if let Some(prior) = unique.insert(object.declared_semantic_id(), object) {
+                    if prior != object {
+                        return Err(
+                            "protected-pipeline response has conflicting semantic objects"
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+            (
+                "protected-pipeline missing-object response",
+                MAX_PROTECTED_PIPELINE_RESPONSE_FRAME_BYTES,
+            )
+        }
+    };
+    let encoded = NetworkMessage::ProtectedPipelineEvidence {
+        message: message.clone(),
+        chain_incarnation: crate::genesis::canonical_genesis()?.chain_incarnation(),
+        genesis_hash: crate::genesis::canonical_genesis()?.hash().to_string(),
+    };
+    let frame_bytes = serde_json::to_vec(&encoded)
+        .map_err(|error| format!("serialize {kind} frame: {error}"))?
+        .len()
+        .checked_add(4)
+        .ok_or_else(|| format!("{kind} frame length overflow"))?;
+    validate_typed_consensus_frame_length(kind, frame_bytes, maximum)
+}
+
+fn validate_protected_target_binding(
+    target_height: Height,
+    target_context_root: &Hash,
+) -> Result<(), String> {
+    if target_height.0 == 0 || target_context_root.is_zero() {
+        return Err("protected-pipeline message has invalid target binding".to_string());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::etdag::tests::{fixture, target_admission_package};
+    use crate::etdag::tests::{complete_protected_input, fixture, target_admission_package};
     use crate::synergy_types::{
         AegisPqKeyId, AegisPqSignature, BlockId, ChainId, ClusterId, Epoch, Hash, Height,
         NetworkId, Round, UmaId, ValidatorId, VotePhase,
@@ -937,5 +1266,136 @@ mod tests {
         )
         .expect_err("oversized target-admission package must fail closed");
         assert!(error.contains("target-admission certified package frame"));
+    }
+
+    fn protected_evidence_fixture() -> (
+        ProtectedPipelineSemanticObject,
+        ProtectedPipelineSemanticObject,
+        ProtectedPipelineSemanticObject,
+    ) {
+        let mut fixture = fixture(5, None);
+        let input = complete_protected_input(&mut fixture);
+        let transaction = input
+            .certified_vertices
+            .values()
+            .find(|certified| certified.vertex.kind == VertexKind::Transactions)
+            .expect("fixture has transaction vertex")
+            .clone();
+        let transaction_id = transaction.vertex.digest().unwrap();
+        let transaction = ProtectedPipelineSemanticObject::CertifiedVertex {
+            semantic_id: transaction_id,
+            certified_vertex: transaction,
+        };
+
+        let authorization = ProtectedRevealAuthorization {
+            chain_id: fixture.context.chain_id,
+            network_id: fixture.context.network_id.clone(),
+            epoch: fixture.context.epoch,
+            target_height: fixture.context.target_height,
+            target_context_root: fixture.context.root().unwrap(),
+            proposal_id: EtdagDigest::from_domain_bytes("test-proposal", b"proposal"),
+            vc_root: EtdagDigest::from_domain_bytes("test-vc", b"vc"),
+            commitment_root: EtdagDigest::from_domain_bytes("test-commitment", b"commitment"),
+            evidence_root: EtdagDigest::from_domain_bytes("test-evidence", b"evidence"),
+        };
+        let authorization_id = authorization.semantic_id().unwrap();
+        let authorization_object = ProtectedPipelineSemanticObject::RevealAuthorization {
+            semantic_id: authorization_id.clone(),
+            authorization,
+        };
+        let share = input
+            .decrypt_shares
+            .values()
+            .flat_map(|shares| shares.iter())
+            .next()
+            .expect("fixture has decrypt share")
+            .clone();
+        let mut share_object = ProtectedPipelineSemanticObject::RevealShare {
+            semantic_id: EtdagDigest::from_domain_bytes("placeholder", b"placeholder"),
+            authorization_id,
+            share,
+        };
+        let share_id = share_object.computed_semantic_id().unwrap();
+        if let ProtectedPipelineSemanticObject::RevealShare { semantic_id, .. } = &mut share_object
+        {
+            *semantic_id = share_id;
+        }
+        (transaction, authorization_object, share_object)
+    }
+
+    #[test]
+    fn protected_semantic_ids_and_exact_object_bounds_fail_closed() {
+        let (transaction, _authorization, mut share) = protected_evidence_fixture();
+        validate_protected_pipeline_evidence_message(&ProtectedPipelineEvidenceMessage::Evidence {
+            object: transaction.clone(),
+        })
+        .expect("ordinary certified vertex evidence fits bounded frame");
+
+        let mut mismatched = transaction;
+        if let ProtectedPipelineSemanticObject::CertifiedVertex { semantic_id, .. } =
+            &mut mismatched
+        {
+            *semantic_id = EtdagDigest::from_domain_bytes("wrong", b"semantic-id");
+        }
+        assert!(validate_protected_pipeline_evidence_message(
+            &ProtectedPipelineEvidenceMessage::Evidence { object: mismatched }
+        )
+        .unwrap_err()
+        .contains("semantic id mismatch"));
+
+        if let ProtectedPipelineSemanticObject::RevealShare { share, .. } = &mut share {
+            share.signature.signature_bytes = vec![7; MAX_PROTECTED_PIPELINE_EVIDENCE_FRAME_BYTES];
+        }
+        assert!(validate_protected_pipeline_evidence_message(
+            &ProtectedPipelineEvidenceMessage::Evidence { object: share }
+        )
+        .unwrap_err()
+        .contains("semantic evidence frame"));
+    }
+
+    #[test]
+    fn protected_missing_object_counts_and_target_bindings_are_bounded() {
+        let ids = (0..=MAX_PROTECTED_PIPELINE_REQUEST_IDS)
+            .map(|index| EtdagDigest::from_domain_bytes("request-id", &index.to_be_bytes()))
+            .collect();
+        let error = validate_protected_pipeline_evidence_message(
+            &ProtectedPipelineEvidenceMessage::MissingObjectsRequest {
+                target_height: Height(8),
+                target_context_root: Hash::from_domain_bytes("target", b"height-8"),
+                semantic_ids: ids,
+            },
+        )
+        .expect_err("request above semantic-ID count must fail closed");
+        assert!(error.contains("invalid count"));
+
+        let (object, _, _) = protected_evidence_fixture();
+        let (height, root) = object.target_binding();
+        validate_protected_pipeline_evidence_message(
+            &ProtectedPipelineEvidenceMessage::MissingObjectsResponse {
+                target_height: height,
+                target_context_root: root,
+                objects: vec![object.clone(), object],
+            },
+        )
+        .expect("exact duplicate response evidence is idempotent");
+    }
+
+    #[test]
+    fn protected_evidence_is_a_distinct_wire_family_from_legacy_carriers() {
+        let (object, _, _) = protected_evidence_fixture();
+        let message = NetworkMessage::ProtectedPipelineEvidence {
+            message: ProtectedPipelineEvidenceMessage::Evidence { object },
+            chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
+            genesis_hash: crate::genesis::canonical_genesis()
+                .unwrap()
+                .hash()
+                .to_string(),
+        };
+        let encoded = serde_json::to_vec(&message).unwrap();
+        assert!(String::from_utf8_lossy(&encoded).contains("ProtectedPipelineEvidence"));
+        assert!(matches!(
+            serde_json::from_slice::<NetworkMessage>(&encoded).unwrap(),
+            NetworkMessage::ProtectedPipelineEvidence { .. }
+        ));
     }
 }
