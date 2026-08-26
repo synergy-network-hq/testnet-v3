@@ -121,9 +121,15 @@ fn certify_vertex(
         })
         .collect::<Vec<_>>();
     let verifier = fixture.signer.verifier();
-    let availability_certificate =
-        form_etdag_certificate(transcript, votes, &verifier, &validator_set, &cluster_map)
-            .expect("form VAC");
+    let availability_certificate = form_etdag_certificate(
+        transcript,
+        votes,
+        &verifier,
+        &context,
+        &validator_set,
+        &cluster_map,
+    )
+    .expect("form VAC");
     CertifiedVertex {
         vertex,
         availability_certificate,

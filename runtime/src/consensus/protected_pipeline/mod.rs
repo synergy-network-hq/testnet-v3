@@ -973,7 +973,7 @@ impl ProtectedPipeline {
         if candidate.cutoff_marker_digests.len()
             >= strict_count_quorum(candidate.target.assigned_cluster_validator_count)?
         {
-            advance_phase(&mut candidate, ProtectedPipelinePhase::CutoffReady)?;
+            reconcile_phase(&mut candidate, ProtectedPipelinePhase::CutoffReady)?;
             let marker_digests = candidate
                 .cutoff_marker_digests
                 .iter()
@@ -1007,7 +1007,7 @@ impl ProtectedPipeline {
             }
         }
         if candidate.cut_proof.is_some() {
-            advance_phase(&mut candidate, ProtectedPipelinePhase::CutReady)?;
+            reconcile_phase(&mut candidate, ProtectedPipelinePhase::CutReady)?;
         }
         if let (Some(cut), Some(seed_evidence)) = (
             candidate.cut_proof.as_ref(),
@@ -1039,22 +1039,22 @@ impl ProtectedPipeline {
             }
             candidate.protected_batch = Some(batch);
             candidate.next_commitment = Some(commitment);
-            advance_phase(&mut candidate, ProtectedPipelinePhase::OrderReady)?;
+            reconcile_phase(&mut candidate, ProtectedPipelinePhase::OrderReady)?;
         }
         if !candidate.observations.parent_proposals.is_empty() {
-            advance_phase(&mut candidate, ProtectedPipelinePhase::CommittedInParent)?;
+            reconcile_phase(&mut candidate, ProtectedPipelinePhase::CommittedInParent)?;
         }
         if !candidate.observations.reveal_authorizations.is_empty() {
-            advance_phase(&mut candidate, ProtectedPipelinePhase::RevealAuthorized)?;
+            reconcile_phase(&mut candidate, ProtectedPipelinePhase::RevealAuthorized)?;
         }
         if !candidate.observations.reveal_shares.is_empty() {
-            advance_phase(&mut candidate, ProtectedPipelinePhase::Revealing)?;
+            reconcile_phase(&mut candidate, ProtectedPipelinePhase::Revealing)?;
         }
         if !candidate.observations.execution_roots.is_empty() {
-            advance_phase(&mut candidate, ProtectedPipelinePhase::ReadyForExecution)?;
+            reconcile_phase(&mut candidate, ProtectedPipelinePhase::ReadyForExecution)?;
         }
         if !candidate.observations.consumed_roots.is_empty() {
-            advance_phase(&mut candidate, ProtectedPipelinePhase::Consumed)?;
+            reconcile_phase(&mut candidate, ProtectedPipelinePhase::Consumed)?;
         }
         validate_durable_record(&candidate)?;
         let changed = candidate != self.record;
@@ -1420,6 +1420,16 @@ fn advance_phase(
     }
     if requested > record.phase {
         record.phase = requested;
+    }
+    Ok(())
+}
+
+fn reconcile_phase(
+    record: &mut ProtectedPipelineRecord,
+    requested: ProtectedPipelinePhase,
+) -> ProtectedPipelineResult<()> {
+    if requested > record.phase {
+        advance_phase(record, requested)?;
     }
     Ok(())
 }
