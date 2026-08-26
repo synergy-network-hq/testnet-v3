@@ -1,6 +1,8 @@
 # Validator Operations API v1
 
-This API is a read-only operations adapter. It is not part of PoSy, block
+The status schema is a read-only operations adapter. Its separately authorized
+lifecycle and diagnostic endpoints use only the local agent's fixed allowlist.
+It is not part of PoSy, block
 validation, VC/QC, or ProtectedPipeline progression. A validator does not call
 it and continues operating if the agent or Node Control Panel is unavailable.
 
@@ -27,18 +29,33 @@ addresses are allowed.
 - `GET /v1/validator-operations/cluster/status`
 - `GET /v1/validator-operations/nodes/{validator_id}/status`
 - `GET /v1/validator-operations/nodes/{validator_id}/diagnose-liveness`
+- `GET /v1/validator-operations/nodes/{validator_id}/preflight`
+- `GET /v1/validator-operations/nodes/{validator_id}/logs?limit=200`
+- `POST /v1/validator-operations/nodes/{validator_id}/control`
+- `POST /v1/validator-operations/nodes/{validator_id}/diagnostic-snapshots`
 
 Every endpoint requires:
 
 - loopback, or an explicitly allowlisted private/VPN source address;
 - `Authorization: Bearer <SYNERGY_TESTNET_AGENT_TOKEN>`;
 - `X-Synergy-Operator-Id: <stable operator identity>`;
-- `X-Synergy-Operator-Scopes: validator.operations.read`.
+- `X-Synergy-Operator-Scopes: validator.operations.read` for reads,
+  `validator.operations.control` for lifecycle changes, or
+  `validator.operations.snapshot` for snapshot capture.
+
+Lifecycle input is a closed `START | STOP | RESTART` enum and a mandatory audit
+reason. Start and restart require every defined host preflight check and release
+consistency to pass. The handler maps those values to the existing local
+`nodectl` allowlist and cannot accept arbitrary commands. Diagnostic snapshots
+contain the typed status, preflight result, and bounded structured logs. A
+conservative marker filter replaces an entire sensitive log line; neither the
+API nor the UI returns raw custody material.
 
 Requests and outcomes are appended to
 `audit/validator-operations-api.jsonl`. Audit records contain operator identity,
 remote address, action, validator ID, and outcome only. Tokens and response
-payloads are never recorded.
+payloads are never recorded. Mutations require a durable authorization audit
+record before execution and a second outcome record afterward.
 
 The current HTTP transport is acceptable only on loopback or through the
 encrypted validator VPN. The endpoint must not be bound to a public interface.

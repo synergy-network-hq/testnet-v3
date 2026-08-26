@@ -15,6 +15,9 @@ use crate::monitor::{
     monitor_initialize_workspace_from_context, monitor_mark_setup_complete, monitor_node_control,
     monitor_remove_ssh_binding, monitor_run_terminal_command, monitor_set_active_operator,
     monitor_update_local_agent_from_context, monitor_upsert_operator, monitor_upsert_ssh_profile,
+    monitor_validator_operations_cluster_status, monitor_validator_operations_lifecycle,
+    monitor_validator_operations_logs, monitor_validator_operations_preflight,
+    monitor_validator_operations_snapshot, monitor_validator_operations_status,
     MonitorOperatorInput, MonitorSshBindingInput, MonitorSshProfileInput,
 };
 use crate::testnet::{
@@ -53,6 +56,7 @@ use crate::testnet::{
     TestnetValidatorStakeInput, TestnetValidatorTransferInput, TestnetValidatorUnstakeInput,
     TestnetValidatorVpnInput,
 };
+use crate::validator_operations::ValidatorLifecycleRequest;
 use crate::validator_vpn::{
     consume_reserved_validator_vpn_onboarding_token, create_validator_vpn_challenge,
     enroll_validator_vpn_node, get_latest_validator_vpn_snapshot,
@@ -146,6 +150,21 @@ struct NodeSlotArgs {
 struct NodeActionArgs {
     node_slot_id: String,
     action: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ValidatorOperationsLogsArgs {
+    node_slot_id: String,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ValidatorOperationsLifecycleArgs {
+    node_slot_id: String,
+    request: ValidatorLifecycleRequest,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2267,6 +2286,29 @@ async fn dispatch_command(
         "monitor_node_control" => {
             let args: NodeActionArgs = parse_args(request.args)?;
             to_value(monitor_node_control(args.node_slot_id, args.action).await?)
+        }
+        "validator.operations.cluster.status" => {
+            to_value(monitor_validator_operations_cluster_status().await?)
+        }
+        "validator.operations.node.status" => {
+            let args: NodeSlotArgs = parse_args(request.args)?;
+            to_value(monitor_validator_operations_status(args.node_slot_id).await?)
+        }
+        "validator.operations.preflight" => {
+            let args: NodeSlotArgs = parse_args(request.args)?;
+            to_value(monitor_validator_operations_preflight(args.node_slot_id).await?)
+        }
+        "validator.operations.logs" => {
+            let args: ValidatorOperationsLogsArgs = parse_args(request.args)?;
+            to_value(monitor_validator_operations_logs(args.node_slot_id, args.limit).await?)
+        }
+        "validator.operations.lifecycle.control" => {
+            let args: ValidatorOperationsLifecycleArgs = parse_args(request.args)?;
+            to_value(monitor_validator_operations_lifecycle(args.node_slot_id, args.request).await?)
+        }
+        "validator.operations.snapshot.capture" => {
+            let args: NodeSlotArgs = parse_args(request.args)?;
+            to_value(monitor_validator_operations_snapshot(args.node_slot_id).await?)
         }
         "monitor_bulk_node_control" => {
             let args: BulkActionArgs = parse_args(request.args)?;

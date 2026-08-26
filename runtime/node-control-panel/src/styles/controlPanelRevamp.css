@@ -5055,6 +5055,63 @@ body,
   overflow-wrap: anywhere;
 }
 
+.validator-operations-panel {
+  display: grid;
+  gap: 12px;
+  margin: 14px 0;
+  padding: 14px;
+  border: 1px solid rgba(96, 165, 250, 0.3);
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.72);
+}
+
+.validator-operations-heading,
+.validator-operations-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.validator-operations-heading span {
+  display: block;
+  margin-top: 3px;
+  color: rgba(203, 213, 225, 0.72);
+  font-size: 0.76rem;
+}
+
+.validator-operations-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px;
+}
+
+.validator-operations-node {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 9px;
+  background: rgba(2, 6, 23, 0.45);
+}
+
+.validator-operations-node.is-selected { border-color: #60a5fa; }
+.validator-operations-node header { display: flex; justify-content: space-between; gap: 8px; }
+.validator-operations-node header span { color: #93c5fd; font-size: 0.72rem; }
+.validator-operations-node dl { display: grid; gap: 6px; margin: 10px 0 0; }
+.validator-operations-node dl div { min-width: 0; }
+.validator-operations-node dt { color: rgba(148, 163, 184, 0.88); font-size: 0.68rem; }
+.validator-operations-node dd { margin: 1px 0 0; overflow-wrap: anywhere; color: #e2e8f0; font-size: 0.75rem; }
+.validator-operations-cluster-line,
+.validator-operations-notice { color: #bfdbfe; font-size: 0.78rem; }
+.validator-operations-actions { justify-content: flex-start; }
+.validator-operations-panel button { cursor: pointer; }
+.validator-operations-panel button:disabled { cursor: not-allowed; opacity: 0.55; }
+.validator-operations-panel details { color: #cbd5e1; font-size: 0.76rem; }
+.validator-operations-logs { display: grid; gap: 4px; max-height: 280px; overflow: auto; margin-top: 8px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.validator-operations-logs div { padding: 5px 7px; border-radius: 4px; background: rgba(2, 6, 23, 0.65); overflow-wrap: anywhere; }
+.validator-operations-logs span { display: block; color: #93c5fd; font-size: 0.66rem; }
+
 @media (max-width: 1100px) {
   .cp-v2-summary-grid,
   .cp-v2-envelope-layout,
