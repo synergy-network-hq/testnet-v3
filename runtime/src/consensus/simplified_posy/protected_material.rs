@@ -6,22 +6,23 @@
 //! legacy proposer schedule and exposes no empty or plaintext fallback.
 
 use super::{
-    compute_simplified_protected_execution_root, simplified_fee_market_header_fields,
-    validate_simplified_fee_market_header_against_parent, ConsensusObjectContext,
-    DurableSimplifiedFinalitySink, DurableSimplifiedProposalMaterialStore, FinalizedBlockRecord,
-    SimplifiedCoreMaterialAdapter, SimplifiedEpochContext, SimplifiedFinalityEnvironment,
-    SimplifiedFinalityParent, SimplifiedMaterialAdapter, SimplifiedParentFeeMarketState,
-    SimplifiedPreviousEpochFinalityReplay, SimplifiedProposal, SimplifiedProposalDirective,
-    VerifiedSimplifiedEpochTransition, VerifiedSimplifiedProposalMaterial,
-    POSY_SIMPLIFIED_PROTOCOL_VERSION,
+    compute_simplified_protected_execution_root_with_next_commitment,
+    simplified_fee_market_header_fields, validate_simplified_fee_market_header_against_parent,
+    ConsensusObjectContext, DurableSimplifiedFinalitySink, DurableSimplifiedProposalMaterialStore,
+    FinalizedBlockRecord, SimplifiedCoreMaterialAdapter, SimplifiedEpochContext,
+    SimplifiedFinalityEnvironment, SimplifiedFinalityParent, SimplifiedMaterialAdapter,
+    SimplifiedParentFeeMarketState, SimplifiedPreviousEpochFinalityReplay, SimplifiedProposal,
+    SimplifiedProposalDirective, VerifiedSimplifiedEpochTransition,
+    VerifiedSimplifiedProposalMaterial, POSY_SIMPLIFIED_PROTOCOL_VERSION,
 };
 use crate::consensus_parameters::ConsensusParameterRoot;
 use crate::crypto::aegis_pqvm::AegisPqvmVerifier;
 use crate::dag_mempool::compute_tx_order_root;
 use crate::etdag::{
-    canonical_finality_context_digest, target_admission_source_finality_root, EtdagDigest,
-    EtdagParameters, EtdagProtectedInputCoordinator, EtdagScheduleNeutralFinalityAuthority,
-    ProtectedBlockInput, TargetAdmissionContext,
+    canonical_finality_context_digest, target_admission_source_finality_root,
+    DeterministicProtectedExecutionInput, EtdagDigest, EtdagParameters,
+    EtdagProtectedInputCoordinator, EtdagScheduleNeutralFinalityAuthority,
+    ProtectedExecutionTargetContext, TargetAdmissionContext,
 };
 use crate::execution::{compute_state_root_after, execute_block, ExecutionState};
 use crate::synergy_types::{
@@ -31,6 +32,16 @@ use crate::synergy_types::{
 use std::path::PathBuf;
 
 pub const POSY_SIMPLIFIED_PROTECTED_BLOCK_VERSION: u32 = 3;
+
+/// Single source of concrete, cryptographically replayable R11 protected
+/// execution material. Implementations are expected to read the durable
+/// `ProtectedPipeline` record; absence at H3+ is a hard not-ready condition.
+pub trait SimplifiedProtectedExecutionInputSource: Send {
+    fn load_ready_execution_input(
+        &mut self,
+        height: crate::synergy_types::Height,
+    ) -> Result<Option<DeterministicProtectedExecutionInput>, String>;
+}
 
 /// Exact durable-chain authority needed to execute one protected candidate.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -585,25 +596,52 @@ impl SimplifiedProtectedMaterialConfiguration {
 /// Canonical protected-ETDAG adapter used behind the durable material source.
 pub struct SimplifiedProtectedMaterialAdapter<A> {
     epoch_context: SimplifiedEpochContext,
-    coordinator: EtdagProtectedInputCoordinator,
     configuration: SimplifiedProtectedMaterialConfiguration,
     authority: A,
+    execution_input_source: Option<Box<dyn SimplifiedProtectedExecutionInputSource>>,
 }
 
 impl<A: SimplifiedProtectedMaterialAuthority> SimplifiedProtectedMaterialAdapter<A> {
     pub fn new(
         epoch_context: SimplifiedEpochContext,
-        coordinator: EtdagProtectedInputCoordinator,
+        _coordinator: EtdagProtectedInputCoordinator,
         configuration: SimplifiedProtectedMaterialConfiguration,
         authority: A,
     ) -> Result<Self, String> {
         configuration.validate(&epoch_context)?;
         Ok(Self {
             epoch_context,
-            coordinator,
             configuration,
             authority,
+            execution_input_source: None,
         })
+    }
+
+    pub fn with_protected_pipeline_source(
+        mut self,
+        source: impl SimplifiedProtectedExecutionInputSource + 'static,
+    ) -> Self {
+        self.execution_input_source = Some(Box::new(source));
+        self
+    }
+
+    fn ready_execution_input(
+        &mut self,
+        height: crate::synergy_types::Height,
+    ) -> Result<DeterministicProtectedExecutionInput, String> {
+        self.execution_input_source
+            .as_mut()
+            .ok_or_else(|| {
+                "PROTECTED_PIPELINE_EXECUTION_INPUT_NOT_READY: no durable ProtectedPipeline source is configured"
+                    .to_string()
+            })?
+            .load_ready_execution_input(height)?
+            .ok_or_else(|| {
+                format!(
+                    "PROTECTED_PIPELINE_EXECUTION_INPUT_NOT_READY: no concrete execution input for H{}",
+                    height.0
+                )
+            })
     }
 
     fn timestamp_for_height(&self, height: crate::synergy_types::Height) -> Result<u64, String> {
@@ -673,24 +711,67 @@ impl<A: SimplifiedProtectedMaterialAuthority> SimplifiedProtectedMaterialAdapter
         Ok(())
     }
 
-    fn finality_digest_matches(
-        protected_input: &ProtectedBlockInput,
-        expected: &EtdagDigest,
+    fn verify_execution_target(
+        &self,
+        input: &DeterministicProtectedExecutionInput,
+        context: &ConsensusObjectContext,
+        finalized: &FinalizedBlockRecord,
+        finality_digest: &EtdagDigest,
     ) -> Result<(), String> {
-        expected.validate("simplified protected finality context digest")?;
-        if expected.is_zero()
-            || protected_input
-                .boc
-                .bvc
-                .batch_candidate
-                .canonical_finality_context_digest
-                != *expected
-        {
-            return Err(
-                "protected material deterministic order names another finality context".to_string(),
-            );
+        match &input.target_context {
+            ProtectedExecutionTargetContext::NormalEtdag { admission_context } => {
+                self.verify_target_context(admission_context, context, finalized, finality_digest)
+            }
+            ProtectedExecutionTargetContext::GenesisBootstrap { height_context } => {
+                height_context.validate_validator_and_cluster_bindings(
+                    &self.configuration.validator_set,
+                    &self.configuration.etdag_cluster_map,
+                )?;
+                if !matches!(context.height.0, 1 | 2)
+                    || height_context.height != context.height
+                    || height_context.epoch != context.epoch
+                    || height_context.active_validator_set_root != context.active_validator_set_root
+                    || height_context.validator_consensus_key_root
+                        != context.validator_consensus_key_root
+                    || height_context.frozen_bonded_weight_root != context.frozen_voting_weight_root
+                    || height_context.consensus_parameter_root.to_hex()
+                        != context.consensus_parameter_root
+                {
+                    return Err("Genesis protected input names another PoSy slot".to_string());
+                }
+                Ok(())
+            }
         }
-        Ok(())
+    }
+
+    fn target_bindings(
+        input: &DeterministicProtectedExecutionInput,
+    ) -> (
+        crate::synergy_types::ClusterId,
+        String,
+        Hash,
+        Hash,
+        u64,
+        u64,
+    ) {
+        match &input.target_context {
+            ProtectedExecutionTargetContext::GenesisBootstrap { height_context } => (
+                height_context.assigned_cluster_id,
+                height_context.cluster_schedule_version.clone(),
+                height_context.cluster_map_root,
+                height_context.assigned_cluster_membership_root,
+                height_context.assigned_cluster_validator_count,
+                height_context.assigned_cluster_total_voting_weight,
+            ),
+            ProtectedExecutionTargetContext::NormalEtdag { admission_context } => (
+                admission_context.assigned_cluster_id,
+                admission_context.cluster_schedule_version.clone(),
+                admission_context.cluster_map_root,
+                admission_context.assigned_cluster_membership_root,
+                admission_context.assigned_cluster_validator_count,
+                admission_context.assigned_cluster_total_voting_weight,
+            ),
+        }
     }
 
     fn ordered_transaction_ids(transactions: &[Transaction]) -> Result<Vec<TxId>, String> {
@@ -720,32 +801,29 @@ impl<A: SimplifiedProtectedMaterialAuthority> SimplifiedProtectedMaterialAdapter
         &self,
         proposal: &SimplifiedProposal,
         expected_finalized: &FinalizedBlockRecord,
-        target_context: &TargetAdmissionContext,
-        protected_input: &ProtectedBlockInput,
+        protected_execution_input: &DeterministicProtectedExecutionInput,
         material: &VerifiedSimplifiedProposalMaterial,
     ) -> Result<(), String> {
+        let (cluster_id, schedule, map_root, membership_root, validator_count, voting_weight) =
+            Self::target_bindings(protected_execution_input);
         let header = &material.canonical_block.header;
         let transaction_ids =
             Self::ordered_transaction_ids(&material.canonical_block.transactions)?;
         let expected_dag_frontier = Hash::from_domain_bytes(
             "SYNERGY_ETDAG_DAG_CUT_ROOT_V2",
-            protected_input
-                .dcc
-                .candidate
-                .causal_closure_root
+            protected_execution_input
+                .protected_batch
+                .cut_root
                 .0
                 .as_bytes(),
         );
         if header.version != POSY_SIMPLIFIED_PROTECTED_BLOCK_VERSION
-            || header.cluster_id != target_context.assigned_cluster_id
-            || header.cluster_schedule_version != target_context.cluster_schedule_version
-            || header.cluster_map_hash != target_context.cluster_map_root
-            || header.assigned_cluster_membership_root
-                != target_context.assigned_cluster_membership_root
-            || header.assigned_cluster_validator_count
-                != target_context.assigned_cluster_validator_count
-            || header.assigned_cluster_total_voting_weight
-                != target_context.assigned_cluster_total_voting_weight
+            || header.cluster_id != cluster_id
+            || header.cluster_schedule_version != schedule
+            || header.cluster_map_hash != map_root
+            || header.assigned_cluster_membership_root != membership_root
+            || header.assigned_cluster_validator_count != validator_count
+            || header.assigned_cluster_total_voting_weight != voting_weight
             || header.proposer_schedule_hash != self.epoch_context.leader_ring_root
             || header.cryptographic_profile_root != self.configuration.cryptographic_profile_root
             || header.dag_frontier_root != expected_dag_frontier
@@ -770,18 +848,13 @@ impl<A: SimplifiedProtectedMaterialAuthority> SimplifiedProtectedMaterialAdapter
         &self,
         directive: &SimplifiedProposalDirective,
         proposer: &ValidatorRecord,
-        target_context: &TargetAdmissionContext,
-        protected_input: &ProtectedBlockInput,
+        protected_execution_input: &DeterministicProtectedExecutionInput,
+        transactions: Vec<Transaction>,
         parent_state: &ExecutionState,
         authority_parent_fee_market: Option<SimplifiedParentFeeMarketState>,
     ) -> Result<Block, String> {
-        let transactions = protected_input.verify_and_extract_transactions(
-            &self.configuration.verifier,
-            target_context,
-            &self.configuration.validator_set,
-            &self.configuration.etdag_cluster_map,
-            &self.configuration.etdag_parameters,
-        )?;
+        let (cluster_id, schedule, map_root, membership_root, validator_count, voting_weight) =
+            Self::target_bindings(protected_execution_input);
         let transaction_ids = Self::ordered_transaction_ids(&transactions)?;
         let state_root_before = compute_state_root_after(parent_state)?;
         let timestamp = self.timestamp_for_height(directive.context.height)?;
@@ -798,7 +871,7 @@ impl<A: SimplifiedProtectedMaterialAuthority> SimplifiedProtectedMaterialAdapter
                 height: directive.context.height,
                 round: directive.context.round,
                 epoch: directive.context.epoch,
-                cluster_id: target_context.assigned_cluster_id,
+                cluster_id,
                 height_context_root: directive.context.epoch_context_root,
                 parent_block_hash: Hash::from_hex(&directive.parent.block_id().0)?,
                 parent_state_root: state_root_before,
@@ -810,12 +883,11 @@ impl<A: SimplifiedProtectedMaterialAuthority> SimplifiedProtectedMaterialAdapter
                 eligible_validator_set_hash: directive.context.active_validator_set_root,
                 validator_consensus_key_root: directive.context.validator_consensus_key_root,
                 frozen_bonded_weight_root: directive.context.frozen_voting_weight_root,
-                cluster_schedule_version: target_context.cluster_schedule_version.clone(),
-                cluster_map_hash: target_context.cluster_map_root,
-                assigned_cluster_membership_root: target_context.assigned_cluster_membership_root,
-                assigned_cluster_validator_count: target_context.assigned_cluster_validator_count,
-                assigned_cluster_total_voting_weight: target_context
-                    .assigned_cluster_total_voting_weight,
+                cluster_schedule_version: schedule,
+                cluster_map_hash: map_root,
+                assigned_cluster_membership_root: membership_root,
+                assigned_cluster_validator_count: validator_count,
+                assigned_cluster_total_voting_weight: voting_weight,
                 proposer_schedule_hash: self.epoch_context.leader_ring_root,
                 protocol_config_hash: ConsensusParameterRoot::from_hex(
                     &directive.context.consensus_parameter_root,
@@ -823,10 +895,9 @@ impl<A: SimplifiedProtectedMaterialAuthority> SimplifiedProtectedMaterialAdapter
                 cryptographic_profile_root: self.configuration.cryptographic_profile_root,
                 dag_frontier_root: Hash::from_domain_bytes(
                     "SYNERGY_ETDAG_DAG_CUT_ROOT_V2",
-                    protected_input
-                        .dcc
-                        .candidate
-                        .causal_closure_root
+                    protected_execution_input
+                        .protected_batch
+                        .cut_root
                         .0
                         .as_bytes(),
                 ),
@@ -862,14 +933,6 @@ impl<A: SimplifiedProtectedMaterialAuthority> SimplifiedProtectedMaterialAdapter
             authorized_state.mark_authorized_at(transaction, timestamp.saturating_div(1_000))?;
         }
         let execution = execute_block(&block, &authorized_state)?;
-        let manifest =
-            protected_input.build_execution_manifest(&block.transactions, &execution.receipts)?;
-        let commitment =
-            protected_input.protected_batch_commitment(&manifest, &execution.receipts)?;
-        if commitment.protected_count != block.header.tx_count {
-            return Err("protected batch count differs from block body".to_string());
-        }
-        block.header.protected_batch = Some(commitment);
         block.header.state_root_after = execution.state_root_after;
         block.header.receipt_root = execution.receipt_root;
         block.header.gas_used = execution.gas_used_total;
@@ -900,31 +963,18 @@ impl<A: SimplifiedProtectedMaterialAuthority> SimplifiedMaterialAdapter
             &directive.parent,
             &directive.finalized,
         )?;
-        let ready = self
-            .coordinator
-            .load_ready_protected_material_schedule_neutral(
-                directive.context.height,
-                &authority.canonical_finality_context_digest,
-                &self.configuration.verifier,
-                &self.configuration.validator_set,
-                &self.configuration.etdag_cluster_map,
-                self.configuration.consensus_parameter_root,
-                &self.configuration.etdag_parameters,
-            );
-        let (target_context, protected_input) = match ready {
-            Ok(material) => material,
-            Err(error) if error.contains("ETDAG_PROTECTED_INPUT_NOT_READY") => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        self.verify_target_context(
-            &target_context,
+        let protected_execution_input = self.ready_execution_input(directive.context.height)?;
+        self.verify_execution_target(
+            &protected_execution_input,
             &directive.context,
             &directive.finalized,
             &authority.canonical_finality_context_digest,
         )?;
-        Self::finality_digest_matches(
-            &protected_input,
-            &authority.canonical_finality_context_digest,
+        let transactions = protected_execution_input.verify_and_extract_transactions(
+            &self.configuration.verifier,
+            &self.configuration.validator_set,
+            &self.configuration.etdag_cluster_map,
+            &self.configuration.etdag_parameters,
         )?;
         let unsigned_proposal = SimplifiedProposal {
             context: directive.context.clone(),
@@ -944,20 +994,20 @@ impl<A: SimplifiedProtectedMaterialAuthority> SimplifiedMaterialAdapter
         let block = self.build_block(
             directive,
             &proposer,
-            &target_context,
-            &protected_input,
+            &protected_execution_input,
+            transactions,
             &authority.parent_execution_state,
             authority.parent_fee_market,
         )?;
         let block_id = block.candidate_id()?;
-        let protected_execution_root = compute_simplified_protected_execution_root(
-            &directive.context,
-            &block,
-            directive.parent.block_id(),
-            &directive.parent,
-            Some(&target_context),
-            Some(&protected_input),
-        )?;
+        let protected_execution_root =
+            compute_simplified_protected_execution_root_with_next_commitment(
+                &directive.context,
+                &block,
+                directive.parent.block_id(),
+                &directive.parent,
+                &protected_execution_input,
+            )?;
         let proposal = SimplifiedProposal {
             block_id,
             protected_execution_root,
@@ -967,8 +1017,7 @@ impl<A: SimplifiedProtectedMaterialAuthority> SimplifiedMaterialAdapter
             epoch_context,
             &proposal,
             block,
-            target_context,
-            protected_input,
+            protected_execution_input,
             &authority.parent_execution_state,
             authority.parent_fee_market,
             &self.configuration.verifier,
@@ -976,21 +1025,10 @@ impl<A: SimplifiedProtectedMaterialAuthority> SimplifiedMaterialAdapter
             &self.configuration.etdag_cluster_map,
             &self.configuration.etdag_parameters,
         )?;
-        let verified_target = material
-            .target_context
-            .as_ref()
-            .ok_or_else(|| "verified protected material lost its target context".to_string())?;
-        let verified_input = material
-            .protected_input
-            .as_ref()
-            .ok_or_else(|| "verified protected material lost its ETDAG input".to_string())?;
-        self.verify_static_header(
-            &proposal,
-            &directive.finalized,
-            verified_target,
-            verified_input,
-            &material,
-        )?;
+        let verified_input = material.protected_execution_input.as_ref().ok_or_else(|| {
+            "verified protected material lost its R11 execution input".to_string()
+        })?;
+        self.verify_static_header(&proposal, &directive.finalized, verified_input, &material)?;
         validate_simplified_fee_market_header_against_parent(
             &material.canonical_block.header,
             authority.parent_fee_market,
@@ -1013,43 +1051,28 @@ impl<A: SimplifiedProtectedMaterialAuthority> SimplifiedMaterialAdapter
             &proposal.parent,
             expected_finalized,
         )?;
-        let target_context = material.target_context.as_ref().ok_or_else(|| {
-            "received protected proposal has no certified target context".to_string()
-        })?;
-        let protected_input = material.protected_input.as_ref().ok_or_else(|| {
-            "received protected proposal has no protected ETDAG input".to_string()
-        })?;
-        let certified_target = self
-            .coordinator
-            .load_verified_target_admission_context_schedule_neutral(
-                proposal.context.height,
-                &self.configuration.verifier,
-                &self.configuration.validator_set,
-                &self.configuration.etdag_cluster_map,
-                self.configuration.consensus_parameter_root,
-            )?;
-        if &certified_target != target_context {
+        let protected_execution_input = material
+            .protected_execution_input
+            .as_ref()
+            .ok_or_else(|| "received protected proposal has no concrete R11 input".to_string())?;
+        let locally_derived = self.ready_execution_input(proposal.context.height)?;
+        if &locally_derived != protected_execution_input {
             return Err(
-                "received target context differs from the durable certified admission package"
+                "received protected input differs from the locally derived ProtectedPipeline record"
                     .to_string(),
             );
         }
-        self.verify_target_context(
-            target_context,
+        self.verify_execution_target(
+            protected_execution_input,
             &proposal.context,
             expected_finalized,
-            &authority.canonical_finality_context_digest,
-        )?;
-        Self::finality_digest_matches(
-            protected_input,
             &authority.canonical_finality_context_digest,
         )?;
         self.proposer(proposal)?;
         self.verify_static_header(
             proposal,
             expected_finalized,
-            target_context,
-            protected_input,
+            protected_execution_input,
             material,
         )?;
         material.replay_and_verify(

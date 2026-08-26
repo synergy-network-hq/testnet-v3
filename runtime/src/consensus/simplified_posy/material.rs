@@ -15,8 +15,9 @@ use super::{
 use crate::consensus_parameters::ConsensusParameterRoot;
 use crate::crypto::aegis_pqvm::AegisPqvmVerifier;
 use crate::etdag::{
-    EtdagDigest, EtdagParameters, NextProtectedBatchCommitment, ProtectedBlockInput,
-    TargetAdmissionContext, DOMAIN_PROTECTED_ORDER_ROOT, PROTECTED_PIPELINE_VERSION,
+    DeterministicProtectedExecutionInput, EtdagDigest, EtdagParameters,
+    NextProtectedBatchCommitment, ProtectedBlockInput, TargetAdmissionContext,
+    PROTECTED_PIPELINE_VERSION,
 };
 use crate::execution::{compute_state_root_after, execute_block, ExecutionState};
 use crate::synergy_types::{
@@ -167,8 +168,10 @@ pub struct VerifiedSimplifiedProposalMaterial {
     /// Proposal-envelope fields and the redundant block proposer signature are
     /// normalized away; the simplified proposal carries that authorization.
     pub canonical_block: Block,
-    pub target_context: Option<TargetAdmissionContext>,
-    pub protected_input: Option<ProtectedBlockInput>,
+    /// Concrete R11 protected execution input. `None` is valid only for the
+    /// historical core-only compatibility path; H1/H2 and H3+ both carry a
+    /// complete independently verifiable input.
+    pub protected_execution_input: Option<DeterministicProtectedExecutionInput>,
     /// Exact deterministic next-batch commitment authenticated by the
     /// proposal's `protected_execution_root`. This is proposal material, not
     /// an unauthenticated sidecar: proposal signatures, ECHOs, block votes,
@@ -188,8 +191,7 @@ struct ProtectedExecutionRootSubject<'a> {
     parent: &'a SimplifiedFinalityParent,
     canonical_block_header: &'a crate::synergy_types::BlockHeader,
     transactions: &'a [crate::synergy_types::Transaction],
-    target_context_root: Option<Hash>,
-    protected_input_digest: Option<&'a EtdagDigest>,
+    protected_execution_input_digest: Option<&'a EtdagDigest>,
     next_protected_batch_commitment: Option<&'a NextProtectedBatchCommitment>,
     transition_subject_root: Option<Hash>,
 }
@@ -236,7 +238,6 @@ impl VerifiedSimplifiedProposalMaterial {
             block,
             None,
             None,
-            None,
             transition_subject_root,
             next_state,
         )
@@ -251,9 +252,13 @@ impl VerifiedSimplifiedProposalMaterial {
         epoch_context: &SimplifiedEpochContext,
         proposal: &SimplifiedProposal,
         block: Block,
-        next_protected_batch_commitment: NextProtectedBatchCommitment,
+        protected_execution_input: DeterministicProtectedExecutionInput,
         parent_execution_state: &ExecutionState,
         parent_fee_market: Option<SimplifiedParentFeeMarketState>,
+        verifier: &AegisPqvmVerifier,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        parameters: &EtdagParameters,
     ) -> Result<(Self, ExecutionState), String> {
         if !block.transactions.is_empty() || block.header.protected_batch.is_some() {
             return Err(
@@ -261,11 +266,14 @@ impl VerifiedSimplifiedProposalMaterial {
                     .to_string(),
             );
         }
-        validate_next_protected_batch_commitment(
-            &next_protected_batch_commitment,
+        let next_protected_batch_commitment = protected_execution_input.next_commitment.clone();
+        validate_execution_input_for_proposal(
+            &protected_execution_input,
             &proposal.context,
-            None,
-            None,
+            verifier,
+            validator_set,
+            cluster_map,
+            parameters,
         )?;
         validate_genesis_bootstrap_next_commitment(&next_protected_batch_commitment)?;
         validate_simplified_fee_market_header_against_parent(&block.header, parent_fee_market)?;
@@ -274,8 +282,7 @@ impl VerifiedSimplifiedProposalMaterial {
             epoch_context,
             proposal,
             block,
-            None,
-            None,
+            Some(protected_execution_input),
             Some(next_protected_batch_commitment),
             None,
             next_state,
@@ -287,9 +294,7 @@ impl VerifiedSimplifiedProposalMaterial {
         epoch_context: &SimplifiedEpochContext,
         proposal: &SimplifiedProposal,
         block: Block,
-        target_context: TargetAdmissionContext,
-        protected_input: ProtectedBlockInput,
-        next_protected_batch_commitment: NextProtectedBatchCommitment,
+        protected_execution_input: DeterministicProtectedExecutionInput,
         parent_execution_state: &ExecutionState,
         parent_fee_market: Option<SimplifiedParentFeeMarketState>,
         verifier: &AegisPqvmVerifier,
@@ -301,9 +306,7 @@ impl VerifiedSimplifiedProposalMaterial {
             epoch_context,
             proposal,
             block,
-            target_context,
-            protected_input,
-            next_protected_batch_commitment,
+            protected_execution_input,
             parent_execution_state,
             parent_fee_market,
             verifier,
@@ -321,9 +324,7 @@ impl VerifiedSimplifiedProposalMaterial {
         epoch_context: &SimplifiedEpochContext,
         proposal: &SimplifiedProposal,
         block: Block,
-        target_context: TargetAdmissionContext,
-        protected_input: ProtectedBlockInput,
-        next_protected_batch_commitment: NextProtectedBatchCommitment,
+        protected_execution_input: DeterministicProtectedExecutionInput,
         parent_execution_state: &ExecutionState,
         parent_fee_market: Option<SimplifiedParentFeeMarketState>,
         verifier: &AegisPqvmVerifier,
@@ -333,16 +334,11 @@ impl VerifiedSimplifiedProposalMaterial {
         transition_subject_root: Option<Hash>,
     ) -> Result<(Self, ExecutionState), String> {
         proposal.context.validate_against(epoch_context)?;
-        validate_target_context_for_epoch(&target_context, epoch_context, proposal.context.height)?;
-        validate_next_protected_batch_commitment(
-            &next_protected_batch_commitment,
+        let next_protected_batch_commitment = protected_execution_input.next_commitment.clone();
+        let transactions = validate_execution_input_for_proposal(
+            &protected_execution_input,
             &proposal.context,
-            Some(&target_context),
-            Some(&protected_input),
-        )?;
-        let transactions = protected_input.verify_and_extract_transactions(
             verifier,
-            &target_context,
             validator_set,
             cluster_map,
             parameters,
@@ -354,22 +350,12 @@ impl VerifiedSimplifiedProposalMaterial {
             );
         }
         validate_simplified_fee_market_header_against_parent(&block.header, parent_fee_market)?;
-        let (next_state, receipts) =
-            verify_block_execution_with_receipts(parent_execution_state, &block)?;
-        let manifest = protected_input.build_execution_manifest(&transactions, &receipts)?;
-        let commitment = protected_input.protected_batch_commitment(&manifest, &receipts)?;
-        if block.header.protected_batch.as_ref() != Some(&commitment) {
-            return Err(
-                "protected material block header does not bind the verified ETDAG execution"
-                    .to_string(),
-            );
-        }
+        let (next_state, _) = verify_block_execution_with_receipts(parent_execution_state, &block)?;
         Self::finish_verified(
             epoch_context,
             proposal,
             block,
-            Some(target_context),
-            Some(protected_input),
+            Some(protected_execution_input),
             Some(next_protected_batch_commitment),
             transition_subject_root,
             next_state,
@@ -380,8 +366,7 @@ impl VerifiedSimplifiedProposalMaterial {
         epoch_context: &SimplifiedEpochContext,
         proposal: &SimplifiedProposal,
         block: Block,
-        target_context: Option<TargetAdmissionContext>,
-        protected_input: Option<ProtectedBlockInput>,
+        protected_execution_input: Option<DeterministicProtectedExecutionInput>,
         next_protected_batch_commitment: Option<NextProtectedBatchCommitment>,
         transition_subject_root: Option<Hash>,
         next_state: ExecutionState,
@@ -393,6 +378,7 @@ impl VerifiedSimplifiedProposalMaterial {
             epoch_context,
             proposal,
             &block,
+            protected_execution_input.as_ref(),
             next_protected_batch_commitment.as_ref(),
             transition_subject_root,
         )?;
@@ -411,8 +397,7 @@ impl VerifiedSimplifiedProposalMaterial {
             stable_candidate_id,
             candidate_subject,
             canonical_block,
-            target_context,
-            protected_input,
+            protected_execution_input,
             next_protected_batch_commitment,
             transition_subject_root,
         };
@@ -440,70 +425,35 @@ impl VerifiedSimplifiedProposalMaterial {
         )?;
         epoch_context.validate_against(&validator_set.active_for_epoch(epoch_context.epoch))?;
         match (
-            &self.target_context,
-            &self.protected_input,
+            &self.protected_execution_input,
             &self.next_protected_batch_commitment,
         ) {
-            (None, None, None) => {
-                verify_block_execution(parent_execution_state, &self.canonical_block)
-            }
-            (None, None, Some(commitment)) => {
-                validate_next_protected_batch_commitment(
-                    commitment,
+            (None, None) => verify_block_execution(parent_execution_state, &self.canonical_block),
+            (Some(input), Some(commitment)) => {
+                let transactions = validate_execution_input_for_proposal(
+                    input,
                     &self.candidate_subject.context,
-                    None,
-                    None,
-                )?;
-                if commitment.target_height.0 > 2
-                    || commitment.protected_count != 0
-                    || commitment.protected_gas != 0
-                    || commitment.protected_bytes != 0
-                    || !self.canonical_block.transactions.is_empty()
-                    || self.canonical_block.header.protected_batch.is_some()
-                {
-                    return Err("invalid durable Genesis bootstrap material".to_string());
-                }
-                verify_block_execution(parent_execution_state, &self.canonical_block)
-            }
-            (Some(target_context), Some(protected_input), Some(commitment)) => {
-                validate_target_context_for_epoch(
-                    target_context,
-                    epoch_context,
-                    self.candidate_subject.context.height,
-                )?;
-                validate_next_protected_batch_commitment(
-                    commitment,
-                    &self.candidate_subject.context,
-                    Some(target_context),
-                    Some(protected_input),
-                )?;
-                let transactions = protected_input.verify_and_extract_transactions(
                     verifier,
-                    target_context,
                     validator_set,
                     cluster_map,
                     parameters,
                 )?;
+                if &input.next_commitment != commitment {
+                    return Err(
+                        "durable protected material stores a mismatched next commitment"
+                            .to_string(),
+                    );
+                }
                 if transactions != self.canonical_block.transactions {
                     return Err(
                         "durable protected material body differs from its verified ETDAG reveal"
                             .to_string(),
                     );
                 }
-                let (next_state, receipts) = verify_block_execution_with_receipts(
+                let (next_state, _) = verify_block_execution_with_receipts(
                     parent_execution_state,
                     &self.canonical_block,
                 )?;
-                let manifest =
-                    protected_input.build_execution_manifest(&transactions, &receipts)?;
-                let commitment =
-                    protected_input.protected_batch_commitment(&manifest, &receipts)?;
-                if self.canonical_block.header.protected_batch.as_ref() != Some(&commitment) {
-                    return Err(
-                        "durable protected material header does not bind replayed ETDAG execution"
-                            .to_string(),
-                    );
-                }
                 Ok(next_state)
             }
             _ => Err(
@@ -524,8 +474,7 @@ impl VerifiedSimplifiedProposalMaterial {
         parent_fee_market: Option<SimplifiedParentFeeMarketState>,
     ) -> Result<ExecutionState, String> {
         self.validate(epoch_context.root()?)?;
-        if self.target_context.is_some()
-            || self.protected_input.is_some()
+        if self.protected_execution_input.is_some()
             || self.next_protected_batch_commitment.is_some()
         {
             return Err(
@@ -595,50 +544,26 @@ impl VerifiedSimplifiedProposalMaterial {
             return Err("simplified protected material block binding is invalid".to_string());
         }
         match (
-            &self.target_context,
-            &self.protected_input,
+            &self.protected_execution_input,
             &self.next_protected_batch_commitment,
         ) {
-            (None, None, None) => {
+            (None, None) => {
                 if !self.canonical_block.transactions.is_empty()
                     || self.canonical_block.header.protected_batch.is_some()
                 {
                     return Err("core material unexpectedly contains protected input".to_string());
                 }
             }
-            (None, None, Some(commitment)) => {
+            (Some(input), Some(commitment)) => {
                 validate_next_protected_batch_commitment(
                     commitment,
                     &self.candidate_subject.context,
-                    None,
-                    None,
-                )?;
-                if commitment.target_height.0 > 2
-                    || commitment.protected_count != 0
-                    || commitment.protected_gas != 0
-                    || commitment.protected_bytes != 0
-                    || !self.canonical_block.transactions.is_empty()
-                    || self.canonical_block.header.protected_batch.is_some()
-                {
-                    return Err("invalid Genesis bootstrap protected material".to_string());
-                }
-            }
-            (Some(target), Some(input), Some(commitment)) => {
-                target.validate()?;
-                input
-                    .digest()?
-                    .validate("simplified protected-input digest")?;
-                validate_next_protected_batch_commitment(
-                    commitment,
-                    &self.candidate_subject.context,
-                    Some(target),
                     Some(input),
                 )?;
-                if target.target_height != self.candidate_subject.context.height
-                    || target.epoch != self.candidate_subject.context.epoch
-                    || self.canonical_block.header.protected_batch.is_none()
-                {
-                    return Err("ETDAG material is not bound to the candidate slot".to_string());
+                if &input.next_commitment != commitment {
+                    return Err(
+                        "protected execution input and material commitment differ".to_string()
+                    );
                 }
             }
             _ => {
@@ -653,8 +578,9 @@ impl VerifiedSimplifiedProposalMaterial {
             &self.canonical_block,
             &self.candidate_subject.parent_block_id,
             &self.candidate_subject.parent,
-            self.target_context.as_ref(),
-            self.protected_input.as_ref(),
+            None,
+            None,
+            self.protected_execution_input.as_ref(),
             self.next_protected_batch_commitment.as_ref(),
             self.transition_subject_root,
         )?;
@@ -713,15 +639,8 @@ fn validate_target_context_for_epoch(
 pub fn validate_next_protected_batch_commitment(
     commitment: &NextProtectedBatchCommitment,
     context: &super::ConsensusObjectContext,
-    target_context: Option<&TargetAdmissionContext>,
-    protected_input: Option<&ProtectedBlockInput>,
+    protected_execution_input: Option<&DeterministicProtectedExecutionInput>,
 ) -> Result<(), String> {
-    if (target_context.is_some()) != (protected_input.is_some()) {
-        return Err(
-            "next protected commitment validation requires both target context and concrete input"
-                .to_string(),
-        );
-    }
     if commitment.commitment_version != PROTECTED_PIPELINE_VERSION
         || commitment.chain_id != context.chain_id
         || commitment.network_id != context.network_id
@@ -753,48 +672,31 @@ pub fn validate_next_protected_batch_commitment(
         return Err("next protected commitment root is zero".to_string());
     }
 
-    let Some(target) = target_context else {
+    let Some(input) = protected_execution_input else {
         return Ok(());
     };
-    let input = protected_input.ok_or_else(|| {
-        "normal next protected commitment lacks concrete protected execution input".to_string()
-    })?;
-    target.validate()?;
-    let target_root = target.root()?;
-    if commitment.cluster_id != target.assigned_cluster_id
-        || commitment.target_context_root != target_root
-        || commitment.validator_set_commitment != target.active_validator_set_root
-        || commitment.parameter_root != target.consensus_parameter_root
-    {
-        return Err("next protected commitment names another ETDAG target".to_string());
-    }
-
-    // Until the R11 concrete reveal payload replaces `ProtectedBlockInput`,
-    // retain a strict cross-check against every deterministic field available
-    // in that independently authenticated package. This is not permission to
-    // accept DCC/BVC/BOC as an R11 reveal authority.
-    let legacy_batch = &input.boc.bvc.batch_candidate;
-    let order_root = EtdagDigest::from_canonical(
-        DOMAIN_PROTECTED_ORDER_ROOT,
-        &legacy_batch.ordered_commitments,
-    )?;
-    let eligible_set_root = EtdagDigest::from_canonical(
-        "PoSy/ProtectedPipeline/EligibleSet/v1",
-        &input.dcc.candidate.eligible_envelopes,
-    )?;
-    if commitment.order_seed != legacy_batch.order_seed
-        || commitment.order_root != order_root
-        || commitment.eligible_set_root != eligible_set_root
-        || commitment.protected_count != legacy_batch.ordered_commitments.len() as u64
-        || commitment.protected_gas != legacy_batch.declared_gas_units
-        || commitment.protected_bytes != legacy_batch.declared_ciphertext_bytes
-    {
+    if &input.next_commitment != commitment {
         return Err(
             "next protected commitment differs from the concrete deterministic execution input"
                 .to_string(),
         );
     }
+    commitment.validate_against_batch(&input.protected_batch)?;
     Ok(())
+}
+
+fn validate_execution_input_for_proposal(
+    input: &DeterministicProtectedExecutionInput,
+    context: &super::ConsensusObjectContext,
+    verifier: &AegisPqvmVerifier,
+    validator_set: &ValidatorSet,
+    cluster_map: &ClusterMap,
+    parameters: &EtdagParameters,
+) -> Result<Vec<crate::synergy_types::Transaction>, String> {
+    validate_next_protected_batch_commitment(&input.next_commitment, context, Some(input))?;
+    let transactions =
+        input.verify_and_extract_transactions(verifier, validator_set, cluster_map, parameters)?;
+    Ok(transactions)
 }
 
 /// Enforce the minimal Genesis pre-window. No empty protected commitment is
@@ -840,18 +742,17 @@ pub fn compute_simplified_protected_execution_root_with_next_commitment(
     block: &Block,
     parent_block_id: &BlockId,
     parent: &SimplifiedFinalityParent,
-    target_context: Option<&TargetAdmissionContext>,
-    protected_input: Option<&ProtectedBlockInput>,
-    next_protected_batch_commitment: &NextProtectedBatchCommitment,
+    protected_execution_input: &DeterministicProtectedExecutionInput,
 ) -> Result<Hash, String> {
     compute_simplified_protected_execution_root_complete(
         context,
         block,
         parent_block_id,
         parent,
-        target_context,
-        protected_input,
-        Some(next_protected_batch_commitment),
+        None,
+        None,
+        Some(protected_execution_input),
+        Some(&protected_execution_input.next_commitment),
         None,
     )
 }
@@ -876,6 +777,7 @@ pub fn compute_simplified_protected_execution_root_with_transition_subject(
         target_context,
         protected_input,
         None,
+        None,
         transition_subject_root,
     )
 }
@@ -888,10 +790,13 @@ fn compute_simplified_protected_execution_root_complete(
     parent: &SimplifiedFinalityParent,
     target_context: Option<&TargetAdmissionContext>,
     protected_input: Option<&ProtectedBlockInput>,
+    protected_execution_input: Option<&DeterministicProtectedExecutionInput>,
     next_protected_batch_commitment: Option<&NextProtectedBatchCommitment>,
     transition_subject_root: Option<Hash>,
 ) -> Result<Hash, String> {
-    if (target_context.is_some()) != (protected_input.is_some()) {
+    if (target_context.is_some()) != (protected_input.is_some())
+        || protected_execution_input.is_some() && protected_input.is_some()
+    {
         return Err(
             "protected-execution commitment requires both target context and protected input"
                 .to_string(),
@@ -901,18 +806,20 @@ fn compute_simplified_protected_execution_root_complete(
     let block_id = canonical_block.candidate_id()?;
     let mut stable_context = context.clone();
     stable_context.round = Round(0);
-    let target_context_root = target_context
-        .map(TargetAdmissionContext::root)
-        .transpose()?;
-    let protected_input_digest = protected_input
+    let legacy_protected_input_digest = protected_input
         .map(ProtectedBlockInput::digest)
         .transpose()?;
+    let protected_execution_input_digest = protected_execution_input
+        .map(DeterministicProtectedExecutionInput::digest)
+        .transpose()?;
+    let protected_execution_input_digest = protected_execution_input_digest
+        .as_ref()
+        .or(legacy_protected_input_digest.as_ref());
     if let Some(commitment) = next_protected_batch_commitment {
         validate_next_protected_batch_commitment(
             commitment,
             &stable_context,
-            target_context,
-            protected_input,
+            protected_execution_input,
         )?;
     }
     let subject = ProtectedExecutionRootSubject {
@@ -922,15 +829,14 @@ fn compute_simplified_protected_execution_root_complete(
         parent,
         canonical_block_header: &canonical_block.header,
         transactions: &canonical_block.transactions,
-        target_context_root,
-        protected_input_digest: protected_input_digest.as_ref(),
+        protected_execution_input_digest,
         next_protected_batch_commitment,
         transition_subject_root,
     };
     let bytes = serde_json::to_vec(&subject)
         .map_err(|error| format!("serialize simplified protected-execution transcript: {error}"))?;
     Ok(Hash::from_domain_bytes(
-        "SYNERGY_POSY_SIMPLIFIED_PROTECTED_EXECUTION_V2",
+        "SYNERGY_POSY_SIMPLIFIED_PROTECTED_EXECUTION_V3",
         &bytes,
     ))
 }
@@ -939,6 +845,7 @@ fn validate_block_binding(
     epoch_context: &SimplifiedEpochContext,
     proposal: &SimplifiedProposal,
     block: &Block,
+    protected_execution_input: Option<&DeterministicProtectedExecutionInput>,
     next_protected_batch_commitment: Option<&NextProtectedBatchCommitment>,
     transition_subject_root: Option<Hash>,
 ) -> Result<(), String> {
@@ -975,13 +882,12 @@ fn validate_block_binding(
         &proposal.parent,
         None,
         None,
+        protected_execution_input,
         next_protected_batch_commitment,
         transition_subject_root,
     );
-    if block.transactions.is_empty() && block.header.protected_batch.is_none() {
-        if recomputed? != proposal.protected_execution_root {
-            return Err("simplified core protected-execution root mismatch".to_string());
-        }
+    if recomputed? != proposal.protected_execution_root {
+        return Err("simplified protected-execution root mismatch".to_string());
     }
     Ok(())
 }
