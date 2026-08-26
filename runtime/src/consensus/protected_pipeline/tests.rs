@@ -586,7 +586,7 @@ fn durable_phases_are_monotonic_and_restart_safe_at_every_phase() {
     pipeline = reopen(pipeline, &path, &fixture.context);
 
     let execution_root = root("phase-execution");
-    pipeline
+    let root_only_error = pipeline
         .merge_observation(
             ProtectedPipelineObservation::ExecutionReady {
                 commitment_root: commitment_root.clone(),
@@ -596,10 +596,10 @@ fn durable_phases_are_monotonic_and_restart_safe_at_every_phase() {
             &evidence_verifier,
             &inputs,
         )
-        .expect("mark execution ready");
+        .expect_err("root-only execution readiness must be rejected");
     assert_eq!(
-        pipeline.record().phase,
-        ProtectedPipelinePhase::ReadyForExecution
+        root_only_error.code,
+        "PROTECTED_EXECUTION_ROOT_ONLY_FORBIDDEN"
     );
     pipeline = reopen(pipeline, &path, &fixture.context);
 
@@ -627,11 +627,11 @@ fn durable_phases_are_monotonic_and_restart_safe_at_every_phase() {
         .expect("observe finality");
     assert_eq!(
         pipeline.record().phase,
-        ProtectedPipelinePhase::ReadyForExecution,
+        ProtectedPipelinePhase::Revealing,
         "diagnostic observations must not skip CONSUMED",
     );
 
-    pipeline
+    let consumed_error = pipeline
         .merge_observation(
             ProtectedPipelineObservation::Consumed {
                 commitment_root,
@@ -641,8 +641,9 @@ fn durable_phases_are_monotonic_and_restart_safe_at_every_phase() {
             &evidence_verifier,
             &inputs,
         )
-        .expect("consume protected input");
-    assert_eq!(pipeline.record().phase, ProtectedPipelinePhase::Consumed);
+        .expect_err("unverified execution input cannot be consumed");
+    assert_eq!(consumed_error.kind, ProtectedPipelineErrorKind::Conflict);
+    assert_eq!(pipeline.record().phase, ProtectedPipelinePhase::Revealing);
     pipeline = reopen(pipeline, &path, &fixture.context);
     let snapshot = pipeline.snapshot().expect("final snapshot");
     assert!(snapshot.diagnostic.qc_seen && snapshot.diagnostic.finalized);

@@ -14,8 +14,9 @@ use serde::{Deserialize, Serialize};
 use crate::crypto::aegis_pqvm::AegisPqvmVerifier;
 use crate::etdag::{
     canonical_content_blind_order, CertifiedEnvelopeRef, CertifiedVertex,
-    DeterministicProtectedBatch, EtdagDigest, EtdagParameters, NextProtectedBatchCommitment,
-    ProtectedBatchSource, ProtectedCutProof, ProtectedPipelineDiagnostic, ProtectedPipelinePhase,
+    DeterministicProtectedBatch, DeterministicProtectedExecutionInput, EtdagDigest,
+    EtdagParameters, NextProtectedBatchCommitment, ProtectedBatchSource, ProtectedCutProof,
+    ProtectedExecutionTargetContext, ProtectedPipelineDiagnostic, ProtectedPipelinePhase,
     TargetAdmissionContext, VertexKind, DOMAIN_PROTECTED_CUT_MARKER_EVIDENCE,
     DOMAIN_PROTECTED_ORDER_ROOT, ETDAG_PROFILE_ID, PROTECTED_PIPELINE_VERSION,
 };
@@ -320,6 +321,9 @@ pub struct ProtectedPipelineRecord {
     pub protected_batch: Option<DeterministicProtectedBatch>,
     /// Exact semantic commitment required in the parent PoSy proposal.
     pub next_commitment: Option<NextProtectedBatchCommitment>,
+    /// Complete, independently replayed ciphertext/share/plaintext material.
+    #[serde(default)]
+    pub execution_input: Option<DeterministicProtectedExecutionInput>,
     observations: DurableObservations,
     /// First fail-closed conflict or invalid-evidence diagnostic.
     pub fault: Option<ProtectedPipelineFault>,
@@ -746,6 +750,7 @@ impl ProtectedPipeline {
             order_seed_evidence: None,
             protected_batch: None,
             next_commitment: None,
+            execution_input: None,
             observations: DurableObservations::default(),
             fault: None,
         };
@@ -905,6 +910,15 @@ impl ProtectedPipeline {
         if let Err(error) = validate_reconcile_inputs(&candidate, inputs) {
             return self.latch_and_return(candidate, error);
         }
+        if matches!(
+            observation,
+            ProtectedPipelineObservation::ExecutionReady { .. }
+        ) {
+            return Err(ProtectedPipelineError::invalid(
+                "PROTECTED_EXECUTION_ROOT_ONLY_FORBIDDEN",
+                "execution readiness requires merge_execution_input with replayable material",
+            ));
+        }
         let Some(expected) = candidate.next_commitment.as_ref() else {
             return Err(ProtectedPipelineError::not_ready(
                 "PROTECTED_COMMITMENT_NOT_READY",
@@ -937,6 +951,117 @@ impl ProtectedPipeline {
         if let Err(error) = merge_observation_into(&mut candidate, observation) {
             return self.latch_and_return(candidate, error);
         }
+        self.reconcile_candidate(candidate, inputs, previous_phase)
+    }
+
+    /// Replay and durably install exact concrete execution material.
+    ///
+    /// This transition cannot be driven by a caller-supplied root. The full
+    /// ciphertext envelopes, VC-bound threshold shares, plaintext ordering,
+    /// and transaction signatures are reverified before the execution root is
+    /// admitted to the durable state machine.
+    pub fn merge_execution_input(
+        &mut self,
+        execution_input: DeterministicProtectedExecutionInput,
+        inputs: &ProtectedPipelineReconcileContext<'_>,
+    ) -> ProtectedPipelineResult<ProtectedPipelineReconcileOutcome> {
+        self.ensure_live()?;
+        let previous_phase = self.record.phase;
+        let mut candidate = self.record.clone();
+        if let Err(error) = validate_reconcile_inputs(&candidate, inputs) {
+            return self.latch_and_return(candidate, error);
+        }
+        let (Some(expected_cut), Some(expected_batch), Some(expected_commitment)) = (
+            candidate.cut_proof.as_ref(),
+            candidate.protected_batch.as_ref(),
+            candidate.next_commitment.as_ref(),
+        ) else {
+            return Err(ProtectedPipelineError::not_ready(
+                "PROTECTED_EXECUTION_COMMITMENT_NOT_READY",
+                "cannot install execution material before cut, order, and commitment",
+            ));
+        };
+        if candidate.observations.parent_proposals.is_empty()
+            || candidate.observations.reveal_authorizations.is_empty()
+        {
+            return Err(ProtectedPipelineError::not_ready(
+                "PROTECTED_EXECUTION_REVEAL_NOT_AUTHORIZED",
+                "cannot install execution material before authenticated parent VC",
+            ));
+        }
+        let exact_target = match &execution_input.target_context {
+            ProtectedExecutionTargetContext::NormalEtdag { admission_context } => {
+                admission_context == inputs.target
+            }
+            ProtectedExecutionTargetContext::GenesisBootstrap { .. } => false,
+        };
+        if execution_input.source != candidate.source
+            || !exact_target
+            || execution_input.cut_proof.as_ref() != Some(expected_cut)
+            || &execution_input.protected_batch != expected_batch
+            || &execution_input.next_commitment != expected_commitment
+        {
+            return self.latch_and_return(
+                candidate,
+                ProtectedPipelineError::conflict(
+                    "PROTECTED_EXECUTION_BINDING_CONFLICT",
+                    "execution material does not match the durable target/cut/order/commitment",
+                ),
+            );
+        }
+        let Some(authorization) = execution_input.reveal_authorization.as_ref() else {
+            return self.latch_and_return(
+                candidate,
+                ProtectedPipelineError::invalid(
+                    "PROTECTED_EXECUTION_REVEAL_AUTHORIZATION_MISSING",
+                    "normal execution material has no exact proposal VC binding",
+                ),
+            );
+        };
+        if !candidate
+            .observations
+            .reveal_authorizations
+            .contains(&authorization.certificate_evidence_root)
+        {
+            return self.latch_and_return(
+                candidate,
+                ProtectedPipelineError::conflict(
+                    "PROTECTED_EXECUTION_REVEAL_AUTHORIZATION_CONFLICT",
+                    "execution material names a proposal VC not authenticated by the pipeline",
+                ),
+            );
+        }
+        if let Err(error) = execution_input.verify_and_extract_transactions(
+            inputs.verifier,
+            inputs.validator_set,
+            inputs.cluster_map,
+            inputs.parameters,
+        ) {
+            return self.latch_and_return(
+                candidate,
+                ProtectedPipelineError::invalid("PROTECTED_EXECUTION_INPUT_INVALID", error),
+            );
+        }
+        let execution_root = execution_input.digest().map_err(|error| {
+            ProtectedPipelineError::invalid("PROTECTED_EXECUTION_INPUT_HASH_FAILED", error)
+        })?;
+        match &candidate.execution_input {
+            Some(existing) if existing != &execution_input => {
+                return self.latch_and_return(
+                    candidate,
+                    ProtectedPipelineError::conflict(
+                        "PROTECTED_EXECUTION_INPUT_CONFLICT",
+                        "another exact execution input is already durable",
+                    ),
+                );
+            }
+            Some(_) => {}
+            None => candidate.execution_input = Some(execution_input),
+        }
+        candidate
+            .observations
+            .execution_roots
+            .insert(execution_root);
         self.reconcile_candidate(candidate, inputs, previous_phase)
     }
 
@@ -1485,12 +1610,27 @@ fn validate_durable_record(record: &ProtectedPipelineRecord) -> ProtectedPipelin
         ));
     }
     if record.phase >= ProtectedPipelinePhase::ReadyForExecution
-        && record.observations.execution_roots.is_empty()
+        && (record.observations.execution_roots.is_empty() || record.execution_input.is_none())
     {
         return Err(ProtectedPipelineError::corrupt(
             "PROTECTED_RECORD_PHASE_INVALID",
-            "READY_FOR_EXECUTION record has no verified execution root",
+            "READY_FOR_EXECUTION record has no fully verified execution input",
         ));
+    }
+    if let Some(execution_input) = &record.execution_input {
+        let execution_root = execution_input.digest().map_err(|error| {
+            ProtectedPipelineError::corrupt("PROTECTED_RECORD_EXECUTION_INPUT_INVALID", error)
+        })?;
+        if !record
+            .observations
+            .execution_roots
+            .contains(&execution_root)
+        {
+            return Err(ProtectedPipelineError::corrupt(
+                "PROTECTED_RECORD_EXECUTION_INPUT_INVALID",
+                "execution input digest is absent from verified execution roots",
+            ));
+        }
     }
     if record.phase >= ProtectedPipelinePhase::Consumed
         && record.observations.consumed_roots.is_empty()
