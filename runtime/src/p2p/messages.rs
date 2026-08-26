@@ -15,9 +15,10 @@ use crate::consensus::simplified_posy::{
 use crate::consensus::typed_finality_store::TypedFinalityRecord;
 use crate::dag_mempool::compute_tx_order_root;
 use crate::etdag::{
-    CertifiedProtectedInputArtifact, CertifiedVertex, EtdagDigest, ProtectedBlockInput,
-    ProtectedRevealAuthorization, ProtectedRevealShareMessage, TargetAdmissionContext,
-    TargetAdmissionPackage, VertexKind, PROTECTED_PIPELINE_VERSION,
+    CertifiedProtectedInputArtifact, CertifiedVertex, EtdagDigest, EtdagSubmissionEnvelope,
+    ProtectedBlockInput, ProtectedRevealAuthorization, ProtectedRevealShareMessage,
+    TargetAdmissionContext, TargetAdmissionPackage, VertexKind, ETDAG_PROFILE_ID,
+    PROTECTED_PIPELINE_VERSION,
 };
 use crate::synergy_types::AegisPqSignature;
 use crate::synergy_types::{
@@ -97,6 +98,14 @@ pub enum SimplifiedTargetAdmissionMessage {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
 pub enum ProtectedPipelineSemanticObject {
+    /// The exact wallet-authenticated encrypted material referenced by a
+    /// transaction vertex. The semantic ID is the envelope's canonical
+    /// transaction commitment, allowing a vertex reference to request the
+    /// concrete ciphertext, share capsules, and sender key proof directly.
+    EncryptedMaterial {
+        semantic_id: EtdagDigest,
+        submission: EtdagSubmissionEnvelope,
+    },
     CertifiedVertex {
         semantic_id: EtdagDigest,
         certified_vertex: CertifiedVertex,
@@ -119,7 +128,8 @@ pub enum ProtectedPipelineSemanticObject {
 impl ProtectedPipelineSemanticObject {
     pub fn declared_semantic_id(&self) -> &EtdagDigest {
         match self {
-            Self::CertifiedVertex { semantic_id, .. }
+            Self::EncryptedMaterial { semantic_id, .. }
+            | Self::CertifiedVertex { semantic_id, .. }
             | Self::CutoffMarker { semantic_id, .. }
             | Self::RevealAuthorization { semantic_id, .. }
             | Self::RevealShare { semantic_id, .. } => semantic_id,
@@ -128,6 +138,9 @@ impl ProtectedPipelineSemanticObject {
 
     pub fn computed_semantic_id(&self) -> Result<EtdagDigest, String> {
         match self {
+            Self::EncryptedMaterial { submission, .. } => {
+                Ok(submission.sealed_bundle.envelope.tx_commitment.clone())
+            }
             Self::CertifiedVertex {
                 certified_vertex, ..
             }
@@ -149,6 +162,9 @@ impl ProtectedPipelineSemanticObject {
             return Err("protected evidence semantic id mismatch".to_string());
         }
         match self {
+            Self::EncryptedMaterial { submission, .. } => {
+                validate_encrypted_material_shape(submission)
+            }
             Self::CertifiedVertex {
                 certified_vertex, ..
             } if certified_vertex.vertex.kind != VertexKind::Transactions => Err(
@@ -196,6 +212,10 @@ impl ProtectedPipelineSemanticObject {
 
     pub fn target_binding(&self) -> (Height, Hash) {
         match self {
+            Self::EncryptedMaterial { submission, .. } => {
+                let envelope = &submission.sealed_bundle.envelope;
+                (envelope.target_height, envelope.target_context_root)
+            }
             Self::CertifiedVertex {
                 certified_vertex, ..
             }
@@ -215,6 +235,10 @@ impl ProtectedPipelineSemanticObject {
 
     pub fn chain_binding(&self) -> (ChainId, &NetworkId) {
         match self {
+            Self::EncryptedMaterial { submission, .. } => {
+                let envelope = &submission.sealed_bundle.envelope;
+                (envelope.chain_id, &envelope.network_id)
+            }
             Self::CertifiedVertex {
                 certified_vertex, ..
             }
@@ -230,6 +254,95 @@ impl ProtectedPipelineSemanticObject {
             Self::RevealShare { share, .. } => (share.chain_id, &share.network_id),
         }
     }
+
+    pub fn encrypted_submission(&self) -> Option<&EtdagSubmissionEnvelope> {
+        match self {
+            Self::EncryptedMaterial { submission, .. } => Some(submission),
+            _ => None,
+        }
+    }
+}
+
+fn validate_encrypted_material_shape(submission: &EtdagSubmissionEnvelope) -> Result<(), String> {
+    let envelope = &submission.sealed_bundle.envelope;
+    envelope.chain_id.require_testnet_v3()?;
+    envelope.network_id.require_fresh_posy_testnet_v3()?;
+    if envelope.envelope_version != 2
+        || envelope.profile_id != ETDAG_PROFILE_ID
+        || envelope.protocol_version
+            != crate::consensus::simplified_posy::POSY_SIMPLIFIED_PROTOCOL_VERSION
+        || envelope.target_height.0 == 0
+        || envelope.target_context_root.is_zero()
+        || envelope.expiry_height != envelope.target_height
+        || envelope.sender_id.trim().is_empty()
+        || envelope.aead_nonce.len() != 12
+        || envelope.ciphertext.len() < 16
+        || !crate::etdag::EtdagParameters::default()
+            .ciphertext_size_classes
+            .contains(&envelope.ciphertext_size_class)
+        || envelope.ciphertext.len() > envelope.ciphertext_size_class as usize
+        || envelope.outer_key_id.0.trim().is_empty()
+        || !envelope.outer_signature.is_present()
+    {
+        return Err("protected encrypted material has invalid target-bound shape".to_string());
+    }
+    for (name, digest) in [
+        (
+            "protected encrypted key commitment",
+            &envelope.key_commitment,
+        ),
+        (
+            "protected encrypted share commitment root",
+            &envelope.share_commitment_root,
+        ),
+        (
+            "protected encrypted share capsule root",
+            &envelope.share_capsule_root,
+        ),
+        (
+            "protected encrypted transaction commitment",
+            &envelope.tx_commitment,
+        ),
+    ] {
+        digest.validate(name)?;
+        if digest.is_zero() {
+            return Err(format!("{name} is zero"));
+        }
+    }
+    if envelope.recompute_commitment()? != envelope.tx_commitment {
+        return Err("protected encrypted transaction commitment mismatch".to_string());
+    }
+    submission.sealed_bundle.validate_roots()?;
+    if submission.outer_public_key.key_id != envelope.outer_key_id
+        || submission.outer_public_key.algorithm.trim().is_empty()
+        || submission.outer_public_key.key_bytes.is_empty()
+        || submission.outer_key_lifecycle.key_id != envelope.outer_key_id
+        || submission.outer_key_lifecycle.uma_id != envelope.sender_id
+        || !submission
+            .outer_key_lifecycle
+            .roles
+            .contains(&crate::synergy_types::AegisPqKeyRole::Transaction)
+        || submission.outer_key_lifecycle.active_from_epoch.0 > envelope.epoch.0
+        || submission
+            .outer_key_lifecycle
+            .active_until_epoch
+            .is_some_and(|until| envelope.epoch.0 > until.0)
+        || submission
+            .outer_key_lifecycle
+            .revoked_from_epoch
+            .is_some_and(|revoked| envelope.epoch.0 >= revoked.0)
+    {
+        return Err("protected encrypted material sender key is not authorized".to_string());
+    }
+    let verifier =
+        crate::crypto::aegis_pqvm::AegisPqvmVerifier::initialize_required_for_public_key(
+            submission.outer_public_key.clone(),
+            submission.outer_key_lifecycle.clone(),
+        )
+        .map_err(|error| format!("initialize protected envelope verifier: {error}"))?;
+    envelope
+        .verify_outer_signature(&verifier)
+        .map_err(|error| format!("verify protected envelope origin: {error}"))
 }
 
 fn validate_reveal_authorization_shape(
