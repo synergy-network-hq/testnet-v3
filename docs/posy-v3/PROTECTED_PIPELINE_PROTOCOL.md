@@ -38,8 +38,17 @@ validator computes the same causal closure, eligible encrypted-envelope set,
 semantic `CutRoot`, and `ProtectedCutProof`. The semantic roots exclude
 incidental message arrival order and the particular encoding/order of a valid
 signer subset; the proof-evidence root may bind the exact canonical evidence
-bundle. A marker bundle that cannot prove a complete deterministic cut is not
-ready and cannot be substituted with an empty batch.
+bundle. The causal-closure root contains transaction ancestors, not marker
+vertices: authenticated marker digests remain separately bound as cutoff
+evidence so different valid 4-of-5 marker subsets cannot change `CutRoot`. A
+marker bundle that cannot prove a complete deterministic cut is not ready and
+cannot be substituted with an empty batch.
+
+The durable audit record retains the exact marker-evidence proof root. The
+PoSy-visible next-batch commitment does not bind that subset-specific root; it
+binds the semantic `CutRoot`, eligible-set, order and protected-batch roots so
+validators that observed different valid quorum subsets still propose and
+validate one identical commitment.
 
 `derive_protected_batch` sorts and deduplicates governed inputs canonically and
 uses only the target height, semantic cut, eligible encrypted envelopes,

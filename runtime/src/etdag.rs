@@ -2851,6 +2851,10 @@ pub struct ProtectedCutProof {
     pub cutoff_vc_context_root: Hash,
     pub cutoff_marker_digests: Vec<EtdagDigest>,
     pub cutoff_marker_evidence_root: EtdagDigest,
+    /// Canonical transaction-ancestor closure selected by the authenticated
+    /// cutoff. Marker vertices are evidence for the cutoff and are bound by
+    /// `cutoff_marker_evidence_root`; they are intentionally excluded here so
+    /// valid quorum subsets cannot change the semantic `cut_root`.
     pub causal_closure_digests: Vec<EtdagDigest>,
     pub causal_closure_root: EtdagDigest,
     pub eligible_envelopes: Vec<CertifiedEnvelopeRef>,
@@ -2924,10 +2928,6 @@ impl ProtectedCutProof {
         if self.cutoff_marker_digests.len() < required
             || !strictly_sorted_unique(&self.cutoff_marker_digests)
             || !strictly_sorted_unique(&self.causal_closure_digests)
-            || !self
-                .cutoff_marker_digests
-                .iter()
-                .all(|digest| self.causal_closure_digests.binary_search(digest).is_ok())
         {
             return Err("protected cut proof evidence is not canonical quorum data".to_string());
         }
@@ -3091,7 +3091,6 @@ pub struct NextProtectedBatchCommitment {
     pub protected_count: u64,
     pub protected_gas: u64,
     pub protected_bytes: u64,
-    pub cut_proof_root: EtdagDigest,
 }
 
 impl NextProtectedBatchCommitment {
