@@ -2491,6 +2491,49 @@ impl TargetAdmissionRebroadcastCache {
     }
 }
 
+/// Bounds retries for durable ETDAG assembly frames.  The empty-ETDAG
+/// producer is intentionally durable and will re-emit a phase candidate or
+/// vote after restart, but a 250 ms producer cadence must not turn one
+/// unchanged BOC candidate into a permanent per-peer write-gate flood.  The
+/// semantic wire hash keeps a changed candidate eligible immediately while
+/// retaining a bounded retry path for a missed frame.
+#[derive(Default)]
+struct SimplifiedEtdagAssemblyRebroadcastCache {
+    last_broadcast: BTreeMap<Hash, Instant>,
+}
+
+impl SimplifiedEtdagAssemblyRebroadcastCache {
+    const MAX_ENTRIES: usize = 48;
+
+    fn decision(&self, message_id: &Hash, now: Instant) -> TargetAdmissionBroadcastDecision {
+        match self.last_broadcast.get(message_id) {
+            None => TargetAdmissionBroadcastDecision::Initial,
+            Some(last)
+                if now.saturating_duration_since(*last)
+                    >= SIMPLIFIED_TARGET_ADMISSION_REBROADCAST_INTERVAL =>
+            {
+                TargetAdmissionBroadcastDecision::Retry
+            }
+            Some(_) => TargetAdmissionBroadcastDecision::SuppressDuplicate,
+        }
+    }
+
+    fn record_successful_broadcast(&mut self, message_id: Hash, now: Instant) {
+        self.last_broadcast.insert(message_id, now);
+        while self.last_broadcast.len() > Self::MAX_ENTRIES {
+            let Some(oldest) = self
+                .last_broadcast
+                .iter()
+                .min_by_key(|(_, last)| **last)
+                .map(|(message_id, _)| message_id.clone())
+            else {
+                break;
+            };
+            self.last_broadcast.remove(&oldest);
+        }
+    }
+}
+
 fn run_simplified_target_admission_worker(
     initial_outputs: Vec<SimplifiedTargetAdmissionOutput>,
     network: &p2p::networking::P2PNetwork,
@@ -2576,6 +2619,7 @@ fn run_simplified_empty_etdag_worker(
     running: &AtomicBool,
 ) -> Result<(), String> {
     const PREPARE_INTERVAL: Duration = Duration::from_millis(250);
+    let mut rebroadcast_cache = SimplifiedEtdagAssemblyRebroadcastCache::default();
     while running.load(Ordering::Acquire) {
         let outputs = match prepare_simplified_empty_etdag() {
             Ok(outputs) => outputs,
@@ -2588,10 +2632,24 @@ fn run_simplified_empty_etdag_worker(
         for output in outputs {
             match output {
                 SimplifiedEmptyEtdagOutput::Assembly(message) => {
+                    let canonical = serde_json::to_vec(&message).map_err(|error| {
+                        format!("serialize simplified empty-ETDAG assembly: {error}")
+                    })?;
+                    let message_id = Hash::from_domain_bytes(
+                        "SYNERGY_POSY_SIMPLIFIED_EMPTY_ETDAG_WIRE_V1",
+                        &canonical,
+                    );
+                    let now = Instant::now();
+                    if rebroadcast_cache.decision(&message_id, now)
+                        == TargetAdmissionBroadcastDecision::SuppressDuplicate
+                    {
+                        continue;
+                    }
                     record_empty_etdag_enqueued(&message);
                     if network.broadcast_simplified_empty_etdag(&message, frozen_validator_ids)? > 0
                     {
                         record_empty_etdag_sent(&message);
+                        rebroadcast_cache.record_successful_broadcast(message_id, now);
                     }
                 }
                 SimplifiedEmptyEtdagOutput::CertifiedInput(artifact) => {
@@ -6065,6 +6123,46 @@ mod tests {
                 "the governed retry remains available after five seconds"
             );
         }
+    }
+
+    #[test]
+    fn empty_etdag_boc_rebroadcast_is_bounded_without_suppressing_a_changed_candidate() {
+        let mut cache = SimplifiedEtdagAssemblyRebroadcastCache::default();
+        let now = Instant::now();
+        let boc_h1 = Hash::from_domain_bytes(
+            "SYNERGY_POSY_SIMPLIFIED_EMPTY_ETDAG_WIRE_V1",
+            b"boc-height-1-candidate-a",
+        );
+        assert_eq!(
+            cache.decision(&boc_h1, now),
+            TargetAdmissionBroadcastDecision::Initial
+        );
+        cache.record_successful_broadcast(boc_h1.clone(), now);
+
+        for tick in 1..20 {
+            assert_eq!(
+                cache.decision(&boc_h1, now + Duration::from_millis(250 * tick)),
+                TargetAdmissionBroadcastDecision::SuppressDuplicate,
+                "an unchanged BOC candidate must not take the per-peer write gate every 250 ms"
+            );
+        }
+        assert_eq!(
+            cache.decision(
+                &boc_h1,
+                now + SIMPLIFIED_TARGET_ADMISSION_REBROADCAST_INTERVAL,
+            ),
+            TargetAdmissionBroadcastDecision::Retry
+        );
+
+        let changed_boc_h1 = Hash::from_domain_bytes(
+            "SYNERGY_POSY_SIMPLIFIED_EMPTY_ETDAG_WIRE_V1",
+            b"boc-height-1-candidate-b",
+        );
+        assert_eq!(
+            cache.decision(&changed_boc_h1, now + Duration::from_millis(250)),
+            TargetAdmissionBroadcastDecision::Initial,
+            "a semantic candidate change remains immediately deliverable"
+        );
     }
 
     #[test]
