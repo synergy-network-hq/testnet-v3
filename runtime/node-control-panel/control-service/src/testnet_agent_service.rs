@@ -1,3 +1,9 @@
+use crate::validator_operations::{
+    evaluate_validator_cluster, evaluate_validator_operations, validate_observation,
+    LivenessDiagnosis, ValidatorOperationsClusterStatus, ValidatorOperationsObservation,
+    ValidatorOperationsStatus, MAX_VALIDATOR_OPERATIONS_SNAPSHOT_BYTES,
+    VALIDATOR_OPERATIONS_SNAPSHOT_RELATIVE_PATH,
+};
 use axum::{
     extract::{ConnectInfo, Path as AxumPath, State},
     http::{
@@ -14,6 +20,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
@@ -26,6 +34,10 @@ use uuid::Uuid;
 pub const TESTNET_AGENT_PORT: u16 = 47_990;
 const TESTNET_AGENT_TOKEN_ENV: &str = "SYNERGY_TESTNET_AGENT_TOKEN";
 const TESTNET_AGENT_ALLOWED_REMOTES_ENV: &str = "SYNERGY_TESTNET_AGENT_ALLOWED_REMOTES";
+const OPERATIONS_OPERATOR_ID_HEADER: &str = "x-synergy-operator-id";
+const OPERATIONS_SCOPES_HEADER: &str = "x-synergy-operator-scopes";
+const OPERATIONS_READ_SCOPE: &str = "validator.operations.read";
+const VALIDATOR_OPERATIONS_AUDIT_RELATIVE_PATH: &str = "audit/validator-operations-api.jsonl";
 const DEFAULT_REMOTE_ROOT_UNIX: &str = "/opt/synergy";
 const DEFAULT_REMOTE_ROOT_WINDOWS: &str = "C:\\Synergy\\Testnet";
 const DEFAULT_VALIDATOR_VPN_COORDINATOR_URL: &str = "https://vpn-coordinator.synergy-network.io";
@@ -97,6 +109,25 @@ struct NodeInstall {
     install_dir: PathBuf,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct ValidatorOperationsAuditRecord {
+    recorded_at_utc: String,
+    operator_id: String,
+    remote_address: String,
+    action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    validator_id: Option<String>,
+    outcome: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OperationsAccessError {
+    NetworkDenied,
+    AuthenticationRequired,
+    OperatorIdentityRequired,
+    ReadScopeRequired,
+}
+
 pub async fn serve(workspace_root: PathBuf, port: u16) -> Result<(), String> {
     serve_with_host(workspace_root, port, None).await
 }
@@ -125,6 +156,18 @@ pub async fn serve_with_host(
         .route("/health", get(health_handler))
         .route("/v1/control", post(control_handler))
         .route("/v1/control/jobs/{job_id}", get(control_job_handler))
+        .route(
+            "/v1/validator-operations/cluster/status",
+            get(validator_operations_cluster_status_handler),
+        )
+        .route(
+            "/v1/validator-operations/nodes/{node_slot_id}/status",
+            get(validator_operations_status_handler),
+        )
+        .route(
+            "/v1/validator-operations/nodes/{node_slot_id}/diagnose-liveness",
+            get(validator_operations_liveness_handler),
+        )
         .with_state(state);
 
     let mut listeners = Vec::new();
@@ -434,6 +477,382 @@ async fn control_job_handler(
         Json(serde_json::json!({ "error": format!("control job not found: {}", job_id.trim()) })),
     )
         .into_response()
+}
+
+async fn validator_operations_status_handler(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    State(state): State<AgentState>,
+    AxumPath(node_slot_id): AxumPath<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let operator_id = match authorize_operations_request(remote_addr, &headers) {
+        Ok(operator_id) => operator_id,
+        Err(error) => {
+            let _ = append_validator_operations_audit(
+                &state.workspace_root,
+                ValidatorOperationsAuditRecord {
+                    recorded_at_utc: Utc::now().to_rfc3339(),
+                    operator_id: operations_operator_id(&headers)
+                        .unwrap_or_else(|| "unidentified".to_string()),
+                    remote_address: remote_addr.ip().to_string(),
+                    action: "validator.operations.status".to_string(),
+                    validator_id: Some(node_slot_id.clone()),
+                    outcome: format!("denied:{error:?}"),
+                },
+            );
+            return operations_access_error_response(error);
+        }
+    };
+
+    let result = load_validator_operations_status(&state.workspace_root, &node_slot_id);
+    if let Err(error) = append_validator_operations_audit(
+        &state.workspace_root,
+        ValidatorOperationsAuditRecord {
+            recorded_at_utc: Utc::now().to_rfc3339(),
+            operator_id,
+            remote_address: remote_addr.ip().to_string(),
+            action: "validator.operations.status".to_string(),
+            validator_id: Some(node_slot_id),
+            outcome: if result.is_ok() {
+                "success".to_string()
+            } else {
+                "unavailable".to_string()
+            },
+        },
+    ) {
+        return operations_internal_error(error);
+    }
+
+    operations_status_response(result)
+}
+
+async fn validator_operations_liveness_handler(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    State(state): State<AgentState>,
+    AxumPath(node_slot_id): AxumPath<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let operator_id = match authorize_operations_request(remote_addr, &headers) {
+        Ok(operator_id) => operator_id,
+        Err(error) => {
+            let _ = append_validator_operations_audit(
+                &state.workspace_root,
+                ValidatorOperationsAuditRecord {
+                    recorded_at_utc: Utc::now().to_rfc3339(),
+                    operator_id: operations_operator_id(&headers)
+                        .unwrap_or_else(|| "unidentified".to_string()),
+                    remote_address: remote_addr.ip().to_string(),
+                    action: "validator.operations.diagnose_liveness".to_string(),
+                    validator_id: Some(node_slot_id.clone()),
+                    outcome: format!("denied:{error:?}"),
+                },
+            );
+            return operations_access_error_response(error);
+        }
+    };
+
+    let result = load_validator_operations_status(&state.workspace_root, &node_slot_id)
+        .map(|status| status.liveness);
+    if let Err(error) = append_validator_operations_audit(
+        &state.workspace_root,
+        ValidatorOperationsAuditRecord {
+            recorded_at_utc: Utc::now().to_rfc3339(),
+            operator_id,
+            remote_address: remote_addr.ip().to_string(),
+            action: "validator.operations.diagnose_liveness".to_string(),
+            validator_id: Some(node_slot_id),
+            outcome: if result.is_ok() {
+                "success".to_string()
+            } else {
+                "unavailable".to_string()
+            },
+        },
+    ) {
+        return operations_internal_error(error);
+    }
+
+    operations_liveness_response(result)
+}
+
+async fn validator_operations_cluster_status_handler(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    State(state): State<AgentState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let operator_id = match authorize_operations_request(remote_addr, &headers) {
+        Ok(operator_id) => operator_id,
+        Err(error) => {
+            let _ = append_validator_operations_audit(
+                &state.workspace_root,
+                ValidatorOperationsAuditRecord {
+                    recorded_at_utc: Utc::now().to_rfc3339(),
+                    operator_id: operations_operator_id(&headers)
+                        .unwrap_or_else(|| "unidentified".to_string()),
+                    remote_address: remote_addr.ip().to_string(),
+                    action: "validator.operations.cluster_status".to_string(),
+                    validator_id: None,
+                    outcome: format!("denied:{error:?}"),
+                },
+            );
+            return operations_access_error_response(error);
+        }
+    };
+
+    let result = load_validator_operations_cluster_status(&state.workspace_root);
+    if let Err(error) = append_validator_operations_audit(
+        &state.workspace_root,
+        ValidatorOperationsAuditRecord {
+            recorded_at_utc: Utc::now().to_rfc3339(),
+            operator_id,
+            remote_address: remote_addr.ip().to_string(),
+            action: "validator.operations.cluster_status".to_string(),
+            validator_id: None,
+            outcome: if result.is_ok() {
+                "success".to_string()
+            } else {
+                "unavailable".to_string()
+            },
+        },
+    ) {
+        return operations_internal_error(error);
+    }
+
+    operations_cluster_status_response(result)
+}
+
+fn operations_status_response(
+    result: Result<ValidatorOperationsStatus, String>,
+) -> axum::response::Response {
+    match result {
+        Ok(status) => (StatusCode::OK, Json(status)).into_response(),
+        Err(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": "validator_operations_status_unavailable",
+                "detail": error,
+            })),
+        )
+            .into_response(),
+    }
+}
+
+fn operations_liveness_response(
+    result: Result<LivenessDiagnosis, String>,
+) -> axum::response::Response {
+    match result {
+        Ok(diagnosis) => (StatusCode::OK, Json(diagnosis)).into_response(),
+        Err(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": "validator_liveness_diagnosis_unavailable",
+                "detail": error,
+            })),
+        )
+            .into_response(),
+    }
+}
+
+fn operations_cluster_status_response(
+    result: Result<ValidatorOperationsClusterStatus, String>,
+) -> axum::response::Response {
+    match result {
+        Ok(status) => (StatusCode::OK, Json(status)).into_response(),
+        Err(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": "validator_operations_cluster_status_unavailable",
+                "detail": error,
+            })),
+        )
+            .into_response(),
+    }
+}
+
+fn operations_internal_error(error: String) -> axum::response::Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({
+            "error": "validator_operations_audit_unavailable",
+            "detail": error,
+        })),
+    )
+        .into_response()
+}
+
+fn load_validator_operations_status(
+    workspace_root: &Path,
+    node_slot_id: &str,
+) -> Result<ValidatorOperationsStatus, String> {
+    load_validator_operations_observation(workspace_root, node_slot_id)
+        .map(evaluate_validator_operations)
+}
+
+fn load_validator_operations_cluster_status(
+    workspace_root: &Path,
+) -> Result<ValidatorOperationsClusterStatus, String> {
+    let inventory = load_inventory_nodes(workspace_root)?;
+    let node_slot_ids = installed_node_slots(workspace_root, &inventory);
+    if node_slot_ids.is_empty() {
+        return Err(
+            "No installed validators were discovered by the local management agent.".to_string(),
+        );
+    }
+
+    let mut observations = Vec::new();
+    let mut unavailable = Vec::new();
+    for node_slot_id in node_slot_ids {
+        match load_validator_operations_observation(workspace_root, &node_slot_id) {
+            Ok(observation) => observations.push(observation),
+            Err(_) => unavailable.push(node_slot_id),
+        }
+    }
+    if observations.is_empty() {
+        return Err(
+            "No valid runtime-emitted validator operations snapshots are available.".to_string(),
+        );
+    }
+
+    Ok(evaluate_validator_cluster(observations, unavailable))
+}
+
+fn load_validator_operations_observation(
+    workspace_root: &Path,
+    node_slot_id: &str,
+) -> Result<ValidatorOperationsObservation, String> {
+    let node_slot_id = node_slot_id.trim();
+    if node_slot_id.is_empty() {
+        return Err("node_slot_id is required".to_string());
+    }
+    let install = resolve_node_install(workspace_root, node_slot_id)?;
+    let snapshot_path = install
+        .install_dir
+        .join(VALIDATOR_OPERATIONS_SNAPSHOT_RELATIVE_PATH);
+    let metadata = fs::metadata(&snapshot_path).map_err(|_| {
+        format!(
+            "Runtime status snapshot is not available for {}.",
+            install.node_slot_id
+        )
+    })?;
+    if metadata.len() > MAX_VALIDATOR_OPERATIONS_SNAPSHOT_BYTES {
+        return Err(format!(
+            "Runtime status snapshot exceeds the {} byte safety limit.",
+            MAX_VALIDATOR_OPERATIONS_SNAPSHOT_BYTES
+        ));
+    }
+    let encoded = fs::read(&snapshot_path)
+        .map_err(|error| format!("Failed to read runtime status snapshot: {error}"))?;
+    let observation =
+        serde_json::from_slice::<ValidatorOperationsObservation>(&encoded).map_err(|error| {
+            format!("Runtime status snapshot does not match the v1 schema: {error}")
+        })?;
+    validate_observation(&observation, Some(node_slot_id))?;
+    Ok(observation)
+}
+
+fn authorize_operations_request(
+    remote_addr: SocketAddr,
+    headers: &HeaderMap,
+) -> Result<String, OperationsAccessError> {
+    if !is_operations_management_address(remote_addr.ip()) {
+        return Err(OperationsAccessError::NetworkDenied);
+    }
+
+    let expected = std::env::var(TESTNET_AGENT_TOKEN_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or(OperationsAccessError::AuthenticationRequired)?;
+    if parse_bearer_token(headers).as_deref().map(str::trim) != Some(expected.as_str()) {
+        return Err(OperationsAccessError::AuthenticationRequired);
+    }
+
+    let operator_id =
+        operations_operator_id(headers).ok_or(OperationsAccessError::OperatorIdentityRequired)?;
+    let has_read_scope = headers
+        .get(OPERATIONS_SCOPES_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            value
+                .split(|character: char| character == ',' || character.is_ascii_whitespace())
+                .any(|scope| scope == OPERATIONS_READ_SCOPE)
+        })
+        .unwrap_or(false);
+    if !has_read_scope {
+        return Err(OperationsAccessError::ReadScopeRequired);
+    }
+
+    Ok(operator_id)
+}
+
+fn operations_operator_id(headers: &HeaderMap) -> Option<String> {
+    let value = headers
+        .get(OPERATIONS_OPERATOR_ID_HEADER)?
+        .to_str()
+        .ok()?
+        .trim();
+    if value.is_empty()
+        || value.len() > 128
+        || !value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | '@')
+        })
+    {
+        return None;
+    }
+    Some(value.to_string())
+}
+
+fn is_operations_management_address(ip: IpAddr) -> bool {
+    if is_loopback_address(ip) {
+        return true;
+    }
+    if !is_allowed_remote(ip) {
+        return false;
+    }
+    match ip {
+        IpAddr::V4(ip) => ip.is_private(),
+        IpAddr::V6(ip) => (ip.segments()[0] & 0xfe00) == 0xfc00,
+    }
+}
+
+fn operations_access_error_response(error: OperationsAccessError) -> axum::response::Response {
+    let (status, code) = match error {
+        OperationsAccessError::NetworkDenied => {
+            (StatusCode::FORBIDDEN, "management_network_required")
+        }
+        OperationsAccessError::AuthenticationRequired => {
+            (StatusCode::UNAUTHORIZED, "operator_authentication_required")
+        }
+        OperationsAccessError::OperatorIdentityRequired => {
+            (StatusCode::UNAUTHORIZED, "operator_identity_required")
+        }
+        OperationsAccessError::ReadScopeRequired => (
+            StatusCode::FORBIDDEN,
+            "validator_operations_read_scope_required",
+        ),
+    };
+    (status, Json(json!({ "error": code }))).into_response()
+}
+
+fn append_validator_operations_audit(
+    workspace_root: &Path,
+    record: ValidatorOperationsAuditRecord,
+) -> Result<(), String> {
+    let audit_path = workspace_root.join(VALIDATOR_OPERATIONS_AUDIT_RELATIVE_PATH);
+    if let Some(parent) = audit_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!("Failed to create validator operations audit directory: {error}")
+        })?;
+    }
+    let mut encoded = serde_json::to_string(&record)
+        .map_err(|error| format!("Failed to encode validator operations audit record: {error}"))?;
+    encoded.push('\n');
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&audit_path)
+        .map_err(|error| format!("Failed to open validator operations audit log: {error}"))?;
+    file.write_all(encoded.as_bytes())
+        .map_err(|error| format!("Failed to append validator operations audit record: {error}"))
 }
 
 fn build_health(workspace_root: &Path) -> Result<TestnetAgentHealth, String> {
@@ -1303,6 +1722,115 @@ mod tests {
                 assert!(is_authorized_control_request(remote, &headers));
             },
         );
+    }
+
+    fn operations_headers(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            format!("Bearer {token}")
+                .parse()
+                .expect("authorization header"),
+        );
+        headers.insert(
+            OPERATIONS_OPERATOR_ID_HEADER,
+            "operator-01".parse().expect("operator header"),
+        );
+        headers.insert(
+            OPERATIONS_SCOPES_HEADER,
+            OPERATIONS_READ_SCOPE.parse().expect("scope header"),
+        );
+        headers
+    }
+
+    #[test]
+    fn operations_api_requires_bearer_authentication_even_on_loopback() {
+        with_env_vars(&[(TESTNET_AGENT_TOKEN_ENV, None)], || {
+            let remote = SocketAddr::from(([127, 0, 0, 1], 1234));
+            let headers = HeaderMap::new();
+
+            assert_eq!(
+                authorize_operations_request(remote, &headers),
+                Err(OperationsAccessError::AuthenticationRequired)
+            );
+        });
+    }
+
+    #[test]
+    fn operations_api_requires_operator_identity_and_read_scope() {
+        with_env_vars(&[(TESTNET_AGENT_TOKEN_ENV, Some("agent-secret"))], || {
+            let remote = SocketAddr::from(([127, 0, 0, 1], 1234));
+            let mut headers = operations_headers("agent-secret");
+            headers.remove(OPERATIONS_OPERATOR_ID_HEADER);
+            assert_eq!(
+                authorize_operations_request(remote, &headers),
+                Err(OperationsAccessError::OperatorIdentityRequired)
+            );
+
+            let mut headers = operations_headers("agent-secret");
+            headers.insert(
+                OPERATIONS_SCOPES_HEADER,
+                "validator.control.restart".parse().expect("scope header"),
+            );
+            assert_eq!(
+                authorize_operations_request(remote, &headers),
+                Err(OperationsAccessError::ReadScopeRequired)
+            );
+        });
+    }
+
+    #[test]
+    fn operations_api_accepts_only_loopback_or_private_allowlisted_management_addresses() {
+        with_env_vars(
+            &[
+                (TESTNET_AGENT_TOKEN_ENV, Some("agent-secret")),
+                (
+                    TESTNET_AGENT_ALLOWED_REMOTES_ENV,
+                    Some("10.70.0.0/16,198.18.0.10"),
+                ),
+            ],
+            || {
+                let headers = operations_headers("agent-secret");
+                let vpn_remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 70, 10, 20)), 1234);
+                assert_eq!(
+                    authorize_operations_request(vpn_remote, &headers).as_deref(),
+                    Ok("operator-01")
+                );
+
+                let public_remote =
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 18, 0, 10)), 1234);
+                assert_eq!(
+                    authorize_operations_request(public_remote, &headers),
+                    Err(OperationsAccessError::NetworkDenied)
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn operations_audit_records_identity_and_action_without_credentials() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let record = ValidatorOperationsAuditRecord {
+            recorded_at_utc: "2026-08-26T12:00:00Z".to_string(),
+            operator_id: "operator-01".to_string(),
+            remote_address: "10.70.10.20".to_string(),
+            action: "validator.operations.status".to_string(),
+            validator_id: Some("validator-02".to_string()),
+            outcome: "success".to_string(),
+        };
+
+        append_validator_operations_audit(workspace.path(), record).expect("append audit");
+
+        let encoded = fs::read_to_string(
+            workspace
+                .path()
+                .join(VALIDATOR_OPERATIONS_AUDIT_RELATIVE_PATH),
+        )
+        .expect("read audit");
+        assert!(encoded.contains("operator-01"));
+        assert!(encoded.contains("validator.operations.status"));
+        assert!(!encoded.to_ascii_lowercase().contains("authorization"));
+        assert!(!encoded.contains("agent-secret"));
     }
 
     #[test]
