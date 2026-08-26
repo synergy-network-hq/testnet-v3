@@ -2,8 +2,9 @@ use super::*;
 use crate::consensus::simplified_posy::{
     ConsensusObjectContext, POSY_SIMPLIFIED_OBJECT_SCHEMA_VERSION,
 };
-use crate::etdag::{NextProtectedBatchCommitment, PROTECTED_PIPELINE_VERSION};
-use crate::synergy_types::{ChainId, ClusterId, Epoch, NetworkId};
+use crate::consensus_parameters::ConsensusParameterRoot;
+use crate::etdag::{EtdagDigest, NextProtectedBatchCommitment, PROTECTED_PIPELINE_VERSION};
+use crate::synergy_types::{ChainId, ClusterId, Epoch, Hash, Height, NetworkId, Round};
 
 fn context(height: Height) -> ConsensusObjectContext {
     let parameter_root = ConsensusParameterRoot::from_canonical_manifest_bytes(b"r11-test");

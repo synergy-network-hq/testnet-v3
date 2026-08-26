@@ -44,4 +44,7 @@ pub(crate) use transition::tests::{
 };
 
 #[cfg(test)]
+mod protected_pipeline_integration_tests;
+
+#[cfg(test)]
 mod tests;
