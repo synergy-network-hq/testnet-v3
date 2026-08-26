@@ -13599,11 +13599,12 @@ mod tests {
     use crate::crypto::pqc::{PQCAlgorithm, PQCManager, PQCSignature};
     use crate::etdag::tests::{complete_protected_input, fixture, target_admission_package};
     use crate::etdag::{
-        CertifiedProtectedInputArtifact, EtdagAuthenticatedIngressPeer, EtdagDigest, VertexKind,
+        CertifiedProtectedInputArtifact, EtdagAuthenticatedIngressPeer, EtdagDigest,
+        ProtectedRevealAuthorization, ProtectedRevealShareMessage, VertexKind,
+        PROTECTED_PIPELINE_VERSION,
     };
     use crate::p2p::messages::{
         NetworkMessage, ProtectedPipelineEvidenceMessage, ProtectedPipelineSemanticObject,
-        ProtectedRevealAuthorization,
     };
     use crate::p2p::messages::{
         MAX_PROTECTED_PIPELINE_EVIDENCE_FRAME_BYTES, MAX_PROTECTED_PIPELINE_REQUEST_FRAME_BYTES,
@@ -13615,7 +13616,9 @@ mod tests {
         MAX_SIMPLIFIED_TARGET_ADMISSION_PACKAGE_FRAME_BYTES,
         MAX_SIMPLIFIED_TARGET_ADMISSION_VOTE_FRAME_BYTES,
     };
-    use crate::synergy_types::{AegisPqKeyId, AegisPqKeyRole, Epoch, UmaId, ValidatorId};
+    use crate::synergy_types::{
+        AegisPqKeyId, AegisPqKeyRole, BlockId, Epoch, Hash, UmaId, ValidatorId,
+    };
     use crate::transaction::Transaction;
     use crate::validator::{
         Validator, ValidatorManager, ValidatorRegistration, ValidatorStatus, VALIDATOR_MANAGER,
@@ -14310,28 +14313,58 @@ mod tests {
             certified_vertex: transaction,
         };
         let authorization = ProtectedRevealAuthorization {
+            authorization_version: PROTECTED_PIPELINE_VERSION,
             chain_id: fixture.context.chain_id,
             network_id: fixture.context.network_id.clone(),
+            protocol_version: fixture.context.protocol_version.clone(),
             epoch: fixture.context.epoch,
             target_height: fixture.context.target_height,
+            cluster_id: fixture.context.assigned_cluster_id,
             target_context_root: fixture.context.root().unwrap(),
-            proposal_id: EtdagDigest::from_domain_bytes("test-proposal", b"proposal"),
-            vc_root: EtdagDigest::from_domain_bytes("test-vc", b"vc"),
-            commitment_root: EtdagDigest::from_domain_bytes("test-commitment", b"commitment"),
-            evidence_root: EtdagDigest::from_domain_bytes("test-evidence", b"evidence"),
+            validator_set_commitment: fixture.context.active_validator_set_root,
+            parameter_root: fixture.context.consensus_parameter_root,
+            parent_proposal_id: BlockId::from("test-parent-proposal"),
+            parent_block_id: BlockId::from("test-parent-block"),
+            next_commitment_root: EtdagDigest::from_domain_bytes("test-commitment", b"commitment"),
+            protected_batch_root: EtdagDigest::from_domain_bytes("test-batch", b"batch"),
+            proposal_validation_certificate_root: Hash::from_domain_bytes("test-vc", b"vc"),
+            certificate_evidence_root: EtdagDigest::from_domain_bytes("test-evidence", b"evidence"),
         };
-        let authorization_id = authorization.semantic_id().unwrap();
+        let authorization_id = authorization.root().unwrap();
+        let next_commitment_root = authorization.next_commitment_root.clone();
+        let protected_batch_root = authorization.protected_batch_root.clone();
         let authorization = ProtectedPipelineSemanticObject::RevealAuthorization {
             semantic_id: authorization_id.clone(),
             authorization,
         };
-        let share = input
+        let legacy_share = input
             .decrypt_shares
             .values()
             .flat_map(|shares| shares.iter())
             .next()
             .unwrap()
             .clone();
+        let share = ProtectedRevealShareMessage {
+            share_version: PROTECTED_PIPELINE_VERSION,
+            chain_id: legacy_share.chain_id,
+            network_id: legacy_share.network_id,
+            protocol_version: fixture.context.protocol_version.clone(),
+            profile_id: legacy_share.profile_id,
+            epoch: legacy_share.epoch,
+            target_height: legacy_share.target_height,
+            target_context_root: legacy_share.target_context_root,
+            cluster_id: legacy_share.cluster_id,
+            authorization_root: authorization_id.clone(),
+            next_commitment_root,
+            protected_batch_root,
+            tx_commitment: legacy_share.tx_commitment,
+            validator_id: legacy_share.validator_id,
+            share: legacy_share.share,
+            share_commitment: legacy_share.share_commitment,
+            parameter_root: fixture.context.consensus_parameter_root,
+            key_id: legacy_share.key_id,
+            signature: legacy_share.signature,
+        };
         let mut share = ProtectedPipelineSemanticObject::RevealShare {
             semantic_id: EtdagDigest::from_domain_bytes("placeholder", b"placeholder"),
             authorization_id,
