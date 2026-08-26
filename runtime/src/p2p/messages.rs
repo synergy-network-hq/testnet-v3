@@ -15,8 +15,9 @@ use crate::consensus::simplified_posy::{
 use crate::consensus::typed_finality_store::TypedFinalityRecord;
 use crate::dag_mempool::compute_tx_order_root;
 use crate::etdag::{
-    CertifiedProtectedInputArtifact, CertifiedVertex, DecryptShareMessage, EtdagDigest,
-    ProtectedBlockInput, TargetAdmissionContext, TargetAdmissionPackage, VertexKind,
+    CertifiedProtectedInputArtifact, CertifiedVertex, EtdagDigest, ProtectedBlockInput,
+    ProtectedRevealAuthorization, ProtectedRevealShareMessage, TargetAdmissionContext,
+    TargetAdmissionPackage, VertexKind, PROTECTED_PIPELINE_VERSION,
 };
 use crate::synergy_types::AegisPqSignature;
 use crate::synergy_types::{
@@ -90,48 +91,6 @@ pub enum SimplifiedTargetAdmissionMessage {
     },
 }
 
-/// Authenticated PoSy proof that opens the reveal gate for one exact parent
-/// proposal commitment. Cryptographic VC verification remains the
-/// ProtectedPipeline consumer's responsibility; the P2P layer binds this
-/// object to a Genesis-authenticated validator session and immutable target.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ProtectedRevealAuthorization {
-    pub chain_id: ChainId,
-    pub network_id: NetworkId,
-    pub epoch: Epoch,
-    pub target_height: Height,
-    pub target_context_root: Hash,
-    pub proposal_id: EtdagDigest,
-    pub vc_root: EtdagDigest,
-    pub commitment_root: EtdagDigest,
-    pub evidence_root: EtdagDigest,
-}
-
-impl ProtectedRevealAuthorization {
-    pub fn semantic_id(&self) -> Result<EtdagDigest, String> {
-        EtdagDigest::from_canonical(DOMAIN_PROTECTED_PIPELINE_EVIDENCE_ID, self)
-    }
-
-    pub fn validate_shape(&self) -> Result<(), String> {
-        if self.target_height.0 == 0 || self.target_context_root.is_zero() {
-            return Err("protected reveal authorization has invalid target binding".to_string());
-        }
-        for (label, root) in [
-            ("proposal", &self.proposal_id),
-            ("VC", &self.vc_root),
-            ("commitment", &self.commitment_root),
-            ("evidence", &self.evidence_root),
-        ] {
-            root.validate(&format!("protected reveal {label} root"))?;
-            if root.is_zero() {
-                return Err(format!("protected reveal {label} root is zero"));
-            }
-        }
-        Ok(())
-    }
-}
-
 /// One independently identifiable object consumed by ProtectedPipeline.
 /// Transaction vertices and cutoff markers are distinct variants so a marker
 /// cannot be reinterpreted as encrypted transaction availability evidence.
@@ -153,18 +112,30 @@ pub enum ProtectedPipelineSemanticObject {
     RevealShare {
         semantic_id: EtdagDigest,
         authorization_id: EtdagDigest,
-        share: DecryptShareMessage,
+        share: ProtectedRevealShareMessage,
     },
 }
 
 #[derive(Serialize)]
 struct RevealShareSemantic<'a> {
     authorization_id: &'a EtdagDigest,
+    share_version: u32,
+    chain_id: ChainId,
+    network_id: &'a NetworkId,
+    protocol_version: &'a str,
+    profile_id: &'a str,
+    epoch: Epoch,
+    target_height: Height,
     target_context_root: Hash,
-    batch_candidate_digest: &'a EtdagDigest,
+    cluster_id: crate::synergy_types::ClusterId,
+    next_commitment_root: &'a EtdagDigest,
+    protected_batch_root: &'a EtdagDigest,
     tx_commitment: &'a EtdagDigest,
     validator_id: &'a crate::synergy_types::ValidatorId,
+    share_index: u8,
     share_commitment: &'a EtdagDigest,
+    parameter_root: crate::consensus_parameters::ConsensusParameterRoot,
+    key_id: &'a crate::synergy_types::AegisPqKeyId,
 }
 
 impl ProtectedPipelineSemanticObject {
@@ -185,7 +156,7 @@ impl ProtectedPipelineSemanticObject {
             | Self::CutoffMarker {
                 certified_vertex, ..
             } => certified_vertex.vertex.digest(),
-            Self::RevealAuthorization { authorization, .. } => authorization.semantic_id(),
+            Self::RevealAuthorization { authorization, .. } => authorization.root(),
             Self::RevealShare {
                 authorization_id,
                 share,
@@ -194,11 +165,23 @@ impl ProtectedPipelineSemanticObject {
                 DOMAIN_PROTECTED_PIPELINE_EVIDENCE_ID,
                 &RevealShareSemantic {
                     authorization_id,
+                    share_version: share.share_version,
+                    chain_id: share.chain_id,
+                    network_id: &share.network_id,
+                    protocol_version: &share.protocol_version,
+                    profile_id: &share.profile_id,
+                    epoch: share.epoch,
+                    target_height: share.target_height,
                     target_context_root: share.target_context_root,
-                    batch_candidate_digest: &share.batch_candidate_digest,
+                    cluster_id: share.cluster_id,
+                    next_commitment_root: &share.next_commitment_root,
+                    protected_batch_root: &share.protected_batch_root,
                     tx_commitment: &share.tx_commitment,
                     validator_id: &share.validator_id,
+                    share_index: share.share.index,
                     share_commitment: &share.share_commitment,
+                    parameter_root: share.parameter_root,
+                    key_id: &share.key_id,
                 },
             ),
         }
@@ -223,16 +206,26 @@ impl ProtectedPipelineSemanticObject {
             } if certified_vertex.vertex.kind != VertexKind::CutoffMarker => {
                 Err("protected cutoff-marker object does not contain a cutoff marker".to_string())
             }
-            Self::RevealAuthorization { authorization, .. } => authorization.validate_shape(),
+            Self::RevealAuthorization { authorization, .. } => {
+                validate_reveal_authorization_shape(authorization)
+            }
             Self::RevealShare {
                 authorization_id,
                 share,
                 ..
             } => {
                 authorization_id.validate("protected reveal authorization id")?;
-                if authorization_id.is_zero()
+                if share.share_version != PROTECTED_PIPELINE_VERSION
+                    || authorization_id != &share.authorization_root
+                    || authorization_id.is_zero()
                     || share.target_height.0 == 0
                     || share.target_context_root.is_zero()
+                    || share.next_commitment_root.is_zero()
+                    || share.protected_batch_root.is_zero()
+                    || share.tx_commitment.is_zero()
+                    || share.parameter_root.is_zero()
+                    || share.protocol_version.trim().is_empty()
+                    || share.profile_id.trim().is_empty()
                     || share.validator_id.0.trim().is_empty()
                     || share.key_id.0.trim().is_empty()
                     || share.signature.signature_bytes.is_empty()
@@ -283,6 +276,29 @@ impl ProtectedPipelineSemanticObject {
             Self::RevealShare { share, .. } => (share.chain_id, &share.network_id),
         }
     }
+}
+
+fn validate_reveal_authorization_shape(
+    authorization: &ProtectedRevealAuthorization,
+) -> Result<(), String> {
+    if authorization.authorization_version != PROTECTED_PIPELINE_VERSION
+        || authorization.target_height.0 == 0
+        || authorization.target_context_root.is_zero()
+        || authorization.validator_set_commitment.is_zero()
+        || authorization.parameter_root.is_zero()
+        || authorization.protocol_version.trim().is_empty()
+        || authorization.parent_proposal_id.0.trim().is_empty()
+        || authorization.parent_block_id.0.trim().is_empty()
+        || authorization.next_commitment_root.is_zero()
+        || authorization.protected_batch_root.is_zero()
+        || authorization.proposal_validation_certificate_root.is_zero()
+        || authorization.certificate_evidence_root.is_zero()
+    {
+        return Err("protected reveal authorization has invalid authenticated shape".to_string());
+    }
+    authorization
+        .root()?
+        .validate("protected reveal authorization root")
 }
 
 /// One bounded semantic evidence propagation family. Missing-object recovery
@@ -1288,28 +1304,58 @@ mod tests {
         };
 
         let authorization = ProtectedRevealAuthorization {
+            authorization_version: PROTECTED_PIPELINE_VERSION,
             chain_id: fixture.context.chain_id,
             network_id: fixture.context.network_id.clone(),
+            protocol_version: fixture.context.protocol_version.clone(),
             epoch: fixture.context.epoch,
             target_height: fixture.context.target_height,
+            cluster_id: fixture.context.assigned_cluster_id,
             target_context_root: fixture.context.root().unwrap(),
-            proposal_id: EtdagDigest::from_domain_bytes("test-proposal", b"proposal"),
-            vc_root: EtdagDigest::from_domain_bytes("test-vc", b"vc"),
-            commitment_root: EtdagDigest::from_domain_bytes("test-commitment", b"commitment"),
-            evidence_root: EtdagDigest::from_domain_bytes("test-evidence", b"evidence"),
+            validator_set_commitment: fixture.context.active_validator_set_root,
+            parameter_root: fixture.context.consensus_parameter_root,
+            parent_proposal_id: BlockId::from("test-parent-proposal"),
+            parent_block_id: BlockId::from("test-parent-block"),
+            next_commitment_root: EtdagDigest::from_domain_bytes("test-commitment", b"commitment"),
+            protected_batch_root: EtdagDigest::from_domain_bytes("test-batch", b"batch"),
+            proposal_validation_certificate_root: Hash::from_domain_bytes("test-vc", b"vc"),
+            certificate_evidence_root: EtdagDigest::from_domain_bytes("test-evidence", b"evidence"),
         };
-        let authorization_id = authorization.semantic_id().unwrap();
+        let authorization_id = authorization.root().unwrap();
+        let next_commitment_root = authorization.next_commitment_root.clone();
+        let protected_batch_root = authorization.protected_batch_root.clone();
         let authorization_object = ProtectedPipelineSemanticObject::RevealAuthorization {
             semantic_id: authorization_id.clone(),
             authorization,
         };
-        let share = input
+        let legacy_share = input
             .decrypt_shares
             .values()
             .flat_map(|shares| shares.iter())
             .next()
             .expect("fixture has decrypt share")
             .clone();
+        let share = ProtectedRevealShareMessage {
+            share_version: PROTECTED_PIPELINE_VERSION,
+            chain_id: legacy_share.chain_id,
+            network_id: legacy_share.network_id,
+            protocol_version: fixture.context.protocol_version.clone(),
+            profile_id: legacy_share.profile_id,
+            epoch: legacy_share.epoch,
+            target_height: legacy_share.target_height,
+            target_context_root: legacy_share.target_context_root,
+            cluster_id: legacy_share.cluster_id,
+            authorization_root: authorization_id.clone(),
+            next_commitment_root,
+            protected_batch_root,
+            tx_commitment: legacy_share.tx_commitment,
+            validator_id: legacy_share.validator_id,
+            share: legacy_share.share,
+            share_commitment: legacy_share.share_commitment,
+            parameter_root: fixture.context.consensus_parameter_root,
+            key_id: legacy_share.key_id,
+            signature: legacy_share.signature,
+        };
         let mut share_object = ProtectedPipelineSemanticObject::RevealShare {
             semantic_id: EtdagDigest::from_domain_bytes("placeholder", b"placeholder"),
             authorization_id,
