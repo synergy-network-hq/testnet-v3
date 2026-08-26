@@ -86,8 +86,8 @@ use crate::rpc::rpc_server::{SHARED_CHAIN, SYNC_MANAGER, TX_POOL};
 use crate::sxcp;
 use crate::sync::SyncManager;
 use crate::synergy_types::{
-    AegisPqKeyId, AegisPqKeyRole, BlockHeader, ClusterMap, Hash, Height, ProtocolConfig,
-    ValidatorId, ValidatorSet, SYNERGY_TESTNET_V3_CHAIN_ID, TESTNET_V3_CANONICAL_NETWORK_ID,
+    AegisPqKeyId, AegisPqKeyRole, BlockHeader, ClusterMap, Hash, Height, ValidatorId, ValidatorSet,
+    SYNERGY_TESTNET_V3_CHAIN_ID, TESTNET_V3_CANONICAL_NETWORK_ID,
 };
 use crate::telemetry;
 use crate::testnet_v3_execution_bootstrap::load_finalized_testnet_v3_genesis_execution_state;
@@ -2541,7 +2541,11 @@ fn build_genesis_bootstrap_protected_input_source(
     let bootstrap = load_testnet_v3_genesis_bootstrap(genesis)?;
     let genesis_anchor = Hash::from_hex(genesis.hash())
         .map_err(|error| format!("decode canonical Genesis anchor: {error}"))?;
-    let protocol_config = ProtocolConfig::testnet_v3();
+    let finalized_parameters = genesis.consensus_parameters().ok_or_else(|| {
+        "protected Genesis bootstrap requires finalized Genesis consensus parameters".to_string()
+    })?;
+    finalized_parameters.require_genesis_binding()?;
+    let protocol_config = finalized_parameters.protocol_config.clone();
     let source = CoordinatedProtectedExecutionInputSource::new();
     for height in [Height(1), Height(2)] {
         let context = bootstrap.derive_genesis_bootstrap_height_context(

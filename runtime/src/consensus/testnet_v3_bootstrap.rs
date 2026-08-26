@@ -179,6 +179,23 @@ impl TestnetV3GenesisBootstrap {
         genesis_anchor: Hash,
         height: Height,
     ) -> Result<HeightConsensusContext, String> {
+        self.derive_genesis_bootstrap_height_context_from_parameter_root(
+            protocol_config.hash()?,
+            genesis_anchor,
+            height,
+        )
+    }
+
+    /// Production bootstrap variant: the immutable parameter root is read
+    /// from verified Genesis, rather than reconstructed through a mutable
+    /// runtime configuration.  The resulting H1/H2 context is otherwise
+    /// byte-for-byte the same derivation as the test/config path above.
+    pub fn derive_genesis_bootstrap_height_context_from_parameter_root(
+        &self,
+        consensus_parameter_root: crate::consensus_parameters::ConsensusParameterRoot,
+        genesis_anchor: Hash,
+        height: Height,
+    ) -> Result<HeightConsensusContext, String> {
         if genesis_anchor.is_zero() {
             return Err("Genesis bootstrap height context requires final Genesis anchor".into());
         }
@@ -196,7 +213,7 @@ impl TestnetV3GenesisBootstrap {
             ),
             _ => unreachable!("bootstrap source check already restricts H1/H2"),
         };
-        HeightConsensusContext::derive(
+        HeightConsensusContext::derive_from_finalized_parameter_root(
             HeightConsensusContextSpec {
                 protocol_version: POSY_PROTOCOL_VERSION.to_string(),
                 height,
@@ -210,7 +227,7 @@ impl TestnetV3GenesisBootstrap {
             },
             &self.validator_set,
             &self.cluster_map,
-            protocol_config,
+            consensus_parameter_root,
         )
     }
 

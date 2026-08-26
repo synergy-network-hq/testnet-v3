@@ -442,9 +442,31 @@ impl HeightConsensusContext {
         cluster_map: &ClusterMap,
         protocol_config: &ProtocolConfig,
     ) -> Result<Self, String> {
-        spec_validate(&spec)?;
         protocol_config.chain_id.require_testnet_v3()?;
         protocol_config.network_id.require_testnet_v3()?;
+        Self::derive_from_finalized_parameter_root(
+            spec,
+            validator_set,
+            cluster_map,
+            protocol_config.hash()?,
+        )
+    }
+
+    /// Derive a height context from the exact consensus-parameter root already
+    /// committed by Genesis or a verified epoch transition.  Production
+    /// bootstrap cannot manufacture a mutable [`ProtocolConfig`]; callers
+    /// therefore supply the immutable, independently verified root rather
+    /// than a test default.
+    pub fn derive_from_finalized_parameter_root(
+        spec: HeightConsensusContextSpec,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        consensus_parameter_root: ConsensusParameterRoot,
+    ) -> Result<Self, String> {
+        spec_validate(&spec)?;
+        if consensus_parameter_root.is_zero() {
+            return Err("height context consensus parameter root is missing".to_string());
+        }
         if validator_set.epoch != spec.epoch {
             return Err("height context validator-set epoch mismatch".to_string());
         }
@@ -500,8 +522,6 @@ impl HeightConsensusContext {
             "SYNERGY_POSY_LEADER_SCHEDULE_V1",
             &leader_schedule.canonical_bytes()?,
         );
-        let consensus_parameter_root = protocol_config.hash()?;
-
         let context = Self {
             context_version: HEIGHT_CONSENSUS_CONTEXT_VERSION,
             chain_id: ChainId::synergy_testnet_v3(),

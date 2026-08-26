@@ -10,11 +10,17 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
+use crate::crypto::aegis_pqvm::AegisPqvmVerifier;
 use crate::etdag::{
-    CertifiedVertex, DeterministicProtectedExecutionInput, EtdagDigest,
-    NextProtectedBatchCommitment, ProtectedBatchSource, ProtectedPipelinePhase,
-    TargetAdmissionContext,
+    CertifiedVertex, DeterministicProtectedExecutionInput, EtdagAuthenticatedIngressPeer,
+    EtdagDigest, EtdagParameters, NextProtectedBatchCommitment, ProtectedBatchSource,
+    ProtectedPipelinePhase, TargetAdmissionContext,
 };
+use crate::p2p::messages::{ProtectedPipelineEvidenceMessage, ProtectedPipelineSemanticObject};
+use crate::p2p::networking::{
+    ProtectedPipelineCoordinatorIngress, ProtectedPipelineEvidenceEnvelope,
+};
+use crate::synergy_types::{ClusterMap, Hash, Height, ValidatorSet, ValidatorStatus};
 
 use super::protected_pipeline::{
     ProtectedOrderSeedEvidence, ProtectedPipeline, ProtectedPipelineError,
@@ -28,6 +34,242 @@ use super::testnet_v3_bootstrap::GenesisBootstrapProtectedMaterial;
 pub const PROTECTED_PIPELINE_RUNTIME_DIRECTORY: &str = "protected-pipeline-v1";
 
 type SharedPipeline = Arc<Mutex<ProtectedPipeline>>;
+
+/// Process-owned ingress coordinator for normal H3+ protected targets.
+///
+/// It owns the only mapping from an authenticated P2P semantic object to the
+/// target's durable [`ProtectedPipelineRuntime`].  P2P performs transport
+/// authentication/deduplication first; this layer rebinds the envelope to the
+/// immutable target context and durable record before accepting it.  It does
+/// not manufacture a PoSy observation or an execution input: those require
+/// the later VC/reveal/finality bridge and remain fail-closed here.
+#[derive(Clone)]
+pub struct NormalProtectedPipelineCoordinator {
+    data_directory: PathBuf,
+    verifier: AegisPqvmVerifier,
+    validator_set: ValidatorSet,
+    cluster_map: ClusterMap,
+    parameters: EtdagParameters,
+    runtimes: Arc<Mutex<BTreeMap<(Height, Hash), ProtectedPipelineRuntime>>>,
+}
+
+impl NormalProtectedPipelineCoordinator {
+    pub fn new(
+        data_directory: impl Into<PathBuf>,
+        verifier: AegisPqvmVerifier,
+        validator_set: ValidatorSet,
+        cluster_map: ClusterMap,
+        parameters: EtdagParameters,
+    ) -> Result<Self, String> {
+        let active = validator_set.active_for_epoch(validator_set.epoch);
+        active.validate_unique_validator_and_key_ids()?;
+        if active.validators.is_empty()
+            || cluster_map.epoch != validator_set.epoch
+            || cluster_map != cluster_map.canonicalized()
+        {
+            return Err("invalid normal protected-pipeline coordinator authority".to_string());
+        }
+        cluster_map.validate_complete_balanced_assignment(&active)?;
+        parameters.validate()?;
+        Ok(Self {
+            data_directory: data_directory.into(),
+            verifier,
+            validator_set,
+            cluster_map,
+            parameters,
+            runtimes: Arc::new(Mutex::new(BTreeMap::new())),
+        })
+    }
+
+    /// Bind one finality-derived normal target to its sole durable runtime.
+    /// Re-registering the exact same context is idempotent; a different
+    /// context for the same `(height, root)` is impossible by construction and
+    /// treated as a conflict.
+    pub fn register_target(
+        &self,
+        target: TargetAdmissionContext,
+    ) -> Result<ProtectedPipelineRuntime, String> {
+        target.validate()?;
+        if target.epoch != self.validator_set.epoch {
+            return Err("protected pipeline target is outside the frozen epoch".to_string());
+        }
+        let root = target.root()?;
+        let key = (target.target_height, root);
+        let mut runtimes = self
+            .runtimes
+            .lock()
+            .map_err(|_| "protected-pipeline target registry lock is poisoned".to_string())?;
+        if let Some(existing) = runtimes.get(&key) {
+            if existing.target() != &target {
+                return Err(
+                    "protected-pipeline target root resolves to conflicting context".to_string(),
+                );
+            }
+            return Ok(existing.clone());
+        }
+        let source = if target.target_height.0 == 3 {
+            ProtectedBatchSource::NormalEtdag
+        } else {
+            ProtectedBatchSource::NormalEtdagSteadyState
+        };
+        let runtime = ProtectedPipelineRuntime::open(&self.data_directory, target, source)
+            .map_err(|error| format!("open durable protected target runtime: {error}"))?;
+        runtimes.insert(key, runtime.clone());
+        Ok(runtime)
+    }
+
+    pub fn runtime_for_target(
+        &self,
+        target_height: Height,
+        target_context_root: Hash,
+    ) -> Result<Option<ProtectedPipelineRuntime>, String> {
+        Ok(self
+            .runtimes
+            .lock()
+            .map_err(|_| "protected-pipeline target registry lock is poisoned".to_string())?
+            .get(&(target_height, target_context_root))
+            .cloned())
+    }
+
+    fn authorize_peer(
+        &self,
+        target: &TargetAdmissionContext,
+        peer: &EtdagAuthenticatedIngressPeer,
+    ) -> Result<(), String> {
+        let validator = self
+            .validator_set
+            .active_for_epoch(target.epoch)
+            .validators
+            .into_iter()
+            .find(|validator| validator.validator_id == peer.validator_id)
+            .ok_or_else(|| {
+                "protected-pipeline evidence peer is outside the frozen target set".to_string()
+            })?;
+        if validator.status != ValidatorStatus::Active
+            || validator.validator_uma_id != peer.validator_uma_id
+            || validator.consensus_public_key.key_id != peer.consensus_key_id
+        {
+            return Err(
+                "protected-pipeline evidence peer does not match frozen identity".to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    fn ingest_message(&self, envelope: ProtectedPipelineEvidenceEnvelope) -> Result<(), String> {
+        let objects =
+            match &envelope.message {
+                ProtectedPipelineEvidenceMessage::Evidence { object } => vec![object],
+                ProtectedPipelineEvidenceMessage::MissingObjectsResponse { objects, .. } => {
+                    objects.iter().collect::<Vec<_>>()
+                }
+                ProtectedPipelineEvidenceMessage::MissingObjectsRequest { .. } => return Err(
+                    "protected-pipeline coordinator does not serve unbound missing-object requests"
+                        .to_string(),
+                ),
+            };
+        if objects.is_empty() {
+            return Err(
+                "protected-pipeline evidence message contains no semantic objects".to_string(),
+            );
+        }
+        let (height, root) = objects[0].target_binding();
+        if objects
+            .iter()
+            .any(|object| object.target_binding() != (height, root))
+        {
+            return Err("protected-pipeline evidence message mixes target contexts".to_string());
+        }
+        let runtime = self.runtime_for_target(height, root)?.ok_or_else(|| {
+            "protected-pipeline evidence names an unregistered target".to_string()
+        })?;
+        self.authorize_peer(runtime.target(), &envelope.authenticated_peer)?;
+
+        let mut certified_vertices = Vec::new();
+        let mut cutoff_marker_digests = Vec::new();
+        for object in objects {
+            match object {
+                ProtectedPipelineSemanticObject::CertifiedVertex {
+                    certified_vertex, ..
+                } => {
+                    certified_vertices.push(certified_vertex.clone());
+                }
+                ProtectedPipelineSemanticObject::CutoffMarker {
+                    semantic_id,
+                    certified_vertex,
+                } => {
+                    certified_vertices.push(certified_vertex.clone());
+                    cutoff_marker_digests.push(semantic_id.clone());
+                }
+                // These are intentionally not translated to root-only
+                // observations.  The coordinator will accept them only after
+                // the concrete envelope/VC/reveal builder has verified the
+                // exact execution input they authenticate.
+                ProtectedPipelineSemanticObject::RevealAuthorization { .. }
+                | ProtectedPipelineSemanticObject::RevealShare { .. } => {
+                    return Err(
+                        "protected reveal evidence requires the concrete material bridge"
+                            .to_string(),
+                    )
+                }
+            }
+        }
+        let inputs = ProtectedPipelineReconcileContext {
+            target: runtime.target(),
+            verifier: &self.verifier,
+            validator_set: &self.validator_set,
+            cluster_map: &self.cluster_map,
+            parameters: &self.parameters,
+        };
+        runtime
+            .ingest_authenticated_event(
+                AuthenticatedProtectedPipelineEvent::EtdagEvidence {
+                    certified_vertices,
+                    cutoff_marker_digests,
+                },
+                &NoObservationVerifier,
+                &inputs,
+            )
+            .map_err(|error| format!("merge protected ETDAG evidence: {error}"))?;
+        Ok(())
+    }
+}
+
+impl ProtectedPipelineCoordinatorIngress for NormalProtectedPipelineCoordinator {
+    fn ingest_protected_pipeline_evidence(
+        &self,
+        envelope: ProtectedPipelineEvidenceEnvelope,
+    ) -> Result<(), String> {
+        self.ingest_message(envelope)
+    }
+}
+
+/// ETDAG evidence does not consult the observation verifier.  Keeping this
+/// implementation permanently rejecting prevents the ingress path from ever
+/// converting unverified P2P roots into parent/VC/share/QC/finality state.
+struct NoObservationVerifier;
+
+impl ProtectedPipelineEvidenceVerifier for NoObservationVerifier {
+    fn verify_order_seed(
+        &self,
+        _target: &TargetAdmissionContext,
+        _evidence: &ProtectedOrderSeedEvidence,
+    ) -> Result<(), String> {
+        Err("normal protected coordinator requires a finalized PoSy order-seed bridge".to_string())
+    }
+
+    fn verify_observation(
+        &self,
+        _target: &TargetAdmissionContext,
+        _expected_commitment: &NextProtectedBatchCommitment,
+        _observation: &ProtectedPipelineObservation,
+    ) -> Result<(), String> {
+        Err(
+            "normal protected coordinator requires a concrete PoSy/reveal observation bridge"
+                .to_string(),
+        )
+    }
+}
 
 /// Process-local single-writer registry.  The durable `ProtectedPipeline`
 /// remains the source of truth across restarts; this registry prevents two

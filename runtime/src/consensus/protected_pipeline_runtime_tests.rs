@@ -7,7 +7,8 @@ use super::protected_pipeline::{
     ProtectedPipelineReconcileContext,
 };
 use super::protected_pipeline_runtime::{
-    AuthenticatedProtectedPipelineEvent, ProtectedPipelineRuntime,
+    AuthenticatedProtectedPipelineEvent, NormalProtectedPipelineCoordinator,
+    ProtectedPipelineRuntime,
 };
 
 static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -46,6 +47,41 @@ fn order_seed_event(label: &str) -> AuthenticatedProtectedPipelineEvent {
         order_seed: EtdagDigest::from_domain_bytes("runtime-order-seed", label.as_bytes()),
         authority_root: EtdagDigest::from_domain_bytes("runtime-authority", label.as_bytes()),
     })
+}
+
+#[test]
+fn normal_coordinator_binds_one_target_to_one_durable_runtime() {
+    let fixture = etdag::tests::fixture(5, None);
+    let verifier = fixture.signer.verifier();
+    let parameters = EtdagParameters::default();
+    let coordinator = NormalProtectedPipelineCoordinator::new(
+        test_directory("normal-coordinator"),
+        verifier,
+        fixture.validator_set.clone(),
+        fixture.cluster_map.clone(),
+        parameters,
+    )
+    .expect("construct immutable normal coordinator");
+    let root = fixture.context.root().expect("target root");
+
+    let first = coordinator
+        .register_target(fixture.context.clone())
+        .expect("register exact target");
+    let duplicate = coordinator
+        .register_target(fixture.context.clone())
+        .expect("idempotently register exact target");
+    let routed = coordinator
+        .runtime_for_target(fixture.context.target_height, root)
+        .expect("read target registry")
+        .expect("registered target runtime");
+
+    assert_eq!(first.record_path_ref(), duplicate.record_path_ref());
+    assert_eq!(first.record_path_ref(), routed.record_path_ref());
+    assert_eq!(
+        routed.source(),
+        ProtectedBatchSource::NormalEtdagSteadyState,
+        "fixture target is H4+ and cannot regress to the H3 source class",
+    );
 }
 
 #[test]
