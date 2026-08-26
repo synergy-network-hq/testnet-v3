@@ -22,12 +22,12 @@ use crate::etdag::{
     canonical_finality_context_digest, target_admission_source_finality_root,
     DeterministicProtectedExecutionInput, EtdagDigest, EtdagParameters,
     EtdagProtectedInputCoordinator, EtdagScheduleNeutralFinalityAuthority,
-    ProtectedExecutionTargetContext, TargetAdmissionContext,
+    ProtectedExecutionTargetContext, TargetAdmissionContext, ETDAG_PROFILE_ID,
 };
 use crate::execution::{compute_state_root_after, execute_block, ExecutionState};
 use crate::synergy_types::{
     AegisPqSignature, Block, BlockHeader, BlockId, CanonicalSerialize, ClusterMap, Hash,
-    Transaction, TxId, ValidatorRecord, ValidatorSet,
+    ProtectedBatchCommitment, Transaction, TxId, ValidatorRecord, ValidatorSet,
 };
 use std::path::PathBuf;
 
@@ -41,6 +41,23 @@ pub trait SimplifiedProtectedExecutionInputSource: Send {
         &mut self,
         height: crate::synergy_types::Height,
     ) -> Result<Option<DeterministicProtectedExecutionInput>, String>;
+}
+
+fn header_protected_batch(
+    input: &DeterministicProtectedExecutionInput,
+) -> Result<ProtectedBatchCommitment, String> {
+    Ok(ProtectedBatchCommitment {
+        profile_id: ETDAG_PROFILE_ID.to_string(),
+        target_context_root: input.next_commitment.target_context_root.to_hex(),
+        boc_digest: input.next_commitment.root()?.0,
+        dcc_digest: input.protected_batch.cut_root.0.clone(),
+        encrypted_set_root: input.protected_batch.eligible_set_root.0.clone(),
+        protected_order_root: input.protected_batch.order_root.0.clone(),
+        public_reveal_transcript_root: input.reveal_transcript_root.0.clone(),
+        execution_manifest_root: input.digest()?.0,
+        protected_gas_total: input.next_commitment.protected_gas,
+        protected_count: input.next_commitment.protected_count,
+    })
 }
 
 /// Exact durable-chain authority needed to execute one protected candidate.
@@ -862,6 +879,10 @@ impl<A: SimplifiedProtectedMaterialAuthority> SimplifiedProtectedMaterialAdapter
             directive.context.height,
             authority_parent_fee_market,
         )?;
+        // `BlockHeader` retains this serializable field for decoder
+        // compatibility, but each value is derived solely from the concrete
+        // R11 input rather than any retired certificate family.
+        let header_protected_batch = header_protected_batch(protected_execution_input)?;
         let mut block = Block {
             header: BlockHeader {
                 version: POSY_SIMPLIFIED_PROTECTED_BLOCK_VERSION,
@@ -904,7 +925,7 @@ impl<A: SimplifiedProtectedMaterialAuthority> SimplifiedProtectedMaterialAdapter
                 tx_order_root: compute_tx_order_root(&transaction_ids)?,
                 tx_count: u64::try_from(transactions.len())
                     .map_err(|_| "protected transaction count exceeds u64".to_string())?,
-                protected_batch: None,
+                protected_batch: Some(header_protected_batch),
                 evidence_root: Self::evidence_root(&directive.parent, &directive.finalized)?,
                 state_root_before,
                 state_root_after: Hash::zero(),
@@ -963,7 +984,13 @@ impl<A: SimplifiedProtectedMaterialAuthority> SimplifiedMaterialAdapter
             &directive.parent,
             &directive.finalized,
         )?;
-        let protected_execution_input = self.ready_execution_input(directive.context.height)?;
+        let protected_execution_input = match self.ready_execution_input(directive.context.height) {
+            Ok(input) => input,
+            Err(error) if error.starts_with("PROTECTED_PIPELINE_EXECUTION_INPUT_NOT_READY") => {
+                return Ok(None)
+            }
+            Err(error) => return Err(error),
+        };
         self.verify_execution_target(
             &protected_execution_input,
             &directive.context,
@@ -1095,7 +1122,7 @@ mod tests {
         DurableSimplifiedProposalMaterialStore, QuorumCertificateReference,
         SimplifiedCoreMaterialConfiguration,
     };
-    use crate::etdag::tests::{complete_protected_input, fixture, target_admission_package};
+    use crate::etdag::tests::{complete_r11_execution_input, fixture};
     use crate::synergy_types::{Epoch, Height, Round};
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1125,14 +1152,41 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct StaticExecutionInputSource {
+        input: Option<DeterministicProtectedExecutionInput>,
+    }
+
+    impl SimplifiedProtectedExecutionInputSource for StaticExecutionInputSource {
+        fn load_ready_execution_input(
+            &mut self,
+            height: crate::synergy_types::Height,
+        ) -> Result<Option<DeterministicProtectedExecutionInput>, String> {
+            match &self.input {
+                Some(input)
+                    if match &input.target_context {
+                        ProtectedExecutionTargetContext::GenesisBootstrap { height_context } => {
+                            height_context.height
+                        }
+                        ProtectedExecutionTargetContext::NormalEtdag { admission_context } => {
+                            admission_context.target_height
+                        }
+                    } != height =>
+                {
+                    Err("test protected input source was asked for another height".to_string())
+                }
+                Some(input) => Ok(Some(input.clone())),
+                None => Ok(None),
+            }
+        }
+    }
+
     struct TestSetup {
         epoch_context: SimplifiedEpochContext,
         directive: SimplifiedProposalDirective,
-        coordinator: EtdagProtectedInputCoordinator,
         configuration: SimplifiedProtectedMaterialConfiguration,
         authority: ExactAuthority,
-        admission_path: PathBuf,
-        protected_path: PathBuf,
+        execution_input: Option<DeterministicProtectedExecutionInput>,
     }
 
     fn temp_root(label: &str) -> PathBuf {
@@ -1155,15 +1209,14 @@ mod tests {
         }
     }
 
-    fn setup(label: &str, install_protected: bool) -> TestSetup {
+    fn setup(_label: &str, install_protected: bool) -> TestSetup {
         let finality_digest = EtdagDigest::from_domain_bytes("finality", b"complete-input");
         let mut etdag_fixture = fixture(5, None);
         etdag_fixture.context.source_finality_context_root =
             target_admission_source_finality_root(&finality_digest).unwrap();
         let target_context = etdag_fixture.context.clone();
-        let admission_package =
-            target_admission_package(&mut etdag_fixture, target_context.clone());
-        let protected_input = complete_protected_input(&mut etdag_fixture);
+        let execution_input =
+            install_protected.then(|| complete_r11_execution_input(&mut etdag_fixture));
         let parameter_root = target_context.consensus_parameter_root;
         let epoch_context = SimplifiedEpochContext::derive(
             Epoch(0),
@@ -1220,27 +1273,6 @@ mod tests {
             takeover_tc_id: None,
             mandatory_carry_candidate: None,
         };
-        let root = temp_root(label);
-        let admission_path = root.join("admission.json");
-        let protected_path = root.join("protected.json");
-        let coordinator = EtdagProtectedInputCoordinator::at_paths(
-            admission_path.clone(),
-            protected_path.clone(),
-        );
-        if install_protected {
-            coordinator
-                .admit_certified_public_input_schedule_neutral(
-                    &admission_package,
-                    &protected_input,
-                    &finality_digest,
-                    &etdag_fixture.signer.verifier(),
-                    &etdag_fixture.validator_set,
-                    &etdag_fixture.cluster_map,
-                    parameter_root,
-                    &EtdagParameters::default(),
-                )
-                .unwrap();
-        }
         let configuration = SimplifiedProtectedMaterialConfiguration {
             verifier: etdag_fixture.signer.verifier(),
             validator_set: etdag_fixture.validator_set,
@@ -1268,24 +1300,26 @@ mod tests {
         TestSetup {
             epoch_context,
             directive,
-            coordinator,
             configuration,
             authority,
-            admission_path,
-            protected_path,
+            execution_input,
         }
     }
 
     #[test]
     fn adapter_builds_replays_and_restarts_with_exact_durable_material() {
         let setup = setup("restart", true);
+        let execution_input = setup.execution_input.clone();
         let mut adapter = SimplifiedProtectedMaterialAdapter::new(
             setup.epoch_context.clone(),
-            setup.coordinator,
+            EtdagProtectedInputCoordinator::process_wide(),
             setup.configuration.clone(),
             setup.authority.clone(),
         )
-        .unwrap();
+        .unwrap()
+        .with_protected_pipeline_source(StaticExecutionInputSource {
+            input: execution_input.clone(),
+        });
         let (proposal, material) = adapter
             .build_local(&setup.epoch_context, &setup.directive)
             .unwrap()
@@ -1311,15 +1345,16 @@ mod tests {
         store.install_verified(&material).unwrap();
         assert_eq!(store.load(material.stable_candidate_id).unwrap(), material);
 
-        let restarted =
-            EtdagProtectedInputCoordinator::at_paths(setup.admission_path, setup.protected_path);
         let mut restarted_adapter = SimplifiedProtectedMaterialAdapter::new(
             setup.epoch_context.clone(),
-            restarted,
+            EtdagProtectedInputCoordinator::process_wide(),
             setup.configuration,
             setup.authority,
         )
-        .unwrap();
+        .unwrap()
+        .with_protected_pipeline_source(StaticExecutionInputSource {
+            input: execution_input,
+        });
         assert_eq!(
             restarted_adapter
                 .verify_received(
@@ -1336,13 +1371,17 @@ mod tests {
     #[test]
     fn adapter_rejects_body_context_input_execution_and_finality_substitution() {
         let setup = setup("adversarial", true);
+        let execution_input = setup.execution_input.clone();
         let mut adapter = SimplifiedProtectedMaterialAdapter::new(
             setup.epoch_context.clone(),
-            setup.coordinator,
+            EtdagProtectedInputCoordinator::process_wide(),
             setup.configuration,
             setup.authority,
         )
-        .unwrap();
+        .unwrap()
+        .with_protected_pipeline_source(StaticExecutionInputSource {
+            input: execution_input,
+        });
         let (proposal, material) = adapter
             .build_local(&setup.epoch_context, &setup.directive)
             .unwrap()
@@ -1360,11 +1399,19 @@ mod tests {
             .is_err());
 
         let mut wrong_context = material.clone();
-        wrong_context
-            .target_context
+        match &mut wrong_context
+            .protected_execution_input
             .as_mut()
             .unwrap()
-            .source_finalized_height = Height(1);
+            .target_context
+        {
+            ProtectedExecutionTargetContext::NormalEtdag { admission_context } => {
+                admission_context.source_finalized_height = Height(1);
+            }
+            ProtectedExecutionTargetContext::GenesisBootstrap { .. } => {
+                panic!("normal ETDAG fixture unexpectedly used Genesis material")
+            }
+        }
         assert!(adapter
             .verify_received(
                 &setup.epoch_context,
@@ -1376,11 +1423,14 @@ mod tests {
 
         let mut wrong_input = material.clone();
         wrong_input
-            .protected_input
+            .protected_execution_input
             .as_mut()
             .unwrap()
-            .epoch_randomness =
-            Hash::from_domain_bytes("simplified-protected-test", b"wrong-randomness");
+            .next_commitment
+            .order_seed = EtdagDigest::from_domain_bytes(
+            "simplified-protected-test",
+            b"wrong-protected-order-seed",
+        );
         assert!(adapter
             .verify_received(
                 &setup.epoch_context,
@@ -1417,13 +1467,17 @@ mod tests {
     #[test]
     fn adapter_waits_without_proposing_when_certified_input_is_missing() {
         let setup = setup("not-ready", false);
+        let execution_input = setup.execution_input.clone();
         let mut adapter = SimplifiedProtectedMaterialAdapter::new(
             setup.epoch_context.clone(),
-            setup.coordinator,
+            EtdagProtectedInputCoordinator::process_wide(),
             setup.configuration,
             setup.authority,
         )
-        .unwrap();
+        .unwrap()
+        .with_protected_pipeline_source(StaticExecutionInputSource {
+            input: execution_input,
+        });
         assert!(adapter
             .build_local(&setup.epoch_context, &setup.directive)
             .unwrap()

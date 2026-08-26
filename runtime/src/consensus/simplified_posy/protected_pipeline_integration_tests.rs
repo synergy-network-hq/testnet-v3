@@ -52,13 +52,13 @@ fn h1_h2_commitments_are_exact_and_height_bound() {
     for height in [Height(1), Height(2)] {
         let context = context(height);
         let commitment = commitment(&context);
-        validate_next_protected_batch_commitment(&commitment, &context, None, None).unwrap();
+        validate_next_protected_batch_commitment(&commitment, &context, None).unwrap();
         validate_genesis_bootstrap_next_commitment(&commitment).unwrap();
 
         let mut wrong_height = commitment.clone();
         wrong_height.target_height = Height(height.0 + 1);
         assert!(
-            validate_next_protected_batch_commitment(&wrong_height, &context, None, None,)
+            validate_next_protected_batch_commitment(&wrong_height, &context, None)
                 .unwrap_err()
                 .contains("exact PoSy proposal context")
         );
@@ -80,17 +80,16 @@ fn h3_and_later_have_no_empty_bootstrap_fallback() {
 fn commitment_mismatch_is_detected_independently() {
     let context = context(Height(2));
     let canonical = commitment(&context);
-    validate_next_protected_batch_commitment(&canonical, &context, None, None).unwrap();
+    validate_next_protected_batch_commitment(&canonical, &context, None).unwrap();
 
     let mut wrong_epoch = canonical.clone();
     wrong_epoch.epoch = Epoch(1);
-    assert!(validate_next_protected_batch_commitment(&wrong_epoch, &context, None, None,).is_err());
+    assert!(validate_next_protected_batch_commitment(&wrong_epoch, &context, None).is_err());
 
     let mut wrong_validator_set = canonical;
     wrong_validator_set.validator_set_commitment =
         Hash::from_domain_bytes("r11-test", b"wrong-validators");
     assert!(
-        validate_next_protected_batch_commitment(&wrong_validator_set, &context, None, None,)
-            .is_err()
+        validate_next_protected_batch_commitment(&wrong_validator_set, &context, None).is_err()
     );
 }

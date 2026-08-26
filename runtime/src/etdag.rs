@@ -7091,7 +7091,9 @@ pub(crate) mod tests {
         }
     }
 
-    fn complete_r11_execution_input(fixture: &mut Fixture) -> DeterministicProtectedExecutionInput {
+    pub(crate) fn complete_r11_execution_input(
+        fixture: &mut Fixture,
+    ) -> DeterministicProtectedExecutionInput {
         use crate::consensus::protected_pipeline::{
             construct_protected_cut_proof, derive_next_protected_batch_commitment,
             derive_protected_batch,

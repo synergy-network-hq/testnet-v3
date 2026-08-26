@@ -1346,6 +1346,10 @@ mod tests {
         if let ProtectedPipelineSemanticObject::RevealShare { share, .. } = &mut share {
             share.signature.signature_bytes = vec![7; MAX_PROTECTED_PIPELINE_EVIDENCE_FRAME_BYTES];
         }
+        let oversized_share_id = share.computed_semantic_id().unwrap();
+        if let ProtectedPipelineSemanticObject::RevealShare { semantic_id, .. } = &mut share {
+            *semantic_id = oversized_share_id;
+        }
         assert!(validate_protected_pipeline_evidence_message(
             &ProtectedPipelineEvidenceMessage::Evidence { object: share }
         )
