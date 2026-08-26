@@ -21,7 +21,7 @@ use crate::etdag::{
 };
 use crate::synergy_types::AegisPqSignature;
 use crate::synergy_types::{
-    Block as TypedBlock, CanonicalSerialize, ChainId, Epoch, Hash, Height, HeightConsensusContext,
+    Block as TypedBlock, CanonicalSerialize, ChainId, Hash, Height, HeightConsensusContext,
     NetworkId, QuorumCertificate as TypedQuorumCertificate, TimeoutCertificate, TxId,
     ValidationCertificate, Vote as TypedVote,
 };
@@ -116,28 +116,6 @@ pub enum ProtectedPipelineSemanticObject {
     },
 }
 
-#[derive(Serialize)]
-struct RevealShareSemantic<'a> {
-    authorization_id: &'a EtdagDigest,
-    share_version: u32,
-    chain_id: ChainId,
-    network_id: &'a NetworkId,
-    protocol_version: &'a str,
-    profile_id: &'a str,
-    epoch: Epoch,
-    target_height: Height,
-    target_context_root: Hash,
-    cluster_id: crate::synergy_types::ClusterId,
-    next_commitment_root: &'a EtdagDigest,
-    protected_batch_root: &'a EtdagDigest,
-    tx_commitment: &'a EtdagDigest,
-    validator_id: &'a crate::synergy_types::ValidatorId,
-    share_index: u8,
-    share_commitment: &'a EtdagDigest,
-    parameter_root: crate::consensus_parameters::ConsensusParameterRoot,
-    key_id: &'a crate::synergy_types::AegisPqKeyId,
-}
-
 impl ProtectedPipelineSemanticObject {
     pub fn declared_semantic_id(&self) -> &EtdagDigest {
         match self {
@@ -157,33 +135,9 @@ impl ProtectedPipelineSemanticObject {
                 certified_vertex, ..
             } => certified_vertex.vertex.digest(),
             Self::RevealAuthorization { authorization, .. } => authorization.root(),
-            Self::RevealShare {
-                authorization_id,
-                share,
-                ..
-            } => EtdagDigest::from_canonical(
-                DOMAIN_PROTECTED_PIPELINE_EVIDENCE_ID,
-                &RevealShareSemantic {
-                    authorization_id,
-                    share_version: share.share_version,
-                    chain_id: share.chain_id,
-                    network_id: &share.network_id,
-                    protocol_version: &share.protocol_version,
-                    profile_id: &share.profile_id,
-                    epoch: share.epoch,
-                    target_height: share.target_height,
-                    target_context_root: share.target_context_root,
-                    cluster_id: share.cluster_id,
-                    next_commitment_root: &share.next_commitment_root,
-                    protected_batch_root: &share.protected_batch_root,
-                    tx_commitment: &share.tx_commitment,
-                    validator_id: &share.validator_id,
-                    share_index: share.share.index,
-                    share_commitment: &share.share_commitment,
-                    parameter_root: share.parameter_root,
-                    key_id: &share.key_id,
-                },
-            ),
+            Self::RevealShare { share, .. } => {
+                EtdagDigest::from_canonical(DOMAIN_PROTECTED_PIPELINE_EVIDENCE_ID, share)
+            }
         }
     }
 
