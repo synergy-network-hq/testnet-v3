@@ -1,11 +1,14 @@
 use crate::validator_operations::{
-    evaluate_validator_cluster, evaluate_validator_operations, validate_observation,
-    LivenessDiagnosis, ValidatorOperationsClusterStatus, ValidatorOperationsObservation,
-    ValidatorOperationsStatus, MAX_VALIDATOR_OPERATIONS_SNAPSHOT_BYTES,
+    evaluate_host_preflight, evaluate_validator_cluster, evaluate_validator_operations,
+    validate_observation, DiagnosticSnapshot, DiagnosticSnapshotResult, LivenessDiagnosis,
+    StructuredLogEntry, StructuredLogSeverity, StructuredLogSubsystem, StructuredLogsResponse,
+    ValidatorLifecycleRequest, ValidatorLifecycleResult, ValidatorOperationsClusterStatus,
+    ValidatorOperationsObservation, ValidatorOperationsStatus,
+    MAX_VALIDATOR_OPERATIONS_SNAPSHOT_BYTES, VALIDATOR_OPERATIONS_SCHEMA_VERSION,
     VALIDATOR_OPERATIONS_SNAPSHOT_RELATIVE_PATH,
 };
 use axum::{
-    extract::{ConnectInfo, Path as AxumPath, State},
+    extract::{ConnectInfo, Path as AxumPath, Query, State},
     http::{
         header::{AUTHORIZATION, WWW_AUTHENTICATE},
         HeaderMap, StatusCode,
@@ -37,7 +40,11 @@ const TESTNET_AGENT_ALLOWED_REMOTES_ENV: &str = "SYNERGY_TESTNET_AGENT_ALLOWED_R
 const OPERATIONS_OPERATOR_ID_HEADER: &str = "x-synergy-operator-id";
 const OPERATIONS_SCOPES_HEADER: &str = "x-synergy-operator-scopes";
 const OPERATIONS_READ_SCOPE: &str = "validator.operations.read";
+const OPERATIONS_CONTROL_SCOPE: &str = "validator.operations.control";
+const OPERATIONS_SNAPSHOT_SCOPE: &str = "validator.operations.snapshot";
 const VALIDATOR_OPERATIONS_AUDIT_RELATIVE_PATH: &str = "audit/validator-operations-api.jsonl";
+const VALIDATOR_DIAGNOSTICS_RELATIVE_PATH: &str = "diagnostics/validator-operations";
+const MAX_STRUCTURED_LOG_LINES: usize = 500;
 const DEFAULT_REMOTE_ROOT_UNIX: &str = "/opt/synergy";
 const DEFAULT_REMOTE_ROOT_WINDOWS: &str = "C:\\Synergy\\Testnet";
 const DEFAULT_VALIDATOR_VPN_COORDINATOR_URL: &str = "https://vpn-coordinator.synergy-network.io";
@@ -125,7 +132,13 @@ enum OperationsAccessError {
     NetworkDenied,
     AuthenticationRequired,
     OperatorIdentityRequired,
-    ReadScopeRequired,
+    ScopeRequired,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct StructuredLogsQuery {
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 pub async fn serve(workspace_root: PathBuf, port: u16) -> Result<(), String> {
@@ -167,6 +180,22 @@ pub async fn serve_with_host(
         .route(
             "/v1/validator-operations/nodes/{node_slot_id}/diagnose-liveness",
             get(validator_operations_liveness_handler),
+        )
+        .route(
+            "/v1/validator-operations/nodes/{node_slot_id}/preflight",
+            get(validator_operations_preflight_handler),
+        )
+        .route(
+            "/v1/validator-operations/nodes/{node_slot_id}/control",
+            post(validator_operations_lifecycle_handler),
+        )
+        .route(
+            "/v1/validator-operations/nodes/{node_slot_id}/logs",
+            get(validator_operations_logs_handler),
+        )
+        .route(
+            "/v1/validator-operations/nodes/{node_slot_id}/diagnostic-snapshots",
+            post(validator_operations_snapshot_handler),
         )
         .with_state(state);
 
@@ -574,6 +603,307 @@ async fn validator_operations_liveness_handler(
     operations_liveness_response(result)
 }
 
+async fn validator_operations_preflight_handler(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    State(state): State<AgentState>,
+    AxumPath(node_slot_id): AxumPath<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let operator_id = match authorize_operations_request(remote_addr, &headers) {
+        Ok(operator_id) => operator_id,
+        Err(error) => {
+            return operations_denied_response(
+                &state,
+                remote_addr,
+                &headers,
+                "validator.operations.preflight",
+                Some(node_slot_id),
+                error,
+            )
+        }
+    };
+    let result = load_validator_operations_status(&state.workspace_root, &node_slot_id)
+        .map(|status| evaluate_host_preflight(&status));
+    if let Err(error) = append_validator_operations_audit(
+        &state.workspace_root,
+        ValidatorOperationsAuditRecord {
+            recorded_at_utc: Utc::now().to_rfc3339(),
+            operator_id,
+            remote_address: remote_addr.ip().to_string(),
+            action: "validator.operations.preflight".to_string(),
+            validator_id: Some(node_slot_id),
+            outcome: if result.is_ok() {
+                "success"
+            } else {
+                "unavailable"
+            }
+            .to_string(),
+        },
+    ) {
+        return operations_internal_error(error);
+    }
+    match result {
+        Ok(payload) => (StatusCode::OK, Json(payload)).into_response(),
+        Err(error) => {
+            operations_unavailable_response("validator_operations_preflight_unavailable", error)
+        }
+    }
+}
+
+async fn validator_operations_lifecycle_handler(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    State(state): State<AgentState>,
+    AxumPath(node_slot_id): AxumPath<String>,
+    headers: HeaderMap,
+    Json(request): Json<ValidatorLifecycleRequest>,
+) -> impl IntoResponse {
+    let operator_id = match authorize_operations_request_for_scope(
+        remote_addr,
+        &headers,
+        OPERATIONS_CONTROL_SCOPE,
+    ) {
+        Ok(operator_id) => operator_id,
+        Err(error) => {
+            return operations_denied_response(
+                &state,
+                remote_addr,
+                &headers,
+                "validator.operations.lifecycle",
+                Some(node_slot_id),
+                error,
+            )
+        }
+    };
+    if request.reason.trim().is_empty() || request.reason.len() > 512 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(
+                json!({"error":"a non-empty control reason of at most 512 characters is required"}),
+            ),
+        )
+            .into_response();
+    }
+    let action = request.action;
+    if action.requires_preflight() {
+        match load_validator_operations_status(&state.workspace_root, &node_slot_id)
+            .map(|status| evaluate_host_preflight(&status)) {
+            Ok(preflight) if preflight.ready => {}
+            Ok(preflight) => return (StatusCode::CONFLICT, Json(json!({
+                "error":"validator_host_preflight_failed", "blocking_check_ids":preflight.blocking_check_ids
+            }))).into_response(),
+            Err(error) => return operations_unavailable_response("validator_operations_preflight_unavailable", error),
+        }
+    }
+    let audit_action = format!(
+        "validator.operations.lifecycle.{}",
+        action.as_nodectl_action()
+    );
+    if let Err(error) = append_validator_operations_audit(
+        &state.workspace_root,
+        ValidatorOperationsAuditRecord {
+            recorded_at_utc: Utc::now().to_rfc3339(),
+            operator_id: operator_id.clone(),
+            remote_address: remote_addr.ip().to_string(),
+            action: audit_action.clone(),
+            validator_id: Some(node_slot_id.clone()),
+            outcome: "authorized:execution_pending".to_string(),
+        },
+    ) {
+        return operations_internal_error(error);
+    }
+
+    let workspace_root = state.workspace_root.clone();
+    let target = node_slot_id.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        execute_control(
+            &workspace_root,
+            TestnetAgentControlRequest {
+                node_slot_id: target,
+                action: action.as_nodectl_action().to_string(),
+                target_reason: Some(request.reason),
+                target_url: None,
+                vpn_node_id: None,
+                vpn_ip: None,
+                vpn_public_key: None,
+            },
+        )
+    })
+    .await;
+    let lifecycle_result = match result {
+        Ok(Ok(outcome)) => ValidatorLifecycleResult {
+            schema_version: VALIDATOR_OPERATIONS_SCHEMA_VERSION.to_string(),
+            validator_id: node_slot_id.clone(),
+            action,
+            accepted: outcome.success,
+            exit_code: outcome.exit_code,
+            executed_at_utc: outcome.executed_at_utc,
+            message: redact_control_message(if outcome.success {
+                &outcome.stdout
+            } else {
+                &outcome.stderr
+            }),
+        },
+        Ok(Err(error)) => ValidatorLifecycleResult {
+            schema_version: VALIDATOR_OPERATIONS_SCHEMA_VERSION.to_string(),
+            validator_id: node_slot_id.clone(),
+            action,
+            accepted: false,
+            exit_code: 1,
+            executed_at_utc: Utc::now().to_rfc3339(),
+            message: redact_control_message(&error),
+        },
+        Err(error) => {
+            return operations_internal_error(format!("validator lifecycle task failed: {error}"))
+        }
+    };
+    if let Err(error) = append_validator_operations_audit(
+        &state.workspace_root,
+        ValidatorOperationsAuditRecord {
+            recorded_at_utc: Utc::now().to_rfc3339(),
+            operator_id,
+            remote_address: remote_addr.ip().to_string(),
+            action: audit_action,
+            validator_id: Some(node_slot_id),
+            outcome: if lifecycle_result.accepted {
+                "success"
+            } else {
+                "failed"
+            }
+            .to_string(),
+        },
+    ) {
+        return operations_internal_error(error);
+    }
+    let status = if lifecycle_result.accepted {
+        StatusCode::OK
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    (status, Json(lifecycle_result)).into_response()
+}
+
+async fn validator_operations_logs_handler(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    State(state): State<AgentState>,
+    AxumPath(node_slot_id): AxumPath<String>,
+    headers: HeaderMap,
+    Query(query): Query<StructuredLogsQuery>,
+) -> impl IntoResponse {
+    let operator_id = match authorize_operations_request(remote_addr, &headers) {
+        Ok(operator_id) => operator_id,
+        Err(error) => {
+            return operations_denied_response(
+                &state,
+                remote_addr,
+                &headers,
+                "validator.operations.logs",
+                Some(node_slot_id),
+                error,
+            )
+        }
+    };
+    let workspace_root = state.workspace_root.clone();
+    let target = node_slot_id.clone();
+    let limit = query
+        .limit
+        .unwrap_or(200)
+        .clamp(1, MAX_STRUCTURED_LOG_LINES);
+    let result = tokio::task::spawn_blocking(move || {
+        collect_structured_logs(&workspace_root, &target, limit)
+    })
+    .await
+    .map_err(|error| format!("structured logs task failed: {error}"))
+    .and_then(|result| result);
+    if let Err(error) = append_validator_operations_audit(
+        &state.workspace_root,
+        ValidatorOperationsAuditRecord {
+            recorded_at_utc: Utc::now().to_rfc3339(),
+            operator_id,
+            remote_address: remote_addr.ip().to_string(),
+            action: "validator.operations.logs".to_string(),
+            validator_id: Some(node_slot_id),
+            outcome: if result.is_ok() {
+                "success"
+            } else {
+                "unavailable"
+            }
+            .to_string(),
+        },
+    ) {
+        return operations_internal_error(error);
+    }
+    match result {
+        Ok(payload) => (StatusCode::OK, Json(payload)).into_response(),
+        Err(error) => {
+            operations_unavailable_response("validator_operations_logs_unavailable", error)
+        }
+    }
+}
+
+async fn validator_operations_snapshot_handler(
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    State(state): State<AgentState>,
+    AxumPath(node_slot_id): AxumPath<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let operator_id = match authorize_operations_request_for_scope(
+        remote_addr,
+        &headers,
+        OPERATIONS_SNAPSHOT_SCOPE,
+    ) {
+        Ok(operator_id) => operator_id,
+        Err(error) => {
+            return operations_denied_response(
+                &state,
+                remote_addr,
+                &headers,
+                "validator.operations.snapshot.capture",
+                Some(node_slot_id),
+                error,
+            )
+        }
+    };
+    if let Err(error) = append_validator_operations_audit(
+        &state.workspace_root,
+        ValidatorOperationsAuditRecord {
+            recorded_at_utc: Utc::now().to_rfc3339(),
+            operator_id: operator_id.clone(),
+            remote_address: remote_addr.ip().to_string(),
+            action: "validator.operations.snapshot.capture".to_string(),
+            validator_id: Some(node_slot_id.clone()),
+            outcome: "authorized:capture_pending".to_string(),
+        },
+    ) {
+        return operations_internal_error(error);
+    }
+    let workspace_root = state.workspace_root.clone();
+    let target = node_slot_id.clone();
+    let result =
+        tokio::task::spawn_blocking(move || capture_diagnostic_snapshot(&workspace_root, &target))
+            .await
+            .map_err(|error| format!("diagnostic snapshot task failed: {error}"))
+            .and_then(|result| result);
+    if let Err(error) = append_validator_operations_audit(
+        &state.workspace_root,
+        ValidatorOperationsAuditRecord {
+            recorded_at_utc: Utc::now().to_rfc3339(),
+            operator_id,
+            remote_address: remote_addr.ip().to_string(),
+            action: "validator.operations.snapshot.capture".to_string(),
+            validator_id: Some(node_slot_id),
+            outcome: if result.is_ok() { "success" } else { "failed" }.to_string(),
+        },
+    ) {
+        return operations_internal_error(error);
+    }
+    match result {
+        Ok(payload) => (StatusCode::CREATED, Json(payload)).into_response(),
+        Err(error) => {
+            operations_unavailable_response("validator_operations_snapshot_failed", error)
+        }
+    }
+}
+
 async fn validator_operations_cluster_status_handler(
     ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
     State(state): State<AgentState>,
@@ -753,6 +1083,14 @@ fn authorize_operations_request(
     remote_addr: SocketAddr,
     headers: &HeaderMap,
 ) -> Result<String, OperationsAccessError> {
+    authorize_operations_request_for_scope(remote_addr, headers, OPERATIONS_READ_SCOPE)
+}
+
+fn authorize_operations_request_for_scope(
+    remote_addr: SocketAddr,
+    headers: &HeaderMap,
+    required_scope: &str,
+) -> Result<String, OperationsAccessError> {
     if !is_operations_management_address(remote_addr.ip()) {
         return Err(OperationsAccessError::NetworkDenied);
     }
@@ -768,17 +1106,17 @@ fn authorize_operations_request(
 
     let operator_id =
         operations_operator_id(headers).ok_or(OperationsAccessError::OperatorIdentityRequired)?;
-    let has_read_scope = headers
+    let has_required_scope = headers
         .get(OPERATIONS_SCOPES_HEADER)
         .and_then(|value| value.to_str().ok())
         .map(|value| {
             value
                 .split(|character: char| character == ',' || character.is_ascii_whitespace())
-                .any(|scope| scope == OPERATIONS_READ_SCOPE)
+                .any(|scope| scope == required_scope)
         })
         .unwrap_or(false);
-    if !has_read_scope {
-        return Err(OperationsAccessError::ReadScopeRequired);
+    if !has_required_scope {
+        return Err(OperationsAccessError::ScopeRequired);
     }
 
     Ok(operator_id)
@@ -825,12 +1163,42 @@ fn operations_access_error_response(error: OperationsAccessError) -> axum::respo
         OperationsAccessError::OperatorIdentityRequired => {
             (StatusCode::UNAUTHORIZED, "operator_identity_required")
         }
-        OperationsAccessError::ReadScopeRequired => (
-            StatusCode::FORBIDDEN,
-            "validator_operations_read_scope_required",
-        ),
+        OperationsAccessError::ScopeRequired => {
+            (StatusCode::FORBIDDEN, "validator_operations_scope_required")
+        }
     };
     (status, Json(json!({ "error": code }))).into_response()
+}
+
+fn operations_denied_response(
+    state: &AgentState,
+    remote_addr: SocketAddr,
+    headers: &HeaderMap,
+    action: &str,
+    validator_id: Option<String>,
+    error: OperationsAccessError,
+) -> axum::response::Response {
+    let _ = append_validator_operations_audit(
+        &state.workspace_root,
+        ValidatorOperationsAuditRecord {
+            recorded_at_utc: Utc::now().to_rfc3339(),
+            operator_id: operations_operator_id(headers)
+                .unwrap_or_else(|| "unidentified".to_string()),
+            remote_address: remote_addr.ip().to_string(),
+            action: action.to_string(),
+            validator_id,
+            outcome: format!("denied:{error:?}"),
+        },
+    );
+    operations_access_error_response(error)
+}
+
+fn operations_unavailable_response(code: &str, detail: String) -> axum::response::Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({ "error": code, "detail": detail })),
+    )
+        .into_response()
 }
 
 fn append_validator_operations_audit(
@@ -853,6 +1221,192 @@ fn append_validator_operations_audit(
         .map_err(|error| format!("Failed to open validator operations audit log: {error}"))?;
     file.write_all(encoded.as_bytes())
         .map_err(|error| format!("Failed to append validator operations audit record: {error}"))
+}
+
+fn redact_control_message(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return "Control action completed without output.".to_string();
+    }
+    if contains_sensitive_marker(trimmed) {
+        return "[REDACTED SENSITIVE CONTROL OUTPUT]".to_string();
+    }
+    trimmed.chars().take(1000).collect()
+}
+
+fn contains_sensitive_marker(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    [
+        "authorization:",
+        "bearer ",
+        "private_key",
+        "private key",
+        "secret_key",
+        "secret key",
+        "mnemonic",
+        "seed phrase",
+        "passphrase",
+        "password=",
+        "password:",
+        "token=",
+        "token:",
+        "secret=",
+        "secret:",
+        "key_material",
+        "governance credential",
+        "recovery phrase",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+fn classify_log_severity(line: &str) -> StructuredLogSeverity {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("critical") || lower.contains("fatal") || lower.contains("panic") {
+        StructuredLogSeverity::Critical
+    } else if lower.contains("error") || lower.contains(" err ") {
+        StructuredLogSeverity::Error
+    } else if lower.contains("warn") {
+        StructuredLogSeverity::Warn
+    } else if lower.contains("debug") {
+        StructuredLogSeverity::Debug
+    } else if lower.contains("trace") {
+        StructuredLogSeverity::Trace
+    } else if lower.contains("info") {
+        StructuredLogSeverity::Info
+    } else {
+        StructuredLogSeverity::Unknown
+    }
+}
+
+fn classify_log_subsystem(line: &str) -> StructuredLogSubsystem {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("protected_pipeline")
+        || lower.contains("protected pipeline")
+        || lower.contains("etdag")
+        || lower.contains("reveal")
+    {
+        StructuredLogSubsystem::ProtectedPipeline
+    } else if lower.contains("posy")
+        || lower.contains("validation certificate")
+        || lower.contains(" vc ")
+    {
+        StructuredLogSubsystem::Posy
+    } else if lower.contains("finality")
+        || lower.contains("quorum certificate")
+        || lower.contains(" qc ")
+    {
+        StructuredLogSubsystem::Finality
+    } else if lower.contains("consensus") || lower.contains("proposal") || lower.contains("vote") {
+        StructuredLogSubsystem::Consensus
+    } else if lower.contains("peer") || lower.contains("p2p") || lower.contains("network") {
+        StructuredLogSubsystem::Network
+    } else if lower.contains("storage") || lower.contains("database") || lower.contains("disk") {
+        StructuredLogSubsystem::Storage
+    } else if lower.contains("service") || lower.contains("process") || lower.contains("nodectl") {
+        StructuredLogSubsystem::Service
+    } else {
+        StructuredLogSubsystem::Unknown
+    }
+}
+
+fn collect_structured_logs(
+    workspace_root: &Path,
+    node_slot_id: &str,
+    limit: usize,
+) -> Result<StructuredLogsResponse, String> {
+    let outcome = execute_control(
+        workspace_root,
+        TestnetAgentControlRequest {
+            node_slot_id: node_slot_id.to_string(),
+            action: "node_logs".to_string(),
+            target_reason: None,
+            target_url: None,
+            vpn_node_id: None,
+            vpn_ip: None,
+            vpn_public_key: None,
+        },
+    )?;
+    if !outcome.success {
+        return Err(
+            "The allowlisted local log collector did not complete successfully.".to_string(),
+        );
+    }
+    let lines = outcome
+        .stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    let start = lines.len().saturating_sub(limit);
+    let generated_at_utc = Utc::now().to_rfc3339();
+    let entries = lines[start..]
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let sensitive = contains_sensitive_marker(line);
+            StructuredLogEntry {
+                sequence: (start + index) as u64,
+                observed_at_utc: generated_at_utc.clone(),
+                severity: classify_log_severity(line),
+                subsystem: classify_log_subsystem(line),
+                message: if sensitive {
+                    "[REDACTED SENSITIVE LOG LINE]".to_string()
+                } else {
+                    line.trim().chars().take(2000).collect()
+                },
+                redacted: sensitive,
+            }
+        })
+        .collect();
+    Ok(StructuredLogsResponse {
+        schema_version: VALIDATOR_OPERATIONS_SCHEMA_VERSION.to_string(),
+        validator_id: node_slot_id.to_string(),
+        generated_at_utc,
+        entries,
+        truncated: start > 0,
+    })
+}
+
+fn capture_diagnostic_snapshot(
+    workspace_root: &Path,
+    node_slot_id: &str,
+) -> Result<DiagnosticSnapshotResult, String> {
+    let status = load_validator_operations_status(workspace_root, node_slot_id)?;
+    let preflight = evaluate_host_preflight(&status);
+    let logs = collect_structured_logs(workspace_root, node_slot_id, 200)?;
+    let snapshot_id = Uuid::new_v4().to_string();
+    let captured_at_utc = Utc::now().to_rfc3339();
+    let snapshot = DiagnosticSnapshot {
+        schema_version: VALIDATOR_OPERATIONS_SCHEMA_VERSION.to_string(),
+        snapshot_id: snapshot_id.clone(),
+        captured_at_utc: captured_at_utc.clone(),
+        validator_id: node_slot_id.to_string(),
+        status,
+        preflight,
+        logs,
+    };
+    let relative_path =
+        format!("{VALIDATOR_DIAGNOSTICS_RELATIVE_PATH}/{node_slot_id}-{snapshot_id}.json");
+    let destination = workspace_root.join(&relative_path);
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "Diagnostic snapshot destination is invalid.".to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Failed to create diagnostic snapshot directory: {error}"))?;
+    let temporary = parent.join(format!(".{snapshot_id}.tmp"));
+    let encoded = serde_json::to_vec_pretty(&snapshot)
+        .map_err(|error| format!("Failed to encode diagnostic snapshot: {error}"))?;
+    fs::write(&temporary, encoded)
+        .map_err(|error| format!("Failed to write diagnostic snapshot: {error}"))?;
+    fs::rename(&temporary, &destination)
+        .map_err(|error| format!("Failed to finalize diagnostic snapshot: {error}"))?;
+    Ok(DiagnosticSnapshotResult {
+        schema_version: VALIDATOR_OPERATIONS_SCHEMA_VERSION.to_string(),
+        snapshot_id,
+        validator_id: node_slot_id.to_string(),
+        captured_at_utc,
+        relative_path,
+    })
 }
 
 fn build_health(workspace_root: &Path) -> Result<TestnetAgentHealth, String> {
@@ -1774,7 +2328,7 @@ mod tests {
             );
             assert_eq!(
                 authorize_operations_request(remote, &headers),
-                Err(OperationsAccessError::ReadScopeRequired)
+                Err(OperationsAccessError::ScopeRequired)
             );
         });
     }
@@ -1831,6 +2385,61 @@ mod tests {
         assert!(encoded.contains("validator.operations.status"));
         assert!(!encoded.to_ascii_lowercase().contains("authorization"));
         assert!(!encoded.contains("agent-secret"));
+    }
+
+    #[test]
+    fn structured_log_redaction_and_classification_are_conservative() {
+        assert!(contains_sensitive_marker(
+            "Authorization: Bearer do-not-print"
+        ));
+        assert!(contains_sensitive_marker("validator private_key=hidden"));
+        assert!(!contains_sensitive_marker("consensus proposal accepted"));
+        assert_eq!(
+            classify_log_severity("ERROR finality stalled"),
+            StructuredLogSeverity::Error
+        );
+        assert_eq!(
+            classify_log_subsystem("protected pipeline reveal share"),
+            StructuredLogSubsystem::ProtectedPipeline
+        );
+        assert_eq!(
+            classify_log_subsystem("PoSy validation certificate formed"),
+            StructuredLogSubsystem::Posy
+        );
+    }
+
+    #[test]
+    fn operations_control_and_snapshot_scopes_are_distinct() {
+        with_env_vars(
+            &[(TESTNET_AGENT_TOKEN_ENV, Some("operations-test-token"))],
+            || {
+                let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234);
+                let mut headers = HeaderMap::new();
+                headers.insert(
+                    AUTHORIZATION,
+                    "Bearer operations-test-token".parse().unwrap(),
+                );
+                headers.insert(OPERATIONS_OPERATOR_ID_HEADER, "operator-a".parse().unwrap());
+                headers.insert(
+                    OPERATIONS_SCOPES_HEADER,
+                    OPERATIONS_CONTROL_SCOPE.parse().unwrap(),
+                );
+                assert!(authorize_operations_request_for_scope(
+                    remote,
+                    &headers,
+                    OPERATIONS_CONTROL_SCOPE
+                )
+                .is_ok());
+                assert_eq!(
+                    authorize_operations_request_for_scope(
+                        remote,
+                        &headers,
+                        OPERATIONS_SNAPSHOT_SCOPE
+                    ),
+                    Err(OperationsAccessError::ScopeRequired)
+                );
+            },
+        );
     }
 
     #[test]

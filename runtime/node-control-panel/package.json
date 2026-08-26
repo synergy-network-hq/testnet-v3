@@ -40,7 +40,8 @@
     "test:validator-distribution": "node --test scripts/qa/validator-distribution-contract-test.mjs",
     "test:validator-assignment": "node --test scripts/qa/validator-assignment-contract-test.mjs",
     "test:selected-node-persistence": "node scripts/qa/control-panel-selected-node-persistence-test.mjs",
-    "test:wallet-null-safety": "node --test scripts/qa/wallet-account-null-safety-test.mjs"
+    "test:wallet-null-safety": "node --test scripts/qa/wallet-account-null-safety-test.mjs",
+    "test:validator-operations": "node --test scripts/qa/validator-operations-contract-test.mjs"
   },
   "dependencies": {
     "@rainbow-me/rainbowkit": "^2.2.11",

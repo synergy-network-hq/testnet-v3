@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { fetchValidatorLiveStatus, listenValidatorLiveStatus } from '../../lib/desktopClient';
 import { epochForBlockHeight, validatorNetworkClusterQuorumThreshold } from '../../lib/protocolPolicy';
 import { formatNumber, safeArray, truncateMiddle } from './controlPanelModel';
+import ValidatorOperationsPanel from './ValidatorOperationsPanel';
 
 const REQUIRED_STAKE_SNRG = 50000;
 const REQUIRED_STAKE_NWEI = 50000000000000;
@@ -661,6 +662,7 @@ export default function ValidatorLiveStatusPanel({ node, nodeLive, liveStatus, v
     return (
       <ValidatorStatusBorder status={status}>
         <ValidatorStatusHeadline status={status} streamState={streamState} stale={stale} />
+        <ValidatorOperationsPanel selectedNodeId={node?.id} />
         <div className="validator-live-empty-state">
           <strong>Live validator telemetry unavailable</strong>
           <p>The control-service has not reported validator lifecycle data yet. Once the node is online, this panel will show the actual lifecycle, stake, consensus, and activation evidence.</p>
@@ -672,6 +674,7 @@ export default function ValidatorLiveStatusPanel({ node, nodeLive, liveStatus, v
   return (
     <ValidatorStatusBorder status={status}>
       <ValidatorStatusHeadline status={status} streamState={streamState} stale={stale} />
+      <ValidatorOperationsPanel selectedNodeId={node?.id} />
       <div className="validator-live-summary-grid">
         <StatusCard title="Current State">
           <DetailRow label="Status" value={status.current_status} strong />

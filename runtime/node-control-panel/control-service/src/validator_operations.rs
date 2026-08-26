@@ -7,6 +7,26 @@ pub const VALIDATOR_OPERATIONS_SNAPSHOT_RELATIVE_PATH: &str =
 pub const MAX_VALIDATOR_OPERATIONS_SNAPSHOT_BYTES: u64 = 1024 * 1024;
 pub const DEFAULT_MAX_SYNC_GAP: u64 = 1;
 pub const DEFAULT_FINALITY_STALL_AFTER_MS: u64 = 30_000;
+pub const REQUIRED_HOST_PREFLIGHT_CHECK_IDS: &[&str] = &[
+    "genesis_hash",
+    "chain_id",
+    "network",
+    "release_id",
+    "release_tag",
+    "binary_sha256",
+    "core_revision",
+    "synq_revision",
+    "aegis_revision",
+    "validator_config",
+    "key_binding",
+    "validator_registry",
+    "protected_pipeline_config",
+    "etdag_roots",
+    "vpn_reachability",
+    "peer_readiness",
+    "storage",
+    "clock_sync",
+];
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -78,6 +98,53 @@ pub enum ValidatorHealthClass {
     Offline,
     Misconfigured,
     ReleaseMismatch,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ValidatorLifecycleAction {
+    Start,
+    Stop,
+    Restart,
+}
+
+impl ValidatorLifecycleAction {
+    pub fn as_nodectl_action(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Stop => "stop",
+            Self::Restart => "restart",
+        }
+    }
+
+    pub fn requires_preflight(self) -> bool {
+        !matches!(self, Self::Stop)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum StructuredLogSeverity {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+    Critical,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum StructuredLogSubsystem {
+    Service,
+    Network,
+    Consensus,
+    Finality,
+    Posy,
+    ProtectedPipeline,
+    Storage,
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -215,6 +282,74 @@ pub struct ValidatorPreflightCheck {
     pub detail: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HostPreflightStatus {
+    pub schema_version: String,
+    pub validator_id: String,
+    pub generated_at_utc: String,
+    pub ready: bool,
+    pub required_check_ids: Vec<String>,
+    pub checks: Vec<ValidatorPreflightCheck>,
+    pub blocking_check_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ValidatorLifecycleRequest {
+    pub action: ValidatorLifecycleAction,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ValidatorLifecycleResult {
+    pub schema_version: String,
+    pub validator_id: String,
+    pub action: ValidatorLifecycleAction,
+    pub accepted: bool,
+    pub exit_code: i32,
+    pub executed_at_utc: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StructuredLogEntry {
+    pub sequence: u64,
+    pub observed_at_utc: String,
+    pub severity: StructuredLogSeverity,
+    pub subsystem: StructuredLogSubsystem,
+    pub message: String,
+    pub redacted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StructuredLogsResponse {
+    pub schema_version: String,
+    pub validator_id: String,
+    pub generated_at_utc: String,
+    pub entries: Vec<StructuredLogEntry>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DiagnosticSnapshot {
+    pub schema_version: String,
+    pub snapshot_id: String,
+    pub captured_at_utc: String,
+    pub validator_id: String,
+    pub status: ValidatorOperationsStatus,
+    pub preflight: HostPreflightStatus,
+    pub logs: StructuredLogsResponse,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiagnosticSnapshotResult {
+    pub schema_version: String,
+    pub snapshot_id: String,
+    pub validator_id: String,
+    pub captured_at_utc: String,
+    pub relative_path: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ValidatorOperationsObservation {
@@ -342,14 +477,52 @@ pub fn evaluate_validator_operations(
     }
 }
 
+pub fn evaluate_host_preflight(status: &ValidatorOperationsStatus) -> HostPreflightStatus {
+    let by_id = status
+        .preflight
+        .iter()
+        .map(|check| (check.id.as_str(), check.status))
+        .collect::<BTreeMap<_, _>>();
+    let mut blocking_check_ids = REQUIRED_HOST_PREFLIGHT_CHECK_IDS
+        .iter()
+        .filter(|id| by_id.get(**id) != Some(&PreflightCheckStatus::Pass))
+        .map(|id| (*id).to_string())
+        .collect::<Vec<_>>();
+    if !status.release_consistency.matches_expected {
+        blocking_check_ids.push("release_consistency".to_string());
+    }
+    blocking_check_ids.sort();
+    blocking_check_ids.dedup();
+
+    HostPreflightStatus {
+        schema_version: VALIDATOR_OPERATIONS_SCHEMA_VERSION.to_string(),
+        validator_id: status.discovery.validator_id.clone(),
+        generated_at_utc: status.generated_at_utc.clone(),
+        ready: blocking_check_ids.is_empty(),
+        required_check_ids: REQUIRED_HOST_PREFLIGHT_CHECK_IDS
+            .iter()
+            .map(|id| (*id).to_string())
+            .collect(),
+        checks: status.preflight.clone(),
+        blocking_check_ids,
+    }
+}
+
 pub fn evaluate_validator_cluster(
     observations: Vec<ValidatorOperationsObservation>,
-    mut unavailable_validator_ids: Vec<String>,
+    unavailable_validator_ids: Vec<String>,
 ) -> ValidatorOperationsClusterStatus {
-    let mut validators = observations
+    let validators = observations
         .into_iter()
         .map(evaluate_validator_operations)
         .collect::<Vec<_>>();
+    aggregate_validator_statuses(validators, unavailable_validator_ids)
+}
+
+pub fn aggregate_validator_statuses(
+    mut validators: Vec<ValidatorOperationsStatus>,
+    mut unavailable_validator_ids: Vec<String>,
+) -> ValidatorOperationsClusterStatus {
     validators.sort_by(|left, right| {
         left.discovery
             .validator_id
@@ -1031,6 +1204,21 @@ where
 mod tests {
     use super::*;
 
+    #[derive(Deserialize)]
+    struct FiveValidatorFixture {
+        validator_ids: Vec<String>,
+        release_mismatch_validator_id: String,
+        first_missing_transition_validator_id: String,
+        base_observation: ValidatorOperationsObservation,
+    }
+
+    fn five_validator_fixture() -> FiveValidatorFixture {
+        serde_json::from_str(include_str!(
+            "../fixtures/validator-operations/five-validator-observations.json"
+        ))
+        .expect("five-validator operations fixture")
+    }
+
     fn release(id: &str, byte: char) -> ReleaseIdentity {
         ReleaseIdentity {
             release_id: id.to_string(),
@@ -1151,6 +1339,134 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(first.health.classification, ValidatorHealthClass::Healthy);
         assert!(first.liveness.first_missing_transition.is_none());
+    }
+
+    #[test]
+    fn five_validator_fixture_covers_fanout_status_and_diagnostics() {
+        let fixture = five_validator_fixture();
+        assert_eq!(fixture.validator_ids.len(), 5);
+        let observations = fixture
+            .validator_ids
+            .iter()
+            .map(|id| {
+                let mut observation = fixture.base_observation.clone();
+                observation.discovery.validator_id = id.clone();
+                observation.discovery.hostname = format!("{id}.testnet-v3");
+                if id == &fixture.release_mismatch_validator_id {
+                    observation.release.binary_sha256 = "b".repeat(64);
+                }
+                if id == &fixture.first_missing_transition_validator_id {
+                    observation.protected_pipeline.phase = ProtectedPipelinePhase::Revealing;
+                    observation.protected_pipeline.reveal_share_count = 2;
+                    observation.protected_pipeline.execution_ready = false;
+                    observation.protected_pipeline.consumed = false;
+                }
+                validate_observation(&observation, Some(id)).expect("fixture observation is valid");
+                observation
+            })
+            .collect::<Vec<_>>();
+
+        let cluster = evaluate_validator_cluster(observations, Vec::new());
+        assert_eq!(cluster.validators.len(), 5);
+        assert_eq!(
+            cluster
+                .validators
+                .iter()
+                .map(|status| status.discovery.validator_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "validator-02",
+                "validator-03",
+                "validator-04",
+                "validator-05",
+                "validator-06"
+            ]
+        );
+        assert_eq!(
+            cluster.release_consistency.mismatched_validator_ids,
+            vec!["validator-04"]
+        );
+        for status in &cluster.validators {
+            assert_eq!(status.release.binary_sha256.len(), 64);
+            assert_eq!(status.service.state, ServiceState::Active);
+            assert_eq!(status.peers.connected_peer_count, 4);
+            assert_eq!(
+                (status.chain.head_height, status.chain.finalized_height),
+                (128, 128)
+            );
+            assert_eq!(
+                (
+                    status.posy.current_view,
+                    status.posy.vc_status,
+                    status.posy.qc_status
+                ),
+                (7, CertificateStatus::Formed, CertificateStatus::Formed)
+            );
+            assert!(status.resources.cpu_percent > 0.0);
+            assert!(status.resources.memory_bytes > 0);
+            assert!(status.service.uptime_seconds > 0);
+        }
+        let stalled = cluster
+            .validators
+            .iter()
+            .find(|status| {
+                status.discovery.validator_id == fixture.first_missing_transition_validator_id
+            })
+            .unwrap();
+        let transition = stalled
+            .liveness
+            .first_missing_transition
+            .as_ref()
+            .expect("first missing transition");
+        assert_eq!(transition.to, "PROTECTED_PIPELINE.EXECUTION_READY");
+        assert!(transition.reason.contains("reveal shares 2/4"));
+        assert_eq!(
+            stalled.protected_pipeline.source,
+            ProtectedPipelineSource::NormalEtdagSteadyState
+        );
+    }
+
+    #[test]
+    fn host_preflight_and_all_lifecycle_actions_are_stable() {
+        let fixture = five_validator_fixture();
+        let status = evaluate_validator_operations(fixture.base_observation);
+        let preflight = evaluate_host_preflight(&status);
+        assert!(preflight.ready);
+        assert_eq!(
+            preflight.required_check_ids.len(),
+            REQUIRED_HOST_PREFLIGHT_CHECK_IDS.len()
+        );
+
+        for (encoded, action, nodectl, requires_preflight) in [
+            (
+                r#"{"action":"START","reason":"operator approved"}"#,
+                ValidatorLifecycleAction::Start,
+                "start",
+                true,
+            ),
+            (
+                r#"{"action":"STOP","reason":"operator approved"}"#,
+                ValidatorLifecycleAction::Stop,
+                "stop",
+                false,
+            ),
+            (
+                r#"{"action":"RESTART","reason":"operator approved"}"#,
+                ValidatorLifecycleAction::Restart,
+                "restart",
+                true,
+            ),
+        ] {
+            let request: ValidatorLifecycleRequest =
+                serde_json::from_str(encoded).expect("lifecycle request");
+            assert_eq!(request.action, action);
+            assert_eq!(request.action.as_nodectl_action(), nodectl);
+            assert_eq!(request.action.requires_preflight(), requires_preflight);
+        }
+        assert!(serde_json::from_str::<ValidatorLifecycleRequest>(
+            r#"{"action":"SHELL","reason":"no"}"#
+        )
+        .is_err());
     }
 
     #[test]
