@@ -54,6 +54,11 @@ const EPOCH_START_HEIGHT: u64 = 1;
 const ROUTER_CAPACITY: usize = 4_096;
 const DRIVER_INGRESS_CAPACITY: usize = 512;
 const MAX_ROUTED_FRAME_BYTES: usize = 1024 * 1024;
+/// The harness asserts the Testnet-v3 block interval contract without
+/// inheriting the 2s release-manifest value.  This is intentionally local to
+/// the qualification process; changing a governed release binding requires
+/// its own authorization.
+const HARNESS_TARGET_BLOCK_TIME_MS: u64 = 500;
 // The autonomous harness runs five concurrent ML-DSA-65 signers and the
 // authenticated ECHO/READY delivery phase before the one ordinary block vote.
 // Keep these finalized, harness-local timings long enough to qualify that
@@ -715,7 +720,7 @@ fn run_worker(validator_index: usize, generation: u64, work_dir: &Path) -> Resul
                 b"mldsa65-core",
             ),
             epoch_start_timestamp_ms: 1_000_000,
-            target_block_time_ms: 2_000,
+            target_block_time_ms: HARNESS_TARGET_BLOCK_TIME_MS,
             app_version: 1,
             execution_version: 1,
             dag_version: 2,
@@ -1350,7 +1355,7 @@ fn finalized_manifest() -> SimplifiedConsensusParameterManifest {
         protected_execution_binding_required: true,
         initial_etdag_activation: POSY_SIMPLIFIED_ETDAG_GOVERNED_GENESIS_BINDING_REQUIRED
             .to_string(),
-        target_block_time_ms: 2_000,
+        target_block_time_ms: HARNESS_TARGET_BLOCK_TIME_MS,
         proposal_timeout_ms: PROPOSAL_TIMEOUT_MS,
         vote_timeout_ms: VOTE_TIMEOUT_MS,
         max_round_timeout_ms: MAX_ROUND_TIMEOUT_MS,
