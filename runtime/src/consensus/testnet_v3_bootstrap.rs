@@ -40,6 +40,8 @@ const GENESIS_EMPTY_ELIGIBLE_SET_DOMAIN: &str =
     "PoSy/ProtectedPipeline/GenesisBootstrap/EligibleSet/v1";
 const GENESIS_EMPTY_ORDER_SEED_DOMAIN: &str =
     "PoSy/ProtectedPipeline/GenesisBootstrap/OrderSeed/v1";
+const GENESIS_BOOTSTRAP_H2_PRIOR_AUTHORITY_DOMAIN: &str =
+    "PoSy/ProtectedPipeline/GenesisBootstrap/H2PriorAuthority/v1";
 pub const PROTECTED_PIPELINE_LOOKAHEAD_HEIGHTS: u64 = 3;
 pub const GENESIS_BOOTSTRAP_FIRST_HEIGHT: Height = Height(1);
 pub const GENESIS_BOOTSTRAP_LAST_HEIGHT: Height = Height(2);
@@ -167,6 +169,51 @@ pub fn normal_etdag_source_finalized_height(target_height: Height) -> Result<Hei
 }
 
 impl TestnetV3GenesisBootstrap {
+    /// Derives the canonical immutable H1/H2 context used by the Genesis
+    /// protected pipeline. Neither height waits for a live PoSy QC: H1 is
+    /// bound to the finalized Genesis transition, while H2 uses a distinct
+    /// deterministic authority derived from that same Genesis anchor.
+    pub fn derive_genesis_bootstrap_height_context(
+        &self,
+        protocol_config: &ProtocolConfig,
+        genesis_anchor: Hash,
+        height: Height,
+    ) -> Result<HeightConsensusContext, String> {
+        if genesis_anchor.is_zero() {
+            return Err("Genesis bootstrap height context requires final Genesis anchor".into());
+        }
+        if protected_batch_source_for_height(height)? != ProtectedBatchSource::GenesisBootstrap {
+            return Err(format!(
+                "Genesis bootstrap context is forbidden at H{}; H3+ requires normal ETDAG",
+                height.0
+            ));
+        }
+        let prior_finalized_qc_or_transition_root = match height {
+            GENESIS_BOOTSTRAP_FIRST_HEIGHT => self.genesis_transition_root,
+            GENESIS_BOOTSTRAP_LAST_HEIGHT => Hash::from_domain_bytes(
+                GENESIS_BOOTSTRAP_H2_PRIOR_AUTHORITY_DOMAIN,
+                &genesis_anchor.0,
+            ),
+            _ => unreachable!("bootstrap source check already restricts H1/H2"),
+        };
+        HeightConsensusContext::derive(
+            HeightConsensusContextSpec {
+                protocol_version: POSY_PROTOCOL_VERSION.to_string(),
+                height,
+                epoch: Epoch(0),
+                assigned_cluster_id: ClusterId(0),
+                cluster_schedule_version: TESTNET_V3_CLUSTER_SCHEDULE_VERSION.to_string(),
+                finalized_epoch_seed_root: self.finalized_epoch_seed_root,
+                assigned_height_schedule_root: self.assigned_height_schedule_root(height.0),
+                cryptographic_profile_root: self.cryptographic_profile_root,
+                prior_finalized_qc_or_transition_root,
+            },
+            &self.validator_set,
+            &self.cluster_map,
+            protocol_config,
+        )
+    }
+
     /// Returns a distinct schedule root for a height derived solely from the
     /// finalized Genesis commitment.  It is not an imported snapshot.
     pub fn assigned_height_schedule_root(&self, height: u64) -> Hash {

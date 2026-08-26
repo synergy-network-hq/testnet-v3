@@ -17,6 +17,7 @@ use crate::consensus::consensus_fork;
 use crate::consensus::dao_governance::{DAOGovernance, SynergyOracle};
 use crate::consensus::dual_quorum::{EntropyBeacon, ValidatorRotation};
 use crate::consensus::posy::LocalConsensusContext;
+use crate::consensus::protected_pipeline_runtime::GenesisBootstrapProtectedExecutionSource;
 use crate::consensus::self_realign::{
     expected_genesis_hash, persisted_recovery_state, RealignmentState,
 };
@@ -33,8 +34,9 @@ use crate::consensus::simplified_posy::{
     DurableSimplifiedProtectedExecutionTransitionAuthorityVerifier,
     DurableSimplifiedProtectedMaterialAuthority,
     DurableSimplifiedProtectedMaterialAuthorityConfiguration,
-    DurableVerifiedSimplifiedProposalSource, FinalizedBlockRecord, GenesisFinalityReference,
-    P2pSimplifiedConsensusEgress, QuorumCertificateReference, SimplifiedActivatedMaterialAdapter,
+    CoordinatedProtectedExecutionInputSource, DurableVerifiedSimplifiedProposalSource,
+    FinalizedBlockRecord, GenesisFinalityReference, P2pSimplifiedConsensusEgress,
+    QuorumCertificateReference, SimplifiedActivatedMaterialAdapter,
     SimplifiedCoreMaterialAdapter, SimplifiedCoreMaterialConfiguration, SimplifiedDriverTiming,
     SimplifiedEpochContext, SimplifiedFinalityEnvironment, SimplifiedFinalityParent,
     SimplifiedParentFeeMarketState, SimplifiedPosyDriver, SimplifiedPreviousEpochFinalityReplay,
@@ -85,7 +87,8 @@ use crate::sxcp;
 use crate::sync::SyncManager;
 use crate::synergy_types::{
     AegisPqKeyId, AegisPqKeyRole, BlockHeader, CanonicalSerialize, ClusterMap, Hash, Height,
-    ValidatorId, ValidatorSet, SYNERGY_TESTNET_V3_CHAIN_ID, TESTNET_V3_CANONICAL_NETWORK_ID,
+    ProtocolConfig, ValidatorId, ValidatorSet, SYNERGY_TESTNET_V3_CHAIN_ID,
+    TESTNET_V3_CANONICAL_NETWORK_ID,
 };
 use crate::telemetry;
 use crate::testnet_v3_execution_bootstrap::load_finalized_testnet_v3_genesis_execution_state;
@@ -2530,6 +2533,35 @@ fn build_simplified_v3_transition_runtime_finality_at_depth(
     })
 }
 
+/// Creates the two immutable, immediately-ready bootstrap inputs before the
+/// simplified driver begins proposing. H3 and later are deliberately absent:
+/// they must be registered by the normal durable ETDAG coordinator.
+fn build_genesis_bootstrap_protected_input_source(
+    genesis: &GenesisDocument,
+) -> Result<CoordinatedProtectedExecutionInputSource, String> {
+    let bootstrap = load_testnet_v3_genesis_bootstrap(genesis)?;
+    let genesis_anchor = Hash::from_hex(genesis.hash())
+        .map_err(|error| format!("decode canonical Genesis anchor: {error}"))?;
+    let protocol_config = ProtocolConfig::testnet_v3();
+    let source = CoordinatedProtectedExecutionInputSource::new();
+    for height in [Height(1), Height(2)] {
+        let context = bootstrap.derive_genesis_bootstrap_height_context(
+            &protocol_config,
+            genesis_anchor,
+            height,
+        )?;
+        let material = bootstrap.derive_genesis_bootstrap_protected_material(
+            &protocol_config,
+            genesis_anchor,
+            &context,
+        )?;
+        let bootstrap_source = GenesisBootstrapProtectedExecutionSource::new(material)
+            .map_err(|error| format!("validate canonical H{} protected bootstrap: {error}", height.0))?;
+        source.register_genesis_bootstrap(height, bootstrap_source)?;
+    }
+    Ok(source)
+}
+
 /// Starts the authenticated simplified v3 driver from finalized activation
 /// state. The Genesis-committed governed ETDAG artifacts issue the protected
 /// adapter capability; no default or deferred compatibility path exists.
@@ -2594,6 +2626,10 @@ fn spawn_finalized_simplified_posy_driver(
             .fee_market_params,
     )?;
     let material_mode = select_simplified_material_mode(etdag_activation_permit.as_ref());
+    let mut bootstrap_protected_input_source =
+        (material_mode == SimplifiedMaterialMode::Protected)
+            .then(|| build_genesis_bootstrap_protected_input_source(&genesis))
+            .transpose()?;
     let genesis_execution_state = load_finalized_testnet_v3_genesis_execution_state(genesis)
         .map_err(|error| format!("load finalized Genesis execution state: {error}"))?;
     let genesis_runtime_metadata = simplified_genesis_runtime_metadata(genesis.value())?;
@@ -2774,28 +2810,35 @@ fn spawn_finalized_simplified_posy_driver(
     let material_adapter: SimplifiedActivatedMaterialAdapter<
         DurableSimplifiedProtectedMaterialAuthority,
     > = if material_mode == SimplifiedMaterialMode::Protected {
-        SimplifiedActivatedMaterialAdapter::Protected(SimplifiedProtectedMaterialAdapter::new(
-            epoch_context.clone(),
-            protected_inputs.clone(),
-            SimplifiedProtectedMaterialConfiguration {
-                verifier: crypto.verifier.clone(),
-                validator_set: validator_set.clone(),
-                etdag_cluster_map: cluster_map.clone(),
-                consensus_parameter_root,
-                etdag_parameters: etdag_parameters.clone(),
-                cryptographic_profile_root,
-                epoch_start_timestamp_ms,
-                target_block_time_ms,
-                app_version: runtime_metadata.app_version,
-                execution_version: runtime_metadata.execution_version,
-                dag_version: runtime_metadata.dag_version,
-                aegis_pqvm_version: runtime_metadata.aegis_pqvm_version.clone(),
-            },
-            protected_authority
-                .as_ref()
-                .ok_or_else(|| "protected material authority is unavailable".to_string())?
-                .clone(),
-        )?)
+        SimplifiedActivatedMaterialAdapter::Protected(
+            SimplifiedProtectedMaterialAdapter::new(
+                epoch_context.clone(),
+                protected_inputs.clone(),
+                SimplifiedProtectedMaterialConfiguration {
+                    verifier: crypto.verifier.clone(),
+                    validator_set: validator_set.clone(),
+                    etdag_cluster_map: cluster_map.clone(),
+                    consensus_parameter_root,
+                    etdag_parameters: etdag_parameters.clone(),
+                    cryptographic_profile_root,
+                    epoch_start_timestamp_ms,
+                    target_block_time_ms,
+                    app_version: runtime_metadata.app_version,
+                    execution_version: runtime_metadata.execution_version,
+                    dag_version: runtime_metadata.dag_version,
+                    aegis_pqvm_version: runtime_metadata.aegis_pqvm_version.clone(),
+                },
+                protected_authority
+                    .as_ref()
+                    .ok_or_else(|| "protected material authority is unavailable".to_string())?
+                    .clone(),
+            )?
+            .with_protected_pipeline_source(
+                bootstrap_protected_input_source.take().ok_or_else(|| {
+                    "protected runtime has no canonical Genesis bootstrap input source".to_string()
+                })?,
+            ),
+        )
     } else {
         SimplifiedActivatedMaterialAdapter::Core(SimplifiedCoreMaterialAdapter::new(
             epoch_context.clone(),
