@@ -1431,8 +1431,29 @@ mod tests {
             .expect("canonical bootstrap is immediately available");
         assert_eq!(input, material.execution_input);
         assert_eq!(input.next_commitment, material.next_commitment);
+
+        let h2_context = bootstrap
+            .derive_genesis_bootstrap_height_context(&protocol, genesis_anchor, Height(2))
+            .expect("derive canonical H2 context");
+        let h2_material = bootstrap
+            .derive_genesis_bootstrap_protected_material(&protocol, genesis_anchor, &h2_context)
+            .expect("derive canonical H2 protected material");
+        bridge
+            .register_genesis_bootstrap(
+                Height(2),
+                GenesisBootstrapProtectedExecutionSource::new(h2_material.clone())
+                    .expect("validate canonical H2 bootstrap source"),
+            )
+            .expect("register H2 bootstrap source");
+        assert_eq!(
+            bridge
+                .load_ready_execution_input(Height(2))
+                .expect("load H2 protected input")
+                .expect("canonical H2 bootstrap is immediately available"),
+            h2_material.execution_input
+        );
         assert!(bridge
-            .load_ready_execution_input(Height(2))
+            .load_ready_execution_input(Height(3))
             .unwrap_err()
             .contains("PROTECTED_PIPELINE_EXECUTION_INPUT_NOT_READY"));
     }
