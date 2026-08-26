@@ -1,5 +1,4 @@
 use std::any::Any;
-use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -25,13 +24,11 @@ use crate::consensus::signing_authority::DurableConsensusSigningAuthority;
 #[cfg(test)]
 use crate::consensus::simplified_posy::FailClosedSimplifiedTransitionAuthorityVerifier;
 use crate::consensus::simplified_posy::{
-    install_simplified_consensus_ingress, install_simplified_target_admission_producer_handler,
-    load_genesis_bound_simplified_activation, prepare_simplified_target_admission_h3,
-    remove_simplified_consensus_ingress, remove_simplified_target_admission_producer_handler,
-    run_simplified_posy_driver, select_consensus_profile_at_height,
-    select_consensus_profile_from_verified_v3_transition, validate_simplified_driver_activation,
-    ConsensusProfileAtHeight, ConsensusSignatureVerifier, DurableSimplifiedEpochTransitionStore,
-    DurableSimplifiedFinalitySink, DurableSimplifiedIngressKemRegistrySource,
+    install_simplified_consensus_ingress, load_genesis_bound_simplified_activation,
+    remove_simplified_consensus_ingress, run_simplified_posy_driver,
+    select_consensus_profile_at_height, select_consensus_profile_from_verified_v3_transition,
+    validate_simplified_driver_activation, ConsensusProfileAtHeight, ConsensusSignatureVerifier,
+    DurableSimplifiedEpochTransitionStore, DurableSimplifiedFinalitySink,
     DurableSimplifiedPosyStore, DurableSimplifiedProposalMaterialStore,
     DurableSimplifiedProtectedExecutionTransitionAuthorityVerifier,
     DurableSimplifiedProtectedMaterialAuthority,
@@ -42,9 +39,7 @@ use crate::consensus::simplified_posy::{
     SimplifiedEpochContext, SimplifiedFinalityEnvironment, SimplifiedFinalityParent,
     SimplifiedParentFeeMarketState, SimplifiedPosyDriver, SimplifiedPreviousEpochFinalityReplay,
     SimplifiedProtectedMaterialAdapter, SimplifiedProtectedMaterialConfiguration,
-    SimplifiedTargetAdmissionConfiguration, SimplifiedTargetAdmissionOutput,
-    SimplifiedTargetAdmissionProducer, SimplifiedTransitionAuthorityVerifier,
-    VerifiedSimplifiedEpochTransition,
+    SimplifiedTransitionAuthorityVerifier, VerifiedSimplifiedEpochTransition,
 };
 use crate::consensus::synergy_score::SynergyScoreCalculator;
 use crate::consensus::testnet_v3_bootstrap::load_testnet_v3_genesis_bootstrap;
@@ -2097,7 +2092,6 @@ fn spawn_finalized_typed_posy_driver(
 
 struct SimplifiedCryptoAuthority {
     signer: AegisPqvmSigner,
-    target_admission_signer: AegisPqvmSigner,
     verifier: AegisPqvmVerifier,
     local_validator_id: ValidatorId,
     local_key_id: AegisPqKeyId,
@@ -2301,17 +2295,6 @@ fn build_simplified_crypto_authority(
     ];
     let mut signer = AegisPqvmSigner::initialize_required()
         .map_err(|error| format!("initialize simplified Aegis signer: {error}"))?;
-    let mut target_admission_signer = AegisPqvmSigner::initialize_required()
-        .map_err(|error| format!("initialize simplified target-admission signer: {error}"))?;
-    let target_admission_key_id = target_admission_signer
-        .register_existing_keypair(
-            &local.validator_uma_id.0,
-            public_key.clone(),
-            private_key.clone(),
-            roles.clone(),
-            epoch_context.epoch,
-        )
-        .map_err(|error| format!("import simplified target-admission key: {error}"))?;
     let local_key_id = signer
         .register_existing_keypair(
             &local.validator_uma_id.0,
@@ -2324,17 +2307,10 @@ fn build_simplified_crypto_authority(
     if local_key_id != local.consensus_public_key.key_id {
         return Err("simplified signer registered a different frozen key ID".to_string());
     }
-    if target_admission_key_id != local_key_id {
-        return Err(
-            "simplified target-admission signer registered a different frozen key ID".to_string(),
-        );
-    }
-
     let verifier = build_simplified_consensus_verifier(epoch_context, validator_set)?;
 
     Ok(SimplifiedCryptoAuthority {
         signer,
-        target_admission_signer,
         verifier,
         local_validator_id: local.validator_id.clone(),
         local_key_id,
@@ -2385,74 +2361,6 @@ struct SimplifiedV3TransitionRuntimeFinality {
     certified_parent_header: BlockHeader,
     boundary_execution_state: crate::execution::ExecutionState,
     previous_replay: SimplifiedPreviousEpochFinalityReplay,
-}
-
-fn simplified_target_admission_wire_message(
-    output: SimplifiedTargetAdmissionOutput,
-) -> (
-    Height,
-    crate::p2p::messages::SimplifiedTargetAdmissionMessage,
-) {
-    match output {
-        SimplifiedTargetAdmissionOutput::Vote(request) => (
-            request.context.target_height,
-            crate::p2p::messages::SimplifiedTargetAdmissionMessage::Vote { request },
-        ),
-        SimplifiedTargetAdmissionOutput::CertifiedPackage(package) => (
-            package.context.target_height,
-            crate::p2p::messages::SimplifiedTargetAdmissionMessage::CertifiedPackage { package },
-        ),
-    }
-}
-
-fn run_simplified_target_admission_worker(
-    initial_outputs: Vec<SimplifiedTargetAdmissionOutput>,
-    network: &p2p::networking::P2PNetwork,
-    frozen_validator_ids: &std::collections::BTreeSet<ValidatorId>,
-    running: &AtomicBool,
-) -> Result<(), String> {
-    const PREPARE_INTERVAL: Duration = Duration::from_millis(500);
-    const REBROADCAST_INTERVAL: Duration = Duration::from_secs(5);
-
-    let mut pending_outputs = initial_outputs;
-    let mut last_broadcast = BTreeMap::<(Height, Hash), Instant>::new();
-    while running.load(Ordering::Acquire) {
-        if pending_outputs.is_empty() {
-            match prepare_simplified_target_admission_h3() {
-                Ok(outputs) => pending_outputs = outputs,
-                Err(error) if error.contains("producer is busy; ingress rejected") => {
-                    thread::sleep(PREPARE_INTERVAL);
-                    continue;
-                }
-                Err(error) => return Err(error),
-            }
-        }
-
-        let now = Instant::now();
-        for output in pending_outputs.drain(..) {
-            let (target_height, message) = simplified_target_admission_wire_message(output);
-            let canonical = serde_json::to_vec(&message)
-                .map_err(|error| format!("serialize target-admission output: {error}"))?;
-            let message_id = Hash::from_domain_bytes(
-                "SYNERGY_POSY_SIMPLIFIED_TARGET_ADMISSION_WIRE_V1",
-                &canonical,
-            );
-            last_broadcast.retain(|(height, _), _| *height == target_height);
-            if last_broadcast
-                .get(&(target_height, message_id))
-                .is_some_and(|last| now.saturating_duration_since(*last) < REBROADCAST_INTERVAL)
-            {
-                continue;
-            }
-            let sent =
-                network.broadcast_simplified_target_admission(&message, frozen_validator_ids)?;
-            if sent > 0 {
-                last_broadcast.insert((target_height, message_id), now);
-            }
-        }
-        thread::sleep(PREPARE_INTERVAL);
-    }
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2924,42 +2832,6 @@ fn spawn_finalized_simplified_posy_driver(
     } else {
         None
     };
-    let target_admission_runtime = if material_mode == SimplifiedMaterialMode::Protected {
-        let configuration = SimplifiedTargetAdmissionConfiguration {
-            epoch_context: epoch_context.clone(),
-            validator_set: validator_set.clone(),
-            cluster_map: cluster_map.clone(),
-            verifier: crypto.verifier.clone(),
-            cryptographic_profile_root,
-        };
-        let frozen_validator_ids = validator_set
-            .active_for_epoch(epoch_context.epoch)
-            .validators
-            .into_iter()
-            .map(|validator| validator.validator_id)
-            .collect::<std::collections::BTreeSet<_>>();
-        let mut producer = SimplifiedTargetAdmissionProducer::new_process_wide(
-            configuration,
-            crypto.local_validator_id.clone(),
-            Arc::new(Mutex::new(crypto.target_admission_signer)),
-            Box::new(
-                protected_authority
-                    .as_ref()
-                    .ok_or_else(|| "protected material authority is unavailable".to_string())?
-                    .clone(),
-            ),
-            Box::new(DurableSimplifiedIngressKemRegistrySource::process_wide(
-                epoch_context.root()?,
-            )?),
-        )?;
-        // This is a startup preflight as well as the first durable production
-        // step. An active protected profile must not start unless the exact
-        // public H+3 ML-KEM registry is already provisioned.
-        let initial_outputs = producer.prepare_h3()?;
-        Some((producer, initial_outputs, frozen_validator_ids))
-    } else {
-        None
-    };
     let proposal_source = DurableVerifiedSimplifiedProposalSource::new(
         epoch_context.clone(),
         material_store,
@@ -3033,62 +2905,12 @@ fn spawn_finalized_simplified_posy_driver(
         }
     };
 
+    // The R11 protected pipeline derives its H+3 target context from finalized
+    // PoSy authority.  Startup deliberately installs no target-admission vote
+    // collector, certificate assembler, or independently scheduled worker.
+    // Compatibility decoders may retain the old wire shapes, but there is no
+    // process-local handler capable of signing or producing them.
     let fatal_error = Arc::new(Mutex::new(None));
-    let mut auxiliary_handles = Vec::new();
-    if let Some((producer, initial_outputs, frozen_validator_ids)) = target_admission_runtime {
-        if let Err(error) = install_simplified_target_admission_producer_handler(producer) {
-            let _ = remove_simplified_consensus_ingress();
-            if etdag_ingress_installed {
-                let _ = remove_etdag_certified_input_ingress();
-            }
-            remove_finalized_execution_state_snapshot();
-            return Err(format!(
-                "install simplified target-admission producer: {error}"
-            ));
-        }
-        let target_worker_error = Arc::clone(&fatal_error);
-        let target_worker_running = Arc::clone(&running);
-        let target_network = Arc::clone(&network);
-        let target_handle = match thread::Builder::new()
-            .name("simplified-posy-target-admission".to_string())
-            .spawn(move || {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run_simplified_target_admission_worker(
-                        initial_outputs,
-                        &target_network,
-                        &frozen_validator_ids,
-                        &target_worker_running,
-                    )
-                }));
-                let failure = match result {
-                    Ok(Ok(_)) => None,
-                    Ok(Err(error)) => Some(error),
-                    Err(_) => Some("simplified target-admission worker panicked".to_string()),
-                };
-                if let Some(error) = failure {
-                    eprintln!("Simplified target-admission worker failed closed: {error}");
-                    if let Ok(mut slot) = target_worker_error.lock() {
-                        if slot.is_none() {
-                            *slot = Some(error);
-                        }
-                    }
-                    target_worker_running.store(false, Ordering::Release);
-                }
-                let _ = remove_simplified_target_admission_producer_handler();
-            }) {
-            Ok(handle) => handle,
-            Err(error) => {
-                let _ = remove_simplified_target_admission_producer_handler();
-                let _ = remove_simplified_consensus_ingress();
-                if etdag_ingress_installed {
-                    let _ = remove_etdag_certified_input_ingress();
-                }
-                remove_finalized_execution_state_snapshot();
-                return Err(format!("spawn simplified target-admission worker: {error}"));
-            }
-        };
-        auxiliary_handles.push(target_handle);
-    }
 
     let worker_error = Arc::clone(&fatal_error);
     let worker_running = Arc::clone(&running);
@@ -3119,9 +2941,6 @@ fn spawn_finalized_simplified_posy_driver(
         Ok(handle) => handle,
         Err(error) => {
             running.store(false, Ordering::Release);
-            for auxiliary_handle in auxiliary_handles.drain(..) {
-                let _ = auxiliary_handle.join();
-            }
             let _ = remove_simplified_consensus_ingress();
             if etdag_ingress_installed {
                 let _ = remove_etdag_certified_input_ingress();
@@ -3132,7 +2951,7 @@ fn spawn_finalized_simplified_posy_driver(
     };
     Ok(FinalizedPosyWorker {
         handle,
-        auxiliary_handles,
+        auxiliary_handles: Vec::new(),
         fatal_error,
     })
 }
@@ -6033,11 +5852,20 @@ mod tests {
     }
 
     #[test]
-    fn production_role_runtime_has_no_inherited_consensus_constructor() {
+    fn production_role_runtime_has_only_the_simplified_posy_authority() {
         let source = include_str!("role_runtime.rs");
         let inherited_dual_quorum_constructor = ["DualQuorumConsensus", "::"].concat();
         let inherited_posy_constructor = ["ProofOfSynergy", "::new"].concat();
         let inherited_role_startup = ["spawn_consensus_engine", "("].concat();
+        let target_admission_producer =
+            ["SimplifiedTargetAdmissionProducer", "::new_process_wide"].concat();
+        let target_admission_handler =
+            ["install_simplified_target_admission_", "producer_handler"].concat();
+        let target_admission_worker = ["simplified-posy-target-", "admission"].concat();
+        let old_dcc = ["DagCut", "Certificate"].concat();
+        let old_bvc = ["BatchValidation", "Certificate"].concat();
+        let old_boc = ["BatchOrder", "Certificate"].concat();
+        let old_btc = ["BatchTimeout", "Certificate"].concat();
         let retired_typed_dispatcher = [
             "FinalizedConsensusDriverStartup",
             "::",
@@ -6057,6 +5885,19 @@ mod tests {
         assert!(
             !source.contains(&inherited_role_startup),
             "the production role runtime must not retain the legacy consensus startup path"
+        );
+        assert!(
+            !source.contains(&target_admission_producer)
+                && !source.contains(&target_admission_handler)
+                && !source.contains(&target_admission_worker),
+            "the production role runtime must not construct the retired target-admission vote/certificate worker"
+        );
+        assert!(
+            !source.contains(&old_dcc)
+                && !source.contains(&old_bvc)
+                && !source.contains(&old_boc)
+                && !source.contains(&old_btc),
+            "the production role runtime must not directly dispatch the old DCC/BVC/BOC/BTC certificate pipeline"
         );
         assert!(
             !source.contains(&retired_typed_dispatcher),
