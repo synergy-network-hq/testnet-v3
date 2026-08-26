@@ -376,6 +376,15 @@ impl GenesisBootstrapProtectedExecutionSource {
             || material.execution_input.source != ProtectedBatchSource::GenesisBootstrap
             || material.execution_input.protected_batch != material.protected_batch
             || material.execution_input.next_commitment != material.next_commitment
+            || material.protected_batch.protected_count != 0
+            || material.protected_batch.protected_gas != 0
+            || material.protected_batch.protected_bytes != 0
+            || !material.protected_batch.ordered_transaction_ids.is_empty()
+            || material.execution_input.cut_proof.is_some()
+            || material.execution_input.reveal_authorization.is_some()
+            || !material.execution_input.envelopes.is_empty()
+            || !material.execution_input.reveal_shares.is_empty()
+            || !material.execution_input.ordered_transactions.is_empty()
         {
             return Err(invalid(
                 "PROTECTED_BOOTSTRAP_INPUT_INVALID",
@@ -392,6 +401,14 @@ impl GenesisBootstrapProtectedExecutionSource {
                 ));
             }
         }
+        material
+            .next_commitment
+            .validate_against_batch(&material.protected_batch)
+            .map_err(|error| invalid("PROTECTED_BOOTSTRAP_COMMITMENT_INVALID", error))?;
+        material
+            .execution_input
+            .digest()
+            .map_err(|error| invalid("PROTECTED_BOOTSTRAP_INPUT_INVALID", error))?;
         Ok(Self { material })
     }
 
