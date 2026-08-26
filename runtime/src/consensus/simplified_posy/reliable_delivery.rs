@@ -12,8 +12,10 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     CertifiedCandidateSubject, ConsensusObjectContext, ConsensusSignatureVerifier,
-    SimplifiedEpochContext, POSY_SIMPLIFIED_MIN_VALIDATOR_COUNT,
+    SimplifiedEpochContext, VerifiedSimplifiedProposalMaterial,
+    POSY_SIMPLIFIED_MIN_VALIDATOR_COUNT,
 };
+use crate::etdag::EtdagDigest;
 use crate::synergy_types::{
     AegisPqKeyId, AegisPqSignature, Hash, Round, ValidatorId, ValidatorRecord, ValidatorSet,
 };
@@ -25,6 +27,152 @@ pub const POSY_SIMPLIFIED_PROPOSAL_READY_DOMAIN: &str = "PoSy/Consensus/v3/Propo
 /// Durable serialization format for reliable-delivery state.
 pub const POSY_SIMPLIFIED_RELIABLE_DELIVERY_FORMAT: &str =
     "synergy-posy-simplified-reliable-delivery-v2";
+/// Canonical n-1 ECHO proof format used as the PoSy proposal VC.
+pub const POSY_SIMPLIFIED_PROPOSAL_VC_FORMAT: &str = "synergy-posy-simplified-proposal-vc-v1";
+/// Domain for the exact authenticated proposal VC proof bundle.
+pub const POSY_SIMPLIFIED_PROPOSAL_VC_DOMAIN: &str =
+    "PoSy/Consensus/v3/ProposalValidationCertificate";
+
+/// Canonical n-1 authenticated ECHO proof for one exact proposal view and
+/// proposal-authenticated next protected-batch commitment.
+///
+/// The candidate identity is stable across retransmission rounds, while
+/// `context.round` binds this proof to the exact PoSy view in which its ECHOs
+/// were signed. READY statements are deliberately absent and cannot be
+/// converted into this certificate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PosyProposalValidationCertificate {
+    pub format: String,
+    pub context: ConsensusObjectContext,
+    pub candidate: CertifiedCandidateSubject,
+    pub next_protected_batch_commitment_root: EtdagDigest,
+    pub echoes: Vec<ReliableDeliveryStatement>,
+}
+
+impl PosyProposalValidationCertificate {
+    /// Stable semantic identity shared by every valid n-1 signer subset.
+    pub fn semantic_candidate_id(&self) -> Result<Hash, String> {
+        self.candidate.id()
+    }
+
+    /// Root of this exact canonical ECHO evidence bundle.
+    pub fn proof_root(&self) -> Result<EtdagDigest, String> {
+        EtdagDigest::from_canonical(POSY_SIMPLIFIED_PROPOSAL_VC_DOMAIN, self)
+    }
+
+    /// Construct and authenticate the canonical n-1 subset. Extra valid ECHOs
+    /// do not change the semantic candidate identity and are deterministically
+    /// omitted by validator ID.
+    pub fn from_authenticated_echoes<V: ConsensusSignatureVerifier>(
+        context: ConsensusObjectContext,
+        candidate: CertifiedCandidateSubject,
+        material: &VerifiedSimplifiedProposalMaterial,
+        mut echoes: Vec<ReliableDeliveryStatement>,
+        epoch_context: &SimplifiedEpochContext,
+        validator_set: &ValidatorSet,
+        verifier: &V,
+    ) -> Result<Self, String> {
+        let next_commitment = material
+            .next_protected_batch_commitment
+            .as_ref()
+            .ok_or_else(|| "proposal VC material has no protected-batch commitment".to_string())?;
+        if material.candidate_subject != candidate {
+            return Err("proposal VC material names another proposal candidate".to_string());
+        }
+        let thresholds =
+            ReliableDeliveryThresholds::for_validator_count(epoch_context.leader_ring.len())?;
+        echoes.sort_by(|left, right| left.validator_id.cmp(&right.validator_id));
+        if echoes.len() < thresholds.echo {
+            return Err(format!(
+                "proposal VC has {} ECHOs, requires {}",
+                echoes.len(),
+                thresholds.echo
+            ));
+        }
+        echoes.truncate(thresholds.echo);
+        let certificate = Self {
+            format: POSY_SIMPLIFIED_PROPOSAL_VC_FORMAT.to_string(),
+            context,
+            candidate,
+            next_protected_batch_commitment_root: next_commitment.root()?,
+            echoes,
+        };
+        certificate.validate_authenticated(material, epoch_context, validator_set, verifier)?;
+        Ok(certificate)
+    }
+
+    /// Independently validate the exact view, candidate, commitment, frozen
+    /// validator identities, canonical n-1 subset, and every ECHO signature.
+    pub fn validate_authenticated<V: ConsensusSignatureVerifier>(
+        &self,
+        material: &VerifiedSimplifiedProposalMaterial,
+        epoch_context: &SimplifiedEpochContext,
+        validator_set: &ValidatorSet,
+        verifier: &V,
+    ) -> Result<(), String> {
+        let commitment = material
+            .next_protected_batch_commitment
+            .as_ref()
+            .ok_or_else(|| "proposal VC material has no protected-batch commitment".to_string())?;
+        if material.candidate_subject != self.candidate
+            || material.stable_candidate_id != self.candidate.id()?
+        {
+            return Err("proposal VC material names another proposal candidate".to_string());
+        }
+        self.validate_authenticated_binding(commitment, epoch_context, validator_set, verifier)
+    }
+
+    fn validate_authenticated_binding<V: ConsensusSignatureVerifier>(
+        &self,
+        commitment: &crate::etdag::NextProtectedBatchCommitment,
+        epoch_context: &SimplifiedEpochContext,
+        validator_set: &ValidatorSet,
+        verifier: &V,
+    ) -> Result<(), String> {
+        if self.format != POSY_SIMPLIFIED_PROPOSAL_VC_FORMAT {
+            return Err("unsupported proposal VC format".to_string());
+        }
+        self.context.validate_against(epoch_context)?;
+        epoch_context.validate_against(validator_set)?;
+        let mut stable_context = self.context.clone();
+        stable_context.round = Round(0);
+        if self.candidate.context != stable_context {
+            return Err("proposal VC candidate or view binding mismatch".to_string());
+        }
+        if commitment.target_height != self.context.height
+            || commitment.epoch != self.context.epoch
+            || self.next_protected_batch_commitment_root != commitment.root()?
+        {
+            return Err("proposal VC protected commitment binding mismatch".to_string());
+        }
+        let threshold =
+            ReliableDeliveryThresholds::for_validator_count(epoch_context.leader_ring.len())?.echo;
+        if self.echoes.len() != threshold {
+            return Err(format!(
+                "proposal VC must contain exactly {threshold} canonical ECHOs"
+            ));
+        }
+        let mut previous_validator: Option<&ValidatorId> = None;
+        for echo in &self.echoes {
+            if previous_validator.is_some_and(|previous| previous >= &echo.validator_id) {
+                return Err("proposal VC ECHOs are duplicate or noncanonical".to_string());
+            }
+            previous_validator = Some(&echo.validator_id);
+            if echo.phase != ReliableDeliveryPhase::Echo
+                || echo.context != self.context
+                || echo.candidate != self.candidate
+            {
+                return Err(
+                    "proposal VC contains a non-ECHO or differently bound statement".to_string(),
+                );
+            }
+            verify_statement(echo, epoch_context, validator_set, verifier)?;
+        }
+        self.proof_root()?.validate("proposal VC proof root")?;
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ReliableDeliveryThresholds {
@@ -278,6 +426,40 @@ impl ReliableDeliveryState {
                 "persisted local reliable-delivery authorization lacks its signed statement"
                     .to_string()
             })
+    }
+
+    /// Return the canonical authenticated n-1 ECHO proof for the exact
+    /// proposal material once the threshold exists. READY delivery is not
+    /// consulted and cannot authorize protected reveal.
+    pub fn proposal_validation_certificate<V: ConsensusSignatureVerifier>(
+        &self,
+        material: &VerifiedSimplifiedProposalMaterial,
+        epoch_context: &SimplifiedEpochContext,
+        validator_set: &ValidatorSet,
+        verifier: &V,
+    ) -> Result<Option<PosyProposalValidationCertificate>, String> {
+        self.validate_authenticated(epoch_context, validator_set, verifier)?;
+        let candidate = material.candidate_subject.clone();
+        self.require_candidate_slot(&candidate)?;
+        let candidate_key = candidate.id()?.to_hex();
+        let echoes = self
+            .echoes
+            .get(&candidate_key)
+            .map(|statements| statements.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        if echoes.len() < self.thresholds()?.echo {
+            return Ok(None);
+        }
+        PosyProposalValidationCertificate::from_authenticated_echoes(
+            self.context.clone(),
+            candidate,
+            material,
+            echoes,
+            epoch_context,
+            validator_set,
+            verifier,
+        )
+        .map(Some)
     }
 
     /// Registers a proposal candidate before authorizing the local ECHO.
@@ -536,6 +718,7 @@ mod tests {
         QuorumCertificateReference, SimplifiedFinalityParent, POSY_SIMPLIFIED_PROTOCOL_VERSION,
     };
     use crate::consensus_parameters::ConsensusParameterRoot;
+    use crate::etdag::{NextProtectedBatchCommitment, PROTECTED_PIPELINE_VERSION};
     use crate::synergy_types::{
         AegisPqPublicKey, BlockId, ClusterId, Epoch, Height, Round, UmaId, ValidatorStatus,
         TESTNET_V3_CONSENSUS_SIGNATURE_ALGORITHM, TESTNET_V3_MLDSA65_PUBLIC_KEY_BYTES,
@@ -660,6 +843,51 @@ mod tests {
         statement
     }
 
+    fn next_commitment(context: &ConsensusObjectContext) -> NextProtectedBatchCommitment {
+        NextProtectedBatchCommitment {
+            commitment_version: PROTECTED_PIPELINE_VERSION,
+            chain_id: context.chain_id,
+            network_id: context.network_id.clone(),
+            protocol_version: context.protocol_version.clone(),
+            epoch: context.epoch,
+            target_height: context.height,
+            cluster_id: ClusterId(0),
+            target_context_root: Hash::from_domain_bytes("vc-test", b"target-context"),
+            validator_set_commitment: context.active_validator_set_root,
+            parameter_root: ConsensusParameterRoot::from_hex(&context.consensus_parameter_root)
+                .unwrap(),
+            cut_root: EtdagDigest::from_domain_bytes("vc-test", b"cut"),
+            eligible_set_root: EtdagDigest::from_domain_bytes("vc-test", b"eligible"),
+            order_seed: EtdagDigest::from_domain_bytes("vc-test", b"seed"),
+            order_root: EtdagDigest::from_domain_bytes("vc-test", b"order"),
+            protected_batch_root: EtdagDigest::from_domain_bytes("vc-test", b"batch"),
+            protected_count: 1,
+            protected_gas: 10,
+            protected_bytes: 20,
+        }
+    }
+
+    fn proposal_vc(
+        context: &ConsensusObjectContext,
+        candidate: &CertifiedCandidateSubject,
+        validators: &ValidatorSet,
+    ) -> PosyProposalValidationCertificate {
+        PosyProposalValidationCertificate {
+            format: POSY_SIMPLIFIED_PROPOSAL_VC_FORMAT.to_string(),
+            context: context.clone(),
+            candidate: candidate.clone(),
+            next_protected_batch_commitment_root: next_commitment(context).root().unwrap(),
+            echoes: validators
+                .validators
+                .iter()
+                .take(4)
+                .map(|validator| {
+                    statement(context, candidate, validator, ReliableDeliveryPhase::Echo)
+                })
+                .collect(),
+        }
+    }
+
     #[test]
     fn five_validator_thresholds_derive_from_the_frozen_epoch() {
         let validators = validators(5);
@@ -740,6 +968,106 @@ mod tests {
             }
         }
         state.validate(&epoch_context).unwrap();
+    }
+
+    #[test]
+    fn n_minus_one_echo_proof_is_the_exact_proposal_vc() {
+        let validators = validators(5);
+        let epoch_context = epoch_context(&validators);
+        let context = context(&epoch_context);
+        let candidate = candidate(&context, "vc");
+        let certificate = proposal_vc(&context, &candidate, &validators);
+
+        certificate
+            .validate_authenticated_binding(
+                &next_commitment(&context),
+                &epoch_context,
+                &validators,
+                &TestVerifier,
+            )
+            .unwrap();
+        assert_eq!(
+            certificate.semantic_candidate_id().unwrap(),
+            candidate.id().unwrap()
+        );
+        assert!(!certificate.proof_root().unwrap().is_zero());
+    }
+
+    #[test]
+    fn proposal_vc_rejects_wrong_view_proposal_or_commitment() {
+        let validators = validators(5);
+        let epoch_context = epoch_context(&validators);
+        let context = context(&epoch_context);
+        let candidate_subject = candidate(&context, "vc-bound");
+        let certificate = proposal_vc(&context, &candidate_subject, &validators);
+
+        let mut wrong_view = certificate.clone();
+        wrong_view.context.round = Round(1);
+        assert!(wrong_view
+            .validate_authenticated_binding(
+                &next_commitment(&context),
+                &epoch_context,
+                &validators,
+                &TestVerifier,
+            )
+            .unwrap_err()
+            .contains("view"));
+
+        let mut wrong_proposal = certificate.clone();
+        wrong_proposal.candidate = candidate(&context, "another-proposal");
+        assert!(wrong_proposal
+            .validate_authenticated_binding(
+                &next_commitment(&context),
+                &epoch_context,
+                &validators,
+                &TestVerifier,
+            )
+            .is_err());
+
+        let mut wrong_commitment = next_commitment(&context);
+        wrong_commitment.protected_batch_root =
+            EtdagDigest::from_domain_bytes("vc-test", b"wrong-batch");
+        assert!(certificate
+            .validate_authenticated_binding(
+                &wrong_commitment,
+                &epoch_context,
+                &validators,
+                &TestVerifier,
+            )
+            .unwrap_err()
+            .contains("commitment"));
+    }
+
+    #[test]
+    fn ready_only_proof_never_becomes_a_proposal_vc() {
+        let validators = validators(5);
+        let epoch_context = epoch_context(&validators);
+        let context = context(&epoch_context);
+        let candidate = candidate(&context, "ready-only");
+        let mut certificate = proposal_vc(&context, &candidate, &validators);
+        certificate.echoes = validators
+            .validators
+            .iter()
+            .take(4)
+            .map(|validator| {
+                statement(
+                    &context,
+                    &candidate,
+                    validator,
+                    ReliableDeliveryPhase::Ready,
+                )
+            })
+            .collect();
+
+        assert!(certificate
+            .validate_authenticated_binding(
+                &next_commitment(&context),
+                &epoch_context,
+                &validators,
+                &TestVerifier,
+            )
+            .unwrap_err()
+            .contains("non-ECHO"));
     }
 
     #[test]
