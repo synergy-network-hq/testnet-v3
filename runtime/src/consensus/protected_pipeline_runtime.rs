@@ -279,6 +279,48 @@ impl ProtectedPipelineRuntime {
         })
     }
 
+    /// Return this coordinator's one target-bound, concrete ready input.
+    ///
+    /// The simplified proposal builder knows the target before it derives the
+    /// header commitment, so it cannot safely provide that commitment as a
+    /// lookup key.  This method is intentionally scoped to a coordinator that
+    /// is already permanently bound to one target; callers must still bind the
+    /// returned commitment into the candidate header during construction.
+    /// It never exposes a naked root or an input from a different target.
+    pub fn load_ready_execution_input_for_target(
+        &self,
+    ) -> ProtectedPipelineResult<Option<DeterministicProtectedExecutionInput>> {
+        self.with_pipeline(|pipeline| {
+            let record = pipeline.record();
+            if record.phase < ProtectedPipelinePhase::ReadyForExecution {
+                return Ok(None);
+            }
+            let input = record.execution_input.as_ref().ok_or_else(|| {
+                corrupt(
+                    "PROTECTED_RUNTIME_READY_INPUT_MISSING",
+                    "READY_FOR_EXECUTION record has no concrete execution input",
+                )
+            })?;
+            if input.source != self.source
+                || !matches!(
+                    &input.target_context,
+                    crate::etdag::ProtectedExecutionTargetContext::NormalEtdag {
+                        admission_context
+                    } if admission_context == &self.target
+                )
+                || record.next_commitment.as_ref() != Some(&input.next_commitment)
+                || record.protected_batch.as_ref() != Some(&input.protected_batch)
+                || record.cut_proof.as_ref() != input.cut_proof.as_ref()
+            {
+                return Err(conflict(
+                    "PROTECTED_RUNTIME_TARGET_INPUT_CONFLICT",
+                    "ready input is not the exact durable concrete input for this target",
+                ));
+            }
+            Ok(Some(input.clone()))
+        })
+    }
+
     /// Publish the exact ready input, if any.  Repeated publication is safe as
     /// long as the destination honors the documented idempotency contract.
     pub fn publish_ready_execution_input(
@@ -427,6 +469,16 @@ impl GenesisBootstrapProtectedExecutionSource {
                 "PoSy bootstrap request does not match the canonical H1/H2 commitment",
             ));
         }
+        Ok(Some(self.material.execution_input.clone()))
+    }
+
+    /// Return the one canonical bootstrap input retained for this source.
+    /// This is target-bound by construction and is used before proposal
+    /// construction derives the header commitment.  H3+ cannot instantiate
+    /// this source, and the input remains fully concrete (never root-only).
+    pub fn load_ready_execution_input_for_target(
+        &self,
+    ) -> ProtectedPipelineResult<Option<DeterministicProtectedExecutionInput>> {
         Ok(Some(self.material.execution_input.clone()))
     }
 }
