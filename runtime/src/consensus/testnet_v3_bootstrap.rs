@@ -1241,6 +1241,22 @@ mod tests {
     }
 
     #[test]
+    fn genesis_bootstrap_context_accepts_the_finalized_parameter_root_directly() {
+        let (bootstrap, protocol, genesis_anchor) = protected_bootstrap_fixture();
+        let through_config = bootstrap
+            .derive_genesis_bootstrap_height_context(&protocol, genesis_anchor, Height(1))
+            .expect("derive H1 through finalized protocol configuration");
+        let through_root = bootstrap
+            .derive_genesis_bootstrap_height_context_from_parameter_root(
+                protocol.hash().expect("finalized parameter root"),
+                genesis_anchor,
+                Height(1),
+            )
+            .expect("derive H1 directly through finalized parameter root");
+        assert_eq!(through_root, through_config);
+    }
+
+    #[test]
     fn bootstrap_material_binds_parameters_and_validator_set() {
         let (bootstrap, protocol, genesis_anchor) = protected_bootstrap_fixture();
         let context = target_context(&bootstrap, &protocol, Height(1));
