@@ -96,6 +96,10 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::runtime::{Builder as TokioRuntimeBuilder, Runtime as TokioRuntime};
 
+#[path = "protected_ciphertext_store.rs"]
+mod protected_ciphertext_store;
+pub use protected_ciphertext_store::DurableProtectedCiphertextStore;
+
 #[cfg(test)]
 thread_local! {
     static TEST_COMMIT_VERIFIER_VALIDATOR_MANAGER: RefCell<Option<Arc<ValidatorManager>>> =
@@ -3483,6 +3487,9 @@ fn etdag_ingress_peer_for_session(
 const MAX_PROTECTED_PIPELINE_DEDUP_OBJECTS: usize = 4_096;
 const MAX_PROTECTED_PIPELINE_PENDING_REVEAL_SHARES: usize = 256;
 const MAX_PROTECTED_PIPELINE_STARTUP_STAGING: usize = 256;
+const MAX_PROTECTED_PIPELINE_RECOVERY_ATTEMPTS: u8 = 8;
+const PROTECTED_PIPELINE_RECOVERY_RETRY_MILLIS: u64 = 250;
+const MAX_PROTECTED_PIPELINE_RECOVERY_FLIGHTS: usize = 4_096;
 
 /// One authenticated semantic evidence delivery from P2P to the authoritative
 /// ProtectedPipeline runtime coordinator.  This envelope is intentionally
@@ -3514,6 +3521,8 @@ struct ProtectedPipelineEvidenceIngress {
     seen_order: VecDeque<EtdagDigest>,
     seen_messages: BTreeSet<EtdagDigest>,
     message_order: VecDeque<EtdagDigest>,
+    request_last_served: BTreeMap<EtdagDigest, Instant>,
+    request_order: VecDeque<EtdagDigest>,
     reveal_authorizations: BTreeSet<EtdagDigest>,
     pending_reveal_shares: BTreeMap<EtdagDigest, Vec<ProtectedPipelineEvidenceEnvelope>>,
 }
@@ -3521,6 +3530,76 @@ struct ProtectedPipelineEvidenceIngress {
 static PROTECTED_PIPELINE_EVIDENCE_INGRESS: OnceLock<
     Mutex<Option<ProtectedPipelineEvidenceIngress>>,
 > = OnceLock::new();
+
+static PROTECTED_CIPHERTEXT_STORE: OnceLock<Mutex<Option<DurableProtectedCiphertextStore>>> =
+    OnceLock::new();
+
+#[derive(Debug, Clone)]
+struct ProtectedPipelineRecoveryFlight {
+    target_height: crate::synergy_types::Height,
+    target_context_root: crate::synergy_types::Hash,
+    semantic_id: EtdagDigest,
+    attempts: u8,
+    last_attempt: Option<Instant>,
+}
+
+static PROTECTED_PIPELINE_RECOVERY_FLIGHTS: OnceLock<
+    Mutex<BTreeMap<EtdagDigest, ProtectedPipelineRecoveryFlight>>,
+> = OnceLock::new();
+
+fn protected_ciphertext_store() -> &'static Mutex<Option<DurableProtectedCiphertextStore>> {
+    PROTECTED_CIPHERTEXT_STORE.get_or_init(|| Mutex::new(None))
+}
+
+fn protected_pipeline_recovery_flights(
+) -> &'static Mutex<BTreeMap<EtdagDigest, ProtectedPipelineRecoveryFlight>> {
+    PROTECTED_PIPELINE_RECOVERY_FLIGHTS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// Installs the one restart-safe authority for exact encrypted material before
+/// protected P2P ingress starts. Replacing it in-process is rejected so a
+/// target cannot silently switch persistence roots.
+pub fn install_protected_ciphertext_store(
+    store: DurableProtectedCiphertextStore,
+) -> Result<(), String> {
+    let mut slot = protected_ciphertext_store()
+        .lock()
+        .map_err(|_| "protected ciphertext store lock is poisoned".to_string())?;
+    if slot.is_some() {
+        return Err("protected ciphertext store is already installed".to_string());
+    }
+    *slot = Some(store);
+    Ok(())
+}
+
+/// Removes the process-wide store during an orderly role shutdown. Durable
+/// records remain on disk and are available when the same directory is opened
+/// after restart.
+pub fn remove_protected_ciphertext_store() -> Result<(), String> {
+    *protected_ciphertext_store()
+        .lock()
+        .map_err(|_| "protected ciphertext store lock is poisoned".to_string())? = None;
+    protected_pipeline_recovery_flights()
+        .lock()
+        .map_err(|_| "protected recovery-flight lock is poisoned".to_string())?
+        .clear();
+    Ok(())
+}
+
+/// Loads the exact authenticated submission matching a transaction commitment.
+/// The durable store revalidates canonical bytes, object identity, roots, and
+/// the wallet outer signature on every load before returning it.
+pub fn load_protected_ciphertext_material(
+    semantic_id: &EtdagDigest,
+) -> Result<Option<ProtectedPipelineSemanticObject>, String> {
+    let slot = protected_ciphertext_store()
+        .lock()
+        .map_err(|_| "protected ciphertext store lock is poisoned".to_string())?;
+    let store = slot
+        .as_ref()
+        .ok_or_else(|| "protected ciphertext store is not installed".to_string())?;
+    store.load(semantic_id)
+}
 
 fn protected_pipeline_evidence_ingress() -> &'static Mutex<Option<ProtectedPipelineEvidenceIngress>>
 {
@@ -3540,6 +3619,8 @@ pub fn install_protected_pipeline_evidence_ingress(
         seen_order: VecDeque::new(),
         seen_messages: BTreeSet::new(),
         message_order: VecDeque::new(),
+        request_last_served: BTreeMap::new(),
+        request_order: VecDeque::new(),
         reveal_authorizations: BTreeSet::new(),
         pending_reveal_shares: BTreeMap::new(),
     });
@@ -3566,7 +3647,6 @@ pub fn flush_protected_pipeline_evidence_ingress() -> Result<usize, String> {
     flush_protected_pipeline_startup_staging(ingress)
 }
 
-#[cfg(test)]
 pub fn remove_protected_pipeline_evidence_ingress() -> Result<(), String> {
     *protected_pipeline_evidence_ingress()
         .lock()
@@ -3582,11 +3662,18 @@ pub fn dispatch_protected_pipeline_evidence_message(
     peer_address: &str,
     authenticated_peer: Option<EtdagAuthenticatedIngressPeer>,
     message: ProtectedPipelineEvidenceMessage,
-) -> Result<(), String> {
+) -> Result<Option<ProtectedPipelineEvidenceMessage>, String> {
     validate_protected_pipeline_evidence_message(&message)?;
     let authenticated_peer = authenticated_peer.ok_or_else(|| {
         "protected-pipeline evidence requires an authenticated validator peer".to_string()
     })?;
+    if matches!(
+        &message,
+        ProtectedPipelineEvidenceMessage::MissingObjectsRequest { .. }
+    ) {
+        return respond_to_protected_missing_objects_request(&authenticated_peer, &message);
+    }
+    persist_exact_ciphertext_objects(&message)?;
     let envelope = ProtectedPipelineEvidenceEnvelope {
         peer_address: peer_address.to_string(),
         authenticated_peer,
@@ -3602,6 +3689,8 @@ pub fn dispatch_protected_pipeline_evidence_message(
         seen_order: VecDeque::new(),
         seen_messages: BTreeSet::new(),
         message_order: VecDeque::new(),
+        request_last_served: BTreeMap::new(),
+        request_order: VecDeque::new(),
         reveal_authorizations: BTreeSet::new(),
         pending_reveal_shares: BTreeMap::new(),
     });
@@ -3632,7 +3721,7 @@ pub fn dispatch_protected_pipeline_evidence_message(
                 .flatten()
                 .any(|pending| message_semantic_ids(&pending.message).first() == Some(&semantic_id))
         {
-            return Ok(());
+            return Ok(None);
         }
         if pending_count >= MAX_PROTECTED_PIPELINE_PENDING_REVEAL_SHARES {
             return Err(
@@ -3644,13 +3733,201 @@ pub fn dispatch_protected_pipeline_evidence_message(
             .entry(authorization_id)
             .or_default()
             .push(envelope);
-        return Ok(());
+        return Ok(None);
     }
 
     validate_message_reveal_authorizations(ingress, &envelope.message)?;
 
+    let recovered_ids = message_semantic_ids(&envelope.message);
     enqueue_protected_pipeline_envelope(ingress, envelope)?;
-    flush_authorized_pending_reveals(ingress)
+    flush_authorized_pending_reveals(ingress)?;
+    mark_recovered_objects(&recovered_ids)?;
+    Ok(None)
+}
+
+fn respond_to_protected_missing_objects_request(
+    authenticated_peer: &EtdagAuthenticatedIngressPeer,
+    message: &ProtectedPipelineEvidenceMessage,
+) -> Result<Option<ProtectedPipelineEvidenceMessage>, String> {
+    let message_id = message_dedup_id(message)?;
+    let mut request_binding =
+        Vec::with_capacity(authenticated_peer.validator_id.0.len() + message_id.0.len() + 16);
+    request_binding.extend_from_slice(authenticated_peer.validator_id.0.as_bytes());
+    request_binding.extend_from_slice(message_id.0.as_bytes());
+    let dedup_id = EtdagDigest::from_domain_bytes(
+        "PoSy/ProtectedPipeline/PeerRecoveryRequestId/v1",
+        &request_binding,
+    );
+    {
+        let mut slot = protected_pipeline_evidence_ingress()
+            .lock()
+            .map_err(|_| "protected-pipeline evidence ingress lock is poisoned".to_string())?;
+        let ingress = slot.get_or_insert_with(|| ProtectedPipelineEvidenceIngress {
+            coordinator: None,
+            startup_staging: VecDeque::new(),
+            seen_objects: BTreeMap::new(),
+            seen_order: VecDeque::new(),
+            seen_messages: BTreeSet::new(),
+            message_order: VecDeque::new(),
+            request_last_served: BTreeMap::new(),
+            request_order: VecDeque::new(),
+            reveal_authorizations: BTreeSet::new(),
+            pending_reveal_shares: BTreeMap::new(),
+        });
+        let now = Instant::now();
+        if ingress
+            .request_last_served
+            .get(&dedup_id)
+            .is_some_and(|last| {
+                now.duration_since(*last)
+                    < Duration::from_millis(PROTECTED_PIPELINE_RECOVERY_RETRY_MILLIS)
+            })
+        {
+            return Ok(None);
+        }
+        if ingress
+            .request_last_served
+            .insert(dedup_id.clone(), now)
+            .is_none()
+        {
+            ingress.request_order.push_back(dedup_id);
+        }
+        while ingress.request_order.len() > MAX_PROTECTED_PIPELINE_DEDUP_OBJECTS {
+            if let Some(expired) = ingress.request_order.pop_front() {
+                ingress.request_last_served.remove(&expired);
+            }
+        }
+    }
+    let durable_objects = durable_ciphertext_response_objects(message)?;
+    let slot = protected_pipeline_evidence_ingress()
+        .lock()
+        .map_err(|_| "protected-pipeline evidence ingress lock is poisoned".to_string())?;
+    let ingress = slot
+        .as_ref()
+        .ok_or_else(|| "protected-pipeline evidence ingress disappeared".to_string())?;
+    local_missing_objects_response(ingress, message, durable_objects)
+}
+
+fn send_protected_pipeline_response_for_session(
+    connected_peers: &PeersArc,
+    peer_state_cache: &PeerStateCacheArc,
+    peer_address: &str,
+    session_id: u64,
+    response: ProtectedPipelineEvidenceMessage,
+) -> Result<bool, String> {
+    validate_protected_pipeline_evidence_message(&response)?;
+    let wire_message = NetworkMessage::ProtectedPipelineEvidence {
+        message: response,
+        chain_incarnation: canonical_chain_incarnation(),
+        genesis_hash: canonical_genesis_hash(),
+    };
+    send_peer_message_for_session(
+        connected_peers,
+        peer_state_cache,
+        peer_address,
+        session_id,
+        &wire_message,
+        Duration::from_millis(CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS),
+        "protected-pipeline-recovery-response",
+    )
+}
+
+fn persist_exact_ciphertext_objects(
+    message: &ProtectedPipelineEvidenceMessage,
+) -> Result<(), String> {
+    if !message_objects(message)
+        .iter()
+        .any(|object| object.encrypted_submission().is_some())
+    {
+        return Ok(());
+    }
+    let slot = protected_ciphertext_store()
+        .lock()
+        .map_err(|_| "protected ciphertext store lock is poisoned".to_string())?;
+    let store = slot.as_ref().ok_or_else(|| {
+        "protected ciphertext material arrived before durable store installation".to_string()
+    })?;
+    for object in message_objects(message) {
+        if object.encrypted_submission().is_some() {
+            store.install(object)?;
+        }
+    }
+    Ok(())
+}
+
+fn durable_ciphertext_response_objects(
+    message: &ProtectedPipelineEvidenceMessage,
+) -> Result<Vec<ProtectedPipelineSemanticObject>, String> {
+    let ProtectedPipelineEvidenceMessage::MissingObjectsRequest {
+        target_height,
+        target_context_root,
+        semantic_ids,
+    } = message
+    else {
+        return Ok(Vec::new());
+    };
+    let slot = protected_ciphertext_store()
+        .lock()
+        .map_err(|_| "protected ciphertext store lock is poisoned".to_string())?;
+    let Some(store) = slot.as_ref() else {
+        return Ok(Vec::new());
+    };
+    store.load_for_target(*target_height, *target_context_root, semantic_ids)
+}
+
+fn local_missing_objects_response(
+    ingress: &ProtectedPipelineEvidenceIngress,
+    message: &ProtectedPipelineEvidenceMessage,
+    durable_objects: Vec<ProtectedPipelineSemanticObject>,
+) -> Result<Option<ProtectedPipelineEvidenceMessage>, String> {
+    let ProtectedPipelineEvidenceMessage::MissingObjectsRequest {
+        target_height,
+        target_context_root,
+        semantic_ids,
+    } = message
+    else {
+        return Ok(None);
+    };
+    let durable = durable_objects
+        .into_iter()
+        .map(|object| (object.declared_semantic_id().clone(), object))
+        .collect::<BTreeMap<_, _>>();
+    let mut objects = Vec::new();
+    for semantic_id in semantic_ids {
+        let object = ingress
+            .seen_objects
+            .get(semantic_id)
+            .cloned()
+            .or_else(|| durable.get(semantic_id).cloned());
+        if let Some(object) = object {
+            if object.target_binding() == (*target_height, *target_context_root) {
+                objects.push(object);
+                if objects.len() == crate::p2p::messages::MAX_PROTECTED_PIPELINE_RESPONSE_OBJECTS {
+                    break;
+                }
+            }
+        }
+    }
+    if objects.is_empty() {
+        return Ok(None);
+    }
+    let response = ProtectedPipelineEvidenceMessage::MissingObjectsResponse {
+        target_height: *target_height,
+        target_context_root: *target_context_root,
+        objects,
+    };
+    validate_protected_pipeline_evidence_message(&response)?;
+    Ok(Some(response))
+}
+
+fn mark_recovered_objects(semantic_ids: &[EtdagDigest]) -> Result<(), String> {
+    let mut flights = protected_pipeline_recovery_flights()
+        .lock()
+        .map_err(|_| "protected recovery-flight lock is poisoned".to_string())?;
+    for semantic_id in semantic_ids {
+        flights.remove(semantic_id);
+    }
+    Ok(())
 }
 
 fn validate_message_reveal_authorizations(
@@ -6708,6 +6985,9 @@ impl P2PNetwork {
             );
         }
         validate_protected_pipeline_evidence_message(message)?;
+        // Local wallet/RPC submissions must become restart-safe before any
+        // peer can certify or request the referenced transaction commitment.
+        persist_exact_ciphertext_objects(message)?;
         if frozen_validator_ids.is_empty() {
             return Err("protected-pipeline frozen egress set is empty".to_string());
         }
@@ -6760,6 +7040,122 @@ impl P2PNetwork {
                     "error" => error
                 ),
             }
+        }
+        Ok(sent)
+    }
+
+    /// Registers and broadcasts a bounded exact-object recovery request.
+    /// Flights survive disconnect/reconnect within the process and are removed
+    /// only when the requested semantic object is validated on ingress.
+    pub fn request_protected_pipeline_objects(
+        &self,
+        target_height: crate::synergy_types::Height,
+        target_context_root: crate::synergy_types::Hash,
+        semantic_ids: Vec<EtdagDigest>,
+        frozen_validator_ids: &BTreeSet<ValidatorId>,
+    ) -> Result<usize, String> {
+        let request = ProtectedPipelineEvidenceMessage::MissingObjectsRequest {
+            target_height,
+            target_context_root,
+            semantic_ids: semantic_ids.clone(),
+        };
+        validate_protected_pipeline_evidence_message(&request)?;
+        {
+            let mut flights = protected_pipeline_recovery_flights()
+                .lock()
+                .map_err(|_| "protected recovery-flight lock is poisoned".to_string())?;
+            let new_count = semantic_ids
+                .iter()
+                .filter(|semantic_id| !flights.contains_key(*semantic_id))
+                .count();
+            if flights.len().saturating_add(new_count) > MAX_PROTECTED_PIPELINE_RECOVERY_FLIGHTS {
+                return Err("protected-pipeline recovery capacity is exhausted".to_string());
+            }
+            for semantic_id in &semantic_ids {
+                if let Some(existing) = flights.get(semantic_id) {
+                    if existing.target_height != target_height
+                        || existing.target_context_root != target_context_root
+                    {
+                        return Err(
+                            "protected semantic id was requested under conflicting targets"
+                                .to_string(),
+                        );
+                    }
+                    if existing.attempts >= MAX_PROTECTED_PIPELINE_RECOVERY_ATTEMPTS {
+                        return Err(
+                            "protected-pipeline recovery retry budget is exhausted".to_string()
+                        );
+                    }
+                }
+            }
+            let now = Instant::now();
+            for semantic_id in semantic_ids {
+                match flights.get_mut(&semantic_id) {
+                    Some(existing) => {
+                        existing.attempts = existing.attempts.saturating_add(1);
+                        existing.last_attempt = Some(now);
+                    }
+                    None => {
+                        flights.insert(
+                            semantic_id.clone(),
+                            ProtectedPipelineRecoveryFlight {
+                                target_height,
+                                target_context_root,
+                                semantic_id,
+                                attempts: 1,
+                                last_attempt: Some(now),
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        self.broadcast_protected_pipeline_evidence(&request, frozen_validator_ids)
+    }
+
+    /// Replays due recovery flights after reconnect or on a coordinator tick.
+    /// The 250 ms floor and eight-attempt ceiling prevent retry amplification;
+    /// batches preserve their immutable target binding.
+    pub fn retry_protected_pipeline_object_requests(
+        &self,
+        frozen_validator_ids: &BTreeSet<ValidatorId>,
+    ) -> Result<usize, String> {
+        let now = Instant::now();
+        let groups = {
+            let flights = protected_pipeline_recovery_flights()
+                .lock()
+                .map_err(|_| "protected recovery-flight lock is poisoned".to_string())?;
+            let mut groups = BTreeMap::<
+                (crate::synergy_types::Height, crate::synergy_types::Hash),
+                Vec<EtdagDigest>,
+            >::new();
+            for flight in flights.values() {
+                if flight.attempts >= MAX_PROTECTED_PIPELINE_RECOVERY_ATTEMPTS {
+                    continue;
+                }
+                if flight.last_attempt.is_some_and(|last| {
+                    now.duration_since(last)
+                        < Duration::from_millis(PROTECTED_PIPELINE_RECOVERY_RETRY_MILLIS)
+                }) {
+                    continue;
+                }
+                let ids = groups
+                    .entry((flight.target_height, flight.target_context_root))
+                    .or_default();
+                if ids.len() < crate::p2p::messages::MAX_PROTECTED_PIPELINE_REQUEST_IDS {
+                    ids.push(flight.semantic_id.clone());
+                }
+            }
+            groups
+        };
+        let mut sent = 0usize;
+        for ((target_height, target_context_root), semantic_ids) in groups {
+            sent = sent.saturating_add(self.request_protected_pipeline_objects(
+                target_height,
+                target_context_root,
+                semantic_ids,
+                frozen_validator_ids,
+            )?);
         }
         Ok(sent)
     }
@@ -9347,17 +9743,34 @@ fn dispatch_peer_message(
                 );
                 return Ok(());
             }
-            if let Err(error) = dispatch_protected_pipeline_evidence_message(
+            match dispatch_protected_pipeline_evidence_message(
                 peer_address,
                 etdag_ingress_peer_for_session(peer_address, session_id),
                 message,
             ) {
-                warn!(
+                Ok(Some(response)) => {
+                    if let Err(error) = send_protected_pipeline_response_for_session(
+                        connected_peers,
+                        peer_state_cache,
+                        peer_address,
+                        session_id,
+                        response,
+                    ) {
+                        warn!(
+                            "p2p",
+                            "Failed to return protected-pipeline recovery response",
+                            "peer" => peer_address.to_string(),
+                            "error" => error
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => warn!(
                     "p2p",
                     "Rejected protected-pipeline evidence",
                     "peer" => peer_address.to_string(),
                     "error" => error
-                );
+                ),
             }
             Ok(())
         }
@@ -10622,17 +11035,34 @@ fn handle_messages(
                             );
                             continue;
                         }
-                        if let Err(error) = dispatch_protected_pipeline_evidence_message(
+                        match dispatch_protected_pipeline_evidence_message(
                             &peer_address,
                             etdag_ingress_peer_for_session(&peer_address, session_id),
                             message,
                         ) {
-                            warn!(
+                            Ok(Some(response)) => {
+                                if let Err(error) = send_protected_pipeline_response_for_session(
+                                    &connected_peers,
+                                    &peer_state_cache,
+                                    &peer_address,
+                                    session_id,
+                                    response,
+                                ) {
+                                    warn!(
+                                        "p2p",
+                                        "Failed to return protected-pipeline recovery response",
+                                        "peer" => peer_address.clone(),
+                                        "error" => error
+                                    );
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(error) => warn!(
                                 "p2p",
                                 "Rejected protected-pipeline evidence",
                                 "peer" => peer_address.clone(),
                                 "error" => error
-                            );
+                            ),
                         }
                     }
                     NetworkMessage::TypedFinalityObserver {
