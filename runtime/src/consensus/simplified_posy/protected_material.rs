@@ -22,14 +22,19 @@ use crate::etdag::{
     canonical_finality_context_digest, target_admission_source_finality_root,
     DeterministicProtectedExecutionInput, EtdagDigest, EtdagParameters,
     EtdagProtectedInputCoordinator, EtdagScheduleNeutralFinalityAuthority,
-    ProtectedExecutionTargetContext, TargetAdmissionContext, ETDAG_PROFILE_ID,
+    ProtectedBatchSource, ProtectedExecutionTargetContext, TargetAdmissionContext, ETDAG_PROFILE_ID,
+};
+use crate::consensus::protected_pipeline_runtime::{
+    GenesisBootstrapProtectedExecutionSource, ProtectedPipelineRuntime,
 };
 use crate::execution::{compute_state_root_after, execute_block, ExecutionState};
 use crate::synergy_types::{
     AegisPqSignature, Block, BlockHeader, BlockId, CanonicalSerialize, ClusterMap, Hash,
     ProtectedBatchCommitment, Transaction, TxId, ValidatorRecord, ValidatorSet,
 };
+use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 pub const POSY_SIMPLIFIED_PROTECTED_BLOCK_VERSION: u32 = 3;
 
@@ -41,6 +46,173 @@ pub trait SimplifiedProtectedExecutionInputSource: Send {
         &mut self,
         height: crate::synergy_types::Height,
     ) -> Result<Option<DeterministicProtectedExecutionInput>, String>;
+}
+
+/// Height-keyed bridge from simplified PoSy to the sole protected-pipeline
+/// authority for that target.  It contains no material of its own: H1/H2 are
+/// served only by the canonical Genesis source and H3+ only by the durable
+/// normal-target coordinator.  A binding cannot be overwritten, which keeps
+/// a restarted proposer from silently switching its protected subset.
+#[derive(Clone, Default)]
+pub struct CoordinatedProtectedExecutionInputSource {
+    bindings: Arc<Mutex<BTreeMap<crate::synergy_types::Height, ProtectedExecutionBinding>>>,
+}
+
+#[derive(Clone)]
+enum ProtectedExecutionBinding {
+    Genesis(GenesisBootstrapProtectedExecutionSource),
+    Normal(ProtectedPipelineRuntime),
+}
+
+impl CoordinatedProtectedExecutionInputSource {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register the immutable H1 or H2 bootstrap authority.  The source has
+    /// already validated its exact Genesis-derived commitment and empty input.
+    pub fn register_genesis_bootstrap(
+        &self,
+        height: crate::synergy_types::Height,
+        source: GenesisBootstrapProtectedExecutionSource,
+    ) -> Result<(), String> {
+        if !matches!(height.0, 1 | 2) {
+            return Err(format!(
+                "PROTECTED_BOOTSTRAP_SOURCE_HEIGHT_INVALID: H{} is not a Genesis bootstrap height",
+                height.0
+            ));
+        }
+        self.register(height, ProtectedExecutionBinding::Genesis(source))
+    }
+
+    /// Register the durable H3+ coordinator for one normal ETDAG target.
+    /// The coordinator owns the record, event reconciliation, and exact
+    /// commitment; this bridge only routes PoSy's height-bound query to it.
+    pub fn register_normal_target(
+        &self,
+        runtime: ProtectedPipelineRuntime,
+    ) -> Result<(), String> {
+        let target = runtime.target();
+        let height = target.target_height;
+        if height.0 < 3
+            || !matches!(
+                runtime.source(),
+                ProtectedBatchSource::NormalEtdag | ProtectedBatchSource::NormalEtdagSteadyState
+            )
+        {
+            return Err(format!(
+                "PROTECTED_NORMAL_SOURCE_TARGET_INVALID: H{} is not a normal ETDAG target",
+                height.0
+            ));
+        }
+        self.register(height, ProtectedExecutionBinding::Normal(runtime))
+    }
+
+    fn register(
+        &self,
+        height: crate::synergy_types::Height,
+        binding: ProtectedExecutionBinding,
+    ) -> Result<(), String> {
+        let mut bindings = self.bindings.lock().map_err(|_| {
+            "PROTECTED_EXECUTION_SOURCE_REGISTRY_POISONED: protected source registry lock is poisoned"
+                .to_string()
+        })?;
+        if bindings.contains_key(&height) {
+            return Err(format!(
+                "PROTECTED_EXECUTION_SOURCE_CONFLICT: H{} already has a protected authority",
+                height.0
+            ));
+        }
+        bindings.insert(height, binding);
+        Ok(())
+    }
+
+    fn binding_for(
+        &self,
+        height: crate::synergy_types::Height,
+    ) -> Result<ProtectedExecutionBinding, String> {
+        self.bindings
+            .lock()
+            .map_err(|_| {
+                "PROTECTED_EXECUTION_SOURCE_REGISTRY_POISONED: protected source registry lock is poisoned"
+                    .to_string()
+            })?
+            .get(&height)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "PROTECTED_PIPELINE_EXECUTION_INPUT_NOT_READY: no height-bound protected authority for H{}",
+                    height.0
+                )
+            })
+    }
+
+    fn validate_loaded_input(
+        height: crate::synergy_types::Height,
+        binding: &ProtectedExecutionBinding,
+        input: &DeterministicProtectedExecutionInput,
+    ) -> Result<(), String> {
+        let (expected_source, expected_normal_target) = match binding {
+            ProtectedExecutionBinding::Genesis(_) => (ProtectedBatchSource::GenesisBootstrap, None),
+            ProtectedExecutionBinding::Normal(runtime) => (runtime.source(), Some(runtime.target())),
+        };
+        if input.source != expected_source
+            || input.next_commitment.target_height != height
+            || input.protected_batch.target_height != height
+        {
+            return Err(format!(
+                "PROTECTED_EXECUTION_SOURCE_BINDING_CONFLICT: H{} source or commitment differs from its coordinator",
+                height.0
+            ));
+        }
+        match (&input.target_context, expected_normal_target) {
+            (ProtectedExecutionTargetContext::GenesisBootstrap { height_context }, None)
+                if matches!(height.0, 1 | 2) && height_context.height == height => {}
+            (ProtectedExecutionTargetContext::NormalEtdag { admission_context }, Some(target))
+                if admission_context == target && admission_context.target_height == height => {}
+            _ => {
+                return Err(format!(
+                    "PROTECTED_EXECUTION_SOURCE_TARGET_CONFLICT: concrete input does not name H{}'s registered target",
+                    height.0
+                ));
+            }
+        }
+        input
+            .next_commitment
+            .validate_against_batch(&input.protected_batch)
+            .map_err(|error| {
+                format!(
+                    "PROTECTED_EXECUTION_SOURCE_COMMITMENT_INVALID: concrete input commitment is invalid: {error}"
+                )
+            })?;
+        input.digest().map_err(|error| {
+            format!(
+                "PROTECTED_EXECUTION_SOURCE_INPUT_INVALID: concrete input digest failed: {error}"
+            )
+        })?;
+        Ok(())
+    }
+}
+
+impl SimplifiedProtectedExecutionInputSource for CoordinatedProtectedExecutionInputSource {
+    fn load_ready_execution_input(
+        &mut self,
+        height: crate::synergy_types::Height,
+    ) -> Result<Option<DeterministicProtectedExecutionInput>, String> {
+        let binding = self.binding_for(height)?;
+        let input = match &binding {
+            ProtectedExecutionBinding::Genesis(source) => source
+                .load_ready_execution_input_for_target()
+                .map_err(|error| format!("PROTECTED_BOOTSTRAP_SOURCE_LOOKUP_FAILED: {error}"))?,
+            ProtectedExecutionBinding::Normal(runtime) => runtime
+                .load_ready_execution_input_for_target()
+                .map_err(|error| format!("PROTECTED_RUNTIME_SOURCE_LOOKUP_FAILED: {error}"))?,
+        };
+        if let Some(input) = &input {
+            Self::validate_loaded_input(height, &binding, input)?;
+        }
+        Ok(input)
+    }
 }
 
 pub(super) fn header_protected_batch(
@@ -1122,8 +1294,14 @@ mod tests {
         DurableSimplifiedProposalMaterialStore, QuorumCertificateReference,
         SimplifiedCoreMaterialConfiguration,
     };
+    use crate::consensus::protected_pipeline_runtime::GenesisBootstrapProtectedExecutionSource;
+    use crate::consensus::testnet_v3_bootstrap::load_testnet_v3_genesis_bootstrap;
     use crate::etdag::tests::{complete_r11_execution_input, fixture};
-    use crate::synergy_types::{Epoch, Height, Round};
+    use crate::genesis::canonical_genesis;
+    use crate::synergy_types::{
+        ClusterId, Epoch, Height, HeightConsensusContext, HeightConsensusContextSpec,
+        ProtocolConfig, Round, POSY_PROTOCOL_VERSION, TESTNET_V3_CLUSTER_SCHEDULE_VERSION,
+    };
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1207,6 +1385,56 @@ mod tests {
             gas_used: 0,
             fee_market_version: parameters.fee_market_version,
         }
+    }
+
+    #[test]
+    fn coordinated_source_serves_only_the_registered_canonical_h1_bootstrap_input() {
+        let genesis = canonical_genesis().expect("load canonical Testnet-v3 Genesis");
+        let bootstrap =
+            load_testnet_v3_genesis_bootstrap(genesis).expect("load typed Genesis bootstrap");
+        let protocol = ProtocolConfig::testnet_v3();
+        let height_context = HeightConsensusContext::derive(
+            HeightConsensusContextSpec {
+                protocol_version: POSY_PROTOCOL_VERSION.to_string(),
+                height: Height(1),
+                epoch: Epoch(0),
+                assigned_cluster_id: ClusterId(0),
+                cluster_schedule_version: TESTNET_V3_CLUSTER_SCHEDULE_VERSION.to_string(),
+                finalized_epoch_seed_root: bootstrap.finalized_epoch_seed_root,
+                assigned_height_schedule_root: bootstrap.assigned_height_schedule_root(1),
+                cryptographic_profile_root: bootstrap.cryptographic_profile_root,
+                prior_finalized_qc_or_transition_root: bootstrap.genesis_transition_root,
+            },
+            &bootstrap.validator_set,
+            &bootstrap.cluster_map,
+            &protocol,
+        )
+        .expect("derive H1 context");
+        let genesis_anchor = Hash::from_hex(genesis.hash()).expect("decode Genesis anchor");
+        let material = bootstrap
+            .derive_genesis_bootstrap_protected_material(&protocol, genesis_anchor, &height_context)
+            .expect("derive canonical H1 protected material");
+        let source = GenesisBootstrapProtectedExecutionSource::new(material.clone())
+            .expect("validate canonical bootstrap source");
+        let mut bridge = CoordinatedProtectedExecutionInputSource::new();
+        bridge
+            .register_genesis_bootstrap(Height(1), source.clone())
+            .expect("register H1 bootstrap source");
+        assert!(bridge
+            .register_genesis_bootstrap(Height(1), source)
+            .unwrap_err()
+            .contains("PROTECTED_EXECUTION_SOURCE_CONFLICT"));
+
+        let input = bridge
+            .load_ready_execution_input(Height(1))
+            .expect("load H1 protected input")
+            .expect("canonical bootstrap is immediately available");
+        assert_eq!(input, material.execution_input);
+        assert_eq!(input.next_commitment, material.next_commitment);
+        assert!(bridge
+            .load_ready_execution_input(Height(2))
+            .unwrap_err()
+            .contains("PROTECTED_PIPELINE_EXECUTION_INPUT_NOT_READY"));
     }
 
     fn setup(_label: &str, install_protected: bool) -> TestSetup {
