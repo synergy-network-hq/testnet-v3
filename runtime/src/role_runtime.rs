@@ -86,9 +86,8 @@ use crate::rpc::rpc_server::{SHARED_CHAIN, SYNC_MANAGER, TX_POOL};
 use crate::sxcp;
 use crate::sync::SyncManager;
 use crate::synergy_types::{
-    AegisPqKeyId, AegisPqKeyRole, BlockHeader, CanonicalSerialize, ClusterMap, Hash, Height,
-    ProtocolConfig, ValidatorId, ValidatorSet, SYNERGY_TESTNET_V3_CHAIN_ID,
-    TESTNET_V3_CANONICAL_NETWORK_ID,
+    AegisPqKeyId, AegisPqKeyRole, BlockHeader, ClusterMap, Hash, Height, ProtocolConfig,
+    ValidatorId, ValidatorSet, SYNERGY_TESTNET_V3_CHAIN_ID, TESTNET_V3_CANONICAL_NETWORK_ID,
 };
 use crate::telemetry;
 use crate::testnet_v3_execution_bootstrap::load_finalized_testnet_v3_genesis_execution_state;
