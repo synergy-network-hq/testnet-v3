@@ -28,9 +28,13 @@ use crate::consensus::simplified_posy::{
     install_simplified_consensus_ingress, install_simplified_empty_etdag_producer_handler,
     install_simplified_target_admission_producer_handler, load_genesis_bound_simplified_activation,
     prepare_simplified_empty_etdag, prepare_simplified_target_admission_h3,
+    record_certified_protected_input_completed, record_empty_etdag_enqueued,
+    record_empty_etdag_sent, record_target_admission_broadcast_attempt,
+    record_target_admission_duplicate_suppression, record_target_admission_unique_package,
     remove_simplified_consensus_ingress, remove_simplified_empty_etdag_producer_handler,
     remove_simplified_target_admission_producer_handler, run_simplified_posy_driver,
     select_consensus_profile_at_height, select_consensus_profile_from_verified_v3_transition,
+    set_target_admission_cache_entries, simplified_etdag_traffic_metrics_snapshot,
     validate_simplified_driver_activation, ConsensusProfileAtHeight, ConsensusSignatureVerifier,
     DurableSimplifiedEpochTransitionStore, DurableSimplifiedFinalitySink,
     DurableSimplifiedIngressKemRegistrySource, DurableSimplifiedPosyStore,
@@ -2427,14 +2431,64 @@ fn simplified_target_admission_wire_message(
 }
 
 const SIMPLIFIED_TARGET_ADMISSION_REBROADCAST_INTERVAL: Duration = Duration::from_secs(5);
+const SIMPLIFIED_TARGET_ADMISSION_ACTIVE_HORIZON: usize = 3;
 
-fn prune_expired_target_admission_rebroadcasts(
-    last_broadcast: &mut BTreeMap<(Height, Hash), Instant>,
-    now: Instant,
-) {
-    last_broadcast.retain(|_, last| {
-        now.saturating_duration_since(*last) < SIMPLIFIED_TARGET_ADMISSION_REBROADCAST_INTERVAL
-    });
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetAdmissionBroadcastDecision {
+    Initial,
+    Retry,
+    SuppressDuplicate,
+}
+
+#[derive(Debug, Default)]
+struct TargetAdmissionRebroadcastCache {
+    last_broadcast: BTreeMap<(Height, Hash), Instant>,
+}
+
+impl TargetAdmissionRebroadcastCache {
+    fn decision(
+        &self,
+        target_height: Height,
+        message_id: Hash,
+        now: Instant,
+    ) -> TargetAdmissionBroadcastDecision {
+        match self.last_broadcast.get(&(target_height, message_id)) {
+            Some(last)
+                if now.saturating_duration_since(*last)
+                    < SIMPLIFIED_TARGET_ADMISSION_REBROADCAST_INTERVAL =>
+            {
+                TargetAdmissionBroadcastDecision::SuppressDuplicate
+            }
+            Some(_) => TargetAdmissionBroadcastDecision::Retry,
+            None => TargetAdmissionBroadcastDecision::Initial,
+        }
+    }
+
+    fn record_successful_broadcast(
+        &mut self,
+        target_height: Height,
+        message_id: Hash,
+        now: Instant,
+    ) {
+        // A changed semantic package replaces only the prior identity for the
+        // same target. Entries for the other two live horizon heights remain.
+        self.last_broadcast
+            .retain(|(height, id), _| *height != target_height || *id == message_id);
+        self.last_broadcast.insert((target_height, message_id), now);
+        while self.last_broadcast.len() > SIMPLIFIED_TARGET_ADMISSION_ACTIVE_HORIZON {
+            let oldest = self
+                .last_broadcast
+                .iter()
+                .min_by_key(|(_, last)| **last)
+                .map(|(key, _)| *key);
+            if let Some(oldest) = oldest {
+                self.last_broadcast.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+        set_target_admission_cache_entries(self.last_broadcast.len());
+    }
 }
 
 fn run_simplified_target_admission_worker(
@@ -2446,7 +2500,8 @@ fn run_simplified_target_admission_worker(
     const PREPARE_INTERVAL: Duration = Duration::from_millis(500);
 
     let mut pending_outputs = initial_outputs;
-    let mut last_broadcast = BTreeMap::<(Height, Hash), Instant>::new();
+    let mut rebroadcast_cache = TargetAdmissionRebroadcastCache::default();
+    let mut last_metrics_report = Instant::now();
     while running.load(Ordering::Acquire) {
         if pending_outputs.is_empty() {
             match prepare_simplified_target_admission_h3() {
@@ -2468,21 +2523,47 @@ fn run_simplified_target_admission_worker(
                 "SYNERGY_POSY_SIMPLIFIED_TARGET_ADMISSION_WIRE_V1",
                 &canonical,
             );
-            prune_expired_target_admission_rebroadcasts(&mut last_broadcast, now);
-            if last_broadcast
-                .get(&(target_height, message_id))
-                .is_some_and(|last| {
-                    now.saturating_duration_since(*last)
-                        < SIMPLIFIED_TARGET_ADMISSION_REBROADCAST_INTERVAL
-                })
-            {
+            let decision = rebroadcast_cache.decision(target_height, message_id, now);
+            if decision == TargetAdmissionBroadcastDecision::SuppressDuplicate {
+                record_target_admission_duplicate_suppression();
                 continue;
             }
+            record_target_admission_broadcast_attempt(
+                decision == TargetAdmissionBroadcastDecision::Retry,
+            );
             let sent =
                 network.broadcast_simplified_target_admission(&message, frozen_validator_ids)?;
             if sent > 0 {
-                last_broadcast.insert((target_height, message_id), now);
+                if decision == TargetAdmissionBroadcastDecision::Initial {
+                    record_target_admission_unique_package();
+                }
+                rebroadcast_cache.record_successful_broadcast(target_height, message_id, now);
             }
+        }
+        if now.saturating_duration_since(last_metrics_report)
+            >= SIMPLIFIED_TARGET_ADMISSION_REBROADCAST_INTERVAL
+        {
+            let metrics = simplified_etdag_traffic_metrics_snapshot();
+            info!(
+                "consensus",
+                "PoSy target-admission and ETDAG traffic metrics",
+                "target_admission_unique_packages" => metrics.target_admission_unique_packages,
+                "target_admission_broadcast_attempts" => metrics.target_admission_broadcast_attempts,
+                "target_admission_rebroadcasts" => metrics.target_admission_rebroadcasts,
+                "target_admission_duplicate_suppressions" => metrics.target_admission_duplicate_suppressions,
+                "target_admission_cache_entries" => metrics.target_admission_cache_entries as u64,
+                "p2p_outbound_queue_depth" => metrics.p2p_outbound_queue_depth as u64,
+                "dcc_messages_sent" => metrics.dcc_messages_sent,
+                "dcc_messages_received" => metrics.dcc_messages_received,
+                "bvc_messages_enqueued" => metrics.bvc_messages_enqueued,
+                "bvc_messages_sent" => metrics.bvc_messages_sent,
+                "bvc_messages_received" => metrics.bvc_messages_received,
+                "boc_messages_enqueued" => metrics.boc_messages_enqueued,
+                "boc_messages_sent" => metrics.boc_messages_sent,
+                "boc_messages_received" => metrics.boc_messages_received,
+                "certified_protected_inputs_completed" => metrics.certified_protected_inputs_completed
+            );
+            last_metrics_report = now;
         }
         thread::sleep(PREPARE_INTERVAL);
     }
@@ -2507,9 +2588,14 @@ fn run_simplified_empty_etdag_worker(
         for output in outputs {
             match output {
                 SimplifiedEmptyEtdagOutput::Assembly(message) => {
-                    network.broadcast_simplified_empty_etdag(&message, frozen_validator_ids)?;
+                    record_empty_etdag_enqueued(&message);
+                    if network.broadcast_simplified_empty_etdag(&message, frozen_validator_ids)? > 0
+                    {
+                        record_empty_etdag_sent(&message);
+                    }
                 }
                 SimplifiedEmptyEtdagOutput::CertifiedInput(artifact) => {
+                    record_certified_protected_input_completed();
                     network.broadcast_etdag_certified_input(&artifact)?;
                 }
             }
@@ -5929,36 +6015,166 @@ mod tests {
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-    #[test]
-    fn target_admission_rebroadcast_cache_retains_all_live_horizon_messages() {
-        let mut last_broadcast = BTreeMap::new();
-        let now = Instant::now();
+    fn target_message_id(height: Height, identity: u8) -> Hash {
+        Hash::from_domain_bytes(
+            "SYNERGY_POSY_SIMPLIFIED_TARGET_ADMISSION_WIRE_V1",
+            &[height.0 as u8, identity],
+        )
+    }
 
-        for height in 1..=3 {
-            let height = Height(height);
-            prune_expired_target_admission_rebroadcasts(&mut last_broadcast, now);
-            last_broadcast.insert(
-                (
-                    height,
-                    Hash::from_domain_bytes(
-                        "SYNERGY_POSY_SIMPLIFIED_TARGET_ADMISSION_WIRE_V1",
-                        &[height.0 as u8],
-                    ),
-                ),
-                now,
+    fn active_target_heights(base: u64) -> std::collections::BTreeSet<Height> {
+        (1..=3).map(|offset| Height(base + offset)).collect()
+    }
+
+    #[test]
+    fn target_admission_rebroadcast_decisions_retain_all_heights_and_suppress_the_500ms_storm() {
+        let mut cache = TargetAdmissionRebroadcastCache::default();
+        let now = Instant::now();
+        let active = active_target_heights(0);
+        let mut emitted = 0usize;
+
+        for height in &active {
+            let id = target_message_id(*height, 1);
+            assert_eq!(
+                cache.decision(*height, id, now),
+                TargetAdmissionBroadcastDecision::Initial
+            );
+            emitted += 1;
+            cache.record_successful_broadcast(*height, id, now);
+        }
+        for tick in 1..10 {
+            let tick_now = now + Duration::from_millis(500 * tick);
+            for height in &active {
+                assert_eq!(
+                    cache.decision(*height, target_message_id(*height, 1), tick_now),
+                    TargetAdmissionBroadcastDecision::SuppressDuplicate
+                );
+            }
+        }
+        assert_eq!(
+            emitted, 3,
+            "unchanged H+1/H+2/H+3 packages emit once, not thirty times"
+        );
+        assert_eq!(cache.last_broadcast.len(), 3);
+
+        let retry_now = now + SIMPLIFIED_TARGET_ADMISSION_REBROADCAST_INTERVAL;
+        for height in &active {
+            assert_eq!(
+                cache.decision(*height, target_message_id(*height, 1), retry_now),
+                TargetAdmissionBroadcastDecision::Retry,
+                "the governed retry remains available after five seconds"
             );
         }
+    }
 
+    #[test]
+    fn target_admission_cache_replaces_only_changed_identity_and_stays_bounded() {
+        let mut cache = TargetAdmissionRebroadcastCache::default();
+        let start = Instant::now();
+        for base in 0..1_000u64 {
+            let active = active_target_heights(base);
+            for height in active {
+                let id = target_message_id(height, (base % 251) as u8);
+                if cache.decision(height, id, start)
+                    != TargetAdmissionBroadcastDecision::SuppressDuplicate
+                {
+                    cache.record_successful_broadcast(height, id, start);
+                }
+            }
+            assert!(cache.last_broadcast.len() <= SIMPLIFIED_TARGET_ADMISSION_ACTIVE_HORIZON);
+        }
+
+        let height = Height(1_001);
+        let changed = target_message_id(height, 252);
         assert_eq!(
-            last_broadcast.len(),
-            3,
-            "H+1/H+2/H+3 cache entries must coexist so completed admission packages are not re-sent every worker pass"
+            cache.decision(height, changed, start),
+            TargetAdmissionBroadcastDecision::Initial
         );
-        prune_expired_target_admission_rebroadcasts(
-            &mut last_broadcast,
-            now + SIMPLIFIED_TARGET_ADMISSION_REBROADCAST_INTERVAL,
+        cache.record_successful_broadcast(height, changed, start);
+        assert_eq!(
+            cache
+                .last_broadcast
+                .keys()
+                .filter(|(h, _)| *h == height)
+                .count(),
+            1
         );
-        assert!(last_broadcast.is_empty());
+    }
+
+    #[test]
+    fn target_admission_restart_sync_is_once_then_bounded_and_etdag_gets_write_gate_service() {
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum GateWork {
+            TargetAdmission,
+            Dcc,
+            Bvc,
+            Boc,
+        }
+
+        fn simulate(use_broken_policy: bool, ticks: usize) -> (usize, Vec<GateWork>) {
+            let now = Instant::now();
+            let active = active_target_heights(0);
+            let mut cache = TargetAdmissionRebroadcastCache::default();
+            let mut target_broadcasts = 0usize;
+            let mut served = Vec::new();
+            for tick in 0..ticks {
+                let tick_now = now + Duration::from_millis((tick as u64) * 500);
+                let target_ready = if use_broken_policy {
+                    // This is the former production eviction rule: each target
+                    // removes the other two, so a target broadcast is always
+                    // ready at every scheduler tick.
+                    true
+                } else {
+                    active.iter().any(|height| {
+                        cache.decision(*height, target_message_id(*height, 1), tick_now)
+                            != TargetAdmissionBroadcastDecision::SuppressDuplicate
+                    })
+                };
+                if target_ready {
+                    target_broadcasts += active.len();
+                    if !use_broken_policy {
+                        for height in &active {
+                            let id = target_message_id(*height, 1);
+                            if cache.decision(*height, id, tick_now)
+                                != TargetAdmissionBroadcastDecision::SuppressDuplicate
+                            {
+                                cache.record_successful_broadcast(*height, id, tick_now);
+                            }
+                        }
+                    }
+                    // Production target-admission and ETDAG fanout contend on
+                    // the same non-fair per-peer Mutex. Exercise the admissible
+                    // target-first schedule that caused the live starvation.
+                    served.push(GateWork::TargetAdmission);
+                    continue;
+                }
+                let next = match served
+                    .iter()
+                    .filter(|work| **work != GateWork::TargetAdmission)
+                    .count()
+                {
+                    0 => GateWork::Dcc,
+                    1 => GateWork::Bvc,
+                    _ => GateWork::Boc,
+                };
+                served.push(next);
+            }
+            (target_broadcasts, served)
+        }
+
+        let (broken_broadcasts, broken_service) = simulate(true, 1_000);
+        assert_eq!(broken_broadcasts, 3_000);
+        assert!(!broken_service.contains(&GateWork::Bvc));
+        assert!(!broken_service.contains(&GateWork::Boc));
+
+        let (fixed_broadcasts, fixed_service) = simulate(false, 9);
+        assert_eq!(
+            fixed_broadcasts, 3,
+            "one post-restart synchronization fanout is legitimate"
+        );
+        assert!(fixed_service.contains(&GateWork::Dcc));
+        assert!(fixed_service.contains(&GateWork::Bvc));
+        assert!(fixed_service.contains(&GateWork::Boc));
     }
 
     fn simplified_readiness_validator_ids(

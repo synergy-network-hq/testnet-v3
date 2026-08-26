@@ -23,7 +23,8 @@ use crate::consensus::legacy_canonical_lock::{
 };
 use crate::consensus::simplified_posy::{
     dispatch_simplified_empty_etdag_message, dispatch_simplified_target_admission_package,
-    dispatch_simplified_target_admission_vote, load_genesis_bound_simplified_activation,
+    dispatch_simplified_target_admission_vote, enter_p2p_outbound_queue, leave_p2p_outbound_queue,
+    load_genesis_bound_simplified_activation, record_empty_etdag_received,
     AuthenticatedSimplifiedConsensusPeer, GenesisBoundSimplifiedActivation,
     SimplifiedConsensusMessage, SimplifiedEmptyEtdagMessage, POSY_SIMPLIFIED_PROTOCOL_VERSION,
 };
@@ -3564,6 +3565,21 @@ fn peer_write_gate(peer_address: &str) -> Arc<Mutex<()>> {
         .clone()
 }
 
+struct P2pOutboundQueueGuard;
+
+impl P2pOutboundQueueGuard {
+    fn enter() -> Self {
+        enter_p2p_outbound_queue();
+        Self
+    }
+}
+
+impl Drop for P2pOutboundQueueGuard {
+    fn drop(&mut self) {
+        leave_p2p_outbound_queue();
+    }
+}
+
 fn with_peer_stream_outside_peers_lock<T>(
     connected_peers: &PeersArc,
     peer_address: &str,
@@ -3587,7 +3603,9 @@ fn with_peer_stream_outside_peers_lock<T>(
     };
 
     let gate = peer_write_gate(peer_address);
+    let queue_guard = P2pOutboundQueueGuard::enter();
     let _write_guard = gate.lock().unwrap();
+    drop(queue_guard);
     if current_peer_session_id(peer_address) != Some(expected_session_id) {
         return None;
     }
@@ -9148,7 +9166,7 @@ fn dispatch_peer_message(
             }
             if let Err(error) = dispatch_simplified_empty_etdag_ingress(
                 etdag_ingress_peer_for_session(peer_address, session_id),
-                message,
+                message.clone(),
             ) {
                 warn!(
                     "p2p",
@@ -9156,6 +9174,8 @@ fn dispatch_peer_message(
                     "peer" => peer_address.to_string(),
                     "error" => error
                 );
+            } else {
+                record_empty_etdag_received(&message);
             }
             Ok(())
         }
@@ -10458,7 +10478,7 @@ fn handle_messages(
                         }
                         if let Err(error) = dispatch_simplified_empty_etdag_ingress(
                             etdag_ingress_peer_for_session(&peer_address, session_id),
-                            message,
+                            message.clone(),
                         ) {
                             warn!(
                                 "p2p",
@@ -10466,6 +10486,8 @@ fn handle_messages(
                                 "peer" => peer_address.clone(),
                                 "error" => error
                             );
+                        } else {
+                            record_empty_etdag_received(&message);
                         }
                     }
                     NetworkMessage::TypedFinalityObserver {

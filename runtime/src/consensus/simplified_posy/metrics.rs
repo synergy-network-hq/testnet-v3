@@ -1,6 +1,148 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SimplifiedEtdagTrafficMetrics {
+    pub target_admission_unique_packages: u64,
+    pub target_admission_broadcast_attempts: u64,
+    pub target_admission_rebroadcasts: u64,
+    pub target_admission_duplicate_suppressions: u64,
+    pub target_admission_cache_entries: usize,
+    pub p2p_outbound_queue_depth: usize,
+    pub dcc_messages_sent: u64,
+    pub dcc_messages_received: u64,
+    pub bvc_messages_enqueued: u64,
+    pub bvc_messages_sent: u64,
+    pub bvc_messages_received: u64,
+    pub boc_messages_enqueued: u64,
+    pub boc_messages_sent: u64,
+    pub boc_messages_received: u64,
+    pub certified_protected_inputs_completed: u64,
+}
+
+static TARGET_ADMISSION_UNIQUE_PACKAGES: AtomicU64 = AtomicU64::new(0);
+static TARGET_ADMISSION_BROADCAST_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+static TARGET_ADMISSION_REBROADCASTS: AtomicU64 = AtomicU64::new(0);
+static TARGET_ADMISSION_DUPLICATE_SUPPRESSIONS: AtomicU64 = AtomicU64::new(0);
+static TARGET_ADMISSION_CACHE_ENTRIES: AtomicUsize = AtomicUsize::new(0);
+static P2P_OUTBOUND_QUEUE_DEPTH: AtomicUsize = AtomicUsize::new(0);
+static DCC_MESSAGES_SENT: AtomicU64 = AtomicU64::new(0);
+static DCC_MESSAGES_RECEIVED: AtomicU64 = AtomicU64::new(0);
+static BVC_MESSAGES_ENQUEUED: AtomicU64 = AtomicU64::new(0);
+static BVC_MESSAGES_SENT: AtomicU64 = AtomicU64::new(0);
+static BVC_MESSAGES_RECEIVED: AtomicU64 = AtomicU64::new(0);
+static BOC_MESSAGES_ENQUEUED: AtomicU64 = AtomicU64::new(0);
+static BOC_MESSAGES_SENT: AtomicU64 = AtomicU64::new(0);
+static BOC_MESSAGES_RECEIVED: AtomicU64 = AtomicU64::new(0);
+static CERTIFIED_PROTECTED_INPUTS_COMPLETED: AtomicU64 = AtomicU64::new(0);
+
+pub fn record_target_admission_unique_package() {
+    TARGET_ADMISSION_UNIQUE_PACKAGES.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn record_target_admission_broadcast_attempt(rebroadcast: bool) {
+    TARGET_ADMISSION_BROADCAST_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
+    if rebroadcast {
+        TARGET_ADMISSION_REBROADCASTS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+pub fn record_target_admission_duplicate_suppression() {
+    TARGET_ADMISSION_DUPLICATE_SUPPRESSIONS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn set_target_admission_cache_entries(entries: usize) {
+    TARGET_ADMISSION_CACHE_ENTRIES.store(entries, Ordering::Relaxed);
+}
+
+pub fn enter_p2p_outbound_queue() {
+    P2P_OUTBOUND_QUEUE_DEPTH.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn leave_p2p_outbound_queue() {
+    let _ = P2P_OUTBOUND_QUEUE_DEPTH.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |depth| {
+        Some(depth.saturating_sub(1))
+    });
+}
+
+pub fn record_empty_etdag_enqueued(message: &super::SimplifiedEmptyEtdagMessage) {
+    match message {
+        super::SimplifiedEmptyEtdagMessage::BvcCandidate { .. }
+        | super::SimplifiedEmptyEtdagMessage::BvcVote { .. } => {
+            BVC_MESSAGES_ENQUEUED.fetch_add(1, Ordering::Relaxed);
+        }
+        super::SimplifiedEmptyEtdagMessage::BocCandidate { .. }
+        | super::SimplifiedEmptyEtdagMessage::BocVote { .. } => {
+            BOC_MESSAGES_ENQUEUED.fetch_add(1, Ordering::Relaxed);
+        }
+        _ => {}
+    }
+}
+
+pub fn record_empty_etdag_sent(message: &super::SimplifiedEmptyEtdagMessage) {
+    match message {
+        super::SimplifiedEmptyEtdagMessage::DccCandidate { .. }
+        | super::SimplifiedEmptyEtdagMessage::DccVote { .. } => {
+            DCC_MESSAGES_SENT.fetch_add(1, Ordering::Relaxed);
+        }
+        super::SimplifiedEmptyEtdagMessage::BvcCandidate { .. }
+        | super::SimplifiedEmptyEtdagMessage::BvcVote { .. } => {
+            BVC_MESSAGES_SENT.fetch_add(1, Ordering::Relaxed);
+        }
+        super::SimplifiedEmptyEtdagMessage::BocCandidate { .. }
+        | super::SimplifiedEmptyEtdagMessage::BocVote { .. } => {
+            BOC_MESSAGES_SENT.fetch_add(1, Ordering::Relaxed);
+        }
+        _ => {}
+    }
+}
+
+pub fn record_empty_etdag_received(message: &super::SimplifiedEmptyEtdagMessage) {
+    match message {
+        super::SimplifiedEmptyEtdagMessage::DccCandidate { .. }
+        | super::SimplifiedEmptyEtdagMessage::DccVote { .. } => {
+            DCC_MESSAGES_RECEIVED.fetch_add(1, Ordering::Relaxed);
+        }
+        super::SimplifiedEmptyEtdagMessage::BvcCandidate { .. }
+        | super::SimplifiedEmptyEtdagMessage::BvcVote { .. } => {
+            BVC_MESSAGES_RECEIVED.fetch_add(1, Ordering::Relaxed);
+        }
+        super::SimplifiedEmptyEtdagMessage::BocCandidate { .. }
+        | super::SimplifiedEmptyEtdagMessage::BocVote { .. } => {
+            BOC_MESSAGES_RECEIVED.fetch_add(1, Ordering::Relaxed);
+        }
+        _ => {}
+    }
+}
+
+pub fn record_certified_protected_input_completed() {
+    CERTIFIED_PROTECTED_INPUTS_COMPLETED.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn simplified_etdag_traffic_metrics_snapshot() -> SimplifiedEtdagTrafficMetrics {
+    SimplifiedEtdagTrafficMetrics {
+        target_admission_unique_packages: TARGET_ADMISSION_UNIQUE_PACKAGES.load(Ordering::Relaxed),
+        target_admission_broadcast_attempts: TARGET_ADMISSION_BROADCAST_ATTEMPTS
+            .load(Ordering::Relaxed),
+        target_admission_rebroadcasts: TARGET_ADMISSION_REBROADCASTS.load(Ordering::Relaxed),
+        target_admission_duplicate_suppressions: TARGET_ADMISSION_DUPLICATE_SUPPRESSIONS
+            .load(Ordering::Relaxed),
+        target_admission_cache_entries: TARGET_ADMISSION_CACHE_ENTRIES.load(Ordering::Relaxed),
+        p2p_outbound_queue_depth: P2P_OUTBOUND_QUEUE_DEPTH.load(Ordering::Relaxed),
+        dcc_messages_sent: DCC_MESSAGES_SENT.load(Ordering::Relaxed),
+        dcc_messages_received: DCC_MESSAGES_RECEIVED.load(Ordering::Relaxed),
+        bvc_messages_enqueued: BVC_MESSAGES_ENQUEUED.load(Ordering::Relaxed),
+        bvc_messages_sent: BVC_MESSAGES_SENT.load(Ordering::Relaxed),
+        bvc_messages_received: BVC_MESSAGES_RECEIVED.load(Ordering::Relaxed),
+        boc_messages_enqueued: BOC_MESSAGES_ENQUEUED.load(Ordering::Relaxed),
+        boc_messages_sent: BOC_MESSAGES_SENT.load(Ordering::Relaxed),
+        boc_messages_received: BOC_MESSAGES_RECEIVED.load(Ordering::Relaxed),
+        certified_protected_inputs_completed: CERTIFIED_PROTECTED_INPUTS_COMPLETED
+            .load(Ordering::Relaxed),
+    }
+}
 
 pub const POSY_SIMPLIFIED_METRIC_SAMPLE_CAPACITY: usize = 4_096;
 
