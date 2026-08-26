@@ -29,14 +29,14 @@ use crate::consensus::simplified_posy::{
     remove_simplified_consensus_ingress, run_simplified_posy_driver,
     select_consensus_profile_at_height, select_consensus_profile_from_verified_v3_transition,
     validate_simplified_driver_activation, ConsensusProfileAtHeight, ConsensusSignatureVerifier,
-    DurableSimplifiedEpochTransitionStore, DurableSimplifiedFinalitySink,
-    DurableSimplifiedPosyStore, DurableSimplifiedProposalMaterialStore,
+    CoordinatedProtectedExecutionInputSource, DurableSimplifiedEpochTransitionStore,
+    DurableSimplifiedFinalitySink, DurableSimplifiedPosyStore,
+    DurableSimplifiedProposalMaterialStore,
     DurableSimplifiedProtectedExecutionTransitionAuthorityVerifier,
     DurableSimplifiedProtectedMaterialAuthority,
     DurableSimplifiedProtectedMaterialAuthorityConfiguration,
-    CoordinatedProtectedExecutionInputSource, DurableVerifiedSimplifiedProposalSource,
-    FinalizedBlockRecord, GenesisFinalityReference, P2pSimplifiedConsensusEgress,
-    QuorumCertificateReference, SimplifiedActivatedMaterialAdapter,
+    DurableVerifiedSimplifiedProposalSource, FinalizedBlockRecord, GenesisFinalityReference,
+    P2pSimplifiedConsensusEgress, QuorumCertificateReference, SimplifiedActivatedMaterialAdapter,
     SimplifiedCoreMaterialAdapter, SimplifiedCoreMaterialConfiguration, SimplifiedDriverTiming,
     SimplifiedEpochContext, SimplifiedFinalityEnvironment, SimplifiedFinalityParent,
     SimplifiedParentFeeMarketState, SimplifiedPosyDriver, SimplifiedPreviousEpochFinalityReplay,
@@ -2555,8 +2555,13 @@ fn build_genesis_bootstrap_protected_input_source(
             genesis_anchor,
             &context,
         )?;
-        let bootstrap_source = GenesisBootstrapProtectedExecutionSource::new(material)
-            .map_err(|error| format!("validate canonical H{} protected bootstrap: {error}", height.0))?;
+        let bootstrap_source =
+            GenesisBootstrapProtectedExecutionSource::new(material).map_err(|error| {
+                format!(
+                    "validate canonical H{} protected bootstrap: {error}",
+                    height.0
+                )
+            })?;
         source.register_genesis_bootstrap(height, bootstrap_source)?;
     }
     Ok(source)
@@ -2626,10 +2631,9 @@ fn spawn_finalized_simplified_posy_driver(
             .fee_market_params,
     )?;
     let material_mode = select_simplified_material_mode(etdag_activation_permit.as_ref());
-    let mut bootstrap_protected_input_source =
-        (material_mode == SimplifiedMaterialMode::Protected)
-            .then(|| build_genesis_bootstrap_protected_input_source(&genesis))
-            .transpose()?;
+    let mut bootstrap_protected_input_source = (material_mode == SimplifiedMaterialMode::Protected)
+        .then(|| build_genesis_bootstrap_protected_input_source(&genesis))
+        .transpose()?;
     let genesis_execution_state = load_finalized_testnet_v3_genesis_execution_state(genesis)
         .map_err(|error| format!("load finalized Genesis execution state: {error}"))?;
     let genesis_runtime_metadata = simplified_genesis_runtime_metadata(genesis.value())?;

@@ -15,17 +15,17 @@ use super::{
     SimplifiedProposalDirective, VerifiedSimplifiedEpochTransition,
     VerifiedSimplifiedProposalMaterial, POSY_SIMPLIFIED_PROTOCOL_VERSION,
 };
+use crate::consensus::protected_pipeline_runtime::{
+    GenesisBootstrapProtectedExecutionSource, ProtectedPipelineRuntime,
+};
 use crate::consensus_parameters::ConsensusParameterRoot;
 use crate::crypto::aegis_pqvm::AegisPqvmVerifier;
 use crate::dag_mempool::compute_tx_order_root;
 use crate::etdag::{
     canonical_finality_context_digest, target_admission_source_finality_root,
     DeterministicProtectedExecutionInput, EtdagDigest, EtdagParameters,
-    EtdagProtectedInputCoordinator, EtdagScheduleNeutralFinalityAuthority,
-    ProtectedBatchSource, ProtectedExecutionTargetContext, TargetAdmissionContext, ETDAG_PROFILE_ID,
-};
-use crate::consensus::protected_pipeline_runtime::{
-    GenesisBootstrapProtectedExecutionSource, ProtectedPipelineRuntime,
+    EtdagProtectedInputCoordinator, EtdagScheduleNeutralFinalityAuthority, ProtectedBatchSource,
+    ProtectedExecutionTargetContext, TargetAdmissionContext, ETDAG_PROFILE_ID,
 };
 use crate::execution::{compute_state_root_after, execute_block, ExecutionState};
 use crate::synergy_types::{
@@ -88,10 +88,7 @@ impl CoordinatedProtectedExecutionInputSource {
     /// Register the durable H3+ coordinator for one normal ETDAG target.
     /// The coordinator owns the record, event reconciliation, and exact
     /// commitment; this bridge only routes PoSy's height-bound query to it.
-    pub fn register_normal_target(
-        &self,
-        runtime: ProtectedPipelineRuntime,
-    ) -> Result<(), String> {
+    pub fn register_normal_target(&self, runtime: ProtectedPipelineRuntime) -> Result<(), String> {
         let target = runtime.target();
         let height = target.target_height;
         if height.0 < 3
@@ -154,7 +151,9 @@ impl CoordinatedProtectedExecutionInputSource {
     ) -> Result<(), String> {
         let (expected_source, expected_normal_target) = match binding {
             ProtectedExecutionBinding::Genesis(_) => (ProtectedBatchSource::GenesisBootstrap, None),
-            ProtectedExecutionBinding::Normal(runtime) => (runtime.source(), Some(runtime.target())),
+            ProtectedExecutionBinding::Normal(runtime) => {
+                (runtime.source(), Some(runtime.target()))
+            }
         };
         if input.source != expected_source
             || input.next_commitment.target_height != height
@@ -1290,11 +1289,11 @@ impl<A: SimplifiedProtectedMaterialAuthority> SimplifiedMaterialAdapter
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::consensus::protected_pipeline_runtime::GenesisBootstrapProtectedExecutionSource;
     use crate::consensus::simplified_posy::{
         DurableSimplifiedProposalMaterialStore, QuorumCertificateReference,
         SimplifiedCoreMaterialConfiguration,
     };
-    use crate::consensus::protected_pipeline_runtime::GenesisBootstrapProtectedExecutionSource;
     use crate::consensus::testnet_v3_bootstrap::load_testnet_v3_genesis_bootstrap;
     use crate::etdag::tests::{complete_r11_execution_input, fixture};
     use crate::genesis::canonical_genesis;
