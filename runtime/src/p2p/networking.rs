@@ -22,7 +22,6 @@ use crate::consensus::legacy_canonical_lock::{
     write_legacy_canonical_locks,
 };
 use crate::consensus::simplified_posy::{
-    dispatch_simplified_target_admission_package, dispatch_simplified_target_admission_vote,
     load_genesis_bound_simplified_activation, AuthenticatedSimplifiedConsensusPeer,
     GenesisBoundSimplifiedActivation, SimplifiedConsensusMessage, POSY_SIMPLIFIED_PROTOCOL_VERSION,
 };
@@ -40,17 +39,17 @@ use crate::crypto::aegis_pqvm::{
     AegisPqvmKeyRegistry, AegisPqvmSigner, AegisPqvmVerifier, SYNERGY_P2P_HANDSHAKE_V1,
 };
 use crate::crypto::pqc::{PQCAlgorithm, PQCPrivateKey, PQCPublicKey};
-use crate::etdag::{
-    dispatch_etdag_certified_input, CertifiedProtectedInputArtifact, EtdagAuthenticatedIngressPeer,
-};
+use crate::etdag::{CertifiedProtectedInputArtifact, EtdagAuthenticatedIngressPeer, EtdagDigest};
 use crate::genesis::canonical_genesis;
 use crate::p2p::messages::{
     validate_coordinated_consensus_message_size,
     validate_coordinated_finality_observer_message_size,
-    validate_simplified_consensus_message_size, validate_simplified_target_admission_message_size,
+    validate_protected_pipeline_evidence_message, validate_simplified_consensus_message_size,
     validate_typed_finality_observer_message_size, CoordinatedConsensusMessage,
-    CoordinatedFinalityObserverMessage, NetworkMessage, SimplifiedTargetAdmissionMessage,
-    TypedConsensusMessage, TypedFinalityObserverMessage,
+    CoordinatedFinalityObserverMessage, NetworkMessage, ProtectedPipelineEvidenceMessage,
+    ProtectedPipelineSemanticObject, SimplifiedTargetAdmissionMessage, TypedConsensusMessage,
+    TypedFinalityObserverMessage, MAX_PROTECTED_PIPELINE_EVIDENCE_FRAME_BYTES,
+    MAX_PROTECTED_PIPELINE_REQUEST_FRAME_BYTES, MAX_PROTECTED_PIPELINE_RESPONSE_FRAME_BYTES,
     MAX_SIMPLIFIED_CONSENSUS_CERTIFICATE_FRAME_BYTES, MAX_SIMPLIFIED_CONSENSUS_CONTROL_FRAME_BYTES,
     MAX_SIMPLIFIED_CONSENSUS_PROPOSAL_FRAME_BYTES, MAX_SIMPLIFIED_CONSENSUS_STATE_SYNC_FRAME_BYTES,
     MAX_SIMPLIFIED_CONSENSUS_VOTE_FRAME_BYTES, MAX_SIMPLIFIED_TARGET_ADMISSION_PACKAGE_FRAME_BYTES,
@@ -84,7 +83,7 @@ use serde_json;
 use socket2::{SockRef, TcpKeepalive};
 #[cfg(test)]
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
@@ -92,7 +91,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Arc, Mutex, Once, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::runtime::{Builder as TokioRuntimeBuilder, Runtime as TokioRuntime};
@@ -3481,16 +3480,318 @@ fn etdag_ingress_peer_for_session(
     })
 }
 
-fn dispatch_simplified_target_admission_ingress(
+const MAX_PROTECTED_PIPELINE_DEDUP_OBJECTS: usize = 4_096;
+const MAX_PROTECTED_PIPELINE_PENDING_REVEAL_SHARES: usize = 256;
+
+/// One bounded handoff from authenticated P2P ingress to ProtectedPipeline.
+/// The runtime consumer performs full VAC/VC/share verification against its
+/// frozen target authority before any durable state transition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtectedPipelineEvidenceEnvelope {
+    pub peer_address: String,
+    pub authenticated_peer: EtdagAuthenticatedIngressPeer,
+    pub message: ProtectedPipelineEvidenceMessage,
+}
+
+struct ProtectedPipelineEvidenceIngress {
+    sender: mpsc::SyncSender<ProtectedPipelineEvidenceEnvelope>,
+    seen_objects: BTreeMap<EtdagDigest, ProtectedPipelineSemanticObject>,
+    seen_order: VecDeque<EtdagDigest>,
+    seen_messages: BTreeSet<EtdagDigest>,
+    message_order: VecDeque<EtdagDigest>,
+    reveal_authorizations: BTreeSet<EtdagDigest>,
+    pending_reveal_shares: BTreeMap<EtdagDigest, Vec<ProtectedPipelineEvidenceEnvelope>>,
+}
+
+static PROTECTED_PIPELINE_EVIDENCE_INGRESS: OnceLock<
+    Mutex<Option<ProtectedPipelineEvidenceIngress>>,
+> = OnceLock::new();
+
+fn protected_pipeline_evidence_ingress() -> &'static Mutex<Option<ProtectedPipelineEvidenceIngress>>
+{
+    PROTECTED_PIPELINE_EVIDENCE_INGRESS.get_or_init(|| Mutex::new(None))
+}
+
+pub fn install_protected_pipeline_evidence_ingress(
+    capacity: usize,
+) -> Result<mpsc::Receiver<ProtectedPipelineEvidenceEnvelope>, String> {
+    if capacity == 0 {
+        return Err("protected-pipeline evidence ingress capacity must be nonzero".to_string());
+    }
+    let (sender, receiver) = mpsc::sync_channel(capacity);
+    let mut slot = protected_pipeline_evidence_ingress()
+        .lock()
+        .map_err(|_| "protected-pipeline evidence ingress lock is poisoned".to_string())?;
+    if slot.is_some() {
+        return Err("protected-pipeline evidence ingress is already installed".to_string());
+    }
+    *slot = Some(ProtectedPipelineEvidenceIngress {
+        sender,
+        seen_objects: BTreeMap::new(),
+        seen_order: VecDeque::new(),
+        seen_messages: BTreeSet::new(),
+        message_order: VecDeque::new(),
+        reveal_authorizations: BTreeSet::new(),
+        pending_reveal_shares: BTreeMap::new(),
+    });
+    Ok(receiver)
+}
+
+pub fn remove_protected_pipeline_evidence_ingress() -> Result<(), String> {
+    *protected_pipeline_evidence_ingress()
+        .lock()
+        .map_err(|_| "protected-pipeline evidence ingress lock is poisoned".to_string())? = None;
+    Ok(())
+}
+
+/// Validates, deduplicates and queues one semantic evidence message. Duplicate,
+/// reordered and late evidence is accepted idempotently. A reveal share that
+/// arrives before its authorization is held in a bounded pending set and is
+/// released only after the exact authorization semantic ID is accepted.
+pub fn dispatch_protected_pipeline_evidence_message(
+    peer_address: &str,
     authenticated_peer: Option<EtdagAuthenticatedIngressPeer>,
-    message: SimplifiedTargetAdmissionMessage,
+    message: ProtectedPipelineEvidenceMessage,
 ) -> Result<(), String> {
-    match message {
-        SimplifiedTargetAdmissionMessage::Vote { request } => {
-            dispatch_simplified_target_admission_vote(authenticated_peer, request)?;
+    validate_protected_pipeline_evidence_message(&message)?;
+    let authenticated_peer = authenticated_peer.ok_or_else(|| {
+        "protected-pipeline evidence requires an authenticated validator peer".to_string()
+    })?;
+    let envelope = ProtectedPipelineEvidenceEnvelope {
+        peer_address: peer_address.to_string(),
+        authenticated_peer,
+        message,
+    };
+    let mut slot = protected_pipeline_evidence_ingress()
+        .lock()
+        .map_err(|_| "protected-pipeline evidence ingress lock is poisoned".to_string())?;
+    let ingress = slot.as_mut().ok_or_else(|| {
+        "ProtectedPipeline is not running; refusing semantic evidence".to_string()
+    })?;
+
+    for object in message_objects(&envelope.message) {
+        let (chain_id, network_id) = object.chain_binding();
+        if chain_id != crate::synergy_types::ChainId::synergy_testnet_v3()
+            || network_id != &crate::synergy_types::NetworkId::synergy_testnet_v3()
+        {
+            return Err("protected evidence chain or network binding mismatch".to_string());
         }
-        SimplifiedTargetAdmissionMessage::CertifiedPackage { package } => {
-            dispatch_simplified_target_admission_package(authenticated_peer, package)?;
+    }
+
+    if let Some(authorization_id) = unauthorized_standalone_reveal(ingress, &envelope.message) {
+        let pending_count = ingress
+            .pending_reveal_shares
+            .values()
+            .map(Vec::len)
+            .sum::<usize>();
+        let semantic_id = message_semantic_ids(&envelope.message)
+            .into_iter()
+            .next()
+            .ok_or_else(|| "protected reveal share has no semantic id".to_string())?;
+        if ingress.seen_objects.contains_key(&semantic_id)
+            || ingress
+                .pending_reveal_shares
+                .values()
+                .flatten()
+                .any(|pending| message_semantic_ids(&pending.message).first() == Some(&semantic_id))
+        {
+            return Ok(());
+        }
+        if pending_count >= MAX_PROTECTED_PIPELINE_PENDING_REVEAL_SHARES {
+            return Err(
+                "protected-pipeline pending reveal-share capacity is exhausted".to_string(),
+            );
+        }
+        ingress
+            .pending_reveal_shares
+            .entry(authorization_id)
+            .or_default()
+            .push(envelope);
+        return Ok(());
+    }
+
+    validate_message_reveal_authorizations(ingress, &envelope.message)?;
+
+    enqueue_protected_pipeline_envelope(ingress, envelope)?;
+    flush_authorized_pending_reveals(ingress)
+}
+
+fn validate_message_reveal_authorizations(
+    ingress: &ProtectedPipelineEvidenceIngress,
+    message: &ProtectedPipelineEvidenceMessage,
+) -> Result<(), String> {
+    let message_authorizations = message_objects(message)
+        .into_iter()
+        .filter_map(|object| match object {
+            ProtectedPipelineSemanticObject::RevealAuthorization { semantic_id, .. } => {
+                Some(semantic_id)
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    for object in message_objects(message) {
+        if let ProtectedPipelineSemanticObject::RevealShare {
+            authorization_id, ..
+        } = object
+        {
+            if !ingress.reveal_authorizations.contains(authorization_id)
+                && !message_authorizations.contains(authorization_id)
+            {
+                return Err(
+                    "protected reveal material arrived without its exact authorization".to_string(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn unauthorized_standalone_reveal(
+    ingress: &ProtectedPipelineEvidenceIngress,
+    message: &ProtectedPipelineEvidenceMessage,
+) -> Option<EtdagDigest> {
+    let ProtectedPipelineEvidenceMessage::Evidence {
+        object:
+            ProtectedPipelineSemanticObject::RevealShare {
+                authorization_id, ..
+            },
+    } = message
+    else {
+        return None;
+    };
+    (!ingress.reveal_authorizations.contains(authorization_id)).then(|| authorization_id.clone())
+}
+
+fn message_objects(
+    message: &ProtectedPipelineEvidenceMessage,
+) -> Vec<&ProtectedPipelineSemanticObject> {
+    match message {
+        ProtectedPipelineEvidenceMessage::Evidence { object } => vec![object],
+        ProtectedPipelineEvidenceMessage::MissingObjectsRequest { .. } => Vec::new(),
+        ProtectedPipelineEvidenceMessage::MissingObjectsResponse { objects, .. } => {
+            objects.iter().collect()
+        }
+    }
+}
+
+fn message_semantic_ids(message: &ProtectedPipelineEvidenceMessage) -> Vec<EtdagDigest> {
+    message_objects(message)
+        .into_iter()
+        .map(|object| object.declared_semantic_id().clone())
+        .collect()
+}
+
+fn message_dedup_id(message: &ProtectedPipelineEvidenceMessage) -> Result<EtdagDigest, String> {
+    let bytes = serde_json::to_vec(message)
+        .map_err(|error| format!("serialize protected evidence for deduplication: {error}"))?;
+    Ok(EtdagDigest::from_domain_bytes(
+        "PoSy/ProtectedPipeline/WireMessageId/v1",
+        &bytes,
+    ))
+}
+
+fn enqueue_protected_pipeline_envelope(
+    ingress: &mut ProtectedPipelineEvidenceIngress,
+    envelope: ProtectedPipelineEvidenceEnvelope,
+) -> Result<(), String> {
+    let objects = message_objects(&envelope.message);
+    for object in &objects {
+        if let Some(prior) = ingress.seen_objects.get(object.declared_semantic_id()) {
+            if prior != *object {
+                return Err("conflicting protected evidence reused a semantic id".to_string());
+            }
+        }
+    }
+    let dedup_id = message_dedup_id(&envelope.message)?;
+    let all_objects_seen = !objects.is_empty()
+        && objects.iter().all(|object| {
+            ingress
+                .seen_objects
+                .get(object.declared_semantic_id())
+                .is_some_and(|prior| prior == *object)
+        });
+    if all_objects_seen || ingress.seen_messages.contains(&dedup_id) {
+        return Ok(());
+    }
+
+    ingress
+        .sender
+        .try_send(envelope.clone())
+        .map_err(|error| match error {
+            mpsc::TrySendError::Full(_) => {
+                "protected-pipeline evidence ingress is full".to_string()
+            }
+            mpsc::TrySendError::Disconnected(_) => {
+                "protected-pipeline evidence ingress is disconnected".to_string()
+            }
+        })?;
+
+    remember_message_id(ingress, dedup_id);
+    for object in message_objects(&envelope.message) {
+        remember_semantic_object(ingress, object.clone());
+        if matches!(
+            object,
+            ProtectedPipelineSemanticObject::RevealAuthorization { .. }
+        ) {
+            ingress
+                .reveal_authorizations
+                .insert(object.declared_semantic_id().clone());
+        }
+    }
+    Ok(())
+}
+
+fn remember_message_id(ingress: &mut ProtectedPipelineEvidenceIngress, id: EtdagDigest) {
+    if ingress.seen_messages.insert(id.clone()) {
+        ingress.message_order.push_back(id);
+    }
+    while ingress.message_order.len() > MAX_PROTECTED_PIPELINE_DEDUP_OBJECTS {
+        if let Some(expired) = ingress.message_order.pop_front() {
+            ingress.seen_messages.remove(&expired);
+        }
+    }
+}
+
+fn remember_semantic_object(
+    ingress: &mut ProtectedPipelineEvidenceIngress,
+    object: ProtectedPipelineSemanticObject,
+) {
+    let id = object.declared_semantic_id().clone();
+    if ingress.seen_objects.insert(id.clone(), object).is_none() {
+        ingress.seen_order.push_back(id);
+    }
+    while ingress.seen_order.len() > MAX_PROTECTED_PIPELINE_DEDUP_OBJECTS {
+        if let Some(expired) = ingress.seen_order.pop_front() {
+            ingress.seen_objects.remove(&expired);
+            ingress.reveal_authorizations.remove(&expired);
+        }
+    }
+}
+
+fn flush_authorized_pending_reveals(
+    ingress: &mut ProtectedPipelineEvidenceIngress,
+) -> Result<(), String> {
+    let ready = ingress
+        .pending_reveal_shares
+        .keys()
+        .filter(|id| ingress.reveal_authorizations.contains(*id))
+        .cloned()
+        .collect::<Vec<_>>();
+    for authorization_id in ready {
+        let pending = ingress
+            .pending_reveal_shares
+            .remove(&authorization_id)
+            .unwrap_or_default();
+        let mut iterator = pending.into_iter();
+        while let Some(envelope) = iterator.next() {
+            if let Err(error) = enqueue_protected_pipeline_envelope(ingress, envelope.clone()) {
+                ingress
+                    .pending_reveal_shares
+                    .entry(authorization_id.clone())
+                    .or_default()
+                    .extend(std::iter::once(envelope).chain(iterator));
+                return Err(error);
+            }
         }
     }
     Ok(())
@@ -6103,74 +6404,18 @@ impl P2PNetwork {
         Ok(())
     }
 
-    /// Broadcasts one bounded H+3 target-admission vote or certified package
-    /// only to authenticated sessions in the caller's frozen dynamic epoch.
+    /// Compatibility-only legacy surface. Active protected progression uses
+    /// [`Self::broadcast_protected_pipeline_evidence`].
     pub fn broadcast_simplified_target_admission(
         &self,
         message: &SimplifiedTargetAdmissionMessage,
         frozen_validator_ids: &BTreeSet<ValidatorId>,
     ) -> Result<usize, String> {
-        if coordinated_consensus_active(&self.config) {
-            return Err(
-                "simplified target-admission egress is disabled while coordinated_round_robin_v1 is selected"
-                    .to_string(),
-            );
-        }
-        validate_simplified_target_admission_message_size(message)?;
-        if frozen_validator_ids.is_empty() {
-            return Err("simplified target-admission frozen egress set is empty".to_string());
-        }
-        let wire_message = NetworkMessage::SimplifiedTargetAdmission {
-            chain_incarnation: canonical_chain_incarnation(),
-            genesis_hash: canonical_genesis_hash(),
-            message: message.clone(),
-        };
-        let targets = {
-            let peers = self.connected_peers.lock().unwrap();
-            peers
-                .iter()
-                .filter_map(|(address, peer)| {
-                    if peer.stream.is_none() {
-                        return None;
-                    }
-                    let session_id = current_peer_session_id(address)?;
-                    let identity = etdag_ingress_peer_for_session(address, session_id)?;
-                    frozen_validator_ids
-                        .contains(&identity.validator_id)
-                        .then(|| (address.clone(), session_id))
-                })
-                .collect::<Vec<_>>()
-        };
-        let send_results = run_with_bounded_parallelism(
-            &targets,
-            targets.len(),
-            "simplified target-admission fanout",
-            |(address, session_id)| {
-                send_peer_message_for_session(
-                    &self.connected_peers,
-                    &self.peer_state_cache,
-                    address,
-                    *session_id,
-                    &wire_message,
-                    Duration::from_millis(CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS),
-                    "simplified-target-admission",
-                )
-            },
-        );
-        let mut sent = 0usize;
-        for ((address, _), result) in targets.into_iter().zip(send_results) {
-            match result {
-                Ok(true) => sent += 1,
-                Ok(false) => {}
-                Err(error) => warn!(
-                    "p2p",
-                    "Failed to send simplified target-admission message",
-                    "peer" => address,
-                    "error" => error
-                ),
-            }
-        }
-        Ok(sent)
+        let _ = (message, frozen_validator_ids);
+        Err(
+            "compatibility-only target-admission carrier cannot activate production progression"
+                .to_string(),
+        )
     }
 
     /// Sends a simplified-consensus response only to the authenticated session
@@ -6389,36 +6634,58 @@ impl P2PNetwork {
         Ok(sent)
     }
 
-    /// Relays one complete certified ETDAG input package only to currently
-    /// authenticated, consensus-eligible validator peers.  The receiver does
-    /// not trust this fanout: it rechecks the sender identity and every proof
-    /// against its own immutable height/finality authority before persistence.
+    /// Compatibility-only legacy surface retained while old frames age out.
     pub fn broadcast_etdag_certified_input(
         &self,
         artifact: &CertifiedProtectedInputArtifact,
     ) -> Result<usize, String> {
-        artifact.validate_wire_size()?;
-        let wire_message = NetworkMessage::EtdagCertifiedInput {
-            artifact: artifact.clone(),
+        let _ = artifact;
+        Err("compatibility-only whole certified ETDAG carrier cannot activate production progression"
+            .to_string())
+    }
+
+    /// Relays one bounded semantic evidence message only to authenticated
+    /// validators in the caller's frozen target epoch.
+    pub fn broadcast_protected_pipeline_evidence(
+        &self,
+        message: &ProtectedPipelineEvidenceMessage,
+        frozen_validator_ids: &BTreeSet<ValidatorId>,
+    ) -> Result<usize, String> {
+        if coordinated_consensus_active(&self.config) {
+            return Err(
+                "protected-pipeline egress is disabled while coordinated mode is selected"
+                    .to_string(),
+            );
+        }
+        validate_protected_pipeline_evidence_message(message)?;
+        if frozen_validator_ids.is_empty() {
+            return Err("protected-pipeline frozen egress set is empty".to_string());
+        }
+        let wire_message = NetworkMessage::ProtectedPipelineEvidence {
+            message: message.clone(),
+            chain_incarnation: canonical_chain_incarnation(),
+            genesis_hash: canonical_genesis_hash(),
         };
         let targets = {
             let peers = self.connected_peers.lock().unwrap();
             peers
                 .iter()
                 .filter_map(|(address, peer)| {
-                    if peer.stream.is_none()
-                        || !peer_is_active_consensus_validator(&self.config, peer)
-                    {
+                    if peer.stream.is_none() {
                         return None;
                     }
-                    current_peer_session_id(address).map(|session_id| (address.clone(), session_id))
+                    let session_id = current_peer_session_id(address)?;
+                    let identity = etdag_ingress_peer_for_session(address, session_id)?;
+                    frozen_validator_ids
+                        .contains(&identity.validator_id)
+                        .then(|| (address.clone(), session_id))
                 })
                 .collect::<Vec<_>>()
         };
         let send_results = run_with_bounded_parallelism(
             &targets,
             targets.len(),
-            "certified ETDAG input fanout",
+            "protected-pipeline evidence fanout",
             |(address, session_id)| {
                 send_peer_message_for_session(
                     &self.connected_peers,
@@ -6427,7 +6694,7 @@ impl P2PNetwork {
                     *session_id,
                     &wire_message,
                     Duration::from_millis(CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS),
-                    "etdag-certified-input",
+                    "protected-pipeline-evidence",
                 )
             },
         );
@@ -6438,7 +6705,7 @@ impl P2PNetwork {
                 Ok(false) => {}
                 Err(error) => warn!(
                     "p2p",
-                    "Failed to send certified ETDAG input",
+                    "Failed to send protected-pipeline evidence",
                     "peer" => address,
                     "error" => error
                 ),
@@ -8558,6 +8825,7 @@ fn bypasses_shared_message_queue(message: &NetworkMessage) -> bool {
             | NetworkMessage::CoordinatedConsensus { .. }
             | NetworkMessage::SimplifiedConsensus { .. }
             | NetworkMessage::SimplifiedTargetAdmission { .. }
+            | NetworkMessage::ProtectedPipelineEvidence { .. }
             | NetworkMessage::TypedFinalityObserver { .. }
             | NetworkMessage::CoordinatedFinalityObserver { .. }
             | NetworkMessage::EtdagCertifiedInput { .. }
@@ -9004,32 +9272,39 @@ fn dispatch_peer_message(
             genesis_hash,
             message,
         } => {
-            if coordinated_consensus_active(config) {
-                warn!(
-                    "p2p",
-                    "Rejected simplified target-admission message while coordinated mode is selected",
-                    "peer" => peer_address.to_string()
-                );
-                return Ok(());
-            }
-            if chain_incarnation != canonical_chain_incarnation()
+            let _ = (chain_incarnation, genesis_hash, message);
+            warn!(
+                "p2p",
+                "Ignored compatibility-only target-admission carrier",
+                "peer" => peer_address.to_string()
+            );
+            Ok(())
+        }
+        NetworkMessage::ProtectedPipelineEvidence {
+            chain_incarnation,
+            genesis_hash,
+            message,
+        } => {
+            if coordinated_consensus_active(config)
+                || chain_incarnation != canonical_chain_incarnation()
                 || genesis_hash != canonical_genesis_hash()
             {
                 warn!(
                     "p2p",
-                    "Rejected simplified target-admission frame from a different chain incarnation",
+                    "Rejected protected-pipeline evidence outside the canonical simplified-PoSy incarnation",
                     "peer" => peer_address.to_string(),
                     "incarnation" => chain_incarnation
                 );
                 return Ok(());
             }
-            if let Err(error) = dispatch_simplified_target_admission_ingress(
+            if let Err(error) = dispatch_protected_pipeline_evidence_message(
+                peer_address,
                 etdag_ingress_peer_for_session(peer_address, session_id),
                 message,
             ) {
                 warn!(
                     "p2p",
-                    "Rejected simplified target-admission message",
+                    "Rejected protected-pipeline evidence",
                     "peer" => peer_address.to_string(),
                     "error" => error
                 );
@@ -9103,17 +9378,12 @@ fn dispatch_peer_message(
             Ok(())
         }
         NetworkMessage::EtdagCertifiedInput { artifact } => {
-            if let Err(error) = dispatch_etdag_certified_input(
-                etdag_ingress_peer_for_session(peer_address, session_id),
-                artifact,
-            ) {
-                warn!(
-                    "p2p",
-                    "Rejected certified ETDAG input",
-                    "peer" => peer_address.to_string(),
-                    "error" => error
-                );
-            }
+            let _ = artifact;
+            warn!(
+                "p2p",
+                "Ignored compatibility-only whole certified ETDAG input carrier",
+                "peer" => peer_address.to_string()
+            );
             Ok(())
         }
         NetworkMessage::Block {
@@ -10278,32 +10548,38 @@ fn handle_messages(
                         genesis_hash,
                         message,
                     } => {
-                        if coordinated_consensus_active(&config) {
-                            warn!(
-                                "p2p",
-                                "Rejected simplified target-admission message while coordinated mode is selected",
-                                "peer" => peer_address.clone()
-                            );
-                            continue;
-                        }
-                        if chain_incarnation != canonical_chain_incarnation()
+                        let _ = (chain_incarnation, genesis_hash, message);
+                        warn!(
+                            "p2p",
+                            "Ignored compatibility-only target-admission carrier",
+                            "peer" => peer_address.clone()
+                        );
+                    }
+                    NetworkMessage::ProtectedPipelineEvidence {
+                        chain_incarnation,
+                        genesis_hash,
+                        message,
+                    } => {
+                        if coordinated_consensus_active(&config)
+                            || chain_incarnation != canonical_chain_incarnation()
                             || genesis_hash != canonical_genesis_hash()
                         {
                             warn!(
                                 "p2p",
-                                "Rejected old-incarnation simplified target-admission message",
+                                "Rejected old-incarnation protected-pipeline evidence",
                                 "peer" => peer_address.clone(),
                                 "incarnation" => chain_incarnation
                             );
                             continue;
                         }
-                        if let Err(error) = dispatch_simplified_target_admission_ingress(
+                        if let Err(error) = dispatch_protected_pipeline_evidence_message(
+                            &peer_address,
                             etdag_ingress_peer_for_session(&peer_address, session_id),
                             message,
                         ) {
                             warn!(
                                 "p2p",
-                                "Rejected simplified target-admission message",
+                                "Rejected protected-pipeline evidence",
                                 "peer" => peer_address.clone(),
                                 "error" => error
                             );
@@ -10342,17 +10618,12 @@ fn handle_messages(
                         }
                     }
                     NetworkMessage::EtdagCertifiedInput { artifact } => {
-                        if let Err(error) = dispatch_etdag_certified_input(
-                            etdag_ingress_peer_for_session(&peer_address, session_id),
-                            artifact,
-                        ) {
-                            warn!(
-                                "p2p",
-                                "Rejected certified ETDAG input",
-                                "peer" => peer_address.clone(),
-                                "error" => error
-                            );
-                        }
+                        let _ = artifact;
+                        warn!(
+                            "p2p",
+                            "Ignored compatibility-only whole certified ETDAG input carrier",
+                            "peer" => peer_address.clone()
+                        );
                     }
                     NetworkMessage::Transaction { transaction_data } => {
                         if config.node.bootstrap_only {
@@ -10966,6 +11237,55 @@ fn validate_simplified_predecode_frame_length(len: usize, prefix: &[u8]) -> io::
     let mut cursor = 0usize;
     consume_json_byte(prefix, &mut cursor, b'{', "network envelope")?;
     let outer_kind = consume_json_key(prefix, &mut cursor, "network envelope kind")?;
+    if outer_kind == b"ProtectedPipelineEvidence" {
+        consume_json_byte(prefix, &mut cursor, b':', "protected-pipeline envelope")?;
+        consume_json_byte(prefix, &mut cursor, b'{', "protected-pipeline body")?;
+        if consume_json_key(prefix, &mut cursor, "protected-pipeline body field")? != b"message" {
+            return Err(invalid_predecode(
+                "protected-pipeline message must be the first canonical body field",
+            ));
+        }
+        consume_json_byte(
+            prefix,
+            &mut cursor,
+            b':',
+            "protected-pipeline message field",
+        )?;
+        consume_json_byte(prefix, &mut cursor, b'{', "protected-pipeline message")?;
+        let message_kind =
+            consume_json_key(prefix, &mut cursor, "protected-pipeline message kind")?;
+        let (kind, maximum) = match message_kind {
+            b"EVIDENCE" => (
+                "semantic evidence",
+                MAX_PROTECTED_PIPELINE_EVIDENCE_FRAME_BYTES,
+            ),
+            b"MISSING_OBJECTS_REQUEST" => (
+                "missing-object request",
+                MAX_PROTECTED_PIPELINE_REQUEST_FRAME_BYTES,
+            ),
+            b"MISSING_OBJECTS_RESPONSE" => (
+                "missing-object response",
+                MAX_PROTECTED_PIPELINE_RESPONSE_FRAME_BYTES,
+            ),
+            _ => {
+                return Err(invalid_predecode(
+                    "protected-pipeline frame does not declare a bounded message kind in its predecode prefix",
+                ));
+            }
+        };
+        let frame_len = len
+            .checked_add(4)
+            .ok_or_else(|| invalid_predecode("protected-pipeline frame length overflow"))?;
+        if frame_len > maximum {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "protected-pipeline {kind} frame length {frame_len} exceeds limit {maximum}"
+                ),
+            ));
+        }
+        return Ok(());
+    }
     if outer_kind == b"SimplifiedTargetAdmission" {
         consume_json_byte(prefix, &mut cursor, b':', "target-admission envelope")?;
         consume_json_byte(prefix, &mut cursor, b'{', "target-admission body")?;
@@ -13277,8 +13597,17 @@ mod tests {
     };
     use crate::crypto::aegis_pqvm::AegisPqvmSigner;
     use crate::crypto::pqc::{PQCAlgorithm, PQCManager, PQCSignature};
-    use crate::p2p::messages::NetworkMessage;
+    use crate::etdag::tests::{complete_protected_input, fixture, target_admission_package};
+    use crate::etdag::{
+        CertifiedProtectedInputArtifact, EtdagAuthenticatedIngressPeer, EtdagDigest, VertexKind,
+    };
     use crate::p2p::messages::{
+        NetworkMessage, ProtectedPipelineEvidenceMessage, ProtectedPipelineSemanticObject,
+        ProtectedRevealAuthorization,
+    };
+    use crate::p2p::messages::{
+        MAX_PROTECTED_PIPELINE_EVIDENCE_FRAME_BYTES, MAX_PROTECTED_PIPELINE_REQUEST_FRAME_BYTES,
+        MAX_PROTECTED_PIPELINE_RESPONSE_FRAME_BYTES,
         MAX_SIMPLIFIED_CONSENSUS_CERTIFICATE_FRAME_BYTES,
         MAX_SIMPLIFIED_CONSENSUS_CONTROL_FRAME_BYTES,
         MAX_SIMPLIFIED_CONSENSUS_PROPOSAL_FRAME_BYTES,
@@ -13293,7 +13622,7 @@ mod tests {
     };
     use base64::{engine::general_purpose, Engine as _};
     use lazy_static::lazy_static;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{BTreeSet, HashMap, HashSet};
     use std::fs;
     use std::io;
     use std::net::TcpListener;
@@ -13356,6 +13685,29 @@ mod tests {
             package,
         )
         .is_err());
+    }
+
+    #[test]
+    fn protected_evidence_variants_are_bounded_before_full_payload_allocation() {
+        let cases: &[(&[u8], usize)] = &[
+            (
+                br#"{"ProtectedPipelineEvidence":{"message":{"EVIDENCE":{"object":{}}}}}"#,
+                MAX_PROTECTED_PIPELINE_EVIDENCE_FRAME_BYTES,
+            ),
+            (
+                br#"{"ProtectedPipelineEvidence":{"message":{"MISSING_OBJECTS_REQUEST":{}}}}"#,
+                MAX_PROTECTED_PIPELINE_REQUEST_FRAME_BYTES,
+            ),
+            (
+                br#"{"ProtectedPipelineEvidence":{"message":{"MISSING_OBJECTS_RESPONSE":{}}}}"#,
+                MAX_PROTECTED_PIPELINE_RESPONSE_FRAME_BYTES,
+            ),
+        ];
+        for &(prefix, maximum) in cases {
+            validate_simplified_predecode_frame_length(maximum - 4, prefix)
+                .expect("exact protected-pipeline wire budget is accepted");
+            assert!(validate_simplified_predecode_frame_length(maximum - 3, prefix).is_err());
+        }
     }
 
     #[test]
@@ -13935,6 +14287,205 @@ mod tests {
     lazy_static! {
         static ref TEST_VALIDATOR_KEY_LOCK: Mutex<()> = Mutex::new(());
         static ref TEST_BLOCK_APPLICATION_LOCK: Mutex<()> = Mutex::new(());
+        static ref TEST_PROTECTED_EVIDENCE_LOCK: Mutex<()> = Mutex::new(());
+    }
+
+    fn protected_ingress_fixture() -> (
+        EtdagAuthenticatedIngressPeer,
+        ProtectedPipelineSemanticObject,
+        ProtectedPipelineSemanticObject,
+        ProtectedPipelineSemanticObject,
+    ) {
+        let mut fixture = fixture(5, None);
+        let peer_validator = fixture.validator_set.validators[0].clone();
+        let input = complete_protected_input(&mut fixture);
+        let transaction = input
+            .certified_vertices
+            .values()
+            .find(|certified| certified.vertex.kind == VertexKind::Transactions)
+            .unwrap()
+            .clone();
+        let transaction = ProtectedPipelineSemanticObject::CertifiedVertex {
+            semantic_id: transaction.vertex.digest().unwrap(),
+            certified_vertex: transaction,
+        };
+        let authorization = ProtectedRevealAuthorization {
+            chain_id: fixture.context.chain_id,
+            network_id: fixture.context.network_id.clone(),
+            epoch: fixture.context.epoch,
+            target_height: fixture.context.target_height,
+            target_context_root: fixture.context.root().unwrap(),
+            proposal_id: EtdagDigest::from_domain_bytes("test-proposal", b"proposal"),
+            vc_root: EtdagDigest::from_domain_bytes("test-vc", b"vc"),
+            commitment_root: EtdagDigest::from_domain_bytes("test-commitment", b"commitment"),
+            evidence_root: EtdagDigest::from_domain_bytes("test-evidence", b"evidence"),
+        };
+        let authorization_id = authorization.semantic_id().unwrap();
+        let authorization = ProtectedPipelineSemanticObject::RevealAuthorization {
+            semantic_id: authorization_id.clone(),
+            authorization,
+        };
+        let share = input
+            .decrypt_shares
+            .values()
+            .flat_map(|shares| shares.iter())
+            .next()
+            .unwrap()
+            .clone();
+        let mut share = ProtectedPipelineSemanticObject::RevealShare {
+            semantic_id: EtdagDigest::from_domain_bytes("placeholder", b"placeholder"),
+            authorization_id,
+            share,
+        };
+        let semantic_id = share.computed_semantic_id().unwrap();
+        if let ProtectedPipelineSemanticObject::RevealShare {
+            semantic_id: declared,
+            ..
+        } = &mut share
+        {
+            *declared = semantic_id;
+        }
+        (
+            EtdagAuthenticatedIngressPeer {
+                validator_id: peer_validator.validator_id,
+                validator_uma_id: peer_validator.validator_uma_id,
+                consensus_key_id: peer_validator.consensus_public_key.key_id,
+            },
+            transaction,
+            authorization,
+            share,
+        )
+    }
+
+    #[test]
+    fn protected_ingress_deduplicates_and_releases_reordered_reveal_after_authorization() {
+        let _guard = TEST_PROTECTED_EVIDENCE_LOCK.lock().unwrap();
+        super::remove_protected_pipeline_evidence_ingress().unwrap();
+        let receiver = super::install_protected_pipeline_evidence_ingress(8).unwrap();
+        let (peer, transaction, authorization, share) = protected_ingress_fixture();
+
+        let transaction_message = ProtectedPipelineEvidenceMessage::Evidence {
+            object: transaction,
+        };
+        super::dispatch_protected_pipeline_evidence_message(
+            "peer-a",
+            Some(peer.clone()),
+            transaction_message.clone(),
+        )
+        .unwrap();
+        super::dispatch_protected_pipeline_evidence_message(
+            "peer-a",
+            Some(peer.clone()),
+            transaction_message,
+        )
+        .expect("duplicate semantic evidence is idempotent");
+        assert!(matches!(
+            receiver.try_recv().unwrap().message,
+            ProtectedPipelineEvidenceMessage::Evidence { .. }
+        ));
+        assert!(receiver.try_recv().is_err());
+
+        super::dispatch_protected_pipeline_evidence_message(
+            "peer-a",
+            Some(peer.clone()),
+            ProtectedPipelineEvidenceMessage::Evidence {
+                object: share.clone(),
+            },
+        )
+        .expect("reordered reveal share is held pending");
+        assert!(receiver.try_recv().is_err());
+
+        super::dispatch_protected_pipeline_evidence_message(
+            "peer-a",
+            Some(peer.clone()),
+            ProtectedPipelineEvidenceMessage::Evidence {
+                object: authorization.clone(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            receiver.try_recv().unwrap().message,
+            ProtectedPipelineEvidenceMessage::Evidence {
+                object: ProtectedPipelineSemanticObject::RevealAuthorization { .. }
+            }
+        ));
+        assert!(matches!(
+            receiver.try_recv().unwrap().message,
+            ProtectedPipelineEvidenceMessage::Evidence {
+                object: ProtectedPipelineSemanticObject::RevealShare { .. }
+            }
+        ));
+
+        super::dispatch_protected_pipeline_evidence_message(
+            "peer-a",
+            Some(peer),
+            ProtectedPipelineEvidenceMessage::Evidence { object: share },
+        )
+        .expect("late reveal duplicate is idempotent");
+        assert!(receiver.try_recv().is_err());
+        super::remove_protected_pipeline_evidence_ingress().unwrap();
+    }
+
+    #[test]
+    fn protected_ingress_accepts_response_reordering_and_rejects_unauthenticated_evidence() {
+        let _guard = TEST_PROTECTED_EVIDENCE_LOCK.lock().unwrap();
+        super::remove_protected_pipeline_evidence_ingress().unwrap();
+        let receiver = super::install_protected_pipeline_evidence_ingress(4).unwrap();
+        let (peer, _transaction, authorization, share) = protected_ingress_fixture();
+        let (target_height, target_context_root) = share.target_binding();
+        let response = ProtectedPipelineEvidenceMessage::MissingObjectsResponse {
+            target_height,
+            target_context_root,
+            objects: vec![share, authorization],
+        };
+        super::dispatch_protected_pipeline_evidence_message("peer-a", Some(peer), response)
+            .expect("share-before-authorization object order is accepted as one response");
+        assert!(matches!(
+            receiver.try_recv().unwrap().message,
+            ProtectedPipelineEvidenceMessage::MissingObjectsResponse { .. }
+        ));
+
+        let (_, transaction, _, _) = protected_ingress_fixture();
+        let error = super::dispatch_protected_pipeline_evidence_message(
+            "peer-unauthenticated",
+            None,
+            ProtectedPipelineEvidenceMessage::Evidence {
+                object: transaction,
+            },
+        )
+        .expect_err("unauthenticated evidence must fail closed");
+        assert!(error.contains("authenticated validator peer"));
+        super::remove_protected_pipeline_evidence_ingress().unwrap();
+    }
+
+    #[test]
+    fn legacy_etdag_carriers_are_decode_only_and_cannot_activate_egress() {
+        let mut fixture = fixture(5, None);
+        let protected_input = complete_protected_input(&mut fixture);
+        let context = fixture.context.clone();
+        let package = target_admission_package(&mut fixture, context);
+        let artifact = CertifiedProtectedInputArtifact {
+            admission_package: package.clone(),
+            protected_input,
+        };
+        let network = P2PNetwork::new(
+            Arc::new(Mutex::new(BlockChain::new())),
+            &NodeConfig::default(),
+        );
+        let validators = BTreeSet::from([fixture.validator_set.validators[0].validator_id.clone()]);
+        assert!(network
+            .broadcast_simplified_target_admission(
+                &crate::p2p::messages::SimplifiedTargetAdmissionMessage::CertifiedPackage {
+                    package,
+                },
+                &validators,
+            )
+            .unwrap_err()
+            .contains("compatibility-only"));
+        assert!(network
+            .broadcast_etdag_certified_input(&artifact)
+            .unwrap_err()
+            .contains("compatibility-only"));
     }
 
     struct TestCommitVerifierGuard {
