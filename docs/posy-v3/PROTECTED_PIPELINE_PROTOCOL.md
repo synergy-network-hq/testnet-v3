@@ -62,7 +62,7 @@ The parent PoSy proposal carries `NextProtectedBatchCommitment` for the target
 execution height. The proposer has no discretion: every validator derives the
 required value independently and rejects a missing or unequal commitment.
 The commitment binds target height, `CutRoot`, eligible-set root, order seed and
-root, protected-batch root, count/gas/bytes, cut-proof root, parameter root,
+root, protected-batch root, count/gas/bytes, parameter root,
 protocol version, chain/network/epoch, cluster, and validator-set commitment.
 
 ## Target admission
