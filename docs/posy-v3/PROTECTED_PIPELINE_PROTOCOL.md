@@ -94,12 +94,21 @@ Bootstrap is permitted only for the minimal H1-H2 window. A later missing cut,
 batch, commitment, or reveal is a hard not-ready condition, never permission to
 propose an empty or plaintext block.
 
-Reveal for target H is authorized only after the normal PoSy VC for the parent
+The current simplified PoSy profile already signs `ECHO` only after complete
+local proposal/material validation and requires `n-1` authenticated ECHOs
+before READY. R11 names the canonical `n-1` ECHO proof the PoSy proposal
+validation certificate (VC); it does not add another message, leader, vote
+round, timeout, or finality system. Proof bundles may contain different valid
+signer subsets, while their semantic identity is the stable candidate ID.
+
+Reveal for target H is authorized only after that PoSy VC for the parent
 proposal has independently validated the exact `NextProtectedBatchCommitment`
 for H. A VC for another proposal, view, parent, target, or commitment does not
-authorize reveal. Reveal shares remain authenticated, replay-bound, and secret
-until that gate. Decryption and execution are deterministic, and the resulting
-execution commitment remains bound into normal PoSy voting and QC finality.
+authorize reveal. READY delivery without the validating ECHO quorum is not a
+reveal certificate. Reveal shares remain authenticated, replay-bound, and
+secret until the gate. Decryption and execution are deterministic, and the
+resulting execution commitment remains bound into the one ordinary PoSy vote
+and QC finality.
 
 ## Recovery and diagnostics
 

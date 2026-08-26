@@ -77,6 +77,15 @@ pub const DOMAIN_TARGET_ADMISSION_SOURCE_FINALITY: &str =
     "PoSy/ETDAG/TargetAdmission/SourceFinality/v3";
 pub const DOMAIN_ORDER_SEED: &str = "PoSy/ETDAG/OrderSeed/v3";
 pub const DOMAIN_ORDER_KEY: &str = "PoSy/ETDAG/Order/v3";
+pub const PROTECTED_PIPELINE_VERSION: u32 = 1;
+pub const DOMAIN_PROTECTED_CUT_MARKER_EVIDENCE: &str =
+    "PoSy/ProtectedPipeline/CutMarkerEvidence/v1";
+pub const DOMAIN_PROTECTED_CUT_SEMANTIC: &str = "PoSy/ProtectedPipeline/CutSemantic/v1";
+pub const DOMAIN_PROTECTED_CUT_PROOF: &str = "PoSy/ProtectedPipeline/CutProof/v1";
+pub const DOMAIN_PROTECTED_ORDER_ROOT: &str = "PoSy/ProtectedPipeline/OrderRoot/v1";
+pub const DOMAIN_PROTECTED_BATCH: &str = "PoSy/ProtectedPipeline/Batch/v1";
+pub const DOMAIN_NEXT_PROTECTED_BATCH_COMMITMENT: &str =
+    "PoSy/ProtectedPipeline/NextBatchCommitment/v1";
 
 fn require_process_wide_consensus_signing_allowed() -> Result<(), String> {
     #[cfg(test)]
@@ -2821,6 +2830,315 @@ impl CertifiedEnvelopeRef {
         }
         Ok(())
     }
+}
+
+/// Canonical proof that authenticated cutoff evidence deterministically selects
+/// one semantic encrypted-data cut. The exact marker evidence root may vary
+/// across valid quorum subsets; `cut_root` may not.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProtectedCutProof {
+    pub proof_version: u32,
+    pub chain_id: ChainId,
+    pub network_id: NetworkId,
+    pub protocol_version: String,
+    pub profile_id: String,
+    pub epoch: Epoch,
+    pub target_height: Height,
+    pub cluster_id: ClusterId,
+    pub target_context_root: Hash,
+    pub validator_set_commitment: Hash,
+    pub parameter_root: ConsensusParameterRoot,
+    pub cutoff_vc_context_root: Hash,
+    pub cutoff_marker_digests: Vec<EtdagDigest>,
+    pub cutoff_marker_evidence_root: EtdagDigest,
+    pub causal_closure_digests: Vec<EtdagDigest>,
+    pub causal_closure_root: EtdagDigest,
+    pub eligible_envelopes: Vec<CertifiedEnvelopeRef>,
+    pub eligible_set_root: EtdagDigest,
+    pub cut_root: EtdagDigest,
+}
+
+#[derive(Serialize, Deserialize, PartialEq)]
+struct ProtectedCutSemantic {
+    proof_version: u32,
+    chain_id: ChainId,
+    network_id: NetworkId,
+    protocol_version: String,
+    profile_id: String,
+    epoch: Epoch,
+    target_height: Height,
+    cluster_id: ClusterId,
+    target_context_root: Hash,
+    validator_set_commitment: Hash,
+    parameter_root: ConsensusParameterRoot,
+    cutoff_vc_context_root: Hash,
+    causal_closure_root: EtdagDigest,
+    eligible_set_root: EtdagDigest,
+}
+
+impl ProtectedCutProof {
+    pub fn semantic_root(&self) -> Result<EtdagDigest, String> {
+        EtdagDigest::from_canonical(
+            DOMAIN_PROTECTED_CUT_SEMANTIC,
+            &ProtectedCutSemantic {
+                proof_version: self.proof_version,
+                chain_id: self.chain_id,
+                network_id: self.network_id.clone(),
+                protocol_version: self.protocol_version.clone(),
+                profile_id: self.profile_id.clone(),
+                epoch: self.epoch,
+                target_height: self.target_height,
+                cluster_id: self.cluster_id,
+                target_context_root: self.target_context_root,
+                validator_set_commitment: self.validator_set_commitment,
+                parameter_root: self.parameter_root,
+                cutoff_vc_context_root: self.cutoff_vc_context_root,
+                causal_closure_root: self.causal_closure_root.clone(),
+                eligible_set_root: self.eligible_set_root.clone(),
+            },
+        )
+    }
+
+    pub fn proof_root(&self) -> Result<EtdagDigest, String> {
+        EtdagDigest::from_canonical(DOMAIN_PROTECTED_CUT_PROOF, self)
+    }
+
+    pub fn validate_declared_roots(&self, context: &TargetAdmissionContext) -> Result<(), String> {
+        context.validate()?;
+        if self.proof_version != PROTECTED_PIPELINE_VERSION
+            || self.chain_id != context.chain_id
+            || self.network_id != context.network_id
+            || self.protocol_version != context.protocol_version
+            || self.profile_id != ETDAG_PROFILE_ID
+            || self.epoch != context.epoch
+            || self.target_height != context.target_height
+            || self.cluster_id != context.assigned_cluster_id
+            || self.target_context_root != context.root()?
+            || self.validator_set_commitment != context.active_validator_set_root
+            || self.parameter_root != context.consensus_parameter_root
+            || self.cutoff_vc_context_root.is_zero()
+        {
+            return Err("protected cut proof context mismatch".to_string());
+        }
+        let required = certificate_quorum(context.assigned_cluster_validator_count as usize)?;
+        if self.cutoff_marker_digests.len() < required
+            || !strictly_sorted_unique(&self.cutoff_marker_digests)
+            || !strictly_sorted_unique(&self.causal_closure_digests)
+            || !self
+                .cutoff_marker_digests
+                .iter()
+                .all(|digest| self.causal_closure_digests.binary_search(digest).is_ok())
+        {
+            return Err("protected cut proof evidence is not canonical quorum data".to_string());
+        }
+        let mut prior: Option<&EtdagDigest> = None;
+        for envelope in &self.eligible_envelopes {
+            envelope.validate()?;
+            if prior.is_some_and(|value| value >= &envelope.tx_commitment) {
+                return Err("protected cut eligible set is not strictly canonical".to_string());
+            }
+            prior = Some(&envelope.tx_commitment);
+        }
+        let marker_root = EtdagDigest::from_canonical(
+            DOMAIN_PROTECTED_CUT_MARKER_EVIDENCE,
+            &self.cutoff_marker_digests,
+        )?;
+        let closure_root = EtdagDigest::from_canonical(
+            "PoSy/ProtectedPipeline/CausalClosure/v1",
+            &self.causal_closure_digests,
+        )?;
+        let eligible_root = EtdagDigest::from_canonical(
+            "PoSy/ProtectedPipeline/EligibleSet/v1",
+            &self.eligible_envelopes,
+        )?;
+        if self.cutoff_marker_evidence_root != marker_root
+            || self.causal_closure_root != closure_root
+            || self.eligible_set_root != eligible_root
+            || self.cut_root != self.semantic_root()?
+        {
+            return Err("protected cut proof declared roots mismatch".to_string());
+        }
+        Ok(())
+    }
+}
+
+fn strictly_sorted_unique<T: Ord>(values: &[T]) -> bool {
+    values.windows(2).all(|pair| pair[0] < pair[1])
+}
+
+/// Deterministic protected batch derived from one semantic cut and one
+/// consensus-provided ordering seed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeterministicProtectedBatch {
+    pub batch_version: u32,
+    pub chain_id: ChainId,
+    pub network_id: NetworkId,
+    pub protocol_version: String,
+    pub profile_id: String,
+    pub epoch: Epoch,
+    pub target_height: Height,
+    pub cluster_id: ClusterId,
+    pub target_context_root: Hash,
+    pub validator_set_commitment: Hash,
+    pub parameter_root: ConsensusParameterRoot,
+    pub cut_root: EtdagDigest,
+    pub eligible_set_root: EtdagDigest,
+    pub order_seed: EtdagDigest,
+    pub ordered_transaction_ids: Vec<EtdagDigest>,
+    pub order_root: EtdagDigest,
+    pub protected_count: u64,
+    pub protected_gas: u64,
+    pub protected_bytes: u64,
+    pub protected_batch_root: EtdagDigest,
+}
+
+#[derive(Serialize, Deserialize, PartialEq)]
+struct ProtectedBatchSemantic {
+    batch_version: u32,
+    chain_id: ChainId,
+    network_id: NetworkId,
+    protocol_version: String,
+    profile_id: String,
+    epoch: Epoch,
+    target_height: Height,
+    cluster_id: ClusterId,
+    target_context_root: Hash,
+    validator_set_commitment: Hash,
+    parameter_root: ConsensusParameterRoot,
+    cut_root: EtdagDigest,
+    eligible_set_root: EtdagDigest,
+    order_seed: EtdagDigest,
+    order_root: EtdagDigest,
+    protected_count: u64,
+    protected_gas: u64,
+    protected_bytes: u64,
+}
+
+impl DeterministicProtectedBatch {
+    pub fn semantic_root(&self) -> Result<EtdagDigest, String> {
+        EtdagDigest::from_canonical(
+            DOMAIN_PROTECTED_BATCH,
+            &ProtectedBatchSemantic {
+                batch_version: self.batch_version,
+                chain_id: self.chain_id,
+                network_id: self.network_id.clone(),
+                protocol_version: self.protocol_version.clone(),
+                profile_id: self.profile_id.clone(),
+                epoch: self.epoch,
+                target_height: self.target_height,
+                cluster_id: self.cluster_id,
+                target_context_root: self.target_context_root,
+                validator_set_commitment: self.validator_set_commitment,
+                parameter_root: self.parameter_root,
+                cut_root: self.cut_root.clone(),
+                eligible_set_root: self.eligible_set_root.clone(),
+                order_seed: self.order_seed.clone(),
+                order_root: self.order_root.clone(),
+                protected_count: self.protected_count,
+                protected_gas: self.protected_gas,
+                protected_bytes: self.protected_bytes,
+            },
+        )
+    }
+
+    pub fn validate_declared_roots(&self) -> Result<(), String> {
+        if self.batch_version != PROTECTED_PIPELINE_VERSION
+            || self.profile_id != ETDAG_PROFILE_ID
+            || self.target_height.0 == 0
+            || self.target_context_root.is_zero()
+            || self.validator_set_commitment.is_zero()
+            || self.order_seed.is_zero()
+            || self.protected_count != self.ordered_transaction_ids.len() as u64
+            || self
+                .ordered_transaction_ids
+                .iter()
+                .collect::<BTreeSet<_>>()
+                .len()
+                != self.ordered_transaction_ids.len()
+        {
+            return Err("invalid deterministic protected batch".to_string());
+        }
+        let order_root = EtdagDigest::from_canonical(
+            DOMAIN_PROTECTED_ORDER_ROOT,
+            &self.ordered_transaction_ids,
+        )?;
+        if self.order_root != order_root || self.protected_batch_root != self.semantic_root()? {
+            return Err("deterministic protected batch declared roots mismatch".to_string());
+        }
+        Ok(())
+    }
+}
+
+/// Exact protected batch that the parent PoSy proposal must commit for the
+/// target execution height. This is derived, never proposer-selected.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NextProtectedBatchCommitment {
+    pub commitment_version: u32,
+    pub chain_id: ChainId,
+    pub network_id: NetworkId,
+    pub protocol_version: String,
+    pub epoch: Epoch,
+    pub target_height: Height,
+    pub cluster_id: ClusterId,
+    pub target_context_root: Hash,
+    pub validator_set_commitment: Hash,
+    pub parameter_root: ConsensusParameterRoot,
+    pub cut_root: EtdagDigest,
+    pub eligible_set_root: EtdagDigest,
+    pub order_seed: EtdagDigest,
+    pub order_root: EtdagDigest,
+    pub protected_batch_root: EtdagDigest,
+    pub protected_count: u64,
+    pub protected_gas: u64,
+    pub protected_bytes: u64,
+    pub cut_proof_root: EtdagDigest,
+}
+
+impl NextProtectedBatchCommitment {
+    pub fn root(&self) -> Result<EtdagDigest, String> {
+        EtdagDigest::from_canonical(DOMAIN_NEXT_PROTECTED_BATCH_COMMITMENT, self)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ProtectedPipelinePhase {
+    Collecting,
+    CutoffReady,
+    CutReady,
+    OrderReady,
+    CommittedInParent,
+    RevealAuthorized,
+    Revealing,
+    ReadyForExecution,
+    Consumed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ProtectedBatchSource {
+    GenesisBootstrap,
+    NormalEtdag,
+    NormalEtdagSteadyState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProtectedPipelineDiagnostic {
+    pub target_height: Height,
+    pub phase: ProtectedPipelinePhase,
+    pub source: ProtectedBatchSource,
+    pub availability_count: u64,
+    pub cutoff_marker_count: u64,
+    pub cut_ready: bool,
+    pub order_ready: bool,
+    pub parent_commitment: bool,
+    pub reveal_authorized: bool,
+    pub reveal_share_count: u64,
+    pub execution_ready: bool,
+    pub proposal_seen: bool,
+    pub vc_seen: bool,
+    pub qc_seen: bool,
+    pub finalized: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
