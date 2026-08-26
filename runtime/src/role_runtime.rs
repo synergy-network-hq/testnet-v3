@@ -2426,6 +2426,17 @@ fn simplified_target_admission_wire_message(
     }
 }
 
+const SIMPLIFIED_TARGET_ADMISSION_REBROADCAST_INTERVAL: Duration = Duration::from_secs(5);
+
+fn prune_expired_target_admission_rebroadcasts(
+    last_broadcast: &mut BTreeMap<(Height, Hash), Instant>,
+    now: Instant,
+) {
+    last_broadcast.retain(|_, last| {
+        now.saturating_duration_since(*last) < SIMPLIFIED_TARGET_ADMISSION_REBROADCAST_INTERVAL
+    });
+}
+
 fn run_simplified_target_admission_worker(
     initial_outputs: Vec<SimplifiedTargetAdmissionOutput>,
     network: &p2p::networking::P2PNetwork,
@@ -2433,7 +2444,6 @@ fn run_simplified_target_admission_worker(
     running: &AtomicBool,
 ) -> Result<(), String> {
     const PREPARE_INTERVAL: Duration = Duration::from_millis(500);
-    const REBROADCAST_INTERVAL: Duration = Duration::from_secs(5);
 
     let mut pending_outputs = initial_outputs;
     let mut last_broadcast = BTreeMap::<(Height, Hash), Instant>::new();
@@ -2458,10 +2468,13 @@ fn run_simplified_target_admission_worker(
                 "SYNERGY_POSY_SIMPLIFIED_TARGET_ADMISSION_WIRE_V1",
                 &canonical,
             );
-            last_broadcast.retain(|(height, _), _| *height == target_height);
+            prune_expired_target_admission_rebroadcasts(&mut last_broadcast, now);
             if last_broadcast
                 .get(&(target_height, message_id))
-                .is_some_and(|last| now.saturating_duration_since(*last) < REBROADCAST_INTERVAL)
+                .is_some_and(|last| {
+                    now.saturating_duration_since(*last)
+                        < SIMPLIFIED_TARGET_ADMISSION_REBROADCAST_INTERVAL
+                })
             {
                 continue;
             }
@@ -5915,6 +5928,38 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    #[test]
+    fn target_admission_rebroadcast_cache_retains_all_live_horizon_messages() {
+        let mut last_broadcast = BTreeMap::new();
+        let now = Instant::now();
+
+        for height in 1..=3 {
+            let height = Height(height);
+            prune_expired_target_admission_rebroadcasts(&mut last_broadcast, now);
+            last_broadcast.insert(
+                (
+                    height,
+                    Hash::from_domain_bytes(
+                        "SYNERGY_POSY_SIMPLIFIED_TARGET_ADMISSION_WIRE_V1",
+                        &[height.0 as u8],
+                    ),
+                ),
+                now,
+            );
+        }
+
+        assert_eq!(
+            last_broadcast.len(),
+            3,
+            "H+1/H+2/H+3 cache entries must coexist so completed admission packages are not re-sent every worker pass"
+        );
+        prune_expired_target_admission_rebroadcasts(
+            &mut last_broadcast,
+            now + SIMPLIFIED_TARGET_ADMISSION_REBROADCAST_INTERVAL,
+        );
+        assert!(last_broadcast.is_empty());
+    }
 
     fn simplified_readiness_validator_ids(
         validator_ids: &[&str],
