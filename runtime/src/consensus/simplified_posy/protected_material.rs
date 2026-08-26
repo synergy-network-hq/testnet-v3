@@ -43,7 +43,7 @@ pub trait SimplifiedProtectedExecutionInputSource: Send {
     ) -> Result<Option<DeterministicProtectedExecutionInput>, String>;
 }
 
-fn header_protected_batch(
+pub(super) fn header_protected_batch(
     input: &DeterministicProtectedExecutionInput,
 ) -> Result<ProtectedBatchCommitment, String> {
     Ok(ProtectedBatchCommitment {

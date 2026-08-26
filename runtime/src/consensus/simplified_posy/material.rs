@@ -7,6 +7,7 @@
 //! the stable certified-candidate ID and written one-per-file so an epoch does
 //! not require rewriting or deserializing a multi-gigabyte monolith.
 
+use super::protected_material::header_protected_batch;
 use super::{
     CertifiedCandidateSubject, FinalizedBlockRecord, SimplifiedEpochContext,
     SimplifiedFinalityParent, SimplifiedProposal, SimplifiedProposalDirective,
@@ -343,10 +344,12 @@ impl VerifiedSimplifiedProposalMaterial {
             cluster_map,
             parameters,
         )?;
-        if transactions != block.transactions || block.header.protected_batch.is_none() {
+        let expected_header_commitment = header_protected_batch(&protected_execution_input)?;
+        if transactions != block.transactions
+            || block.header.protected_batch.as_ref() != Some(&expected_header_commitment)
+        {
             return Err(
-                "protected material block body does not equal the verified ETDAG reveal"
-                    .to_string(),
+                "protected material block does not equal the verified R11 ETDAG input".to_string(),
             );
         }
         validate_simplified_fee_market_header_against_parent(&block.header, parent_fee_market)?;
