@@ -12,7 +12,9 @@ use crate::crypto::aegis_pqvm::{
 };
 use crate::crypto::pqc::{PQCAlgorithm, PQCPublicKey};
 use crate::etdag::{
-    DeterministicProtectedBatch, EtdagDigest, NextProtectedBatchCommitment, ProtectedBatchSource,
+    protected_reveal_transcript_root, DeterministicProtectedBatch,
+    DeterministicProtectedExecutionInput, EtdagDigest, NextProtectedBatchCommitment,
+    ProtectedBatchSource, ProtectedExecutionTargetContext, ProtectedRevealShareMessage,
     DOMAIN_PROTECTED_ORDER_ROOT, ETDAG_PROFILE_ID, PROTECTED_PIPELINE_VERSION,
 };
 use crate::genesis::GenesisDocument;
@@ -88,6 +90,7 @@ pub struct GenesisBootstrapProtectedMaterial {
     pub source: ProtectedBatchSource,
     pub protected_batch: DeterministicProtectedBatch,
     pub next_commitment: NextProtectedBatchCommitment,
+    pub execution_input: DeterministicProtectedExecutionInput,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -303,10 +306,30 @@ impl TestnetV3GenesisBootstrap {
         // whose commitment cannot itself be rooted.
         next_commitment.root()?;
 
+        let execution_input = DeterministicProtectedExecutionInput {
+            material_version: PROTECTED_PIPELINE_VERSION,
+            source,
+            target_context: ProtectedExecutionTargetContext::GenesisBootstrap {
+                height_context: target_context.clone(),
+            },
+            cut_proof: None,
+            protected_batch: protected_batch.clone(),
+            next_commitment: next_commitment.clone(),
+            reveal_authorization: None,
+            envelopes: Default::default(),
+            reveal_shares: Default::default(),
+            ordered_transactions: Vec::new(),
+            reveal_transcript_root: protected_reveal_transcript_root(
+                &std::collections::BTreeMap::<EtdagDigest, Vec<ProtectedRevealShareMessage>>::new(),
+            )?,
+        };
+        execution_input.digest()?;
+
         Ok(GenesisBootstrapProtectedMaterial {
             source,
             protected_batch,
             next_commitment,
+            execution_input,
         })
     }
 
@@ -1113,6 +1136,16 @@ mod tests {
                 .next_commitment
                 .root()
                 .expect("canonical next protected batch commitment");
+            assert!(material
+                .execution_input
+                .verify_and_extract_transactions(
+                    &bootstrap.verifier,
+                    &bootstrap.validator_set,
+                    &bootstrap.cluster_map,
+                    &crate::etdag::EtdagParameters::default(),
+                )
+                .expect("canonical H1/H2 protected execution input")
+                .is_empty());
         }
         assert_ne!(
             h1.protected_batch.protected_batch_root,
