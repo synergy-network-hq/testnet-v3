@@ -89,10 +89,9 @@ def render_config(validator_id: str, validator: dict[str, Any], root: str) -> by
     address = validator.get("validator_uma_id")
     require(isinstance(address, str) and address, f"{validator_id} has no public validator UMA")
     ordinal = int(validator_id.rsplit("-", 1)[1])
-    # `block_time`/`block_time_secs` are deliberately not emitted: current
-    # production config types only model whole seconds.  A 500 ms candidate
-    # must not lie with a rounded one-second value.  The runtime change that
-    # adds millisecond cadence fields will consume these desired-state inputs.
+    # Legacy whole-second aliases are deliberately omitted.  Fresh-P3 uses the
+    # explicit millisecond field, which the production role verifies against
+    # the Genesis-bound manifest without rounding to a one-second value.
     text = f'''# R11 unsigned 500 ms qualification candidate; NOT deployment authorization.
 # Legacy integer-second cadence aliases are intentionally omitted.
 
@@ -101,10 +100,22 @@ node_id = "{validator_id}"
 role = "validator"
 address = "{address}"
 
+[role]
+compiled_profile = "validator_node"
+
 [network]
 id = 1266
 network_id = "testnet"
-p2p_port = 5622
+name = "Synergy Testnet-v3 R11 Local Qualification"
+p2p_port = {5600 + ordinal}
+rpc_port = {6200 + ordinal}
+ws_port = {6300 + ordinal}
+max_peers = 16
+
+[blockchain]
+target_block_time_ms = {NEW_TIMING_MS}
+max_gas_limit = "0x2fefd8"
+chain_id = 1266
 
 [consensus]
 algorithm = "posy/3.0"
@@ -123,6 +134,39 @@ consensus_parameter_root_sha3_512 = "{root}"
 [p2p]
 listen_address = "127.0.0.1:{5600 + ordinal}"
 public_address = "127.0.0.1:{5600 + ordinal}"
+discovery_listen_address = "127.0.0.1:{5700 + ordinal}"
+discovery_public_address = "127.0.0.1:{5700 + ordinal}"
+node_name = "{validator_id}"
+enable_discovery = false
+enable_peer_exchange = false
+reject_private_advertise_addrs = false
+discovery_port = {5700 + ordinal}
+heartbeat_interval = 1
+bootstrap_refresh_secs = 1
+
+[logging]
+log_level = "info"
+log_file = "logs/{validator_id}.log"
+enable_console = true
+max_file_size = 10485760
+max_files = 5
+
+[rpc]
+bind_address = "127.0.0.1:{6200 + ordinal}"
+enable_http = true
+http_port = {6200 + ordinal}
+enable_ws = true
+ws_port = {6300 + ordinal}
+enable_grpc = false
+grpc_port = {6400 + ordinal}
+cors_enabled = false
+cors_origins = []
+
+[storage]
+database = "rocksdb"
+path = "data/chain"
+enable_pruning = true
+pruning_interval = 86400
 
 [r11_qualification]
 environment = "LOCAL_R11_QUALIFICATION"
@@ -204,7 +248,7 @@ def main() -> None:
         "consensus_parameter_root_sha3_512": candidate_root,
         "genesis_candidate_sha256": genesis_hash,
         "validator_config_sha256": {path.split("/")[-2]: sha256(data) for path, data in configs.items()},
-        "runtime_config_status": "REQUIRES_MILLISECOND_CADENCE_FIELDS",
+        "runtime_config_status": "MILLISECOND_CADENCE_FIELDS_BOUND",
     }
     signing_request = {
         "schema_version": 1,
@@ -236,7 +280,7 @@ def main() -> None:
         "candidate_parameter_manifest_sha256": sha256(candidate_manifest_bytes),
         "candidate_parameter_root_sha3_512": candidate_root,
         "rendered_validator_count": len(configs),
-        "runtime_config_status": "REQUIRES_MILLISECOND_CADENCE_FIELDS",
+        "runtime_config_status": "MILLISECOND_CADENCE_FIELDS_BOUND",
         "validation": {"source_preserved": True, "source_timing_ms": OLD_TIMING_MS,
                        "candidate_timing_ms": NEW_TIMING_MS, "candidate_within_100_to_1100_ms": True,
                        "no_governance_signature_fabricated": True},

@@ -36,7 +36,15 @@ class CandidateTests(unittest.TestCase):
             self.assertEqual(genesis["consensus"]["posy_v3_activation"]["parameter_root_sha3_512"],
                              report["candidate_parameter_root_sha3_512"])
             self.assertEqual(request["status"], "UNSIGNED_EXTERNAL_GOVERNANCE_ACTION_REQUIRED")
-            self.assertEqual(len(list((output / "rendered-configs").glob("*/config.toml"))), 5)
+            rendered = list((output / "rendered-configs").glob("*/config.toml"))
+            self.assertEqual(len(rendered), 5)
+            config = rendered[0].read_text()
+            self.assertIn('compiled_profile = "validator_node"', config)
+            self.assertIn("target_block_time_ms = 500", config)
+            self.assertNotIn("block_time_secs", config)
+            self.assertIn("[logging]", config)
+            self.assertIn("[rpc]", config)
+            self.assertIn("[storage]", config)
             self.assertEqual(before, {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in before})
 
 

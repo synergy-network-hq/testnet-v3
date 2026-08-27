@@ -1342,16 +1342,36 @@ fn ensure_node_config_matches_simplified_posy_parameters(
     use crate::consensus::simplified_posy::POSY_SIMPLIFIED_PROTOCOL_VERSION;
 
     manifest.require_activatable()?;
-    let target_block_time_ms = config
-        .blockchain
-        .block_time
-        .checked_mul(1_000)
-        .ok_or_else(|| "node blockchain block time overflows milliseconds".to_string())?;
-    let consensus_block_time_ms = config
-        .consensus
-        .block_time_secs
-        .checked_mul(1_000)
-        .ok_or_else(|| "node consensus block time overflows milliseconds".to_string())?;
+    let target_block_time_ms = if config.blockchain.target_block_time_ms != 0 {
+        let legacy_block_time_ms = config
+            .blockchain
+            .block_time
+            .checked_mul(1_000)
+            .ok_or_else(|| "node blockchain block time overflows milliseconds".to_string())?;
+        if legacy_block_time_ms != 0
+            && legacy_block_time_ms != config.blockchain.target_block_time_ms
+        {
+            return Err(
+                "node blockchain legacy and millisecond cadence fields disagree".to_string(),
+            );
+        }
+        config.blockchain.target_block_time_ms
+    } else {
+        config
+            .blockchain
+            .block_time
+            .checked_mul(1_000)
+            .ok_or_else(|| "node blockchain block time overflows milliseconds".to_string())?
+    };
+    let consensus_block_time_ms = if config.consensus.block_time_secs == 0 {
+        config.consensus.target_block_time_ms
+    } else {
+        config
+            .consensus
+            .block_time_secs
+            .checked_mul(1_000)
+            .ok_or_else(|| "node consensus block time overflows milliseconds".to_string())?
+    };
     if config.blockchain.chain_id != manifest.chain_id.0
         || config.network.id != manifest.chain_id.0
         || config.network.network_id != manifest.network_id.0
@@ -6347,6 +6367,13 @@ mod tests {
             .expect("canonical unit-test Genesis must carry the fresh P3 parameter manifest");
         let config = NodeConfig::default();
         ensure_node_config_matches_finalized_consensus_parameters(&config, genesis).unwrap();
+
+        let mut millisecond_only = config.clone();
+        millisecond_only.blockchain.block_time = 0;
+        millisecond_only.blockchain.target_block_time_ms = 2_000;
+        millisecond_only.consensus.block_time_secs = 0;
+        ensure_node_config_matches_finalized_consensus_parameters(&millisecond_only, genesis)
+            .expect("a fresh-P3 config may bind cadence without legacy whole-second aliases");
 
         let mut wrong_epoch = config.clone();
         wrong_epoch.consensus.epoch_length = 1_001;

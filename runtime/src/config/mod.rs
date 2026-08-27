@@ -62,7 +62,14 @@ pub struct ValidatorVpnTransportConfig {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct BlockchainConfig {
+    /// Legacy whole-second cadence. New fresh-P3 candidates may omit this
+    /// alias and bind cadence directly in milliseconds.
+    #[serde(default)]
     pub block_time: u64,
+    /// Canonical cadence for fresh PoSy configurations. A non-zero value is
+    /// authoritative and must agree with the Genesis-bound manifest.
+    #[serde(default)]
+    pub target_block_time_ms: u64,
     pub max_gas_limit: String,
     pub chain_id: u64,
 }
@@ -87,6 +94,9 @@ pub struct ConsensusConfig {
     pub producer_ids: Vec<String>,
     #[serde(default = "default_producer_turn_timeout_ms")]
     pub producer_turn_timeout_ms: u64,
+    /// Legacy whole-second cadence.  Fresh-P3 500 ms configurations omit the
+    /// alias and use `target_block_time_ms` instead.
+    #[serde(default)]
     pub block_time_secs: u64,
     pub epoch_length: u64,
     #[serde(default = "default_target_block_time_ms")]
@@ -526,6 +536,7 @@ impl Default for NodeConfig {
             },
             blockchain: BlockchainConfig {
                 block_time: 2,
+                target_block_time_ms: 2_000,
                 max_gas_limit: "0x2fefd8".to_string(),
                 chain_id: 1266,
             },
