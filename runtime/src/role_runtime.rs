@@ -17,7 +17,11 @@ use crate::consensus::consensus_fork;
 use crate::consensus::dao_governance::{DAOGovernance, SynergyOracle};
 use crate::consensus::dual_quorum::{EntropyBeacon, ValidatorRotation};
 use crate::consensus::posy::LocalConsensusContext;
-use crate::consensus::protected_pipeline_runtime::GenesisBootstrapProtectedExecutionSource;
+use crate::consensus::protected_pipeline::ProtectedPipelineReconcileContext;
+use crate::consensus::protected_pipeline_runtime::{
+    GenesisBootstrapProtectedExecutionSource, NormalProtectedPipelineCoordinator,
+    ProtectedPipelineRuntime,
+};
 use crate::consensus::self_realign::{
     expected_genesis_hash, persisted_recovery_state, RealignmentState,
 };
@@ -28,9 +32,10 @@ use crate::consensus::simplified_posy::{
     install_simplified_consensus_ingress, load_genesis_bound_simplified_activation,
     remove_simplified_consensus_ingress, run_simplified_posy_driver,
     select_consensus_profile_at_height, select_consensus_profile_from_verified_v3_transition,
-    validate_simplified_driver_activation, ConsensusProfileAtHeight, ConsensusSignatureVerifier,
-    CoordinatedProtectedExecutionInputSource, DurableSimplifiedEpochTransitionStore,
-    DurableSimplifiedFinalitySink, DurableSimplifiedPosyStore,
+    simplified_target_admission_assignment, validate_simplified_driver_activation,
+    ConsensusProfileAtHeight, ConsensusSignatureVerifier, CoordinatedProtectedExecutionInputSource,
+    DurableSimplifiedEpochTransitionStore, DurableSimplifiedFinalitySink,
+    DurableSimplifiedIngressKemRegistrySource, DurableSimplifiedPosyStore,
     DurableSimplifiedProposalMaterialStore,
     DurableSimplifiedProtectedExecutionTransitionAuthorityVerifier,
     DurableSimplifiedProtectedMaterialAuthority,
@@ -39,9 +44,10 @@ use crate::consensus::simplified_posy::{
     P2pSimplifiedConsensusEgress, QuorumCertificateReference, SimplifiedActivatedMaterialAdapter,
     SimplifiedCoreMaterialAdapter, SimplifiedCoreMaterialConfiguration, SimplifiedDriverTiming,
     SimplifiedEpochContext, SimplifiedFinalityEnvironment, SimplifiedFinalityParent,
-    SimplifiedParentFeeMarketState, SimplifiedPosyDriver, SimplifiedPreviousEpochFinalityReplay,
-    SimplifiedProtectedMaterialAdapter, SimplifiedProtectedMaterialConfiguration,
-    SimplifiedTransitionAuthorityVerifier, VerifiedSimplifiedEpochTransition,
+    SimplifiedIngressKemRegistrySource, SimplifiedParentFeeMarketState, SimplifiedPosyDriver,
+    SimplifiedPreviousEpochFinalityReplay, SimplifiedProtectedMaterialAdapter,
+    SimplifiedProtectedMaterialConfiguration, SimplifiedTransitionAuthorityVerifier,
+    VerifiedSimplifiedEpochTransition, POSY_SIMPLIFIED_PROTOCOL_VERSION,
 };
 use crate::consensus::synergy_score::SynergyScoreCalculator;
 use crate::consensus::testnet_v3_bootstrap::load_testnet_v3_genesis_bootstrap;
@@ -67,9 +73,9 @@ use crate::crypto::aegis_pqvm::{
 };
 use crate::crypto::pqc::{PQCAlgorithm, PQCManager, PQCPublicKey};
 use crate::etdag::{
-    install_etdag_certified_input_ingress, install_schedule_neutral_etdag_certified_input_ingress,
-    remove_etdag_certified_input_ingress, EtdagCertifiedInputIngress, EtdagParameters,
-    EtdagProtectedInputCoordinator, EtdagScheduleNeutralCertifiedInputIngress,
+    install_etdag_certified_input_ingress, remove_etdag_certified_input_ingress,
+    target_admission_source_finality_root, EtdagCertifiedInputIngress, EtdagParameters,
+    EtdagProtectedInputCoordinator, TargetAdmissionContext, TargetAdmissionContextSpec,
 };
 use crate::execution::{
     install_finalized_execution_state_snapshot, remove_finalized_execution_state_snapshot,
@@ -88,6 +94,7 @@ use crate::sync::SyncManager;
 use crate::synergy_types::{
     AegisPqKeyId, AegisPqKeyRole, BlockHeader, ClusterMap, Hash, Height, ValidatorId, ValidatorSet,
     SYNERGY_TESTNET_V3_CHAIN_ID, TESTNET_V3_CANONICAL_NETWORK_ID,
+    TESTNET_V3_CLUSTER_SCHEDULE_VERSION,
 };
 use crate::telemetry;
 use crate::testnet_v3_execution_bootstrap::load_finalized_testnet_v3_genesis_execution_state;
@@ -2570,6 +2577,90 @@ fn build_genesis_bootstrap_protected_input_source(
     Ok(source)
 }
 
+/// Opens the sole normal protected coordinator and binds the first H+3 target
+/// to the exact durable finality and public ingress-KEM authorities available
+/// at startup. Later finality events use the same derivation through the
+/// lifecycle bridge; this initial registration ensures P2P cannot race PoSy
+/// startup with an unbound H3 object.
+#[allow(clippy::too_many_arguments)]
+fn build_initial_normal_protected_target(
+    epoch_context: &SimplifiedEpochContext,
+    validator_set: &ValidatorSet,
+    cluster_map: &ClusterMap,
+    consensus_parameter_root: ConsensusParameterRoot,
+    cryptographic_profile_root: Hash,
+    verifier: AegisPqvmVerifier,
+    etdag_parameters: EtdagParameters,
+    authority: &DurableSimplifiedProtectedMaterialAuthority,
+    execution_sources: &CoordinatedProtectedExecutionInputSource,
+) -> Result<(NormalProtectedPipelineCoordinator, ProtectedPipelineRuntime), String> {
+    let (finalized, _state_root, finality_digest) =
+        authority.current_finalized_authority_with_state_root()?;
+    let target_height = finalized
+        .height
+        .0
+        .checked_add(3)
+        .map(Height)
+        .ok_or_else(|| "normal protected target height overflowed".to_string())?;
+    if target_height.0 > epoch_context.epoch_end_height.0 {
+        return Err(
+            "normal protected target crosses an epoch without a verified transition".to_string(),
+        );
+    }
+    let (assigned_cluster_id, assigned_height_schedule_root) =
+        simplified_target_admission_assignment(epoch_context, target_height, cluster_map)?;
+    let epoch_context_root = epoch_context.root()?;
+    let mut registry_source =
+        DurableSimplifiedIngressKemRegistrySource::process_wide(epoch_context_root)?;
+    let ingress_kem_registry = registry_source
+        .registry_for_target(epoch_context.epoch, target_height, assigned_cluster_id)?
+        .ok_or_else(|| {
+            format!(
+                "normal protected H{} requires its public ingress KEM registry artifact",
+                target_height.0
+            )
+        })?;
+    let target = TargetAdmissionContext::derive_schedule_neutral(
+        TargetAdmissionContextSpec {
+            protocol_version: POSY_SIMPLIFIED_PROTOCOL_VERSION.to_string(),
+            epoch: epoch_context.epoch,
+            target_height,
+            source_finalized_height: finalized.height,
+            source_finality_context_root: target_admission_source_finality_root(&finality_digest)?,
+            assigned_cluster_id,
+            cluster_schedule_version: TESTNET_V3_CLUSTER_SCHEDULE_VERSION.to_string(),
+            finalized_epoch_seed_root: epoch_context.finalized_epoch_seed_root,
+            assigned_height_schedule_root,
+            cryptographic_profile_root,
+            ingress_kem_registry_root: ingress_kem_registry.root()?,
+        },
+        validator_set,
+        cluster_map,
+        consensus_parameter_root,
+    )?;
+    ingress_kem_registry.validate_against(&target, validator_set)?;
+
+    let coordinator = NormalProtectedPipelineCoordinator::new(
+        crate::utils::resolve_data_path("data"),
+        verifier.clone(),
+        validator_set.clone(),
+        cluster_map.clone(),
+        etdag_parameters.clone(),
+    )?;
+    let runtime = coordinator.register_target(target)?;
+    runtime
+        .reconcile_on_startup(&ProtectedPipelineReconcileContext {
+            target: runtime.target(),
+            verifier: &verifier,
+            validator_set,
+            cluster_map,
+            parameters: &etdag_parameters,
+        })
+        .map_err(|error| format!("reconcile initial normal protected target: {error}"))?;
+    execution_sources.register_normal_target(runtime.clone())?;
+    Ok((coordinator, runtime))
+}
+
 /// Starts the authenticated simplified v3 driver from finalized activation
 /// state. The Genesis-committed governed ETDAG artifacts issue the protected
 /// adapter capability; no default or deferred compatibility path exists.
@@ -2634,7 +2725,7 @@ fn spawn_finalized_simplified_posy_driver(
             .fee_market_params,
     )?;
     let material_mode = select_simplified_material_mode(etdag_activation_permit.as_ref());
-    let mut bootstrap_protected_input_source = (material_mode == SimplifiedMaterialMode::Protected)
+    let protected_execution_sources = (material_mode == SimplifiedMaterialMode::Protected)
         .then(|| build_genesis_bootstrap_protected_input_source(&genesis))
         .transpose()?;
     let genesis_execution_state = load_finalized_testnet_v3_genesis_execution_state(genesis)
@@ -2814,6 +2905,27 @@ fn spawn_finalized_simplified_posy_driver(
     let consensus_parameter_root =
         ConsensusParameterRoot::from_hex(&epoch_context.consensus_parameter_root)?;
     let protected_inputs = EtdagProtectedInputCoordinator::process_wide();
+    let normal_protected_coordinator = if material_mode == SimplifiedMaterialMode::Protected {
+        let execution_sources = protected_execution_sources.as_ref().ok_or_else(|| {
+            "protected runtime has no canonical height-bound execution source".to_string()
+        })?;
+        let (coordinator, _initial_runtime) = build_initial_normal_protected_target(
+            &epoch_context,
+            &validator_set,
+            &cluster_map,
+            consensus_parameter_root,
+            cryptographic_profile_root,
+            crypto.verifier.clone(),
+            etdag_parameters.clone(),
+            protected_authority
+                .as_ref()
+                .ok_or_else(|| "protected material authority is unavailable".to_string())?,
+            execution_sources,
+        )?;
+        Some(coordinator)
+    } else {
+        None
+    };
     let material_adapter: SimplifiedActivatedMaterialAdapter<
         DurableSimplifiedProtectedMaterialAuthority,
     > = if material_mode == SimplifiedMaterialMode::Protected {
@@ -2841,9 +2953,13 @@ fn spawn_finalized_simplified_posy_driver(
                     .clone(),
             )?
             .with_protected_pipeline_source(
-                bootstrap_protected_input_source.take().ok_or_else(|| {
-                    "protected runtime has no canonical Genesis bootstrap input source".to_string()
-                })?,
+                protected_execution_sources
+                    .as_ref()
+                    .ok_or_else(|| {
+                        "protected runtime has no canonical Genesis bootstrap input source"
+                            .to_string()
+                    })?
+                    .clone(),
             ),
         )
     } else {
@@ -2863,24 +2979,6 @@ fn spawn_finalized_simplified_posy_driver(
                 aegis_pqvm_version: runtime_metadata.aegis_pqvm_version.clone(),
             },
         )?)
-    };
-    let schedule_neutral_etdag_ingress = if material_mode == SimplifiedMaterialMode::Protected {
-        Some(EtdagScheduleNeutralCertifiedInputIngress::new(
-            protected_inputs.clone(),
-            Arc::new(
-                protected_authority
-                    .as_ref()
-                    .ok_or_else(|| "protected material authority is unavailable".to_string())?
-                    .clone(),
-            ),
-            crypto.verifier.clone(),
-            validator_set.clone(),
-            cluster_map.clone(),
-            consensus_parameter_root,
-            etdag_parameters.clone(),
-        )?)
-    } else {
-        None
     };
     let proposal_source = DurableVerifiedSimplifiedProposalSource::new(
         epoch_context.clone(),
@@ -2924,21 +3022,38 @@ fn spawn_finalized_simplified_posy_driver(
         )?
     };
 
-    let etdag_ingress_installed = match (etdag_activation_permit, schedule_neutral_etdag_ingress) {
-        (Some(permit), Some(ingress)) => {
-            install_schedule_neutral_etdag_certified_input_ingress(permit, ingress).map_err(
-                |error| format!("install simplified schedule-neutral ETDAG ingress: {error}"),
-            )?;
-            true
+    let etdag_ingress_installed = false;
+    match (
+        etdag_activation_permit,
+        normal_protected_coordinator.as_ref(),
+    ) {
+        (Some(_), Some(_)) | (None, None) => {}
+        _ => return Err(
+            "simplified runtime received an incomplete protected-pipeline activation capability"
+                .to_string(),
+        ),
+    }
+    let protected_pipeline_installed = if let Some(coordinator) = &normal_protected_coordinator {
+        let store = p2p::networking::DurableProtectedCiphertextStore::at_directory(
+            crate::utils::resolve_data_path("data/posy-v3-protected-ciphertexts"),
+        )?;
+        p2p::networking::install_protected_ciphertext_store(store)
+            .map_err(|error| format!("install durable protected ciphertext store: {error}"))?;
+        if let Err(error) = p2p::networking::install_protected_pipeline_evidence_ingress(Arc::new(
+            coordinator.clone(),
+        )) {
+            let _ = p2p::networking::remove_protected_ciphertext_store();
+            return Err(format!("install protected-pipeline P2P ingress: {error}"));
         }
-        (None, None) => false,
-        _ => {
-            return Err(
-                "simplified runtime received an incomplete ETDAG activation capability".to_string(),
-            )
-        }
+        true
+    } else {
+        false
     };
     if let Err(error) = install_finalized_execution_state_snapshot(initial_execution_state) {
+        if protected_pipeline_installed {
+            let _ = p2p::networking::remove_protected_pipeline_evidence_ingress();
+            let _ = p2p::networking::remove_protected_ciphertext_store();
+        }
         if etdag_ingress_installed {
             let _ = remove_etdag_certified_input_ingress();
         }
@@ -2947,6 +3062,10 @@ fn spawn_finalized_simplified_posy_driver(
     let receiver = match install_simplified_consensus_ingress(SIMPLIFIED_POSY_INGRESS_CAPACITY) {
         Ok(receiver) => receiver,
         Err(error) => {
+            if protected_pipeline_installed {
+                let _ = p2p::networking::remove_protected_pipeline_evidence_ingress();
+                let _ = p2p::networking::remove_protected_ciphertext_store();
+            }
             if etdag_ingress_installed {
                 let _ = remove_etdag_certified_input_ingress();
             }
@@ -2986,12 +3105,20 @@ fn spawn_finalized_simplified_posy_driver(
             if etdag_ingress_installed {
                 let _ = remove_etdag_certified_input_ingress();
             }
+            if protected_pipeline_installed {
+                let _ = p2p::networking::remove_protected_pipeline_evidence_ingress();
+                let _ = p2p::networking::remove_protected_ciphertext_store();
+            }
             remove_finalized_execution_state_snapshot();
         }) {
         Ok(handle) => handle,
         Err(error) => {
             running.store(false, Ordering::Release);
             let _ = remove_simplified_consensus_ingress();
+            if protected_pipeline_installed {
+                let _ = p2p::networking::remove_protected_pipeline_evidence_ingress();
+                let _ = p2p::networking::remove_protected_ciphertext_store();
+            }
             if etdag_ingress_installed {
                 let _ = remove_etdag_certified_input_ingress();
             }

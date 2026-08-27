@@ -6,7 +6,11 @@
 //! PoSy, ETDAG, or reveal proof before allowing a state transition.
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -63,6 +67,8 @@ pub const DOMAIN_PROTECTED_REVEAL_SHARE_EVIDENCE: &str =
     "PoSy/ProtectedPipeline/RevealShareEvidence/v1";
 
 const MAX_PRODUCTION_EVIDENCE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_PRODUCTION_EVIDENCE_OBJECTS: usize = 16_384;
+const PRODUCTION_EVIDENCE_STORE_FORMAT: &str = "synergy-posy-protected-production-evidence-v1";
 
 /// Complete finalized authority from which one normal H+3 ordering seed is
 /// derived.
@@ -195,6 +201,228 @@ pub trait ProductionProtectedPipelineEvidenceSource: Send + Sync {
         &self,
         root: &EtdagDigest,
     ) -> Result<Option<ProductionProtectedPipelineEvidence>, String>;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct StoredProductionProtectedPipelineEvidence {
+    format: String,
+    root: EtdagDigest,
+    evidence: ProductionProtectedPipelineEvidence,
+}
+
+/// Restart-safe content-addressed proof store used by the production
+/// verifier. Complete evidence is persisted before its compact observation is
+/// merged, so restart/reconciliation never depends on an in-memory root.
+#[derive(Debug, Clone)]
+pub struct DurableProductionProtectedPipelineEvidenceStore {
+    directory: PathBuf,
+}
+
+static PRODUCTION_EVIDENCE_STORE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+impl DurableProductionProtectedPipelineEvidenceStore {
+    pub fn at_directory(directory: impl Into<PathBuf>) -> Result<Self, String> {
+        let directory = directory.into();
+        if directory.as_os_str().is_empty() {
+            return Err("protected production evidence directory is empty".to_string());
+        }
+        Ok(Self { directory })
+    }
+
+    pub fn install(
+        &self,
+        evidence: &ProductionProtectedPipelineEvidence,
+    ) -> Result<EtdagDigest, String> {
+        let root = evidence.lookup_root()?;
+        root.validate("protected production evidence root")?;
+        if root.is_zero() {
+            return Err("protected production evidence root is zero".to_string());
+        }
+        let record = StoredProductionProtectedPipelineEvidence {
+            format: PRODUCTION_EVIDENCE_STORE_FORMAT.to_string(),
+            root: root.clone(),
+            evidence: evidence.clone(),
+        };
+        let bytes = serde_json::to_vec(&record)
+            .map_err(|error| format!("encode protected production evidence: {error}"))?;
+        if bytes.is_empty() || bytes.len() > MAX_PRODUCTION_EVIDENCE_BYTES {
+            return Err("protected production evidence violates its size bound".to_string());
+        }
+        let _guard = PRODUCTION_EVIDENCE_STORE_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| "protected production evidence store lock is poisoned".to_string())?;
+        fs::create_dir_all(&self.directory).map_err(|error| {
+            format!(
+                "create protected production evidence directory {}: {error}",
+                self.directory.display()
+            )
+        })?;
+        let path = self.object_path(&root)?;
+        if path.exists() {
+            let existing = self.load_unlocked(&root)?;
+            if existing == *evidence {
+                return Ok(root);
+            }
+            return Err("PROTECTED_PRODUCTION_EVIDENCE_CONFLICT".to_string());
+        }
+        if self.object_count_unlocked()? >= MAX_PRODUCTION_EVIDENCE_OBJECTS {
+            return Err("protected production evidence capacity is exhausted".to_string());
+        }
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| format!("clock failure for evidence persistence: {error}"))?
+            .as_nanos();
+        let temporary =
+            self.directory
+                .join(format!(".{}.tmp-{}-{nonce}", root.0, std::process::id()));
+        let result = (|| -> Result<(), String> {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&temporary).map_err(|error| {
+                format!(
+                    "create protected evidence temp {}: {error}",
+                    temporary.display()
+                )
+            })?;
+            file.write_all(&bytes).map_err(|error| {
+                format!(
+                    "write protected evidence temp {}: {error}",
+                    temporary.display()
+                )
+            })?;
+            file.sync_all().map_err(|error| {
+                format!(
+                    "sync protected evidence temp {}: {error}",
+                    temporary.display()
+                )
+            })?;
+            match fs::hard_link(&temporary, &path) {
+                Ok(()) => {
+                    fs::remove_file(&temporary).map_err(|error| {
+                        format!(
+                            "remove protected evidence temp {}: {error}",
+                            temporary.display()
+                        )
+                    })?;
+                    sync_evidence_directory(&self.directory)
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if self.load_unlocked(&root)? != *evidence {
+                        return Err("PROTECTED_PRODUCTION_EVIDENCE_CONFLICT".to_string());
+                    }
+                    fs::remove_file(&temporary).map_err(|remove_error| {
+                        format!(
+                            "remove idempotent protected evidence temp {}: {remove_error}",
+                            temporary.display()
+                        )
+                    })?;
+                    Ok(())
+                }
+                Err(error) => Err(format!(
+                    "atomically install protected production evidence {}: {error}",
+                    path.display()
+                )),
+            }
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result.map(|()| root)
+    }
+
+    fn load_unlocked(
+        &self,
+        root: &EtdagDigest,
+    ) -> Result<ProductionProtectedPipelineEvidence, String> {
+        let path = self.object_path(root)?;
+        let mut file = OpenOptions::new()
+            .read(true)
+            .open(&path)
+            .map_err(|error| format!("open protected evidence {}: {error}", path.display()))?;
+        let length = file
+            .metadata()
+            .map_err(|error| format!("stat protected evidence {}: {error}", path.display()))?
+            .len();
+        if length == 0 || length > MAX_PRODUCTION_EVIDENCE_BYTES as u64 {
+            return Err("protected production evidence has an invalid length".to_string());
+        }
+        let mut bytes = Vec::with_capacity(length as usize);
+        file.read_to_end(&mut bytes)
+            .map_err(|error| format!("read protected evidence {}: {error}", path.display()))?;
+        let record: StoredProductionProtectedPipelineEvidence = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("decode protected evidence {}: {error}", path.display()))?;
+        if serde_json::to_vec(&record)
+            .map_err(|error| format!("canonicalize protected evidence: {error}"))?
+            != bytes
+            || record.format != PRODUCTION_EVIDENCE_STORE_FORMAT
+            || &record.root != root
+            || record.evidence.lookup_root()? != *root
+        {
+            return Err("protected production evidence durable binding mismatch".to_string());
+        }
+        Ok(record.evidence)
+    }
+
+    fn object_path(&self, root: &EtdagDigest) -> Result<PathBuf, String> {
+        root.validate("protected production evidence root")?;
+        if root.is_zero() {
+            return Err("protected production evidence root is zero".to_string());
+        }
+        Ok(self.directory.join(format!("{}.json", root.0)))
+    }
+
+    fn object_count_unlocked(&self) -> Result<usize, String> {
+        let mut count = 0usize;
+        for entry in fs::read_dir(&self.directory).map_err(|error| {
+            format!(
+                "read protected production evidence directory {}: {error}",
+                self.directory.display()
+            )
+        })? {
+            let entry = entry.map_err(|error| format!("read evidence directory entry: {error}"))?;
+            if entry.path().extension().and_then(|value| value.to_str()) == Some("json") {
+                count = count.saturating_add(1);
+            }
+        }
+        Ok(count)
+    }
+}
+
+impl ProductionProtectedPipelineEvidenceSource for DurableProductionProtectedPipelineEvidenceStore {
+    fn load_evidence(
+        &self,
+        root: &EtdagDigest,
+    ) -> Result<Option<ProductionProtectedPipelineEvidence>, String> {
+        let _guard = PRODUCTION_EVIDENCE_STORE_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| "protected production evidence store lock is poisoned".to_string())?;
+        let path = self.object_path(root)?;
+        if !path.exists() {
+            return Ok(None);
+        }
+        self.load_unlocked(root).map(Some)
+    }
+}
+
+fn sync_evidence_directory(directory: &Path) -> Result<(), String> {
+    OpenOptions::new()
+        .read(true)
+        .open(directory)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            format!(
+                "sync protected production evidence directory {}: {error}",
+                directory.display()
+            )
+        })
 }
 
 /// Fail-closed verifier used by the normal protected-pipeline coordinator.

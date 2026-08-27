@@ -93,7 +93,7 @@ pub struct ProtectedPipelineLifecycleUpdate {
 
 /// Durable integration boundary implemented by the normal protected-pipeline
 /// coordinator (or a thin adapter around it).
-pub trait ProtectedPipelineLifecycleSink {
+pub trait ProtectedPipelineLifecycleSink: Send {
     fn apply_protected_pipeline_lifecycle_update(
         &mut self,
         update: ProtectedPipelineLifecycleUpdate,

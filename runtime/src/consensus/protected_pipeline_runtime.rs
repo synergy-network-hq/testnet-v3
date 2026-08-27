@@ -12,9 +12,12 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use crate::crypto::aegis_pqvm::AegisPqvmVerifier;
 use crate::etdag::{
-    CertifiedVertex, DeterministicProtectedExecutionInput, EtdagAuthenticatedIngressPeer,
-    EtdagDigest, EtdagParameters, NextProtectedBatchCommitment, ProtectedBatchSource,
-    ProtectedPipelinePhase, TargetAdmissionContext,
+    decrypt_inner_transaction, decryption_threshold, protected_reveal_transcript_root,
+    CertifiedVertex, DeterministicProtectedExecutionInput, EncryptedTransactionEnvelope,
+    EtdagAuthenticatedIngressPeer, EtdagDigest, EtdagParameters, EtdagSubmissionEnvelope,
+    NextProtectedBatchCommitment, ProtectedBatchSource, ProtectedExecutionTargetContext,
+    ProtectedPipelinePhase, ProtectedRevealAuthorization, ProtectedRevealShareMessage,
+    TargetAdmissionContext, PROTECTED_PIPELINE_VERSION,
 };
 use crate::p2p::messages::{ProtectedPipelineEvidenceMessage, ProtectedPipelineSemanticObject};
 use crate::p2p::networking::{
@@ -131,6 +134,66 @@ impl NormalProtectedPipelineCoordinator {
             .cloned())
     }
 
+    /// Load the exact durable ciphertext objects selected by the pipeline's
+    /// deterministic order and assemble the concrete execution input. A
+    /// missing object remains not-ready and can be requested through the P2P
+    /// recovery API; no caller-supplied ciphertext map is accepted here.
+    pub fn assemble_target_execution_input(
+        &self,
+        target_height: Height,
+        target_context_root: Hash,
+        reveal_authorization: ProtectedRevealAuthorization,
+        reveal_shares: BTreeMap<EtdagDigest, Vec<ProtectedRevealShareMessage>>,
+    ) -> ProtectedPipelineResult<ProtectedPipelineReconcileOutcome> {
+        let runtime = self
+            .runtime_for_target(target_height, target_context_root)
+            .map_err(|error| persistence("PROTECTED_ASSEMBLY_TARGET_LOOKUP_FAILED", error))?
+            .ok_or_else(|| {
+                not_ready(
+                    "PROTECTED_ASSEMBLY_TARGET_NOT_REGISTERED",
+                    "normal protected target is not registered",
+                )
+            })?;
+        let commitments = runtime.ordered_transaction_commitments()?;
+        let mut submissions = BTreeMap::new();
+        for commitment in commitments {
+            match crate::p2p::networking::load_protected_ciphertext_material(&commitment).map_err(
+                |error| persistence("PROTECTED_ASSEMBLY_CIPHERTEXT_LOOKUP_FAILED", error),
+            )? {
+                Some(ProtectedPipelineSemanticObject::EncryptedMaterial {
+                    semantic_id,
+                    submission,
+                }) if semantic_id == commitment => {
+                    submissions.insert(commitment, submission);
+                }
+                Some(_) => {
+                    return Err(conflict(
+                        "PROTECTED_ASSEMBLY_CIPHERTEXT_CONFLICT",
+                        "durable ciphertext store returned another semantic object",
+                    ))
+                }
+                None => {
+                    return Err(not_ready(
+                        "PROTECTED_ASSEMBLY_CIPHERTEXT_NOT_READY",
+                        format!("missing durable encrypted material {}", commitment.0),
+                    ))
+                }
+            }
+        }
+        runtime.assemble_and_ingest_execution_input(
+            reveal_authorization,
+            submissions,
+            reveal_shares,
+            &ProtectedPipelineReconcileContext {
+                target: runtime.target(),
+                verifier: &self.verifier,
+                validator_set: &self.validator_set,
+                cluster_map: &self.cluster_map,
+                parameters: &self.parameters,
+            },
+        )
+    }
+
     fn authorize_peer(
         &self,
         target: &TargetAdmissionContext,
@@ -189,6 +252,30 @@ impl NormalProtectedPipelineCoordinator {
         let mut cutoff_marker_digests = Vec::new();
         for object in objects {
             match object {
+                ProtectedPipelineSemanticObject::EncryptedMaterial {
+                    semantic_id,
+                    submission,
+                } => {
+                    submission
+                        .verify(runtime.target(), &self.parameters)
+                        .map_err(|error| format!("verify protected encrypted material: {error}"))?;
+                    match crate::p2p::networking::load_protected_ciphertext_material(semantic_id)? {
+                        Some(ProtectedPipelineSemanticObject::EncryptedMaterial {
+                            semantic_id: stored_id,
+                            submission: stored_submission,
+                        }) if &stored_id == semantic_id && &stored_submission == submission => {}
+                        Some(_) => {
+                            return Err("protected ciphertext store returned conflicting material"
+                                .to_string())
+                        }
+                        None => {
+                            return Err(
+                                "protected ciphertext was not durably retained before ingress"
+                                    .to_string(),
+                            )
+                        }
+                    }
+                }
                 ProtectedPipelineSemanticObject::CertifiedVertex {
                     certified_vertex, ..
                 } => {
@@ -213,6 +300,9 @@ impl NormalProtectedPipelineCoordinator {
                     )
                 }
             }
+        }
+        if certified_vertices.is_empty() {
+            return Ok(());
         }
         let inputs = ProtectedPipelineReconcileContext {
             target: runtime.target(),
@@ -429,6 +519,24 @@ impl ProtectedPipelineRuntime {
         Ok(self.snapshot()?.diagnostic.phase)
     }
 
+    /// Exact transaction commitments selected by the durable cut/order. This
+    /// is used only to retrieve their content-addressed ciphertext objects.
+    pub fn ordered_transaction_commitments(&self) -> ProtectedPipelineResult<Vec<EtdagDigest>> {
+        self.with_pipeline(|pipeline| {
+            pipeline
+                .record()
+                .protected_batch
+                .as_ref()
+                .map(|batch| batch.ordered_transaction_ids.clone())
+                .ok_or_else(|| {
+                    not_ready(
+                        "PROTECTED_RUNTIME_ORDER_NOT_READY",
+                        "deterministic protected order is not durable yet",
+                    )
+                })
+        })
+    }
+
     /// Level-triggered startup reconciliation.  Safe to call repeatedly.
     pub fn reconcile_on_startup(
         &self,
@@ -480,6 +588,135 @@ impl ProtectedPipelineRuntime {
     ) -> ProtectedPipelineResult<ProtectedPipelineReconcileOutcome> {
         self.require_context(inputs)?;
         self.with_pipeline_mut(|pipeline| pipeline.merge_execution_input(input, inputs))
+    }
+
+    /// Assemble the concrete normal execution input from the exact durable
+    /// cut/order plus retrieved authenticated ciphertexts and VC-bound reveal
+    /// shares. The caller cannot select a different order or substitute a
+    /// root-only payload: the completed input is replayed by
+    /// `merge_execution_input` before becoming ready for PoSy.
+    pub fn assemble_and_ingest_execution_input(
+        &self,
+        reveal_authorization: ProtectedRevealAuthorization,
+        submissions: BTreeMap<EtdagDigest, EtdagSubmissionEnvelope>,
+        mut reveal_shares: BTreeMap<EtdagDigest, Vec<ProtectedRevealShareMessage>>,
+        inputs: &ProtectedPipelineReconcileContext<'_>,
+    ) -> ProtectedPipelineResult<ProtectedPipelineReconcileOutcome> {
+        self.require_context(inputs)?;
+        self.with_pipeline_mut(|pipeline| {
+            let record = pipeline.record().clone();
+            let cut_proof = record.cut_proof.clone().ok_or_else(|| {
+                not_ready(
+                    "PROTECTED_ASSEMBLY_CUT_NOT_READY",
+                    "cannot assemble execution input before the durable cut is ready",
+                )
+            })?;
+            let protected_batch = record.protected_batch.clone().ok_or_else(|| {
+                not_ready(
+                    "PROTECTED_ASSEMBLY_BATCH_NOT_READY",
+                    "cannot assemble execution input before deterministic ordering",
+                )
+            })?;
+            let next_commitment = record.next_commitment.clone().ok_or_else(|| {
+                not_ready(
+                    "PROTECTED_ASSEMBLY_COMMITMENT_NOT_READY",
+                    "cannot assemble execution input before parent commitment derivation",
+                )
+            })?;
+            reveal_authorization
+                .validate_against(&self.target, &next_commitment, &protected_batch)
+                .map_err(|error| {
+                    invalid("PROTECTED_ASSEMBLY_REVEAL_AUTHORIZATION_INVALID", error)
+                })?;
+
+            let expected_ids = protected_batch
+                .ordered_transaction_ids
+                .iter()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            if submissions.keys().cloned().collect::<std::collections::BTreeSet<_>>()
+                != expected_ids
+                || reveal_shares
+                    .keys()
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    != expected_ids
+            {
+                return Err(conflict(
+                    "PROTECTED_ASSEMBLY_MATERIAL_SET_CONFLICT",
+                    "retrieved ciphertext/share keys do not equal the deterministic protected order",
+                ));
+            }
+
+            let threshold = decryption_threshold(
+                self.target.assigned_cluster_validator_count as usize,
+            )
+            .map_err(|error| invalid("PROTECTED_ASSEMBLY_THRESHOLD_INVALID", error))?;
+            let mut envelopes = BTreeMap::<EtdagDigest, EncryptedTransactionEnvelope>::new();
+            let mut ordered_transactions = Vec::with_capacity(expected_ids.len());
+            for commitment in &protected_batch.ordered_transaction_ids {
+                let submission = submissions.get(commitment).ok_or_else(|| {
+                    conflict(
+                        "PROTECTED_ASSEMBLY_CIPHERTEXT_MISSING",
+                        "deterministic protected order names a missing ciphertext",
+                    )
+                })?;
+                submission
+                    .verify(&self.target, inputs.parameters)
+                    .map_err(|error| invalid("PROTECTED_ASSEMBLY_CIPHERTEXT_INVALID", error))?;
+                if &submission.sealed_bundle.envelope.tx_commitment != commitment {
+                    return Err(conflict(
+                        "PROTECTED_ASSEMBLY_CIPHERTEXT_CONFLICT",
+                        "retrieved ciphertext semantic ID does not match its envelope",
+                    ));
+                }
+                let shares = reveal_shares.get_mut(commitment).ok_or_else(|| {
+                    conflict(
+                        "PROTECTED_ASSEMBLY_REVEAL_SHARES_MISSING",
+                        "deterministic protected order names missing reveal shares",
+                    )
+                })?;
+                shares.sort_by(|left, right| {
+                    left.validator_id
+                        .cmp(&right.validator_id)
+                        .then_with(|| left.share.index.cmp(&right.share.index))
+                });
+                let plaintext = decrypt_inner_transaction(
+                    &submission.sealed_bundle.envelope,
+                    &shares
+                        .iter()
+                        .map(|message| message.share.clone())
+                        .collect::<Vec<_>>(),
+                    threshold,
+                )
+                .map_err(|error| invalid("PROTECTED_ASSEMBLY_DECRYPTION_FAILED", error))?;
+                envelopes.insert(
+                    commitment.clone(),
+                    submission.sealed_bundle.envelope.clone(),
+                );
+                ordered_transactions.push(plaintext);
+            }
+            let reveal_transcript_root = protected_reveal_transcript_root(&reveal_shares)
+                .map_err(|error| invalid("PROTECTED_ASSEMBLY_TRANSCRIPT_INVALID", error))?;
+            pipeline.merge_execution_input(
+                DeterministicProtectedExecutionInput {
+                    material_version: PROTECTED_PIPELINE_VERSION,
+                    source: self.source,
+                    target_context: ProtectedExecutionTargetContext::NormalEtdag {
+                        admission_context: self.target.clone(),
+                    },
+                    cut_proof: Some(cut_proof),
+                    protected_batch,
+                    next_commitment,
+                    reveal_authorization: Some(reveal_authorization),
+                    envelopes,
+                    reveal_shares,
+                    ordered_transactions,
+                    reveal_transcript_root,
+                },
+                inputs,
+            )
+        })
     }
 
     /// Look up a ready input only when it is the exact expected commitment and
@@ -742,6 +979,14 @@ impl ProtectedExecutionInputSource for GenesisBootstrapProtectedExecutionSource 
 fn invalid(code: &str, detail: impl Into<String>) -> ProtectedPipelineError {
     ProtectedPipelineError {
         kind: ProtectedPipelineErrorKind::InvalidEvidence,
+        code: code.to_string(),
+        detail: detail.into(),
+    }
+}
+
+fn not_ready(code: &str, detail: impl Into<String>) -> ProtectedPipelineError {
+    ProtectedPipelineError {
+        kind: ProtectedPipelineErrorKind::NotReady,
         code: code.to_string(),
         detail: detail.into(),
     }
