@@ -35,7 +35,8 @@ pub const SIMPLIFIED_TARGET_ADMISSION_STORE_FORMAT: &str =
 pub const MAX_SIMPLIFIED_TARGET_ADMISSION_ENTRIES: usize = 4;
 pub const MAX_SIMPLIFIED_TARGET_ADMISSION_STORE_BYTES: usize = 16 * 1024 * 1024;
 const SIMPLIFIED_TARGET_ADMISSION_STORE_DIRECTORY: &str = "data/posy-v3-target-admission";
-const SIMPLIFIED_INGRESS_KEM_REGISTRY_DIRECTORY: &str = "data/posy-v3-ingress-kem-registries";
+pub(crate) const SIMPLIFIED_INGRESS_KEM_REGISTRY_DIRECTORY: &str =
+    "data/posy-v3-ingress-kem-registries";
 pub const SIMPLIFIED_INGRESS_KEM_REGISTRY_ARTIFACT_FORMAT: &str =
     "synergy-posy-simplified-ingress-kem-registry-v1";
 pub const MAX_SIMPLIFIED_INGRESS_KEM_REGISTRY_ARTIFACT_BYTES: usize = 4 * 1024 * 1024;

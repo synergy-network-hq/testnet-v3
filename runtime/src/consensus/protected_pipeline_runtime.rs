@@ -441,6 +441,7 @@ pub struct ProductionProtectedPipelineLifecycle {
     coordinator: NormalProtectedPipelineCoordinator,
     execution_sources: CoordinatedProtectedExecutionInputSource,
     cryptographic_profile_root: Hash,
+    ingress_registry_directory: PathBuf,
     evidence_store: Arc<DurableProductionProtectedPipelineEvidenceStore>,
     evidence_verifier: Arc<ProductionProtectedPipelineEvidenceVerifier>,
 }
@@ -457,6 +458,37 @@ impl ProductionProtectedPipelineLifecycle {
         coordinator: NormalProtectedPipelineCoordinator,
         execution_sources: CoordinatedProtectedExecutionInputSource,
         cryptographic_profile_root: Hash,
+        evidence_directory: impl Into<PathBuf>,
+    ) -> Result<Self, String> {
+        Self::new_at_registry_directory(
+            consensus_domain,
+            epoch_context,
+            validator_set,
+            cluster_map,
+            parameters,
+            verifier,
+            coordinator,
+            execution_sources,
+            cryptographic_profile_root,
+            crate::utils::resolve_data_path(
+                crate::consensus::simplified_posy::SIMPLIFIED_INGRESS_KEM_REGISTRY_DIRECTORY,
+            ),
+            evidence_directory,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_at_registry_directory(
+        consensus_domain: ConsensusDomain,
+        epoch_context: SimplifiedEpochContext,
+        validator_set: ValidatorSet,
+        cluster_map: ClusterMap,
+        parameters: EtdagParameters,
+        verifier: AegisPqvmVerifier,
+        coordinator: NormalProtectedPipelineCoordinator,
+        execution_sources: CoordinatedProtectedExecutionInputSource,
+        cryptographic_profile_root: Hash,
+        ingress_registry_directory: impl Into<PathBuf>,
         evidence_directory: impl Into<PathBuf>,
     ) -> Result<Self, String> {
         let evidence_store = Arc::new(
@@ -479,6 +511,7 @@ impl ProductionProtectedPipelineLifecycle {
             coordinator,
             execution_sources,
             cryptographic_profile_root,
+            ingress_registry_directory: ingress_registry_directory.into(),
             evidence_store,
             evidence_verifier,
         })
@@ -632,8 +665,57 @@ impl ProductionProtectedPipelineLifecycle {
         if transaction.target_finalized.height != material.candidate_subject.context.height {
             return Ok(());
         }
-        let target_height = transaction
-            .target_finalized
+        self.register_successor_from_finalized_state(
+            &transaction.target_finalized,
+            material.canonical_block.header.state_root_after,
+        )
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_for_test(
+        consensus_domain: ConsensusDomain,
+        epoch_context: SimplifiedEpochContext,
+        validator_set: ValidatorSet,
+        cluster_map: ClusterMap,
+        parameters: EtdagParameters,
+        verifier: AegisPqvmVerifier,
+        coordinator: NormalProtectedPipelineCoordinator,
+        execution_sources: CoordinatedProtectedExecutionInputSource,
+        cryptographic_profile_root: Hash,
+        ingress_registry_directory: impl Into<PathBuf>,
+        evidence_directory: impl Into<PathBuf>,
+    ) -> Result<Self, String> {
+        Self::new_at_registry_directory(
+            consensus_domain,
+            epoch_context,
+            validator_set,
+            cluster_map,
+            parameters,
+            verifier,
+            coordinator,
+            execution_sources,
+            cryptographic_profile_root,
+            ingress_registry_directory,
+            evidence_directory,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn register_successor_from_finalized_state_for_test(
+        &self,
+        finalized: &crate::consensus::simplified_posy::FinalizedBlockRecord,
+        finalized_execution_state_root: Hash,
+    ) -> Result<(), String> {
+        self.register_successor_from_finalized_state(finalized, finalized_execution_state_root)
+    }
+
+    fn register_successor_from_finalized_state(
+        &self,
+        finalized: &crate::consensus::simplified_posy::FinalizedBlockRecord,
+        finalized_execution_state_root: Hash,
+    ) -> Result<(), String> {
+        let target_height = finalized
             .height
             .0
             .checked_add(3)
@@ -649,8 +731,10 @@ impl ProductionProtectedPipelineLifecycle {
                 &self.coordinator.cluster_map,
             )?;
         let epoch_context_root = self.epoch_context.root()?;
-        let mut registry_source =
-            DurableSimplifiedIngressKemRegistrySource::process_wide(epoch_context_root)?;
+        let mut registry_source = DurableSimplifiedIngressKemRegistrySource::at_directory(
+            &self.ingress_registry_directory,
+            epoch_context_root,
+        )?;
         let registry = registry_source
             .registry_for_target(self.epoch_context.epoch, target_height, assigned_cluster_id)?
             .ok_or_else(|| {
@@ -661,8 +745,8 @@ impl ProductionProtectedPipelineLifecycle {
             })?;
         let finality_context = simplified_protected_finality_context_digest_from_state_root(
             &self.epoch_context,
-            &transaction.target_finalized,
-            material.canonical_block.header.state_root_after,
+            finalized,
+            finalized_execution_state_root,
             &self.validator_set,
             &self.coordinator.cluster_map,
         )?;
@@ -671,7 +755,7 @@ impl ProductionProtectedPipelineLifecycle {
                 protocol_version: POSY_SIMPLIFIED_PROTOCOL_VERSION.to_string(),
                 epoch: self.epoch_context.epoch,
                 target_height,
-                source_finalized_height: transaction.target_finalized.height,
+                source_finalized_height: finalized.height,
                 source_finality_context_root: crate::etdag::target_admission_source_finality_root(
                     &finality_context,
                 )?,
