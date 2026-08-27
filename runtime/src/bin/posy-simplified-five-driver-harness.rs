@@ -68,6 +68,14 @@ const PROPOSAL_TIMEOUT_MS: u64 = 8_000;
 const VOTE_TIMEOUT_MS: u64 = 8_000;
 const MAX_ROUND_TIMEOUT_MS: u64 = 16_000;
 
+/// The worker currently constructs `SimplifiedCoreMaterialAdapter` directly.
+/// Keep the qualification boundary explicit until the harness is supplied the
+/// canonical Genesis bootstrap, authenticated ingress-KEM registry, ETDAG
+/// producer, and production protected-lifecycle wiring.  In particular, the
+/// parent must never turn the ordinary-driver checks below into an R11 claim.
+const R11_PROTECTED_QUALIFICATION_UNAVAILABLE: &str =
+    "R11_PROTECTED_QUALIFICATION_UNAVAILABLE: autonomous workers use SimplifiedCoreMaterialAdapter; no canonical protected lifecycle or normal ETDAG producer is installed";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PublicConfiguration {
@@ -315,13 +323,24 @@ fn run() -> Result<(), String> {
                 .unwrap_or_else(|| {
                     env::temp_dir().join(format!("posy-five-driver-{}", std::process::id()))
                 });
-            run_parent(&work_dir)
+            let require_r11 = args.iter().any(|argument| argument == "--require-r11");
+            run_parent(&work_dir, require_r11)
         }
-        _ => Err("usage: posy-simplified-five-driver-harness run [--work-dir PATH]".to_string()),
+        _ => Err(
+            "usage: posy-simplified-five-driver-harness run [--work-dir PATH] [--require-r11]"
+                .to_string(),
+        ),
     }
 }
 
-fn run_parent(work_dir: &Path) -> Result<(), String> {
+fn run_parent(work_dir: &Path, require_r11: bool) -> Result<(), String> {
+    // Fail before creating ephemeral identities or starting workers.  The
+    // autonomous harness has useful ordinary-PoSy coverage, but cannot
+    // honestly assert any protected R11 milestone until its worker setup
+    // follows the same canonical protected path as the validator role.
+    if require_r11 {
+        return Err(R11_PROTECTED_QUALIFICATION_UNAVAILABLE.to_string());
+    }
     fs::create_dir_all(work_dir)
         .map_err(|error| format!("create harness directory {}: {error}", work_dir.display()))?;
     let configuration = provision_configuration(work_dir)?;
@@ -678,11 +697,24 @@ fn run_qualification(
             "three_chain_finalization"
         ],
         "remaining_node_only_gaps": [
+            "canonical protected R11 worker construction: Genesis bootstrap, authenticated ingress-KEM registry, ETDAG producer, production lifecycle observer, and durable replay",
             "real_synergy_node_role_runtime_and_socket_stack",
-            "protected_etdag_h3_producer_and_execution",
             "production_identity_and_deployment_bundles",
             "soak_performance_and_byzantine_qualification"
         ],
+        "r11_protected_qualification": {
+            "qualified": false,
+            "failure_code": "R11_PROTECTED_QUALIFICATION_UNAVAILABLE",
+            "reason": R11_PROTECTED_QUALIFICATION_UNAVAILABLE,
+            "h1_bootstrap_finalized": false,
+            "h2_bootstrap_finalized": false,
+            "h3_normal_etdag_finalized": false,
+            "h4_steady_state_finalized": false,
+            "twenty_block_pass": false,
+            "protected_validator_restart_pass": false,
+            "block_time_target_ms": HARNESS_TARGET_BLOCK_TIME_MS,
+            "block_time_target_range_ms": [100, 1100]
+        },
         "work_dir": work_dir
     }))
 }
