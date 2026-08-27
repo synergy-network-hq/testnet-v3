@@ -275,6 +275,21 @@ processes_are_healthy() {
     done
 }
 
+processes_are_healthy_except() {
+    local skipped="$1"
+    local index pid validator log
+    for index in "${!VALIDATORS[@]}"; do
+        [[ "$index" == "$skipped" ]] && continue
+        validator="${VALIDATORS[$index]}"
+        pid="${pids[$index]:-}"
+        log="$work_dir/logs/$validator.log"
+        [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null || fail "$validator process exited; inspect $log"
+        if rg -n -i 'consensus startup failed closed|safetyhalt|panic|fatal consensus/signing' "$log" >/dev/null; then
+            fail "$validator emitted a fatal role/consensus log; inspect $log"
+        fi
+    done
+}
+
 wait_for_log_marker() {
     local marker="$1"
     local deadline=$(( $(now_ms) + timeout_secs * 1000 ))
@@ -317,6 +332,45 @@ assert_finality_record() {
     ' "$record" >/dev/null 2>&1
 }
 
+# The bootstrap heights intentionally have no normal target record.  Their
+# proof is the persisted material selected by the production adapter, tied to
+# the same height and carrying the GenesisBootstrap execution source.
+assert_genesis_bootstrap_material() {
+    local validator="$1"
+    local height="$2"
+    local node_dir material
+    node_dir="$(workspace_for "$validator")"
+    while IFS= read -r material; do
+        jq -e --argjson height "$height" '
+            .format == "synergy-posy-simplified-protected-material-v3" and
+            .candidate_subject.context.height == $height and
+            .protected_execution_input != null and
+            .protected_execution_input.source == "GENESIS_BOOTSTRAP" and
+            .protected_execution_input.target_context.kind == "GENESIS_BOOTSTRAP" and
+            .next_protected_batch_commitment != null
+        ' "$material" >/dev/null 2>&1 && return 0
+    done < <(find "$node_dir/data/posy-v3-protected-material" -maxdepth 1 -type f -name '*.json' -print 2>/dev/null)
+    return 1
+}
+
+wait_for_genesis_bootstrap_finality() {
+    local height="$1"
+    local deadline=$(( $(now_ms) + timeout_secs * 1000 ))
+    local validator all_found
+    while (( $(now_ms) < deadline )); do
+        processes_are_healthy
+        all_found=1
+        for validator in "${VALIDATORS[@]}"; do
+            assert_finality_record "$validator" "$height" || all_found=0
+            assert_genesis_bootstrap_material "$validator" "$height" || all_found=0
+        done
+        (( all_found == 1 )) && return
+        sleep 0.05
+    done
+    fail_transition "GENESIS_BOOTSTRAP(H$height)->PROPOSAL_VC_QC_FINALIZED(H$height)" \
+        "H$height did not durably finalize with a GenesisBootstrap execution input on every production role"
+}
+
 record_timing_samples() {
     local height record timestamp key
     for height in $(seq 1 "$REQUIRED_FINALIZED_HEIGHT"); do
@@ -347,6 +401,26 @@ wait_for_finality_height() {
     done
     fail_transition "QC(H$height)->FINALIZED(H$height)" \
         "timed out waiting for all five production roles to durably finalize H$height"
+}
+
+wait_for_four_validator_finality() {
+    local height="$1"
+    local offline_index="$2"
+    local deadline=$(( $(now_ms) + timeout_secs * 1000 ))
+    local index validator all_found
+    while (( $(now_ms) < deadline )); do
+        processes_are_healthy_except "$offline_index"
+        all_found=1
+        for index in "${!VALIDATORS[@]}"; do
+            [[ "$index" == "$offline_index" ]] && continue
+            validator="${VALIDATORS[$index]}"
+            assert_finality_record "$validator" "$height" || all_found=0
+        done
+        (( all_found == 1 )) && return
+        sleep 0.025
+    done
+    fail_transition "FOUR_OF_FIVE_LIVENESS->FINALIZED(H$height)" \
+        "the remaining four production validators did not finalize H$height while ${VALIDATORS[$offline_index]} was offline"
 }
 
 assert_same_finalized_block() {
@@ -540,13 +614,19 @@ restart_and_assert_replay() {
     local validator="${VALIDATORS[$restart_index]}"
     local previous_pid="${pids[$restart_index]}"
     local log="$work_dir/logs/$validator.log"
-    local starts_before
+    local starts_before finality_before lifecycle_before continued_height=23
     starts_before="$(rg -F -c 'Starting finalized simplified PoSy consensus worker' "$log" || true)"
     assert_finality_record "$validator" "$REQUIRED_FINALIZED_HEIGHT" || fail "cannot restart $validator without durable H$REQUIRED_FINALIZED_HEIGHT WAL"
+    finality_before="$(shasum -a 256 "$(finality_record_for "$validator" "$REQUIRED_FINALIZED_HEIGHT")" | awk '{print $1}')"
+    lifecycle_before="$(find "$(workspace_for "$validator")/data/protected-pipeline-v1/lifecycle" -type f -name 'h20-*.json' -exec shasum -a 256 {} \; 2>/dev/null | awk '{print $1}' | head -1)"
+    [[ -n "$lifecycle_before" ]] || fail "cannot restart $validator without durable H20 lifecycle evidence"
 
     kill -TERM "$previous_pid" 2>/dev/null || fail "could not stop $validator for local restart test"
     wait "$previous_pid" 2>/dev/null || true
     pids[$restart_index]=""
+    # Three new QCs are required before the post-restart target can itself be
+    # finalized.  This explicitly proves 4/5 liveness while the node is down.
+    wait_for_four_validator_finality "$continued_height" "$restart_index"
     start_node "$restart_index"
 
     local deadline=$(( $(now_ms) + timeout_secs * 1000 ))
@@ -554,12 +634,19 @@ restart_and_assert_replay() {
         processes_are_healthy
         local starts_now
         starts_now="$(rg -F -c 'Starting finalized simplified PoSy consensus worker' "$log" || true)"
-        if (( starts_now > starts_before )) && assert_finality_record "$validator" "$REQUIRED_FINALIZED_HEIGHT"; then
+        if (( starts_now > starts_before )) \
+            && assert_finality_record "$validator" "$continued_height" \
+            && assert_lifecycle_finality "$validator" "$REQUIRED_FINALIZED_HEIGHT"; then
+            [[ "$(shasum -a 256 "$(finality_record_for "$validator" "$REQUIRED_FINALIZED_HEIGHT")" | awk '{print $1}')" == "$finality_before" ]] \
+                || fail "restart rewrote durable H$REQUIRED_FINALIZED_HEIGHT finality evidence"
+            [[ "$(find "$(workspace_for "$validator")/data/protected-pipeline-v1/lifecycle" -type f -name 'h20-*.json' -exec shasum -a 256 {} \; 2>/dev/null | awk '{print $1}' | head -1)" == "$lifecycle_before" ]] \
+                || fail "restart rewrote durable H20 protected lifecycle evidence"
             return
         fi
         sleep 0.05
     done
-    fail "$validator restart did not reach the production simplified worker with its durable H$REQUIRED_FINALIZED_HEIGHT finality WAL"
+    fail_transition "DURABLE_REPLAY->REJOIN_FINALIZED(H$continued_height)" \
+        "$validator restart did not rejoin the production simplified worker and finalize H$continued_height"
 }
 
 genesis=""
@@ -638,8 +725,10 @@ for index in "${!VALIDATORS[@]}"; do
 done
 
 wait_for_log_marker 'Starting finalized simplified PoSy consensus worker'
-wait_for_finality_height 1
-wait_for_finality_height 2
+wait_for_genesis_bootstrap_finality 1
+wait_for_genesis_bootstrap_finality 2
+wait_for_normal_pipeline_finality 3 NORMAL_ETDAG
+wait_for_normal_pipeline_finality 4 NORMAL_ETDAG_STEADY_STATE
 wait_for_lifecycle_finality 3
 wait_for_lifecycle_finality 4
 wait_for_finality_height "$REQUIRED_FINALIZED_HEIGHT"
