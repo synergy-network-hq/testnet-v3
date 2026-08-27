@@ -18,7 +18,7 @@
   "candidate_parameter_root_sha3_512": "4a1cbf3e0b759dddd4daecf1d34ba647075dc4210db42dda0f547399de1fd506cdc8b4cf6b677a100f04d59994c1e811b26cd00b616d7ef61275fb9e49776cd9",
   "rendered_validator_count": 5,
   "result": "R11_500MS_QUALIFICATION_CANDIDATE_WRITTEN",
-  "runtime_config_status": "REQUIRES_MILLISECOND_CADENCE_FIELDS",
+  "runtime_config_status": "MILLISECOND_CADENCE_FIELDS_BOUND",
   "validation": {
     "candidate_timing_ms": 500,
     "candidate_within_100_to_1100_ms": true,

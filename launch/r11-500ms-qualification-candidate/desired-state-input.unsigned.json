@@ -5,16 +5,16 @@
   "environment": "LOCAL_R11_QUALIFICATION",
   "genesis_candidate_sha256": "333606db79c7e851d38dc61ff912e827ed5604fdb2b4f3beb656f36c0a7cd976",
   "network_id": "testnet",
-  "runtime_config_status": "REQUIRES_MILLISECOND_CADENCE_FIELDS",
+  "runtime_config_status": "MILLISECOND_CADENCE_FIELDS_BOUND",
   "schema_version": 1,
-  "source_revision": "0ecf023fc1c7013604dc8ab41ebe8de417a95624",
+  "source_revision": "9e9d8f9",
   "status": "UNSIGNED_NOT_AUTHORIZED_FOR_LIVE_DEPLOYMENT",
   "target_block_time_ms": 500,
   "validator_config_sha256": {
-    "validator-02": "47ac32fa758c66e63ac26a5706b05e9842aee70b663907a7c2c795298535ac85",
-    "validator-03": "161894ac7b70288858bcbec55638df7ca2cfed112a334f68d88827f78298b120",
-    "validator-04": "7f89402951aefc06387de0368f02c8d410c398bcb87a475049595e810417a364",
-    "validator-05": "bd6b5f1c34d284ef52f46eefe62b31bb6ac4212481794f952503547d564ade4f",
-    "validator-06": "4338505e1e426b38f120615a8d13d489e065ef569d038c3be74ddf34d50f3544"
+    "validator-02": "ca0ea3f8de0a3bc3fee18dd915e55585557a7ea3c377ac45c2779cb4648b3b5f",
+    "validator-03": "29e3f4077ba16b77190c5bcd2bff4a238a8b3cc524d26af4bc9e59606259062c",
+    "validator-04": "99a6dda3ab85e661a1bd56727e15d11cfdaed3e21e01ddcbefb66b7695323784",
+    "validator-05": "2acc3e361a2068239035b2256d8ebc7f47cb76d38345296bda190f36c3fa3e3e",
+    "validator-06": "5b0b2d3da538bdd006b9d8e925ea523da92b9609cc43cd82f6b95cb6eac0b6a8"
   }
 }
