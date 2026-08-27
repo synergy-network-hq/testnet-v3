@@ -45,6 +45,40 @@ const SIMPLIFIED_MATERIAL_SERVE_WINDOW: Duration = Duration::from_secs(30);
 // three-chain state-sync boundary. Keep that complete recovery bounded.
 const MAX_SIMPLIFIED_MATERIAL_SERVES_PER_PEER_WINDOW: usize = 4;
 
+/// The sole production bridge from verified PoSy artifacts into the durable
+/// protected pipeline. Complete evidence is persisted before the observer
+/// forwards any compact protected-pipeline observation.
+pub trait SimplifiedProtectedLifecycleObserver: Send {
+    fn on_validated_proposal(
+        &mut self,
+        proposal: &SimplifiedProposal,
+        material: &VerifiedSimplifiedProposalMaterial,
+    ) -> Result<(), String>;
+    fn on_proposal_validation_certificate(
+        &mut self,
+        proposal: &SimplifiedProposal,
+        material: &VerifiedSimplifiedProposalMaterial,
+        certificate: &super::PosyProposalValidationCertificate,
+    ) -> Result<(), String>;
+    fn on_execution_consumed(
+        &mut self,
+        proposal: &SimplifiedProposal,
+        material: &VerifiedSimplifiedProposalMaterial,
+    ) -> Result<(), String>;
+    fn on_quorum_certificate(
+        &mut self,
+        proposal: &SimplifiedProposal,
+        material: &VerifiedSimplifiedProposalMaterial,
+        certificate: &SimplifiedQuorumCertificate,
+    ) -> Result<(), String>;
+    fn on_finalization(
+        &mut self,
+        proposal: &SimplifiedProposal,
+        material: &VerifiedSimplifiedProposalMaterial,
+        transaction: &SimplifiedFinalizationTransaction,
+    ) -> Result<(), String>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SimplifiedEnvelopeFailure {
     PeerRejected(String),
@@ -598,6 +632,7 @@ pub struct SimplifiedPosyDriver<S, E, F> {
     proposal_source: S,
     egress: E,
     finalization_sink: F,
+    protected_lifecycle_observer: Option<Box<dyn SimplifiedProtectedLifecycleObserver>>,
     /// Receiver-owned transition capability. Peer messages and state sync can
     /// never install or replace this authority.
     epoch_transition: Option<VerifiedSimplifiedEpochTransition>,
@@ -830,6 +865,7 @@ impl<
             proposal_source,
             egress,
             finalization_sink,
+            protected_lifecycle_observer: None,
             epoch_transition,
             peer_authorizer,
             timing,
@@ -865,6 +901,14 @@ impl<
 
     pub fn state_machine(&self) -> &SimplifiedConsensusStateMachine {
         &self.state_machine
+    }
+
+    pub fn with_protected_lifecycle_observer(
+        mut self,
+        observer: Box<dyn SimplifiedProtectedLifecycleObserver>,
+    ) -> Self {
+        self.protected_lifecycle_observer = Some(observer);
+        self
     }
 
     pub fn drive_scheduled_proposal(&mut self) -> Result<bool, String> {
@@ -1189,6 +1233,7 @@ impl<
         self.validated_proposals
             .entry(candidate_id)
             .or_insert(proposal.clone());
+        self.notify_validated_proposal(&proposal, candidate_id)?;
         let should_echo = self
             .reliable_delivery
             .as_ref()
@@ -1214,6 +1259,49 @@ impl<
         self.vote_if_delivered(candidate_id)
     }
 
+    fn notify_validated_proposal(
+        &mut self,
+        proposal: &SimplifiedProposal,
+        candidate_id: Hash,
+    ) -> Result<(), String> {
+        if self.protected_lifecycle_observer.is_none() {
+            return Ok(());
+        }
+        let material = self
+            .proposal_source
+            .material_for_serving(candidate_id)?
+            .ok_or_else(|| "protected lifecycle lacks verified proposal material".to_string())?;
+        self.protected_lifecycle_observer
+            .as_mut()
+            .expect("observer presence was checked")
+            .on_validated_proposal(proposal, &material)?;
+        self.notify_proposal_validation_if_ready(proposal, &material)
+    }
+
+    fn notify_proposal_validation_if_ready(
+        &mut self,
+        proposal: &SimplifiedProposal,
+        material: &VerifiedSimplifiedProposalMaterial,
+    ) -> Result<(), String> {
+        let Some(observer) = self.protected_lifecycle_observer.as_mut() else {
+            return Ok(());
+        };
+        let Some(delivery) = self.reliable_delivery.as_ref() else {
+            return Ok(());
+        };
+        let Some(certificate) = delivery.proposal_validation_certificate(
+            material,
+            &self.epoch_context,
+            &self.validator_set,
+            &self.verifier,
+        )?
+        else {
+            return Ok(());
+        };
+        observer.on_proposal_validation_certificate(proposal, material, &certificate)?;
+        observer.on_execution_consumed(proposal, material)
+    }
+
     fn retransmit_restored_delivery(&mut self) -> Result<(), String> {
         while let Some(statement) = self.pending_delivery_retransmission.first().cloned() {
             self.broadcast(SimplifiedConsensusMessage::ReliableDelivery { statement })?;
@@ -1237,6 +1325,13 @@ impl<
             .ensure_reliable_delivery_slot(context.clone())?
             .accept_statement(statement, &epoch_context, &validator_set, &verifier)?;
         self.persist_reliable_delivery()?;
+        if let Some(proposal) = self.validated_proposals.get(&candidate_id).cloned() {
+            let material = self
+                .proposal_source
+                .material_for_serving(candidate_id)?
+                .ok_or_else(|| "reliable delivery lacks verified proposal material".to_string())?;
+            self.notify_proposal_validation_if_ready(&proposal, &material)?;
+        }
         if let Some(candidate) = decision.ready_candidate {
             self.emit_reliable_delivery_statement(
                 context,
@@ -1343,6 +1438,15 @@ impl<
             .ok_or_else(|| "reliable-delivery state was not initialized".to_string())?
             .accept_statement(statement.clone(), &epoch_context, &validator_set, &verifier)?;
         self.persist_reliable_delivery()?;
+        if let Some(proposal) = self.validated_proposals.get(&candidate_id).cloned() {
+            let material = self
+                .proposal_source
+                .material_for_serving(candidate_id)?
+                .ok_or_else(|| {
+                    "local reliable delivery lacks verified proposal material".to_string()
+                })?;
+            self.notify_proposal_validation_if_ready(&proposal, &material)?;
+        }
         self.broadcast(SimplifiedConsensusMessage::ReliableDelivery { statement })?;
         self.metrics.reliable_delivery_broadcast =
             self.metrics.reliable_delivery_broadcast.saturating_add(1);
@@ -1572,6 +1676,7 @@ impl<
         certificate: SimplifiedQuorumCertificate,
     ) -> Result<(), String> {
         certificate.verify(&self.epoch_context, &self.validator_set, &self.verifier)?;
+        self.notify_quorum_certificate(&certificate)?;
         if let Some(target) = self.state_machine.preview_finalized_with_qc(&certificate)? {
             let transaction = build_finalization_transaction(
                 self.epoch_context.root()?,
@@ -1592,6 +1697,24 @@ impl<
         Ok(())
     }
 
+    fn notify_quorum_certificate(
+        &mut self,
+        certificate: &SimplifiedQuorumCertificate,
+    ) -> Result<(), String> {
+        if self.protected_lifecycle_observer.is_none() {
+            return Ok(());
+        }
+        let proposal = self.proposal_for_certificate(certificate)?;
+        let material = self
+            .proposal_source
+            .material_for_serving(certificate.id()?)?
+            .ok_or_else(|| "protected QC lacks verified proposal material".to_string())?;
+        self.protected_lifecycle_observer
+            .as_mut()
+            .expect("observer presence was checked")
+            .on_quorum_certificate(&proposal, &material, certificate)
+    }
+
     fn commit_finalization(
         &mut self,
         transaction: &SimplifiedFinalizationTransaction,
@@ -1610,6 +1733,29 @@ impl<
                 "SIMPLIFIED_LOCAL_FINALIZATION_FAILURE: sink returned a mismatched durable receipt"
                     .to_string(),
             );
+        }
+        if self.protected_lifecycle_observer.is_some() {
+            let finalized = transaction
+                .commitments
+                .iter()
+                .map(|commitment| {
+                    let proposal = self.proposal_for_certificate(&commitment.certificate)?;
+                    let material = self
+                        .proposal_source
+                        .material_for_serving(commitment.certificate.id()?)?
+                        .ok_or_else(|| {
+                            "protected finality lacks verified proposal material".to_string()
+                        })?;
+                    Ok((proposal, material))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let observer = self
+                .protected_lifecycle_observer
+                .as_mut()
+                .expect("observer presence was checked");
+            for (proposal, material) in finalized {
+                observer.on_finalization(&proposal, &material, transaction)?;
+            }
         }
         Ok(())
     }

@@ -23,6 +23,9 @@ pub mod protected_pipeline_evidence_verifier;
 pub mod protected_pipeline_runtime;
 #[cfg(test)]
 mod protected_pipeline_runtime_tests;
+
+#[cfg(test)]
+mod protected_pipeline_view_invariance_tests;
 pub mod self_realign;
 pub mod signing_authority;
 pub mod simplified_posy;

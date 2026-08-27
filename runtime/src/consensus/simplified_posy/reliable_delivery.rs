@@ -74,9 +74,11 @@ impl PosyProposalValidationCertificate {
         verifier: &V,
     ) -> Result<Self, String> {
         let next_commitment = material
-            .next_protected_batch_commitment
+            .future_protected_batch_commitment
             .as_ref()
-            .ok_or_else(|| "proposal VC material has no protected-batch commitment".to_string())?;
+            .ok_or_else(|| {
+                "proposal VC material has no child protected-batch commitment".to_string()
+            })?;
         if material.candidate_subject != candidate {
             return Err("proposal VC material names another proposal candidate".to_string());
         }
@@ -112,9 +114,11 @@ impl PosyProposalValidationCertificate {
         verifier: &V,
     ) -> Result<(), String> {
         let commitment = material
-            .next_protected_batch_commitment
+            .future_protected_batch_commitment
             .as_ref()
-            .ok_or_else(|| "proposal VC material has no protected-batch commitment".to_string())?;
+            .ok_or_else(|| {
+                "proposal VC material has no child protected-batch commitment".to_string()
+            })?;
         if material.candidate_subject != self.candidate
             || material.stable_candidate_id != self.candidate.id()?
         {
@@ -140,7 +144,14 @@ impl PosyProposalValidationCertificate {
         if self.candidate.context != stable_context {
             return Err("proposal VC candidate or view binding mismatch".to_string());
         }
-        if commitment.target_height != self.context.height
+        let child_height = crate::synergy_types::Height(
+            self.context
+                .height
+                .0
+                .checked_add(1)
+                .ok_or_else(|| "proposal VC child height overflow".to_string())?,
+        );
+        if commitment.target_height != child_height
             || commitment.epoch != self.context.epoch
             || self.next_protected_batch_commitment_root != commitment.root()?
         {

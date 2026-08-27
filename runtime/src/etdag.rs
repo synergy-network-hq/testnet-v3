@@ -3168,8 +3168,15 @@ impl NextProtectedBatchCommitment {
         context: &TargetAdmissionContext,
         batch: &DeterministicProtectedBatch,
     ) -> Result<(), String> {
-        context.validate()?;
+        self.validate_against_context(context)?;
         self.validate_against_batch(batch)?;
+        Ok(())
+    }
+
+    /// Validate the target binding that is available before reveal. Batch
+    /// equality remains a separate execution-readiness check.
+    pub fn validate_against_context(&self, context: &TargetAdmissionContext) -> Result<(), String> {
+        context.validate()?;
         if self.chain_id != context.chain_id
             || self.network_id != context.network_id
             || self.protocol_version != context.protocol_version
@@ -3182,7 +3189,8 @@ impl NextProtectedBatchCommitment {
         {
             return Err("next protected-batch target context mismatch".to_string());
         }
-        Ok(())
+        self.root()?
+            .validate("next protected-batch commitment root")
     }
 
     pub fn validate_against_batch(
@@ -3252,6 +3260,22 @@ impl ProtectedRevealAuthorization {
         batch: &DeterministicProtectedBatch,
     ) -> Result<(), String> {
         commitment.validate_against(context, batch)?;
+        self.validate_against_commitment(context, commitment)?;
+        if self.protected_batch_root != batch.protected_batch_root {
+            return Err("protected reveal authorization batch mismatch".to_string());
+        }
+        Ok(())
+    }
+
+    /// Validate the pre-reveal authorization against the parent-committed
+    /// target commitment. The concrete protected batch is deliberately not
+    /// required until reveal completes and execution input is assembled.
+    pub fn validate_against_commitment(
+        &self,
+        context: &TargetAdmissionContext,
+        commitment: &NextProtectedBatchCommitment,
+    ) -> Result<(), String> {
+        commitment.validate_against_context(context)?;
         if self.authorization_version != PROTECTED_PIPELINE_VERSION
             || self.chain_id != context.chain_id
             || self.network_id != context.network_id
@@ -3265,7 +3289,7 @@ impl ProtectedRevealAuthorization {
             || self.parent_proposal_id.0.trim().is_empty()
             || self.parent_block_id.0.trim().is_empty()
             || self.next_commitment_root != commitment.root()?
-            || self.protected_batch_root != batch.protected_batch_root
+            || self.protected_batch_root != commitment.protected_batch_root
             || self.proposal_validation_certificate_root.is_zero()
             || self.certificate_evidence_root.is_zero()
         {

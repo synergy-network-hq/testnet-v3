@@ -10,6 +10,24 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
+use crate::consensus::protected_pipeline_evidence_verifier::{
+    DurableProductionProtectedPipelineEvidenceStore, ProductionProtectedPipelineEvidence,
+    ProductionProtectedPipelineEvidenceVerifier, ProtectedConsumedEvidence,
+    ProtectedFinalityEvidence, ProtectedParentProposalEvidence, ProtectedQcEvidence,
+    ProtectedRevealAuthorizationEvidence,
+};
+use crate::consensus::simplified_posy::{
+    simplified_protected_finality_context_digest_from_state_root,
+    simplified_target_admission_assignment, CoordinatedProtectedExecutionInputSource,
+    DurableProtectedPipelineLifecycleStore, DurableSimplifiedIngressKemRegistrySource,
+    PosyProposalValidationCertificate, ProtectedPipelineLifecycleBridge,
+    ProtectedPipelineLifecycleEvent, ProtectedPipelineLifecycleRecoverySink,
+    ProtectedPipelineLifecycleSink, ProtectedPipelineLifecycleUpdate, SimplifiedEpochContext,
+    SimplifiedFinalizationTransaction, SimplifiedIngressKemRegistrySource, SimplifiedProposal,
+    SimplifiedProtectedLifecycleObserver, SimplifiedQuorumCertificate,
+    VerifiedSimplifiedProposalMaterial, POSY_SIMPLIFIED_PROTOCOL_VERSION,
+};
+use crate::consensus_parameters::ConsensusParameterRoot;
 use crate::crypto::aegis_pqvm::AegisPqvmVerifier;
 use crate::etdag::{
     decrypt_inner_transaction, decryption_threshold, protected_reveal_transcript_root,
@@ -17,13 +35,16 @@ use crate::etdag::{
     EtdagAuthenticatedIngressPeer, EtdagDigest, EtdagParameters, EtdagSubmissionEnvelope,
     NextProtectedBatchCommitment, ProtectedBatchSource, ProtectedExecutionTargetContext,
     ProtectedPipelinePhase, ProtectedRevealAuthorization, ProtectedRevealShareMessage,
-    TargetAdmissionContext, PROTECTED_PIPELINE_VERSION,
+    TargetAdmissionContext, TargetAdmissionContextSpec, PROTECTED_PIPELINE_VERSION,
 };
 use crate::p2p::messages::{ProtectedPipelineEvidenceMessage, ProtectedPipelineSemanticObject};
 use crate::p2p::networking::{
     ProtectedPipelineCoordinatorIngress, ProtectedPipelineEvidenceEnvelope,
 };
-use crate::synergy_types::{ClusterMap, Hash, Height, ValidatorSet, ValidatorStatus};
+use crate::synergy_types::{
+    ClusterMap, ConsensusDomain, Hash, Height, ValidatorSet, ValidatorStatus,
+    TESTNET_V3_CLUSTER_SCHEDULE_VERSION,
+};
 
 use super::protected_pipeline::{
     ProtectedOrderSeedEvidence, ProtectedPipeline, ProtectedPipelineError,
@@ -54,6 +75,7 @@ pub struct NormalProtectedPipelineCoordinator {
     cluster_map: ClusterMap,
     parameters: EtdagParameters,
     runtimes: Arc<Mutex<BTreeMap<(Height, Hash), ProtectedPipelineRuntime>>>,
+    lifecycle: Arc<Mutex<Option<Weak<Mutex<ProductionProtectedPipelineLifecycle>>>>>,
 }
 
 impl NormalProtectedPipelineCoordinator {
@@ -81,7 +103,20 @@ impl NormalProtectedPipelineCoordinator {
             cluster_map,
             parameters,
             runtimes: Arc::new(Mutex::new(BTreeMap::new())),
+            lifecycle: Arc::new(Mutex::new(None)),
         })
+    }
+
+    pub fn install_lifecycle(
+        &self,
+        lifecycle: &Arc<Mutex<ProductionProtectedPipelineLifecycle>>,
+    ) -> Result<(), String> {
+        *self
+            .lifecycle
+            .lock()
+            .map_err(|_| "protected-pipeline lifecycle registry lock is poisoned".to_string())? =
+            Some(Arc::downgrade(lifecycle));
+        Ok(())
     }
 
     /// Bind one finality-derived normal target to its sole durable runtime.
@@ -132,6 +167,19 @@ impl NormalProtectedPipelineCoordinator {
             .map_err(|_| "protected-pipeline target registry lock is poisoned".to_string())?
             .get(&(target_height, target_context_root))
             .cloned())
+    }
+
+    pub fn lifecycle_store_path(&self, target: &TargetAdmissionContext) -> Result<PathBuf, String> {
+        let root = target.root()?;
+        Ok(self
+            .data_directory
+            .join(PROTECTED_PIPELINE_RUNTIME_DIRECTORY)
+            .join("lifecycle")
+            .join(format!(
+                "h{}-{}.json",
+                target.target_height.0,
+                root.to_hex()
+            )))
     }
 
     /// Load the exact durable ciphertext objects selected by the pipeline's
@@ -292,12 +340,59 @@ impl NormalProtectedPipelineCoordinator {
                 // observations.  The coordinator will accept them only after
                 // the concrete envelope/VC/reveal builder has verified the
                 // exact execution input they authenticate.
-                ProtectedPipelineSemanticObject::RevealAuthorization { .. }
-                | ProtectedPipelineSemanticObject::RevealShare { .. } => {
-                    return Err(
-                        "protected reveal evidence requires the concrete material bridge"
-                            .to_string(),
-                    )
+                ProtectedPipelineSemanticObject::RevealAuthorization { .. } => return Err(
+                    "protected reveal authorization is derived only from the authenticated PoSy VC"
+                        .to_string(),
+                ),
+                ProtectedPipelineSemanticObject::RevealShare {
+                    authorization_id,
+                    share,
+                    ..
+                } => {
+                    let lifecycle = self
+                        .lifecycle
+                        .lock()
+                        .map_err(|_| {
+                            "protected-pipeline lifecycle registry lock is poisoned".to_string()
+                        })?
+                        .as_ref()
+                        .and_then(Weak::upgrade)
+                        .ok_or_else(|| {
+                            "protected reveal share arrived before the production lifecycle bridge"
+                                .to_string()
+                        })?;
+                    let mut lifecycle = lifecycle.lock().map_err(|_| {
+                        "protected-pipeline lifecycle bridge lock is poisoned".to_string()
+                    })?;
+                    let target = lifecycle
+                        .coordinator
+                        .runtime_for_target(share.target_height, share.target_context_root)?
+                        .ok_or_else(|| {
+                            "protected reveal share names an unregistered target".to_string()
+                        })?
+                        .target()
+                        .clone();
+                    let store = DurableProtectedPipelineLifecycleStore::at_path(
+                        lifecycle.coordinator.lifecycle_store_path(&target)?,
+                    );
+                    let record = store.load()?.ok_or_else(|| {
+                        "protected reveal share arrived before durable lifecycle evidence"
+                            .to_string()
+                    })?;
+                    let expected_authorization = record
+                        .reveal_authorization
+                        .as_ref()
+                        .ok_or_else(|| {
+                            "protected reveal share arrived before proposal VC authorization"
+                                .to_string()
+                        })?
+                        .authorization
+                        .root()?;
+                    if *authorization_id != expected_authorization {
+                        return Err("protected reveal share names another durable authorization"
+                            .to_string());
+                    }
+                    lifecycle.on_reveal_share(share.clone())?;
                 }
             }
         }
@@ -331,6 +426,589 @@ impl ProtectedPipelineCoordinatorIngress for NormalProtectedPipelineCoordinator 
         envelope: ProtectedPipelineEvidenceEnvelope,
     ) -> Result<(), String> {
         self.ingest_message(envelope)
+    }
+}
+
+/// Runtime-owned bridge that makes the normal PoSy path durable and
+/// receiver-verifiable. It is the only observer installed into the production
+/// driver; bootstrap heights simply have no registered normal target and are
+/// ignored here.
+pub struct ProductionProtectedPipelineLifecycle {
+    consensus_domain: ConsensusDomain,
+    epoch_context: SimplifiedEpochContext,
+    validator_set: ValidatorSet,
+    verifier: AegisPqvmVerifier,
+    coordinator: NormalProtectedPipelineCoordinator,
+    execution_sources: CoordinatedProtectedExecutionInputSource,
+    cryptographic_profile_root: Hash,
+    evidence_store: Arc<DurableProductionProtectedPipelineEvidenceStore>,
+    evidence_verifier: Arc<ProductionProtectedPipelineEvidenceVerifier>,
+}
+
+impl ProductionProtectedPipelineLifecycle {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        consensus_domain: ConsensusDomain,
+        epoch_context: SimplifiedEpochContext,
+        validator_set: ValidatorSet,
+        cluster_map: ClusterMap,
+        parameters: EtdagParameters,
+        verifier: AegisPqvmVerifier,
+        coordinator: NormalProtectedPipelineCoordinator,
+        execution_sources: CoordinatedProtectedExecutionInputSource,
+        cryptographic_profile_root: Hash,
+        evidence_directory: impl Into<PathBuf>,
+    ) -> Result<Self, String> {
+        let evidence_store = Arc::new(
+            DurableProductionProtectedPipelineEvidenceStore::at_directory(evidence_directory)?,
+        );
+        let evidence_verifier = Arc::new(ProductionProtectedPipelineEvidenceVerifier::new(
+            consensus_domain.clone(),
+            epoch_context.clone(),
+            validator_set.clone(),
+            cluster_map,
+            parameters,
+            verifier.clone(),
+            evidence_store.clone(),
+        )?);
+        Ok(Self {
+            consensus_domain,
+            epoch_context,
+            validator_set,
+            verifier,
+            coordinator,
+            execution_sources,
+            cryptographic_profile_root,
+            evidence_store,
+            evidence_verifier,
+        })
+    }
+
+    fn registered_target_for_commitment(
+        &self,
+        commitment: &NextProtectedBatchCommitment,
+    ) -> Result<Option<TargetAdmissionContext>, String> {
+        Ok(self
+            .coordinator
+            .runtime_for_target(commitment.target_height, commitment.target_context_root)?
+            .map(|runtime| runtime.target().clone()))
+    }
+
+    fn dispatch_event(
+        &self,
+        event: ProtectedPipelineLifecycleEvent,
+        evidence: ProductionProtectedPipelineEvidence,
+    ) -> Result<(), String> {
+        let target = lifecycle_event_target(&event)?;
+        let Some(_runtime) = self
+            .coordinator
+            .runtime_for_target(target.target_height, target.root()?)?
+        else {
+            // H1/H2 are intentionally served by their Genesis-bound source.
+            return Ok(());
+        };
+        let store = DurableProtectedPipelineLifecycleStore::at_path(
+            self.coordinator.lifecycle_store_path(&target)?,
+        );
+        let bridge = ProtectedPipelineLifecycleBridge::new(
+            &self.epoch_context,
+            &self.validator_set,
+            &self.verifier,
+        )?;
+        let mapped = bridge.map_event(event.clone())?;
+        let evidence_root = lifecycle_observation_evidence_root(&mapped.observation)?;
+        if self.evidence_store.install(&evidence)? != evidence_root {
+            return Err("production evidence root differs from lifecycle observation".to_string());
+        }
+        let mut sink = RuntimeLifecycleSink {
+            coordinator: self.coordinator.clone(),
+            evidence_verifier: self.evidence_verifier.clone(),
+        };
+        store.persist_event_before_dispatch(&bridge, event, Some(evidence), &mut sink)
+    }
+
+    /// Reinstall complete durable proof objects and replay level-triggered
+    /// observations before the role runtime accepts new network traffic.
+    pub fn replay_target(&self, target: &TargetAdmissionContext) -> Result<bool, String> {
+        let store = DurableProtectedPipelineLifecycleStore::at_path(
+            self.coordinator.lifecycle_store_path(target)?,
+        );
+        let Some(recovery) =
+            store.recover_verified(&self.epoch_context, &self.validator_set, &self.verifier)?
+        else {
+            return Ok(false);
+        };
+        for update in recovery
+            .before_execution
+            .iter()
+            .chain(recovery.after_execution.iter())
+        {
+            if let Some(evidence) =
+                store.production_evidence_for_observation(&update.observation)?
+            {
+                self.evidence_store.install(&evidence)?;
+            }
+        }
+        let mut sink = RuntimeLifecycleSink {
+            coordinator: self.coordinator.clone(),
+            evidence_verifier: self.evidence_verifier.clone(),
+        };
+        store.replay_verified(
+            &self.epoch_context,
+            &self.validator_set,
+            &self.verifier,
+            &mut sink,
+        )
+    }
+
+    pub fn replay_registered_targets(&self) -> Result<u64, String> {
+        let targets = self
+            .coordinator
+            .runtimes
+            .lock()
+            .map_err(|_| "protected-pipeline target registry lock is poisoned".to_string())?
+            .values()
+            .map(|runtime| runtime.target().clone())
+            .collect::<Vec<_>>();
+        let mut replayed = 0u64;
+        for target in targets {
+            if self.replay_target(&target)? {
+                replayed = replayed.saturating_add(1);
+            }
+        }
+        Ok(replayed)
+    }
+
+    /// Persist and authenticate a network-delivered reveal share against the
+    /// already durable parent/VC record. A compact per-validator observation
+    /// is emitted only when its full multi-transaction bundle is complete.
+    pub fn on_reveal_share(&mut self, share: ProtectedRevealShareMessage) -> Result<(), String> {
+        let runtime = self
+            .coordinator
+            .runtime_for_target(share.target_height, share.target_context_root)?
+            .ok_or_else(|| "reveal share names an unregistered target".to_string())?;
+        let target = runtime.target().clone();
+        let store = DurableProtectedPipelineLifecycleStore::at_path(
+            self.coordinator.lifecycle_store_path(&target)?,
+        );
+        let record = store.load()?.ok_or_else(|| {
+            "reveal share arrived before durable parent lifecycle evidence".to_string()
+        })?;
+        let authorization = record
+            .reveal_authorization
+            .ok_or_else(|| "reveal share arrived before proposal VC authorization".to_string())?;
+        let evidence =
+            crate::consensus::protected_pipeline_evidence_verifier::ProtectedRevealShareEvidence {
+                authorization,
+                share,
+            };
+        let Some(update) =
+            store.persist_reveal_share(evidence, &self.verifier, &self.validator_set)?
+        else {
+            return Ok(());
+        };
+        let complete = store
+            .production_evidence_for_observation(&update.observation)?
+            .ok_or_else(|| "complete reveal bundle disappeared from lifecycle store".to_string())?;
+        if self.evidence_store.install(&complete)?
+            != lifecycle_observation_evidence_root(&update.observation)?
+        {
+            return Err(
+                "reveal bundle evidence root differs from lifecycle observation".to_string(),
+            );
+        }
+        let mut sink = RuntimeLifecycleSink {
+            coordinator: self.coordinator.clone(),
+            evidence_verifier: self.evidence_verifier.clone(),
+        };
+        sink.apply_protected_pipeline_lifecycle_update(update)
+    }
+
+    fn register_successor_from_finalization(
+        &self,
+        material: &VerifiedSimplifiedProposalMaterial,
+        transaction: &SimplifiedFinalizationTransaction,
+    ) -> Result<(), String> {
+        if transaction.target_finalized.height != material.candidate_subject.context.height {
+            return Ok(());
+        }
+        let target_height = transaction
+            .target_finalized
+            .height
+            .0
+            .checked_add(3)
+            .map(Height)
+            .ok_or_else(|| "normal protected successor target height overflowed".to_string())?;
+        if target_height.0 > self.epoch_context.epoch_end_height.0 {
+            return Ok(());
+        }
+        let (assigned_cluster_id, assigned_height_schedule_root) =
+            simplified_target_admission_assignment(
+                &self.epoch_context,
+                target_height,
+                &self.coordinator.cluster_map,
+            )?;
+        let epoch_context_root = self.epoch_context.root()?;
+        let mut registry_source =
+            DurableSimplifiedIngressKemRegistrySource::process_wide(epoch_context_root)?;
+        let registry = registry_source
+            .registry_for_target(self.epoch_context.epoch, target_height, assigned_cluster_id)?
+            .ok_or_else(|| {
+                format!(
+                    "normal protected H{} requires its public ingress KEM registry artifact",
+                    target_height.0
+                )
+            })?;
+        let finality_context = simplified_protected_finality_context_digest_from_state_root(
+            &self.epoch_context,
+            &transaction.target_finalized,
+            material.canonical_block.header.state_root_after,
+            &self.validator_set,
+            &self.coordinator.cluster_map,
+        )?;
+        let target = TargetAdmissionContext::derive_schedule_neutral(
+            TargetAdmissionContextSpec {
+                protocol_version: POSY_SIMPLIFIED_PROTOCOL_VERSION.to_string(),
+                epoch: self.epoch_context.epoch,
+                target_height,
+                source_finalized_height: transaction.target_finalized.height,
+                source_finality_context_root: crate::etdag::target_admission_source_finality_root(
+                    &finality_context,
+                )?,
+                assigned_cluster_id,
+                cluster_schedule_version: TESTNET_V3_CLUSTER_SCHEDULE_VERSION.to_string(),
+                finalized_epoch_seed_root: self.epoch_context.finalized_epoch_seed_root,
+                assigned_height_schedule_root,
+                cryptographic_profile_root: self.cryptographic_profile_root,
+                ingress_kem_registry_root: registry.root()?,
+            },
+            &self.validator_set,
+            &self.coordinator.cluster_map,
+            ConsensusParameterRoot::from_hex(&self.epoch_context.consensus_parameter_root)?,
+        )?;
+        registry.validate_against(&target, &self.validator_set)?;
+        let runtime = self.coordinator.register_target(target)?;
+        self.execution_sources.register_normal_target(runtime)
+    }
+}
+
+impl SimplifiedProtectedLifecycleObserver for ProductionProtectedPipelineLifecycle {
+    fn on_validated_proposal(
+        &mut self,
+        proposal: &SimplifiedProposal,
+        material: &VerifiedSimplifiedProposalMaterial,
+    ) -> Result<(), String> {
+        let Some(commitment) = material.future_protected_batch_commitment.as_ref() else {
+            return Ok(());
+        };
+        let Some(target) = self.registered_target_for_commitment(commitment)? else {
+            return Ok(());
+        };
+        self.dispatch_event(
+            ProtectedPipelineLifecycleEvent::ParentProposalCommitted {
+                target: target.clone(),
+                proposal: proposal.clone(),
+                material: material.clone(),
+            },
+            ProductionProtectedPipelineEvidence::ParentProposal(ProtectedParentProposalEvidence {
+                consensus_domain: self.consensus_domain.clone(),
+                target,
+                proposal: proposal.clone(),
+                material: material.clone(),
+            }),
+        )
+    }
+
+    fn on_proposal_validation_certificate(
+        &mut self,
+        proposal: &SimplifiedProposal,
+        material: &VerifiedSimplifiedProposalMaterial,
+        certificate: &PosyProposalValidationCertificate,
+    ) -> Result<(), String> {
+        let Some(commitment) = material.future_protected_batch_commitment.as_ref() else {
+            return Ok(());
+        };
+        let Some(target) = self.registered_target_for_commitment(commitment)? else {
+            return Ok(());
+        };
+        let runtime = self
+            .coordinator
+            .runtime_for_target(target.target_height, target.root()?)?
+            .ok_or_else(|| "registered lifecycle target disappeared".to_string())?;
+        let batch = runtime
+            .pre_reveal_batch()
+            .map_err(|error| format!("read durable pre-reveal batch: {error}"))?
+            .ok_or_else(|| "protected VC arrived before durable cut/order batch".to_string())?;
+        let bridge = ProtectedPipelineLifecycleBridge::new(
+            &self.epoch_context,
+            &self.validator_set,
+            &self.verifier,
+        )?;
+        let authorization = bridge
+            .map_event(
+                ProtectedPipelineLifecycleEvent::ProposalValidationCertified {
+                    target: target.clone(),
+                    proposal: proposal.clone(),
+                    material: material.clone(),
+                    certificate: certificate.clone(),
+                },
+            )?
+            .reveal_authorization
+            .ok_or_else(|| "VC lifecycle mapping omitted reveal authorization".to_string())?;
+        let parent = ProtectedParentProposalEvidence {
+            consensus_domain: self.consensus_domain.clone(),
+            target: target.clone(),
+            proposal: proposal.clone(),
+            material: material.clone(),
+        };
+        self.dispatch_event(
+            ProtectedPipelineLifecycleEvent::ProposalValidationCertified {
+                target,
+                proposal: proposal.clone(),
+                material: material.clone(),
+                certificate: certificate.clone(),
+            },
+            ProductionProtectedPipelineEvidence::RevealAuthorization(
+                ProtectedRevealAuthorizationEvidence {
+                    parent,
+                    validation_certificate: certificate.clone(),
+                    authorization,
+                    protected_batch: batch,
+                },
+            ),
+        )
+    }
+
+    fn on_execution_consumed(
+        &mut self,
+        proposal: &SimplifiedProposal,
+        material: &VerifiedSimplifiedProposalMaterial,
+    ) -> Result<(), String> {
+        let Some(commitment) = material.next_protected_batch_commitment.as_ref() else {
+            return Ok(());
+        };
+        let Some(target) = self.registered_target_for_commitment(commitment)? else {
+            return Ok(());
+        };
+        self.dispatch_event(
+            ProtectedPipelineLifecycleEvent::ExecutionConsumed {
+                target: target.clone(),
+                proposal: proposal.clone(),
+                material: material.clone(),
+            },
+            ProductionProtectedPipelineEvidence::Consumed(ProtectedConsumedEvidence {
+                consensus_domain: self.consensus_domain.clone(),
+                target,
+                proposal: proposal.clone(),
+                material: material.clone(),
+            }),
+        )
+    }
+
+    fn on_quorum_certificate(
+        &mut self,
+        proposal: &SimplifiedProposal,
+        material: &VerifiedSimplifiedProposalMaterial,
+        certificate: &SimplifiedQuorumCertificate,
+    ) -> Result<(), String> {
+        let Some(commitment) = material.next_protected_batch_commitment.as_ref() else {
+            return Ok(());
+        };
+        let Some(target) = self.registered_target_for_commitment(commitment)? else {
+            return Ok(());
+        };
+        self.dispatch_event(
+            ProtectedPipelineLifecycleEvent::QuorumCertified {
+                target: target.clone(),
+                proposal: proposal.clone(),
+                material: material.clone(),
+                certificate: certificate.clone(),
+            },
+            ProductionProtectedPipelineEvidence::QuorumCertificate(ProtectedQcEvidence {
+                consensus_domain: self.consensus_domain.clone(),
+                target,
+                certificate: certificate.clone(),
+                material: material.clone(),
+            }),
+        )
+    }
+
+    fn on_finalization(
+        &mut self,
+        proposal: &SimplifiedProposal,
+        material: &VerifiedSimplifiedProposalMaterial,
+        transaction: &SimplifiedFinalizationTransaction,
+    ) -> Result<(), String> {
+        let Some(commitment) = material.next_protected_batch_commitment.as_ref() else {
+            return Ok(());
+        };
+        let Some(target) = self.registered_target_for_commitment(commitment)? else {
+            return Ok(());
+        };
+        self.dispatch_event(
+            ProtectedPipelineLifecycleEvent::FinalizationCommitted {
+                target: target.clone(),
+                proposal: proposal.clone(),
+                material: material.clone(),
+                transaction: transaction.clone(),
+            },
+            ProductionProtectedPipelineEvidence::Finality(ProtectedFinalityEvidence {
+                consensus_domain: self.consensus_domain.clone(),
+                target,
+                transaction: transaction.clone(),
+                material: material.clone(),
+            }),
+        )?;
+        self.register_successor_from_finalization(material, transaction)
+    }
+}
+
+impl SimplifiedProtectedLifecycleObserver for Arc<Mutex<ProductionProtectedPipelineLifecycle>> {
+    fn on_validated_proposal(
+        &mut self,
+        proposal: &SimplifiedProposal,
+        material: &VerifiedSimplifiedProposalMaterial,
+    ) -> Result<(), String> {
+        self.lock()
+            .map_err(|_| "protected lifecycle bridge lock is poisoned".to_string())?
+            .on_validated_proposal(proposal, material)
+    }
+
+    fn on_proposal_validation_certificate(
+        &mut self,
+        proposal: &SimplifiedProposal,
+        material: &VerifiedSimplifiedProposalMaterial,
+        certificate: &PosyProposalValidationCertificate,
+    ) -> Result<(), String> {
+        self.lock()
+            .map_err(|_| "protected lifecycle bridge lock is poisoned".to_string())?
+            .on_proposal_validation_certificate(proposal, material, certificate)
+    }
+
+    fn on_execution_consumed(
+        &mut self,
+        proposal: &SimplifiedProposal,
+        material: &VerifiedSimplifiedProposalMaterial,
+    ) -> Result<(), String> {
+        self.lock()
+            .map_err(|_| "protected lifecycle bridge lock is poisoned".to_string())?
+            .on_execution_consumed(proposal, material)
+    }
+
+    fn on_quorum_certificate(
+        &mut self,
+        proposal: &SimplifiedProposal,
+        material: &VerifiedSimplifiedProposalMaterial,
+        certificate: &SimplifiedQuorumCertificate,
+    ) -> Result<(), String> {
+        self.lock()
+            .map_err(|_| "protected lifecycle bridge lock is poisoned".to_string())?
+            .on_quorum_certificate(proposal, material, certificate)
+    }
+
+    fn on_finalization(
+        &mut self,
+        proposal: &SimplifiedProposal,
+        material: &VerifiedSimplifiedProposalMaterial,
+        transaction: &SimplifiedFinalizationTransaction,
+    ) -> Result<(), String> {
+        self.lock()
+            .map_err(|_| "protected lifecycle bridge lock is poisoned".to_string())?
+            .on_finalization(proposal, material, transaction)
+    }
+}
+
+#[derive(Clone)]
+struct RuntimeLifecycleSink {
+    coordinator: NormalProtectedPipelineCoordinator,
+    evidence_verifier: Arc<ProductionProtectedPipelineEvidenceVerifier>,
+}
+
+impl ProtectedPipelineLifecycleSink for RuntimeLifecycleSink {
+    fn apply_protected_pipeline_lifecycle_update(
+        &mut self,
+        update: ProtectedPipelineLifecycleUpdate,
+    ) -> Result<(), String> {
+        let target_root = update.target.root()?;
+        let runtime = self
+            .coordinator
+            .runtime_for_target(update.target.target_height, target_root)?
+            .ok_or_else(|| "protected lifecycle target is not registered".to_string())?;
+        let inputs = ProtectedPipelineReconcileContext {
+            target: runtime.target(),
+            verifier: &self.coordinator.verifier,
+            validator_set: &self.coordinator.validator_set,
+            cluster_map: &self.coordinator.cluster_map,
+            parameters: &self.coordinator.parameters,
+        };
+        runtime
+            .ingest_authenticated_event(
+                AuthenticatedProtectedPipelineEvent::Observation(update.observation),
+                self.evidence_verifier.as_ref(),
+                &inputs,
+            )
+            .map_err(|error| format!("merge durable protected lifecycle observation: {error}"))?;
+        Ok(())
+    }
+}
+
+impl ProtectedPipelineLifecycleRecoverySink for RuntimeLifecycleSink {
+    fn apply_recovered_protected_execution_input(
+        &mut self,
+        target: &TargetAdmissionContext,
+        input: DeterministicProtectedExecutionInput,
+    ) -> Result<(), String> {
+        let runtime = self
+            .coordinator
+            .runtime_for_target(target.target_height, target.root()?)?
+            .ok_or_else(|| "protected lifecycle recovery target is not registered".to_string())?;
+        let inputs = ProtectedPipelineReconcileContext {
+            target: runtime.target(),
+            verifier: &self.coordinator.verifier,
+            validator_set: &self.coordinator.validator_set,
+            cluster_map: &self.coordinator.cluster_map,
+            parameters: &self.coordinator.parameters,
+        };
+        runtime
+            .ingest_authenticated_event(
+                AuthenticatedProtectedPipelineEvent::ExecutionInput(input),
+                self.evidence_verifier.as_ref(),
+                &inputs,
+            )
+            .map_err(|error| format!("replay durable protected execution input: {error}"))?;
+        Ok(())
+    }
+}
+
+fn lifecycle_event_target(
+    event: &ProtectedPipelineLifecycleEvent,
+) -> Result<TargetAdmissionContext, String> {
+    match event {
+        ProtectedPipelineLifecycleEvent::ParentProposalCommitted { target, .. }
+        | ProtectedPipelineLifecycleEvent::ProposalValidationCertified { target, .. }
+        | ProtectedPipelineLifecycleEvent::ExecutionConsumed { target, .. }
+        | ProtectedPipelineLifecycleEvent::QuorumCertified { target, .. }
+        | ProtectedPipelineLifecycleEvent::FinalizationCommitted { target, .. } => {
+            Ok(target.clone())
+        }
+    }
+}
+
+fn lifecycle_observation_evidence_root(
+    observation: &ProtectedPipelineObservation,
+) -> Result<EtdagDigest, String> {
+    match observation {
+        ProtectedPipelineObservation::ParentCommitment { evidence_root, .. }
+        | ProtectedPipelineObservation::RevealAuthorization { evidence_root, .. }
+        | ProtectedPipelineObservation::Consumed { evidence_root, .. }
+        | ProtectedPipelineObservation::QcObserved { evidence_root, .. }
+        | ProtectedPipelineObservation::Finalized { evidence_root, .. } => {
+            Ok(evidence_root.clone())
+        }
+        ProtectedPipelineObservation::RevealShare { share_root, .. } => Ok(share_root.clone()),
+        ProtectedPipelineObservation::ExecutionReady { .. } => {
+            Err("root-only execution-ready observation is forbidden".to_string())
+        }
     }
 }
 
@@ -535,6 +1213,23 @@ impl ProtectedPipelineRuntime {
                     )
                 })
         })
+    }
+
+    /// Proposal-safe pre-reveal commitment. This becomes available after cut
+    /// and deterministic ordering, before any reveal authorization or concrete
+    /// execution input exists.
+    pub fn pre_reveal_commitment(
+        &self,
+    ) -> ProtectedPipelineResult<Option<NextProtectedBatchCommitment>> {
+        self.with_pipeline(|pipeline| Ok(pipeline.record().next_commitment.clone()))
+    }
+
+    /// Public deterministic cut/order result bound by the pre-reveal
+    /// commitment. This excludes envelopes, reveal shares, and plaintext.
+    pub fn pre_reveal_batch(
+        &self,
+    ) -> ProtectedPipelineResult<Option<crate::etdag::DeterministicProtectedBatch>> {
+        self.with_pipeline(|pipeline| Ok(pipeline.record().protected_batch.clone()))
     }
 
     /// Level-triggered startup reconciliation.  Safe to call repeatedly.

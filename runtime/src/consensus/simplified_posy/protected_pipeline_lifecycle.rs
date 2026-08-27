@@ -14,6 +14,9 @@ use super::{
     SimplifiedQuorumCertificate, VerifiedSimplifiedProposalMaterial,
 };
 use crate::consensus::protected_pipeline::ProtectedPipelineObservation;
+use crate::consensus::protected_pipeline_evidence_verifier::{
+    protected_finality_root, protected_proposal_id, protected_proposal_vc_root, protected_qc_root,
+};
 use crate::etdag::{
     DeterministicProtectedExecutionInput, EtdagDigest, NextProtectedBatchCommitment,
     ProtectedBatchSource, ProtectedExecutionTargetContext, ProtectedRevealAuthorization,
@@ -132,11 +135,11 @@ impl<'a, V: ConsensusSignatureVerifier> ProtectedPipelineLifecycleBridge<'a, V> 
                 proposal,
                 material,
             } => {
-                let binding = self.validate_normal_binding(&target, &proposal, &material)?;
+                let binding = self.validate_parent_binding(&target, &proposal, &material)?;
                 Ok(ProtectedPipelineLifecycleUpdate {
                     target,
                     observation: ProtectedPipelineObservation::ParentCommitment {
-                        proposal_id: protected_pipeline_proposal_id(&binding.candidate)?,
+                        proposal_id: protected_proposal_id(&proposal)?,
                         commitment_root: binding.commitment.root()?,
                         evidence_root: protected_pipeline_proposal_evidence_root(
                             &proposal, &material,
@@ -151,7 +154,7 @@ impl<'a, V: ConsensusSignatureVerifier> ProtectedPipelineLifecycleBridge<'a, V> 
                 material,
                 certificate,
             } => {
-                let binding = self.validate_normal_binding(&target, &proposal, &material)?;
+                let binding = self.validate_parent_binding(&target, &proposal, &material)?;
                 certificate.validate_authenticated(
                     &material,
                     self.epoch_context,
@@ -171,12 +174,12 @@ impl<'a, V: ConsensusSignatureVerifier> ProtectedPipelineLifecycleBridge<'a, V> 
                 let authorization = build_protected_reveal_authorization(
                     &target,
                     &proposal,
-                    binding.input,
+                    binding.commitment,
                     &certificate,
                 )?;
                 let observation = ProtectedPipelineObservation::RevealAuthorization {
-                    proposal_id: protected_pipeline_proposal_id(&binding.candidate)?,
-                    vc_root: authorization.certificate_evidence_root.clone(),
+                    proposal_id: protected_proposal_id(&proposal)?,
+                    vc_root: protected_proposal_vc_root(certificate.semantic_candidate_id()?)?,
                     commitment_root: binding.commitment.root()?,
                     evidence_root: authorization.root()?,
                 };
@@ -191,7 +194,7 @@ impl<'a, V: ConsensusSignatureVerifier> ProtectedPipelineLifecycleBridge<'a, V> 
                 proposal,
                 material,
             } => {
-                let binding = self.validate_normal_binding(&target, &proposal, &material)?;
+                let binding = self.validate_execution_binding(&target, &proposal, &material)?;
                 require_consumed_reveal_binding(&target, &proposal, binding.input)?;
                 let execution_root = binding.input.digest()?;
                 Ok(ProtectedPipelineLifecycleUpdate {
@@ -212,7 +215,7 @@ impl<'a, V: ConsensusSignatureVerifier> ProtectedPipelineLifecycleBridge<'a, V> 
                 material,
                 certificate,
             } => {
-                let binding = self.validate_normal_binding(&target, &proposal, &material)?;
+                let binding = self.validate_execution_binding(&target, &proposal, &material)?;
                 require_consumed_reveal_binding(&target, &proposal, binding.input)?;
                 certificate.verify(self.epoch_context, self.validator_set, self.verifier)?;
                 if certificate.subject()? != binding.candidate
@@ -229,7 +232,7 @@ impl<'a, V: ConsensusSignatureVerifier> ProtectedPipelineLifecycleBridge<'a, V> 
                     target,
                     observation: ProtectedPipelineObservation::QcObserved {
                         commitment_root: binding.commitment.root()?,
-                        qc_root: protected_pipeline_qc_id(&certificate)?,
+                        qc_root: protected_qc_root(certificate.id()?)?,
                         evidence_root: protected_pipeline_qc_evidence_root(&certificate)?,
                     },
                     reveal_authorization: None,
@@ -241,7 +244,7 @@ impl<'a, V: ConsensusSignatureVerifier> ProtectedPipelineLifecycleBridge<'a, V> 
                 material,
                 transaction,
             } => {
-                let binding = self.validate_normal_binding(&target, &proposal, &material)?;
+                let binding = self.validate_execution_binding(&target, &proposal, &material)?;
                 require_consumed_reveal_binding(&target, &proposal, binding.input)?;
                 transaction.validate()?;
                 let matching = transaction
@@ -270,7 +273,7 @@ impl<'a, V: ConsensusSignatureVerifier> ProtectedPipelineLifecycleBridge<'a, V> 
                     target,
                     observation: ProtectedPipelineObservation::Finalized {
                         commitment_root: binding.commitment.root()?,
-                        finality_root: protected_pipeline_finality_id(&transaction),
+                        finality_root: protected_finality_root(&transaction.target_finalized)?,
                         evidence_root: protected_pipeline_finality_evidence_root(&transaction)?,
                     },
                     reveal_authorization: None,
@@ -290,7 +293,54 @@ impl<'a, V: ConsensusSignatureVerifier> ProtectedPipelineLifecycleBridge<'a, V> 
         sink.apply_protected_pipeline_lifecycle_update(self.map_event(event)?)
     }
 
-    fn validate_normal_binding<'b>(
+    fn validate_parent_binding<'b>(
+        &self,
+        target: &TargetAdmissionContext,
+        proposal: &SimplifiedProposal,
+        material: &'b VerifiedSimplifiedProposalMaterial,
+    ) -> Result<ParentProtectedBinding<'b>, String> {
+        target.validate()?;
+        if target.target_height.0 < 3 {
+            return Err("normal protected lifecycle is unavailable before H3".to_string());
+        }
+        proposal.context.validate_against(self.epoch_context)?;
+        let child_height = proposal
+            .context
+            .height
+            .0
+            .checked_add(1)
+            .ok_or_else(|| "protected parent child height overflow".to_string())?;
+        if proposal.context.chain_id != target.chain_id
+            || proposal.context.network_id != target.network_id
+            || proposal.context.protocol_version != target.protocol_version
+            || proposal.context.epoch != target.epoch
+            || Height(child_height) != target.target_height
+            || proposal.context.active_validator_set_root != target.active_validator_set_root
+            || proposal.context.validator_consensus_key_root != target.validator_consensus_key_root
+            || proposal.context.frozen_voting_weight_root != target.frozen_bonded_weight_root
+            || proposal.context.consensus_parameter_root != target.consensus_parameter_root.to_hex()
+        {
+            return Err(
+                "PoSy parent proposal context does not match the child protected target"
+                    .to_string(),
+            );
+        }
+        material.validate(proposal.context.epoch_context_root)?;
+        let candidate = validated_candidate(proposal, material)?;
+        let commitment = material
+            .future_protected_batch_commitment
+            .as_ref()
+            .ok_or_else(|| {
+                "normal protected parent material has no child batch commitment".to_string()
+            })?;
+        commitment.validate_against_context(target)?;
+        Ok(ParentProtectedBinding {
+            candidate,
+            commitment,
+        })
+    }
+
+    fn validate_execution_binding<'b>(
         &self,
         target: &TargetAdmissionContext,
         proposal: &SimplifiedProposal,
@@ -316,18 +366,7 @@ impl<'a, V: ConsensusSignatureVerifier> ProtectedPipelineLifecycleBridge<'a, V> 
             );
         }
         material.validate(proposal.context.epoch_context_root)?;
-        let candidate = CertifiedCandidateSubject::new(
-            proposal.context.clone(),
-            proposal.block_id.clone(),
-            proposal.parent_block_id.clone(),
-            proposal.parent.clone(),
-            proposal.protected_execution_root,
-        )?;
-        if candidate != material.candidate_subject
-            || candidate.id()? != material.stable_candidate_id
-        {
-            return Err("verified proposal material names another PoSy candidate".to_string());
-        }
+        let candidate = validated_candidate(proposal, material)?;
         let input = material.protected_execution_input.as_ref().ok_or_else(|| {
             "normal protected proposal material has no concrete execution input".to_string()
         })?;
@@ -361,6 +400,11 @@ impl<'a, V: ConsensusSignatureVerifier> ProtectedPipelineLifecycleBridge<'a, V> 
             input,
         })
     }
+}
+
+struct ParentProtectedBinding<'a> {
+    candidate: CertifiedCandidateSubject,
+    commitment: &'a NextProtectedBatchCommitment,
 }
 
 struct NormalProtectedBinding<'a> {
@@ -442,11 +486,10 @@ pub fn protected_pipeline_finality_evidence_root(
 pub fn build_protected_reveal_authorization(
     target: &TargetAdmissionContext,
     proposal: &SimplifiedProposal,
-    input: &DeterministicProtectedExecutionInput,
+    commitment: &NextProtectedBatchCommitment,
     certificate: &PosyProposalValidationCertificate,
 ) -> Result<ProtectedRevealAuthorization, String> {
-    let commitment = &input.next_commitment;
-    commitment.validate_against(target, &input.protected_batch)?;
+    commitment.validate_against_context(target)?;
     let candidate = CertifiedCandidateSubject::new(
         proposal.context.clone(),
         proposal.block_id.clone(),
@@ -474,12 +517,29 @@ pub fn build_protected_reveal_authorization(
         parent_proposal_id: proposal.block_id.clone(),
         parent_block_id: proposal.parent_block_id.clone(),
         next_commitment_root: commitment.root()?,
-        protected_batch_root: input.protected_batch.protected_batch_root.clone(),
+        protected_batch_root: commitment.protected_batch_root.clone(),
         proposal_validation_certificate_root: certificate.semantic_candidate_id()?,
         certificate_evidence_root: certificate.proof_root()?,
     };
-    authorization.validate_against(target, commitment, &input.protected_batch)?;
+    authorization.validate_against_commitment(target, commitment)?;
     Ok(authorization)
+}
+
+fn validated_candidate(
+    proposal: &SimplifiedProposal,
+    material: &VerifiedSimplifiedProposalMaterial,
+) -> Result<CertifiedCandidateSubject, String> {
+    let candidate = CertifiedCandidateSubject::new(
+        proposal.context.clone(),
+        proposal.block_id.clone(),
+        proposal.parent_block_id.clone(),
+        proposal.parent.clone(),
+        proposal.protected_execution_root,
+    )?;
+    if candidate != material.candidate_subject || candidate.id()? != material.stable_candidate_id {
+        return Err("verified proposal material names another PoSy candidate".to_string());
+    }
+    Ok(candidate)
 }
 
 fn require_consumed_reveal_binding(

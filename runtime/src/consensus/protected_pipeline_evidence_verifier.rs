@@ -5,7 +5,7 @@
 //! a receiver-owned evidence source and replays the complete authenticated
 //! PoSy, ETDAG, or reveal proof before allowing a state transition.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -18,6 +18,8 @@ use crate::consensus::protected_pipeline::{
     ProtectedOrderSeedEvidence, ProtectedPipelineEvidenceVerifier, ProtectedPipelineObservation,
 };
 use crate::consensus::simplified_posy::{
+    protected_pipeline_consumed_evidence_root, protected_pipeline_finality_evidence_root,
+    protected_pipeline_proposal_evidence_root, protected_pipeline_qc_evidence_root,
     simplified_protected_finality_context_digest_from_state_root, CertifiedCandidateSubject,
     ConsensusSignatureVerifier, FinalizedBlockRecord, PosyProposalValidationCertificate,
     SimplifiedEpochContext, SimplifiedFinalizationTransaction, SimplifiedProposal,
@@ -65,6 +67,10 @@ pub const DOMAIN_PROTECTED_FINALITY_ROOT: &str = "PoSy/ProtectedPipeline/Finalit
 /// root.
 pub const DOMAIN_PROTECTED_REVEAL_SHARE_EVIDENCE: &str =
     "PoSy/ProtectedPipeline/RevealShareEvidence/v1";
+pub const DOMAIN_PROTECTED_REVEAL_SHARE_BUNDLE: &str =
+    "PoSy/ProtectedPipeline/RevealShareBundle/v1";
+pub const DOMAIN_PROTECTED_POSY_CONSUMED_EVIDENCE: &str =
+    "PoSy/ProtectedPipeline/ConsumedEvidence/v1";
 
 const MAX_PRODUCTION_EVIDENCE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_PRODUCTION_EVIDENCE_OBJECTS: usize = 16_384;
@@ -112,6 +118,9 @@ pub struct ProtectedRevealAuthorizationEvidence {
     pub parent: ProtectedParentProposalEvidence,
     pub validation_certificate: PosyProposalValidationCertificate,
     pub authorization: ProtectedRevealAuthorization,
+    /// The deterministic cut/order result committed by the parent. This is
+    /// public pre-reveal material, not plaintext execution material.
+    pub protected_batch: DeterministicProtectedBatch,
 }
 
 /// Complete signed share together with the VC-authorized reveal proof it
@@ -124,9 +133,43 @@ pub struct ProtectedRevealShareEvidence {
     pub share: ProtectedRevealShareMessage,
 }
 
+/// Complete execution-consumption proof.  Consumption precedes the ordinary
+/// QC and finality, so it must never be reconstructed from finality evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProtectedConsumedEvidence {
+    pub consensus_domain: ConsensusDomain,
+    pub target: TargetAdmissionContext,
+    pub proposal: SimplifiedProposal,
+    pub material: VerifiedSimplifiedProposalMaterial,
+}
+
+impl ProtectedConsumedEvidence {
+    pub fn evidence_root(&self) -> Result<EtdagDigest, String> {
+        bounded_evidence_root(DOMAIN_PROTECTED_POSY_CONSUMED_EVIDENCE, self)
+    }
+}
+
 impl ProtectedRevealShareEvidence {
     pub fn evidence_root(&self) -> Result<EtdagDigest, String> {
         bounded_evidence_root(DOMAIN_PROTECTED_REVEAL_SHARE_EVIDENCE, self)
+    }
+}
+
+/// All per-transaction shares contributed by one validator for one committed
+/// batch. The pipeline tracks reveal observations per validator, so this is
+/// the only compact proof shape that remains replayable for multi-transaction
+/// batches.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProtectedRevealShareBundleEvidence {
+    pub authorization: ProtectedRevealAuthorizationEvidence,
+    pub shares: BTreeMap<EtdagDigest, ProtectedRevealShareEvidence>,
+}
+
+impl ProtectedRevealShareBundleEvidence {
+    pub fn evidence_root(&self) -> Result<EtdagDigest, String> {
+        bounded_evidence_root(DOMAIN_PROTECTED_REVEAL_SHARE_BUNDLE, &self.shares)
     }
 }
 
@@ -171,6 +214,8 @@ pub enum ProductionProtectedPipelineEvidence {
     ParentProposal(ProtectedParentProposalEvidence),
     RevealAuthorization(ProtectedRevealAuthorizationEvidence),
     RevealShare(ProtectedRevealShareEvidence),
+    RevealShareBundle(ProtectedRevealShareBundleEvidence),
+    Consumed(ProtectedConsumedEvidence),
     QuorumCertificate(ProtectedQcEvidence),
     Finality(ProtectedFinalityEvidence),
 }
@@ -182,11 +227,23 @@ impl ProductionProtectedPipelineEvidence {
     pub fn lookup_root(&self) -> Result<EtdagDigest, String> {
         match self {
             Self::OrderSeed(evidence) => evidence.authority_root(),
-            Self::ParentProposal(evidence) => evidence.evidence_root(),
-            Self::RevealAuthorization(evidence) => evidence.validation_certificate.proof_root(),
+            // These compact roots are also the roots stored in the durable
+            // lifecycle journal. Full evidence remains rechecked after lookup.
+            Self::ParentProposal(evidence) => {
+                protected_pipeline_proposal_evidence_root(&evidence.proposal, &evidence.material)
+            }
+            Self::RevealAuthorization(evidence) => evidence.authorization.root(),
             Self::RevealShare(evidence) => evidence.evidence_root(),
-            Self::QuorumCertificate(evidence) => evidence.evidence_root(),
-            Self::Finality(evidence) => evidence.evidence_root(),
+            Self::RevealShareBundle(evidence) => evidence.evidence_root(),
+            Self::Consumed(evidence) => {
+                protected_pipeline_consumed_evidence_root(&evidence.proposal, &evidence.material)
+            }
+            Self::QuorumCertificate(evidence) => {
+                protected_pipeline_qc_evidence_root(&evidence.certificate)
+            }
+            Self::Finality(evidence) => {
+                protected_pipeline_finality_evidence_root(&evidence.transaction)
+            }
         }
     }
 }
@@ -592,7 +649,14 @@ impl ProductionProtectedPipelineEvidenceVerifier {
             evidence.proposal.protected_execution_root,
         )?;
         if expected_candidate != evidence.material.candidate_subject
-            || evidence.proposal.context.height != target.target_height
+            || evidence
+                .proposal
+                .context
+                .height
+                .0
+                .checked_add(1)
+                .map(crate::synergy_types::Height)
+                != Some(target.target_height)
         {
             return Err("protected parent proposal material binding mismatch".to_string());
         }
@@ -620,7 +684,12 @@ impl ProductionProtectedPipelineEvidenceVerifier {
             target.epoch,
             &evidence.proposal.proposer_signature,
         )?;
-        self.validate_material(target, expected_commitment, &evidence.material)?;
+        evidence.material.validate(self.epoch_context.root()?)?;
+        if evidence.material.future_protected_batch_commitment.as_ref() != Some(expected_commitment)
+        {
+            return Err("protected parent proposal commits another child target".to_string());
+        }
+        expected_commitment.validate_against_context(target)?;
         Ok(())
     }
 
@@ -631,8 +700,7 @@ impl ProductionProtectedPipelineEvidenceVerifier {
         evidence: &ProtectedRevealAuthorizationEvidence,
     ) -> Result<(), String> {
         self.validate_parent(target, expected_commitment, &evidence.parent)?;
-        let batch =
-            self.validate_material(target, expected_commitment, &evidence.parent.material)?;
+        expected_commitment.validate_against(target, &evidence.protected_batch)?;
         evidence.validation_certificate.validate_authenticated(
             &evidence.parent.material,
             &self.epoch_context,
@@ -648,9 +716,11 @@ impl ProductionProtectedPipelineEvidenceVerifier {
         {
             return Err("protected reveal authorization has another proposal VC".to_string());
         }
-        evidence
-            .authorization
-            .validate_against(target, expected_commitment, batch)
+        evidence.authorization.validate_against(
+            target,
+            expected_commitment,
+            &evidence.protected_batch,
+        )
     }
 
     fn validate_qc(
@@ -822,28 +892,43 @@ impl ProtectedPipelineEvidenceVerifier for ProductionProtectedPipelineEvidenceVe
                 commitment_root,
                 share_root,
             } => {
-                let ProductionProtectedPipelineEvidence::RevealShare(evidence) =
+                let ProductionProtectedPipelineEvidence::RevealShareBundle(evidence) =
                     self.load_exact(share_root)?
                 else {
                     return Err("share root resolved to another evidence kind".to_string());
                 };
                 self.validate_authorization(target, expected_commitment, &evidence.authorization)?;
-                let batch = self.validate_material(
-                    target,
-                    expected_commitment,
-                    &evidence.authorization.parent.material,
-                )?;
-                verify_protected_reveal_share(
-                    &evidence.share,
-                    &evidence.authorization.authorization,
-                    expected_commitment,
-                    batch,
-                    &self.verifier,
-                    target,
-                    &self.validator_set,
-                )?;
-                if validator_id != &evidence.share.validator_id || commitment_root != &expected_root
+                let expected_transactions = evidence
+                    .authorization
+                    .protected_batch
+                    .ordered_transaction_ids
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                if evidence.shares.keys().cloned().collect::<BTreeSet<_>>() != expected_transactions
                 {
+                    return Err(
+                        "reveal-share bundle does not cover the committed batch".to_string()
+                    );
+                }
+                for (transaction, share_evidence) in &evidence.shares {
+                    if &share_evidence.authorization != &evidence.authorization
+                        || &share_evidence.share.tx_commitment != transaction
+                        || &share_evidence.share.validator_id != validator_id
+                    {
+                        return Err("reveal-share bundle has another authorization, transaction, or validator".to_string());
+                    }
+                    verify_protected_reveal_share(
+                        &share_evidence.share,
+                        &evidence.authorization.authorization,
+                        expected_commitment,
+                        &evidence.authorization.protected_batch,
+                        &self.verifier,
+                        target,
+                        &self.validator_set,
+                    )?;
+                }
+                if commitment_root != &expected_root {
                     return Err("protected reveal-share observation binding mismatch".to_string());
                 }
             }
@@ -893,12 +978,27 @@ impl ProtectedPipelineEvidenceVerifier for ProductionProtectedPipelineEvidenceVe
                 execution_root,
                 evidence_root,
             } => {
-                let ProductionProtectedPipelineEvidence::Finality(evidence) =
+                let ProductionProtectedPipelineEvidence::Consumed(evidence) =
                     self.load_exact(evidence_root)?
                 else {
                     return Err("consumption root resolved to another evidence kind".to_string());
                 };
-                self.validate_finality(target, expected_commitment, &evidence)?;
+                self.validate_domain_and_target(
+                    &evidence.consensus_domain,
+                    target,
+                    &evidence.target,
+                )?;
+                self.validate_material(target, expected_commitment, &evidence.material)?;
+                let candidate = CertifiedCandidateSubject::new(
+                    evidence.proposal.context.clone(),
+                    evidence.proposal.block_id.clone(),
+                    evidence.proposal.parent_block_id.clone(),
+                    evidence.proposal.parent.clone(),
+                    evidence.proposal.protected_execution_root,
+                )?;
+                if candidate != evidence.material.candidate_subject {
+                    return Err("consumed evidence names another proposal material".to_string());
+                }
                 let input = evidence
                     .material
                     .protected_execution_input

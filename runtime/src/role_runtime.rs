@@ -20,7 +20,7 @@ use crate::consensus::posy::LocalConsensusContext;
 use crate::consensus::protected_pipeline::ProtectedPipelineReconcileContext;
 use crate::consensus::protected_pipeline_runtime::{
     GenesisBootstrapProtectedExecutionSource, NormalProtectedPipelineCoordinator,
-    ProtectedPipelineRuntime,
+    ProductionProtectedPipelineLifecycle, ProtectedPipelineRuntime,
 };
 use crate::consensus::self_realign::{
     expected_genesis_hash, persisted_recovery_state, RealignmentState,
@@ -92,8 +92,8 @@ use crate::rpc::rpc_server::{SHARED_CHAIN, SYNC_MANAGER, TX_POOL};
 use crate::sxcp;
 use crate::sync::SyncManager;
 use crate::synergy_types::{
-    AegisPqKeyId, AegisPqKeyRole, BlockHeader, ClusterMap, Hash, Height, ValidatorId, ValidatorSet,
-    SYNERGY_TESTNET_V3_CHAIN_ID, TESTNET_V3_CANONICAL_NETWORK_ID,
+    current_consensus_domain, AegisPqKeyId, AegisPqKeyRole, BlockHeader, ClusterMap, Hash, Height,
+    ValidatorId, ValidatorSet, SYNERGY_TESTNET_V3_CHAIN_ID, TESTNET_V3_CANONICAL_NETWORK_ID,
     TESTNET_V3_CLUSTER_SCHEDULE_VERSION,
 };
 use crate::telemetry;
@@ -2926,6 +2926,29 @@ fn spawn_finalized_simplified_posy_driver(
     } else {
         None
     };
+    let protected_lifecycle = normal_protected_coordinator
+        .as_ref()
+        .map(|coordinator| {
+            ProductionProtectedPipelineLifecycle::new(
+                current_consensus_domain()?,
+                epoch_context.clone(),
+                validator_set.clone(),
+                cluster_map.clone(),
+                etdag_parameters.clone(),
+                crypto.verifier.clone(),
+                coordinator.clone(),
+                protected_execution_sources
+                    .as_ref()
+                    .ok_or_else(|| {
+                        "protected lifecycle has no coordinated execution source".to_string()
+                    })?
+                    .clone(),
+                cryptographic_profile_root,
+                crate::utils::resolve_data_path("data/posy-v3-protected-evidence"),
+            )
+        })
+        .transpose()?
+        .map(|lifecycle| Arc::new(Mutex::new(lifecycle)));
     let material_adapter: SimplifiedActivatedMaterialAdapter<
         DurableSimplifiedProtectedMaterialAuthority,
     > = if material_mode == SimplifiedMaterialMode::Protected {
@@ -3021,6 +3044,17 @@ fn spawn_finalized_simplified_posy_driver(
             timing,
         )?
     };
+    if let Some(lifecycle) = protected_lifecycle {
+        lifecycle
+            .lock()
+            .map_err(|_| "protected lifecycle bridge lock is poisoned".to_string())?
+            .replay_registered_targets()?;
+        normal_protected_coordinator
+            .as_ref()
+            .ok_or_else(|| "protected lifecycle has no normal coordinator".to_string())?
+            .install_lifecycle(&lifecycle)?;
+        driver = driver.with_protected_lifecycle_observer(Box::new(lifecycle));
+    }
 
     let etdag_ingress_installed = false;
     match (

@@ -14,6 +14,7 @@ mod material_sync;
 mod metrics;
 mod protected_material;
 mod protected_pipeline_lifecycle;
+mod protected_pipeline_lifecycle_store;
 mod reliable_delivery;
 mod schedule;
 mod state;
@@ -31,6 +32,7 @@ pub use material_sync::*;
 pub use metrics::*;
 pub use protected_material::*;
 pub use protected_pipeline_lifecycle::*;
+pub use protected_pipeline_lifecycle_store::*;
 pub use reliable_delivery::*;
 pub use schedule::*;
 pub use state::*;
@@ -47,6 +49,9 @@ pub(crate) use transition::tests::{
 
 #[cfg(test)]
 mod protected_pipeline_integration_tests;
+
+#[cfg(test)]
+mod protected_pipeline_lifecycle_store_tests;
 
 #[cfg(test)]
 mod tests;

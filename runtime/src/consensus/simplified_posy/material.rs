@@ -178,6 +178,11 @@ pub struct VerifiedSimplifiedProposalMaterial {
     /// an unauthenticated sidecar: proposal signatures, ECHOs, block votes,
     /// and the resulting QC all transitively certify this complete value.
     pub next_protected_batch_commitment: Option<NextProtectedBatchCommitment>,
+    /// View-invariant pre-reveal commitment for the proposal's child height.
+    /// Unlike `protected_execution_input`, this contains no plaintext, reveal
+    /// share, or future execution authority.
+    #[serde(default)]
+    pub future_protected_batch_commitment: Option<NextProtectedBatchCommitment>,
     /// Optional signer-independent dynamic-membership subject. When present,
     /// it is part of the protected-execution root certified by the QC and can
     /// therefore be used only by the durable transition-authority verifier.
@@ -194,6 +199,7 @@ struct ProtectedExecutionRootSubject<'a> {
     transactions: &'a [crate::synergy_types::Transaction],
     protected_execution_input_digest: Option<&'a EtdagDigest>,
     next_protected_batch_commitment: Option<&'a NextProtectedBatchCommitment>,
+    future_protected_batch_commitment: Option<&'a NextProtectedBatchCommitment>,
     transition_subject_root: Option<Hash>,
 }
 
@@ -237,6 +243,7 @@ impl VerifiedSimplifiedProposalMaterial {
             epoch_context,
             proposal,
             block,
+            None,
             None,
             None,
             transition_subject_root,
@@ -286,6 +293,7 @@ impl VerifiedSimplifiedProposalMaterial {
             Some(protected_execution_input),
             Some(next_protected_batch_commitment),
             None,
+            None,
             next_state,
         )
     }
@@ -303,11 +311,43 @@ impl VerifiedSimplifiedProposalMaterial {
         cluster_map: &ClusterMap,
         parameters: &EtdagParameters,
     ) -> Result<(Self, ExecutionState), String> {
-        Self::verify_protected_with_transition_subject(
+        Self::verify_protected_with_future_commitment(
             epoch_context,
             proposal,
             block,
             protected_execution_input,
+            None,
+            parent_execution_state,
+            parent_fee_market,
+            verifier,
+            validator_set,
+            cluster_map,
+            parameters,
+        )
+    }
+
+    /// Verify current execution material while separately binding the
+    /// pre-reveal commitment for the proposal's child height.
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_protected_with_future_commitment(
+        epoch_context: &SimplifiedEpochContext,
+        proposal: &SimplifiedProposal,
+        block: Block,
+        protected_execution_input: DeterministicProtectedExecutionInput,
+        future_protected_batch_commitment: Option<NextProtectedBatchCommitment>,
+        parent_execution_state: &ExecutionState,
+        parent_fee_market: Option<SimplifiedParentFeeMarketState>,
+        verifier: &AegisPqvmVerifier,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        parameters: &EtdagParameters,
+    ) -> Result<(Self, ExecutionState), String> {
+        Self::verify_protected_with_transition_subject_and_future_commitment(
+            epoch_context,
+            proposal,
+            block,
+            protected_execution_input,
+            future_protected_batch_commitment,
             parent_execution_state,
             parent_fee_market,
             verifier,
@@ -326,6 +366,37 @@ impl VerifiedSimplifiedProposalMaterial {
         proposal: &SimplifiedProposal,
         block: Block,
         protected_execution_input: DeterministicProtectedExecutionInput,
+        parent_execution_state: &ExecutionState,
+        parent_fee_market: Option<SimplifiedParentFeeMarketState>,
+        verifier: &AegisPqvmVerifier,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        parameters: &EtdagParameters,
+        transition_subject_root: Option<Hash>,
+    ) -> Result<(Self, ExecutionState), String> {
+        Self::verify_protected_with_transition_subject_and_future_commitment(
+            epoch_context,
+            proposal,
+            block,
+            protected_execution_input,
+            None,
+            parent_execution_state,
+            parent_fee_market,
+            verifier,
+            validator_set,
+            cluster_map,
+            parameters,
+            transition_subject_root,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn verify_protected_with_transition_subject_and_future_commitment(
+        epoch_context: &SimplifiedEpochContext,
+        proposal: &SimplifiedProposal,
+        block: Block,
+        protected_execution_input: DeterministicProtectedExecutionInput,
+        future_protected_batch_commitment: Option<NextProtectedBatchCommitment>,
         parent_execution_state: &ExecutionState,
         parent_fee_market: Option<SimplifiedParentFeeMarketState>,
         verifier: &AegisPqvmVerifier,
@@ -360,6 +431,7 @@ impl VerifiedSimplifiedProposalMaterial {
             block,
             Some(protected_execution_input),
             Some(next_protected_batch_commitment),
+            future_protected_batch_commitment,
             transition_subject_root,
             next_state,
         )
@@ -371,6 +443,7 @@ impl VerifiedSimplifiedProposalMaterial {
         block: Block,
         protected_execution_input: Option<DeterministicProtectedExecutionInput>,
         next_protected_batch_commitment: Option<NextProtectedBatchCommitment>,
+        future_protected_batch_commitment: Option<NextProtectedBatchCommitment>,
         transition_subject_root: Option<Hash>,
         next_state: ExecutionState,
     ) -> Result<(Self, ExecutionState), String> {
@@ -383,6 +456,7 @@ impl VerifiedSimplifiedProposalMaterial {
             &block,
             protected_execution_input.as_ref(),
             next_protected_batch_commitment.as_ref(),
+            future_protected_batch_commitment.as_ref(),
             transition_subject_root,
         )?;
         let candidate_subject = CertifiedCandidateSubject::new(
@@ -402,6 +476,7 @@ impl VerifiedSimplifiedProposalMaterial {
             canonical_block,
             protected_execution_input,
             next_protected_batch_commitment,
+            future_protected_batch_commitment,
             transition_subject_root,
         };
         record.validate(epoch_context.root()?)?;
@@ -576,6 +651,12 @@ impl VerifiedSimplifiedProposalMaterial {
                 )
             }
         }
+        if let Some(commitment) = &self.future_protected_batch_commitment {
+            validate_future_protected_batch_commitment(
+                commitment,
+                &self.candidate_subject.context,
+            )?;
+        }
         let recomputed = compute_simplified_protected_execution_root_complete(
             &self.candidate_subject.context,
             &self.canonical_block,
@@ -585,6 +666,7 @@ impl VerifiedSimplifiedProposalMaterial {
             None,
             self.protected_execution_input.as_ref(),
             self.next_protected_batch_commitment.as_ref(),
+            self.future_protected_batch_commitment.as_ref(),
             self.transition_subject_root,
         )?;
         if recomputed != self.candidate_subject.protected_execution_root {
@@ -688,6 +770,49 @@ pub fn validate_next_protected_batch_commitment(
     Ok(())
 }
 
+/// Validate the commitment a parent proposal carries for its child height.
+/// This validates only deterministic pre-reveal material and must never
+/// require the child's concrete execution input.
+pub fn validate_future_protected_batch_commitment(
+    commitment: &NextProtectedBatchCommitment,
+    parent_context: &super::ConsensusObjectContext,
+) -> Result<(), String> {
+    let expected_child = parent_context
+        .height
+        .0
+        .checked_add(1)
+        .ok_or_else(|| "future protected commitment height overflowed".to_string())?;
+    if commitment.commitment_version != PROTECTED_PIPELINE_VERSION
+        || commitment.chain_id != parent_context.chain_id
+        || commitment.network_id != parent_context.network_id
+        || commitment.protocol_version != parent_context.protocol_version
+        || commitment.epoch != parent_context.epoch
+        || commitment.target_height.0 != expected_child
+        || commitment.validator_set_commitment != parent_context.active_validator_set_root
+        || commitment.parameter_root.to_hex() != parent_context.consensus_parameter_root
+    {
+        return Err(
+            "future protected commitment does not bind the exact child PoSy context".to_string(),
+        );
+    }
+    if commitment.target_context_root.is_zero() {
+        return Err("future protected commitment contains a zero target root".to_string());
+    }
+    for root in [
+        &commitment.cut_root,
+        &commitment.eligible_set_root,
+        &commitment.order_seed,
+        &commitment.order_root,
+        &commitment.protected_batch_root,
+    ] {
+        root.validate("future protected commitment root")?;
+        if root.is_zero() {
+            return Err("future protected commitment contains a zero root".to_string());
+        }
+    }
+    commitment.root()?.validate("future protected commitment")
+}
+
 fn validate_execution_input_for_proposal(
     input: &DeterministicProtectedExecutionInput,
     context: &super::ConsensusObjectContext,
@@ -747,6 +872,24 @@ pub fn compute_simplified_protected_execution_root_with_next_commitment(
     parent: &SimplifiedFinalityParent,
     protected_execution_input: &DeterministicProtectedExecutionInput,
 ) -> Result<Hash, String> {
+    compute_simplified_protected_execution_root_with_current_and_future_commitment(
+        context,
+        block,
+        parent_block_id,
+        parent,
+        protected_execution_input,
+        None,
+    )
+}
+
+pub fn compute_simplified_protected_execution_root_with_current_and_future_commitment(
+    context: &super::ConsensusObjectContext,
+    block: &Block,
+    parent_block_id: &BlockId,
+    parent: &SimplifiedFinalityParent,
+    protected_execution_input: &DeterministicProtectedExecutionInput,
+    future_protected_batch_commitment: Option<&NextProtectedBatchCommitment>,
+) -> Result<Hash, String> {
     compute_simplified_protected_execution_root_complete(
         context,
         block,
@@ -756,6 +899,7 @@ pub fn compute_simplified_protected_execution_root_with_next_commitment(
         None,
         Some(protected_execution_input),
         Some(&protected_execution_input.next_commitment),
+        future_protected_batch_commitment,
         None,
     )
 }
@@ -781,6 +925,7 @@ pub fn compute_simplified_protected_execution_root_with_transition_subject(
         protected_input,
         None,
         None,
+        None,
         transition_subject_root,
     )
 }
@@ -795,6 +940,7 @@ fn compute_simplified_protected_execution_root_complete(
     protected_input: Option<&ProtectedBlockInput>,
     protected_execution_input: Option<&DeterministicProtectedExecutionInput>,
     next_protected_batch_commitment: Option<&NextProtectedBatchCommitment>,
+    future_protected_batch_commitment: Option<&NextProtectedBatchCommitment>,
     transition_subject_root: Option<Hash>,
 ) -> Result<Hash, String> {
     if (target_context.is_some()) != (protected_input.is_some())
@@ -825,6 +971,9 @@ fn compute_simplified_protected_execution_root_complete(
             protected_execution_input,
         )?;
     }
+    if let Some(commitment) = future_protected_batch_commitment {
+        validate_future_protected_batch_commitment(commitment, &stable_context)?;
+    }
     let subject = ProtectedExecutionRootSubject {
         context: &stable_context,
         block_id: &block_id,
@@ -834,6 +983,7 @@ fn compute_simplified_protected_execution_root_complete(
         transactions: &canonical_block.transactions,
         protected_execution_input_digest,
         next_protected_batch_commitment,
+        future_protected_batch_commitment,
         transition_subject_root,
     };
     let bytes = serde_json::to_vec(&subject)
@@ -850,6 +1000,7 @@ fn validate_block_binding(
     block: &Block,
     protected_execution_input: Option<&DeterministicProtectedExecutionInput>,
     next_protected_batch_commitment: Option<&NextProtectedBatchCommitment>,
+    future_protected_batch_commitment: Option<&NextProtectedBatchCommitment>,
     transition_subject_root: Option<Hash>,
 ) -> Result<(), String> {
     proposal.context.validate_against(epoch_context)?;
@@ -887,6 +1038,7 @@ fn validate_block_binding(
         None,
         protected_execution_input,
         next_protected_batch_commitment,
+        future_protected_batch_commitment,
         transition_subject_root,
     );
     if recomputed? != proposal.protected_execution_root {

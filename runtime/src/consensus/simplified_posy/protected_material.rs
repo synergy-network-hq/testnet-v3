@@ -6,7 +6,7 @@
 //! legacy proposer schedule and exposes no empty or plaintext fallback.
 
 use super::{
-    compute_simplified_protected_execution_root_with_next_commitment,
+    compute_simplified_protected_execution_root_with_current_and_future_commitment,
     simplified_fee_market_header_fields, validate_simplified_fee_market_header_against_parent,
     ConsensusObjectContext, DurableSimplifiedFinalitySink, DurableSimplifiedProposalMaterialStore,
     FinalizedBlockRecord, SimplifiedCoreMaterialAdapter, SimplifiedEpochContext,
@@ -24,8 +24,9 @@ use crate::dag_mempool::compute_tx_order_root;
 use crate::etdag::{
     canonical_finality_context_digest, target_admission_source_finality_root,
     DeterministicProtectedExecutionInput, EtdagDigest, EtdagParameters,
-    EtdagProtectedInputCoordinator, EtdagScheduleNeutralFinalityAuthority, ProtectedBatchSource,
-    ProtectedExecutionTargetContext, TargetAdmissionContext, ETDAG_PROFILE_ID,
+    EtdagProtectedInputCoordinator, EtdagScheduleNeutralFinalityAuthority,
+    NextProtectedBatchCommitment, ProtectedBatchSource, ProtectedExecutionTargetContext,
+    TargetAdmissionContext, ETDAG_PROFILE_ID,
 };
 use crate::execution::{compute_state_root_after, execute_block, ExecutionState};
 use crate::synergy_types::{
@@ -46,6 +47,19 @@ pub trait SimplifiedProtectedExecutionInputSource: Send {
         &mut self,
         height: crate::synergy_types::Height,
     ) -> Result<Option<DeterministicProtectedExecutionInput>, String>;
+
+    /// Commitment for the proposal's child height. It is derived from the
+    /// child's durable cut/order and intentionally requires no reveal or
+    /// concrete execution input.
+    fn load_pre_reveal_commitment(
+        &mut self,
+        child_height: crate::synergy_types::Height,
+    ) -> Result<Option<crate::etdag::NextProtectedBatchCommitment>, String> {
+        Err(format!(
+            "PROTECTED_PIPELINE_COMMITMENT_NOT_READY: no pre-reveal source for H{}",
+            child_height.0
+        ))
+    }
 }
 
 /// Height-keyed bridge from simplified PoSy to the sole protected-pipeline
@@ -211,6 +225,22 @@ impl SimplifiedProtectedExecutionInputSource for CoordinatedProtectedExecutionIn
             Self::validate_loaded_input(height, &binding, input)?;
         }
         Ok(input)
+    }
+
+    fn load_pre_reveal_commitment(
+        &mut self,
+        child_height: crate::synergy_types::Height,
+    ) -> Result<Option<crate::etdag::NextProtectedBatchCommitment>, String> {
+        let binding = self.binding_for(child_height)?;
+        match binding {
+            ProtectedExecutionBinding::Genesis(source) => source
+                .load_ready_execution_input_for_target()
+                .map(|input| input.map(|input| input.next_commitment))
+                .map_err(|error| format!("PROTECTED_BOOTSTRAP_COMMITMENT_LOOKUP_FAILED: {error}")),
+            ProtectedExecutionBinding::Normal(runtime) => runtime
+                .pre_reveal_commitment()
+                .map_err(|error| format!("PROTECTED_RUNTIME_COMMITMENT_LOOKUP_FAILED: {error}")),
+        }
     }
 }
 
@@ -832,6 +862,24 @@ impl<A: SimplifiedProtectedMaterialAuthority> SimplifiedProtectedMaterialAdapter
             })
     }
 
+    fn pre_reveal_commitment(
+        &mut self,
+        parent_height: crate::synergy_types::Height,
+    ) -> Result<Option<NextProtectedBatchCommitment>, String> {
+        let child_height = parent_height
+            .0
+            .checked_add(1)
+            .map(crate::synergy_types::Height)
+            .ok_or_else(|| "protected child height overflowed".to_string())?;
+        self.execution_input_source
+            .as_mut()
+            .ok_or_else(|| {
+                "PROTECTED_PIPELINE_EXECUTION_INPUT_NOT_READY: no durable ProtectedPipeline source is configured"
+                    .to_string()
+            })?
+            .load_pre_reveal_commitment(child_height)
+    }
+
     fn timestamp_for_height(&self, height: crate::synergy_types::Height) -> Result<u64, String> {
         let offset = height
             .0
@@ -1168,6 +1216,15 @@ impl<A: SimplifiedProtectedMaterialAuthority> SimplifiedMaterialAdapter
             &directive.finalized,
             &authority.canonical_finality_context_digest,
         )?;
+        let future_protected_batch_commitment =
+            match self.pre_reveal_commitment(directive.context.height) {
+                Ok(Some(commitment)) => commitment,
+                Ok(None) => return Ok(None),
+                Err(error) if error.starts_with("PROTECTED_PIPELINE_COMMITMENT_NOT_READY") => {
+                    return Ok(None)
+                }
+                Err(error) => return Err(error),
+            };
         let transactions = protected_execution_input.verify_and_extract_transactions(
             &self.configuration.verifier,
             &self.configuration.validator_set,
@@ -1199,30 +1256,33 @@ impl<A: SimplifiedProtectedMaterialAuthority> SimplifiedMaterialAdapter
         )?;
         let block_id = block.candidate_id()?;
         let protected_execution_root =
-            compute_simplified_protected_execution_root_with_next_commitment(
+            compute_simplified_protected_execution_root_with_current_and_future_commitment(
                 &directive.context,
                 &block,
                 directive.parent.block_id(),
                 &directive.parent,
                 &protected_execution_input,
+                Some(&future_protected_batch_commitment),
             )?;
         let proposal = SimplifiedProposal {
             block_id,
             protected_execution_root,
             ..unsigned_proposal
         };
-        let (material, _) = VerifiedSimplifiedProposalMaterial::verify_protected(
-            epoch_context,
-            &proposal,
-            block,
-            protected_execution_input,
-            &authority.parent_execution_state,
-            authority.parent_fee_market,
-            &self.configuration.verifier,
-            &self.configuration.validator_set,
-            &self.configuration.etdag_cluster_map,
-            &self.configuration.etdag_parameters,
-        )?;
+        let (material, _) =
+            VerifiedSimplifiedProposalMaterial::verify_protected_with_future_commitment(
+                epoch_context,
+                &proposal,
+                block,
+                protected_execution_input,
+                Some(future_protected_batch_commitment),
+                &authority.parent_execution_state,
+                authority.parent_fee_market,
+                &self.configuration.verifier,
+                &self.configuration.validator_set,
+                &self.configuration.etdag_cluster_map,
+                &self.configuration.etdag_parameters,
+            )?;
         let verified_input = material.protected_execution_input.as_ref().ok_or_else(|| {
             "verified protected material lost its R11 execution input".to_string()
         })?;
@@ -1257,6 +1317,20 @@ impl<A: SimplifiedProtectedMaterialAuthority> SimplifiedMaterialAdapter
         if &locally_derived != protected_execution_input {
             return Err(
                 "received protected input differs from the locally derived ProtectedPipeline record"
+                    .to_string(),
+            );
+        }
+        let locally_derived_future = self
+            .pre_reveal_commitment(proposal.context.height)?
+            .ok_or_else(|| {
+                format!(
+                    "PROTECTED_PIPELINE_COMMITMENT_NOT_READY: no child commitment is ready for proposal H{}",
+                    proposal.context.height.0
+                )
+            })?;
+        if material.future_protected_batch_commitment.as_ref() != Some(&locally_derived_future) {
+            return Err(
+                "received protected proposal child commitment differs from the locally derived pre-reveal commitment"
                     .to_string(),
             );
         }

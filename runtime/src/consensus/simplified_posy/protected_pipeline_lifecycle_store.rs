@@ -24,9 +24,10 @@ use super::{
 };
 use crate::consensus::protected_pipeline::ProtectedPipelineObservation;
 use crate::consensus::protected_pipeline_evidence_verifier::{
-    ProductionProtectedPipelineEvidence, ProtectedFinalityEvidence,
+    protected_finality_root, protected_proposal_id, protected_proposal_vc_root, protected_qc_root,
+    ProductionProtectedPipelineEvidence, ProtectedConsumedEvidence, ProtectedFinalityEvidence,
     ProtectedParentProposalEvidence, ProtectedQcEvidence, ProtectedRevealAuthorizationEvidence,
-    ProtectedRevealShareEvidence,
+    ProtectedRevealShareBundleEvidence, ProtectedRevealShareEvidence,
 };
 use crate::crypto::aegis_pqvm::AegisPqvmVerifier;
 use crate::etdag::{
@@ -39,8 +40,7 @@ use crate::synergy_types::{CanonicalSerialize, Hash, ValidatorId, ValidatorSet};
 pub const PROTECTED_PIPELINE_LIFECYCLE_STORE_FORMAT: &str =
     "synergy-posy-protected-pipeline-lifecycle-v2";
 pub const PROTECTED_PIPELINE_LIFECYCLE_RECORD_VERSION: u32 = 2;
-pub const DOMAIN_PROTECTED_REVEAL_SHARE_BUNDLE: &str =
-    "PoSy/ProtectedPipeline/RevealShareBundle/v1";
+pub use crate::consensus::protected_pipeline_evidence_verifier::DOMAIN_PROTECTED_REVEAL_SHARE_BUNDLE;
 const MAX_PROTECTED_PIPELINE_LIFECYCLE_STORE_BYTES: usize = 128 * 1024 * 1024;
 
 static LIFECYCLE_STORE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -151,7 +151,7 @@ impl DurableProtectedPipelineLifecycleStore {
         validator_set: &ValidatorSet,
         sink: &mut S,
     ) -> Result<bool, String> {
-        let update = self.merge_verified_share(evidence, verifier, validator_set)?;
+        let update = self.persist_reveal_share(evidence, verifier, validator_set)?;
         match update {
             Some(update) => {
                 sink.apply_protected_pipeline_lifecycle_update(update)?;
@@ -161,9 +161,108 @@ impl DurableProtectedPipelineLifecycleStore {
         }
     }
 
+    /// Persist a verified share and return the aggregate observation only once
+    /// this validator has supplied every transaction share in the committed
+    /// batch. The caller must install the returned complete bundle into its
+    /// evidence source before applying it to the protected pipeline.
+    pub fn persist_reveal_share(
+        &self,
+        evidence: ProtectedRevealShareEvidence,
+        verifier: &AegisPqvmVerifier,
+        validator_set: &ValidatorSet,
+    ) -> Result<Option<ProtectedPipelineLifecycleUpdate>, String> {
+        self.merge_verified_share(evidence, verifier, validator_set)
+    }
+
     pub fn load(&self) -> Result<Option<ProtectedPipelineLifecycleRecord>, String> {
         let _guard = lifecycle_store_guard()?;
         self.load_unlocked()
+    }
+
+    /// Reconstruct the complete proof for a compact observation from the
+    /// already fsynced lifecycle record. Callers install this into the
+    /// receiver-owned production evidence source before merging the compact
+    /// observation into a target runtime.
+    pub fn production_evidence_for_observation(
+        &self,
+        observation: &ProtectedPipelineObservation,
+    ) -> Result<Option<ProductionProtectedPipelineEvidence>, String> {
+        let Some(record) = self.load()? else {
+            return Ok(None);
+        };
+        let evidence = match observation {
+            ProtectedPipelineObservation::ParentCommitment { .. }
+                if observation == &record.parent_observation =>
+            {
+                ProductionProtectedPipelineEvidence::ParentProposal(record.parent.clone())
+            }
+            ProtectedPipelineObservation::RevealAuthorization { .. }
+                if record.reveal_authorization_observation.as_ref() == Some(observation) =>
+            {
+                ProductionProtectedPipelineEvidence::RevealAuthorization(
+                    record.reveal_authorization.clone().ok_or_else(|| {
+                        "stored reveal observation has no authorization evidence".to_string()
+                    })?,
+                )
+            }
+            ProtectedPipelineObservation::RevealShare { validator_id, .. }
+                if record.reveal_share_observations.get(validator_id) == Some(observation) =>
+            {
+                let authorization = record.reveal_authorization.clone().ok_or_else(|| {
+                    "stored reveal-share observation has no authorization evidence".to_string()
+                })?;
+                let expected = authorization
+                    .protected_batch
+                    .ordered_transaction_ids
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                ProductionProtectedPipelineEvidence::RevealShareBundle(
+                    ProtectedRevealShareBundleEvidence {
+                        authorization,
+                        shares: share_bundle(&record, validator_id, &expected)?,
+                    },
+                )
+            }
+            ProtectedPipelineObservation::Consumed { .. }
+                if record.consumed_observation.as_ref() == Some(observation) =>
+            {
+                ProductionProtectedPipelineEvidence::Consumed(ProtectedConsumedEvidence {
+                    consensus_domain: record.parent.consensus_domain.clone(),
+                    target: record.target.clone(),
+                    proposal: record.execution_proposal.clone().ok_or_else(|| {
+                        "stored consumed observation has no execution proposal".to_string()
+                    })?,
+                    material: record.execution_material.clone().ok_or_else(|| {
+                        "stored consumed observation has no execution material".to_string()
+                    })?,
+                })
+            }
+            ProtectedPipelineObservation::QcObserved { .. }
+                if record.qc_observation.as_ref() == Some(observation) =>
+            {
+                ProductionProtectedPipelineEvidence::QuorumCertificate(
+                    record
+                        .quorum_certificate
+                        .clone()
+                        .ok_or_else(|| "stored QC observation has no QC evidence".to_string())?,
+                )
+            }
+            ProtectedPipelineObservation::Finalized { .. }
+                if record.finality_observation.as_ref() == Some(observation) =>
+            {
+                ProductionProtectedPipelineEvidence::Finality(record.finality.clone().ok_or_else(
+                    || "stored finality observation has no finality evidence".to_string(),
+                )?)
+            }
+            _ => return Ok(None),
+        };
+        if evidence.lookup_root()? != observation_evidence_root(observation)? {
+            return Err(
+                "stored lifecycle evidence does not reproduce its compact root".to_string(),
+            );
+        }
+        Ok(Some(evidence))
     }
 
     /// Re-authenticate VC, shares, current QC, and finality using the frozen
@@ -624,7 +723,7 @@ impl ProtectedPipelineLifecycleRecord {
             .material
             .validate(self.parent.proposal.context.epoch_context_root)?;
         let expected_parent = ProtectedPipelineObservation::ParentCommitment {
-            proposal_id: protected_pipeline_proposal_id(&self.parent.material.candidate_subject)?,
+            proposal_id: protected_proposal_id(&self.parent.proposal)?,
             commitment_root: self.parent_commitment.root()?,
             evidence_root: protected_pipeline_proposal_evidence_root(
                 &self.parent.proposal,
@@ -653,10 +752,10 @@ impl ProtectedPipelineLifecycleRecord {
                     &evidence.protected_batch,
                 )?;
                 let expected = ProtectedPipelineObservation::RevealAuthorization {
-                    proposal_id: protected_pipeline_proposal_id(
-                        &self.parent.material.candidate_subject,
+                    proposal_id: protected_proposal_id(&self.parent.proposal)?,
+                    vc_root: protected_proposal_vc_root(
+                        evidence.validation_certificate.semantic_candidate_id()?,
                     )?,
-                    vc_root: evidence.authorization.certificate_evidence_root.clone(),
                     commitment_root: self.parent_commitment.root()?,
                     evidence_root: evidence.authorization.root()?,
                 };
@@ -747,7 +846,7 @@ impl ProtectedPipelineLifecycleRecord {
                 }
                 let expected = ProtectedPipelineObservation::QcObserved {
                     commitment_root: self.parent_commitment.root()?,
-                    qc_root: protected_pipeline_qc_id(&qc.certificate)?,
+                    qc_root: protected_qc_root(qc.certificate.id()?)?,
                     evidence_root: protected_pipeline_qc_evidence_root(&qc.certificate)?,
                 };
                 require_same_observation(observation, &expected)?;
@@ -763,7 +862,7 @@ impl ProtectedPipelineLifecycleRecord {
                 finality.transaction.validate()?;
                 let expected = ProtectedPipelineObservation::Finalized {
                     commitment_root: self.parent_commitment.root()?,
-                    finality_root: protected_pipeline_finality_id(&finality.transaction),
+                    finality_root: protected_finality_root(&finality.transaction.target_finalized)?,
                     evidence_root: protected_pipeline_finality_evidence_root(
                         &finality.transaction,
                     )?,
@@ -869,9 +968,7 @@ impl ProtectedPipelineLifecycleRecord {
         Ok(ProtectedPipelineLifecycleRecovery {
             target: self.target.clone(),
             parent_proposal: self.parent.proposal.clone(),
-            parent_proposal_identity: protected_pipeline_proposal_id(
-                &self.parent.material.candidate_subject,
-            )?,
+            parent_proposal_identity: protected_proposal_id(&self.parent.proposal)?,
             parent_commitment: self.parent_commitment.clone(),
             reveal_authorization: self
                 .reveal_authorization
@@ -1007,6 +1104,24 @@ fn update_for_stored_observation(
         target: target.clone(),
         observation,
         reveal_authorization,
+    }
+}
+
+fn observation_evidence_root(
+    observation: &ProtectedPipelineObservation,
+) -> Result<EtdagDigest, String> {
+    match observation {
+        ProtectedPipelineObservation::ParentCommitment { evidence_root, .. }
+        | ProtectedPipelineObservation::RevealAuthorization { evidence_root, .. }
+        | ProtectedPipelineObservation::Consumed { evidence_root, .. }
+        | ProtectedPipelineObservation::QcObserved { evidence_root, .. }
+        | ProtectedPipelineObservation::Finalized { evidence_root, .. } => {
+            Ok(evidence_root.clone())
+        }
+        ProtectedPipelineObservation::RevealShare { share_root, .. } => Ok(share_root.clone()),
+        ProtectedPipelineObservation::ExecutionReady { .. } => {
+            Err("root-only execution-ready observation is forbidden".to_string())
+        }
     }
 }
 
