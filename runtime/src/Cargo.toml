@@ -65,6 +65,10 @@ name = "synergy-validator-node"
 path = "bin/synergy-validator-node.rs"
 
 [[bin]]
+name = "generate-local-r11-qualification-artifacts"
+path = "bin/generate-local-r11-qualification-artifacts.rs"
+
+[[bin]]
 name = "synergy-relayer-node"
 path = "bin/synergy-relayer-node.rs"
 
