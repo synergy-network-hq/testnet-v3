@@ -83,6 +83,20 @@ require_directory() {
     [[ -d "$1" && -r "$1" ]] || fail "required readable directory is missing: $1"
 }
 
+require_qualification_file() {
+    local edge="$1"
+    local path="$2"
+    [[ -f "$path" && -r "$path" ]] || fail_transition "$edge" \
+        "required readable qualification artifact is missing: $path"
+}
+
+require_qualification_directory() {
+    local edge="$1"
+    local path="$2"
+    [[ -d "$path" && -r "$path" ]] || fail_transition "$edge" \
+        "required readable qualification artifact directory is missing: $path"
+}
+
 now_ms() {
     perl -MTime::HiRes=time -e 'printf "%.0f\n", time() * 1000'
 }
@@ -177,8 +191,8 @@ validate_registry_directory() {
 }
 
 validate_artifacts() {
-    require_file "$genesis"
-    require_directory "$registry_dir"
+    require_qualification_file "SIGNED_GENESIS->ROLE_PREFLIGHT" "$genesis"
+    require_qualification_directory "SIGNED_INGRESS_REGISTRIES->NORMAL_TARGET_ADMISSION" "$registry_dir"
     command -v jq >/dev/null || fail "jq is required for fail-closed artifact checks"
     command -v perl >/dev/null || fail "perl with Time::HiRes is required for timing evidence"
     command -v rg >/dev/null || fail "rg is required for local-only transport checks"
@@ -199,8 +213,8 @@ validate_artifacts() {
         validator="${VALIDATORS[$index]}"
         config="${configs[$index]}"
         key="${keys[$index]}"
-        require_file "$config"
-        require_file "$key"
+        require_qualification_file "RENDERED_CONFIG->ROLE_PREFLIGHT($validator)" "$config"
+        require_qualification_file "LOCAL_VALIDATOR_CUSTODY->ROLE_PREFLIGHT($validator)" "$key"
         assert_no_retired_input "$config"
         assert_local_only_config "$config" "$validator"
         parsed="$($validator_binary validate-config --config "$config" 2>&1)" || fail "$validator config failed runtime parser: $parsed"
@@ -684,7 +698,6 @@ done
 [[ -n "$genesis" ]] || fail "--genesis is required"
 [[ -n "$registry_dir" ]] || fail "--ingress-kem-registry-dir is required"
 [[ "$timeout_secs" =~ ^[1-9][0-9]*$ ]] || fail "--timeout-secs must be a positive integer"
-require_file "$validator_binary"
 
 if [[ -z "$work_dir" ]]; then
     work_dir="$(mktemp -d "${TMPDIR:-/tmp}/synergy-r11-production-role.XXXXXX")"
@@ -694,6 +707,10 @@ else
 fi
 mkdir -p "$work_dir/evidence"
 trap stop_nodes EXIT INT TERM
+
+[[ -f "$validator_binary" && -x "$validator_binary" ]] || fail_transition \
+    "BUILD->SYNERGY_VALIDATOR_NODE" \
+    "required executable production validator binary is missing: $validator_binary"
 
 validate_artifacts
 for validator in "${VALIDATORS[@]}"; do
