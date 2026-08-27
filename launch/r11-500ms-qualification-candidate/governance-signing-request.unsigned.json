@@ -1,0 +1,22 @@
+{
+  "action": "APPROVE_FINAL_TESTNET_V3_GENESIS_CANDIDATE",
+  "artifact_type": "testnet-v3-r11-500ms-governance-signing-request",
+  "candidate_parameter_manifest_sha256": "c997e12c1b9787853a4bd44f69a0de0d34a65bed014c4c3fe3f43d409f3f9074",
+  "candidate_parameter_root_sha3_512": "4a1cbf3e0b759dddd4daecf1d34ba647075dc4210db42dda0f547399de1fd506cdc8b4cf6b677a100f04d59994c1e811b26cd00b616d7ef61275fb9e49776cd9",
+  "candidate_predeployment_genesis_sha256": "333606db79c7e851d38dc61ff912e827ed5604fdb2b4f3beb656f36c0a7cd976",
+  "desired_state_input_sha256": "048df1972897af3ee678478d7ebf9eb61e0eeee53b22825fdb3f86152cdf9499",
+  "prohibitions": [
+    "no signature is present",
+    "not valid for live deployment"
+  ],
+  "required_before_v4_request_can_be_materialized": [
+    "governance decision identifier and approval of this exact manifest",
+    "fresh 500 ms deployment execution receipts and state roots",
+    "final Genesis hash bound to those receipts",
+    "final desired-state revision, role binary hashes, and rendered runtime configs"
+  ],
+  "schema_version": 1,
+  "signature_algorithm": "ML-DSA-87",
+  "signature_domain": "SYNERGY_TESTNET_V3_GENESIS_RELEASE_APPROVAL_V4",
+  "status": "UNSIGNED_EXTERNAL_GOVERNANCE_ACTION_REQUIRED"
+}

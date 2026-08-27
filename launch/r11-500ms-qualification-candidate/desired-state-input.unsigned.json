@@ -1,0 +1,20 @@
+{
+  "artifact_type": "testnet-v3-r11-qualification-desired-state-input",
+  "chain_id": 1266,
+  "consensus_parameter_root_sha3_512": "4a1cbf3e0b759dddd4daecf1d34ba647075dc4210db42dda0f547399de1fd506cdc8b4cf6b677a100f04d59994c1e811b26cd00b616d7ef61275fb9e49776cd9",
+  "environment": "LOCAL_R11_QUALIFICATION",
+  "genesis_candidate_sha256": "333606db79c7e851d38dc61ff912e827ed5604fdb2b4f3beb656f36c0a7cd976",
+  "network_id": "testnet",
+  "runtime_config_status": "REQUIRES_MILLISECOND_CADENCE_FIELDS",
+  "schema_version": 1,
+  "source_revision": "0ecf023fc1c7013604dc8ab41ebe8de417a95624",
+  "status": "UNSIGNED_NOT_AUTHORIZED_FOR_LIVE_DEPLOYMENT",
+  "target_block_time_ms": 500,
+  "validator_config_sha256": {
+    "validator-02": "47ac32fa758c66e63ac26a5706b05e9842aee70b663907a7c2c795298535ac85",
+    "validator-03": "161894ac7b70288858bcbec55638df7ca2cfed112a334f68d88827f78298b120",
+    "validator-04": "7f89402951aefc06387de0368f02c8d410c398bcb87a475049595e810417a364",
+    "validator-05": "bd6b5f1c34d284ef52f46eefe62b31bb6ac4212481794f952503547d564ade4f",
+    "validator-06": "4338505e1e426b38f120615a8d13d489e065ef569d038c3be74ddf34d50f3544"
+  }
+}

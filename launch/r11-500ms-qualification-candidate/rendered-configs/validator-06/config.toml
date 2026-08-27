@@ -1,0 +1,35 @@
+# R11 unsigned 500 ms qualification candidate; NOT deployment authorization.
+# Legacy integer-second cadence aliases are intentionally omitted.
+
+[identity]
+node_id = "validator-06"
+role = "validator"
+address = "synv1185wz3n8dj45vlfe6aadktg7j4e65yg5hqa7"
+
+[network]
+id = 1266
+network_id = "testnet"
+p2p_port = 5622
+
+[consensus]
+algorithm = "posy/3.0"
+mode = "posy_simplified_v3"
+target_block_time_ms = 500
+proposal_timeout_ms = 1500
+prevote_timeout_ms = 1500
+precommit_timeout_ms = 1500
+max_round_timeout_ms = 10000
+epoch_length = 1000
+validator_cluster_size = 5
+min_validators = 5
+validator_vote_threshold = 4
+consensus_parameter_root_sha3_512 = "4a1cbf3e0b759dddd4daecf1d34ba647075dc4210db42dda0f547399de1fd506cdc8b4cf6b677a100f04d59994c1e811b26cd00b616d7ef61275fb9e49776cd9"
+
+[p2p]
+listen_address = "127.0.0.1:5606"
+public_address = "127.0.0.1:5606"
+
+[r11_qualification]
+environment = "LOCAL_R11_QUALIFICATION"
+candidate_status = "UNSIGNED_NOT_AUTHORIZED_FOR_LIVE_DEPLOYMENT"
+legacy_integer_second_cadence_omitted = true
