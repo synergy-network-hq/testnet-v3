@@ -45,6 +45,19 @@ const SIMPLIFIED_MATERIAL_SERVE_WINDOW: Duration = Duration::from_secs(30);
 // three-chain state-sync boundary. Keep that complete recovery bounded.
 const MAX_SIMPLIFIED_MATERIAL_SERVES_PER_PEER_WINDOW: usize = 4;
 
+/// Emits a deliberately small, non-secret H1 transition marker for the
+/// production-role qualification logs.  Later heights use the same driver
+/// path, but H1 is the unique Genesis-to-runtime boundary whose first missing
+/// edge must be directly observable during a fresh-chain launch.
+fn emit_h1_transition(stage: &str, height: Height, round: u64) {
+    if height.0 == 1 {
+        eprintln!(
+            "H1_TRANSITION_{stage}=YES height={} round={round}",
+            height.0
+        );
+    }
+}
+
 /// The sole production bridge from verified PoSy artifacts into the durable
 /// protected pipeline. Complete evidence is persisted before the observer
 /// forwards any compact protected-pipeline observation.
@@ -954,21 +967,46 @@ impl<
             takeover_tc_id: tc_id,
             mandatory_carry_candidate,
         };
-        let Some(unsigned) = self
+        emit_h1_transition("PROPOSER_SELECTED", height, round.0);
+        let unsigned = self
             .proposal_source
-            .proposal_for(&self.epoch_context, &directive)?
-        else {
+            .proposal_for(&self.epoch_context, &directive)
+            .map_err(|error| {
+                if height.0 == 1 {
+                    format!("H1_TRANSITION_BOOTSTRAP_INPUT_READY=NO: {error}")
+                } else {
+                    error
+                }
+            })?;
+        let Some(unsigned) = unsigned else {
+            if height.0 == 1 {
+                return Err(
+                    "H1_TRANSITION_BOOTSTRAP_INPUT_READY=NO: canonical Genesis supplied no H1 proposal input"
+                        .to_string(),
+                );
+            }
             return Ok(false);
         };
+        emit_h1_transition("BOOTSTRAP_INPUT_READY", height, round.0);
         let proposal = self.state_machine.sign_proposal(
             unsigned,
             &self.signing_authority,
             &mut self.signer,
         )?;
+        emit_h1_transition(
+            "PROPOSAL_BUILT",
+            proposal.context.height,
+            proposal.context.round.0,
+        );
         self.accept_validated_proposal(proposal.clone())?;
         self.broadcast(SimplifiedConsensusMessage::Proposal {
             proposal: proposal.clone(),
         })?;
+        emit_h1_transition(
+            "PROPOSAL_BROADCAST",
+            proposal.context.height,
+            proposal.context.round.0,
+        );
         self.locally_proposed_slot = Some((height, round));
         self.metrics.proposals_broadcast = self.metrics.proposals_broadcast.saturating_add(1);
         Ok(true)
@@ -1005,6 +1043,11 @@ impl<
             SimplifiedConsensusMessage::Proposal { proposal } => {
                 self.state_machine
                     .validate_proposal(&proposal, &self.verifier)?;
+                emit_h1_transition(
+                    "PROPOSAL_RECEIVED",
+                    proposal.context.height,
+                    proposal.context.round.0,
+                );
                 let recomputed = self
                     .proposal_source
                     .recompute_received_protected_execution_root(
@@ -1013,6 +1056,11 @@ impl<
                     )?;
                 match recomputed {
                     Some(root) if !root.is_zero() && root == proposal.protected_execution_root => {
+                        emit_h1_transition(
+                            "VALIDATED",
+                            proposal.context.height,
+                            proposal.context.round.0,
+                        );
                         self.accept_validated_proposal(proposal)
                     }
                     Some(_) => Err(
@@ -1195,6 +1243,11 @@ impl<
                                 .to_string(),
                         );
                     }
+                    emit_h1_transition(
+                        "VALIDATED",
+                        proposal.context.height,
+                        proposal.context.round.0,
+                    );
                     self.pending_material_proposals.remove(&candidate_id);
                     self.pending_certified_material.remove(&candidate_id);
                     self.material_request_ids.remove(&candidate_id);
@@ -1298,6 +1351,11 @@ impl<
         else {
             return Ok(());
         };
+        emit_h1_transition(
+            "VC_QUORUM",
+            proposal.context.height,
+            proposal.context.round.0,
+        );
         observer.on_proposal_validation_certificate(proposal, material, &certificate)?;
         observer.on_execution_consumed(proposal, material)
     }
@@ -1676,6 +1734,11 @@ impl<
         certificate: SimplifiedQuorumCertificate,
     ) -> Result<(), String> {
         certificate.verify(&self.epoch_context, &self.validator_set, &self.verifier)?;
+        emit_h1_transition(
+            "QC",
+            certificate.context.height,
+            certificate.context.round.0,
+        );
         self.notify_quorum_certificate(&certificate)?;
         if let Some(target) = self.state_machine.preview_finalized_with_qc(&certificate)? {
             let transaction = build_finalization_transaction(
@@ -1734,6 +1797,15 @@ impl<
                     .to_string(),
             );
         }
+        emit_h1_transition(
+            "FINALIZED",
+            transaction.target_finalized.height,
+            transaction
+                .commitments
+                .last()
+                .map(|commitment| commitment.certificate.context.round.0)
+                .unwrap_or_default(),
+        );
         if self.protected_lifecycle_observer.is_some() {
             let finalized = transaction
                 .commitments
