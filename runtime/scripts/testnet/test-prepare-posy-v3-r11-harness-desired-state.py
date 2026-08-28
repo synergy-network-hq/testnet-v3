@@ -18,6 +18,7 @@ REVISIONS = {
     "synq_revision": "2" * 40,
     "aegis_revision": "3" * 40,
 }
+PARAMETER_ROOT = "a" * 128
 
 
 def write_executable(path: Path, text: str) -> None:
@@ -46,12 +47,24 @@ else:
             % tuple(REVISIONS.values()),
         )
         self.genesis = self.root / "genesis.json"
-        self.genesis.write_text("{}", encoding="utf-8")
+        self.genesis.write_text(json.dumps({
+            "consensus": {"posy_v3_activation": {
+                "parameter_root_sha3_512": PARAMETER_ROOT,
+                "manifest": {"target_block_time_ms": 500},
+            }},
+            "consensus_parameters": {"parameter_root_sha3_512": PARAMETER_ROOT},
+        }), encoding="utf-8")
         self.config_dir = self.root / "configs"
         for validator in VALIDATORS:
             config = self.config_dir / validator / "config.toml"
             config.parent.mkdir(parents=True)
-            config.write_text(f"validator = \"{validator}\"\n", encoding="utf-8")
+            config.write_text(
+                f"[identity]\nnode_id = \"{validator}\"\n"
+                "[blockchain]\ntarget_block_time_ms = 500\n"
+                "[consensus]\ntarget_block_time_ms = 500\n"
+                f"consensus_parameter_root_sha3_512 = \"{PARAMETER_ROOT}\"\n",
+                encoding="utf-8",
+            )
         self.builder = self.root / "build-chain1266-desired-state"
         write_executable(
             self.builder,

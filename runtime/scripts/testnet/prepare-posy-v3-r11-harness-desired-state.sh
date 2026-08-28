@@ -103,10 +103,35 @@ jq -e \
     ' <<<"$provenance" >/dev/null || \
     fail "validator binary provenance does not match the requested source revisions"
 
+genesis_parameter_root="$(jq -er '
+    .consensus.posy_v3_activation.parameter_root_sha3_512 as $activation |
+    .consensus_parameters.parameter_root_sha3_512 as $binding |
+    select($activation == $binding) |
+    select($activation | test("^[0-9a-f]{128}$")) |
+    select(.consensus.posy_v3_activation.manifest.target_block_time_ms == 500) |
+    $activation
+' "$genesis" 2>/dev/null || true)"
+[[ -n "$genesis_parameter_root" ]] || \
+    fail "Genesis does not carry one consistent finalized 500ms consensus-parameter root"
+
 configurations=()
 for validator in "${VALIDATORS[@]}"; do
     config="$config_dir/$validator/config.toml"
     require_file "$config"
+    config_parameter_root="$(python3 - "$config" <<'PY'
+import sys
+import tomllib
+with open(sys.argv[1], "rb") as handle:
+    value = tomllib.load(handle)
+consensus = value.get("consensus", {})
+blockchain = value.get("blockchain", {})
+if consensus.get("target_block_time_ms") != 500 or blockchain.get("target_block_time_ms") != 500:
+    raise SystemExit(1)
+print(consensus.get("consensus_parameter_root_sha3_512", ""))
+PY
+    )" || fail "$validator config does not bind the finalized 500ms cadence"
+    [[ "$config_parameter_root" == "$genesis_parameter_root" ]] || \
+        fail "$validator config consensus-parameter root disagrees with finalized Genesis"
     parsed="$($binary validate-config --config "$config" 2>&1)" || \
         fail "$validator failed the production config parser: $parsed"
     [[ "$parsed" == *"validator_id=$validator"* && \
