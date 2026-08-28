@@ -415,7 +415,11 @@ export_release_binding() {
     export SYNERGY_DESIRED_STATE_MANIFEST="$desired_state"
     export SYNERGY_DESIRED_STATE_MANIFEST_SHA256="$desired_state_sha256"
     export SYNERGY_TESTNET_V3_RELEASE_APPROVAL="$release_approval"
-    export SYNERGY_TESTNET_V3_AUTHORITY_RECORD="$authority_record"
+    if [[ -f "$qualification_root/authority-record.json" ]]; then
+        export SYNERGY_TESTNET_V3_AUTHORITY_RECORD="$qualification_root/authority-record.json"
+    else
+        export SYNERGY_TESTNET_V3_AUTHORITY_RECORD="$authority_record"
+    fi
     export SYNERGY_TESTNET_V3_RELEASE_CANDIDATE="$release_candidate"
     export SYNERGY_CHAIN1266_QUALIFICATION_MODE=1
     export SYNERGY_CHAIN1266_QUALIFICATION_ROOT="$qualification_root"
@@ -429,6 +433,10 @@ prepare_workspace() {
     config="$(config_for "$validator")"
     mkdir -p "$node_dir/config" "$data_dir"
     cp "$config" "$node_dir/config/node.toml"
+    # The production verifier resolves the public authority bundle relative to
+    # the authority-record parent. Keep both together inside each isolated
+    # node root while preserving the exact approved authority-record bytes.
+    cp "$authority_record" "$node_dir/authority-record.json"
     # Artifacts are public.  Copying them into each isolated runtime root is
     # required because the production role resolves this read-only source from
     # its own data directory. Keys remain outside the work directory.
