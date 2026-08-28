@@ -2751,8 +2751,15 @@ fn spawn_finalized_simplified_posy_driver(
     let protected_execution_sources = (material_mode == SimplifiedMaterialMode::Protected)
         .then(|| build_genesis_bootstrap_protected_input_source(&genesis))
         .transpose()?;
-    let genesis_execution_state = load_verified_testnet_v3_release_execution_state(genesis)
-        .map_err(|error| format!("load finalized Genesis execution state: {error}"))?;
+    // A normal NCP-managed node restores only the state committed by canonical
+    // Genesis.  The separate execution bundle remains an isolated
+    // qualification/audit input and is never a normal node-start dependency.
+    let genesis_execution_state = if crate::desired_state::chain1266_qualification_mode() {
+        load_verified_testnet_v3_release_execution_state(genesis)
+    } else {
+        load_finalized_testnet_v3_genesis_execution_state(genesis)
+    }
+    .map_err(|error| format!("load finalized Genesis execution state: {error}"))?;
     let genesis_runtime_metadata = simplified_genesis_runtime_metadata(genesis.value())?;
     let cryptographic_profile_root =
         fresh_simplified_genesis_cryptographic_profile_root(genesis, &genesis_runtime_metadata)?;
@@ -4652,21 +4659,23 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                     process::exit(1);
                 }
             };
-            let desired_role_profile = role_profile.unwrap_or_else(|| {
-                eprintln!(
-                    "Failed to validate Chain 1266 desired state: node role/profile is unresolved"
-                );
+            let resolved_role_profile = role_profile.unwrap_or_else(|| {
+                eprintln!("Failed to validate Chain 1266 runtime: node role/profile is unresolved");
                 process::exit(1);
             });
-            let release_id = crate::desired_state::verify_chain1266_desired_state(
-                desired_role_profile,
-                &config.identity.node_id,
-                &effective_config_path,
-            )
-            .unwrap_or_else(|error| {
-                eprintln!("Failed to validate Chain 1266 desired state: {error}");
-                process::exit(1);
-            });
+            let runtime_binding = if crate::desired_state::chain1266_qualification_mode() {
+                crate::desired_state::verify_chain1266_desired_state(
+                    resolved_role_profile,
+                    &config.identity.node_id,
+                    &effective_config_path,
+                )
+                .unwrap_or_else(|error| {
+                    eprintln!("Failed to validate Chain 1266 qualification release: {error}");
+                    process::exit(1);
+                })
+            } else {
+                "canonical-genesis".to_string()
+            };
 
             if preflight_only {
                 let genesis = canonical_genesis().unwrap_or_else(|error| {
@@ -4705,10 +4714,10 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                 });
                 println!(
                     "CHAIN1266_ROLE_RELEASE_PREFLIGHT_VERIFIED release_id={} node_id={} validator_address={} profile={}",
-                    release_id,
+                    runtime_binding,
                     config.identity.node_id,
                     validator_address,
-                    desired_role_profile.compiled_profile
+                    resolved_role_profile.compiled_profile
                 );
                 return;
             }
@@ -4733,12 +4742,12 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
             );
             info!(
                 "main",
-                "Validated role-bound runtime profile and desired state",
-                "role_id" => desired_role_profile.role_id,
-                "compiled_profile" => desired_role_profile.compiled_profile,
-                "authority_plane" => format!("{:?}", desired_role_profile.authority_plane),
+                "Validated role-bound runtime profile and canonical startup binding",
+                "role_id" => resolved_role_profile.role_id,
+                "compiled_profile" => resolved_role_profile.compiled_profile,
+                "authority_plane" => format!("{:?}", resolved_role_profile.authority_plane),
                 "binary" => binary_name,
-                "release_id" => release_id
+                "runtime_binding" => runtime_binding
             );
 
             env::set_var(

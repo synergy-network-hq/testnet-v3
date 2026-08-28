@@ -65,6 +65,12 @@ pub const CHAIN1266_P1_PRODUCER_TURN_TIMEOUT_MS: u64 = 4_000;
 pub const CHAIN1266_P3_CONSENSUS_MODE: &str = "posy_simplified_v3";
 pub const CHAIN1266_P3_CONSENSUS_ALGORITHM: &str = "posy/3.0";
 
+/// Qualification is an explicitly isolated evidence run.  A normal node
+/// startup must not silently inherit its external release-artifact contract.
+pub fn chain1266_qualification_mode() -> bool {
+    env::var(CHAIN1266_QUALIFICATION_MODE_ENV).as_deref() == Ok("1")
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DesiredStateManifest {
@@ -591,7 +597,7 @@ pub fn verify_chain1266_desired_state(
     {
         return Err("desired-state consensus schema or state namespace is invalid".to_string());
     }
-    let qualification_mode = env::var(CHAIN1266_QUALIFICATION_MODE_ENV).as_deref() == Ok("1");
+    let qualification_mode = chain1266_qualification_mode();
     let state_root = env::var("SYNERGY_DATA_PATH")
         .map(PathBuf::from)
         .map_err(|_| "SYNERGY_DATA_PATH is required for incarnation-isolated state".to_string())?;
