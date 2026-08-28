@@ -1,9 +1,9 @@
 //! Generates and verifies offline Testnet-v3 Genesis release-approval evidence.
 //!
-//! This binary intentionally has no signing mode.  It emits the canonical
-//! request that the frozen governance authority must sign elsewhere, and it
-//! verifies a supplied ML-DSA-87 detached signature before the finalizer can
-//! apply the staged candidate.
+//! This binary intentionally has no signing mode or custody dependency.  It
+//! emits the canonical request that the frozen governance authority must sign
+//! elsewhere, and verifies a supplied ML-DSA-87 detached signature before the
+//! finalizer can apply the staged candidate.
 
 use sha2::{Digest, Sha256};
 use std::fs;

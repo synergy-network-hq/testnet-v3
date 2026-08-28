@@ -28,6 +28,18 @@ pub const TESTNET_V3_GENESIS_RELEASE_APPROVAL_ARTIFACT_TYPE: &str =
     "testnet-v3-genesis-release-approval";
 /// The exact action that the designated governance authority approves.
 pub const TESTNET_V3_GENESIS_RELEASE_ACTION: &str = "APPROVE_FINAL_TESTNET_V3_GENESIS_CANDIDATE";
+/// Separate signature domain used only by the isolated R11 production-role
+/// qualification. A qualification approval can therefore never authorize a
+/// Testnet-v3 release even though it traverses the same V4 parser and verifier.
+pub const LOCAL_R11_QUALIFICATION_RELEASE_APPROVAL_DOMAIN: &str =
+    "SYNERGY_LOCAL_R11_QUALIFICATION_GENESIS_RELEASE_APPROVAL_V4";
+pub const LOCAL_R11_QUALIFICATION_ENVIRONMENT: &str = "LOCAL_R11_QUALIFICATION";
+pub const LOCAL_R11_QUALIFICATION_AUTHORITY_ROLE: &str =
+    "LOCAL-R11-QUALIFICATION-GOVERNANCE-AUTHORITY";
+pub const LOCAL_R11_QUALIFICATION_APPROVAL_ARTIFACT_TYPE: &str =
+    "local-r11-qualification-genesis-release-approval";
+pub const LOCAL_R11_QUALIFICATION_RELEASE_ACTION: &str =
+    "AUTHORIZE_LOCAL_R11_QUALIFICATION_ONLY";
 
 const SCHEMA_VERSION: u32 = 4;
 const EXPECTED_CHAIN_ID: u64 = 1266;
@@ -38,6 +50,8 @@ const EXPECTED_RELEASE_ID: &str = "testnet-v3";
 const EXPECTED_SYNQ_NETWORK_ID: &str = "synergy-testnet";
 const EXPECTED_ALGORITHM: &str = "ML-DSA-87";
 const EXPECTED_AUTHORITIES_ARTIFACT: &str = "TESTNET_V3_PRODUCTION_AUTHORITIES";
+const LOCAL_R11_QUALIFICATION_AUTHORITIES_ARTIFACT: &str =
+    "LOCAL_R11_QUALIFICATION_AUTHORITIES";
 const ETDAG_MEMBERSHIP_ANCHOR_SCHEMA: &str = "synergy-etdag-governed-membership-proof-v1";
 
 /// The immutable facts a governance signature authorizes.
@@ -47,6 +61,11 @@ pub struct TestnetV3GenesisReleaseApprovalRequest {
     pub schema_version: u32,
     pub artifact_type: String,
     pub action: String,
+    /// Omitted from byte-for-byte production V4 requests. Its presence with
+    /// the single accepted value makes a local approval non-replayable in the
+    /// production profile while retaining this exact request schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
     pub signature_algorithm: String,
     pub signature_domain: String,
     pub governance_authority_role: String,
@@ -126,6 +145,75 @@ pub struct FrozenGovernanceAuthority {
     pub frozen_authority_record_sha256: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReleaseApprovalProfile {
+    Production,
+    LocalR11Qualification,
+}
+
+impl ReleaseApprovalProfile {
+    fn from_request(request: &TestnetV3GenesisReleaseApprovalRequest) -> Result<Self, String> {
+        match request.environment.as_deref() {
+            None => Ok(Self::Production),
+            Some(LOCAL_R11_QUALIFICATION_ENVIRONMENT) => Ok(Self::LocalR11Qualification),
+            Some(_) => Err("release-approval request has an unsupported environment".to_string()),
+        }
+    }
+
+    fn environment(self) -> Option<&'static str> {
+        match self {
+            Self::Production => None,
+            Self::LocalR11Qualification => Some(LOCAL_R11_QUALIFICATION_ENVIRONMENT),
+        }
+    }
+
+    fn authority_artifact(self) -> &'static str {
+        match self {
+            Self::Production => EXPECTED_AUTHORITIES_ARTIFACT,
+            Self::LocalR11Qualification => LOCAL_R11_QUALIFICATION_AUTHORITIES_ARTIFACT,
+        }
+    }
+
+    fn authority_role(self) -> &'static str {
+        match self {
+            Self::Production => TESTNET_V3_GOVERNANCE_AUTHORITY_ROLE,
+            Self::LocalR11Qualification => LOCAL_R11_QUALIFICATION_AUTHORITY_ROLE,
+        }
+    }
+
+    fn signature_domain(self) -> &'static str {
+        match self {
+            Self::Production => TESTNET_V3_GENESIS_RELEASE_APPROVAL_DOMAIN,
+            Self::LocalR11Qualification => LOCAL_R11_QUALIFICATION_RELEASE_APPROVAL_DOMAIN,
+        }
+    }
+
+    fn artifact_type(self) -> &'static str {
+        match self {
+            Self::Production => TESTNET_V3_GENESIS_RELEASE_APPROVAL_ARTIFACT_TYPE,
+            Self::LocalR11Qualification => LOCAL_R11_QUALIFICATION_APPROVAL_ARTIFACT_TYPE,
+        }
+    }
+
+    fn action(self) -> &'static str {
+        match self {
+            Self::Production => TESTNET_V3_GENESIS_RELEASE_ACTION,
+            Self::LocalR11Qualification => LOCAL_R11_QUALIFICATION_RELEASE_ACTION,
+        }
+    }
+
+    fn purpose(self) -> &'static str {
+        match self {
+            Self::Production => "testnet-v3-genesis-release-approval",
+            Self::LocalR11Qualification => "local-r11-qualification-genesis-release-approval",
+        }
+    }
+
+    fn test_fixture(self) -> bool {
+        matches!(self, Self::LocalR11Qualification)
+    }
+}
+
 /// Builds the unsigned, canonical request for a staged Testnet-v3 candidate.
 ///
 /// The request includes the SHA-256 of the candidate bytes as staged, rather
@@ -142,8 +230,15 @@ pub fn build_release_approval_request(
         candidate_path,
         authorities_path,
         desired_state_path,
-        true,
+        AuthorityMaterial::RecordOnly,
     )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AuthorityMaterial {
+    RecordOnly,
+    PublicBundle,
+    CustodyHashes,
 }
 
 fn build_release_approval_request_inner(
@@ -151,15 +246,12 @@ fn build_release_approval_request_inner(
     candidate_path: &Path,
     authorities_path: &Path,
     desired_state_path: &Path,
-    require_custody_hashes: bool,
+    authority_material: AuthorityMaterial,
 ) -> Result<TestnetV3GenesisReleaseApprovalRequest, String> {
     let candidate_bytes = read_file(candidate_path, "release candidate")?;
     let candidate = parse_json(&candidate_bytes, "release candidate")?;
-    let authority = load_frozen_governance_authority_inner(
-        repo_root,
-        authorities_path,
-        require_custody_hashes,
-    )?;
+    let authority =
+        load_frozen_governance_authority_inner(repo_root, authorities_path, authority_material)?;
 
     let candidate_authority_sha = json_string(
         &candidate,
@@ -279,7 +371,11 @@ pub fn load_frozen_governance_authority(
     repo_root: &Path,
     authorities_path: &Path,
 ) -> Result<FrozenGovernanceAuthority, String> {
-    load_frozen_governance_authority_inner(repo_root, authorities_path, true)
+    load_frozen_governance_authority_inner(
+        repo_root,
+        authorities_path,
+        AuthorityMaterial::CustodyHashes,
+    )
 }
 
 /// Node-side trust loading validates only public identity material.  The V4
@@ -289,13 +385,17 @@ pub fn load_frozen_governance_authority_public(
     repo_root: &Path,
     authorities_path: &Path,
 ) -> Result<FrozenGovernanceAuthority, String> {
-    load_frozen_governance_authority_inner(repo_root, authorities_path, false)
+    load_frozen_governance_authority_inner(
+        repo_root,
+        authorities_path,
+        AuthorityMaterial::PublicBundle,
+    )
 }
 
 fn load_frozen_governance_authority_inner(
     repo_root: &Path,
     authorities_path: &Path,
-    require_custody_hashes: bool,
+    authority_material: AuthorityMaterial,
 ) -> Result<FrozenGovernanceAuthority, String> {
     let authority_bytes = read_file(authorities_path, "frozen authority record")?;
     let authorities = parse_json(&authority_bytes, "frozen authority record")?;
@@ -375,6 +475,17 @@ fn load_frozen_governance_authority_inner(
                 .to_string(),
         );
     }
+    if authority_material == AuthorityMaterial::RecordOnly {
+        return Ok(FrozenGovernanceAuthority {
+            role,
+            standard_account_address,
+            public_key_fingerprint,
+            governance_identity_authorization_binding_sha3_256,
+            public_key: Vec::new(),
+            frozen_authority_record_sha256: sha256_hex(&authority_bytes),
+        });
+    }
+
     let bundle_dir = value_string(entry, "bundle_dir", "governance bundle directory")?;
     let bundle_dir = safe_relative_path(&bundle_dir, "governance bundle directory")?;
     let bundle = repo_root.join(bundle_dir);
@@ -389,7 +500,7 @@ fn load_frozen_governance_authority_inner(
                 .to_string(),
         );
     }
-    if require_custody_hashes
+    if authority_material == AuthorityMaterial::CustodyHashes
         && (sha256_hex(&read_file(
             &bundle.join("identity-root.enc.json"),
             "governance encrypted identity-root custody",
@@ -679,7 +790,7 @@ pub fn verify_release_approval_file_public(
         candidate_path,
         authorities_path,
         desired_state_path,
-        false,
+        AuthorityMaterial::PublicBundle,
     )?;
     let authority = load_frozen_governance_authority_public(trust_root, authorities_path)?;
     let approval: SignedTestnetV3GenesisReleaseApproval = serde_json::from_slice(&read_file(
@@ -1736,6 +1847,32 @@ mod tests {
         assert_ne!(
             request.etdag_membership_anchor_digest_sha3_512,
             "0".repeat(128)
+        );
+    }
+
+    #[test]
+    fn unsigned_request_requires_only_the_candidate_bound_frozen_record() {
+        let (public_key, _) = test_authority_keypair();
+        let repository = test_repository(&public_key);
+
+        fs::remove_dir_all(repository.root.join("test-fixture/governance"))
+            .expect("remove signer custody and public bundle");
+
+        let request = build_release_approval_request(
+            &repository.root,
+            &repository.candidate,
+            &repository.authorities,
+            &repository.desired_state,
+        )
+        .expect("build unsigned request from the candidate-bound frozen record");
+
+        assert_eq!(
+            request.frozen_authority_record_sha256,
+            sha256_hex(&fs::read(&repository.authorities).expect("read authority record"))
+        );
+        assert_eq!(
+            request.governance_public_key_fingerprint,
+            format!("sha256:{}", sha256_hex(&public_key))
         );
     }
 

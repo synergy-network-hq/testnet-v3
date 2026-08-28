@@ -2,6 +2,22 @@ use synergy_testnet::{config::load_node_config, role_profiles::NodeRole};
 
 fn main() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if args.as_slice() == ["build-provenance"] {
+        println!(
+            "{}",
+            serde_json::json!({
+                "schema_version": 1,
+                "artifact": "synergy-validator-node",
+                "crate_version": env!("CARGO_PKG_VERSION"),
+                "source": {
+                    "testnet_v3_revision": option_env!("SYNERGY_TESTNET_V3_SOURCE_REVISION"),
+                    "synq_revision": option_env!("SYNERGY_SYNQ_SOURCE_REVISION"),
+                    "aegis_revision": option_env!("SYNERGY_AEGIS_SOURCE_REVISION"),
+                },
+            })
+        );
+        return;
+    }
     if args.as_slice() == ["release-binding"] {
         print!(
             "{}",

@@ -19,6 +19,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -115,7 +116,7 @@ def checked_configurations(config_dir: Path, validator_binary: Path) -> dict[str
     return output
 
 
-def validate_final_genesis(path: Path) -> None:
+def validate_final_genesis(path: Path) -> dict[str, Any]:
     value = read_json(path)
     activation = value.get("consensus", {}).get("posy_v3_activation", {})
     manifest = activation.get("manifest", {}) if isinstance(activation, dict) else {}
@@ -127,6 +128,50 @@ def validate_final_genesis(path: Path) -> None:
             "final Genesis must bind exactly validator-02 through validator-06")
     require(manifest.get("target_block_time_ms") == 500,
             "final Genesis does not bind the R11 500 ms target")
+    deployment = value.get("genesis_deployment", {})
+    require(isinstance(deployment, dict) and deployment.get("status") == "EXECUTED_AND_BOUND",
+            "final Genesis does not contain verified deployment evidence")
+    require(value.get("integrity", {}).get("status") == "candidate_deployment_bound_pending_release_approval",
+            "final Genesis integrity status is not release-final")
+    return value
+
+
+def validate_finalized_manifest(genesis: dict[str, Any], path: Path) -> dict[str, Any]:
+    manifest = read_json(path)
+    activation = genesis["consensus"]["posy_v3_activation"]
+    binding = genesis.get("consensus_parameters", {})
+    require(activation.get("manifest") == manifest,
+            "finalized consensus manifest differs from the Genesis activation manifest")
+    require(binding.get("canonical_manifest_sha256") == sha256_path(path),
+            "Genesis consensus-parameter binding does not commit the supplied manifest bytes")
+    require(binding.get("parameter_root_sha3_512") == activation.get("parameter_root_sha3_512"),
+            "Genesis consensus-parameter root differs from its activation root")
+    require(manifest.get("status") == "FINALIZED"
+            and manifest.get("target_block_time_ms") == 500,
+            "consensus manifest is not the finalized R11 500 ms manifest")
+    return manifest
+
+
+def read_binary_provenance(binary: Path, revisions: dict[str, str]) -> dict[str, Any]:
+    try:
+        result = subprocess.run(
+            [str(binary), "build-provenance"], check=False, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+    except OSError as error:
+        fail(f"read validator build provenance: {error}")
+    require(result.returncode == 0, f"validator build-provenance failed: {result.stdout.strip()}")
+    try:
+        value = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        fail(f"validator build-provenance emitted invalid JSON: {error}")
+    require(isinstance(value, dict)
+            and value.get("schema_version") == 1
+            and value.get("artifact") == "synergy-validator-node",
+            "validator build-provenance has an unsupported identity")
+    require(value.get("source") == revisions,
+            "validator binary was not compiled from the three frozen source revisions")
+    return value
 
 
 def select_registries(registry_dir: Path) -> dict[int, Path]:
@@ -211,7 +256,7 @@ def run_checked(command: list[str], label: str) -> None:
     require(result.returncode == 0, f"{label} failed: {result.stdout.strip()}")
 
 
-def verify_desired_state(path: Path, binary: Path, configs: dict[str, Path]) -> None:
+def verify_desired_state(path: Path, binary: Path, configs: dict[str, Path]) -> dict[str, Any]:
     value = read_json(path)
     require(value.get("schema_version") == 1, "desired state has unsupported schema")
     chain = value.get("chain", {})
@@ -230,16 +275,106 @@ def verify_desired_state(path: Path, binary: Path, configs: dict[str, Path]) -> 
     expected_configs = {validator: sha256_path(path) for validator, path in configs.items()}
     require(value.get("configuration") == expected_configs,
             "desired state does not bind exactly the five supplied validator configs")
+    return value
 
 
-def verify_v4_request(path: Path) -> None:
+def verify_v4_request(path: Path) -> dict[str, Any]:
     value = read_json(path)
-    require(value.get("schema_version") == 1
+    require(value.get("schema_version") == 4
             and value.get("signature_algorithm") == "ML-DSA-87"
             and value.get("signature_domain") == V4_DOMAIN,
             "canonical V4 request has an invalid signing profile")
     require(not any(key in value for key in ("signature", "private_key", "secret_key")),
             "canonical V4 request must remain unsigned")
+    return value
+
+
+def build_compatibility_report(
+    genesis_path: Path,
+    genesis: dict[str, Any],
+    manifest_path: Path,
+    desired_path: Path,
+    desired: dict[str, Any],
+    request_path: Path,
+    request: dict[str, Any],
+    authority_path: Path,
+    binary_path: Path,
+    configs: dict[str, Path],
+    registries: dict[int, Path],
+    provenance: dict[str, Any],
+) -> dict[str, Any]:
+    activation = genesis["consensus"]["posy_v3_activation"]
+    parameter_binding = genesis["consensus_parameters"]
+    expected_config_hashes = {validator: sha256_path(path) for validator, path in configs.items()}
+    expected_revisions = desired["source"]
+    expected_request = {
+        "candidate_sha256": sha256_path(genesis_path),
+        "genesis_hash": genesis["integrity"]["genesis_hash"],
+        "frozen_authority_record_sha256": sha256_path(authority_path),
+        "desired_state_sha256": sha256_path(desired_path),
+        "desired_state_testnet_v3_revision": expected_revisions["testnet_v3_revision"],
+        "desired_state_synq_revision": expected_revisions["synq_revision"],
+        "desired_state_aegis_revision": expected_revisions["aegis_revision"],
+        "desired_state_role_binary_sha256": {"validator_node": sha256_path(binary_path)},
+        "desired_state_role_configuration_sha256": expected_config_hashes,
+        "consensus_parameter_manifest_sha256": sha256_path(manifest_path),
+        "consensus_parameter_root_sha3_512": activation["parameter_root_sha3_512"],
+    }
+    for field, expected in expected_request.items():
+        require(request.get(field) == expected, f"V4 request does not bind compatible {field}")
+    require(parameter_binding.get("canonical_manifest_sha256") == sha256_path(manifest_path),
+            "Genesis and finalized consensus manifest are incompatible")
+    require(desired.get("artifacts") == {"validator_node": sha256_path(binary_path)}
+            and desired.get("configuration") == expected_config_hashes,
+            "desired state is incompatible with the staged binary/configuration set")
+    require(provenance.get("source") == expected_revisions,
+            "binary provenance is incompatible with desired-state source revisions")
+    return {
+        "schema_version": 1,
+        "artifact_type": "r11-release-candidate-compatibility-report",
+        "status": "PASS",
+        "bindings": {
+            "genesis_sha256": expected_request["candidate_sha256"],
+            "genesis_hash": expected_request["genesis_hash"],
+            "consensus_manifest_sha256": expected_request["consensus_parameter_manifest_sha256"],
+            "consensus_parameter_root_sha3_512": expected_request["consensus_parameter_root_sha3_512"],
+            "authority_record_sha256": expected_request["frozen_authority_record_sha256"],
+            "validator_binary_sha256": sha256_path(binary_path),
+            "validator_config_sha256": expected_config_hashes,
+            "desired_state_sha256": expected_request["desired_state_sha256"],
+            "unsigned_v4_request_sha256": sha256_path(request_path),
+            "ingress_kem_registry_sha256": {
+                f"H{height}": sha256_path(path) for height, path in registries.items()
+            },
+            "source_revisions": expected_revisions,
+        },
+        "checked_edges": [
+            "Genesis -> finalized consensus manifest",
+            "Genesis -> frozen authority record",
+            "desired state -> validator binary",
+            "desired state -> five validator configs",
+            "validator binary -> three compiled source revisions",
+            "unsigned V4 request -> Genesis/authority/desired state/provenance",
+            "H3-H20 ingress registries -> Chain 1266/P3/five validators",
+        ],
+    }
+
+
+def preflight_definition() -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "artifact_type": "r11-pre-signature-preflight-definition",
+        "status": "READY",
+        "gates": [
+            {"id": "QUALIFICATION", "requires": list(SUMMARY_MARKERS)},
+            {"id": "STEADY_STATE_TIMING", "heights": "H3-H20", "minimum_ms": 100, "maximum_ms": 1100},
+            {"id": "PROVENANCE", "requires": ["Testnet-v3 revision", "SynQ revision", "Aegis revision"]},
+            {"id": "CONFIGURATION", "requires": list(VALIDATORS)},
+            {"id": "CRYPTOGRAPHIC_REGISTRIES", "heights": [f"H{height}" for height in REGISTRY_HEIGHTS]},
+            {"id": "V4_REQUEST", "signature_state": "UNSIGNED", "requires_external_signing": True},
+            {"id": "PACKAGE_INTEGRITY", "requires": ["SHA256SUMS", "deterministic tar archive", "archive SHA-256"]},
+        ],
+    }
 
 
 def relative_files(root: Path) -> Iterable[Path]:
@@ -256,13 +391,71 @@ def seal_package(root: Path) -> None:
         entries.append(f"{sha256_path(path)}  {relative}\n")
     sums_path.write_text("".join(entries), encoding="utf-8")
     for path in relative_files(root):
-        path.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+        mode = stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
+        if path.relative_to(root).parts[0] == "bin":
+            mode |= stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+        path.chmod(mode)
     for path in sorted((path for path in root.rglob("*") if path.is_dir()), reverse=True):
         path.chmod(stat.S_IRUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
     root.chmod(stat.S_IRUSR | stat.S_IXUSR | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
 
 
-def verify_package(root: Path) -> None:
+def archive_paths(root: Path) -> tuple[Path, Path]:
+    archive = root.parent / f"{root.name}.tar"
+    return archive, archive.parent / f"{archive.name}.sha256"
+
+
+def create_archive(root: Path) -> tuple[Path, Path]:
+    archive, sidecar = archive_paths(root)
+    require(not archive.exists() and not sidecar.exists(),
+            f"refusing to overwrite existing release archive: {archive}")
+    with tarfile.open(archive, mode="w", format=tarfile.USTAR_FORMAT) as handle:
+        for path in relative_files(root):
+            relative = Path(root.name) / path.relative_to(root)
+            info = tarfile.TarInfo(relative.as_posix())
+            info.size = path.stat().st_size
+            info.mode = path.stat().st_mode & 0o777
+            info.uid = 0
+            info.gid = 0
+            info.uname = ""
+            info.gname = ""
+            info.mtime = 0
+            with path.open("rb") as source:
+                handle.addfile(info, source)
+    digest = sha256_path(archive)
+    sidecar.write_text(f"{digest}  {archive.name}\n", encoding="utf-8")
+    archive.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+    sidecar.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+    return archive, sidecar
+
+
+def verify_archive(root: Path) -> None:
+    archive, sidecar = archive_paths(root)
+    require_regular(archive, "immutable release archive")
+    require_regular(sidecar, "release archive checksum")
+    require(not archive.stat().st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH),
+            "release archive is writable")
+    require(not sidecar.stat().st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH),
+            "release archive checksum is writable")
+    require(sidecar.read_text(encoding="utf-8") == f"{sha256_path(archive)}  {archive.name}\n",
+            "release archive SHA-256 sidecar is invalid")
+    expected = {
+        (Path(root.name) / path.relative_to(root)).as_posix(): sha256_path(path)
+        for path in relative_files(root)
+    }
+    actual: dict[str, str] = {}
+    with tarfile.open(archive, mode="r:") as handle:
+        for member in handle.getmembers():
+            require(member.isfile() and not member.issym() and not member.islnk(),
+                    f"release archive contains a non-regular entry: {member.name}")
+            require(member.name not in actual, f"release archive contains a duplicate entry: {member.name}")
+            source = handle.extractfile(member)
+            require(source is not None, f"release archive entry is unreadable: {member.name}")
+            actual[member.name] = hashlib.sha256(source.read()).hexdigest()
+    require(actual == expected, "release archive content differs from the sealed package directory")
+
+
+def verify_package(root: Path, require_archive: bool = True) -> None:
     require(root.is_dir() and not root.is_symlink(), f"package directory is invalid: {root}")
     manifest = read_json(root / "package-manifest.json")
     require(manifest.get("status") == "LOCAL_R11_QUALIFIED_V4_REQUEST_UNSIGNED",
@@ -293,26 +486,55 @@ def verify_package(root: Path) -> None:
     actual_paths = {path.relative_to(root).as_posix() for path in relative_files(root) if path.name != "SHA256SUMS"}
     require(actual_paths == expected_paths,
             "package contains an unchecksummed file or SHA256SUMS omits a payload file")
-    verify_desired_state(root / "desired-state.json", root / "bin" / "synergy-validator-node",
-                         {validator: root / "configs" / validator / "config.toml" for validator in VALIDATORS})
-    verify_v4_request(root / "v4-governance-request.unsigned.json")
+    binary = root / "bin" / "synergy-validator-node"
+    configs = checked_configurations(root / "configs", binary)
+    genesis_path = root / "genesis" / "genesis.final.json"
+    manifest_path = root / "consensus" / "consensus-parameter-manifest.final.json"
+    genesis = validate_final_genesis(genesis_path)
+    validate_finalized_manifest(genesis, manifest_path)
+    desired_path = root / "desired-state.json"
+    desired = verify_desired_state(desired_path, binary, configs)
+    provenance = read_binary_provenance(binary, desired["source"])
+    request_path = root / "v4-governance-request.unsigned.json"
+    request = verify_v4_request(request_path)
+    registries = select_registries(root / "ingress-kem-registries")
+    compatibility = read_json(root / "compatibility-report.json")
+    expected_compatibility = build_compatibility_report(
+        genesis_path, genesis, manifest_path, desired_path, desired,
+        request_path, request, root / "authority" / "testnet-v3-v4-authorities.json",
+        binary, configs, registries, provenance,
+    )
+    require(compatibility == expected_compatibility,
+            "artifact compatibility report does not match the staged release outputs")
+    preflight = read_json(root / "preflight-definition.json")
+    require(preflight.get("status") == "READY", "pre-signature preflight definition is not ready")
+    if require_archive:
+        verify_archive(root)
     print(f"R11_RELEASE_CANDIDATE_PREFLIGHT_PASS package={root.resolve()}")
 
 
 def assemble(args: argparse.Namespace) -> None:
     for label, revision in (("testnet-v3", args.testnet_v3_revision), ("synq", args.synq_revision), ("aegis", args.aegis_revision)):
         require(REVISION.fullmatch(revision) is not None, f"{label} revision must be a full lowercase Git revision")
+    revisions = {
+        "testnet_v3_revision": args.testnet_v3_revision,
+        "synq_revision": args.synq_revision,
+        "aegis_revision": args.aegis_revision,
+    }
     output = args.output_dir.resolve()
     require(not output.exists(), f"refusing to overwrite existing output: {output}")
     for path, label, executable in (
         (args.genesis, "final engine-produced Genesis", False),
+        (args.finalized_consensus_manifest, "finalized consensus parameter manifest", False),
         (args.validator_binary, "validator binary", True),
         (args.desired_state_builder, "desired-state builder", True),
         (args.release_approval_tool, "V4 request tool", True),
         (args.authority_record, "dated public V4 authority record", False),
     ):
         require_regular(path, label, executable)
-    validate_final_genesis(args.genesis)
+    genesis = validate_final_genesis(args.genesis)
+    validate_finalized_manifest(genesis, args.finalized_consensus_manifest)
+    binary_provenance = read_binary_provenance(args.validator_binary, revisions)
     configs = checked_configurations(args.config_dir, args.validator_binary)
     registries = select_registries(args.ingress_kem_registry_dir)
     summary, timing, qualified = qualification_evidence(args.evidence_dir)
@@ -324,6 +546,8 @@ def assemble(args: argparse.Namespace) -> None:
     staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.", dir=output.parent))
     try:
         copy_regular(args.genesis, staging / "genesis" / "genesis.final.json")
+        copy_regular(args.finalized_consensus_manifest,
+                     staging / "consensus" / "consensus-parameter-manifest.final.json")
         copy_regular(args.validator_binary, staging / "bin" / "synergy-validator-node")
         copy_regular(args.authority_record, staging / "authority" / "testnet-v3-v4-authorities.json")
         copy_regular(summary, staging / "qualification" / "qualification-summary.txt")
@@ -332,10 +556,21 @@ def assemble(args: argparse.Namespace) -> None:
         for validator, path in configs.items():
             copy_regular(path, staging / "configs" / validator / "config.toml")
         registry_hashes: dict[str, str] = {}
+        staged_registries: dict[int, Path] = {}
         for height, path in registries.items():
             relative = Path("ingress-kem-registries") / f"h{height:02d}-registry.json"
             copy_regular(path, staging / relative)
+            staged_registries[height] = staging / relative
             registry_hashes[f"H{height}"] = sha256_path(path)
+
+        write_json(staging / "provenance" / "validator-build-provenance.json", binary_provenance)
+        write_json(staging / "provenance" / "source-provenance.json", {
+            "schema_version": 1,
+            "artifact_type": "r11-source-provenance",
+            "release_id": args.release_id,
+            "release_tag": args.release_tag,
+            "source": revisions,
+        })
 
         desired_state = staging / "desired-state.json"
         desired_command = [
@@ -348,8 +583,10 @@ def assemble(args: argparse.Namespace) -> None:
         for validator in VALIDATORS:
             desired_command.extend(("--configuration", f"{validator}={staging / 'configs' / validator / 'config.toml'}"))
         run_checked(desired_command, "canonical desired-state generator")
-        verify_desired_state(desired_state, staging / "bin" / "synergy-validator-node",
-                             {validator: staging / "configs" / validator / "config.toml" for validator in VALIDATORS})
+        staged_configs = {validator: staging / "configs" / validator / "config.toml" for validator in VALIDATORS}
+        desired = verify_desired_state(
+            desired_state, staging / "bin" / "synergy-validator-node", staged_configs,
+        )
 
         request = staging / "v4-governance-request.unsigned.json"
         run_checked([
@@ -357,7 +594,24 @@ def assemble(args: argparse.Namespace) -> None:
             "--desired-state", str(desired_state), "--authorities", str(staging / "authority" / "testnet-v3-v4-authorities.json"),
             "--output", str(request),
         ], "canonical unsigned V4 governance request generator")
-        verify_v4_request(request)
+        request_value = verify_v4_request(request)
+
+        compatibility = build_compatibility_report(
+            staging / "genesis" / "genesis.final.json",
+            genesis,
+            staging / "consensus" / "consensus-parameter-manifest.final.json",
+            desired_state,
+            desired,
+            request,
+            request_value,
+            staging / "authority" / "testnet-v3-v4-authorities.json",
+            staging / "bin" / "synergy-validator-node",
+            staged_configs,
+            staged_registries,
+            binary_provenance,
+        )
+        write_json(staging / "compatibility-report.json", compatibility)
+        write_json(staging / "preflight-definition.json", preflight_definition())
 
         manifest = {
             "schema_version": 1,
@@ -370,6 +624,7 @@ def assemble(args: argparse.Namespace) -> None:
                 "testnet_v3_revision": args.testnet_v3_revision, "synq_revision": args.synq_revision,
                 "aegis_revision": args.aegis_revision, "candidate_input_sha256": candidate_hashes,
                 "authority_record_sha256": sha256_path(args.authority_record),
+                "validator_build_provenance": binary_provenance,
             },
             "qualification": {
                 "required_markers": list(SUMMARY_MARKERS), "summary_sha256": sha256_path(summary),
@@ -377,10 +632,14 @@ def assemble(args: argparse.Namespace) -> None:
                 "validator_restart": "PASS", "finalized_height": 20,
             },
             "artifacts": {
-                "final_genesis_sha256": sha256_path(args.genesis), "validator_node_sha256": sha256_path(args.validator_binary),
+                "final_genesis_sha256": sha256_path(args.genesis),
+                "finalized_consensus_manifest_sha256": sha256_path(args.finalized_consensus_manifest),
+                "validator_node_sha256": sha256_path(args.validator_binary),
                 "validator_config_sha256": {validator: sha256_path(path) for validator, path in configs.items()},
                 "ingress_kem_registry_sha256": registry_hashes, "desired_state_sha256": sha256_path(desired_state),
                 "unsigned_v4_governance_request_sha256": sha256_path(request),
+                "compatibility_report": "PASS",
+                "pre_signature_preflight": "READY",
             },
             "prohibitions": ["no private keys", "no signatures", "no deployment", "no live host access"],
             "next_external_action": "obtain governance signature for the exact canonical V4 request",
@@ -391,14 +650,20 @@ def assemble(args: argparse.Namespace) -> None:
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
+    verify_package(output, require_archive=False)
+    archive, archive_sha256 = create_archive(output)
     verify_package(output)
     print(f"R11_RELEASE_CANDIDATE_ASSEMBLED output={output}")
+    print(f"IMMUTABLE_ARCHIVE={archive}")
+    print(f"IMMUTABLE_ARCHIVE_SHA256={sha256_path(archive)}")
+    print(f"IMMUTABLE_ARCHIVE_SHA256_FILE={archive_sha256}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--verify-package", type=Path, metavar="DIR")
     parser.add_argument("--genesis", type=Path)
+    parser.add_argument("--finalized-consensus-manifest", type=Path)
     parser.add_argument("--ingress-kem-registry-dir", type=Path)
     parser.add_argument("--evidence-dir", type=Path)
     parser.add_argument("--validator-binary", type=Path)
@@ -416,14 +681,14 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path)
     args = parser.parse_args()
     if args.verify_package is not None:
-        supplied = [args.genesis, args.ingress_kem_registry_dir, args.evidence_dir, args.validator_binary,
+        supplied = [args.genesis, args.finalized_consensus_manifest, args.ingress_kem_registry_dir, args.evidence_dir, args.validator_binary,
                     args.config_dir, args.desired_state_builder, args.release_approval_tool, args.authority_record,
                     args.release_id, args.release_tag, args.testnet_v3_revision, args.synq_revision,
                     args.aegis_revision, args.output_dir]
         require(not any(item is not None for item in supplied), "--verify-package cannot be combined with assembly inputs")
         verify_package(args.verify_package.resolve())
         return
-    required = ("genesis", "ingress_kem_registry_dir", "evidence_dir", "validator_binary", "config_dir",
+    required = ("genesis", "finalized_consensus_manifest", "ingress_kem_registry_dir", "evidence_dir", "validator_binary", "config_dir",
                 "desired_state_builder", "release_approval_tool", "authority_record", "release_id", "release_tag",
                 "testnet_v3_revision", "synq_revision", "aegis_revision", "output_dir")
     missing = [name for name in required if getattr(args, name) is None]
