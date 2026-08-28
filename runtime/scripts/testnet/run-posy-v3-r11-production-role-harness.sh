@@ -154,7 +154,7 @@ assert_local_only_config() {
     # The production binary performs its own typed TOML validation. These
     # checks are intentionally narrower: the harness must never dial a public
     # address because it is only a local qualification environment.
-    if rg -n -i 'https?://|synergy-[a-z0-9.-]+\.(io|xyz|net|com|org)' "$config" >/dev/null; then
+    if rg -n -i 'synergy-[a-z0-9.-]+\.(io|xyz|net|com|org)' "$config" >/dev/null; then
         fail "$label config contains a public endpoint; local harness refuses it"
     fi
     python3 - "$config" <<'PY' || fail "$label config contains a non-loopback IPv4 address"
@@ -173,8 +173,8 @@ PY
     if ! rg -n '^\s*listen_address\s*=\s*"(127\.0\.0\.1|\[::1\]|localhost):[0-9]+"\s*$' "$config" >/dev/null; then
         fail "$label config must bind P2P listen_address to an explicit loopback address"
     fi
-    if rg -n '^\s*(bootnodes|seed_servers|bootstrap_dns_records|register_endpoints|heartbeat_endpoints)\s*=\s*\[[^]]*[^[:space:],\[\]]' "$config" >/dev/null; then
-        fail "$label config contains non-local bootstrap or registration endpoints"
+    if rg -n '^\s*(bootnodes|bootstrap_dns_records|persistent_peers|additional_dial_targets|register_endpoints|heartbeat_endpoints)\s*=\s*\[[^]]*[^[:space:],\[\]]' "$config" >/dev/null; then
+        fail "$label config contains a direct peer mapping or non-seed bootstrap endpoint"
     fi
 }
 
@@ -221,14 +221,22 @@ if not address or not (0 < p2p_port < 65536) or not (0 < rpc_port < 65536):
 if not loopback(listen, p2p_port) or not loopback(rpc_bind, rpc_port):
     raise SystemExit(1)
 targets = network.get("additional_dial_targets", [])
-if not isinstance(targets, list) or len(targets) != 4 or len(set(targets)) != 4:
+seeds = network.get("seed_servers", [])
+if not isinstance(targets, list) or targets:
     raise SystemExit(1)
-for field in ("bootnodes", "seed_servers", "bootstrap_dns_records", "persistent_peers"):
+if not isinstance(seeds, list) or len(seeds) != 2 or len(set(seeds)) != 2:
+    raise SystemExit(1)
+for seed in seeds:
+    if not seed.startswith("http://"):
+        raise SystemExit(1)
+    if not loopback(seed.removeprefix("http://"), split_endpoint(seed.removeprefix("http://"))[1]):
+        raise SystemExit(1)
+for field in ("bootnodes", "bootstrap_dns_records", "persistent_peers"):
     if network.get(field, []):
         raise SystemExit(1)
-if any(not loopback(str(target), split_endpoint(str(target))[1]) for target in targets):
+if network.get("validator_vpn_transports", []):
     raise SystemExit(1)
-print(f"{address}\t{p2p_port}\t{rpc_port}\t{json.dumps(targets, separators=(',', ':'))}")
+print(f"{address}\t{p2p_port}\t{rpc_port}\t{json.dumps(seeds, separators=(',', ':'))}")
 PY
 }
 
@@ -339,8 +347,8 @@ validate_artifacts() {
         [[ "$parsed" == *"validator_id=$validator"* ]] || fail "$validator config does not bind expected validator identity: $parsed"
         [[ "$parsed" == *'chain_id=1266 network_id=testnet protocol=posy/3.0 mode=posy_simplified_v3'* ]] || fail "$validator config has an invalid fresh-P3 runtime binding: $parsed"
         mesh_identity="$(config_mesh_identity "$config")" || fail \
-            "$validator config must bind one local RPC/P2P endpoint and exactly four loopback dial targets"
-        IFS=$'\t' read -r validator_addresses[$index] p2p_ports[$index] rpc_ports[$index] mesh_targets[$index] <<<"$mesh_identity"
+            "$validator config must bind one local RPC/P2P endpoint, two seed services, and no direct validator routes"
+        IFS=$'\t' read -r validator_addresses[$index] p2p_ports[$index] rpc_ports[$index] seed_targets[$index] <<<"$mesh_identity"
     done
 
     [[ "$(printf '%s\n' "${validator_addresses[@]}" | LC_ALL=C sort -u | wc -l | tr -d ' ')" == "5" ]] || \
@@ -349,22 +357,10 @@ validate_artifacts() {
         fail "validator configurations do not bind five distinct local P2P ports"
     [[ "$(printf '%s\n' "${rpc_ports[@]}" | LC_ALL=C sort -u | wc -l | tr -d ' ')" == "5" ]] || \
         fail "validator configurations do not bind five distinct local RPC ports"
-    local expected_targets target_index
-    for index in "${!VALIDATORS[@]}"; do
-        expected_targets=()
-        for target_index in "${!VALIDATORS[@]}"; do
-            [[ "$target_index" == "$index" ]] && continue
-            expected_targets+=("127.0.0.1:${p2p_ports[$target_index]}")
-        done
-        python3 - "${mesh_targets[$index]}" "${expected_targets[@]}" <<'PY' || \
-            fail "${VALIDATORS[$index]} does not dial the exact other four loopback validators"
-import json
-import sys
-actual = json.loads(sys.argv[1])
-expected = sys.argv[2:]
-raise SystemExit(0 if sorted(actual) == sorted(expected) else 1)
-PY
-    done
+    [[ "$(printf '%s\n' "${seed_targets[@]}" | LC_ALL=C sort -u | wc -l | tr -d ' ')" == "1" ]] || \
+        fail "validator configurations do not use the same two bootstrap seed services"
+    mapfile -t discovery_seed_urls < <(jq -r '.[]' <<<"${seed_targets[0]}")
+    [[ "${#discovery_seed_urls[@]}" == "2" ]] || fail "two discovery seed URLs are required"
 
     # Fail at the byte-binding edge before invoking five independent role
     # preflights.  The production verifier performs the authoritative check;
@@ -453,6 +449,103 @@ prepare_workspace() {
     fi
 }
 
+start_discovery_services() {
+    local index url port config log
+    mkdir -p "$work_dir/discovery" "$work_dir/logs" "$work_dir/evidence/discovery"
+    for index in 0 1; do
+        url="${discovery_seed_urls[$index]}"
+        port="${url##*:}"
+        config="$work_dir/discovery/seed-$((index + 1)).json"
+        log="$work_dir/logs/seed-$((index + 1)).log"
+        python3 - "$config" "$index" "$port" "${validator_addresses[@]}" -- "${p2p_ports[@]}" <<'PY'
+import json
+import pathlib
+import sys
+
+destination = pathlib.Path(sys.argv[1])
+index = int(sys.argv[2])
+port = int(sys.argv[3])
+separator = sys.argv.index("--")
+addresses = sys.argv[4:separator]
+ports = [int(value) for value in sys.argv[separator + 1:]]
+if len(addresses) != 5 or len(ports) != 5:
+    raise SystemExit("expected five validator identities and transports")
+payload = {
+    "label": f"r11-qualification-seed-{index + 1}",
+    "seed_id": f"r11-qualification-seed-{index + 1}",
+    "chain_id": "synergy-testnet",
+    "listen_host": "127.0.0.1",
+    "port": port,
+    "allow_dynamic_registration": True,
+    "allow_private_qualification_endpoints": True,
+    "static_dialback_on_start": False,
+    "state_file": str(destination.with_suffix(".state.json")),
+    "public_bootstrap_roles": ["validator"],
+    "static_registry": [
+        {
+            "chain_id": "synergy-testnet",
+            "role": "validator",
+            "node_name": f"validator-{number:02d}",
+            "validator_address": address,
+            "peer_id": f"validator-{number:02d}",
+            "public_endpoint": f"127.0.0.1:{p2p_port}",
+            "protocol_version": "posy/3.0",
+            "app_version": "r11-qualification",
+        }
+        for number, (address, p2p_port) in enumerate(zip(addresses, ports), start=2)
+    ],
+}
+destination.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+        (
+            export SYNERGY_CHAIN1266_QUALIFICATION_MODE=1
+            exec python3 "$script_dir/seed_service.py" --config "$config"
+        ) >>"$log" 2>&1 &
+        seed_pids[$index]=$!
+    done
+}
+
+verify_bootstrap_discovery() {
+    local deadline=$(( $(now_ms) + timeout_secs * 1000 ))
+    local index url evidence all_ready
+    while (( $(now_ms) < deadline )); do
+        all_ready=1
+        for index in 0 1; do
+            url="${discovery_seed_urls[$index]}/peer-list.json"
+            evidence="$work_dir/evidence/discovery/seed-$((index + 1))-peer-list.json"
+            python3 - "$url" "$evidence" "${validator_addresses[@]}" -- "${p2p_ports[@]}" <<'PY' || all_ready=0
+import json
+import pathlib
+import sys
+import urllib.request
+
+url = sys.argv[1]
+destination = pathlib.Path(sys.argv[2])
+separator = sys.argv.index("--")
+addresses = sys.argv[3:separator]
+ports = sys.argv[separator + 1:]
+with urllib.request.urlopen(url, timeout=1.0) as response:
+    payload = json.load(response)
+destination.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+actual = {
+    (str(record.get("validator_address", "")), str(record.get("public_endpoint", "")))
+    for record in payload.get("registry", [])
+    if record.get("role") == "validator"
+}
+expected = set(zip(addresses, (f"127.0.0.1:{port}" for port in ports)))
+raise SystemExit(0 if payload.get("ok") is True and actual == expected else 1)
+PY
+        done
+        if (( all_ready == 1 )); then
+            printf 'BOOTSTRAP_DISCOVERY_PASS=YES\n' | tee "$work_dir/evidence/bootstrap-discovery-pass.txt"
+            return
+        fi
+        sleep 0.05
+    done
+    fail_transition "BOOTSTRAP_DISCOVERY_INFRASTRUCTURE->AUTHENTICATED_VALIDATOR_PEERS" \
+        "two seed services did not publish the exact five validator identity-to-route mappings"
+}
+
 start_node() {
     local index="$1"
     local validator="${VALIDATORS[$index]}"
@@ -482,6 +575,12 @@ stop_nodes() {
         kill -TERM "$finality_observer_pid" 2>/dev/null || true
         wait "$finality_observer_pid" 2>/dev/null || true
     fi
+    for index in "${!seed_pids[@]}"; do
+        pid="${seed_pids[$index]:-}"
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            kill -TERM "$pid" 2>/dev/null || true
+        fi
+    done
     for index in "${!pids[@]}"; do
         pid="${pids[$index]:-}"
         if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
@@ -490,6 +589,10 @@ stop_nodes() {
     done
     for index in "${!pids[@]}"; do
         pid="${pids[$index]:-}"
+        [[ -n "$pid" ]] && wait "$pid" 2>/dev/null || true
+    done
+    for index in "${!seed_pids[@]}"; do
+        pid="${seed_pids[$index]:-}"
         [[ -n "$pid" ]] && wait "$pid" 2>/dev/null || true
     done
 }
@@ -609,8 +712,8 @@ wait_for_full_four_peer_mesh() {
         (( all_ready == 1 )) && return
         sleep 0.05
     done
-    fail_transition "FOUR_PEER_LOOPBACK_MESH->SIMPLIFIED_POSY_DRIVER" \
-        "every production validator must authenticate the exact other four loopback peers; inspect $work_dir/evidence/mesh"
+    fail_transition "BOOTSTRAP_DISCOVERY_INFRASTRUCTURE->AUTHENTICATED_VALIDATOR_PEERS" \
+        "every production validator must authenticate the exact other four discovery-supplied peers; inspect $work_dir/evidence/mesh"
 }
 
 finality_record_for() {
@@ -1026,7 +1129,9 @@ pids=("" "" "" "" "")
 validator_addresses=("" "" "" "" "")
 p2p_ports=("" "" "" "" "")
 rpc_ports=("" "" "" "" "")
-mesh_targets=("" "" "" "" "")
+seed_targets=("" "" "" "" "")
+discovery_seed_urls=()
+seed_pids=("" "")
 finality_observer_pid=""
 
 while (( $# > 0 )); do
@@ -1105,12 +1210,15 @@ for index in "${!VALIDATORS[@]}"; do
     rg -F 'CHAIN1266_ROLE_RELEASE_PREFLIGHT_VERIFIED' "$preflight_log" >/dev/null || fail "$validator preflight emitted no verified role marker"
 done
 
+start_discovery_services
+verify_bootstrap_discovery
 for index in "${!VALIDATORS[@]}"; do
     start_node "$index"
 done
 
 start_finality_observer
 wait_for_full_four_peer_mesh
+printf 'P2P_5_VALIDATOR_MESH_PASS=YES\n' | tee "$work_dir/evidence/p2p-five-validator-mesh-pass.txt"
 wait_for_log_marker 'Starting finalized simplified PoSy consensus worker'
 wait_for_genesis_bootstrap_finality 1
 assert_same_finalized_block 1
@@ -1133,6 +1241,8 @@ assert_block_timing
 restart_and_assert_replay
 
 cat >"$work_dir/evidence/qualification-summary.txt" <<SUMMARY
+BOOTSTRAP_DISCOVERY_PASS=YES
+P2P_5_VALIDATOR_MESH_PASS=YES
 H1_H2_BOOTSTRAP_FINALIZED=YES
 H3_NORMAL_ETDAG_FINALIZED=YES
 H4_STEADY_STATE_FINALIZED=YES

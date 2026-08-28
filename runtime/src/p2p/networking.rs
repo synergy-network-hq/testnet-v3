@@ -1374,6 +1374,8 @@ struct SeedPeerListResponse {
     dnsaddr_bootstrap: Vec<String>,
     #[serde(default)]
     peers: Vec<String>,
+    #[serde(default)]
+    registry: Vec<SeedRegistryRecord>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1382,6 +1384,16 @@ struct SeedBootnodeRecord {
     port: u16,
     #[serde(default)]
     reachable: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SeedRegistryRecord {
+    #[serde(default)]
+    role: String,
+    #[serde(default)]
+    validator_address: String,
+    #[serde(default)]
+    public_endpoint: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4948,7 +4960,9 @@ fn resolve_bootstrap_dial_targets(config: &NodeConfig) -> Vec<String> {
     }
 
     for dial in resolve_seed_server_targets(&config.network.seed_servers) {
-        if let Some(dial) = normalize_peer_target(config, &dial) {
+        if parse_seed_discovered_validator_route(&dial).is_some() {
+            targets.insert(dial);
+        } else if let Some(dial) = normalize_peer_target(config, &dial) {
             targets.insert(dial);
         }
     }
@@ -5006,6 +5020,9 @@ fn self_dial_aliases(config: &NodeConfig) -> HashSet<String> {
 }
 
 fn is_self_dial_target(config: &NodeConfig, dial: &str) -> bool {
+    if let Some((validator_address, _)) = parse_seed_discovered_validator_route(dial) {
+        return announced_validator_address(config).as_deref() == Some(validator_address.as_str());
+    }
     if let Some(validator_address) = normalize_validator_address_target(dial) {
         return self_dial_aliases(config).contains(&validator_address);
     }
@@ -6003,6 +6020,33 @@ fn fetch_seed_server_targets(
             Ok(response) if response.status().is_success() => {
                 match response.json::<SeedPeerListResponse>() {
                     Ok(payload) => {
+                        if chain1266_private_qualification_mode() {
+                            for record in payload.registry {
+                                if !record.role.eq_ignore_ascii_case("validator") {
+                                    continue;
+                                }
+                                let Some(validator_address) =
+                                    normalize_validator_address_target(&record.validator_address)
+                                else {
+                                    continue;
+                                };
+                                let Some(dial) =
+                                    parse_bootnode_dial_address(&record.public_endpoint)
+                                else {
+                                    continue;
+                                };
+                                if is_private_qualification_loopback_dial_address(&dial) {
+                                    insert_seed_server_target(
+                                        out,
+                                        configured_seed_endpoints,
+                                        format_seed_discovered_validator_route(
+                                            &validator_address,
+                                            &dial,
+                                        ),
+                                    );
+                                }
+                            }
+                        }
                         for bootnode in payload.bootnodes {
                             if bootnode.reachable.unwrap_or(true) {
                                 let dial = format!("{}:{}", bootnode.hostname, bootnode.port);
@@ -6090,10 +6134,11 @@ fn register_self_with_seed_servers(config: &NodeConfig) {
         return;
     }
     let public_address = config.p2p.public_address.trim().to_string();
+    let qualification_loopback = chain1266_private_qualification_mode()
+        && is_private_qualification_loopback_dial_address(&public_address);
     if public_address.is_empty()
-        || public_address.starts_with("127.")
         || public_address.starts_with("0.0.0.0")
-        || !is_assigned_synergy_dial_address(&public_address)
+        || (!is_assigned_synergy_dial_address(&public_address) && !qualification_loopback)
     {
         return;
     }
@@ -6113,7 +6158,8 @@ fn register_self_with_seed_servers(config: &NodeConfig) {
         "role_id": role_id,
         "dial": public_address,
     });
-    payload["wallet_address"] = serde_json::Value::String(validator_address);
+    payload["wallet_address"] = serde_json::Value::String(validator_address.clone());
+    payload["validator_address"] = serde_json::Value::String(validator_address);
     for seed_server in &config.network.seed_servers {
         let register_url = normalize_seed_server_url(seed_server, "/peers/register");
         if register_url.is_empty() {
@@ -6366,16 +6412,30 @@ impl P2PNetwork {
     }
 
     pub fn connect_to_peer(&self, address: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let peer_address = normalize_peer_target(&self.config, address)
-            .unwrap_or_else(|| address.trim().to_string());
-        let Some(transport_address) = resolve_peer_transport_address(&self.config, &peer_address)
-        else {
-            warn!(
-                "p2p",
-                "Failed to resolve peer transport address",
-                "peer" => peer_address.clone()
-            );
-            return Ok(());
+        let (peer_address, transport_address) = if let Some((validator_address, dial)) =
+            parse_seed_discovered_validator_route(address)
+        {
+            if !chain1266_private_qualification_mode()
+                || !is_private_qualification_loopback_dial_address(&dial)
+                || !is_validator_allowed(&self.config, &validator_address)
+            {
+                return Ok(());
+            }
+            (validator_address, dial)
+        } else {
+            let peer_address = normalize_peer_target(&self.config, address)
+                .unwrap_or_else(|| address.trim().to_string());
+            let Some(transport_address) =
+                resolve_peer_transport_address(&self.config, &peer_address)
+            else {
+                warn!(
+                    "p2p",
+                    "Failed to resolve peer transport address",
+                    "peer" => peer_address.clone()
+                );
+                return Ok(());
+            };
+            (peer_address, transport_address)
         };
         if !reserve_outbound_dial(
             &self.outbound_dial_registry,
@@ -12238,6 +12298,42 @@ fn chain1266_private_qualification_mode() -> bool {
     std::env::var(crate::desired_state::CHAIN1266_QUALIFICATION_MODE_ENV).as_deref() == Ok("1")
 }
 
+const SEED_DISCOVERED_VALIDATOR_ROUTE_PREFIX: &str = "seedreg://";
+
+fn format_seed_discovered_validator_route(validator_address: &str, dial: &str) -> String {
+    format!("{SEED_DISCOVERED_VALIDATOR_ROUTE_PREFIX}{validator_address}@{dial}")
+}
+
+fn parse_seed_discovered_validator_route(value: &str) -> Option<(String, String)> {
+    let raw = value
+        .trim()
+        .strip_prefix(SEED_DISCOVERED_VALIDATOR_ROUTE_PREFIX)?;
+    let (validator_address, dial) = raw.split_once('@')?;
+    let validator_address = normalize_validator_address_target(validator_address)?;
+    let dial = parse_bootnode_dial_address(dial)?;
+    Some((validator_address, dial))
+}
+
+fn is_private_qualification_loopback_dial_address(value: &str) -> bool {
+    let Some(normalized) = parse_bootnode_dial_address(value) else {
+        return false;
+    };
+    let Some((host, port)) = normalized.rsplit_once(':') else {
+        return false;
+    };
+    let Ok(port) = port.parse::<u16>() else {
+        return false;
+    };
+    if port == 0 {
+        return false;
+    }
+    host.trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|address| address.is_loopback())
+}
+
 fn local_node_uses_relayer_only_topology(config: &NodeConfig) -> bool {
     !local_node_runs_validator_consensus(config)
         && !local_p2p_role(config).eq_ignore_ascii_case("relayer")
@@ -15849,6 +15945,31 @@ mod tests {
                 "snr://synv1156xl3ct9cxc4cl9pdn5ww9myxudavl0hxrq7zv@2a02:1812:172a:e900:1497:71dc:d720:e28e:5620",
             ),
             Some("[2a02:1812:172a:e900:1497:71dc:d720:e28e]:5620".to_string())
+        );
+    }
+
+    #[test]
+    fn seed_discovered_validator_routes_bind_identity_to_loopback_transport() {
+        let route = format_seed_discovered_validator_route(
+            "synv1validator2xxxxxxxxxxxxxxxxxxxx",
+            "127.0.0.1:5602",
+        );
+        assert_eq!(
+            parse_seed_discovered_validator_route(&route),
+            Some((
+                "synv1validator2xxxxxxxxxxxxxxxxxxxx".to_string(),
+                "127.0.0.1:5602".to_string(),
+            ))
+        );
+        assert!(is_private_qualification_loopback_dial_address(
+            "127.0.0.1:5602"
+        ));
+        assert!(!is_private_qualification_loopback_dial_address(
+            "10.126.10.2:5622"
+        ));
+        assert_eq!(
+            parse_seed_discovered_validator_route("seedreg://not-a-validator@127.0.0.1:5602"),
+            None
         );
     }
 
