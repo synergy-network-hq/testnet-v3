@@ -4550,7 +4550,43 @@ fn write_role_runtime_report(
 }
 
 pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProfile>) {
-    let args: Vec<String> = env::args().collect();
+    let mut args: Vec<String> = env::args().collect();
+    // The NCP product invokes a validator with one operator-facing input:
+    // `synergy-validator-node --config <node>/config.toml`.  Its exact
+    // Genesis lives adjacent to that config and is selected before any
+    // process-global Genesis loader can initialize.  The old `start` spelling
+    // remains available for developer and release tooling.
+    if let [_, flag, config_path] = args.as_slice() {
+        if flag == "--config" {
+            let config_path = PathBuf::from(config_path);
+            if !config_path.is_file() {
+                eprintln!(
+                    "NCP runtime configuration does not exist: {}",
+                    config_path.display()
+                );
+                process::exit(1);
+            }
+            let genesis_path = config_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("genesis.json");
+            if !genesis_path.is_file() {
+                eprintln!(
+                    "NCP runtime requires the adjacent canonical Genesis file: {}",
+                    genesis_path.display()
+                );
+                process::exit(1);
+            }
+            env::set_var("SYNERGY_CONFIG_PATH", &config_path);
+            env::set_var("SYNERGY_GENESIS_FILE", &genesis_path);
+            args = vec![
+                args[0].clone(),
+                "start".to_string(),
+                "--config".to_string(),
+                config_path.to_string_lossy().to_string(),
+            ];
+        }
+    }
     if args.len() < 2 {
         print_usage(binary_name, expected_profile);
         process::exit(1);

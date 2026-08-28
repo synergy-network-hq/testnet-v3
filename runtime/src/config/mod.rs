@@ -1041,9 +1041,18 @@ fn parse_node_config_content(
     source_path: Option<&Path>,
 ) -> Result<NodeConfig, Box<dyn Error>> {
     let raw: toml::Value = toml::from_str(content)?;
-    let mut config = toml::from_str::<NodeConfig>(content).map_err(|error| {
-        format!("node configuration cannot be deserialized without fallback defaults: {error}")
-    })?;
+    // NCP owns the operator-facing configuration.  That format deliberately
+    // contains only node-local inputs (config, adjacent Genesis, and encrypted
+    // custody), rather than exposing every internal runtime default.  Expand
+    // it here into the same fully validated runtime configuration used by the
+    // legacy/full TOML format.
+    let mut config = if is_ncp_managed_config(&raw) {
+        ncp_managed_node_config(&raw)?
+    } else {
+        toml::from_str::<NodeConfig>(content).map_err(|error| {
+            format!("node configuration cannot be deserialized without fallback defaults: {error}")
+        })?
+    };
 
     apply_compatibility_overrides(&mut config, &raw);
 
@@ -1051,6 +1060,95 @@ fn parse_node_config_content(
         merge_companion_peers_file(source_path, &mut config)?;
     }
 
+    Ok(config)
+}
+
+fn is_ncp_managed_config(raw: &toml::Value) -> bool {
+    get_string(raw, &["runtime", "startup_mode"])
+        .is_some_and(|mode| mode == "genesis-config-identity")
+}
+
+fn ncp_required_string(
+    raw: &toml::Value,
+    path: &[&str],
+    label: &str,
+) -> Result<String, Box<dyn Error>> {
+    get_string(raw, path)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("NCP-managed configuration is missing {label}").into())
+}
+
+fn ncp_managed_node_config(raw: &toml::Value) -> Result<NodeConfig, Box<dyn Error>> {
+    let chain_id = get_u64(raw, &["chain_id"])
+        .ok_or_else(|| "NCP-managed configuration is missing chain_id".to_string())?;
+    let network_id = ncp_required_string(raw, &["network_id"], "network_id")?;
+    let role = ncp_required_string(raw, &["role"], "role")?;
+    if chain_id != 1266 || network_id != TESTNET_V3_CANONICAL_NETWORK_ID || role != "validator" {
+        return Err(
+            "NCP-managed configuration has an unsupported Chain 1266 validator identity".into(),
+        );
+    }
+
+    // The operator product must never ship static validator routes.  Seeds are
+    // discovery inputs; every validator route remains authenticated at the
+    // Synergy P2P layer after discovery.
+    for forbidden in [
+        &["persistent_peers"][..],
+        &["additional_dial_targets"][..],
+        &["p2p", "persistent_peers"][..],
+        &["p2p", "additional_dial_targets"][..],
+        &["p2p", "validator_vpn_transports"][..],
+    ] {
+        if get_string_array(raw, forbidden).is_some() {
+            return Err("NCP-managed configuration must not contain static validator peers".into());
+        }
+    }
+
+    let node_id = ncp_required_string(raw, &["identity", "node_id"], "identity.node_id")?;
+    let listen_address =
+        ncp_required_string(raw, &["p2p", "listen_address"], "p2p.listen_address")?;
+    let data_dir = ncp_required_string(raw, &["data_dir"], "data_dir")?;
+    let seed_servers = get_string_array(raw, &["p2p", "seed_servers"])
+        .unwrap_or_default()
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    if seed_servers.is_empty() {
+        return Err("NCP-managed configuration requires at least one seed server".into());
+    }
+    let block_time_target_ms = get_u64(raw, &["block_time_target_ms"])
+        .ok_or_else(|| "NCP-managed configuration is missing block_time_target_ms".to_string())?;
+    if !(100..=1100).contains(&block_time_target_ms) {
+        return Err(
+            "NCP-managed configuration block_time_target_ms must be between 100 and 1100".into(),
+        );
+    }
+
+    let mut config = NodeConfig::default();
+    config.network.id = chain_id;
+    config.network.network_id = network_id;
+    config.network.name = "Synergy Testnet".to_string();
+    config.network.seed_servers = seed_servers;
+    config.blockchain.chain_id = chain_id;
+    config.blockchain.block_time = 0;
+    config.blockchain.target_block_time_ms = block_time_target_ms;
+    config.consensus.block_time_secs = 0;
+    config.consensus.target_block_time_ms = block_time_target_ms;
+    config.p2p.listen_address = listen_address.clone();
+    config.p2p.public_address = get_string(raw, &["p2p", "public_address"])
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(listen_address);
+    config.p2p.node_name = node_id.clone();
+    config.p2p.enable_discovery = true;
+    config.p2p.enable_peer_exchange = true;
+    config.storage.path = data_dir;
+    config.logging.log_file = "data/logs/synergy-validator.log".to_string();
+    config.identity.node_id = node_id;
+    config.identity.role = role;
+    config.role.compiled_profile = "validator_node".to_string();
     Ok(config)
 }
 
@@ -2221,5 +2319,76 @@ validator_address = "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5"
         assert!(error
             .to_string()
             .contains("does not accept a locally configured coordinator or producer ring"));
+    }
+
+    #[test]
+    fn ncp_managed_validator_config_expands_to_the_validated_runtime_profile() {
+        let parsed = parse_node_config_content(
+            r#"
+chain_id = 1266
+network_id = "testnet"
+role = "validator"
+block_time_target_ms = 500
+data_dir = "/var/lib/synergy/validator-02"
+
+[identity]
+node_id = "synv1ncpvalidatorfixture"
+
+[p2p]
+listen_address = "10.69.0.2:5622"
+public_address = "10.69.0.2:5622"
+seed_servers = ["https://seed-01.example"]
+enable_discovery = true
+enable_peer_exchange = true
+
+[netbird]
+provider = "netbird"
+managed_by_ncp = true
+
+[runtime]
+startup_mode = "genesis-config-identity"
+"#,
+            None,
+        )
+        .expect("minimal NCP validator configuration should expand");
+
+        assert_eq!(parsed.identity.role, "validator");
+        assert_eq!(parsed.role.compiled_profile, "validator_node");
+        assert_eq!(parsed.network.seed_servers, vec!["https://seed-01.example"]);
+        assert!(parsed.network.persistent_peers.is_empty());
+        assert!(parsed.network.additional_dial_targets.is_empty());
+        assert_eq!(parsed.consensus.target_block_time_ms, 500);
+        assert_eq!(parsed.storage.path, "/var/lib/synergy/validator-02");
+        enforce_consensus_config_invariants(&parsed)
+            .expect("expanded NCP config must satisfy consensus invariants");
+    }
+
+    #[test]
+    fn ncp_managed_validator_config_rejects_static_peers() {
+        let error = parse_node_config_content(
+            r#"
+chain_id = 1266
+network_id = "testnet"
+role = "validator"
+block_time_target_ms = 500
+data_dir = "/var/lib/synergy/validator-02"
+persistent_peers = ["10.69.0.3:5622"]
+
+[identity]
+node_id = "synv1ncpvalidatorfixture"
+
+[p2p]
+listen_address = "10.69.0.2:5622"
+seed_servers = ["https://seed-01.example"]
+
+[runtime]
+startup_mode = "genesis-config-identity"
+"#,
+            None,
+        )
+        .expect_err("NCP config must reject static validator peers");
+        assert!(error
+            .to_string()
+            .contains("must not contain static validator peers"));
     }
 }
