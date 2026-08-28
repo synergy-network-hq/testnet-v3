@@ -440,7 +440,7 @@ prepare_workspace() {
     local authority_bundle
     authority_bundle="$(dirname "$authority_record")/authority-bundle"
     if [[ -d "$authority_bundle" ]]; then
-        cp -R "$authority_bundle" "$node_dir/authority-bundle"
+        cp -R "$authority_bundle" "$node_dir/local-r11-authority-bundle"
     fi
 }
 
