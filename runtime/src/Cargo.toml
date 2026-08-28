@@ -181,6 +181,10 @@ name = "generate-local-r11-genesis-execution-bundle"
 path = "bin/generate-local-r11-genesis-execution-bundle.rs"
 
 [[bin]]
+name = "bind-local-r11-execution-bundle-candidate"
+path = "bin/bind-local-r11-execution-bundle-candidate.rs"
+
+[[bin]]
 name = "testnet-v3-etdag-admission"
 path = "bin/testnet-v3-etdag-admission.rs"
 
