@@ -12256,6 +12256,8 @@ fn peer_target_allowed_by_local_scope(config: &NodeConfig, value: &str) -> bool 
     if local_validator_vpn_peer_scope(config) {
         normalize_validator_address_target(value).is_some()
             || is_current_validator_vpn_relayer_dial_address(value)
+            || (chain1266_private_qualification_mode()
+                && is_private_qualification_loopback_dial_address(value))
     } else if local_p2p_role(config).eq_ignore_ascii_case("relayer") {
         normalize_validator_address_target(value).is_some()
             || is_current_validator_vpn_relayer_dial_address(value)
@@ -12266,6 +12268,30 @@ fn peer_target_allowed_by_local_scope(config: &NodeConfig, value: &str) -> bool 
         normalize_validator_address_target(value).is_some()
             || is_assigned_or_validator_vpn_dial_address(value)
     }
+}
+
+/// The one-host R11 qualification runs five real production P2P stacks on
+/// distinct loopback ports. This allowance is gated by the explicit private
+/// qualification environment; the normal validator overlay continues to
+/// accept only validator identities and signed innernet transports.
+fn is_private_qualification_loopback_dial_address(value: &str) -> bool {
+    let Some(normalized) = parse_bootnode_dial_address(value) else {
+        return false;
+    };
+    let Some((host, port)) = normalized.rsplit_once(':') else {
+        return false;
+    };
+    let Ok(port) = port.parse::<u16>() else {
+        return false;
+    };
+    if port == 0 {
+        return false;
+    }
+    host.trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|address| address.is_loopback())
 }
 
 fn is_validator_vpn_dial_address(value: &str) -> bool {
@@ -15930,6 +15956,20 @@ mod tests {
             canonical_validator_public_address("10.69.10.5:58352", Some(validator_address)),
             Some(validator_address.to_string())
         );
+    }
+
+    #[test]
+    fn qualification_loopback_dials_require_loopback_and_nonzero_port() {
+        assert!(is_private_qualification_loopback_dial_address(
+            "127.0.0.1:5602"
+        ));
+        assert!(is_private_qualification_loopback_dial_address("[::1]:5603"));
+        assert!(!is_private_qualification_loopback_dial_address(
+            "127.0.0.1:0"
+        ));
+        assert!(!is_private_qualification_loopback_dial_address(
+            "10.126.10.2:5602"
+        ));
     }
 
     #[test]
