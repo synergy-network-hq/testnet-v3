@@ -90,9 +90,6 @@ class HarnessContractTests(unittest.TestCase):
                 )
                 (keys / f"{validator}.key").parent.mkdir(parents=True, exist_ok=True)
                 (keys / f"{validator}.key").write_text("fixture", encoding="utf-8")
-            desired = root / "desired-state.json"
-            desired.write_text("{}", encoding="utf-8")
-            desired_sha = hashlib.sha256(desired.read_bytes()).hexdigest()
             authority = root / "authority.json"
             approval = root / "approval.json"
             candidate = root / "candidate.json"
@@ -116,6 +113,19 @@ case "$1" in
 esac
 """, encoding="utf-8")
             binary.chmod(0o755)
+            desired = root / "desired-state.json"
+            write_json(desired, {
+                "artifacts": {
+                    "validator_node": hashlib.sha256(binary.read_bytes()).hexdigest(),
+                },
+                "configuration": {
+                    validator: hashlib.sha256(
+                        (configs / validator / "config.toml").read_bytes()
+                    ).hexdigest()
+                    for validator in VALIDATORS
+                },
+            })
+            desired_sha = hashlib.sha256(desired.read_bytes()).hexdigest()
             work_dir = root / "work"
             command = [
                 "bash", str(HARNESS), "--genesis", str(genesis), "--ingress-kem-registry-dir", str(root / "registries"),
@@ -127,6 +137,34 @@ esac
             for validator in VALIDATORS:
                 command.extend((f"--{validator}-config", str(configs / validator / "config.toml")))
                 command.extend((f"--{validator}-key", str(keys / f"{validator}.key")))
+            mismatched_desired = root / "desired-state-binary-drift.json"
+            mismatched_value = json.loads(desired.read_text(encoding="utf-8"))
+            mismatched_value["artifacts"]["validator_node"] = "0" * 64
+            write_json(mismatched_desired, mismatched_value)
+            mismatched_command = list(command)
+            replacements = {
+                "--desired-state": str(mismatched_desired),
+                "--desired-state-sha256": hashlib.sha256(
+                    mismatched_desired.read_bytes()
+                ).hexdigest(),
+                "--work-dir": str(root / "work-binary-drift"),
+            }
+            for flag, value in replacements.items():
+                mismatched_command[mismatched_command.index(flag) + 1] = value
+            mismatch = subprocess.run(
+                mismatched_command,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env={**os.environ, "CAPTURE_DIR": str(captures)},
+                check=False,
+            )
+            self.assertNotEqual(mismatch.returncode, 0, mismatch.stdout)
+            self.assertIn(
+                "FIRST_MISSING_TRANSITION=RELEASE_BINARY->DESIRED_STATE_BINDING",
+                mismatch.stdout,
+            )
+            self.assertEqual(list(captures.glob("*.env")), [], mismatch.stdout)
             result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                     env={**os.environ, "CAPTURE_DIR": str(captures)}, check=False)
             self.assertNotEqual(result.returncode, 0, result.stdout)
@@ -152,7 +190,6 @@ esac
                     f"127.0.0.1:{p2p_ports[peer]}" for peer in VALIDATORS if peer != validator
                 }
                 self.assertEqual(set(staged_toml["network"]["additional_dial_targets"]), expected_targets)
-
 
 if __name__ == "__main__":
     unittest.main()

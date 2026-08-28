@@ -364,6 +364,41 @@ expected = sys.argv[2:]
 raise SystemExit(0 if sorted(actual) == sorted(expected) else 1)
 PY
     done
+
+    # Fail at the byte-binding edge before invoking five independent role
+    # preflights.  The production verifier performs the authoritative check;
+    # this duplicate is diagnostic only and deliberately compares exact file
+    # bytes rather than parsed config structures.  Without it, a rebuilt
+    # validator or rerendered config is reported only as a generic role
+    # preflight failure and obscures the first actionable release transition.
+    local actual_sha expected_sha
+    actual_sha="$(shasum -a 256 "$validator_binary" | awk '{print $1}')"
+    expected_sha="$(jq -er '
+        if (.artifacts | type) == "object" and
+           (.artifacts | keys) == ["validator_node"] and
+           (.artifacts.validator_node | type) == "string"
+        then .artifacts.validator_node else empty end
+    ' "$desired_state" 2>/dev/null || true)"
+    [[ "$actual_sha" == "$expected_sha" ]] || fail_transition \
+        "RELEASE_BINARY->DESIRED_STATE_BINDING" \
+        "desired state does not bind the exact supplied synergy-validator-node bytes"
+
+    for index in "${!VALIDATORS[@]}"; do
+        validator="${VALIDATORS[$index]}"
+        actual_sha="$(shasum -a 256 "${configs[$index]}" | awk '{print $1}')"
+        expected_sha="$(jq -er --arg validator "$validator" '
+            if (.configuration | type) == "object" and
+               (.configuration | keys) == [
+                   "validator-02", "validator-03", "validator-04",
+                   "validator-05", "validator-06"
+               ] and
+               (.configuration[$validator] | type) == "string"
+            then .configuration[$validator] else empty end
+        ' "$desired_state" 2>/dev/null || true)"
+        [[ "$actual_sha" == "$expected_sha" ]] || fail_transition \
+            "RENDERED_CONFIG->DESIRED_STATE_BINDING($validator)" \
+            "desired state does not bind the exact supplied $validator configuration bytes"
+    done
 }
 
 workspace_for() {
