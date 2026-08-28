@@ -709,6 +709,10 @@ mod tests {
             "release_id".to_string(),
             Value::String("testnet-v3".to_string()),
         );
+        source_execution_object.insert(
+            "identity_authorization_bindings".to_string(),
+            Value::Object(serde_json::Map::new()),
+        );
         let source_execution_state: GenesisExecutionSnapshot =
             serde_json::from_value(source_execution_value).expect("fixture execution snapshot");
         let mut fixture_state = source_execution_state
