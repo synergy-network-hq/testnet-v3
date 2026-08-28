@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -226,6 +227,18 @@ def qualification_evidence(evidence_dir: Path) -> tuple[Path, Path, list[tuple[i
     require(all(100 <= interval <= 1100 for _, _, interval in qualified),
             "H3-H20 timing evidence is outside the 100-1100 ms qualification range")
     return summary, timing, qualified
+
+
+def timing_statistics(samples: list[tuple[int, int, int]]) -> dict[str, int]:
+    values = sorted(interval for _, _, interval in samples)
+    require(bool(values), "steady-state timing evidence is empty")
+    return {
+        "count": len(values),
+        "minimum": values[0],
+        "p50": values[len(values) // 2],
+        "p95": values[math.ceil(len(values) * 0.95) - 1],
+        "maximum": values[-1],
+    }
 
 
 def copy_candidate_inputs(source: Path, destination: Path) -> dict[str, str]:
@@ -629,6 +642,7 @@ def assemble(args: argparse.Namespace) -> None:
             "qualification": {
                 "required_markers": list(SUMMARY_MARKERS), "summary_sha256": sha256_path(summary),
                 "timing_sha256": sha256_path(timing), "h3_h20_interval_ms": [interval for _, _, interval in qualified],
+                "timing_statistics_ms": timing_statistics(qualified),
                 "validator_restart": "PASS", "finalized_height": 20,
             },
             "artifacts": {
@@ -641,7 +655,7 @@ def assemble(args: argparse.Namespace) -> None:
                 "compatibility_report": "PASS",
                 "pre_signature_preflight": "READY",
             },
-            "prohibitions": ["no private keys", "no signatures", "no deployment", "no live host access"],
+            "prohibitions": ["no private keys", "no V4 release-approval signature", "no deployment", "no live host access"],
             "next_external_action": "obtain governance signature for the exact canonical V4 request",
         }
         write_json(staging / "package-manifest.json", manifest)

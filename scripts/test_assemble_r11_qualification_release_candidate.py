@@ -146,6 +146,9 @@ open(arg('--output'), 'w').write(json.dumps({
             manifest = json.loads((output / "package-manifest.json").read_text())
             self.assertEqual(manifest["status"], "LOCAL_R11_QUALIFIED_V4_REQUEST_UNSIGNED")
             self.assertEqual(len(manifest["artifacts"]["ingress_kem_registry_sha256"]), 18)
+            self.assertEqual(manifest["qualification"]["timing_statistics_ms"], {
+                "count": 17, "minimum": 500, "p50": 500, "p95": 500, "maximum": 500,
+            })
             self.assertTrue((output / "SHA256SUMS").is_file())
             self.assertEqual(json.loads((output / "compatibility-report.json").read_text())["status"], "PASS")
             self.assertTrue(Path(f"{output}.tar").is_file())
