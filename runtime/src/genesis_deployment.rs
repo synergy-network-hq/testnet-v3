@@ -1500,6 +1500,7 @@ fn run_initialization_sequence(
     synq_addresses: &BTreeMap<GenesisContract, SynQAddress>,
     authorities: &GenesisAuthorities,
     parameters: &GenesisParameters,
+    authorization: GenesisExecutionAuthorization<'_>,
 ) -> Result<Vec<SynQAivmReceiptSummary>, String> {
     let artifact_for = |contract: GenesisContract| -> Result<SynQContractArtifact, String> {
         plan.entries
@@ -1575,6 +1576,7 @@ fn run_initialization_sequence(
             args,
             &authorities.governance,
             governance_call_nonce,
+            authorization,
         )?);
         *nonce += 1;
         governance_call_nonce += 1;
@@ -1616,6 +1618,7 @@ fn run_initialization_sequence(
             args,
             &authorities.governance,
             governance_call_nonce,
+            authorization,
         )?);
         *nonce += 1;
         governance_call_nonce += 1;
@@ -1660,6 +1663,7 @@ fn run_initialization_sequence(
             ],
             &registry_authority,
             registry_call_nonce,
+            authorization,
         )?);
         registry_call_nonce += 1;
     }
@@ -1676,6 +1680,7 @@ fn run_initialization_sequence(
             ],
             &registry_authority,
             registry_call_nonce,
+            authorization,
         )?);
         registry_call_nonce += 1;
     }
@@ -1708,6 +1713,7 @@ fn run_initialization_sequence(
             args,
             &authorities.governance,
             governance_call_nonce,
+            authorization,
         )?);
         *nonce += 1;
         governance_call_nonce += 1;
@@ -1736,6 +1742,7 @@ fn run_initialization_sequence(
             args,
             &authorities.governance,
             governance_call_nonce,
+            authorization,
         )?);
         *nonce += 1;
         governance_call_nonce += 1;
