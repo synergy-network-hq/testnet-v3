@@ -177,6 +177,10 @@ name = "assemble-local-r11-public-artifacts"
 path = "bin/assemble-local-r11-public-artifacts.rs"
 
 [[bin]]
+name = "generate-local-r11-genesis-execution-bundle"
+path = "bin/generate-local-r11-genesis-execution-bundle.rs"
+
+[[bin]]
 name = "testnet-v3-etdag-admission"
 path = "bin/testnet-v3-etdag-admission.rs"
 
