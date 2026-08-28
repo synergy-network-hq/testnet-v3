@@ -11774,6 +11774,23 @@ fn receive_message(stream: &mut impl Read) -> Result<NetworkMessage, io::Error> 
 }
 
 fn validate_simplified_predecode_frame_length(len: usize, prefix: &[u8]) -> io::Result<()> {
+    // Serde's externally tagged representation uses a JSON string for unit
+    // variants. These four bounded control messages are the only unit
+    // variants in `NetworkMessage`; all data-bearing envelopes remain objects
+    // and continue through the kind-specific allocation gate below.
+    if prefix.first() == Some(&b'"') {
+        if len != prefix.len() {
+            return Err(invalid_predecode(
+                "unit network envelope exceeds the bounded predecode prefix",
+            ));
+        }
+        return match prefix {
+            b"\"GetPeers\"" | b"\"Ping\"" | b"\"Pong\"" | b"\"GetStatus\"" => Ok(()),
+            _ => Err(invalid_predecode(
+                "network unit envelope does not declare an allowed message kind",
+            )),
+        };
+    }
     let mut cursor = 0usize;
     consume_json_byte(prefix, &mut cursor, b'{', "network envelope")?;
     let outer_kind = consume_json_key(prefix, &mut cursor, "network envelope kind")?;
@@ -14223,6 +14240,23 @@ mod tests {
             prefix,
         )
         .is_err());
+    }
+
+    #[test]
+    fn predecode_accepts_only_declared_unit_network_envelopes() {
+        for message in [
+            NetworkMessage::GetPeers,
+            NetworkMessage::Ping,
+            NetworkMessage::Pong,
+            NetworkMessage::GetStatus,
+        ] {
+            let wire = serde_json::to_vec(&message).expect("unit network message should serialize");
+            validate_simplified_predecode_frame_length(wire.len(), &wire)
+                .expect("declared unit network message should pass predecode");
+        }
+        assert!(validate_simplified_predecode_frame_length(9, br#""Unknown""#).is_err());
+        assert!(validate_simplified_predecode_frame_length(4097, br#""GetPeers""#).is_err());
+        assert!(validate_simplified_predecode_frame_length(11, b" \"GetPeers\"").is_err());
     }
 
     #[test]
@@ -18469,6 +18503,127 @@ mod tests {
             block_sync_min_serve_interval_secs(&config, Some(&active_peer)),
             BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS
         );
+    }
+
+    fn framed_network_message(message: &NetworkMessage) -> Vec<u8> {
+        let mut wire = Vec::new();
+        super::send_message(&mut wire, message).expect("network message should frame");
+        wire
+    }
+
+    fn framed_payload(payload: &[u8]) -> Vec<u8> {
+        let mut wire = Vec::with_capacity(4 + payload.len());
+        wire.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        wire.extend_from_slice(payload);
+        wire
+    }
+
+    struct ChunkedReader {
+        cursor: std::io::Cursor<Vec<u8>>,
+        maximum_chunk: usize,
+        interrupt_on_call: Option<usize>,
+        calls: usize,
+    }
+
+    impl ChunkedReader {
+        fn new(bytes: Vec<u8>, maximum_chunk: usize) -> Self {
+            Self {
+                cursor: std::io::Cursor::new(bytes),
+                maximum_chunk,
+                interrupt_on_call: None,
+                calls: 0,
+            }
+        }
+
+        fn with_interrupt(mut self, call: usize) -> Self {
+            self.interrupt_on_call = Some(call);
+            self
+        }
+    }
+
+    impl std::io::Read for ChunkedReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let call = self.calls;
+            self.calls = self.calls.saturating_add(1);
+            if self.interrupt_on_call == Some(call) {
+                self.interrupt_on_call = None;
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "more framed bytes are not available yet",
+                ));
+            }
+            let available = self.maximum_chunk.min(buffer.len());
+            std::io::Read::read(&mut self.cursor, &mut buffer[..available])
+        }
+    }
+
+    #[test]
+    fn production_decoder_accepts_unit_frame_in_one_read() {
+        for message in [
+            NetworkMessage::GetPeers,
+            NetworkMessage::Ping,
+            NetworkMessage::Pong,
+            NetworkMessage::GetStatus,
+        ] {
+            let mut wire = std::io::Cursor::new(framed_network_message(&message));
+            assert_eq!(receive_message(&mut wire).unwrap(), message);
+        }
+    }
+
+    #[test]
+    fn production_decoder_accepts_legal_frame_split_across_reads() {
+        let message = NetworkMessage::GetStatus;
+        let mut wire = ChunkedReader::new(framed_network_message(&message), 1);
+        assert_eq!(receive_message(&mut wire).unwrap(), message);
+    }
+
+    #[test]
+    fn production_decoder_accepts_multiple_coalesced_frames() {
+        let first = NetworkMessage::GetStatus;
+        let second = NetworkMessage::Ping;
+        let mut bytes = framed_network_message(&first);
+        bytes.extend_from_slice(&framed_network_message(&second));
+        let mut wire = std::io::Cursor::new(bytes);
+
+        assert_eq!(receive_message(&mut wire).unwrap(), first);
+        assert_eq!(receive_message(&mut wire).unwrap(), second);
+    }
+
+    #[test]
+    fn production_decoder_accepts_exact_transport_boundary() {
+        let empty = serde_json::to_vec(&NetworkMessage::Error {
+            message: String::new(),
+        })
+        .unwrap();
+        let message = NetworkMessage::Error {
+            message: "x".repeat(MAX_P2P_FRAME_BYTES - empty.len()),
+        };
+        let encoded = serde_json::to_vec(&message).unwrap();
+        assert_eq!(encoded.len(), MAX_P2P_FRAME_BYTES);
+
+        let mut wire = std::io::Cursor::new(framed_payload(&encoded));
+        assert_eq!(receive_message(&mut wire).unwrap(), message);
+    }
+
+    #[test]
+    fn production_decoder_rejects_malformed_length_prefix() {
+        let mut wire = std::io::Cursor::new(vec![1, 0, 0]);
+        let error = receive_message(&mut wire).expect_err("partial length must fail closed");
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn production_decoder_rejects_malformed_envelope() {
+        let mut wire = std::io::Cursor::new(framed_payload(br#""Unknown""#));
+        let error = receive_message(&mut wire).expect_err("unknown unit variant must fail closed");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn production_decoder_retries_incomplete_frame_read() {
+        let message = NetworkMessage::GetStatus;
+        let mut wire = ChunkedReader::new(framed_network_message(&message), 2).with_interrupt(3);
+        assert_eq!(receive_message(&mut wire).unwrap(), message);
     }
 
     #[test]
