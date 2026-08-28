@@ -967,7 +967,7 @@ impl<
             takeover_tc_id: tc_id,
             mandatory_carry_candidate,
         };
-        emit_h1_transition("PROPOSER_SELECTED", height, round.0);
+        emit_h1_transition("PROPOSER_SELECTED", height, round);
         let unsigned = self
             .proposal_source
             .proposal_for(&self.epoch_context, &directive)
@@ -987,7 +987,7 @@ impl<
             }
             return Ok(false);
         };
-        emit_h1_transition("BOOTSTRAP_INPUT_READY", height, round.0);
+        emit_h1_transition("BOOTSTRAP_INPUT_READY", height, round);
         let proposal = self.state_machine.sign_proposal(
             unsigned,
             &self.signing_authority,
