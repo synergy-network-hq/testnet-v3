@@ -4927,7 +4927,15 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
             });
             env::set_var("SYNERGY_PROJECT_ROOT", &project_root);
 
-            let data_dir = project_root.join("data");
+            // The NCP product owns a node root containing only config.toml,
+            // genesis.json, and encrypted identity.  Its configured storage
+            // location is therefore the authoritative live data directory;
+            // legacy source-workspace launches retain their historical root.
+            let data_dir = if config.identity.encrypted_custody_path.trim().is_empty() {
+                project_root.join("data")
+            } else {
+                PathBuf::from(&config.storage.path)
+            };
             let logs_dir = data_dir.join("logs");
             let chain_dir = data_dir.join("chain");
 
