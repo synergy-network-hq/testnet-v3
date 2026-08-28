@@ -415,6 +415,8 @@ export_release_binding() {
     export SYNERGY_TESTNET_V3_RELEASE_APPROVAL="$release_approval"
     export SYNERGY_TESTNET_V3_AUTHORITY_RECORD="$authority_record"
     export SYNERGY_TESTNET_V3_RELEASE_CANDIDATE="$release_candidate"
+    export SYNERGY_CHAIN1266_QUALIFICATION_MODE=1
+    export SYNERGY_CHAIN1266_QUALIFICATION_ROOT="$work_dir/nodes"
 }
 
 prepare_workspace() {

@@ -39,6 +39,10 @@ pub const TESTNET_V3_AUTHORITY_RECORD_ENV: &str = "SYNERGY_TESTNET_V3_AUTHORITY_
 pub const TESTNET_V3_RELEASE_CANDIDATE_ENV: &str = "SYNERGY_TESTNET_V3_RELEASE_CANDIDATE";
 pub const CHAIN1266_DESIRED_STATE_SIGNATURE_DOMAIN: &str = "SYNERGY_CHAIN1266_DESIRED_STATE_V1";
 pub const CHAIN1266_QUALIFICATION_MODE_ENV: &str = "SYNERGY_CHAIN1266_QUALIFICATION_MODE";
+/// Optional root for an isolated local qualification run. Production startup
+/// never consults this variable; qualification mode defaults to the dedicated
+/// `/var/lib` root when it is absent.
+pub const CHAIN1266_QUALIFICATION_ROOT_ENV: &str = "SYNERGY_CHAIN1266_QUALIFICATION_ROOT";
 const PRODUCTION_GOVERNANCE_FINGERPRINT: &str =
     "sha256:7f296c61ad8c636dd21eb8c3dd360e981ba720cdef1b2a7e84f3c1107f6eb200";
 const EXPECTED_SCHEMA_VERSION: u32 = 1;
@@ -363,7 +367,16 @@ fn state_root_matches_namespace(
         return false;
     }
     if qualification_mode {
-        let qualification_root = Path::new("/var/lib/synergy/chain1266-qualification");
+        let qualification_root = env::var(CHAIN1266_QUALIFICATION_ROOT_ENV)
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/var/lib/synergy/chain1266-qualification"));
+        if !qualification_root.is_absolute()
+            || qualification_root.components().any(|component| {
+                matches!(component, std::path::Component::ParentDir)
+            })
+        {
+            return false;
+        }
         let Ok(relative) = state_root.strip_prefix(qualification_root) else {
             return false;
         };
@@ -605,19 +618,18 @@ pub fn verify_chain1266_desired_state(
         return Err("qualification mode requires the private qualification Genesis".to_string());
     }
     let authorization_bytes = if is_fresh_p3 {
-        if private_qualification {
-            return Err(
-                "fresh P3 release approval cannot be replaced by qualification material"
-                    .to_string(),
-            );
-        }
         let approval_path = configured_release_approval_path()?;
         let authority_record_path = configured_authority_record_path()?;
         let trust_root = authority_record_path
             .parent()
             .ok_or_else(|| "fresh P3 authority record has no parent trust directory".to_string())?;
         let candidate_path = configured_release_candidate_path()?;
-        crate::testnet_v3_release_approval::verify_release_approval_file_public(
+        let verify = if private_qualification {
+            crate::testnet_v3_release_approval::verify_local_r11_qualification_release_approval_file_public
+        } else {
+            crate::testnet_v3_release_approval::verify_release_approval_file_public
+        };
+        verify(
             trust_root,
             &candidate_path,
             &authority_record_path,

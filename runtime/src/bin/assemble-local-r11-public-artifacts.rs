@@ -388,6 +388,10 @@ fn assemble_genesis(args: &[String]) -> Result<(), String> {
 
     let bundles = read_consensus_public_bundles(&public_dir)?;
     let mut candidate = read_value(&source_path, "fresh P3 source Genesis")?;
+    // Mark the emitted document as an isolated qualification Genesis. The
+    // production loader still parses and validates it, while production
+    // desired-state verification rejects this explicit non-live environment.
+    candidate["env"] = Value::String("chain1266-private-qualification".to_string());
     install_consensus_public_keys(&mut candidate, &mut activation, &bundles)?;
     activation.validate()?;
     let etdag_binding = EtdagGovernedGenesisBinding::from_canonical_bytes(&read_bytes(
