@@ -705,6 +705,10 @@ mod tests {
             .remove("runtime_network_id")
             .expect("fixture runtime network id");
         source_execution_object.insert("network_id".to_string(), runtime_network_id);
+        source_execution_object.insert(
+            "release_id".to_string(),
+            Value::String("testnet-v3".to_string()),
+        );
         let source_execution_state: GenesisExecutionSnapshot =
             serde_json::from_value(source_execution_value).expect("fixture execution snapshot");
         let mut fixture_state = source_execution_state
