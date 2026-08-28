@@ -36,7 +36,7 @@ fn path(args: &[String], name: &str) -> PathBuf {
     args.windows(2)
         .find(|pair| pair[0] == name)
         .map(|pair| PathBuf::from(&pair[1]))
-        .unwrap_or_else(usage)
+        .unwrap_or_else(|| usage())
 }
 
 fn read(path: &Path, label: &str) -> Vec<u8> {
