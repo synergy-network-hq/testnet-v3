@@ -701,10 +701,13 @@ mod tests {
         let source_execution_object = source_execution_value
             .as_object_mut()
             .expect("fixture execution state object");
-        let runtime_network_id = source_execution_object
+        source_execution_object
             .remove("runtime_network_id")
             .expect("fixture runtime network id");
-        source_execution_object.insert("network_id".to_string(), runtime_network_id);
+        source_execution_object.insert(
+            "network_id".to_string(),
+            Value::String("testnet".to_string()),
+        );
         source_execution_object.insert(
             "release_id".to_string(),
             Value::String("testnet-v3".to_string()),
