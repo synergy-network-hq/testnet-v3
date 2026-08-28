@@ -119,13 +119,17 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         aegis_revision: take("--aegis-revision"),
         validator_binary_sha256: take("--validator-binary-sha256"),
     };
-    for (label, digest) in [
-        ("testnet-v3 revision", &options.testnet_v3_revision),
-        ("SynQ revision", &options.synq_revision),
-        ("Aegis revision", &options.aegis_revision),
-        ("validator binary SHA-256", &options.validator_binary_sha256),
+    for (label, digest, length) in [
+        ("testnet-v3 revision", &options.testnet_v3_revision, 40),
+        ("SynQ revision", &options.synq_revision, 40),
+        ("Aegis revision", &options.aegis_revision, 40),
+        (
+            "validator binary SHA-256",
+            &options.validator_binary_sha256,
+            64,
+        ),
     ] {
-        require_lower_hex(digest, label, 64)?;
+        require_lower_hex(digest, label, length)?;
     }
     Ok(options)
 }
