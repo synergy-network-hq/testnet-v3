@@ -9,7 +9,8 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use synergy_testnet::testnet_v3_release_approval::{
-    build_release_approval_request, verify_release_approval_file,
+    build_local_r11_qualification_release_approval_request, build_release_approval_request,
+    verify_local_r11_qualification_release_approval_file_public, verify_release_approval_file,
     TESTNET_V3_GENESIS_RELEASE_APPROVAL_DOMAIN,
 };
 
@@ -58,8 +59,13 @@ fn write_request(
     authorities: &Path,
     desired_state: &Path,
     output: &Path,
+    local_qualification: bool,
 ) {
-    let request = build_release_approval_request(root, candidate, authorities, desired_state)
+    let request = if local_qualification {
+        build_local_r11_qualification_release_approval_request(root, candidate, authorities, desired_state)
+    } else {
+        build_release_approval_request(root, candidate, authorities, desired_state)
+    }
         .unwrap_or_else(|error| fail(format!("build canonical request: {error}")));
     let canonical = request
         .canonical_bytes()
@@ -90,9 +96,15 @@ fn verify(
     authorities: &Path,
     desired_state: &Path,
     approval: &Path,
+    local_qualification: bool,
 ) {
-    let request =
+    let request = if local_qualification {
+        verify_local_r11_qualification_release_approval_file_public(
+            root, candidate, authorities, desired_state, approval,
+        )
+    } else {
         verify_release_approval_file(root, candidate, authorities, desired_state, approval)
+    }
             .unwrap_or_else(|error| fail(format!("release approval rejected: {error}")));
     let approval_sha256 =
         sha256_file(approval).unwrap_or_else(|error| fail(format!("hash approval: {error}")));
@@ -121,6 +133,7 @@ fn main() {
     let mut output = root.join(DEFAULT_REQUEST);
     let mut approval = None;
     let mut desired_state = None;
+    let mut local_qualification = false;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -130,6 +143,10 @@ fn main() {
             }
             "--verify" => {
                 verify_mode = true;
+                index += 1;
+            }
+            "--local-r11-qualification" => {
+                local_qualification = true;
                 index += 1;
             }
             "--candidate" => {
@@ -187,9 +204,23 @@ fn main() {
         if approval.is_some() {
             usage();
         }
-        write_request(&root, &candidate, &authorities, &desired_state, &output);
+        write_request(
+            &root,
+            &candidate,
+            &authorities,
+            &desired_state,
+            &output,
+            local_qualification,
+        );
     } else {
         let approval = approval.unwrap_or_else(|| usage());
-        verify(&root, &candidate, &authorities, &desired_state, &approval);
+        verify(
+            &root,
+            &candidate,
+            &authorities,
+            &desired_state,
+            &approval,
+            local_qualification,
+        );
     }
 }
