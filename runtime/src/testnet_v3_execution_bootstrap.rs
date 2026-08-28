@@ -264,8 +264,10 @@ fn verify_genesis_execution_bundle(
         &approval.snapshot_canonical_sha256,
         "canonical Genesis execution snapshot",
     )?;
-    if bundle.execution_state.schema_version != approval.snapshot_schema_version {
-        return Err("approved execution snapshot schema disagrees with its envelope".to_string());
+    if bundle.execution_state.schema_version
+        != crate::execution::TESTNET_V3_GENESIS_SNAPSHOT_SCHEMA_VERSION
+    {
+        return Err("approved execution snapshot has an unsupported state schema".to_string());
     }
 
     // `restore_testnet_v3` reconstructs ExecutionState and independently
