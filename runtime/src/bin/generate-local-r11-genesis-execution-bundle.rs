@@ -1031,5 +1031,5 @@ fn main() {
         eprintln!("generate-local-r11-genesis-execution-bundle: {error}");
         usage();
     });
-    run(options, &args).unwrap_or_else(fail);
+    run(options, &args).unwrap_or_else(|error| fail(error));
 }
