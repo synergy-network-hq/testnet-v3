@@ -58,7 +58,7 @@ def finalized_binding(genesis: dict[str, Any]) -> tuple[str, dict[str, str]]:
         or re.fullmatch(r"[0-9a-f]{128}", parameter_root) is None
         or parameter_root != bound_root
         or manifest.get("target_block_time_ms") != 500
-        or manifest.get("initial_validator_ids") != list(VALIDATORS)
+        or manifest.get("active_validator_count") != len(VALIDATORS)
         or set(validators) != set(VALIDATORS)
     ):
         fail("Genesis does not bind one finalized 500ms root and the exact five validators")

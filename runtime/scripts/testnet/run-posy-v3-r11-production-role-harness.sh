@@ -319,7 +319,8 @@ validate_artifacts() {
         .network.chain_id == 1266 and
         .consensus.posy_v3_activation.manifest.protocol_version == "posy/3.0" and
         .consensus.posy_v3_activation.manifest.network_id == "testnet" and
-        .consensus.posy_v3_activation.manifest.initial_validator_ids ==
+        .consensus.posy_v3_activation.manifest.active_validator_count == 5 and
+        ([.consensus.posy_v3_activation.frozen_validator_set.validators[].validator_id] | sort) ==
           ["validator-02", "validator-03", "validator-04", "validator-05", "validator-06"]
     ' "$genesis" >/dev/null || fail "Genesis is not the signed fresh-P3 five-validator artifact"
 
