@@ -906,7 +906,7 @@ mod tests {
         byte_tamper.push(b'\n');
         assert!(verify_fixture(genesis, &byte_tamper, &approval)
             .expect_err("byte tamper must fail")
-            .contains("SHA-256 mismatch"));
+            .contains("does not match committed value"));
 
         let mut wrong_genesis = bundle.clone();
         wrong_genesis.canonical_genesis_hash = "00".repeat(32);
