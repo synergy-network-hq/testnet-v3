@@ -312,16 +312,63 @@ fn validate_restored_execution_state(
         return Err("finalized Genesis execution snapshot has invalid cardinality".to_string());
     }
     for balance in genesis.balances() {
-        if state.balances_nwei.get(&balance.address).copied()
+        let finalized_address = finalized_balance_address(genesis, state, &balance.address)?;
+        if state.balances_nwei.get(&finalized_address).copied()
             != Some(u128::from(balance.balance_nwei))
         {
             return Err(format!(
                 "finalized Genesis execution balance mismatch for {}",
-                balance.address
+                finalized_address
             ));
         }
     }
     Ok(())
+}
+
+/// TEM-A01 is a custody identity in the canonical Genesis input, but its
+/// allocation is held by the deterministically deployed TeamVesting contract
+/// in finalized execution state. All other Genesis balances remain at their
+/// declared addresses. Resolve that one governed relocation from the frozen
+/// TeamVesting artifact hash rather than trusting a mutable address overlay.
+fn finalized_balance_address(
+    genesis: &GenesisDocument,
+    state: &ExecutionState,
+    genesis_address: &str,
+) -> Result<String, String> {
+    let source_balance = genesis
+        .value()
+        .get("balances")
+        .and_then(Value::as_array)
+        .and_then(|balances| {
+            balances.iter().find(|balance| {
+                balance.get("address").and_then(Value::as_str) == Some(genesis_address)
+            })
+        })
+        .ok_or_else(|| format!("finalized Genesis is missing balance {genesis_address}"))?;
+    if source_balance.get("account_id").and_then(Value::as_str) != Some("TEM-A01") {
+        return Ok(genesis_address.to_string());
+    }
+
+    let contracts = required_object(genesis.value(), "contracts")?;
+    let team_vesting = contracts
+        .get("team_vesting")
+        .ok_or_else(|| "finalized Genesis is missing TeamVesting contract metadata".to_string())?;
+    let expected_hash = hex::decode(required_string(team_vesting, "bytecode_hash")?)
+        .map_err(|error| format!("decode TeamVesting bytecode hash: {error}"))?;
+    let expected_hash: [u8; 32] = expected_hash
+        .try_into()
+        .map_err(|_| "TeamVesting bytecode hash has an invalid length".to_string())?;
+    let addresses = state
+        .synq_contracts
+        .iter()
+        .filter_map(|(address, deployment)| {
+            (deployment.artifact_key.bytecode_hash == expected_hash).then_some(address.as_str())
+        })
+        .collect::<Vec<_>>();
+    match addresses.as_slice() {
+        [address] => Ok((*address).to_string()),
+        _ => Err("finalized execution state has no unique TeamVesting deployment".to_string()),
+    }
 }
 
 fn validate_bundle_receipts(
@@ -424,22 +471,7 @@ fn load_finalized_execution_state_from_value(
         );
     }
 
-    if state.synq_artifacts.len() != FINALIZED_NATIVE_GENESIS_CONTRACTS.len()
-        || state.synq_contracts.len() != FINALIZED_NATIVE_GENESIS_CONTRACTS.len()
-        || state.balances_nwei.len() != genesis.balances().len()
-    {
-        return Err("finalized Genesis execution snapshot has invalid cardinality".to_string());
-    }
-    for balance in genesis.balances() {
-        if state.balances_nwei.get(&balance.address).copied()
-            != Some(u128::from(balance.balance_nwei))
-        {
-            return Err(format!(
-                "finalized Genesis execution balance mismatch for {}",
-                balance.address
-            ));
-        }
-    }
+    validate_restored_execution_state(genesis, &state)?;
 
     let contracts = required_object(finalized, "contracts")?;
     for (genesis_key, contract_name) in FINALIZED_NATIVE_GENESIS_CONTRACTS {
