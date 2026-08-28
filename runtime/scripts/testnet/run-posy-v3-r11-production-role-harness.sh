@@ -411,13 +411,14 @@ data_for() {
 }
 
 export_release_binding() {
+    local qualification_root="${1:-$work_dir/nodes}"
     export SYNERGY_DESIRED_STATE_MANIFEST="$desired_state"
     export SYNERGY_DESIRED_STATE_MANIFEST_SHA256="$desired_state_sha256"
     export SYNERGY_TESTNET_V3_RELEASE_APPROVAL="$release_approval"
     export SYNERGY_TESTNET_V3_AUTHORITY_RECORD="$authority_record"
     export SYNERGY_TESTNET_V3_RELEASE_CANDIDATE="$release_candidate"
     export SYNERGY_CHAIN1266_QUALIFICATION_MODE=1
-    export SYNERGY_CHAIN1266_QUALIFICATION_ROOT="$work_dir/nodes"
+    export SYNERGY_CHAIN1266_QUALIFICATION_ROOT="$qualification_root"
 }
 
 prepare_workspace() {
@@ -461,7 +462,7 @@ start_node() {
         export SYNERGY_DATA_PATH="$data_dir"
         export SYNERGY_GENESIS_FILE="$genesis"
         export SYNERGY_VALIDATOR_MLDSA65_CONSENSUS_PRIVATE_KEY_FILE="$key"
-        export_release_binding
+        export_release_binding "$node_dir"
         exec "$validator_binary" start --config "$node_dir/config/node.toml"
     ) >>"$log" 2>&1 &
     pids[$index]=$!
@@ -1090,7 +1091,7 @@ for index in "${!VALIDATORS[@]}"; do
         export SYNERGY_DATA_PATH="$data_dir"
         export SYNERGY_GENESIS_FILE="$genesis"
         export SYNERGY_VALIDATOR_MLDSA65_CONSENSUS_PRIVATE_KEY_FILE="${keys[$index]}"
-        export_release_binding
+        export_release_binding "$node_dir"
         exec "$validator_binary" preflight-release --config "$node_dir/config/node.toml"
     ) >"$preflight_log" 2>&1 || fail "$validator production-role release preflight failed; inspect $preflight_log"
     rg -F 'CHAIN1266_ROLE_RELEASE_PREFLIGHT_VERIFIED' "$preflight_log" >/dev/null || fail "$validator preflight emitted no verified role marker"
