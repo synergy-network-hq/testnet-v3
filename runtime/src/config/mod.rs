@@ -475,6 +475,10 @@ pub struct IdentityConfig {
     pub address: String,
     #[serde(default)]
     pub label: String,
+    /// NCP's opaque encrypted Aegis validator custody. The runtime only
+    /// consumes it through the Aegis in-memory unlock channel.
+    #[serde(default)]
+    pub encrypted_custody_path: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
@@ -1148,6 +1152,14 @@ fn ncp_managed_node_config(raw: &toml::Value) -> Result<NodeConfig, Box<dyn Erro
     config.logging.log_file = "data/logs/synergy-validator.log".to_string();
     config.identity.node_id = node_id;
     config.identity.role = role;
+    config.identity.encrypted_custody_path =
+        get_string(raw, &["identity", "encrypted_custody_path"])
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                "NCP-managed configuration is missing identity.encrypted_custody_path".to_string()
+            })?;
+    config.node.validator_address = config.identity.node_id.clone();
     config.role.compiled_profile = "validator_node".to_string();
     Ok(config)
 }
@@ -2333,6 +2345,7 @@ data_dir = "/var/lib/synergy/validator-02"
 
 [identity]
 node_id = "synv1ncpvalidatorfixture"
+encrypted_custody_path = "identity/validator.identity.enc"
 
 [p2p]
 listen_address = "10.69.0.2:5622"
@@ -2359,6 +2372,10 @@ startup_mode = "genesis-config-identity"
         assert!(parsed.network.additional_dial_targets.is_empty());
         assert_eq!(parsed.consensus.target_block_time_ms, 500);
         assert_eq!(parsed.storage.path, "/var/lib/synergy/validator-02");
+        assert_eq!(
+            parsed.identity.encrypted_custody_path,
+            "identity/validator.identity.enc"
+        );
         enforce_consensus_config_invariants(&parsed)
             .expect("expanded NCP config must satisfy consensus invariants");
     }
@@ -2376,6 +2393,7 @@ persistent_peers = ["10.69.0.3:5622"]
 
 [identity]
 node_id = "synv1ncpvalidatorfixture"
+encrypted_custody_path = "identity/validator.identity.enc"
 
 [p2p]
 listen_address = "10.69.0.2:5622"

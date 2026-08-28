@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::env;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{self, Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -108,7 +109,8 @@ use crate::validator::{consensus_membership_validators, ValidatorRegistration, V
 use crate::wallet;
 use crate::{info, warn};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
+use zeroize::Zeroizing;
 
 const OFFLINE_SNAPSHOT_COMMAND_STACK_BYTES: usize = 64 * 1024 * 1024;
 /// Network input is untrusted even after the P2P handshake.  Keep typed
@@ -810,6 +812,121 @@ fn resolve_local_validator_address(config: &NodeConfig) -> String {
     }
 
     config.p2p.node_name.clone()
+}
+
+/// Returns the consensus private key from the Aegis plaintext only while it is
+/// held in the current process. The caller owns zeroization of the source
+/// buffer and the returned string.
+fn aegis_consensus_private_key(plaintext: &[u8]) -> Result<Zeroizing<String>, String> {
+    let identity: Value = serde_json::from_slice(plaintext).map_err(|error| {
+        format!("Aegis custody plaintext is not valid validator identity JSON: {error}")
+    })?;
+    let encoded = identity
+        .get("keys")
+        .and_then(Value::as_array)
+        .and_then(|keys| {
+            keys.iter().find_map(|entry| {
+                (entry.get("role").and_then(Value::as_str) == Some("consensus"))
+                    .then(|| entry.get("private_key").and_then(Value::as_str))
+                    .flatten()
+            })
+        })
+        .filter(|key| !key.trim().is_empty())
+        .ok_or_else(|| "Aegis validator custody has no consensus private key".to_string())?;
+    Ok(Zeroizing::new(encoded.to_string()))
+}
+
+/// NCP's minimal node model keeps only encrypted validator custody on disk.
+/// This bridge invokes the approved Aegis engine with an NCP-provided stdin
+/// unlock secret, captures its stdout in memory, validates the ML-DSA key
+/// against the Genesis member record, and installs it into the process-local
+/// signing cache. It never creates a plaintext key file.
+fn unlock_ncp_aegis_validator_custody(
+    config: &NodeConfig,
+    config_path: &Path,
+    validator_address: &str,
+) -> Result<(), String> {
+    let configured_path = config.identity.encrypted_custody_path.trim();
+    if configured_path.is_empty() {
+        return Ok(());
+    }
+    if env::var("SYNERGY_NCP_CUSTODY_PASSPHRASE_STDIN")
+        .ok()
+        .as_deref()
+        != Some("1")
+    {
+        return Err(
+            "NCP encrypted custody requires its protected stdin unlock channel; refusing legacy plaintext-key fallback"
+                .to_string(),
+        );
+    }
+    let custody_path = PathBuf::from(configured_path);
+    let custody_path = if custody_path.is_absolute() {
+        custody_path
+    } else {
+        config_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(custody_path)
+    };
+    let custody_metadata = fs::metadata(&custody_path).map_err(|error| {
+        format!(
+            "NCP encrypted custody is unavailable at {}: {error}",
+            custody_path.display()
+        )
+    })?;
+    if !custody_metadata.is_file() || custody_metadata.len() == 0 {
+        return Err("NCP encrypted custody must be a non-empty regular file".to_string());
+    }
+
+    let engine_path = env::var("SYNERGY_AEGIS_ENGINE")
+        .map(PathBuf::from)
+        .map_err(|_| "NCP did not provide the bundled Aegis custody engine".to_string())?;
+    let engine_metadata = fs::metadata(&engine_path).map_err(|error| {
+        format!(
+            "NCP Aegis custody engine is unavailable at {}: {error}",
+            engine_path.display()
+        )
+    })?;
+    if !engine_metadata.is_file() {
+        return Err("NCP Aegis custody engine is not a regular file".to_string());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if engine_metadata.permissions().mode() & 0o022 != 0 {
+            return Err("NCP Aegis custody engine must not be group/world writable".to_string());
+        }
+    }
+
+    let mut passphrase = Zeroizing::new(String::new());
+    io::stdin()
+        .read_line(&mut passphrase)
+        .map_err(|error| format!("read NCP custody unlock channel: {error}"))?;
+    if passphrase.trim().is_empty() {
+        return Err("NCP custody unlock channel was empty".to_string());
+    }
+    let output = Command::new(&engine_path)
+        .args(["decrypt"])
+        .arg(&custody_path)
+        .arg("--stdout")
+        // The secret is passed only to the short-lived Aegis child, never in
+        // argv or a file. The engine emits plaintext solely through stdout.
+        .env("SYNERGY_DECRYPT_PASSPHRASE", passphrase.trim())
+        .output()
+        .map_err(|error| format!("run NCP Aegis custody engine: {error}"))?;
+    if !output.status.success() {
+        return Err("Aegis rejected NCP validator custody unlock".to_string());
+    }
+    let plaintext = Zeroizing::new(output.stdout);
+    let consensus_private_key = aegis_consensus_private_key(&plaintext)?;
+    crate::consensus::validator_keys::install_aegis_unlocked_validator_key(
+        0,
+        validator_address,
+        &consensus_private_key,
+        &VALIDATOR_MANAGER,
+    )?;
+    Ok(())
 }
 
 fn normalize_socket_address(bind_address: &str, default_port: u16) -> String {
@@ -4854,9 +4971,18 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                 info!(
                     "main",
                     "Canonical Genesis validator membership loaded before P2P",
-                    "validator_address" => validator_address,
+                    "validator_address" => validator_address.clone(),
                     "active_validator_count" => active_validator_count as u64
                 );
+                unlock_ncp_aegis_validator_custody(
+                    &config,
+                    &effective_config_path,
+                    &validator_address,
+                )
+                .unwrap_or_else(|error| {
+                    eprintln!("NCP encrypted validator custody failed closed: {error}");
+                    process::exit(1);
+                });
             }
             info!(
                 "main",
@@ -5868,6 +5994,27 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    #[test]
+    fn ncp_custody_selects_only_the_consensus_key() {
+        let identity = br#"{
+            "keys": [
+                {"role": "peer", "private_key": "peer-private"},
+                {"role": "consensus", "private_key": "consensus-private"}
+            ]
+        }"#;
+
+        let key = aegis_consensus_private_key(identity).expect("consensus key must be present");
+
+        assert_eq!(&*key, "consensus-private");
+    }
+
+    #[test]
+    fn ncp_custody_rejects_an_identity_without_a_consensus_key() {
+        let identity = br#"{"keys": [{"role": "peer", "private_key": "peer-private"}]}"#;
+
+        assert!(aegis_consensus_private_key(identity).is_err());
+    }
 
     fn simplified_readiness_validator_ids(
         validator_ids: &[&str],
