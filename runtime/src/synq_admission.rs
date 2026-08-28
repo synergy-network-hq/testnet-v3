@@ -21,6 +21,15 @@ pub const SYNQ_ADMISSION_VERSION: u16 = 1;
 pub const SYNQ_CANONICAL_TESTNET_NETWORK_ID: &str = "synergy-testnet";
 pub const SYNQ_DEPLOY_AUTHORIZATION_PURPOSE: &str = "synq-contract-deploy";
 pub const SYNQ_CALL_AUTHORIZATION_PURPOSE: &str = "synq-contract-call";
+/// Explicitly isolated authorization purposes used only by the offline R11
+/// qualification Genesis executor.  These are deliberately different from
+/// normal SNTS-bound admission purposes: the local fixture has a real Aegis
+/// ML-DSA-87 custody key, but no production Genesis identity-root custody.
+/// Normal transaction admission never selects this authority mode.
+pub const LOCAL_R11_GENESIS_DEPLOY_AUTHORIZATION_PURPOSE: &str =
+    "local-r11-qualification-genesis-synq-contract-deploy";
+pub const LOCAL_R11_GENESIS_CALL_AUTHORIZATION_PURPOSE: &str =
+    "local-r11-qualification-genesis-synq-contract-call";
 pub const MAX_SYNQ_DEPLOY_BYTECODE_BYTES: usize = 256 * 1024;
 pub const MAX_SYNQ_DEPLOY_ABI_JSON_BYTES: usize = 64 * 1024;
 pub const MAX_SYNQ_DEPLOY_MANIFEST_JSON_BYTES: usize = 64 * 1024;
@@ -804,6 +813,56 @@ fn authorized_envelope_signer(
     )
 }
 
+fn authorized_signer_for_authority(
+    envelope: &SynQAdmissionEnvelope,
+    public_key: &[u8],
+    consensus_timestamp_unix: u64,
+    authority: IdentityBindingAuthority<'_>,
+) -> Result<String, SynQAdmissionError> {
+    if let IdentityBindingAuthority::LocalR11Genesis {
+        expected_signer,
+        expected_public_key,
+    } = authority
+    {
+        if envelope.identity_authorization.is_some() {
+            return Err(SynQAdmissionError::InvalidCarrier {
+                code: "LOCAL-R11-AUTH-MODE",
+                message: "local R11 Genesis execution must not claim an SNTS production binding"
+                    .to_string(),
+            });
+        }
+        let expected_purpose = match envelope.kind {
+            SynQAdmissionKind::Deploy => LOCAL_R11_GENESIS_DEPLOY_AUTHORIZATION_PURPOSE,
+            SynQAdmissionKind::Call => LOCAL_R11_GENESIS_CALL_AUTHORIZATION_PURPOSE,
+        };
+        if envelope.authorization_purpose != expected_purpose {
+            return Err(SynQAdmissionError::InvalidCarrier {
+                code: "LOCAL-R11-AUTH-DOMAIN",
+                message: format!(
+                    "local R11 Genesis {:?} authorization purpose must be {expected_purpose}",
+                    envelope.kind
+                ),
+            });
+        }
+        if envelope.signer != expected_signer || public_key != expected_public_key {
+            return Err(SynQAdmissionError::InvalidCarrier {
+                code: "LOCAL-R11-AUTHORITY",
+                message: "local R11 Genesis signer address or ML-DSA-87 key differs from the frozen qualification authority"
+                    .to_string(),
+            });
+        }
+        return Ok(expected_signer.to_string());
+    }
+
+    let carrier = envelope.identity_authorization.as_ref().ok_or(
+        SynQAdmissionError::MissingRequiredField {
+            field: "identity_authorization",
+        },
+    )?;
+    require_current_identity_binding(carrier, authority)?;
+    authorized_envelope_signer(envelope, public_key, consensus_timestamp_unix)
+}
+
 /// `tsynq…` was an internal execution-signer identifier rendered with an
 /// address-like prefix. It is retired on Testnet-v3 and must never appear as a
 /// signer, caller or authority.
@@ -822,6 +881,10 @@ enum IdentityBindingAuthority<'a> {
     FinalizedSnapshot,
     ExactCurrentHash(&'a str),
     OfflineCreation,
+    LocalR11Genesis {
+        expected_signer: &'a str,
+        expected_public_key: &'a [u8],
+    },
 }
 
 fn require_current_identity_binding(
@@ -840,6 +903,13 @@ fn require_current_identity_binding(
         }
         IdentityBindingAuthority::ExactCurrentHash(hash) => hash.to_string(),
         IdentityBindingAuthority::OfflineCreation => return Ok(()),
+        IdentityBindingAuthority::LocalR11Genesis { .. } => {
+            return Err(SynQAdmissionError::InvalidCarrier {
+                code: "LOCAL-R11-AUTH-MODE",
+                message: "local R11 Genesis authorization cannot verify an SNTS carrier"
+                    .to_string(),
+            })
+        }
     };
     crate::identity_auth::require_canonical_current_binding(&carrier.binding, &current_hash)
         .map_err(|error| SynQAdmissionError::InvalidCarrier {
@@ -979,6 +1049,27 @@ pub fn verify_synq_deploy_for_offline_creation(
     )
 }
 
+/// Verifies one offline LOCAL_R11 Genesis deployment with the exact frozen
+/// qualification signer.  This still performs the production PQSynQ
+/// signature, network, payload, artifact, and constructor-argument checks.
+/// It does not claim that the qualification key has an SNTS production
+/// identity binding, and it is never used by normal transaction admission.
+pub fn verify_synq_deploy_for_local_r11_genesis(
+    envelope: &SynQAdmissionEnvelope,
+    now_unix: u64,
+    expected_signer: &str,
+    expected_public_key: &[u8],
+) -> Result<SynQVerificationSummary, SynQAdmissionError> {
+    verify_synq_deploy(
+        envelope,
+        now_unix,
+        IdentityBindingAuthority::LocalR11Genesis {
+            expected_signer,
+            expected_public_key,
+        },
+    )
+}
+
 fn verify_synq_deploy(
     envelope: &SynQAdmissionEnvelope,
     now_unix: u64,
@@ -996,14 +1087,8 @@ fn verify_synq_deploy(
         &envelope.encoded_pqsynq_envelope,
         "decode SynQ deploy envelope",
     )?;
-    let carrier = envelope.identity_authorization.as_ref().ok_or(
-        SynQAdmissionError::MissingRequiredField {
-            field: "identity_authorization",
-        },
-    )?;
-    require_current_identity_binding(carrier, authority)?;
     let authorized_signer =
-        authorized_envelope_signer(envelope, &deploy.public_key.bytes, now_unix)?;
+        authorized_signer_for_authority(envelope, &deploy.public_key.bytes, now_unix, authority)?;
     let context = pqsynq_context(envelope.chain_id, &normalized.pqsynq_network_id, now_unix);
     let verified = AegisSynQVerifier::testnet_1266()
         .verify_contract_deploy(&deploy, &context)
@@ -1074,6 +1159,23 @@ pub fn verify_synq_call_for_offline_creation(
     )
 }
 
+/// Call counterpart to `verify_synq_deploy_for_local_r11_genesis`.
+pub fn verify_synq_call_for_local_r11_genesis(
+    envelope: &SynQAdmissionEnvelope,
+    now_unix: u64,
+    expected_signer: &str,
+    expected_public_key: &[u8],
+) -> Result<SynQVerificationSummary, SynQAdmissionError> {
+    verify_synq_call(
+        envelope,
+        now_unix,
+        IdentityBindingAuthority::LocalR11Genesis {
+            expected_signer,
+            expected_public_key,
+        },
+    )
+}
+
 fn verify_synq_call(
     envelope: &SynQAdmissionEnvelope,
     now_unix: u64,
@@ -1088,13 +1190,8 @@ fn verify_synq_call(
         &envelope.encoded_pqsynq_envelope,
         "decode SynQ call envelope",
     )?;
-    let carrier = envelope.identity_authorization.as_ref().ok_or(
-        SynQAdmissionError::MissingRequiredField {
-            field: "identity_authorization",
-        },
-    )?;
-    require_current_identity_binding(carrier, authority)?;
-    let authorized_signer = authorized_envelope_signer(envelope, &call.public_key.bytes, now_unix)?;
+    let authorized_signer =
+        authorized_signer_for_authority(envelope, &call.public_key.bytes, now_unix, authority)?;
     let context = pqsynq_context(envelope.chain_id, &normalized.pqsynq_network_id, now_unix);
     AegisSynQVerifier::testnet_1266()
         .verify_contract_call(&call, &context)

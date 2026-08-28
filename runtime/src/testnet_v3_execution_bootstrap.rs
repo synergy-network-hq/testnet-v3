@@ -9,10 +9,17 @@
 
 use crate::execution::{compute_state_root_after, ExecutionState, GenesisExecutionSnapshot};
 use crate::genesis::GenesisDocument;
-use crate::synq_execution::{register_synq_artifact, SynQArtifactKey, SynQContractArtifact};
+use crate::genesis_deployment::compute_genesis_receipt_root;
+use crate::synq_execution::{
+    register_synq_artifact, SynQAivmReceiptSummary, SynQArtifactKey, SynQContractArtifact,
+};
+use crate::testnet_v3_release_approval::{
+    TestnetV3GenesisExecutionBundle, TESTNET_V3_GENESIS_EXECUTION_BUNDLE_ARTIFACT_TYPE,
+    TESTNET_V3_GENESIS_EXECUTION_BUNDLE_SCHEMA_VERSION,
+};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -145,13 +152,227 @@ fn contract_artifact_requirements(consensus_version: &str) -> (&'static str, &'s
 pub fn load_finalized_testnet_v3_genesis_execution_state(
     genesis: &GenesisDocument,
 ) -> Result<ExecutionState, String> {
+    validate_execution_genesis_domain(genesis)?;
+    load_finalized_execution_state_from_value(genesis, genesis.value())
+}
+
+/// Restores the separately stored execution bundle authenticated by the
+/// installed local-R11 approval. Qualification never falls back to an
+/// unapproved or embedded state. Existing production V4 Genesis documents
+/// retain their original embedded-snapshot path until their byte-compatible
+/// approval profile adopts the external bundle contract.
+pub fn load_verified_testnet_v3_release_execution_state(
+    genesis: &GenesisDocument,
+) -> Result<ExecutionState, String> {
+    validate_execution_genesis_domain(genesis)?;
+    let verified = crate::desired_state::verified_desired_state_identity().ok_or_else(|| {
+        "release execution state requires verified desired-state identity".to_string()
+    })?;
+    if verified.genesis_hash != genesis.hash() {
+        return Err("verified desired state disagrees with canonical Genesis hash".to_string());
+    }
+    let Some(approval) = verified.genesis_execution_approval.as_ref() else {
+        if genesis.value().get("env").and_then(Value::as_str)
+            == Some("chain1266-private-qualification")
+        {
+            return Err(
+                "local R11 qualification approval omits the Genesis execution bundle binding"
+                    .to_string(),
+            );
+        }
+        return load_finalized_testnet_v3_genesis_execution_state(genesis);
+    };
+    let path = crate::desired_state::configured_genesis_execution_snapshot_path()?;
+    let bytes = read_genesis_execution_bundle_bytes(&path)?;
+    verify_genesis_execution_bundle(
+        genesis,
+        &bytes,
+        approval,
+        &verified.testnet_v3_revision,
+        &verified.synq_revision,
+        &verified.aegis_revision,
+        &verified.binary_sha256,
+    )
+}
+
+fn read_genesis_execution_bundle_bytes(path: &Path) -> Result<Vec<u8>, String> {
+    fs::read(path).map_err(|error| {
+        format!(
+            "read approved Genesis execution bundle {}: {error}",
+            path.display()
+        )
+    })
+}
+
+fn verify_genesis_execution_bundle(
+    genesis: &GenesisDocument,
+    bytes: &[u8],
+    approval: &crate::desired_state::VerifiedGenesisExecutionApproval,
+    expected_testnet_v3_revision: &str,
+    expected_synq_revision: &str,
+    expected_aegis_revision: &str,
+    expected_validator_binary_sha256: &str,
+) -> Result<ExecutionState, String> {
+    verify_sha256(bytes, &approval.snapshot_sha256, "Genesis execution bundle")?;
+    let bundle: TestnetV3GenesisExecutionBundle = serde_json::from_slice(bytes)
+        .map_err(|error| format!("decode approved Genesis execution bundle: {error}"))?;
+
+    if bundle.schema_version != TESTNET_V3_GENESIS_EXECUTION_BUNDLE_SCHEMA_VERSION
+        || bundle.schema_version != approval.snapshot_schema_version
+        || bundle.artifact_type != TESTNET_V3_GENESIS_EXECUTION_BUNDLE_ARTIFACT_TYPE
+        || bundle.artifact_type != approval.snapshot_artifact_type
+    {
+        return Err("approved Genesis execution bundle has an unsupported schema".to_string());
+    }
+    if bundle.chain_id != 1266
+        || bundle.chain_id != genesis.chain_id()
+        || bundle.chain_id != approval.chain_id
+        || bundle.network_id != "testnet"
+        || bundle.network_id != approval.network_id
+        || bundle.release_id != "testnet-v3"
+        || bundle.release_id != approval.release_id
+        || bundle.protocol_version != genesis.consensus_version()
+        || bundle.canonical_genesis_hash != genesis.hash()
+        || bundle.canonical_genesis_hash != approval.genesis_hash
+    {
+        return Err(
+            "approved Genesis execution bundle has a wrong chain/network/release/Genesis binding"
+                .to_string(),
+        );
+    }
+    if bundle.testnet_v3_revision != expected_testnet_v3_revision
+        || bundle.synq_revision != expected_synq_revision
+        || bundle.aegis_revision != expected_aegis_revision
+        || bundle.validator_binary_sha256 != expected_validator_binary_sha256
+    {
+        return Err("approved Genesis execution bundle has stale release provenance".to_string());
+    }
+    if bundle.deployment_count != 9
+        || bundle.initialization_count != 27
+        || bundle.deployment_receipts.len() != bundle.deployment_count as usize
+        || bundle.initialization_receipts.len() != bundle.initialization_count as usize
+    {
+        return Err(
+            "approved Genesis execution bundle has incomplete receipt evidence".to_string(),
+        );
+    }
+
+    let canonical_snapshot = serde_json::to_vec(&bundle.execution_state)
+        .map_err(|error| format!("canonicalize approved Genesis execution snapshot: {error}"))?;
+    verify_sha256(
+        &canonical_snapshot,
+        &approval.snapshot_canonical_sha256,
+        "canonical Genesis execution snapshot",
+    )?;
+    if bundle.execution_state.schema_version != approval.snapshot_schema_version {
+        return Err("approved execution snapshot schema disagrees with its envelope".to_string());
+    }
+
+    // `restore_testnet_v3` reconstructs ExecutionState and independently
+    // recomputes both roots. A correct-looking declared root cannot conceal a
+    // byte edit to balances, contract storage, artifacts, or deployments.
+    let state = bundle.execution_state.restore_testnet_v3()?;
+    if bundle.execution_state_root != bundle.execution_state.state_root
+        || bundle.execution_state_root != approval.execution_state_root
+        || bundle.aivm_state_root != bundle.execution_state.aivm_state_root
+        || bundle.aivm_state_root != approval.aivm_state_root
+    {
+        return Err("approved Genesis execution bundle root binding mismatch".to_string());
+    }
+    let computed_receipt_root =
+        compute_genesis_receipt_root(&bundle.deployment_receipts, &bundle.initialization_receipts)?
+            .to_hex();
+    if bundle.receipt_root != computed_receipt_root || bundle.receipt_root != approval.receipt_root
+    {
+        return Err("approved Genesis execution bundle receipt root mismatch".to_string());
+    }
+
+    validate_restored_execution_state(genesis, &state)?;
+    validate_bundle_receipts(&bundle, &state)?;
+    Ok(state)
+}
+
+fn validate_execution_genesis_domain(genesis: &GenesisDocument) -> Result<(), String> {
     if genesis.chain_id() != 1266 || genesis.network_id() != 1266 {
         return Err("finalized SynQ Genesis state requires chain ID 1266".to_string());
     }
-    require_supported_execution_genesis_protocol(genesis, "finalized SynQ Genesis state")?;
+    require_supported_execution_genesis_protocol(genesis, "finalized SynQ Genesis state")
+}
 
-    let deployment = genesis
-        .value()
+fn validate_restored_execution_state(
+    genesis: &GenesisDocument,
+    state: &ExecutionState,
+) -> Result<(), String> {
+    if state.synq_artifacts.len() != FINALIZED_NATIVE_GENESIS_CONTRACTS.len()
+        || state.synq_contracts.len() != FINALIZED_NATIVE_GENESIS_CONTRACTS.len()
+        || state.balances_nwei.len() != genesis.balances().len()
+    {
+        return Err("finalized Genesis execution snapshot has invalid cardinality".to_string());
+    }
+    for balance in genesis.balances() {
+        if state.balances_nwei.get(&balance.address).copied()
+            != Some(u128::from(balance.balance_nwei))
+        {
+            return Err(format!(
+                "finalized Genesis execution balance mismatch for {}",
+                balance.address
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_bundle_receipts(
+    bundle: &TestnetV3GenesisExecutionBundle,
+    state: &ExecutionState,
+) -> Result<(), String> {
+    let mut deployed_addresses = BTreeSet::new();
+    for receipt in &bundle.deployment_receipts {
+        if receipt.operation != "deploy"
+            || receipt.status != "succeeded"
+            || receipt.error_code.is_some()
+            || receipt.error_message.is_some()
+            || !state.synq_contracts.contains_key(&receipt.contract_address)
+            || !deployed_addresses.insert(receipt.contract_address.clone())
+        {
+            return Err(
+                "Genesis execution bundle contains an invalid deployment receipt".to_string(),
+            );
+        }
+    }
+    for receipt in &bundle.initialization_receipts {
+        if receipt.operation != "call"
+            || receipt.status != "succeeded"
+            || receipt.error_code.is_some()
+            || receipt.error_message.is_some()
+            || !state.synq_contracts.contains_key(&receipt.contract_address)
+        {
+            return Err(
+                "Genesis execution bundle contains an invalid initialization receipt".to_string(),
+            );
+        }
+    }
+    let receipts: Vec<&SynQAivmReceiptSummary> = bundle
+        .deployment_receipts
+        .iter()
+        .chain(bundle.initialization_receipts.iter())
+        .collect();
+    if receipts
+        .windows(2)
+        .any(|pair| pair[0].post_state_root != pair[1].pre_state_root)
+    {
+        return Err(
+            "Genesis execution bundle receipt state transitions are discontinuous".to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn load_finalized_execution_state_from_value(
+    genesis: &GenesisDocument,
+    finalized: &Value,
+) -> Result<ExecutionState, String> {
+    let deployment = finalized
         .get("genesis_deployment")
         .filter(|value| value.is_object())
         .ok_or_else(|| "finalized Genesis is missing genesis_deployment".to_string())?;
@@ -184,15 +405,13 @@ pub fn load_finalized_testnet_v3_genesis_execution_state(
         || required_string(deployment, "post_deployment_aivm_state_root")?
             != snapshot.aivm_state_root
         || required_string(
-            genesis
-                .value()
+            finalized
                 .get("execution")
                 .ok_or_else(|| "finalized Genesis is missing execution metadata".to_string())?,
             "genesis_execution_state_root",
         )? != snapshot.state_root
         || required_string(
-            genesis
-                .value()
+            finalized
                 .get("execution")
                 .ok_or_else(|| "finalized Genesis is missing execution metadata".to_string())?,
             "genesis_aivm_state_root",
@@ -220,7 +439,7 @@ pub fn load_finalized_testnet_v3_genesis_execution_state(
         }
     }
 
-    let contracts = required_object(genesis.value(), "contracts")?;
+    let contracts = required_object(finalized, "contracts")?;
     for (genesis_key, contract_name) in FINALIZED_NATIVE_GENESIS_CONTRACTS {
         let contract = contracts
             .get(genesis_key)
@@ -437,6 +656,7 @@ fn required_string<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::desired_state::VerifiedGenesisExecutionApproval;
     use crate::synergy_types::TxId;
     use crate::synq_execution::{
         execute_synq_static_call, SynQContractArtifact, SynQDeploymentRecord, SynQExecutionContext,
@@ -446,6 +666,120 @@ mod tests {
     use aivm_core::synq_runtime::{deploy_synq_contract, synq_execution_request};
 
     const STATIC_COUNTER_ADDRESS: &str = "sync1p3staticcounterfixture00000000000000000";
+    const TEST_TESTNET_REVISION: &str = "1111111111111111111111111111111111111111";
+    const TEST_SYNQ_REVISION: &str = "2222222222222222222222222222222222222222";
+    const TEST_AEGIS_REVISION: &str = "3333333333333333333333333333333333333333";
+    const TEST_VALIDATOR_BINARY_SHA256: &str =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn finalized_bundle_fixture(
+        genesis: &GenesisDocument,
+    ) -> (
+        TestnetV3GenesisExecutionBundle,
+        VerifiedGenesisExecutionApproval,
+        Vec<u8>,
+    ) {
+        // The checked-in finalized deployment fixture supplies a real state
+        // and real deterministic receipts. The envelope is freshly bound to
+        // the current P3 unit-test Genesis so this test exercises the external
+        // artifact contract instead of the legacy embedded loader.
+        let finalized: Value = serde_json::from_str(include_str!(
+            "../../launch/production-node-configs/canonical-genesis/genesis.json"
+        ))
+        .expect("checked-in finalized Genesis fixture");
+        let deployment = finalized
+            .get("genesis_deployment")
+            .expect("fixture deployment");
+        let source_execution_state: GenesisExecutionSnapshot = serde_json::from_value(
+            deployment
+                .get("execution_state")
+                .expect("fixture execution state")
+                .clone(),
+        )
+        .expect("fixture execution snapshot");
+        let mut fixture_state = source_execution_state
+            .restore_testnet_v3()
+            .expect("restore checked-in execution snapshot");
+        fixture_state.balances_nwei = genesis
+            .balances()
+            .iter()
+            .map(|balance| (balance.address.clone(), u128::from(balance.balance_nwei)))
+            .collect();
+        let execution_state = GenesisExecutionSnapshot::capture_testnet_v3(&fixture_state)
+            .expect("capture P3-bound execution fixture");
+        let deployment_receipts = serde_json::from_value(
+            deployment
+                .get("deployment_receipts")
+                .expect("fixture deployment receipts")
+                .clone(),
+        )
+        .expect("decode deployment receipts");
+        let initialization_receipts = serde_json::from_value(
+            deployment
+                .get("initialization_receipts")
+                .expect("fixture initialization receipts")
+                .clone(),
+        )
+        .expect("decode initialization receipts");
+        let bundle = TestnetV3GenesisExecutionBundle {
+            schema_version: TESTNET_V3_GENESIS_EXECUTION_BUNDLE_SCHEMA_VERSION,
+            artifact_type: TESTNET_V3_GENESIS_EXECUTION_BUNDLE_ARTIFACT_TYPE.to_string(),
+            chain_id: 1266,
+            network_id: "testnet".to_string(),
+            release_id: "testnet-v3".to_string(),
+            protocol_version: genesis.consensus_version().to_string(),
+            canonical_genesis_hash: genesis.hash().to_string(),
+            testnet_v3_revision: TEST_TESTNET_REVISION.to_string(),
+            synq_revision: TEST_SYNQ_REVISION.to_string(),
+            aegis_revision: TEST_AEGIS_REVISION.to_string(),
+            validator_binary_sha256: TEST_VALIDATOR_BINARY_SHA256.to_string(),
+            execution_state_root: execution_state.state_root.clone(),
+            aivm_state_root: execution_state.aivm_state_root.clone(),
+            receipt_root: required_string(deployment, "receipt_root")
+                .expect("fixture receipt root")
+                .to_string(),
+            deployment_count: 9,
+            initialization_count: 27,
+            deployment_receipts,
+            initialization_receipts,
+            execution_state,
+        };
+        let bytes = serde_json::to_vec(&bundle).expect("serialize execution bundle");
+        let canonical_snapshot =
+            serde_json::to_vec(&bundle.execution_state).expect("canonical execution snapshot");
+        let approval = VerifiedGenesisExecutionApproval {
+            candidate_sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .to_string(),
+            snapshot_schema_version: TESTNET_V3_GENESIS_EXECUTION_BUNDLE_SCHEMA_VERSION,
+            snapshot_artifact_type: TESTNET_V3_GENESIS_EXECUTION_BUNDLE_ARTIFACT_TYPE.to_string(),
+            snapshot_sha256: hex::encode(Sha256::digest(&bytes)),
+            snapshot_canonical_sha256: hex::encode(Sha256::digest(&canonical_snapshot)),
+            genesis_hash: genesis.hash().to_string(),
+            chain_id: 1266,
+            network_id: "testnet".to_string(),
+            release_id: "testnet-v3".to_string(),
+            execution_state_root: bundle.execution_state_root.clone(),
+            aivm_state_root: bundle.aivm_state_root.clone(),
+            receipt_root: bundle.receipt_root.clone(),
+        };
+        (bundle, approval, bytes)
+    }
+
+    fn verify_fixture(
+        genesis: &GenesisDocument,
+        bytes: &[u8],
+        approval: &VerifiedGenesisExecutionApproval,
+    ) -> Result<ExecutionState, String> {
+        verify_genesis_execution_bundle(
+            genesis,
+            bytes,
+            approval,
+            TEST_TESTNET_REVISION,
+            TEST_SYNQ_REVISION,
+            TEST_AEGIS_REVISION,
+            TEST_VALIDATOR_BINARY_SHA256,
+        )
+    }
 
     fn deployed_fresh_p3_static_counter() -> (
         ContractState,
@@ -515,6 +849,99 @@ mod tests {
             "a fresh predeployment candidate must not be accepted as finalized Genesis",
         );
         assert!(error.contains("missing genesis_deployment"));
+    }
+
+    #[test]
+    fn approved_external_genesis_execution_bundle_fails_closed_on_every_binding_edge() {
+        let genesis = crate::genesis::canonical_genesis()
+            .expect("canonical unit-test Genesis must be fresh P3");
+        let (bundle, approval, bytes) = finalized_bundle_fixture(genesis);
+        let restored = verify_fixture(genesis, &bytes, &approval)
+            .expect("matching Genesis and approved execution bundle must restore");
+        assert_eq!(
+            compute_state_root_after(&restored)
+                .expect("restored execution root")
+                .to_hex(),
+            approval.execution_state_root
+        );
+
+        let mut byte_tamper = bytes.clone();
+        byte_tamper.push(b'\n');
+        assert!(verify_fixture(genesis, &byte_tamper, &approval)
+            .expect_err("byte tamper must fail")
+            .contains("SHA-256 mismatch"));
+
+        let mut wrong_genesis = bundle.clone();
+        wrong_genesis.canonical_genesis_hash = "00".repeat(32);
+        let wrong_genesis_bytes = serde_json::to_vec(&wrong_genesis).expect("wrong Genesis bundle");
+        let mut wrong_genesis_approval = approval.clone();
+        wrong_genesis_approval.snapshot_sha256 = hex::encode(Sha256::digest(&wrong_genesis_bytes));
+        assert!(
+            verify_fixture(genesis, &wrong_genesis_bytes, &wrong_genesis_approval)
+                .expect_err("snapshot from another Genesis must fail")
+                .contains("wrong chain/network/release/Genesis")
+        );
+
+        let mut altered_state = bundle.clone();
+        *altered_state
+            .execution_state
+            .balances_nwei
+            .values_mut()
+            .next()
+            .expect("fixture balance") += 1;
+        let altered_state_bytes = serde_json::to_vec(&altered_state).expect("altered state bundle");
+        let mut altered_state_approval = approval.clone();
+        altered_state_approval.snapshot_sha256 = hex::encode(Sha256::digest(&altered_state_bytes));
+        altered_state_approval.snapshot_canonical_sha256 = hex::encode(Sha256::digest(
+            &serde_json::to_vec(&altered_state.execution_state)
+                .expect("canonical altered execution snapshot"),
+        ));
+        assert!(
+            verify_fixture(genesis, &altered_state_bytes, &altered_state_approval)
+                .expect_err("right claimed root over altered state must fail")
+                .contains("state root mismatch")
+        );
+
+        let mut wrong_domain = bundle.clone();
+        wrong_domain.network_id = "mainnet".to_string();
+        let wrong_domain_bytes = serde_json::to_vec(&wrong_domain).expect("wrong-domain bundle");
+        let mut wrong_domain_approval = approval.clone();
+        wrong_domain_approval.snapshot_sha256 = hex::encode(Sha256::digest(&wrong_domain_bytes));
+        assert!(
+            verify_fixture(genesis, &wrong_domain_bytes, &wrong_domain_approval)
+                .expect_err("wrong chain/network must fail")
+                .contains("wrong chain/network/release/Genesis")
+        );
+
+        let mut stale = bundle.clone();
+        stale.testnet_v3_revision = "44".repeat(20);
+        let stale_bytes = serde_json::to_vec(&stale).expect("stale bundle");
+        let mut stale_approval = approval.clone();
+        stale_approval.snapshot_sha256 = hex::encode(Sha256::digest(&stale_bytes));
+        assert!(verify_fixture(genesis, &stale_bytes, &stale_approval)
+            .expect_err("stale release must fail")
+            .contains("stale release provenance"));
+
+        let mut altered_receipt = bundle;
+        altered_receipt.deployment_receipts[0]
+            .return_data_hex
+            .push_str("00");
+        let altered_receipt_bytes =
+            serde_json::to_vec(&altered_receipt).expect("altered receipt bundle");
+        let mut altered_receipt_approval = approval;
+        altered_receipt_approval.snapshot_sha256 =
+            hex::encode(Sha256::digest(&altered_receipt_bytes));
+        assert!(
+            verify_fixture(genesis, &altered_receipt_bytes, &altered_receipt_approval)
+                .expect_err("altered receipt must fail")
+                .contains("receipt root mismatch")
+        );
+
+        assert!(read_genesis_execution_bundle_bytes(Path::new(
+            "/missing/synergy-testnet-v3-genesis-execution-bundle.json"
+        ))
+        .expect_err("missing snapshot must fail closed")
+        .contains("read approved Genesis execution bundle"));
     }
 
     #[test]

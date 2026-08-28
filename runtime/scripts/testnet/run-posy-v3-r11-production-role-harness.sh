@@ -30,6 +30,7 @@ Usage:
     --genesis PATH --ingress-kem-registry-dir PATH \
     --desired-state PATH --desired-state-sha256 SHA256 \
     --release-approval PATH --authority-record PATH --release-candidate PATH \
+    --execution-snapshot PATH \
     --validator-02-config PATH --validator-02-key PATH \
     --validator-03-config PATH --validator-03-key PATH \
     --validator-04-config PATH --validator-04-key PATH \
@@ -44,8 +45,9 @@ All artifact paths are mandatory and must name the approved fresh-P3 release:
     for every target H3 through H20, under the runtime's exact
     epoch-root/epoch-0-height-N-cluster-C.json directory layout.
   * Desired state, its SHA-256, the dated V4 authority record, signed V4
-    approval, and immutable release candidate are all mandatory. They are
-    passed unchanged to the production verifier; no qualification bypass exists.
+    approval, immutable release candidate, and content-addressed Genesis
+    execution snapshot envelope are all mandatory. They are passed unchanged
+    to the production verifier; no qualification bypass exists.
   * Configurations are rendered validator profiles for validator-02 through
     validator-06, use technical network_id `testnet`, bind only loopback
     transports, and have distinct local P2P/RPC/metrics ports.
@@ -313,6 +315,7 @@ validate_artifacts() {
     require_qualification_file "V4_AUTHORITY_RECORD->ROLE_PREFLIGHT" "$authority_record"
     require_qualification_file "V4_RELEASE_APPROVAL->ROLE_PREFLIGHT" "$release_approval"
     require_qualification_file "V4_RELEASE_CANDIDATE->ROLE_PREFLIGHT" "$release_candidate"
+    require_qualification_file "EXECUTION_SNAPSHOT->ROLE_PREFLIGHT" "$execution_snapshot"
     [[ "$desired_state_sha256" =~ ^[0-9a-f]{64}$ ]] || fail_transition \
         "DESIRED_STATE_HASH->ROLE_PREFLIGHT" "--desired-state-sha256 must be lowercase SHA-256"
     [[ "$(shasum -a 256 "$desired_state" | awk '{print $1}')" == "$desired_state_sha256" ]] || fail_transition \
@@ -417,6 +420,7 @@ export_release_binding() {
         export SYNERGY_TESTNET_V3_AUTHORITY_RECORD="$authority_record"
     fi
     export SYNERGY_TESTNET_V3_RELEASE_CANDIDATE="$release_candidate"
+    export SYNERGY_TESTNET_V3_GENESIS_EXECUTION_SNAPSHOT="$execution_snapshot"
     export SYNERGY_CHAIN1266_QUALIFICATION_MODE=1
     export SYNERGY_CHAIN1266_QUALIFICATION_ROOT="$qualification_root"
 }
@@ -1120,6 +1124,7 @@ desired_state_sha256=""
 release_approval=""
 authority_record=""
 release_candidate=""
+execution_snapshot=""
 validator_binary="$runtime_root/target/debug/synergy-validator-node"
 work_dir=""
 timeout_secs=180
@@ -1143,6 +1148,7 @@ while (( $# > 0 )); do
         --release-approval) release_approval="${2:-}"; shift 2 ;;
         --authority-record) authority_record="${2:-}"; shift 2 ;;
         --release-candidate) release_candidate="${2:-}"; shift 2 ;;
+        --execution-snapshot) execution_snapshot="${2:-}"; shift 2 ;;
         --binary) validator_binary="${2:-}"; shift 2 ;;
         --work-dir) work_dir="${2:-}"; shift 2 ;;
         --timeout-secs) timeout_secs="${2:-}"; shift 2 ;;
@@ -1168,6 +1174,7 @@ done
 [[ -n "$release_approval" ]] || fail "--release-approval is required"
 [[ -n "$authority_record" ]] || fail "--authority-record is required"
 [[ -n "$release_candidate" ]] || fail "--release-candidate is required"
+[[ -n "$execution_snapshot" ]] || fail "--execution-snapshot is required"
 [[ "$timeout_secs" =~ ^[1-9][0-9]*$ ]] || fail "--timeout-secs must be a positive integer"
 
 if [[ -z "$work_dir" ]]; then

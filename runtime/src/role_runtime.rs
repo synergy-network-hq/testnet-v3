@@ -97,7 +97,10 @@ use crate::synergy_types::{
     TESTNET_V3_CLUSTER_SCHEDULE_VERSION,
 };
 use crate::telemetry;
-use crate::testnet_v3_execution_bootstrap::load_finalized_testnet_v3_genesis_execution_state;
+use crate::testnet_v3_execution_bootstrap::{
+    load_finalized_testnet_v3_genesis_execution_state,
+    load_verified_testnet_v3_release_execution_state,
+};
 use crate::token::TOKEN_MANAGER;
 use crate::transaction::Transaction;
 use crate::utils;
@@ -2748,7 +2751,7 @@ fn spawn_finalized_simplified_posy_driver(
     let protected_execution_sources = (material_mode == SimplifiedMaterialMode::Protected)
         .then(|| build_genesis_bootstrap_protected_input_source(&genesis))
         .transpose()?;
-    let genesis_execution_state = load_finalized_testnet_v3_genesis_execution_state(genesis)
+    let genesis_execution_state = load_verified_testnet_v3_release_execution_state(genesis)
         .map_err(|error| format!("load finalized Genesis execution state: {error}"))?;
     let genesis_runtime_metadata = simplified_genesis_runtime_metadata(genesis.value())?;
     let cryptographic_profile_root =

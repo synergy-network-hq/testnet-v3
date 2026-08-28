@@ -43,10 +43,19 @@ class HarnessContractTests(unittest.TestCase):
             genesis = root / "genesis.json"
             write_json(genesis, {
                 "network": {"chain_id": 1266},
-                "consensus": {"posy_v3_activation": {"manifest": {
-                    "protocol_version": "posy/3.0", "network_id": "testnet",
-                    "initial_validator_ids": VALIDATORS,
-                }}},
+                "consensus": {"posy_v3_activation": {
+                    "manifest": {
+                        "protocol_version": "posy/3.0",
+                        "network_id": "testnet",
+                        "active_validator_count": 5,
+                        "initial_validator_ids": VALIDATORS,
+                    },
+                    "frozen_validator_set": {
+                        "validators": [
+                            {"validator_id": validator} for validator in VALIDATORS
+                        ],
+                    },
+                }},
             })
             epoch_root_name = "01" * 32
             registry_root = root / "registries" / epoch_root_name
@@ -73,17 +82,15 @@ class HarnessContractTests(unittest.TestCase):
             keys = root / "keys"
             p2p_ports = {validator: 5602 + index for index, validator in enumerate(VALIDATORS)}
             rpc_ports = {validator: 6202 + index for index, validator in enumerate(VALIDATORS)}
+            seed_servers = ["http://127.0.0.1:18181", "http://127.0.0.1:18182"]
             for validator in VALIDATORS:
                 path = configs / validator / "config.toml"
                 path.parent.mkdir(parents=True)
-                targets = [
-                    f'"127.0.0.1:{p2p_ports[peer]}"'
-                    for peer in VALIDATORS if peer != validator
-                ]
                 path.write_text(
                     f"[identity]\nnode_id = \"{validator}\"\naddress = \"synv1fixture{validator[-2:]}\"\n"
                     f"[network]\np2p_port = {p2p_ports[validator]}\nrpc_port = {rpc_ports[validator]}\n"
-                    f"additional_dial_targets = [{','.join(targets)}]\n"
+                    "additional_dial_targets = []\n"
+                    f"seed_servers = {json.dumps(seed_servers)}\n"
                     f"[p2p]\nlisten_address = \"127.0.0.1:{p2p_ports[validator]}\"\n"
                     f"[rpc]\nbind_address = \"127.0.0.1:{rpc_ports[validator]}\"\n",
                     encoding="utf-8",
@@ -93,7 +100,8 @@ class HarnessContractTests(unittest.TestCase):
             authority = root / "authority.json"
             approval = root / "approval.json"
             candidate = root / "candidate.json"
-            for path in (authority, approval, candidate):
+            execution_snapshot = root / "genesis-execution-snapshot.json"
+            for path in (authority, approval, candidate, execution_snapshot):
                 path.write_text("{}", encoding="utf-8")
             binary = root / "synergy-validator-node"
             binary.write_text("""#!/usr/bin/env bash
@@ -131,7 +139,9 @@ esac
                 "bash", str(HARNESS), "--genesis", str(genesis), "--ingress-kem-registry-dir", str(root / "registries"),
                 "--desired-state", str(desired), "--desired-state-sha256", desired_sha,
                 "--authority-record", str(authority), "--release-approval", str(approval),
-                "--release-candidate", str(candidate), "--binary", str(binary), "--work-dir", str(work_dir),
+                "--release-candidate", str(candidate),
+                "--execution-snapshot", str(execution_snapshot),
+                "--binary", str(binary), "--work-dir", str(work_dir),
                 "--timeout-secs", "1",
             ]
             for validator in VALIDATORS:
@@ -176,20 +186,25 @@ esac
                 env = (captures / f"{validator}.env").read_text(encoding="utf-8")
                 self.assertIn(f"SYNERGY_DESIRED_STATE_MANIFEST={desired}", env)
                 self.assertIn(f"SYNERGY_DESIRED_STATE_MANIFEST_SHA256={desired_sha}", env)
-                self.assertIn(f"SYNERGY_TESTNET_V3_AUTHORITY_RECORD={authority}", env)
+                self.assertIn(
+                    f"SYNERGY_TESTNET_V3_AUTHORITY_RECORD={work_dir / 'nodes' / validator / 'authority-record.json'}",
+                    env,
+                )
                 self.assertIn(f"SYNERGY_TESTNET_V3_RELEASE_APPROVAL={approval}", env)
                 self.assertIn(f"SYNERGY_TESTNET_V3_RELEASE_CANDIDATE={candidate}", env)
+                self.assertIn(
+                    f"SYNERGY_TESTNET_V3_GENESIS_EXECUTION_SNAPSHOT={execution_snapshot}",
+                    env,
+                )
                 expected_data = work_dir / "nodes" / validator / "chain-1266" / "incarnation-5" / "data"
                 self.assertIn(f"SYNERGY_DATA_PATH={expected_data}", env)
-                self.assertNotIn("SYNERGY_CHAIN1266_QUALIFICATION_MODE=", env)
+                self.assertIn("SYNERGY_CHAIN1266_QUALIFICATION_MODE=1", env)
                 staged_config = work_dir / "nodes" / validator / "config" / "node.toml"
                 self.assertEqual(staged_config.read_bytes(), (configs / validator / "config.toml").read_bytes())
                 with staged_config.open("rb") as handle:
                     staged_toml = tomllib.load(handle)
-                expected_targets = {
-                    f"127.0.0.1:{p2p_ports[peer]}" for peer in VALIDATORS if peer != validator
-                }
-                self.assertEqual(set(staged_toml["network"]["additional_dial_targets"]), expected_targets)
+                self.assertEqual(staged_toml["network"]["additional_dial_targets"], [])
+                self.assertEqual(staged_toml["network"]["seed_servers"], seed_servers)
 
 if __name__ == "__main__":
     unittest.main()

@@ -17,6 +17,9 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use crate::address::derive_standard_account_address;
+use crate::execution::GenesisExecutionSnapshot;
+use crate::genesis_deployment::compute_genesis_receipt_root;
+use crate::synq_execution::SynQAivmReceiptSummary;
 
 /// The exact ML-DSA context used for Testnet-v3 genesis release approval.
 pub const TESTNET_V3_GENESIS_RELEASE_APPROVAL_DOMAIN: &str =
@@ -39,6 +42,11 @@ pub const LOCAL_R11_QUALIFICATION_AUTHORITY_ROLE: &str =
 pub const LOCAL_R11_QUALIFICATION_APPROVAL_ARTIFACT_TYPE: &str =
     "local-r11-qualification-genesis-release-approval";
 pub const LOCAL_R11_QUALIFICATION_RELEASE_ACTION: &str = "AUTHORIZE_LOCAL_R11_QUALIFICATION_ONLY";
+/// Strict envelope carried beside the canonical Genesis. The approval binds
+/// the SHA-256 of the exact envelope bytes, not merely the nested state.
+pub const TESTNET_V3_GENESIS_EXECUTION_BUNDLE_ARTIFACT_TYPE: &str =
+    "synergy-testnet-v3-genesis-execution-bundle-v1";
+pub const TESTNET_V3_GENESIS_EXECUTION_BUNDLE_SCHEMA_VERSION: u32 = 1;
 
 const SCHEMA_VERSION: u32 = 4;
 const EXPECTED_CHAIN_ID: u64 = 1266;
@@ -47,10 +55,43 @@ const EXPECTED_CHAIN_ID: u64 = 1266;
 const EXPECTED_NETWORK_ID: &str = "testnet";
 const EXPECTED_RELEASE_ID: &str = "testnet-v3";
 const EXPECTED_SYNQ_NETWORK_ID: &str = "synergy-testnet";
+const EXPECTED_PROTOCOL_VERSION: &str = "posy/3.0";
 const EXPECTED_ALGORITHM: &str = "ML-DSA-87";
 const EXPECTED_AUTHORITIES_ARTIFACT: &str = "TESTNET_V3_PRODUCTION_AUTHORITIES";
 const LOCAL_R11_QUALIFICATION_AUTHORITIES_ARTIFACT: &str = "LOCAL_R11_QUALIFICATION_AUTHORITIES";
 const ETDAG_MEMBERSHIP_ANCHOR_SCHEMA: &str = "synergy-etdag-governed-membership-proof-v1";
+const MAX_GENESIS_EXECUTION_BUNDLE_BYTES: u64 = 128 * 1024 * 1024;
+
+/// A complete, independently restorable Genesis execution-state carrier.
+///
+/// `execution_snapshot_sha256` in the signed approval is the SHA-256 of the
+/// exact serialized bytes of this entire envelope. The separately signed
+/// `execution_state_canonical_sha256` is the SHA-256 of `serde_json::to_vec`
+/// over only `execution_state`, so transport formatting and state identity are
+/// both unambiguous.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TestnetV3GenesisExecutionBundle {
+    pub schema_version: u32,
+    pub artifact_type: String,
+    pub chain_id: u64,
+    pub network_id: String,
+    pub release_id: String,
+    pub protocol_version: String,
+    pub canonical_genesis_hash: String,
+    pub testnet_v3_revision: String,
+    pub synq_revision: String,
+    pub aegis_revision: String,
+    pub validator_binary_sha256: String,
+    pub execution_state_root: String,
+    pub aivm_state_root: String,
+    pub receipt_root: String,
+    pub deployment_count: u64,
+    pub initialization_count: u64,
+    pub deployment_receipts: Vec<SynQAivmReceiptSummary>,
+    pub initialization_receipts: Vec<SynQAivmReceiptSummary>,
+    pub execution_state: GenesisExecutionSnapshot,
+}
 
 /// The immutable facts a governance signature authorizes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -71,6 +112,19 @@ pub struct TestnetV3GenesisReleaseApprovalRequest {
     pub governance_public_key_fingerprint: String,
     pub governance_identity_authorization_binding_sha3_256: String,
     pub candidate_sha256: String,
+    /// Local-R11 only. This is the SHA-256 of the exact external execution
+    /// bundle envelope bytes, not the nested execution-state JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_snapshot_sha256: Option<String>,
+    /// Local-R11 only. Canonical SHA-256 of the nested execution state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_state_canonical_sha256: Option<String>,
+    /// Local-R11 only. Exact strict-envelope schema accepted by validators.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_snapshot_schema_version: Option<u32>,
+    /// Local-R11 only. Exact strict-envelope artifact type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_snapshot_artifact_type: Option<String>,
     pub genesis_hash: String,
     pub chain_id: u64,
     pub network_id: String,
@@ -228,6 +282,7 @@ pub fn build_release_approval_request(
         candidate_path,
         authorities_path,
         desired_state_path,
+        None,
         AuthorityMaterial::RecordOnly,
         ReleaseApprovalProfile::Production,
     )
@@ -238,12 +293,14 @@ pub fn build_local_r11_qualification_release_approval_request(
     candidate_path: &Path,
     authorities_path: &Path,
     desired_state_path: &Path,
+    execution_bundle_path: &Path,
 ) -> Result<TestnetV3GenesisReleaseApprovalRequest, String> {
     build_release_approval_request_inner(
         repo_root,
         candidate_path,
         authorities_path,
         desired_state_path,
+        Some(execution_bundle_path),
         AuthorityMaterial::RecordOnly,
         ReleaseApprovalProfile::LocalR11Qualification,
     )
@@ -256,11 +313,165 @@ enum AuthorityMaterial {
     CustodyHashes,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalR11ExecutionBundleBinding {
+    schema_version: u32,
+    artifact_type: String,
+    envelope_sha256: String,
+    execution_state_canonical_sha256: String,
+}
+
+fn load_local_r11_execution_bundle_binding(
+    execution_bundle_path: &Path,
+    candidate: &Value,
+    desired_state: &FreshP3DesiredStateBinding,
+) -> Result<LocalR11ExecutionBundleBinding, String> {
+    let bytes = read_regular_bounded_file(
+        execution_bundle_path,
+        "local R11 Genesis execution bundle",
+        MAX_GENESIS_EXECUTION_BUNDLE_BYTES,
+    )?;
+    let envelope_sha256 = sha256_hex(&bytes);
+    let bundle: TestnetV3GenesisExecutionBundle = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("parse local R11 Genesis execution bundle: {error}"))?;
+    let genesis_hash = json_string(
+        candidate,
+        "/integrity/genesis_hash",
+        "candidate genesis hash",
+    )?;
+    let candidate_execution_root = json_string(
+        candidate,
+        "/genesis_deployment/post_deployment_execution_state_root",
+        "candidate post-deployment execution root",
+    )?;
+    let candidate_aivm_root = json_string(
+        candidate,
+        "/genesis_deployment/post_deployment_aivm_state_root",
+        "candidate post-deployment AIVM root",
+    )?;
+    let candidate_receipt_root = json_string(
+        candidate,
+        "/genesis_deployment/receipt_root",
+        "candidate deployment receipt root",
+    )?;
+
+    if bundle.schema_version != TESTNET_V3_GENESIS_EXECUTION_BUNDLE_SCHEMA_VERSION
+        || bundle.artifact_type != TESTNET_V3_GENESIS_EXECUTION_BUNDLE_ARTIFACT_TYPE
+        || bundle.chain_id != EXPECTED_CHAIN_ID
+        || bundle.network_id != EXPECTED_NETWORK_ID
+        || bundle.release_id != EXPECTED_RELEASE_ID
+        || bundle.protocol_version != EXPECTED_PROTOCOL_VERSION
+        || bundle.canonical_genesis_hash != genesis_hash
+    {
+        return Err(
+            "local R11 Genesis execution bundle has a wrong schema, chain, network, release, protocol, or canonical Genesis binding"
+                .to_string(),
+        );
+    }
+    if bundle.testnet_v3_revision != desired_state.testnet_v3_revision
+        || bundle.synq_revision != desired_state.synq_revision
+        || bundle.aegis_revision != desired_state.aegis_revision
+        || desired_state
+            .role_binary_sha256
+            .get("validator_node")
+            .map(String::as_str)
+            != Some(bundle.validator_binary_sha256.as_str())
+    {
+        return Err(
+            "local R11 Genesis execution bundle does not match desired-state release provenance"
+                .to_string(),
+        );
+    }
+    if bundle.deployment_count != 9
+        || bundle.initialization_count != 27
+        || bundle.deployment_receipts.len() != bundle.deployment_count as usize
+        || bundle.initialization_receipts.len() != bundle.initialization_count as usize
+    {
+        return Err(
+            "local R11 Genesis execution bundle does not contain exactly 9 deployment and 27 initialization receipts"
+                .to_string(),
+        );
+    }
+
+    // This is the independent computation edge: declarations in the envelope
+    // and candidate are accepted only after the strict snapshot restores and
+    // recomputes both root-bearing state commitments.
+    bundle
+        .execution_state
+        .restore_testnet_v3()
+        .map_err(|error| format!("restore local R11 Genesis execution state: {error}"))?;
+    if bundle.execution_state.state_root != bundle.execution_state_root
+        || bundle.execution_state.aivm_state_root != bundle.aivm_state_root
+        || bundle.execution_state_root != candidate_execution_root
+        || bundle.aivm_state_root != candidate_aivm_root
+    {
+        return Err(
+            "local R11 Genesis execution bundle computed roots do not match its envelope and approved candidate"
+                .to_string(),
+        );
+    }
+    let computed_receipt_root =
+        compute_genesis_receipt_root(&bundle.deployment_receipts, &bundle.initialization_receipts)?
+            .to_hex();
+    if computed_receipt_root != bundle.receipt_root
+        || computed_receipt_root != candidate_receipt_root
+    {
+        return Err(
+            "local R11 Genesis execution bundle computed receipt root does not match its envelope and approved candidate"
+                .to_string(),
+        );
+    }
+
+    let execution_state_canonical_sha256 = sha256_hex(
+        &serde_json::to_vec(&bundle.execution_state)
+            .map_err(|error| format!("canonicalize local R11 execution state: {error}"))?,
+    );
+    let binding = candidate
+        .pointer("/genesis_execution_snapshot")
+        .ok_or_else(|| {
+            "local R11 candidate is missing genesis_execution_snapshot binding".to_string()
+        })?;
+    if json_u64(
+        binding,
+        "/schema_version",
+        "candidate execution-snapshot schema version",
+    )? != u64::from(TESTNET_V3_GENESIS_EXECUTION_BUNDLE_SCHEMA_VERSION)
+        || json_string(
+            binding,
+            "/artifact_type",
+            "candidate execution-snapshot artifact type",
+        )? != TESTNET_V3_GENESIS_EXECUTION_BUNDLE_ARTIFACT_TYPE
+        || json_string(
+            binding,
+            "/sha256",
+            "candidate execution-snapshot envelope SHA-256",
+        )? != envelope_sha256
+        || json_string(
+            binding,
+            "/execution_state_canonical_sha256",
+            "candidate canonical execution-state SHA-256",
+        )? != execution_state_canonical_sha256
+    {
+        return Err(
+            "local R11 candidate does not bind the exact verified Genesis execution bundle"
+                .to_string(),
+        );
+    }
+
+    Ok(LocalR11ExecutionBundleBinding {
+        schema_version: bundle.schema_version,
+        artifact_type: bundle.artifact_type,
+        envelope_sha256,
+        execution_state_canonical_sha256,
+    })
+}
+
 fn build_release_approval_request_inner(
     repo_root: &Path,
     candidate_path: &Path,
     authorities_path: &Path,
     desired_state_path: &Path,
+    execution_bundle_path: Option<&Path>,
     authority_material: AuthorityMaterial,
     profile: ReleaseApprovalProfile,
 ) -> Result<TestnetV3GenesisReleaseApprovalRequest, String> {
@@ -293,6 +504,26 @@ fn build_release_approval_request_inner(
             "candidate genesis hash",
         )?,
     )?;
+    let execution_bundle = match profile {
+        ReleaseApprovalProfile::Production => {
+            if execution_bundle_path.is_some() {
+                return Err(
+                    "production V4 request does not accept the local R11 execution bundle"
+                        .to_string(),
+                );
+            }
+            None
+        }
+        ReleaseApprovalProfile::LocalR11Qualification => {
+            Some(load_local_r11_execution_bundle_binding(
+                execution_bundle_path.ok_or_else(|| {
+                    "local R11 approval requires an external Genesis execution bundle".to_string()
+                })?,
+                &candidate,
+                &desired_state,
+            )?)
+        }
+    };
     let etdag_binding = load_candidate_etdag_governance(&candidate)?;
     let etdag_membership_anchor = load_candidate_etdag_membership_anchor(&candidate)?;
 
@@ -309,6 +540,18 @@ fn build_release_approval_request_inner(
         governance_identity_authorization_binding_sha3_256: authority
             .governance_identity_authorization_binding_sha3_256,
         candidate_sha256: sha256_hex(&candidate_bytes),
+        execution_snapshot_sha256: execution_bundle
+            .as_ref()
+            .map(|binding| binding.envelope_sha256.clone()),
+        execution_state_canonical_sha256: execution_bundle
+            .as_ref()
+            .map(|binding| binding.execution_state_canonical_sha256.clone()),
+        execution_snapshot_schema_version: execution_bundle
+            .as_ref()
+            .map(|binding| binding.schema_version),
+        execution_snapshot_artifact_type: execution_bundle
+            .as_ref()
+            .map(|binding| binding.artifact_type.clone()),
         genesis_hash: json_string(
             &candidate,
             "/integrity/genesis_hash",
@@ -839,6 +1082,7 @@ pub fn verify_release_approval_file_public(
         candidate_path,
         authorities_path,
         desired_state_path,
+        None,
         approval_path,
         ReleaseApprovalProfile::Production,
     )
@@ -853,6 +1097,7 @@ pub fn verify_local_r11_qualification_release_approval_file_public(
     candidate_path: &Path,
     authorities_path: &Path,
     desired_state_path: &Path,
+    execution_bundle_path: &Path,
     approval_path: &Path,
 ) -> Result<TestnetV3GenesisReleaseApprovalRequest, String> {
     verify_release_approval_file_public_inner(
@@ -860,6 +1105,7 @@ pub fn verify_local_r11_qualification_release_approval_file_public(
         candidate_path,
         authorities_path,
         desired_state_path,
+        Some(execution_bundle_path),
         approval_path,
         ReleaseApprovalProfile::LocalR11Qualification,
     )
@@ -870,6 +1116,7 @@ fn verify_release_approval_file_public_inner(
     candidate_path: &Path,
     authorities_path: &Path,
     desired_state_path: &Path,
+    execution_bundle_path: Option<&Path>,
     approval_path: &Path,
     profile: ReleaseApprovalProfile,
 ) -> Result<TestnetV3GenesisReleaseApprovalRequest, String> {
@@ -878,6 +1125,7 @@ fn verify_release_approval_file_public_inner(
         candidate_path,
         authorities_path,
         desired_state_path,
+        execution_bundle_path,
         AuthorityMaterial::PublicBundle,
         profile,
     )?;
@@ -1221,6 +1469,48 @@ fn validate_request_shape_for_profile(
             "release-approval request has an invalid immutable Testnet-v3 binding".to_string(),
         );
     }
+    match profile {
+        ReleaseApprovalProfile::Production => {
+            if request.execution_snapshot_sha256.is_some()
+                || request.execution_state_canonical_sha256.is_some()
+                || request.execution_snapshot_schema_version.is_some()
+                || request.execution_snapshot_artifact_type.is_some()
+            {
+                return Err(
+                    "production V4 request cannot carry the local R11 execution-snapshot extension"
+                        .to_string(),
+                );
+            }
+        }
+        ReleaseApprovalProfile::LocalR11Qualification => {
+            if request.execution_snapshot_schema_version
+                != Some(TESTNET_V3_GENESIS_EXECUTION_BUNDLE_SCHEMA_VERSION)
+                || request.execution_snapshot_artifact_type.as_deref()
+                    != Some(TESTNET_V3_GENESIS_EXECUTION_BUNDLE_ARTIFACT_TYPE)
+                || !request
+                    .execution_snapshot_sha256
+                    .as_deref()
+                    .is_some_and(|digest| is_lower_hex(digest, 32))
+                || !request
+                    .execution_state_canonical_sha256
+                    .as_deref()
+                    .is_some_and(|digest| is_lower_hex(digest, 32))
+                || request
+                    .execution_snapshot_sha256
+                    .as_deref()
+                    .is_some_and(|digest| digest.bytes().all(|byte| byte == b'0'))
+                || request
+                    .execution_state_canonical_sha256
+                    .as_deref()
+                    .is_some_and(|digest| digest.bytes().all(|byte| byte == b'0'))
+            {
+                return Err(
+                    "local R11 release approval does not bind a valid Genesis execution bundle"
+                        .to_string(),
+                );
+            }
+        }
+    }
     for (label, value, bytes) in [
         ("candidate_sha256", &request.candidate_sha256, 32),
         ("genesis_hash", &request.genesis_hash, 32),
@@ -1381,6 +1671,21 @@ fn read_file(path: &Path, label: &str) -> Result<Vec<u8>, String> {
     fs::read(path).map_err(|error| format!("read {label} {}: {error}", path.display()))
 }
 
+fn read_regular_bounded_file(path: &Path, label: &str, maximum: u64) -> Result<Vec<u8>, String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("inspect {label} {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!("{label} must be a regular non-symlink file"));
+    }
+    if metadata.len() > maximum {
+        return Err(format!(
+            "{label} is {} bytes; maximum accepted size is {maximum}",
+            metadata.len()
+        ));
+    }
+    read_file(path, label)
+}
+
 fn parse_json(bytes: &[u8], label: &str) -> Result<Value, String> {
     serde_json::from_slice(bytes).map_err(|error| format!("parse {label} JSON: {error}"))
 }
@@ -1461,6 +1766,7 @@ mod tests {
         candidate: PathBuf,
         authorities: PathBuf,
         desired_state: PathBuf,
+        execution_bundle: PathBuf,
     }
 
     fn test_authority_keypair() -> (Vec<u8>, Vec<u8>) {
@@ -1676,6 +1982,7 @@ mod tests {
         )
         .expect("write desired state");
         TestRepository {
+            execution_bundle: root.join("genesis-execution-bundle.json"),
             root,
             candidate,
             authorities,
@@ -1757,6 +2064,93 @@ mod tests {
             serde_json::to_vec(&candidate).expect("encode candidate"),
         )
         .expect("write candidate");
+
+        let state =
+            crate::execution::ExecutionState::new().with_balance("local-r11-genesis-account", 1266);
+        let execution_state = GenesisExecutionSnapshot::capture_testnet_v3(&state)
+            .expect("capture local R11 test execution state");
+        let receipt = |ordinal: usize, operation: &str| SynQAivmReceiptSummary {
+            operation: operation.to_string(),
+            contract_address: format!("synq-test-contract-{ordinal:02}"),
+            status: "Success".to_string(),
+            gas_used: ordinal as u64,
+            pqc_gas_used: 0,
+            return_data_hex: String::new(),
+            pre_state_root: format!("{:064x}", ordinal),
+            post_state_root: format!("{:064x}", ordinal + 1),
+            receipt_hash: format!("{:064x}", ordinal + 2),
+            logs: vec![format!("receipt-{ordinal:02}")],
+            native_transfers: Vec::new(),
+            error_code: None,
+            error_message: None,
+        };
+        let deployment_receipts = (0..9)
+            .map(|ordinal| receipt(ordinal, "deploy"))
+            .collect::<Vec<_>>();
+        let initialization_receipts = (9..36)
+            .map(|ordinal| receipt(ordinal, "call"))
+            .collect::<Vec<_>>();
+        let receipt_root =
+            compute_genesis_receipt_root(&deployment_receipts, &initialization_receipts)
+                .expect("compute local R11 test receipt root")
+                .to_hex();
+        let bundle = TestnetV3GenesisExecutionBundle {
+            schema_version: TESTNET_V3_GENESIS_EXECUTION_BUNDLE_SCHEMA_VERSION,
+            artifact_type: TESTNET_V3_GENESIS_EXECUTION_BUNDLE_ARTIFACT_TYPE.to_string(),
+            chain_id: EXPECTED_CHAIN_ID,
+            network_id: EXPECTED_NETWORK_ID.to_string(),
+            release_id: EXPECTED_RELEASE_ID.to_string(),
+            protocol_version: EXPECTED_PROTOCOL_VERSION.to_string(),
+            canonical_genesis_hash: "11".repeat(32),
+            testnet_v3_revision: "33".repeat(20),
+            synq_revision: "44".repeat(20),
+            aegis_revision: "55".repeat(20),
+            validator_binary_sha256: "66".repeat(32),
+            execution_state_root: execution_state.state_root.clone(),
+            aivm_state_root: execution_state.aivm_state_root.clone(),
+            receipt_root: receipt_root.clone(),
+            deployment_count: deployment_receipts.len() as u64,
+            initialization_count: initialization_receipts.len() as u64,
+            deployment_receipts,
+            initialization_receipts,
+            execution_state,
+        };
+        let bundle_bytes = serde_json::to_vec(&bundle).expect("encode local R11 execution bundle");
+        fs::write(&repository.execution_bundle, &bundle_bytes)
+            .expect("write local R11 execution bundle");
+
+        let mut candidate: Value =
+            serde_json::from_slice(&fs::read(&repository.candidate).expect("read candidate"))
+                .expect("parse candidate");
+        candidate["genesis_deployment"]["post_deployment_execution_state_root"] =
+            Value::String(bundle.execution_state_root.clone());
+        candidate["genesis_deployment"]["post_deployment_aivm_state_root"] =
+            Value::String(bundle.aivm_state_root.clone());
+        candidate["genesis_deployment"]["receipt_root"] =
+            Value::String(bundle.receipt_root.clone());
+        let mut anchor: crate::etdag_governance::EtdagGovernedMembershipAnchor =
+            serde_json::from_value(candidate["etdag_membership_anchor"].clone())
+                .expect("parse local R11 membership anchor");
+        anchor.deployed_execution_state_root = bundle.execution_state_root.clone();
+        anchor.anchor_digest = anchor
+            .expected_anchor_digest()
+            .expect("recompute local R11 membership anchor");
+        candidate["etdag_membership_anchor"] =
+            serde_json::to_value(anchor).expect("encode local R11 membership anchor");
+        candidate["genesis_execution_snapshot"] = json!({
+            "schema_version": TESTNET_V3_GENESIS_EXECUTION_BUNDLE_SCHEMA_VERSION,
+            "artifact_type": TESTNET_V3_GENESIS_EXECUTION_BUNDLE_ARTIFACT_TYPE,
+            "sha256": sha256_hex(&bundle_bytes),
+            "execution_state_canonical_sha256": sha256_hex(
+                &serde_json::to_vec(&bundle.execution_state)
+                    .expect("canonicalize local R11 execution state")
+            ),
+        });
+        fs::write(
+            &repository.candidate,
+            serde_json::to_vec(&candidate).expect("encode snapshot-bound candidate"),
+        )
+        .expect("write snapshot-bound candidate");
         repository
     }
 
@@ -1881,6 +2275,7 @@ mod tests {
             &repository.candidate,
             &repository.authorities,
             &repository.desired_state,
+            &repository.execution_bundle,
         )
         .expect("build local R11 request");
         let signing_key =
@@ -1978,6 +2373,7 @@ mod tests {
             &repository.candidate,
             &repository.authorities,
             &repository.desired_state,
+            &repository.execution_bundle,
             &approval_path,
         )
         .expect("verify domain-separated local V4 approval");
@@ -1989,6 +2385,22 @@ mod tests {
             verified.signature_domain,
             LOCAL_R11_QUALIFICATION_RELEASE_APPROVAL_DOMAIN
         );
+        assert_eq!(
+            verified.execution_snapshot_schema_version,
+            Some(TESTNET_V3_GENESIS_EXECUTION_BUNDLE_SCHEMA_VERSION)
+        );
+        assert_eq!(
+            verified.execution_snapshot_artifact_type.as_deref(),
+            Some(TESTNET_V3_GENESIS_EXECUTION_BUNDLE_ARTIFACT_TYPE)
+        );
+        assert!(verified
+            .execution_snapshot_sha256
+            .as_deref()
+            .is_some_and(|digest| is_lower_hex(digest, 32)));
+        assert!(verified
+            .execution_state_canonical_sha256
+            .as_deref()
+            .is_some_and(|digest| is_lower_hex(digest, 32)));
 
         assert!(verify_release_approval_file_public(
             &repository.root,
@@ -1998,6 +2410,120 @@ mod tests {
             &approval_path,
         )
         .is_err());
+    }
+
+    #[test]
+    fn local_r11_execution_bundle_binding_rejects_tamper_wrong_identity_and_missing_state() {
+        let (public_key, _) = test_authority_keypair();
+        let repository = local_r11_test_repository(&public_key);
+        let original = fs::read(&repository.execution_bundle).expect("read execution bundle");
+
+        build_local_r11_qualification_release_approval_request(
+            &repository.root,
+            &repository.candidate,
+            &repository.authorities,
+            &repository.desired_state,
+            &repository.execution_bundle,
+        )
+        .expect("valid snapshot-bound request");
+
+        let mut formatting_tamper = original.clone();
+        formatting_tamper.push(b'\n');
+        fs::write(&repository.execution_bundle, formatting_tamper)
+            .expect("write byte-tampered bundle");
+        let error = build_local_r11_qualification_release_approval_request(
+            &repository.root,
+            &repository.candidate,
+            &repository.authorities,
+            &repository.desired_state,
+            &repository.execution_bundle,
+        )
+        .expect_err("exact bundle-byte tamper must fail");
+        assert!(error.contains("does not bind the exact verified"));
+
+        let mut wrong_identity: Value =
+            serde_json::from_slice(&original).expect("parse execution bundle");
+        wrong_identity["canonical_genesis_hash"] = Value::String("ff".repeat(32));
+        fs::write(
+            &repository.execution_bundle,
+            serde_json::to_vec(&wrong_identity).expect("encode wrong-Genesis bundle"),
+        )
+        .expect("write wrong-Genesis bundle");
+        let error = build_local_r11_qualification_release_approval_request(
+            &repository.root,
+            &repository.candidate,
+            &repository.authorities,
+            &repository.desired_state,
+            &repository.execution_bundle,
+        )
+        .expect_err("snapshot from a different Genesis must fail");
+        assert!(
+            error.contains("wrong schema, chain, network, release, protocol, or canonical Genesis")
+        );
+
+        let mut wrong_network: Value =
+            serde_json::from_slice(&original).expect("parse execution bundle");
+        wrong_network["network_id"] = Value::String("mainnet".to_string());
+        fs::write(
+            &repository.execution_bundle,
+            serde_json::to_vec(&wrong_network).expect("encode wrong-network bundle"),
+        )
+        .expect("write wrong-network bundle");
+        let error = build_local_r11_qualification_release_approval_request(
+            &repository.root,
+            &repository.candidate,
+            &repository.authorities,
+            &repository.desired_state,
+            &repository.execution_bundle,
+        )
+        .expect_err("wrong snapshot network must fail");
+        assert!(
+            error.contains("wrong schema, chain, network, release, protocol, or canonical Genesis")
+        );
+
+        let mut false_root_claim: Value =
+            serde_json::from_slice(&original).expect("parse execution bundle");
+        false_root_claim["execution_state"]["balances_nwei"]["local-r11-genesis-account"] =
+            json!(1267);
+        let false_root_bytes =
+            serde_json::to_vec(&false_root_claim).expect("encode false-root bundle");
+        fs::write(&repository.execution_bundle, &false_root_bytes)
+            .expect("write false-root bundle");
+        let mut candidate: Value =
+            serde_json::from_slice(&fs::read(&repository.candidate).expect("read candidate"))
+                .expect("parse candidate");
+        candidate["genesis_execution_snapshot"]["sha256"] =
+            Value::String(sha256_hex(&false_root_bytes));
+        candidate["genesis_execution_snapshot"]["execution_state_canonical_sha256"] =
+            Value::String(sha256_hex(
+                &serde_json::to_vec(&false_root_claim["execution_state"])
+                    .expect("canonicalize false-root state"),
+            ));
+        fs::write(
+            &repository.candidate,
+            serde_json::to_vec(&candidate).expect("encode rebound candidate"),
+        )
+        .expect("write rebound candidate");
+        let error = build_local_r11_qualification_release_approval_request(
+            &repository.root,
+            &repository.candidate,
+            &repository.authorities,
+            &repository.desired_state,
+            &repository.execution_bundle,
+        )
+        .expect_err("claimed root with altered computed state must fail");
+        assert!(error.contains("state root mismatch"));
+
+        fs::remove_file(&repository.execution_bundle).expect("remove execution bundle");
+        let error = build_local_r11_qualification_release_approval_request(
+            &repository.root,
+            &repository.candidate,
+            &repository.authorities,
+            &repository.desired_state,
+            &repository.execution_bundle,
+        )
+        .expect_err("missing snapshot must fail closed");
+        assert!(error.contains("inspect local R11 Genesis execution bundle"));
     }
 
     #[test]
@@ -2092,6 +2618,10 @@ mod tests {
         .expect("build governed V4 request");
 
         assert_eq!(request.schema_version, 4);
+        assert_eq!(request.execution_snapshot_sha256, None);
+        assert_eq!(request.execution_state_canonical_sha256, None);
+        assert_eq!(request.execution_snapshot_schema_version, None);
+        assert_eq!(request.execution_snapshot_artifact_type, None);
         assert_eq!(request.network_id, EXPECTED_NETWORK_ID);
         assert_eq!(request.release_id, EXPECTED_RELEASE_ID);
         assert!(is_lower_hex(&request.etdag_parameter_root_sha3_512, 64));
