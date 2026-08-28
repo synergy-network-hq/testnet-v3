@@ -25,8 +25,8 @@ use synergy_testnet::genesis::{
 };
 use synergy_testnet::genesis_deployment::{
     compute_genesis_receipt_root, constructor_arguments, derive_genesis_addresses,
-    GenesisAuthorities, GenesisContract, GenesisDeploymentPlan, GenesisParameters, GenesisSigner,
-    GenesisValidator,
+    GenesisAuthorities, GenesisContract, GenesisDeploymentPlan, GenesisParameters,
+    GenesisReplayOperation, GenesisSigner, GenesisValidator,
 };
 use synergy_testnet::synq_execution::{SynQAivmReceiptSummary, SynQContractArtifact};
 use synergy_testnet::testnet_v3_release_approval::{
@@ -38,6 +38,8 @@ const EXECUTION_STATUS: &str = "launch/production-genesis-ceremony/execution-sta
 const DEPLOYMENT_RECEIPTS: &str = "launch/production-genesis-ceremony/deployment-receipts.json";
 const INITIALIZATION_RECEIPTS: &str =
     "launch/production-genesis-ceremony/initialization-receipts.json";
+const SIGNED_REPLAY_OPERATIONS: &str =
+    "launch/production-genesis-ceremony/signed-replay-operations.json";
 const EXECUTION_STATE: &str = "launch/production-genesis-ceremony/execution-state.json";
 /// Superseded authority input retained only for historical ceremony replay.
 /// Fresh P3 callers must pass their dated V4 authority record with
@@ -583,6 +585,7 @@ fn build_candidate(root: &Path, authorities_path: &Path) -> Value {
     let execution = read_json(&root.join(EXECUTION_STATUS));
     let deployment_values = read_json(&root.join(DEPLOYMENT_RECEIPTS));
     let initialization_values = read_json(&root.join(INITIALIZATION_RECEIPTS));
+    let signed_replay_operations = read_json(&root.join(SIGNED_REPLAY_OPERATIONS));
     let execution_state_value = read_json(&root.join(EXECUTION_STATE));
     let (consensus_parameters, decision_sha256, decision_id) = finalized_consensus_parameters(root);
     let execution_snapshot: GenesisExecutionSnapshot =
@@ -597,6 +600,20 @@ fn build_candidate(root: &Path, authorities_path: &Path) -> Value {
     let initializations: Vec<SynQAivmReceiptSummary> =
         serde_json::from_value(initialization_values.clone())
             .unwrap_or_else(|error| fail(format!("decode initialization receipts: {error}")));
+    let replay_operations: Vec<GenesisReplayOperation> =
+        serde_json::from_value(signed_replay_operations.clone()).unwrap_or_else(|error| {
+            fail(format!("decode signed Genesis replay operations: {error}"))
+        });
+    if replay_operations.len() != 36
+        || replay_operations.iter().take(9).any(|operation| {
+            operation.kind != synergy_testnet::synq_admission::SynQAdmissionKind::Deploy
+        })
+        || replay_operations.iter().skip(9).any(|operation| {
+            operation.kind != synergy_testnet::synq_admission::SynQAdmissionKind::Call
+        })
+    {
+        fail("signed Genesis replay operation sequence is not 9 deployments followed by 27 calls");
+    }
 
     if execution["status"] != "EXECUTION_PASSED"
         || execution["mode"] != "execute"
@@ -905,11 +922,13 @@ fn build_candidate(root: &Path, authorities_path: &Path) -> Value {
         "execution_status_sha256": sha256_file(&root.join(EXECUTION_STATUS)),
         "deployment_receipts_sha256": sha256_file(&root.join(DEPLOYMENT_RECEIPTS)),
         "initialization_receipts_sha256": sha256_file(&root.join(INITIALIZATION_RECEIPTS)),
+        "signed_replay_operations_sha256": sha256_file(&root.join(SIGNED_REPLAY_OPERATIONS)),
         "execution_state_snapshot_sha256": sha256_file(&root.join(EXECUTION_STATE)),
         "execution_state_snapshot_canonical_sha256": execution["execution_state_snapshot_canonical_sha256"],
         "contracts": deployment_bindings,
         "deployment_receipts": deployment_values,
         "initialization_receipts": initialization_values,
+        "signed_replay_operations": signed_replay_operations,
         "execution_state": execution_state_value,
         "deployment_count": 9,
         "initialization_count": 27,

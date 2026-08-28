@@ -3,20 +3,26 @@
 //! A fresh chain must not treat the presence of a `.synq` file as a deployed
 //! contract. The legacy pre-approval adapter proves eight identity-assigned
 //! artifacts while leaving `synq_contracts` empty. The finalized adapter
-//! restores the complete public ceremony snapshot embedded in Genesis and
-//! verifies its execution root, AIVM root, balances, artifacts, and deployed
-//! addresses before returning any state to consensus.
+//! replays the complete public, signed ceremony operation list embedded in
+//! Genesis and verifies its execution root, AIVM root, balances, artifacts,
+//! and deployed addresses before returning any state to consensus. A legacy
+//! snapshot reader remains only for historical finalized Genesis evidence.
 
 use crate::execution::{compute_state_root_after, ExecutionState, GenesisExecutionSnapshot};
 use crate::genesis::GenesisDocument;
-use crate::genesis_deployment::compute_genesis_receipt_root;
+use crate::genesis_deployment::{
+    compute_genesis_receipt_root, replay_genesis_deployment_from_signed_operations,
+    GenesisReplayOperation,
+};
 use crate::synq_execution::{
-    register_synq_artifact, SynQAivmReceiptSummary, SynQArtifactKey, SynQContractArtifact,
+    derive_synergy_contract_address_from_deploy_with_identity_address, register_synq_artifact,
+    SynQAivmReceiptSummary, SynQArtifactKey, SynQContractArtifact,
 };
 use crate::testnet_v3_release_approval::{
     TestnetV3GenesisExecutionBundle, TESTNET_V3_GENESIS_EXECUTION_BUNDLE_ARTIFACT_TYPE,
     TESTNET_V3_GENESIS_EXECUTION_BUNDLE_SCHEMA_VERSION,
 };
+use pqsynq::ContractDeployEnvelope;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -146,9 +152,10 @@ fn contract_artifact_requirements(consensus_version: &str) -> (&'static str, &'s
     }
 }
 
-/// Restores the exact post-ceremony execution state embedded in a finalized
-/// Testnet-v3 Genesis document. No external artifact path and no authority key
-/// is consulted; the canonical Genesis hash binds the embedded snapshot.
+/// Initializes the exact post-ceremony execution state from finalized Genesis.
+/// New canonical Genesis documents contain signed H0 operations and are
+/// replayed from empty state. No external artifact path, private authority key,
+/// or serialized state snapshot is consulted.
 pub fn load_finalized_testnet_v3_genesis_execution_state(
     genesis: &GenesisDocument,
 ) -> Result<ExecutionState, String> {
@@ -436,6 +443,17 @@ fn load_finalized_execution_state_from_value(
         return Err("finalized Genesis deployment boundary is incomplete".to_string());
     }
 
+    if let Some(operations_value) = deployment.get("signed_replay_operations") {
+        return replay_finalized_execution_state_from_operations(
+            genesis,
+            finalized,
+            deployment,
+            operations_value,
+        );
+    }
+
+    // Historical finalized documents can still be audited from their embedded
+    // state evidence. New canonical Genesis must take the replay branch above.
     let snapshot_value = deployment
         .get("execution_state")
         .ok_or_else(|| "finalized Genesis is missing embedded execution_state".to_string())?;
@@ -491,6 +509,112 @@ fn load_finalized_execution_state_from_value(
         }
     }
 
+    Ok(state)
+}
+
+fn replay_finalized_execution_state_from_operations(
+    genesis: &GenesisDocument,
+    finalized: &Value,
+    deployment: &Value,
+    operations_value: &Value,
+) -> Result<ExecutionState, String> {
+    let operations: Vec<GenesisReplayOperation> = serde_json::from_value(operations_value.clone())
+        .map_err(|error| format!("decode finalized Genesis signed replay operations: {error}"))?;
+    let team_vesting_operation = operations.get(8).ok_or_else(|| {
+        "finalized Genesis replay operations omit TeamVesting deployment".to_string()
+    })?;
+    let deploy: ContractDeployEnvelope = serde_json::from_slice(
+        &team_vesting_operation
+            .admission_envelope
+            .encoded_pqsynq_envelope,
+    )
+    .map_err(|error| format!("decode TeamVesting replay deployment envelope: {error}"))?;
+    let team_vesting_address = derive_synergy_contract_address_from_deploy_with_identity_address(
+        &deploy,
+        &team_vesting_operation.admission_envelope.signer,
+    )?;
+    let mut state = genesis_execution_state_before_h0(finalized, &team_vesting_address)?;
+    let manifest_hash = crate::synergy_types::Hash::from_hex(required_string(
+        deployment,
+        "deployment_manifest_hash",
+    )?)
+    .map_err(|error| format!("decode finalized Genesis deployment manifest hash: {error}"))?;
+    let replay =
+        replay_genesis_deployment_from_signed_operations(&mut state, manifest_hash, &operations)?;
+
+    let expected_state_root = required_string(deployment, "post_deployment_execution_state_root")?;
+    let expected_aivm_root = required_string(deployment, "post_deployment_aivm_state_root")?;
+    let expected_receipt_root = required_string(deployment, "receipt_root")?;
+    if replay.post_deployment_state_root.to_hex() != expected_state_root
+        || hex::encode(state.synq_aivm_state.state_root()) != expected_aivm_root
+        || replay.receipt_root.to_hex() != expected_receipt_root
+        || required_string(
+            finalized
+                .get("execution")
+                .ok_or_else(|| "finalized Genesis is missing execution metadata".to_string())?,
+            "genesis_execution_state_root",
+        )? != expected_state_root
+        || required_string(
+            finalized
+                .get("execution")
+                .ok_or_else(|| "finalized Genesis is missing execution metadata".to_string())?,
+            "genesis_aivm_state_root",
+        )? != expected_aivm_root
+    {
+        return Err("replayed Genesis execution roots do not match canonical Genesis".to_string());
+    }
+    let expected_deployments: Vec<SynQAivmReceiptSummary> = serde_json::from_value(
+        deployment
+            .get("deployment_receipts")
+            .cloned()
+            .ok_or_else(|| "finalized Genesis is missing deployment receipts".to_string())?,
+    )
+    .map_err(|error| format!("decode finalized Genesis deployment receipts: {error}"))?;
+    let expected_initializations: Vec<SynQAivmReceiptSummary> = serde_json::from_value(
+        deployment
+            .get("initialization_receipts")
+            .cloned()
+            .ok_or_else(|| "finalized Genesis is missing initialization receipts".to_string())?,
+    )
+    .map_err(|error| format!("decode finalized Genesis initialization receipts: {error}"))?;
+    if replay.deployment_receipts != expected_deployments
+        || replay.initialization_receipts != expected_initializations
+    {
+        return Err("replayed Genesis receipts do not match canonical Genesis".to_string());
+    }
+    validate_restored_execution_state(genesis, &state)?;
+    Ok(state)
+}
+
+fn genesis_execution_state_before_h0(
+    finalized: &Value,
+    team_vesting_address: &str,
+) -> Result<ExecutionState, String> {
+    let balances = finalized
+        .get("balances")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "finalized Genesis balances must be an array".to_string())?;
+    let mut state = ExecutionState::new();
+    for balance in balances {
+        let source_address = required_string(balance, "address")?;
+        let address = if balance.get("account_id").and_then(Value::as_str) == Some("TEM-A01") {
+            team_vesting_address
+        } else {
+            source_address
+        };
+        let amount = required_string(balance, "balance_nwei")?
+            .parse::<u128>()
+            .map_err(|error| format!("parse finalized Genesis balance: {error}"))?;
+        if state
+            .balances_nwei
+            .insert(address.to_string(), amount)
+            .is_some()
+        {
+            return Err(format!(
+                "finalized Genesis repeats balance address {address}"
+            ));
+        }
+    }
     Ok(state)
 }
 

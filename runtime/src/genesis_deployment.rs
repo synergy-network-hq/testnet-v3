@@ -37,7 +37,7 @@ use pqsynq::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sha3::Sha3_512;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Reserved AIVM namespace recording the genesis deployment authority
 /// lifecycle. Retirement is enforced here, in protocol state that is covered by
@@ -546,6 +546,178 @@ pub struct GenesisDeploymentOutcome {
     pub receipt_root: Hash,
     pub deployment_manifest_hash: Hash,
     pub lifecycle: GenesisDeployerLifecycle,
+    /// Public, already-signed H0 operations. These let normal nodes replay
+    /// canonical Genesis without any ceremony private authority material.
+    pub replay_operations: Vec<GenesisReplayOperation>,
+}
+
+/// One exact signed deployment or initialization operation from H0.
+///
+/// It is produced during the Genesis ceremony. Runtime replay verifies and
+/// executes it but never signs again or loads ceremony custody.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GenesisReplayOperation {
+    pub kind: SynQAdmissionKind,
+    pub operation_label: String,
+    pub sequence: u64,
+    pub admission_envelope: SynQAdmissionEnvelope,
+}
+
+/// The independently verifiable result of replaying the public H0 operation
+/// list. No ceremony key material is accepted by this interface.
+#[derive(Debug, Clone)]
+pub struct GenesisReplayOutcome {
+    pub deployment_receipts: Vec<SynQAivmReceiptSummary>,
+    pub initialization_receipts: Vec<SynQAivmReceiptSummary>,
+    pub post_deployment_state_root: Hash,
+    pub receipt_root: Hash,
+}
+
+/// Replays the exact public signed operations committed by finalized Genesis.
+///
+/// This is the normal-node H0 initialization path. It starts from empty state,
+/// installs only the public identity-authorization bindings carried by the
+/// already-signed envelopes, verifies each envelope, and executes it through
+/// the same SynQ/AIVM admission path as the ceremony. It never accepts a
+/// private Genesis authority key and never restores a serialized state image.
+pub fn replay_genesis_deployment_from_signed_operations(
+    state: &mut ExecutionState,
+    deployment_manifest_hash: Hash,
+    operations: &[GenesisReplayOperation],
+) -> Result<GenesisReplayOutcome, String> {
+    if read_deployer_lifecycle(state)? != GenesisDeployerLifecycle::Uninitialized {
+        return Err("genesis signed-operation replay requires empty deployment state".to_string());
+    }
+    if operations.len() != 36 {
+        return Err(format!(
+            "genesis signed-operation replay requires 36 operations, found {}",
+            operations.len()
+        ));
+    }
+    for (index, contract) in GenesisContract::APPROVED_ORDER.iter().enumerate() {
+        let operation = &operations[index];
+        if operation.kind != SynQAdmissionKind::Deploy
+            || operation.sequence != index as u64
+            || operation.operation_label != contract.name()
+        {
+            return Err("genesis signed deployment operation order is not canonical".to_string());
+        }
+    }
+    if operations[GenesisContract::APPROVED_ORDER.len()..]
+        .iter()
+        .any(|operation| operation.kind != SynQAdmissionKind::Call)
+    {
+        return Err("genesis initialization operation sequence is not canonical".to_string());
+    }
+
+    let mut working = state.clone();
+    let mut installed_bindings = BTreeSet::new();
+    for operation in operations {
+        let carrier = operation
+            .admission_envelope
+            .identity_authorization
+            .as_ref()
+            .ok_or_else(|| {
+                "genesis replay operation lacks public identity authorization".to_string()
+            })?;
+        if installed_bindings.insert(carrier.binding.identity_address.clone()) {
+            working.install_genesis_identity_authorization_binding(&carrier.binding)?;
+        }
+    }
+    write_lifecycle(&mut working, GenesisDeployerLifecycle::AuthorizedForGenesis)?;
+    write_lifecycle(&mut working, GenesisDeployerLifecycle::Executing)?;
+
+    let mut deployment_receipts = Vec::with_capacity(9);
+    let mut initialization_receipts = Vec::with_capacity(27);
+    let mut addresses = BTreeMap::new();
+    for operation in operations {
+        let envelope = &operation.admission_envelope;
+        let binding = working
+            .current_identity_authorization_binding_hash(&envelope.signer)
+            .ok_or_else(|| {
+                format!(
+                    "genesis replay signer {} has no canonical identity binding",
+                    envelope.signer
+                )
+            })?;
+        let verification = match operation.kind {
+            SynQAdmissionKind::Deploy => verify_synq_deploy_for_chain_admission_at_current_binding(
+                envelope,
+                GENESIS_NOW_UNIX,
+                binding,
+            ),
+            SynQAdmissionKind::Call => verify_synq_call_for_chain_admission_at_current_binding(
+                envelope,
+                GENESIS_NOW_UNIX,
+                binding,
+            ),
+        }
+        .map_err(|error| format!("genesis signed-operation verification failed: {error}"))?;
+        let carrier = encode_synq_admission_carrier(envelope)
+            .map_err(|error| format!("encode genesis replay carrier: {error}"))?;
+        let kind_label = match operation.kind {
+            SynQAdmissionKind::Deploy => "deploy",
+            SynQAdmissionKind::Call => "call",
+        };
+        let tx = genesis_transaction(&verification.signer, carrier, operation.sequence);
+        let tx_id = genesis_tx_id(
+            kind_label,
+            &operation.operation_label,
+            operation.sequence,
+            &envelope.payload_hash,
+        );
+        let receipt = execute_synq_transaction_at(
+            &tx_id,
+            &tx,
+            &verification,
+            &mut working.synq_aivm_state,
+            &mut working.synq_artifacts,
+            &mut working.synq_contracts,
+            SynQExecutionContext {
+                runtime_block_height: GENESIS_BLOCK_HEIGHT,
+                runtime_block_timestamp_unix: GENESIS_NOW_UNIX,
+                sts_host: None,
+                applied_fee_market: None,
+            },
+        )?
+        .ok_or_else(|| "genesis signed operation produced no receipt".to_string())?;
+        if receipt.status != "succeeded" {
+            return Err(format!(
+                "genesis signed operation {} failed: {} {}",
+                operation.operation_label,
+                receipt.error_code.clone().unwrap_or_default(),
+                receipt.error_message.clone().unwrap_or_default()
+            ));
+        }
+        working.synq_verifications.insert(tx_id, verification);
+        match operation.kind {
+            SynQAdmissionKind::Deploy => {
+                let contract = GenesisContract::APPROVED_ORDER[deployment_receipts.len()];
+                addresses.insert(contract, receipt.contract_address.clone());
+                deployment_receipts.push(receipt);
+            }
+            SynQAdmissionKind::Call => initialization_receipts.push(receipt),
+        }
+    }
+    if deployment_receipts.len() != 9 || initialization_receipts.len() != 27 {
+        return Err(
+            "genesis signed-operation replay produced the wrong operation counts".to_string(),
+        );
+    }
+    normalize_genesis_deployment_records(&mut working, &addresses)?;
+    write_lifecycle(&mut working, GenesisDeployerLifecycle::Completed)?;
+    write_lifecycle(&mut working, GenesisDeployerLifecycle::PermanentlyRetired)?;
+    write_manifest_hash(&mut working, &deployment_manifest_hash);
+    let post_deployment_state_root = compute_state_root_after(&working)?;
+    let receipt_root =
+        compute_genesis_receipt_root(&deployment_receipts, &initialization_receipts)?;
+    *state = working;
+    Ok(GenesisReplayOutcome {
+        deployment_receipts,
+        initialization_receipts,
+        post_deployment_state_root,
+        receipt_root,
+    })
 }
 
 /// Deterministic genesis transaction identifier.
@@ -802,6 +974,7 @@ fn deploy_one(
     deployer: &GenesisSigner,
     constructor_args: Vec<u8>,
     authorization: GenesisExecutionAuthorization<'_>,
+    replay_operations: &mut Vec<GenesisReplayOperation>,
 ) -> Result<(String, SynQAddress, SynQAivmReceiptSummary), String> {
     let deployer_address = deployer.synq_address()?;
     let key = entry.artifact.key();
@@ -970,6 +1143,12 @@ fn deploy_one(
         ));
     }
     state.synq_verifications.insert(tx_id, verification);
+    replay_operations.push(GenesisReplayOperation {
+        kind: SynQAdmissionKind::Deploy,
+        operation_label: entry.contract.name().to_string(),
+        sequence: entry.nonce,
+        admission_envelope: envelope,
+    });
     Ok((contract_address, synq_contract_address, summary))
 }
 
@@ -1010,6 +1189,7 @@ fn call_one(
     caller: &GenesisSigner,
     call_nonce: u64,
     authorization: GenesisExecutionAuthorization<'_>,
+    replay_operations: &mut Vec<GenesisReplayOperation>,
 ) -> Result<SynQAivmReceiptSummary, String> {
     let caller_address = caller.synq_address()?;
     let method_selector = selector(artifact, method)?;
@@ -1136,6 +1316,12 @@ fn call_one(
         ));
     }
     state.synq_verifications.insert(tx_id, verification);
+    replay_operations.push(GenesisReplayOperation {
+        kind: SynQAdmissionKind::Call,
+        operation_label: method.to_string(),
+        sequence: call_nonce,
+        admission_envelope: envelope,
+    });
     Ok(summary)
 }
 
@@ -1366,6 +1552,7 @@ fn execute_genesis_deployment_inner(
     let mut addresses: BTreeMap<GenesisContract, String> = BTreeMap::new();
     let mut synq_addresses: BTreeMap<GenesisContract, SynQAddress> = BTreeMap::new();
     let mut deployment_receipts = Vec::new();
+    let mut replay_operations = Vec::new();
 
     for entry in &plan.entries {
         let constructor_args =
@@ -1376,6 +1563,7 @@ fn execute_genesis_deployment_inner(
             &authorities.genesis_deployer,
             constructor_args,
             authorization,
+            &mut replay_operations,
         )?;
         addresses.insert(entry.contract, address);
         synq_addresses.insert(entry.contract, synq_address);
@@ -1390,6 +1578,7 @@ fn execute_genesis_deployment_inner(
         authorities,
         parameters,
         authorization,
+        &mut replay_operations,
     )?;
 
     normalize_genesis_deployment_records(&mut working, &addresses)?;
@@ -1419,6 +1608,7 @@ fn execute_genesis_deployment_inner(
         receipt_root,
         deployment_manifest_hash: manifest_hash,
         lifecycle: GenesisDeployerLifecycle::PermanentlyRetired,
+        replay_operations,
     })
 }
 
@@ -1501,6 +1691,7 @@ fn run_initialization_sequence(
     authorities: &GenesisAuthorities,
     parameters: &GenesisParameters,
     authorization: GenesisExecutionAuthorization<'_>,
+    replay_operations: &mut Vec<GenesisReplayOperation>,
 ) -> Result<Vec<SynQAivmReceiptSummary>, String> {
     let artifact_for = |contract: GenesisContract| -> Result<SynQContractArtifact, String> {
         plan.entries
@@ -1577,6 +1768,7 @@ fn run_initialization_sequence(
             &authorities.governance,
             governance_call_nonce,
             authorization,
+            replay_operations,
         )?);
         *nonce += 1;
         governance_call_nonce += 1;
@@ -1624,6 +1816,7 @@ fn run_initialization_sequence(
             &authorities.governance,
             governance_call_nonce,
             authorization,
+            replay_operations,
         )?);
         *nonce += 1;
         governance_call_nonce += 1;
@@ -1666,6 +1859,7 @@ fn run_initialization_sequence(
             &authorities.governance,
             governance_call_nonce,
             authorization,
+            replay_operations,
         )?);
         *nonce += 1;
         governance_call_nonce += 1;
@@ -1711,6 +1905,7 @@ fn run_initialization_sequence(
             &registry_authority,
             registry_call_nonce,
             authorization,
+            replay_operations,
         )?);
         registry_call_nonce += 1;
     }
@@ -1728,6 +1923,7 @@ fn run_initialization_sequence(
             &registry_authority,
             registry_call_nonce,
             authorization,
+            replay_operations,
         )?);
         registry_call_nonce += 1;
     }
@@ -1761,6 +1957,7 @@ fn run_initialization_sequence(
             &authorities.governance,
             governance_call_nonce,
             authorization,
+            replay_operations,
         )?);
         *nonce += 1;
         governance_call_nonce += 1;
@@ -1790,6 +1987,7 @@ fn run_initialization_sequence(
             &authorities.governance,
             governance_call_nonce,
             authorization,
+            replay_operations,
         )?);
         *nonce += 1;
         governance_call_nonce += 1;
@@ -2176,6 +2374,24 @@ mod tests {
         assert_eq!(a.deployment_receipts.len(), 9);
         assert_eq!(a.initialization_receipts.len(), 27);
         assert_eq!(a.lifecycle, GenesisDeployerLifecycle::PermanentlyRetired);
+        assert_eq!(a.replay_operations.len(), 36);
+
+        let mut replayed = ExecutionState::new();
+        let replay = replay_genesis_deployment_from_signed_operations(
+            &mut replayed,
+            a.deployment_manifest_hash,
+            &a.replay_operations,
+        )
+        .expect("replay public signed Genesis operations without custody");
+        assert_eq!(
+            replay.post_deployment_state_root,
+            a.post_deployment_state_root
+        );
+        assert_eq!(replay.receipt_root, a.receipt_root);
+        assert_eq!(
+            compute_state_root_after(&replayed).expect("replayed state root"),
+            compute_state_root_after(&first).expect("ceremony state root")
+        );
 
         let genesis_signers = [
             &authorities.genesis_deployer,

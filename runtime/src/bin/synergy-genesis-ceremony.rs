@@ -1104,6 +1104,9 @@ fn run() -> Result<(), String> {
     let initialization_contents = serde_json::to_string_pretty(&outcome.initialization_receipts)
         .map_err(|error| format!("serialize initialization receipts: {error}"))?
         + "\n";
+    let replay_operations_contents = serde_json::to_string_pretty(&outcome.replay_operations)
+        .map_err(|error| format!("serialize signed genesis replay operations: {error}"))?
+        + "\n";
     let evidence = if execute {
         json!({
             "schema_version": 1,
@@ -1120,6 +1123,7 @@ fn run() -> Result<(), String> {
             "evidence_files": {
                 "deployment_receipts_sha256": sha256_hex(deployment_contents.as_bytes()),
                 "initialization_receipts_sha256": sha256_hex(initialization_contents.as_bytes()),
+                "signed_replay_operations_sha256": sha256_hex(replay_operations_contents.as_bytes()),
                 "execution_state_sha256": snapshot_sha256,
                 "execution_state_canonical_sha256": snapshot_canonical_sha256,
             },
@@ -1170,6 +1174,10 @@ fn run() -> Result<(), String> {
         write_public(
             &output_dir.join("initialization-receipts.json"),
             &initialization_contents,
+        )?;
+        write_public(
+            &output_dir.join("signed-replay-operations.json"),
+            &replay_operations_contents,
         )?;
     }
 
