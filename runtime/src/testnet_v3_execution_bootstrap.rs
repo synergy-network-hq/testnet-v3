@@ -720,6 +720,16 @@ mod tests {
             "schema_version".to_string(),
             Value::from(crate::execution::TESTNET_V3_GENESIS_SNAPSHOT_SCHEMA_VERSION),
         );
+        // The strict snapshot verifier checks the declared root before the
+        // fixture can be recaptured. The value is the deterministic root of
+        // this normalized legacy fixture (network spelling, release ID, and
+        // empty binding map above), not a production qualification root.
+        source_execution_object.insert(
+            "state_root".to_string(),
+            Value::String(
+                "87318d45987425b0528bf4e7be525ca6db71acb50eb138698e5d00a954b7a916".to_string(),
+            ),
+        );
         let source_execution_state: GenesisExecutionSnapshot =
             serde_json::from_value(source_execution_value).expect("fixture execution snapshot");
         let mut fixture_state = source_execution_state
