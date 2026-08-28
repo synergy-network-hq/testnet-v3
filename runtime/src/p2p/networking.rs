@@ -18559,14 +18559,15 @@ mod tests {
 
     #[test]
     fn production_decoder_accepts_unit_frame_in_one_read() {
-        for message in [
-            NetworkMessage::GetPeers,
-            NetworkMessage::Ping,
-            NetworkMessage::Pong,
-            NetworkMessage::GetStatus,
+        for (message, expected_wire) in [
+            (NetworkMessage::GetPeers, br#""GetPeers""#.as_slice()),
+            (NetworkMessage::Ping, br#""Ping""#.as_slice()),
+            (NetworkMessage::Pong, br#""Pong""#.as_slice()),
+            (NetworkMessage::GetStatus, br#""GetStatus""#.as_slice()),
         ] {
             let mut wire = std::io::Cursor::new(framed_network_message(&message));
-            assert_eq!(receive_message(&mut wire).unwrap(), message);
+            let decoded = receive_message(&mut wire).unwrap();
+            assert_eq!(serde_json::to_vec(&decoded).unwrap(), expected_wire);
         }
     }
 
@@ -18574,7 +18575,10 @@ mod tests {
     fn production_decoder_accepts_legal_frame_split_across_reads() {
         let message = NetworkMessage::GetStatus;
         let mut wire = ChunkedReader::new(framed_network_message(&message), 1);
-        assert_eq!(receive_message(&mut wire).unwrap(), message);
+        assert!(matches!(
+            receive_message(&mut wire).unwrap(),
+            NetworkMessage::GetStatus
+        ));
     }
 
     #[test]
@@ -18585,8 +18589,14 @@ mod tests {
         bytes.extend_from_slice(&framed_network_message(&second));
         let mut wire = std::io::Cursor::new(bytes);
 
-        assert_eq!(receive_message(&mut wire).unwrap(), first);
-        assert_eq!(receive_message(&mut wire).unwrap(), second);
+        assert!(matches!(
+            receive_message(&mut wire).unwrap(),
+            NetworkMessage::GetStatus
+        ));
+        assert!(matches!(
+            receive_message(&mut wire).unwrap(),
+            NetworkMessage::Ping
+        ));
     }
 
     #[test]
@@ -18600,9 +18610,16 @@ mod tests {
         };
         let encoded = serde_json::to_vec(&message).unwrap();
         assert_eq!(encoded.len(), MAX_P2P_FRAME_BYTES);
+        drop(message);
 
         let mut wire = std::io::Cursor::new(framed_payload(&encoded));
-        assert_eq!(receive_message(&mut wire).unwrap(), message);
+        match receive_message(&mut wire).unwrap() {
+            NetworkMessage::Error { message } => {
+                assert_eq!(message.len(), MAX_P2P_FRAME_BYTES - empty.len());
+                assert!(message.bytes().all(|byte| byte == b'x'));
+            }
+            other => panic!("expected boundary-sized error envelope, received {other:?}"),
+        }
     }
 
     #[test]
@@ -18623,7 +18640,10 @@ mod tests {
     fn production_decoder_retries_incomplete_frame_read() {
         let message = NetworkMessage::GetStatus;
         let mut wire = ChunkedReader::new(framed_network_message(&message), 2).with_interrupt(3);
-        assert_eq!(receive_message(&mut wire).unwrap(), message);
+        assert!(matches!(
+            receive_message(&mut wire).unwrap(),
+            NetworkMessage::GetStatus
+        ));
     }
 
     #[test]
