@@ -1581,6 +1581,53 @@ fn run_initialization_sequence(
         *nonce += 1;
         governance_call_nonce += 1;
     }
+    // The Treasury constructor receives these immutable Genesis values so it
+    // can reject an invalid deployment immediately.  Record the two governed
+    // initialization transitions as well: the durable initialization receipt
+    // set must prove the configured threshold and Governance dependency were
+    // both admitted through the canonical call path, not merely constructor
+    // arguments.  This is especially important for the five-validator fresh
+    // P3 set, where the receipt set is otherwise two entries short of the
+    // approved 27-call Genesis sequence.
+    for (method, action_args) in [
+        (
+            "setRequiredSigners",
+            vec![serde_json::Value::String(
+                parameters.treasury_required_signers.clone(),
+            )],
+        ),
+        (
+            "setGovernanceContract",
+            vec![serde_json::Value::String(address_for(
+                GenesisContract::Governance,
+            )?)],
+        ),
+    ] {
+        let nonce = governance_nonces
+            .entry(GenesisContract::Treasury)
+            .or_insert(0);
+        let args = governance_tail(
+            &authorities.governance,
+            &treasury_artifact,
+            &treasury_address,
+            method,
+            &action_args,
+            *nonce,
+        )?;
+        receipts.push(call_one(
+            working,
+            &treasury_artifact,
+            &treasury_address,
+            treasury_synq,
+            method,
+            args,
+            &authorities.governance,
+            governance_call_nonce,
+            authorization,
+        )?);
+        *nonce += 1;
+        governance_call_nonce += 1;
+    }
 
     // --- Identity: six reserved names -------------------------------------
     let identity_artifact = artifact_for(GenesisContract::Identity)?;
