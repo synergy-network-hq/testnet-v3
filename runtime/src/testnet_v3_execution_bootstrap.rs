@@ -713,6 +713,10 @@ mod tests {
             "identity_authorization_bindings".to_string(),
             Value::Object(serde_json::Map::new()),
         );
+        source_execution_object.insert(
+            "schema_version".to_string(),
+            Value::from(crate::execution::TESTNET_V3_GENESIS_SNAPSHOT_SCHEMA_VERSION),
+        );
         let source_execution_state: GenesisExecutionSnapshot =
             serde_json::from_value(source_execution_value).expect("fixture execution snapshot");
         let mut fixture_state = source_execution_state
