@@ -695,13 +695,16 @@ mod tests {
             .expect("fixture execution state")
             .clone();
         // This frozen production fixture predates the strict snapshot schema
-        // and carries a redundant outer network label.  It is not part of
-        // `GenesisExecutionSnapshot`; discard it before recreating the
-        // canonical test-only snapshot from restored state.
-        source_execution_value
+        // and calls the required network field `runtime_network_id`. Normalize
+        // that legacy spelling before recreating the canonical test-only
+        // snapshot from restored state.
+        let source_execution_object = source_execution_value
             .as_object_mut()
-            .expect("fixture execution state object")
-            .remove("runtime_network_id");
+            .expect("fixture execution state object");
+        let runtime_network_id = source_execution_object
+            .remove("runtime_network_id")
+            .expect("fixture runtime network id");
+        source_execution_object.insert("network_id".to_string(), runtime_network_id);
         let source_execution_state: GenesisExecutionSnapshot =
             serde_json::from_value(source_execution_value).expect("fixture execution snapshot");
         let mut fixture_state = source_execution_state
