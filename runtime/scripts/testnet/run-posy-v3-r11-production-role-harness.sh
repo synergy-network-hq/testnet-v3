@@ -433,6 +433,15 @@ prepare_workspace() {
     # its own data directory. Keys remain outside the work directory.
     mkdir -p "$data_dir/posy-v3-ingress-kem-registries"
     cp -R "$registry_dir/." "$data_dir/posy-v3-ingress-kem-registries/"
+    # Public governance identity material is resolved relative to each
+    # isolated project root by the production verifier. Keep the authority
+    # record itself external, but replicate only its public bundle beside the
+    # node so every role can independently validate the same V4 key binding.
+    local authority_bundle
+    authority_bundle="$(dirname "$authority_record")/authority-bundle"
+    if [[ -d "$authority_bundle" ]]; then
+        cp -R "$authority_bundle" "$node_dir/authority-bundle"
+    fi
 }
 
 start_node() {
