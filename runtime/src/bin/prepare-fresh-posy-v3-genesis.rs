@@ -69,7 +69,7 @@ fn require_fresh_p3_source_genesis(value: &serde_json::Value) {
         .and_then(serde_json::Value::as_u64)
         .unwrap_or_else(|| fail("fresh P3 source Genesis has no numeric Chain ID"));
     if chain_id != 1266
-        || required_string(value, "/network/network_slug", "technical network ID") != "testnet"
+        || required_string(value, "/network/network_id", "technical network ID") != "testnet"
         || required_string(value, "/network/consensus_version", "consensus version") != "posy/3.0"
         || required_string(
             value,

@@ -777,6 +777,14 @@ fn is_chain1266_pre_p1_genesis(value: &Value) -> bool {
 fn load_candidate_consensus_parameters(
     value: &Value,
 ) -> Result<Option<LoadedConsensusParameters>, String> {
+    // Fresh PoSy v3 carries its typed, Genesis-bound consensus activation in
+    // `consensus.posy_v3_activation`; it must not be forced through the
+    // retired P2.2 `consensus_parameters` artifact path.
+    if required_string(value, &["network", "consensus_version"]).as_deref() == Ok("posy/3.0")
+        && value.pointer("/consensus/posy_v3_activation").is_some()
+    {
+        return Ok(None);
+    }
     let Some(binding) = value.get("consensus_parameters") else {
         if value.get("genesis_deployment").is_some() {
             return Err(
