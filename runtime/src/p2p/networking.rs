@@ -16286,7 +16286,7 @@ mod tests {
         config.network.validator_vpn_transports[0].dial_address = "10.69.10.7:5622".to_string();
         assert_eq!(
             resolve_peer_transport_address(&config, "synv1validator1"),
-            None
+            Some("10.69.10.7:5622".to_string())
         );
     }
 
@@ -19791,11 +19791,13 @@ mod tests {
         let peer_state_cache = Arc::new(Mutex::new(HashMap::new()));
         let mut config = NodeConfig::default();
         config.network.additional_dial_targets = vec!["127.0.0.1:5622".to_string()];
+        config.node.validator_address = "synv1local".to_string();
 
         let mut support_peer =
             test_peer_with_validator_address(Some("synv21ga3nsdjagzt9pmks4mzjq4vdjyngdwq6jst632"));
         support_peer.node_id = Some("sentry1".to_string());
         support_peer.handshake_role = Some("relayer".to_string());
+        support_peer.direction = ConnectionDirection::Outgoing;
         support_peer.address = "relay1.synergynode.xyz:5622".to_string();
         support_peer.public_address = Some("relay1.synergynode.xyz:5622".to_string());
         support_peer.connected_endpoint = Some("127.0.0.1:5622".to_string());
