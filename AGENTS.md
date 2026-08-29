@@ -9,3 +9,16 @@ Never declare the chain healthy from an active service alone. Require an
 advancing, identical finalized tip across all five initial validators, zero new fatal
 consensus/signing conflicts, bounded observer/public-tier lag, and live Atlas
 data.
+
+## Source-integrity boundary
+
+The only Testnet-v3 development checkout is
+`/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3`.
+
+Do not create nested clones, long-lived worktrees, or copied Testnet trees. A
+temporary worktree must have a named purpose, be reconciled into this checkout
+before its task is complete, and then be removed with `git worktree remove`.
+Testnet-v2 source and runtime artifacts are forbidden in this tree. The Node
+Control Panel source belongs only at
+`/Volumes/xcode/Synergy-Network/07-Node-Control-Panel`; do not embed or copy it
+under Testnet-v3.
