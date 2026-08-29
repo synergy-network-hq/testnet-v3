@@ -161,7 +161,6 @@ pub fn active_pqc_variant_by_code(code_name: &str) -> Result<&'static PqcVariant
 }
 
 pub const TESTNET_BETA_V1_CHAIN_ID: u64 = 1262;
-pub const TESTNET_V2_CHAIN_ID: u64 = 1264;
 pub const TESTNET_V3_CHAIN_ID: u64 = crate::synergy_types::SYNERGY_TESTNET_V3_CHAIN_ID;
 pub const MAINNET_BETA_CHAIN_ID: u64 = 1268;
 pub const MAINNET_CHAIN_ID: u64 = 1269;
@@ -240,21 +239,14 @@ pub struct NetworkReleaseSpec {
 }
 
 /// Canonical release-to-chain mappings. Environments are deliberately
-/// separate from releases: Testnet has both v2 and v3 release identities, and
-/// Mainnet Beta is a release on the `mainnet` environment rather than a fourth
-/// environment identifier.
+/// separate from releases. Mainnet Beta is a release on the `mainnet`
+/// environment rather than a fourth environment identifier.
 pub const NETWORK_RELEASES: &[NetworkReleaseSpec] = &[
     NetworkReleaseSpec {
         release_id: "testnet-beta-v1",
         display_name: "Testnet-beta (v1)",
         environment: TESTBETA_ENVIRONMENT,
         chain_id: TESTNET_BETA_V1_CHAIN_ID,
-    },
-    NetworkReleaseSpec {
-        release_id: "testnet-v2",
-        display_name: "Testnet (v2)",
-        environment: TESTNET_ENVIRONMENT,
-        chain_id: TESTNET_V2_CHAIN_ID,
     },
     NetworkReleaseSpec {
         release_id: TESTNET_V3_RELEASE_ID,

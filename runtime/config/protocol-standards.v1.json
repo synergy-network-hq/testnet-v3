@@ -49,7 +49,6 @@
   ],
   "network_releases": [
     {"release_id": "testnet-beta-v1", "display_name": "Testnet-beta (v1)", "environment": "testbeta", "chain_id": 1262},
-    {"release_id": "testnet-v2", "display_name": "Testnet (v2)", "environment": "testnet", "chain_id": 1264},
     {"release_id": "testnet-v3", "display_name": "Testnet (v3)", "environment": "testnet", "chain_id": 1266},
     {"release_id": "mainnet-beta", "display_name": "Mainnet-beta", "environment": "mainnet", "chain_id": 1268},
     {"release_id": "mainnet", "display_name": "Mainnet", "environment": "mainnet", "chain_id": 1269}
