@@ -4,12 +4,15 @@
 //! This store is the restart-safe retrieval authority for the complete
 //! wallet-authenticated submission matching each commitment.
 
-use crate::etdag::EtdagDigest;
+use crate::etdag::{
+    EncryptedTransactionEnvelope, EtdagDigest, EtdagSubmissionEnvelope, SealedTransactionBundle,
+    ShareCapsule, ShareCommitment,
+};
 use crate::p2p::messages::{
     ProtectedPipelineSemanticObject, MAX_PROTECTED_PIPELINE_EVIDENCE_FRAME_BYTES,
     MAX_PROTECTED_PIPELINE_REQUEST_IDS,
 };
-use crate::synergy_types::{Hash, Height};
+use crate::synergy_types::{AegisPqPublicKey, Hash, Height};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -17,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const PROTECTED_CIPHERTEXT_STORE_FORMAT: &str = "synergy-posy-protected-ciphertext-material-v1";
+pub const PROTECTED_CIPHERTEXT_STORE_FORMAT: &str = "synergy-posy-protected-ciphertext-material-v3";
 pub const MAX_PROTECTED_CIPHERTEXT_STORE_OBJECTS: usize = 16_384;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -27,7 +30,155 @@ struct StoredProtectedCiphertext {
     semantic_id: EtdagDigest,
     target_height: Height,
     target_context_root: Hash,
-    object: ProtectedPipelineSemanticObject,
+    object: StoredEncryptedMaterial,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct StoredEncryptedMaterial {
+    semantic_id: EtdagDigest,
+    envelope: StoredEncryptedTransactionEnvelope,
+    share_commitments: Vec<ShareCommitment>,
+    share_capsules: Vec<ShareCapsule>,
+    outer_public_key: AegisPqPublicKey,
+    outer_key_lifecycle: crate::crypto::aegis_pqvm::AegisPqKeyLifecycleRecord,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct StoredEncryptedTransactionEnvelope {
+    envelope_version: u32,
+    profile_id: String,
+    chain_id: crate::synergy_types::ChainId,
+    network_id: crate::synergy_types::NetworkId,
+    protocol_version: String,
+    epoch: crate::synergy_types::Epoch,
+    target_height: Height,
+    target_context_root: Hash,
+    assigned_cluster_id: crate::synergy_types::ClusterId,
+    lane_id: String,
+    sender_id: String,
+    nonce_slot: u64,
+    gas_class: u32,
+    fee_class: u32,
+    admission_bond_nwei: String,
+    expiry_height: Height,
+    ciphertext_size_class: u64,
+    aead_nonce: Vec<u8>,
+    ciphertext: Vec<u8>,
+    key_commitment: EtdagDigest,
+    share_commitment_root: EtdagDigest,
+    share_capsule_root: EtdagDigest,
+    cryptographic_profile_root: Hash,
+    tx_commitment: EtdagDigest,
+    outer_key_id: crate::synergy_types::AegisPqKeyId,
+    outer_signature: crate::synergy_types::AegisPqSignature,
+}
+
+impl StoredEncryptedMaterial {
+    fn from_object(object: &ProtectedPipelineSemanticObject) -> Result<Self, String> {
+        let ProtectedPipelineSemanticObject::EncryptedMaterial {
+            semantic_id,
+            submission,
+        } = object
+        else {
+            return Err(
+                "protected ciphertext store accepts exact encrypted material only".to_string(),
+            );
+        };
+        Ok(Self {
+            semantic_id: semantic_id.clone(),
+            envelope: StoredEncryptedTransactionEnvelope::from_envelope(
+                &submission.sealed_bundle.envelope,
+            ),
+            share_commitments: submission.sealed_bundle.share_commitments.clone(),
+            share_capsules: submission.sealed_bundle.share_capsules.clone(),
+            outer_public_key: submission.outer_public_key.clone(),
+            outer_key_lifecycle: submission.outer_key_lifecycle.clone(),
+        })
+    }
+
+    fn into_object(self) -> Result<ProtectedPipelineSemanticObject, String> {
+        Ok(ProtectedPipelineSemanticObject::EncryptedMaterial {
+            semantic_id: self.semantic_id,
+            submission: EtdagSubmissionEnvelope {
+                sealed_bundle: SealedTransactionBundle {
+                    envelope: self.envelope.into_envelope()?,
+                    share_commitments: self.share_commitments,
+                    share_capsules: self.share_capsules,
+                },
+                outer_public_key: self.outer_public_key,
+                outer_key_lifecycle: self.outer_key_lifecycle,
+            },
+        })
+    }
+}
+
+impl StoredEncryptedTransactionEnvelope {
+    fn from_envelope(envelope: &EncryptedTransactionEnvelope) -> Self {
+        Self {
+            envelope_version: envelope.envelope_version,
+            profile_id: envelope.profile_id.clone(),
+            chain_id: envelope.chain_id,
+            network_id: envelope.network_id.clone(),
+            protocol_version: envelope.protocol_version.clone(),
+            epoch: envelope.epoch,
+            target_height: envelope.target_height,
+            target_context_root: envelope.target_context_root,
+            assigned_cluster_id: envelope.assigned_cluster_id,
+            lane_id: envelope.lane_id.clone(),
+            sender_id: envelope.sender_id.clone(),
+            nonce_slot: envelope.nonce_slot,
+            gas_class: envelope.gas_class,
+            fee_class: envelope.fee_class,
+            admission_bond_nwei: envelope.admission_bond_nwei.to_string(),
+            expiry_height: envelope.expiry_height,
+            ciphertext_size_class: envelope.ciphertext_size_class,
+            aead_nonce: envelope.aead_nonce.clone(),
+            ciphertext: envelope.ciphertext.clone(),
+            key_commitment: envelope.key_commitment.clone(),
+            share_commitment_root: envelope.share_commitment_root.clone(),
+            share_capsule_root: envelope.share_capsule_root.clone(),
+            cryptographic_profile_root: envelope.cryptographic_profile_root,
+            tx_commitment: envelope.tx_commitment.clone(),
+            outer_key_id: envelope.outer_key_id.clone(),
+            outer_signature: envelope.outer_signature.clone(),
+        }
+    }
+
+    fn into_envelope(self) -> Result<EncryptedTransactionEnvelope, String> {
+        Ok(EncryptedTransactionEnvelope {
+            envelope_version: self.envelope_version,
+            profile_id: self.profile_id,
+            chain_id: self.chain_id,
+            network_id: self.network_id,
+            protocol_version: self.protocol_version,
+            epoch: self.epoch,
+            target_height: self.target_height,
+            target_context_root: self.target_context_root,
+            assigned_cluster_id: self.assigned_cluster_id,
+            lane_id: self.lane_id,
+            sender_id: self.sender_id,
+            nonce_slot: self.nonce_slot,
+            gas_class: self.gas_class,
+            fee_class: self.fee_class,
+            admission_bond_nwei: self
+                .admission_bond_nwei
+                .parse()
+                .map_err(|error| format!("decode protected ciphertext admission bond: {error}"))?,
+            expiry_height: self.expiry_height,
+            ciphertext_size_class: self.ciphertext_size_class,
+            aead_nonce: self.aead_nonce,
+            ciphertext: self.ciphertext,
+            key_commitment: self.key_commitment,
+            share_commitment_root: self.share_commitment_root,
+            share_capsule_root: self.share_capsule_root,
+            cryptographic_profile_root: self.cryptographic_profile_root,
+            tx_commitment: self.tx_commitment,
+            outer_key_id: self.outer_key_id,
+            outer_signature: self.outer_signature,
+        })
+    }
 }
 
 /// One-object-per-file durable store. Files are installed with a hard-link
@@ -67,9 +218,9 @@ impl DurableProtectedCiphertextStore {
             semantic_id: semantic_id.clone(),
             target_height,
             target_context_root,
-            object: object.clone(),
+            object: StoredEncryptedMaterial::from_object(object)?,
         };
-        let bytes = serde_json::to_vec(&record)
+        let bytes = encode_record(&record)
             .map_err(|error| format!("encode protected ciphertext material: {error}"))?;
         if bytes.len().saturating_add(4) > MAX_PROTECTED_PIPELINE_EVIDENCE_FRAME_BYTES {
             return Err("protected ciphertext material exceeds its exact wire budget".to_string());
@@ -213,21 +364,22 @@ impl DurableProtectedCiphertextStore {
             .map_err(|error| format!("read protected ciphertext {}: {error}", path.display()))?;
         let record: StoredProtectedCiphertext = serde_json::from_slice(&bytes)
             .map_err(|error| format!("decode protected ciphertext {}: {error}", path.display()))?;
-        let canonical = serde_json::to_vec(&record)
+        let canonical = encode_record(&record)
             .map_err(|error| format!("re-encode protected ciphertext: {error}"))?;
         if canonical != bytes {
             return Err("protected ciphertext record is not canonically serialized".to_string());
         }
+        let object = record.object.into_object()?;
         if record.format != PROTECTED_CIPHERTEXT_STORE_FORMAT
             || &record.semantic_id != semantic_id
-            || record.object.declared_semantic_id() != semantic_id
-            || record.object.target_binding() != (record.target_height, record.target_context_root)
-            || record.object.encrypted_submission().is_none()
+            || object.declared_semantic_id() != semantic_id
+            || object.target_binding() != (record.target_height, record.target_context_root)
+            || object.encrypted_submission().is_none()
         {
             return Err("protected ciphertext durable binding mismatch".to_string());
         }
-        record.object.validate_shape()?;
-        Ok(record.object)
+        object.validate_shape()?;
+        Ok(object)
     }
 
     fn object_path(&self, semantic_id: &EtdagDigest) -> Result<PathBuf, String> {
@@ -254,6 +406,10 @@ impl DurableProtectedCiphertextStore {
         }
         Ok(count)
     }
+}
+
+fn encode_record(record: &StoredProtectedCiphertext) -> Result<Vec<u8>, serde_json::Error> {
+    serde_json::to_vec(record)
 }
 
 fn sync_directory(directory: &Path) -> Result<(), String> {

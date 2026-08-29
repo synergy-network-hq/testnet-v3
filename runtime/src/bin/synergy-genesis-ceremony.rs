@@ -1430,12 +1430,6 @@ fn production_parameters(source_genesis: &Path) -> Result<GenesisParameters, Str
             .iter()
             .map(s)
             .collect(),
-        validator_max_count: c["validator_registry"]["init_params"]["max_validator_count"]
-            .as_u64()
-            .or_else(|| {
-                c["validator_registry"]["init_params"]["preconfigured_validator_count"]
-                    .as_u64()
-            })
         // Fresh P3 deliberately represents an uncapped validator set as null
         // in the public Genesis policy.  The deployment ABI is numeric-only;
         // zero is its canonical unbounded sentinel.

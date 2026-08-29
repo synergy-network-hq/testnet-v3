@@ -228,8 +228,8 @@ fn ciphertext_tampered_signature_and_noncanonical_durable_bytes_fail_closed() {
     let path = directory.join(format!("{}.json", semantic_id.0));
     let canonical = fs::read(&path).unwrap();
     let mut noncanonical = Vec::with_capacity(canonical.len() + 1);
-    noncanonical.push(b' ');
     noncanonical.extend_from_slice(&canonical);
+    noncanonical.push(b'\n');
     fs::write(&path, noncanonical).unwrap();
     let canonical_error = store
         .load(&semantic_id)
