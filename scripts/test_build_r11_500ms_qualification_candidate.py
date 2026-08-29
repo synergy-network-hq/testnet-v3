@@ -5,6 +5,7 @@ import hashlib
 import json
 import subprocess
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -45,6 +46,16 @@ class CandidateTests(unittest.TestCase):
             self.assertIn("[logging]", config)
             self.assertIn("[rpc]", config)
             self.assertIn("[storage]", config)
+            for path in rendered:
+                validator = path.parent.name
+                with path.open("rb") as handle:
+                    parsed = tomllib.load(handle)
+                expected = {
+                    f"127.0.0.1:{5600 + int(peer.rsplit('-', 1)[1])}"
+                    for peer in (f"validator-{ordinal:02d}" for ordinal in range(2, 7))
+                    if peer != validator
+                }
+                self.assertEqual(set(parsed["network"]["additional_dial_targets"]), expected)
             self.assertEqual(before, {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in before})
 
 

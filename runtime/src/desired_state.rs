@@ -37,8 +37,18 @@ pub const TESTNET_V3_AUTHORITY_RECORD_ENV: &str = "SYNERGY_TESTNET_V3_AUTHORITY_
 /// release-state/authority bindings while the latter is the block-zero
 /// Genesis consumed by the node.
 pub const TESTNET_V3_RELEASE_CANDIDATE_ENV: &str = "SYNERGY_TESTNET_V3_RELEASE_CANDIDATE";
+/// Immutable, content-addressed post-deployment execution bundle authenticated
+/// by the local R11 release approval. The canonical Genesis remains the
+/// block-zero consensus document; this file is only its restorable execution
+/// state and deterministic receipt evidence.
+pub const TESTNET_V3_GENESIS_EXECUTION_SNAPSHOT_ENV: &str =
+    "SYNERGY_TESTNET_V3_GENESIS_EXECUTION_SNAPSHOT";
 pub const CHAIN1266_DESIRED_STATE_SIGNATURE_DOMAIN: &str = "SYNERGY_CHAIN1266_DESIRED_STATE_V1";
 pub const CHAIN1266_QUALIFICATION_MODE_ENV: &str = "SYNERGY_CHAIN1266_QUALIFICATION_MODE";
+/// Optional root for an isolated local qualification run. Production startup
+/// never consults this variable; qualification mode defaults to the dedicated
+/// `/var/lib` root when it is absent.
+pub const CHAIN1266_QUALIFICATION_ROOT_ENV: &str = "SYNERGY_CHAIN1266_QUALIFICATION_ROOT";
 const PRODUCTION_GOVERNANCE_FINGERPRINT: &str =
     "sha256:7f296c61ad8c636dd21eb8c3dd360e981ba720cdef1b2a7e84f3c1107f6eb200";
 const EXPECTED_SCHEMA_VERSION: u32 = 1;
@@ -54,6 +64,12 @@ pub const CHAIN1266_P1_PRODUCER_IDS: [&str; 5] = [
 pub const CHAIN1266_P1_PRODUCER_TURN_TIMEOUT_MS: u64 = 4_000;
 pub const CHAIN1266_P3_CONSENSUS_MODE: &str = "posy_simplified_v3";
 pub const CHAIN1266_P3_CONSENSUS_ALGORITHM: &str = "posy/3.0";
+
+/// Qualification is an explicitly isolated evidence run.  A normal node
+/// startup must not silently inherit its external release-artifact contract.
+pub fn chain1266_qualification_mode() -> bool {
+    env::var(CHAIN1266_QUALIFICATION_MODE_ENV).as_deref() == Ok("1")
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -147,7 +163,30 @@ pub struct VerifiedDesiredStateIdentity {
     pub configuration_sha256: String,
     pub desired_state_sha256: String,
     pub desired_state_signature_sha256: String,
+    /// Present only when the verified approval authenticates a separate,
+    /// restorable Genesis execution bundle.
+    pub genesis_execution_approval: Option<VerifiedGenesisExecutionApproval>,
     pub state_root: String,
+}
+
+/// Snapshot facts returned by the already-completed ML-DSA-87 release
+/// approval verification. The execution loader compares independently parsed
+/// bytes and recomputed roots against this immutable copy; it never trusts
+/// claims made by the snapshot itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedGenesisExecutionApproval {
+    pub candidate_sha256: String,
+    pub snapshot_schema_version: u32,
+    pub snapshot_artifact_type: String,
+    pub snapshot_sha256: String,
+    pub snapshot_canonical_sha256: String,
+    pub genesis_hash: String,
+    pub chain_id: u64,
+    pub network_id: String,
+    pub release_id: String,
+    pub execution_state_root: String,
+    pub aivm_state_root: String,
+    pub receipt_root: String,
 }
 
 #[cfg(not(test))]
@@ -349,6 +388,16 @@ fn configured_release_candidate_path() -> Result<PathBuf, String> {
         .map_err(|_| format!("{TESTNET_V3_RELEASE_CANDIDATE_ENV} is required for fresh P3 startup"))
 }
 
+pub(crate) fn configured_genesis_execution_snapshot_path() -> Result<PathBuf, String> {
+    env::var(TESTNET_V3_GENESIS_EXECUTION_SNAPSHOT_ENV)
+        .map(PathBuf::from)
+        .map_err(|_| {
+            format!(
+                "{TESTNET_V3_GENESIS_EXECUTION_SNAPSHOT_ENV} is required for approved fresh P3 execution-state restore"
+            )
+        })
+}
+
 fn state_root_matches_namespace(
     state_root: &Path,
     qualification_mode: bool,
@@ -363,7 +412,16 @@ fn state_root_matches_namespace(
         return false;
     }
     if qualification_mode {
-        let qualification_root = Path::new("/var/lib/synergy/chain1266-qualification");
+        let qualification_root = env::var(CHAIN1266_QUALIFICATION_ROOT_ENV)
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/var/lib/synergy/chain1266-qualification"));
+        if !qualification_root.is_absolute()
+            || qualification_root
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return false;
+        }
         let Ok(relative) = state_root.strip_prefix(qualification_root) else {
             return false;
         };
@@ -539,7 +597,7 @@ pub fn verify_chain1266_desired_state(
     {
         return Err("desired-state consensus schema or state namespace is invalid".to_string());
     }
-    let qualification_mode = env::var(CHAIN1266_QUALIFICATION_MODE_ENV).as_deref() == Ok("1");
+    let qualification_mode = chain1266_qualification_mode();
     let state_root = env::var("SYNERGY_DATA_PATH")
         .map(PathBuf::from)
         .map_err(|_| "SYNERGY_DATA_PATH is required for incarnation-isolated state".to_string())?;
@@ -604,27 +662,71 @@ pub fn verify_chain1266_desired_state(
     if qualification_mode != private_qualification {
         return Err("qualification mode requires the private qualification Genesis".to_string());
     }
+    let mut genesis_execution_approval = None;
     let authorization_bytes = if is_fresh_p3 {
-        if private_qualification {
-            return Err(
-                "fresh P3 release approval cannot be replaced by qualification material"
-                    .to_string(),
-            );
-        }
         let approval_path = configured_release_approval_path()?;
         let authority_record_path = configured_authority_record_path()?;
         let trust_root = authority_record_path
             .parent()
             .ok_or_else(|| "fresh P3 authority record has no parent trust directory".to_string())?;
         let candidate_path = configured_release_candidate_path()?;
-        crate::testnet_v3_release_approval::verify_release_approval_file_public(
-            trust_root,
-            &candidate_path,
-            &authority_record_path,
-            &manifest_path,
-            &approval_path,
-        )
+        let verified_request = if private_qualification {
+            let snapshot_path = configured_genesis_execution_snapshot_path()?;
+            crate::testnet_v3_release_approval::verify_local_r11_qualification_release_approval_file_public(
+                trust_root,
+                &candidate_path,
+                &authority_record_path,
+                &manifest_path,
+                &snapshot_path,
+                &approval_path,
+            )
+        } else {
+            crate::testnet_v3_release_approval::verify_release_approval_file_public(
+                trust_root,
+                &candidate_path,
+                &authority_record_path,
+                &manifest_path,
+                &approval_path,
+            )
+        }
         .map_err(|error| format!("fresh P3 V4 release approval: {error}"))?;
+        if private_qualification {
+            genesis_execution_approval = Some(VerifiedGenesisExecutionApproval {
+                candidate_sha256: verified_request.candidate_sha256.clone(),
+                snapshot_schema_version: verified_request
+                    .execution_snapshot_schema_version
+                    .ok_or_else(|| {
+                        "local R11 approval omits execution snapshot schema version".to_string()
+                    })?,
+                snapshot_artifact_type: verified_request
+                    .execution_snapshot_artifact_type
+                    .clone()
+                    .ok_or_else(|| {
+                    "local R11 approval omits execution snapshot artifact type".to_string()
+                })?,
+                snapshot_sha256: verified_request
+                    .execution_snapshot_sha256
+                    .clone()
+                    .ok_or_else(|| {
+                        "local R11 approval omits execution snapshot SHA-256".to_string()
+                    })?,
+                snapshot_canonical_sha256: verified_request
+                    .execution_state_canonical_sha256
+                    .clone()
+                    .ok_or_else(|| {
+                        "local R11 approval omits canonical execution snapshot SHA-256".to_string()
+                    })?,
+                genesis_hash: verified_request.genesis_hash.clone(),
+                chain_id: verified_request.chain_id,
+                network_id: verified_request.network_id.clone(),
+                release_id: verified_request.release_id.clone(),
+                execution_state_root: verified_request
+                    .post_deployment_execution_state_root
+                    .clone(),
+                aivm_state_root: verified_request.post_deployment_aivm_state_root.clone(),
+                receipt_root: verified_request.deployment_receipt_root.clone(),
+            });
+        }
         fs::read(&approval_path).map_err(|error| {
             format!(
                 "read fresh P3 release approval {}: {error}",
@@ -773,6 +875,7 @@ pub fn verify_chain1266_desired_state(
         configuration_sha256: actual_config,
         desired_state_sha256: manifest_sha256,
         desired_state_signature_sha256: sha256_bytes(&authorization_bytes),
+        genesis_execution_approval,
         state_root: state_root.display().to_string(),
     };
     #[cfg(not(test))]

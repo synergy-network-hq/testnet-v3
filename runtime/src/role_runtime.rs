@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::env;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{self, Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -97,7 +98,10 @@ use crate::synergy_types::{
     TESTNET_V3_CLUSTER_SCHEDULE_VERSION,
 };
 use crate::telemetry;
-use crate::testnet_v3_execution_bootstrap::load_finalized_testnet_v3_genesis_execution_state;
+use crate::testnet_v3_execution_bootstrap::{
+    load_finalized_testnet_v3_genesis_execution_state,
+    load_verified_testnet_v3_release_execution_state,
+};
 use crate::token::TOKEN_MANAGER;
 use crate::transaction::Transaction;
 use crate::utils;
@@ -105,7 +109,8 @@ use crate::validator::{consensus_membership_validators, ValidatorRegistration, V
 use crate::wallet;
 use crate::{info, warn};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
+use zeroize::Zeroizing;
 
 const OFFLINE_SNAPSHOT_COMMAND_STACK_BYTES: usize = 64 * 1024 * 1024;
 /// Network input is untrusted even after the P2P handshake.  Keep typed
@@ -807,6 +812,121 @@ fn resolve_local_validator_address(config: &NodeConfig) -> String {
     }
 
     config.p2p.node_name.clone()
+}
+
+/// Returns the consensus private key from the Aegis plaintext only while it is
+/// held in the current process. The caller owns zeroization of the source
+/// buffer and the returned string.
+fn aegis_consensus_private_key(plaintext: &[u8]) -> Result<Zeroizing<String>, String> {
+    let identity: Value = serde_json::from_slice(plaintext).map_err(|error| {
+        format!("Aegis custody plaintext is not valid validator identity JSON: {error}")
+    })?;
+    let encoded = identity
+        .get("keys")
+        .and_then(Value::as_array)
+        .and_then(|keys| {
+            keys.iter().find_map(|entry| {
+                (entry.get("role").and_then(Value::as_str) == Some("consensus"))
+                    .then(|| entry.get("private_key").and_then(Value::as_str))
+                    .flatten()
+            })
+        })
+        .filter(|key| !key.trim().is_empty())
+        .ok_or_else(|| "Aegis validator custody has no consensus private key".to_string())?;
+    Ok(Zeroizing::new(encoded.to_string()))
+}
+
+/// NCP's minimal node model keeps only encrypted validator custody on disk.
+/// This bridge invokes the approved Aegis engine with an NCP-provided stdin
+/// unlock secret, captures its stdout in memory, validates the ML-DSA key
+/// against the Genesis member record, and installs it into the process-local
+/// signing cache. It never creates a plaintext key file.
+fn unlock_ncp_aegis_validator_custody(
+    config: &NodeConfig,
+    config_path: &Path,
+    validator_address: &str,
+) -> Result<(), String> {
+    let configured_path = config.identity.encrypted_custody_path.trim();
+    if configured_path.is_empty() {
+        return Ok(());
+    }
+    if env::var("SYNERGY_NCP_CUSTODY_PASSPHRASE_STDIN")
+        .ok()
+        .as_deref()
+        != Some("1")
+    {
+        return Err(
+            "NCP encrypted custody requires its protected stdin unlock channel; refusing legacy plaintext-key fallback"
+                .to_string(),
+        );
+    }
+    let custody_path = PathBuf::from(configured_path);
+    let custody_path = if custody_path.is_absolute() {
+        custody_path
+    } else {
+        config_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(custody_path)
+    };
+    let custody_metadata = fs::metadata(&custody_path).map_err(|error| {
+        format!(
+            "NCP encrypted custody is unavailable at {}: {error}",
+            custody_path.display()
+        )
+    })?;
+    if !custody_metadata.is_file() || custody_metadata.len() == 0 {
+        return Err("NCP encrypted custody must be a non-empty regular file".to_string());
+    }
+
+    let engine_path = env::var("SYNERGY_AEGIS_ENGINE")
+        .map(PathBuf::from)
+        .map_err(|_| "NCP did not provide the bundled Aegis custody engine".to_string())?;
+    let engine_metadata = fs::metadata(&engine_path).map_err(|error| {
+        format!(
+            "NCP Aegis custody engine is unavailable at {}: {error}",
+            engine_path.display()
+        )
+    })?;
+    if !engine_metadata.is_file() {
+        return Err("NCP Aegis custody engine is not a regular file".to_string());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if engine_metadata.permissions().mode() & 0o022 != 0 {
+            return Err("NCP Aegis custody engine must not be group/world writable".to_string());
+        }
+    }
+
+    let mut passphrase = Zeroizing::new(String::new());
+    io::stdin()
+        .read_line(&mut passphrase)
+        .map_err(|error| format!("read NCP custody unlock channel: {error}"))?;
+    if passphrase.trim().is_empty() {
+        return Err("NCP custody unlock channel was empty".to_string());
+    }
+    let output = Command::new(&engine_path)
+        .args(["decrypt"])
+        .arg(&custody_path)
+        .arg("--stdout")
+        // The secret is passed only to the short-lived Aegis child, never in
+        // argv or a file. The engine emits plaintext solely through stdout.
+        .env("SYNERGY_DECRYPT_PASSPHRASE", passphrase.trim())
+        .output()
+        .map_err(|error| format!("run NCP Aegis custody engine: {error}"))?;
+    if !output.status.success() {
+        return Err("Aegis rejected NCP validator custody unlock".to_string());
+    }
+    let plaintext = Zeroizing::new(output.stdout);
+    let consensus_private_key = aegis_consensus_private_key(&plaintext)?;
+    crate::consensus::validator_keys::install_aegis_unlocked_validator_key(
+        0,
+        validator_address,
+        &consensus_private_key,
+        &VALIDATOR_MANAGER,
+    )?;
+    Ok(())
 }
 
 fn normalize_socket_address(bind_address: &str, default_port: u16) -> String {
@@ -2748,8 +2868,15 @@ fn spawn_finalized_simplified_posy_driver(
     let protected_execution_sources = (material_mode == SimplifiedMaterialMode::Protected)
         .then(|| build_genesis_bootstrap_protected_input_source(&genesis))
         .transpose()?;
-    let genesis_execution_state = load_finalized_testnet_v3_genesis_execution_state(genesis)
-        .map_err(|error| format!("load finalized Genesis execution state: {error}"))?;
+    // A normal NCP-managed node restores only the state committed by canonical
+    // Genesis.  The separate execution bundle remains an isolated
+    // qualification/audit input and is never a normal node-start dependency.
+    let genesis_execution_state = if crate::desired_state::chain1266_qualification_mode() {
+        load_verified_testnet_v3_release_execution_state(genesis)
+    } else {
+        load_finalized_testnet_v3_genesis_execution_state(genesis)
+    }
+    .map_err(|error| format!("load finalized Genesis execution state: {error}"))?;
     let genesis_runtime_metadata = simplified_genesis_runtime_metadata(genesis.value())?;
     let cryptographic_profile_root =
         fresh_simplified_genesis_cryptographic_profile_root(genesis, &genesis_runtime_metadata)?;
@@ -4540,7 +4667,43 @@ fn write_role_runtime_report(
 }
 
 pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProfile>) {
-    let args: Vec<String> = env::args().collect();
+    let mut args: Vec<String> = env::args().collect();
+    // The NCP product invokes a validator with one operator-facing input:
+    // `synergy-validator-node --config <node>/config.toml`.  Its exact
+    // Genesis lives adjacent to that config and is selected before any
+    // process-global Genesis loader can initialize.  The old `start` spelling
+    // remains available for developer and release tooling.
+    if let [_, flag, config_path] = args.as_slice() {
+        if flag == "--config" {
+            let config_path = PathBuf::from(config_path);
+            if !config_path.is_file() {
+                eprintln!(
+                    "NCP runtime configuration does not exist: {}",
+                    config_path.display()
+                );
+                process::exit(1);
+            }
+            let genesis_path = config_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("genesis.sgen");
+            if !genesis_path.is_file() {
+                eprintln!(
+                    "NCP runtime requires the adjacent canonical Genesis file: {}",
+                    genesis_path.display()
+                );
+                process::exit(1);
+            }
+            env::set_var("SYNERGY_CONFIG_PATH", &config_path);
+            env::set_var("SYNERGY_GENESIS_FILE", &genesis_path);
+            args = vec![
+                args[0].clone(),
+                "start".to_string(),
+                "--config".to_string(),
+                config_path.to_string_lossy().to_string(),
+            ];
+        }
+    }
     if args.len() < 2 {
         print_usage(binary_name, expected_profile);
         process::exit(1);
@@ -4649,21 +4812,23 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                     process::exit(1);
                 }
             };
-            let desired_role_profile = role_profile.unwrap_or_else(|| {
-                eprintln!(
-                    "Failed to validate Chain 1266 desired state: node role/profile is unresolved"
-                );
+            let resolved_role_profile = role_profile.unwrap_or_else(|| {
+                eprintln!("Failed to validate Chain 1266 runtime: node role/profile is unresolved");
                 process::exit(1);
             });
-            let release_id = crate::desired_state::verify_chain1266_desired_state(
-                desired_role_profile,
-                &config.identity.node_id,
-                &effective_config_path,
-            )
-            .unwrap_or_else(|error| {
-                eprintln!("Failed to validate Chain 1266 desired state: {error}");
-                process::exit(1);
-            });
+            let runtime_binding = if crate::desired_state::chain1266_qualification_mode() {
+                crate::desired_state::verify_chain1266_desired_state(
+                    resolved_role_profile,
+                    &config.identity.node_id,
+                    &effective_config_path,
+                )
+                .unwrap_or_else(|error| {
+                    eprintln!("Failed to validate Chain 1266 qualification release: {error}");
+                    process::exit(1);
+                })
+            } else {
+                "canonical-genesis".to_string()
+            };
 
             if preflight_only {
                 let genesis = canonical_genesis().unwrap_or_else(|error| {
@@ -4702,10 +4867,10 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                 });
                 println!(
                     "CHAIN1266_ROLE_RELEASE_PREFLIGHT_VERIFIED release_id={} node_id={} validator_address={} profile={}",
-                    release_id,
+                    runtime_binding,
                     config.identity.node_id,
                     validator_address,
-                    desired_role_profile.compiled_profile
+                    resolved_role_profile.compiled_profile
                 );
                 return;
             }
@@ -4730,12 +4895,12 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
             );
             info!(
                 "main",
-                "Validated role-bound runtime profile and desired state",
-                "role_id" => desired_role_profile.role_id,
-                "compiled_profile" => desired_role_profile.compiled_profile,
-                "authority_plane" => format!("{:?}", desired_role_profile.authority_plane),
+                "Validated role-bound runtime profile and canonical startup binding",
+                "role_id" => resolved_role_profile.role_id,
+                "compiled_profile" => resolved_role_profile.compiled_profile,
+                "authority_plane" => format!("{:?}", resolved_role_profile.authority_plane),
                 "binary" => binary_name,
-                "release_id" => release_id
+                "runtime_binding" => runtime_binding
             );
 
             env::set_var(
@@ -4762,7 +4927,15 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
             });
             env::set_var("SYNERGY_PROJECT_ROOT", &project_root);
 
-            let data_dir = project_root.join("data");
+            // The NCP product owns a node root containing only config.toml,
+            // genesis.json, and encrypted identity.  Its configured storage
+            // location is therefore the authoritative live data directory;
+            // legacy source-workspace launches retain their historical root.
+            let data_dir = if config.identity.encrypted_custody_path.trim().is_empty() {
+                project_root.join("data")
+            } else {
+                PathBuf::from(&config.storage.path)
+            };
             let logs_dir = data_dir.join("logs");
             let chain_dir = data_dir.join("chain");
 
@@ -4806,9 +4979,18 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                 info!(
                     "main",
                     "Canonical Genesis validator membership loaded before P2P",
-                    "validator_address" => validator_address,
+                    "validator_address" => validator_address.clone(),
                     "active_validator_count" => active_validator_count as u64
                 );
+                unlock_ncp_aegis_validator_custody(
+                    &config,
+                    &effective_config_path,
+                    &validator_address,
+                )
+                .unwrap_or_else(|error| {
+                    eprintln!("NCP encrypted validator custody failed closed: {error}");
+                    process::exit(1);
+                });
             }
             info!(
                 "main",
@@ -5820,6 +6002,27 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    #[test]
+    fn ncp_custody_selects_only_the_consensus_key() {
+        let identity = br#"{
+            "keys": [
+                {"role": "peer", "private_key": "peer-private"},
+                {"role": "consensus", "private_key": "consensus-private"}
+            ]
+        }"#;
+
+        let key = aegis_consensus_private_key(identity).expect("consensus key must be present");
+
+        assert_eq!(&*key, "consensus-private");
+    }
+
+    #[test]
+    fn ncp_custody_rejects_an_identity_without_a_consensus_key() {
+        let identity = br#"{"keys": [{"role": "peer", "private_key": "peer-private"}]}"#;
+
+        assert!(aegis_consensus_private_key(identity).is_err());
+    }
 
     fn simplified_readiness_validator_ids(
         validator_ids: &[&str],

@@ -89,6 +89,11 @@ def render_config(validator_id: str, validator: dict[str, Any], root: str) -> by
     address = validator.get("validator_uma_id")
     require(isinstance(address, str) and address, f"{validator_id} has no public validator UMA")
     ordinal = int(validator_id.rsplit("-", 1)[1])
+    dial_targets = [
+        f"127.0.0.1:{5600 + int(peer_id.rsplit('-', 1)[1])}"
+        for peer_id in ACTIVE_VALIDATORS
+        if peer_id != validator_id
+    ]
     # Legacy whole-second aliases are deliberately omitted.  Fresh-P3 uses the
     # explicit millisecond field, which the production role verifies against
     # the Genesis-bound manifest without rounding to a one-second value.
@@ -111,6 +116,7 @@ p2p_port = {5600 + ordinal}
 rpc_port = {6200 + ordinal}
 ws_port = {6300 + ordinal}
 max_peers = 16
+additional_dial_targets = {json.dumps(dial_targets, separators=(",", ":"))}
 
 [blockchain]
 target_block_time_ms = {NEW_TIMING_MS}
@@ -121,14 +127,9 @@ chain_id = 1266
 algorithm = "posy/3.0"
 mode = "posy_simplified_v3"
 target_block_time_ms = {NEW_TIMING_MS}
-proposal_timeout_ms = 1500
-prevote_timeout_ms = 1500
-precommit_timeout_ms = 1500
-max_round_timeout_ms = 10000
-epoch_length = 1000
-validator_cluster_size = 5
-min_validators = 5
-validator_vote_threshold = 4
+coordinator_id = ""
+producer_ids = []
+producer_turn_timeout_ms = 0
 consensus_parameter_root_sha3_512 = "{root}"
 
 [p2p]

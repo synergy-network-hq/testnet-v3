@@ -209,6 +209,18 @@ fn load_canonical_genesis_from_disk() -> Result<GenesisDocument, String> {
 fn load_canonical_genesis_from_path(path: PathBuf) -> Result<GenesisDocument, String> {
     let bytes = fs::read(&path)
         .map_err(|error| format!("read canonical genesis {}: {error}", path.display()))?;
+    if path.extension().and_then(|extension| extension.to_str()) == Some("sgen") {
+        let verified = crate::sgen::verify_sgen_bytes(&bytes)
+            .map_err(|error| format!("verify canonical SGEN {}: {error}", path.display()))?;
+        let mut document = load_canonical_genesis_from_value(verified.reconstructed_document, path)?;
+        // The SGEN payload identity is the canonical Genesis hash. The
+        // internally reconstructed legacy document retains its own integrity
+        // hash only to validate the fields it supplies during the migration.
+        document.genesis_hash = verified.genesis_hash;
+        let caip2 = required_string(&document.value, &["network_identity", "canonical_caip2", "value"])?;
+        document.network_magic_bytes = network_magic_bytes_for(&caip2, &document.genesis_hash);
+        return Ok(document);
+    }
     let value: Value = serde_json::from_slice(&bytes)
         .map_err(|error| format!("parse canonical genesis {}: {error}", path.display()))?;
 
@@ -491,7 +503,7 @@ fn genesis_path() -> PathBuf {
     let configured = std::env::var("SYNERGY_GENESIS_FILE")
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "config/genesis.json".to_string());
+        .unwrap_or_else(|| "config/genesis.sgen".to_string());
     resolve_data_path(&configured)
 }
 
@@ -765,6 +777,14 @@ fn is_chain1266_pre_p1_genesis(value: &Value) -> bool {
 fn load_candidate_consensus_parameters(
     value: &Value,
 ) -> Result<Option<LoadedConsensusParameters>, String> {
+    // Fresh PoSy v3 carries its typed, Genesis-bound consensus activation in
+    // `consensus.posy_v3_activation`; it must not be forced through the
+    // retired P2.2 `consensus_parameters` artifact path.
+    if required_string(value, &["network", "consensus_version"]).as_deref() == Ok("posy/3.0")
+        && value.pointer("/consensus/posy_v3_activation").is_some()
+    {
+        return Ok(None);
+    }
     let Some(binding) = value.get("consensus_parameters") else {
         if value.get("genesis_deployment").is_some() {
             return Err(

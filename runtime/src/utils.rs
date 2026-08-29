@@ -44,18 +44,22 @@ pub fn get_project_root() -> Option<PathBuf> {
 
 fn has_runtime_config_dir(path: &Path) -> bool {
     let config_dir = path.join("config");
-    if !config_dir.is_dir() {
-        return false;
+    if config_dir.is_dir() {
+        if config_dir.join("mod.rs").is_file()
+            && !config_dir.join("genesis.json").is_file()
+            && !config_dir.join("genesis.testnet.json").is_file()
+            && !config_dir.join("node_config.toml").is_file()
+            && !config_dir.join("network-config.toml").is_file()
+        {
+            return false;
+        }
+        return true;
     }
-    if config_dir.join("mod.rs").is_file()
-        && !config_dir.join("genesis.json").is_file()
-        && !config_dir.join("genesis.testnet.json").is_file()
-        && !config_dir.join("node_config.toml").is_file()
-        && !config_dir.join("network-config.toml").is_file()
-    {
-        return false;
-    }
-    true
+
+    // NCP's deployed node layout deliberately keeps its only operator-facing
+    // files at the node root: config.toml and genesis.json.  Do not require a
+    // source-checkout-style config/ directory merely to identify that root.
+    path.join("config.toml").is_file() && path.join("genesis.json").is_file()
 }
 
 fn search_runtime_root_from(start: &Path) -> Option<PathBuf> {
@@ -416,5 +420,24 @@ mod tests {
             resolve_data_path("logs/synergy-testnet.log"),
             workspace.root.join("logs").join("synergy-testnet.log")
         );
+    }
+
+    #[test]
+    fn ncp_node_root_is_a_valid_runtime_root_without_a_config_directory() {
+        let _lock = env_lock().lock().expect("env lock should be available");
+        let workspace = TempWorkspace::new();
+        std::fs::write(workspace.root.join("config.toml"), "chain_id = 1266\n").unwrap();
+        std::fs::write(workspace.root.join("genesis.json"), "{}\n").unwrap();
+        let _project_root = EnvVarGuard::clear("SYNERGY_PROJECT_ROOT");
+        let _config_path = EnvVarGuard::set(
+            "SYNERGY_CONFIG_PATH",
+            workspace
+                .root
+                .join("config.toml")
+                .to_str()
+                .expect("config path should be utf-8"),
+        );
+
+        assert_eq!(get_runtime_root(), Some(workspace.root.clone()));
     }
 }

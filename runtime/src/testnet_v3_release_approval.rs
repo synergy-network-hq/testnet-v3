@@ -17,6 +17,9 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use crate::address::derive_standard_account_address;
+use crate::execution::GenesisExecutionSnapshot;
+use crate::genesis_deployment::compute_genesis_receipt_root;
+use crate::synq_execution::SynQAivmReceiptSummary;
 
 /// The exact ML-DSA context used for Testnet-v3 genesis release approval.
 pub const TESTNET_V3_GENESIS_RELEASE_APPROVAL_DOMAIN: &str =
@@ -28,6 +31,22 @@ pub const TESTNET_V3_GENESIS_RELEASE_APPROVAL_ARTIFACT_TYPE: &str =
     "testnet-v3-genesis-release-approval";
 /// The exact action that the designated governance authority approves.
 pub const TESTNET_V3_GENESIS_RELEASE_ACTION: &str = "APPROVE_FINAL_TESTNET_V3_GENESIS_CANDIDATE";
+/// Separate signature domain used only by the isolated R11 production-role
+/// qualification. A qualification approval can therefore never authorize a
+/// Testnet-v3 release even though it traverses the same V4 parser and verifier.
+pub const LOCAL_R11_QUALIFICATION_RELEASE_APPROVAL_DOMAIN: &str =
+    "SYNERGY_LOCAL_R11_QUALIFICATION_GENESIS_RELEASE_APPROVAL_V4";
+pub const LOCAL_R11_QUALIFICATION_ENVIRONMENT: &str = "LOCAL_R11_QUALIFICATION";
+pub const LOCAL_R11_QUALIFICATION_AUTHORITY_ROLE: &str =
+    "LOCAL-R11-QUALIFICATION-GOVERNANCE-AUTHORITY";
+pub const LOCAL_R11_QUALIFICATION_APPROVAL_ARTIFACT_TYPE: &str =
+    "local-r11-qualification-genesis-release-approval";
+pub const LOCAL_R11_QUALIFICATION_RELEASE_ACTION: &str = "AUTHORIZE_LOCAL_R11_QUALIFICATION_ONLY";
+/// Strict envelope carried beside the canonical Genesis. The approval binds
+/// the SHA-256 of the exact envelope bytes, not merely the nested state.
+pub const TESTNET_V3_GENESIS_EXECUTION_BUNDLE_ARTIFACT_TYPE: &str =
+    "synergy-testnet-v3-genesis-execution-bundle-v1";
+pub const TESTNET_V3_GENESIS_EXECUTION_BUNDLE_SCHEMA_VERSION: u32 = 1;
 
 const SCHEMA_VERSION: u32 = 4;
 const EXPECTED_CHAIN_ID: u64 = 1266;
@@ -36,9 +55,43 @@ const EXPECTED_CHAIN_ID: u64 = 1266;
 const EXPECTED_NETWORK_ID: &str = "testnet";
 const EXPECTED_RELEASE_ID: &str = "testnet-v3";
 const EXPECTED_SYNQ_NETWORK_ID: &str = "synergy-testnet";
+const EXPECTED_PROTOCOL_VERSION: &str = "posy/3.0";
 const EXPECTED_ALGORITHM: &str = "ML-DSA-87";
 const EXPECTED_AUTHORITIES_ARTIFACT: &str = "TESTNET_V3_PRODUCTION_AUTHORITIES";
+const LOCAL_R11_QUALIFICATION_AUTHORITIES_ARTIFACT: &str = "LOCAL_R11_QUALIFICATION_AUTHORITIES";
 const ETDAG_MEMBERSHIP_ANCHOR_SCHEMA: &str = "synergy-etdag-governed-membership-proof-v1";
+const MAX_GENESIS_EXECUTION_BUNDLE_BYTES: u64 = 128 * 1024 * 1024;
+
+/// A complete, independently restorable Genesis execution-state carrier.
+///
+/// `execution_snapshot_sha256` in the signed approval is the SHA-256 of the
+/// exact serialized bytes of this entire envelope. The separately signed
+/// `execution_state_canonical_sha256` is the SHA-256 of `serde_json::to_vec`
+/// over only `execution_state`, so transport formatting and state identity are
+/// both unambiguous.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TestnetV3GenesisExecutionBundle {
+    pub schema_version: u32,
+    pub artifact_type: String,
+    pub chain_id: u64,
+    pub network_id: String,
+    pub release_id: String,
+    pub protocol_version: String,
+    pub canonical_genesis_hash: String,
+    pub testnet_v3_revision: String,
+    pub synq_revision: String,
+    pub aegis_revision: String,
+    pub validator_binary_sha256: String,
+    pub execution_state_root: String,
+    pub aivm_state_root: String,
+    pub receipt_root: String,
+    pub deployment_count: u64,
+    pub initialization_count: u64,
+    pub deployment_receipts: Vec<SynQAivmReceiptSummary>,
+    pub initialization_receipts: Vec<SynQAivmReceiptSummary>,
+    pub execution_state: GenesisExecutionSnapshot,
+}
 
 /// The immutable facts a governance signature authorizes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -47,6 +100,11 @@ pub struct TestnetV3GenesisReleaseApprovalRequest {
     pub schema_version: u32,
     pub artifact_type: String,
     pub action: String,
+    /// Omitted from byte-for-byte production V4 requests. Its presence with
+    /// the single accepted value makes a local approval non-replayable in the
+    /// production profile while retaining this exact request schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
     pub signature_algorithm: String,
     pub signature_domain: String,
     pub governance_authority_role: String,
@@ -54,6 +112,19 @@ pub struct TestnetV3GenesisReleaseApprovalRequest {
     pub governance_public_key_fingerprint: String,
     pub governance_identity_authorization_binding_sha3_256: String,
     pub candidate_sha256: String,
+    /// Local-R11 only. This is the SHA-256 of the exact external execution
+    /// bundle envelope bytes, not the nested execution-state JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_snapshot_sha256: Option<String>,
+    /// Local-R11 only. Canonical SHA-256 of the nested execution state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_state_canonical_sha256: Option<String>,
+    /// Local-R11 only. Exact strict-envelope schema accepted by validators.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_snapshot_schema_version: Option<u32>,
+    /// Local-R11 only. Exact strict-envelope artifact type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_snapshot_artifact_type: Option<String>,
     pub genesis_hash: String,
     pub chain_id: u64,
     pub network_id: String,
@@ -99,7 +170,7 @@ pub struct FreshP3DesiredStateBinding {
 impl TestnetV3GenesisReleaseApprovalRequest {
     /// Serializes the only payload that an approver is allowed to sign.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, String> {
-        validate_request_shape(self)?;
+        validate_request_shape_for_profile(self, ReleaseApprovalProfile::from_request(self)?)?;
         serde_json::to_vec(self)
             .map_err(|error| format!("serialize canonical release-approval request: {error}"))
     }
@@ -126,6 +197,75 @@ pub struct FrozenGovernanceAuthority {
     pub frozen_authority_record_sha256: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReleaseApprovalProfile {
+    Production,
+    LocalR11Qualification,
+}
+
+impl ReleaseApprovalProfile {
+    fn from_request(request: &TestnetV3GenesisReleaseApprovalRequest) -> Result<Self, String> {
+        match request.environment.as_deref() {
+            None => Ok(Self::Production),
+            Some(LOCAL_R11_QUALIFICATION_ENVIRONMENT) => Ok(Self::LocalR11Qualification),
+            Some(_) => Err("release-approval request has an unsupported environment".to_string()),
+        }
+    }
+
+    fn environment(self) -> Option<&'static str> {
+        match self {
+            Self::Production => None,
+            Self::LocalR11Qualification => Some(LOCAL_R11_QUALIFICATION_ENVIRONMENT),
+        }
+    }
+
+    fn authority_artifact(self) -> &'static str {
+        match self {
+            Self::Production => EXPECTED_AUTHORITIES_ARTIFACT,
+            Self::LocalR11Qualification => LOCAL_R11_QUALIFICATION_AUTHORITIES_ARTIFACT,
+        }
+    }
+
+    fn authority_role(self) -> &'static str {
+        match self {
+            Self::Production => TESTNET_V3_GOVERNANCE_AUTHORITY_ROLE,
+            Self::LocalR11Qualification => LOCAL_R11_QUALIFICATION_AUTHORITY_ROLE,
+        }
+    }
+
+    fn signature_domain(self) -> &'static str {
+        match self {
+            Self::Production => TESTNET_V3_GENESIS_RELEASE_APPROVAL_DOMAIN,
+            Self::LocalR11Qualification => LOCAL_R11_QUALIFICATION_RELEASE_APPROVAL_DOMAIN,
+        }
+    }
+
+    fn artifact_type(self) -> &'static str {
+        match self {
+            Self::Production => TESTNET_V3_GENESIS_RELEASE_APPROVAL_ARTIFACT_TYPE,
+            Self::LocalR11Qualification => LOCAL_R11_QUALIFICATION_APPROVAL_ARTIFACT_TYPE,
+        }
+    }
+
+    fn action(self) -> &'static str {
+        match self {
+            Self::Production => TESTNET_V3_GENESIS_RELEASE_ACTION,
+            Self::LocalR11Qualification => LOCAL_R11_QUALIFICATION_RELEASE_ACTION,
+        }
+    }
+
+    fn purpose(self) -> &'static str {
+        match self {
+            Self::Production => "testnet-v3-genesis-release-approval",
+            Self::LocalR11Qualification => "local-r11-qualification-genesis-release-approval",
+        }
+    }
+
+    fn test_fixture(self) -> bool {
+        matches!(self, Self::LocalR11Qualification)
+    }
+}
+
 /// Builds the unsigned, canonical request for a staged Testnet-v3 candidate.
 ///
 /// The request includes the SHA-256 of the candidate bytes as staged, rather
@@ -142,8 +282,188 @@ pub fn build_release_approval_request(
         candidate_path,
         authorities_path,
         desired_state_path,
-        true,
+        None,
+        AuthorityMaterial::RecordOnly,
+        ReleaseApprovalProfile::Production,
     )
+}
+
+pub fn build_local_r11_qualification_release_approval_request(
+    repo_root: &Path,
+    candidate_path: &Path,
+    authorities_path: &Path,
+    desired_state_path: &Path,
+    execution_bundle_path: &Path,
+) -> Result<TestnetV3GenesisReleaseApprovalRequest, String> {
+    build_release_approval_request_inner(
+        repo_root,
+        candidate_path,
+        authorities_path,
+        desired_state_path,
+        Some(execution_bundle_path),
+        AuthorityMaterial::RecordOnly,
+        ReleaseApprovalProfile::LocalR11Qualification,
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AuthorityMaterial {
+    RecordOnly,
+    PublicBundle,
+    CustodyHashes,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalR11ExecutionBundleBinding {
+    schema_version: u32,
+    artifact_type: String,
+    envelope_sha256: String,
+    execution_state_canonical_sha256: String,
+}
+
+fn load_local_r11_execution_bundle_binding(
+    execution_bundle_path: &Path,
+    candidate: &Value,
+    desired_state: &FreshP3DesiredStateBinding,
+) -> Result<LocalR11ExecutionBundleBinding, String> {
+    let bytes = read_regular_bounded_file(
+        execution_bundle_path,
+        "local R11 Genesis execution bundle",
+        MAX_GENESIS_EXECUTION_BUNDLE_BYTES,
+    )?;
+    let envelope_sha256 = sha256_hex(&bytes);
+    let bundle: TestnetV3GenesisExecutionBundle = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("parse local R11 Genesis execution bundle: {error}"))?;
+    let genesis_hash = json_string(
+        candidate,
+        "/integrity/genesis_hash",
+        "candidate genesis hash",
+    )?;
+    let candidate_execution_root = json_string(
+        candidate,
+        "/genesis_deployment/post_deployment_execution_state_root",
+        "candidate post-deployment execution root",
+    )?;
+    let candidate_aivm_root = json_string(
+        candidate,
+        "/genesis_deployment/post_deployment_aivm_state_root",
+        "candidate post-deployment AIVM root",
+    )?;
+    let candidate_receipt_root = json_string(
+        candidate,
+        "/genesis_deployment/receipt_root",
+        "candidate deployment receipt root",
+    )?;
+
+    if bundle.schema_version != TESTNET_V3_GENESIS_EXECUTION_BUNDLE_SCHEMA_VERSION
+        || bundle.artifact_type != TESTNET_V3_GENESIS_EXECUTION_BUNDLE_ARTIFACT_TYPE
+        || bundle.chain_id != EXPECTED_CHAIN_ID
+        || bundle.network_id != EXPECTED_NETWORK_ID
+        || bundle.release_id != EXPECTED_RELEASE_ID
+        || bundle.protocol_version != EXPECTED_PROTOCOL_VERSION
+        || bundle.canonical_genesis_hash != genesis_hash
+    {
+        return Err(
+            "local R11 Genesis execution bundle has a wrong schema, chain, network, release, protocol, or canonical Genesis binding"
+                .to_string(),
+        );
+    }
+    if bundle.testnet_v3_revision != desired_state.testnet_v3_revision
+        || bundle.synq_revision != desired_state.synq_revision
+        || bundle.aegis_revision != desired_state.aegis_revision
+        || desired_state
+            .role_binary_sha256
+            .get("validator_node")
+            .map(String::as_str)
+            != Some(bundle.validator_binary_sha256.as_str())
+    {
+        return Err(
+            "local R11 Genesis execution bundle does not match desired-state release provenance"
+                .to_string(),
+        );
+    }
+    if bundle.deployment_count != 9
+        || bundle.initialization_count != 27
+        || bundle.deployment_receipts.len() != bundle.deployment_count as usize
+        || bundle.initialization_receipts.len() != bundle.initialization_count as usize
+    {
+        return Err(
+            "local R11 Genesis execution bundle does not contain exactly 9 deployment and 27 initialization receipts"
+                .to_string(),
+        );
+    }
+
+    // This is the independent computation edge: declarations in the envelope
+    // and candidate are accepted only after the strict snapshot restores and
+    // recomputes both root-bearing state commitments.
+    bundle
+        .execution_state
+        .restore_testnet_v3()
+        .map_err(|error| format!("restore local R11 Genesis execution state: {error}"))?;
+    if bundle.execution_state.state_root != bundle.execution_state_root
+        || bundle.execution_state.aivm_state_root != bundle.aivm_state_root
+        || bundle.execution_state_root != candidate_execution_root
+        || bundle.aivm_state_root != candidate_aivm_root
+    {
+        return Err(
+            "local R11 Genesis execution bundle computed roots do not match its envelope and approved candidate"
+                .to_string(),
+        );
+    }
+    let computed_receipt_root =
+        compute_genesis_receipt_root(&bundle.deployment_receipts, &bundle.initialization_receipts)?
+            .to_hex();
+    if computed_receipt_root != bundle.receipt_root
+        || computed_receipt_root != candidate_receipt_root
+    {
+        return Err(
+            "local R11 Genesis execution bundle computed receipt root does not match its envelope and approved candidate"
+                .to_string(),
+        );
+    }
+
+    let execution_state_canonical_sha256 = sha256_hex(
+        &serde_json::to_vec(&bundle.execution_state)
+            .map_err(|error| format!("canonicalize local R11 execution state: {error}"))?,
+    );
+    let binding = candidate
+        .pointer("/genesis_execution_snapshot")
+        .ok_or_else(|| {
+            "local R11 candidate is missing genesis_execution_snapshot binding".to_string()
+        })?;
+    if json_u64(
+        binding,
+        "/schema_version",
+        "candidate execution-snapshot schema version",
+    )? != u64::from(TESTNET_V3_GENESIS_EXECUTION_BUNDLE_SCHEMA_VERSION)
+        || json_string(
+            binding,
+            "/artifact_type",
+            "candidate execution-snapshot artifact type",
+        )? != TESTNET_V3_GENESIS_EXECUTION_BUNDLE_ARTIFACT_TYPE
+        || json_string(
+            binding,
+            "/sha256",
+            "candidate execution-snapshot envelope SHA-256",
+        )? != envelope_sha256
+        || json_string(
+            binding,
+            "/execution_state_canonical_sha256",
+            "candidate canonical execution-state SHA-256",
+        )? != execution_state_canonical_sha256
+    {
+        return Err(
+            "local R11 candidate does not bind the exact verified Genesis execution bundle"
+                .to_string(),
+        );
+    }
+
+    Ok(LocalR11ExecutionBundleBinding {
+        schema_version: bundle.schema_version,
+        artifact_type: bundle.artifact_type,
+        envelope_sha256,
+        execution_state_canonical_sha256,
+    })
 }
 
 fn build_release_approval_request_inner(
@@ -151,14 +471,17 @@ fn build_release_approval_request_inner(
     candidate_path: &Path,
     authorities_path: &Path,
     desired_state_path: &Path,
-    require_custody_hashes: bool,
+    execution_bundle_path: Option<&Path>,
+    authority_material: AuthorityMaterial,
+    profile: ReleaseApprovalProfile,
 ) -> Result<TestnetV3GenesisReleaseApprovalRequest, String> {
     let candidate_bytes = read_file(candidate_path, "release candidate")?;
     let candidate = parse_json(&candidate_bytes, "release candidate")?;
     let authority = load_frozen_governance_authority_inner(
         repo_root,
         authorities_path,
-        require_custody_hashes,
+        authority_material,
+        profile,
     )?;
 
     let candidate_authority_sha = json_string(
@@ -172,7 +495,7 @@ fn build_release_approval_request_inner(
                 .to_string(),
         );
     }
-    validate_candidate_release_state(&candidate)?;
+    validate_candidate_release_state(&candidate, profile)?;
     let desired_state = load_fresh_p3_desired_state_binding(
         desired_state_path,
         &json_string(
@@ -181,21 +504,54 @@ fn build_release_approval_request_inner(
             "candidate genesis hash",
         )?,
     )?;
+    let execution_bundle = match profile {
+        ReleaseApprovalProfile::Production => {
+            if execution_bundle_path.is_some() {
+                return Err(
+                    "production V4 request does not accept the local R11 execution bundle"
+                        .to_string(),
+                );
+            }
+            None
+        }
+        ReleaseApprovalProfile::LocalR11Qualification => {
+            Some(load_local_r11_execution_bundle_binding(
+                execution_bundle_path.ok_or_else(|| {
+                    "local R11 approval requires an external Genesis execution bundle".to_string()
+                })?,
+                &candidate,
+                &desired_state,
+            )?)
+        }
+    };
     let etdag_binding = load_candidate_etdag_governance(&candidate)?;
     let etdag_membership_anchor = load_candidate_etdag_membership_anchor(&candidate)?;
 
     let request = TestnetV3GenesisReleaseApprovalRequest {
         schema_version: SCHEMA_VERSION,
-        artifact_type: TESTNET_V3_GENESIS_RELEASE_APPROVAL_ARTIFACT_TYPE.to_string(),
-        action: TESTNET_V3_GENESIS_RELEASE_ACTION.to_string(),
+        artifact_type: profile.artifact_type().to_string(),
+        action: profile.action().to_string(),
+        environment: profile.environment().map(str::to_string),
         signature_algorithm: EXPECTED_ALGORITHM.to_string(),
-        signature_domain: TESTNET_V3_GENESIS_RELEASE_APPROVAL_DOMAIN.to_string(),
+        signature_domain: profile.signature_domain().to_string(),
         governance_authority_role: authority.role,
         governance_standard_account_address: authority.standard_account_address,
         governance_public_key_fingerprint: authority.public_key_fingerprint,
         governance_identity_authorization_binding_sha3_256: authority
             .governance_identity_authorization_binding_sha3_256,
         candidate_sha256: sha256_hex(&candidate_bytes),
+        execution_snapshot_sha256: execution_bundle
+            .as_ref()
+            .map(|binding| binding.envelope_sha256.clone()),
+        execution_state_canonical_sha256: execution_bundle
+            .as_ref()
+            .map(|binding| binding.execution_state_canonical_sha256.clone()),
+        execution_snapshot_schema_version: execution_bundle
+            .as_ref()
+            .map(|binding| binding.schema_version),
+        execution_snapshot_artifact_type: execution_bundle
+            .as_ref()
+            .map(|binding| binding.artifact_type.clone()),
         genesis_hash: json_string(
             &candidate,
             "/integrity/genesis_hash",
@@ -279,7 +635,12 @@ pub fn load_frozen_governance_authority(
     repo_root: &Path,
     authorities_path: &Path,
 ) -> Result<FrozenGovernanceAuthority, String> {
-    load_frozen_governance_authority_inner(repo_root, authorities_path, true)
+    load_frozen_governance_authority_inner(
+        repo_root,
+        authorities_path,
+        AuthorityMaterial::CustodyHashes,
+        ReleaseApprovalProfile::Production,
+    )
 }
 
 /// Node-side trust loading validates only public identity material.  The V4
@@ -289,23 +650,41 @@ pub fn load_frozen_governance_authority_public(
     repo_root: &Path,
     authorities_path: &Path,
 ) -> Result<FrozenGovernanceAuthority, String> {
-    load_frozen_governance_authority_inner(repo_root, authorities_path, false)
+    load_frozen_governance_authority_inner(
+        repo_root,
+        authorities_path,
+        AuthorityMaterial::PublicBundle,
+        ReleaseApprovalProfile::Production,
+    )
+}
+
+fn load_local_r11_qualification_governance_authority_public(
+    repo_root: &Path,
+    authorities_path: &Path,
+) -> Result<FrozenGovernanceAuthority, String> {
+    load_frozen_governance_authority_inner(
+        repo_root,
+        authorities_path,
+        AuthorityMaterial::PublicBundle,
+        ReleaseApprovalProfile::LocalR11Qualification,
+    )
 }
 
 fn load_frozen_governance_authority_inner(
     repo_root: &Path,
     authorities_path: &Path,
-    require_custody_hashes: bool,
+    authority_material: AuthorityMaterial,
+    profile: ReleaseApprovalProfile,
 ) -> Result<FrozenGovernanceAuthority, String> {
     let authority_bytes = read_file(authorities_path, "frozen authority record")?;
     let authorities = parse_json(&authority_bytes, "frozen authority record")?;
     if authorities.pointer("/artifact").and_then(Value::as_str)
-        != Some(EXPECTED_AUTHORITIES_ARTIFACT)
+        != Some(profile.authority_artifact())
         || authorities.pointer("/status").and_then(Value::as_str) != Some("FROZEN")
         || authorities
             .pointer("/test_fixture")
             .and_then(Value::as_bool)
-            != Some(false)
+            != Some(profile.test_fixture())
         || authorities
             .pointer("/current_release_authority")
             .and_then(Value::as_bool)
@@ -326,6 +705,20 @@ fn load_frozen_governance_authority_inner(
             "authority record is not the canonical frozen Testnet-v3 V4 record".to_string(),
         );
     }
+    match profile.environment() {
+        Some(environment)
+            if authorities.pointer("/environment").and_then(Value::as_str) != Some(environment) =>
+        {
+            return Err("qualification authority record has an invalid environment".to_string())
+        }
+        None if authorities.get("environment").is_some() => {
+            return Err(
+                "production authority record must not carry a qualification environment"
+                    .to_string(),
+            )
+        }
+        _ => {}
+    }
 
     let entries = authorities
         .pointer("/authorities")
@@ -334,8 +727,7 @@ fn load_frozen_governance_authority_inner(
     let entry = entries
         .iter()
         .find(|entry| {
-            entry.get("role_id").and_then(Value::as_str)
-                == Some(TESTNET_V3_GOVERNANCE_AUTHORITY_ROLE)
+            entry.get("role_id").and_then(Value::as_str) == Some(profile.authority_role())
         })
         .ok_or_else(|| "frozen authority record has no governance authority entry".to_string())?;
 
@@ -375,6 +767,17 @@ fn load_frozen_governance_authority_inner(
                 .to_string(),
         );
     }
+    if authority_material == AuthorityMaterial::RecordOnly {
+        return Ok(FrozenGovernanceAuthority {
+            role,
+            standard_account_address,
+            public_key_fingerprint,
+            governance_identity_authorization_binding_sha3_256,
+            public_key: Vec::new(),
+            frozen_authority_record_sha256: sha256_hex(&authority_bytes),
+        });
+    }
+
     let bundle_dir = value_string(entry, "bundle_dir", "governance bundle directory")?;
     let bundle_dir = safe_relative_path(&bundle_dir, "governance bundle directory")?;
     let bundle = repo_root.join(bundle_dir);
@@ -389,7 +792,7 @@ fn load_frozen_governance_authority_inner(
                 .to_string(),
         );
     }
-    if require_custody_hashes
+    if authority_material == AuthorityMaterial::CustodyHashes
         && (sha256_hex(&read_file(
             &bundle.join("identity-root.enc.json"),
             "governance encrypted identity-root custody",
@@ -569,7 +972,7 @@ fn load_frozen_governance_authority_inner(
         || release_binding
             .pointer("/authorization_scopes/0/signature_domain")
             .and_then(Value::as_str)
-            != Some(TESTNET_V3_GENESIS_RELEASE_APPROVAL_DOMAIN)
+            != Some(profile.signature_domain())
         || release_binding
             .pointer("/authorization_scopes/0/chain_id")
             .and_then(Value::as_u64)
@@ -581,7 +984,7 @@ fn load_frozen_governance_authority_inner(
         || release_binding
             .pointer("/authorization_scopes/0/purpose")
             .and_then(Value::as_str)
-            != Some("testnet-v3-genesis-release-approval")
+            != Some(profile.purpose())
         || release_binding
             .get("authorization_scopes")
             .and_then(Value::as_array)
@@ -674,21 +1077,73 @@ pub fn verify_release_approval_file_public(
     desired_state_path: &Path,
     approval_path: &Path,
 ) -> Result<TestnetV3GenesisReleaseApprovalRequest, String> {
+    verify_release_approval_file_public_inner(
+        trust_root,
+        candidate_path,
+        authorities_path,
+        desired_state_path,
+        None,
+        approval_path,
+        ReleaseApprovalProfile::Production,
+    )
+}
+
+/// Local harness entry point. This performs the same candidate, desired-state,
+/// ETDAG, authority-bundle, canonical-request, and ML-DSA-87 checks as the
+/// production entry point, under a non-production profile that cannot be
+/// replayed as live authorization.
+pub fn verify_local_r11_qualification_release_approval_file_public(
+    trust_root: &Path,
+    candidate_path: &Path,
+    authorities_path: &Path,
+    desired_state_path: &Path,
+    execution_bundle_path: &Path,
+    approval_path: &Path,
+) -> Result<TestnetV3GenesisReleaseApprovalRequest, String> {
+    verify_release_approval_file_public_inner(
+        trust_root,
+        candidate_path,
+        authorities_path,
+        desired_state_path,
+        Some(execution_bundle_path),
+        approval_path,
+        ReleaseApprovalProfile::LocalR11Qualification,
+    )
+}
+
+fn verify_release_approval_file_public_inner(
+    trust_root: &Path,
+    candidate_path: &Path,
+    authorities_path: &Path,
+    desired_state_path: &Path,
+    execution_bundle_path: Option<&Path>,
+    approval_path: &Path,
+    profile: ReleaseApprovalProfile,
+) -> Result<TestnetV3GenesisReleaseApprovalRequest, String> {
     let expected = build_release_approval_request_inner(
         trust_root,
         candidate_path,
         authorities_path,
         desired_state_path,
-        false,
+        execution_bundle_path,
+        AuthorityMaterial::PublicBundle,
+        profile,
     )?;
-    let authority = load_frozen_governance_authority_public(trust_root, authorities_path)?;
+    let authority = match profile {
+        ReleaseApprovalProfile::Production => {
+            load_frozen_governance_authority_public(trust_root, authorities_path)?
+        }
+        ReleaseApprovalProfile::LocalR11Qualification => {
+            load_local_r11_qualification_governance_authority_public(trust_root, authorities_path)?
+        }
+    };
     let approval: SignedTestnetV3GenesisReleaseApproval = serde_json::from_slice(&read_file(
         approval_path,
         "signed release-approval artifact",
     )?)
     .map_err(|error| format!("parse signed release-approval artifact: {error}"))?;
     if approval.schema_version != SCHEMA_VERSION
-        || approval.artifact_type != TESTNET_V3_GENESIS_RELEASE_APPROVAL_ARTIFACT_TYPE
+        || approval.artifact_type != profile.artifact_type()
     {
         return Err(
             "signed release-approval artifact has an unsupported schema or type".to_string(),
@@ -712,14 +1167,17 @@ pub fn verify_release_approval_file_public(
     mldsa87::verify_detached_signature_ctx(
         &signature,
         &payload,
-        TESTNET_V3_GENESIS_RELEASE_APPROVAL_DOMAIN.as_bytes(),
+        profile.signature_domain().as_bytes(),
         &public_key,
     )
     .map_err(|_| "ML-DSA-87 release-approval signature verification failed".to_string())?;
     Ok(approval.request)
 }
 
-fn validate_candidate_release_state(candidate: &Value) -> Result<(), String> {
+fn validate_candidate_release_state(
+    candidate: &Value,
+    profile: ReleaseApprovalProfile,
+) -> Result<(), String> {
     if candidate
         .pointer("/integrity/status")
         .and_then(Value::as_str)
@@ -742,6 +1200,23 @@ fn validate_candidate_release_state(candidate: &Value) -> Result<(), String> {
             != Some(EXPECTED_RELEASE_ID)
     {
         return Err("candidate is not the executed Testnet-v3 release-approval stage".to_string());
+    }
+    let qualification_environment = candidate
+        .pointer("/r11_qualification_candidate/environment")
+        .and_then(Value::as_str);
+    match profile {
+        ReleaseApprovalProfile::Production if qualification_environment.is_some() => {
+            return Err("production release approval rejects qualification candidates".to_string())
+        }
+        ReleaseApprovalProfile::LocalR11Qualification
+            if qualification_environment != Some(LOCAL_R11_QUALIFICATION_ENVIRONMENT) =>
+        {
+            return Err(
+                "local R11 approval requires an explicitly domain-separated qualification candidate"
+                    .to_string(),
+            )
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -974,13 +1449,17 @@ fn required_sha256_map(
     Ok(output)
 }
 
-fn validate_request_shape(request: &TestnetV3GenesisReleaseApprovalRequest) -> Result<(), String> {
+fn validate_request_shape_for_profile(
+    request: &TestnetV3GenesisReleaseApprovalRequest,
+    profile: ReleaseApprovalProfile,
+) -> Result<(), String> {
     if request.schema_version != SCHEMA_VERSION
-        || request.artifact_type != TESTNET_V3_GENESIS_RELEASE_APPROVAL_ARTIFACT_TYPE
-        || request.action != TESTNET_V3_GENESIS_RELEASE_ACTION
+        || request.artifact_type != profile.artifact_type()
+        || request.action != profile.action()
+        || request.environment.as_deref() != profile.environment()
         || request.signature_algorithm != EXPECTED_ALGORITHM
-        || request.signature_domain != TESTNET_V3_GENESIS_RELEASE_APPROVAL_DOMAIN
-        || request.governance_authority_role != TESTNET_V3_GOVERNANCE_AUTHORITY_ROLE
+        || request.signature_domain != profile.signature_domain()
+        || request.governance_authority_role != profile.authority_role()
         || request.chain_id != EXPECTED_CHAIN_ID
         || request.network_id != EXPECTED_NETWORK_ID
         || request.release_id != EXPECTED_RELEASE_ID
@@ -989,6 +1468,48 @@ fn validate_request_shape(request: &TestnetV3GenesisReleaseApprovalRequest) -> R
         return Err(
             "release-approval request has an invalid immutable Testnet-v3 binding".to_string(),
         );
+    }
+    match profile {
+        ReleaseApprovalProfile::Production => {
+            if request.execution_snapshot_sha256.is_some()
+                || request.execution_state_canonical_sha256.is_some()
+                || request.execution_snapshot_schema_version.is_some()
+                || request.execution_snapshot_artifact_type.is_some()
+            {
+                return Err(
+                    "production V4 request cannot carry the local R11 execution-snapshot extension"
+                        .to_string(),
+                );
+            }
+        }
+        ReleaseApprovalProfile::LocalR11Qualification => {
+            if request.execution_snapshot_schema_version
+                != Some(TESTNET_V3_GENESIS_EXECUTION_BUNDLE_SCHEMA_VERSION)
+                || request.execution_snapshot_artifact_type.as_deref()
+                    != Some(TESTNET_V3_GENESIS_EXECUTION_BUNDLE_ARTIFACT_TYPE)
+                || !request
+                    .execution_snapshot_sha256
+                    .as_deref()
+                    .is_some_and(|digest| is_lower_hex(digest, 32))
+                || !request
+                    .execution_state_canonical_sha256
+                    .as_deref()
+                    .is_some_and(|digest| is_lower_hex(digest, 32))
+                || request
+                    .execution_snapshot_sha256
+                    .as_deref()
+                    .is_some_and(|digest| digest.bytes().all(|byte| byte == b'0'))
+                || request
+                    .execution_state_canonical_sha256
+                    .as_deref()
+                    .is_some_and(|digest| digest.bytes().all(|byte| byte == b'0'))
+            {
+                return Err(
+                    "local R11 release approval does not bind a valid Genesis execution bundle"
+                        .to_string(),
+                );
+            }
+        }
     }
     for (label, value, bytes) in [
         ("candidate_sha256", &request.candidate_sha256, 32),
@@ -1150,6 +1671,21 @@ fn read_file(path: &Path, label: &str) -> Result<Vec<u8>, String> {
     fs::read(path).map_err(|error| format!("read {label} {}: {error}", path.display()))
 }
 
+fn read_regular_bounded_file(path: &Path, label: &str, maximum: u64) -> Result<Vec<u8>, String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("inspect {label} {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!("{label} must be a regular non-symlink file"));
+    }
+    if metadata.len() > maximum {
+        return Err(format!(
+            "{label} is {} bytes; maximum accepted size is {maximum}",
+            metadata.len()
+        ));
+    }
+    read_file(path, label)
+}
+
 fn parse_json(bytes: &[u8], label: &str) -> Result<Value, String> {
     serde_json::from_slice(bytes).map_err(|error| format!("parse {label} JSON: {error}"))
 }
@@ -1230,6 +1766,7 @@ mod tests {
         candidate: PathBuf,
         authorities: PathBuf,
         desired_state: PathBuf,
+        execution_bundle: PathBuf,
     }
 
     fn test_authority_keypair() -> (Vec<u8>, Vec<u8>) {
@@ -1445,6 +1982,7 @@ mod tests {
         )
         .expect("write desired state");
         TestRepository {
+            execution_bundle: root.join("genesis-execution-bundle.json"),
             root,
             candidate,
             authorities,
@@ -1454,6 +1992,166 @@ mod tests {
 
     fn test_repository(public_key: &[u8]) -> TestRepository {
         test_repository_with_governance_schema(public_key, false)
+    }
+
+    fn local_r11_test_repository(public_key: &[u8]) -> TestRepository {
+        let repository = test_repository(public_key);
+        let bundle = repository.root.join("test-fixture/governance");
+
+        let identity_root_path = bundle.join("identity-root.pub.json");
+        let mut identity_root: Value =
+            serde_json::from_slice(&fs::read(&identity_root_path).expect("read identity root"))
+                .expect("parse identity root");
+        identity_root["identity_id"] =
+            Value::String(LOCAL_R11_QUALIFICATION_AUTHORITY_ROLE.to_string());
+        let identity_root_bytes = serde_json::to_vec(&identity_root).expect("encode identity root");
+        fs::write(&identity_root_path, &identity_root_bytes).expect("write identity root");
+
+        let public_path = bundle.join("identity.pub.json");
+        let mut public: Value =
+            serde_json::from_slice(&fs::read(&public_path).expect("read public key"))
+                .expect("parse public key");
+        public["role_id"] = Value::String(LOCAL_R11_QUALIFICATION_AUTHORITY_ROLE.to_string());
+        let public_bytes = serde_json::to_vec(&public).expect("encode public key");
+        fs::write(&public_path, &public_bytes).expect("write public key");
+
+        let binding_path = bundle.join("release-authorization-binding.json");
+        let mut binding: Value =
+            serde_json::from_slice(&fs::read(&binding_path).expect("read binding"))
+                .expect("parse binding");
+        binding["identity_id"] = Value::String(LOCAL_R11_QUALIFICATION_AUTHORITY_ROLE.to_string());
+        binding["authorization_policy"]["principals"][0]["principal_id"] =
+            Value::String(LOCAL_R11_QUALIFICATION_AUTHORITY_ROLE.to_string());
+        binding["authorization_policy"]["principals"][0]["purposes"] =
+            json!(["local-r11-qualification-genesis-release-approval"]);
+        binding["authorization_scopes"][0]["signature_domain"] =
+            Value::String(LOCAL_R11_QUALIFICATION_RELEASE_APPROVAL_DOMAIN.to_string());
+        binding["authorization_scopes"][0]["purpose"] =
+            Value::String("local-r11-qualification-genesis-release-approval".to_string());
+        let binding_bytes = serde_json::to_vec(&binding).expect("encode binding");
+        fs::write(&binding_path, &binding_bytes).expect("write binding");
+
+        let mut authorities: Value =
+            serde_json::from_slice(&fs::read(&repository.authorities).expect("read authorities"))
+                .expect("parse authorities");
+        authorities["artifact"] =
+            Value::String(LOCAL_R11_QUALIFICATION_AUTHORITIES_ARTIFACT.to_string());
+        authorities["test_fixture"] = Value::Bool(true);
+        authorities["environment"] = Value::String(LOCAL_R11_QUALIFICATION_ENVIRONMENT.to_string());
+        authorities["authorities"][0]["role_id"] =
+            Value::String(LOCAL_R11_QUALIFICATION_AUTHORITY_ROLE.to_string());
+        authorities["authorities"][0]["identity_root_public_sha256"] =
+            Value::String(sha256_hex(&identity_root_bytes));
+        authorities["authorities"][0]["authorization_public_sha256"] =
+            Value::String(sha256_hex(&public_bytes));
+        authorities["authorities"][0]["release_authorization_binding_sha256"] =
+            Value::String(sha256_hex(&binding_bytes));
+        let authority_bytes = serde_json::to_vec(&authorities).expect("encode authorities");
+        fs::write(&repository.authorities, &authority_bytes).expect("write authorities");
+
+        let mut candidate: Value =
+            serde_json::from_slice(&fs::read(&repository.candidate).expect("read candidate"))
+                .expect("parse candidate");
+        candidate["genesis_deployment"]["authority_record_sha256"] =
+            Value::String(sha256_hex(&authority_bytes));
+        candidate["r11_qualification_candidate"] = json!({
+            "environment": LOCAL_R11_QUALIFICATION_ENVIRONMENT,
+            "status": "FINALIZED_FOR_LOCAL_QUALIFICATION_ONLY_NOT_LIVE_DEPLOYMENT_AUTHORITY",
+            "target_block_time_ms": 500,
+        });
+        fs::write(
+            &repository.candidate,
+            serde_json::to_vec(&candidate).expect("encode candidate"),
+        )
+        .expect("write candidate");
+
+        let state =
+            crate::execution::ExecutionState::new().with_balance("local-r11-genesis-account", 1266);
+        let execution_state = GenesisExecutionSnapshot::capture_testnet_v3(&state)
+            .expect("capture local R11 test execution state");
+        let receipt = |ordinal: usize, operation: &str| SynQAivmReceiptSummary {
+            operation: operation.to_string(),
+            contract_address: format!("synq-test-contract-{ordinal:02}"),
+            status: "Success".to_string(),
+            gas_used: ordinal as u64,
+            pqc_gas_used: 0,
+            return_data_hex: String::new(),
+            pre_state_root: format!("{:064x}", ordinal),
+            post_state_root: format!("{:064x}", ordinal + 1),
+            receipt_hash: format!("{:064x}", ordinal + 2),
+            logs: vec![format!("receipt-{ordinal:02}")],
+            native_transfers: Vec::new(),
+            error_code: None,
+            error_message: None,
+        };
+        let deployment_receipts = (0..9)
+            .map(|ordinal| receipt(ordinal, "deploy"))
+            .collect::<Vec<_>>();
+        let initialization_receipts = (9..36)
+            .map(|ordinal| receipt(ordinal, "call"))
+            .collect::<Vec<_>>();
+        let receipt_root =
+            compute_genesis_receipt_root(&deployment_receipts, &initialization_receipts)
+                .expect("compute local R11 test receipt root")
+                .to_hex();
+        let bundle = TestnetV3GenesisExecutionBundle {
+            schema_version: TESTNET_V3_GENESIS_EXECUTION_BUNDLE_SCHEMA_VERSION,
+            artifact_type: TESTNET_V3_GENESIS_EXECUTION_BUNDLE_ARTIFACT_TYPE.to_string(),
+            chain_id: EXPECTED_CHAIN_ID,
+            network_id: EXPECTED_NETWORK_ID.to_string(),
+            release_id: EXPECTED_RELEASE_ID.to_string(),
+            protocol_version: EXPECTED_PROTOCOL_VERSION.to_string(),
+            canonical_genesis_hash: "11".repeat(32),
+            testnet_v3_revision: "33".repeat(20),
+            synq_revision: "44".repeat(20),
+            aegis_revision: "55".repeat(20),
+            validator_binary_sha256: "66".repeat(32),
+            execution_state_root: execution_state.state_root.clone(),
+            aivm_state_root: execution_state.aivm_state_root.clone(),
+            receipt_root: receipt_root.clone(),
+            deployment_count: deployment_receipts.len() as u64,
+            initialization_count: initialization_receipts.len() as u64,
+            deployment_receipts,
+            initialization_receipts,
+            execution_state,
+        };
+        let bundle_bytes = serde_json::to_vec(&bundle).expect("encode local R11 execution bundle");
+        fs::write(&repository.execution_bundle, &bundle_bytes)
+            .expect("write local R11 execution bundle");
+
+        let mut candidate: Value =
+            serde_json::from_slice(&fs::read(&repository.candidate).expect("read candidate"))
+                .expect("parse candidate");
+        candidate["genesis_deployment"]["post_deployment_execution_state_root"] =
+            Value::String(bundle.execution_state_root.clone());
+        candidate["genesis_deployment"]["post_deployment_aivm_state_root"] =
+            Value::String(bundle.aivm_state_root.clone());
+        candidate["genesis_deployment"]["receipt_root"] =
+            Value::String(bundle.receipt_root.clone());
+        let mut anchor: crate::etdag_governance::EtdagGovernedMembershipAnchor =
+            serde_json::from_value(candidate["etdag_membership_anchor"].clone())
+                .expect("parse local R11 membership anchor");
+        anchor.deployed_execution_state_root = bundle.execution_state_root.clone();
+        anchor.anchor_digest = anchor
+            .expected_anchor_digest()
+            .expect("recompute local R11 membership anchor");
+        candidate["etdag_membership_anchor"] =
+            serde_json::to_value(anchor).expect("encode local R11 membership anchor");
+        candidate["genesis_execution_snapshot"] = json!({
+            "schema_version": TESTNET_V3_GENESIS_EXECUTION_BUNDLE_SCHEMA_VERSION,
+            "artifact_type": TESTNET_V3_GENESIS_EXECUTION_BUNDLE_ARTIFACT_TYPE,
+            "sha256": sha256_hex(&bundle_bytes),
+            "execution_state_canonical_sha256": sha256_hex(
+                &serde_json::to_vec(&bundle.execution_state)
+                    .expect("canonicalize local R11 execution state")
+            ),
+        });
+        fs::write(
+            &repository.candidate,
+            serde_json::to_vec(&candidate).expect("encode snapshot-bound candidate"),
+        )
+        .expect("write snapshot-bound candidate");
+        repository
     }
 
     fn test_etdag_binding() -> crate::etdag_governance::EtdagGovernedGenesisBinding {
@@ -1568,6 +2266,33 @@ mod tests {
         }
     }
 
+    fn signed_local_r11_approval(
+        repository: &TestRepository,
+        signing_key: &[u8],
+    ) -> SignedTestnetV3GenesisReleaseApproval {
+        let request = build_local_r11_qualification_release_approval_request(
+            &repository.root,
+            &repository.candidate,
+            &repository.authorities,
+            &repository.desired_state,
+            &repository.execution_bundle,
+        )
+        .expect("build local R11 request");
+        let signing_key =
+            mldsa87::SecretKey::from_bytes(signing_key).expect("parse ML-DSA-87 signing key");
+        let signature = mldsa87::detached_sign_ctx(
+            &request.canonical_bytes().expect("canonical request"),
+            LOCAL_R11_QUALIFICATION_RELEASE_APPROVAL_DOMAIN.as_bytes(),
+            &signing_key,
+        );
+        SignedTestnetV3GenesisReleaseApproval {
+            schema_version: SCHEMA_VERSION,
+            artifact_type: LOCAL_R11_QUALIFICATION_APPROVAL_ARTIFACT_TYPE.to_string(),
+            request,
+            signature_hex: hex::encode(signature.as_bytes()),
+        }
+    }
+
     #[test]
     fn signed_approval_verifies_only_against_the_frozen_governance_key() {
         let (public_key, signing_key) = test_authority_keypair();
@@ -1629,6 +2354,176 @@ mod tests {
         .expect("verify public-only release approval");
 
         assert_eq!(verified, approval.request);
+    }
+
+    #[test]
+    fn local_r11_profile_uses_the_exact_v4_verifier_but_cannot_cross_into_production() {
+        let (public_key, signing_key) = test_authority_keypair();
+        let repository = local_r11_test_repository(&public_key);
+        let approval = signed_local_r11_approval(&repository, &signing_key);
+        let approval_path = repository.root.join("local-r11-approval.json");
+        fs::write(
+            &approval_path,
+            serde_json::to_vec(&approval).expect("encode local approval"),
+        )
+        .expect("write local approval");
+
+        let verified = verify_local_r11_qualification_release_approval_file_public(
+            &repository.root,
+            &repository.candidate,
+            &repository.authorities,
+            &repository.desired_state,
+            &repository.execution_bundle,
+            &approval_path,
+        )
+        .expect("verify domain-separated local V4 approval");
+        assert_eq!(
+            verified.environment.as_deref(),
+            Some(LOCAL_R11_QUALIFICATION_ENVIRONMENT)
+        );
+        assert_eq!(
+            verified.signature_domain,
+            LOCAL_R11_QUALIFICATION_RELEASE_APPROVAL_DOMAIN
+        );
+        assert_eq!(
+            verified.execution_snapshot_schema_version,
+            Some(TESTNET_V3_GENESIS_EXECUTION_BUNDLE_SCHEMA_VERSION)
+        );
+        assert_eq!(
+            verified.execution_snapshot_artifact_type.as_deref(),
+            Some(TESTNET_V3_GENESIS_EXECUTION_BUNDLE_ARTIFACT_TYPE)
+        );
+        assert!(verified
+            .execution_snapshot_sha256
+            .as_deref()
+            .is_some_and(|digest| is_lower_hex(digest, 32)));
+        assert!(verified
+            .execution_state_canonical_sha256
+            .as_deref()
+            .is_some_and(|digest| is_lower_hex(digest, 32)));
+
+        assert!(verify_release_approval_file_public(
+            &repository.root,
+            &repository.candidate,
+            &repository.authorities,
+            &repository.desired_state,
+            &approval_path,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn local_r11_execution_bundle_binding_rejects_tamper_wrong_identity_and_missing_state() {
+        let (public_key, _) = test_authority_keypair();
+        let repository = local_r11_test_repository(&public_key);
+        let original = fs::read(&repository.execution_bundle).expect("read execution bundle");
+
+        build_local_r11_qualification_release_approval_request(
+            &repository.root,
+            &repository.candidate,
+            &repository.authorities,
+            &repository.desired_state,
+            &repository.execution_bundle,
+        )
+        .expect("valid snapshot-bound request");
+
+        let mut formatting_tamper = original.clone();
+        formatting_tamper.push(b'\n');
+        fs::write(&repository.execution_bundle, formatting_tamper)
+            .expect("write byte-tampered bundle");
+        let error = build_local_r11_qualification_release_approval_request(
+            &repository.root,
+            &repository.candidate,
+            &repository.authorities,
+            &repository.desired_state,
+            &repository.execution_bundle,
+        )
+        .expect_err("exact bundle-byte tamper must fail");
+        assert!(error.contains("does not bind the exact verified"));
+
+        let mut wrong_identity: Value =
+            serde_json::from_slice(&original).expect("parse execution bundle");
+        wrong_identity["canonical_genesis_hash"] = Value::String("ff".repeat(32));
+        fs::write(
+            &repository.execution_bundle,
+            serde_json::to_vec(&wrong_identity).expect("encode wrong-Genesis bundle"),
+        )
+        .expect("write wrong-Genesis bundle");
+        let error = build_local_r11_qualification_release_approval_request(
+            &repository.root,
+            &repository.candidate,
+            &repository.authorities,
+            &repository.desired_state,
+            &repository.execution_bundle,
+        )
+        .expect_err("snapshot from a different Genesis must fail");
+        assert!(
+            error.contains("wrong schema, chain, network, release, protocol, or canonical Genesis")
+        );
+
+        let mut wrong_network: Value =
+            serde_json::from_slice(&original).expect("parse execution bundle");
+        wrong_network["network_id"] = Value::String("mainnet".to_string());
+        fs::write(
+            &repository.execution_bundle,
+            serde_json::to_vec(&wrong_network).expect("encode wrong-network bundle"),
+        )
+        .expect("write wrong-network bundle");
+        let error = build_local_r11_qualification_release_approval_request(
+            &repository.root,
+            &repository.candidate,
+            &repository.authorities,
+            &repository.desired_state,
+            &repository.execution_bundle,
+        )
+        .expect_err("wrong snapshot network must fail");
+        assert!(
+            error.contains("wrong schema, chain, network, release, protocol, or canonical Genesis")
+        );
+
+        let mut false_root_claim: Value =
+            serde_json::from_slice(&original).expect("parse execution bundle");
+        false_root_claim["execution_state"]["balances_nwei"]["local-r11-genesis-account"] =
+            json!(1267);
+        let false_root_bytes =
+            serde_json::to_vec(&false_root_claim).expect("encode false-root bundle");
+        fs::write(&repository.execution_bundle, &false_root_bytes)
+            .expect("write false-root bundle");
+        let mut candidate: Value =
+            serde_json::from_slice(&fs::read(&repository.candidate).expect("read candidate"))
+                .expect("parse candidate");
+        candidate["genesis_execution_snapshot"]["sha256"] =
+            Value::String(sha256_hex(&false_root_bytes));
+        candidate["genesis_execution_snapshot"]["execution_state_canonical_sha256"] =
+            Value::String(sha256_hex(
+                &serde_json::to_vec(&false_root_claim["execution_state"])
+                    .expect("canonicalize false-root state"),
+            ));
+        fs::write(
+            &repository.candidate,
+            serde_json::to_vec(&candidate).expect("encode rebound candidate"),
+        )
+        .expect("write rebound candidate");
+        let error = build_local_r11_qualification_release_approval_request(
+            &repository.root,
+            &repository.candidate,
+            &repository.authorities,
+            &repository.desired_state,
+            &repository.execution_bundle,
+        )
+        .expect_err("claimed root with altered computed state must fail");
+        assert!(error.contains("state root mismatch"));
+
+        fs::remove_file(&repository.execution_bundle).expect("remove execution bundle");
+        let error = build_local_r11_qualification_release_approval_request(
+            &repository.root,
+            &repository.candidate,
+            &repository.authorities,
+            &repository.desired_state,
+            &repository.execution_bundle,
+        )
+        .expect_err("missing snapshot must fail closed");
+        assert!(error.contains("inspect local R11 Genesis execution bundle"));
     }
 
     #[test]
@@ -1723,6 +2618,10 @@ mod tests {
         .expect("build governed V4 request");
 
         assert_eq!(request.schema_version, 4);
+        assert_eq!(request.execution_snapshot_sha256, None);
+        assert_eq!(request.execution_state_canonical_sha256, None);
+        assert_eq!(request.execution_snapshot_schema_version, None);
+        assert_eq!(request.execution_snapshot_artifact_type, None);
         assert_eq!(request.network_id, EXPECTED_NETWORK_ID);
         assert_eq!(request.release_id, EXPECTED_RELEASE_ID);
         assert!(is_lower_hex(&request.etdag_parameter_root_sha3_512, 64));
@@ -1736,6 +2635,32 @@ mod tests {
         assert_ne!(
             request.etdag_membership_anchor_digest_sha3_512,
             "0".repeat(128)
+        );
+    }
+
+    #[test]
+    fn unsigned_request_requires_only_the_candidate_bound_frozen_record() {
+        let (public_key, _) = test_authority_keypair();
+        let repository = test_repository(&public_key);
+
+        fs::remove_dir_all(repository.root.join("test-fixture/governance"))
+            .expect("remove signer custody and public bundle");
+
+        let request = build_release_approval_request(
+            &repository.root,
+            &repository.candidate,
+            &repository.authorities,
+            &repository.desired_state,
+        )
+        .expect("build unsigned request from the candidate-bound frozen record");
+
+        assert_eq!(
+            request.frozen_authority_record_sha256,
+            sha256_hex(&fs::read(&repository.authorities).expect("read authority record"))
+        );
+        assert_eq!(
+            request.governance_public_key_fingerprint,
+            format!("sha256:{}", sha256_hex(&public_key))
         );
     }
 

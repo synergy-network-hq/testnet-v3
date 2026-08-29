@@ -7,14 +7,14 @@
   "network_id": "testnet",
   "runtime_config_status": "MILLISECOND_CADENCE_FIELDS_BOUND",
   "schema_version": 1,
-  "source_revision": "9e9d8f9",
+  "source_revision": "65280006078944f92cfa2ab00dfacf91d08d1a93",
   "status": "UNSIGNED_NOT_AUTHORIZED_FOR_LIVE_DEPLOYMENT",
   "target_block_time_ms": 500,
   "validator_config_sha256": {
-    "validator-02": "ca0ea3f8de0a3bc3fee18dd915e55585557a7ea3c377ac45c2779cb4648b3b5f",
-    "validator-03": "29e3f4077ba16b77190c5bcd2bff4a238a8b3cc524d26af4bc9e59606259062c",
-    "validator-04": "99a6dda3ab85e661a1bd56727e15d11cfdaed3e21e01ddcbefb66b7695323784",
-    "validator-05": "2acc3e361a2068239035b2256d8ebc7f47cb76d38345296bda190f36c3fa3e3e",
-    "validator-06": "5b0b2d3da538bdd006b9d8e925ea523da92b9609cc43cd82f6b95cb6eac0b6a8"
+    "validator-02": "fd9f562415b3750de6933beb684fad17870d17450739e55501c33423bfa57a0f",
+    "validator-03": "37f4c2d2e5008a3281ae6fa3cf5295f4f948e6bb3f47780b24ce7ac55f62fb9a",
+    "validator-04": "0c0b849b01358894522366724a17013231cf58ec568bf8360f0ede1be3a4de5b",
+    "validator-05": "ce23e416065fe4948edc8e7541081a826d504c58e8a93a9d6203c6e9d82d0f29",
+    "validator-06": "4e7087536a672fc7670bffe1d5330d10e0343dc31ed1d78c5871b520af80968e"
   }
 }

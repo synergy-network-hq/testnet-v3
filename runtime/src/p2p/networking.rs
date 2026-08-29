@@ -1374,6 +1374,8 @@ struct SeedPeerListResponse {
     dnsaddr_bootstrap: Vec<String>,
     #[serde(default)]
     peers: Vec<String>,
+    #[serde(default)]
+    registry: Vec<SeedRegistryRecord>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1382,6 +1384,16 @@ struct SeedBootnodeRecord {
     port: u16,
     #[serde(default)]
     reachable: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SeedRegistryRecord {
+    #[serde(default)]
+    role: String,
+    #[serde(default)]
+    validator_address: String,
+    #[serde(default)]
+    public_endpoint: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4948,7 +4960,9 @@ fn resolve_bootstrap_dial_targets(config: &NodeConfig) -> Vec<String> {
     }
 
     for dial in resolve_seed_server_targets(&config.network.seed_servers) {
-        if let Some(dial) = normalize_peer_target(config, &dial) {
+        if parse_seed_discovered_validator_route(&dial).is_some() {
+            targets.insert(dial);
+        } else if let Some(dial) = normalize_peer_target(config, &dial) {
             targets.insert(dial);
         }
     }
@@ -5006,6 +5020,9 @@ fn self_dial_aliases(config: &NodeConfig) -> HashSet<String> {
 }
 
 fn is_self_dial_target(config: &NodeConfig, dial: &str) -> bool {
+    if let Some((validator_address, _)) = parse_seed_discovered_validator_route(dial) {
+        return announced_validator_address(config).as_deref() == Some(validator_address.as_str());
+    }
     if let Some(validator_address) = normalize_validator_address_target(dial) {
         return self_dial_aliases(config).contains(&validator_address);
     }
@@ -6003,6 +6020,33 @@ fn fetch_seed_server_targets(
             Ok(response) if response.status().is_success() => {
                 match response.json::<SeedPeerListResponse>() {
                     Ok(payload) => {
+                        if chain1266_private_qualification_mode() {
+                            for record in payload.registry {
+                                if !record.role.eq_ignore_ascii_case("validator") {
+                                    continue;
+                                }
+                                let Some(validator_address) =
+                                    normalize_validator_address_target(&record.validator_address)
+                                else {
+                                    continue;
+                                };
+                                let Some(dial) =
+                                    parse_bootnode_dial_address(&record.public_endpoint)
+                                else {
+                                    continue;
+                                };
+                                if is_private_qualification_loopback_dial_address(&dial) {
+                                    insert_seed_server_target(
+                                        out,
+                                        configured_seed_endpoints,
+                                        format_seed_discovered_validator_route(
+                                            &validator_address,
+                                            &dial,
+                                        ),
+                                    );
+                                }
+                            }
+                        }
                         for bootnode in payload.bootnodes {
                             if bootnode.reachable.unwrap_or(true) {
                                 let dial = format!("{}:{}", bootnode.hostname, bootnode.port);
@@ -6090,10 +6134,11 @@ fn register_self_with_seed_servers(config: &NodeConfig) {
         return;
     }
     let public_address = config.p2p.public_address.trim().to_string();
+    let qualification_loopback = chain1266_private_qualification_mode()
+        && is_private_qualification_loopback_dial_address(&public_address);
     if public_address.is_empty()
-        || public_address.starts_with("127.")
         || public_address.starts_with("0.0.0.0")
-        || !is_assigned_synergy_dial_address(&public_address)
+        || (!is_assigned_synergy_dial_address(&public_address) && !qualification_loopback)
     {
         return;
     }
@@ -6113,7 +6158,8 @@ fn register_self_with_seed_servers(config: &NodeConfig) {
         "role_id": role_id,
         "dial": public_address,
     });
-    payload["wallet_address"] = serde_json::Value::String(validator_address);
+    payload["wallet_address"] = serde_json::Value::String(validator_address.clone());
+    payload["validator_address"] = serde_json::Value::String(validator_address);
     for seed_server in &config.network.seed_servers {
         let register_url = normalize_seed_server_url(seed_server, "/peers/register");
         if register_url.is_empty() {
@@ -6366,16 +6412,30 @@ impl P2PNetwork {
     }
 
     pub fn connect_to_peer(&self, address: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let peer_address = normalize_peer_target(&self.config, address)
-            .unwrap_or_else(|| address.trim().to_string());
-        let Some(transport_address) = resolve_peer_transport_address(&self.config, &peer_address)
-        else {
-            warn!(
-                "p2p",
-                "Failed to resolve peer transport address",
-                "peer" => peer_address.clone()
-            );
-            return Ok(());
+        let (peer_address, transport_address) = if let Some((validator_address, dial)) =
+            parse_seed_discovered_validator_route(address)
+        {
+            if !chain1266_private_qualification_mode()
+                || !is_private_qualification_loopback_dial_address(&dial)
+                || !is_validator_allowed(&self.config, &validator_address)
+            {
+                return Ok(());
+            }
+            (validator_address, dial)
+        } else {
+            let peer_address = normalize_peer_target(&self.config, address)
+                .unwrap_or_else(|| address.trim().to_string());
+            let Some(transport_address) =
+                resolve_peer_transport_address(&self.config, &peer_address)
+            else {
+                warn!(
+                    "p2p",
+                    "Failed to resolve peer transport address",
+                    "peer" => peer_address.clone()
+                );
+                return Ok(());
+            };
+            (peer_address, transport_address)
         };
         if !reserve_outbound_dial(
             &self.outbound_dial_registry,
@@ -11714,6 +11774,23 @@ fn receive_message(stream: &mut impl Read) -> Result<NetworkMessage, io::Error> 
 }
 
 fn validate_simplified_predecode_frame_length(len: usize, prefix: &[u8]) -> io::Result<()> {
+    // Serde's externally tagged representation uses a JSON string for unit
+    // variants. These four bounded control messages are the only unit
+    // variants in `NetworkMessage`; all data-bearing envelopes remain objects
+    // and continue through the kind-specific allocation gate below.
+    if prefix.first() == Some(&b'"') {
+        if len != prefix.len() {
+            return Err(invalid_predecode(
+                "unit network envelope exceeds the bounded predecode prefix",
+            ));
+        }
+        return match prefix {
+            b"\"GetPeers\"" | b"\"Ping\"" | b"\"Pong\"" | b"\"GetStatus\"" => Ok(()),
+            _ => Err(invalid_predecode(
+                "network unit envelope does not declare an allowed message kind",
+            )),
+        };
+    }
     let mut cursor = 0usize;
     consume_json_byte(prefix, &mut cursor, b'{', "network envelope")?;
     let outer_kind = consume_json_key(prefix, &mut cursor, "network envelope kind")?;
@@ -12236,6 +12313,42 @@ fn local_node_uses_signed_validator_transports(config: &NodeConfig) -> bool {
 
 fn chain1266_private_qualification_mode() -> bool {
     std::env::var(crate::desired_state::CHAIN1266_QUALIFICATION_MODE_ENV).as_deref() == Ok("1")
+}
+
+const SEED_DISCOVERED_VALIDATOR_ROUTE_PREFIX: &str = "seedreg://";
+
+fn format_seed_discovered_validator_route(validator_address: &str, dial: &str) -> String {
+    format!("{SEED_DISCOVERED_VALIDATOR_ROUTE_PREFIX}{validator_address}@{dial}")
+}
+
+fn parse_seed_discovered_validator_route(value: &str) -> Option<(String, String)> {
+    let raw = value
+        .trim()
+        .strip_prefix(SEED_DISCOVERED_VALIDATOR_ROUTE_PREFIX)?;
+    let (validator_address, dial) = raw.split_once('@')?;
+    let validator_address = normalize_validator_address_target(validator_address)?;
+    let dial = parse_bootnode_dial_address(dial)?;
+    Some((validator_address, dial))
+}
+
+fn is_private_qualification_loopback_dial_address(value: &str) -> bool {
+    let Some(normalized) = parse_bootnode_dial_address(value) else {
+        return false;
+    };
+    let Some((host, port)) = normalized.rsplit_once(':') else {
+        return false;
+    };
+    let Ok(port) = port.parse::<u16>() else {
+        return false;
+    };
+    if port == 0 {
+        return false;
+    }
+    host.trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|address| address.is_loopback())
 }
 
 fn local_node_uses_relayer_only_topology(config: &NodeConfig) -> bool {
@@ -14012,19 +14125,21 @@ mod tests {
         connected_endpoint_matches_configured_address, connected_peer_key_for_address,
         connected_validator_participants, current_bootstrap_refresh_interval, current_timestamp,
         dial_with_timeout, disconnect_peer_after_poisoned_write, disconnect_peer_entry,
-        dispatch_peer_message, ensure_peer_status_allows_chain_data, handle_get_blocks_message,
-        handle_status_message, handshake_version_mismatch_reason, hydrate_peer_from_cache,
-        insert_seed_server_target, is_validator_vpn_dial_address,
+        dispatch_peer_message, ensure_peer_status_allows_chain_data,
+        format_seed_discovered_validator_route, handle_get_blocks_message, handle_status_message,
+        handshake_version_mismatch_reason, hydrate_peer_from_cache, insert_seed_server_target,
+        is_private_qualification_loopback_dial_address, is_validator_vpn_dial_address,
         is_validator_vpn_relayer_dial_address, local_consensus_handshake_required,
         local_consensus_version, local_is_typed_finality_relayer,
         local_is_typed_finality_service_observer, local_node_runs_validator_consensus,
         local_node_uses_service_batch_durability, local_peer_identity,
         merge_peer_state_from_existing, normalize_peer_target, parse_block_sync_busy_retry,
-        parse_bootnode_dial_address, peer_has_identifying_metadata, peer_identity_key,
-        peer_is_authorized_block_sync_requester, peer_is_designated_support_sync_source,
-        peer_is_eligible_block_sync_source, peer_is_eligible_block_sync_source_for_local,
-        peer_is_validator_vpn_relayer, peer_matches_address, peer_readiness_exclusion_reason_at,
-        peer_write_gate, pending_incoming_connections_from_host, preferred_connection_direction,
+        parse_bootnode_dial_address, parse_seed_discovered_validator_route,
+        peer_has_identifying_metadata, peer_identity_key, peer_is_authorized_block_sync_requester,
+        peer_is_designated_support_sync_source, peer_is_eligible_block_sync_source,
+        peer_is_eligible_block_sync_source_for_local, peer_is_validator_vpn_relayer,
+        peer_matches_address, peer_readiness_exclusion_reason_at, peer_write_gate,
+        pending_incoming_connections_from_host, preferred_connection_direction,
         preflight_validator_activation_transactions, receive_message,
         recover_peer_validator_address_for_vote_target, register_typed_consensus_peer_session,
         register_validator_consensus_handshake_key, release_block_sync_apply_slot_after_worker,
@@ -14125,6 +14240,23 @@ mod tests {
             prefix,
         )
         .is_err());
+    }
+
+    #[test]
+    fn predecode_accepts_only_declared_unit_network_envelopes() {
+        for message in [
+            NetworkMessage::GetPeers,
+            NetworkMessage::Ping,
+            NetworkMessage::Pong,
+            NetworkMessage::GetStatus,
+        ] {
+            let wire = serde_json::to_vec(&message).expect("unit network message should serialize");
+            validate_simplified_predecode_frame_length(wire.len(), &wire)
+                .expect("declared unit network message should pass predecode");
+        }
+        assert!(validate_simplified_predecode_frame_length(9, br#""Unknown""#).is_err());
+        assert!(validate_simplified_predecode_frame_length(4097, br#""GetPeers""#).is_err());
+        assert!(validate_simplified_predecode_frame_length(11, b" \"GetPeers\"").is_err());
     }
 
     #[test]
@@ -15849,6 +15981,31 @@ mod tests {
                 "snr://synv1156xl3ct9cxc4cl9pdn5ww9myxudavl0hxrq7zv@2a02:1812:172a:e900:1497:71dc:d720:e28e:5620",
             ),
             Some("[2a02:1812:172a:e900:1497:71dc:d720:e28e]:5620".to_string())
+        );
+    }
+
+    #[test]
+    fn seed_discovered_validator_routes_bind_identity_to_loopback_transport() {
+        let route = format_seed_discovered_validator_route(
+            "synv1validator2xxxxxxxxxxxxxxxxxxxx",
+            "127.0.0.1:5602",
+        );
+        assert_eq!(
+            parse_seed_discovered_validator_route(&route),
+            Some((
+                "synv1validator2xxxxxxxxxxxxxxxxxxxx".to_string(),
+                "127.0.0.1:5602".to_string(),
+            ))
+        );
+        assert!(is_private_qualification_loopback_dial_address(
+            "127.0.0.1:5602"
+        ));
+        assert!(!is_private_qualification_loopback_dial_address(
+            "10.126.10.2:5622"
+        ));
+        assert_eq!(
+            parse_seed_discovered_validator_route("seedreg://not-a-validator@127.0.0.1:5602"),
+            None
         );
     }
 
@@ -18346,6 +18503,147 @@ mod tests {
             block_sync_min_serve_interval_secs(&config, Some(&active_peer)),
             BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS
         );
+    }
+
+    fn framed_network_message(message: &NetworkMessage) -> Vec<u8> {
+        let mut wire = Vec::new();
+        super::send_message(&mut wire, message).expect("network message should frame");
+        wire
+    }
+
+    fn framed_payload(payload: &[u8]) -> Vec<u8> {
+        let mut wire = Vec::with_capacity(4 + payload.len());
+        wire.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        wire.extend_from_slice(payload);
+        wire
+    }
+
+    struct ChunkedReader {
+        cursor: std::io::Cursor<Vec<u8>>,
+        maximum_chunk: usize,
+        interrupt_on_call: Option<usize>,
+        calls: usize,
+    }
+
+    impl ChunkedReader {
+        fn new(bytes: Vec<u8>, maximum_chunk: usize) -> Self {
+            Self {
+                cursor: std::io::Cursor::new(bytes),
+                maximum_chunk,
+                interrupt_on_call: None,
+                calls: 0,
+            }
+        }
+
+        fn with_interrupt(mut self, call: usize) -> Self {
+            self.interrupt_on_call = Some(call);
+            self
+        }
+    }
+
+    impl std::io::Read for ChunkedReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let call = self.calls;
+            self.calls = self.calls.saturating_add(1);
+            if self.interrupt_on_call == Some(call) {
+                self.interrupt_on_call = None;
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "more framed bytes are not available yet",
+                ));
+            }
+            let available = self.maximum_chunk.min(buffer.len());
+            std::io::Read::read(&mut self.cursor, &mut buffer[..available])
+        }
+    }
+
+    #[test]
+    fn production_decoder_accepts_unit_frame_in_one_read() {
+        for (message, expected_wire) in [
+            (NetworkMessage::GetPeers, br#""GetPeers""#.as_slice()),
+            (NetworkMessage::Ping, br#""Ping""#.as_slice()),
+            (NetworkMessage::Pong, br#""Pong""#.as_slice()),
+            (NetworkMessage::GetStatus, br#""GetStatus""#.as_slice()),
+        ] {
+            let mut wire = std::io::Cursor::new(framed_network_message(&message));
+            let decoded = receive_message(&mut wire).unwrap();
+            assert_eq!(serde_json::to_vec(&decoded).unwrap(), expected_wire);
+        }
+    }
+
+    #[test]
+    fn production_decoder_accepts_legal_frame_split_across_reads() {
+        let message = NetworkMessage::GetStatus;
+        let mut wire = ChunkedReader::new(framed_network_message(&message), 1);
+        assert!(matches!(
+            receive_message(&mut wire).unwrap(),
+            NetworkMessage::GetStatus
+        ));
+    }
+
+    #[test]
+    fn production_decoder_accepts_multiple_coalesced_frames() {
+        let first = NetworkMessage::GetStatus;
+        let second = NetworkMessage::Ping;
+        let mut bytes = framed_network_message(&first);
+        bytes.extend_from_slice(&framed_network_message(&second));
+        let mut wire = std::io::Cursor::new(bytes);
+
+        assert!(matches!(
+            receive_message(&mut wire).unwrap(),
+            NetworkMessage::GetStatus
+        ));
+        assert!(matches!(
+            receive_message(&mut wire).unwrap(),
+            NetworkMessage::Ping
+        ));
+    }
+
+    #[test]
+    fn production_decoder_accepts_exact_transport_boundary() {
+        let empty = serde_json::to_vec(&NetworkMessage::Error {
+            message: String::new(),
+        })
+        .unwrap();
+        let message = NetworkMessage::Error {
+            message: "x".repeat(MAX_P2P_FRAME_BYTES - empty.len()),
+        };
+        let encoded = serde_json::to_vec(&message).unwrap();
+        assert_eq!(encoded.len(), MAX_P2P_FRAME_BYTES);
+        drop(message);
+
+        let mut wire = std::io::Cursor::new(framed_payload(&encoded));
+        match receive_message(&mut wire).unwrap() {
+            NetworkMessage::Error { message } => {
+                assert_eq!(message.len(), MAX_P2P_FRAME_BYTES - empty.len());
+                assert!(message.bytes().all(|byte| byte == b'x'));
+            }
+            other => panic!("expected boundary-sized error envelope, received {other:?}"),
+        }
+    }
+
+    #[test]
+    fn production_decoder_rejects_malformed_length_prefix() {
+        let mut wire = std::io::Cursor::new(vec![1, 0, 0]);
+        let error = receive_message(&mut wire).expect_err("partial length must fail closed");
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn production_decoder_rejects_malformed_envelope() {
+        let mut wire = std::io::Cursor::new(framed_payload(br#""Unknown""#));
+        let error = receive_message(&mut wire).expect_err("unknown unit variant must fail closed");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn production_decoder_retries_incomplete_frame_read() {
+        let message = NetworkMessage::GetStatus;
+        let mut wire = ChunkedReader::new(framed_network_message(&message), 2).with_interrupt(3);
+        assert!(matches!(
+            receive_message(&mut wire).unwrap(),
+            NetworkMessage::GetStatus
+        ));
     }
 
     #[test]

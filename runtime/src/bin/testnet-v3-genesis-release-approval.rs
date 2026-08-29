@@ -1,15 +1,16 @@
 //! Generates and verifies offline Testnet-v3 Genesis release-approval evidence.
 //!
-//! This binary intentionally has no signing mode.  It emits the canonical
-//! request that the frozen governance authority must sign elsewhere, and it
-//! verifies a supplied ML-DSA-87 detached signature before the finalizer can
-//! apply the staged candidate.
+//! This binary intentionally has no signing mode or custody dependency.  It
+//! emits the canonical request that the frozen governance authority must sign
+//! elsewhere, and verifies a supplied ML-DSA-87 detached signature before the
+//! finalizer can apply the staged candidate.
 
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use synergy_testnet::testnet_v3_release_approval::{
-    build_release_approval_request, verify_release_approval_file,
+    build_local_r11_qualification_release_approval_request, build_release_approval_request,
+    verify_local_r11_qualification_release_approval_file_public, verify_release_approval_file,
     TESTNET_V3_GENESIS_RELEASE_APPROVAL_DOMAIN,
 };
 
@@ -28,7 +29,7 @@ fn repo() -> PathBuf {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  testnet-v3-genesis-release-approval --write-request --desired-state PATH (--authorities PATH | --legacy-authorities) [--candidate PATH] [--output PATH]\n  testnet-v3-genesis-release-approval --verify --approval PATH --desired-state PATH (--authorities PATH | --legacy-authorities) [--candidate PATH]\n\nNew P3 work must pass the dated fresh V4 authority record explicitly. --legacy-authorities is only for reproducing the superseded launch ceremony. The request is the exact payload for ML-DSA-87 context signing. This tool never decrypts, signs, or loads private material. Signature context: {TESTNET_V3_GENESIS_RELEASE_APPROVAL_DOMAIN}"
+        "usage:\n  testnet-v3-genesis-release-approval --write-request --desired-state PATH (--authorities PATH | --legacy-authorities) [--candidate PATH] [--output PATH]\n  testnet-v3-genesis-release-approval --verify --approval PATH --desired-state PATH (--authorities PATH | --legacy-authorities) [--candidate PATH]\n\nLocal R11 mode additionally requires --local-r11-qualification --execution-snapshot PATH. PATH is the strict Genesis execution-bundle envelope whose exact bytes are approval-bound. New P3 work must pass the dated fresh V4 authority record explicitly. --legacy-authorities is only for reproducing the superseded launch ceremony. The request is the exact payload for ML-DSA-87 context signing. This tool never decrypts, signs, or loads private material. Signature context: {TESTNET_V3_GENESIS_RELEASE_APPROVAL_DOMAIN}"
     );
     std::process::exit(2);
 }
@@ -57,10 +58,22 @@ fn write_request(
     candidate: &Path,
     authorities: &Path,
     desired_state: &Path,
+    execution_bundle: Option<&Path>,
     output: &Path,
+    local_qualification: bool,
 ) {
-    let request = build_release_approval_request(root, candidate, authorities, desired_state)
-        .unwrap_or_else(|error| fail(format!("build canonical request: {error}")));
+    let request = if local_qualification {
+        build_local_r11_qualification_release_approval_request(
+            root,
+            candidate,
+            authorities,
+            desired_state,
+            execution_bundle.unwrap_or_else(|| usage()),
+        )
+    } else {
+        build_release_approval_request(root, candidate, authorities, desired_state)
+    }
+    .unwrap_or_else(|error| fail(format!("build canonical request: {error}")));
     let canonical = request
         .canonical_bytes()
         .unwrap_or_else(|error| fail(format!("canonicalize request: {error}")));
@@ -74,13 +87,21 @@ fn write_request(
     fs::rename(&temporary, output)
         .unwrap_or_else(|error| fail(format!("publish {}: {error}", output.display())));
     println!(
-        "{{\n  \"result\": \"UNSIGNED_CANONICAL_REQUEST_WRITTEN\",\n  \"request_path\": \"{}\",\n  \"request_sha256\": \"{}\",\n  \"candidate_sha256\": \"{}\",\n  \"genesis_hash\": \"{}\",\n  \"signature_algorithm\": \"{}\",\n  \"signature_domain\": \"{}\"\n}}",
-        output.display(),
-        hex::encode(Sha256::digest(&canonical)),
-        request.candidate_sha256,
-        request.genesis_hash,
-        request.signature_algorithm,
-        request.signature_domain,
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "result": "UNSIGNED_CANONICAL_REQUEST_WRITTEN",
+            "request_path": output.display().to_string(),
+            "request_sha256": hex::encode(Sha256::digest(&canonical)),
+            "candidate_sha256": request.candidate_sha256,
+            "genesis_hash": request.genesis_hash,
+            "execution_snapshot_sha256": request.execution_snapshot_sha256,
+            "execution_state_canonical_sha256": request.execution_state_canonical_sha256,
+            "execution_snapshot_schema_version": request.execution_snapshot_schema_version,
+            "execution_snapshot_artifact_type": request.execution_snapshot_artifact_type,
+            "signature_algorithm": request.signature_algorithm,
+            "signature_domain": request.signature_domain,
+        }))
+        .unwrap_or_else(|error| fail(format!("encode result: {error}")))
     );
 }
 
@@ -89,21 +110,41 @@ fn verify(
     candidate: &Path,
     authorities: &Path,
     desired_state: &Path,
+    execution_bundle: Option<&Path>,
     approval: &Path,
+    local_qualification: bool,
 ) {
-    let request =
+    let request = if local_qualification {
+        verify_local_r11_qualification_release_approval_file_public(
+            root,
+            candidate,
+            authorities,
+            desired_state,
+            execution_bundle.unwrap_or_else(|| usage()),
+            approval,
+        )
+    } else {
         verify_release_approval_file(root, candidate, authorities, desired_state, approval)
-            .unwrap_or_else(|error| fail(format!("release approval rejected: {error}")));
+    }
+    .unwrap_or_else(|error| fail(format!("release approval rejected: {error}")));
     let approval_sha256 =
         sha256_file(approval).unwrap_or_else(|error| fail(format!("hash approval: {error}")));
     println!(
-        "{{\n  \"result\": \"RELEASE_APPROVAL_VERIFIED\",\n  \"approval_path\": \"{}\",\n  \"approval_sha256\": \"{}\",\n  \"candidate_sha256\": \"{}\",\n  \"genesis_hash\": \"{}\",\n  \"governance_authority_role\": \"{}\",\n  \"governance_standard_account_address\": \"{}\"\n}}",
-        approval.display(),
-        approval_sha256,
-        request.candidate_sha256,
-        request.genesis_hash,
-        request.governance_authority_role,
-        request.governance_standard_account_address,
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "result": "RELEASE_APPROVAL_VERIFIED",
+            "approval_path": approval.display().to_string(),
+            "approval_sha256": approval_sha256,
+            "candidate_sha256": request.candidate_sha256,
+            "genesis_hash": request.genesis_hash,
+            "execution_snapshot_sha256": request.execution_snapshot_sha256,
+            "execution_state_canonical_sha256": request.execution_state_canonical_sha256,
+            "execution_snapshot_schema_version": request.execution_snapshot_schema_version,
+            "execution_snapshot_artifact_type": request.execution_snapshot_artifact_type,
+            "governance_authority_role": request.governance_authority_role,
+            "governance_standard_account_address": request.governance_standard_account_address,
+        }))
+        .unwrap_or_else(|error| fail(format!("encode result: {error}")))
     );
 }
 
@@ -121,6 +162,8 @@ fn main() {
     let mut output = root.join(DEFAULT_REQUEST);
     let mut approval = None;
     let mut desired_state = None;
+    let mut local_qualification = false;
+    let mut execution_bundle = None;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -130,6 +173,10 @@ fn main() {
             }
             "--verify" => {
                 verify_mode = true;
+                index += 1;
+            }
+            "--local-r11-qualification" => {
+                local_qualification = true;
                 index += 1;
             }
             "--candidate" => {
@@ -171,6 +218,13 @@ fn main() {
                 ));
                 index += 2;
             }
+            "--execution-snapshot" => {
+                execution_bundle = Some(resolve(
+                    &root,
+                    args.get(index + 1).unwrap_or_else(|| usage()),
+                ));
+                index += 2;
+            }
             _ => usage(),
         }
     }
@@ -183,13 +237,32 @@ fn main() {
         authorities.unwrap_or_else(|| usage())
     };
     let desired_state = desired_state.unwrap_or_else(|| usage());
+    if local_qualification != execution_bundle.is_some() {
+        usage();
+    }
     if write {
         if approval.is_some() {
             usage();
         }
-        write_request(&root, &candidate, &authorities, &desired_state, &output);
+        write_request(
+            &root,
+            &candidate,
+            &authorities,
+            &desired_state,
+            execution_bundle.as_deref(),
+            &output,
+            local_qualification,
+        );
     } else {
         let approval = approval.unwrap_or_else(|| usage());
-        verify(&root, &candidate, &authorities, &desired_state, &approval);
+        verify(
+            &root,
+            &candidate,
+            &authorities,
+            &desired_state,
+            execution_bundle.as_deref(),
+            &approval,
+            local_qualification,
+        );
     }
 }

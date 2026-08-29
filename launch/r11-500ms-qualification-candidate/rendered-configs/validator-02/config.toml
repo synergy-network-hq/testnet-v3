@@ -17,6 +17,7 @@ p2p_port = 5602
 rpc_port = 6202
 ws_port = 6302
 max_peers = 16
+additional_dial_targets = ["127.0.0.1:5603","127.0.0.1:5604","127.0.0.1:5605","127.0.0.1:5606"]
 
 [blockchain]
 target_block_time_ms = 500
@@ -27,14 +28,9 @@ chain_id = 1266
 algorithm = "posy/3.0"
 mode = "posy_simplified_v3"
 target_block_time_ms = 500
-proposal_timeout_ms = 1500
-prevote_timeout_ms = 1500
-precommit_timeout_ms = 1500
-max_round_timeout_ms = 10000
-epoch_length = 1000
-validator_cluster_size = 5
-min_validators = 5
-validator_vote_threshold = 4
+coordinator_id = ""
+producer_ids = []
+producer_turn_timeout_ms = 0
 consensus_parameter_root_sha3_512 = "4a1cbf3e0b759dddd4daecf1d34ba647075dc4210db42dda0f547399de1fd506cdc8b4cf6b677a100f04d59994c1e811b26cd00b616d7ef61275fb9e49776cd9"
 
 [p2p]

@@ -17,9 +17,12 @@ use crate::synergy_types::{
 use crate::synq_admission::{
     build_deploy_admission_envelope_from_pqsynq_bytes_with_artifacts_constructor_args_and_identity_authorization,
     encode_synq_admission_carrier, verify_synq_call_for_chain_admission_at_current_binding,
-    verify_synq_deploy_for_chain_admission_at_current_binding, SynQAdmissionEnvelope,
-    SynQAdmissionKind, SYNQ_ADMISSION_VERSION, SYNQ_CALL_AUTHORIZATION_PURPOSE,
-    SYNQ_CANONICAL_TESTNET_NETWORK_ID, SYNQ_DEPLOY_AUTHORIZATION_PURPOSE,
+    verify_synq_call_for_local_r11_genesis,
+    verify_synq_deploy_for_chain_admission_at_current_binding,
+    verify_synq_deploy_for_local_r11_genesis, SynQAdmissionEnvelope, SynQAdmissionKind,
+    LOCAL_R11_GENESIS_CALL_AUTHORIZATION_PURPOSE, LOCAL_R11_GENESIS_DEPLOY_AUTHORIZATION_PURPOSE,
+    SYNQ_ADMISSION_VERSION, SYNQ_CALL_AUTHORIZATION_PURPOSE, SYNQ_CANONICAL_TESTNET_NETWORK_ID,
+    SYNQ_DEPLOY_AUTHORIZATION_PURPOSE,
 };
 use crate::synq_execution::{
     execute_synq_transaction_at, SynQAivmReceiptSummary, SynQContractArtifact, SynQExecutionContext,
@@ -33,7 +36,8 @@ use pqsynq::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use sha3::Sha3_512;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Reserved AIVM namespace recording the genesis deployment authority
 /// lifecycle. Retirement is enforced here, in protocol state that is covered by
@@ -51,6 +55,27 @@ const GENESIS_BLOCK_HEIGHT: u64 = 0;
 pub const GENESIS_NOW_UNIX: u64 = 1_800_000_000;
 const GENESIS_EXPIRATION_UNIX: u64 = 4_102_444_800;
 const GENESIS_PROTOCOL_VERSION: u16 = 1;
+
+/// Domain for the explicit, isolated R11 qualification authority adapter.
+/// It must never be confused with an SNTS production authority binding.
+pub const LOCAL_R11_GENESIS_EXECUTION_AUTHORIZATION_DOMAIN: &str =
+    "SYNERGY_LOCAL_R11_QUALIFICATION_GENESIS_EXECUTION_V1";
+pub const LOCAL_R11_GENESIS_AUTHORITY_ID: &str = "local-r11-qualification-authority";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalR11GenesisExecutionAuthorization {
+    pub signature_domain: String,
+    pub authority_id: String,
+    pub standard_account_address: String,
+    pub public_key_sha3_512: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum GenesisExecutionAuthorization<'a> {
+    Production,
+    LocalR11(&'a LocalR11GenesisExecutionAuthorization),
+}
 
 /// The nine Testnet-v3 native contracts, in approved nonce order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -303,6 +328,81 @@ fn validate_genesis_signer_authorizations(authorities: &GenesisAuthorities) -> R
     Ok(())
 }
 
+fn validate_local_r11_genesis_authorization(
+    authorities: &GenesisAuthorities,
+    authorization: &LocalR11GenesisExecutionAuthorization,
+) -> Result<(), String> {
+    if authorization.signature_domain != LOCAL_R11_GENESIS_EXECUTION_AUTHORIZATION_DOMAIN
+        || authorization.authority_id != LOCAL_R11_GENESIS_AUTHORITY_ID
+    {
+        return Err(
+            "local R11 Genesis authorization has the wrong isolated domain or authority id"
+                .to_string(),
+        );
+    }
+    let decoded = crate::address::decode_address(&authorization.standard_account_address)
+        .map_err(|error| format!("local R11 authority address is invalid: {error}"))?;
+    if decoded.classification != crate::snts_registry::IdentifierClass::KeyControlledAddress {
+        return Err("local R11 authority address is not a canonical key-controlled address".into());
+    }
+    let signers = [
+        &authorities.genesis_deployer,
+        &authorities.governance,
+        &authorities.validator_registry_authority_key,
+    ];
+    let expected_public_key = &authorities.genesis_deployer.public_key;
+    let expected_private_key = &authorities.genesis_deployer.private_key;
+    if expected_public_key.len() != 2_592 || expected_private_key.len() != 4_896 {
+        return Err("local R11 Genesis authority is not an ML-DSA-87 keypair".to_string());
+    }
+    if signers.iter().any(|signer| {
+        signer.public_key != *expected_public_key
+            || signer.private_key != *expected_private_key
+            || signer.identity_authorization.is_some()
+    }) {
+        return Err("local R11 Genesis must use the exact same unlabelled qualification key in all three signer slots".to_string());
+    }
+    if authorities.validator_registry_authority != authorization.standard_account_address {
+        return Err(
+            "local R11 ValidatorRegistry authority differs from the frozen qualification address"
+                .to_string(),
+        );
+    }
+    let actual_public_key_sha3_512 = hex::encode(Sha3_512::digest(expected_public_key));
+    if actual_public_key_sha3_512 != authorization.public_key_sha3_512 {
+        return Err(
+            "local R11 Genesis authority public key differs from the authorized Aegis key"
+                .to_string(),
+        );
+    }
+    let probe = LOCAL_R11_GENESIS_EXECUTION_AUTHORIZATION_DOMAIN.as_bytes();
+    let signature = Sign::mldsa87()
+        .detached_sign(probe, expected_private_key)
+        .map_err(|error| format!("local R11 ML-DSA-87 correspondence probe failed: {error:?}"))?;
+    if !Sign::mldsa87()
+        .verify_detached(probe, &signature, expected_public_key)
+        .map_err(|error| format!("local R11 ML-DSA-87 probe verification failed: {error:?}"))?
+    {
+        return Err("local R11 Genesis authority public/private keys do not correspond".into());
+    }
+    Ok(())
+}
+
+fn signer_identity_address(
+    signer: &GenesisSigner,
+    authorization: GenesisExecutionAuthorization<'_>,
+) -> Result<String, String> {
+    match authorization {
+        GenesisExecutionAuthorization::Production => signer.account_address(),
+        GenesisExecutionAuthorization::LocalR11(local) => {
+            if hex::encode(Sha3_512::digest(&signer.public_key)) != local.public_key_sha3_512 {
+                return Err("local R11 signer differs from the authorized Aegis key".to_string());
+            }
+            Ok(local.standard_account_address.clone())
+        }
+    }
+}
+
 /// Genesis configuration values that are not authorities. Sourced from the
 /// genesis document's `init_params` after the approved unit conversions.
 #[derive(Debug, Clone)]
@@ -446,6 +546,178 @@ pub struct GenesisDeploymentOutcome {
     pub receipt_root: Hash,
     pub deployment_manifest_hash: Hash,
     pub lifecycle: GenesisDeployerLifecycle,
+    /// Public, already-signed H0 operations. These let normal nodes replay
+    /// canonical Genesis without any ceremony private authority material.
+    pub replay_operations: Vec<GenesisReplayOperation>,
+}
+
+/// One exact signed deployment or initialization operation from H0.
+///
+/// It is produced during the Genesis ceremony. Runtime replay verifies and
+/// executes it but never signs again or loads ceremony custody.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GenesisReplayOperation {
+    pub kind: SynQAdmissionKind,
+    pub operation_label: String,
+    pub sequence: u64,
+    pub admission_envelope: SynQAdmissionEnvelope,
+}
+
+/// The independently verifiable result of replaying the public H0 operation
+/// list. No ceremony key material is accepted by this interface.
+#[derive(Debug, Clone)]
+pub struct GenesisReplayOutcome {
+    pub deployment_receipts: Vec<SynQAivmReceiptSummary>,
+    pub initialization_receipts: Vec<SynQAivmReceiptSummary>,
+    pub post_deployment_state_root: Hash,
+    pub receipt_root: Hash,
+}
+
+/// Replays the exact public signed operations committed by finalized Genesis.
+///
+/// This is the normal-node H0 initialization path. It starts from empty state,
+/// installs only the public identity-authorization bindings carried by the
+/// already-signed envelopes, verifies each envelope, and executes it through
+/// the same SynQ/AIVM admission path as the ceremony. It never accepts a
+/// private Genesis authority key and never restores a serialized state image.
+pub fn replay_genesis_deployment_from_signed_operations(
+    state: &mut ExecutionState,
+    deployment_manifest_hash: Hash,
+    operations: &[GenesisReplayOperation],
+) -> Result<GenesisReplayOutcome, String> {
+    if read_deployer_lifecycle(state)? != GenesisDeployerLifecycle::Uninitialized {
+        return Err("genesis signed-operation replay requires empty deployment state".to_string());
+    }
+    if operations.len() != 36 {
+        return Err(format!(
+            "genesis signed-operation replay requires 36 operations, found {}",
+            operations.len()
+        ));
+    }
+    for (index, contract) in GenesisContract::APPROVED_ORDER.iter().enumerate() {
+        let operation = &operations[index];
+        if operation.kind != SynQAdmissionKind::Deploy
+            || operation.sequence != index as u64
+            || operation.operation_label != contract.name()
+        {
+            return Err("genesis signed deployment operation order is not canonical".to_string());
+        }
+    }
+    if operations[GenesisContract::APPROVED_ORDER.len()..]
+        .iter()
+        .any(|operation| operation.kind != SynQAdmissionKind::Call)
+    {
+        return Err("genesis initialization operation sequence is not canonical".to_string());
+    }
+
+    let mut working = state.clone();
+    let mut installed_bindings = BTreeSet::new();
+    for operation in operations {
+        let carrier = operation
+            .admission_envelope
+            .identity_authorization
+            .as_ref()
+            .ok_or_else(|| {
+                "genesis replay operation lacks public identity authorization".to_string()
+            })?;
+        if installed_bindings.insert(carrier.binding.identity_address.clone()) {
+            working.install_genesis_identity_authorization_binding(&carrier.binding)?;
+        }
+    }
+    write_lifecycle(&mut working, GenesisDeployerLifecycle::AuthorizedForGenesis)?;
+    write_lifecycle(&mut working, GenesisDeployerLifecycle::Executing)?;
+
+    let mut deployment_receipts = Vec::with_capacity(9);
+    let mut initialization_receipts = Vec::with_capacity(27);
+    let mut addresses = BTreeMap::new();
+    for operation in operations {
+        let envelope = &operation.admission_envelope;
+        let binding = working
+            .current_identity_authorization_binding_hash(&envelope.signer)
+            .ok_or_else(|| {
+                format!(
+                    "genesis replay signer {} has no canonical identity binding",
+                    envelope.signer
+                )
+            })?;
+        let verification = match operation.kind {
+            SynQAdmissionKind::Deploy => verify_synq_deploy_for_chain_admission_at_current_binding(
+                envelope,
+                GENESIS_NOW_UNIX,
+                binding,
+            ),
+            SynQAdmissionKind::Call => verify_synq_call_for_chain_admission_at_current_binding(
+                envelope,
+                GENESIS_NOW_UNIX,
+                binding,
+            ),
+        }
+        .map_err(|error| format!("genesis signed-operation verification failed: {error}"))?;
+        let carrier = encode_synq_admission_carrier(envelope)
+            .map_err(|error| format!("encode genesis replay carrier: {error}"))?;
+        let kind_label = match operation.kind {
+            SynQAdmissionKind::Deploy => "deploy",
+            SynQAdmissionKind::Call => "call",
+        };
+        let tx = genesis_transaction(&verification.signer, carrier, operation.sequence);
+        let tx_id = genesis_tx_id(
+            kind_label,
+            &operation.operation_label,
+            operation.sequence,
+            &envelope.payload_hash,
+        );
+        let receipt = execute_synq_transaction_at(
+            &tx_id,
+            &tx,
+            &verification,
+            &mut working.synq_aivm_state,
+            &mut working.synq_artifacts,
+            &mut working.synq_contracts,
+            SynQExecutionContext {
+                runtime_block_height: GENESIS_BLOCK_HEIGHT,
+                runtime_block_timestamp_unix: GENESIS_NOW_UNIX,
+                sts_host: None,
+                applied_fee_market: None,
+            },
+        )?
+        .ok_or_else(|| "genesis signed operation produced no receipt".to_string())?;
+        if receipt.status != "succeeded" {
+            return Err(format!(
+                "genesis signed operation {} failed: {} {}",
+                operation.operation_label,
+                receipt.error_code.clone().unwrap_or_default(),
+                receipt.error_message.clone().unwrap_or_default()
+            ));
+        }
+        working.synq_verifications.insert(tx_id, verification);
+        match operation.kind {
+            SynQAdmissionKind::Deploy => {
+                let contract = GenesisContract::APPROVED_ORDER[deployment_receipts.len()];
+                addresses.insert(contract, receipt.contract_address.clone());
+                deployment_receipts.push(receipt);
+            }
+            SynQAdmissionKind::Call => initialization_receipts.push(receipt),
+        }
+    }
+    if deployment_receipts.len() != 9 || initialization_receipts.len() != 27 {
+        return Err(
+            "genesis signed-operation replay produced the wrong operation counts".to_string(),
+        );
+    }
+    normalize_genesis_deployment_records(&mut working, &addresses)?;
+    write_lifecycle(&mut working, GenesisDeployerLifecycle::Completed)?;
+    write_lifecycle(&mut working, GenesisDeployerLifecycle::PermanentlyRetired)?;
+    write_manifest_hash(&mut working, &deployment_manifest_hash);
+    let post_deployment_state_root = compute_state_root_after(&working)?;
+    let receipt_root =
+        compute_genesis_receipt_root(&deployment_receipts, &initialization_receipts)?;
+    *state = working;
+    Ok(GenesisReplayOutcome {
+        deployment_receipts,
+        initialization_receipts,
+        post_deployment_state_root,
+        receipt_root,
+    })
 }
 
 /// Deterministic genesis transaction identifier.
@@ -701,6 +973,8 @@ fn deploy_one(
     entry: &GenesisPlanEntry,
     deployer: &GenesisSigner,
     constructor_args: Vec<u8>,
+    authorization: GenesisExecutionAuthorization<'_>,
+    replay_operations: &mut Vec<GenesisReplayOperation>,
 ) -> Result<(String, SynQAddress, SynQAivmReceiptSummary), String> {
     let deployer_address = deployer.synq_address()?;
     let key = entry.artifact.key();
@@ -737,7 +1011,7 @@ fn deploy_one(
 
     // The address is derived from the same envelope the runtime admits and
     // executes — never chosen, never assigned.
-    let deployer_identity_address = deployer.account_address()?;
+    let deployer_identity_address = signer_identity_address(deployer, authorization)?;
     let synq_contract_address =
         crate::synq_execution::derive_synq_contract_address_from_deploy_with_identity_address(
             &deploy,
@@ -751,38 +1025,70 @@ fn deploy_one(
 
     let encoded = serde_json::to_vec(&deploy)
         .map_err(|error| format!("encode genesis deploy envelope: {error}"))?;
-    let envelope =
-        build_deploy_admission_envelope_from_pqsynq_bytes_with_artifacts_constructor_args_and_identity_authorization(
-            SYNERGY_TESTNET_V3_CHAIN_ID,
-            SYNQ_CANONICAL_TESTNET_NETWORK_ID,
-            &encoded,
-            entry.artifact.bytecode.clone(),
-            entry.artifact.abi_json.clone(),
-            entry.artifact.manifest_json.clone(),
-            constructor_args,
-            deployer.synq_identity_authorization(SYNQ_DEPLOY_AUTHORIZATION_PURPOSE)?,
-            SYNQ_DEPLOY_AUTHORIZATION_PURPOSE,
-            GENESIS_NOW_UNIX,
+    let envelope = match authorization {
+        GenesisExecutionAuthorization::Production =>
+            build_deploy_admission_envelope_from_pqsynq_bytes_with_artifacts_constructor_args_and_identity_authorization(
+                SYNERGY_TESTNET_V3_CHAIN_ID,
+                SYNQ_CANONICAL_TESTNET_NETWORK_ID,
+                &encoded,
+                entry.artifact.bytecode.clone(),
+                entry.artifact.abi_json.clone(),
+                entry.artifact.manifest_json.clone(),
+                constructor_args,
+                deployer.synq_identity_authorization(SYNQ_DEPLOY_AUTHORIZATION_PURPOSE)?,
+                SYNQ_DEPLOY_AUTHORIZATION_PURPOSE,
+                GENESIS_NOW_UNIX,
+            ),
+        GenesisExecutionAuthorization::LocalR11(local) => Ok(SynQAdmissionEnvelope {
+            version: SYNQ_ADMISSION_VERSION,
+            kind: SynQAdmissionKind::Deploy,
+            chain_id: SYNERGY_TESTNET_V3_CHAIN_ID,
+            network_id: SYNQ_CANONICAL_TESTNET_NETWORK_ID.to_string(),
+            signer: local.standard_account_address.clone(),
+            identity_authorization: None,
+            authorization_purpose: LOCAL_R11_GENESIS_DEPLOY_AUTHORIZATION_PURPOSE.to_string(),
+            payload_hash: deploy.signing_payload.payload_hash,
+            bytecode_hash: Some(key.bytecode_hash),
+            manifest_hash: Some(key.manifest_hash),
+            abi_hash: Some(key.abi_hash),
+            encoded_pqsynq_envelope: encoded,
+            bytecode: Some(entry.artifact.bytecode.clone()),
+            abi_json: Some(entry.artifact.abi_json.clone()),
+            manifest_json: Some(entry.artifact.manifest_json.clone()),
+            constructor_args: Some(constructor_args),
+            encoded_args: None,
+            sts9_verification_json: None,
+        }),
+    }
+    .map_err(|error| {
+        format!(
+            "{} genesis deploy admission failed: {error}",
+            entry.contract.name()
         )
-        .map_err(|error| {
-            format!(
-                "{} genesis deploy admission failed: {error}",
-                entry.contract.name()
+    })?;
+    let verification = match authorization {
+        GenesisExecutionAuthorization::Production => {
+            let canonical_binding = state
+                .current_identity_authorization_binding_hash(&envelope.signer)
+                .ok_or_else(|| {
+                    format!(
+                        "Genesis deployer {} has no canonical identity binding",
+                        envelope.signer
+                    )
+                })?;
+            verify_synq_deploy_for_chain_admission_at_current_binding(
+                &envelope,
+                GENESIS_NOW_UNIX,
+                canonical_binding,
             )
-        })?;
-    let canonical_binding = state
-        .current_identity_authorization_binding_hash(&envelope.signer)
-        .ok_or_else(|| {
-            format!(
-                "Genesis deployer {} has no canonical identity binding",
-                envelope.signer
-            )
-        })?;
-    let verification = verify_synq_deploy_for_chain_admission_at_current_binding(
-        &envelope,
-        GENESIS_NOW_UNIX,
-        canonical_binding,
-    )
+        }
+        GenesisExecutionAuthorization::LocalR11(local) => verify_synq_deploy_for_local_r11_genesis(
+            &envelope,
+            GENESIS_NOW_UNIX,
+            &local.standard_account_address,
+            &deployer.public_key,
+        ),
+    }
     .map_err(|error| {
         format!(
             "{} genesis deploy verification failed: {error}",
@@ -837,6 +1143,12 @@ fn deploy_one(
         ));
     }
     state.synq_verifications.insert(tx_id, verification);
+    replay_operations.push(GenesisReplayOperation {
+        kind: SynQAdmissionKind::Deploy,
+        operation_label: entry.contract.name().to_string(),
+        sequence: entry.nonce,
+        admission_envelope: envelope,
+    });
     Ok((contract_address, synq_contract_address, summary))
 }
 
@@ -876,6 +1188,8 @@ fn call_one(
     args: Vec<serde_json::Value>,
     caller: &GenesisSigner,
     call_nonce: u64,
+    authorization: GenesisExecutionAuthorization<'_>,
+    replay_operations: &mut Vec<GenesisReplayOperation>,
 ) -> Result<SynQAivmReceiptSummary, String> {
     let caller_address = caller.synq_address()?;
     let method_selector = selector(artifact, method)?;
@@ -917,16 +1231,26 @@ fn call_one(
     // first verification pass before attaching the arguments and therefore
     // hashes an empty argument list. The envelope below is the same shape and
     // is verified once, with the arguments present.
+    let (signer, identity_authorization, authorization_purpose) = match authorization {
+        GenesisExecutionAuthorization::Production => (
+            caller.account_address()?,
+            Some(caller.synq_identity_authorization(SYNQ_CALL_AUTHORIZATION_PURPOSE)?),
+            SYNQ_CALL_AUTHORIZATION_PURPOSE,
+        ),
+        GenesisExecutionAuthorization::LocalR11(local) => (
+            signer_identity_address(caller, authorization)?,
+            None,
+            LOCAL_R11_GENESIS_CALL_AUTHORIZATION_PURPOSE,
+        ),
+    };
     let envelope = SynQAdmissionEnvelope {
         version: SYNQ_ADMISSION_VERSION,
         kind: SynQAdmissionKind::Call,
         chain_id: SYNERGY_TESTNET_V3_CHAIN_ID,
         network_id: SYNQ_CANONICAL_TESTNET_NETWORK_ID.to_string(),
-        signer: caller.account_address()?,
-        identity_authorization: Some(
-            caller.synq_identity_authorization(SYNQ_CALL_AUTHORIZATION_PURPOSE)?,
-        ),
-        authorization_purpose: SYNQ_CALL_AUTHORIZATION_PURPOSE.to_string(),
+        signer,
+        identity_authorization,
+        authorization_purpose: authorization_purpose.to_string(),
         payload_hash: call.signing_payload.payload_hash,
         bytecode_hash: None,
         manifest_hash: None,
@@ -939,19 +1263,29 @@ fn call_one(
         encoded_args: Some(encoded_args),
         sts9_verification_json: None,
     };
-    let canonical_binding = state
-        .current_identity_authorization_binding_hash(&envelope.signer)
-        .ok_or_else(|| {
-            format!(
-                "Genesis caller {} has no canonical identity binding",
-                envelope.signer
+    let verification = match authorization {
+        GenesisExecutionAuthorization::Production => {
+            let canonical_binding = state
+                .current_identity_authorization_binding_hash(&envelope.signer)
+                .ok_or_else(|| {
+                    format!(
+                        "Genesis caller {} has no canonical identity binding",
+                        envelope.signer
+                    )
+                })?;
+            verify_synq_call_for_chain_admission_at_current_binding(
+                &envelope,
+                GENESIS_NOW_UNIX,
+                canonical_binding,
             )
-        })?;
-    let verification = verify_synq_call_for_chain_admission_at_current_binding(
-        &envelope,
-        GENESIS_NOW_UNIX,
-        canonical_binding,
-    )
+        }
+        GenesisExecutionAuthorization::LocalR11(local) => verify_synq_call_for_local_r11_genesis(
+            &envelope,
+            GENESIS_NOW_UNIX,
+            &local.standard_account_address,
+            &caller.public_key,
+        ),
+    }
     .map_err(|error| format!("genesis {method} call verification failed: {error}"))?;
     let carrier = encode_synq_admission_carrier(&envelope)
         .map_err(|error| format!("encode genesis call carrier: {error}"))?;
@@ -982,6 +1316,12 @@ fn call_one(
         ));
     }
     state.synq_verifications.insert(tx_id, verification);
+    replay_operations.push(GenesisReplayOperation {
+        kind: SynQAdmissionKind::Call,
+        operation_label: method.to_string(),
+        sequence: call_nonce,
+        admission_envelope: envelope,
+    });
     Ok(summary)
 }
 
@@ -1130,6 +1470,44 @@ pub fn execute_genesis_deployment(
     authorities: &GenesisAuthorities,
     parameters: &GenesisParameters,
 ) -> Result<GenesisDeploymentOutcome, String> {
+    execute_genesis_deployment_inner(
+        state,
+        plan,
+        authorities,
+        parameters,
+        GenesisExecutionAuthorization::Production,
+    )
+}
+
+/// Runs the exact production Genesis deployment/execution algorithm with the
+/// one pre-existing R11 Aegis ML-DSA-87 fixture key cloned into the three
+/// signer roles.  The adapter is explicit and qualification-only: it cannot
+/// be selected by runtime transaction admission, never claims an SNTS
+/// production identity binding, and does not skip PQSynQ signature, artifact,
+/// execution, receipt, or root verification.
+pub fn execute_local_r11_genesis_deployment(
+    state: &mut ExecutionState,
+    plan: &GenesisDeploymentPlan,
+    authorities: &GenesisAuthorities,
+    parameters: &GenesisParameters,
+    authorization: &LocalR11GenesisExecutionAuthorization,
+) -> Result<GenesisDeploymentOutcome, String> {
+    execute_genesis_deployment_inner(
+        state,
+        plan,
+        authorities,
+        parameters,
+        GenesisExecutionAuthorization::LocalR11(authorization),
+    )
+}
+
+fn execute_genesis_deployment_inner(
+    state: &mut ExecutionState,
+    plan: &GenesisDeploymentPlan,
+    authorities: &GenesisAuthorities,
+    parameters: &GenesisParameters,
+    authorization: GenesisExecutionAuthorization<'_>,
+) -> Result<GenesisDeploymentOutcome, String> {
     plan.validate()?;
 
     let lifecycle = read_deployer_lifecycle(state)?;
@@ -1142,22 +1520,31 @@ pub fn execute_genesis_deployment(
     // Fail before constructing the overlay unless every signer has the exact
     // root-signed scope it will exercise. Genesis does not infer deploy
     // authority from call authority, or vice versa.
-    validate_genesis_signer_authorizations(authorities)?;
+    match authorization {
+        GenesisExecutionAuthorization::Production => {
+            validate_genesis_signer_authorizations(authorities)?
+        }
+        GenesisExecutionAuthorization::LocalR11(local) => {
+            validate_local_r11_genesis_authorization(authorities, local)?
+        }
+    }
 
     let deployer_address = authorities.genesis_deployer.synq_address()?;
     let manifest_hash = deployment_manifest_hash(&deployer_address, plan)?;
 
     // Everything below mutates the working clone only.
     let mut working = state.clone();
-    for signer in [
-        &authorities.genesis_deployer,
-        &authorities.governance,
-        &authorities.validator_registry_authority_key,
-    ] {
-        let carrier = signer.identity_authorization.as_ref().ok_or_else(|| {
-            "Genesis signer is missing its canonical identity authorization binding".to_string()
-        })?;
-        working.install_genesis_identity_authorization_binding(&carrier.binding)?;
+    if matches!(authorization, GenesisExecutionAuthorization::Production) {
+        for signer in [
+            &authorities.genesis_deployer,
+            &authorities.governance,
+            &authorities.validator_registry_authority_key,
+        ] {
+            let carrier = signer.identity_authorization.as_ref().ok_or_else(|| {
+                "Genesis signer is missing its canonical identity authorization binding".to_string()
+            })?;
+            working.install_genesis_identity_authorization_binding(&carrier.binding)?;
+        }
     }
     write_lifecycle(&mut working, GenesisDeployerLifecycle::AuthorizedForGenesis)?;
     write_lifecycle(&mut working, GenesisDeployerLifecycle::Executing)?;
@@ -1165,6 +1552,7 @@ pub fn execute_genesis_deployment(
     let mut addresses: BTreeMap<GenesisContract, String> = BTreeMap::new();
     let mut synq_addresses: BTreeMap<GenesisContract, SynQAddress> = BTreeMap::new();
     let mut deployment_receipts = Vec::new();
+    let mut replay_operations = Vec::new();
 
     for entry in &plan.entries {
         let constructor_args =
@@ -1174,6 +1562,8 @@ pub fn execute_genesis_deployment(
             entry,
             &authorities.genesis_deployer,
             constructor_args,
+            authorization,
+            &mut replay_operations,
         )?;
         addresses.insert(entry.contract, address);
         synq_addresses.insert(entry.contract, synq_address);
@@ -1187,6 +1577,8 @@ pub fn execute_genesis_deployment(
         &synq_addresses,
         authorities,
         parameters,
+        authorization,
+        &mut replay_operations,
     )?;
 
     normalize_genesis_deployment_records(&mut working, &addresses)?;
@@ -1216,6 +1608,7 @@ pub fn execute_genesis_deployment(
         receipt_root,
         deployment_manifest_hash: manifest_hash,
         lifecycle: GenesisDeployerLifecycle::PermanentlyRetired,
+        replay_operations,
     })
 }
 
@@ -1297,6 +1690,8 @@ fn run_initialization_sequence(
     synq_addresses: &BTreeMap<GenesisContract, SynQAddress>,
     authorities: &GenesisAuthorities,
     parameters: &GenesisParameters,
+    authorization: GenesisExecutionAuthorization<'_>,
+    replay_operations: &mut Vec<GenesisReplayOperation>,
 ) -> Result<Vec<SynQAivmReceiptSummary>, String> {
     let artifact_for = |contract: GenesisContract| -> Result<SynQContractArtifact, String> {
         plan.entries
@@ -1372,6 +1767,56 @@ fn run_initialization_sequence(
             args,
             &authorities.governance,
             governance_call_nonce,
+            authorization,
+            replay_operations,
+        )?);
+        *nonce += 1;
+        governance_call_nonce += 1;
+    }
+    // The Treasury constructor receives these immutable Genesis values so it
+    // can reject an invalid deployment immediately.  Record the two governed
+    // initialization transitions as well: the durable initialization receipt
+    // set must prove the configured threshold and Governance dependency were
+    // both admitted through the canonical call path, not merely constructor
+    // arguments.  This is especially important for the five-validator fresh
+    // P3 set, where the receipt set is otherwise two entries short of the
+    // approved 27-call Genesis sequence.
+    for (method, action_args) in [
+        (
+            "setRequiredSigners",
+            vec![serde_json::Value::String(
+                parameters.treasury_required_signers.clone(),
+            )],
+        ),
+        (
+            "setGovernanceContract",
+            vec![serde_json::Value::String(address_for(
+                GenesisContract::Governance,
+            )?)],
+        ),
+    ] {
+        let nonce = governance_nonces
+            .entry(GenesisContract::Treasury)
+            .or_insert(0);
+        let args = governance_tail(
+            &authorities.governance,
+            &treasury_artifact,
+            &treasury_address,
+            method,
+            &action_args,
+            *nonce,
+        )?;
+        receipts.push(call_one(
+            working,
+            &treasury_artifact,
+            &treasury_address,
+            treasury_synq,
+            method,
+            args,
+            &authorities.governance,
+            governance_call_nonce,
+            authorization,
+            replay_operations,
         )?);
         *nonce += 1;
         governance_call_nonce += 1;
@@ -1413,6 +1858,8 @@ fn run_initialization_sequence(
             args,
             &authorities.governance,
             governance_call_nonce,
+            authorization,
+            replay_operations,
         )?);
         *nonce += 1;
         governance_call_nonce += 1;
@@ -1457,6 +1904,8 @@ fn run_initialization_sequence(
             ],
             &registry_authority,
             registry_call_nonce,
+            authorization,
+            replay_operations,
         )?);
         registry_call_nonce += 1;
     }
@@ -1473,6 +1922,8 @@ fn run_initialization_sequence(
             ],
             &registry_authority,
             registry_call_nonce,
+            authorization,
+            replay_operations,
         )?);
         registry_call_nonce += 1;
     }
@@ -1505,6 +1956,8 @@ fn run_initialization_sequence(
             args,
             &authorities.governance,
             governance_call_nonce,
+            authorization,
+            replay_operations,
         )?);
         *nonce += 1;
         governance_call_nonce += 1;
@@ -1533,6 +1986,8 @@ fn run_initialization_sequence(
             args,
             &authorities.governance,
             governance_call_nonce,
+            authorization,
+            replay_operations,
         )?);
         *nonce += 1;
         governance_call_nonce += 1;
@@ -1919,6 +2374,24 @@ mod tests {
         assert_eq!(a.deployment_receipts.len(), 9);
         assert_eq!(a.initialization_receipts.len(), 27);
         assert_eq!(a.lifecycle, GenesisDeployerLifecycle::PermanentlyRetired);
+        assert_eq!(a.replay_operations.len(), 36);
+
+        let mut replayed = ExecutionState::new();
+        let replay = replay_genesis_deployment_from_signed_operations(
+            &mut replayed,
+            a.deployment_manifest_hash,
+            &a.replay_operations,
+        )
+        .expect("replay public signed Genesis operations without custody");
+        assert_eq!(
+            replay.post_deployment_state_root,
+            a.post_deployment_state_root
+        );
+        assert_eq!(replay.receipt_root, a.receipt_root);
+        assert_eq!(
+            compute_state_root_after(&replayed).expect("replayed state root"),
+            compute_state_root_after(&first).expect("ceremony state root")
+        );
 
         let genesis_signers = [
             &authorities.genesis_deployer,

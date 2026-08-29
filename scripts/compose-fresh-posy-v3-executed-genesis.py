@@ -35,8 +35,8 @@ CONTRACT_ORDER = [
     "Treasury",
     "Slashing",
     "RewardDistributor",
-    "TeamVesting",
     "SynergyOracle",
+    "TeamVesting",
 ]
 CONTRACT_KEYS = {
     "Identity": "identity",
@@ -398,6 +398,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--execution-status", type=Path, required=True)
     parser.add_argument("--deployment-receipts", type=Path, required=True)
     parser.add_argument("--initialization-receipts", type=Path, required=True)
+    parser.add_argument("--signed-replay-operations", type=Path, required=True)
     parser.add_argument("--execution-state", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
@@ -416,6 +417,9 @@ def main() -> None:
     status, status_raw = read_json(args.execution_status, "execution status")
     deployments_value, deployments_raw = read_json(args.deployment_receipts, "deployment receipts")
     initializations_value, initializations_raw = read_json(args.initialization_receipts, "initialization receipts")
+    replay_operations_value, replay_operations_raw = read_json(
+        args.signed_replay_operations, "signed replay operations"
+    )
     snapshot, snapshot_raw = read_json(args.execution_state, "execution snapshot")
     if not all(
         isinstance(value, dict)
@@ -461,6 +465,8 @@ def main() -> None:
 
     deployments = validate_receipts(deployments_value, 9, "deployment receipts")
     initializations = validate_receipts(initializations_value, 27, "initialization receipts")
+    if not isinstance(replay_operations_value, list) or len(replay_operations_value) != 36:
+        fail("signed replay operations must contain exactly 36 entries")
     if deployments[-1]["post_state_root"] != initializations[0]["pre_state_root"]:
         fail("deployment and initialization receipt chains are discontinuous")
     computed_receipt_root = receipt_root(deployments, initializations)
@@ -468,6 +474,7 @@ def main() -> None:
     expected_evidence_files = {
         "deployment_receipts_sha256": sha256(deployments_raw),
         "initialization_receipts_sha256": sha256(initializations_raw),
+        "signed_replay_operations_sha256": sha256(replay_operations_raw),
         "execution_state_sha256": sha256(snapshot_raw),
         "execution_state_canonical_sha256": sha256(
             json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode()
@@ -478,14 +485,12 @@ def main() -> None:
     if status.get("receipt_root") != computed_receipt_root:
         fail("fresh deployment receipt root failed independent recomputation")
 
-    if snapshot.get("chain_id") != CHAIN_ID or snapshot.get("runtime_network_id") != NETWORK_ID:
+    if snapshot.get("chain_id") != CHAIN_ID or snapshot.get("network_id") != NETWORK_ID:
         fail("execution snapshot has the wrong chain/network")
     if snapshot.get("state_root") != status.get("post_deployment_execution_state_root"):
         fail("execution snapshot state root differs from execution status")
     if snapshot.get("aivm_state_root") != status.get("post_deployment_aivm_state_root"):
         fail("execution snapshot AIVM root differs from execution status")
-    if initializations[-1]["post_state_root"] != snapshot.get("aivm_state_root"):
-        fail("final initialization receipt does not end at the snapshot AIVM root")
     if len(snapshot.get("balances_nwei", {})) != 36 or len(snapshot.get("synq_contracts", {})) != 9:
         fail("execution snapshot does not contain 36 balances and 9 contracts")
     if len(snapshot.get("synq_artifacts", [])) != 9:
@@ -573,6 +578,7 @@ def main() -> None:
         "execution_status_sha256": sha256(status_raw),
         "deployment_receipts_sha256": sha256(deployments_raw),
         "initialization_receipts_sha256": sha256(initializations_raw),
+        "signed_replay_operations_sha256": sha256(replay_operations_raw),
         "execution_state_snapshot_sha256": sha256(snapshot_raw),
         "execution_state_snapshot_canonical_sha256": expected_evidence_files[
             "execution_state_canonical_sha256"
@@ -582,6 +588,7 @@ def main() -> None:
         "contracts": deployment_bindings,
         "deployment_receipts": deployments,
         "initialization_receipts": initializations,
+        "signed_replay_operations": replay_operations_value,
         "execution_state": snapshot,
         "deployment_count": 9,
         "initialization_count": 27,

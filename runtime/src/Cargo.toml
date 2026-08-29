@@ -173,6 +173,18 @@ name = "prepare-fresh-posy-v3-genesis"
 path = "bin/prepare-fresh-posy-v3-genesis.rs"
 
 [[bin]]
+name = "assemble-local-r11-public-artifacts"
+path = "bin/assemble-local-r11-public-artifacts.rs"
+
+[[bin]]
+name = "generate-local-r11-genesis-execution-bundle"
+path = "bin/generate-local-r11-genesis-execution-bundle.rs"
+
+[[bin]]
+name = "bind-local-r11-execution-bundle-candidate"
+path = "bin/bind-local-r11-execution-bundle-candidate.rs"
+
+[[bin]]
 name = "testnet-v3-etdag-admission"
 path = "bin/testnet-v3-etdag-admission.rs"
 
