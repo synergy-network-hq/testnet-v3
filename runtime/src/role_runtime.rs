@@ -4686,7 +4686,7 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
             let genesis_path = config_path
                 .parent()
                 .unwrap_or_else(|| Path::new("."))
-                .join("genesis.json");
+                .join("genesis.sgen");
             if !genesis_path.is_file() {
                 eprintln!(
                     "NCP runtime requires the adjacent canonical Genesis file: {}",

@@ -503,7 +503,7 @@ fn genesis_path() -> PathBuf {
     let configured = std::env::var("SYNERGY_GENESIS_FILE")
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "config/genesis.json".to_string());
+        .unwrap_or_else(|| "config/genesis.sgen".to_string());
     resolve_data_path(&configured)
 }
 
