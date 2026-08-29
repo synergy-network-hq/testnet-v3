@@ -164,6 +164,14 @@ pub fn verify_sgen_file(path: impl AsRef<Path>) -> Result<VerifiedSgen, String> 
 }
 
 pub fn verify_sgen_bytes(bytes: &[u8]) -> Result<VerifiedSgen, String> {
+    let authorities = canonical_testnet_authorities()?;
+    verify_sgen_bytes_against(bytes, &authorities)
+}
+
+fn verify_sgen_bytes_against(
+    bytes: &[u8],
+    authorities: &BTreeMap<String, SgenAuthorityPublic>,
+) -> Result<VerifiedSgen, String> {
     if bytes.len() > MAX_FILE_BYTES { return Err("SGEN exceeds the v1 file limit".to_string()); }
     let mut decoder = Decoder::new(bytes);
     if decoder.take_exact(4)? != SGEN_MAGIC { return Err("SGEN magic is invalid".to_string()); }
@@ -179,7 +187,6 @@ pub fn verify_sgen_bytes(bytes: &[u8]) -> Result<VerifiedSgen, String> {
     if payload_digest(&payload_bytes) != digest { return Err("SGEN payload digest does not match its canonical bytes".to_string()); }
     let payload = decode_payload(&payload_bytes)?;
     validate_payload_shape(&payload)?;
-    let authorities = canonical_testnet_authorities()?;
     let message = signature_message(&digest);
     let mut seen = BTreeSet::new();
     let mut signatures = Vec::with_capacity(3);
@@ -433,6 +440,8 @@ impl<'a> Decoder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aegis_pqvm::pqc::signatures::mldsa::mldsa87;
+    use pqrust_traits::sign::{PublicKey as _, SecretKey as _};
 
     fn payload() -> SgenPayloadV1 { SgenPayloadV1 { chain_id: 1266, network_id: "testnet".to_string(), release_id: "testnet-v3".to_string(), protocol_version: "1.0.0".to_string(), consensus_version: "posy/3.0".to_string(), activation_timestamp: 1, target_block_time_ms: 500, parameter_root: "11".repeat(32), membership_root: "22".repeat(32), expected_execution_state_root: "33".repeat(32), expected_aivm_state_root: "44".repeat(32), expected_receipt_root: "55".repeat(32), legacy_document: br#"{}"#.to_vec(), h0_operations: vec![b"{}".to_vec(); H0_OPERATION_COUNT] } }
 
@@ -458,5 +467,34 @@ mod tests {
     fn payload_rejects_wrong_chain_and_operation_count() {
         let mut wrong_chain = payload(); wrong_chain.chain_id = 1; assert!(validate_payload_shape(&wrong_chain).is_err());
         let mut wrong_operations = payload(); wrong_operations.h0_operations.pop(); assert!(validate_payload_shape(&wrong_operations).is_err());
+    }
+
+    #[test]
+    fn signatures_are_domain_bound_and_wrong_authorities_fail_closed() {
+        let raw = encode_payload(&payload()).unwrap();
+        let digest = payload_digest(&raw);
+        let message = signature_message(&digest);
+        let mut authorities = BTreeMap::new();
+        let mut signatures = Vec::new();
+        for role in [DEPLOYER_ROLE, GOVERNANCE_ROLE, REGISTRY_ROLE] {
+            let (public, secret) = mldsa87::keypair();
+            let public_key = public.as_bytes().to_vec();
+            let signature = Sign::mldsa87().sign_ctx(&message, secret.as_bytes(), SGEN_AUTHORITY_SIGNATURE_DOMAIN).unwrap();
+            authorities.insert(role.to_string(), SgenAuthorityPublic { role: role.to_string(), identity_address: format!("test-{role}"), public_key });
+            signatures.push(SgenSignature { role: role.to_string(), signature });
+        }
+        let encoded = encode_file(&raw, digest, &signatures).unwrap();
+        // All three real test-domain signatures verify before the deliberately
+        // minimal test document is rejected by semantic validation.
+        let semantic_error = verify_sgen_bytes_against(&encoded, &authorities).unwrap_err();
+        assert!(semantic_error.contains("document") || semantic_error.contains("Genesis") || semantic_error.contains("operation"), "{semantic_error}");
+
+        let mut tampered = encoded.clone();
+        *tampered.last_mut().unwrap() ^= 1;
+        assert!(verify_sgen_bytes_against(&tampered, &authorities).unwrap_err().contains("signature"));
+
+        let (wrong_public, _) = mldsa87::keypair();
+        authorities.get_mut(REGISTRY_ROLE).unwrap().public_key = wrong_public.as_bytes().to_vec();
+        assert!(verify_sgen_bytes_against(&encoded, &authorities).unwrap_err().contains("signature"));
     }
 }
