@@ -164,6 +164,14 @@ pub fn list_syn_ids() -> Vec<SynIdRecord> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wallet_test_address(fill: u8) -> String {
+        crate::address::generate_wallet_address(&hex::encode(vec![
+            fill;
+            crate::address::FN_DSA_1024_PUBLIC_KEY_BYTES
+        ]))
+        .expect("canonical FN-DSA test root derives a wallet address")
+    }
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -198,9 +206,7 @@ mod tests {
     #[test]
     fn registers_and_resolves_syn_id_records() {
         with_temp_runtime_root(|| {
-            let address = crate::address::generate_wallet_address(
-                "0000000000000000000000000000000000000000000000000000000000000000",
-            );
+            let address = wallet_test_address(0);
 
             let record = register_syn_id("@devpup", &address, Some("Dev Pup")).expect("register");
             assert_eq!(record.syn_id, "devpup.syn");
@@ -220,12 +226,8 @@ mod tests {
     #[test]
     fn prevents_reassigning_existing_syn_id() {
         with_temp_runtime_root(|| {
-            let first = crate::address::generate_wallet_address(
-                "0000000000000000000000000000000000000000000000000000000000000000",
-            );
-            let second = crate::address::generate_wallet_address(
-                "1111111111111111111111111111111111111111111111111111111111111111",
-            );
+            let first = wallet_test_address(0);
+            let second = wallet_test_address(1);
             register_syn_id("devpup.syn", &first, None).expect("register first");
             let err =
                 register_syn_id("devpup.syn", &second, None).expect_err("reject reassignment");

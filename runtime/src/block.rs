@@ -211,7 +211,7 @@ impl Block {
     /// parent that this block extends.  This is called before the proposer
     /// signs the block; validators independently recompute the same values.
     pub fn apply_fee_market_from_parent(&mut self, parent: &Block) -> Result<(), String> {
-        let params = crate::gas::fee_market::FeeMarketParams::testnet_v3_defaults();
+        let params = *crate::gas::fee_market_params_for_runtime()?;
         if !params.is_active_at(self.block_index) {
             return Ok(());
         }
@@ -245,11 +245,13 @@ impl Block {
     fn validate_fee_market_fields(&self) -> Result<(), String> {
         if self.fee_market_version == 0 {
             if self.base_fee_per_gas_nwei != 0 || self.gas_used != 0 || self.gas_limit != 0 {
-                return Err("legacy fee-market version 0 block contains active fee fields".to_string());
+                return Err(
+                    "legacy fee-market version 0 block contains active fee fields".to_string(),
+                );
             }
             return Ok(());
         }
-        let params = crate::gas::fee_market::FeeMarketParams::testnet_v3_defaults();
+        let params = *crate::gas::fee_market_params_for_runtime()?;
         if self.fee_market_version != params.fee_market_version {
             return Err("unsupported legacy fee-market version".to_string());
         }
@@ -264,7 +266,9 @@ impl Block {
         }
         let estimated = self.estimated_gas_used()?;
         if self.gas_used != estimated {
-            return Err("legacy block declared gas used does not match transaction gas".to_string());
+            return Err(
+                "legacy block declared gas used does not match transaction gas".to_string(),
+            );
         }
         if self.gas_used > self.gas_limit {
             return Err("legacy block gas used exceeds its gas limit".to_string());
@@ -282,22 +286,29 @@ impl Block {
                 .map_err(|error| format!("calculate active transaction fee: {error}"))?
                 .total_network_fee_nwei;
             let reserved_fee = transaction
-                .network_fee_breakdown_with_gas(transaction.get_gas_limit(), transaction.get_gas_price())
+                .network_fee_breakdown_with_gas(
+                    transaction.get_gas_limit(),
+                    transaction.get_gas_price(),
+                )
                 .map_err(|error| format!("calculate transaction maximum fee: {error}"))?
                 .total_network_fee_nwei;
             if actual_fee > reserved_fee {
-                return Err("active transaction fee exceeds the sender's maximum reserve".to_string());
+                return Err(
+                    "active transaction fee exceeds the sender's maximum reserve".to_string(),
+                );
             }
         }
         Ok(())
     }
 
     fn estimated_gas_used(&self) -> Result<u64, String> {
-        self.transactions.iter().try_fold(0u64, |total, transaction| {
-            total
-                .checked_add(transaction.estimate_gas())
-                .ok_or_else(|| "legacy block gas accounting overflow".to_string())
-        })
+        self.transactions
+            .iter()
+            .try_fold(0u64, |total, transaction| {
+                total
+                    .checked_add(transaction.estimate_gas())
+                    .ok_or_else(|| "legacy block gas accounting overflow".to_string())
+            })
     }
 
     /// Validate all fee-market commitments that depend on the exact parent.
@@ -311,7 +322,7 @@ impl Block {
             return Ok(());
         }
         self.validate_fee_market_fields()?;
-        let params = crate::gas::fee_market::FeeMarketParams::testnet_v3_defaults();
+        let params = *crate::gas::fee_market_params_for_runtime()?;
         if !params.is_active_at(self.block_index) {
             return Ok(());
         }
@@ -326,7 +337,10 @@ impl Block {
             params.initial_base_fee_nwei
         };
         if self.base_fee_per_gas_nwei != expected {
-            return Err("legacy block base fee does not match the parent-derived protocol value".to_string());
+            return Err(
+                "legacy block base fee does not match the parent-derived protocol value"
+                    .to_string(),
+            );
         }
         Ok(())
     }

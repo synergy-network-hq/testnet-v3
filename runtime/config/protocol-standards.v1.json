@@ -1,0 +1,73 @@
+{
+  "schema": "synergy-protocol-standards-v1",
+  "source_standard_version": "SNTS-01/04/06/07/08/09 v1.3",
+  "source_docx_sha256": "7dbf3ac0333f8f40b51502b625ec9242de88b70d612d340581968e69c222635c",
+  "approved_port_allocation_source": "Synergy Protocol Naming and Encoding Standards v1.3 section 6.3",
+  "address_engine": {
+    "version": 1,
+    "registry_version": "SNTS-01-v1.3",
+    "encoding": "bech32m",
+    "canonical_case": "lowercase",
+    "canonical_total_length": 41,
+    "key_controlled_identity_root": "FN-DSA-1024",
+    "digest": "SHA3-256",
+    "digest_to_data_rule": "leading_n_5_bit_groups_big_endian",
+    "data_word_count_formula": "41-len(hrp)-1-6",
+    "separator": "1",
+    "checksum_symbols": 6,
+    "synthetic_burn_address": "syn0000000000000000000000000000000"
+  },
+  "denominations": {
+    "symbol": "SNRG",
+    "decimals": 9,
+    "base_unit": "nWei",
+    "nwei_per_snrg": "1000000000",
+    "mwei_per_snrg": "1000000",
+    "uwei_per_snrg": "1000",
+    "maximum_total_supply_snrg": "12000000000",
+    "maximum_total_supply_nwei": "12000000000000000000"
+  },
+  "timestamp": {
+    "wire_type": "u64",
+    "unit": "whole_seconds_since_unix_epoch",
+    "maximum": 253402300799,
+    "display": "iso8601_utc_z_no_fraction"
+  },
+  "pqc_families": [
+    {"documentation_name": "ML-KEM", "code_name": "mlkem", "status": "active"},
+    {"documentation_name": "ML-DSA", "code_name": "mldsa", "status": "active"},
+    {"documentation_name": "FN-DSA", "code_name": "fndsa", "status": "active"},
+    {"documentation_name": "SLH-DSA", "code_name": "slhdsa", "status": "governance_reserve"},
+    {"documentation_name": "HQC-KEM", "code_name": "hqckem", "status": "active_reserve"},
+    {"documentation_name": "CMCE-KEM", "code_name": "cmce", "status": "governance_reserve"},
+    {"documentation_name": "UOV-DSA", "code_name": "uovdsa", "status": "governance_reserve"}
+  ],
+  "environments": [
+    {"display_name": "Testnet Beta", "identifier": "testbeta", "ports": null},
+    {"display_name": "Testnet", "identifier": "testnet", "ports": {"p2p_default": 5622, "p2p_bootnode": 5620, "p2p_seed_server": 5621, "p2p_archive_validator": 5615, "qrpc_default": 5640, "qrpc_archive_validator": 5641, "ws_default": 5660, "ws_archive_validator": 5661, "discovery_default": 5680, "discovery_seed_or_archive": 5681, "metrics_default": 6030, "metrics_archive_validator": 6031}},
+    {"display_name": "Mainnet", "identifier": "mainnet", "ports": null}
+  ],
+  "network_releases": [
+    {"release_id": "testnet-beta-v1", "display_name": "Testnet-beta (v1)", "environment": "testbeta", "chain_id": 1262},
+    {"release_id": "testnet-v2", "display_name": "Testnet (v2)", "environment": "testnet", "chain_id": 1264},
+    {"release_id": "testnet-v3", "display_name": "Testnet (v3)", "environment": "testnet", "chain_id": 1266},
+    {"release_id": "mainnet-beta", "display_name": "Mainnet-beta", "environment": "mainnet", "chain_id": 1268},
+    {"release_id": "mainnet", "display_name": "Mainnet", "environment": "mainnet", "chain_id": 1269}
+  ],
+  "testnet_v3_compatibility": {
+    "environment": "testnet",
+    "release_id": "testnet-v3",
+    "chain_id": 1266,
+    "network_id": "testnet",
+    "legacy_network_id": "synergy-testnet-v3",
+    "legacy_input_only": true,
+    "note": "The canonical Testnet-v3 identity tuple is chain_id 1266, network_id testnet, release_id testnet-v3. The legacy value is accepted only by explicit migration readers and is never emitted."
+  },
+  "unresolved_governance": {
+    "environment_chain_ids_applied": true,
+    "v1_3_section_6_3_testnet_ports_applied": true,
+    "address_engine_v1_3_applied": true,
+    "source_blockers": ["namespace_count_37_declared_36_enumerated", "pqc_six_family_declared_seven_specified"],
+    "reason": "SNTS v1.3 Address Engine, release-to-chain mappings, and role-aware Testnet ports are canonical. Remaining source contradictions are fail-closed and do not authorize an invented namespace or family."
+  }
+}

@@ -7,10 +7,22 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 pub const SYNERGY_TESTNET_V3_CHAIN_ID: u64 = 1266;
-pub const SYNERGY_TESTNET_V3_NETWORK_ID: &str = "synergy-testnet-v3";
+/// Canonical SNTS-09 technical network identifier. Newly emitted, signed, or
+/// consensus-bound material must use this value.
+pub const SYNERGY_TESTNET_V3_NETWORK_ID: &str = "testnet";
+/// Versioned release identity, kept separate from the technical network ID.
+pub const SYNERGY_TESTNET_V3_RELEASE_ID: &str = "testnet-v3";
+/// Retired single-authority-chain identifier. Explicit migration readers may
+/// consume it, but fresh PoSy artifacts must never emit it.
+pub const SYNERGY_TESTNET_V3_LEGACY_NETWORK_ID: &str = "synergy-testnet-v3";
+/// Compatibility spelling retained for existing fresh-P3 loaders.
+pub const TESTNET_V3_CANONICAL_NETWORK_ID: &str = SYNERGY_TESTNET_V3_NETWORK_ID;
 pub const TESTNET_V3_CHAIN_INCARNATION: u64 = 4;
+/// Fresh block-zero PoSy P3 must not share the P1 consensus-signing domain.
+pub const TESTNET_V3_FRESH_P3_CHAIN_INCARNATION: u64 = 5;
 pub const TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION: u32 = 4;
-pub const POSY_PROTOCOL_VERSION: &str = "posy/2.2";
+/// The sole active Testnet-v3 consensus wire/version identifier.
+pub const POSY_PROTOCOL_VERSION: &str = "posy/3.0";
 pub const TESTNET_V3_CONSENSUS_SIGNATURE_ALGORITHM: &str = "mldsa65";
 pub const TESTNET_V3_MLDSA65_PUBLIC_KEY_BYTES: usize = 1_952;
 pub const HEIGHT_CONSENSUS_CONTEXT_VERSION: u32 = 1;
@@ -64,12 +76,27 @@ impl NetworkId {
         Self(SYNERGY_TESTNET_V3_NETWORK_ID.to_string())
     }
 
+    pub fn fresh_posy_testnet_v3() -> Self {
+        Self(SYNERGY_TESTNET_V3_NETWORK_ID.to_string())
+    }
+
     pub fn require_testnet_v3(&self) -> Result<(), String> {
         if self.0 == SYNERGY_TESTNET_V3_NETWORK_ID {
             Ok(())
         } else {
             Err(format!(
                 "wrong network_id: expected {}, found {}",
+                SYNERGY_TESTNET_V3_NETWORK_ID, self.0
+            ))
+        }
+    }
+
+    pub fn require_fresh_posy_testnet_v3(&self) -> Result<(), String> {
+        if self.0 == SYNERGY_TESTNET_V3_NETWORK_ID {
+            Ok(())
+        } else {
+            Err(format!(
+                "wrong fresh PoSy network_id: expected {}, found {}",
                 SYNERGY_TESTNET_V3_NETWORK_ID, self.0
             ))
         }
@@ -415,9 +442,31 @@ impl HeightConsensusContext {
         cluster_map: &ClusterMap,
         protocol_config: &ProtocolConfig,
     ) -> Result<Self, String> {
-        spec_validate(&spec)?;
         protocol_config.chain_id.require_testnet_v3()?;
         protocol_config.network_id.require_testnet_v3()?;
+        Self::derive_from_finalized_parameter_root(
+            spec,
+            validator_set,
+            cluster_map,
+            protocol_config.hash()?,
+        )
+    }
+
+    /// Derive a height context from the exact consensus-parameter root already
+    /// committed by Genesis or a verified epoch transition.  Production
+    /// bootstrap cannot manufacture a mutable [`ProtocolConfig`]; callers
+    /// therefore supply the immutable, independently verified root rather
+    /// than a test default.
+    pub fn derive_from_finalized_parameter_root(
+        spec: HeightConsensusContextSpec,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        consensus_parameter_root: ConsensusParameterRoot,
+    ) -> Result<Self, String> {
+        spec_validate(&spec)?;
+        if consensus_parameter_root.is_zero() {
+            return Err("height context consensus parameter root is missing".to_string());
+        }
         if validator_set.epoch != spec.epoch {
             return Err("height context validator-set epoch mismatch".to_string());
         }
@@ -473,8 +522,6 @@ impl HeightConsensusContext {
             "SYNERGY_POSY_LEADER_SCHEDULE_V1",
             &leader_schedule.canonical_bytes()?,
         );
-        let consensus_parameter_root = protocol_config.hash()?;
-
         let context = Self {
             context_version: HEIGHT_CONSENSUS_CONTEXT_VERSION,
             chain_id: ChainId::synergy_testnet_v3(),
@@ -975,6 +1022,14 @@ pub enum VotePhase {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ConsensusSubjectPhase {
     Proposal,
+    /// Authenticated reliable-delivery transport evidence; never an ordinary
+    /// block vote or direct finality input.
+    ProposalEcho,
+    /// Authenticated reliable-delivery transport evidence; never an ordinary
+    /// block vote or direct finality input.
+    ProposalReady,
+    /// The sole ordinary block-vote phase in simplified PoSy.
+    Vote,
     Validate,
     Finality,
     Timeout,
@@ -1043,7 +1098,9 @@ pub struct ConsensusDomain {
 impl ConsensusDomain {
     pub fn validate(&self) -> Result<(), String> {
         self.chain_id.require_testnet_v3()?;
-        if self.chain_incarnation != TESTNET_V3_CHAIN_INCARNATION || self.genesis_hash.is_zero() {
+        if self.chain_incarnation != TESTNET_V3_FRESH_P3_CHAIN_INCARNATION
+            || self.genesis_hash.is_zero()
+        {
             return Err("wrong or incomplete Chain 1266 consensus domain".to_string());
         }
         Ok(())
@@ -2193,6 +2250,20 @@ mod tests {
             algorithm: "fndsa".to_string(),
             signature_bytes: vec![1, 2, 3],
         }
+    }
+
+    #[test]
+    fn consensus_domain_accepts_only_the_fresh_p3_incarnation() {
+        let fresh = ConsensusDomain {
+            chain_id: ChainId::synergy_testnet_v3(),
+            chain_incarnation: TESTNET_V3_FRESH_P3_CHAIN_INCARNATION,
+            genesis_hash: root("fresh-p3-genesis"),
+        };
+        assert!(fresh.validate().is_ok());
+
+        let mut retired = fresh;
+        retired.chain_incarnation = TESTNET_V3_CHAIN_INCARNATION;
+        assert!(retired.validate().is_err());
     }
 
     #[test]

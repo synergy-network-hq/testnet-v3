@@ -35,8 +35,9 @@ export function validatorClusterQuorumThreshold(totalValidators) {
   const count = Number(totalValidators);
   if (!Number.isFinite(count) || count <= 0) return 0;
   const normalizedCount = Math.trunc(count);
-  if (normalizedCount === 5) return 3;
-  return Math.ceil((normalizedCount * 2) / 3);
+  if (normalizedCount <= 0) return 0;
+  // Smallest q satisfying 3*q > 2*n.
+  return normalizedCount - Math.floor((normalizedCount - 1) / 3);
 }
 
 export function validatorClusterCount(totalValidators) {

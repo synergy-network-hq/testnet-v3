@@ -1,5 +1,13 @@
 # Dynamic Validator Clusters
 
+> Historical scope: this document records the v2.2/dynamic topology source and
+> its migration-era fixtures. It is not a PoSy v3 topology or activation
+> authority, and its commands must not be run against the fresh P3 chain. The
+> P3 chain starts at block zero with Chain `1266`, technical network `testnet`,
+> protocol `posy/3.0`, and five initial validators. Later P3 membership is
+> derived from finalized v3-to-v3 epoch transitions as specified by
+> `docs/posy-v3/POSY-00E-SIMPLIFIED-CONSENSUS-AMENDMENT.md`.
+
 Dynamic validator cluster handling must derive quorum and liveness from the
 planned validator count in the evidence being evaluated. Current six-validator
 Testnet fixtures are compatibility inputs, not permanent protocol topology.
@@ -32,7 +40,7 @@ boundary fails closed.
 
 - `1-9` active validators use one cluster.
 - `10-20` active validators use exactly two balanced clusters. At 10
-  validators this is two `3-of-5` clusters.
+  validators this is two `4-of-5` clusters.
 - `21-27` active validators use exactly three balanced clusters. At 21
   validators this is three `5-of-7` clusters.
 - At 28 validators and above, cluster count is `floor(active_validators / 7)`.
@@ -45,7 +53,7 @@ boundary fails closed.
 - Cluster membership is balanced so cluster sizes differ by at most one.
 
 Quorum is calculated independently for each cluster from its active member
-count. The protocol explicitly requires `3-of-5`, `4-of-6`, and `5-of-7`; it
+count. The strict rule requires `4-of-5`, `5-of-6`, and `5-of-7`; it
 must never reuse a network-wide static threshold for a cluster.
 
 ## Rotation Rules
@@ -66,7 +74,7 @@ must never reuse a network-wide static threshold for a cluster.
 synergy-node validator cluster-assignment preview \
   --input cluster-assignment.json \
   --output cluster-assignment-report.json \
-  --chain-id 1264 \
+  --chain-id 1266 \
   --network-id synergy-testnet-v3
 ```
 

@@ -1,7 +1,10 @@
 # Coordinated Consensus Message Schemas
 
-Status: Phase One schema reference. These messages are not yet enabled by the
-production role lifecycle.
+Status: **historical Phase-One schema reference; not a PoSy v3 wire schema.**
+These coordinated/six-validator messages are retained for audit and
+compatibility tests only. They are not legal P3 authority and must not be used
+to decode, construct, synchronize, or recover fresh `posy/3.0` consensus
+state. See `docs/posy-v3/CONSENSUS_OBJECT_SCHEMAS.md` for P3 semantics.
 
 Only the messages in `runtime/src/p2p/messages.rs` are legal for
 `coordinated_round_robin_v1`. All are accepted only after the existing P2P

@@ -53,7 +53,17 @@ the prior finalized transition; it is not a pending historical snapshot import.
 
 ## Requirement-to-runtime findings
 
-| Requirement | Current evidence | Status | Required closure |
+The table in this section is the original v2.2 audit snapshot. Its statements
+that validator startup lacked an operational typed coordinator are historical
+and are superseded by the current role-runtime status: finalized typed v2.2 is
+wired, and the Genesis-bound initial simplified-v3 driver now supports either
+the deferred core-material path or a finalized-permit protected-material path.
+The applied Genesis still defers ETDAG. Full-profile and launch gates stay
+blocked for the protected-input producer, verified later-epoch transition
+authority, and autonomous distributed qualification. The current v3 evidence
+is recorded in the 2026-08-12 addendum below.
+
+| Requirement | Evidence at original v2.2 audit snapshot | Status | Required closure at that snapshot |
 | --- | --- | --- | --- |
 | Unique Testnet-v3 identity | Chain ID `1266` and runtime network ID `synergy-testnet-v3` appear in current templates. | BLOCKED | Bind both values into every signed consensus object and finalized genesis roots. |
 | Strict distinct-signer and voting-weight quorum | The inherited runtime used inclusive two-thirds and treated every validator's weight as `1.0`. Count quorum now computes `floor(2n/3)+1`, and QC formation/verification additionally requires integer bonded weight satisfying `3 * signed_weight > 2 * total_weight`. Tests prove 5-of-6, 4-of-5, unequal-weight fail-closed behavior, and fail-closed chaos behavior. The weights are still resolved independently from the height-scoped registry path rather than one signed consensus-context root. | BLOCKED | Bind the exact membership and bonded weights into the common height-scoped context used by proposals, votes, QCs, VCs, and TCs; replace the legacy floating-point QC compatibility field with the canonical v2 integer schema. |
@@ -77,14 +87,18 @@ the prior finalized transition; it is not a pending historical snapshot import.
 | Plaintext rejection | Public RPC rejects all legacy plaintext send/simulation/pending-content paths with `ERR_PLAINTEXT_USER_TX_DISABLED`; CLI live submit paths fail closed and `synergy-node tx submit-etdag` accepts only a sealed envelope. The external Wallet still contains legacy submission methods. | BLOCKED | Convert all Wallet/service/extension/mobile/web/desktop paths and prove no network-facing plaintext path remains. |
 | Exact protected execution | Typed consensus now proposes and validates header version 2 only from a verified DCC causal union, deterministic BOC, authenticated public reveal, locally derived Execution Manifest, receipt root, and state root. Insertion/substitution/reordering/manifest-root attacks fail. The inherited engine is disabled, leaving validator startup fail-closed until the typed coordinator is wired. | BLOCKED | Wire the operational proposer/validator coordinator and add full-network replay/state-sync tests. |
 
-The H+3 target-admission `PASS` is backed by
+The historical H+3 target-admission `PASS` was backed at the original audit
+snapshot by
 `runtime/src/etdag.rs` SHA-256
 `337c1fcd7c54ef5e173a84de6146b5e4577d8c7fff404902eaa8e9b334169416`
 and `runtime/src/rpc/rpc_server.rs` SHA-256
 `13ca9b3cc991553fa3e052a750b778b6fe9e4f46ee49280eb8ee976ac2da766d`.
-These are implementation snapshots, not final release hashes.
+These hashes intentionally preserve that dated evidence snapshot; they are not
+hashes of the current working tree and are not final-release hashes. A frozen
+candidate release must publish a new release-manifest hash set rather than
+silently rewriting this historical record.
 
-## Current implementation evidence
+## Historical v2.2 implementation evidence at the audit snapshot
 
 - General stateful SynQ IR v2 and AIVM execution are implemented without
   contract-name handlers. All eight native genesis contracts deploy, execute,
@@ -101,11 +115,13 @@ These are implementation snapshots, not final release hashes.
 - `cargo check --lib`, `cargo check --bin synergy-node --bin synergy-sts`, and
   `cargo fmt --all -- --check` pass.
 
-These are focused implementation results, not full launch qualification. The
-typed operational runtime coordinator, production target-package issuance and propagation,
-final external ingress-key records, Wallet sealing, Security v7, full-suite
-regression, deterministic genesis, reproducible release, chaos/performance
-profiles, and 10,000-block soak are still mandatory blockers.
+These were focused implementation results, not full launch qualification. At
+that snapshot the typed operational runtime coordinator, production
+target-package issuance and propagation, final external ingress-key records,
+Wallet sealing, Security v7, full-suite regression, deterministic genesis,
+reproducible release, chaos/performance profiles, and 10,000-block soak were
+mandatory blockers. Current engine integration and remaining blockers are
+described in the v3 addendum below.
 
 ## Changes completed during this audit
 
@@ -190,3 +206,132 @@ The next required implementation work is:
 4. Complete the Security Specification v7 control audit and remediate every
    network-wide gap.
 5. Only then generate fresh identities and prepare signed genesis inputs.
+
+## 2026-08-12 proposed PoSy v3 simplified profile
+
+This branch adds an epoch-gated `posy/3.0` proposal; it does not change the
+currently finalized v2.2 parameter manifest or activate validator duties. The
+proposal replaces the future healthy-path `VALIDATE -> VC -> FINALITY -> QC`
+ceremony with `PROPOSAL -> VOTE -> QC`, retains strict count and frozen-weight
+quorum verification, and uses a three-certified-block commit rule. Exceptional
+recovery uses only a quorum-certified TC.
+
+The proposed leader authority is one immutable, full-SHA3-512-ranked ring per
+epoch with fixed ten-block leases. Sequential TCs forfeit only the remainder of
+the current lease; local clocks, health observations, live-set inference,
+floating-point stake priority, and fallback loops have no authority. The next
+lease starts from the original frozen schedule.
+
+Implementation evidence produced in this branch:
+
+- The focused simplified-consensus suites exercise real ML-DSA-65 proposal and
+  QC signatures, strict 4-of-5 plus strict frozen-weight quorum, lease
+  inheritance, chained finality, restart, verified state-sync reconstruction,
+  lock rejection, protected-execution-root binding, signer-independent
+  certificate subjects, and conflicting-QC SafetyHalt. Aggregate counts are
+  intentionally omitted from this moving branch audit; the PR verification
+  record must retain the exact command output from the final candidate commit.
+- Proposal envelopes do not authorize ECHO, READY, or VOTE without their exact
+  full material. The branch now includes an immutable content-addressed material
+  store, independent core/protected replay, bounded request-correlated
+  `MaterialRequest`/`MaterialChunk` transfer, peer/session/replay controls, and
+  durable install before reliable delivery. Component and driver tests cover
+  canonical replay, restart, idempotence/conflict, missing-material request,
+  unsolicited/cross-peer/replayed chunks, and exact-root correlation.
+- Finalized commits can be written to an immutable fsynced WAL whose records
+  contain complete QCs and the exact three-QC finality witness while referring
+  to separately immutable proposal material. Startup replay pins the epoch,
+  anchor, and boundary state, then re-verifies every QC and material record and
+  re-executes the chain. Component tests cover idempotent restart replay and
+  reject missing material and anchor substitution. The transition-aware sink
+  also retains the exact previous-epoch tail inputs, commits across the distinct
+  finalized-seed/certified-parent boundary, reopens the combined WAL, and
+  rejects missing prior material.
+- Proof-aware v3-to-v3 state sync is implemented and tested at state-machine
+  scope. The verified durable transition proof carries the exact previous-epoch
+  three-QC tail, distinguishes the certified parent from the finalized seed,
+  and binds the transition subject plus dynamic next set. Transition-aware
+  chunk staging, install, and restart succeed, while a bare bundle without that
+  proof and a substituted transition-tail finality claim are rejected. The
+  transition authorization is now a non-circular schema-v2 subject that omits
+  the block/QC identifiers derived after execution. Role-runtime transition
+  traversal and exact prior replay loading are implemented; production still
+  fails closed until finalized execution supplies an inclusion/receipt proof
+  for that subject.
+- Simplified-consensus P2P ingress now classifies the exact message kind from a
+  bounded prefix and enforces its tighter frame limit before allocating the
+  full payload. Targeted responses require the current authenticated session's
+  validator identity to match the frozen-set target; a socket address is not
+  authority, and address rebinding to another validator is rejected. Focused
+  tests cover the exact per-kind budgets and rebinding rejection, but not an
+  autonomous five-node network rehearsal.
+- The protected-ETDAG material adapter and schedule-neutral coordinator APIs
+  are implemented and tested. They re-verify certified target admission and
+  protected input without importing a proposer schedule, execute the exact
+  candidate, bind its state/receipt/protected roots, independently replay
+  received material, survive durable restart, reject substituted body/context/
+  input/execution/finality, and wait without proposing when input is incomplete.
+  Role runtime now constructs the adapter's authority from the durable
+  finality WAL and bounded certified-material tail, selects it only from a
+  finalized ETDAG permit, and installs authenticated schedule-neutral ingress
+  transactionally with the execution snapshot and simplified-consensus ingress.
+  Cleanup prevents a failed startup or worker from leaving a stale ingress.
+  Protected startup now also constructs the dynamic schedule-neutral H+3
+  producer, requires the exact canonical externally provisioned public ML-KEM
+  registry, journals its ML-DSA vote before signing, broadcasts vote/package
+  traffic only to the frozen set, and stops the auxiliary worker with the main
+  consensus lifecycle. Missing/substituted registries fail closed, while a
+  next-epoch target waits for verified transition authority.
+- The transition-aware driver builds the first cross-epoch finalization
+  transaction only from its receiver-owned verified transition. A focused
+  restart test proves the first current-epoch QC finalizes the prior parent and
+  that a post-commit local failure retries the same durable transaction before
+  advancing consensus state; omitting the transition capability is rejected.
+- The validator role runtime now constructs and spawns the authenticated
+  simplified driver for the Genesis-bound initial epoch in either material
+  mode. It replays the v2 boundary execution state, requires the real frozen-set
+  ML-DSA signing authority, opens durable safety, material, and finality stores,
+  publishes execution snapshots after verified finality, and attaches
+  authenticated P2P ingress/egress. A finalized ETDAG permit selects only the
+  protected adapter and schedule-neutral ingress; no permit selects only the
+  core adapter. The applied Genesis currently takes the deferred core path.
+  Later-epoch loading walks adjacent durable transition proofs and prior replay
+  inputs, then stops at the intentionally fail-closed finalized-execution
+  transition-authority verifier.
+- The autonomous five-OS-process driver harness passes. Every child owns the
+  production `SimplifiedPosyDriver`, real timers, an ephemeral ML-DSA-65 key,
+  and distinct durable signer-journal, safety, proposal-material, and finality
+  stores. The parent is only a bounded authenticated router/fault injector and
+  does not create proposals, votes, QCs, TCs, or state-sync evidence. The run
+  proves four-of-five progress, three-of-five fail-closed at height 1004,
+  three-chain finality at 1001, real-timer takeover, proposal-material recovery,
+  future-QC state-sync healing to height 1003, and exact durable restart roots.
+  Ephemeral private-key files are removed at exit.
+- The passing harness is still not five full `synergy-node` deployments using
+  the production role-runtime and socket stack. It does not qualify live
+  ETDAG/BOC/reveal execution, production identity/deployment bundles, real
+  socket churn/backpressure, five node databases, Byzantine/model coverage, or
+  performance/soak/release readiness.
+- The schema-4 manifest proposal is canonical and deliberately refuses
+  activation. Its SHA3-512 parameter root is
+  `2c8be6837fa49c160887cc1fcf2b741eadd72172bdeed27c9645c08ebe88be5fb562ca82e89af7cbe821157aba6d0e20a7727f0ff9e191a14dff5744fd4de101`.
+  This is the protocol's SHA3-512 `ConsensusParameterRoot`; a conventional
+  SHA-512 file digest is a different value.
+- A standalone v3 parameter-control workbook proposal records five-validator
+  count/weight liveness and keeps the activation result `BLOCKED`. Its five
+  rows are explicitly first-epoch hardware inputs; the protocol derives
+  membership and quorum from every finalized epoch set and has no five-validator
+  ceiling.
+
+The specifically named `posy_v3_five_process_harness_passed` launch-readiness
+gate is now `true` based on the autonomous production-driver process run. This
+does not imply full qualification or activation: those gates remain `false`.
+Specification approval, a finalized canonical manifest, activation
+coordinates, final initial public topology and weights, five full
+role-runtime/socket nodes, live protected ETDAG execution and public registry
+provisioning, and the production finalized-execution transition-authority proof
+needed to onboard later validators remain open. Signed release artifacts, full
+regression/chaos/performance/soak qualification, and live activation also remain
+false. The inherited production engine remains disabled. The implemented
+Genesis-bound deferred-ETDAG path cannot create a launch path around existing
+Testnet-v3 blockers.

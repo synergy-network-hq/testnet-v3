@@ -13,6 +13,7 @@ bincode = { workspace = true }
 hex = { workspace = true }
 sha3 = { workspace = true }
 lazy_static = { workspace = true }
+zeroize = { workspace = true }
 sha2 = "0.10"
 
 # Additional dependencies
@@ -164,6 +165,14 @@ name = "testnet-v3-genesis-release-approval"
 path = "bin/testnet-v3-genesis-release-approval.rs"
 
 [[bin]]
+name = "testnet-v3-etdag-governed-artifacts"
+path = "bin/testnet-v3-etdag-governed-artifacts.rs"
+
+[[bin]]
+name = "prepare-fresh-posy-v3-genesis"
+path = "bin/prepare-fresh-posy-v3-genesis.rs"
+
+[[bin]]
 name = "testnet-v3-etdag-admission"
 path = "bin/testnet-v3-etdag-admission.rs"
 
@@ -179,11 +188,22 @@ path = "bin/bind-testnet-v3-consensus-genesis.rs"
 name = "audit-testnet-v3-address-migration"
 path = "bin/audit-testnet-v3-address-migration.rs"
 
+[[bin]]
+name = "posy-simplified-five-node-harness"
+path = "bin/posy-simplified-five-node-harness.rs"
+
+[[bin]]
+name = "posy-simplified-five-driver-harness"
+path = "bin/posy-simplified-five-driver-harness.rs"
+
 [features]
 # Opt-in: the genesis ceremony links the Synergy Address Engine for its approved
 # custody decryptor. Kept behind a feature so the default library build and the
 # release five-run gate are unaffected.
 ceremony = []
+# Development-only escape hatch for exercising the ceremony against an
+# uninstalled Address Engine. Production ceremony builds must not enable this.
+ceremony-dev-engine-override = ["ceremony"]
 
 [[bin]]
 name = "synergy-genesis-ceremony"

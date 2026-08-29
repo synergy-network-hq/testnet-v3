@@ -186,6 +186,7 @@ pub fn derive_synergy_cluster_address(
 ) -> String {
     let seed = format!("{network_id}:{genesis_hash}:{cluster_index}:{created_epoch}");
     generate_validator_cluster_address(&seed)
+        .expect("non-empty canonical cluster seed must derive a cluster address")
 }
 
 pub fn fault_tolerance_f(cluster_size: usize) -> usize {

@@ -1,0 +1,434 @@
+{
+  "allocation_count": 36,
+  "allocation_plan_sha256": "3ae0f7a26fdd24837a83ab9e8081fb4b8f70f6eb8259af287f622839e96aeb39",
+  "amount_authority": "runtime/testnet-allocation-manifest.json",
+  "approved_total_supply_nwei": "12000000000000000000",
+  "artifact_type": "testnet-v3-fresh-resolved-allocation-inputs",
+  "chain_id": 1266,
+  "identity_amount_policy": "Identity manifests establish public-key/address custody correspondence only; the approved allocation plan exclusively controls Genesis amounts.",
+  "network_id": "testnet",
+  "protocol_version": "posy/3.0",
+  "public_only": true,
+  "release_id": "testnet-v3",
+  "resolved_allocations": [
+    {
+      "account_id": "VNS-A01",
+      "address": "synl1g8hgegyaezgqwq755zjrglwr7wrvz3jj6dvr",
+      "address_source": "canonical-testnet-v3-custody-public-identity",
+      "amount_nwei": "2638950000000000000",
+      "identity_provenance": {
+        "address_correspondence_verified": true,
+        "bundle_checksum_verified": true,
+        "embedded_amount_matches_approved_plan": true,
+        "embedded_genesis_amount_nwei": "2638950000000000000",
+        "encrypted_bundle_sha256": "fb9fc47da13f76c26675c182dc84e0288b7b5a9edb0561fe04616599296627bb",
+        "identity_directory": "VNS-A01_tnv3-val-security-reserve",
+        "manifest_sha256": "0aa7a1700961de8543f3c347e37ce67572c67ce545c4256e8d31cb6325ea9e4a",
+        "public_identity_sha256": "3b5a725b08bb22c0b61c0b2d5cfd9283fe080f723622366e492897c4a9a8431f"
+      }
+    },
+    {
+      "account_id": "VNS-A02",
+      "address": "synv11sepsn8twhm2acy3slpyfuwyvmmer9pfxsxv",
+      "address_source": "fresh-validator-identity-ceremony",
+      "amount_nwei": "50000000000000",
+      "initially_active": false,
+      "validator_id": "validator-01"
+    },
+    {
+      "account_id": "VNS-A03",
+      "address": "synv115lseq6ty4j2f3g9nzv04c3zq3xa7j3989uj",
+      "address_source": "fresh-validator-identity-ceremony",
+      "amount_nwei": "50000000000000",
+      "initially_active": true,
+      "validator_id": "validator-02"
+    },
+    {
+      "account_id": "VNS-A04",
+      "address": "synv11qvvp796w3kp2m0c5h8zer3grxw0sygvfk64",
+      "address_source": "fresh-validator-identity-ceremony",
+      "amount_nwei": "50000000000000",
+      "initially_active": true,
+      "validator_id": "validator-03"
+    },
+    {
+      "account_id": "VNS-A05",
+      "address": "synv11jtkkaj3rsgnup2grckkpejc86ru5u488nv7",
+      "address_source": "fresh-validator-identity-ceremony",
+      "amount_nwei": "50000000000000",
+      "initially_active": true,
+      "validator_id": "validator-04"
+    },
+    {
+      "account_id": "VNS-A06",
+      "address": "synv11cxug3akr7w7x2ms8wghhlxnqkdue0e980az",
+      "address_source": "fresh-validator-identity-ceremony",
+      "amount_nwei": "50000000000000",
+      "initially_active": true,
+      "validator_id": "validator-05"
+    },
+    {
+      "account_id": "VNS-A07",
+      "address": "synv1185wz3n8dj45vlfe6aadktg7j4e65yg5hqa7",
+      "address_source": "fresh-validator-identity-ceremony",
+      "amount_nwei": "50000000000000",
+      "initially_active": true,
+      "validator_id": "validator-06"
+    },
+    {
+      "account_id": "VNS-A08",
+      "address": "synv11z6e5ylekhd6r5gcutwxd7390xje5dttgpa9",
+      "address_source": "fresh-validator-identity-ceremony",
+      "amount_nwei": "50000000000000",
+      "initially_active": false,
+      "validator_id": "validator-07"
+    },
+    {
+      "account_id": "VNS-A09",
+      "address": "synv1100svsj4ahs9g3e9fr7ump7kgf06xa609psx",
+      "address_source": "fresh-validator-identity-ceremony",
+      "amount_nwei": "50000000000000",
+      "initially_active": false,
+      "validator_id": "validator-08"
+    },
+    {
+      "account_id": "VNS-A10",
+      "address": "synv11pcr7yqyw8kxqm56g9hvca4p32v2ppkhu0k9",
+      "address_source": "fresh-validator-identity-ceremony",
+      "amount_nwei": "50000000000000",
+      "initially_active": false,
+      "validator_id": "validator-09"
+    },
+    {
+      "account_id": "VNS-A11",
+      "address": "synv110uqyxmyqp84kjc9hjqvdrn0cu0xq3063q3m",
+      "address_source": "fresh-validator-identity-ceremony",
+      "amount_nwei": "50000000000000",
+      "initially_active": false,
+      "validator_id": "validator-10"
+    },
+    {
+      "account_id": "VNS-A12",
+      "address": "synv11f5z0agnaqjhfmsx5hw4l8crygw4hjpr9xjx",
+      "address_source": "fresh-validator-identity-ceremony",
+      "amount_nwei": "50000000000000",
+      "initially_active": false,
+      "validator_id": "validator-11"
+    },
+    {
+      "account_id": "VNS-A13",
+      "address": "synv11g8jn0amf3qxv3057j32kyjh4e53qfq99mn5",
+      "address_source": "fresh-validator-identity-ceremony",
+      "amount_nwei": "50000000000000",
+      "initially_active": false,
+      "validator_id": "validator-12"
+    },
+    {
+      "account_id": "VNS-A14",
+      "address": "synv116gyk9je3zny00k2rx8upnme4dfkwe83qn64",
+      "address_source": "fresh-validator-identity-ceremony",
+      "amount_nwei": "50000000000000",
+      "initially_active": false,
+      "validator_id": "validator-13"
+    },
+    {
+      "account_id": "VNS-A15",
+      "address": "synv11q3kmu3utqy86tkqlh5r8pfryzmzgu67q97y",
+      "address_source": "fresh-validator-identity-ceremony",
+      "amount_nwei": "50000000000000",
+      "initially_active": false,
+      "validator_id": "validator-14"
+    },
+    {
+      "account_id": "VNS-A16",
+      "address": "synv11vr379ufqng9p5jla2c5nsgxe3p6mwdh7kl2",
+      "address_source": "fresh-validator-identity-ceremony",
+      "amount_nwei": "50000000000000",
+      "initially_active": false,
+      "validator_id": "validator-15"
+    },
+    {
+      "account_id": "VNS-A17",
+      "address": "synv11f9mr2uuv9x4pe7lf56uek9sh7tvn3zxgv92",
+      "address_source": "fresh-validator-identity-ceremony",
+      "amount_nwei": "50000000000000",
+      "initially_active": false,
+      "validator_id": "validator-16"
+    },
+    {
+      "account_id": "VNS-A18",
+      "address": "synv119xzs03tsh8hvkyfwc0ce49d4pac4re4ajvs",
+      "address_source": "fresh-validator-identity-ceremony",
+      "amount_nwei": "50000000000000",
+      "initially_active": false,
+      "validator_id": "validator-17"
+    },
+    {
+      "account_id": "VNS-A19",
+      "address": "synv114mdy5ggme0h0dpzunhz0cdkf7chya7z0wv2",
+      "address_source": "fresh-validator-identity-ceremony",
+      "amount_nwei": "50000000000000",
+      "initially_active": false,
+      "validator_id": "validator-18"
+    },
+    {
+      "account_id": "VNS-A20",
+      "address": "synv11uj6swdy42nzqyv5czp4n48acj27uta0336m",
+      "address_source": "fresh-validator-identity-ceremony",
+      "amount_nwei": "50000000000000",
+      "initially_active": false,
+      "validator_id": "validator-19"
+    },
+    {
+      "account_id": "VNS-A21",
+      "address": "synv11uspwfavra0xsqnu0ykmt3aa5zsezj4982vv",
+      "address_source": "fresh-validator-identity-ceremony",
+      "amount_nwei": "50000000000000",
+      "initially_active": false,
+      "validator_id": "validator-20"
+    },
+    {
+      "account_id": "VNS-A22",
+      "address": "synv118hzmqwswus4784m62npdrwwlqjgvdcyw4n2",
+      "address_source": "fresh-validator-identity-ceremony",
+      "amount_nwei": "50000000000000",
+      "initially_active": false,
+      "validator_id": "validator-21"
+    },
+    {
+      "account_id": "SAL-A01",
+      "address": "synq1q223wea4q5x74y7xvn24szlfj3da9k6z0ww4",
+      "address_source": "canonical-testnet-v3-custody-public-identity",
+      "amount_nwei": "2240000000000000000",
+      "identity_provenance": {
+        "address_correspondence_verified": true,
+        "bundle_checksum_verified": true,
+        "embedded_amount_matches_approved_plan": false,
+        "embedded_amount_status": "SUPERSEDED_METADATA_ONLY_APPROVED_ALLOCATION_PLAN_IS_AUTHORITATIVE",
+        "embedded_genesis_amount_nwei": "2226000000000000000",
+        "encrypted_bundle_sha256": "917e83688c717f5a44de65879d62c13be8fb90b5e4d7f028966dba9777e61c61",
+        "identity_directory": "SAL-A01_tnv3-sale-reserve",
+        "manifest_sha256": "1c54903644f70754454dfecd3e983d22d3224c67f782f969dbdc72158867cdb6",
+        "public_identity_sha256": "5f997be154d56e8dc54eafe435ba4a629fea4f305f5319f6776c770fd81e573f"
+      }
+    },
+    {
+      "account_id": "ECO-A01",
+      "address": "synm16uf39wtwzlqkyfteme5uqpythp9lx635mfcm",
+      "address_source": "canonical-testnet-v3-custody-public-identity",
+      "amount_nwei": "1559000000000000000",
+      "identity_provenance": {
+        "address_correspondence_verified": true,
+        "bundle_checksum_verified": true,
+        "embedded_amount_matches_approved_plan": true,
+        "embedded_genesis_amount_nwei": "1559000000000000000",
+        "encrypted_bundle_sha256": "168611f28f78ff300ca21eb6125de9a9414da249a3536132797ff55d728bd229",
+        "identity_directory": "ECO-A01_tnv3-eco-reserve",
+        "manifest_sha256": "80da1f719cab59aeee54cd1eade253976117467f7ff382b20440eeec63c9c6fc",
+        "public_identity_sha256": "a117a88395053163a5f33ac24279f2db8d627345480383a8ca0c9c5d1895ed47"
+      }
+    },
+    {
+      "account_id": "ECO-A02",
+      "address": "syns10a8prj2pvm3lwtd2zf8ke54zhq8ux3804kl2",
+      "address_source": "canonical-testnet-v3-custody-public-identity",
+      "amount_nwei": "1000000000000000",
+      "identity_provenance": {
+        "address_correspondence_verified": true,
+        "bundle_checksum_verified": true,
+        "embedded_amount_matches_approved_plan": true,
+        "embedded_genesis_amount_nwei": "1000000000000000",
+        "encrypted_bundle_sha256": "9803bbc31eae0561c65cee25330daf20731d585ba66a25e3c618a06c78249c48",
+        "identity_directory": "ECO-A02_tnv3-eco-faucet",
+        "manifest_sha256": "5042067ecbf9cfed02e67c2e444bd6aa1f6616c2941357042b962ce19c8a20eb",
+        "public_identity_sha256": "52d4d08faa6731989d7a29200911604e139f6f57d521f9557fb0628e06e67851"
+      }
+    },
+    {
+      "account_id": "LIQ-A01",
+      "address": "synm1k8p8ket4tp4hyvpa0whv9cfhetd0hwzgp07v",
+      "address_source": "canonical-testnet-v3-custody-public-identity",
+      "amount_nwei": "1440000000000000000",
+      "identity_provenance": {
+        "address_correspondence_verified": true,
+        "bundle_checksum_verified": true,
+        "embedded_amount_matches_approved_plan": true,
+        "embedded_genesis_amount_nwei": "1440000000000000000",
+        "encrypted_bundle_sha256": "bf1a16f68ec0e06469fc7c75e5699557efafac38deda028738081ec4b134724b",
+        "identity_directory": "LIQ-A01_tnv3-liq-reserve",
+        "manifest_sha256": "ff068ce434e173357e6d8f70816bef625166b368dfd116fbba6767cda1a2c5da",
+        "public_identity_sha256": "779a68284adb3832c05e26de4e6b5a10e437ce1d69c7252fff52e66af2947594"
+      }
+    },
+    {
+      "account_id": "MKT-A01",
+      "address": "synm16gqdhdfq5au7zhxrpedh8k7y5ks7ajl34hj6",
+      "address_source": "canonical-testnet-v3-custody-public-identity",
+      "amount_nwei": "1260000000000000000",
+      "identity_provenance": {
+        "address_correspondence_verified": true,
+        "bundle_checksum_verified": true,
+        "embedded_amount_matches_approved_plan": true,
+        "embedded_genesis_amount_nwei": "1260000000000000000",
+        "encrypted_bundle_sha256": "9d756564a3093e2946c3612612418c40b1370dff154ff071068775c1a8325325",
+        "identity_directory": "MKT-A01_tnv3-mkt-reserve",
+        "manifest_sha256": "fce4c253e8c596d6368b4313e39961ebc4ad54d634ae19fff20199b3de9255f6",
+        "public_identity_sha256": "57cecc4e3bbc1d5006055806f64bedb4469958b359095fd93941d4d427bbe09b"
+      }
+    },
+    {
+      "account_id": "PAR-A01",
+      "address": "synm1yps0r6977nxdsuqmvmep9h045k8yg5mrmlur",
+      "address_source": "canonical-testnet-v3-custody-public-identity",
+      "amount_nwei": "894000000000000000",
+      "identity_provenance": {
+        "address_correspondence_verified": true,
+        "bundle_checksum_verified": true,
+        "embedded_amount_matches_approved_plan": true,
+        "embedded_genesis_amount_nwei": "894000000000000000",
+        "encrypted_bundle_sha256": "1a047ad88b734f4e5a49dd898739b0445a52a231ef8470bef5b7f4265210f7c9",
+        "identity_directory": "PAR-A01_tnv3-partner-reserve",
+        "manifest_sha256": "e38dc5257e3b808cd5cae339e535f2abe8eb55ef9de847d36b272921ba8c0d76",
+        "public_identity_sha256": "3067f82be9b688d9f018df64729a2ffd118411936878e1d9dd53aa52555ee2dd"
+      }
+    },
+    {
+      "account_id": "DAO-A01",
+      "address": "synu18tmdavp9yskftz4lldshrxvzwyg0tpnu23n9",
+      "address_source": "canonical-testnet-v3-custody-public-identity",
+      "amount_nwei": "720000000000000000",
+      "identity_provenance": {
+        "address_correspondence_verified": true,
+        "bundle_checksum_verified": true,
+        "embedded_amount_matches_approved_plan": true,
+        "embedded_genesis_amount_nwei": "720000000000000000",
+        "encrypted_bundle_sha256": "d04c541cfd53520979449d4b9814fb7422620721fba0f4f1603e772f21c23f44",
+        "identity_directory": "DAO-A01_tnv3-dao-reserve",
+        "manifest_sha256": "46c93eb9985f50fdb0d4d2e25d4380565a62215b4d181f6d0b7d94d18141188c",
+        "public_identity_sha256": "f03cd837f979a27baece1db944e33455408e48da46294eeb0134718556a2679f"
+      }
+    },
+    {
+      "account_id": "TRE-A01",
+      "address": "synu134gwnzuwzrg698rpnk85qdc7r6u2fll34nmp",
+      "address_source": "canonical-testnet-v3-custody-public-identity",
+      "amount_nwei": "720000000000000000",
+      "identity_provenance": {
+        "address_correspondence_verified": true,
+        "bundle_checksum_verified": true,
+        "embedded_amount_matches_approved_plan": true,
+        "embedded_genesis_amount_nwei": "720000000000000000",
+        "encrypted_bundle_sha256": "f5c4615154ccac0e0dab5dca75d314685bb1bff5b8e1a7dff6e20a8d4b11136e",
+        "identity_directory": "TRE-A01_tnv3-treasury-reserve",
+        "manifest_sha256": "705242a94e2db998d4c6f5235eb85a75d833ebb7e727d6a95f52625616dd1412",
+        "public_identity_sha256": "74498081c83f1ee48f47f9bf498cecadf0fb97ba56afe1e6fd93264e1c1a42f5"
+      }
+    },
+    {
+      "account_id": "TEM-A01",
+      "address": "synq1gumqs3s0yecpdp9ugsyaqw7drkm562yk3rtl",
+      "address_role": "administrative-and-custody-identity",
+      "address_source": "canonical-testnet-v3-custody-public-identity",
+      "amount_nwei": "340000000000000000",
+      "genesis_funding_target": "DEPLOYED_TEAM_VESTING_CONTRACT",
+      "identity_provenance": {
+        "address_correspondence_verified": true,
+        "bundle_checksum_verified": true,
+        "embedded_amount_matches_approved_plan": true,
+        "embedded_genesis_amount_nwei": "340000000000000000",
+        "encrypted_bundle_sha256": "28e4bbd9ff23127f6ed4eb3d41040aa13e9e69e2fa9035d254c30e8aa880f8e3",
+        "identity_directory": "TEM-A01_tnv3-team-vesting",
+        "manifest_sha256": "14371f149ece1a5545eadcaa8c84b2da94d3125787959b20416698b40ba1c329",
+        "public_identity_sha256": "b8b587770eef15f171cbf0ee1cdd545ecf199e34b8cbd85fd4d020802ecf3db9"
+      }
+    },
+    {
+      "account_id": "TEM-A02",
+      "address": "synm1qz58et37qrxza8qv58lw93cf3nc4y4g5mlh8",
+      "address_source": "canonical-testnet-v3-custody-public-identity",
+      "amount_nwei": "186000000000000000",
+      "identity_provenance": {
+        "address_correspondence_verified": true,
+        "bundle_checksum_verified": true,
+        "embedded_amount_matches_approved_plan": false,
+        "embedded_amount_status": "SUPERSEDED_METADATA_ONLY_APPROVED_ALLOCATION_PLAN_IS_AUTHORITATIVE",
+        "embedded_genesis_amount_nwei": "200000000000000000",
+        "encrypted_bundle_sha256": "800a7c8d8781fe06e8f8cb64d92dd5628d9821e1632b2759ca41690fa77b4fb0",
+        "identity_directory": "TEM-A02_tnv3-team-unassigned-reserve",
+        "manifest_sha256": "02c161a95ca8852892536b7b9bbd1e3a2f00bb47e39928849ae78806cd91f07b",
+        "public_identity_sha256": "e301efe7658c3f87c0f86b8ea94a31d77d2610d694f98e041b0bd887bcbc0477"
+      }
+    },
+    {
+      "account_id": "SYS-01",
+      "address": "synf1pnchsrnyral0u9r65xusjrexuctfh465h06l",
+      "address_source": "canonical-testnet-v3-custody-public-identity",
+      "amount_nwei": "0",
+      "identity_provenance": {
+        "address_correspondence_verified": true,
+        "bundle_checksum_verified": true,
+        "embedded_amount_matches_approved_plan": true,
+        "embedded_genesis_amount_nwei": "0",
+        "encrypted_bundle_sha256": "c2786027b26b7813b64a5a79e0aa6ee97c09e151074df376e2173f74f937bc69",
+        "identity_directory": "SYS-01_tnv3-system-fee-collector",
+        "manifest_sha256": "d542e22ecc0ea1f0cc3c74d6bbf690606f2fdd23032ab2d10cf6c21ead7e252c",
+        "public_identity_sha256": "ec6dedf868367f340e3a51bae9f0d6b3184424524a2693507c588a51420b0d1a"
+      }
+    },
+    {
+      "account_id": "SYS-02",
+      "address": "synq1fkv2x4arnmxldk35m4e2furg9lq7xp77agdc",
+      "address_source": "canonical-testnet-v3-custody-public-identity",
+      "amount_nwei": "0",
+      "identity_provenance": {
+        "address_correspondence_verified": true,
+        "bundle_checksum_verified": true,
+        "embedded_amount_matches_approved_plan": true,
+        "embedded_genesis_amount_nwei": "0",
+        "encrypted_bundle_sha256": "968b6c2706ea4cf606fa06de311042b981d3f1cdf91efbe466a8488d6bfc04d1",
+        "identity_directory": "SYS-02_tnv3-system-treasury-recovery",
+        "manifest_sha256": "f49caee7e80c8e389a5de0ede30278ab71a3ebeb984d416dd5a916a52955e3b3",
+        "public_identity_sha256": "3f87c1e15d2f3f965a815f2db8eb93175acfe66ec7b166e6aa8230aea66ec58b"
+      }
+    },
+    {
+      "account_id": "SYS-03",
+      "address": "synq188dfee3r9qu7hyd2kvjp4025wg0s8mmrltfl",
+      "address_source": "canonical-testnet-v3-custody-public-identity",
+      "amount_nwei": "0",
+      "identity_provenance": {
+        "address_correspondence_verified": true,
+        "bundle_checksum_verified": true,
+        "embedded_amount_matches_approved_plan": true,
+        "embedded_genesis_amount_nwei": "0",
+        "encrypted_bundle_sha256": "208d0b8c5abc9b458e9ac2887dd385d0b87d791b526a72ddd54941554c04e447",
+        "identity_directory": "SYS-03_tnv3-system-slashing-settlement",
+        "manifest_sha256": "0134625b5606b8178871be849701aa5fe46f6b3e7f11e9e98ba8ca4fbe251a0a",
+        "public_identity_sha256": "8ee0d31b4e2ea553a74708e970d2be853b941d6f96c166972763f1c1a363a3ea"
+      }
+    },
+    {
+      "account_id": "SYS-04",
+      "address": "syn00000000000000000000000000000000000000",
+      "address_source": "canonical-testnet-v3-custody-public-identity",
+      "amount_nwei": "0",
+      "identity_provenance": {
+        "address_correspondence_verified": true,
+        "bundle_checksum_verified": true,
+        "embedded_amount_matches_approved_plan": true,
+        "embedded_genesis_amount_nwei": "0",
+        "encrypted_bundle_sha256": null,
+        "identity_directory": "SYS-04_tnv3-system-burn",
+        "manifest_sha256": "e2c349dae50aa12d73c909e889e81800e5f2fc85e63253caa25e16a8f264e69a",
+        "public_identity_sha256": "6020e8a8db312217680443e595092dcf8b5a1d148c8e2d2f9dd76e4c943b2d72"
+      }
+    }
+  ],
+  "schema_version": 1,
+  "status": "COMPLETE",
+  "superseded_identity_manifest_amount_metadata": [
+    "SAL-A01",
+    "TEM-A02"
+  ],
+  "validator_source_inputs_sha256": "fb4a1d273a65817b10ffff8d8239bc6db53492879f84b6f6d1ac1453c479a9e4"
+}

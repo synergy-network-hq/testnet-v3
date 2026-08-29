@@ -1,75 +1,30 @@
-# Synergy Testnet-v3
+# Synergy Testnet-v3 identity custody
 
-Dedicated, fail-closed preparation workspace for Synergy Testnet-v3.
+This directory contains the public identity registry and the canonical encrypted
+custody bundles used to prepare the independent PoSy Testnet-v3 Genesis.
 
-## Frozen network identity
+## Canonical network identity
 
+- Chain ID: `1266`
+- Network ID: `testnet`
 - Release ID: `testnet-v3`
-- Runtime network ID: `synergy-testnet-v3`
-- Chain ID: `1264`
-- Numeric network ID: `1264`
+- Protocol version: `posy/3.0`
 - Token: `SNRG`
 
-The chain and numeric network IDs remain `1264`. The runtime network ID changes
-to prevent Testnet-v3 nodes, transactions, snapshots, and recovery artifacts
-from being accepted by the Testnet-v2 runtime.
+No prior-chain identity, state, snapshot, or Genesis data is authoritative for
+this launch.
 
-## Layout
+## Validator identities
 
-- `runtime/` — source and operational files derived from `../01-Testnet/synergy-testnet`
-- `validator-workspace/` — secret-free validator filesystem template
-- `observability/` — monitoring definitions and validation tools
-- `genesis-contracts/` — native `.synq` source, compiled SynQ bytecode, ABI,
-  manifest, and deployment inputs for the eight genesis contracts
-- `launch/` — launch manifest, functional component parity evidence, checklist, and retired v2 reference files
-- `artifacts/` — destination for signed Testnet-v3 binaries, checksums, and generated installers
-- `scripts/validate-testnet-v3.py` — structure and full launch-readiness gate
+The canonical validator IDs are exactly `validator-01` through `validator-21`.
+All 21 identities and their Genesis stake allocations are prepared before
+launch. The initial active validator set is `validator-02` through
+`validator-06`. `validator-01` and `validator-07` through `validator-21` remain
+inactive until admitted by a governed validator-set transition.
 
-## Current status
+Encrypted bundles are custody material and are not committed. Public records may
+be committed only after they have been regenerated from the fresh bundles and
+validated against the canonical roster.
 
-The workspace contains the Testnet-v2 protocol feature set for Testnet-v3
-validation. Launch-specific genesis values, validator identities, system-wallet
-bindings, release binaries, and bootstrap bundles are still separate prelaunch
-inputs. Testnet-v2 identity material retained under
-`launch/reference/testnet-v2/` is reference-only and must not be reused.
-
-Inherited Testnet-v2 bindings have not yet all been removed from runtime
-configuration, manifests, templates, or the node-control-panel copy. They are
-not approved Testnet-v3 identities and must be replaced with newly generated
-values before launch.
-
-Run the safe structural check:
-
-```bash
-python3 scripts/validate-testnet-v3.py --structure
-```
-
-Run the full launch gate:
-
-```bash
-python3 scripts/validate-testnet-v3.py
-```
-
-The full gate must continue to fail until the approved Testnet-v3 genesis
-configuration, new validator and node identities, signed release binaries,
-regenerated bootstrap bundles, and launch approvals are present.
-
-Check component packaging and the operational blockers independently of launch
-identity:
-
-```bash
-python3 scripts/check-component-parity.py
-```
-
-The packaging portion currently passes. The command exits nonzero because
-general stateful SynQ execution and end-to-end deployment of the eight genesis
-contracts remain blocked in the inherited AIVM.
-
-## Source repository
-
-This directory is intended to be the checkout for:
-
-`https://github.com/synergy-network-hq/testnet-v3.git`
-
-Do not copy private keys, decrypted key files, passwords, `.env` files, live
-chain state, or machine credentials into this repository.
+Never place decrypted keys, passphrases, passwords, environment files, live chain
+state, or machine credentials in this repository.

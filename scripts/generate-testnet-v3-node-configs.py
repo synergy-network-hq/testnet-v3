@@ -1,17 +1,9 @@
 #!/usr/bin/env python3
-"""Generate Testnet-v3 node configs from finalized, public launch records.
+"""Retired coordinated-round-robin Testnet-v3 node-config generator.
 
-This tool intentionally contains no private key, passphrase, or live-node logic.
-It fails closed unless the supplied Genesis is deployment-bound, its exact
-ML-DSA-87 governance approval has been verified by the runtime verifier, and a
-matching Phase-7/8 apply-integrity record proves that the candidate was applied.
-The generated files are deterministic and are bound to the exact Genesis,
-topology, VPN registry, consensus manifest root, approval, and apply record.
-
-The coordinator-signed validator transport registry is deliberately not produced
-here.  Runtime production code will not use static validator VPN transports as a
-fallback, so publication of that signed registry remains an independent launch
-gate.
+This source is retained only for review of the prior deployment flow. It is
+fail-closed because it models an inactive validator-01 coordinator instead of
+the fresh simplified-PoSy v3 Genesis set, validator-02 through validator-06.
 """
 
 from __future__ import annotations
@@ -30,18 +22,22 @@ from pathlib import Path
 from typing import Any
 
 
-GENERATOR_VERSION = "testnet-v3-node-configs/v7-coordinated-round-robin-p1"
+GENERATOR_VERSION = "testnet-v3-node-configs/v7-coordinated-round-robin-p1-retired"
 CHAIN_ID = 1266
 NETWORK_ID = "synergy-testnet-v3"
 VALIDATOR_P2P_PORT = 5622
 COORDINATED_CONSENSUS_MODE = "coordinated_round_robin_v1"
-COORDINATED_COORDINATOR_ID = "validator-1"
+COORDINATED_COORDINATOR_ID = "validator-01"
 COORDINATED_PRODUCER_IDS = (
-    "validator-2",
-    "validator-3",
-    "validator-4",
-    "validator-5",
-    "validator-6",
+    "validator-02",
+    "validator-03",
+    "validator-04",
+    "validator-05",
+    "validator-06",
+)
+RETIRED_REASON = (
+    "retired coordinated-round-robin generator cannot produce fresh PoSy v3 configs; "
+    "use a finalized simplified-PoSy v3 generator bound to validator-02 through validator-06"
 )
 RELEASE_INTEGRITY_STATUS = "PHASE_7_8_APPLIED_PENDING_RELEASE_GATES"
 RELEASE_APPROVAL_RESULT = "RELEASE_APPROVAL_VERIFIED"
@@ -1712,6 +1708,7 @@ def build_outputs(
     registry_path: Path,
     release_binding: dict[str, str],
 ) -> tuple[dict[Path, str], dict[str, Any], dict[Path, bytes]]:
+    fail(RETIRED_REASON)
     genesis = read_json_object(genesis_path, "Genesis")
     registry = read_json_object(registry_path, "VPN registry")
     with topology_path.open("rb") as handle:
@@ -2157,6 +2154,7 @@ def main() -> int:
     mode.add_argument("--self-test", action="store_true", help="exercise deterministic rendering without publishing")
     args = parser.parse_args()
     try:
+        fail(RETIRED_REASON)
         for path in (args.genesis, args.topology, args.vpn_public_registry):
             if not path.is_file():
                 fail(f"Required input does not exist: {path}")

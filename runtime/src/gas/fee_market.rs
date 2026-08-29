@@ -97,6 +97,7 @@ impl std::error::Error for FeeMarketError {}
 /// explicit Testnet v3 economic-configuration decision before this is
 /// treated as permanent policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FeeMarketParams {
     /// Master switch. When `false`, canonical blocks are validated under the
     /// pre-fee-market (legacy) rules: no protocol base fee is enforced and
@@ -251,7 +252,9 @@ pub fn effective_pq_gas_price(
     (base_fee_per_gas_nwei as u128)
         .checked_mul(pq_gas_multiplier as u128)
         .and_then(|value| u64::try_from(value).ok())
-        .ok_or(FeeMarketError::Overflow("base_fee_per_gas * pq_gas_multiplier"))
+        .ok_or(FeeMarketError::Overflow(
+            "base_fee_per_gas * pq_gas_multiplier",
+        ))
 }
 
 /// Utilization in basis points (`0..=10_000`, saturating above 100%),
@@ -261,8 +264,7 @@ pub fn utilization_bps(gas_used: u64, gas_limit: u64) -> u64 {
     if gas_limit == 0 {
         return 0;
     }
-    let bps = (gas_used as u128)
-        .saturating_mul(super::constants::BPS_DENOMINATOR as u128)
+    let bps = (gas_used as u128).saturating_mul(super::constants::BPS_DENOMINATOR as u128)
         / (gas_limit as u128);
     u64::try_from(bps).unwrap_or(u64::MAX).min(u64::MAX)
 }
@@ -278,7 +280,10 @@ pub struct AppliedFeeMarket {
 }
 
 impl AppliedFeeMarket {
-    pub fn from_params(base_fee_per_gas_nwei: u64, params: &FeeMarketParams) -> Result<Self, FeeMarketError> {
+    pub fn from_params(
+        base_fee_per_gas_nwei: u64,
+        params: &FeeMarketParams,
+    ) -> Result<Self, FeeMarketError> {
         Ok(Self {
             base_fee_per_gas_nwei,
             pq_gas_multiplier: params.pq_gas_multiplier,
@@ -322,10 +327,14 @@ pub fn calculate_execution_fee(
         .ok_or(FeeMarketError::Overflow("gas_used * base_fee_per_gas"))?;
     let pq_execution_fee_nwei = (pq_gas_used as u128)
         .checked_mul(applied.effective_pq_gas_price_nwei as u128)
-        .ok_or(FeeMarketError::Overflow("pq_gas_used * effective_pq_gas_price"))?;
+        .ok_or(FeeMarketError::Overflow(
+            "pq_gas_used * effective_pq_gas_price",
+        ))?;
     let execution_fee_total_nwei = base_execution_fee_nwei
         .checked_add(pq_execution_fee_nwei)
-        .ok_or(FeeMarketError::Overflow("base_execution_fee + pq_execution_fee"))?;
+        .ok_or(FeeMarketError::Overflow(
+            "base_execution_fee + pq_execution_fee",
+        ))?;
 
     Ok(ExecutionFeeBreakdown {
         gas_used,
@@ -403,7 +412,10 @@ mod tests {
         let mut prev = u64::MAX;
         for _ in 0..200 {
             let next = next_base_fee_per_gas(fee, 0, &p).unwrap();
-            assert!(next <= fee, "fee must never increase under zero utilization");
+            assert!(
+                next <= fee,
+                "fee must never increase under zero utilization"
+            );
             assert!(next <= prev);
             prev = fee;
             fee = next;
@@ -421,7 +433,10 @@ mod tests {
         let mut fee = 1_000u64;
         for _ in 0..10 {
             let next = next_base_fee_per_gas(fee, 30_000_000, &p).unwrap();
-            assert!(next > fee, "fee must strictly increase under max utilization");
+            assert!(
+                next > fee,
+                "fee must strictly increase under max utilization"
+            );
             fee = next;
         }
     }
@@ -451,7 +466,10 @@ mod tests {
         p.max_block_gas = 2_000_000_000;
         p.base_fee_change_denominator = 8;
         let next = next_base_fee_per_gas(10, 1_000_000_001, &p).unwrap();
-        assert_eq!(next, 11, "a minimum guaranteed increase of 1 nWei must apply");
+        assert_eq!(
+            next, 11,
+            "a minimum guaranteed increase of 1 nWei must apply"
+        );
     }
 
     #[test]
@@ -510,7 +528,9 @@ mod tests {
     fn effective_pq_gas_price_overflow_is_checked() {
         assert_eq!(
             effective_pq_gas_price(u64::MAX, 2),
-            Err(FeeMarketError::Overflow("base_fee_per_gas * pq_gas_multiplier"))
+            Err(FeeMarketError::Overflow(
+                "base_fee_per_gas * pq_gas_multiplier"
+            ))
         );
     }
 
@@ -538,7 +558,10 @@ mod tests {
         };
         let breakdown = calculate_execution_fee(21_000, 0, &applied).unwrap();
         assert_eq!(breakdown.pq_execution_fee_nwei, 0);
-        assert_eq!(breakdown.execution_fee_total_nwei, breakdown.base_execution_fee_nwei);
+        assert_eq!(
+            breakdown.execution_fee_total_nwei,
+            breakdown.base_execution_fee_nwei
+        );
     }
 
     #[test]

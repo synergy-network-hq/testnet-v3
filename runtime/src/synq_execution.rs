@@ -406,7 +406,10 @@ fn execute_deploy(
     execution_context: SynQExecutionContext,
 ) -> Result<SynQAivmReceiptSummary, String> {
     let deploy = deploy_envelope_from_carrier(envelope)?;
-    let contract_address = derive_synergy_contract_address_from_deploy(&deploy)?;
+    let contract_address = derive_synergy_contract_address_from_deploy_with_identity_address(
+        &deploy,
+        &verification.signer,
+    )?;
     let artifact = match artifact_from_envelope(envelope) {
         Ok(artifact) => artifact,
         Err(message) => {
@@ -463,6 +466,16 @@ fn execute_deploy(
 pub fn derive_synq_contract_address_from_deploy(
     deploy: &ContractDeployEnvelope,
 ) -> Result<SynQAddress, String> {
+    Err(format!(
+        "SynQ contract address derivation for key {} requires a verified FN-DSA-rooted identity address",
+        hex::encode(Sha256::digest(&deploy.public_key.bytes))
+    ))
+}
+
+pub fn derive_synq_contract_address_from_deploy_with_identity_address(
+    deploy: &ContractDeployEnvelope,
+    identity_address: &str,
+) -> Result<SynQAddress, String> {
     if deploy.signing_payload.domain_tag != DomainTag::SynqContractDeployV1
         || deploy.signing_payload.signature_purpose != SignaturePurpose::ContractDeploy
     {
@@ -488,14 +501,13 @@ pub fn derive_synq_contract_address_from_deploy(
     push_u16(&mut material, deploy.signing_payload.protocol_version);
     push_u16(&mut material, deploy.signing_payload.algorithm_id.code());
     push_u64(&mut material, deploy.signing_payload.nonce);
-    // Canonical Synergy account address of the deployer, not the internal
-    // 41-byte execution-signer binding. The deployer's public identity is what
-    // a contract address must attest to, and it is the same value the runtime
-    // presents as `msg.sender`.
-    push_string(
-        &mut material,
-        &crate::address::derive_standard_account_address(&deploy.public_key.bytes),
-    );
+    let decoded_identity = crate::address::decode_address(identity_address)?;
+    if decoded_identity.classification
+        != crate::snts_registry::IdentifierClass::KeyControlledAddress
+    {
+        return Err("SynQ deployer identity address must be key-controlled".to_string());
+    }
+    push_string(&mut material, identity_address);
     push_bytes(&mut material, &deploy.signing_payload.payload_hash);
     push_bytes(&mut material, &deploy.bytecode_hash);
     push_bytes(&mut material, &deploy.manifest_hash);
@@ -518,10 +530,21 @@ pub fn derive_synergy_contract_address_from_deploy(
     deploy: &ContractDeployEnvelope,
 ) -> Result<String, String> {
     let synq_address = derive_synq_contract_address_from_deploy(deploy)?;
-    Ok(synergy_contract_address_from_pqsynq_address(&synq_address))
+    synergy_contract_address_from_pqsynq_address(&synq_address)
 }
 
-pub fn synergy_contract_address_from_pqsynq_address(address: &SynQAddress) -> String {
+pub fn derive_synergy_contract_address_from_deploy_with_identity_address(
+    deploy: &ContractDeployEnvelope,
+    identity_address: &str,
+) -> Result<String, String> {
+    let synq_address =
+        derive_synq_contract_address_from_deploy_with_identity_address(deploy, identity_address)?;
+    synergy_contract_address_from_pqsynq_address(&synq_address)
+}
+
+pub fn synergy_contract_address_from_pqsynq_address(
+    address: &SynQAddress,
+) -> Result<String, String> {
     crate::address::generate_generic_address(
         SYNERGY_CUSTOM_CONTRACT_ADDRESS_PREFIX,
         &hex::encode(address.as_bytes()),
@@ -556,7 +579,7 @@ fn execute_call(
 ) -> Result<SynQAivmReceiptSummary, String> {
     let call: ContractCallEnvelope = serde_json::from_slice(&envelope.encoded_pqsynq_envelope)
         .map_err(|error| format!("SynQ call envelope decode failed after admission: {error}"))?;
-    let contract_address = synergy_contract_address_from_pqsynq_address(&call.contract_address);
+    let contract_address = synergy_contract_address_from_pqsynq_address(&call.contract_address)?;
     let Some(deployment) = deployments.get(&contract_address) else {
         return Ok(pre_aivm_failed_summary(
             SynQRuntimeOperation::Call,

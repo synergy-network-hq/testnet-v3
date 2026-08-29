@@ -1,5 +1,7 @@
 #[path = "../../src/testnet_agent_service.rs"]
 mod testnet_agent_service;
+#[path = "../../src/validator_operations.rs"]
+mod validator_operations;
 
 use testnet_agent_service::{serve_with_host, TESTNET_AGENT_PORT};
 use std::path::PathBuf;

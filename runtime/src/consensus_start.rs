@@ -88,19 +88,22 @@ pub fn verify_signed_start_command(
     if desired.chain.validator_set_root.is_empty() {
         return Err("start barrier desired state has an invalid validator authority".to_string());
     }
-    if desired.state.consensus_schema_version
-        != crate::synergy_types::TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION
-        || desired.state.directory_namespace != "chain-1266/incarnation-4"
-    {
-        return Err("start barrier desired state has an invalid P1 state namespace".to_string());
-    }
-    crate::desired_state::validate_chain1266_p1_consensus_binding(
+    crate::desired_state::validate_chain1266_desired_state_profile(
+        desired.chain.incarnation,
+        desired.state.consensus_schema_version,
+        &desired.state.directory_namespace,
         &desired.state.mode,
         &desired.state.coordinator_id,
         &desired.state.producer_ids,
         desired.state.producer_turn_timeout_ms,
     )
     .map_err(|error| format!("start barrier desired state: {error}"))?;
+    if desired.state.mode == crate::desired_state::CHAIN1266_P3_CONSENSUS_MODE {
+        return Err(
+            "fresh P3 must start only after V4 release-approval verification; detached start commands are retired"
+                .to_string(),
+        );
+    }
     let command: SignedChain1266StartCommand = serde_json::from_slice(
         &fs::read(command_path)
             .map_err(|error| format!("read signed consensus start command: {error}"))?,

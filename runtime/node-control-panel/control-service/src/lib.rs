@@ -10,4 +10,5 @@ pub mod innernet;
 pub mod monitor;
 pub mod testnet;
 pub mod testnet_agent_service;
+pub mod validator_operations;
 pub mod validator_vpn;

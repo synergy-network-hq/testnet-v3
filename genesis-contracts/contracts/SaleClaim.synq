@@ -5,7 +5,7 @@
 // (synergy-website/docs/token-offering/UNIFIED_PRESALE_INFRASTRUCTURE_SPEC.md
 // and SNRGClaimVoucherSoulbound.sol). Canonical truth is the Ethereum
 // soulbound voucher; this contract settles ATTESTED ReceiptRedeemed records
-// against the SAL-A01 inventory (2,226,000,000 SNRG), honoring each
+// against the SAL-A01 inventory (2,240,000,000 SNRG), honoring each
 // voucher's own vesting terms. Attestations are threshold-signed by a
 // DAO-governed attestor set; each voucher tokenId and each payment
 // fingerprint settles exactly once. No manual mint bypass exists.
@@ -13,7 +13,7 @@ pragma synq ^1.0.0;
 
 contract SaleClaim {
     admin: Address public;               // DAO-A01 authority
-    inventoryRemaining: UInt256 public;  // starts at 2_226_000_000 SNRG in nwei
+    inventoryRemaining: UInt256 public;  // starts at 2_240_000_000 SNRG in nwei
     attestorThreshold: UInt256 public;
     attestorCount: UInt256 public;
     paused: Bool public;

@@ -1851,11 +1851,10 @@ fn synq_contract_address_from_payload(payload: &[u8]) -> Option<String> {
         synergy_testnet::synq_admission::SynQAdmissionKind::Call => {
             let call: pqsynq::ContractCallEnvelope =
                 serde_json::from_slice(&envelope.encoded_pqsynq_envelope).ok()?;
-            Some(
-                synergy_testnet::synq_execution::synergy_contract_address_from_pqsynq_address(
-                    &call.contract_address,
-                ),
+            synergy_testnet::synq_execution::synergy_contract_address_from_pqsynq_address(
+                &call.contract_address,
             )
+            .ok()
         }
     }
 }

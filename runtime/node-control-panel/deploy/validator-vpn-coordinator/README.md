@@ -1,4 +1,14 @@
-# Validator VPN Coordinator Deployment Artifacts
+# Retired Innernet VPN Coordinator Deployment Artifacts
+
+> **Not a Fresh PoSy v3 deployment path.** This coordinator is retained only
+> as a record of the prior Innernet migration. It is bound to superseded
+> transport identity, bootstrap, and `10.70.0.0/16` assumptions and must not
+> be installed, configured, enrolled, or used for the fresh Chain-1266
+> Testnet-v3 PoSy launch. In particular, it cannot authorize or substitute for
+> the governed P3 validator set, the canonical `10.69.0.0/16` plan, or the
+> `validator-02` through `validator-06` Genesis deployment. A future VPN
+> implementation must be separately reviewed and bound to the final P3
+> release artifacts before it is used.
 
 This directory contains repo-side templates for running the node-control-panel `control-service` as the public validator VPN coordinator behind the `vpn-coordinator.synergy-network.io` reverse proxy.
 

@@ -18,8 +18,17 @@ pub mod diagnostics;
 pub mod dual_quorum;
 pub mod legacy_canonical_lock;
 pub mod posy;
+pub mod protected_pipeline;
+pub mod protected_pipeline_evidence_verifier;
+pub mod protected_pipeline_runtime;
+#[cfg(test)]
+mod protected_pipeline_runtime_tests;
+
+#[cfg(test)]
+mod protected_pipeline_view_invariance_tests;
 pub mod self_realign;
 pub mod signing_authority;
+pub mod simplified_posy;
 pub mod synergy_score;
 pub mod testnet_v3_bootstrap;
 pub mod testnet_v3_finality_context;

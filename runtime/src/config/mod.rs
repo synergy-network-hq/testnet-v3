@@ -6,7 +6,8 @@ use std::fs;
 use std::path::Path;
 use toml;
 
-use crate::synergy_types::POSY_PROTOCOL_VERSION;
+use crate::consensus::simplified_posy::POSY_SIMPLIFIED_PROTOCOL_VERSION;
+use crate::synergy_types::TESTNET_V3_CANONICAL_NETWORK_ID;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct NodeConfig {
@@ -61,7 +62,14 @@ pub struct ValidatorVpnTransportConfig {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct BlockchainConfig {
+    /// Legacy whole-second cadence. New fresh-P3 candidates may omit this
+    /// alias and bind cadence directly in milliseconds.
+    #[serde(default)]
     pub block_time: u64,
+    /// Canonical cadence for fresh PoSy configurations. A non-zero value is
+    /// authoritative and must agree with the Genesis-bound manifest.
+    #[serde(default)]
+    pub target_block_time_ms: u64,
     pub max_gas_limit: String,
     pub chain_id: u64,
 }
@@ -86,6 +94,9 @@ pub struct ConsensusConfig {
     pub producer_ids: Vec<String>,
     #[serde(default = "default_producer_turn_timeout_ms")]
     pub producer_turn_timeout_ms: u64,
+    /// Legacy whole-second cadence.  Fresh-P3 500 ms configurations omit the
+    /// alias and use `target_block_time_ms` instead.
+    #[serde(default)]
     pub block_time_secs: u64,
     pub epoch_length: u64,
     #[serde(default = "default_target_block_time_ms")]
@@ -143,16 +154,19 @@ pub struct ConsensusConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvedConsensusMode {
-    PosyV2_2,
+    /// The only production consensus mode for the fresh block-zero
+    /// Testnet-v3 chain.  Its complete authority comes from the canonical
+    /// Genesis activation binding, never from this local configuration.
+    PosySimplifiedV3,
     CoordinatedRoundRobinV1(crate::consensus::coordinated_round_robin::CoordinatedRoundRobinConfig),
 }
 
 fn default_consensus_protocol_version() -> String {
-    POSY_PROTOCOL_VERSION.to_string()
+    POSY_SIMPLIFIED_PROTOCOL_VERSION.to_string()
 }
 
 fn default_consensus_mode() -> String {
-    "posy_v2_2".to_string()
+    "posy_simplified_v3".to_string()
 }
 
 fn default_producer_turn_timeout_ms() -> u64 {
@@ -168,7 +182,21 @@ impl ConsensusConfig {
         use crate::consensus::coordinated_round_robin::COORDINATED_ROUND_ROBIN_V1;
 
         match self.mode.as_str() {
-            "posy_v2_2" => Ok(ResolvedConsensusMode::PosyV2_2),
+            "posy_simplified_v3" => {
+                if self.algorithm != POSY_SIMPLIFIED_PROTOCOL_VERSION {
+                    return Err(format!(
+                        "posy_simplified_v3 requires algorithm {POSY_SIMPLIFIED_PROTOCOL_VERSION}, found {}",
+                        self.algorithm
+                    ));
+                }
+                if !self.coordinator_id.is_empty() || !self.producer_ids.is_empty() {
+                    return Err(
+                        "posy_simplified_v3 does not accept a locally configured coordinator or producer ring"
+                            .to_string(),
+                    );
+                }
+                Ok(ResolvedConsensusMode::PosySimplifiedV3)
+            }
             COORDINATED_ROUND_ROBIN_V1 => Ok(ResolvedConsensusMode::CoordinatedRoundRobinV1(
                 self.coordinated_round_robin_config(chain_id, network_id)?,
             )),
@@ -231,7 +259,7 @@ fn default_max_round_timeout_ms() -> u64 {
 }
 
 fn default_min_validators() -> usize {
-    6
+    5
 }
 
 fn default_emergency_stable_committee_mode() -> bool {
@@ -255,7 +283,7 @@ fn default_vote_only_probation_blocks() -> u64 {
 }
 
 fn default_validator_vote_threshold() -> usize {
-    5
+    4
 }
 
 fn default_max_validators() -> usize {
@@ -311,7 +339,7 @@ impl Default for ConsensusConfig {
             vote_only_rejoin_enabled: default_vote_only_rejoin_enabled(),
             vote_only_probation_blocks: default_vote_only_probation_blocks(),
             min_validators: default_min_validators(),
-            validator_cluster_size: 6,
+            validator_cluster_size: 5,
             validator_vote_threshold: default_validator_vote_threshold(),
             max_validators: default_max_validators(),
             status_ready_gate_enabled: default_status_ready_gate_enabled(),
@@ -400,7 +428,7 @@ fn default_reject_private_advertise_addrs() -> bool {
 }
 
 fn default_network_id() -> String {
-    "synergy-testnet-v3".to_string()
+    TESTNET_V3_CANONICAL_NETWORK_ID.to_string()
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -508,6 +536,7 @@ impl Default for NodeConfig {
             },
             blockchain: BlockchainConfig {
                 block_time: 2,
+                target_block_time_ms: 2_000,
                 max_gas_limit: "0x2fefd8".to_string(),
                 chain_id: 1266,
             },
@@ -639,8 +668,6 @@ pub fn load_node_config_from_template(node_type: &str) -> Result<NodeConfig, Box
 }
 
 fn enforce_consensus_config_invariants(config: &NodeConfig) -> Result<(), Box<dyn Error>> {
-    use crate::consensus::coordinated_round_robin::COORDINATED_ROUND_ROBIN_V1;
-
     if config.blockchain.chain_id != 1266 || config.network.id != 1266 {
         return Err(format!(
             "Synergy Testnet v3 requires chain_id/network id 1266, found blockchain.chain_id={} network.id={}",
@@ -648,23 +675,29 @@ fn enforce_consensus_config_invariants(config: &NodeConfig) -> Result<(), Box<dy
         )
         .into());
     }
-    if config.network.network_id != "synergy-testnet-v3" {
+    if config.network.network_id != TESTNET_V3_CANONICAL_NETWORK_ID {
         return Err(format!(
-            "Synergy Testnet v3 requires network_id synergy-testnet-v3, found {}",
-            config.network.network_id
+            "Synergy Testnet v3 requires network_id {TESTNET_V3_CANONICAL_NETWORK_ID}, found {}",
+            config.network.network_id,
         )
         .into());
     }
     if config.consensus.allow_genesis_status_bypass {
         return Err("genesis status bypass is disabled for PQC Testnet consensus".into());
     }
-    if config.consensus.algorithm != COORDINATED_ROUND_ROBIN_V1
-        || config.consensus.mode != COORDINATED_ROUND_ROBIN_V1
+    if config.consensus.algorithm != POSY_SIMPLIFIED_PROTOCOL_VERSION
+        || config.consensus.mode != "posy_simplified_v3"
     {
         return Err(format!(
-            "this Chain 1266 release only accepts consensus algorithm/mode {COORDINATED_ROUND_ROBIN_V1}; typed PoSy and fallback consensus are disabled"
+            "this fresh Chain 1266 release only accepts consensus algorithm {POSY_SIMPLIFIED_PROTOCOL_VERSION} and mode posy_simplified_v3"
         )
         .into());
+    }
+    if !config.consensus.coordinator_id.is_empty() || !config.consensus.producer_ids.is_empty() {
+        return Err(
+            "fresh simplified PoSy does not accept a locally configured coordinator or producer ring"
+                .into(),
+        );
     }
     for variable in [
         "CHAIN1266_VOTING_ENABLED",
@@ -678,7 +711,7 @@ fn enforce_consensus_config_invariants(config: &NodeConfig) -> Result<(), Box<dy
             .unwrap_or(false)
         {
             return Err(
-                format!("{variable}=true is forbidden by coordinated_round_robin_v1").into(),
+                format!("{variable}=true is forbidden because fresh simplified PoSy derives voting authority from canonical Genesis").into(),
             );
         }
     }
@@ -1631,7 +1664,7 @@ metrics_bind = "0.0.0.0:6030"
 [network]
 id = 1266
 name = "synergy-testnet"
-network_id = "synergy-testnet-v3"
+network_id = "testnet"
 p2p_port = 5622
 rpc_port = 5640
 ws_port = 5660
@@ -1643,7 +1676,7 @@ max_gas_limit = "0x2fefd8"
 chain_id = 1266
 
 [consensus]
-algorithm = "posy/2.2"
+algorithm = "posy/3.0"
 block_time_secs = 2
 epoch_length = 1000
 target_block_time_ms = 2000
@@ -1651,9 +1684,9 @@ proposal_timeout_ms = 1500
 prevote_timeout_ms = 1500
 precommit_timeout_ms = 1500
 max_round_timeout_ms = 10000
-min_validators = 6
-validator_cluster_size = 6
-validator_vote_threshold = 5
+min_validators = 5
+validator_cluster_size = 5
+validator_vote_threshold = 4
 max_validators = 0
 synergy_score_decay_rate = 0.05
 vrf_enabled = true
@@ -1717,9 +1750,9 @@ additional_dial_targets = ["62.146.182.208:39638"]
         let config =
             parse_node_config_content(&content, Some(&node_path)).expect("config should parse");
 
-        assert_eq!(config.network.network_id, "synergy-testnet-v3");
+        assert_eq!(config.network.network_id, "testnet");
         assert_eq!(config.blockchain.block_time, 2);
-        assert_eq!(config.consensus.algorithm, POSY_PROTOCOL_VERSION);
+        assert_eq!(config.consensus.algorithm, POSY_SIMPLIFIED_PROTOCOL_VERSION);
         assert_eq!(config.consensus.block_time_secs, 2);
         assert_eq!(config.consensus.epoch_length, 1_000);
         assert_eq!(config.consensus.target_block_time_ms, 2_000);
@@ -1727,8 +1760,8 @@ additional_dial_targets = ["62.146.182.208:39638"]
         assert_eq!(config.consensus.prevote_timeout_ms, 1_500);
         assert_eq!(config.consensus.precommit_timeout_ms, 1_500);
         assert_eq!(config.consensus.max_round_timeout_ms, 10_000);
-        assert_eq!(config.consensus.min_validators, 6);
-        assert_eq!(config.consensus.validator_vote_threshold, 5);
+        assert_eq!(config.consensus.min_validators, 5);
+        assert_eq!(config.consensus.validator_vote_threshold, 4);
 
         assert_eq!(config.network.bootnodes.len(), 2);
         assert!(config
@@ -2068,7 +2101,7 @@ state_sync_before_join = true
 [network]
 id = 1266
 name = "synergy-testnet"
-network_id = "synergy-testnet-v3"
+network_id = "testnet"
 p2p_port = 5622
 rpc_port = 5640
 ws_port = 5660
@@ -2080,7 +2113,7 @@ max_gas_limit = "0x2fefd8"
 chain_id = 1266
 
 [consensus]
-algorithm = "posy/2.2"
+algorithm = "posy/3.0"
 block_time_secs = 2
 epoch_length = 1000
 target_block_time_ms = 2000
@@ -2088,9 +2121,9 @@ proposal_timeout_ms = 1500
 prevote_timeout_ms = 1500
 precommit_timeout_ms = 1500
 max_round_timeout_ms = 10000
-min_validators = 6
-validator_cluster_size = 6
-validator_vote_threshold = 5
+min_validators = 5
+validator_cluster_size = 5
+validator_vote_threshold = 4
 max_validators = 0
 synergy_score_decay_rate = 0.05
 vrf_enabled = true
@@ -2143,9 +2176,9 @@ validator_address = "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5"
         let content = fs::read_to_string(&config_path).expect("config should be readable");
         let parsed = parse_node_config_content(&content, Some(&config_path))
             .expect("canonical Testnet-v3 fixture should parse");
-        assert_eq!(parsed.network.network_id, "synergy-testnet-v3");
+        assert_eq!(parsed.network.network_id, "testnet");
         assert_eq!(parsed.blockchain.block_time, 2);
-        assert_eq!(parsed.consensus.algorithm, POSY_PROTOCOL_VERSION);
+        assert_eq!(parsed.consensus.algorithm, POSY_SIMPLIFIED_PROTOCOL_VERSION);
         assert_eq!(parsed.consensus.block_time_secs, 2);
         assert_eq!(parsed.consensus.epoch_length, 1_000);
         assert_eq!(parsed.consensus.target_block_time_ms, 2_000);
@@ -2170,29 +2203,23 @@ validator_address = "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5"
     }
 
     #[test]
-    fn coordinated_mode_requires_explicit_canonical_configuration() {
-        let mut consensus = NodeConfig::default().consensus;
-        consensus.mode =
+    fn fresh_testnet_v3_rejects_coordinator_mode_and_local_ring() {
+        let mut config = NodeConfig::default();
+        config.consensus.mode =
             crate::consensus::coordinated_round_robin::COORDINATED_ROUND_ROBIN_V1.to_string();
-        consensus.coordinator_id = "validator-1".to_string();
-        consensus.producer_ids = vec![
-            "validator-2".to_string(),
-            "validator-3".to_string(),
-            "validator-4".to_string(),
-            "validator-5".to_string(),
-            "validator-6".to_string(),
-        ];
-        let resolved = consensus
-            .resolve_mode(1266, "synergy-testnet-v3")
-            .expect("complete coordinated configuration should resolve");
-        match resolved {
-            ResolvedConsensusMode::CoordinatedRoundRobinV1(config) => {
-                assert_eq!(config.producer_turn_timeout_ms, 4_000);
-            }
-            ResolvedConsensusMode::PosyV2_2 => panic!("coordinated configuration resolved to PoSy"),
-        }
+        let error = enforce_consensus_config_invariants(&config)
+            .expect_err("fresh Testnet-v3 must reject the retired coordinator mode");
+        assert!(error
+            .to_string()
+            .contains("only accepts consensus algorithm posy/3.0 and mode posy_simplified_v3"));
 
-        consensus.producer_ids.pop();
-        assert!(consensus.resolve_mode(1266, "synergy-testnet-v3").is_err());
+        config.consensus.mode = "posy_simplified_v3".to_string();
+        config.consensus.coordinator_id = "validator-01".to_string();
+        config.consensus.producer_ids = vec!["validator-02".to_string()];
+        let error = enforce_consensus_config_invariants(&config)
+            .expect_err("fresh Testnet-v3 must reject a locally configured leader ring");
+        assert!(error
+            .to_string()
+            .contains("does not accept a locally configured coordinator or producer ring"));
     }
 }

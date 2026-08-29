@@ -9,23 +9,22 @@
 //! nonces, no mempool, no fee requirement, an all-or-nothing overlay, and a
 //! deployer that is retired in protocol state when it is done.
 
-use crate::execution::{compute_receipt_root, compute_state_root_after, ExecutionState};
+use crate::execution::{compute_state_root_after, ExecutionState};
 use crate::synergy_types::{
     AegisPqKeyId, AegisPqSignature, ChainId, Epoch, Hash, Height, NetworkId, Transaction, TxId,
     UmaId, SYNERGY_TESTNET_V3_CHAIN_ID,
 };
 use crate::synq_admission::{
-    build_deploy_admission_envelope_from_pqsynq_bytes_with_artifacts_and_constructor_args,
-    encode_synq_admission_carrier, verify_synq_call_for_chain_admission,
-    verify_synq_deploy_for_chain_admission, SynQAdmissionEnvelope, SynQAdmissionKind,
-    SYNQ_ADMISSION_VERSION, SYNQ_CANONICAL_TESTNET_NETWORK_ID,
+    build_deploy_admission_envelope_from_pqsynq_bytes_with_artifacts_constructor_args_and_identity_authorization,
+    encode_synq_admission_carrier, verify_synq_call_for_chain_admission_at_current_binding,
+    verify_synq_deploy_for_chain_admission_at_current_binding, SynQAdmissionEnvelope,
+    SynQAdmissionKind, SYNQ_ADMISSION_VERSION, SYNQ_CALL_AUTHORIZATION_PURPOSE,
+    SYNQ_CANONICAL_TESTNET_NETWORK_ID, SYNQ_DEPLOY_AUTHORIZATION_PURPOSE,
 };
 use crate::synq_execution::{
-    derive_synergy_contract_address_from_deploy, execute_synq_transaction_at,
-    SynQAivmReceiptSummary, SynQContractArtifact, SynQExecutionContext,
+    execute_synq_transaction_at, SynQAivmReceiptSummary, SynQContractArtifact, SynQExecutionContext,
 };
 use aivm_core::state::StateKey;
-use pqsynq::traits::DetachedSignature;
 use pqsynq::{
     canonicalize_signing_payload, derive_synq_address, hash_contract_call_body,
     hash_contract_deploy_body, AlgorithmId, ChainId as SynQChainId, ContractCallEnvelope,
@@ -147,12 +146,97 @@ impl GenesisDeployerLifecycle {
 pub struct GenesisSigner {
     pub public_key: Vec<u8>,
     pub private_key: Vec<u8>,
+    pub identity_authorization: Option<crate::identity_auth::IdentityAuthorizationCarrier>,
 }
 
 impl GenesisSigner {
-    /// Canonical public identity: `syna…` Standard Account address.
-    pub fn account_address(&self) -> String {
-        crate::address::derive_standard_account_address(&self.public_key)
+    /// Canonical public identity: `syna…` Standard Account address. Fails
+    /// closed (rather than deriving a substitute identity) when the public
+    /// key material cannot produce a canonical address.
+    pub fn account_address(&self) -> Result<String, String> {
+        let carrier = self.identity_authorization.as_ref().ok_or_else(|| {
+            "genesis signer is missing its identity authorization carrier".to_string()
+        })?;
+        carrier
+            .identity_address_for_key_in_context_at(
+                crate::identity_auth::GENESIS_CEREMONY_AUTHORIZATION_DOMAIN,
+                crate::synergy_types::SYNERGY_TESTNET_V3_CHAIN_ID,
+                crate::synergy_types::SYNERGY_TESTNET_V3_NETWORK_ID,
+                "ML-DSA-87",
+                &self.public_key,
+                "genesis-signing",
+                GENESIS_NOW_UNIX,
+            )
+            .map_err(|error| format!("genesis signer authorization failed: {error}"))
+    }
+
+    fn synq_identity_authorization(
+        &self,
+        required_purpose: &str,
+    ) -> Result<crate::identity_auth::IdentityAuthorizationCarrier, String> {
+        let carrier = self.identity_authorization.as_ref().ok_or_else(|| {
+            "genesis signer is missing its identity authorization carrier".to_string()
+        })?;
+        if required_purpose != SYNQ_DEPLOY_AUTHORIZATION_PURPOSE
+            && required_purpose != SYNQ_CALL_AUTHORIZATION_PURPOSE
+        {
+            return Err(format!(
+                "unsupported Genesis SynQ authorization purpose '{required_purpose}'"
+            ));
+        }
+        carrier.verify_context_at(
+            crate::identity_auth::GENESIS_CEREMONY_AUTHORIZATION_DOMAIN,
+            GENESIS_NOW_UNIX,
+        )?;
+        // The domain switch below is only a wire-routing label. Authority is
+        // established first from the binding's root- and key-possession-signed
+        // exact (domain, chain, network, purpose) scope. Re-labelling a binding
+        // that lacks this exact signed scope therefore cannot grant authority.
+        crate::identity_auth::identity_address_for_authorization_key_in_context_at(
+            &carrier.binding,
+            "ML-DSA-87",
+            &self.public_key,
+            crate::identity_auth::SYNQ_ADMISSION_AUTHORIZATION_DOMAIN,
+            crate::synergy_types::SYNERGY_TESTNET_V3_CHAIN_ID,
+            crate::synergy_types::SYNERGY_TESTNET_V3_NETWORK_ID,
+            required_purpose,
+            GENESIS_NOW_UNIX,
+        )
+        .map_err(|error| {
+            format!(
+                "genesis binding does not explicitly authorize SynQ purpose '{required_purpose}': {error}"
+            )
+        })?;
+        let synq_carrier = crate::identity_auth::IdentityAuthorizationCarrier {
+            schema_version: crate::identity_auth::AUTHORIZATION_CARRIER_SCHEMA_VERSION,
+            signature_domain: crate::identity_auth::SYNQ_ADMISSION_AUTHORIZATION_DOMAIN.to_string(),
+            binding: carrier.binding.clone(),
+        };
+        synq_carrier.verify_context_at(
+            crate::identity_auth::SYNQ_ADMISSION_AUTHORIZATION_DOMAIN,
+            GENESIS_NOW_UNIX,
+        )?;
+        Ok(synq_carrier)
+    }
+
+    /// Resolves this ML-DSA-87 signer through a dual-possession SNTS v1.3
+    /// binding instead of treating the operational key as an address root.
+    pub fn account_address_from_binding(
+        &self,
+        binding: &crate::identity_auth::IdentityAuthorizationBinding,
+        required_purpose: &str,
+    ) -> Result<String, String> {
+        crate::identity_auth::identity_address_for_authorization_key_in_context_at(
+            binding,
+            "ML-DSA-87",
+            &self.public_key,
+            crate::identity_auth::GENESIS_CEREMONY_AUTHORIZATION_DOMAIN,
+            crate::synergy_types::SYNERGY_TESTNET_V3_CHAIN_ID,
+            crate::synergy_types::SYNERGY_TESTNET_V3_NETWORK_ID,
+            required_purpose,
+            GENESIS_NOW_UNIX,
+        )
+        .map_err(|error| format!("genesis signer authorization binding failed: {error}"))
     }
 
     /// Internal signed-payload binding. Never surfaced as an address.
@@ -191,6 +275,32 @@ pub struct GenesisAuthorities {
     pub identity_fee_collector: String,
     pub team_vesting_admin: String,
     pub oracle_publisher: String,
+}
+
+fn validate_genesis_signer_authorizations(authorities: &GenesisAuthorities) -> Result<(), String> {
+    authorities.genesis_deployer.account_address()?;
+    authorities
+        .genesis_deployer
+        .synq_identity_authorization(SYNQ_DEPLOY_AUTHORIZATION_PURPOSE)?;
+
+    authorities.governance.account_address()?;
+    authorities
+        .governance
+        .synq_identity_authorization(SYNQ_CALL_AUTHORIZATION_PURPOSE)?;
+
+    let registry_authority = authorities
+        .validator_registry_authority_key
+        .account_address()?;
+    if registry_authority != authorities.validator_registry_authority {
+        return Err(format!(
+            "validator registry authority identity mismatch: configured {}, signed binding resolves to {registry_authority}",
+            authorities.validator_registry_authority
+        ));
+    }
+    authorities
+        .validator_registry_authority_key
+        .synq_identity_authorization(SYNQ_CALL_AUTHORIZATION_PURPOSE)?;
+    Ok(())
 }
 
 /// Genesis configuration values that are not authorities. Sourced from the
@@ -627,14 +737,22 @@ fn deploy_one(
 
     // The address is derived from the same envelope the runtime admits and
     // executes — never chosen, never assigned.
+    let deployer_identity_address = deployer.account_address()?;
     let synq_contract_address =
-        crate::synq_execution::derive_synq_contract_address_from_deploy(&deploy)?;
-    let contract_address = derive_synergy_contract_address_from_deploy(&deploy)?;
+        crate::synq_execution::derive_synq_contract_address_from_deploy_with_identity_address(
+            &deploy,
+            &deployer_identity_address,
+        )?;
+    let contract_address =
+        crate::synq_execution::derive_synergy_contract_address_from_deploy_with_identity_address(
+            &deploy,
+            &deployer_identity_address,
+        )?;
 
     let encoded = serde_json::to_vec(&deploy)
         .map_err(|error| format!("encode genesis deploy envelope: {error}"))?;
     let envelope =
-        build_deploy_admission_envelope_from_pqsynq_bytes_with_artifacts_and_constructor_args(
+        build_deploy_admission_envelope_from_pqsynq_bytes_with_artifacts_constructor_args_and_identity_authorization(
             SYNERGY_TESTNET_V3_CHAIN_ID,
             SYNQ_CANONICAL_TESTNET_NETWORK_ID,
             &encoded,
@@ -642,6 +760,8 @@ fn deploy_one(
             entry.artifact.abi_json.clone(),
             entry.artifact.manifest_json.clone(),
             constructor_args,
+            deployer.synq_identity_authorization(SYNQ_DEPLOY_AUTHORIZATION_PURPOSE)?,
+            SYNQ_DEPLOY_AUTHORIZATION_PURPOSE,
             GENESIS_NOW_UNIX,
         )
         .map_err(|error| {
@@ -650,13 +770,25 @@ fn deploy_one(
                 entry.contract.name()
             )
         })?;
-    let verification = verify_synq_deploy_for_chain_admission(&envelope, GENESIS_NOW_UNIX)
-        .map_err(|error| {
+    let canonical_binding = state
+        .current_identity_authorization_binding_hash(&envelope.signer)
+        .ok_or_else(|| {
             format!(
-                "{} genesis deploy verification failed: {error}",
-                entry.contract.name()
+                "Genesis deployer {} has no canonical identity binding",
+                envelope.signer
             )
         })?;
+    let verification = verify_synq_deploy_for_chain_admission_at_current_binding(
+        &envelope,
+        GENESIS_NOW_UNIX,
+        canonical_binding,
+    )
+    .map_err(|error| {
+        format!(
+            "{} genesis deploy verification failed: {error}",
+            entry.contract.name()
+        )
+    })?;
     let carrier = encode_synq_admission_carrier(&envelope)
         .map_err(|error| format!("encode genesis deploy carrier: {error}"))?;
 
@@ -790,7 +922,11 @@ fn call_one(
         kind: SynQAdmissionKind::Call,
         chain_id: SYNERGY_TESTNET_V3_CHAIN_ID,
         network_id: SYNQ_CANONICAL_TESTNET_NETWORK_ID.to_string(),
-        signer: caller.account_address(),
+        signer: caller.account_address()?,
+        identity_authorization: Some(
+            caller.synq_identity_authorization(SYNQ_CALL_AUTHORIZATION_PURPOSE)?,
+        ),
+        authorization_purpose: SYNQ_CALL_AUTHORIZATION_PURPOSE.to_string(),
         payload_hash: call.signing_payload.payload_hash,
         bytecode_hash: None,
         manifest_hash: None,
@@ -803,8 +939,20 @@ fn call_one(
         encoded_args: Some(encoded_args),
         sts9_verification_json: None,
     };
-    let verification = verify_synq_call_for_chain_admission(&envelope, GENESIS_NOW_UNIX)
-        .map_err(|error| format!("genesis {method} call verification failed: {error}"))?;
+    let canonical_binding = state
+        .current_identity_authorization_binding_hash(&envelope.signer)
+        .ok_or_else(|| {
+            format!(
+                "Genesis caller {} has no canonical identity binding",
+                envelope.signer
+            )
+        })?;
+    let verification = verify_synq_call_for_chain_admission_at_current_binding(
+        &envelope,
+        GENESIS_NOW_UNIX,
+        canonical_binding,
+    )
+    .map_err(|error| format!("genesis {method} call verification failed: {error}"))?;
     let carrier = encode_synq_admission_carrier(&envelope)
         .map_err(|error| format!("encode genesis call carrier: {error}"))?;
 
@@ -991,11 +1139,26 @@ pub fn execute_genesis_deployment(
         ));
     }
 
+    // Fail before constructing the overlay unless every signer has the exact
+    // root-signed scope it will exercise. Genesis does not infer deploy
+    // authority from call authority, or vice versa.
+    validate_genesis_signer_authorizations(authorities)?;
+
     let deployer_address = authorities.genesis_deployer.synq_address()?;
     let manifest_hash = deployment_manifest_hash(&deployer_address, plan)?;
 
     // Everything below mutates the working clone only.
     let mut working = state.clone();
+    for signer in [
+        &authorities.genesis_deployer,
+        &authorities.governance,
+        &authorities.validator_registry_authority_key,
+    ] {
+        let carrier = signer.identity_authorization.as_ref().ok_or_else(|| {
+            "Genesis signer is missing its canonical identity authorization binding".to_string()
+        })?;
+        working.install_genesis_identity_authorization_binding(&carrier.binding)?;
+    }
     write_lifecycle(&mut working, GenesisDeployerLifecycle::AuthorizedForGenesis)?;
     write_lifecycle(&mut working, GenesisDeployerLifecycle::Executing)?;
 
@@ -1255,7 +1418,7 @@ fn run_initialization_sequence(
         governance_call_nonce += 1;
     }
 
-    // --- ValidatorRegistry: register and activate six validators ----------
+    // --- ValidatorRegistry: register and activate the five Genesis validators
     // These are authority-gated (`msg.sender == authority`), not
     // governance-signed, so they are issued by the dedicated registry authority.
     let registry_artifact = artifact_for(GenesisContract::ValidatorRegistry)?;
@@ -1269,6 +1432,10 @@ fn run_initialization_sequence(
         private_key: authorities
             .validator_registry_authority_key
             .private_key
+            .clone(),
+        identity_authorization: authorities
+            .validator_registry_authority_key
+            .identity_authorization
             .clone(),
     };
     let mut registry_call_nonce: u64 = 0;
@@ -1456,11 +1623,17 @@ mod tests {
     }
 
     fn staged_artifact(contract: GenesisContract) -> SynQContractArtifact {
-        let dir = repo_root().join("genesis-contracts/staged-governance-v1");
+        let dir = repo_root().join("genesis-contracts/contracts");
         let name = contract.name();
         let read = |ext: &str| {
-            std::fs::read(dir.join(format!("{name}.{ext}")))
-                .unwrap_or_else(|e| panic!("read staged {name}.{ext}: {e}"))
+            let path = dir.join(format!("{name}.{ext}"));
+            assert!(
+                path.is_file(),
+                "approved test artifact triple is missing {}",
+                path.display()
+            );
+            std::fs::read(&path)
+                .unwrap_or_else(|e| panic!("read approved test artifact {}: {e}", path.display()))
         };
         SynQContractArtifact::new(
             read("compiled.synq"),
@@ -1479,7 +1652,10 @@ mod tests {
 
     /// Frozen test-only authorities. Generated once and checked in precisely so
     /// that addresses, receipts and roots reproduce across runs and machines.
-    fn test_signer(role: &str) -> GenesisSigner {
+    fn test_signer_with_scopes(
+        role: &str,
+        authorization_scopes: &[crate::identity_auth::AuthorizationScope],
+    ) -> GenesisSigner {
         let path = repo_root().join("runtime/fixtures/genesis-deployment-test-authorities.json");
         let doc: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).expect("read authority fixture"))
@@ -1491,27 +1667,112 @@ mod tests {
             .iter()
             .find(|a| a["role"] == role)
             .unwrap_or_else(|| panic!("fixture has no role {role}"));
+        let public_key = hex::decode(entry["public_key_hex"].as_str().unwrap()).unwrap();
+        let private_key = hex::decode(entry["private_key_hex"].as_str().unwrap()).unwrap();
+        let mut manager = crate::crypto::pqc::PQCManager::new();
+        let (identity_public, identity_private) = manager
+            .generate_keypair(crate::crypto::pqc::PQCAlgorithm::FNDSA)
+            .expect("test identity keypair");
+        let authorization_public = crate::crypto::pqc::PQCPublicKey {
+            algorithm: crate::crypto::pqc::PQCAlgorithm::MLDSA87,
+            key_data: public_key.clone(),
+            key_id: format!("test-genesis-{role}"),
+            created_at: 0,
+        };
+        let authorization_private = crate::crypto::pqc::PQCPrivateKey {
+            algorithm: crate::crypto::pqc::PQCAlgorithm::MLDSA87,
+            key_data: private_key.clone(),
+            public_key_id: authorization_public.key_id.clone(),
+            created_at: 0,
+        };
+        let binding = crate::identity_auth::create_single_key_binding_with_scopes(
+            role,
+            "syna",
+            &identity_public,
+            &identity_private,
+            "genesis-key",
+            &authorization_public,
+            &authorization_private,
+            authorization_scopes,
+            "2026-08-22T00:00:00Z",
+        )
+        .expect("test genesis identity binding");
         GenesisSigner {
-            public_key: hex::decode(entry["public_key_hex"].as_str().unwrap()).unwrap(),
-            private_key: hex::decode(entry["private_key_hex"].as_str().unwrap()).unwrap(),
+            public_key,
+            private_key,
+            identity_authorization: Some(
+                crate::identity_auth::IdentityAuthorizationCarrier::new(
+                    crate::identity_auth::GENESIS_CEREMONY_AUTHORIZATION_DOMAIN,
+                    binding,
+                )
+                .expect("test genesis identity carrier"),
+            ),
         }
     }
 
+    fn test_signer(role: &str) -> GenesisSigner {
+        test_signer_with_scopes(
+            role,
+            &[crate::identity_auth::AuthorizationScope::testnet(
+                crate::identity_auth::GENESIS_CEREMONY_AUTHORIZATION_DOMAIN,
+                "genesis-signing",
+            )],
+        )
+    }
+
+    fn test_deploy_signer(role: &str) -> GenesisSigner {
+        test_signer_with_scopes(
+            role,
+            &[
+                crate::identity_auth::AuthorizationScope::testnet(
+                    crate::identity_auth::GENESIS_CEREMONY_AUTHORIZATION_DOMAIN,
+                    "genesis-signing",
+                ),
+                crate::identity_auth::AuthorizationScope::testnet(
+                    crate::identity_auth::SYNQ_ADMISSION_AUTHORIZATION_DOMAIN,
+                    SYNQ_DEPLOY_AUTHORIZATION_PURPOSE,
+                ),
+            ],
+        )
+    }
+
+    fn test_call_signer(role: &str) -> GenesisSigner {
+        test_signer_with_scopes(
+            role,
+            &[
+                crate::identity_auth::AuthorizationScope::testnet(
+                    crate::identity_auth::GENESIS_CEREMONY_AUTHORIZATION_DOMAIN,
+                    "genesis-signing",
+                ),
+                crate::identity_auth::AuthorizationScope::testnet(
+                    crate::identity_auth::SYNQ_ADMISSION_AUTHORIZATION_DOMAIN,
+                    SYNQ_CALL_AUTHORIZATION_PURPOSE,
+                ),
+            ],
+        )
+    }
+
     pub(crate) fn test_authorities() -> GenesisAuthorities {
-        let registry = test_signer("validator_registry_authority");
-        let registry_address = registry.account_address();
+        let registry = test_call_signer("validator_registry_authority");
+        let registry_address = registry
+            .account_address()
+            .expect("test fixture signer produces a valid canonical address");
         GenesisAuthorities {
-            genesis_deployer: test_signer("genesis_deployer"),
-            governance: test_signer("governance_authority"),
+            genesis_deployer: test_deploy_signer("genesis_deployer"),
+            governance: test_call_signer("governance_authority"),
             emergency_slashing_authority: test_signer("emergency_slashing_authority")
-                .account_address(),
+                .account_address()
+                .expect("test fixture signer produces a valid canonical address"),
             validator_registry_authority: registry_address,
             validator_registry_authority_key: registry,
             reward_distributor_authority: test_signer("reward_distributor_authority")
-                .account_address(),
+                .account_address()
+                .expect("test fixture signer produces a valid canonical address"),
             identity_fee_collector: "synf1genesisfeecollectortestfixture".to_string(),
             team_vesting_admin: "synu1teamvestingadmintestfixture".to_string(),
-            oracle_publisher: test_signer("oracle_publisher").account_address(),
+            oracle_publisher: test_signer("oracle_publisher")
+                .account_address()
+                .expect("test fixture signer produces a valid canonical address"),
         }
     }
 
@@ -1543,7 +1804,7 @@ mod tests {
             validator_max_count: "100".to_string(),
             validator_min_count: "4".to_string(),
             validator_min_self_stake_nwei: "50000000000000".to_string(),
-            validators: (0..6).map(test_validator).collect(),
+            validators: (0..5).map(test_validator).collect(),
             staking_min_stake_nwei: "50000000000000".to_string(),
             staking_max_stake_nwei: "5000000000000000000".to_string(),
             staking_unbonding_blocks: "302400".to_string(),
@@ -1574,8 +1835,8 @@ mod tests {
                 "synergy-testbeta".into(),
             ],
             team_vesting_start_time: "1775044800".to_string(),
-            team_allocation_nwei: "340000000000000000".to_string(),
-            support_allocation_nwei: "200000000000000000".to_string(),
+            team_allocation_nwei: "60000000000000000".to_string(),
+            support_allocation_nwei: "10000000000000000".to_string(),
             team_count: "5".to_string(),
             support_count: "4".to_string(),
         }
@@ -1659,6 +1920,29 @@ mod tests {
         assert_eq!(a.initialization_receipts.len(), 27);
         assert_eq!(a.lifecycle, GenesisDeployerLifecycle::PermanentlyRetired);
 
+        let genesis_signers = [
+            &authorities.genesis_deployer,
+            &authorities.governance,
+            &authorities.validator_registry_authority_key,
+        ];
+        assert_eq!(
+            first.identity_authorization_bindings.len(),
+            genesis_signers.len(),
+            "every GenesisSigner binding is part of root-bearing execution state"
+        );
+        for signer in genesis_signers {
+            let binding = &signer
+                .identity_authorization
+                .as_ref()
+                .expect("test Genesis signer identity authorization")
+                .binding;
+            assert_eq!(
+                first.current_identity_authorization_binding_hash(&binding.identity_address),
+                Some(binding.binding_payload_sha3_256.as_str()),
+                "Genesis snapshot must commit the signer's exact binding"
+            );
+        }
+
         for (contract, address) in &a.addresses {
             assert!(
                 first.synq_contracts.contains_key(address),
@@ -1666,6 +1950,74 @@ mod tests {
                 contract.name()
             );
         }
+    }
+
+    #[test]
+    fn genesis_rejects_conflicting_preexisting_identity_binding_without_committing() {
+        let plan = staged_plan();
+        let authorities = test_authorities();
+        let parameters = test_parameters();
+        let binding = &authorities
+            .genesis_deployer
+            .identity_authorization
+            .as_ref()
+            .expect("deployer carrier")
+            .binding;
+
+        let mut state = ExecutionState::new();
+        state.identity_authorization_bindings.insert(
+            binding.identity_address.clone(),
+            crate::execution::IdentityAuthorizationBindingCommitment {
+                binding_payload_sha3_256: "00".repeat(32),
+                identity_root_public_key_sha3_256: binding
+                    .identity_root
+                    .public_key_sha3_256
+                    .clone(),
+                effective_at_unix: 0,
+            },
+        );
+        let baseline = state.clone();
+
+        let error = execute_genesis_deployment(&mut state, &plan, &authorities, &parameters)
+            .expect_err("conflicting Genesis binding must fail closed");
+        assert!(
+            error.contains("conflicting identity authorization bindings"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            state, baseline,
+            "the conflicting deployment must not commit"
+        );
+    }
+
+    #[test]
+    fn genesis_synq_requires_the_exact_root_signed_scope() {
+        let call_only = test_signer_with_scopes(
+            "genesis_deployer",
+            &[
+                crate::identity_auth::AuthorizationScope::testnet(
+                    crate::identity_auth::GENESIS_CEREMONY_AUTHORIZATION_DOMAIN,
+                    "genesis-signing",
+                ),
+                crate::identity_auth::AuthorizationScope::testnet(
+                    crate::identity_auth::SYNQ_ADMISSION_AUTHORIZATION_DOMAIN,
+                    SYNQ_CALL_AUTHORIZATION_PURPOSE,
+                ),
+            ],
+        );
+
+        call_only
+            .synq_identity_authorization(SYNQ_CALL_AUTHORIZATION_PURPOSE)
+            .expect("the separately signed call scope is accepted");
+        let error = call_only
+            .synq_identity_authorization(SYNQ_DEPLOY_AUTHORIZATION_PURPOSE)
+            .expect_err("an absent deploy scope must not be synthesized by carrier relabelling");
+        assert!(
+            error.contains("does not explicitly authorize SynQ purpose 'synq-contract-deploy'")
+                && (error.contains("does not grant signed scope")
+                    || error.contains("is not actively bound for purpose")),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -1840,9 +2192,10 @@ pub fn derive_genesis_addresses(
     let deployer_signer = GenesisSigner {
         public_key: deployer_public_key.to_vec(),
         private_key: Vec::new(),
+        identity_authorization: authorities.genesis_deployer.identity_authorization.clone(),
     };
     let deployer_address = deployer_signer.synq_address()?;
-    let deployer_account = deployer_signer.account_address();
+    let deployer_account = deployer_signer.account_address()?;
     let mut resolved: BTreeMap<GenesisContract, String> = BTreeMap::new();
     let mut out = Vec::new();
 
@@ -1875,8 +2228,15 @@ pub fn derive_genesis_addresses(
             constructor_args_hash,
         };
         let synq_address =
-            crate::synq_execution::derive_synq_contract_address_from_deploy(&envelope)?;
-        let contract_address = derive_synergy_contract_address_from_deploy(&envelope)?;
+            crate::synq_execution::derive_synq_contract_address_from_deploy_with_identity_address(
+                &envelope,
+                &deployer_account,
+            )?;
+        let contract_address =
+            crate::synq_execution::derive_synergy_contract_address_from_deploy_with_identity_address(
+                &envelope,
+                &deployer_account,
+            )?;
 
         resolved.insert(entry.contract, contract_address.clone());
         out.push(DerivedContractAddress {

@@ -2,6 +2,11 @@ use crate::app_context::AppContext;
 use crate::testnet_agent_service::{
     TestnetAgentControlRequest, TestnetAgentControlResponse, TestnetAgentHealth, TESTNET_AGENT_PORT,
 };
+use crate::validator_operations::{
+    aggregate_validator_statuses, DiagnosticSnapshotResult, HostPreflightStatus,
+    StructuredLogsResponse, ValidatorLifecycleRequest, ValidatorLifecycleResult,
+    ValidatorOperationsClusterStatus, ValidatorOperationsStatus,
+};
 use chrono::Utc;
 use futures_util::future::join_all;
 use reqwest::{Client, StatusCode, Url};
@@ -23,10 +28,9 @@ const INNERNET_RELAYER_ADDRESS_PREFIX: &str = "10.70.20";
 fn validator_quorum_threshold(total_validators: usize) -> usize {
     if total_validators == 0 {
         0
-    } else if total_validators == 5 {
-        3
     } else {
-        (total_validators * 2).div_ceil(3)
+        // Smallest q satisfying 3*q > 2*n, without multiplication overflow.
+        total_validators - (total_validators - 1) / 3
     }
 }
 
@@ -1905,6 +1909,314 @@ pub async fn monitor_node_control(
     execute_monitor_node_control(&node_slot_id, &normalized_action, &operator, "single").await
 }
 
+fn validator_operations_agent_token() -> Result<String, String> {
+    std::env::var("SYNERGY_TESTNET_AGENT_TOKEN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            "SYNERGY_TESTNET_AGENT_TOKEN is required for validator operations.".to_string()
+        })
+}
+
+fn validator_operations_nodes(nodes: &[MonitorNode]) -> Vec<MonitorNode> {
+    let mut validators = nodes
+        .iter()
+        .filter(|node| is_bootstrap_consensus_validator(node))
+        .cloned()
+        .collect::<Vec<_>>();
+    validators.sort_by(|left, right| {
+        monitor_node_slot_number(left)
+            .unwrap_or(u8::MAX)
+            .cmp(&monitor_node_slot_number(right).unwrap_or(u8::MAX))
+            .then(left.node_slot_id.cmp(&right.node_slot_id))
+    });
+    validators.truncate(5);
+    validators
+}
+
+fn validator_operations_node<'a>(
+    nodes: &'a [MonitorNode],
+    node_slot_id: &str,
+) -> Result<&'a MonitorNode, String> {
+    nodes
+        .iter()
+        .find(|node| {
+            is_bootstrap_consensus_validator(node)
+                && (node.node_slot_id.eq_ignore_ascii_case(node_slot_id)
+                    || node.node_alias.eq_ignore_ascii_case(node_slot_id))
+        })
+        .ok_or_else(|| format!("Validator not found in inventory: {node_slot_id}"))
+}
+
+fn validator_operations_agent_url(
+    node: &MonitorNode,
+    host_overrides: &HashMap<String, String>,
+    suffix: &str,
+) -> Result<String, String> {
+    let base = agent_endpoint_for_node(node, host_overrides).ok_or_else(|| {
+        format!(
+            "No management endpoint is configured for {}.",
+            node.node_slot_id
+        )
+    })?;
+    let mut url = Url::parse(&base)
+        .map_err(|_| format!("Invalid management endpoint for {}.", node.node_slot_id))?;
+    let (path_suffix, query) = suffix
+        .split_once('?')
+        .map_or((suffix, None), |(path, query)| (path, Some(query)));
+    url.set_path(&format!(
+        "/v1/validator-operations/nodes/{}/{}",
+        node.node_slot_id, path_suffix
+    ));
+    url.set_query(query);
+    Ok(url.to_string())
+}
+
+fn validator_operations_agent_client() -> Result<Client, String> {
+    Client::builder()
+        .connect_timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| format!("Failed to create validator operations client: {error}"))
+}
+
+async fn validator_operations_agent_get<T: for<'de> Deserialize<'de>>(
+    node: &MonitorNode,
+    host_overrides: &HashMap<String, String>,
+    operator: &MonitorOperatorProfile,
+    suffix: &str,
+    scope: &str,
+) -> Result<T, String> {
+    let token = validator_operations_agent_token()?;
+    let url = validator_operations_agent_url(node, host_overrides, suffix)?;
+    let response = validator_operations_agent_client()?
+        .get(url)
+        .bearer_auth(token)
+        .header("x-synergy-operator-id", &operator.operator_id)
+        .header("x-synergy-operator-scopes", scope)
+        .send()
+        .await
+        .map_err(|error| {
+            format!(
+                "Validator operations agent unavailable for {}: {error}",
+                node.node_slot_id
+            )
+        })?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Validator operations agent returned {} for {}.",
+            response.status(),
+            node.node_slot_id
+        ));
+    }
+    response.json::<T>().await.map_err(|error| {
+        format!(
+            "Invalid validator operations response for {}: {error}",
+            node.node_slot_id
+        )
+    })
+}
+
+async fn validator_operations_agent_post<B: Serialize, T: for<'de> Deserialize<'de>>(
+    node: &MonitorNode,
+    host_overrides: &HashMap<String, String>,
+    operator: &MonitorOperatorProfile,
+    suffix: &str,
+    scope: &str,
+    body: &B,
+) -> Result<T, String> {
+    let token = validator_operations_agent_token()?;
+    let url = validator_operations_agent_url(node, host_overrides, suffix)?;
+    let response = validator_operations_agent_client()?
+        .post(url)
+        .bearer_auth(token)
+        .header("x-synergy-operator-id", &operator.operator_id)
+        .header("x-synergy-operator-scopes", scope)
+        .json(body)
+        .send()
+        .await
+        .map_err(|error| {
+            format!(
+                "Validator operations agent unavailable for {}: {error}",
+                node.node_slot_id
+            )
+        })?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Validator operations agent returned {} for {}.",
+            response.status(),
+            node.node_slot_id
+        ));
+    }
+    response.json::<T>().await.map_err(|error| {
+        format!(
+            "Invalid validator operations response for {}: {error}",
+            node.node_slot_id
+        )
+    })
+}
+
+async fn validator_operations_context() -> Result<
+    (
+        Vec<MonitorNode>,
+        HashMap<String, String>,
+        MonitorOperatorProfile,
+    ),
+    String,
+> {
+    let inventory_path = resolve_inventory_path()?;
+    let nodes = load_inventory_nodes(&inventory_path)?;
+    let mut host_overrides = load_hosts_overrides(&inventory_path);
+    augment_host_overrides_with_runtime_placements(&mut host_overrides).await;
+    let operator = resolve_active_operator(&load_security_config()?)?;
+    Ok((nodes, host_overrides, operator))
+}
+
+pub async fn monitor_validator_operations_cluster_status(
+) -> Result<ValidatorOperationsClusterStatus, String> {
+    let (nodes, host_overrides, operator) = validator_operations_context().await?;
+    let validators = validator_operations_nodes(&nodes);
+    if validators.len() != 5 {
+        return Err(format!(
+            "Expected five validator inventory entries, discovered {}.",
+            validators.len()
+        ));
+    }
+    let futures = validators.iter().map(|node| {
+        validator_operations_agent_get::<ValidatorOperationsStatus>(
+            node,
+            &host_overrides,
+            &operator,
+            "status",
+            "validator.operations.read",
+        )
+    });
+    let results = join_all(futures).await;
+    let mut statuses = Vec::new();
+    let mut unavailable = Vec::new();
+    for (node, result) in validators.iter().zip(results) {
+        match result {
+            Ok(status) => statuses.push(status),
+            Err(_) => unavailable.push(node.node_slot_id.clone()),
+        }
+    }
+    Ok(aggregate_validator_statuses(statuses, unavailable))
+}
+
+pub async fn monitor_validator_operations_status(
+    node_slot_id: String,
+) -> Result<ValidatorOperationsStatus, String> {
+    let (nodes, host_overrides, operator) = validator_operations_context().await?;
+    let node = validator_operations_node(&nodes, &node_slot_id)?;
+    validator_operations_agent_get(
+        node,
+        &host_overrides,
+        &operator,
+        "status",
+        "validator.operations.read",
+    )
+    .await
+}
+
+pub async fn monitor_validator_operations_preflight(
+    node_slot_id: String,
+) -> Result<HostPreflightStatus, String> {
+    let (nodes, host_overrides, operator) = validator_operations_context().await?;
+    let node = validator_operations_node(&nodes, &node_slot_id)?;
+    validator_operations_agent_get(
+        node,
+        &host_overrides,
+        &operator,
+        "preflight",
+        "validator.operations.read",
+    )
+    .await
+}
+
+pub async fn monitor_validator_operations_logs(
+    node_slot_id: String,
+    limit: Option<usize>,
+) -> Result<StructuredLogsResponse, String> {
+    let (nodes, host_overrides, operator) = validator_operations_context().await?;
+    let node = validator_operations_node(&nodes, &node_slot_id)?;
+    let suffix = format!("logs?limit={}", limit.unwrap_or(200).clamp(1, 500));
+    validator_operations_agent_get(
+        node,
+        &host_overrides,
+        &operator,
+        &suffix,
+        "validator.operations.read",
+    )
+    .await
+}
+
+pub async fn monitor_validator_operations_lifecycle(
+    node_slot_id: String,
+    request: ValidatorLifecycleRequest,
+) -> Result<ValidatorLifecycleResult, String> {
+    let (nodes, host_overrides, operator) = validator_operations_context().await?;
+    let node = validator_operations_node(&nodes, &node_slot_id)?;
+    let action = request.action.as_nodectl_action();
+    if !role_allows_control(&operator.role, action) {
+        append_audit_event(
+            json!({"event_type":"validator.operations.lifecycle.denied","operator_id":operator.operator_id,"node_slot_id":node.node_slot_id,"action":action,"timestamp_utc":Utc::now().to_rfc3339()}),
+        )?;
+        return Err(format!(
+            "RBAC denied: role '{}' cannot execute action '{}'",
+            operator.role, action
+        ));
+    }
+    append_audit_event(
+        json!({"event_type":"validator.operations.lifecycle.authorized","operator_id":operator.operator_id,"node_slot_id":node.node_slot_id,"action":action,"timestamp_utc":Utc::now().to_rfc3339()}),
+    )?;
+    let result = validator_operations_agent_post(
+        node,
+        &host_overrides,
+        &operator,
+        "control",
+        "validator.operations.control",
+        &request,
+    )
+    .await;
+    append_audit_event(
+        json!({"event_type":"validator.operations.lifecycle.completed","operator_id":operator.operator_id,"node_slot_id":node.node_slot_id,"action":action,"success":result.is_ok(),"timestamp_utc":Utc::now().to_rfc3339()}),
+    )?;
+    result
+}
+
+pub async fn monitor_validator_operations_snapshot(
+    node_slot_id: String,
+) -> Result<DiagnosticSnapshotResult, String> {
+    let (nodes, host_overrides, operator) = validator_operations_context().await?;
+    let node = validator_operations_node(&nodes, &node_slot_id)?;
+    if !role_allows_control(&operator.role, "export_logs") {
+        append_audit_event(
+            json!({"event_type":"validator.operations.snapshot.denied","operator_id":operator.operator_id,"node_slot_id":node.node_slot_id,"timestamp_utc":Utc::now().to_rfc3339()}),
+        )?;
+        return Err(
+            "RBAC denied: diagnostic snapshot capture requires node-control permission."
+                .to_string(),
+        );
+    }
+    append_audit_event(
+        json!({"event_type":"validator.operations.snapshot.authorized","operator_id":operator.operator_id,"node_slot_id":node.node_slot_id,"timestamp_utc":Utc::now().to_rfc3339()}),
+    )?;
+    let result = validator_operations_agent_post(
+        node,
+        &host_overrides,
+        &operator,
+        "diagnostic-snapshots",
+        "validator.operations.snapshot",
+        &json!({}),
+    )
+    .await;
+    append_audit_event(
+        json!({"event_type":"validator.operations.snapshot.completed","operator_id":operator.operator_id,"node_slot_id":node.node_slot_id,"success":result.is_ok(),"timestamp_utc":Utc::now().to_rfc3339()}),
+    )?;
+    result
+}
+
 pub async fn monitor_update_local_agent_from_context(
     node_slot_id: String,
     app_context: &AppContext,
@@ -2120,9 +2432,10 @@ mod terminal_command_tests {
         physical_machine_for_binding_target, preferred_control_plane_host,
         preferred_public_inventory_host, resolve_host_override, resolve_inventory_path,
         split_command_arguments, validator_cluster_count, validator_largest_cluster_size,
-        validator_network_cluster_quorum_threshold, validator_quorum_threshold,
-        validator_vpn_identity_for_monitor_node, validator_vpn_monitor_coordinator_url,
-        MonitorNode, DEFAULT_VALIDATOR_VPN_COORDINATOR_URL, MONITOR_WORKSPACE_ENV,
+        validator_network_cluster_quorum_threshold, validator_operations_nodes,
+        validator_quorum_threshold, validator_vpn_identity_for_monitor_node,
+        validator_vpn_monitor_coordinator_url, MonitorNode, DEFAULT_VALIDATOR_VPN_COORDINATOR_URL,
+        MONITOR_WORKSPACE_ENV,
     };
     use crate::app_context::AppContext;
     use once_cell::sync::Lazy;
@@ -2255,8 +2568,8 @@ mod terminal_command_tests {
     #[test]
     fn validator_quorum_threshold_matches_cluster_policy() {
         assert_eq!(validator_quorum_threshold(0), 0);
-        assert_eq!(validator_quorum_threshold(5), 3);
-        assert_eq!(validator_quorum_threshold(6), 4);
+        assert_eq!(validator_quorum_threshold(5), 4);
+        assert_eq!(validator_quorum_threshold(6), 5);
         assert_eq!(validator_quorum_threshold(7), 5);
     }
 
@@ -2264,13 +2577,13 @@ mod terminal_command_tests {
     fn validator_network_quorum_uses_largest_balanced_cluster() {
         for (validators, clusters, largest_cluster, quorum) in [
             (0, 0, 0, 0),
-            (6, 1, 6, 4),
-            (9, 1, 9, 6),
-            (10, 2, 5, 3),
+            (6, 1, 6, 5),
+            (9, 1, 9, 7),
+            (10, 2, 5, 4),
             (15, 2, 8, 6),
             (20, 2, 10, 7),
             (21, 3, 7, 5),
-            (27, 3, 9, 6),
+            (27, 3, 9, 7),
             (28, 4, 7, 5),
             (29, 4, 8, 6),
             (35, 5, 7, 5),
@@ -2320,6 +2633,34 @@ mod terminal_command_tests {
             node_address: None,
             physical_machine_id: node_name,
         }
+    }
+
+    #[test]
+    fn validator_operations_discovery_selects_exactly_five_consensus_validators() {
+        let mut nodes = (2..=6)
+            .map(|slot| {
+                let mut node = monitor_vpn_test_node("validator", slot);
+                node.role_group = "consensus".to_string();
+                node.node_type = "validator".to_string();
+                node
+            })
+            .collect::<Vec<_>>();
+        nodes.push(monitor_vpn_test_node("relayer", 1));
+        let selected = validator_operations_nodes(&nodes);
+        assert_eq!(selected.len(), 5);
+        assert_eq!(
+            selected
+                .iter()
+                .map(|node| node.node_slot_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "validator-2",
+                "validator-3",
+                "validator-4",
+                "validator-5",
+                "validator-6"
+            ]
+        );
     }
 
     #[test]

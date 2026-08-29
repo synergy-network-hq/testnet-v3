@@ -48,21 +48,22 @@ test('epoch windows preserve inclusive block ranges', () => {
 
 test('cluster quorum matches canonical five, six, and seven member policy', () => {
   assert.equal(validatorClusterQuorumThreshold(0), 0);
-  assert.equal(validatorClusterQuorumThreshold(5), 3);
-  assert.equal(validatorClusterQuorumThreshold(6), 4);
+  assert.equal(validatorClusterQuorumThreshold(0.5), 0);
+  assert.equal(validatorClusterQuorumThreshold(5), 4);
+  assert.equal(validatorClusterQuorumThreshold(6), 5);
   assert.equal(validatorClusterQuorumThreshold(7), 5);
 });
 
 test('network quorum is derived from balanced cluster size, not total validators', () => {
   for (const [validators, clusters, largestCluster, quorum] of [
     [0, 0, 0, 0],
-    [6, 1, 6, 4],
-    [9, 1, 9, 6],
-    [10, 2, 5, 3],
+    [6, 1, 6, 5],
+    [9, 1, 9, 7],
+    [10, 2, 5, 4],
     [15, 2, 8, 6],
     [20, 2, 10, 7],
     [21, 3, 7, 5],
-    [27, 3, 9, 6],
+    [27, 3, 9, 7],
     [28, 4, 7, 5],
     [29, 4, 8, 6],
     [35, 5, 7, 5],
