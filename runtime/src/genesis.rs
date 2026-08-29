@@ -209,6 +209,18 @@ fn load_canonical_genesis_from_disk() -> Result<GenesisDocument, String> {
 fn load_canonical_genesis_from_path(path: PathBuf) -> Result<GenesisDocument, String> {
     let bytes = fs::read(&path)
         .map_err(|error| format!("read canonical genesis {}: {error}", path.display()))?;
+    if path.extension().and_then(|extension| extension.to_str()) == Some("sgen") {
+        let verified = crate::sgen::verify_sgen_bytes(&bytes)
+            .map_err(|error| format!("verify canonical SGEN {}: {error}", path.display()))?;
+        let mut document = load_canonical_genesis_from_value(verified.reconstructed_document, path)?;
+        // The SGEN payload identity is the canonical Genesis hash. The
+        // internally reconstructed legacy document retains its own integrity
+        // hash only to validate the fields it supplies during the migration.
+        document.genesis_hash = verified.genesis_hash;
+        let caip2 = required_string(&document.value, &["network_identity", "canonical_caip2", "value"])?;
+        document.network_magic_bytes = network_magic_bytes_for(&caip2, &document.genesis_hash);
+        return Ok(document);
+    }
     let value: Value = serde_json::from_slice(&bytes)
         .map_err(|error| format!("parse canonical genesis {}: {error}", path.display()))?;
 

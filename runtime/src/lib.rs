@@ -38,6 +38,7 @@ pub mod rewards;
 pub mod role_profiles;
 pub mod role_runtime;
 pub mod rpc;
+pub mod sgen;
 pub mod snts_registry;
 pub mod sts;
 pub mod sxcp;

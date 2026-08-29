@@ -15,8 +15,10 @@ use std::io::Write;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use synergy_testnet::execution::{ExecutionState, GenesisExecutionSnapshot};
+use synergy_testnet::genesis::load_genesis_from_path;
 use synergy_testnet::genesis_deployment::*;
 use synergy_testnet::posy_simplified_parameters::POSY_SIMPLIFIED_FRESH_GENESIS_BOUNDARY;
+use synergy_testnet::sgen::{compile_sgen, payload_from_finalized_document, verify_sgen_file, SgenAuthoritySigner};
 use synergy_testnet::synq_execution::SynQContractArtifact;
 use zeroize::Zeroize;
 
@@ -825,8 +827,136 @@ fn require_new_empty_output_dir(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// `inspect` and `verify` are intentionally part of the ceremony binary so
+/// operators do not need a second Genesis tool or a JSON sidecar to explain a
+/// binary canonical Genesis.
+fn run_sgen_inspection(args: &[String]) -> Result<(), String> {
+    let command = args.first().map(String::as_str).unwrap_or_default();
+    if command != "inspect" && command != "verify" {
+        return Err("unknown SGEN command".to_string());
+    }
+    let path = args.get(1).filter(|value| !value.starts_with("--"))
+        .map(PathBuf::from)
+        .ok_or_else(|| format!("usage: synergy-genesis-ceremony {command} <genesis.sgen> [--json] [--execute-h0]"))?;
+    let mut json_output = false;
+    let mut execute_h0 = false;
+    for argument in &args[2..] {
+        match argument.as_str() {
+            "--json" => json_output = true,
+            "--execute-h0" if command == "verify" => execute_h0 = true,
+            _ => return Err(format!("unknown {command} option {argument}")),
+        }
+    }
+    let verified = verify_sgen_file(&path)?;
+    if execute_h0 {
+        // The normal runtime loader independently verifies the SGEN and then
+        // replays the 9+27 signed operations through production admission and
+        // AIVM execution before accepting the expected roots.
+        load_genesis_from_path(&path)
+            .map_err(|error| format!("SGEN deterministic H0 execution failed: {error}"))?;
+    }
+    let document = &verified.reconstructed_document;
+    let validators = document.get("validators").and_then(Value::as_array).map(Vec::len).unwrap_or(0);
+    let identities = document.get("validators").and_then(Value::as_array).map(|entries| entries.iter().filter_map(|entry| entry.get("validator_id").and_then(Value::as_str)).collect::<Vec<_>>()).unwrap_or_default();
+    let report = json!({
+        "sgen_version": 1,
+        "genesis_hash": verified.genesis_hash,
+        "chain_id": verified.payload.chain_id,
+        "network_id": verified.payload.network_id,
+        "protocol_version": verified.payload.protocol_version,
+        "consensus_version": verified.payload.consensus_version,
+        "validator_count": validators,
+        "validator_identities": identities,
+        "target_block_time_ms": verified.payload.target_block_time_ms,
+        "parameter_root": verified.payload.parameter_root,
+        "membership_root": verified.payload.membership_root,
+        "h0_operation_count": verified.payload.h0_operations.len(),
+        "deployment_count": 9,
+        "initialization_count": 27,
+        "execution_state_root": verified.payload.expected_execution_state_root,
+        "aivm_state_root": verified.payload.expected_aivm_state_root,
+        "receipt_root": verified.payload.expected_receipt_root,
+        "authority_approval": "PASS",
+        "execute_h0": if execute_h0 { "PASS" } else { "NOT_REQUESTED" }
+    });
+    if json_output {
+        println!("{}", serde_json::to_string(&report).map_err(|error| format!("render SGEN inspection: {error}"))?);
+    } else {
+        println!("SGEN_VERSION=1");
+        println!("GENESIS_HASH={}", report["genesis_hash"].as_str().unwrap_or_default());
+        println!("CHAIN_ID={}", report["chain_id"]);
+        println!("NETWORK_ID={}", report["network_id"].as_str().unwrap_or_default());
+        println!("VALIDATOR_COUNT={validators}");
+        println!("TARGET_BLOCK_TIME_MS={}", report["target_block_time_ms"]);
+        println!("H0_OPERATION_COUNT=36");
+        println!("DEPLOYMENTS=9");
+        println!("INITIALIZATION_CALLS=27");
+        println!("SGEN_AUTHORITY_PASS=YES");
+        println!("EXECUTE_H0={}", report["execute_h0"].as_str().unwrap_or_default());
+    }
+    Ok(())
+}
+
+/// Completes the same three-authority ceremony over an already-finalized JSON
+/// authoring document. JSON is an authoring input only: the no-clobber output
+/// is the single runtime `genesis.sgen` artifact and carries the signed H0
+/// operations itself.
+fn run_sign_sgen(args: &[String]) -> Result<(), String> {
+    let mut authorities_file = None;
+    let mut identity_root = None;
+    let mut engine_binary = None;
+    let mut engine_sha256 = None;
+    let mut genesis_json = None;
+    let mut output = None;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--authorities-file" => { authorities_file = Some(parse_path_argument(args, index, "--authorities-file")?); index += 2; }
+            "--identity-root" => { identity_root = Some(parse_path_argument(args, index, "--identity-root")?); index += 2; }
+            "--address-engine-binary" => { engine_binary = Some(parse_path_argument(args, index, "--address-engine-binary")?); index += 2; }
+            "--address-engine-sha256" => { let value = args.get(index + 1).ok_or_else(|| "--address-engine-sha256 requires a value".to_string())?; require_sha256(value, "--address-engine-sha256")?; engine_sha256 = Some(value.clone()); index += 2; }
+            "--genesis-json" => { genesis_json = Some(parse_path_argument(args, index, "--genesis-json")?); index += 2; }
+            "--output" => { output = Some(parse_path_argument(args, index, "--output")?); index += 2; }
+            other => return Err(format!("unknown sign-sgen option {other}")),
+        }
+    }
+    let (authorities_file, identity_root, engine_binary, engine_sha256, genesis_json, output) = match (authorities_file, identity_root, engine_binary, engine_sha256, genesis_json, output) {
+        (Some(authorities_file), Some(identity_root), Some(engine_binary), Some(engine_sha256), Some(genesis_json), Some(output)) => (authorities_file, identity_root, engine_binary, engine_sha256, genesis_json, output),
+        _ => return Err("usage: synergy-genesis-ceremony sign-sgen --authorities-file FILE --identity-root DIR --address-engine-binary FILE --address-engine-sha256 SHA256 --genesis-json FINALIZED.json --output genesis.sgen".to_string()),
+    };
+    if output.exists() { return Err(format!("refusing to overwrite existing SGEN {}", output.display())); }
+    verify_engine_binary(&engine_binary, &engine_sha256)?;
+    let frozen = read_json(&authorities_file)?;
+    if frozen["chain_id"] != json!(1266) || frozen["network_id"] != json!("testnet") || frozen["authority_count"] != json!(3) {
+        return Err("SGEN signing requires the frozen three-authority Testnet-v3 record".to_string());
+    }
+    let mut deployer = unlock(&engine_binary, &identity_root, DEPLOYER, &frozen)?;
+    let mut governance = unlock(&engine_binary, &identity_root, GOVERNANCE, &frozen)?;
+    let mut registry = unlock(&engine_binary, &identity_root, REGISTRY, &frozen)?;
+    let payload = payload_from_finalized_document(&read_json(&genesis_json)?)?;
+    let signers = vec![
+        SgenAuthoritySigner { role: DEPLOYER.to_string(), identity_address: deployer.account_address, public_key: deployer.public_key, private_key: deployer.private_key.take() },
+        SgenAuthoritySigner { role: GOVERNANCE.to_string(), identity_address: governance.account_address, public_key: governance.public_key, private_key: governance.private_key.take() },
+        SgenAuthoritySigner { role: REGISTRY.to_string(), identity_address: registry.account_address, public_key: registry.public_key, private_key: registry.private_key.take() },
+    ];
+    let bytes = compile_sgen(payload, &signers)?;
+    if let Some(parent) = output.parent() { std::fs::create_dir_all(parent).map_err(|error| format!("create SGEN output directory: {error}"))?; }
+    std::fs::write(&output, bytes).map_err(|error| format!("write {}: {error}", output.display()))?;
+    #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o600)).map_err(|error| format!("restrict {}: {error}", output.display()))?; }
+    run_sgen_inspection(&["verify".to_string(), output.to_string_lossy().to_string()])?;
+    println!("COMPLETE=SGEN_GENERATED");
+    Ok(())
+}
+
 fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if matches!(args.first().map(String::as_str), Some("inspect") | Some("verify")) {
+        return run_sgen_inspection(&args);
+    }
+    if args.first().map(String::as_str) == Some("sign-sgen") {
+        reject_non_interactive_passphrases(&args)?;
+        return run_sign_sgen(&args);
+    }
     reject_non_interactive_passphrases(&args)?;
     let CeremonyOptions {
         authorities_file,
