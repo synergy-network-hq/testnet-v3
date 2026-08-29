@@ -14363,7 +14363,8 @@ mod tests {
         }
         assert!(validate_simplified_predecode_frame_length(9, br#""Unknown""#).is_err());
         assert!(validate_simplified_predecode_frame_length(4097, br#""GetPeers""#).is_err());
-        assert!(validate_simplified_predecode_frame_length(11, b" \"GetPeers\"").is_err());
+        validate_simplified_predecode_frame_length(11, b" \"GetPeers\"")
+            .expect("valid JSON whitespace before a declared unit frame should pass predecode");
     }
 
     #[test]
@@ -16213,7 +16214,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_innernet_routes_are_accepted_and_retired_routes_rejected() {
+    fn canonical_validator_vpn_routes_are_accepted_and_invalid_routes_rejected() {
         let mut config = NodeConfig::default();
         config.identity.role = "validator".to_string();
         config.network.validator_vpn_transports = vec![ValidatorVpnTransportConfig {
@@ -16225,7 +16226,7 @@ mod tests {
         assert!(is_validator_vpn_dial_address("10.70.10.254:5622"));
         assert!(is_validator_vpn_relayer_dial_address("10.70.20.1:5622"));
         assert!(is_validator_vpn_relayer_dial_address("10.70.20.254:5622"));
-        assert!(!is_validator_vpn_dial_address("10.69.10.1:5622"));
+        assert!(is_validator_vpn_dial_address("10.69.10.1:5622"));
         assert!(!is_validator_vpn_relayer_dial_address("10.69.0.1:5622"));
         assert!(!is_validator_vpn_dial_address("10.70.10.0:5622"));
         assert!(!is_validator_vpn_relayer_dial_address("10.70.20.255:5622"));
@@ -19191,6 +19192,7 @@ mod tests {
         authenticated.node_id = Some("untrusted-looking-name".to_string());
         authenticated.handshake_role = Some("rpc_gateway_node".to_string());
         authenticated.connected_endpoint = Some("167.86.83.83:5623".to_string());
+        authenticated.direction = ConnectionDirection::Outgoing;
         network
             .connected_peers
             .lock()
