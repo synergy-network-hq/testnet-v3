@@ -2466,6 +2466,7 @@ mod tests {
         ))
         .expect("decode registry SynQ address");
         let later = test_validator(5);
+        let mut replay_operations = Vec::new();
         call_one(
             &mut state,
             &staged_artifact(GenesisContract::ValidatorRegistry),
@@ -2483,6 +2484,8 @@ mod tests {
             ],
             &authorities.validator_registry_authority_key,
             50,
+            GenesisExecutionAuthorization::Production,
+            &mut replay_operations,
         )
         .expect("a sixth validator is admitted under the unbounded policy");
         assert_eq!(
