@@ -1,0 +1,572 @@
+name: Chain 1266 Immutable Role Release
+
+on:
+  push:
+    tags:
+      - "chain1266-v20.0.0-rc.*"
+
+concurrency:
+  group: chain1266-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  CARGO_BUILD_JOBS: "2"
+
+jobs:
+  resolve-signed-tag:
+    name: Resolve signed tag and dependency lock
+    runs-on: ubuntu-22.04
+    outputs:
+      release_id: ${{ steps.identity.outputs.release_id }}
+      testnet_revision: ${{ steps.identity.outputs.testnet_revision }}
+      synq_revision: ${{ steps.identity.outputs.synq_revision }}
+      aegis_revision: ${{ steps.identity.outputs.aegis_revision }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: identity
+        name: Verify signed tag and resolve immutable source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF_TYPE" == "tag" ]]
+          [[ "$GITHUB_REF_NAME" =~ ^chain1266-v20\.0\.0-rc\.([0-9]+)$ ]] || {
+            echo "Tag must match chain1266-v20.0.0-rc.N" >&2
+            exit 1
+          }
+          release_number="${BASH_REMATCH[1]}"
+          git cat-file -t "$GITHUB_REF_NAME" | grep -qx tag || {
+            echo "Chain 1266 release tags must be annotated tags." >&2
+            exit 1
+          }
+          git config gpg.format ssh
+          git config gpg.ssh.allowedSignersFile \
+            "$GITHUB_WORKSPACE/launch/CHAIN_1266_RELEASE_SIGNERS"
+          git verify-tag "$GITHUB_REF_NAME"
+          testnet_revision="$(git rev-list -n 1 "$GITHUB_REF_NAME")"
+          [[ "$testnet_revision" == "$GITHUB_SHA" ]]
+          runtime_version="$(awk -F'"' '/^version = / { print $2; exit }' runtime/src/Cargo.toml)"
+          [[ "$runtime_version" == "20.0.0" ]]
+
+          lock=launch/CHAIN_1266_DEPENDENCIES.lock.json
+          jq -e '.schema_version == 1' "$lock" >/dev/null
+          synq_revision="$(jq -er '.synq.revision' "$lock")"
+          aegis_revision="$(jq -er '.aegis.revision' "$lock")"
+          [[ "$synq_revision" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$aegis_revision" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse "${GITHUB_SHA}:runtime/aegis-pqvm")" == "$aegis_revision" ]]
+
+          echo "release_id=chain1266-incarnation-4-rc${release_number}" >>"$GITHUB_OUTPUT"
+          echo "testnet_revision=$testnet_revision" >>"$GITHUB_OUTPUT"
+          echo "synq_revision=$synq_revision" >>"$GITHUB_OUTPUT"
+          echo "aegis_revision=$aegis_revision" >>"$GITHUB_OUTPUT"
+
+  ring1:
+    name: Ring 1 deterministic fault matrix
+    needs: resolve-signed-tag
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout locked SynQ source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+          SYNQ_REVISION: ${{ needs.resolve-signed-tag.outputs.synq_revision }}
+        run: |
+          set -euo pipefail
+          synq_root="${GITHUB_WORKSPACE}/../synq-language"
+          auth=()
+          if [[ -n "${GH_TOKEN:-}" ]]; then
+            header="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+            auth=(-c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${header}")
+          fi
+          git init --quiet "$synq_root"
+          git -C "$synq_root" remote add origin https://github.com/synergy-network-hq/synq-language.git
+          git -C "$synq_root" "${auth[@]}" fetch --depth 1 origin "$SYNQ_REVISION"
+          git -C "$synq_root" checkout --detach --quiet FETCH_HEAD
+          git -C "$synq_root" "${auth[@]}" submodule update --init --recursive
+          [[ "$(git -C "$synq_root" rev-parse HEAD)" == "$SYNQ_REVISION" ]]
+          expected_submodule="$(jq -er '.synq.submodules["aegis-pqsynq"]' launch/CHAIN_1266_DEPENDENCIES.lock.json)"
+          [[ "$(git -C "$synq_root/aegis-pqsynq" rev-parse HEAD)" == "$expected_submodule" ]]
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang cmake pkg-config libssl-dev
+
+      - name: Run complete Ring 1 matrix
+        env:
+          CHAIN1266_QUALIFICATION_REPORT_DIR: ${{ runner.temp }}/chain1266-ring1
+        run: scripts/chain1266/run-ring1-fault-matrix.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chain1266-ring1-${{ needs.resolve-signed-tag.outputs.release_id }}
+          if-no-files-found: error
+          path: ${{ runner.temp }}/chain1266-ring1
+
+  build-role-artifacts:
+    name: Build immutable role artifacts
+    needs:
+      - resolve-signed-tag
+      - ring1
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout locked SynQ source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+          SYNQ_REVISION: ${{ needs.resolve-signed-tag.outputs.synq_revision }}
+        run: |
+          set -euo pipefail
+          synq_root="${GITHUB_WORKSPACE}/../synq-language"
+          auth=()
+          if [[ -n "${GH_TOKEN:-}" ]]; then
+            header="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+            auth=(-c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${header}")
+          fi
+          git init --quiet "$synq_root"
+          git -C "$synq_root" remote add origin https://github.com/synergy-network-hq/synq-language.git
+          git -C "$synq_root" "${auth[@]}" fetch --depth 1 origin "$SYNQ_REVISION"
+          git -C "$synq_root" checkout --detach --quiet FETCH_HEAD
+          git -C "$synq_root" "${auth[@]}" submodule update --init --recursive
+          [[ "$(git -C "$synq_root" rev-parse HEAD)" == "$SYNQ_REVISION" ]]
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang cmake pkg-config libssl-dev
+
+      - name: Build all role-specific binaries from the resolved tag
+        shell: bash
+        env:
+          SYNERGY_TESTNET_V3_SOURCE_REVISION: ${{ needs.resolve-signed-tag.outputs.testnet_revision }}
+          SYNERGY_SYNQ_SOURCE_REVISION: ${{ needs.resolve-signed-tag.outputs.synq_revision }}
+          SYNERGY_AEGIS_SOURCE_REVISION: ${{ needs.resolve-signed-tag.outputs.aegis_revision }}
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --manifest-path runtime/Cargo.toml \
+            --package synergy-testnet \
+            --bin synergy-validator-node \
+            --bin synergy-relayer-node \
+            --bin synergy-observer-light-node \
+            --bin synergy-rpc-gateway-node \
+            --bin synergy-indexer-and-explorer-node \
+            --bin build-chain1266-desired-state \
+            --bin build-chain1266-private-ring-material \
+            --bin sign-chain1266-desired-state \
+            --bin sign-chain1266-start-command \
+            --bin verify-chain1266-release-authorization \
+            --bin testnet-v3-genesis-release-approval
+          out="$RUNNER_TEMP/chain1266-release"
+          mkdir -p "$out/bin" "$out/config"
+          for binary in \
+            synergy-validator-node \
+            synergy-relayer-node \
+            synergy-observer-light-node \
+            synergy-rpc-gateway-node \
+            synergy-indexer-and-explorer-node \
+            build-chain1266-desired-state \
+            build-chain1266-private-ring-material \
+            sign-chain1266-desired-state \
+            sign-chain1266-start-command \
+            verify-chain1266-release-authorization \
+            testnet-v3-genesis-release-approval
+          do
+            install -m 0755 "runtime/target/release/$binary" "$out/bin/$binary"
+            "$out/bin/$binary" --version >/dev/null 2>&1 || true
+          done
+          cp genesis.testnet-v3.identity-assigned.json "$out/genesis.json"
+          cp launch/production-genesis-ceremony/testnet-v3-genesis-release-approval.json \
+            "$out/genesis-release-approval.json"
+          cp launch/CHAIN_1266_DEPENDENCIES.lock.json "$out/dependencies.lock.json"
+          cp -R launch/chain1266-systemd "$out/systemd"
+          cp -R atlas "$out/atlas"
+          cp -R launch/production-node-configs/validators "$out/config/"
+          cp -R launch/production-node-configs/relayers "$out/config/"
+          cp -R launch/production-node-configs/rpc-gateway "$out/config/"
+          cp -R launch/production-node-configs/explorer-indexer "$out/config/"
+          cp -R launch/production-node-configs/observer "$out/config/"
+          "$out/bin/testnet-v3-genesis-release-approval" \
+            --verify \
+            --candidate launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json \
+            --authorities launch/TESTNET_V3_PRODUCTION_AUTHORITIES.json \
+            --approval launch/production-genesis-ceremony/testnet-v3-genesis-release-approval.json
+
+      - name: Refuse stale Genesis-bound configurations
+        shell: bash
+        run: |
+          set -euo pipefail
+          genesis_hash="$(jq -er '.integrity.genesis_hash' genesis.testnet-v3.identity-assigned.json)"
+          while IFS= read -r config; do
+            grep -Fq "genesis_hash = \"${genesis_hash}\"" "$config" || {
+              echo "Stale Genesis binding in $config" >&2
+              exit 1
+            }
+            grep -Fxq 'algorithm = "coordinated_round_robin_v1"' "$config" || {
+              echo "P1 consensus algorithm is missing from $config" >&2
+              exit 1
+            }
+            grep -Fxq 'mode = "coordinated_round_robin_v1"' "$config" || {
+              echo "P1 consensus mode is missing from $config" >&2
+              exit 1
+            }
+            grep -Fq 'coordinator_id = "validator-1"' "$config" || {
+              echo "P1 coordinator binding is missing from $config" >&2
+              exit 1
+            }
+          done < <(find launch/production-node-configs/{validators,relayers,rpc-gateway,explorer-indexer,observer} -type f -name '*.toml' -print)
+
+      - name: Generate exact desired-state manifest and checksums
+        shell: bash
+        env:
+          RELEASE_ID: ${{ needs.resolve-signed-tag.outputs.release_id }}
+          TESTNET_REVISION: ${{ needs.resolve-signed-tag.outputs.testnet_revision }}
+          SYNQ_REVISION: ${{ needs.resolve-signed-tag.outputs.synq_revision }}
+          AEGIS_REVISION: ${{ needs.resolve-signed-tag.outputs.aegis_revision }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/chain1266-release"
+          args=(
+            --release-id "$RELEASE_ID"
+            --release-tag "$GITHUB_REF_NAME"
+            --testnet-revision "$TESTNET_REVISION"
+            --synq-revision "$SYNQ_REVISION"
+            --aegis-revision "$AEGIS_REVISION"
+            --genesis "$out/genesis.json"
+            --start-authority launch/TESTNET_V3_CHAIN_START_AUTHORITY.json
+            --artifact "validator_node=$out/bin/synergy-validator-node"
+            --artifact "relayer_node=$out/bin/synergy-relayer-node"
+            --artifact "observer_light_node=$out/bin/synergy-observer-light-node"
+            --artifact "rpc_gateway_node=$out/bin/synergy-rpc-gateway-node"
+            --artifact "indexer_and_explorer_node=$out/bin/synergy-indexer-and-explorer-node"
+          )
+          for number in 1 2 3 4 5 6; do
+            args+=(--configuration "validator-node-0${number}=$out/config/validators/val${number}.toml")
+          done
+          for number in 1 2 3; do
+            args+=(--configuration "relay${number}=$out/config/relayers/relay${number}.toml")
+          done
+          args+=(--configuration "rpc-gateway=$out/config/rpc-gateway/rpc-gateway.toml")
+          args+=(--configuration "explorer-indexer=$out/config/explorer-indexer/explorer-indexer.toml")
+          args+=(--configuration "observer=$out/config/observer/observer.toml")
+          "$out/bin/build-chain1266-desired-state" "${args[@]}" \
+            --output "$out/desired-state.json"
+          desired_sha="$(sha256sum "$out/desired-state.json" | awk '{print $1}')"
+          approval_sha="$(sha256sum "$out/genesis-release-approval.json" | awk '{print $1}')"
+          genesis_hash="$(jq -er .integrity.genesis_hash "$out/genesis.json")"
+          network_magic="$(jq -er .network_magic_bytes.value "$out/genesis.json")"
+          jq -n \
+            --arg genesis_hash "$genesis_hash" \
+            --arg network_magic "$network_magic" \
+            --arg approval_sha "$approval_sha" \
+            --arg release_sha "$desired_sha" \
+            '{
+              schema_version:1,
+              chain_id:1266,
+              chain_incarnation:4,
+              network_id:"synergy-testnet-v3",
+              genesis_hash:$genesis_hash,
+              network_magic:$network_magic,
+              finalization:{
+                status:"final",
+                approval_sha256:$approval_sha,
+                release_sha256:$release_sha
+              },
+              endpoints:{
+                rpc:"https://testnet-core-rpc.synergy-network.io",
+                api:"https://testnet-atlas-api.synergy-network.io",
+                websocket:"wss://testnet-core-ws.synergy-network.io"
+              },
+              token_metadata:{source_url:"https://testnet-core-rpc.synergy-network.io",sha256:$release_sha},
+              validator_registry:{source_url:"https://testnet-core-rpc.synergy-network.io",sha256:$release_sha},
+              contracts:{source_url:"https://testnet-core-rpc.synergy-network.io",sha256:$release_sha},
+              fee_reward:{source_url:"https://testnet-core-rpc.synergy-network.io",sha256:$release_sha},
+              coordinated_round_robin:{
+                source_url:"https://testnet-core-rpc.synergy-network.io",
+                sha256:$release_sha,
+                mode:"coordinated_round_robin_v1",
+                coordinator_id:"validator-1",
+                producer_ids:["validator-2","validator-3","validator-4","validator-5","validator-6"],
+                producer_turn_timeout_ms:4000
+              }
+            }' >"$out/atlas-network.json"
+          node "$out/atlas/scripts/validate-network-config.mjs" \
+            "$out/atlas-network.json"
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: ${{ runner.temp }}/chain1266-release
+          format: cyclonedx-json
+          output-file: ${{ runner.temp }}/chain1266-release/SBOM.cdx.json
+
+      - name: Generate complete release checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/chain1266-release"
+          find "$out" -type f ! -name SHA256SUMS -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            | sed "s#  $out/#  #" >"$out/SHA256SUMS"
+
+      - name: Attest immutable release directory
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ runner.temp }}/chain1266-release/**
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chain1266-role-release-${{ needs.resolve-signed-tag.outputs.release_id }}
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 30
+          path: ${{ runner.temp }}/chain1266-release
+
+  ring2-private-qualification:
+    name: Ring 2 isolated preflight (not real-host qualification)
+    needs:
+      - resolve-signed-tag
+      - build-role-artifacts
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: atlas_chain1266
+          POSTGRES_USER: atlas_qualification
+          POSTGRES_PASSWORD: atlas_qualification
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U atlas_qualification -d atlas_chain1266"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install private-ring service and WireGuard dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iproute2 postgresql-client wireguard-tools
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: chain1266-role-release-${{ needs.resolve-signed-tag.outputs.release_id }}
+          path: ${{ runner.temp }}/chain1266-release
+
+      - name: Verify artifact attestation and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          (cd "$RUNNER_TEMP/chain1266-release" && sha256sum --check SHA256SUMS)
+          while IFS= read -r artifact; do
+            gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY"
+          done < <(find "$RUNNER_TEMP/chain1266-release/bin" -type f -perm -111 -print | sort)
+
+      - name: Run isolated six-validator qualification ring
+        env:
+          CHAIN1266_RELEASE_DIR: ${{ runner.temp }}/chain1266-release
+          CHAIN1266_QUALIFICATION_ROOT: ${{ runner.temp }}/chain1266-ring2
+          CHAIN1266_RING2_ATLAS_DATABASE_URL: postgresql://atlas_qualification:atlas_qualification@127.0.0.1:5432/atlas_chain1266
+        run: scripts/chain1266/run-ring2-private-qualification.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chain1266-ring2-${{ needs.resolve-signed-tag.outputs.release_id }}
+          if-no-files-found: error
+          retention-days: 30
+          path: ${{ runner.temp }}/chain1266-ring2/evidence
+
+  promote-qualified-release:
+    name: Bind immutable release to both qualification rings
+    needs:
+      - resolve-signed-tag
+      - ring1
+      - build-role-artifacts
+      - ring2-private-qualification
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: chain1266-role-release-${{ needs.resolve-signed-tag.outputs.release_id }}
+          path: ${{ runner.temp }}/role-release
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: chain1266-ring1-${{ needs.resolve-signed-tag.outputs.release_id }}
+          path: ${{ runner.temp }}/ring1
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: chain1266-ring2-${{ needs.resolve-signed-tag.outputs.release_id }}
+          path: ${{ runner.temp }}/ring2
+
+      - name: Verify complete qualification identity
+        shell: bash
+        env:
+          RELEASE_ID: ${{ needs.resolve-signed-tag.outputs.release_id }}
+          TESTNET_REVISION: ${{ needs.resolve-signed-tag.outputs.testnet_revision }}
+          SYNQ_REVISION: ${{ needs.resolve-signed-tag.outputs.synq_revision }}
+          AEGIS_REVISION: ${{ needs.resolve-signed-tag.outputs.aegis_revision }}
+        run: |
+          set -euo pipefail
+          (cd "$RUNNER_TEMP/role-release" && sha256sum --check SHA256SUMS)
+          (cd "$RUNNER_TEMP/ring1" && sha256sum --check SHA256SUMS)
+          (cd "$RUNNER_TEMP/ring2" && sha256sum --check SHA256SUMS)
+          jq -e \
+            --arg testnet "$TESTNET_REVISION" \
+            --arg synq "$SYNQ_REVISION" \
+            --arg aegis "$AEGIS_REVISION" \
+            '.result == "PASS"
+             and .consensus_mode == "coordinated_round_robin_v1"
+             and .cases_passed == 20
+             and .cases_total == 20
+             and (.case_ids | length) == 20
+             and .p1_invariants.coordinator_id == "validator-1"
+             and .p1_invariants.producer_ids == ["validator-2","validator-3","validator-4","validator-5","validator-6"]
+             and .p1_invariants.val1_is_not_a_normal_producer == true
+             and .p1_invariants.timeout_skips_producer_turn_not_height == true
+             and .p1_invariants.assignment_and_commit_signatures_required == true
+             and .p1_invariants.all_validators_execute_identically == true
+             and .p1_invariants.legacy_posy_qc_vc_tc_vote_aggregation_disabled == true
+             and .p1_invariants.durable_signing_and_restart_replay == true
+             and .p1_invariants.fresh_reset_requires_block_zero_genesis == true
+             and .p1_invariants.support_roles_verify_without_signing == true
+             and .source.testnet_v3_revision == $testnet
+             and .source.synq_revision == $synq
+             and .source.aegis_revision == $aegis' \
+            "$RUNNER_TEMP/ring1/report.json" >/dev/null
+          jq -e \
+            --arg release "$RELEASE_ID" \
+            '.result == "PASS"
+             and .operational_state == "STABLE"
+             and .release_id == $release
+             and .consensus_mode == "coordinated_round_robin_v1"
+             and .finalized_height >= 5000
+             and .validator_count == 6
+             and .p1.coordinator_id == "validator-1"
+             and .p1.producer_ids == ["validator-2","validator-3","validator-4","validator-5","validator-6"]
+             and .p1.strict_producer_rotation_verified == true
+             and .p1.val1_never_normal_producer_verified == true
+             and .p1.timeout_skips_turn_not_height_verified == true
+             and .p1.assignment_and_commit_signatures_verified == true
+             and .p1.all_validators_independently_execute_verified == true
+             and .p1.restart_rejoin_verified == true
+             and .p1.support_finality_replication_verified == true
+             and .p1.atlas_verified == true
+             and .wireguard_overlay == true
+             and .wireguard_credentials_disposable == true
+             and .qualification_environment == "six-real-validator-hosts"
+             and .canonical_systemd_unit == "synergy-chain1266-role@.service"
+             and .production_custody_material_used == false' \
+            "$RUNNER_TEMP/ring2/report.json" >/dev/null
+
+      - name: Assemble promotable release record
+        shell: bash
+        env:
+          RELEASE_ID: ${{ needs.resolve-signed-tag.outputs.release_id }}
+          TESTNET_REVISION: ${{ needs.resolve-signed-tag.outputs.testnet_revision }}
+          SYNQ_REVISION: ${{ needs.resolve-signed-tag.outputs.synq_revision }}
+          AEGIS_REVISION: ${{ needs.resolve-signed-tag.outputs.aegis_revision }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/chain1266-promotable"
+          mkdir -p "$out/release" "$out/qualification/ring1" "$out/qualification/ring2"
+          cp -R "$RUNNER_TEMP/role-release/." "$out/release/"
+          cp -R "$RUNNER_TEMP/ring1/." "$out/qualification/ring1/"
+          cp -R "$RUNNER_TEMP/ring2/." "$out/qualification/ring2/"
+          desired_sha="$(sha256sum "$out/release/desired-state.json" | awk '{print $1}')"
+          genesis_hash="$(jq -er '.chain.genesis_hash' "$out/release/desired-state.json")"
+          ring1_sha="$(sha256sum "$out/qualification/ring1/report.json" | awk '{print $1}')"
+          ring2_sha="$(sha256sum "$out/qualification/ring2/report.json" | awk '{print $1}')"
+          jq -n \
+            --arg release_id "$RELEASE_ID" \
+            --arg release_tag "$GITHUB_REF_NAME" \
+            --arg testnet_revision "$TESTNET_REVISION" \
+            --arg synq_revision "$SYNQ_REVISION" \
+            --arg aegis_revision "$AEGIS_REVISION" \
+            --arg desired_state_sha256 "$desired_sha" \
+            --arg genesis_hash "$genesis_hash" \
+            --arg ring1_report_sha256 "$ring1_sha" \
+            --arg ring2_report_sha256 "$ring2_sha" \
+            '{
+              schema_version:2,
+              result:"PROMOTABLE",
+              release_id:$release_id,
+              release_tag:$release_tag,
+              chain:{chain_id:1266,chain_incarnation:4},
+              consensus_mode:"coordinated_round_robin_v1",
+              genesis_hash:$genesis_hash,
+              source:{
+                testnet_v3_revision:$testnet_revision,
+                synq_revision:$synq_revision,
+                aegis_revision:$aegis_revision
+              },
+              desired_state_sha256:$desired_state_sha256,
+              qualification:{
+                ring1:{result:"PASS",cases:20,report_sha256:$ring1_report_sha256},
+                ring2:{result:"PASS",stable_height:5000,report_sha256:$ring2_report_sha256}
+              },
+              public_deployment_authorized:false,
+              governance_desired_state_signature_required:true
+            }' >"$out/release-qualification.json"
+          find "$out" -type f ! -name SHA256SUMS -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            | sed "s#  $out/#  #" >"$out/SHA256SUMS"
+
+      - name: Sign promotable release provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ runner.temp }}/chain1266-promotable/**
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chain1266-promotable-${{ needs.resolve-signed-tag.outputs.release_id }}
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 30
+          path: ${{ runner.temp }}/chain1266-promotable

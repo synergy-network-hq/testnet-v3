@@ -471,7 +471,9 @@ impl Transaction {
         gas_used: u64,
         base_fee_per_gas_nwei: u64,
     ) -> Result<crate::gas::NetworkFeeBreakdown, String> {
-        use crate::gas::{calculate_network_fee, FeeSchedule, NetworkFeeInput, TransactionFeeType};
+        use crate::gas::{
+            calculate_network_fee, fee_schedule_for_runtime, NetworkFeeInput, TransactionFeeType,
+        };
 
         let gas_fee_nwei = crate::gas::calculate_total_fee_nwei(gas_used, base_fee_per_gas_nwei)?;
         let (tx_type, asset_id, amount_raw, amount_snrgequivalent_nwei, valuation_status) =
@@ -496,8 +498,14 @@ impl Transaction {
                 gas_fee_nwei,
                 storage_fee_nwei: 0,
                 priority_fee_nwei: 0,
+                pq_gas_used: 0,
+                pq_gas_multiplier: 0,
+                effective_pq_gas_price_nwei: 0,
+                pq_execution_fee_nwei: 0,
+                fee_market_active: false,
+                fee_market_version: 0,
             },
-            &FeeSchedule::default(),
+            fee_schedule_for_runtime()?,
         )
     }
 
@@ -778,6 +786,22 @@ fn json_u128(value: &serde_json::Value) -> Option<u128> {
 mod tests {
     use super::*;
 
+    fn wallet_test_address(fill: u8) -> String {
+        crate::address::generate_wallet_address(&hex::encode(vec![
+            fill;
+            crate::address::FN_DSA_1024_PUBLIC_KEY_BYTES
+        ]))
+        .expect("canonical FN-DSA test root derives a wallet address")
+    }
+
+    fn validator_test_address(fill: u8) -> String {
+        crate::address::generate_class_based_address(
+            &vec![fill; crate::address::FN_DSA_1024_PUBLIC_KEY_BYTES],
+            1,
+        )
+        .expect("canonical FN-DSA test root derives a validator address")
+    }
+
     #[test]
     fn test_transaction_creation() {
         let tx = Transaction::new(
@@ -883,12 +907,12 @@ mod tests {
     }
 
     #[test]
-    fn admission_requires_testnet_context_and_real_pqc_signature() {
+    fn admission_rejects_unbound_operational_key_even_with_real_pqc_signature() {
         let mut manager = PQCManager::new();
         let (public_key, private_key) = manager
             .generate_keypair(PQCAlgorithm::MLDSA87)
             .expect("test keypair should generate");
-        let sender = crate::address::generate_wallet_address(&hex::encode(&public_key.key_data));
+        let sender = wallet_test_address(1);
         let mut tx = Transaction::new(
             sender,
             "receiver456".to_string(),
@@ -903,7 +927,10 @@ mod tests {
         tx.sign_with_public_key(&public_key, &private_key, &mut manager)
             .expect("test transaction should sign");
 
-        assert!(tx.validate_for_admission().is_valid);
+        assert!(
+            !tx.validate_for_admission().is_valid,
+            "an ML-DSA operational key must not be accepted as an FN-DSA address root"
+        );
 
         let mut wrong_chain = tx.clone();
         wrong_chain.chain_id = 999;
@@ -923,17 +950,17 @@ mod tests {
 
         let mut wrong_sender = missing_key;
         wrong_sender.signer_public_key = public_key.key_data;
-        wrong_sender.sender = crate::address::generate_wallet_address(&hex::encode([9u8; 32]));
+        wrong_sender.sender = wallet_test_address(9);
         assert!(!wrong_sender.validate_for_admission().is_valid);
     }
 
     #[test]
-    fn admission_allows_signed_zero_value_validator_activation() {
+    fn admission_rejects_unbound_operational_key_validator_activation() {
         let mut manager = PQCManager::new();
         let (public_key, private_key) = manager
             .generate_keypair(PQCAlgorithm::MLDSA87)
             .expect("test keypair should generate");
-        let sender = crate::address::generate_class_based_address(&public_key.key_data, 1);
+        let sender = validator_test_address(2);
         let mut tx = Transaction::new(
             sender.clone(),
             sender.clone(),
@@ -945,7 +972,7 @@ mod tests {
             Some(format!(
                 "validator_activation:{{\"validator\":\"{}\",\"public_key\":\"{}\",\"name\":\"Test Validator\",\"stake_amount_nwei\":50000000000000}}",
                 sender,
-                hex::encode(&public_key.key_data)
+                hex::encode(vec![2u8; crate::address::FN_DSA_1024_PUBLIC_KEY_BYTES])
             )),
             "mldsa87".to_string(),
         );
@@ -955,19 +982,19 @@ mod tests {
         let validation = tx.validate_for_admission();
 
         assert!(
-            validation.is_valid,
-            "validator activation admission failed: {:?}",
+            !validation.is_valid,
+            "validator activation must reject an unbound operational key: {:?}",
             validation.error_message
         );
     }
 
     #[test]
-    fn admission_allows_signed_zero_value_sts_payload() {
+    fn admission_rejects_unbound_operational_key_sts_payload() {
         let mut manager = PQCManager::new();
         let (public_key, private_key) = manager
             .generate_keypair(PQCAlgorithm::MLDSA87)
             .expect("test keypair should generate");
-        let sender = crate::address::generate_wallet_address(&hex::encode(&public_key.key_data));
+        let sender = wallet_test_address(3);
         let payload = crate::sts::StsSignedPayload::new(crate::sts::StsTx::CreateFungible(
             crate::sts::CreateFungibleParams {
                 class: crate::sts::TokenClass::B1BasicFungible,
@@ -1008,8 +1035,8 @@ mod tests {
         let validation = tx.validate_for_admission();
 
         assert!(
-            validation.is_valid,
-            "STS carrier admission failed: {:?}",
+            !validation.is_valid,
+            "STS payload must reject an unbound operational key: {:?}",
             validation.error_message
         );
     }
@@ -1038,22 +1065,12 @@ mod tests {
     }
 
     #[test]
-    fn aegis_carrier_transaction_validates_for_p2p_admission() {
-        let report = crate::aegis_tx_tool::sign_with_new_aegis_transaction_key(
+    fn aegis_transaction_builder_requires_identity_authorization_carrier() {
+        let error = crate::aegis_tx_tool::sign_with_new_aegis_transaction_key(
             crate::aegis_tx_tool::AegisTxBuildOptions::default(),
         )
-        .unwrap();
-
-        let validation = report.rpc_transaction.validate_for_admission();
-
-        assert!(
-            validation.is_valid,
-            "Aegis carrier admission failed: {:?}",
-            validation.error_message
-        );
-        assert!(crate::aegis_tx_tool::is_legacy_aegis_carrier_transaction(
-            &report.rpc_transaction
-        ));
+        .expect_err("unbound Aegis operational key must be rejected");
+        assert!(error.contains("identity authorization carrier"));
     }
 
     #[test]

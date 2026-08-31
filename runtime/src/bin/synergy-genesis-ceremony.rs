@@ -8,44 +8,45 @@
 //! Secrets live in memory for exactly as long as the deployment needs them and
 //! are zeroized on every exit path.
 
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::io::Write;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use synergy_testnet::address::derive_standard_account_address;
 use synergy_testnet::execution::{ExecutionState, GenesisExecutionSnapshot};
 use synergy_testnet::genesis_deployment::*;
+use synergy_testnet::posy_simplified_parameters::POSY_SIMPLIFIED_FRESH_GENESIS_BOUNDARY;
+use synergy_testnet::sgen::{
+    compile_sgen, compile_unsigned_sgen, payload_from_h0_evidence, verify_sgen_file,
+    verify_unsigned_sgen_file, verify_h0_execution, SgenAuthoritySigner,
+};
 use synergy_testnet::synq_execution::SynQContractArtifact;
+use zeroize::Zeroize;
 
 const DEPLOYER: &str = "SNRG-TESTNET-V3-GENESIS-DEPLOYER";
 const GOVERNANCE: &str = "SNRG-TESTNET-V3-GOVERNANCE-AUTHORITY";
 const REGISTRY: &str = "SNRG-TESTNET-V3-VALIDATOR-REGISTRY-AUTHORITY";
 const CONFIRMATION: &str = "EXECUTE TESTNET-V3 GENESIS";
-
 /// Best-effort wipe. Rust may still move a `Vec` before this runs, so the real
 /// guarantee is scope: nothing here is ever written to disk or printed.
 fn zeroize(buf: &mut Vec<u8>) {
-    for byte in buf.iter_mut() {
-        *byte = 0;
-    }
+    buf.zeroize();
     buf.clear();
     buf.shrink_to_fit();
 }
 
-fn zeroize_string(s: &mut String) {
-    unsafe {
-        for byte in s.as_bytes_mut().iter_mut() {
-            *byte = 0;
-        }
-    }
-    s.clear();
-    s.shrink_to_fit();
-}
-
 struct Secret(Vec<u8>);
+impl Secret {
+    fn take(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.0)
+    }
+}
 impl Drop for Secret {
     fn drop(&mut self) {
         zeroize(&mut self.0);
+        #[cfg(test)]
+        SECRET_DROP_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 impl std::fmt::Debug for Secret {
@@ -54,16 +55,140 @@ impl std::fmt::Debug for Secret {
     }
 }
 
-fn fail(message: &str) -> ! {
-    eprintln!("\n  CEREMONY ABORTED: {message}");
-    std::process::exit(1);
+#[derive(Deserialize)]
+struct RecoveredAuthorityDocument {
+    schema_version: String,
+    binary_encoding: String,
+    role_id: String,
+    algorithm: String,
+    private_key: String,
 }
 
-fn read_json(path: &Path) -> Value {
-    serde_json::from_slice(
-        &std::fs::read(path).unwrap_or_else(|e| fail(&format!("read {}: {e}", path.display()))),
-    )
-    .unwrap_or_else(|e| fail(&format!("parse {}: {e}", path.display())))
+impl Drop for RecoveredAuthorityDocument {
+    fn drop(&mut self) {
+        self.private_key.zeroize();
+    }
+}
+
+struct SecretGenesisAuthorities(GenesisAuthorities);
+
+impl Deref for SecretGenesisAuthorities {
+    type Target = GenesisAuthorities;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for SecretGenesisAuthorities {
+    fn drop(&mut self) {
+        zeroize(&mut self.0.genesis_deployer.private_key);
+        zeroize(&mut self.0.governance.private_key);
+        zeroize(&mut self.0.validator_registry_authority_key.private_key);
+    }
+}
+
+fn read_json(path: &Path) -> Result<Value, String> {
+    let bytes = std::fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    serde_json::from_slice(&bytes).map_err(|error| format!("parse {}: {error}", path.display()))
+}
+
+fn require_canonical_chain_tuple(value: &Value, label: &str) -> Result<(), String> {
+    for retired in [
+        "technical_network_id",
+        "runtime_network_id",
+        "network_slug",
+        "network_native_id",
+    ] {
+        if value.get(retired).is_some() {
+            return Err(format!("{label} contains retired network field {retired}"));
+        }
+    }
+    if value["chain_id"] != json!(1266)
+        || value["network_id"] != json!("testnet")
+        || value["release_id"] != json!("testnet-v3")
+    {
+        return Err(format!(
+            "{label} must bind chain_id 1266, network_id testnet, and release_id testnet-v3"
+        ));
+    }
+    Ok(())
+}
+
+fn require_clean_genesis_launch_profile(value: &Value) -> Result<(), String> {
+    let network = value
+        .get("network")
+        .ok_or_else(|| "source Genesis network is missing".to_string())?;
+    require_canonical_chain_tuple(network, "source Genesis network")?;
+    let consensus = value
+        .get("consensus")
+        .ok_or_else(|| "source Genesis consensus is missing".to_string())?;
+    if consensus["initial_active_validator_count"] != json!(5)
+        || consensus["min_validator_count"] != json!(5)
+        || consensus["min_quorum_threshold"] != json!(4)
+        || consensus["dynamic_validator_membership"] != json!(true)
+        || !consensus
+            .get("protocol_validator_count_cap")
+            .is_some_and(Value::is_null)
+        || consensus["initial_validator_ssh_aliases"]
+            != json!([
+                "synergy-val2",
+                "synergy-val3",
+                "synergy-val4",
+                "synergy-val5",
+                "synergy-val6"
+            ])
+    {
+        return Err(
+            "source Genesis is not the dynamic, uncapped, exact Val2-Val6 initial profile"
+                .to_string(),
+        );
+    }
+    let validators = value["validators"]
+        .as_array()
+        .ok_or_else(|| "source Genesis validators are missing".to_string())?;
+    if validators.len() != 5
+        || validators
+            .iter()
+            .any(|validator| validator["status"] != json!("active_at_genesis"))
+        || validators
+            .iter()
+            .map(|validator| validator["validator_id"].as_str())
+            .ne((2..=6).map(|slot| {
+                Some(match slot {
+                    2 => "validator-02",
+                    3 => "validator-03",
+                    4 => "validator-04",
+                    5 => "validator-05",
+                    6 => "validator-06",
+                    _ => unreachable!(),
+                })
+            }))
+    {
+        return Err("source Genesis does not contain exactly five active validators".to_string());
+    }
+    if contains_retired_identifier(value) {
+        return Err("source Genesis contains a retired chain identifier".to_string());
+    }
+    Ok(())
+}
+
+fn contains_retired_identifier(value: &Value) -> bool {
+    match value {
+        Value::Object(entries) => entries.iter().any(|(key, value)| {
+            key.to_ascii_lowercase().starts_with("synixn") || contains_retired_identifier(value)
+        }),
+        Value::Array(entries) => entries.iter().any(contains_retired_identifier),
+        Value::String(value) => {
+            let lower = value.to_ascii_lowercase();
+            lower.contains("synixn")
+                || lower.contains("posy-validator")
+                || matches!(value.as_str(), "posy/2.2" | "posy/v2.2" | "ProofOfSynergy")
+                || matches!(value.as_str(), "38658" | "48658" | "58658")
+                || value.starts_with("10.70.")
+        }
+        _ => false,
+    }
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -71,17 +196,17 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-fn file_checksum(path: &Path) -> String {
-    sha256_hex(
-        &std::fs::read(path).unwrap_or_else(|e| fail(&format!("read {}: {e}", path.display()))),
-    )
+fn file_checksum(path: &Path) -> Result<String, String> {
+    std::fs::read(path)
+        .map(|bytes| sha256_hex(&bytes))
+        .map_err(|error| format!("read {}: {error}", path.display()))
 }
 
 /// Rejects any attempt to supply a passphrase other than at the prompt.
-fn reject_non_interactive_passphrases(args: &[String]) {
+fn reject_non_interactive_passphrases(args: &[String]) -> Result<(), String> {
     for var in ["SYNERGY_PASSPHRASE", "SYNERGY_DECRYPT_PASSPHRASE"] {
         if std::env::var(var).is_ok() {
-            fail(&format!(
+            return Err(format!(
                 "{var} is set. Genesis ceremony passphrases must be entered interactively. Unset it and re-run."
             ));
         }
@@ -89,17 +214,22 @@ fn reject_non_interactive_passphrases(args: &[String]) {
     for arg in args {
         let lower = arg.to_ascii_lowercase();
         if lower.contains("passphrase") || lower.contains("password") {
-            fail("passphrases must never be supplied as command arguments");
+            return Err("passphrases must never be supplied as command arguments".to_string());
         }
     }
+    Ok(())
 }
 
 /// Checked immediately before the first prompt, so argument and mode errors
 /// surface without needing a terminal.
-fn require_terminal() {
+fn require_terminal() -> Result<(), String> {
     if !atty_stdin() {
-        fail("a terminal is required: genesis ceremony passphrases are entered without echo");
+        return Err(
+            "a terminal is required: genesis ceremony passphrases are entered without echo"
+                .to_string(),
+        );
     }
+    Ok(())
 }
 
 fn atty_stdin() -> bool {
@@ -116,30 +246,54 @@ fn atty_stdin() -> bool {
     }
 }
 
-/// Locates the Address Engine binary that owns the approved custody format.
-fn engine_binary() -> PathBuf {
-    if let Ok(explicit) = std::env::var("SYNERGY_KEYGEN_BIN") {
-        return PathBuf::from(explicit);
+fn require_sha256(value: &str, label: &str) -> Result<(), String> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(format!(
+            "{label} must be exactly 64 lowercase hex characters"
+        ));
     }
-    PathBuf::from(
-        "/Volumes/xcode/Synergy-Network-Projects/protocol-components/\
-synergy-address-engine/target/release/synergy-keygen",
-    )
+    Ok(())
+}
+
+fn verify_engine_binary(path: &Path, expected_sha256: &str) -> Result<String, String> {
+    require_sha256(expected_sha256, "approved Address Engine SHA-256")?;
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("inspect Address Engine {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        return Err("approved Address Engine path must be a regular non-symlink file".to_string());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err("approved Address Engine binary is not executable".to_string());
+        }
+        if metadata.permissions().mode() & 0o022 != 0 {
+            return Err(
+                "approved Address Engine binary must not be group- or world-writable".to_string(),
+            );
+        }
+    }
+
+    let actual = file_checksum(path)?;
+    if actual != expected_sha256 {
+        return Err(format!(
+            "approved Address Engine SHA-256 mismatch: expected {expected_sha256}, got {actual}"
+        ));
+    }
+    Ok(actual)
 }
 
 /// Runs `synergy-keygen decrypt --stdout`, inheriting the terminal so the
 /// passphrase prompt is the engine's own non-echoing prompt. Nothing secret is
 /// written to disk and the passphrase never reaches this process.
-fn decrypt_via_engine(enc_path: &Path, role: &str) -> Vec<u8> {
+fn decrypt_via_engine(engine: &Path, enc_path: &Path, role: &str) -> Result<Secret, String> {
     use std::process::{Command, Stdio};
-    let engine = engine_binary();
-    if !engine.exists() {
-        fail(&format!(
-            "Address Engine binary not found at {}. Set SYNERGY_KEYGEN_BIN.",
-            engine.display()
-        ));
-    }
-    let output = Command::new(&engine)
+    let mut output = Command::new(engine)
         .arg("decrypt")
         .arg(enc_path)
         .arg("--stdout")
@@ -147,107 +301,143 @@ fn decrypt_via_engine(enc_path: &Path, role: &str) -> Vec<u8> {
         .stderr(Stdio::inherit())
         .stdout(Stdio::piped())
         .output()
-        .unwrap_or_else(|e| fail(&format!("{role}: could not run the Address Engine: {e}")));
+        .map_err(|error| format!("{role}: could not run the Address Engine: {error}"))?;
+    // Guard stdout before examining the exit status: even a failing decryptor
+    // may have emitted a partial plaintext record.
+    let recovered = Secret(std::mem::take(&mut output.stdout));
     if !output.status.success() {
-        fail(&format!(
+        return Err(format!(
             "{role}: decryption failed (wrong passphrase or damaged custody file)"
         ));
     }
-    output.stdout
+    Ok(recovered)
 }
 
 struct Authority {
-    role: String,
     account_address: String,
     public_key: Vec<u8>,
     private_key: Secret,
+    identity_authorization: synergy_testnet::identity_auth::IdentityAuthorizationCarrier,
 }
 
 /// Decrypts one bundle and refuses to return until every public check passes.
-fn unlock(base: &Path, role: &str, frozen: &Value) -> Authority {
+fn unlock(
+    engine_binary: &Path,
+    base: &Path,
+    role: &str,
+    frozen: &Value,
+) -> Result<Authority, String> {
     let dir = base.join(role);
-    let manifest = read_json(&dir.join("manifest.json"));
-    let pubdoc = read_json(&dir.join("identity.pub.json"));
-    let corr = read_json(&dir.join("correspondence.json"));
-
-    if manifest["test_fixture"] != json!(false) {
-        fail(&format!(
-            "{role}: bundle is marked test_fixture and cannot sign a production genesis"
-        ));
-    }
-    if manifest["role_id"] != json!(role) {
-        fail(&format!("{role}: manifest role_id mismatch"));
-    }
-    if manifest["network_id"] != json!("synergy-testnet-v3")
-        || manifest["chain_id"] != json!(1266)
-        || manifest["environment"] != json!("testnet-v3")
-    {
-        fail(&format!("{role}: network / chain / environment mismatch"));
-    }
-    if manifest["algorithm"] != json!("ML-DSA-87") {
-        fail(&format!("{role}: algorithm is not ML-DSA-87"));
-    }
-
-    // Checksums over the public bundle.
-    let sums = std::fs::read_to_string(dir.join("SHA256SUMS"))
-        .unwrap_or_else(|e| fail(&format!("{role}: read SHA256SUMS: {e}")));
-    for line in sums.lines().filter(|l| !l.trim().is_empty()) {
-        let (digest, name) = line
-            .split_once("  ")
-            .unwrap_or_else(|| fail(&format!("{role}: malformed SHA256SUMS")));
-        if file_checksum(&dir.join(name)) != digest {
-            fail(&format!("{role}: checksum mismatch for {name}"));
-        }
-    }
+    let public_path = dir.join("identity.pub.json");
+    let binding_path = dir.join("genesis-authorization-binding.json");
+    let encrypted_path = dir.join("identity.enc.json");
+    let pubdoc = read_json(&public_path)?;
+    let binding_bytes = std::fs::read(&binding_path)
+        .map_err(|error| format!("{role}: read {}: {error}", binding_path.display()))?;
+    let binding: synergy_testnet::identity_auth::IdentityAuthorizationBinding =
+        serde_json::from_slice(&binding_bytes).map_err(|error| {
+            format!("{role}: genesis-authorization-binding.json is invalid: {error}")
+        })?;
+    let identity_authorization = synergy_testnet::identity_auth::IdentityAuthorizationCarrier::new(
+        synergy_testnet::identity_auth::GENESIS_CEREMONY_AUTHORIZATION_DOMAIN,
+        binding,
+    )
+    .map_err(|error| format!("{role}: authorization binding failed: {error}"))?;
 
     let expected_account = frozen["authorities"]
         .as_array()
-        .unwrap()
+        .ok_or_else(|| "frozen authority record is missing authorities array".to_string())?
         .iter()
         .find(|a| a["role_id"] == json!(role))
-        .unwrap_or_else(|| fail(&format!("{role}: absent from the frozen authority record")));
-    let expected_address = expected_account["standard_account_address"]
+        .ok_or_else(|| format!("{role}: absent from the frozen authority record"))?;
+    let expected_address = expected_account["identity_address"]
         .as_str()
-        .unwrap();
-    let expected_fingerprint = expected_account["public_key_fingerprint"].as_str().unwrap();
-
-    if expected_address.starts_with("tsynq") {
-        fail(&format!(
-            "{role}: frozen record uses the retired tsynq form"
+        .ok_or_else(|| format!("{role}: frozen identity address is missing"))?;
+    for (field, expected_pointer, path, actual) in [
+        (
+            "authorization_public",
+            "/source_artifact_sha256/authorization_public",
+            &public_path,
+            file_checksum(&public_path)?,
+        ),
+        (
+            "authorization_encrypted",
+            "/custody_inputs/authorization_encrypted_sha256",
+            &encrypted_path,
+            file_checksum(&encrypted_path)?,
+        ),
+        (
+            "binding",
+            "/source_artifact_sha256/binding",
+            &binding_path,
+            sha256_hex(&binding_bytes),
+        ),
+    ] {
+        let expected = expected_account
+            .pointer(expected_pointer)
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("{role}: frozen {field} SHA-256 is missing"))?;
+        if actual != expected {
+            return Err(format!(
+                "{role}: {} does not match frozen {field} SHA-256",
+                path.display()
+            ));
+        }
+    }
+    if expected_account["identity_authorization_binding"] != json!(identity_authorization.binding) {
+        return Err(format!(
+            "{role}: identity authorization binding differs from the fresh authority freeze"
         ));
     }
 
-    let public_key = base64_decode(
+    if expected_address.starts_with("tsynq") {
+        return Err(format!("{role}: frozen record uses the retired tsynq form"));
+    }
+
+    let expected_public_schema = if role == GOVERNANCE {
+        "synergy-governance-authorization-public-key-v1"
+    } else {
+        "synergy-authorization-public-key-v1"
+    };
+    if pubdoc["schema_version"] != json!(expected_public_schema)
+        || pubdoc["binary_encoding"] != json!("lowercase-hex")
+        || pubdoc["role_id"] != json!(role)
+        || pubdoc["algorithm"] != json!("ML-DSA-87")
+    {
+        return Err(format!(
+            "{role}: identity.pub.json is not the canonical v1.3 authorization-key record"
+        ));
+    }
+    let public_key = decode_lowercase_hex(
         pubdoc["public_key"]
             .as_str()
-            .unwrap_or_else(|| fail(&format!("{role}: identity.pub.json has no public_key"))),
-    );
+            .ok_or_else(|| format!("{role}: identity.pub.json has no public_key"))?,
+        &format!("{role}: public key"),
+    )?;
     if public_key.len() != 2592 {
-        fail(&format!(
+        return Err(format!(
             "{role}: public key is not ML-DSA-87 (got {} bytes)",
             public_key.len()
         ));
     }
-    let fingerprint = format!("sha256:{}", sha256_hex(&public_key));
-    if fingerprint != expected_fingerprint
-        || manifest["public_key_fingerprint"] != json!(fingerprint)
-    {
-        fail(&format!(
-            "{role}: public-key fingerprint does not match the frozen record"
+    if expected_account["authorization_public"] != pubdoc {
+        return Err(format!(
+            "{role}: authorization public record differs from the fresh authority freeze"
         ));
     }
-    let derived = derive_standard_account_address(&public_key);
-    if derived != expected_address || manifest["standard_account_address"] != json!(derived) {
-        fail(&format!(
+    let derived = identity_authorization
+        .identity_address_for_key(
+            synergy_testnet::identity_auth::GENESIS_CEREMONY_AUTHORIZATION_DOMAIN,
+            "ML-DSA-87",
+            &public_key,
+            "genesis-signing",
+        )
+        .map_err(|error| format!("{role}: identity authorization failed: {error}"))?;
+    if derived != expected_address {
+        return Err(format!(
             "{role}: canonical syna address does not match the frozen record"
         ));
     }
-    if corr["standard_account"]["recomputed_address"] != json!(derived)
-        || corr["standard_account"]["verified"] != json!(true)
-    {
-        fail(&format!("{role}: correspondence proof does not agree"));
-    }
-
     // Only now ask for the secret.
     let label = match role {
         DEPLOYER => "Genesis Deployer passphrase",
@@ -259,46 +449,49 @@ fn unlock(base: &Path, role: &str, frozen: &Value) -> Authority {
     // terminal, so the passphrase never enters this process at all. Only the
     // decrypted payload crosses the pipe, in memory.
     println!("\n  {label} (entered in the Address Engine):");
-    let plaintext = decrypt_via_engine(&dir.join("identity.enc.json"), role);
+    let recovered = decrypt_via_engine(engine_binary, &encrypted_path, role)?;
+    let document: RecoveredAuthorityDocument = serde_json::from_slice(&recovered.0)
+        .map_err(|_| format!("{role}: decrypted payload is not the expected record"))?;
+    let expected_private_schema = if role == GOVERNANCE {
+        "synergy-governance-authorization-private-key-v1"
+    } else {
+        "synergy-authorization-private-key-v1"
+    };
+    if document.schema_version != expected_private_schema
+        || document.binary_encoding != "lowercase-hex"
+        || document.role_id != role
+        || document.algorithm != "ML-DSA-87"
+    {
+        return Err(format!(
+            "{role}: decrypted payload metadata is not canonical v1.3"
+        ));
+    }
+    let private_key = decode_lowercase_hex_secret(&document.private_key, role)?;
+    drop(document);
+    drop(recovered);
 
-    let mut recovered = Secret(plaintext);
-    let doc: Value = serde_json::from_slice(&recovered.0).unwrap_or_else(|_| {
-        fail(&format!(
-            "{role}: decrypted payload is not the expected record"
-        ))
-    });
-    let mut private_key = base64_decode(
-        doc["private_key"]
-            .as_str()
-            .unwrap_or_else(|| fail(&format!("{role}: no private key in payload"))),
-    );
-    zeroize(&mut recovered.0);
-
-    if private_key.len() != 4896 {
-        zeroize(&mut private_key);
-        fail(&format!(
+    if private_key.0.len() != 4896 {
+        return Err(format!(
             "{role}: recovered key is not an ML-DSA-87 secret key"
         ));
     }
     // Prove the recovered secret belongs to the verified public key.
-    if !signs_correctly(&private_key, &public_key) {
-        zeroize(&mut private_key);
-        fail(&format!(
+    if !signs_correctly(&private_key.0, &public_key) {
+        return Err(format!(
             "{role}: recovered private key does not correspond to the bundle public key"
         ));
     }
 
     println!("    unlocked  {role}  {derived}");
-    Authority {
-        role: role.to_string(),
+    Ok(Authority {
         account_address: derived,
         public_key,
-        private_key: Secret(private_key),
-    }
+        private_key,
+        identity_authorization,
+    })
 }
 
 fn signs_correctly(private_key: &[u8], public_key: &[u8]) -> bool {
-    use pqsynq::traits::{DetachedSignature, DigitalSignature};
     use pqsynq::Sign;
     let probe = b"synergy-genesis-ceremony-keypair-correspondence-probe";
     match Sign::mldsa87().detached_sign(probe, private_key) {
@@ -310,182 +503,598 @@ fn signs_correctly(private_key: &[u8], public_key: &[u8]) -> bool {
     }
 }
 
-fn base64_decode(input: &str) -> Vec<u8> {
-    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = Vec::new();
-    let (mut buf, mut bits) = (0u32, 0u32);
-    for c in input
-        .bytes()
-        .filter(|c| *c != b'=' && !c.is_ascii_whitespace())
+fn decode_lowercase_hex(input: &str, label: &str) -> Result<Vec<u8>, String> {
+    if input.is_empty()
+        || input.len() % 2 != 0
+        || !input
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
-        let v = match T.iter().position(|t| *t == c) {
-            Some(v) => v as u32,
-            None => fail("malformed base64 in bundle"),
-        };
-        buf = (buf << 6) | v;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((buf >> bits) as u8);
-        }
+        return Err(format!("{label} is not canonical lowercase hex"));
     }
-    out
+    hex::decode(input).map_err(|error| format!("decode {label}: {error}"))
 }
 
-fn write_public(path: &Path, contents: &str) {
-    std::fs::write(path, contents)
-        .unwrap_or_else(|e| fail(&format!("write {}: {e}", path.display())));
+fn decode_lowercase_hex_secret(input: &str, role: &str) -> Result<Secret, String> {
+    let bytes = decode_lowercase_hex(input, &format!("{role}: private key"))?;
+    Ok(Secret(bytes))
+}
+
+fn write_public(path: &Path, contents: &str) -> Result<(), String> {
+    std::fs::write(path, contents).map_err(|error| format!("write {}: {error}", path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("set permissions on {}: {error}", path.display()))?;
     }
+    Ok(())
 }
 
-fn frozen_contract_address<'a>(contracts: &'a Value, contract_name: &str) -> &'a str {
-    contracts["contracts"]
-        .as_array()
-        .and_then(|entries| {
-            entries
-                .iter()
-                .find(|entry| entry.get("contract").and_then(Value::as_str) == Some(contract_name))
-        })
-        .and_then(|entry| entry.get("contract_address"))
-        .and_then(Value::as_str)
-        .filter(|address| !address.is_empty())
-        .unwrap_or_else(|| {
-            fail(&format!(
-                "frozen contract record is missing {contract_name}"
-            ))
-        })
-}
-
-fn genesis_execution_state(repo: &Path, contracts: &Value) -> ExecutionState {
-    let genesis_path = repo.join("genesis.testnet-v3.identity-assigned.json");
-    let genesis = read_json(&genesis_path);
+fn genesis_execution_state(
+    source_genesis: &Path,
+    team_vesting_address: &str,
+) -> Result<ExecutionState, String> {
+    let genesis = read_json(source_genesis)?;
     let balances = genesis["balances"]
         .as_array()
-        .unwrap_or_else(|| fail("source genesis balances must be an array"));
+        .ok_or_else(|| "source genesis balances must be an array".to_string())?;
     let mut state = ExecutionState::new();
     let mut total = 0u128;
     for balance in balances {
         let source_address = balance["address"]
             .as_str()
             .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| fail("source genesis balance address is missing"));
+            .ok_or_else(|| "source genesis balance address is missing".to_string())?;
         // TEM-A01 funds the deployed TeamVesting instance, not its separate
         // FN-DSA administrative/custody identity. SaleClaim is excluded, so
         // SAL-A01 remains at its custody identity.
         let address = if balance["account_id"] == "TEM-A01" {
-            frozen_contract_address(contracts, "TeamVesting")
+            team_vesting_address
         } else {
             source_address
         };
         let amount = balance["balance_nwei"]
             .as_str()
-            .unwrap_or_else(|| fail("source genesis balance_nwei must be a decimal string"))
+            .ok_or_else(|| "source genesis balance_nwei must be a decimal string".to_string())?
             .parse::<u128>()
-            .unwrap_or_else(|error| fail(&format!("parse source genesis balance_nwei: {error}")));
+            .map_err(|error| format!("parse source genesis balance_nwei: {error}"))?;
         if state
             .balances_nwei
             .insert(address.to_string(), amount)
             .is_some()
         {
-            fail(&format!(
+            return Err(format!(
                 "source genesis contains duplicate balance address {address}"
             ));
         }
         total = total
             .checked_add(amount)
-            .unwrap_or_else(|| fail("source genesis balance sum overflowed u128"));
+            .ok_or_else(|| "source genesis balance sum overflowed u128".to_string())?;
     }
     let declared_total = genesis["allocation_sum_check"]["grand_total_nwei"]
         .as_str()
-        .unwrap_or_else(|| fail("source genesis allocation_sum_check.grand_total_nwei is missing"))
+        .ok_or_else(|| {
+            "source genesis allocation_sum_check.grand_total_nwei is missing".to_string()
+        })?
         .parse::<u128>()
-        .unwrap_or_else(|error| fail(&format!("parse source genesis grand total: {error}")));
+        .map_err(|error| format!("parse source genesis grand total: {error}"))?;
     if total != declared_total {
-        fail(&format!(
+        return Err(format!(
             "source genesis balances sum to {total}, declared total is {declared_total}"
         ));
     }
-    state
+    Ok(state)
 }
 
-fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    reject_non_interactive_passphrases(&args);
+#[derive(Debug, PartialEq, Eq)]
+struct CeremonyOptions {
+    authorities_file: PathBuf,
+    allocation_manifest: PathBuf,
+    resolved_allocations: PathBuf,
+    validator_inputs: PathBuf,
+    contracts_dir: PathBuf,
+    source_genesis: PathBuf,
+    identity_root: PathBuf,
+    output_dir: PathBuf,
+    prior_dry_run_status: Option<PathBuf>,
+    address_engine_binary: PathBuf,
+    address_engine_sha256: String,
+    execute: bool,
+}
 
+fn parse_path_argument(args: &[String], index: usize, flag: &str) -> Result<PathBuf, String> {
+    let value = args
+        .get(index + 1)
+        .filter(|value| !value.is_empty() && !value.starts_with("--"))
+        .ok_or_else(|| format!("{flag} requires a non-empty path"))?;
+    Ok(PathBuf::from(value))
+}
+
+fn parse_ceremony_options(args: &[String]) -> Result<CeremonyOptions, String> {
     let mut authorities_file = None;
-    let mut contracts_file = None;
+    let mut allocation_manifest = None;
+    let mut resolved_allocations = None;
+    let mut validator_inputs = None;
+    let mut contracts_dir = None;
+    let mut source_genesis = None;
+    let mut identity_root = None;
     let mut output_dir = None;
-    let mut dry_run = false;
-    let mut execute = false;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
+    let mut prior_dry_run_status = None;
+    let mut address_engine_binary = None;
+    let mut address_engine_sha256 = None;
+    let mut mode = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
             "--authorities-file" => {
-                authorities_file = args.get(i + 1).cloned();
-                i += 2;
+                if authorities_file.is_some() {
+                    return Err("--authorities-file may be supplied only once".to_string());
+                }
+                authorities_file = Some(parse_path_argument(args, index, "--authorities-file")?);
+                index += 2;
             }
-            "--contracts-file" => {
-                contracts_file = args.get(i + 1).cloned();
-                i += 2;
+            "--allocation-manifest" => {
+                if allocation_manifest.is_some() {
+                    return Err("--allocation-manifest may be supplied only once".to_string());
+                }
+                allocation_manifest =
+                    Some(parse_path_argument(args, index, "--allocation-manifest")?);
+                index += 2;
+            }
+            "--resolved-allocations" => {
+                if resolved_allocations.is_some() {
+                    return Err("--resolved-allocations may be supplied only once".to_string());
+                }
+                resolved_allocations =
+                    Some(parse_path_argument(args, index, "--resolved-allocations")?);
+                index += 2;
+            }
+            "--validator-inputs" => {
+                if validator_inputs.is_some() {
+                    return Err("--validator-inputs may be supplied only once".to_string());
+                }
+                validator_inputs = Some(parse_path_argument(args, index, "--validator-inputs")?);
+                index += 2;
+            }
+            "--contracts-dir" => {
+                if contracts_dir.is_some() {
+                    return Err("--contracts-dir may be supplied only once".to_string());
+                }
+                contracts_dir = Some(parse_path_argument(args, index, "--contracts-dir")?);
+                index += 2;
+            }
+            "--source-genesis" => {
+                if source_genesis.is_some() {
+                    return Err("--source-genesis may be supplied only once".to_string());
+                }
+                source_genesis = Some(parse_path_argument(args, index, "--source-genesis")?);
+                index += 2;
+            }
+            "--identity-root" => {
+                if identity_root.is_some() {
+                    return Err("--identity-root may be supplied only once".to_string());
+                }
+                identity_root = Some(parse_path_argument(args, index, "--identity-root")?);
+                index += 2;
             }
             "--output-dir" => {
-                output_dir = args.get(i + 1).cloned();
-                i += 2;
+                if output_dir.is_some() {
+                    return Err("--output-dir may be supplied only once".to_string());
+                }
+                output_dir = Some(parse_path_argument(args, index, "--output-dir")?);
+                index += 2;
+            }
+            "--prior-dry-run-status" => {
+                if prior_dry_run_status.is_some() {
+                    return Err("--prior-dry-run-status may be supplied only once".to_string());
+                }
+                prior_dry_run_status =
+                    Some(parse_path_argument(args, index, "--prior-dry-run-status")?);
+                index += 2;
+            }
+            "--address-engine-binary" => {
+                if address_engine_binary.is_some() {
+                    return Err("--address-engine-binary may be supplied only once".to_string());
+                }
+                address_engine_binary =
+                    Some(parse_path_argument(args, index, "--address-engine-binary")?);
+                index += 2;
+            }
+            "--address-engine-sha256" => {
+                if address_engine_sha256.is_some() {
+                    return Err("--address-engine-sha256 may be supplied only once".to_string());
+                }
+                let value = args
+                    .get(index + 1)
+                    .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                    .ok_or_else(|| {
+                        "--address-engine-sha256 requires a lowercase-hex digest".to_string()
+                    })?;
+                require_sha256(value, "--address-engine-sha256")?;
+                address_engine_sha256 = Some(value.clone());
+                index += 2;
             }
             "--dry-run" => {
-                dry_run = true;
-                i += 1;
+                if mode.replace(false).is_some() {
+                    return Err("choose exactly one of --dry-run or --execute".to_string());
+                }
+                index += 1;
             }
             "--execute" => {
-                execute = true;
-                i += 1;
+                if mode.replace(true).is_some() {
+                    return Err("choose exactly one of --dry-run or --execute".to_string());
+                }
+                index += 1;
             }
-            other => fail(&format!("unknown flag '{other}'")),
+            other => return Err(format!("unknown flag '{other}'")),
         }
     }
-    if dry_run == execute {
-        fail("choose exactly one of --dry-run or --execute (--dry-run is the safe default path)");
-    }
-    let (authorities_file, contracts_file, output_dir) =
-        match (authorities_file, contracts_file, output_dir) {
-            (Some(a), Some(c), Some(o)) => (PathBuf::from(a), PathBuf::from(c), PathBuf::from(o)),
-            _ => fail("required: --authorities-file --contracts-file --output-dir"),
-        };
 
-    let repo = std::env::current_dir().unwrap_or_else(|e| fail(&format!("cwd: {e}")));
-    let frozen = read_json(&authorities_file);
-    let expected_contracts = read_json(&contracts_file);
-    let source_genesis = repo.join("genesis.testnet-v3.identity-assigned.json");
-
-    if frozen["test_fixture"] != json!(false) || frozen["status"] != json!("FROZEN") {
-        fail("authority record is not a frozen production record");
+    let execute = mode.ok_or_else(|| {
+        "choose exactly one of --dry-run or --execute (--dry-run is the safe default path)"
+            .to_string()
+    })?;
+    match (
+        authorities_file,
+        allocation_manifest,
+        resolved_allocations,
+        validator_inputs,
+        contracts_dir,
+        source_genesis,
+        identity_root,
+        output_dir,
+        address_engine_binary,
+        address_engine_sha256,
+    ) {
+        (
+            Some(authorities_file),
+            Some(allocation_manifest),
+            Some(resolved_allocations),
+            Some(validator_inputs),
+            Some(contracts_dir),
+            Some(source_genesis),
+            Some(identity_root),
+            Some(output_dir),
+            Some(address_engine_binary),
+            Some(address_engine_sha256),
+        ) => Ok(CeremonyOptions {
+            authorities_file,
+            allocation_manifest,
+            resolved_allocations,
+            validator_inputs,
+            contracts_dir,
+            source_genesis,
+            identity_root,
+            output_dir,
+            prior_dry_run_status,
+            address_engine_binary,
+            address_engine_sha256,
+            execute,
+        }),
+        _ => Err(
+            "required: --authorities-file --allocation-manifest --resolved-allocations --validator-inputs --contracts-dir --source-genesis --identity-root --output-dir --address-engine-binary --address-engine-sha256".to_string(),
+        ),
     }
-    if expected_contracts["canonical_synergy_address_model"] != json!(true) {
-        fail("contract record was not produced under the canonical Synergy address model");
-    }
+}
 
-    let input_manifest = json!({
-        "authorities_file": authorities_file.display().to_string(),
-        "authorities_file_sha256": file_checksum(&authorities_file),
-        "contracts_file": contracts_file.display().to_string(),
-        "contracts_file_sha256": file_checksum(&contracts_file),
-        "source_genesis_file": source_genesis.display().to_string(),
-        "source_genesis_file_sha256": file_checksum(&source_genesis),
-        "mode": if execute { "execute" } else { "dry-run" },
+fn ceremony_input_digest(inputs: &BTreeMap<String, String>) -> Result<String, String> {
+    serde_json::to_vec(inputs)
+        .map(|bytes| sha256_hex(&bytes))
+        .map_err(|error| format!("serialize ceremony input digest: {error}"))
+}
+
+fn require_matching_dry_run_evidence(
+    prior: &Value,
+    input_digest: &str,
+    address_engine_sha256: &str,
+) -> Result<(), String> {
+    if prior["status"] != json!("DRY_RUN_PASSED") {
+        return Err("prior dry run did not pass".to_string());
+    }
+    if prior["candidate_input_id"] != json!(input_digest) {
+        return Err("inputs changed since the dry run; re-run --dry-run".to_string());
+    }
+    if prior["address_engine_sha256"] != json!(address_engine_sha256) {
+        return Err("Address Engine changed since the dry run; re-run --dry-run".to_string());
+    }
+    Ok(())
+}
+
+fn contract_artifact_inventory(contracts_dir: &Path) -> Result<(String, Vec<Value>), String> {
+    let mut entries = Vec::new();
+    for contract in GenesisContract::APPROVED_ORDER {
+        for suffix in ["synq", "compiled.synq", "abi.json", "manifest.json"] {
+            let file = format!("{}.{}", contract.name(), suffix);
+            let sha256 = file_checksum(&contracts_dir.join(&file))?;
+            entries.push(json!({"file": file, "sha256": sha256}));
+        }
+    }
+    let canonical = serde_json::to_vec(&entries)
+        .map_err(|error| format!("serialize contract artifact inventory: {error}"))?;
+    Ok((sha256_hex(&canonical), entries))
+}
+
+fn require_new_empty_output_dir(path: &Path) -> Result<(), String> {
+    if path.exists() {
+        let mut entries = std::fs::read_dir(path)
+            .map_err(|error| format!("inspect output directory {}: {error}", path.display()))?;
+        if entries.next().is_some() {
+            return Err(format!(
+                "output directory {} is not empty; refusing to overwrite evidence",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `inspect` and `verify` are intentionally part of the ceremony binary so
+/// operators do not need a second Genesis tool or a JSON sidecar to explain a
+/// binary canonical Genesis.
+fn run_sgen_inspection(args: &[String]) -> Result<(), String> {
+    let command = args.first().map(String::as_str).unwrap_or_default();
+    if command != "inspect" && command != "verify" && command != "verify-unsigned" {
+        return Err("unknown SGEN command".to_string());
+    }
+    let path = args.get(1).filter(|value| !value.starts_with("--"))
+        .map(PathBuf::from)
+        .ok_or_else(|| format!("usage: synergy-genesis-ceremony {command} <genesis.sgen> [--json] [--execute-h0]"))?;
+    let mut json_output = false;
+    let mut execute_h0 = false;
+    for argument in &args[2..] {
+        match argument.as_str() {
+            "--json" => json_output = true,
+            "--execute-h0" if command == "verify" => execute_h0 = true,
+            _ => return Err(format!("unknown {command} option {argument}")),
+        }
+    }
+    let verified = if command == "verify-unsigned" {
+        verify_unsigned_sgen_file(&path)?
+    } else {
+        verify_sgen_file(&path)?
+    };
+    if execute_h0 {
+        verify_h0_execution(&verified)
+            .map_err(|error| format!("SGEN deterministic H0 execution failed: {error}"))?;
+    }
+    let document = &verified.reconstructed_document;
+    let validators = document.get("validators").and_then(Value::as_array).map(Vec::len).unwrap_or(0);
+    let identities = document.get("validators").and_then(Value::as_array).map(|entries| entries.iter().filter_map(|entry| entry.get("validator_id").and_then(Value::as_str)).collect::<Vec<_>>()).unwrap_or_default();
+    let report = json!({
+        "sgen_version": 1,
+        "genesis_hash": verified.genesis_hash,
+        "chain_id": verified.payload.chain_id,
+        "network_id": verified.payload.network_id,
+        "protocol_version": verified.payload.protocol_version,
+        "consensus_version": verified.payload.consensus_version,
+        "validator_count": validators,
+        "validator_identities": identities,
+        "target_block_time_ms": verified.payload.target_block_time_ms,
+        "parameter_root": verified.payload.parameter_root,
+        "membership_root": verified.payload.membership_root,
+        "h0_operation_count": verified.payload.h0_operations.len(),
+        "deployment_count": 9,
+        "initialization_count": 27,
+        "execution_state_root": verified.payload.expected_execution_state_root,
+        "aivm_state_root": verified.payload.expected_aivm_state_root,
+        "receipt_root": verified.payload.expected_receipt_root,
+        "authority_approval": if command == "verify-unsigned" { "UNSIGNED" } else { "PASS" },
+        "execute_h0": if execute_h0 { "PASS" } else { "NOT_REQUESTED" }
     });
-    let input_digest = sha256_hex(
-        serde_json::to_string(&json!({
-            "a": input_manifest["authorities_file_sha256"],
-            "c": input_manifest["contracts_file_sha256"],
-            "g": input_manifest["source_genesis_file_sha256"],
-        }))
+    if json_output {
+        println!("{}", serde_json::to_string(&report).map_err(|error| format!("render SGEN inspection: {error}"))?);
+    } else {
+        println!("SGEN_VERSION=1");
+        println!("GENESIS_HASH={}", report["genesis_hash"].as_str().unwrap_or_default());
+        println!("CHAIN_ID={}", report["chain_id"]);
+        println!("NETWORK_ID={}", report["network_id"].as_str().unwrap_or_default());
+        println!("VALIDATOR_COUNT={validators}");
+        println!("TARGET_BLOCK_TIME_MS={}", report["target_block_time_ms"]);
+        println!("H0_OPERATION_COUNT=36");
+        println!("DEPLOYMENTS=9");
+        println!("INITIALIZATION_CALLS=27");
+        println!("SGEN_AUTHORITY_PASS={}", if command == "verify-unsigned" { "PENDING" } else { "YES" });
+        println!("EXECUTE_H0={}", report["execute_h0"].as_str().unwrap_or_default());
+    }
+    Ok(())
+}
+
+/// Compose the canonical typed SGEN payload directly from source material and
+/// frozen H0 execution evidence.  It intentionally does not accept a legacy
+/// finalization, candidate, approval, or sidecar binding as an input.
+fn run_compose_sgen(args: &[String]) -> Result<(), String> {
+    let mut source = None;
+    let mut execution_status = None;
+    let mut operations = None;
+    let mut output = None;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--source" => { source = Some(parse_path_argument(args, index, "--source")?); index += 2; }
+            "--execution-status" => { execution_status = Some(parse_path_argument(args, index, "--execution-status")?); index += 2; }
+            "--signed-replay-operations" => { operations = Some(parse_path_argument(args, index, "--signed-replay-operations")?); index += 2; }
+            "--output" => { output = Some(parse_path_argument(args, index, "--output")?); index += 2; }
+            other => return Err(format!("unknown compose-sgen option {other}")),
+        }
+    }
+    let (source, execution_status, operations, output) = match (source, execution_status, operations, output) {
+        (Some(source), Some(execution_status), Some(operations), Some(output)) => (source, execution_status, operations, output),
+        _ => return Err("usage: synergy-genesis-ceremony compose-sgen --source GENESIS_SOURCE.json --execution-status execution-status.json --signed-replay-operations signed-replay-operations.json --output genesis.unsigned.sgen".to_string()),
+    };
+    if output.exists() { return Err(format!("refusing to overwrite existing unsigned SGEN {}", output.display())); }
+    let payload = payload_from_h0_evidence(&read_json(&source)?, &read_json(&execution_status)?, &read_json(&operations)?)?;
+    let bytes = compile_unsigned_sgen(payload)?;
+    if let Some(parent) = output.parent() { std::fs::create_dir_all(parent).map_err(|error| format!("create SGEN output directory: {error}"))?; }
+    std::fs::write(&output, bytes).map_err(|error| format!("write {}: {error}", output.display()))?;
+    #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o600)).map_err(|error| format!("restrict {}: {error}", output.display()))?; }
+    run_sgen_inspection(&["verify-unsigned".to_string(), output.to_string_lossy().to_string()])?;
+    println!("COMPLETE=UNSIGNED_SGEN_COMPOSED");
+    Ok(())
+}
+
+/// Completes the same three-authority ceremony over an already-finalized JSON
+/// authoring document. JSON is an authoring input only: the no-clobber output
+/// is the single runtime `genesis.sgen` artifact and carries the signed H0
+/// operations itself.
+fn run_sign_sgen(args: &[String]) -> Result<(), String> {
+    let mut authorities_file = None;
+    let mut identity_root = None;
+    let mut engine_binary = None;
+    let mut engine_sha256 = None;
+    let mut input = None;
+    let mut output = None;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--authorities-file" => { authorities_file = Some(parse_path_argument(args, index, "--authorities-file")?); index += 2; }
+            "--identity-root" => { identity_root = Some(parse_path_argument(args, index, "--identity-root")?); index += 2; }
+            "--address-engine-binary" => { engine_binary = Some(parse_path_argument(args, index, "--address-engine-binary")?); index += 2; }
+            "--address-engine-sha256" => { let value = args.get(index + 1).ok_or_else(|| "--address-engine-sha256 requires a value".to_string())?; require_sha256(value, "--address-engine-sha256")?; engine_sha256 = Some(value.clone()); index += 2; }
+            "--input" => { input = Some(parse_path_argument(args, index, "--input")?); index += 2; }
+            "--output" => { output = Some(parse_path_argument(args, index, "--output")?); index += 2; }
+            other => return Err(format!("unknown sign-sgen option {other}")),
+        }
+    }
+    let (authorities_file, identity_root, engine_binary, engine_sha256, input, output) = match (authorities_file, identity_root, engine_binary, engine_sha256, input, output) {
+        (Some(authorities_file), Some(identity_root), Some(engine_binary), Some(engine_sha256), Some(input), Some(output)) => (authorities_file, identity_root, engine_binary, engine_sha256, input, output),
+        _ => return Err("usage: synergy-genesis-ceremony sign-sgen --authorities-file FILE --identity-root DIR --address-engine-binary FILE --address-engine-sha256 SHA256 --input genesis.unsigned.sgen --output genesis.sgen".to_string()),
+    };
+    if output.exists() { return Err(format!("refusing to overwrite existing SGEN {}", output.display())); }
+    // This happens before custody access: an authority unlock is never used
+    // to discover an ordinary composition or structural error.
+    let payload = verify_unsigned_sgen_file(&input)?.payload;
+    verify_engine_binary(&engine_binary, &engine_sha256)?;
+    let frozen = read_json(&authorities_file)?;
+    if frozen["chain_id"] != json!(1266) || frozen["network_id"] != json!("testnet") || frozen["authority_count"] != json!(3) {
+        return Err("SGEN signing requires the frozen three-authority Testnet-v3 record".to_string());
+    }
+    let mut deployer = unlock(&engine_binary, &identity_root, DEPLOYER, &frozen)?;
+    let mut governance = unlock(&engine_binary, &identity_root, GOVERNANCE, &frozen)?;
+    let mut registry = unlock(&engine_binary, &identity_root, REGISTRY, &frozen)?;
+    let signers = vec![
+        SgenAuthoritySigner { role: DEPLOYER.to_string(), identity_address: deployer.account_address, public_key: deployer.public_key, private_key: deployer.private_key.take() },
+        SgenAuthoritySigner { role: GOVERNANCE.to_string(), identity_address: governance.account_address, public_key: governance.public_key, private_key: governance.private_key.take() },
+        SgenAuthoritySigner { role: REGISTRY.to_string(), identity_address: registry.account_address, public_key: registry.public_key, private_key: registry.private_key.take() },
+    ];
+    let bytes = compile_sgen(payload, &signers)?;
+    if let Some(parent) = output.parent() { std::fs::create_dir_all(parent).map_err(|error| format!("create SGEN output directory: {error}"))?; }
+    std::fs::write(&output, bytes).map_err(|error| format!("write {}: {error}", output.display()))?;
+    #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o600)).map_err(|error| format!("restrict {}: {error}", output.display()))?; }
+    run_sgen_inspection(&["verify".to_string(), output.to_string_lossy().to_string()])?;
+    println!("COMPLETE=SGEN_GENERATED");
+    Ok(())
+}
+
+fn run() -> Result<(), String> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if matches!(args.first().map(String::as_str), Some("inspect") | Some("verify") | Some("verify-unsigned")) {
+        return run_sgen_inspection(&args);
+    }
+    if args.first().map(String::as_str) == Some("compose-sgen") {
+        return run_compose_sgen(&args);
+    }
+    if args.first().map(String::as_str) == Some("sign-sgen") {
+        reject_non_interactive_passphrases(&args)?;
+        return run_sign_sgen(&args);
+    }
+    reject_non_interactive_passphrases(&args)?;
+    let CeremonyOptions {
+        authorities_file,
+        allocation_manifest,
+        resolved_allocations,
+        validator_inputs,
+        contracts_dir,
+        source_genesis,
+        identity_root,
+        output_dir,
+        prior_dry_run_status,
+        address_engine_binary,
+        address_engine_sha256,
+        execute,
+    } = parse_ceremony_options(&args)?;
+    require_new_empty_output_dir(&output_dir)?;
+    let address_engine_binary_sha256 =
+        verify_engine_binary(&address_engine_binary, &address_engine_sha256)?;
+
+    let frozen = read_json(&authorities_file)?;
+    let source_genesis_document = read_json(&source_genesis)?;
+    if !identity_root.is_dir() {
+        return Err(format!(
+            "identity root {} is not a directory",
+            identity_root.display()
+        ));
+    }
+
+    if frozen["chain_id"] != json!(1266)
+        || frozen["network_id"] != json!("testnet")
+        || frozen["release_id"] != json!("testnet-v3")
+        || frozen["consensus_protocol"] != json!("posy/3.0")
+    {
+        return Err("fresh authority freeze has the wrong chain tuple".to_string());
+    }
+    require_clean_genesis_launch_profile(&source_genesis_document)?;
+    if frozen["artifact_type"] != json!("fresh-testnet-v3-genesis-authority-public-freeze")
+        || frozen["schema_version"] != json!("synergy-testnet-v3-genesis-authority-freeze-v1")
+        || frozen["genesis_boundary"] != json!(POSY_SIMPLIFIED_FRESH_GENESIS_BOUNDARY)
+        || frozen["authority_count"] != json!(3)
+        || frozen["authorities"].as_array().map(Vec::len) != Some(3)
+    {
+        return Err(
+            "authority record is not the fresh three-authority production freeze".to_string(),
+        );
+    }
+    let expected_roles = [DEPLOYER, GOVERNANCE, REGISTRY];
+    if frozen["authorities"]
+        .as_array()
         .unwrap()
-        .as_bytes(),
+        .iter()
+        .zip(expected_roles)
+        .any(|(entry, role)| entry["role_id"] != json!(role))
+    {
+        return Err("authority record role order or membership is non-canonical".to_string());
+    }
+
+    let authorities_sha256 = file_checksum(&authorities_file)?;
+    let source_genesis_sha256 = file_checksum(&source_genesis)?;
+    let allocation_manifest_sha256 = file_checksum(&allocation_manifest)?;
+    let resolved_allocations_sha256 = file_checksum(&resolved_allocations)?;
+    let validator_inputs_sha256 = file_checksum(&validator_inputs)?;
+    let (contract_artifact_set_sha256, contract_artifacts) =
+        contract_artifact_inventory(&contracts_dir)?;
+    let mut input_hashes = BTreeMap::new();
+    input_hashes.insert("source_genesis_sha256".to_string(), source_genesis_sha256);
+    input_hashes.insert(
+        "allocation_manifest_sha256".to_string(),
+        allocation_manifest_sha256,
     );
+    input_hashes.insert(
+        "resolved_allocations_sha256".to_string(),
+        resolved_allocations_sha256,
+    );
+    input_hashes.insert(
+        "validator_inputs_sha256".to_string(),
+        validator_inputs_sha256,
+    );
+    input_hashes.insert("authority_record_sha256".to_string(), authorities_sha256);
+    input_hashes.insert(
+        "contract_artifact_set_sha256".to_string(),
+        contract_artifact_set_sha256,
+    );
+    let input_digest = ceremony_input_digest(&input_hashes)?;
+    let binding = &source_genesis_document["fresh_p3_public_input_binding"];
+    for (field, binding_field) in [
+        ("allocation_manifest_sha256", "allocation_plan_sha256"),
+        ("resolved_allocations_sha256", "resolved_allocations_sha256"),
+        ("validator_inputs_sha256", "validator_source_inputs_sha256"),
+        ("authority_record_sha256", "fresh_authority_record_sha256"),
+    ] {
+        if binding[binding_field] != json!(input_hashes[field]) {
+            return Err(format!(
+                "source Genesis {binding_field} does not match supplied {field}"
+            ));
+        }
+    }
 
     println!("\n  Synergy Testnet-v3 genesis ceremony");
     println!(
@@ -494,215 +1103,256 @@ fn main() {
     );
     println!(
         "  authorities sha256: {}",
-        input_manifest["authorities_file_sha256"].as_str().unwrap()
+        input_hashes["authority_record_sha256"]
     );
     println!(
-        "  contracts   sha256: {}",
-        input_manifest["contracts_file_sha256"].as_str().unwrap()
+        "  artifacts   sha256: {}",
+        input_hashes["contract_artifact_set_sha256"]
     );
     println!(
         "  genesis     sha256: {}",
-        input_manifest["source_genesis_file_sha256"]
-            .as_str()
-            .unwrap()
+        input_hashes["source_genesis_sha256"]
     );
+    println!("  address engine    : {}", address_engine_binary.display());
+    println!("  engine      sha256: {address_engine_binary_sha256}");
     println!("  candidate input id: {input_digest}");
 
     // Production mode requires prior matching dry-run evidence and an explicit phrase.
     if execute {
-        let evidence = output_dir.join("dry-run-status.json");
-        if !evidence.exists() {
-            fail("no dry-run evidence in the output directory; run --dry-run first");
-        }
-        let prior = read_json(&evidence);
-        if prior["status"] != json!("DRY_RUN_PASSED") {
-            fail("prior dry run did not pass");
-        }
-        if prior["candidate_input_id"] != json!(input_digest.clone()) {
-            fail("inputs changed since the dry run; re-run --dry-run");
-        }
+        let evidence = prior_dry_run_status.as_ref().ok_or_else(|| {
+            "--execute requires --prior-dry-run-status from a separate completed dry run"
+                .to_string()
+        })?;
+        let prior = read_json(&evidence)?;
+        require_matching_dry_run_evidence(&prior, &input_digest, &address_engine_binary_sha256)?;
         println!("\n  Type the confirmation phrase to proceed:");
         println!("    {CONFIRMATION}");
         print!("  > ");
-        let _ = std::io::stdout().flush();
+        std::io::stdout()
+            .flush()
+            .map_err(|error| format!("write ceremony confirmation prompt: {error}"))?;
         let mut typed = String::new();
-        if std::io::stdin().read_line(&mut typed).is_err() {
-            fail("could not read confirmation");
-        }
+        std::io::stdin()
+            .read_line(&mut typed)
+            .map_err(|error| format!("could not read confirmation: {error}"))?;
         if typed.trim() != CONFIRMATION {
-            fail("confirmation phrase did not match exactly");
+            return Err("confirmation phrase did not match exactly".to_string());
         }
+    } else if prior_dry_run_status.is_some() {
+        return Err("--prior-dry-run-status is valid only with --execute".to_string());
     }
 
-    require_terminal();
+    require_terminal()?;
     println!("\n  Unlocking three production authorities (three passphrase prompts).");
-    let identities = repo.join("testnet-v3-identity-files");
-    let deployer = unlock(&identities, DEPLOYER, &frozen);
-    let governance = unlock(&identities, GOVERNANCE, &frozen);
-    let registry = unlock(&identities, REGISTRY, &frozen);
+    let mut deployer = unlock(&address_engine_binary, &identity_root, DEPLOYER, &frozen)?;
+    let mut governance = unlock(&address_engine_binary, &identity_root, GOVERNANCE, &frozen)?;
+    let mut registry = unlock(&address_engine_binary, &identity_root, REGISTRY, &frozen)?;
 
-    let frozen_addr = |role: &str| -> String {
-        frozen["authorities"]
+    let source_account = |account_id: &str| -> Result<String, String> {
+        source_genesis_document["accounts"]
             .as_array()
-            .unwrap()
+            .ok_or_else(|| "source Genesis accounts are missing".to_string())?
             .iter()
-            .find(|a| a["role_id"] == json!(role))
-            .unwrap()["standard_account_address"]
-            .as_str()
-            .unwrap()
-            .to_string()
+            .find(|account| account["account_id"] == json!(account_id))
+            .and_then(|account| account["address"].as_str())
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| format!("source Genesis account {account_id} has no address"))
     };
+    let emergency_slashing_authority = source_account("SYS-03")?;
+    let reward_distributor_authority = source_genesis_document["contracts"]["reward_distributor"]
+        ["init_params"]["distributor_authority"]
+        .as_str()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| "fresh reward-distributor authority is missing".to_string())?;
+    let identity_fee_collector = source_account("SYS-01")?;
+    let team_vesting_admin = source_genesis_document["contracts"]["team_vesting"]["init_params"]
+        ["admin_authority"]
+        .as_str()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| "fresh TeamVesting admin authority is missing".to_string())?;
+    let oracle_publisher = source_genesis_document["contracts"]["synergy_oracle"]["init_params"]
+        ["authority_address"]
+        .as_str()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| "fresh oracle authority is missing".to_string())?;
 
-    let authorities = GenesisAuthorities {
+    let authorities = SecretGenesisAuthorities(GenesisAuthorities {
         genesis_deployer: GenesisSigner {
-            public_key: deployer.public_key.clone(),
-            private_key: deployer.private_key.0.clone(),
+            public_key: std::mem::take(&mut deployer.public_key),
+            private_key: deployer.private_key.take(),
+            identity_authorization: Some(deployer.identity_authorization.clone()),
         },
         governance: GenesisSigner {
-            public_key: governance.public_key.clone(),
-            private_key: governance.private_key.0.clone(),
+            public_key: std::mem::take(&mut governance.public_key),
+            private_key: governance.private_key.take(),
+            identity_authorization: Some(governance.identity_authorization.clone()),
         },
-        emergency_slashing_authority: frozen_addr("SNRG-TESTNET-V3-EMERGENCY-SLASHING"),
+        emergency_slashing_authority,
         validator_registry_authority: registry.account_address.clone(),
         validator_registry_authority_key: GenesisSigner {
-            public_key: registry.public_key.clone(),
-            private_key: registry.private_key.0.clone(),
+            public_key: std::mem::take(&mut registry.public_key),
+            private_key: registry.private_key.take(),
+            identity_authorization: Some(registry.identity_authorization.clone()),
         },
-        reward_distributor_authority: frozen_addr("SNRG-TESTNET-V3-REWARD-DISTRIBUTOR-AUTHORITY"),
-        identity_fee_collector: "synf1pnchsrnyral0u9r65xusjrexuctfh465h06l".to_string(),
-        team_vesting_admin: "synu18tmdavp9yskftz4lldshrxvzwyg0tpnu23n9".to_string(),
-        oracle_publisher: frozen_addr("SNRG-TESTNET-V3-EMERGENCY-PAUSE-AUTHORITY"),
-    };
-
-    let artifacts: BTreeMap<GenesisContract, SynQContractArtifact> =
-        GenesisContract::APPROVED_ORDER
-            .iter()
-            .map(|c| {
-                let dir = repo.join("genesis-contracts/staged-governance-v1");
-                let name = c.name();
-                let read = |ext: &str| {
-                    std::fs::read(dir.join(format!("{name}.{ext}")))
-                        .unwrap_or_else(|e| fail(&format!("read staged {name}.{ext}: {e}")))
-                };
-                (
-                    *c,
-                    SynQContractArtifact::new(
-                        read("compiled.synq"),
-                        String::from_utf8(read("abi.json")).unwrap(),
-                        String::from_utf8(read("manifest.json")).unwrap(),
-                    ),
-                )
-            })
-            .collect();
-    let plan = GenesisDeploymentPlan::new(&artifacts).unwrap_or_else(|e| fail(&e));
-    let parameters = production_parameters(&repo);
-
-    println!("\n  Executing nine deployments and twenty-seven initialization calls…");
-    let mut state = genesis_execution_state(&repo, &expected_contracts);
-    let outcome = execute_genesis_deployment(&mut state, &plan, &authorities, &parameters);
-
-    // Secrets are no longer needed regardless of outcome.
-    let mut auth = authorities;
-    zeroize(&mut auth.genesis_deployer.private_key);
-    zeroize(&mut auth.governance.private_key);
-    zeroize(&mut auth.validator_registry_authority_key.private_key);
+        reward_distributor_authority,
+        identity_fee_collector,
+        team_vesting_admin,
+        oracle_publisher,
+    });
     drop(deployer);
     drop(governance);
     drop(registry);
 
-    let outcome = outcome.unwrap_or_else(|e| fail(&format!("genesis deployment failed: {e}")));
+    let artifacts: BTreeMap<GenesisContract, SynQContractArtifact> =
+        GenesisContract::APPROVED_ORDER
+            .iter()
+            .map(|c| -> Result<_, String> {
+                let name = c.name();
+                let read = |ext: &str| -> Result<Vec<u8>, String> {
+                    std::fs::read(contracts_dir.join(format!("{name}.{ext}")))
+                        .map_err(|error| format!("read canonical {name}.{ext}: {error}"))
+                };
+                Ok((
+                    *c,
+                    SynQContractArtifact::new(
+                        read("compiled.synq")?,
+                        String::from_utf8(read("abi.json")?)
+                            .map_err(|error| format!("decode staged {name}.abi.json: {error}"))?,
+                        String::from_utf8(read("manifest.json")?).map_err(|error| {
+                            format!("decode staged {name}.manifest.json: {error}")
+                        })?,
+                    ),
+                ))
+            })
+            .collect::<Result<_, _>>()?;
+    let plan = GenesisDeploymentPlan::new(&artifacts)?;
+    let parameters = production_parameters(&source_genesis)?;
+    let derived = derive_genesis_addresses(
+        &plan,
+        &authorities.genesis_deployer.public_key,
+        &authorities,
+        &parameters,
+    )?;
+    let team_vesting_address = derived
+        .iter()
+        .find(|entry| entry.contract == "TeamVesting")
+        .map(|entry| entry.contract_address.as_str())
+        .ok_or_else(|| "fresh derivation omitted TeamVesting".to_string())?;
+
+    println!("\n  Executing nine deployments and the candidate-derived initialization calls…");
+    let mut state = genesis_execution_state(&source_genesis, team_vesting_address)?;
+    let outcome = execute_genesis_deployment(&mut state, &plan, &authorities, &parameters);
+    drop(authorities);
+    let outcome = outcome.map_err(|error| format!("genesis deployment failed: {error}"))?;
     let snapshot = GenesisExecutionSnapshot::capture_testnet_v3(&state)
-        .unwrap_or_else(|e| fail(&format!("capture finalized execution state: {e}")));
+        .map_err(|error| format!("capture finalized execution state: {error}"))?;
     if snapshot.state_root != outcome.post_deployment_state_root.to_hex() {
-        fail("captured execution-state root does not match deployment outcome");
+        return Err("captured execution-state root does not match deployment outcome".to_string());
     }
     let snapshot_name = if execute {
         "execution-state.json"
     } else {
         "dry-run-execution-state.json"
     };
-    let snapshot_contents = serde_json::to_string_pretty(&snapshot).unwrap() + "\n";
+    let snapshot_contents = serde_json::to_string_pretty(&snapshot)
+        .map_err(|error| format!("serialize execution state snapshot: {error}"))?
+        + "\n";
     let snapshot_sha256 = sha256_hex(snapshot_contents.as_bytes());
-    let snapshot_canonical_sha256 = sha256_hex(&serde_json::to_vec(&snapshot).unwrap());
+    let snapshot_canonical_sha256 = sha256_hex(
+        &serde_json::to_vec(&snapshot)
+            .map_err(|error| format!("canonicalize execution state snapshot: {error}"))?,
+    );
 
-    // Compare against the frozen Phase 3-4 derivation record.
-    let mut mismatches = Vec::new();
-    for entry in expected_contracts["contracts"].as_array().unwrap() {
-        let name = entry["contract"].as_str().unwrap();
-        let expected = entry["contract_address"].as_str().unwrap();
-        let contract = GenesisContract::APPROVED_ORDER
-            .iter()
-            .find(|c| c.name() == name)
-            .unwrap();
-        let actual = outcome
-            .addresses
-            .get(contract)
-            .map(String::as_str)
-            .unwrap_or("<absent>");
-        if actual != expected {
-            mismatches.push(format!("{name}: expected {expected}, got {actual}"));
-        }
-    }
-
-    std::fs::create_dir_all(&output_dir)
-        .unwrap_or_else(|e| fail(&format!("create output dir: {e}")));
+    std::fs::create_dir_all(&output_dir).map_err(|error| format!("create output dir: {error}"))?;
     let addresses: BTreeMap<String, String> = outcome
         .addresses
         .iter()
         .map(|(c, a)| (c.name().to_string(), a.clone()))
         .collect();
-    let evidence = json!({
-        "status": if mismatches.is_empty() {
-            if execute { "EXECUTION_PASSED" } else { "DRY_RUN_PASSED" }
-        } else {
-            "ADDRESS_MISMATCH"
-        },
-        "mode": if execute { "execute" } else { "dry-run" },
-        "candidate_input_id": input_digest,
-        "inputs": input_manifest,
-        "contract_addresses": addresses,
-        "deployment_receipts": outcome.deployment_receipts.len(),
-        "initialization_receipts": outcome.initialization_receipts.len(),
-        "deployment_receipt_root": outcome.receipt_root.to_hex(),
-        "post_deployment_execution_state_root": outcome.post_deployment_state_root.to_hex(),
-        "post_deployment_aivm_state_root": snapshot.aivm_state_root,
-        "execution_state_snapshot": snapshot_name,
-        "execution_state_snapshot_sha256": snapshot_sha256,
-        "execution_state_snapshot_canonical_sha256": snapshot_canonical_sha256,
-        "execution_state_balance_count": snapshot.balances_nwei.len(),
-        "execution_state_contract_count": snapshot.synq_contracts.len(),
-        "execution_state_artifact_count": snapshot.synq_artifacts.len(),
-        "deployment_manifest_hash": outcome.deployment_manifest_hash.to_hex(),
-        "genesis_deployer_retirement": format!("{:?}", outcome.lifecycle),
-        "address_mismatches": mismatches,
-    });
+    let deployment_contents = serde_json::to_string_pretty(&outcome.deployment_receipts)
+        .map_err(|error| format!("serialize deployment receipts: {error}"))?
+        + "\n";
+    let initialization_contents = serde_json::to_string_pretty(&outcome.initialization_receipts)
+        .map_err(|error| format!("serialize initialization receipts: {error}"))?
+        + "\n";
+    let replay_operations_contents = serde_json::to_string_pretty(&outcome.replay_operations)
+        .map_err(|error| format!("serialize signed genesis replay operations: {error}"))?
+        + "\n";
+    let evidence = if execute {
+        json!({
+            "schema_version": 1,
+            "artifact_type": "fresh-p3-executed-deployment-evidence",
+            "status": "EXECUTION_PASSED",
+            "mode": "execute",
+            "chain_id": 1266,
+            "network_id": "testnet",
+            "release_id": "testnet-v3",
+            "protocol_version": "posy/3.0",
+            "candidate_input_id": input_digest,
+            "inputs": input_hashes,
+            "contract_artifacts": contract_artifacts,
+            "evidence_files": {
+                "deployment_receipts_sha256": sha256_hex(deployment_contents.as_bytes()),
+                "initialization_receipts_sha256": sha256_hex(initialization_contents.as_bytes()),
+                "signed_replay_operations_sha256": sha256_hex(replay_operations_contents.as_bytes()),
+                "execution_state_sha256": snapshot_sha256,
+                "execution_state_canonical_sha256": snapshot_canonical_sha256,
+            },
+            "contract_addresses": addresses,
+            "receipt_root": outcome.receipt_root.to_hex(),
+            "post_deployment_execution_state_root": outcome.post_deployment_state_root.to_hex(),
+            "post_deployment_aivm_state_root": snapshot.aivm_state_root,
+            "deployment_manifest_hash": outcome.deployment_manifest_hash.to_hex(),
+        })
+    } else {
+        json!({
+            "schema_version": 1,
+            "artifact_type": "fresh-p3-deployment-dry-run-evidence",
+            "status": "DRY_RUN_PASSED",
+            "mode": "dry-run",
+            "chain_id": 1266,
+            "network_id": "testnet",
+            "release_id": "testnet-v3",
+            "protocol_version": "posy/3.0",
+            "candidate_input_id": input_digest,
+            "inputs": input_hashes,
+            "address_engine_sha256": address_engine_binary_sha256,
+            "contract_artifacts": contract_artifacts,
+            "contract_addresses": addresses,
+            "receipt_root": outcome.receipt_root.to_hex(),
+            "post_deployment_execution_state_root": outcome.post_deployment_state_root.to_hex(),
+            "post_deployment_aivm_state_root": snapshot.aivm_state_root,
+            "deployment_manifest_hash": outcome.deployment_manifest_hash.to_hex(),
+        })
+    };
     let name = if execute {
         "execution-status.json"
     } else {
         "dry-run-status.json"
     };
-    write_public(&output_dir.join(snapshot_name), &snapshot_contents);
+    write_public(&output_dir.join(snapshot_name), &snapshot_contents)?;
     write_public(
         &output_dir.join(name),
-        &(serde_json::to_string_pretty(&evidence).unwrap() + "\n"),
-    );
-    write_public(
-        &output_dir.join("deployment-receipts.json"),
-        &(serde_json::to_string_pretty(&outcome.deployment_receipts).unwrap() + "\n"),
-    );
-    write_public(
-        &output_dir.join("initialization-receipts.json"),
-        &(serde_json::to_string_pretty(&outcome.initialization_receipts).unwrap() + "\n"),
-    );
-
-    if !mismatches.is_empty() {
-        for m in &mismatches {
-            eprintln!("    MISMATCH  {m}");
-        }
-        fail("derived addresses do not match the frozen record; no signable candidate produced");
+        &(serde_json::to_string_pretty(&evidence)
+            .map_err(|error| format!("serialize ceremony evidence: {error}"))?
+            + "\n"),
+    )?;
+    if execute {
+        write_public(
+            &output_dir.join("deployment-receipts.json"),
+            &deployment_contents,
+        )?;
+        write_public(
+            &output_dir.join("initialization-receipts.json"),
+            &initialization_contents,
+        )?;
+        write_public(
+            &output_dir.join("signed-replay-operations.json"),
+            &replay_operations_contents,
+        )?;
     }
 
-    println!("\n  All nine addresses match the frozen derivation record.");
+    println!("\n  All nine addresses were freshly derived and executed.");
     println!(
         "  deployments {} / initializations {}",
         outcome.deployment_receipts.len(),
@@ -728,14 +1378,23 @@ fn main() {
     if !execute {
         println!("\n  Dry run only. Nothing was committed to the canonical genesis.");
     }
+    Ok(())
 }
 
-fn production_parameters(repo: &Path) -> GenesisParameters {
-    let g: Value = read_json(&repo.join("genesis.testnet-v3.identity-assigned.json"));
+fn main() {
+    if let Err(error) = run() {
+        eprintln!("\n  CEREMONY ABORTED: {error}");
+        // `run` returned only after every in-scope secret guard was dropped.
+        std::process::exit(1);
+    }
+}
+
+fn production_parameters(source_genesis: &Path) -> Result<GenesisParameters, String> {
+    let g: Value = read_json(source_genesis)?;
     let c = &g["contracts"];
     let s = |v: &Value| v.as_str().unwrap().to_string();
     let n = |v: &Value| v.as_u64().unwrap().to_string();
-    let validators = c["validator_registry"]["init_params"]["validators"]
+    let validators: Vec<GenesisValidator> = c["validator_registry"]["init_params"]["validators"]
         .as_array()
         .unwrap()
         .iter()
@@ -750,7 +1409,20 @@ fn production_parameters(repo: &Path) -> GenesisParameters {
             activation_height: n(&v["activation_height"]),
         })
         .collect();
-    GenesisParameters {
+    let validator_min_self_stake_nwei = c["validator_registry"]["init_params"]
+        ["min_self_stake_nwei"]
+        .as_str()
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            validators
+                .iter()
+                .map(|validator| validator.self_stake_nwei.parse::<u128>().ok())
+                .collect::<Option<Vec<_>>>()
+                .and_then(|stakes| stakes.into_iter().min())
+                .map(|stake| stake.to_string())
+        })
+        .ok_or_else(|| "Genesis ValidatorRegistry minimum self stake is missing".to_string())?;
+    Ok(GenesisParameters {
         identity_registration_fee_nwei: s(&c["identity"]["init_params"]["registration_fee_nwei"]),
         identity_reserved_names: c["identity"]["init_params"]["reserved_names"]
             .as_array()
@@ -758,11 +1430,19 @@ fn production_parameters(repo: &Path) -> GenesisParameters {
             .iter()
             .map(s)
             .collect(),
-        validator_max_count: n(&c["validator_registry"]["init_params"]["max_validator_count"]),
+        // Fresh P3 deliberately represents an uncapped validator set as null
+        // in the public Genesis policy.  The deployment ABI is numeric-only;
+        // zero is its canonical unbounded sentinel.
+        validator_max_count: c["validator_registry"]["init_params"]["max_validator_count"]
+            .as_u64()
+            .or_else(|| {
+                c["validator_registry"]["init_params"]["preconfigured_validator_count"]
+                    .as_u64()
+            })
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "0".to_string()),
         validator_min_count: n(&c["validator_registry"]["init_params"]["min_validator_count"]),
-        validator_min_self_stake_nwei: s(
-            &c["validator_registry"]["init_params"]["min_self_stake_nwei"]
-        ),
+        validator_min_self_stake_nwei,
         validators,
         staking_min_stake_nwei: s(&c["staking"]["init_params"]["min_stake_nwei"]),
         staking_max_stake_nwei: s(&c["staking"]["init_params"]["max_stake_nwei"]),
@@ -796,9 +1476,9 @@ fn production_parameters(repo: &Path) -> GenesisParameters {
             .map(s)
             .collect(),
         team_vesting_start_time: "1775044800".to_string(),
-        team_allocation_nwei: s(&c["team_vesting"]["init_params"]["total_allocation_nwei"]),
-        support_allocation_nwei: "200000000000000000".to_string(),
+        team_allocation_nwei: "60000000000000000".to_string(),
+        support_allocation_nwei: "10000000000000000".to_string(),
         team_count: "5".to_string(),
         support_count: "4".to_string(),
-    }
+    })
 }

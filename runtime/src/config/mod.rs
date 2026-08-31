@@ -6,7 +6,8 @@ use std::fs;
 use std::path::Path;
 use toml;
 
-use crate::synergy_types::POSY_PROTOCOL_VERSION;
+use crate::consensus::simplified_posy::POSY_SIMPLIFIED_PROTOCOL_VERSION;
+use crate::synergy_types::TESTNET_V3_CANONICAL_NETWORK_ID;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct NodeConfig {
@@ -61,15 +62,41 @@ pub struct ValidatorVpnTransportConfig {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct BlockchainConfig {
+    /// Legacy whole-second cadence. New fresh-P3 candidates may omit this
+    /// alias and bind cadence directly in milliseconds.
+    #[serde(default)]
     pub block_time: u64,
+    /// Canonical cadence for fresh PoSy configurations. A non-zero value is
+    /// authoritative and must agree with the Genesis-bound manifest.
+    #[serde(default)]
+    pub target_block_time_ms: u64,
     pub max_gas_limit: String,
     pub chain_id: u64,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
 pub struct ConsensusConfig {
     #[serde(default = "default_consensus_protocol_version")]
     pub algorithm: String,
+    /// Explicit runtime consensus-mode boundary.  `algorithm` remains the
+    /// protocol compatibility label; this field selects which single engine is
+    /// authorized to run for a height range.
+    #[serde(default = "default_consensus_mode")]
+    pub mode: String,
+    /// Canonical coordinator identity for the temporary coordinated mode.
+    /// Empty unless that mode is explicitly configured.
+    #[serde(default)]
+    pub coordinator_id: String,
+    /// Ordered canonical producer identities for the temporary coordinated
+    /// mode. These must never be inferred from peer order or transport data.
+    #[serde(default)]
+    pub producer_ids: Vec<String>,
+    #[serde(default = "default_producer_turn_timeout_ms")]
+    pub producer_turn_timeout_ms: u64,
+    /// Legacy whole-second cadence.  Fresh-P3 500 ms configurations omit the
+    /// alias and use `target_block_time_ms` instead.
+    #[serde(default)]
     pub block_time_secs: u64,
     pub epoch_length: u64,
     #[serde(default = "default_target_block_time_ms")]
@@ -125,8 +152,90 @@ pub struct ConsensusConfig {
     pub reward_weighting: RewardWeighting,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedConsensusMode {
+    /// The only production consensus mode for the fresh block-zero
+    /// Testnet-v3 chain.  Its complete authority comes from the canonical
+    /// Genesis activation binding, never from this local configuration.
+    PosySimplifiedV3,
+    CoordinatedRoundRobinV1(crate::consensus::coordinated_round_robin::CoordinatedRoundRobinConfig),
+}
+
 fn default_consensus_protocol_version() -> String {
-    POSY_PROTOCOL_VERSION.to_string()
+    POSY_SIMPLIFIED_PROTOCOL_VERSION.to_string()
+}
+
+fn default_consensus_mode() -> String {
+    "posy_simplified_v3".to_string()
+}
+
+fn default_producer_turn_timeout_ms() -> u64 {
+    4_000
+}
+
+impl ConsensusConfig {
+    pub fn resolve_mode(
+        &self,
+        chain_id: u64,
+        network_id: &str,
+    ) -> Result<ResolvedConsensusMode, String> {
+        use crate::consensus::coordinated_round_robin::COORDINATED_ROUND_ROBIN_V1;
+
+        match self.mode.as_str() {
+            "posy_simplified_v3" => {
+                if self.algorithm != POSY_SIMPLIFIED_PROTOCOL_VERSION {
+                    return Err(format!(
+                        "posy_simplified_v3 requires algorithm {POSY_SIMPLIFIED_PROTOCOL_VERSION}, found {}",
+                        self.algorithm
+                    ));
+                }
+                if !self.coordinator_id.is_empty() || !self.producer_ids.is_empty() {
+                    return Err(
+                        "posy_simplified_v3 does not accept a locally configured coordinator or producer ring"
+                            .to_string(),
+                    );
+                }
+                Ok(ResolvedConsensusMode::PosySimplifiedV3)
+            }
+            COORDINATED_ROUND_ROBIN_V1 => Ok(ResolvedConsensusMode::CoordinatedRoundRobinV1(
+                self.coordinated_round_robin_config(chain_id, network_id)?,
+            )),
+            mode => Err(format!("unsupported consensus mode {mode}")),
+        }
+    }
+
+    /// Resolves the temporary mode only when configuration explicitly selects
+    /// it. The role runtime uses this typed value as its single dispatcher
+    /// boundary, preventing the existing PoSy worker from running alongside
+    /// coordinated mode.
+    pub fn coordinated_round_robin_config(
+        &self,
+        chain_id: u64,
+        network_id: &str,
+    ) -> Result<crate::consensus::coordinated_round_robin::CoordinatedRoundRobinConfig, String>
+    {
+        use crate::consensus::coordinated_round_robin::{
+            CoordinatedRoundRobinConfig, COORDINATED_ROUND_ROBIN_V1,
+        };
+
+        if self.mode != COORDINATED_ROUND_ROBIN_V1 {
+            return Err(format!(
+                "consensus mode {} is not {}",
+                self.mode, COORDINATED_ROUND_ROBIN_V1
+            ));
+        }
+        let mode = CoordinatedRoundRobinConfig {
+            chain_id,
+            network_id: network_id.to_string(),
+            consensus_version: self.mode.clone(),
+            coordinator_id: self.coordinator_id.clone(),
+            producer_ids: self.producer_ids.clone(),
+            target_block_interval_ms: self.target_block_time_ms,
+            producer_turn_timeout_ms: self.producer_turn_timeout_ms,
+        };
+        mode.validate()?;
+        Ok(mode)
+    }
 }
 
 fn default_target_block_time_ms() -> u64 {
@@ -150,7 +259,7 @@ fn default_max_round_timeout_ms() -> u64 {
 }
 
 fn default_min_validators() -> usize {
-    6
+    5
 }
 
 fn default_emergency_stable_committee_mode() -> bool {
@@ -174,7 +283,7 @@ fn default_vote_only_probation_blocks() -> u64 {
 }
 
 fn default_validator_vote_threshold() -> usize {
-    5
+    4
 }
 
 fn default_max_validators() -> usize {
@@ -207,6 +316,53 @@ fn default_block_timeout_secs() -> u64 {
 
 fn default_penalization_enabled() -> bool {
     true
+}
+
+impl Default for ConsensusConfig {
+    fn default() -> Self {
+        Self {
+            algorithm: default_consensus_protocol_version(),
+            mode: default_consensus_mode(),
+            coordinator_id: String::new(),
+            producer_ids: Vec::new(),
+            producer_turn_timeout_ms: default_producer_turn_timeout_ms(),
+            block_time_secs: 2,
+            epoch_length: 1_000,
+            target_block_time_ms: default_target_block_time_ms(),
+            proposal_timeout_ms: default_proposal_timeout_ms(),
+            prevote_timeout_ms: default_prevote_timeout_ms(),
+            precommit_timeout_ms: default_precommit_timeout_ms(),
+            max_round_timeout_ms: default_max_round_timeout_ms(),
+            emergency_stable_committee_mode: default_emergency_stable_committee_mode(),
+            freeze_validator_set: default_freeze_validator_set(),
+            freeze_score_weighted_proposer_order: default_freeze_score_weighted_proposer_order(),
+            vote_only_rejoin_enabled: default_vote_only_rejoin_enabled(),
+            vote_only_probation_blocks: default_vote_only_probation_blocks(),
+            min_validators: default_min_validators(),
+            validator_cluster_size: 5,
+            validator_vote_threshold: default_validator_vote_threshold(),
+            max_validators: default_max_validators(),
+            status_ready_gate_enabled: default_status_ready_gate_enabled(),
+            status_ready_min_validators: 0,
+            status_ready_genesis_grace_secs: default_status_ready_genesis_grace_secs(),
+            allow_genesis_status_bypass: default_allow_genesis_status_bypass(),
+            mesh_settle_secs: default_mesh_settle_secs(),
+            leader_timeout_secs: 0,
+            vote_timeout_secs: default_vote_timeout_secs(),
+            block_timeout_secs: default_block_timeout_secs(),
+            penalization_enabled: default_penalization_enabled(),
+            synergy_score_decay_rate: 0.05,
+            vrf_enabled: true,
+            vrf_seed_epoch_interval: 1_000,
+            max_synergy_points_per_epoch: 100,
+            max_tasks_per_validator: 10,
+            reward_weighting: RewardWeighting {
+                task_accuracy: 0.5,
+                uptime: 0.3,
+                collaboration: 0.2,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -272,7 +428,7 @@ fn default_reject_private_advertise_addrs() -> bool {
 }
 
 fn default_network_id() -> String {
-    "synergy-testnet-v3".to_string()
+    TESTNET_V3_CANONICAL_NETWORK_ID.to_string()
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -319,6 +475,10 @@ pub struct IdentityConfig {
     pub address: String,
     #[serde(default)]
     pub label: String,
+    /// NCP's opaque encrypted Aegis validator custody. The runtime only
+    /// consumes it through the Aegis in-memory unlock channel.
+    #[serde(default)]
+    pub encrypted_custody_path: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
@@ -380,48 +540,11 @@ impl Default for NodeConfig {
             },
             blockchain: BlockchainConfig {
                 block_time: 2,
+                target_block_time_ms: 2_000,
                 max_gas_limit: "0x2fefd8".to_string(),
                 chain_id: 1266,
             },
-            consensus: ConsensusConfig {
-                algorithm: default_consensus_protocol_version(),
-                block_time_secs: 2,
-                epoch_length: 1000,
-                target_block_time_ms: default_target_block_time_ms(),
-                proposal_timeout_ms: default_proposal_timeout_ms(),
-                prevote_timeout_ms: default_prevote_timeout_ms(),
-                precommit_timeout_ms: default_precommit_timeout_ms(),
-                max_round_timeout_ms: default_max_round_timeout_ms(),
-                emergency_stable_committee_mode: default_emergency_stable_committee_mode(),
-                freeze_validator_set: default_freeze_validator_set(),
-                freeze_score_weighted_proposer_order: default_freeze_score_weighted_proposer_order(
-                ),
-                vote_only_rejoin_enabled: default_vote_only_rejoin_enabled(),
-                vote_only_probation_blocks: default_vote_only_probation_blocks(),
-                min_validators: default_min_validators(),
-                validator_cluster_size: 6,
-                validator_vote_threshold: default_validator_vote_threshold(),
-                max_validators: default_max_validators(),
-                status_ready_gate_enabled: default_status_ready_gate_enabled(),
-                status_ready_min_validators: 0,
-                status_ready_genesis_grace_secs: default_status_ready_genesis_grace_secs(),
-                allow_genesis_status_bypass: default_allow_genesis_status_bypass(),
-                mesh_settle_secs: default_mesh_settle_secs(),
-                leader_timeout_secs: 0,
-                vote_timeout_secs: default_vote_timeout_secs(),
-                block_timeout_secs: default_block_timeout_secs(),
-                penalization_enabled: default_penalization_enabled(),
-                synergy_score_decay_rate: 0.05,
-                vrf_enabled: true,
-                vrf_seed_epoch_interval: 1000,
-                max_synergy_points_per_epoch: 100,
-                max_tasks_per_validator: 10,
-                reward_weighting: RewardWeighting {
-                    task_accuracy: 0.5,
-                    uptime: 0.3,
-                    collaboration: 0.2,
-                },
-            },
+            consensus: ConsensusConfig::default(),
             logging: LoggingConfig {
                 log_level: "info".to_string(),
                 log_file: "data/logs/synergy-node.log".to_string(),
@@ -556,15 +679,45 @@ fn enforce_consensus_config_invariants(config: &NodeConfig) -> Result<(), Box<dy
         )
         .into());
     }
-    if config.network.network_id != "synergy-testnet-v3" {
+    if config.network.network_id != TESTNET_V3_CANONICAL_NETWORK_ID {
         return Err(format!(
-            "Synergy Testnet v3 requires network_id synergy-testnet-v3, found {}",
-            config.network.network_id
+            "Synergy Testnet v3 requires network_id {TESTNET_V3_CANONICAL_NETWORK_ID}, found {}",
+            config.network.network_id,
         )
         .into());
     }
     if config.consensus.allow_genesis_status_bypass {
         return Err("genesis status bypass is disabled for PQC Testnet consensus".into());
+    }
+    if config.consensus.algorithm != POSY_SIMPLIFIED_PROTOCOL_VERSION
+        || config.consensus.mode != "posy_simplified_v3"
+    {
+        return Err(format!(
+            "this fresh Chain 1266 release only accepts consensus algorithm {POSY_SIMPLIFIED_PROTOCOL_VERSION} and mode posy_simplified_v3"
+        )
+        .into());
+    }
+    if !config.consensus.coordinator_id.is_empty() || !config.consensus.producer_ids.is_empty() {
+        return Err(
+            "fresh simplified PoSy does not accept a locally configured coordinator or producer ring"
+                .into(),
+        );
+    }
+    for variable in [
+        "CHAIN1266_VOTING_ENABLED",
+        "CHAIN1266_QUORUM_ENABLED",
+        "CHAIN1266_QC_ENABLED",
+    ] {
+        if env::var(variable)
+            .ok()
+            .as_deref()
+            .and_then(parse_env_bool)
+            .unwrap_or(false)
+        {
+            return Err(
+                format!("{variable}=true is forbidden because fresh simplified PoSy derives voting authority from canonical Genesis").into(),
+            );
+        }
     }
     Ok(())
 }
@@ -892,7 +1045,18 @@ fn parse_node_config_content(
     source_path: Option<&Path>,
 ) -> Result<NodeConfig, Box<dyn Error>> {
     let raw: toml::Value = toml::from_str(content)?;
-    let mut config = toml::from_str::<NodeConfig>(content).unwrap_or_default();
+    // NCP owns the operator-facing configuration.  That format deliberately
+    // contains only node-local inputs (config, adjacent Genesis, and encrypted
+    // custody), rather than exposing every internal runtime default.  Expand
+    // it here into the same fully validated runtime configuration used by the
+    // legacy/full TOML format.
+    let mut config = if is_ncp_managed_config(&raw) {
+        ncp_managed_node_config(&raw)?
+    } else {
+        toml::from_str::<NodeConfig>(content).map_err(|error| {
+            format!("node configuration cannot be deserialized without fallback defaults: {error}")
+        })?
+    };
 
     apply_compatibility_overrides(&mut config, &raw);
 
@@ -900,6 +1064,103 @@ fn parse_node_config_content(
         merge_companion_peers_file(source_path, &mut config)?;
     }
 
+    Ok(config)
+}
+
+fn is_ncp_managed_config(raw: &toml::Value) -> bool {
+    get_string(raw, &["runtime", "startup_mode"])
+        .is_some_and(|mode| mode == "genesis-config-identity")
+}
+
+fn ncp_required_string(
+    raw: &toml::Value,
+    path: &[&str],
+    label: &str,
+) -> Result<String, Box<dyn Error>> {
+    get_string(raw, path)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("NCP-managed configuration is missing {label}").into())
+}
+
+fn ncp_managed_node_config(raw: &toml::Value) -> Result<NodeConfig, Box<dyn Error>> {
+    let chain_id = get_u64(raw, &["chain_id"])
+        .ok_or_else(|| "NCP-managed configuration is missing chain_id".to_string())?;
+    let network_id = ncp_required_string(raw, &["network_id"], "network_id")?;
+    let role = ncp_required_string(raw, &["role"], "role")?;
+    if chain_id != 1266 || network_id != TESTNET_V3_CANONICAL_NETWORK_ID || role != "validator" {
+        return Err(
+            "NCP-managed configuration has an unsupported Chain 1266 validator identity".into(),
+        );
+    }
+
+    // The operator product must never ship static validator routes.  Seeds are
+    // discovery inputs; every validator route remains authenticated at the
+    // Synergy P2P layer after discovery.
+    for forbidden in [
+        &["persistent_peers"][..],
+        &["additional_dial_targets"][..],
+        &["p2p", "persistent_peers"][..],
+        &["p2p", "additional_dial_targets"][..],
+        &["p2p", "validator_vpn_transports"][..],
+    ] {
+        if get_string_array(raw, forbidden).is_some() {
+            return Err("NCP-managed configuration must not contain static validator peers".into());
+        }
+    }
+
+    let node_id = ncp_required_string(raw, &["identity", "node_id"], "identity.node_id")?;
+    let listen_address =
+        ncp_required_string(raw, &["p2p", "listen_address"], "p2p.listen_address")?;
+    let data_dir = ncp_required_string(raw, &["data_dir"], "data_dir")?;
+    let seed_servers = get_string_array(raw, &["p2p", "seed_servers"])
+        .unwrap_or_default()
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    if seed_servers.is_empty() {
+        return Err("NCP-managed configuration requires at least one seed server".into());
+    }
+    let block_time_target_ms = get_u64(raw, &["block_time_target_ms"])
+        .ok_or_else(|| "NCP-managed configuration is missing block_time_target_ms".to_string())?;
+    if !(100..=1100).contains(&block_time_target_ms) {
+        return Err(
+            "NCP-managed configuration block_time_target_ms must be between 100 and 1100".into(),
+        );
+    }
+
+    let mut config = NodeConfig::default();
+    config.network.id = chain_id;
+    config.network.network_id = network_id;
+    config.network.name = "Synergy Testnet".to_string();
+    config.network.seed_servers = seed_servers;
+    config.blockchain.chain_id = chain_id;
+    config.blockchain.block_time = 0;
+    config.blockchain.target_block_time_ms = block_time_target_ms;
+    config.consensus.block_time_secs = 0;
+    config.consensus.target_block_time_ms = block_time_target_ms;
+    config.p2p.listen_address = listen_address.clone();
+    config.p2p.public_address = get_string(raw, &["p2p", "public_address"])
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(listen_address);
+    config.p2p.node_name = node_id.clone();
+    config.p2p.enable_discovery = true;
+    config.p2p.enable_peer_exchange = true;
+    config.storage.path = data_dir;
+    config.logging.log_file = "data/logs/synergy-validator.log".to_string();
+    config.identity.node_id = node_id;
+    config.identity.role = role;
+    config.identity.encrypted_custody_path =
+        get_string(raw, &["identity", "encrypted_custody_path"])
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                "NCP-managed configuration is missing identity.encrypted_custody_path".to_string()
+            })?;
+    config.node.validator_address = config.identity.node_id.clone();
+    config.role.compiled_profile = "validator_node".to_string();
     Ok(config)
 }
 
@@ -1513,7 +1774,7 @@ metrics_bind = "0.0.0.0:6030"
 [network]
 id = 1266
 name = "synergy-testnet"
-network_id = "synergy-testnet-v3"
+network_id = "testnet"
 p2p_port = 5622
 rpc_port = 5640
 ws_port = 5660
@@ -1525,7 +1786,7 @@ max_gas_limit = "0x2fefd8"
 chain_id = 1266
 
 [consensus]
-algorithm = "posy/2.2"
+algorithm = "posy/3.0"
 block_time_secs = 2
 epoch_length = 1000
 target_block_time_ms = 2000
@@ -1533,9 +1794,9 @@ proposal_timeout_ms = 1500
 prevote_timeout_ms = 1500
 precommit_timeout_ms = 1500
 max_round_timeout_ms = 10000
-min_validators = 6
-validator_cluster_size = 6
-validator_vote_threshold = 5
+min_validators = 5
+validator_cluster_size = 5
+validator_vote_threshold = 4
 max_validators = 0
 synergy_score_decay_rate = 0.05
 vrf_enabled = true
@@ -1599,9 +1860,9 @@ additional_dial_targets = ["62.146.182.208:39638"]
         let config =
             parse_node_config_content(&content, Some(&node_path)).expect("config should parse");
 
-        assert_eq!(config.network.network_id, "synergy-testnet-v3");
+        assert_eq!(config.network.network_id, "testnet");
         assert_eq!(config.blockchain.block_time, 2);
-        assert_eq!(config.consensus.algorithm, POSY_PROTOCOL_VERSION);
+        assert_eq!(config.consensus.algorithm, POSY_SIMPLIFIED_PROTOCOL_VERSION);
         assert_eq!(config.consensus.block_time_secs, 2);
         assert_eq!(config.consensus.epoch_length, 1_000);
         assert_eq!(config.consensus.target_block_time_ms, 2_000);
@@ -1609,8 +1870,8 @@ additional_dial_targets = ["62.146.182.208:39638"]
         assert_eq!(config.consensus.prevote_timeout_ms, 1_500);
         assert_eq!(config.consensus.precommit_timeout_ms, 1_500);
         assert_eq!(config.consensus.max_round_timeout_ms, 10_000);
-        assert_eq!(config.consensus.min_validators, 6);
-        assert_eq!(config.consensus.validator_vote_threshold, 5);
+        assert_eq!(config.consensus.min_validators, 5);
+        assert_eq!(config.consensus.validator_vote_threshold, 4);
 
         assert_eq!(config.network.bootnodes.len(), 2);
         assert!(config
@@ -1950,7 +2211,7 @@ state_sync_before_join = true
 [network]
 id = 1266
 name = "synergy-testnet"
-network_id = "synergy-testnet-v3"
+network_id = "testnet"
 p2p_port = 5622
 rpc_port = 5640
 ws_port = 5660
@@ -1962,7 +2223,7 @@ max_gas_limit = "0x2fefd8"
 chain_id = 1266
 
 [consensus]
-algorithm = "posy/2.2"
+algorithm = "posy/3.0"
 block_time_secs = 2
 epoch_length = 1000
 target_block_time_ms = 2000
@@ -1970,9 +2231,9 @@ proposal_timeout_ms = 1500
 prevote_timeout_ms = 1500
 precommit_timeout_ms = 1500
 max_round_timeout_ms = 10000
-min_validators = 6
-validator_cluster_size = 6
-validator_vote_threshold = 5
+min_validators = 5
+validator_cluster_size = 5
+validator_vote_threshold = 4
 max_validators = 0
 synergy_score_decay_rate = 0.05
 vrf_enabled = true
@@ -2025,9 +2286,9 @@ validator_address = "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5"
         let content = fs::read_to_string(&config_path).expect("config should be readable");
         let parsed = parse_node_config_content(&content, Some(&config_path))
             .expect("canonical Testnet-v3 fixture should parse");
-        assert_eq!(parsed.network.network_id, "synergy-testnet-v3");
+        assert_eq!(parsed.network.network_id, "testnet");
         assert_eq!(parsed.blockchain.block_time, 2);
-        assert_eq!(parsed.consensus.algorithm, POSY_PROTOCOL_VERSION);
+        assert_eq!(parsed.consensus.algorithm, POSY_SIMPLIFIED_PROTOCOL_VERSION);
         assert_eq!(parsed.consensus.block_time_secs, 2);
         assert_eq!(parsed.consensus.epoch_length, 1_000);
         assert_eq!(parsed.consensus.target_block_time_ms, 2_000);
@@ -2049,5 +2310,103 @@ validator_address = "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5"
 
         fs::remove_file(&config_path).ok();
         fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn fresh_testnet_v3_rejects_coordinator_mode_and_local_ring() {
+        let mut config = NodeConfig::default();
+        config.consensus.mode =
+            crate::consensus::coordinated_round_robin::COORDINATED_ROUND_ROBIN_V1.to_string();
+        let error = enforce_consensus_config_invariants(&config)
+            .expect_err("fresh Testnet-v3 must reject the retired coordinator mode");
+        assert!(error
+            .to_string()
+            .contains("only accepts consensus algorithm posy/3.0 and mode posy_simplified_v3"));
+
+        config.consensus.mode = "posy_simplified_v3".to_string();
+        config.consensus.coordinator_id = "validator-01".to_string();
+        config.consensus.producer_ids = vec!["validator-02".to_string()];
+        let error = enforce_consensus_config_invariants(&config)
+            .expect_err("fresh Testnet-v3 must reject a locally configured leader ring");
+        assert!(error
+            .to_string()
+            .contains("does not accept a locally configured coordinator or producer ring"));
+    }
+
+    #[test]
+    fn ncp_managed_validator_config_expands_to_the_validated_runtime_profile() {
+        let parsed = parse_node_config_content(
+            r#"
+chain_id = 1266
+network_id = "testnet"
+role = "validator"
+block_time_target_ms = 500
+data_dir = "/var/lib/synergy/validator-02"
+
+[identity]
+node_id = "synv1ncpvalidatorfixture"
+encrypted_custody_path = "identity/validator.identity.enc"
+
+[p2p]
+listen_address = "10.69.0.2:5622"
+public_address = "10.69.0.2:5622"
+seed_servers = ["https://seed-01.example"]
+enable_discovery = true
+enable_peer_exchange = true
+
+[netbird]
+provider = "netbird"
+managed_by_ncp = true
+
+[runtime]
+startup_mode = "genesis-config-identity"
+"#,
+            None,
+        )
+        .expect("minimal NCP validator configuration should expand");
+
+        assert_eq!(parsed.identity.role, "validator");
+        assert_eq!(parsed.role.compiled_profile, "validator_node");
+        assert_eq!(parsed.network.seed_servers, vec!["https://seed-01.example"]);
+        assert!(parsed.network.persistent_peers.is_empty());
+        assert!(parsed.network.additional_dial_targets.is_empty());
+        assert_eq!(parsed.consensus.target_block_time_ms, 500);
+        assert_eq!(parsed.storage.path, "/var/lib/synergy/validator-02");
+        assert_eq!(
+            parsed.identity.encrypted_custody_path,
+            "identity/validator.identity.enc"
+        );
+        enforce_consensus_config_invariants(&parsed)
+            .expect("expanded NCP config must satisfy consensus invariants");
+    }
+
+    #[test]
+    fn ncp_managed_validator_config_rejects_static_peers() {
+        let error = parse_node_config_content(
+            r#"
+chain_id = 1266
+network_id = "testnet"
+role = "validator"
+block_time_target_ms = 500
+data_dir = "/var/lib/synergy/validator-02"
+persistent_peers = ["10.69.0.3:5622"]
+
+[identity]
+node_id = "synv1ncpvalidatorfixture"
+encrypted_custody_path = "identity/validator.identity.enc"
+
+[p2p]
+listen_address = "10.69.0.2:5622"
+seed_servers = ["https://seed-01.example"]
+
+[runtime]
+startup_mode = "genesis-config-identity"
+"#,
+            None,
+        )
+        .expect_err("NCP config must reject static validator peers");
+        assert!(error
+            .to_string()
+            .contains("must not contain static validator peers"));
     }
 }

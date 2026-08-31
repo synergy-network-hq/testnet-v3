@@ -1,5 +1,5 @@
 use crate::block::{Block, BlockChain, HOT_CHAIN_RETENTION_BLOCKS_ENV};
-use crate::config::NodeConfig;
+use crate::config::{NodeConfig, ResolvedConsensusMode};
 use crate::consensus::anti_divergence::{
     current_validator_quarantine_duty_block, record_self_quarantine_for_canonical_lock_conflict,
 };
@@ -7,11 +7,23 @@ use crate::consensus::chain_durability::{
     append_committed_block_bodies, append_committed_block_body,
 };
 use crate::consensus::consensus_algorithm::ProofOfSynergy;
+use crate::consensus::coordinated_finality_observer::{
+    canonical_coordinated_finality_snapshot_from,
+    coordinated_finality_observer_next_missing_height, coordinated_finality_observer_snapshot_from,
+    import_coordinated_finality_observer_records,
+};
+use crate::consensus::coordinated_round_robin::{
+    AuthenticatedCoordinatedConsensusPeer, COORDINATED_ROUND_ROBIN_V1,
+};
 use crate::consensus::dual_quorum::{DualQuorumConsensus, QuorumCertificate};
 use crate::consensus::legacy_canonical_lock::{
     legacy_canonical_commit_record, quarantine_legacy_canonical_locks_above,
     verify_legacy_canonical_lock, verify_legacy_canonical_locks, write_legacy_canonical_lock,
     write_legacy_canonical_locks,
+};
+use crate::consensus::simplified_posy::{
+    load_genesis_bound_simplified_activation, AuthenticatedSimplifiedConsensusPeer,
+    GenesisBoundSimplifiedActivation, SimplifiedConsensusMessage, POSY_SIMPLIFIED_PROTOCOL_VERSION,
 };
 use crate::consensus::testnet_v3_bootstrap::{
     authenticate_active_typed_consensus_peer, load_testnet_v3_genesis_bootstrap,
@@ -22,18 +34,26 @@ use crate::consensus::typed_finality_observer::{
     canonical_typed_finality_snapshot_from, import_typed_finality_observer_records,
     typed_finality_observer_next_missing_height, typed_finality_observer_snapshot_from,
 };
-use crate::consensus::validator_keys::load_local_validator_keypair;
+use crate::consensus::validator_keys::{consensus_algorithm_label, load_local_validator_keypair};
 use crate::crypto::aegis_pqvm::{
     AegisPqvmKeyRegistry, AegisPqvmSigner, AegisPqvmVerifier, SYNERGY_P2P_HANDSHAKE_V1,
 };
 use crate::crypto::pqc::{PQCAlgorithm, PQCPrivateKey, PQCPublicKey};
-use crate::etdag::{
-    dispatch_etdag_certified_input, CertifiedProtectedInputArtifact, EtdagAuthenticatedIngressPeer,
-};
+use crate::etdag::{CertifiedProtectedInputArtifact, EtdagAuthenticatedIngressPeer, EtdagDigest};
 use crate::genesis::canonical_genesis;
 use crate::p2p::messages::{
-    validate_typed_finality_observer_message_size, NetworkMessage, TypedConsensusMessage,
-    TypedFinalityObserverMessage,
+    validate_coordinated_consensus_message_size,
+    validate_coordinated_finality_observer_message_size,
+    validate_protected_pipeline_evidence_message, validate_simplified_consensus_message_size,
+    validate_typed_finality_observer_message_size, CoordinatedConsensusMessage,
+    CoordinatedFinalityObserverMessage, NetworkMessage, ProtectedPipelineEvidenceMessage,
+    ProtectedPipelineSemanticObject, SimplifiedTargetAdmissionMessage, TypedConsensusMessage,
+    TypedFinalityObserverMessage, MAX_PROTECTED_PIPELINE_EVIDENCE_FRAME_BYTES,
+    MAX_PROTECTED_PIPELINE_REQUEST_FRAME_BYTES, MAX_PROTECTED_PIPELINE_RESPONSE_FRAME_BYTES,
+    MAX_SIMPLIFIED_CONSENSUS_CERTIFICATE_FRAME_BYTES, MAX_SIMPLIFIED_CONSENSUS_CONTROL_FRAME_BYTES,
+    MAX_SIMPLIFIED_CONSENSUS_PROPOSAL_FRAME_BYTES, MAX_SIMPLIFIED_CONSENSUS_STATE_SYNC_FRAME_BYTES,
+    MAX_SIMPLIFIED_CONSENSUS_VOTE_FRAME_BYTES, MAX_SIMPLIFIED_TARGET_ADMISSION_PACKAGE_FRAME_BYTES,
+    MAX_SIMPLIFIED_TARGET_ADMISSION_VOTE_FRAME_BYTES,
 };
 #[cfg(not(test))]
 use crate::p2p::validator_transport_registry::refresh_validator_transports;
@@ -45,7 +65,7 @@ use crate::rpc::rpc_server::{
     SYNC_MANAGER, TX_POOL,
 };
 use crate::sync::SyncState;
-use crate::synergy_types::{AegisPqKeyId, AegisPqKeyRole, Epoch};
+use crate::synergy_types::{AegisPqKeyId, AegisPqKeyRole, Epoch, ValidatorId};
 use crate::transaction::Transaction;
 use crate::validator::{
     apply_validator_activation_transaction, canonical_active_validator_set_hash,
@@ -63,7 +83,7 @@ use serde_json;
 use socket2::{SockRef, TcpKeepalive};
 #[cfg(test)]
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
@@ -71,10 +91,14 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Arc, Mutex, Once, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::runtime::{Builder as TokioRuntimeBuilder, Runtime as TokioRuntime};
+
+#[path = "protected_ciphertext_store.rs"]
+mod protected_ciphertext_store;
+pub use protected_ciphertext_store::DurableProtectedCiphertextStore;
 
 #[cfg(test)]
 thread_local! {
@@ -116,7 +140,13 @@ const PUBLIC_RELAYER_DIAL_ADDRESSES: &[&str] = &[
     "relay3.synergynode.xyz:5622",
 ];
 const MAX_BLOCK_SYNC_RESPONSE_BLOCKS: u32 = 64;
-const TYPED_POSY_VALIDATOR_CAPABILITY: &str = "typed-posy-v2.2-validator";
+/// A simplified-PoSy validator has a distinct capability so peers cannot
+/// confuse the fresh v3 Genesis authority with the retired typed PoSy engine.
+const SIMPLIFIED_POSY_VALIDATOR_CAPABILITY: &str = "posy-simplified-v3-validator";
+/// This capability is never accepted. Retaining an explicit reject value keeps
+/// pre-v3 peers from silently degrading to a generic authenticated session.
+const RETIRED_TYPED_POSY_VALIDATOR_CAPABILITY: &str = "typed-posy-v2.2-validator";
+const COORDINATED_VALIDATOR_CAPABILITY: &str = "coordinated-round-robin-v1-validator";
 // Identity bindings are session-scoped and bounded.  A socket address is not a
 // consensus identity, so this registry exists solely to carry the result of a
 // verified Genesis-bound handshake into the typed coordinator mailbox.
@@ -139,7 +169,10 @@ const BLOCK_SYNC_SERVE_QUEUE_CAPACITY: usize = 128;
 const BLOCK_SYNC_APPLY_QUEUE_CAPACITY: usize = 64;
 const BLOCK_SYNC_BUSY_QUEUE_CAPACITY: usize = 128;
 const BLOCK_SYNC_BUSY_RETRY_MILLIS: u64 = 1_000;
-const CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS: u64 = 500;
+// Protected ETDAG and admission frames can legitimately exceed a 500 ms drain
+// window over the validator VPN.  Keep the write bounded, but allow one
+// normal TCP retransmission window before treating a framed send as failed.
+const CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS: u64 = 5_000;
 const CONSENSUS_DIRECT_VOTE_DIAL_TIMEOUT_MILLIS: u64 = 1_200;
 const VOTE_REQUEST_PARENT_SYNC_WAIT_MILLIS: u64 = 900;
 const VOTE_REQUEST_PARENT_SYNC_POLL_MILLIS: u64 = 25;
@@ -166,9 +199,25 @@ const BLOCK_SYNC_RECONCILIATION_LOOKBACK: u64 = 8;
 const BLOCK_SYNC_PROGRESS_OVERLAP: u64 = 2;
 const TESTNET_NATIVE_CAIP2: &str = "synergy:testnet";
 const TESTNET_RESERVED_EIP155: &str = "eip155:1266";
-const TESTNET_NETWORK_ID_TEXT: &str = "synergy-testnet-v3";
-const TESTNET_AEGIS_PQVM_VERSION: &str = "aegis-pqvm";
+const TESTNET_NETWORK_ID_TEXT: &str = "testnet";
+const TESTNET_AEGIS_PQVM_VERSION: &str = "aegis-pqvm-v3";
 const DEFAULT_MAX_CHAIN_SNAPSHOT_CLONE_HEIGHT: u64 = 50_000;
+
+static VERIFIED_MLDSA65_HANDSHAKES: AtomicU64 = AtomicU64::new(0);
+static VERIFIED_FNDSA_HANDSHAKES: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct P2pHandshakeMetricsSnapshot {
+    pub mldsa65_verified: u64,
+    pub fndsa_verified: u64,
+}
+
+pub fn p2p_handshake_metrics_snapshot() -> P2pHandshakeMetricsSnapshot {
+    P2pHandshakeMetricsSnapshot {
+        mldsa65_verified: VERIFIED_MLDSA65_HANDSHAKES.load(Ordering::Relaxed),
+        fndsa_verified: VERIFIED_FNDSA_HANDSHAKES.load(Ordering::Relaxed),
+    }
+}
 
 fn compact_hot_chain_state_from_env(chain: &mut BlockChain, context: &str) {
     if let Some((retain_recent_blocks, removed_blocks)) = chain.compact_from_env() {
@@ -495,6 +544,21 @@ fn canonical_genesis_hash() -> String {
         .unwrap_or_default()
 }
 
+/// P2P replay separation is part of the canonical Genesis identity. Do not
+/// freeze the former chain-incarnation value into wire messages: a fresh
+/// block-zero Testnet-v3 Genesis deliberately owns a new value.
+fn canonical_chain_incarnation() -> u64 {
+    canonical_genesis()
+        .map(|genesis| genesis.chain_incarnation())
+        .unwrap_or(crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION)
+}
+
+fn canonical_consensus_state_schema_version() -> u32 {
+    canonical_genesis()
+        .map(|genesis| genesis.consensus_state_schema_version())
+        .unwrap_or(crate::synergy_types::TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION)
+}
+
 fn canonical_network_magic_bytes() -> String {
     canonical_genesis()
         .map(|genesis| genesis.network_magic_bytes().to_string())
@@ -520,6 +584,11 @@ fn local_protocol_version(config: &NodeConfig) -> String {
 }
 
 fn local_consensus_version(config: &NodeConfig) -> String {
+    match config.consensus.algorithm.trim() {
+        COORDINATED_ROUND_ROBIN_V1 => return COORDINATED_ROUND_ROBIN_V1.to_string(),
+        POSY_SIMPLIFIED_PROTOCOL_VERSION => return POSY_SIMPLIFIED_PROTOCOL_VERSION.to_string(),
+        _ => {}
+    }
     canonical_genesis()
         .map(|genesis| genesis.consensus_version().to_string())
         .unwrap_or_else(|_| config.consensus.algorithm.clone())
@@ -578,6 +647,8 @@ struct HandshakePqSigningPayload {
     version: String,
     capabilities: Vec<String>,
     chain_id: Option<u64>,
+    chain_incarnation: Option<u64>,
+    consensus_state_schema_version: Option<u32>,
     network_id: Option<u64>,
     network_id_text: Option<String>,
     genesis_hash: String,
@@ -604,6 +675,8 @@ fn handshake_pq_signing_payload(message: &NetworkMessage) -> Result<Vec<u8>, Str
         version,
         capabilities,
         chain_id,
+        chain_incarnation,
+        consensus_state_schema_version,
         network_id,
         network_id_text,
         genesis_hash,
@@ -633,6 +706,8 @@ fn handshake_pq_signing_payload(message: &NetworkMessage) -> Result<Vec<u8>, Str
         version: version.clone(),
         capabilities: capabilities.clone(),
         chain_id: *chain_id,
+        chain_incarnation: *chain_incarnation,
+        consensus_state_schema_version: *consensus_state_schema_version,
         network_id: *network_id,
         network_id_text: network_id_text.clone(),
         genesis_hash: genesis_hash.clone(),
@@ -688,7 +763,7 @@ fn build_local_handshake_with_extra_capabilities(
         .unwrap_or_else(|| config.p2p.node_name.trim());
     let key_id = if local_consensus_handshake_required(config) {
         let validator_address = announced_validator_address(config).ok_or_else(|| {
-            "typed PoSy validator handshake requires a configured validator address".to_string()
+            "validator consensus handshake requires a configured validator address".to_string()
         })?;
         let (public_key, private_key) = load_local_validator_keypair(
             &validator_address,
@@ -696,9 +771,33 @@ fn build_local_handshake_with_extra_capabilities(
         )
         .map_err(|error| {
             format!(
-                "typed PoSy validator handshake cannot load the assigned ML-DSA-65 consensus key: {error}"
+                "validator consensus handshake cannot load the assigned ML-DSA-65 consensus key: {error}"
             )
         })?;
+        if config.consensus.algorithm.trim() == POSY_SIMPLIFIED_PROTOCOL_VERSION {
+            let genesis = canonical_genesis().map_err(|error| {
+                format!(
+                    "simplified PoSy validator handshake cannot load canonical Genesis: {error}"
+                )
+            })?;
+            let activation = load_genesis_bound_simplified_activation(genesis.value())?
+                .ok_or_else(|| {
+                    "simplified PoSy validator handshake requires a Genesis-bound v3 activation"
+                        .to_string()
+                })?;
+            authenticate_fresh_simplified_posy_peer(
+                &activation,
+                &validator_address,
+                &public_key.key_id,
+                consensus_algorithm_label(&public_key.algorithm),
+                &public_key.key_data,
+            )
+            .map_err(|error| {
+                format!(
+                    "simplified PoSy local validator key is not authorized by Genesis activation: {error}"
+                )
+            })?;
+        }
         register_validator_consensus_handshake_key(
             &mut signer,
             &validator_address,
@@ -707,7 +806,7 @@ fn build_local_handshake_with_extra_capabilities(
         )?
     } else {
         signer
-            .generate_and_register_key(peer_uma, vec![AegisPqKeyRole::PeerIdentity], Epoch(0))
+            .generate_and_register_fndsa_peer_identity(peer_uma, Epoch(0))
             .map_err(|error| format!("aegis-pqvm P2P key loading failed: {error}"))?
     };
     let public_key = signer
@@ -715,7 +814,8 @@ fn build_local_handshake_with_extra_capabilities(
         .map_err(|error| format!("aegis-pqvm P2P public key loading failed: {error}"))?;
     let mut capabilities = vec!["blocks".to_string(), "transactions".to_string()];
     if local_consensus_handshake_required(config) {
-        capabilities.push(TYPED_POSY_VALIDATOR_CAPABILITY.to_string());
+        let capability = validator_consensus_capability(config.consensus.algorithm.trim())?;
+        capabilities.push(capability.to_string());
     }
     for capability in extra_capabilities {
         let capability = capability.trim();
@@ -728,6 +828,8 @@ fn build_local_handshake_with_extra_capabilities(
         version: "1.0.0".to_string(),
         capabilities,
         chain_id: Some(local_chain_id(config)),
+        chain_incarnation: Some(canonical_chain_incarnation()),
+        consensus_state_schema_version: Some(canonical_consensus_state_schema_version()),
         network_id: Some(local_network_id(config)),
         network_id_text: Some(TESTNET_NETWORK_ID_TEXT.to_string()),
         genesis_hash: canonical_genesis_hash(),
@@ -762,14 +864,25 @@ fn build_local_handshake_with_extra_capabilities(
     Ok(handshake)
 }
 
-/// A typed validator handshake is a proof of possession of the exact
-/// Genesis-assigned ML-DSA-65 consensus key.  It must never fall back to an
-/// ephemeral P2P key: that would authenticate a connection but not the
-/// validator authorized to emit typed PoSy artifacts.
+/// A validator consensus handshake proves possession of the exact
+/// Genesis-assigned ML-DSA-65 key. No validator may fall back to an ephemeral
+/// P2P key.
 fn local_consensus_handshake_required(config: &NodeConfig) -> bool {
-    config.consensus.algorithm.trim() == "posy/2.2"
-        && !config.node.bootstrap_only
+    matches!(
+        config.consensus.algorithm.trim(),
+        POSY_SIMPLIFIED_PROTOCOL_VERSION | COORDINATED_ROUND_ROBIN_V1
+    ) && !config.node.bootstrap_only
         && !config.node.validator_address.trim().is_empty()
+}
+
+fn validator_consensus_capability(algorithm: &str) -> Result<&'static str, String> {
+    match algorithm.trim() {
+        COORDINATED_ROUND_ROBIN_V1 => Ok(COORDINATED_VALIDATOR_CAPABILITY),
+        POSY_SIMPLIFIED_PROTOCOL_VERSION => Ok(SIMPLIFIED_POSY_VALIDATOR_CAPABILITY),
+        algorithm => Err(format!(
+            "validator consensus handshake does not support algorithm {algorithm}"
+        )),
+    }
 }
 
 fn register_validator_consensus_handshake_key(
@@ -780,7 +893,7 @@ fn register_validator_consensus_handshake_key(
 ) -> Result<AegisPqKeyId, String> {
     if public_key.algorithm != PQCAlgorithm::MLDSA65 {
         return Err(
-            "typed PoSy validator handshake requires an ML-DSA-65 consensus key".to_string(),
+            "validator consensus handshake requires an ML-DSA-65 consensus key".to_string(),
         );
     }
     signer
@@ -796,7 +909,55 @@ fn register_validator_consensus_handshake_key(
             ],
             Epoch(0),
         )
-        .map_err(|error| format!("register typed PoSy validator handshake key: {error}"))
+        .map_err(|error| format!("register validator consensus handshake key: {error}"))
+}
+
+/// Authenticates a simplified-PoSy validator against the frozen set embedded
+/// in the canonical fresh-Genesis activation. The generic P2P signature was
+/// verified before this function is reached; this second binding ensures that
+/// its ML-DSA-65 public material belongs to one exact Genesis validator.
+fn authenticate_fresh_simplified_posy_peer(
+    activation: &GenesisBoundSimplifiedActivation,
+    validator_operator_address: &str,
+    advertised_key_id: &str,
+    advertised_algorithm: &str,
+    advertised_public_key: &[u8],
+) -> Result<AuthenticatedTypedConsensusPeer, String> {
+    activation.validate()?;
+    if !matches!(
+        advertised_algorithm.trim(),
+        "ML-DSA-65" | "ml-dsa-65" | "mldsa65"
+    ) {
+        return Err("simplified PoSy peer handshake key algorithm must be ML-DSA-65".to_string());
+    }
+    let operator = validator_operator_address.trim();
+    if operator.is_empty() {
+        return Err("simplified PoSy peer handshake omits validator operator address".to_string());
+    }
+    let validator = activation
+        .frozen_validator_set
+        .validators
+        .iter()
+        .find(|validator| validator.validator_uma_id.0 == operator)
+        .ok_or_else(|| {
+            "simplified PoSy peer is not in the Genesis-frozen validator set".to_string()
+        })?;
+    if !validator.is_active_for_epoch(crate::synergy_types::Epoch(activation.activation_epoch)) {
+        return Err("simplified PoSy peer is not active for the Genesis epoch".to_string());
+    }
+    if validator.consensus_public_key.key_id.0 != advertised_key_id.trim()
+        || validator.consensus_public_key.key_bytes != advertised_public_key
+    {
+        return Err(
+            "simplified PoSy peer handshake key does not match the Genesis-frozen validator consensus key"
+                .to_string(),
+        );
+    }
+    Ok(AuthenticatedTypedConsensusPeer {
+        validator_id: validator.validator_id.clone(),
+        validator_uma_id: validator.validator_uma_id.clone(),
+        consensus_key_id: validator.consensus_public_key.key_id.clone(),
+    })
 }
 
 fn verify_handshake_pq_signature(
@@ -806,6 +967,8 @@ fn verify_handshake_pq_signature(
         node_id,
         capabilities,
         chain_id,
+        chain_incarnation,
+        consensus_state_schema_version,
         network_id_text,
         validator_address,
         aegis_pq_public_key_id,
@@ -818,8 +981,27 @@ fn verify_handshake_pq_signature(
         return Err("P2P handshake verification requested for non-handshake".to_string());
     };
 
-    if *chain_id != Some(1266) {
-        return Err("Aegis PQC handshake must bind chain_id 1266".to_string());
+    let genesis = canonical_genesis()
+        .map_err(|error| format!("Aegis PQC handshake cannot load canonical Genesis: {error}"))?;
+    let expected_chain_id = genesis.chain_id();
+    let expected_chain_incarnation = genesis.chain_incarnation();
+    let expected_state_schema_version = genesis.consensus_state_schema_version();
+    if *chain_id != Some(expected_chain_id) {
+        return Err(format!(
+            "Aegis PQC handshake must bind chain_id {expected_chain_id}"
+        ));
+    }
+    if *chain_incarnation != Some(expected_chain_incarnation) {
+        return Err(format!(
+            "Aegis PQC handshake must bind Chain 1266 incarnation {}",
+            expected_chain_incarnation
+        ));
+    }
+    if *consensus_state_schema_version != Some(expected_state_schema_version) {
+        return Err(format!(
+            "Aegis PQC handshake must bind consensus state schema {}",
+            expected_state_schema_version
+        ));
     }
     if network_id_text.as_deref() != Some(TESTNET_NETWORK_ID_TEXT) {
         return Err(format!(
@@ -849,7 +1031,7 @@ fn verify_handshake_pq_signature(
     registry.register_public_key(
         node_id,
         PQCPublicKey {
-            algorithm,
+            algorithm: algorithm.clone(),
             key_data: aegis_pq_public_key.clone(),
             key_id: key_id.0.clone(),
             created_at: 0,
@@ -870,21 +1052,64 @@ fn verify_handshake_pq_signature(
             signature,
         )
         .map_err(|error| format!("Aegis PQC peer handshake verification failed: {error}"))?;
+    match algorithm {
+        PQCAlgorithm::MLDSA65 => {
+            VERIFIED_MLDSA65_HANDSHAKES.fetch_add(1, Ordering::Relaxed);
+        }
+        PQCAlgorithm::FNDSA => {
+            VERIFIED_FNDSA_HANDSHAKES.fetch_add(1, Ordering::Relaxed);
+        }
+        _ => {}
+    }
 
     if capabilities
         .iter()
-        .any(|capability| capability == TYPED_POSY_VALIDATOR_CAPABILITY)
+        .any(|capability| capability == RETIRED_TYPED_POSY_VALIDATOR_CAPABILITY)
     {
+        return Err(
+            "retired typed PoSy validator capability is forbidden; use the fresh simplified PoSy v3 capability"
+                .to_string(),
+        );
+    }
+    let advertises_simplified_posy = capabilities
+        .iter()
+        .any(|capability| capability == SIMPLIFIED_POSY_VALIDATOR_CAPABILITY);
+    let advertises_coordinated = capabilities
+        .iter()
+        .any(|capability| capability == COORDINATED_VALIDATOR_CAPABILITY);
+    if advertises_simplified_posy && advertises_coordinated {
+        return Err(
+            "validator handshake cannot advertise both simplified PoSy and coordinated capabilities"
+                .to_string(),
+        );
+    }
+    if advertises_simplified_posy || advertises_coordinated {
         let validator_address = validator_address
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| "typed PoSy validator handshake omits validator_address".to_string())?;
-        let genesis = canonical_genesis().map_err(|error| {
-            format!("typed PoSy peer handshake cannot load canonical Genesis: {error}")
-        })?;
-        let bootstrap = load_testnet_v3_genesis_bootstrap(genesis).map_err(|error| {
-            format!("typed PoSy peer handshake canonical Genesis is not a valid bootstrap: {error}")
+            .ok_or_else(|| "validator consensus handshake omits validator_address".to_string())?;
+        if advertises_simplified_posy {
+            let activation = load_genesis_bound_simplified_activation(genesis.value())?
+                .ok_or_else(|| {
+                    "simplified PoSy peer handshake requires a Genesis-bound v3 activation"
+                        .to_string()
+                })?;
+            let identity = authenticate_fresh_simplified_posy_peer(
+                &activation,
+                validator_address,
+                key_id.0.as_str(),
+                aegis_pq_public_key_algorithm.as_deref().unwrap_or_default(),
+                aegis_pq_public_key,
+            )
+            .map_err(|error| {
+                format!("simplified PoSy validator handshake identity binding failed: {error}")
+            })?;
+            return Ok(Some(identity));
+        }
+
+        let bootstrap = load_testnet_v3_genesis_bootstrap(&genesis).map_err(|error| {
+            format!("coordinated validator handshake canonical Genesis is not a valid bootstrap: {error}")
         })?;
         let validator = authenticate_active_typed_consensus_peer(
             &bootstrap,
@@ -894,7 +1119,7 @@ fn verify_handshake_pq_signature(
             aegis_pq_public_key,
         )
         .map_err(|error| {
-            format!("typed PoSy validator handshake identity binding failed: {error}")
+            format!("coordinated validator handshake identity binding failed: {error}")
         })?;
         return Ok(Some(AuthenticatedTypedConsensusPeer {
             validator_id: validator.validator_id,
@@ -908,6 +1133,8 @@ fn verify_handshake_pq_signature(
 fn handshake_mismatch_reason(
     config: &NodeConfig,
     chain_id: Option<u64>,
+    chain_incarnation: Option<u64>,
+    consensus_state_schema_version: Option<u32>,
     network_id: Option<u64>,
     network_id_text: Option<&str>,
     genesis_hash: &str,
@@ -931,6 +1158,21 @@ fn handshake_mismatch_reason(
             ));
         }
         None => return Some(format!("chain_id missing: expected {expected_chain_id}")),
+    }
+
+    let expected_chain_incarnation = canonical_chain_incarnation();
+    if chain_incarnation != Some(expected_chain_incarnation) {
+        return Some(format!(
+            "chain_incarnation differs: expected {}, remote {:?}",
+            expected_chain_incarnation, chain_incarnation
+        ));
+    }
+    let expected_state_schema_version = canonical_consensus_state_schema_version();
+    if consensus_state_schema_version != Some(expected_state_schema_version) {
+        return Some(format!(
+            "consensus state schema differs: expected {}, remote {:?}",
+            expected_state_schema_version, consensus_state_schema_version
+        ));
     }
 
     match network_id {
@@ -1135,6 +1377,8 @@ struct SeedPeerListResponse {
     dnsaddr_bootstrap: Vec<String>,
     #[serde(default)]
     peers: Vec<String>,
+    #[serde(default)]
+    registry: Vec<SeedRegistryRecord>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1143,6 +1387,16 @@ struct SeedBootnodeRecord {
     port: u16,
     #[serde(default)]
     reachable: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SeedRegistryRecord {
+    #[serde(default)]
+    role: String,
+    #[serde(default)]
+    validator_address: String,
+    #[serde(default)]
+    public_endpoint: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3197,6 +3451,37 @@ fn typed_consensus_peer_for_session(
         .cloned()
 }
 
+fn simplified_consensus_peer_for_session(
+    peer_address: &str,
+    session_id: u64,
+) -> Option<AuthenticatedSimplifiedConsensusPeer> {
+    typed_consensus_peer_for_session(peer_address, session_id).map(|peer| {
+        AuthenticatedSimplifiedConsensusPeer {
+            validator_id: peer.validator_id,
+            validator_uma_id: peer.validator_uma_id,
+            consensus_key_id: peer.consensus_key_id,
+        }
+    })
+}
+
+fn validate_simplified_consensus_target_identity(
+    identity: &AuthenticatedSimplifiedConsensusPeer,
+    expected_validator_id: &ValidatorId,
+    frozen_validator_ids: &BTreeSet<ValidatorId>,
+) -> Result<(), String> {
+    if !frozen_validator_ids.contains(&identity.validator_id) {
+        return Err(
+            "simplified consensus target peer is outside the frozen validator set".to_string(),
+        );
+    }
+    if &identity.validator_id != expected_validator_id {
+        return Err(
+            "simplified consensus target address was rebound to another validator".to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Converts the P2P handshake identity into the narrower ETDAG ingress
 /// identity.  It is intentionally derived from the same session-scoped,
 /// Genesis-bound authentication record as typed consensus traffic rather than
@@ -3212,6 +3497,646 @@ fn etdag_ingress_peer_for_session(
             consensus_key_id: peer.consensus_key_id,
         }
     })
+}
+
+const MAX_PROTECTED_PIPELINE_DEDUP_OBJECTS: usize = 4_096;
+const MAX_PROTECTED_PIPELINE_PENDING_REVEAL_SHARES: usize = 256;
+const MAX_PROTECTED_PIPELINE_STARTUP_STAGING: usize = 256;
+const MAX_PROTECTED_PIPELINE_RECOVERY_ATTEMPTS: u8 = 8;
+const PROTECTED_PIPELINE_RECOVERY_RETRY_MILLIS: u64 = 250;
+const MAX_PROTECTED_PIPELINE_RECOVERY_FLIGHTS: usize = 4_096;
+
+/// One authenticated semantic evidence delivery from P2P to the authoritative
+/// ProtectedPipeline runtime coordinator.  This envelope is intentionally
+/// transport-scoped: it carries the session-authenticated peer and validated
+/// wire message, but it does not own any durable pipeline state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtectedPipelineEvidenceEnvelope {
+    pub peer_address: String,
+    pub authenticated_peer: EtdagAuthenticatedIngressPeer,
+    pub message: ProtectedPipelineEvidenceMessage,
+}
+
+/// The only P2P-to-runtime mutation boundary for protected evidence.
+///
+/// The coordinator installs one process-wide handle during startup and must
+/// durably, idempotently merge the envelope before it reports success.  P2P
+/// has no alternate durable writer and never synthesizes a pipeline transition.
+pub trait ProtectedPipelineCoordinatorIngress: Send + Sync {
+    fn ingest_protected_pipeline_evidence(
+        &self,
+        envelope: ProtectedPipelineEvidenceEnvelope,
+    ) -> Result<(), String>;
+}
+
+struct ProtectedPipelineEvidenceIngress {
+    coordinator: Option<Arc<dyn ProtectedPipelineCoordinatorIngress>>,
+    startup_staging: VecDeque<ProtectedPipelineEvidenceEnvelope>,
+    seen_objects: BTreeMap<EtdagDigest, ProtectedPipelineSemanticObject>,
+    seen_order: VecDeque<EtdagDigest>,
+    seen_messages: BTreeSet<EtdagDigest>,
+    message_order: VecDeque<EtdagDigest>,
+    request_last_served: BTreeMap<EtdagDigest, Instant>,
+    request_order: VecDeque<EtdagDigest>,
+    reveal_authorizations: BTreeSet<EtdagDigest>,
+    pending_reveal_shares: BTreeMap<EtdagDigest, Vec<ProtectedPipelineEvidenceEnvelope>>,
+}
+
+static PROTECTED_PIPELINE_EVIDENCE_INGRESS: OnceLock<
+    Mutex<Option<ProtectedPipelineEvidenceIngress>>,
+> = OnceLock::new();
+
+static PROTECTED_CIPHERTEXT_STORE: OnceLock<Mutex<Option<DurableProtectedCiphertextStore>>> =
+    OnceLock::new();
+
+#[derive(Debug, Clone)]
+struct ProtectedPipelineRecoveryFlight {
+    target_height: crate::synergy_types::Height,
+    target_context_root: crate::synergy_types::Hash,
+    semantic_id: EtdagDigest,
+    attempts: u8,
+    last_attempt: Option<Instant>,
+}
+
+static PROTECTED_PIPELINE_RECOVERY_FLIGHTS: OnceLock<
+    Mutex<BTreeMap<EtdagDigest, ProtectedPipelineRecoveryFlight>>,
+> = OnceLock::new();
+
+fn protected_ciphertext_store() -> &'static Mutex<Option<DurableProtectedCiphertextStore>> {
+    PROTECTED_CIPHERTEXT_STORE.get_or_init(|| Mutex::new(None))
+}
+
+fn protected_pipeline_recovery_flights(
+) -> &'static Mutex<BTreeMap<EtdagDigest, ProtectedPipelineRecoveryFlight>> {
+    PROTECTED_PIPELINE_RECOVERY_FLIGHTS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// Installs the one restart-safe authority for exact encrypted material before
+/// protected P2P ingress starts. Replacing it in-process is rejected so a
+/// target cannot silently switch persistence roots.
+pub fn install_protected_ciphertext_store(
+    store: DurableProtectedCiphertextStore,
+) -> Result<(), String> {
+    let mut slot = protected_ciphertext_store()
+        .lock()
+        .map_err(|_| "protected ciphertext store lock is poisoned".to_string())?;
+    if slot.is_some() {
+        return Err("protected ciphertext store is already installed".to_string());
+    }
+    *slot = Some(store);
+    Ok(())
+}
+
+/// Removes the process-wide store during an orderly role shutdown. Durable
+/// records remain on disk and are available when the same directory is opened
+/// after restart.
+pub fn remove_protected_ciphertext_store() -> Result<(), String> {
+    *protected_ciphertext_store()
+        .lock()
+        .map_err(|_| "protected ciphertext store lock is poisoned".to_string())? = None;
+    protected_pipeline_recovery_flights()
+        .lock()
+        .map_err(|_| "protected recovery-flight lock is poisoned".to_string())?
+        .clear();
+    Ok(())
+}
+
+/// Loads the exact authenticated submission matching a transaction commitment.
+/// The durable store revalidates canonical bytes, object identity, roots, and
+/// the wallet outer signature on every load before returning it.
+pub fn load_protected_ciphertext_material(
+    semantic_id: &EtdagDigest,
+) -> Result<Option<ProtectedPipelineSemanticObject>, String> {
+    let slot = protected_ciphertext_store()
+        .lock()
+        .map_err(|_| "protected ciphertext store lock is poisoned".to_string())?;
+    let store = slot
+        .as_ref()
+        .ok_or_else(|| "protected ciphertext store is not installed".to_string())?;
+    store.load(semantic_id)
+}
+
+fn protected_pipeline_evidence_ingress() -> &'static Mutex<Option<ProtectedPipelineEvidenceIngress>>
+{
+    PROTECTED_PIPELINE_EVIDENCE_INGRESS.get_or_init(|| Mutex::new(None))
+}
+
+pub fn install_protected_pipeline_evidence_ingress(
+    coordinator: Arc<dyn ProtectedPipelineCoordinatorIngress>,
+) -> Result<usize, String> {
+    let mut slot = protected_pipeline_evidence_ingress()
+        .lock()
+        .map_err(|_| "protected-pipeline evidence ingress lock is poisoned".to_string())?;
+    let ingress = slot.get_or_insert_with(|| ProtectedPipelineEvidenceIngress {
+        coordinator: None,
+        startup_staging: VecDeque::new(),
+        seen_objects: BTreeMap::new(),
+        seen_order: VecDeque::new(),
+        seen_messages: BTreeSet::new(),
+        message_order: VecDeque::new(),
+        request_last_served: BTreeMap::new(),
+        request_order: VecDeque::new(),
+        reveal_authorizations: BTreeSet::new(),
+        pending_reveal_shares: BTreeMap::new(),
+    });
+    if ingress.coordinator.is_some() {
+        return Err("protected-pipeline coordinator ingress is already installed".to_string());
+    }
+    ingress.coordinator = Some(coordinator);
+    flush_protected_pipeline_startup_staging(ingress)
+}
+
+/// Retries bounded evidence accepted before the runtime coordinator completed
+/// startup.  The coordinator is never replaced: this only replays the exact
+/// queued envelopes to the same installed handle.
+pub fn flush_protected_pipeline_evidence_ingress() -> Result<usize, String> {
+    let mut slot = protected_pipeline_evidence_ingress()
+        .lock()
+        .map_err(|_| "protected-pipeline evidence ingress lock is poisoned".to_string())?;
+    let ingress = slot
+        .as_mut()
+        .ok_or_else(|| "protected-pipeline coordinator ingress is not installed".to_string())?;
+    if ingress.coordinator.is_none() {
+        return Err("protected-pipeline coordinator ingress is not installed".to_string());
+    }
+    flush_protected_pipeline_startup_staging(ingress)
+}
+
+pub fn remove_protected_pipeline_evidence_ingress() -> Result<(), String> {
+    *protected_pipeline_evidence_ingress()
+        .lock()
+        .map_err(|_| "protected-pipeline evidence ingress lock is poisoned".to_string())? = None;
+    Ok(())
+}
+
+/// Validates, deduplicates and queues one semantic evidence message. Duplicate,
+/// reordered and late evidence is accepted idempotently. A reveal share that
+/// arrives before its authorization is held in a bounded pending set and is
+/// released only after the exact authorization semantic ID is accepted.
+pub fn dispatch_protected_pipeline_evidence_message(
+    peer_address: &str,
+    authenticated_peer: Option<EtdagAuthenticatedIngressPeer>,
+    message: ProtectedPipelineEvidenceMessage,
+) -> Result<Option<ProtectedPipelineEvidenceMessage>, String> {
+    validate_protected_pipeline_evidence_message(&message)?;
+    let authenticated_peer = authenticated_peer.ok_or_else(|| {
+        "protected-pipeline evidence requires an authenticated validator peer".to_string()
+    })?;
+    if matches!(
+        &message,
+        ProtectedPipelineEvidenceMessage::MissingObjectsRequest { .. }
+    ) {
+        return respond_to_protected_missing_objects_request(&authenticated_peer, &message);
+    }
+    persist_exact_ciphertext_objects(&message)?;
+    let envelope = ProtectedPipelineEvidenceEnvelope {
+        peer_address: peer_address.to_string(),
+        authenticated_peer,
+        message,
+    };
+    let mut slot = protected_pipeline_evidence_ingress()
+        .lock()
+        .map_err(|_| "protected-pipeline evidence ingress lock is poisoned".to_string())?;
+    let ingress = slot.get_or_insert_with(|| ProtectedPipelineEvidenceIngress {
+        coordinator: None,
+        startup_staging: VecDeque::new(),
+        seen_objects: BTreeMap::new(),
+        seen_order: VecDeque::new(),
+        seen_messages: BTreeSet::new(),
+        message_order: VecDeque::new(),
+        request_last_served: BTreeMap::new(),
+        request_order: VecDeque::new(),
+        reveal_authorizations: BTreeSet::new(),
+        pending_reveal_shares: BTreeMap::new(),
+    });
+
+    for object in message_objects(&envelope.message) {
+        let (chain_id, network_id) = object.chain_binding();
+        if chain_id != crate::synergy_types::ChainId::synergy_testnet_v3()
+            || network_id != &crate::synergy_types::NetworkId::synergy_testnet_v3()
+        {
+            return Err("protected evidence chain or network binding mismatch".to_string());
+        }
+    }
+
+    if let Some(authorization_id) = unauthorized_standalone_reveal(ingress, &envelope.message) {
+        let pending_count = ingress
+            .pending_reveal_shares
+            .values()
+            .map(Vec::len)
+            .sum::<usize>();
+        let semantic_id = message_semantic_ids(&envelope.message)
+            .into_iter()
+            .next()
+            .ok_or_else(|| "protected reveal share has no semantic id".to_string())?;
+        if ingress.seen_objects.contains_key(&semantic_id)
+            || ingress
+                .pending_reveal_shares
+                .values()
+                .flatten()
+                .any(|pending| message_semantic_ids(&pending.message).first() == Some(&semantic_id))
+        {
+            return Ok(None);
+        }
+        if pending_count >= MAX_PROTECTED_PIPELINE_PENDING_REVEAL_SHARES {
+            return Err(
+                "protected-pipeline pending reveal-share capacity is exhausted".to_string(),
+            );
+        }
+        ingress
+            .pending_reveal_shares
+            .entry(authorization_id)
+            .or_default()
+            .push(envelope);
+        return Ok(None);
+    }
+
+    validate_message_reveal_authorizations(ingress, &envelope.message)?;
+
+    let recovered_ids = message_semantic_ids(&envelope.message);
+    enqueue_protected_pipeline_envelope(ingress, envelope)?;
+    flush_authorized_pending_reveals(ingress)?;
+    mark_recovered_objects(&recovered_ids)?;
+    Ok(None)
+}
+
+fn respond_to_protected_missing_objects_request(
+    authenticated_peer: &EtdagAuthenticatedIngressPeer,
+    message: &ProtectedPipelineEvidenceMessage,
+) -> Result<Option<ProtectedPipelineEvidenceMessage>, String> {
+    let message_id = message_dedup_id(message)?;
+    let mut request_binding =
+        Vec::with_capacity(authenticated_peer.validator_id.0.len() + message_id.0.len() + 16);
+    request_binding.extend_from_slice(authenticated_peer.validator_id.0.as_bytes());
+    request_binding.extend_from_slice(message_id.0.as_bytes());
+    let dedup_id = EtdagDigest::from_domain_bytes(
+        "PoSy/ProtectedPipeline/PeerRecoveryRequestId/v1",
+        &request_binding,
+    );
+    {
+        let mut slot = protected_pipeline_evidence_ingress()
+            .lock()
+            .map_err(|_| "protected-pipeline evidence ingress lock is poisoned".to_string())?;
+        let ingress = slot.get_or_insert_with(|| ProtectedPipelineEvidenceIngress {
+            coordinator: None,
+            startup_staging: VecDeque::new(),
+            seen_objects: BTreeMap::new(),
+            seen_order: VecDeque::new(),
+            seen_messages: BTreeSet::new(),
+            message_order: VecDeque::new(),
+            request_last_served: BTreeMap::new(),
+            request_order: VecDeque::new(),
+            reveal_authorizations: BTreeSet::new(),
+            pending_reveal_shares: BTreeMap::new(),
+        });
+        let now = Instant::now();
+        if ingress
+            .request_last_served
+            .get(&dedup_id)
+            .is_some_and(|last| {
+                now.duration_since(*last)
+                    < Duration::from_millis(PROTECTED_PIPELINE_RECOVERY_RETRY_MILLIS)
+            })
+        {
+            return Ok(None);
+        }
+        if ingress
+            .request_last_served
+            .insert(dedup_id.clone(), now)
+            .is_none()
+        {
+            ingress.request_order.push_back(dedup_id);
+        }
+        while ingress.request_order.len() > MAX_PROTECTED_PIPELINE_DEDUP_OBJECTS {
+            if let Some(expired) = ingress.request_order.pop_front() {
+                ingress.request_last_served.remove(&expired);
+            }
+        }
+    }
+    let durable_objects = durable_ciphertext_response_objects(message)?;
+    let slot = protected_pipeline_evidence_ingress()
+        .lock()
+        .map_err(|_| "protected-pipeline evidence ingress lock is poisoned".to_string())?;
+    let ingress = slot
+        .as_ref()
+        .ok_or_else(|| "protected-pipeline evidence ingress disappeared".to_string())?;
+    local_missing_objects_response(ingress, message, durable_objects)
+}
+
+fn send_protected_pipeline_response_for_session(
+    connected_peers: &PeersArc,
+    peer_state_cache: &PeerStateCacheArc,
+    peer_address: &str,
+    session_id: u64,
+    response: ProtectedPipelineEvidenceMessage,
+) -> Result<bool, String> {
+    validate_protected_pipeline_evidence_message(&response)?;
+    let wire_message = NetworkMessage::ProtectedPipelineEvidence {
+        message: response,
+        chain_incarnation: canonical_chain_incarnation(),
+        genesis_hash: canonical_genesis_hash(),
+    };
+    send_peer_message_for_session(
+        connected_peers,
+        peer_state_cache,
+        peer_address,
+        session_id,
+        &wire_message,
+        Duration::from_millis(CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS),
+        "protected-pipeline-recovery-response",
+    )
+}
+
+fn persist_exact_ciphertext_objects(
+    message: &ProtectedPipelineEvidenceMessage,
+) -> Result<(), String> {
+    if !message_objects(message)
+        .iter()
+        .any(|object| object.encrypted_submission().is_some())
+    {
+        return Ok(());
+    }
+    let slot = protected_ciphertext_store()
+        .lock()
+        .map_err(|_| "protected ciphertext store lock is poisoned".to_string())?;
+    let store = slot.as_ref().ok_or_else(|| {
+        "protected ciphertext material arrived before durable store installation".to_string()
+    })?;
+    for object in message_objects(message) {
+        if object.encrypted_submission().is_some() {
+            store.install(object)?;
+        }
+    }
+    Ok(())
+}
+
+fn durable_ciphertext_response_objects(
+    message: &ProtectedPipelineEvidenceMessage,
+) -> Result<Vec<ProtectedPipelineSemanticObject>, String> {
+    let ProtectedPipelineEvidenceMessage::MissingObjectsRequest {
+        target_height,
+        target_context_root,
+        semantic_ids,
+    } = message
+    else {
+        return Ok(Vec::new());
+    };
+    let slot = protected_ciphertext_store()
+        .lock()
+        .map_err(|_| "protected ciphertext store lock is poisoned".to_string())?;
+    let Some(store) = slot.as_ref() else {
+        return Ok(Vec::new());
+    };
+    store.load_for_target(*target_height, *target_context_root, semantic_ids)
+}
+
+fn local_missing_objects_response(
+    ingress: &ProtectedPipelineEvidenceIngress,
+    message: &ProtectedPipelineEvidenceMessage,
+    durable_objects: Vec<ProtectedPipelineSemanticObject>,
+) -> Result<Option<ProtectedPipelineEvidenceMessage>, String> {
+    let ProtectedPipelineEvidenceMessage::MissingObjectsRequest {
+        target_height,
+        target_context_root,
+        semantic_ids,
+    } = message
+    else {
+        return Ok(None);
+    };
+    let durable = durable_objects
+        .into_iter()
+        .map(|object| (object.declared_semantic_id().clone(), object))
+        .collect::<BTreeMap<_, _>>();
+    let mut objects = Vec::new();
+    for semantic_id in semantic_ids {
+        let object = ingress
+            .seen_objects
+            .get(semantic_id)
+            .cloned()
+            .or_else(|| durable.get(semantic_id).cloned());
+        if let Some(object) = object {
+            if object.target_binding() == (*target_height, *target_context_root) {
+                objects.push(object);
+                if objects.len() == crate::p2p::messages::MAX_PROTECTED_PIPELINE_RESPONSE_OBJECTS {
+                    break;
+                }
+            }
+        }
+    }
+    if objects.is_empty() {
+        return Ok(None);
+    }
+    let response = ProtectedPipelineEvidenceMessage::MissingObjectsResponse {
+        target_height: *target_height,
+        target_context_root: *target_context_root,
+        objects,
+    };
+    validate_protected_pipeline_evidence_message(&response)?;
+    Ok(Some(response))
+}
+
+fn mark_recovered_objects(semantic_ids: &[EtdagDigest]) -> Result<(), String> {
+    let mut flights = protected_pipeline_recovery_flights()
+        .lock()
+        .map_err(|_| "protected recovery-flight lock is poisoned".to_string())?;
+    for semantic_id in semantic_ids {
+        flights.remove(semantic_id);
+    }
+    Ok(())
+}
+
+fn validate_message_reveal_authorizations(
+    ingress: &ProtectedPipelineEvidenceIngress,
+    message: &ProtectedPipelineEvidenceMessage,
+) -> Result<(), String> {
+    let message_authorizations = message_objects(message)
+        .into_iter()
+        .filter_map(|object| match object {
+            ProtectedPipelineSemanticObject::RevealAuthorization { semantic_id, .. } => {
+                Some(semantic_id)
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    for object in message_objects(message) {
+        if let ProtectedPipelineSemanticObject::RevealShare {
+            authorization_id, ..
+        } = object
+        {
+            if !ingress.reveal_authorizations.contains(authorization_id)
+                && !message_authorizations.contains(authorization_id)
+            {
+                return Err(
+                    "protected reveal material arrived without its exact authorization".to_string(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn unauthorized_standalone_reveal(
+    ingress: &ProtectedPipelineEvidenceIngress,
+    message: &ProtectedPipelineEvidenceMessage,
+) -> Option<EtdagDigest> {
+    let ProtectedPipelineEvidenceMessage::Evidence {
+        object:
+            ProtectedPipelineSemanticObject::RevealShare {
+                authorization_id, ..
+            },
+    } = message
+    else {
+        return None;
+    };
+    (!ingress.reveal_authorizations.contains(authorization_id)).then(|| authorization_id.clone())
+}
+
+fn message_objects(
+    message: &ProtectedPipelineEvidenceMessage,
+) -> Vec<&ProtectedPipelineSemanticObject> {
+    match message {
+        ProtectedPipelineEvidenceMessage::Evidence { object } => vec![object],
+        ProtectedPipelineEvidenceMessage::MissingObjectsRequest { .. } => Vec::new(),
+        ProtectedPipelineEvidenceMessage::MissingObjectsResponse { objects, .. } => {
+            objects.iter().collect()
+        }
+    }
+}
+
+fn message_semantic_ids(message: &ProtectedPipelineEvidenceMessage) -> Vec<EtdagDigest> {
+    message_objects(message)
+        .into_iter()
+        .map(|object| object.declared_semantic_id().clone())
+        .collect()
+}
+
+fn message_dedup_id(message: &ProtectedPipelineEvidenceMessage) -> Result<EtdagDigest, String> {
+    let bytes = serde_json::to_vec(message)
+        .map_err(|error| format!("serialize protected evidence for deduplication: {error}"))?;
+    Ok(EtdagDigest::from_domain_bytes(
+        "PoSy/ProtectedPipeline/WireMessageId/v1",
+        &bytes,
+    ))
+}
+
+fn enqueue_protected_pipeline_envelope(
+    ingress: &mut ProtectedPipelineEvidenceIngress,
+    envelope: ProtectedPipelineEvidenceEnvelope,
+) -> Result<(), String> {
+    let objects = message_objects(&envelope.message);
+    for object in &objects {
+        if let Some(prior) = ingress.seen_objects.get(object.declared_semantic_id()) {
+            if prior != *object {
+                return Err("conflicting protected evidence reused a semantic id".to_string());
+            }
+        }
+    }
+    let dedup_id = message_dedup_id(&envelope.message)?;
+    let all_objects_seen = !objects.is_empty()
+        && objects.iter().all(|object| {
+            ingress
+                .seen_objects
+                .get(object.declared_semantic_id())
+                .is_some_and(|prior| prior == *object)
+        });
+    if all_objects_seen || ingress.seen_messages.contains(&dedup_id) {
+        return Ok(());
+    }
+
+    if let Some(coordinator) = ingress.coordinator.as_ref() {
+        coordinator.ingest_protected_pipeline_evidence(envelope.clone())?;
+    } else {
+        if ingress.startup_staging.len() >= MAX_PROTECTED_PIPELINE_STARTUP_STAGING {
+            return Err("protected-pipeline startup staging capacity is exhausted".to_string());
+        }
+        ingress.startup_staging.push_back(envelope.clone());
+    }
+
+    remember_message_id(ingress, dedup_id);
+    for object in message_objects(&envelope.message) {
+        remember_semantic_object(ingress, object.clone());
+        if matches!(
+            object,
+            ProtectedPipelineSemanticObject::RevealAuthorization { .. }
+        ) {
+            ingress
+                .reveal_authorizations
+                .insert(object.declared_semantic_id().clone());
+        }
+    }
+    Ok(())
+}
+
+fn flush_protected_pipeline_startup_staging(
+    ingress: &mut ProtectedPipelineEvidenceIngress,
+) -> Result<usize, String> {
+    let coordinator = ingress
+        .coordinator
+        .as_ref()
+        .ok_or_else(|| "protected-pipeline coordinator ingress is not installed".to_string())?;
+    let mut flushed = 0usize;
+    while let Some(envelope) = ingress.startup_staging.front().cloned() {
+        coordinator.ingest_protected_pipeline_evidence(envelope)?;
+        ingress.startup_staging.pop_front();
+        flushed = flushed.saturating_add(1);
+    }
+    Ok(flushed)
+}
+
+fn remember_message_id(ingress: &mut ProtectedPipelineEvidenceIngress, id: EtdagDigest) {
+    if ingress.seen_messages.insert(id.clone()) {
+        ingress.message_order.push_back(id);
+    }
+    while ingress.message_order.len() > MAX_PROTECTED_PIPELINE_DEDUP_OBJECTS {
+        if let Some(expired) = ingress.message_order.pop_front() {
+            ingress.seen_messages.remove(&expired);
+        }
+    }
+}
+
+fn remember_semantic_object(
+    ingress: &mut ProtectedPipelineEvidenceIngress,
+    object: ProtectedPipelineSemanticObject,
+) {
+    let id = object.declared_semantic_id().clone();
+    if ingress.seen_objects.insert(id.clone(), object).is_none() {
+        ingress.seen_order.push_back(id);
+    }
+    while ingress.seen_order.len() > MAX_PROTECTED_PIPELINE_DEDUP_OBJECTS {
+        if let Some(expired) = ingress.seen_order.pop_front() {
+            ingress.seen_objects.remove(&expired);
+            ingress.reveal_authorizations.remove(&expired);
+        }
+    }
+}
+
+fn flush_authorized_pending_reveals(
+    ingress: &mut ProtectedPipelineEvidenceIngress,
+) -> Result<(), String> {
+    let ready = ingress
+        .pending_reveal_shares
+        .keys()
+        .filter(|id| ingress.reveal_authorizations.contains(*id))
+        .cloned()
+        .collect::<Vec<_>>();
+    for authorization_id in ready {
+        let pending = ingress
+            .pending_reveal_shares
+            .remove(&authorization_id)
+            .unwrap_or_default();
+        let mut iterator = pending.into_iter();
+        while let Some(envelope) = iterator.next() {
+            if let Err(error) = enqueue_protected_pipeline_envelope(ingress, envelope.clone()) {
+                ingress
+                    .pending_reveal_shares
+                    .entry(authorization_id.clone())
+                    .or_default()
+                    .extend(std::iter::once(envelope).chain(iterator));
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn current_peer_session_id(peer_address: &str) -> Option<u64> {
@@ -3384,7 +4309,7 @@ fn start_validator_transport_refresh_worker(is_running: Arc<Mutex<bool>>) {
             match refresh_validator_transports() {
                 Ok(refresh) if refresh.changed => info!(
                     "p2p",
-                    "Installed coordinator-signed validator transport registry",
+                    "Installed fresh provider-signed validator transport registry",
                     "generation" => refresh.generation
                 ),
                 Ok(_) => {}
@@ -4038,7 +4963,9 @@ fn resolve_bootstrap_dial_targets(config: &NodeConfig) -> Vec<String> {
     }
 
     for dial in resolve_seed_server_targets(&config.network.seed_servers) {
-        if let Some(dial) = normalize_peer_target(config, &dial) {
+        if parse_seed_discovered_validator_route(&dial).is_some() {
+            targets.insert(dial);
+        } else if let Some(dial) = normalize_peer_target(config, &dial) {
             targets.insert(dial);
         }
     }
@@ -4096,6 +5023,9 @@ fn self_dial_aliases(config: &NodeConfig) -> HashSet<String> {
 }
 
 fn is_self_dial_target(config: &NodeConfig, dial: &str) -> bool {
+    if let Some((validator_address, _)) = parse_seed_discovered_validator_route(dial) {
+        return announced_validator_address(config).as_deref() == Some(validator_address.as_str());
+    }
     if let Some(validator_address) = normalize_validator_address_target(dial) {
         return self_dial_aliases(config).contains(&validator_address);
     }
@@ -4531,7 +5461,9 @@ fn peer_is_validator_vpn_relayer(peer: &PeerConnection) -> bool {
         && peer_connected_endpoint(peer)
             .as_deref()
             .is_some_and(|endpoint| match peer.direction {
-                ConnectionDirection::Outgoing => is_validator_vpn_relayer_dial_address(endpoint),
+                ConnectionDirection::Outgoing => {
+                    is_current_validator_vpn_relayer_dial_address(endpoint)
+                }
                 // A relayer may also connect into a validator.  TCP assigns
                 // that connection an ephemeral source port, so retain the
                 // signed relayer role and verify only the canonical VPN host
@@ -4575,6 +5507,22 @@ fn local_is_typed_finality_service_observer(config: &NodeConfig) -> bool {
             .as_str(),
         "rpc_gateway" | "rpc_gateway_node" | "indexer_explorer" | "indexer_and_explorer_node"
     )
+}
+
+/// Returns the release-validated P1 configuration only when this process is
+/// actually configured for `coordinated_round_robin_v1`. A support role must
+/// never accept P1 observer traffic merely because a peer asks for it.
+fn local_coordinated_finality_observer_config(
+    config: &NodeConfig,
+) -> Option<crate::consensus::coordinated_round_robin::CoordinatedRoundRobinConfig> {
+    match config
+        .consensus
+        .resolve_mode(config.blockchain.chain_id, &config.network.network_id)
+        .ok()?
+    {
+        ResolvedConsensusMode::CoordinatedRoundRobinV1(coordinated) => Some(coordinated),
+        ResolvedConsensusMode::PosySimplifiedV3 => None,
+    }
 }
 
 fn local_validator_requires_designated_sync_sources(config: &NodeConfig) -> bool {
@@ -5075,6 +6023,33 @@ fn fetch_seed_server_targets(
             Ok(response) if response.status().is_success() => {
                 match response.json::<SeedPeerListResponse>() {
                     Ok(payload) => {
+                        if chain1266_private_qualification_mode() {
+                            for record in payload.registry {
+                                if !record.role.eq_ignore_ascii_case("validator") {
+                                    continue;
+                                }
+                                let Some(validator_address) =
+                                    normalize_validator_address_target(&record.validator_address)
+                                else {
+                                    continue;
+                                };
+                                let Some(dial) =
+                                    parse_bootnode_dial_address(&record.public_endpoint)
+                                else {
+                                    continue;
+                                };
+                                if is_private_qualification_loopback_dial_address(&dial) {
+                                    insert_seed_server_target(
+                                        out,
+                                        configured_seed_endpoints,
+                                        format_seed_discovered_validator_route(
+                                            &validator_address,
+                                            &dial,
+                                        ),
+                                    );
+                                }
+                            }
+                        }
                         for bootnode in payload.bootnodes {
                             if bootnode.reachable.unwrap_or(true) {
                                 let dial = format!("{}:{}", bootnode.hostname, bootnode.port);
@@ -5162,10 +6137,11 @@ fn register_self_with_seed_servers(config: &NodeConfig) {
         return;
     }
     let public_address = config.p2p.public_address.trim().to_string();
+    let qualification_loopback = chain1266_private_qualification_mode()
+        && is_private_qualification_loopback_dial_address(&public_address);
     if public_address.is_empty()
-        || public_address.starts_with("127.")
         || public_address.starts_with("0.0.0.0")
-        || !is_assigned_synergy_dial_address(&public_address)
+        || (!is_assigned_synergy_dial_address(&public_address) && !qualification_loopback)
     {
         return;
     }
@@ -5185,7 +6161,8 @@ fn register_self_with_seed_servers(config: &NodeConfig) {
         "role_id": role_id,
         "dial": public_address,
     });
-    payload["wallet_address"] = serde_json::Value::String(validator_address);
+    payload["wallet_address"] = serde_json::Value::String(validator_address.clone());
+    payload["validator_address"] = serde_json::Value::String(validator_address);
     for seed_server in &config.network.seed_servers {
         let register_url = normalize_seed_server_url(seed_server, "/peers/register");
         if register_url.is_empty() {
@@ -5369,18 +6346,24 @@ impl P2PNetwork {
         *is_running.lock().unwrap() = true;
 
         #[cfg(not(test))]
-        if local_node_uses_signed_validator_transports(&self.config) {
+        if local_node_uses_signed_validator_transports(&self.config)
+            && !chain1266_private_qualification_mode()
+        {
             match refresh_validator_transports() {
                 Ok(refresh) => info!(
                     "p2p",
-                    "Loaded coordinator-signed validator transport registry before network start",
+                    "Loaded fresh provider-signed validator transport registry before network start",
                     "generation" => refresh.generation
                 ),
-                Err(error) => warn!(
-                    "p2p",
-                    "Validator transport registry was unavailable at network start; validator peer admission remains closed",
-                    "error" => error
-                ),
+                Err(error) => {
+                    error!(
+                        "p2p",
+                        "Fresh validator transport registry is unavailable; refusing production validator-network start",
+                        "error" => error
+                    );
+                    *is_running.lock().unwrap() = false;
+                    return;
+                }
             }
             start_validator_transport_refresh_worker(Arc::clone(&is_running));
         }
@@ -5432,16 +6415,30 @@ impl P2PNetwork {
     }
 
     pub fn connect_to_peer(&self, address: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let peer_address = normalize_peer_target(&self.config, address)
-            .unwrap_or_else(|| address.trim().to_string());
-        let Some(transport_address) = resolve_peer_transport_address(&self.config, &peer_address)
-        else {
-            warn!(
-                "p2p",
-                "Failed to resolve peer transport address",
-                "peer" => peer_address.clone()
-            );
-            return Ok(());
+        let (peer_address, transport_address) = if let Some((validator_address, dial)) =
+            parse_seed_discovered_validator_route(address)
+        {
+            if !chain1266_private_qualification_mode()
+                || !is_private_qualification_loopback_dial_address(&dial)
+                || !is_validator_allowed(&self.config, &validator_address)
+            {
+                return Ok(());
+            }
+            (validator_address, dial)
+        } else {
+            let peer_address = normalize_peer_target(&self.config, address)
+                .unwrap_or_else(|| address.trim().to_string());
+            let Some(transport_address) =
+                resolve_peer_transport_address(&self.config, &peer_address)
+            else {
+                warn!(
+                    "p2p",
+                    "Failed to resolve peer transport address",
+                    "peer" => peer_address.clone()
+                );
+                return Ok(());
+            };
+            (peer_address, transport_address)
         };
         if !reserve_outbound_dial(
             &self.outbound_dial_registry,
@@ -5566,8 +6563,13 @@ impl P2PNetwork {
         &self,
         message: &TypedConsensusMessage,
     ) -> Result<usize, String> {
+        if coordinated_consensus_active(&self.config) {
+            return Err("typed PoSy egress is disabled in coordinated_round_robin_v1".to_string());
+        }
         crate::p2p::messages::validate_typed_consensus_message_size(message)?;
         let wire_message = NetworkMessage::TypedConsensus {
+            chain_incarnation: canonical_chain_incarnation(),
+            genesis_hash: canonical_genesis_hash(),
             message: message.clone(),
         };
         let targets = {
@@ -5616,6 +6618,259 @@ impl P2PNetwork {
         Ok(sent)
     }
 
+    /// Sends a PoSy v3 artifact only over the already authenticated validator
+    /// sessions. The simplified driver rebinds each peer to its dynamic frozen
+    /// epoch validator set before processing the message.
+    pub fn broadcast_simplified_consensus(
+        &self,
+        message: &SimplifiedConsensusMessage,
+        frozen_validator_ids: &BTreeSet<ValidatorId>,
+    ) -> Result<usize, String> {
+        if coordinated_consensus_active(&self.config) {
+            return Err(
+                "simplified PoSy egress is disabled while coordinated_round_robin_v1 is selected"
+                    .to_string(),
+            );
+        }
+        validate_simplified_consensus_message_size(message)?;
+        if frozen_validator_ids.is_empty() {
+            return Err("simplified consensus frozen egress set is empty".to_string());
+        }
+        let wire_message = NetworkMessage::SimplifiedConsensus {
+            chain_incarnation: canonical_chain_incarnation(),
+            genesis_hash: canonical_genesis_hash(),
+            message: message.clone(),
+        };
+        let targets = {
+            let peers = self.connected_peers.lock().unwrap();
+            peers
+                .iter()
+                .filter_map(|(address, peer)| {
+                    if peer.stream.is_none() {
+                        return None;
+                    }
+                    let session_id = current_peer_session_id(address)?;
+                    let identity = simplified_consensus_peer_for_session(address, session_id)?;
+                    frozen_validator_ids
+                        .contains(&identity.validator_id)
+                        .then(|| (address.clone(), session_id))
+                })
+                .collect::<Vec<_>>()
+        };
+        let send_results = run_with_bounded_parallelism(
+            &targets,
+            targets.len(),
+            "simplified consensus fanout",
+            |(address, session_id)| {
+                send_peer_message_for_session(
+                    &self.connected_peers,
+                    &self.peer_state_cache,
+                    address,
+                    *session_id,
+                    &wire_message,
+                    Duration::from_millis(CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                    "simplified-consensus",
+                )
+            },
+        );
+        let mut sent = 0usize;
+        for ((address, _), result) in targets.into_iter().zip(send_results) {
+            match result {
+                Ok(true) => sent += 1,
+                Ok(false) => {}
+                Err(error) => warn!(
+                    "p2p",
+                    "Failed to send simplified consensus message",
+                    "peer" => address,
+                    "error" => error
+                ),
+            }
+        }
+        Ok(sent)
+    }
+
+    /// Sends a coordinated-mode artifact only to authenticated validator peers.
+    /// This retained compatibility surface is not selected by simplified PoSy.
+    pub fn broadcast_coordinated_consensus(
+        &self,
+        message: &CoordinatedConsensusMessage,
+    ) -> Result<usize, String> {
+        validate_coordinated_consensus_message_size(message)?;
+        let wire_message = NetworkMessage::CoordinatedConsensus {
+            chain_incarnation: canonical_chain_incarnation(),
+            genesis_hash: canonical_genesis_hash(),
+            message: message.clone(),
+        };
+        let targets = {
+            let peers = self.connected_peers.lock().unwrap();
+            peers
+                .iter()
+                .filter_map(|(address, peer)| {
+                    if peer.stream.is_none()
+                        || !peer_is_active_consensus_validator(&self.config, peer)
+                    {
+                        return None;
+                    }
+                    current_peer_session_id(address).map(|session_id| (address.clone(), session_id))
+                })
+                .collect::<Vec<_>>()
+        };
+        let send_results = run_with_bounded_parallelism(
+            &targets,
+            targets.len(),
+            "coordinated consensus fanout",
+            |(address, session_id)| {
+                send_peer_message_for_session(
+                    &self.connected_peers,
+                    &self.peer_state_cache,
+                    address,
+                    *session_id,
+                    &wire_message,
+                    Duration::from_millis(CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                    "coordinated-consensus",
+                )
+            },
+        );
+        let mut sent = 0usize;
+        for ((address, _session_id), result) in targets.into_iter().zip(send_results) {
+            match result {
+                Ok(true) => sent += 1,
+                Ok(false) => {}
+                Err(error) => warn!(
+                    "p2p",
+                    "Failed to send coordinated consensus message",
+                    "peer" => address,
+                    "error" => error
+                ),
+            }
+        }
+        Ok(sent)
+    }
+
+    /// Sends an assigned producer block directly to the authenticated
+    /// coordinator. Simplified PoSy never calls this compatibility path.
+    pub fn send_coordinated_consensus_to_validator(
+        &self,
+        validator_id: &str,
+        message: &CoordinatedConsensusMessage,
+    ) -> Result<(), String> {
+        validate_coordinated_consensus_message_size(message)?;
+        let wire_message = NetworkMessage::CoordinatedConsensus {
+            chain_incarnation: canonical_chain_incarnation(),
+            genesis_hash: canonical_genesis_hash(),
+            message: message.clone(),
+        };
+        let target = {
+            let peers = self
+                .connected_peers
+                .lock()
+                .map_err(|_| "coordinated peer registry lock is poisoned".to_string())?;
+            peers.iter().find_map(|(address, peer)| {
+                if peer.stream.is_none() {
+                    return None;
+                }
+                let session_id = current_peer_session_id(address)?;
+                let identity = typed_consensus_peer_for_session(address, session_id)?;
+                (identity.validator_id.0 == validator_id).then(|| (address.clone(), session_id))
+            })
+        }
+        .ok_or_else(|| {
+            format!("coordinated producer has no authenticated route to {validator_id}")
+        })?;
+        let sent = send_peer_message_for_session(
+            &self.connected_peers,
+            &self.peer_state_cache,
+            &target.0,
+            target.1,
+            &wire_message,
+            Duration::from_millis(CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS),
+            "coordinated-producer-block",
+        )?;
+        if !sent {
+            return Err(format!(
+                "coordinated producer session to {validator_id} was replaced"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Compatibility-only legacy surface. Active protected progression uses
+    /// [`Self::broadcast_protected_pipeline_evidence`].
+    pub fn broadcast_simplified_target_admission(
+        &self,
+        message: &SimplifiedTargetAdmissionMessage,
+        frozen_validator_ids: &BTreeSet<ValidatorId>,
+    ) -> Result<usize, String> {
+        let _ = (message, frozen_validator_ids);
+        Err(
+            "compatibility-only target-admission carrier cannot activate production progression"
+                .to_string(),
+        )
+    }
+
+    /// Sends a simplified-consensus response only to the authenticated session
+    /// that requested it. State-sync chunks are request-correlated and must not
+    /// be amplified across the full validator ring.
+    pub fn send_simplified_consensus_to_peer(
+        &self,
+        peer_address: &str,
+        expected_validator_id: &ValidatorId,
+        message: &SimplifiedConsensusMessage,
+        frozen_validator_ids: &BTreeSet<ValidatorId>,
+    ) -> Result<usize, String> {
+        if coordinated_consensus_active(&self.config) {
+            return Err(
+                "simplified PoSy direct egress is disabled while coordinated_round_robin_v1 is selected"
+                    .to_string(),
+            );
+        }
+        validate_simplified_consensus_message_size(message)?;
+        if frozen_validator_ids.is_empty() {
+            return Err("simplified consensus frozen egress set is empty".to_string());
+        }
+        let session_id = {
+            let peers = self.connected_peers.lock().unwrap();
+            let peer = peers
+                .get(peer_address)
+                .ok_or_else(|| "simplified consensus target peer is disconnected".to_string())?;
+            if peer.stream.is_none() {
+                return Err("simplified consensus target peer has no live stream".to_string());
+            }
+            let session_id = current_peer_session_id(peer_address).ok_or_else(|| {
+                "simplified consensus target peer has no current session".to_string()
+            })?;
+            let identity = simplified_consensus_peer_for_session(peer_address, session_id)
+                .ok_or_else(|| {
+                    "simplified consensus target peer lacks an authenticated validator identity"
+                        .to_string()
+                })?;
+            validate_simplified_consensus_target_identity(
+                &identity,
+                expected_validator_id,
+                frozen_validator_ids,
+            )?;
+            session_id
+        };
+        let wire_message = NetworkMessage::SimplifiedConsensus {
+            chain_incarnation: canonical_chain_incarnation(),
+            genesis_hash: canonical_genesis_hash(),
+            message: message.clone(),
+        };
+        match send_peer_message_for_session(
+            &self.connected_peers,
+            &self.peer_state_cache,
+            peer_address,
+            session_id,
+            &wire_message,
+            Duration::from_millis(CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS),
+            "simplified-consensus-targeted",
+        ) {
+            Ok(true) => Ok(1),
+            Ok(false) => Ok(0),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Pulls the next bounded finalized-typed segment for an installed
     /// non-signing observer. A relayer may ask only a session-authenticated
     /// validator across the validator VPN; RPC/indexer roles may ask only a
@@ -5634,6 +6889,8 @@ impl P2PNetwork {
             );
         }
         let wire_message = NetworkMessage::TypedFinalityObserver {
+            chain_incarnation: canonical_chain_incarnation(),
+            genesis_hash: canonical_genesis_hash(),
             message: TypedFinalityObserverMessage::Request { next_height },
         };
         let targets = {
@@ -5688,36 +6945,57 @@ impl P2PNetwork {
         Ok(sent)
     }
 
-    /// Relays one complete certified ETDAG input package only to currently
-    /// authenticated, consensus-eligible validator peers.  The receiver does
-    /// not trust this fanout: it rechecks the sender identity and every proof
-    /// against its own immutable height/finality authority before persistence.
-    pub fn broadcast_etdag_certified_input(
-        &self,
-        artifact: &CertifiedProtectedInputArtifact,
-    ) -> Result<usize, String> {
-        artifact.validate_wire_size()?;
-        let wire_message = NetworkMessage::EtdagCertifiedInput {
-            artifact: artifact.clone(),
+    /// Pulls the next bounded `coordinated_round_robin_v1` finality segment
+    /// for an installed non-signing support observer. The topology is the
+    /// same narrow bridge as typed finality: validator -> VPN relayer ->
+    /// configured public RPC/indexer observer. P1 coordinator traffic is
+    /// never used as a support-tier synchronization channel.
+    pub fn request_coordinated_finality_observer_records(&self) -> Result<usize, String> {
+        let Some(next_height) = coordinated_finality_observer_next_missing_height() else {
+            return Ok(0);
+        };
+        let Some(_coordinated_config) = local_coordinated_finality_observer_config(&self.config)
+        else {
+            return Err(
+                "coordinated finality observer receiver is installed outside coordinated_round_robin_v1"
+                    .to_string(),
+            );
+        };
+        let is_relayer = local_is_typed_finality_relayer(&self.config);
+        let is_service_observer = local_is_typed_finality_service_observer(&self.config);
+        if !is_relayer && !is_service_observer {
+            return Err(
+                "coordinated finality observer receiver is installed for an unsupported local role"
+                    .to_string(),
+            );
+        }
+        let wire_message = NetworkMessage::CoordinatedFinalityObserver {
+            chain_incarnation: canonical_chain_incarnation(),
+            genesis_hash: canonical_genesis_hash(),
+            message: CoordinatedFinalityObserverMessage::Request { next_height },
         };
         let targets = {
             let peers = self.connected_peers.lock().unwrap();
             peers
                 .iter()
                 .filter_map(|(address, peer)| {
-                    if peer.stream.is_none()
-                        || !peer_is_active_consensus_validator(&self.config, peer)
-                    {
+                    if peer.stream.is_none() {
                         return None;
                     }
-                    current_peer_session_id(address).map(|session_id| (address.clone(), session_id))
+                    let session_id = current_peer_session_id(address)?;
+                    let authorized = if is_relayer {
+                        typed_consensus_peer_for_session(address, session_id).is_some()
+                    } else {
+                        peer_is_designated_relayer_sync_source(&self.config, peer)
+                    };
+                    authorized.then_some((address.clone(), session_id))
                 })
                 .collect::<Vec<_>>()
         };
         let send_results = run_with_bounded_parallelism(
             &targets,
             targets.len(),
-            "certified ETDAG input fanout",
+            "coordinated finality observer request fanout",
             |(address, session_id)| {
                 send_peer_message_for_session(
                     &self.connected_peers,
@@ -5726,7 +7004,7 @@ impl P2PNetwork {
                     *session_id,
                     &wire_message,
                     Duration::from_millis(CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS),
-                    "etdag-certified-input",
+                    "coordinated-finality-observer-request",
                 )
             },
         );
@@ -5737,11 +7015,210 @@ impl P2PNetwork {
                 Ok(false) => {}
                 Err(error) => warn!(
                     "p2p",
-                    "Failed to send certified ETDAG input",
+                    "Failed to request coordinated finality observer records",
                     "peer" => address,
                     "error" => error
                 ),
             }
+        }
+        Ok(sent)
+    }
+
+    /// Compatibility-only legacy surface retained while old frames age out.
+    pub fn broadcast_etdag_certified_input(
+        &self,
+        artifact: &CertifiedProtectedInputArtifact,
+    ) -> Result<usize, String> {
+        let _ = artifact;
+        Err("compatibility-only whole certified ETDAG carrier cannot activate production progression"
+            .to_string())
+    }
+
+    /// Relays one bounded semantic evidence message only to authenticated
+    /// validators in the caller's frozen target epoch.
+    pub fn broadcast_protected_pipeline_evidence(
+        &self,
+        message: &ProtectedPipelineEvidenceMessage,
+        frozen_validator_ids: &BTreeSet<ValidatorId>,
+    ) -> Result<usize, String> {
+        if coordinated_consensus_active(&self.config) {
+            return Err(
+                "protected-pipeline egress is disabled while coordinated mode is selected"
+                    .to_string(),
+            );
+        }
+        validate_protected_pipeline_evidence_message(message)?;
+        // Local wallet/RPC submissions must become restart-safe before any
+        // peer can certify or request the referenced transaction commitment.
+        persist_exact_ciphertext_objects(message)?;
+        if frozen_validator_ids.is_empty() {
+            return Err("protected-pipeline frozen egress set is empty".to_string());
+        }
+        let wire_message = NetworkMessage::ProtectedPipelineEvidence {
+            message: message.clone(),
+            chain_incarnation: canonical_chain_incarnation(),
+            genesis_hash: canonical_genesis_hash(),
+        };
+        let targets = {
+            let peers = self.connected_peers.lock().unwrap();
+            peers
+                .iter()
+                .filter_map(|(address, peer)| {
+                    if peer.stream.is_none() {
+                        return None;
+                    }
+                    let session_id = current_peer_session_id(address)?;
+                    let identity = etdag_ingress_peer_for_session(address, session_id)?;
+                    frozen_validator_ids
+                        .contains(&identity.validator_id)
+                        .then(|| (address.clone(), session_id))
+                })
+                .collect::<Vec<_>>()
+        };
+        let send_results = run_with_bounded_parallelism(
+            &targets,
+            targets.len(),
+            "protected-pipeline evidence fanout",
+            |(address, session_id)| {
+                send_peer_message_for_session(
+                    &self.connected_peers,
+                    &self.peer_state_cache,
+                    address,
+                    *session_id,
+                    &wire_message,
+                    Duration::from_millis(CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                    "protected-pipeline-evidence",
+                )
+            },
+        );
+        let mut sent = 0usize;
+        for ((address, _session_id), result) in targets.into_iter().zip(send_results) {
+            match result {
+                Ok(true) => sent += 1,
+                Ok(false) => {}
+                Err(error) => warn!(
+                    "p2p",
+                    "Failed to send protected-pipeline evidence",
+                    "peer" => address,
+                    "error" => error
+                ),
+            }
+        }
+        Ok(sent)
+    }
+
+    /// Registers and broadcasts a bounded exact-object recovery request.
+    /// Flights survive disconnect/reconnect within the process and are removed
+    /// only when the requested semantic object is validated on ingress.
+    pub fn request_protected_pipeline_objects(
+        &self,
+        target_height: crate::synergy_types::Height,
+        target_context_root: crate::synergy_types::Hash,
+        semantic_ids: Vec<EtdagDigest>,
+        frozen_validator_ids: &BTreeSet<ValidatorId>,
+    ) -> Result<usize, String> {
+        let request = ProtectedPipelineEvidenceMessage::MissingObjectsRequest {
+            target_height,
+            target_context_root,
+            semantic_ids: semantic_ids.clone(),
+        };
+        validate_protected_pipeline_evidence_message(&request)?;
+        {
+            let mut flights = protected_pipeline_recovery_flights()
+                .lock()
+                .map_err(|_| "protected recovery-flight lock is poisoned".to_string())?;
+            let new_count = semantic_ids
+                .iter()
+                .filter(|semantic_id| !flights.contains_key(*semantic_id))
+                .count();
+            if flights.len().saturating_add(new_count) > MAX_PROTECTED_PIPELINE_RECOVERY_FLIGHTS {
+                return Err("protected-pipeline recovery capacity is exhausted".to_string());
+            }
+            for semantic_id in &semantic_ids {
+                if let Some(existing) = flights.get(semantic_id) {
+                    if existing.target_height != target_height
+                        || existing.target_context_root != target_context_root
+                    {
+                        return Err(
+                            "protected semantic id was requested under conflicting targets"
+                                .to_string(),
+                        );
+                    }
+                    if existing.attempts >= MAX_PROTECTED_PIPELINE_RECOVERY_ATTEMPTS {
+                        return Err(
+                            "protected-pipeline recovery retry budget is exhausted".to_string()
+                        );
+                    }
+                }
+            }
+            let now = Instant::now();
+            for semantic_id in semantic_ids {
+                match flights.get_mut(&semantic_id) {
+                    Some(existing) => {
+                        existing.attempts = existing.attempts.saturating_add(1);
+                        existing.last_attempt = Some(now);
+                    }
+                    None => {
+                        flights.insert(
+                            semantic_id.clone(),
+                            ProtectedPipelineRecoveryFlight {
+                                target_height,
+                                target_context_root,
+                                semantic_id,
+                                attempts: 1,
+                                last_attempt: Some(now),
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        self.broadcast_protected_pipeline_evidence(&request, frozen_validator_ids)
+    }
+
+    /// Replays due recovery flights after reconnect or on a coordinator tick.
+    /// The 250 ms floor and eight-attempt ceiling prevent retry amplification;
+    /// batches preserve their immutable target binding.
+    pub fn retry_protected_pipeline_object_requests(
+        &self,
+        frozen_validator_ids: &BTreeSet<ValidatorId>,
+    ) -> Result<usize, String> {
+        let now = Instant::now();
+        let groups = {
+            let flights = protected_pipeline_recovery_flights()
+                .lock()
+                .map_err(|_| "protected recovery-flight lock is poisoned".to_string())?;
+            let mut groups = BTreeMap::<
+                (crate::synergy_types::Height, crate::synergy_types::Hash),
+                Vec<EtdagDigest>,
+            >::new();
+            for flight in flights.values() {
+                if flight.attempts >= MAX_PROTECTED_PIPELINE_RECOVERY_ATTEMPTS {
+                    continue;
+                }
+                if flight.last_attempt.is_some_and(|last| {
+                    now.duration_since(last)
+                        < Duration::from_millis(PROTECTED_PIPELINE_RECOVERY_RETRY_MILLIS)
+                }) {
+                    continue;
+                }
+                let ids = groups
+                    .entry((flight.target_height, flight.target_context_root))
+                    .or_default();
+                if ids.len() < crate::p2p::messages::MAX_PROTECTED_PIPELINE_REQUEST_IDS {
+                    ids.push(flight.semantic_id.clone());
+                }
+            }
+            groups
+        };
+        let mut sent = 0usize;
+        for ((target_height, target_context_root), semantic_ids) in groups {
+            sent = sent.saturating_add(self.request_protected_pipeline_objects(
+                target_height,
+                target_context_root,
+                semantic_ids,
+                frozen_validator_ids,
+            )?);
         }
         Ok(sent)
     }
@@ -5752,6 +7229,14 @@ impl P2PNetwork {
         epoch_number: u64,
         round_number: u64,
     ) -> usize {
+        if coordinated_consensus_active(&self.config) {
+            warn!(
+                "p2p",
+                "Refused validator-voting egress in coordinated mode",
+                "message_type" => "VoteRequest"
+            );
+            return 0;
+        }
         let message = NetworkMessage::VoteRequest {
             block_data: block.clone(),
             epoch_number,
@@ -5973,6 +7458,32 @@ impl P2PNetwork {
 
     pub fn get_status_ready_validator_addresses(&self) -> Vec<String> {
         status_ready_validator_addresses(&self.config, &self.connected_peers)
+    }
+
+    /// Returns only fresh session-authenticated validator identities from the
+    /// immutable v3 frozen set. Address counts or mutable membership cannot
+    /// satisfy simplified startup readiness.
+    pub fn get_status_ready_simplified_validator_ids(
+        &self,
+        frozen_validator_ids: &BTreeSet<ValidatorId>,
+    ) -> BTreeSet<ValidatorId> {
+        let now = current_timestamp();
+        let peers = self.connected_peers.lock().unwrap();
+        peers
+            .iter()
+            .filter_map(|(address, peer)| {
+                if peer.stream.is_none()
+                    || peer_readiness_exclusion_reason_at(peer, now, None).is_some()
+                {
+                    return None;
+                }
+                let session_id = current_peer_session_id(address)?;
+                let identity = simplified_consensus_peer_for_session(address, session_id)?;
+                frozen_validator_ids
+                    .contains(&identity.validator_id)
+                    .then_some(identity.validator_id)
+            })
+            .collect()
     }
 
     pub fn get_best_validator_peer_height(&self) -> u64 {
@@ -6217,6 +7728,13 @@ impl P2PNetwork {
                     warn!(
                         "p2p",
                         "Typed finality observer recovery request rejected",
+                        "error" => error
+                    );
+                }
+                if let Err(error) = network.request_coordinated_finality_observer_records() {
+                    warn!(
+                        "p2p",
+                        "Coordinated finality observer recovery request rejected",
                         "error" => error
                     );
                 }
@@ -7813,11 +9331,25 @@ fn bypasses_shared_message_queue(message: &NetworkMessage) -> bool {
         NetworkMessage::VoteRequest { .. }
             | NetworkMessage::Vote { .. }
             | NetworkMessage::TypedConsensus { .. }
+            | NetworkMessage::CoordinatedConsensus { .. }
+            | NetworkMessage::SimplifiedConsensus { .. }
+            | NetworkMessage::SimplifiedTargetAdmission { .. }
+            | NetworkMessage::ProtectedPipelineEvidence { .. }
             | NetworkMessage::TypedFinalityObserver { .. }
+            | NetworkMessage::CoordinatedFinalityObserver { .. }
             | NetworkMessage::EtdagCertifiedInput { .. }
             | NetworkMessage::Block { .. }
             | NetworkMessage::GetBlocks { .. }
             | NetworkMessage::Blocks { .. }
+    )
+}
+
+fn coordinated_consensus_active(config: &NodeConfig) -> bool {
+    matches!(
+        config
+            .consensus
+            .resolve_mode(config.blockchain.chain_id, &config.network.network_id),
+        Ok(crate::config::ResolvedConsensusMode::CoordinatedRoundRobinV1(_))
     )
 }
 
@@ -7882,7 +9414,11 @@ fn handle_typed_finality_observer_message(
                 peer_state_cache,
                 peer_address,
                 session_id,
-                &NetworkMessage::TypedFinalityObserver { message: response },
+                &NetworkMessage::TypedFinalityObserver {
+                    chain_incarnation: canonical_chain_incarnation(),
+                    genesis_hash: canonical_genesis_hash(),
+                    message: response,
+                },
                 Duration::from_millis(CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS),
                 "typed-finality-observer-response",
             )?;
@@ -7932,6 +9468,129 @@ fn handle_typed_finality_observer_message(
     }
 }
 
+/// Handles P1 finalized-only replication. Unlike `CoordinatedConsensus`, this
+/// path never dispatches into a validator mailbox: it is limited to verified
+/// durable coordinator packages and the same authenticated tier boundaries as
+/// the typed observer bridge.
+fn handle_coordinated_finality_observer_message(
+    connected_peers: &PeersArc,
+    peer_state_cache: &PeerStateCacheArc,
+    config: &NodeConfig,
+    peer_address: &str,
+    session_id: u64,
+    message: CoordinatedFinalityObserverMessage,
+) -> Result<(), String> {
+    if !peer_session_is_current(peer_address, session_id) {
+        return Err(
+            "coordinated finality observer message belongs to a replaced session".to_string(),
+        );
+    }
+    let coordinated_config =
+        local_coordinated_finality_observer_config(config).ok_or_else(|| {
+            "coordinated finality observer traffic is disabled outside coordinated_round_robin_v1"
+                .to_string()
+        })?;
+    match message {
+        CoordinatedFinalityObserverMessage::Request { next_height } => {
+            let peer_is_vpn_relayer = connected_peers
+                .lock()
+                .map_err(|_| {
+                    "coordinated finality observer peer registry lock is poisoned".to_string()
+                })?
+                .get(peer_address)
+                .is_some_and(peer_is_validator_vpn_relayer);
+            let peer_is_public_service = connected_peers
+                .lock()
+                .map_err(|_| {
+                    "coordinated finality observer peer registry lock is poisoned".to_string()
+                })?
+                .get(peer_address)
+                .is_some_and(|peer| peer_is_designated_support_sync_source(config, peer));
+            let records = if local_is_typed_finality_relayer(config) {
+                if !peer_is_public_service {
+                    return Err(
+                        "coordinated finality observer request to relayer is not from a configured public service role"
+                            .to_string(),
+                    );
+                }
+                coordinated_finality_observer_snapshot_from(next_height)?
+            } else if local_node_runs_validator_consensus(config) {
+                if !peer_is_vpn_relayer {
+                    return Err(
+                        "coordinated finality observer request to validator is not from an authenticated validator-VPN relayer"
+                            .to_string(),
+                    );
+                }
+                canonical_coordinated_finality_snapshot_from(&coordinated_config, next_height)?
+            } else {
+                return Err(
+                    "coordinated finality observer request reached a role that cannot serve finalized records"
+                        .to_string(),
+                );
+            };
+            if records.is_empty() {
+                return Ok(());
+            }
+            let response = CoordinatedFinalityObserverMessage::Records { records };
+            validate_coordinated_finality_observer_message_size(&response)?;
+            let sent = send_peer_message_for_session(
+                connected_peers,
+                peer_state_cache,
+                peer_address,
+                session_id,
+                &NetworkMessage::CoordinatedFinalityObserver {
+                    chain_incarnation: canonical_chain_incarnation(),
+                    genesis_hash: canonical_genesis_hash(),
+                    message: response,
+                },
+                Duration::from_millis(CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                "coordinated-finality-observer-response",
+            )?;
+            if !sent {
+                return Err(
+                    "coordinated finality observer response session was replaced".to_string(),
+                );
+            }
+            Ok(())
+        }
+        CoordinatedFinalityObserverMessage::Records { records } => {
+            let source_allowed = if local_is_typed_finality_relayer(config) {
+                typed_consensus_peer_for_session(peer_address, session_id).is_some()
+            } else if local_is_typed_finality_service_observer(config) {
+                connected_peers
+                    .lock()
+                    .map_err(|_| {
+                        "coordinated finality observer peer registry lock is poisoned".to_string()
+                    })?
+                    .get(peer_address)
+                    .is_some_and(|peer| peer_is_designated_relayer_sync_source(config, peer))
+            } else {
+                false
+            };
+            if !source_allowed {
+                return Err(
+                    "coordinated finality observer records are not from an authorized finalized-chain source"
+                        .to_string(),
+                );
+            }
+            let message = CoordinatedFinalityObserverMessage::Records { records };
+            validate_coordinated_finality_observer_message_size(&message)?;
+            let CoordinatedFinalityObserverMessage::Records { records } = message else {
+                unreachable!("the coordinated observer records message was reconstructed above")
+            };
+            let imported = import_coordinated_finality_observer_records(&records)?;
+            info!(
+                "p2p",
+                "Verified coordinated finality observer records",
+                "peer" => peer_address.to_string(),
+                "imported" => imported as u64,
+                "next_height" => coordinated_finality_observer_next_missing_height().map(|height| height.0).unwrap_or(0)
+            );
+            Ok(())
+        }
+    }
+}
+
 fn dispatch_peer_message(
     blockchain: &BlockchainArc,
     connected_peers: &PeersArc,
@@ -7961,6 +9620,15 @@ fn dispatch_peer_message(
             epoch_number,
             round_number,
         } => {
+            if coordinated_consensus_active(config) {
+                warn!(
+                    "p2p",
+                    "Rejected validator-voting message in coordinated mode",
+                    "peer" => peer_address.to_string(),
+                    "message_type" => "VoteRequest"
+                );
+                return Ok(());
+            }
             // Vote requests and vote payloads sit directly on the block production
             // critical path. Handle them immediately instead of routing them through
             // the shared background queue with status, ping, and sync traffic.
@@ -7978,10 +9646,42 @@ fn dispatch_peer_message(
             Ok(())
         }
         NetworkMessage::Vote { vote } => {
+            if coordinated_consensus_active(config) {
+                warn!(
+                    "p2p",
+                    "Rejected validator-voting message in coordinated mode",
+                    "peer" => peer_address.to_string(),
+                    "message_type" => "Vote"
+                );
+                return Ok(());
+            }
             handle_vote_message(connected_peers, config, peer_address, session_id, vote);
             Ok(())
         }
-        NetworkMessage::TypedConsensus { message } => {
+        NetworkMessage::TypedConsensus {
+            chain_incarnation,
+            genesis_hash,
+            message,
+        } => {
+            if coordinated_consensus_active(config) {
+                warn!(
+                    "p2p",
+                    "Rejected typed PoSy message in coordinated mode",
+                    "peer" => peer_address.to_string()
+                );
+                return Ok(());
+            }
+            if chain_incarnation != canonical_chain_incarnation()
+                || genesis_hash != canonical_genesis_hash()
+            {
+                warn!(
+                    "p2p",
+                    "Rejected typed consensus frame from a different chain incarnation",
+                    "peer" => peer_address.to_string(),
+                    "incarnation" => chain_incarnation
+                );
+                return Ok(());
+            }
             if let Err(error) =
                 crate::consensus::typed_coordinator::dispatch_typed_consensus_message(
                     peer_address,
@@ -7998,7 +9698,161 @@ fn dispatch_peer_message(
             }
             Ok(())
         }
-        NetworkMessage::TypedFinalityObserver { message } => {
+        NetworkMessage::CoordinatedConsensus {
+            chain_incarnation,
+            genesis_hash,
+            message,
+        } => {
+            if chain_incarnation != canonical_chain_incarnation()
+                || genesis_hash != canonical_genesis_hash()
+            {
+                warn!(
+                    "p2p",
+                    "Rejected coordinated consensus frame from a different chain incarnation",
+                    "peer" => peer_address.to_string(),
+                    "incarnation" => chain_incarnation
+                );
+                return Ok(());
+            }
+            let authenticated_peer = typed_consensus_peer_for_session(peer_address, session_id)
+                .map(|peer| AuthenticatedCoordinatedConsensusPeer {
+                    validator_id: peer.validator_id,
+                    validator_uma_id: peer.validator_uma_id,
+                    consensus_key_id: peer.consensus_key_id,
+                });
+            if let Err(error) =
+                crate::consensus::coordinated_round_robin::dispatch_coordinated_consensus_message(
+                    peer_address,
+                    authenticated_peer,
+                    message,
+                )
+            {
+                warn!(
+                    "p2p",
+                    "Rejected coordinated consensus message",
+                    "peer" => peer_address.to_string(),
+                    "error" => error
+                );
+            }
+            Ok(())
+        }
+        NetworkMessage::SimplifiedConsensus {
+            chain_incarnation,
+            genesis_hash,
+            message,
+        } => {
+            if coordinated_consensus_active(config) {
+                warn!(
+                    "p2p",
+                    "Rejected simplified consensus message while coordinated mode is selected",
+                    "peer" => peer_address.to_string()
+                );
+                return Ok(());
+            }
+            if chain_incarnation != canonical_chain_incarnation()
+                || genesis_hash != canonical_genesis_hash()
+            {
+                warn!(
+                    "p2p",
+                    "Rejected simplified consensus frame from a different chain incarnation",
+                    "peer" => peer_address.to_string(),
+                    "incarnation" => chain_incarnation
+                );
+                return Ok(());
+            }
+            if let Err(error) =
+                crate::consensus::simplified_posy::dispatch_simplified_consensus_message(
+                    peer_address,
+                    simplified_consensus_peer_for_session(peer_address, session_id),
+                    message,
+                )
+            {
+                warn!(
+                    "p2p",
+                    "Rejected simplified consensus message",
+                    "peer" => peer_address.to_string(),
+                    "error" => error
+                );
+            }
+            Ok(())
+        }
+        NetworkMessage::SimplifiedTargetAdmission {
+            chain_incarnation,
+            genesis_hash,
+            message,
+        } => {
+            let _ = (chain_incarnation, genesis_hash, message);
+            warn!(
+                "p2p",
+                "Ignored compatibility-only target-admission carrier",
+                "peer" => peer_address.to_string()
+            );
+            Ok(())
+        }
+        NetworkMessage::ProtectedPipelineEvidence {
+            chain_incarnation,
+            genesis_hash,
+            message,
+        } => {
+            if coordinated_consensus_active(config)
+                || chain_incarnation != canonical_chain_incarnation()
+                || genesis_hash != canonical_genesis_hash()
+            {
+                warn!(
+                    "p2p",
+                    "Rejected protected-pipeline evidence outside the canonical simplified-PoSy incarnation",
+                    "peer" => peer_address.to_string(),
+                    "incarnation" => chain_incarnation
+                );
+                return Ok(());
+            }
+            match dispatch_protected_pipeline_evidence_message(
+                peer_address,
+                etdag_ingress_peer_for_session(peer_address, session_id),
+                message,
+            ) {
+                Ok(Some(response)) => {
+                    if let Err(error) = send_protected_pipeline_response_for_session(
+                        connected_peers,
+                        peer_state_cache,
+                        peer_address,
+                        session_id,
+                        response,
+                    ) {
+                        warn!(
+                            "p2p",
+                            "Failed to return protected-pipeline recovery response",
+                            "peer" => peer_address.to_string(),
+                            "error" => error
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => warn!(
+                    "p2p",
+                    "Rejected protected-pipeline evidence",
+                    "peer" => peer_address.to_string(),
+                    "error" => error
+                ),
+            }
+            Ok(())
+        }
+        NetworkMessage::TypedFinalityObserver {
+            chain_incarnation,
+            genesis_hash,
+            message,
+        } => {
+            if chain_incarnation != canonical_chain_incarnation()
+                || genesis_hash != canonical_genesis_hash()
+            {
+                warn!(
+                    "p2p",
+                    "Rejected typed observer frame from a different chain incarnation",
+                    "peer" => peer_address.to_string(),
+                    "incarnation" => chain_incarnation
+                );
+                return Ok(());
+            }
             if let Err(error) = handle_typed_finality_observer_message(
                 connected_peers,
                 peer_state_cache,
@@ -8016,18 +9870,46 @@ fn dispatch_peer_message(
             }
             Ok(())
         }
-        NetworkMessage::EtdagCertifiedInput { artifact } => {
-            if let Err(error) = dispatch_etdag_certified_input(
-                etdag_ingress_peer_for_session(peer_address, session_id),
-                artifact,
+        NetworkMessage::CoordinatedFinalityObserver {
+            chain_incarnation,
+            genesis_hash,
+            message,
+        } => {
+            if chain_incarnation != canonical_chain_incarnation()
+                || genesis_hash != canonical_genesis_hash()
+            {
+                warn!(
+                    "p2p",
+                    "Rejected coordinated observer frame from a different chain incarnation",
+                    "peer" => peer_address.to_string(),
+                    "incarnation" => chain_incarnation
+                );
+                return Ok(());
+            }
+            if let Err(error) = handle_coordinated_finality_observer_message(
+                connected_peers,
+                peer_state_cache,
+                config,
+                peer_address,
+                session_id,
+                message,
             ) {
                 warn!(
                     "p2p",
-                    "Rejected certified ETDAG input",
+                    "Rejected coordinated finality observer message",
                     "peer" => peer_address.to_string(),
                     "error" => error
                 );
             }
+            Ok(())
+        }
+        NetworkMessage::EtdagCertifiedInput { artifact } => {
+            let _ = artifact;
+            warn!(
+                "p2p",
+                "Ignored compatibility-only whole certified ETDAG input carrier",
+                "peer" => peer_address.to_string()
+            );
             Ok(())
         }
         NetworkMessage::Block {
@@ -8428,6 +10310,8 @@ fn handle_messages(
                         version,
                         capabilities,
                         chain_id,
+                        chain_incarnation,
+                        consensus_state_schema_version,
                         network_id,
                         network_id_text,
                         genesis_hash,
@@ -8454,6 +10338,8 @@ fn handle_messages(
                             version: version.clone(),
                             capabilities: capabilities.clone(),
                             chain_id,
+                            chain_incarnation,
+                            consensus_state_schema_version,
                             network_id,
                             network_id_text: network_id_text.clone(),
                             genesis_hash: genesis_hash.clone(),
@@ -8510,6 +10396,8 @@ fn handle_messages(
                         if let Some(reason) = handshake_mismatch_reason(
                             &config,
                             chain_id,
+                            chain_incarnation,
+                            consensus_state_schema_version,
                             network_id,
                             network_id_text.as_deref(),
                             &genesis_hash,
@@ -9074,7 +10962,22 @@ fn handle_messages(
                         session_id,
                         vote,
                     ),
-                    NetworkMessage::TypedConsensus { message } => {
+                    NetworkMessage::TypedConsensus {
+                        chain_incarnation,
+                        genesis_hash,
+                        message,
+                    } => {
+                        if chain_incarnation != canonical_chain_incarnation()
+                            || genesis_hash != canonical_genesis_hash()
+                        {
+                            warn!(
+                                "p2p",
+                                "Rejected old-incarnation typed consensus message",
+                                "peer" => peer_address.clone(),
+                                "incarnation" => chain_incarnation
+                            );
+                            continue;
+                        }
                         if let Err(error) =
                             crate::consensus::typed_coordinator::dispatch_typed_consensus_message(
                                 &peer_address,
@@ -9090,7 +10993,157 @@ fn handle_messages(
                             );
                         }
                     }
-                    NetworkMessage::TypedFinalityObserver { message } => {
+                    NetworkMessage::CoordinatedConsensus {
+                        chain_incarnation,
+                        genesis_hash,
+                        message,
+                    } => {
+                        if chain_incarnation != canonical_chain_incarnation()
+                            || genesis_hash != canonical_genesis_hash()
+                        {
+                            warn!(
+                                "p2p",
+                                "Rejected old-incarnation coordinated consensus message",
+                                "peer" => peer_address.clone(),
+                                "incarnation" => chain_incarnation
+                            );
+                            continue;
+                        }
+                        let authenticated_peer =
+                            typed_consensus_peer_for_session(&peer_address, session_id).map(
+                                |peer| AuthenticatedCoordinatedConsensusPeer {
+                                    validator_id: peer.validator_id,
+                                    validator_uma_id: peer.validator_uma_id,
+                                    consensus_key_id: peer.consensus_key_id,
+                                },
+                            );
+                        if let Err(error) = crate::consensus::coordinated_round_robin::dispatch_coordinated_consensus_message(
+                            &peer_address,
+                            authenticated_peer,
+                            message,
+                        ) {
+                            warn!(
+                                "p2p",
+                                "Rejected coordinated consensus message",
+                                "peer" => peer_address.clone(),
+                                "error" => error
+                            );
+                        }
+                    }
+                    NetworkMessage::SimplifiedConsensus {
+                        chain_incarnation,
+                        genesis_hash,
+                        message,
+                    } => {
+                        if coordinated_consensus_active(&config) {
+                            warn!(
+                                "p2p",
+                                "Rejected simplified consensus message while coordinated mode is selected",
+                                "peer" => peer_address.clone()
+                            );
+                            continue;
+                        }
+                        if chain_incarnation != canonical_chain_incarnation()
+                            || genesis_hash != canonical_genesis_hash()
+                        {
+                            warn!(
+                                "p2p",
+                                "Rejected old-incarnation simplified consensus message",
+                                "peer" => peer_address.clone(),
+                                "incarnation" => chain_incarnation
+                            );
+                            continue;
+                        }
+                        if let Err(error) =
+                            crate::consensus::simplified_posy::dispatch_simplified_consensus_message(
+                                &peer_address,
+                                simplified_consensus_peer_for_session(&peer_address, session_id),
+                                message,
+                            )
+                        {
+                            warn!(
+                                "p2p",
+                                "Rejected simplified consensus message",
+                                "peer" => peer_address.clone(),
+                                "error" => error
+                            );
+                        }
+                    }
+                    NetworkMessage::SimplifiedTargetAdmission {
+                        chain_incarnation,
+                        genesis_hash,
+                        message,
+                    } => {
+                        let _ = (chain_incarnation, genesis_hash, message);
+                        warn!(
+                            "p2p",
+                            "Ignored compatibility-only target-admission carrier",
+                            "peer" => peer_address.clone()
+                        );
+                    }
+                    NetworkMessage::ProtectedPipelineEvidence {
+                        chain_incarnation,
+                        genesis_hash,
+                        message,
+                    } => {
+                        if coordinated_consensus_active(&config)
+                            || chain_incarnation != canonical_chain_incarnation()
+                            || genesis_hash != canonical_genesis_hash()
+                        {
+                            warn!(
+                                "p2p",
+                                "Rejected old-incarnation protected-pipeline evidence",
+                                "peer" => peer_address.clone(),
+                                "incarnation" => chain_incarnation
+                            );
+                            continue;
+                        }
+                        match dispatch_protected_pipeline_evidence_message(
+                            &peer_address,
+                            etdag_ingress_peer_for_session(&peer_address, session_id),
+                            message,
+                        ) {
+                            Ok(Some(response)) => {
+                                if let Err(error) = send_protected_pipeline_response_for_session(
+                                    &connected_peers,
+                                    &peer_state_cache,
+                                    &peer_address,
+                                    session_id,
+                                    response,
+                                ) {
+                                    warn!(
+                                        "p2p",
+                                        "Failed to return protected-pipeline recovery response",
+                                        "peer" => peer_address.clone(),
+                                        "error" => error
+                                    );
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(error) => warn!(
+                                "p2p",
+                                "Rejected protected-pipeline evidence",
+                                "peer" => peer_address.clone(),
+                                "error" => error
+                            ),
+                        }
+                    }
+                    NetworkMessage::TypedFinalityObserver {
+                        chain_incarnation,
+                        genesis_hash,
+                        message,
+                    } => {
+                        if chain_incarnation != canonical_chain_incarnation()
+                            || genesis_hash != canonical_genesis_hash()
+                        {
+                            warn!(
+                                "p2p",
+                                "Rejected old-incarnation typed observer message",
+                                "peer" => peer_address.clone(),
+                                "incarnation" => chain_incarnation
+                            );
+                            continue;
+                        }
                         if let Err(error) = handle_typed_finality_observer_message(
                             &connected_peers,
                             &peer_state_cache,
@@ -9108,17 +11161,12 @@ fn handle_messages(
                         }
                     }
                     NetworkMessage::EtdagCertifiedInput { artifact } => {
-                        if let Err(error) = dispatch_etdag_certified_input(
-                            etdag_ingress_peer_for_session(&peer_address, session_id),
-                            artifact,
-                        ) {
-                            warn!(
-                                "p2p",
-                                "Rejected certified ETDAG input",
-                                "peer" => peer_address.clone(),
-                                "error" => error
-                            );
-                        }
+                        let _ = artifact;
+                        warn!(
+                            "p2p",
+                            "Ignored compatibility-only whole certified ETDAG input carrier",
+                            "peer" => peer_address.clone()
+                        );
                     }
                     NetworkMessage::Transaction { transaction_data } => {
                         if config.node.bootstrap_only {
@@ -9679,16 +11727,60 @@ fn send_message_with_write_timeout(
     message: &NetworkMessage,
     timeout: Duration,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let json = serde_json::to_string(message)?;
+    let data = json.as_bytes();
+    let len = validate_outbound_frame_length(data.len())?;
+    let mut frame = Vec::with_capacity(std::mem::size_of_val(&len) + data.len());
+    frame.extend_from_slice(&len.to_le_bytes());
+    frame.extend_from_slice(data);
+
     let previous_timeout = stream.write_timeout()?;
     stream.set_write_timeout(Some(timeout))?;
-    let send_result = send_message(stream, message);
+    let deadline = Instant::now() + timeout;
+    let send_result = write_frame_until_deadline(stream, &frame, deadline);
     let restore_result = stream.set_write_timeout(previous_timeout);
 
     match (send_result, restore_result) {
-        (Err(error), _) => Err(error),
+        (Err(error), _) => Err(Box::new(error)),
         (Ok(_), Err(error)) => Err(Box::new(error)),
         (Ok(_), Ok(_)) => Ok(()),
     }
+}
+
+/// Writes one already-framed consensus message without turning a transient
+/// nonblocking backpressure signal into a peer-disconnect event.  Retrying is
+/// performed from the exact byte offset, so a partial frame is never replayed
+/// from its prefix.
+fn write_frame_until_deadline(
+    stream: &mut impl Write,
+    frame: &[u8],
+    deadline: Instant,
+) -> io::Result<()> {
+    let mut offset = 0usize;
+    while offset < frame.len() {
+        match stream.write(&frame[offset..]) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "consensus peer accepted a zero-length framed write",
+                ));
+            }
+            Ok(written) => offset = offset.saturating_add(written),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "consensus framed write exceeded its deadline",
+                    ));
+                }
+                thread::sleep(remaining.min(Duration::from_millis(1)));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    stream.flush()
 }
 
 fn receive_message(stream: &mut impl Read) -> Result<NetworkMessage, io::Error> {
@@ -9703,9 +11795,21 @@ fn receive_message(stream: &mut impl Read) -> Result<NetworkMessage, io::Error> 
         ));
     }
 
-    // Read message data
+    // Read a small envelope prefix before allocating the declared payload.
+    // Simplified consensus uses JSON's externally tagged enum representation,
+    // so its outer and inner kind are visible here. This prevents an
+    // authenticated peer from forcing a 64-MiB allocation before the tighter
+    // consensus-kind cap is known.
+    const PREDECODE_PREFIX_BYTES: usize = 4 * 1024;
+    let prefix_len = len.min(PREDECODE_PREFIX_BYTES);
+    let mut prefix = vec![0u8; prefix_len];
+    stream.read_exact(&mut prefix)?;
+    validate_simplified_predecode_frame_length(len, &prefix)?;
+
+    // Read the remainder after the predecode allocation gate.
     let mut data = vec![0u8; len];
-    stream.read_exact(&mut data)?;
+    data[..prefix_len].copy_from_slice(&prefix);
+    stream.read_exact(&mut data[prefix_len..])?;
 
     // Parse JSON message
     let json =
@@ -9714,6 +11818,252 @@ fn receive_message(stream: &mut impl Read) -> Result<NetworkMessage, io::Error> 
         serde_json::from_str(&json).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
     Ok(message)
+}
+
+fn validate_simplified_predecode_frame_length(len: usize, prefix: &[u8]) -> io::Result<()> {
+    // Serde's externally tagged representation uses a JSON string for unit
+    // variants. These four bounded control messages are the only unit
+    // variants in `NetworkMessage`; all data-bearing envelopes remain objects
+    // and continue through the kind-specific allocation gate below.
+    if prefix.first() == Some(&b'"') {
+        if len != prefix.len() {
+            return Err(invalid_predecode(
+                "unit network envelope exceeds the bounded predecode prefix",
+            ));
+        }
+        return match prefix {
+            b"\"GetPeers\"" | b"\"Ping\"" | b"\"Pong\"" | b"\"GetStatus\"" => Ok(()),
+            _ => Err(invalid_predecode(
+                "network unit envelope does not declare an allowed message kind",
+            )),
+        };
+    }
+    let mut cursor = 0usize;
+    // Serde encodes unit `NetworkMessage` variants as JSON strings. These
+    // control frames occur immediately after the initial handshake/status
+    // exchange, so treating every frame as an externally-tagged object tears
+    // down otherwise authenticated validator sessions before consensus can
+    // establish peer readiness. Keep the predecode gate fail-closed by
+    // admitting only the complete, known unit control variants.
+    skip_json_whitespace(prefix, &mut cursor);
+    if prefix.get(cursor) == Some(&b'"') {
+        let unit_kind = consume_json_key(prefix, &mut cursor, "network control frame")?;
+        if !matches!(unit_kind, b"GetPeers" | b"Ping" | b"Pong" | b"GetStatus") {
+            return Err(invalid_predecode(
+                "network control frame is not an allowed unit NetworkMessage variant",
+            ));
+        }
+        skip_json_whitespace(prefix, &mut cursor);
+        if cursor != prefix.len() || len != prefix.len() {
+            return Err(invalid_predecode(
+                "network control frame must be fully visible in the bounded predecode prefix",
+            ));
+        }
+        return Ok(());
+    }
+    consume_json_byte(prefix, &mut cursor, b'{', "network envelope")?;
+    let outer_kind = consume_json_key(prefix, &mut cursor, "network envelope kind")?;
+    if outer_kind == b"ProtectedPipelineEvidence" {
+        consume_json_byte(prefix, &mut cursor, b':', "protected-pipeline envelope")?;
+        consume_json_byte(prefix, &mut cursor, b'{', "protected-pipeline body")?;
+        if consume_json_key(prefix, &mut cursor, "protected-pipeline body field")? != b"message" {
+            return Err(invalid_predecode(
+                "protected-pipeline message must be the first canonical body field",
+            ));
+        }
+        consume_json_byte(
+            prefix,
+            &mut cursor,
+            b':',
+            "protected-pipeline message field",
+        )?;
+        consume_json_byte(prefix, &mut cursor, b'{', "protected-pipeline message")?;
+        let message_kind =
+            consume_json_key(prefix, &mut cursor, "protected-pipeline message kind")?;
+        let (kind, maximum) = match message_kind {
+            b"EVIDENCE" => (
+                "semantic evidence",
+                MAX_PROTECTED_PIPELINE_EVIDENCE_FRAME_BYTES,
+            ),
+            b"MISSING_OBJECTS_REQUEST" => (
+                "missing-object request",
+                MAX_PROTECTED_PIPELINE_REQUEST_FRAME_BYTES,
+            ),
+            b"MISSING_OBJECTS_RESPONSE" => (
+                "missing-object response",
+                MAX_PROTECTED_PIPELINE_RESPONSE_FRAME_BYTES,
+            ),
+            _ => {
+                return Err(invalid_predecode(
+                    "protected-pipeline frame does not declare a bounded message kind in its predecode prefix",
+                ));
+            }
+        };
+        let frame_len = len
+            .checked_add(4)
+            .ok_or_else(|| invalid_predecode("protected-pipeline frame length overflow"))?;
+        if frame_len > maximum {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "protected-pipeline {kind} frame length {frame_len} exceeds limit {maximum}"
+                ),
+            ));
+        }
+        return Ok(());
+    }
+    if outer_kind == b"SimplifiedTargetAdmission" {
+        consume_json_byte(prefix, &mut cursor, b':', "target-admission envelope")?;
+        consume_json_byte(prefix, &mut cursor, b'{', "target-admission body")?;
+        if consume_json_key(prefix, &mut cursor, "target-admission body field")? != b"message" {
+            return Err(invalid_predecode(
+                "target-admission message must be the first canonical body field",
+            ));
+        }
+        consume_json_byte(prefix, &mut cursor, b':', "target-admission message field")?;
+        consume_json_byte(prefix, &mut cursor, b'{', "target-admission message")?;
+        let message_kind = consume_json_key(prefix, &mut cursor, "target-admission message kind")?;
+        let (kind, maximum) = match message_kind {
+            b"Vote" => ("vote", MAX_SIMPLIFIED_TARGET_ADMISSION_VOTE_FRAME_BYTES),
+            b"CertifiedPackage" => (
+                "certified package",
+                MAX_SIMPLIFIED_TARGET_ADMISSION_PACKAGE_FRAME_BYTES,
+            ),
+            _ => {
+                return Err(invalid_predecode(
+                    "target-admission frame does not declare a bounded message kind in its predecode prefix",
+                ));
+            }
+        };
+        let frame_len = len
+            .checked_add(4)
+            .ok_or_else(|| invalid_predecode("target-admission frame length overflow"))?;
+        if frame_len > maximum {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "simplified target-admission {kind} frame length {frame_len} exceeds limit {maximum}"
+                ),
+            ));
+        }
+        return Ok(());
+    }
+    if outer_kind != b"SimplifiedConsensus" {
+        return Ok(());
+    }
+    consume_json_byte(prefix, &mut cursor, b':', "simplified consensus envelope")?;
+    consume_json_byte(prefix, &mut cursor, b'{', "simplified consensus body")?;
+    if consume_json_key(prefix, &mut cursor, "simplified consensus body field")? != b"message" {
+        return Err(invalid_predecode(
+            "simplified consensus message must be the first canonical body field",
+        ));
+    }
+    consume_json_byte(
+        prefix,
+        &mut cursor,
+        b':',
+        "simplified consensus message field",
+    )?;
+    consume_json_byte(prefix, &mut cursor, b'{', "simplified consensus message")?;
+    let message_kind = consume_json_key(prefix, &mut cursor, "simplified consensus message kind")?;
+    let (kind, maximum) = match message_kind {
+        b"Proposal" => ("proposal", MAX_SIMPLIFIED_CONSENSUS_PROPOSAL_FRAME_BYTES),
+        b"ReliableDelivery" | b"Vote" | b"TimeoutVote" => {
+            ("vote", MAX_SIMPLIFIED_CONSENSUS_VOTE_FRAME_BYTES)
+        }
+        b"QuorumCertificate" | b"TimeoutCertificate" => (
+            "certificate",
+            MAX_SIMPLIFIED_CONSENSUS_CERTIFICATE_FRAME_BYTES,
+        ),
+        b"StateSyncRequest" | b"MaterialRequest" => (
+            "state-sync request",
+            MAX_SIMPLIFIED_CONSENSUS_CONTROL_FRAME_BYTES,
+        ),
+        b"StateSyncChunk" | b"MaterialChunk" => (
+            "state-sync chunk",
+            MAX_SIMPLIFIED_CONSENSUS_STATE_SYNC_FRAME_BYTES,
+        ),
+        _ => {
+            return Err(invalid_predecode(
+                "simplified consensus frame does not declare a bounded message kind in its predecode prefix",
+            ));
+        }
+    };
+    let frame_len = len
+        .checked_add(4)
+        .ok_or_else(|| invalid_predecode("simplified consensus frame length overflow"))?;
+    if frame_len > maximum {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("simplified consensus {kind} frame length {frame_len} exceeds limit {maximum}"),
+        ));
+    }
+    Ok(())
+}
+
+fn consume_json_byte(
+    prefix: &[u8],
+    cursor: &mut usize,
+    expected: u8,
+    label: &str,
+) -> io::Result<()> {
+    skip_json_whitespace(prefix, cursor);
+    if prefix.get(*cursor) != Some(&expected) {
+        return Err(invalid_predecode(&format!(
+            "{label} is not visible in the bounded predecode prefix"
+        )));
+    }
+    *cursor = cursor
+        .checked_add(1)
+        .ok_or_else(|| invalid_predecode("predecode cursor overflow"))?;
+    Ok(())
+}
+
+fn consume_json_key<'a>(prefix: &'a [u8], cursor: &mut usize, label: &str) -> io::Result<&'a [u8]> {
+    consume_json_byte(prefix, cursor, b'"', label)?;
+    let start = *cursor;
+    while let Some(byte) = prefix.get(*cursor).copied() {
+        match byte {
+            b'"' => {
+                let key = &prefix[start..*cursor];
+                *cursor = cursor
+                    .checked_add(1)
+                    .ok_or_else(|| invalid_predecode("predecode cursor overflow"))?;
+                return Ok(key);
+            }
+            b'\\' => {
+                return Err(invalid_predecode(&format!(
+                    "{label} must use its canonical unescaped wire spelling"
+                )));
+            }
+            0x00..=0x1f | 0x80..=0xff => {
+                return Err(invalid_predecode(&format!(
+                    "{label} contains a non-ASCII tag byte"
+                )));
+            }
+            _ => {
+                *cursor = cursor
+                    .checked_add(1)
+                    .ok_or_else(|| invalid_predecode("predecode cursor overflow"))?;
+            }
+        }
+    }
+    Err(invalid_predecode(&format!(
+        "{label} is incomplete in the bounded predecode prefix"
+    )))
+}
+
+fn skip_json_whitespace(prefix: &[u8], cursor: &mut usize) {
+    while prefix
+        .get(*cursor)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\n' | b'\r' | b'\t'))
+    {
+        *cursor = cursor.saturating_add(1);
+    }
+}
+
+fn invalid_predecode(message: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
 fn current_timestamp() -> u64 {
@@ -9836,7 +12186,11 @@ fn validator_vpn_transport_for_target(
     config: &NodeConfig,
     validator_address: &str,
 ) -> Option<String> {
-    validator_vpn_transport_for_target_with_static_fallback(config, validator_address, cfg!(test))
+    validator_vpn_transport_for_target_with_static_fallback(
+        config,
+        validator_address,
+        cfg!(test) || chain1266_private_qualification_mode(),
+    )
 }
 
 fn validator_vpn_transport_for_target_with_static_fallback(
@@ -9844,19 +12198,34 @@ fn validator_vpn_transport_for_target_with_static_fallback(
     validator_address: &str,
     allow_static_fallback: bool,
 ) -> Option<String> {
+    let qualification_mode = chain1266_private_qualification_mode();
     let validator_address = normalize_validator_address_target(validator_address)?;
-    if let Some(dial_address) = validator_transport_for(&validator_address) {
-        let dial_address = parse_bootnode_dial_address(&dial_address)?;
-        if is_validator_vpn_dial_address(&dial_address) {
-            return Some(dial_address);
+    // Qualification has a disposable WireGuard mesh and its own rendered
+    // validator transport map. Never load a public coordinator snapshot there:
+    // even a valid public mapping would reconnect the isolated release to the
+    // public Chain 1266 overlay.
+    if !qualification_mode {
+        if let Some(dial_address) = validator_transport_for(&validator_address) {
+            let dial_address = parse_bootnode_dial_address(&dial_address)?;
+            if is_validator_vpn_dial_address(&dial_address) {
+                return Some(dial_address);
+            }
         }
-    }
-    if has_validator_transports() {
-        return None;
+        if has_validator_transports() {
+            return None;
+        }
     }
     if !allow_static_fallback {
         return None;
     }
+    configured_validator_vpn_transport_for_target(config, &validator_address, qualification_mode)
+}
+
+fn configured_validator_vpn_transport_for_target(
+    config: &NodeConfig,
+    validator_address: &str,
+    require_private_qualification_overlay: bool,
+) -> Option<String> {
     config
         .network
         .validator_vpn_transports
@@ -9866,7 +12235,16 @@ fn validator_vpn_transport_for_target_with_static_fallback(
                 normalize_validator_address_target(&transport.validator_address)?;
             if configured_validator == validator_address {
                 let dial_address = parse_bootnode_dial_address(&transport.dial_address)?;
-                is_validator_vpn_dial_address(&dial_address).then_some(dial_address)
+                let approved = if require_private_qualification_overlay {
+                    is_private_qualification_innernet_dial_address(&dial_address, 10)
+                } else {
+                    is_validator_vpn_dial_address(&dial_address)
+                };
+                if approved {
+                    Some(dial_address)
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -9879,7 +12257,7 @@ fn resolve_peer_transport_address(config: &NodeConfig, target: &str) -> Option<S
     } else {
         let parsed = parse_bootnode_dial_address(target)?;
         if local_node_uses_signed_validator_transports(config)
-            && is_validator_vpn_dial_address(&parsed)
+            && is_current_validator_vpn_dial_address(&parsed)
         {
             return None;
         }
@@ -9901,7 +12279,8 @@ fn normalize_peer_target(config: &NodeConfig, value: &str) -> Option<String> {
     }
 
     let parsed = parse_bootnode_dial_address(value)?;
-    if local_node_uses_signed_validator_transports(config) && is_validator_vpn_dial_address(&parsed)
+    if local_node_uses_signed_validator_transports(config)
+        && is_current_validator_vpn_dial_address(&parsed)
     {
         return None;
     }
@@ -9990,7 +12369,7 @@ fn is_assigned_synergy_dial_address(value: &str) -> bool {
 }
 
 fn is_assigned_or_validator_vpn_dial_address(value: &str) -> bool {
-    is_assigned_synergy_dial_address(value) || is_validator_vpn_dial_address(value)
+    is_assigned_synergy_dial_address(value) || is_current_validator_vpn_dial_address(value)
 }
 
 fn local_validator_vpn_peer_scope(config: &NodeConfig) -> bool {
@@ -9999,6 +12378,46 @@ fn local_validator_vpn_peer_scope(config: &NodeConfig) -> bool {
 
 fn local_node_uses_signed_validator_transports(config: &NodeConfig) -> bool {
     local_validator_vpn_peer_scope(config) || local_p2p_role(config).eq_ignore_ascii_case("relayer")
+}
+
+fn chain1266_private_qualification_mode() -> bool {
+    std::env::var(crate::desired_state::CHAIN1266_QUALIFICATION_MODE_ENV).as_deref() == Ok("1")
+}
+
+const SEED_DISCOVERED_VALIDATOR_ROUTE_PREFIX: &str = "seedreg://";
+
+fn format_seed_discovered_validator_route(validator_address: &str, dial: &str) -> String {
+    format!("{SEED_DISCOVERED_VALIDATOR_ROUTE_PREFIX}{validator_address}@{dial}")
+}
+
+fn parse_seed_discovered_validator_route(value: &str) -> Option<(String, String)> {
+    let raw = value
+        .trim()
+        .strip_prefix(SEED_DISCOVERED_VALIDATOR_ROUTE_PREFIX)?;
+    let (validator_address, dial) = raw.split_once('@')?;
+    let validator_address = normalize_validator_address_target(validator_address)?;
+    let dial = parse_bootnode_dial_address(dial)?;
+    Some((validator_address, dial))
+}
+
+fn is_private_qualification_loopback_dial_address(value: &str) -> bool {
+    let Some(normalized) = parse_bootnode_dial_address(value) else {
+        return false;
+    };
+    let Some((host, port)) = normalized.rsplit_once(':') else {
+        return false;
+    };
+    let Ok(port) = port.parse::<u16>() else {
+        return false;
+    };
+    if port == 0 {
+        return false;
+    }
+    host.trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|address| address.is_loopback())
 }
 
 fn local_node_uses_relayer_only_topology(config: &NodeConfig) -> bool {
@@ -10018,10 +12437,10 @@ fn is_public_relayer_dial_address(value: &str) -> bool {
 fn peer_target_allowed_by_local_scope(config: &NodeConfig, value: &str) -> bool {
     if local_validator_vpn_peer_scope(config) {
         normalize_validator_address_target(value).is_some()
-            || is_validator_vpn_relayer_dial_address(value)
+            || is_current_validator_vpn_relayer_dial_address(value)
     } else if local_p2p_role(config).eq_ignore_ascii_case("relayer") {
         normalize_validator_address_target(value).is_some()
-            || is_validator_vpn_relayer_dial_address(value)
+            || is_current_validator_vpn_relayer_dial_address(value)
             || is_assigned_synergy_dial_address(value)
     } else if local_node_uses_relayer_only_topology(config) {
         is_public_relayer_dial_address(value)
@@ -10035,7 +12454,26 @@ fn is_validator_vpn_dial_address(value: &str) -> bool {
     is_canonical_innernet_dial_address(value, 10)
 }
 
+fn is_current_validator_vpn_dial_address(value: &str) -> bool {
+    is_validator_vpn_dial_address(value)
+        || (chain1266_private_qualification_mode()
+            && is_private_qualification_innernet_dial_address(value, 10))
+}
+
 fn is_canonical_innernet_dial_address(value: &str, third_octet: u8) -> bool {
+    // The fresh public P3 provider uses 10.69.10.0/24 for validators and
+    // 10.69.1.0/24 for relayers.  The test-only 10.70 fixtures remain accepted
+    // below solely so isolated historical unit fixtures do not become a
+    // production routing fallback.
+    is_innernet_dial_address(value, 69, third_octet)
+        || (cfg!(test) && is_innernet_dial_address(value, 70, third_octet))
+}
+
+fn is_private_qualification_innernet_dial_address(value: &str, third_octet: u8) -> bool {
+    is_innernet_dial_address(value, 126, third_octet)
+}
+
+fn is_innernet_dial_address(value: &str, second_octet: u8, third_octet: u8) -> bool {
     let Some(normalized) = parse_bootnode_dial_address(value) else {
         return false;
     };
@@ -10048,7 +12486,7 @@ fn is_canonical_innernet_dial_address(value: &str, third_octet: u8) -> bool {
     validator_vpn_dial_octets(&normalized)
         .map(|octets| {
             octets[0] == 10
-                && octets[1] == 70
+                && octets[1] == second_octet
                 && octets[2] == third_octet
                 && (1..=254).contains(&octets[3])
         })
@@ -10056,7 +12494,14 @@ fn is_canonical_innernet_dial_address(value: &str, third_octet: u8) -> bool {
 }
 
 fn is_validator_vpn_relayer_dial_address(value: &str) -> bool {
-    is_canonical_innernet_dial_address(value, 20)
+    is_innernet_dial_address(value, 69, 1)
+        || (cfg!(test) && is_innernet_dial_address(value, 70, 20))
+}
+
+fn is_current_validator_vpn_relayer_dial_address(value: &str) -> bool {
+    is_validator_vpn_relayer_dial_address(value)
+        || (chain1266_private_qualification_mode()
+            && is_private_qualification_innernet_dial_address(value, 20))
 }
 
 fn validator_vpn_dial_octets(value: &str) -> Option<[u8; 4]> {
@@ -11458,10 +13903,11 @@ fn apply_token_state_for_blocks(blocks: &[Block]) -> Result<(), String> {
 
     for block in blocks {
         for tx in &block.transactions {
-            match token_manager.process_transaction_in_finalized_block(
+            match token_manager.process_transaction_in_finalized_block_with_fee_market(
                 tx,
                 block.block_index,
                 &block.hash,
+                block.applied_fee_market_base_fee(),
             ) {
                 Ok(_) => applied_txs += 1,
                 Err(error) => {
@@ -11739,24 +14185,26 @@ mod tests {
         block_sync_response_policy, build_local_handshake,
         build_local_handshake_with_extra_capabilities, build_local_status_message,
         bypasses_shared_message_queue, cache_peer_state, cache_pending_block,
-        canonical_genesis_hash, canonical_validator_address_for_slot,
+        canonical_chain_incarnation, canonical_genesis_hash, canonical_validator_address_for_slot,
         canonical_validator_public_address, chain_has_block_sync_overlap,
         chain_snapshot_clone_allowed, claim_status_rate_limit, collect_known_peer_addresses,
-        configured_public_address_for_validator_in_set, configured_seed_server_dial_targets,
-        configured_validator_p2p_dials, configured_validator_public_address_map,
+        configured_seed_server_dial_targets, configured_validator_p2p_dials,
+        configured_validator_public_address_map,
         connected_endpoint_host_matches_configured_address,
         connected_endpoint_matches_configured_address, connected_peer_key_for_address,
         connected_validator_participants, current_bootstrap_refresh_interval, current_timestamp,
         dial_with_timeout, disconnect_peer_after_poisoned_write, disconnect_peer_entry,
-        dispatch_peer_message, ensure_peer_status_allows_chain_data, handle_get_blocks_message,
-        handle_status_message, handshake_version_mismatch_reason, hydrate_peer_from_cache,
-        insert_seed_server_target, is_validator_vpn_dial_address,
+        dispatch_peer_message, ensure_peer_status_allows_chain_data,
+        format_seed_discovered_validator_route, handle_get_blocks_message, handle_status_message,
+        handshake_version_mismatch_reason, hydrate_peer_from_cache, insert_seed_server_target,
+        is_private_qualification_loopback_dial_address, is_validator_vpn_dial_address,
         is_validator_vpn_relayer_dial_address, local_consensus_handshake_required,
-        local_is_typed_finality_relayer, local_is_typed_finality_service_observer,
-        local_node_runs_validator_consensus, local_node_uses_service_batch_durability,
-        local_peer_identity, merge_peer_state_from_existing, normalize_peer_target,
-        parse_block_sync_busy_retry, parse_bootnode_dial_address, peer_has_identifying_metadata,
-        peer_identity_key, peer_is_authorized_block_sync_requester,
+        local_consensus_version, local_is_typed_finality_relayer,
+        local_is_typed_finality_service_observer, local_node_runs_validator_consensus,
+        local_node_uses_service_batch_durability, local_peer_identity,
+        merge_peer_state_from_existing, normalize_peer_target, parse_block_sync_busy_retry,
+        parse_bootnode_dial_address, parse_seed_discovered_validator_route,
+        peer_has_identifying_metadata, peer_identity_key, peer_is_authorized_block_sync_requester,
         peer_is_designated_support_sync_source, peer_is_eligible_block_sync_source,
         peer_is_eligible_block_sync_source_for_local, peer_is_validator_vpn_relayer,
         peer_matches_address, peer_readiness_exclusion_reason_at, peer_write_gate,
@@ -11775,16 +14223,19 @@ mod tests {
         status_ready_validator_addresses_with_local_duty_gate, status_ready_validator_participants,
         status_sync_batch, support_peer_sync_request_is_too_deep, sync_batch_limit_for_role,
         typed_consensus_peer_for_session, validate_outbound_frame_length,
-        validate_vote_request_extends_local_tip, validator_status_genesis_grace_remaining_secs,
+        validate_simplified_consensus_target_identity, validate_simplified_predecode_frame_length,
+        validate_vote_request_extends_local_tip, validator_consensus_capability,
+        validator_status_genesis_grace_remaining_secs,
         validator_status_genesis_within_grace_window, verify_batch_with_bounded_parallelism,
         verify_handshake_pq_signature, vote_request_parent_sync_range,
-        with_peer_stream_outside_peers_lock, ConnectionDirection, DialTargetsArc,
-        DuplicateResolution, P2PNetwork, PeerConnection, PeerEntryGuard,
+        with_peer_stream_outside_peers_lock, write_frame_until_deadline, ConnectionDirection,
+        DialTargetsArc, DuplicateResolution, P2PNetwork, PeerConnection, PeerEntryGuard,
         TypedFinalityObserverMessage, BACKGROUND_SYNC_POLL_MILLIS, BLOCK_SYNC_APPLY_ACTIVE,
-        BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS, DEFAULT_BOOTSTRAP_REFRESH_SECS, DUTY_DISABLED_TTL_SECS,
-        IMMEDIATE_STATUS_SYNC_BATCH, MAX_P2P_FRAME_BYTES, MAX_STATUS_SYNC_BATCH,
-        MAX_SUPPORT_NODE_BLOCK_SYNC_RESPONSE_BLOCKS, MAX_VALIDATOR_SUPPORT_SYNC_RESPONSE_BLOCKS,
-        NORMAL_BOOTSTRAP_REFRESH_SECS, PEER_SESSION_IDS, PEER_WRITE_GATES, PENDING_BLOCKS,
+        BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS, COORDINATED_ROUND_ROBIN_V1,
+        DEFAULT_BOOTSTRAP_REFRESH_SECS, DUTY_DISABLED_TTL_SECS, IMMEDIATE_STATUS_SYNC_BATCH,
+        MAX_P2P_FRAME_BYTES, MAX_STATUS_SYNC_BATCH, MAX_SUPPORT_NODE_BLOCK_SYNC_RESPONSE_BLOCKS,
+        MAX_VALIDATOR_SUPPORT_SYNC_RESPONSE_BLOCKS, NORMAL_BOOTSTRAP_REFRESH_SECS,
+        PEER_SESSION_IDS, PEER_WRITE_GATES, PENDING_BLOCKS, POSY_SIMPLIFIED_PROTOCOL_VERSION,
         QUARANTINE_STATUS_TTL_SECS, SERVICE_BLOCK_SYNC_RESPONSE_TIMEOUT_SECS,
         SERVICE_SYNC_COORDINATOR, STALE_UNIDENTIFIED_PEER_SECS, STALE_VALIDATOR_STATUS_SECS,
         STATUS_READY_TTL_SECS, STATUS_REQUEST_MIN_INTERVAL_SECS, STATUS_RESPONSE_MIN_INTERVAL_SECS,
@@ -11794,6 +14245,7 @@ mod tests {
     use crate::block::{Block, BlockChain};
     use crate::config::{NodeConfig, ValidatorVpnTransportConfig};
     use crate::consensus::dual_quorum::{DualQuorumConsensus, QuorumCertificate, Vote};
+    use crate::consensus::simplified_posy::AuthenticatedSimplifiedConsensusPeer;
     use crate::consensus::typed_coordinator::AuthenticatedTypedConsensusPeer;
     use crate::consensus::validator_keys::{
         consensus_algorithm_label, load_local_validator_keypair,
@@ -11809,20 +14261,286 @@ mod tests {
     };
     use crate::crypto::aegis_pqvm::AegisPqvmSigner;
     use crate::crypto::pqc::{PQCAlgorithm, PQCManager, PQCSignature};
-    use crate::p2p::messages::NetworkMessage;
-    use crate::synergy_types::{AegisPqKeyId, AegisPqKeyRole, Epoch, UmaId, ValidatorId};
+    use crate::etdag::tests::{complete_protected_input, fixture, target_admission_package};
+    use crate::etdag::{
+        CertifiedProtectedInputArtifact, EtdagAuthenticatedIngressPeer, EtdagDigest,
+        ProtectedRevealAuthorization, ProtectedRevealShareMessage, VertexKind,
+        PROTECTED_PIPELINE_VERSION,
+    };
+    use crate::p2p::messages::{
+        NetworkMessage, ProtectedPipelineEvidenceMessage, ProtectedPipelineSemanticObject,
+    };
+    use crate::p2p::messages::{
+        MAX_PROTECTED_PIPELINE_EVIDENCE_FRAME_BYTES, MAX_PROTECTED_PIPELINE_REQUEST_FRAME_BYTES,
+        MAX_PROTECTED_PIPELINE_RESPONSE_FRAME_BYTES,
+        MAX_SIMPLIFIED_CONSENSUS_CERTIFICATE_FRAME_BYTES,
+        MAX_SIMPLIFIED_CONSENSUS_CONTROL_FRAME_BYTES,
+        MAX_SIMPLIFIED_CONSENSUS_PROPOSAL_FRAME_BYTES,
+        MAX_SIMPLIFIED_CONSENSUS_STATE_SYNC_FRAME_BYTES, MAX_SIMPLIFIED_CONSENSUS_VOTE_FRAME_BYTES,
+        MAX_SIMPLIFIED_TARGET_ADMISSION_PACKAGE_FRAME_BYTES,
+        MAX_SIMPLIFIED_TARGET_ADMISSION_VOTE_FRAME_BYTES,
+    };
+    use crate::synergy_types::{
+        AegisPqKeyId, AegisPqKeyRole, BlockId, Epoch, Hash, UmaId, ValidatorId,
+    };
     use crate::transaction::Transaction;
     use crate::validator::{
         Validator, ValidatorManager, ValidatorRegistration, ValidatorStatus, VALIDATOR_MANAGER,
     };
     use base64::{engine::general_purpose, Engine as _};
     use lazy_static::lazy_static;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{BTreeSet, HashMap, HashSet};
     use std::fs;
-    use std::io;
+    use std::io::{self, Write};
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::{mpsc, Arc, Barrier, Mutex, MutexGuard};
+
+    struct WouldBlockOnceWriter {
+        bytes: Vec<u8>,
+        blocked: bool,
+    }
+
+    impl Write for WouldBlockOnceWriter {
+        fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+            if !self.blocked {
+                self.blocked = true;
+                return Err(io::Error::from(io::ErrorKind::WouldBlock));
+            }
+            self.bytes.extend_from_slice(data);
+            Ok(data.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn framed_consensus_write_retries_transient_nonblocking_backpressure() {
+        let expected = b"canonical-consensus-frame";
+        let mut writer = WouldBlockOnceWriter {
+            bytes: Vec::new(),
+            blocked: false,
+        };
+
+        write_frame_until_deadline(
+            &mut writer,
+            expected,
+            Instant::now() + Duration::from_millis(50),
+        )
+        .unwrap();
+
+        assert_eq!(writer.bytes, expected);
+    }
+
+    #[test]
+    fn simplified_vote_frame_is_bounded_before_full_payload_allocation() {
+        let prefix = br#"{"SimplifiedConsensus":{"message":{"Vote":{"vote":{}}}}}"#;
+        validate_simplified_predecode_frame_length(
+            MAX_SIMPLIFIED_CONSENSUS_VOTE_FRAME_BYTES - 4,
+            prefix,
+        )
+        .unwrap();
+        assert!(validate_simplified_predecode_frame_length(
+            MAX_SIMPLIFIED_CONSENSUS_VOTE_FRAME_BYTES - 3,
+            prefix,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn predecode_accepts_only_declared_unit_network_envelopes() {
+        for message in [
+            NetworkMessage::GetPeers,
+            NetworkMessage::Ping,
+            NetworkMessage::Pong,
+            NetworkMessage::GetStatus,
+        ] {
+            let wire = serde_json::to_vec(&message).expect("unit network message should serialize");
+            validate_simplified_predecode_frame_length(wire.len(), &wire)
+                .expect("declared unit network message should pass predecode");
+        }
+        assert!(validate_simplified_predecode_frame_length(9, br#""Unknown""#).is_err());
+        assert!(validate_simplified_predecode_frame_length(4097, br#""GetPeers""#).is_err());
+        validate_simplified_predecode_frame_length(11, b" \"GetPeers\"")
+            .expect("valid JSON whitespace before a declared unit frame should pass predecode");
+    }
+
+    #[test]
+    fn simplified_material_chunk_is_bounded_before_full_payload_allocation() {
+        let prefix = br#"{"SimplifiedConsensus":{"message":{"MaterialChunk":{"chunk":{}}}}}"#;
+        validate_simplified_predecode_frame_length(
+            MAX_SIMPLIFIED_CONSENSUS_STATE_SYNC_FRAME_BYTES - 4,
+            prefix,
+        )
+        .unwrap();
+        assert!(validate_simplified_predecode_frame_length(
+            MAX_SIMPLIFIED_CONSENSUS_STATE_SYNC_FRAME_BYTES - 3,
+            prefix,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn target_admission_variants_are_bounded_before_full_payload_allocation() {
+        let vote = br#"{"SimplifiedTargetAdmission":{"message":{"Vote":{"request":{}}}}}"#;
+        validate_simplified_predecode_frame_length(
+            MAX_SIMPLIFIED_TARGET_ADMISSION_VOTE_FRAME_BYTES - 4,
+            vote,
+        )
+        .unwrap();
+        assert!(validate_simplified_predecode_frame_length(
+            MAX_SIMPLIFIED_TARGET_ADMISSION_VOTE_FRAME_BYTES - 3,
+            vote,
+        )
+        .is_err());
+
+        let package =
+            br#"{"SimplifiedTargetAdmission":{"message":{"CertifiedPackage":{"package":{}}}}}"#;
+        validate_simplified_predecode_frame_length(
+            MAX_SIMPLIFIED_TARGET_ADMISSION_PACKAGE_FRAME_BYTES - 4,
+            package,
+        )
+        .unwrap();
+        assert!(validate_simplified_predecode_frame_length(
+            MAX_SIMPLIFIED_TARGET_ADMISSION_PACKAGE_FRAME_BYTES - 3,
+            package,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn protected_evidence_variants_are_bounded_before_full_payload_allocation() {
+        let cases: &[(&[u8], usize)] = &[
+            (
+                br#"{"ProtectedPipelineEvidence":{"message":{"EVIDENCE":{"object":{}}}}}"#,
+                MAX_PROTECTED_PIPELINE_EVIDENCE_FRAME_BYTES,
+            ),
+            (
+                br#"{"ProtectedPipelineEvidence":{"message":{"MISSING_OBJECTS_REQUEST":{}}}}"#,
+                MAX_PROTECTED_PIPELINE_REQUEST_FRAME_BYTES,
+            ),
+            (
+                br#"{"ProtectedPipelineEvidence":{"message":{"MISSING_OBJECTS_RESPONSE":{}}}}"#,
+                MAX_PROTECTED_PIPELINE_RESPONSE_FRAME_BYTES,
+            ),
+        ];
+        for &(prefix, maximum) in cases {
+            validate_simplified_predecode_frame_length(maximum - 4, prefix)
+                .expect("exact protected-pipeline wire budget is accepted");
+            assert!(validate_simplified_predecode_frame_length(maximum - 3, prefix).is_err());
+        }
+    }
+
+    #[test]
+    fn simplified_predecode_applies_every_exact_kind_budget() {
+        let cases: &[(&[u8], usize)] = &[
+            (
+                br#"{"SimplifiedConsensus":{"message":{"Proposal":{}}}}"#,
+                MAX_SIMPLIFIED_CONSENSUS_PROPOSAL_FRAME_BYTES,
+            ),
+            (
+                br#"{"SimplifiedConsensus":{"message":{"ReliableDelivery":{}}}}"#,
+                MAX_SIMPLIFIED_CONSENSUS_VOTE_FRAME_BYTES,
+            ),
+            (
+                br#"{"SimplifiedConsensus":{"message":{"QuorumCertificate":{}}}}"#,
+                MAX_SIMPLIFIED_CONSENSUS_CERTIFICATE_FRAME_BYTES,
+            ),
+            (
+                br#"{"SimplifiedConsensus":{"message":{"MaterialRequest":{}}}}"#,
+                MAX_SIMPLIFIED_CONSENSUS_CONTROL_FRAME_BYTES,
+            ),
+            (
+                br#"{"SimplifiedConsensus":{"message":{"StateSyncChunk":{}}}}"#,
+                MAX_SIMPLIFIED_CONSENSUS_STATE_SYNC_FRAME_BYTES,
+            ),
+        ];
+
+        for &(prefix, maximum) in cases {
+            validate_simplified_predecode_frame_length(maximum - 4, prefix)
+                .expect("exact simplified wire budget must be accepted");
+            assert!(validate_simplified_predecode_frame_length(maximum - 3, prefix).is_err());
+        }
+    }
+
+    #[test]
+    fn simplified_predecode_accepts_only_complete_unit_control_frames() {
+        for frame in [
+            br#""GetPeers""#.as_slice(),
+            br#""Ping""#,
+            br#""Pong""#,
+            br#""GetStatus""#,
+        ] {
+            validate_simplified_predecode_frame_length(frame.len(), frame)
+                .expect("known unit NetworkMessage control frame must pass");
+        }
+
+        assert!(validate_simplified_predecode_frame_length(9, br#""Unknown""#).is_err());
+        assert!(validate_simplified_predecode_frame_length(13, br#""GetStatus" x"#).is_err());
+    }
+
+    #[test]
+    fn simplified_predecode_rejects_padding_that_hides_the_outer_kind() {
+        let prefix = vec![b' '; 4 * 1024];
+
+        let error = validate_simplified_predecode_frame_length(
+            MAX_SIMPLIFIED_CONSENSUS_VOTE_FRAME_BYTES,
+            &prefix,
+        )
+        .expect_err("padded envelope must not bypass bounded kind discovery");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn simplified_predecode_uses_exact_kind_instead_of_payload_substrings() {
+        let prefix = br#"{"SimplifiedConsensus":{"message":{"MaterialChunk":{"note":"Vote"}}}}"#;
+
+        validate_simplified_predecode_frame_length(
+            MAX_SIMPLIFIED_CONSENSUS_VOTE_FRAME_BYTES - 3,
+            prefix,
+        )
+        .expect("payload text must not change the exact material-chunk bound");
+    }
+
+    #[test]
+    fn simplified_predecode_does_not_decode_unrelated_partial_utf8_payload() {
+        let mut prefix =
+            br#"{"SimplifiedConsensus":{"message":{"MaterialChunk":{"chunk":{"payload":"#.to_vec();
+        prefix.resize((4 * 1024) - 1, b'a');
+        prefix.push(0xc3);
+
+        validate_simplified_predecode_frame_length(
+            MAX_SIMPLIFIED_CONSENSUS_STATE_SYNC_FRAME_BYTES - 4,
+            &prefix,
+        )
+        .expect("bounded tag parsing must not reject a prefix ending inside UTF-8 payload");
+    }
+
+    #[test]
+    fn simplified_target_routing_rejects_an_address_rebound_to_another_validator() {
+        let expected_validator_id = ValidatorId("expected-validator".to_string());
+        let rebound_validator_id = ValidatorId("rebound-validator".to_string());
+        let identity = AuthenticatedSimplifiedConsensusPeer {
+            validator_id: rebound_validator_id.clone(),
+            validator_uma_id: UmaId("uma:rebound-validator".to_string()),
+            consensus_key_id: AegisPqKeyId("rebound-validator-key".to_string()),
+        };
+        let frozen = [expected_validator_id.clone(), rebound_validator_id]
+            .into_iter()
+            .collect();
+
+        let error = validate_simplified_consensus_target_identity(
+            &identity,
+            &expected_validator_id,
+            &frozen,
+        )
+        .expect_err("rebound address must not receive another validator's targeted response");
+
+        assert!(error.contains("rebound to another validator"));
+    }
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -12027,6 +14745,8 @@ mod tests {
     fn typed_finality_observer_messages_bypass_background_queue() {
         assert!(bypasses_shared_message_queue(
             &NetworkMessage::TypedFinalityObserver {
+                chain_incarnation: canonical_chain_incarnation(),
+                genesis_hash: canonical_genesis_hash(),
                 message: TypedFinalityObserverMessage::Request {
                     next_height: crate::synergy_types::Height(1),
                 },
@@ -12306,6 +15026,292 @@ mod tests {
     lazy_static! {
         static ref TEST_VALIDATOR_KEY_LOCK: Mutex<()> = Mutex::new(());
         static ref TEST_BLOCK_APPLICATION_LOCK: Mutex<()> = Mutex::new(());
+        static ref TEST_PROTECTED_EVIDENCE_LOCK: Mutex<()> = Mutex::new(());
+    }
+
+    #[derive(Default)]
+    struct RecordingProtectedPipelineCoordinatorIngress {
+        received: Mutex<Vec<super::ProtectedPipelineEvidenceEnvelope>>,
+    }
+
+    impl super::ProtectedPipelineCoordinatorIngress for RecordingProtectedPipelineCoordinatorIngress {
+        fn ingest_protected_pipeline_evidence(
+            &self,
+            envelope: super::ProtectedPipelineEvidenceEnvelope,
+        ) -> Result<(), String> {
+            self.received
+                .lock()
+                .map_err(|_| "recording protected-pipeline ingress lock is poisoned".to_string())?
+                .push(envelope);
+            Ok(())
+        }
+    }
+
+    fn protected_ingress_fixture() -> (
+        EtdagAuthenticatedIngressPeer,
+        ProtectedPipelineSemanticObject,
+        ProtectedPipelineSemanticObject,
+        ProtectedPipelineSemanticObject,
+    ) {
+        let mut fixture = fixture(5, None);
+        let peer_validator = fixture.validator_set.validators[0].clone();
+        let input = complete_protected_input(&mut fixture);
+        let transaction = input
+            .certified_vertices
+            .values()
+            .find(|certified| certified.vertex.kind == VertexKind::Transactions)
+            .unwrap()
+            .clone();
+        let transaction = ProtectedPipelineSemanticObject::CertifiedVertex {
+            semantic_id: transaction.vertex.digest().unwrap(),
+            certified_vertex: transaction,
+        };
+        let authorization = ProtectedRevealAuthorization {
+            authorization_version: PROTECTED_PIPELINE_VERSION,
+            chain_id: fixture.context.chain_id,
+            network_id: fixture.context.network_id.clone(),
+            protocol_version: fixture.context.protocol_version.clone(),
+            epoch: fixture.context.epoch,
+            target_height: fixture.context.target_height,
+            cluster_id: fixture.context.assigned_cluster_id,
+            target_context_root: fixture.context.root().unwrap(),
+            validator_set_commitment: fixture.context.active_validator_set_root,
+            parameter_root: fixture.context.consensus_parameter_root,
+            parent_proposal_id: BlockId::from("test-parent-proposal"),
+            parent_block_id: BlockId::from("test-parent-block"),
+            next_commitment_root: EtdagDigest::from_domain_bytes("test-commitment", b"commitment"),
+            protected_batch_root: EtdagDigest::from_domain_bytes("test-batch", b"batch"),
+            proposal_validation_certificate_root: Hash::from_domain_bytes("test-vc", b"vc"),
+            certificate_evidence_root: EtdagDigest::from_domain_bytes("test-evidence", b"evidence"),
+        };
+        let authorization_id = authorization.root().unwrap();
+        let next_commitment_root = authorization.next_commitment_root.clone();
+        let protected_batch_root = authorization.protected_batch_root.clone();
+        let authorization = ProtectedPipelineSemanticObject::RevealAuthorization {
+            semantic_id: authorization_id.clone(),
+            authorization,
+        };
+        let legacy_share = input
+            .decrypt_shares
+            .values()
+            .flat_map(|shares| shares.iter())
+            .next()
+            .unwrap()
+            .clone();
+        let share = ProtectedRevealShareMessage {
+            share_version: PROTECTED_PIPELINE_VERSION,
+            chain_id: legacy_share.chain_id,
+            network_id: legacy_share.network_id,
+            protocol_version: fixture.context.protocol_version.clone(),
+            profile_id: legacy_share.profile_id,
+            epoch: legacy_share.epoch,
+            target_height: legacy_share.target_height,
+            target_context_root: legacy_share.target_context_root,
+            cluster_id: legacy_share.cluster_id,
+            authorization_root: authorization_id.clone(),
+            next_commitment_root,
+            protected_batch_root,
+            tx_commitment: legacy_share.tx_commitment,
+            validator_id: legacy_share.validator_id,
+            share: legacy_share.share,
+            share_commitment: legacy_share.share_commitment,
+            parameter_root: fixture.context.consensus_parameter_root,
+            key_id: legacy_share.key_id,
+            signature: legacy_share.signature,
+        };
+        let mut share = ProtectedPipelineSemanticObject::RevealShare {
+            semantic_id: EtdagDigest::from_domain_bytes("placeholder", b"placeholder"),
+            authorization_id,
+            share,
+        };
+        let semantic_id = share.computed_semantic_id().unwrap();
+        if let ProtectedPipelineSemanticObject::RevealShare {
+            semantic_id: declared,
+            ..
+        } = &mut share
+        {
+            *declared = semantic_id;
+        }
+        (
+            EtdagAuthenticatedIngressPeer {
+                validator_id: peer_validator.validator_id,
+                validator_uma_id: peer_validator.validator_uma_id,
+                consensus_key_id: peer_validator.consensus_public_key.key_id,
+            },
+            transaction,
+            authorization,
+            share,
+        )
+    }
+
+    #[test]
+    fn protected_ingress_deduplicates_and_releases_reordered_reveal_after_authorization() {
+        let _guard = TEST_PROTECTED_EVIDENCE_LOCK.lock().unwrap();
+        super::remove_protected_pipeline_evidence_ingress().unwrap();
+        let ingress = Arc::new(RecordingProtectedPipelineCoordinatorIngress::default());
+        super::install_protected_pipeline_evidence_ingress(ingress.clone()).unwrap();
+        let (peer, transaction, authorization, share) = protected_ingress_fixture();
+
+        let transaction_message = ProtectedPipelineEvidenceMessage::Evidence {
+            object: transaction,
+        };
+        super::dispatch_protected_pipeline_evidence_message(
+            "peer-a",
+            Some(peer.clone()),
+            transaction_message.clone(),
+        )
+        .unwrap();
+        super::dispatch_protected_pipeline_evidence_message(
+            "peer-a",
+            Some(peer.clone()),
+            transaction_message,
+        )
+        .expect("duplicate semantic evidence is idempotent");
+        assert!(matches!(
+            &ingress.received.lock().unwrap()[0].message,
+            ProtectedPipelineEvidenceMessage::Evidence { .. }
+        ));
+        assert_eq!(ingress.received.lock().unwrap().len(), 1);
+
+        super::dispatch_protected_pipeline_evidence_message(
+            "peer-a",
+            Some(peer.clone()),
+            ProtectedPipelineEvidenceMessage::Evidence {
+                object: share.clone(),
+            },
+        )
+        .expect("reordered reveal share is held pending");
+        assert_eq!(ingress.received.lock().unwrap().len(), 1);
+
+        super::dispatch_protected_pipeline_evidence_message(
+            "peer-a",
+            Some(peer.clone()),
+            ProtectedPipelineEvidenceMessage::Evidence {
+                object: authorization.clone(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            &ingress.received.lock().unwrap()[1].message,
+            ProtectedPipelineEvidenceMessage::Evidence {
+                object: ProtectedPipelineSemanticObject::RevealAuthorization { .. }
+            }
+        ));
+        assert!(matches!(
+            &ingress.received.lock().unwrap()[2].message,
+            ProtectedPipelineEvidenceMessage::Evidence {
+                object: ProtectedPipelineSemanticObject::RevealShare { .. }
+            }
+        ));
+
+        super::dispatch_protected_pipeline_evidence_message(
+            "peer-a",
+            Some(peer),
+            ProtectedPipelineEvidenceMessage::Evidence { object: share },
+        )
+        .expect("late reveal duplicate is idempotent");
+        assert_eq!(ingress.received.lock().unwrap().len(), 3);
+        super::remove_protected_pipeline_evidence_ingress().unwrap();
+    }
+
+    #[test]
+    fn protected_ingress_accepts_response_reordering_and_rejects_unauthenticated_evidence() {
+        let _guard = TEST_PROTECTED_EVIDENCE_LOCK.lock().unwrap();
+        super::remove_protected_pipeline_evidence_ingress().unwrap();
+        let ingress = Arc::new(RecordingProtectedPipelineCoordinatorIngress::default());
+        super::install_protected_pipeline_evidence_ingress(ingress.clone()).unwrap();
+        let (peer, _transaction, authorization, share) = protected_ingress_fixture();
+        let (target_height, target_context_root) = share.target_binding();
+        let response = ProtectedPipelineEvidenceMessage::MissingObjectsResponse {
+            target_height,
+            target_context_root,
+            objects: vec![share, authorization],
+        };
+        super::dispatch_protected_pipeline_evidence_message("peer-a", Some(peer), response)
+            .expect("share-before-authorization object order is accepted as one response");
+        assert!(matches!(
+            &ingress.received.lock().unwrap()[0].message,
+            ProtectedPipelineEvidenceMessage::MissingObjectsResponse { .. }
+        ));
+
+        let (_, transaction, _, _) = protected_ingress_fixture();
+        let error = super::dispatch_protected_pipeline_evidence_message(
+            "peer-unauthenticated",
+            None,
+            ProtectedPipelineEvidenceMessage::Evidence {
+                object: transaction,
+            },
+        )
+        .expect_err("unauthenticated evidence must fail closed");
+        assert!(error.contains("authenticated validator peer"));
+        super::remove_protected_pipeline_evidence_ingress().unwrap();
+    }
+
+    #[test]
+    fn protected_ingress_stages_early_evidence_and_flushes_to_one_coordinator() {
+        let _guard = TEST_PROTECTED_EVIDENCE_LOCK.lock().unwrap();
+        super::remove_protected_pipeline_evidence_ingress().unwrap();
+        let (peer, transaction, _, _) = protected_ingress_fixture();
+        let message = ProtectedPipelineEvidenceMessage::Evidence {
+            object: transaction,
+        };
+
+        super::dispatch_protected_pipeline_evidence_message(
+            "peer-a",
+            Some(peer.clone()),
+            message.clone(),
+        )
+        .expect("valid early evidence stages before coordinator startup");
+        super::dispatch_protected_pipeline_evidence_message("peer-a", Some(peer), message)
+            .expect("duplicate staged evidence is idempotent");
+
+        let first = Arc::new(RecordingProtectedPipelineCoordinatorIngress::default());
+        assert_eq!(
+            super::install_protected_pipeline_evidence_ingress(first.clone()).unwrap(),
+            1
+        );
+        assert_eq!(first.received.lock().unwrap().len(), 1);
+        assert_eq!(
+            super::flush_protected_pipeline_evidence_ingress().unwrap(),
+            0
+        );
+
+        let replacement = Arc::new(RecordingProtectedPipelineCoordinatorIngress::default());
+        let error = super::install_protected_pipeline_evidence_ingress(replacement)
+            .expect_err("a process may not replace the authoritative coordinator ingress");
+        assert!(error.contains("already installed"));
+        assert_eq!(first.received.lock().unwrap().len(), 1);
+        super::remove_protected_pipeline_evidence_ingress().unwrap();
+    }
+
+    #[test]
+    fn legacy_etdag_carriers_are_decode_only_and_cannot_activate_egress() {
+        let mut fixture = fixture(5, None);
+        let protected_input = complete_protected_input(&mut fixture);
+        let context = fixture.context.clone();
+        let package = target_admission_package(&mut fixture, context);
+        let artifact = CertifiedProtectedInputArtifact {
+            admission_package: package.clone(),
+            protected_input,
+        };
+        let network = P2PNetwork::new(
+            Arc::new(Mutex::new(BlockChain::new())),
+            &NodeConfig::default(),
+        );
+        let validators = BTreeSet::from([fixture.validator_set.validators[0].validator_id.clone()]);
+        assert!(network
+            .broadcast_simplified_target_admission(
+                &crate::p2p::messages::SimplifiedTargetAdmissionMessage::CertifiedPackage {
+                    package,
+                },
+                &validators,
+            )
+            .unwrap_err()
+            .contains("compatibility-only"));
+        assert!(network
+            .broadcast_etdag_certified_input(&artifact)
+            .unwrap_err()
+            .contains("compatibility-only"));
     }
 
     struct TestCommitVerifierGuard {
@@ -12616,12 +15622,82 @@ mod tests {
     fn signed_aegis_pqc_handshake_verifies() {
         configure_canonical_genesis_path_for_tests();
         let mut config = NodeConfig::default();
-        config.p2p.node_name = "genesisval1".to_string();
-        config.node.validator_address = "synv1local".to_string();
+        config.p2p.node_name = "qualification-relay".to_string();
+        config.node.bootstrap_only = true;
+        config.node.validator_address.clear();
 
         let handshake = build_local_handshake(&config).expect("handshake should sign");
 
         verify_handshake_pq_signature(&handshake).expect("handshake signature should verify");
+        let NetworkMessage::Handshake {
+            aegis_pq_public_key_algorithm,
+            ..
+        } = handshake
+        else {
+            panic!("expected handshake");
+        };
+        assert_eq!(aegis_pq_public_key_algorithm.as_deref(), Some("fndsa"));
+    }
+
+    /// The downstream FN-DSA-1024 peer identity must never be substituted for a
+    /// validator's Genesis-assigned ML-DSA-65 consensus key. A validator whose
+    /// custody key is unavailable must fail closed rather than quietly
+    /// generating a weaker non-consensus identity and still advertising the
+    /// simplified PoSy validator capability.
+    ///
+    /// Live ML-DSA-65 handshake verification is proven separately by Ring 1
+    /// case `real_mldsa_six_validator_burn_in` and by the Ring 2
+    /// `p2p_verified_handshakes_total{algorithm="ML-DSA-65"}` counter; the
+    /// canonical Genesis fixture intentionally ships no validator private keys.
+    #[test]
+    fn validator_handshake_never_falls_back_to_the_fndsa_peer_identity() {
+        configure_canonical_genesis_path_for_tests();
+        let mut config = NodeConfig::default();
+        config.p2p.node_name = "genesisval1".to_string();
+        config.node.validator_address = "synv1local".to_string();
+        assert!(
+            local_consensus_handshake_required(&config),
+            "a configured validator address must select the consensus handshake path"
+        );
+
+        let error = build_local_handshake(&config)
+            .expect_err("a validator without its custody key must fail closed");
+
+        assert!(
+            error.contains("ML-DSA-65"),
+            "the validator path must demand the assigned ML-DSA-65 consensus key: {error}"
+        );
+        assert!(
+            !error.contains("fndsa"),
+            "the validator path must not reach the FN-DSA peer identity generator: {error}"
+        );
+    }
+
+    #[test]
+    fn old_chain_incarnation_handshake_is_rejected_before_pq_verification() {
+        configure_canonical_genesis_path_for_tests();
+        let mut config = NodeConfig::default();
+        config.p2p.node_name = "genesisval1".to_string();
+        let mut handshake = build_local_handshake(&config).expect("handshake should sign");
+        if let NetworkMessage::Handshake {
+            chain_incarnation, ..
+        } = &mut handshake
+        {
+            *chain_incarnation = Some(canonical_chain_incarnation().saturating_sub(1));
+        }
+
+        let requests_before =
+            crate::crypto::aegis_pqvm::pqc_verification_metrics_snapshot().requests;
+        let error = verify_handshake_pq_signature(&handshake)
+            .expect_err("an old chain incarnation must fail closed");
+        let requests_after =
+            crate::crypto::aegis_pqvm::pqc_verification_metrics_snapshot().requests;
+
+        assert!(error.contains("Chain 1266 incarnation"), "{error}");
+        assert_eq!(
+            requests_after, requests_before,
+            "incarnation mismatch must be rejected before PQ verification"
+        );
     }
 
     #[test]
@@ -12652,21 +15728,25 @@ mod tests {
     }
 
     #[test]
-    fn handshake_rejects_stale_posy_consensus_version() {
-        let error =
-            handshake_version_mismatch_reason("consensus_version", "posy/2.2", Some("posy/1.0.0"))
-                .expect("stale PoSy peers must be rejected");
+    fn handshake_rejects_retired_posy_consensus_version() {
+        let error = handshake_version_mismatch_reason(
+            "consensus_version",
+            POSY_SIMPLIFIED_PROTOCOL_VERSION,
+            Some("posy/2.2"),
+        )
+        .expect("retired PoSy peers must be rejected");
 
         assert!(error.contains("consensus_version differs"), "{error}");
-        assert!(error.contains("posy/2.2"));
+        assert!(error.contains(POSY_SIMPLIFIED_PROTOCOL_VERSION));
     }
 
     #[test]
     fn direct_vote_handshake_capability_is_signed_and_verifiable() {
         configure_canonical_genesis_path_for_tests();
         let mut config = NodeConfig::default();
-        config.p2p.node_name = "genesisval1".to_string();
-        config.node.validator_address = "synv1local".to_string();
+        config.p2p.node_name = "qualification-relay".to_string();
+        config.node.bootstrap_only = true;
+        config.node.validator_address.clear();
 
         let handshake = build_local_handshake_with_extra_capabilities(&config, &["direct-vote"])
             .expect("direct vote handshake should sign");
@@ -12737,11 +15817,11 @@ mod tests {
         let err = verify_handshake_pq_signature(&handshake)
             .expect_err("missing network name must fail closed");
 
-        assert!(err.contains("network_id synergy-testnet-v3"));
+        assert!(err.contains("network_id testnet"));
     }
 
     #[test]
-    fn typed_validator_handshake_uses_the_assigned_mldsa65_key_only() {
+    fn simplified_validator_handshake_uses_the_assigned_mldsa65_key_only() {
         let mut key_manager = PQCManager::new();
         let (public_key, private_key) = key_manager
             .generate_keypair(PQCAlgorithm::MLDSA65)
@@ -12775,19 +15855,34 @@ mod tests {
             wrong_public,
             wrong_private,
         )
-        .expect_err("typed validator handshake must reject FN-DSA");
+        .expect_err("simplified validator handshake must reject FN-DSA");
         assert!(error.contains("ML-DSA-65"));
     }
 
     #[test]
-    fn typed_validator_handshake_requirement_excludes_bootstrap_and_legacy_profiles() {
+    fn simplified_validator_handshake_requirement_is_exact_and_excludes_bootstrap() {
         let mut config = NodeConfig::default();
         config.node.validator_address = "synv1validator".to_string();
+        config.consensus.algorithm = "unsupported-consensus-profile".to_string();
         assert!(!local_consensus_handshake_required(&config));
-        config.consensus.algorithm = "posy/2.2".to_string();
+        config.consensus.algorithm = POSY_SIMPLIFIED_PROTOCOL_VERSION.to_string();
         assert!(local_consensus_handshake_required(&config));
         config.node.bootstrap_only = true;
         assert!(!local_consensus_handshake_required(&config));
+        config.node.bootstrap_only = false;
+        config.consensus.algorithm = COORDINATED_ROUND_ROBIN_V1.to_string();
+        assert!(local_consensus_handshake_required(&config));
+        assert_eq!(local_consensus_version(&config), COORDINATED_ROUND_ROBIN_V1);
+    }
+
+    #[test]
+    fn simplified_validator_capability_is_the_only_posy_capability() {
+        assert_eq!(
+            validator_consensus_capability(POSY_SIMPLIFIED_PROTOCOL_VERSION)
+                .expect("simplified PoSy must have a validator capability"),
+            "posy-simplified-v3-validator"
+        );
+        assert!(validator_consensus_capability("unsupported-posy-profile").is_err());
     }
 
     #[test]
@@ -13014,6 +16109,31 @@ mod tests {
     }
 
     #[test]
+    fn seed_discovered_validator_routes_bind_identity_to_loopback_transport() {
+        let route = format_seed_discovered_validator_route(
+            "synv1validator2xxxxxxxxxxxxxxxxxxxx",
+            "127.0.0.1:5602",
+        );
+        assert_eq!(
+            parse_seed_discovered_validator_route(&route),
+            Some((
+                "synv1validator2xxxxxxxxxxxxxxxxxxxx".to_string(),
+                "127.0.0.1:5602".to_string(),
+            ))
+        );
+        assert!(is_private_qualification_loopback_dial_address(
+            "127.0.0.1:5602"
+        ));
+        assert!(!is_private_qualification_loopback_dial_address(
+            "10.126.10.2:5622"
+        ));
+        assert_eq!(
+            parse_seed_discovered_validator_route("seedreg://not-a-validator@127.0.0.1:5602"),
+            None
+        );
+    }
+
+    #[test]
     fn parse_bootnode_dial_address_rejects_invalid_bare_host_targets() {
         assert_eq!(parse_bootnode_dial_address("snr://peer@test:5620"), None);
         assert_eq!(parse_bootnode_dial_address(""), None);
@@ -13094,7 +16214,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_innernet_routes_are_accepted_and_retired_routes_rejected() {
+    fn canonical_validator_vpn_routes_are_accepted_and_invalid_routes_rejected() {
         let mut config = NodeConfig::default();
         config.identity.role = "validator".to_string();
         config.network.validator_vpn_transports = vec![ValidatorVpnTransportConfig {
@@ -13106,7 +16226,7 @@ mod tests {
         assert!(is_validator_vpn_dial_address("10.70.10.254:5622"));
         assert!(is_validator_vpn_relayer_dial_address("10.70.20.1:5622"));
         assert!(is_validator_vpn_relayer_dial_address("10.70.20.254:5622"));
-        assert!(!is_validator_vpn_dial_address("10.69.10.1:5622"));
+        assert!(is_validator_vpn_dial_address("10.69.10.1:5622"));
         assert!(!is_validator_vpn_relayer_dial_address("10.69.0.1:5622"));
         assert!(!is_validator_vpn_dial_address("10.70.10.0:5622"));
         assert!(!is_validator_vpn_relayer_dial_address("10.70.20.255:5622"));
@@ -13166,7 +16286,7 @@ mod tests {
         config.network.validator_vpn_transports[0].dial_address = "10.69.10.7:5622".to_string();
         assert_eq!(
             resolve_peer_transport_address(&config, "synv1validator1"),
-            None
+            Some("10.69.10.7:5622".to_string())
         );
     }
 
@@ -15169,19 +18289,26 @@ mod tests {
             0,
             100,
         );
+        // Address Engine v1 accepts only a canonical raw FN-DSA-1024 identity
+        // root. Keep this fixture deterministic while exercising the unfunded
+        // activation path; an arbitrary text label must not be treated as a
+        // public key.
+        let activation_public_key_hex = "42".repeat(crate::address::FN_DSA_1024_PUBLIC_KEY_BYTES);
         let activation_address =
-            crate::address::generate_validator_address("activation-application-failure-key", 1);
+            crate::address::generate_validator_address(&activation_public_key_hex, 1)
+                .expect("deterministic FN-DSA fixture derives a validator address");
         let activation_tx = crate::transaction::Transaction::new(
             activation_address.clone(),
-            activation_address,
+            activation_address.clone(),
             0,
             0,
             vec![1, 2, 3],
             1,
             21_000,
             Some(format!(
-                "validator_activation:{{\"validator\":\"{}\",\"public_key\":\"activation-application-failure-key\",\"name\":\"Unfunded Validator\",\"stake_amount_nwei\":{}}}",
-                crate::address::generate_validator_address("activation-application-failure-key", 1),
+                "validator_activation:{{\"validator\":\"{}\",\"public_key\":\"{}\",\"name\":\"Unfunded Validator\",\"stake_amount_nwei\":{}}}",
+                activation_address,
+                activation_public_key_hex,
                 crate::validator::TESTNET_MIN_VALIDATOR_STAKE_NWEI
             )),
             "fndsa".to_string(),
@@ -15500,6 +18627,147 @@ mod tests {
             block_sync_min_serve_interval_secs(&config, Some(&active_peer)),
             BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS
         );
+    }
+
+    fn framed_network_message(message: &NetworkMessage) -> Vec<u8> {
+        let mut wire = Vec::new();
+        super::send_message(&mut wire, message).expect("network message should frame");
+        wire
+    }
+
+    fn framed_payload(payload: &[u8]) -> Vec<u8> {
+        let mut wire = Vec::with_capacity(4 + payload.len());
+        wire.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        wire.extend_from_slice(payload);
+        wire
+    }
+
+    struct ChunkedReader {
+        cursor: std::io::Cursor<Vec<u8>>,
+        maximum_chunk: usize,
+        interrupt_on_call: Option<usize>,
+        calls: usize,
+    }
+
+    impl ChunkedReader {
+        fn new(bytes: Vec<u8>, maximum_chunk: usize) -> Self {
+            Self {
+                cursor: std::io::Cursor::new(bytes),
+                maximum_chunk,
+                interrupt_on_call: None,
+                calls: 0,
+            }
+        }
+
+        fn with_interrupt(mut self, call: usize) -> Self {
+            self.interrupt_on_call = Some(call);
+            self
+        }
+    }
+
+    impl std::io::Read for ChunkedReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let call = self.calls;
+            self.calls = self.calls.saturating_add(1);
+            if self.interrupt_on_call == Some(call) {
+                self.interrupt_on_call = None;
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "more framed bytes are not available yet",
+                ));
+            }
+            let available = self.maximum_chunk.min(buffer.len());
+            std::io::Read::read(&mut self.cursor, &mut buffer[..available])
+        }
+    }
+
+    #[test]
+    fn production_decoder_accepts_unit_frame_in_one_read() {
+        for (message, expected_wire) in [
+            (NetworkMessage::GetPeers, br#""GetPeers""#.as_slice()),
+            (NetworkMessage::Ping, br#""Ping""#.as_slice()),
+            (NetworkMessage::Pong, br#""Pong""#.as_slice()),
+            (NetworkMessage::GetStatus, br#""GetStatus""#.as_slice()),
+        ] {
+            let mut wire = std::io::Cursor::new(framed_network_message(&message));
+            let decoded = receive_message(&mut wire).unwrap();
+            assert_eq!(serde_json::to_vec(&decoded).unwrap(), expected_wire);
+        }
+    }
+
+    #[test]
+    fn production_decoder_accepts_legal_frame_split_across_reads() {
+        let message = NetworkMessage::GetStatus;
+        let mut wire = ChunkedReader::new(framed_network_message(&message), 1);
+        assert!(matches!(
+            receive_message(&mut wire).unwrap(),
+            NetworkMessage::GetStatus
+        ));
+    }
+
+    #[test]
+    fn production_decoder_accepts_multiple_coalesced_frames() {
+        let first = NetworkMessage::GetStatus;
+        let second = NetworkMessage::Ping;
+        let mut bytes = framed_network_message(&first);
+        bytes.extend_from_slice(&framed_network_message(&second));
+        let mut wire = std::io::Cursor::new(bytes);
+
+        assert!(matches!(
+            receive_message(&mut wire).unwrap(),
+            NetworkMessage::GetStatus
+        ));
+        assert!(matches!(
+            receive_message(&mut wire).unwrap(),
+            NetworkMessage::Ping
+        ));
+    }
+
+    #[test]
+    fn production_decoder_accepts_exact_transport_boundary() {
+        let empty = serde_json::to_vec(&NetworkMessage::Error {
+            message: String::new(),
+        })
+        .unwrap();
+        let message = NetworkMessage::Error {
+            message: "x".repeat(MAX_P2P_FRAME_BYTES - empty.len()),
+        };
+        let encoded = serde_json::to_vec(&message).unwrap();
+        assert_eq!(encoded.len(), MAX_P2P_FRAME_BYTES);
+        drop(message);
+
+        let mut wire = std::io::Cursor::new(framed_payload(&encoded));
+        match receive_message(&mut wire).unwrap() {
+            NetworkMessage::Error { message } => {
+                assert_eq!(message.len(), MAX_P2P_FRAME_BYTES - empty.len());
+                assert!(message.bytes().all(|byte| byte == b'x'));
+            }
+            other => panic!("expected boundary-sized error envelope, received {other:?}"),
+        }
+    }
+
+    #[test]
+    fn production_decoder_rejects_malformed_length_prefix() {
+        let mut wire = std::io::Cursor::new(vec![1, 0, 0]);
+        let error = receive_message(&mut wire).expect_err("partial length must fail closed");
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn production_decoder_rejects_malformed_envelope() {
+        let mut wire = std::io::Cursor::new(framed_payload(br#""Unknown""#));
+        let error = receive_message(&mut wire).expect_err("unknown unit variant must fail closed");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn production_decoder_retries_incomplete_frame_read() {
+        let message = NetworkMessage::GetStatus;
+        let mut wire = ChunkedReader::new(framed_network_message(&message), 2).with_interrupt(3);
+        assert!(matches!(
+            receive_message(&mut wire).unwrap(),
+            NetworkMessage::GetStatus
+        ));
     }
 
     #[test]
@@ -15828,6 +19096,44 @@ mod tests {
     }
 
     #[test]
+    fn private_qualification_static_transport_requires_the_isolated_overlay() {
+        let validator = "synv1privatequalificationxxxxxxxxxxxxxxxxxx";
+        let mut config = NodeConfig::default();
+        config.network.validator_vpn_transports = vec![ValidatorVpnTransportConfig {
+            validator_address: validator.to_string(),
+            dial_address: "10.126.10.8:5622".to_string(),
+        }];
+
+        assert_eq!(
+            super::configured_validator_vpn_transport_for_target(&config, validator, true),
+            Some("10.126.10.8:5622".to_string())
+        );
+
+        config.network.validator_vpn_transports[0].dial_address = "10.70.10.8:5622".to_string();
+        assert_eq!(
+            super::configured_validator_vpn_transport_for_target(&config, validator, true),
+            None
+        );
+
+        assert!(super::is_private_qualification_innernet_dial_address(
+            "10.126.10.8:5622",
+            10,
+        ));
+        assert!(super::is_private_qualification_innernet_dial_address(
+            "10.126.20.8:5622",
+            20,
+        ));
+        assert!(!super::is_private_qualification_innernet_dial_address(
+            "10.70.20.8:5622",
+            20,
+        ));
+        assert!(!super::is_private_qualification_innernet_dial_address(
+            "10.126.20.8:5621",
+            20,
+        ));
+    }
+
+    #[test]
     fn transport_enrollment_does_not_activate_an_unbonded_validator() {
         configure_canonical_genesis_path_for_tests();
         let unactivated_validator = "synv1transportonlyxxxxxxxxxxxxxxxxxxxxx";
@@ -15886,6 +19192,7 @@ mod tests {
         authenticated.node_id = Some("untrusted-looking-name".to_string());
         authenticated.handshake_role = Some("rpc_gateway_node".to_string());
         authenticated.connected_endpoint = Some("167.86.83.83:5623".to_string());
+        authenticated.direction = ConnectionDirection::Outgoing;
         network
             .connected_peers
             .lock()
@@ -16484,11 +19791,13 @@ mod tests {
         let peer_state_cache = Arc::new(Mutex::new(HashMap::new()));
         let mut config = NodeConfig::default();
         config.network.additional_dial_targets = vec!["127.0.0.1:5622".to_string()];
+        config.node.validator_address = "synv1local".to_string();
 
         let mut support_peer =
             test_peer_with_validator_address(Some("synv21ga3nsdjagzt9pmks4mzjq4vdjyngdwq6jst632"));
         support_peer.node_id = Some("sentry1".to_string());
         support_peer.handshake_role = Some("relayer".to_string());
+        support_peer.direction = ConnectionDirection::Outgoing;
         support_peer.address = "relay1.synergynode.xyz:5622".to_string();
         support_peer.public_address = Some("relay1.synergynode.xyz:5622".to_string());
         support_peer.connected_endpoint = Some("127.0.0.1:5622".to_string());

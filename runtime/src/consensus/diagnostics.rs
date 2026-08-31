@@ -6063,6 +6063,10 @@ mod tests {
                 proposer_public_key: Vec::new(),
                 block_signature: Vec::new(),
                 block_signature_algorithm: "fn-dsa".to_string(),
+                base_fee_per_gas_nwei: 0,
+                gas_used: 0,
+                gas_limit: 0,
+                fee_market_version: 0,
             };
             previous_hash = block.hash.clone();
             let entry = CommittedBlockLogEntry {
@@ -6107,6 +6111,10 @@ mod tests {
             proposer_public_key: Vec::new(),
             block_signature: Vec::new(),
             block_signature_algorithm: "fn-dsa".to_string(),
+            base_fee_per_gas_nwei: 0,
+            gas_used: 0,
+            gas_limit: 0,
+            fee_market_version: 0,
         };
         let entry = CommittedBlockLogEntry {
             height: block.block_index,
@@ -6156,6 +6164,10 @@ mod tests {
             proposer_public_key: Vec::new(),
             block_signature: Vec::new(),
             block_signature_algorithm: "fn-dsa".to_string(),
+            base_fee_per_gas_nwei: 0,
+            gas_used: 0,
+            gas_limit: 0,
+            fee_market_version: 0,
         };
         let entry = CommittedBlockLogEntry {
             height: 12,
@@ -6390,6 +6402,10 @@ mod tests {
             proposer_public_key: Vec::new(),
             block_signature: Vec::new(),
             block_signature_algorithm: "fn-dsa".to_string(),
+            base_fee_per_gas_nwei: 0,
+            gas_used: 0,
+            gas_limit: 0,
+            fee_market_version: 0,
         };
         let entry = CommittedBlockLogEntry {
             height: block.block_index,

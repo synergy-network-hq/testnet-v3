@@ -1,0 +1,72 @@
+{
+  "registry_id": "synergy-address-registry",
+  "registry_version": "SNTS-01-v1.3",
+  "source_document_sha256": "7dbf3ac0333f8f40b51502b625ec9242de88b70d612d340581968e69c222635c",
+  "address_engine_version": 1,
+  "address_engine": {
+    "envelope": "bech32m",
+    "digest": "sha3-256",
+    "identity_root_algorithm": "FN-DSA-1024",
+    "identity_root_preimage": "canonical raw verification-key bytes",
+    "checksum_symbols": 6,
+    "canonical_case": "lowercase",
+    "canonical_total_length": 41,
+    "data_symbol_formula": "41-len(hrp)-1-6",
+    "data_symbol_extraction": "leading N 5-bit groups from SHA3-256 in big-endian bit order"
+  },
+  "declared_protocol_namespace_count": 36,
+  "human_table_namespace_count": 36,
+  "registry_reconciliation": "The activated registry is exactly the 36 namespaces printed in the authoritative v1.3 table. The document's later synixn references contradict that table and are explicitly rejected by direct protocol directive. The fixed burn constant is additional and is not Bech32m.",
+  "explicitly_rejected_typed_prefixes": [
+    "synixn-"
+  ],
+  "namespaces": [
+    { "namespace": "synw", "classification": "key_controlled_address", "status": "active", "encoding": "bech32m_v1", "purpose": "primary wallet" },
+    { "namespace": "syns", "classification": "key_controlled_address", "status": "active", "encoding": "bech32m_v1", "purpose": "secondary utility or service wallet" },
+    { "namespace": "syna", "classification": "key_controlled_address", "status": "active", "encoding": "bech32m_v1", "purpose": "autonomous or DAO-controlled account wallet" },
+    { "namespace": "synz", "classification": "key_controlled_address", "status": "active", "encoding": "bech32m_v1", "purpose": "advanced or UMA-linked smart wallet" },
+    { "namespace": "syntxn", "classification": "typed_identifier", "status": "active", "encoding": "typed_hash", "purpose": "standard PoSy transaction identifier" },
+    { "namespace": "synxxn", "classification": "typed_identifier", "status": "active", "encoding": "typed_hash", "purpose": "SXCP cross-chain transaction identifier" },
+    { "namespace": "synb1", "classification": "object_address", "status": "active", "encoding": "bech32m_v1", "purpose": "STS-9 basic fungible token" },
+    { "namespace": "synb2", "classification": "object_address", "status": "active", "encoding": "bech32m_v1", "purpose": "STS-9 managed fungible token" },
+    { "namespace": "synb3", "classification": "object_address", "status": "active", "encoding": "bech32m_v1", "purpose": "STS-9 policy fungible token" },
+    { "namespace": "synn1", "classification": "object_address", "status": "active", "encoding": "bech32m_v1", "purpose": "standard NFT" },
+    { "namespace": "synn2", "classification": "object_address", "status": "active", "encoding": "bech32m_v1", "purpose": "controlled NFT" },
+    { "namespace": "synj", "classification": "object_address", "status": "active", "encoding": "bech32m_v1", "purpose": "multi-asset token" },
+    { "namespace": "synk", "classification": "object_address", "status": "active", "encoding": "bech32m_v1", "purpose": "identity and credential token" },
+    { "namespace": "synq", "classification": "object_address", "status": "active", "encoding": "bech32m_v1", "purpose": "system contract" },
+    { "namespace": "sync", "classification": "object_address", "status": "active", "encoding": "bech32m_v1", "purpose": "custom contract" },
+    { "namespace": "synv1", "classification": "key_controlled_address", "status": "active", "encoding": "bech32m_v1", "purpose": "class I consensus node and canonical node ID" },
+    { "namespace": "synv2", "classification": "key_controlled_address", "status": "active", "encoding": "bech32m_v1", "purpose": "class II interoperability node and canonical node ID" },
+    { "namespace": "synv3", "classification": "key_controlled_address", "status": "active", "encoding": "bech32m_v1", "purpose": "class III execution data and cryptography node and canonical node ID" },
+    { "namespace": "synv4", "classification": "key_controlled_address", "status": "active", "encoding": "bech32m_v1", "purpose": "class IV AI and intelligence node and canonical node ID" },
+    { "namespace": "synv5", "classification": "key_controlled_address", "status": "active", "encoding": "bech32m_v1", "purpose": "class V service and access node and canonical node ID" },
+    { "namespace": "syngrp1", "classification": "object_address", "status": "active", "encoding": "bech32m_v1", "purpose": "node cluster group 1" },
+    { "namespace": "syngrp2", "classification": "object_address", "status": "active", "encoding": "bech32m_v1", "purpose": "node cluster group 2" },
+    { "namespace": "syngrp3", "classification": "object_address", "status": "active", "encoding": "bech32m_v1", "purpose": "node cluster group 3" },
+    { "namespace": "syngrp4", "classification": "object_address", "status": "active", "encoding": "bech32m_v1", "purpose": "node cluster group 4" },
+    { "namespace": "syngrp5", "classification": "object_address", "status": "active", "encoding": "bech32m_v1", "purpose": "node cluster group 5" },
+    { "namespace": "syndao", "classification": "typed_identifier", "status": "active", "encoding": "owning_standard", "purpose": "DAO governance proposal identifier" },
+    { "namespace": "syno", "classification": "key_controlled_address", "status": "active", "encoding": "bech32m_v1", "purpose": "governance oversight auditor" },
+    { "namespace": "syny", "classification": "key_controlled_address", "status": "active", "encoding": "bech32m_v1", "purpose": "DAO committee" },
+    { "namespace": "synm", "classification": "key_controlled_address", "status": "active", "encoding": "bech32m_v1", "purpose": "general multisig wallet" },
+    { "namespace": "synu", "classification": "key_controlled_address", "status": "active", "encoding": "bech32m_v1", "purpose": "DAO treasury multisig wallet" },
+    { "namespace": "synl", "classification": "key_controlled_address", "status": "active", "encoding": "bech32m_v1", "purpose": "validator council or emergency multisig wallet" },
+    { "namespace": "synf", "classification": "object_address", "status": "active", "encoding": "bech32m_v1", "purpose": "network and uDEX fee collector" },
+    { "namespace": "synr", "classification": "reserved_namespace", "status": "reserved", "encoding": "none", "purpose": "future use" },
+    { "namespace": "syni", "classification": "reserved_namespace", "status": "reserved", "encoding": "none", "purpose": "future use" },
+    { "namespace": "synp", "classification": "reserved_namespace", "status": "reserved", "encoding": "none", "purpose": "future use" },
+    { "namespace": "syne", "classification": "reserved_namespace", "status": "reserved", "encoding": "none", "purpose": "future use; independent of burn" }
+  ],
+  "synthetic_addresses": [
+    { "value": "syn0000000000000000000000000000000", "classification": "protocol_synthetic_address", "status": "active", "encoding": "fixed_constant", "purpose": "canonical unspendable burn address" }
+  ],
+  "typed_hash_identifiers": [
+    { "kind": "transaction", "prefix": "syntxn-", "hex_chars": 64, "status": "active" },
+    { "kind": "sxcp_transaction", "prefix": "synxxn-", "hex_chars": 64, "status": "active" },
+    { "kind": "block", "prefix": "synblk-", "hex_chars": 64, "status": "active" },
+    { "kind": "merkle_root", "prefix": "synmkl-", "hex_chars": 64, "status": "active" },
+    { "kind": "epoch_randomness_beacon", "prefix": "synepoch-", "hex_chars": 128, "status": "active" },
+    { "kind": "quorum_certificate", "prefix": "synqc-", "hex_chars": 64, "status": "active" }
+  ]
+}

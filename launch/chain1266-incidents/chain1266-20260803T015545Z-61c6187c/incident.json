@@ -1,0 +1,185 @@
+{
+  "actions": [
+    {
+      "action": "READ_ONLY_COMPACT_EVIDENCE_CAPTURE",
+      "outcome": "COMPLETE",
+      "utc": "2026-08-03T01:55:45Z"
+    }
+  ],
+  "affected_nodes": [
+    "validator-node-01",
+    "validator-node-02",
+    "validator-node-03",
+    "validator-node-04",
+    "validator-node-05",
+    "validator-node-06"
+  ],
+  "chain": {
+    "chain_id": 1266,
+    "genesis_hash": "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",
+    "incarnation": 4
+  },
+  "detected_utc": "2026-08-03T01:55:45Z",
+  "height": {
+    "common": 0,
+    "maximum": 0,
+    "minimum": 0
+  },
+  "incident_id": "chain1266-20260803T015545Z-61c6187c",
+  "operational_state": "STARTING",
+  "schema_version": 1,
+  "snapshots": [
+    {
+      "collected_utc": "2026-08-03T01:55:44Z",
+      "duration_seconds": 0.258,
+      "node_id": "validator-node-01",
+      "parsed": {
+        "faults": [],
+        "metrics": {},
+        "systemd": {
+          "ActiveState": "failed",
+          "CPUUsageNSec": "416551000",
+          "ConfigSHA256": "84b0a693cd4de28afc216264add67bb52db75ad06a42af0773e04b24b7a24d3b",
+          "ExecMainStatus": "1",
+          "GenesisSHA256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+          "MainPID": "0",
+          "MemoryCurrent": "[not set]",
+          "NRestarts": "0",
+          "SubState": "failed"
+        }
+      },
+      "role": "validator",
+      "service": "synergy-chain1266-role@validator-node-01.service",
+      "ssh_alias": "synergy-val1",
+      "ssh_error": "",
+      "ssh_exit": 0
+    },
+    {
+      "collected_utc": "2026-08-03T01:55:44Z",
+      "duration_seconds": 0.285,
+      "node_id": "validator-node-02",
+      "parsed": {
+        "faults": [],
+        "metrics": {},
+        "systemd": {
+          "ActiveState": "failed",
+          "CPUUsageNSec": "293204000",
+          "ConfigSHA256": "946ad3b6ab9c81c193764b552285b324b46df627fb5446698770dd8a063079e2",
+          "ExecMainStatus": "1",
+          "GenesisSHA256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+          "MainPID": "0",
+          "MemoryCurrent": "[not set]",
+          "NRestarts": "0",
+          "SubState": "failed"
+        }
+      },
+      "role": "validator",
+      "service": "synergy-chain1266-role@validator-node-02.service",
+      "ssh_alias": "synergy-val2",
+      "ssh_error": "",
+      "ssh_exit": 0
+    },
+    {
+      "collected_utc": "2026-08-03T01:55:44Z",
+      "duration_seconds": 0.348,
+      "node_id": "validator-node-03",
+      "parsed": {
+        "faults": [],
+        "metrics": {},
+        "systemd": {
+          "ActiveState": "failed",
+          "CPUUsageNSec": "338512000",
+          "ExecMainStatus": "1",
+          "MainPID": "0",
+          "MemoryCurrent": "[not set]",
+          "NRestarts": "0",
+          "SubState": "failed"
+        }
+      },
+      "role": "validator",
+      "service": "synergy-chain1266-role@validator-node-03.service",
+      "ssh_alias": "synergy-val3",
+      "ssh_error": "",
+      "ssh_exit": 0
+    },
+    {
+      "collected_utc": "2026-08-03T01:55:45Z",
+      "duration_seconds": 0.288,
+      "node_id": "validator-node-04",
+      "parsed": {
+        "faults": [],
+        "metrics": {},
+        "systemd": {
+          "ActiveState": "failed",
+          "CPUUsageNSec": "233559000",
+          "ConfigSHA256": "cec4f21314799f6e167a6f115ada49caf7b9c33f4f520ad7583e9f75b2692ba4",
+          "ExecMainStatus": "1",
+          "GenesisSHA256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+          "MainPID": "0",
+          "MemoryCurrent": "[not set]",
+          "NRestarts": "0",
+          "SubState": "failed"
+        }
+      },
+      "role": "validator",
+      "service": "synergy-chain1266-role@validator-node-04.service",
+      "ssh_alias": "synergy-val4",
+      "ssh_error": "",
+      "ssh_exit": 0
+    },
+    {
+      "collected_utc": "2026-08-03T01:55:45Z",
+      "duration_seconds": 0.485,
+      "node_id": "validator-node-05",
+      "parsed": {
+        "faults": [],
+        "metrics": {},
+        "systemd": {
+          "ActiveState": "failed",
+          "CPUUsageNSec": "523471000",
+          "ConfigSHA256": "03cda85cfcd4e50f7d2dc5077d866fb906b914507efe04ae051303fc9852e30b",
+          "ExecMainStatus": "1",
+          "GenesisSHA256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+          "MainPID": "0",
+          "MemoryCurrent": "[not set]",
+          "NRestarts": "0",
+          "SubState": "failed"
+        }
+      },
+      "role": "validator",
+      "service": "synergy-chain1266-role@validator-node-05.service",
+      "ssh_alias": "synergy-val5",
+      "ssh_error": "",
+      "ssh_exit": 0
+    },
+    {
+      "collected_utc": "2026-08-03T01:55:45Z",
+      "duration_seconds": 0.258,
+      "node_id": "validator-node-06",
+      "parsed": {
+        "faults": [],
+        "metrics": {},
+        "systemd": {
+          "ActiveState": "failed",
+          "CPUUsageNSec": "244618000",
+          "ConfigSHA256": "e3fec992b89c914c6d55e07776f2434d846f4a482bc818460cb14e296db5f42c",
+          "ExecMainStatus": "1",
+          "GenesisSHA256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+          "MainPID": "0",
+          "MemoryCurrent": "[not set]",
+          "NRestarts": "0",
+          "SubState": "failed"
+        }
+      },
+      "role": "validator",
+      "service": "synergy-chain1266-role@validator-node-06.service",
+      "ssh_alias": "synergy-val6",
+      "ssh_error": "",
+      "ssh_exit": 0
+    }
+  ],
+  "status": "OPEN",
+  "triggers": [
+    "VALIDATOR_PAUSED_BARRIER_TIMEOUT"
+  ]
+}

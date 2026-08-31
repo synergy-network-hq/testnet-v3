@@ -1,0 +1,72 @@
+{
+  "classification": "DERIVED",
+  "raw_sample_count": 199430,
+  "summary_group_count": 967,
+  "failed_safety_sample_count": 50,
+  "failed_safety_results": [
+    "panic_caught"
+  ],
+  "bootstrap_resamples": 2000,
+  "bootstrap_confidence": 0.95,
+  "bootstrap_statistic": "median",
+  "bootstrap_seed": "sha256 of grouping key",
+  "percentile_method": "linear interpolation at (n-1)*p",
+  "outlier_policy": "MAD flags reported; all samples retained",
+  "inputs": [
+    {
+      "path": "research/aegis-bench/results/runs/publication-m2-20260815-v1/raw/publication-m2-20260815-v1-aegis.csv",
+      "sha256": "e9ece79a0e4c24b99991fe8134dbaf0c3d57f969fe56e7b0bcd14e9580b5eca4",
+      "rows": "55800"
+    },
+    {
+      "path": "research/aegis-bench/results/runs/publication-m2-20260815-v1/raw/publication-m2-20260815-v1-cold-start.csv",
+      "sha256": "e555a7b5eb53622caba87d364c1b4c0ff5a63e2384f0398df177e2f81de8f9cd",
+      "rows": "210"
+    },
+    {
+      "path": "research/aegis-bench/results/runs/publication-m2-20260815-v1/raw/publication-m2-20260815-v1-lifecycle.csv",
+      "sha256": "8e85adf1997e1ba8b675ba03cfcba1678347ffa8f0782771531695c6a6278587",
+      "rows": "3160"
+    },
+    {
+      "path": "research/aegis-bench/results/runs/publication-m2-20260815-v1/raw/publication-m2-20260815-v1-load-workers1.csv",
+      "sha256": "77fdc3c083a62885c08f928b00bc34900a600f5d0d05bae8c2693a33869f1e51",
+      "rows": "800"
+    },
+    {
+      "path": "research/aegis-bench/results/runs/publication-m2-20260815-v1/raw/publication-m2-20260815-v1-load-workers2.csv",
+      "sha256": "ede9ee4ead727b12b0c76a55119dd7cd77fd940f00f3a675c56d0aa0c6fa4389",
+      "rows": "800"
+    },
+    {
+      "path": "research/aegis-bench/results/runs/publication-m2-20260815-v1/raw/publication-m2-20260815-v1-load-workers4.csv",
+      "sha256": "44240134d96148fe3003408d73423ed355c64ffa373c5262251a70e31ae39d7a",
+      "rows": "800"
+    },
+    {
+      "path": "research/aegis-bench/results/runs/publication-m2-20260815-v1/raw/publication-m2-20260815-v1-primitive.csv",
+      "sha256": "6f17313973f1d37a46fb2bc87f7c073a8964162bcc99bc7e7338654c6bcea91e",
+      "rows": "58350"
+    },
+    {
+      "path": "research/aegis-bench/results/runs/publication-m2-20260815-v1/raw/publication-m2-20260815-v1-protocol.csv",
+      "sha256": "c8dd7ef155701e10933f95eb1f29e6fd5ae613d809a9162502b0afec0ca41841",
+      "rows": "79510"
+    }
+  ],
+  "plots": [
+    "research/aegis-bench/results/runs/publication-m2-20260815-v1/derived/primitive-sign-verify-512B.svg",
+    "research/aegis-bench/results/runs/publication-m2-20260815-v1/derived/signature-layer-comparison-512B.svg",
+    "research/aegis-bench/results/runs/publication-m2-20260815-v1/derived/aegis-cache-miss-vs-hit-512B.svg",
+    "research/aegis-bench/results/runs/publication-m2-20260815-v1/derived/verification-message-scaling.svg",
+    "research/aegis-bench/results/runs/publication-m2-20260815-v1/derived/transaction-component-latency-512B.svg",
+    "research/aegis-bench/results/runs/publication-m2-20260815-v1/derived/transaction-byte-overhead.svg",
+    "research/aegis-bench/results/runs/publication-m2-20260815-v1/derived/coordinated-block-wire-scaling.svg",
+    "research/aegis-bench/results/runs/publication-m2-20260815-v1/derived/coordinated-network-message-scaling.svg",
+    "research/aegis-bench/results/runs/publication-m2-20260815-v1/derived/controlled-load-throughput.svg",
+    "research/aegis-bench/results/runs/publication-m2-20260815-v1/derived/controlled-load-tail-latency.svg",
+    "research/aegis-bench/results/runs/publication-m2-20260815-v1/derived/controlled-load-cpu-vs-throughput.svg",
+    "research/aegis-bench/results/runs/publication-m2-20260815-v1/derived/cold-start-latency.svg",
+    "research/aegis-bench/results/runs/publication-m2-20260815-v1/derived/cryptographic-object-sizes.svg"
+  ]
+}

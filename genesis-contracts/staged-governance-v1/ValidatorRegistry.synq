@@ -44,7 +44,9 @@ contract ValidatorRegistry {
     ) {
         require(initialAuthority != Address(0), "Invalid authority");
         require(minimumValidators > 0, "Minimum validator count is zero");
-        require(maximumValidators >= minimumValidators, "Invalid validator limits");
+        // A zero maximum is the canonical Genesis ABI sentinel for an
+        // uncapped, governance-managed validator set.
+        require(maximumValidators == 0 || maximumValidators >= minimumValidators, "Invalid validator limits");
         governanceKey = initialGovernanceKey;
         authority = initialAuthority;
         maxValidatorCount = maximumValidators;
@@ -71,7 +73,7 @@ contract ValidatorRegistry {
         require(validatorStatus[validator] == 0, "Validator exists");
         require(validatorIdToAddress[idHash] == Address(0), "Validator ID exists");
         require(selfStake >= minSelfStake, "Self stake below minimum");
-        require(validatorCount < maxValidatorCount, "Validator limit reached");
+        require(maxValidatorCount == 0 || validatorCount < maxValidatorCount, "Validator limit reached");
 
         validatorStatus[validator] = 1;
         validatorIdHash[validator] = idHash;

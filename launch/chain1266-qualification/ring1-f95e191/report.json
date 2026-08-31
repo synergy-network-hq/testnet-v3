@@ -1,0 +1,23 @@
+{
+  "cases_passed": 23,
+  "cases_total": 23,
+  "failed_case": null,
+  "finished_utc": "2026-08-01T19:02:46Z",
+  "mldsa65_transport_authentication": {
+    "ring1_proof": "real_mldsa_six_validator_burn_in",
+    "ring2_proof": "p2p_verified_handshakes_total{algorithm=ML-DSA-65}",
+    "unit_guard": "validator_handshake_never_falls_back_to_the_fndsa_peer_identity"
+  },
+  "quorum": 5,
+  "real_mldsa": true,
+  "result": "PASS",
+  "ring": 1,
+  "schema_version": 1,
+  "source": {
+    "aegis_revision": "b51884a661e3aed4bb242ecbced47f3d8777b313",
+    "synq_revision": "3f7886701ffee4303a24fa6c6584b792a5e36254",
+    "testnet_v3_revision": "f95e191d1e860cfeb8a0df4a592af6727a01d8aa"
+  },
+  "started_utc": "2026-08-01T18:53:27Z",
+  "validator_count": 6
+}

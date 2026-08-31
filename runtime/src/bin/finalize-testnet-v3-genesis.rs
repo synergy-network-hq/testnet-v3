@@ -25,20 +25,26 @@ use synergy_testnet::genesis::{
 };
 use synergy_testnet::genesis_deployment::{
     compute_genesis_receipt_root, constructor_arguments, derive_genesis_addresses,
-    GenesisAuthorities, GenesisContract, GenesisDeploymentPlan, GenesisParameters, GenesisSigner,
-    GenesisValidator,
+    GenesisAuthorities, GenesisContract, GenesisDeploymentPlan, GenesisParameters,
+    GenesisReplayOperation, GenesisSigner, GenesisValidator,
 };
 use synergy_testnet::synq_execution::{SynQAivmReceiptSummary, SynQContractArtifact};
 use synergy_testnet::testnet_v3_release_approval::{
-    verify_release_approval_file, TestnetV3GenesisReleaseApprovalRequest,
+    load_frozen_governance_authority, verify_release_approval_file,
+    TestnetV3GenesisReleaseApprovalRequest,
 };
 
 const EXECUTION_STATUS: &str = "launch/production-genesis-ceremony/execution-status.json";
 const DEPLOYMENT_RECEIPTS: &str = "launch/production-genesis-ceremony/deployment-receipts.json";
 const INITIALIZATION_RECEIPTS: &str =
     "launch/production-genesis-ceremony/initialization-receipts.json";
+const SIGNED_REPLAY_OPERATIONS: &str =
+    "launch/production-genesis-ceremony/signed-replay-operations.json";
 const EXECUTION_STATE: &str = "launch/production-genesis-ceremony/execution-state.json";
-const AUTHORITIES_FILE: &str = "launch/TESTNET_V3_PRODUCTION_AUTHORITIES.json";
+/// Superseded authority input retained only for historical ceremony replay.
+/// Fresh P3 callers must pass their dated V4 authority record with
+/// `--authorities`; this file is reachable only through `--legacy-authorities`.
+const LEGACY_AUTHORITIES_FILE: &str = "launch/TESTNET_V3_PRODUCTION_AUTHORITIES.json";
 const CONTRACTS_FILE: &str = "launch/TESTNET_V3_PRODUCTION_CONTRACT_ADDRESSES.json";
 const CONSENSUS_PARAMETERS_FILE: &str = "launch/TESTNET_V3_CONSENSUS_PARAMETERS.json";
 const CONSENSUS_PARAMETER_DECISION_FILE: &str =
@@ -109,6 +115,32 @@ fn base64_public_key(root: &Path, role: &str) -> Vec<u8> {
         ));
     }
     bytes
+}
+
+/// Loads the role's public, Genesis-scoped dual-key authorization binding.
+///
+/// The finalizer only needs the public binding to derive the canonical
+/// identity address for each signer.  It intentionally never reads an
+/// encrypted envelope or any other private custody material.
+fn role_identity_authorization(
+    root: &Path,
+    role: &str,
+) -> synergy_testnet::identity_auth::IdentityAuthorizationCarrier {
+    let path = root
+        .join("testnet-v3-identity-files")
+        .join(role)
+        .join("genesis-authorization-binding.json");
+    let binding = serde_json::from_slice(&read_bytes(&path))
+        .unwrap_or_else(|error| fail(format!("parse {}: {error}", path.display())));
+    synergy_testnet::identity_auth::IdentityAuthorizationCarrier::new(
+        synergy_testnet::identity_auth::GENESIS_CEREMONY_AUTHORIZATION_DOMAIN,
+        binding,
+    )
+    .unwrap_or_else(|error| {
+        fail(format!(
+            "construct canonical Genesis identity authorization carrier for {role}: {error}"
+        ))
+    })
 }
 
 fn authority_record<'a>(authorities: &'a Value, role: &str) -> &'a Value {
@@ -223,8 +255,8 @@ fn production_parameters(genesis: &Value) -> GenesisParameters {
             .map(s)
             .collect(),
         team_vesting_start_time: "1775044800".to_string(),
-        team_allocation_nwei: s(&contracts["team_vesting"]["init_params"]["total_allocation_nwei"]),
-        support_allocation_nwei: "200000000000000000".to_string(),
+        team_allocation_nwei: "60000000000000000".to_string(),
+        support_allocation_nwei: "10000000000000000".to_string(),
         team_count: "5".to_string(),
         support_count: "4".to_string(),
     }
@@ -235,10 +267,18 @@ fn authorities(root: &Path, frozen: &Value) -> GenesisAuthorities {
         genesis_deployer: GenesisSigner {
             public_key: base64_public_key(root, "SNRG-TESTNET-V3-GENESIS-DEPLOYER"),
             private_key: Vec::new(),
+            identity_authorization: Some(role_identity_authorization(
+                root,
+                "SNRG-TESTNET-V3-GENESIS-DEPLOYER",
+            )),
         },
         governance: GenesisSigner {
             public_key: base64_public_key(root, "SNRG-TESTNET-V3-GOVERNANCE-AUTHORITY"),
             private_key: Vec::new(),
+            identity_authorization: Some(role_identity_authorization(
+                root,
+                "SNRG-TESTNET-V3-GOVERNANCE-AUTHORITY",
+            )),
         },
         emergency_slashing_authority: authority_address(
             frozen,
@@ -251,6 +291,10 @@ fn authorities(root: &Path, frozen: &Value) -> GenesisAuthorities {
         validator_registry_authority_key: GenesisSigner {
             public_key: base64_public_key(root, "SNRG-TESTNET-V3-VALIDATOR-REGISTRY-AUTHORITY"),
             private_key: Vec::new(),
+            identity_authorization: Some(role_identity_authorization(
+                root,
+                "SNRG-TESTNET-V3-VALIDATOR-REGISTRY-AUTHORITY",
+            )),
         },
         reward_distributor_authority: authority_address(
             frozen,
@@ -386,9 +430,9 @@ fn artifact_record(root: &Path, contract: GenesisContract, expected: &Value) -> 
         "bytecode_version": manifest["bytecode_version"],
         "compiler_version": manifest["compiler_version"],
         "required_chain_id": 1266,
-        "runtime_network_id": "synergy-testnet-v3",
+        "runtime_network_id": "testnet",
         "required_network_id": "synergy-testnet",
-        "network_id_normalization": "runtime synergy-testnet-v3 normalizes to the canonical SynQ domain synergy-testnet",
+        "network_id_normalization": "runtime testnet binds to the canonical SynQ domain synergy-testnet",
         "required_signature_algorithm": "ML-DSA-87"
     })
 }
@@ -503,7 +547,12 @@ fn finalized_consensus_parameters(root: &Path) -> (LoadedConsensusParameters, St
     let decision_path = root.join(CONSENSUS_PARAMETER_DECISION_FILE);
     let decision_bytes = read_bytes(&decision_path);
     let decision_sha256 = sha256_bytes(&decision_bytes);
-    let decision_id = loaded.manifest.governance_approval_id.clone();
+    let manifest = loaded.manifest.as_posy().unwrap_or_else(|error| {
+        fail(format!(
+            "legacy finalization requires PoSy parameters: {error}"
+        ))
+    });
+    let decision_id = manifest.governance_approval_id.clone();
     let decision_marker = format!("Decision ID: `{decision_id}`");
     if !decision_bytes
         .windows(decision_marker.len())
@@ -515,27 +564,28 @@ fn finalized_consensus_parameters(root: &Path) -> (LoadedConsensusParameters, St
             decision_id
         ));
     }
-    if loaded.manifest.epoch_length_slots != Some(1_000)
-        || loaded.manifest.target_block_time_ms != 2_000
-        || loaded.manifest.proposal_timeout_ms != 1_500
-        || loaded.manifest.prevote_timeout_ms != 1_500
-        || loaded.manifest.precommit_timeout_ms != 1_500
-        || loaded.manifest.max_round_timeout_ms != 10_000
+    if manifest.epoch_length_slots != Some(1_000)
+        || manifest.target_block_time_ms != 2_000
+        || manifest.proposal_timeout_ms != 1_500
+        || manifest.prevote_timeout_ms != 1_500
+        || manifest.precommit_timeout_ms != 1_500
+        || manifest.max_round_timeout_ms != 10_000
     {
         fail("finalized consensus manifest does not contain the approved launch timing profile");
     }
     (loaded, decision_sha256, decision_id)
 }
 
-fn build_candidate(root: &Path) -> Value {
+fn build_candidate(root: &Path, authorities_path: &Path) -> Value {
     let source_path = source_genesis_path(root);
     let mut candidate = read_json(&source_path);
     let original = candidate.clone();
-    let frozen_authorities = read_json(&root.join(AUTHORITIES_FILE));
+    let frozen_authorities = read_json(authorities_path);
     let frozen_contracts = read_json(&root.join(CONTRACTS_FILE));
     let execution = read_json(&root.join(EXECUTION_STATUS));
     let deployment_values = read_json(&root.join(DEPLOYMENT_RECEIPTS));
     let initialization_values = read_json(&root.join(INITIALIZATION_RECEIPTS));
+    let signed_replay_operations = read_json(&root.join(SIGNED_REPLAY_OPERATIONS));
     let execution_state_value = read_json(&root.join(EXECUTION_STATE));
     let (consensus_parameters, decision_sha256, decision_id) = finalized_consensus_parameters(root);
     let execution_snapshot: GenesisExecutionSnapshot =
@@ -550,12 +600,26 @@ fn build_candidate(root: &Path) -> Value {
     let initializations: Vec<SynQAivmReceiptSummary> =
         serde_json::from_value(initialization_values.clone())
             .unwrap_or_else(|error| fail(format!("decode initialization receipts: {error}")));
+    let replay_operations: Vec<GenesisReplayOperation> =
+        serde_json::from_value(signed_replay_operations.clone()).unwrap_or_else(|error| {
+            fail(format!("decode signed Genesis replay operations: {error}"))
+        });
+    if replay_operations.len() != 36
+        || replay_operations.iter().take(9).any(|operation| {
+            operation.kind != synergy_testnet::synq_admission::SynQAdmissionKind::Deploy
+        })
+        || replay_operations.iter().skip(9).any(|operation| {
+            operation.kind != synergy_testnet::synq_admission::SynQAdmissionKind::Call
+        })
+    {
+        fail("signed Genesis replay operation sequence is not 9 deployments followed by 27 calls");
+    }
 
     if execution["status"] != "EXECUTION_PASSED"
         || execution["mode"] != "execute"
         || execution["address_mismatches"] != json!([])
         || execution["deployment_receipts"] != 9
-        || execution["initialization_receipts"] != 27
+        || execution["initialization_receipts"] != 25
         || execution["execution_state_balance_count"] != 36
         || execution["execution_state_contract_count"] != 9
         || execution["execution_state_artifact_count"] != 9
@@ -621,8 +685,8 @@ fn build_candidate(root: &Path) -> Value {
             ));
         }
     }
-    if deployments.len() != 9 || initializations.len() != 27 {
-        fail("ceremony receipt counts do not match 9 deployments and 27 initializations");
+    if deployments.len() != 9 || initializations.len() != 25 {
+        fail("ceremony receipt counts do not match 9 deployments and 25 initializations");
     }
     validate_receipt_chain(&deployments, "deployment");
     validate_receipt_chain(&initializations, "initialization");
@@ -635,23 +699,24 @@ fn build_candidate(root: &Path) -> Value {
     if execution["deployment_receipt_root"] != receipt_root {
         fail("recomputed combined receipt root does not match execution evidence");
     }
-    for (declared, path) in [
-        (
-            execution["inputs"]["authorities_file_sha256"]
-                .as_str()
-                .unwrap(),
-            AUTHORITIES_FILE,
-        ),
-        (
-            execution["inputs"]["contracts_file_sha256"]
-                .as_str()
-                .unwrap(),
-            CONTRACTS_FILE,
-        ),
-    ] {
-        if sha256_file(&root.join(path)) != declared {
-            fail(format!("{path} changed after the ceremony"));
-        }
+    let declared_authorities_sha = execution["inputs"]["authorities_file_sha256"]
+        .as_str()
+        .unwrap_or_else(|| fail("execution evidence has no authorities file SHA-256"));
+    if sha256_file(authorities_path) != declared_authorities_sha {
+        fail(format!(
+            "{} changed after the ceremony",
+            authorities_path.display()
+        ));
+    }
+    let contracts_path = root.join(CONTRACTS_FILE);
+    let declared_contracts_sha = execution["inputs"]["contracts_file_sha256"]
+        .as_str()
+        .unwrap_or_else(|| fail("execution evidence has no contracts file SHA-256"));
+    if sha256_file(&contracts_path) != declared_contracts_sha {
+        fail(format!(
+            "{} changed after the ceremony",
+            contracts_path.display()
+        ));
     }
     let declared_source_sha = execution["inputs"]["source_genesis_file_sha256"]
         .as_str()
@@ -848,23 +913,25 @@ fn build_candidate(root: &Path) -> Value {
         "schema_version": 1,
         "status": "EXECUTED_AND_BOUND",
         "chain_id": 1266,
-        "runtime_network_id": "synergy-testnet-v3",
+        "runtime_network_id": "testnet",
         "synq_network_id": "synergy-testnet",
         "candidate_input_id": execution["candidate_input_id"],
         "deployer_address": frozen_contracts["deployer_address"],
-        "authority_record_sha256": sha256_file(&root.join(AUTHORITIES_FILE)),
+        "authority_record_sha256": sha256_file(authorities_path),
         "contract_derivation_record_sha256": sha256_file(&root.join(CONTRACTS_FILE)),
         "execution_status_sha256": sha256_file(&root.join(EXECUTION_STATUS)),
         "deployment_receipts_sha256": sha256_file(&root.join(DEPLOYMENT_RECEIPTS)),
         "initialization_receipts_sha256": sha256_file(&root.join(INITIALIZATION_RECEIPTS)),
+        "signed_replay_operations_sha256": sha256_file(&root.join(SIGNED_REPLAY_OPERATIONS)),
         "execution_state_snapshot_sha256": sha256_file(&root.join(EXECUTION_STATE)),
         "execution_state_snapshot_canonical_sha256": execution["execution_state_snapshot_canonical_sha256"],
         "contracts": deployment_bindings,
         "deployment_receipts": deployment_values,
         "initialization_receipts": initialization_values,
+        "signed_replay_operations": signed_replay_operations,
         "execution_state": execution_state_value,
         "deployment_count": 9,
-        "initialization_count": 27,
+        "initialization_count": 25,
         "receipt_root": receipt_root,
         "post_deployment_execution_state_root": execution["post_deployment_execution_state_root"],
         "post_deployment_aivm_state_root": execution["post_deployment_aivm_state_root"],
@@ -1193,6 +1260,9 @@ fn main() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let mut output = repo().join(DEFAULT_OUTPUT);
     let mut approval_path = repo().join(DEFAULT_RELEASE_APPROVAL);
+    let mut desired_state_path = None;
+    let mut authorities_path = None;
+    let mut legacy_authorities = false;
     let mut apply = false;
     let mut index = 0;
     while index < args.len() {
@@ -1212,18 +1282,58 @@ fn main() {
                 );
                 index += 2;
             }
+            "--desired-state" => {
+                desired_state_path = Some(PathBuf::from(
+                    args.get(index + 1)
+                        .unwrap_or_else(|| fail("--desired-state requires a path")),
+                ));
+                index += 2;
+            }
+            "--authorities" => {
+                if legacy_authorities || authorities_path.is_some() {
+                    fail("use exactly one of --authorities PATH or --legacy-authorities");
+                }
+                authorities_path = Some(PathBuf::from(
+                    args.get(index + 1)
+                        .unwrap_or_else(|| fail("--authorities requires a path")),
+                ));
+                index += 2;
+            }
+            "--legacy-authorities" => {
+                if legacy_authorities || authorities_path.is_some() {
+                    fail("use exactly one of --authorities PATH or --legacy-authorities");
+                }
+                legacy_authorities = true;
+                index += 1;
+            }
             "--apply" => {
                 apply = true;
                 index += 1;
             }
             flag => fail(format!(
-                "unknown argument {flag}; use --prepare|--apply [--output PATH] [--approval PATH]"
+                "unknown argument {flag}; use --prepare|--apply (--authorities PATH|--legacy-authorities) [--output PATH] [--approval PATH] [--desired-state PATH]"
             )),
         }
     }
 
     let root = repo();
-    let candidate = build_candidate(&root);
+    let authorities_path = if legacy_authorities {
+        root.join(LEGACY_AUTHORITIES_FILE)
+    } else {
+        authorities_path.unwrap_or_else(|| {
+            fail("--authorities PATH is required for fresh P3 finalization; use --legacy-authorities only for historical replay")
+        })
+    };
+    // Validate the explicit authority record before consuming any ceremony
+    // evidence.  This pins the governance role, V4 status, custody hashes,
+    // identity binding, and authorization-key fingerprint; no alternate
+    // public key can be supplied through the CLI.
+    load_frozen_governance_authority(&root, &authorities_path).unwrap_or_else(|error| {
+        fail(format!(
+            "explicit authority record failed the Testnet-v3 V4 trust gate: {error}"
+        ))
+    });
+    let candidate = build_candidate(&root, &authorities_path);
     let bytes = pretty_json(&candidate);
     let parent = output
         .parent()
@@ -1281,10 +1391,14 @@ fn main() {
             .unwrap()
     );
     if apply {
+        let desired_state_path = desired_state_path.unwrap_or_else(|| {
+            fail("--apply requires --desired-state PATH bound by the V4 approval")
+        });
         let approval = verify_release_approval_file(
             &root,
             &output,
-            &root.join(AUTHORITIES_FILE),
+            &authorities_path,
+            &desired_state_path,
             &approval_path,
         )
         .unwrap_or_else(|error| fail(format!("release approval gate rejected apply: {error}")));

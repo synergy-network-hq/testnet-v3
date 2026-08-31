@@ -1727,6 +1727,7 @@ fn execute_synq_replay_once(steps: &[SynqReplayStep]) -> Result<SynqReplayRun, S
                     aivm_core::synq_runtime::GENERIC_SYNQ_RUNTIME_ACTIVATION_HEIGHT,
                 runtime_block_timestamp_unix: 0,
                 sts_host: None,
+                applied_fee_market: None,
             },
         )?
         .ok_or_else(|| format!("{} did not execute as a SynQ transaction", step.label))?;
@@ -1850,11 +1851,10 @@ fn synq_contract_address_from_payload(payload: &[u8]) -> Option<String> {
         synergy_testnet::synq_admission::SynQAdmissionKind::Call => {
             let call: pqsynq::ContractCallEnvelope =
                 serde_json::from_slice(&envelope.encoded_pqsynq_envelope).ok()?;
-            Some(
-                synergy_testnet::synq_execution::synergy_contract_address_from_pqsynq_address(
-                    &call.contract_address,
-                ),
+            synergy_testnet::synq_execution::synergy_contract_address_from_pqsynq_address(
+                &call.contract_address,
             )
+            .ok()
         }
     }
 }

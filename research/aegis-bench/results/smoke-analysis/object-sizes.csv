@@ -1,0 +1,7 @@
+algorithm,public_key_bytes,private_key_bytes,signature_bytes_min,signature_bytes_max,ciphertext_bytes,shared_secret_bytes
+FN-DSA-1024,1793,2305,1264,1276,0,0
+HQC-256,7245,7317,0,0,14421,64
+ML-DSA-65,1952,4032,3309,3309,0,0
+ML-DSA-87,2592,4896,4627,4627,0,0
+ML-KEM-1024,1568,3168,0,0,1568,32
+SLH-DSA-SHAKE-128f-simple,32,64,17088,17088,0,0

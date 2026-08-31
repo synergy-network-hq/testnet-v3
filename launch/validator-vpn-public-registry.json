@@ -1,94 +1,107 @@
 {
-  "schema_version": "2",
-  "config_version": "tnv3-vpn-release-registry/v2",
+  "schema_version": 3,
+  "artifact_type": "testnet-v3-validator-vpn-public-registry",
+  "status": "GENESIS_VALIDATORS_VPN_LIVE_IDENTITY_BOUND",
   "chain_id": 1266,
-  "network_id": "synergy-testnet-v3",
-  "supernet": "10.70.0.0/16",
-  "published_at": "2026-07-29T06:17:12Z",
-  "scope": "Testnet-v3 launch release: six active validators and three active relayers only",
-  "transport_authority": {
-    "kind": "coordinator-signed-validator-transport-snapshot",
-    "url": "https://vpn-coordinator.synergy-network.io/v1/mesh/transports/current",
-    "snapshot_sha256": "747fa7ba11905476431308f75cd12ec96a1d0cb01073a08801984d341cdfc141",
-    "configuration_version": 22,
-    "network": "synergy-innernet-membership-v1",
-    "migration_id": "synergy-testnet-innernet-v19-14450ae4d67455c7",
-    "validator_transport_signature_verified": true,
-    "note": "Validator P2P routing is consumed only from the signed snapshot. This release registry intentionally contains no WireGuard key material or inactive/future participants."
-  },
+  "network_id": "testnet",
+  "release_id": "testnet-v3",
+  "protocol_version": "posy/3.0",
+  "supernet": "10.69.0.0/16",
   "coordinator": {
-    "vpn_ip": "10.70.0.1",
-    "public_transport_snapshot_url": "https://vpn-coordinator.synergy-network.io/v1/mesh/transports/current"
+    "vpn_ip": "10.69.0.1",
+    "public_endpoint": "68.183.139.56:51820",
+    "listen_port": 51820,
+    "wireguard_public_key": "jqmVrSakIWkTZwajTh+V3wUEpt9y4PrCkZ0Jspmll1A="
   },
   "participants": [
     {
       "role": "validator",
-      "activation_status": "active",
-      "validator_id": "validator-1",
-      "workbook_node": "Val1",
-      "synv_address": "synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t",
-      "vpn_ip": "10.70.10.1"
-    },
-    {
-      "role": "validator",
-      "activation_status": "active",
-      "validator_id": "validator-2",
+      "activation_status": "GENESIS_ACTIVE_VPN_LIVE_PENDING_CHAIN_START",
+      "validator_id": "validator-02",
+      "identity_id": "VNS-A03",
       "workbook_node": "Val2",
-      "synv_address": "synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk",
-      "vpn_ip": "10.70.10.2"
+      "ssh_alias": "synergy-val2",
+      "synv_address": "synv115lseq6ty4j2f3g9nzv04c3zq3xa7j3989uj",
+      "wireguard_public_key": "5VqVK11KBTm2ntThuC6ge5hm4ozPGKa1+XDQOs8n9kc=",
+      "vpn_ip": "10.69.10.2"
     },
     {
       "role": "validator",
-      "activation_status": "active",
-      "validator_id": "validator-3",
+      "activation_status": "GENESIS_ACTIVE_VPN_LIVE_PENDING_CHAIN_START",
+      "validator_id": "validator-03",
+      "identity_id": "VNS-A04",
       "workbook_node": "Val3",
-      "synv_address": "synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj",
-      "vpn_ip": "10.70.10.3"
+      "ssh_alias": "synergy-val3",
+      "synv_address": "synv11qvvp796w3kp2m0c5h8zer3grxw0sygvfk64",
+      "wireguard_public_key": "M/ONFAgSkVQzcJG16+3TQZHD13beLh4lYUX6/45MPXM=",
+      "vpn_ip": "10.69.10.3"
     },
     {
       "role": "validator",
-      "activation_status": "active",
-      "validator_id": "validator-4",
+      "activation_status": "GENESIS_ACTIVE_VPN_LIVE_PENDING_CHAIN_START",
+      "validator_id": "validator-04",
+      "identity_id": "VNS-A05",
       "workbook_node": "Val4",
-      "synv_address": "synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg",
-      "vpn_ip": "10.70.10.4"
+      "ssh_alias": "synergy-val4",
+      "synv_address": "synv11jtkkaj3rsgnup2grckkpejc86ru5u488nv7",
+      "wireguard_public_key": "PizCcdeaN4ydH+10oHbWGr1aCg4mqgIay7lq9UIQb2I=",
+      "vpn_ip": "10.69.10.4"
     },
     {
       "role": "validator",
-      "activation_status": "active",
-      "validator_id": "validator-5",
+      "activation_status": "GENESIS_ACTIVE_VPN_LIVE_PENDING_CHAIN_START",
+      "validator_id": "validator-05",
+      "identity_id": "VNS-A06",
       "workbook_node": "Val5",
-      "synv_address": "synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu",
-      "vpn_ip": "10.70.10.5"
+      "ssh_alias": "synergy-val5",
+      "synv_address": "synv11cxug3akr7w7x2ms8wghhlxnqkdue0e980az",
+      "wireguard_public_key": "JobeMYl7bHOsBsz3KjkU/PyuefhsHIzgZQ03NiPWUSc=",
+      "vpn_ip": "10.69.10.5"
     },
     {
       "role": "validator",
-      "activation_status": "active",
-      "validator_id": "validator-6",
+      "activation_status": "GENESIS_ACTIVE_VPN_LIVE_PENDING_CHAIN_START",
+      "validator_id": "validator-06",
+      "identity_id": "VNS-A07",
       "workbook_node": "Val6",
-      "synv_address": "synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc",
-      "vpn_ip": "10.70.10.6"
+      "ssh_alias": "synergy-val6",
+      "synv_address": "synv1185wz3n8dj45vlfe6aadktg7j4e65yg5hqa7",
+      "wireguard_public_key": "iV+qBIYe0mR/7fljknDQuZyXFR4DHU6Qr7TurPN1Dws=",
+      "vpn_ip": "10.69.10.6"
     },
     {
       "role": "relayer",
-      "activation_status": "active",
+      "activation_status": "POST_GENESIS_PENDING_DEPLOYMENT",
       "node_id": "relayer-1",
       "workbook_node": "Relayer-1",
-      "vpn_ip": "10.70.20.1"
+      "ssh_alias": "synergy-relayer1",
+      "synv_address": null,
+      "vpn_ip": "10.69.1.1"
     },
     {
       "role": "relayer",
-      "activation_status": "active",
+      "activation_status": "POST_GENESIS_PENDING_DEPLOYMENT",
       "node_id": "relayer-2",
       "workbook_node": "Relayer-2",
-      "vpn_ip": "10.70.20.2"
+      "ssh_alias": "synergy-relayer2",
+      "synv_address": null,
+      "vpn_ip": "10.69.1.2"
     },
     {
       "role": "relayer",
-      "activation_status": "active",
+      "activation_status": "POST_GENESIS_PENDING_DEPLOYMENT",
       "node_id": "relayer-3",
       "workbook_node": "Relayer-3",
-      "vpn_ip": "10.70.20.3"
+      "ssh_alias": "synergy-relayer3",
+      "synv_address": null,
+      "vpn_ip": "10.69.1.3"
     }
-  ]
+  ],
+  "future_validator_reservation": {
+    "validator_id": "validator-01",
+    "identity_id": "VNS-A02",
+    "vpn_ip": "10.69.10.1",
+    "activation_status": "INACTIVE_NOT_DEPLOYED"
+  },
+  "private_material_present": false
 }

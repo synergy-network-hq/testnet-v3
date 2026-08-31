@@ -1,7 +1,0 @@
-{
-  "schema": "synergy-archive-snapshot-authority-v1",
-  "algorithm": "ML-DSA-87",
-  "key_id": "mldsa87-sha256:8411d9bff2e669f69e1d649600ea80fb60aad663959dbb4d45b5e64c3c613199",
-  "signer_public_key_sha256": "8411d9bff2e669f69e1d649600ea80fb60aad663959dbb4d45b5e64c3c613199",
-  "signature_domain": "SYNERGY_ARCHIVE_SNAPSHOT_CATALOG_V1"
-}

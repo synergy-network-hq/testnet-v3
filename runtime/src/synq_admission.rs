@@ -1,6 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+fn wall_clock_unix_timestamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
+}
+
 use crate::synergy_types::{
     Hash, Transaction, SYNERGY_TESTNET_V3_CHAIN_ID, SYNERGY_TESTNET_V3_NETWORK_ID,
 };
@@ -12,12 +19,28 @@ use pqsynq::{
 pub const SYNQ_ADMISSION_CARRIER_PREFIX: &[u8] = b"synq-admission-v1:";
 pub const SYNQ_ADMISSION_VERSION: u16 = 1;
 pub const SYNQ_CANONICAL_TESTNET_NETWORK_ID: &str = "synergy-testnet";
+pub const SYNQ_DEPLOY_AUTHORIZATION_PURPOSE: &str = "synq-contract-deploy";
+pub const SYNQ_CALL_AUTHORIZATION_PURPOSE: &str = "synq-contract-call";
+/// Explicitly isolated authorization purposes used only by the offline R11
+/// qualification Genesis executor.  These are deliberately different from
+/// normal SNTS-bound admission purposes: the local fixture has a real Aegis
+/// ML-DSA-87 custody key, but no production Genesis identity-root custody.
+/// Normal transaction admission never selects this authority mode.
+pub const LOCAL_R11_GENESIS_DEPLOY_AUTHORIZATION_PURPOSE: &str =
+    "local-r11-qualification-genesis-synq-contract-deploy";
+pub const LOCAL_R11_GENESIS_CALL_AUTHORIZATION_PURPOSE: &str =
+    "local-r11-qualification-genesis-synq-contract-call";
 pub const MAX_SYNQ_DEPLOY_BYTECODE_BYTES: usize = 256 * 1024;
 pub const MAX_SYNQ_DEPLOY_ABI_JSON_BYTES: usize = 64 * 1024;
 pub const MAX_SYNQ_DEPLOY_MANIFEST_JSON_BYTES: usize = 64 * 1024;
 pub const MAX_SYNQ_CONSTRUCTOR_ARGS_BYTES: usize = 16 * 1024;
 pub const MAX_SYNQ_CALL_ARGS_BYTES: usize = 16 * 1024;
 pub const MAX_STS9_VERIFICATION_JSON_BYTES: usize = 128 * 1024;
+pub const MAX_SYNQ_ADMISSION_CARRIER_JSON_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_SYNQ_ENCODED_PQSYNQ_ENVELOPE_BYTES: usize = 256 * 1024;
+const MAX_SYNQ_NETWORK_ID_BYTES: usize = 64;
+const MAX_SYNQ_SIGNER_BYTES: usize = 128;
+const MAX_SYNQ_AUTHORIZATION_PURPOSE_BYTES: usize = 128;
 pub const STS9_HORIZON_CONTRACT_NAME: &str = "STS9HorizonToken";
 pub const STS9_HORIZON_DEPLOYER_WALLET: &str = "synw1jmtpyjw62nxgattrcjc2tx2hezwj6rka5war";
 pub const STS9_HORIZON_SUPPLY_BASE_UNITS: &str = "1000000000000000000";
@@ -48,6 +71,10 @@ pub struct SynQAdmissionEnvelope {
     pub chain_id: u64,
     pub network_id: String,
     pub signer: String,
+    #[serde(default)]
+    pub identity_authorization: Option<IdentityAuthorizationBindingCarrier>,
+    #[serde(default)]
+    pub authorization_purpose: String,
     pub payload_hash: [u8; 32],
     pub bytecode_hash: Option<[u8; 32]>,
     pub manifest_hash: Option<[u8; 32]>,
@@ -75,12 +102,15 @@ pub struct SynQVerificationSummary {
     pub domain: String,
     pub algorithm: String,
     pub signer: String,
+    pub identity_authorization_payload_sha3_256: Option<String>,
     pub payload_hash: [u8; 32],
     pub bytecode_hash: Option<[u8; 32]>,
     pub manifest_hash: Option<[u8; 32]>,
     pub abi_hash: Option<[u8; 32]>,
     pub verified_at_admission: bool,
 }
+
+type IdentityAuthorizationBindingCarrier = crate::identity_auth::IdentityAuthorizationCarrier;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SynQAdmissionError {
@@ -189,6 +219,7 @@ pub fn normalize_synq_network(
 pub fn encode_synq_admission_carrier(
     envelope: &SynQAdmissionEnvelope,
 ) -> Result<Vec<u8>, SynQAdmissionError> {
+    validate_synq_envelope_precrypto_bounds(envelope)?;
     let mut out = SYNQ_ADMISSION_CARRIER_PREFIX.to_vec();
     let bytes = serde_json::to_vec(envelope).map_err(|error| SynQAdmissionError::Decode {
         code: "AEGIS-CANON",
@@ -204,31 +235,143 @@ pub fn decode_synq_admission_carrier(
     let Some(bytes) = payload.strip_prefix(SYNQ_ADMISSION_CARRIER_PREFIX) else {
         return Ok(None);
     };
-    serde_json::from_slice(bytes)
-        .map(Some)
-        .map_err(|error| SynQAdmissionError::Decode {
+    if bytes.len() > MAX_SYNQ_ADMISSION_CARRIER_JSON_BYTES {
+        return Err(SynQAdmissionError::InvalidCarrier {
+            code: "SYNQ-CARRIER-SIZE",
+            message: format!(
+                "SynQ admission carrier JSON exceeds {MAX_SYNQ_ADMISSION_CARRIER_JSON_BYTES} bytes"
+            ),
+        });
+    }
+    let envelope: SynQAdmissionEnvelope =
+        serde_json::from_slice(bytes).map_err(|error| SynQAdmissionError::Decode {
             code: "AEGIS-CANON",
             message: format!("decode SynQ admission carrier: {error}"),
-        })
+        })?;
+    validate_synq_envelope_precrypto_bounds(&envelope)?;
+    Ok(Some(envelope))
 }
 
 pub fn is_synq_admission_carrier(payload: &[u8]) -> bool {
     payload.starts_with(SYNQ_ADMISSION_CARRIER_PREFIX)
 }
 
+fn ensure_bounded_carrier_text(
+    field: &'static str,
+    value: &str,
+    maximum: usize,
+) -> Result<(), SynQAdmissionError> {
+    if value.trim().is_empty() || value.chars().any(char::is_control) {
+        return Err(SynQAdmissionError::InvalidCarrier {
+            code: "AEGIS-CANON",
+            message: format!("SynQ carrier field {field} must be non-empty text without controls"),
+        });
+    }
+    if value.len() > maximum {
+        return Err(SynQAdmissionError::InvalidCarrier {
+            code: "SYNQ-CARRIER-SIZE",
+            message: format!("SynQ carrier field {field} exceeds {maximum} bytes"),
+        });
+    }
+    Ok(())
+}
+
+/// Applies every inexpensive carrier bound before identity-binding or inner
+/// ML-DSA verification. This function must remain the first validation step in
+/// deploy/call verification so attacker-controlled allocations cannot amplify
+/// post-quantum work.
+fn validate_synq_envelope_precrypto_bounds(
+    envelope: &SynQAdmissionEnvelope,
+) -> Result<(), SynQAdmissionError> {
+    ensure_bounded_carrier_text(
+        "network_id",
+        &envelope.network_id,
+        MAX_SYNQ_NETWORK_ID_BYTES,
+    )?;
+    ensure_bounded_carrier_text("signer", &envelope.signer, MAX_SYNQ_SIGNER_BYTES)?;
+    ensure_bounded_carrier_text(
+        "authorization_purpose",
+        &envelope.authorization_purpose,
+        MAX_SYNQ_AUTHORIZATION_PURPOSE_BYTES,
+    )?;
+    if envelope.encoded_pqsynq_envelope.is_empty() {
+        return Err(SynQAdmissionError::MissingRequiredField {
+            field: "encoded_pqsynq_envelope",
+        });
+    }
+    if envelope.encoded_pqsynq_envelope.len() > MAX_SYNQ_ENCODED_PQSYNQ_ENVELOPE_BYTES {
+        return Err(SynQAdmissionError::InvalidCarrier {
+            code: "SYNQ-CARRIER-SIZE",
+            message: format!(
+                "SynQ encoded aegis-pqsynq envelope exceeds {MAX_SYNQ_ENCODED_PQSYNQ_ENVELOPE_BYTES} bytes"
+            ),
+        });
+    }
+    if let Some(bytecode) = envelope.bytecode.as_ref() {
+        ensure_artifact_size("bytecode", bytecode.len(), MAX_SYNQ_DEPLOY_BYTECODE_BYTES)?;
+    }
+    if let Some(abi_json) = envelope.abi_json.as_ref() {
+        ensure_artifact_size("abi_json", abi_json.len(), MAX_SYNQ_DEPLOY_ABI_JSON_BYTES)?;
+    }
+    if let Some(manifest_json) = envelope.manifest_json.as_ref() {
+        ensure_artifact_size(
+            "manifest_json",
+            manifest_json.len(),
+            MAX_SYNQ_DEPLOY_MANIFEST_JSON_BYTES,
+        )?;
+    }
+    if let Some(constructor_args) = envelope.constructor_args.as_ref() {
+        ensure_artifact_size(
+            "constructor_args",
+            constructor_args.len(),
+            MAX_SYNQ_CONSTRUCTOR_ARGS_BYTES,
+        )?;
+    }
+    if let Some(encoded_args) = envelope.encoded_args.as_ref() {
+        ensure_artifact_size("encoded_args", encoded_args.len(), MAX_SYNQ_CALL_ARGS_BYTES)?;
+    }
+    if let Some(verification) = envelope.sts9_verification_json.as_ref() {
+        ensure_artifact_size(
+            "sts9_verification_json",
+            verification.len(),
+            MAX_STS9_VERIFICATION_JSON_BYTES,
+        )?;
+    }
+    Ok(())
+}
+
 fn build_deploy_admission_envelope_unverified(
     chain_id: u64,
     network_id: &str,
     encoded_pqsynq_envelope: &[u8],
+    identity_authorization: IdentityAuthorizationBindingCarrier,
+    authorization_purpose: &str,
+    now_unix: u64,
 ) -> Result<SynQAdmissionEnvelope, SynQAdmissionError> {
+    if authorization_purpose != SYNQ_DEPLOY_AUTHORIZATION_PURPOSE {
+        return Err(SynQAdmissionError::InvalidCarrier {
+            code: "AEGIS-CANON",
+            message: format!(
+                "SynQ deploy authorization purpose must be {SYNQ_DEPLOY_AUTHORIZATION_PURPOSE}"
+            ),
+        });
+    }
     let deploy: ContractDeployEnvelope =
         decode_pqsynq_envelope(encoded_pqsynq_envelope, "decode SynQ deploy envelope")?;
+    let signer = canonical_signer_address_from_carrier_at(
+        &identity_authorization,
+        &deploy.public_key.bytes,
+        authorization_purpose,
+        now_unix,
+    )?;
     Ok(SynQAdmissionEnvelope {
         version: SYNQ_ADMISSION_VERSION,
         kind: SynQAdmissionKind::Deploy,
         chain_id,
         network_id: network_id.to_string(),
-        signer: canonical_signer_address(&deploy.public_key.bytes),
+        signer,
+        identity_authorization: Some(identity_authorization),
+        authorization_purpose: authorization_purpose.to_string(),
         payload_hash: deploy.signing_payload.payload_hash,
         bytecode_hash: Some(deploy.bytecode_hash),
         manifest_hash: Some(deploy.manifest_hash),
@@ -244,14 +387,33 @@ fn build_deploy_admission_envelope_unverified(
 }
 
 pub fn build_deploy_admission_envelope_from_pqsynq_bytes(
+    _chain_id: u64,
+    _network_id: &str,
+    _encoded_pqsynq_envelope: &[u8],
+    _now_unix: u64,
+) -> Result<SynQAdmissionEnvelope, SynQAdmissionError> {
+    Err(SynQAdmissionError::MissingRequiredField {
+        field: "identity_authorization",
+    })
+}
+
+pub fn build_deploy_admission_envelope_from_pqsynq_bytes_with_identity_authorization(
     chain_id: u64,
     network_id: &str,
     encoded_pqsynq_envelope: &[u8],
+    identity_authorization: IdentityAuthorizationBindingCarrier,
+    authorization_purpose: &str,
     now_unix: u64,
 ) -> Result<SynQAdmissionEnvelope, SynQAdmissionError> {
-    let envelope =
-        build_deploy_admission_envelope_unverified(chain_id, network_id, encoded_pqsynq_envelope)?;
-    verify_synq_deploy_for_chain_admission(&envelope, now_unix)?;
+    let envelope = build_deploy_admission_envelope_unverified(
+        chain_id,
+        network_id,
+        encoded_pqsynq_envelope,
+        identity_authorization,
+        authorization_purpose,
+        now_unix,
+    )?;
+    verify_synq_deploy_for_offline_creation(&envelope, now_unix)?;
     Ok(envelope)
 }
 
@@ -275,6 +437,22 @@ pub fn build_deploy_admission_envelope_from_pqsynq_bytes_with_artifacts(
 }
 
 pub fn build_deploy_admission_envelope_from_pqsynq_bytes_with_artifacts_and_constructor_args(
+    _chain_id: u64,
+    _network_id: &str,
+    _encoded_pqsynq_envelope: &[u8],
+    _bytecode: Vec<u8>,
+    _abi_json: String,
+    _manifest_json: String,
+    _constructor_args: Vec<u8>,
+    _now_unix: u64,
+) -> Result<SynQAdmissionEnvelope, SynQAdmissionError> {
+    Err(SynQAdmissionError::MissingRequiredField {
+        field: "identity_authorization",
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_deploy_admission_envelope_from_pqsynq_bytes_with_artifacts_constructor_args_and_identity_authorization(
     chain_id: u64,
     network_id: &str,
     encoded_pqsynq_envelope: &[u8],
@@ -282,13 +460,21 @@ pub fn build_deploy_admission_envelope_from_pqsynq_bytes_with_artifacts_and_cons
     abi_json: String,
     manifest_json: String,
     constructor_args: Vec<u8>,
+    identity_authorization: IdentityAuthorizationBindingCarrier,
+    authorization_purpose: &str,
     now_unix: u64,
 ) -> Result<SynQAdmissionEnvelope, SynQAdmissionError> {
-    let mut envelope =
-        build_deploy_admission_envelope_unverified(chain_id, network_id, encoded_pqsynq_envelope)?;
+    let mut envelope = build_deploy_admission_envelope_unverified(
+        chain_id,
+        network_id,
+        encoded_pqsynq_envelope,
+        identity_authorization,
+        authorization_purpose,
+        now_unix,
+    )?;
     attach_deploy_artifacts(&mut envelope, bytecode, abi_json, manifest_json)?;
     attach_constructor_args(&mut envelope, constructor_args)?;
-    verify_synq_deploy_for_chain_admission(&envelope, now_unix)?;
+    verify_synq_deploy_for_offline_creation(&envelope, now_unix)?;
     Ok(envelope)
 }
 
@@ -312,24 +498,53 @@ pub fn build_deploy_admission_envelope_from_pqsynq_bytes_with_artifacts_and_sts9
         now_unix,
     )?;
     attach_sts9_verification(&mut envelope, sts9_verification_json)?;
-    verify_synq_deploy_for_chain_admission(&envelope, now_unix)?;
+    verify_synq_deploy_for_offline_creation(&envelope, now_unix)?;
     Ok(envelope)
 }
 
 pub fn build_call_admission_envelope_from_pqsynq_bytes(
+    _chain_id: u64,
+    _network_id: &str,
+    _encoded_pqsynq_envelope: &[u8],
+    _now_unix: u64,
+) -> Result<SynQAdmissionEnvelope, SynQAdmissionError> {
+    Err(SynQAdmissionError::MissingRequiredField {
+        field: "identity_authorization",
+    })
+}
+
+pub fn build_call_admission_envelope_from_pqsynq_bytes_with_identity_authorization(
     chain_id: u64,
     network_id: &str,
     encoded_pqsynq_envelope: &[u8],
+    identity_authorization: IdentityAuthorizationBindingCarrier,
+    authorization_purpose: &str,
     now_unix: u64,
 ) -> Result<SynQAdmissionEnvelope, SynQAdmissionError> {
+    if authorization_purpose != SYNQ_CALL_AUTHORIZATION_PURPOSE {
+        return Err(SynQAdmissionError::InvalidCarrier {
+            code: "AEGIS-CANON",
+            message: format!(
+                "SynQ call authorization purpose must be {SYNQ_CALL_AUTHORIZATION_PURPOSE}"
+            ),
+        });
+    }
     let call: ContractCallEnvelope =
         decode_pqsynq_envelope(encoded_pqsynq_envelope, "decode SynQ call envelope")?;
+    let signer = canonical_signer_address_from_carrier_at(
+        &identity_authorization,
+        &call.public_key.bytes,
+        authorization_purpose,
+        now_unix,
+    )?;
     let envelope = SynQAdmissionEnvelope {
         version: SYNQ_ADMISSION_VERSION,
         kind: SynQAdmissionKind::Call,
         chain_id,
         network_id: network_id.to_string(),
-        signer: canonical_signer_address(&call.public_key.bytes),
+        signer,
+        identity_authorization: Some(identity_authorization),
+        authorization_purpose: authorization_purpose.to_string(),
         payload_hash: call.signing_payload.payload_hash,
         bytecode_hash: None,
         manifest_hash: None,
@@ -342,7 +557,7 @@ pub fn build_call_admission_envelope_from_pqsynq_bytes(
         encoded_args: None,
         sts9_verification_json: None,
     };
-    verify_synq_call_for_chain_admission(&envelope, now_unix)?;
+    verify_synq_call_for_offline_creation(&envelope, now_unix)?;
     Ok(envelope)
 }
 
@@ -360,7 +575,7 @@ pub fn build_call_admission_envelope_from_pqsynq_bytes_with_args(
         now_unix,
     )?;
     attach_call_args(&mut envelope, encoded_args)?;
-    verify_synq_call_for_chain_admission(&envelope, now_unix)?;
+    verify_synq_call_for_offline_creation(&envelope, now_unix)?;
     Ok(envelope)
 }
 
@@ -485,8 +700,167 @@ pub fn build_call_admission_carrier_from_pqsynq_bytes_with_args(
 /// Derived from the envelope's own ML-DSA-87 public key, so the value the
 /// carrier advertises, the value the signature verifies against, and the value
 /// the AIVM presents as `msg.sender` are one address that cannot disagree.
-pub fn canonical_signer_address(public_key: &[u8]) -> String {
-    crate::address::derive_standard_account_address(public_key)
+pub fn canonical_signer_address(public_key: &[u8]) -> Result<String, SynQAdmissionError> {
+    crate::address::derive_standard_account_address(public_key).map_err(|error| {
+        SynQAdmissionError::InvalidCarrier {
+            code: "AEGIS-ADDRESS",
+            message: format!("canonical signer address derivation failed: {error}"),
+        }
+    })
+}
+
+/// Resolves an ML-DSA SynQ signer to its FN-DSA-rooted native identity. New
+/// SNTS v1.3 carriers must use this binding-aware path; an operational key is
+/// never itself an address derivation preimage.
+pub fn canonical_signer_address_from_binding(
+    binding: &crate::identity_auth::IdentityAuthorizationBinding,
+    public_key: &[u8],
+    required_purpose: &str,
+) -> Result<String, SynQAdmissionError> {
+    canonical_signer_address_from_binding_at(
+        binding,
+        public_key,
+        required_purpose,
+        wall_clock_unix_timestamp(),
+    )
+}
+
+pub fn canonical_signer_address_from_binding_at(
+    binding: &crate::identity_auth::IdentityAuthorizationBinding,
+    public_key: &[u8],
+    required_purpose: &str,
+    consensus_timestamp_unix: u64,
+) -> Result<String, SynQAdmissionError> {
+    crate::identity_auth::identity_address_for_authorization_key_in_context_at(
+        binding,
+        "ML-DSA-87",
+        public_key,
+        crate::identity_auth::SYNQ_ADMISSION_AUTHORIZATION_DOMAIN,
+        crate::synergy_types::SYNERGY_TESTNET_V3_CHAIN_ID,
+        crate::synergy_types::SYNERGY_TESTNET_V3_NETWORK_ID,
+        required_purpose,
+        consensus_timestamp_unix,
+    )
+    .map_err(|error| SynQAdmissionError::InvalidCarrier {
+        code: "AEGIS-AUTH-BINDING",
+        message: format!("SynQ signer authorization binding failed: {error}"),
+    })
+}
+
+pub fn canonical_signer_address_from_carrier(
+    carrier: &IdentityAuthorizationBindingCarrier,
+    public_key: &[u8],
+    required_purpose: &str,
+) -> Result<String, SynQAdmissionError> {
+    canonical_signer_address_from_carrier_at(
+        carrier,
+        public_key,
+        required_purpose,
+        wall_clock_unix_timestamp(),
+    )
+}
+
+pub fn canonical_signer_address_from_carrier_at(
+    carrier: &IdentityAuthorizationBindingCarrier,
+    public_key: &[u8],
+    required_purpose: &str,
+    consensus_timestamp_unix: u64,
+) -> Result<String, SynQAdmissionError> {
+    carrier
+        .identity_address_for_key_in_context_at(
+            crate::identity_auth::SYNQ_ADMISSION_AUTHORIZATION_DOMAIN,
+            crate::synergy_types::SYNERGY_TESTNET_V3_CHAIN_ID,
+            crate::synergy_types::SYNERGY_TESTNET_V3_NETWORK_ID,
+            "ML-DSA-87",
+            public_key,
+            required_purpose,
+            consensus_timestamp_unix,
+        )
+        .map_err(|error| SynQAdmissionError::InvalidCarrier {
+            code: "AEGIS-AUTH-BINDING",
+            message: format!("SynQ signer authorization carrier failed: {error}"),
+        })
+}
+
+fn authorized_envelope_signer(
+    envelope: &SynQAdmissionEnvelope,
+    public_key: &[u8],
+    consensus_timestamp_unix: u64,
+) -> Result<String, SynQAdmissionError> {
+    let carrier = envelope.identity_authorization.as_ref().ok_or(
+        SynQAdmissionError::MissingRequiredField {
+            field: "identity_authorization",
+        },
+    )?;
+    let required_purpose = match envelope.kind {
+        SynQAdmissionKind::Deploy => SYNQ_DEPLOY_AUTHORIZATION_PURPOSE,
+        SynQAdmissionKind::Call => SYNQ_CALL_AUTHORIZATION_PURPOSE,
+    };
+    if envelope.authorization_purpose != required_purpose {
+        return Err(SynQAdmissionError::InvalidCarrier {
+            code: "AEGIS-CANON",
+            message: format!(
+                "SynQ {:?} authorization purpose must be {required_purpose}",
+                envelope.kind
+            ),
+        });
+    }
+    canonical_signer_address_from_carrier_at(
+        carrier,
+        public_key,
+        required_purpose,
+        consensus_timestamp_unix,
+    )
+}
+
+fn authorized_signer_for_authority(
+    envelope: &SynQAdmissionEnvelope,
+    public_key: &[u8],
+    consensus_timestamp_unix: u64,
+    authority: IdentityBindingAuthority<'_>,
+) -> Result<String, SynQAdmissionError> {
+    if let IdentityBindingAuthority::LocalR11Genesis {
+        expected_signer,
+        expected_public_key,
+    } = authority
+    {
+        if envelope.identity_authorization.is_some() {
+            return Err(SynQAdmissionError::InvalidCarrier {
+                code: "LOCAL-R11-AUTH-MODE",
+                message: "local R11 Genesis execution must not claim an SNTS production binding"
+                    .to_string(),
+            });
+        }
+        let expected_purpose = match envelope.kind {
+            SynQAdmissionKind::Deploy => LOCAL_R11_GENESIS_DEPLOY_AUTHORIZATION_PURPOSE,
+            SynQAdmissionKind::Call => LOCAL_R11_GENESIS_CALL_AUTHORIZATION_PURPOSE,
+        };
+        if envelope.authorization_purpose != expected_purpose {
+            return Err(SynQAdmissionError::InvalidCarrier {
+                code: "LOCAL-R11-AUTH-DOMAIN",
+                message: format!(
+                    "local R11 Genesis {:?} authorization purpose must be {expected_purpose}",
+                    envelope.kind
+                ),
+            });
+        }
+        if envelope.signer != expected_signer || public_key != expected_public_key {
+            return Err(SynQAdmissionError::InvalidCarrier {
+                code: "LOCAL-R11-AUTHORITY",
+                message: "local R11 Genesis signer address or ML-DSA-87 key differs from the frozen qualification authority"
+                    .to_string(),
+            });
+        }
+        return Ok(expected_signer.to_string());
+    }
+
+    let carrier = envelope.identity_authorization.as_ref().ok_or(
+        SynQAdmissionError::MissingRequiredField {
+            field: "identity_authorization",
+        },
+    )?;
+    require_current_identity_binding(carrier, authority)?;
+    authorized_envelope_signer(envelope, public_key, consensus_timestamp_unix)
 }
 
 /// `tsynq…` was an internal execution-signer identifier rendered with an
@@ -502,9 +876,78 @@ fn reject_retired_signer_format(signer: &str) -> Result<(), SynQAdmissionError> 
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy)]
+enum IdentityBindingAuthority<'a> {
+    FinalizedSnapshot,
+    ExactCurrentHash(&'a str),
+    OfflineCreation,
+    LocalR11Genesis {
+        expected_signer: &'a str,
+        expected_public_key: &'a [u8],
+    },
+}
+
+fn require_current_identity_binding(
+    carrier: &IdentityAuthorizationBindingCarrier,
+    authority: IdentityBindingAuthority<'_>,
+) -> Result<(), SynQAdmissionError> {
+    let current_hash = match authority {
+        IdentityBindingAuthority::FinalizedSnapshot => {
+            crate::execution::finalized_identity_authorization_binding_hash(
+                &carrier.binding.identity_address,
+            )
+            .map_err(|error| SynQAdmissionError::InvalidCarrier {
+                code: "AEGIS-AUTH-BINDING",
+                message: error,
+            })?
+        }
+        IdentityBindingAuthority::ExactCurrentHash(hash) => hash.to_string(),
+        IdentityBindingAuthority::OfflineCreation => return Ok(()),
+        IdentityBindingAuthority::LocalR11Genesis { .. } => {
+            return Err(SynQAdmissionError::InvalidCarrier {
+                code: "LOCAL-R11-AUTH-MODE",
+                message: "local R11 Genesis authorization cannot verify an SNTS carrier"
+                    .to_string(),
+            })
+        }
+    };
+    crate::identity_auth::require_canonical_current_binding(&carrier.binding, &current_hash)
+        .map_err(|error| SynQAdmissionError::InvalidCarrier {
+            code: "AEGIS-AUTH-BINDING",
+            message: format!("SynQ signer canonical binding check failed: {error}"),
+        })
+}
+
 pub fn verify_transaction_payload_for_chain_admission(
     tx: &Transaction,
     now_unix: u64,
+) -> Result<Option<SynQVerificationSummary>, SynQAdmissionError> {
+    verify_transaction_payload(tx, now_unix, IdentityBindingAuthority::FinalizedSnapshot)
+}
+
+pub fn verify_transaction_payload_for_chain_admission_at_current_binding(
+    tx: &Transaction,
+    now_unix: u64,
+    canonical_binding_payload_sha3_256: &str,
+) -> Result<Option<SynQVerificationSummary>, SynQAdmissionError> {
+    verify_transaction_payload(
+        tx,
+        now_unix,
+        IdentityBindingAuthority::ExactCurrentHash(canonical_binding_payload_sha3_256),
+    )
+}
+
+pub fn verify_transaction_payload_for_offline_creation(
+    tx: &Transaction,
+    now_unix: u64,
+) -> Result<Option<SynQVerificationSummary>, SynQAdmissionError> {
+    verify_transaction_payload(tx, now_unix, IdentityBindingAuthority::OfflineCreation)
+}
+
+fn verify_transaction_payload(
+    tx: &Transaction,
+    now_unix: u64,
+    authority: IdentityBindingAuthority<'_>,
 ) -> Result<Option<SynQVerificationSummary>, SynQAdmissionError> {
     let Some(envelope) = decode_synq_admission_carrier(&tx.payload)? else {
         return Ok(None);
@@ -524,16 +967,51 @@ pub fn verify_transaction_payload_for_chain_admission(
             network_id: envelope.network_id,
         });
     }
-    verify_synq_carrier_for_chain_admission(&envelope, now_unix).map(Some)
+    verify_synq_carrier(&envelope, now_unix, authority).map(Some)
 }
 
 pub fn verify_synq_carrier_for_chain_admission(
     envelope: &SynQAdmissionEnvelope,
     now_unix: u64,
 ) -> Result<SynQVerificationSummary, SynQAdmissionError> {
+    verify_synq_carrier(
+        envelope,
+        now_unix,
+        IdentityBindingAuthority::FinalizedSnapshot,
+    )
+}
+
+pub fn verify_synq_carrier_for_chain_admission_at_current_binding(
+    envelope: &SynQAdmissionEnvelope,
+    now_unix: u64,
+    canonical_binding_payload_sha3_256: &str,
+) -> Result<SynQVerificationSummary, SynQAdmissionError> {
+    verify_synq_carrier(
+        envelope,
+        now_unix,
+        IdentityBindingAuthority::ExactCurrentHash(canonical_binding_payload_sha3_256),
+    )
+}
+
+pub fn verify_synq_carrier_for_offline_creation(
+    envelope: &SynQAdmissionEnvelope,
+    now_unix: u64,
+) -> Result<SynQVerificationSummary, SynQAdmissionError> {
+    verify_synq_carrier(
+        envelope,
+        now_unix,
+        IdentityBindingAuthority::OfflineCreation,
+    )
+}
+
+fn verify_synq_carrier(
+    envelope: &SynQAdmissionEnvelope,
+    now_unix: u64,
+    authority: IdentityBindingAuthority<'_>,
+) -> Result<SynQVerificationSummary, SynQAdmissionError> {
     match envelope.kind {
-        SynQAdmissionKind::Deploy => verify_synq_deploy_for_chain_admission(envelope, now_unix),
-        SynQAdmissionKind::Call => verify_synq_call_for_chain_admission(envelope, now_unix),
+        SynQAdmissionKind::Deploy => verify_synq_deploy(envelope, now_unix, authority),
+        SynQAdmissionKind::Call => verify_synq_call(envelope, now_unix, authority),
     }
 }
 
@@ -541,6 +1019,63 @@ pub fn verify_synq_deploy_for_chain_admission(
     envelope: &SynQAdmissionEnvelope,
     now_unix: u64,
 ) -> Result<SynQVerificationSummary, SynQAdmissionError> {
+    verify_synq_deploy(
+        envelope,
+        now_unix,
+        IdentityBindingAuthority::FinalizedSnapshot,
+    )
+}
+
+pub fn verify_synq_deploy_for_chain_admission_at_current_binding(
+    envelope: &SynQAdmissionEnvelope,
+    now_unix: u64,
+    canonical_binding_payload_sha3_256: &str,
+) -> Result<SynQVerificationSummary, SynQAdmissionError> {
+    verify_synq_deploy(
+        envelope,
+        now_unix,
+        IdentityBindingAuthority::ExactCurrentHash(canonical_binding_payload_sha3_256),
+    )
+}
+
+pub fn verify_synq_deploy_for_offline_creation(
+    envelope: &SynQAdmissionEnvelope,
+    now_unix: u64,
+) -> Result<SynQVerificationSummary, SynQAdmissionError> {
+    verify_synq_deploy(
+        envelope,
+        now_unix,
+        IdentityBindingAuthority::OfflineCreation,
+    )
+}
+
+/// Verifies one offline LOCAL_R11 Genesis deployment with the exact frozen
+/// qualification signer.  This still performs the production PQSynQ
+/// signature, network, payload, artifact, and constructor-argument checks.
+/// It does not claim that the qualification key has an SNTS production
+/// identity binding, and it is never used by normal transaction admission.
+pub fn verify_synq_deploy_for_local_r11_genesis(
+    envelope: &SynQAdmissionEnvelope,
+    now_unix: u64,
+    expected_signer: &str,
+    expected_public_key: &[u8],
+) -> Result<SynQVerificationSummary, SynQAdmissionError> {
+    verify_synq_deploy(
+        envelope,
+        now_unix,
+        IdentityBindingAuthority::LocalR11Genesis {
+            expected_signer,
+            expected_public_key,
+        },
+    )
+}
+
+fn verify_synq_deploy(
+    envelope: &SynQAdmissionEnvelope,
+    now_unix: u64,
+    authority: IdentityBindingAuthority<'_>,
+) -> Result<SynQVerificationSummary, SynQAdmissionError> {
+    validate_synq_envelope_precrypto_bounds(envelope)?;
     ensure_version(envelope)?;
     ensure_kind(envelope, SynQAdmissionKind::Deploy)?;
     reject_retired_signer_format(&envelope.signer)?;
@@ -552,6 +1087,8 @@ pub fn verify_synq_deploy_for_chain_admission(
         &envelope.encoded_pqsynq_envelope,
         "decode SynQ deploy envelope",
     )?;
+    let authorized_signer =
+        authorized_signer_for_authority(envelope, &deploy.public_key.bytes, now_unix, authority)?;
     let context = pqsynq_context(envelope.chain_id, &normalized.pqsynq_network_id, now_unix);
     let verified = AegisSynQVerifier::testnet_1266()
         .verify_contract_deploy(&deploy, &context)
@@ -568,7 +1105,7 @@ pub fn verify_synq_deploy_for_chain_admission(
         || verified.bytecode_hash != bytecode_hash
         || verified.manifest_hash != manifest_hash
         || verified.abi_hash != abi_hash
-        || canonical_signer_address(&deploy.public_key.bytes) != envelope.signer
+        || authorized_signer != envelope.signer
     {
         return Err(SynQAdmissionError::InvalidCarrier {
             code: "AEGIS-CANON",
@@ -592,6 +1129,59 @@ pub fn verify_synq_call_for_chain_admission(
     envelope: &SynQAdmissionEnvelope,
     now_unix: u64,
 ) -> Result<SynQVerificationSummary, SynQAdmissionError> {
+    verify_synq_call(
+        envelope,
+        now_unix,
+        IdentityBindingAuthority::FinalizedSnapshot,
+    )
+}
+
+pub fn verify_synq_call_for_chain_admission_at_current_binding(
+    envelope: &SynQAdmissionEnvelope,
+    now_unix: u64,
+    canonical_binding_payload_sha3_256: &str,
+) -> Result<SynQVerificationSummary, SynQAdmissionError> {
+    verify_synq_call(
+        envelope,
+        now_unix,
+        IdentityBindingAuthority::ExactCurrentHash(canonical_binding_payload_sha3_256),
+    )
+}
+
+pub fn verify_synq_call_for_offline_creation(
+    envelope: &SynQAdmissionEnvelope,
+    now_unix: u64,
+) -> Result<SynQVerificationSummary, SynQAdmissionError> {
+    verify_synq_call(
+        envelope,
+        now_unix,
+        IdentityBindingAuthority::OfflineCreation,
+    )
+}
+
+/// Call counterpart to `verify_synq_deploy_for_local_r11_genesis`.
+pub fn verify_synq_call_for_local_r11_genesis(
+    envelope: &SynQAdmissionEnvelope,
+    now_unix: u64,
+    expected_signer: &str,
+    expected_public_key: &[u8],
+) -> Result<SynQVerificationSummary, SynQAdmissionError> {
+    verify_synq_call(
+        envelope,
+        now_unix,
+        IdentityBindingAuthority::LocalR11Genesis {
+            expected_signer,
+            expected_public_key,
+        },
+    )
+}
+
+fn verify_synq_call(
+    envelope: &SynQAdmissionEnvelope,
+    now_unix: u64,
+    authority: IdentityBindingAuthority<'_>,
+) -> Result<SynQVerificationSummary, SynQAdmissionError> {
+    validate_synq_envelope_precrypto_bounds(envelope)?;
     ensure_version(envelope)?;
     ensure_kind(envelope, SynQAdmissionKind::Call)?;
     reject_retired_signer_format(&envelope.signer)?;
@@ -600,13 +1190,15 @@ pub fn verify_synq_call_for_chain_admission(
         &envelope.encoded_pqsynq_envelope,
         "decode SynQ call envelope",
     )?;
+    let authorized_signer =
+        authorized_signer_for_authority(envelope, &call.public_key.bytes, now_unix, authority)?;
     let context = pqsynq_context(envelope.chain_id, &normalized.pqsynq_network_id, now_unix);
-    let verified = AegisSynQVerifier::testnet_1266()
+    AegisSynQVerifier::testnet_1266()
         .verify_contract_call(&call, &context)
         .map_err(pqsynq_error)?;
 
     if call.signing_payload.payload_hash != envelope.payload_hash
-        || canonical_signer_address(&call.public_key.bytes) != envelope.signer
+        || authorized_signer != envelope.signer
     {
         return Err(SynQAdmissionError::InvalidCarrier {
             code: "AEGIS-CANON",
@@ -628,6 +1220,19 @@ fn decode_pqsynq_envelope<T: for<'de> Deserialize<'de>>(
     bytes: &[u8],
     context: &'static str,
 ) -> Result<T, SynQAdmissionError> {
+    if bytes.is_empty() {
+        return Err(SynQAdmissionError::MissingRequiredField {
+            field: "encoded_pqsynq_envelope",
+        });
+    }
+    if bytes.len() > MAX_SYNQ_ENCODED_PQSYNQ_ENVELOPE_BYTES {
+        return Err(SynQAdmissionError::InvalidCarrier {
+            code: "SYNQ-CARRIER-SIZE",
+            message: format!(
+                "SynQ encoded aegis-pqsynq envelope exceeds {MAX_SYNQ_ENCODED_PQSYNQ_ENVELOPE_BYTES} bytes"
+            ),
+        });
+    }
     serde_json::from_slice(bytes).map_err(|error| SynQAdmissionError::Decode {
         code: "AEGIS-CANON",
         message: format!("{context}: {error}"),
@@ -874,8 +1479,8 @@ fn validate_sts9_horizon_verification(
     )?;
     let contract_address = synergy_contract_address_from_pqsynq_address(
         &derive_synq_contract_address_from_deploy_for_admission(&deploy)?,
-    );
-    let signer = canonical_signer_address(&deploy.public_key.bytes);
+    )?;
+    let signer = envelope.signer.clone();
 
     expect_str_any(
         verification,
@@ -1387,11 +1992,17 @@ fn derive_synq_contract_address_from_deploy_for_admission(
     Ok(SynQAddress::from_bytes(bytes))
 }
 
-fn synergy_contract_address_from_pqsynq_address(address: &SynQAddress) -> String {
+fn synergy_contract_address_from_pqsynq_address(
+    address: &SynQAddress,
+) -> Result<String, SynQAdmissionError> {
     crate::address::generate_generic_address(
         SYNERGY_CUSTOM_CONTRACT_ADDRESS_PREFIX,
         &hex::encode(address.as_bytes()),
     )
+    .map_err(|error| SynQAdmissionError::InvalidCarrier {
+        code: "AEGIS-ADDRESS",
+        message: format!("synergy contract address derivation failed: {error}"),
+    })
 }
 
 fn push_u16(out: &mut Vec<u8>, value: u16) {
@@ -1457,6 +2068,10 @@ fn summary_from_payload(
         domain: domain.as_str().to_string(),
         algorithm: algorithm_name(algorithm).to_string(),
         signer: envelope.signer.clone(),
+        identity_authorization_payload_sha3_256: envelope
+            .identity_authorization
+            .as_ref()
+            .map(|carrier| carrier.binding.binding_payload_sha3_256.clone()),
         payload_hash: envelope.payload_hash,
         bytecode_hash: envelope.bytecode_hash,
         manifest_hash: envelope.manifest_hash,
@@ -1568,13 +2183,21 @@ pub(crate) mod test_support {
             abi_hash,
             constructor_args_hash,
         };
+        let identity_authorization = test_identity_authorization(
+            &deploy.public_key.bytes,
+            &private_key,
+            SYNQ_DEPLOY_AUTHORIZATION_PURPOSE,
+        );
+        let identity_address = identity_authorization.binding.identity_address.clone();
 
         SynQAdmissionEnvelope {
             version: SYNQ_ADMISSION_VERSION,
             kind: SynQAdmissionKind::Deploy,
             chain_id: SYNERGY_TESTNET_V3_CHAIN_ID,
             network_id: network_id.to_string(),
-            signer: canonical_signer_address(&deploy.public_key.bytes),
+            signer: identity_address,
+            identity_authorization: Some(identity_authorization),
+            authorization_purpose: SYNQ_DEPLOY_AUTHORIZATION_PURPOSE.to_string(),
             payload_hash,
             bytecode_hash: Some(bytecode_hash),
             manifest_hash: Some(manifest_hash),
@@ -1616,13 +2239,21 @@ pub(crate) mod test_support {
             method_selector,
             encoded_args_hash,
         };
+        let identity_authorization = test_identity_authorization(
+            &call.public_key.bytes,
+            &private_key,
+            SYNQ_CALL_AUTHORIZATION_PURPOSE,
+        );
+        let identity_address = identity_authorization.binding.identity_address.clone();
 
         SynQAdmissionEnvelope {
             version: SYNQ_ADMISSION_VERSION,
             kind: SynQAdmissionKind::Call,
             chain_id: SYNERGY_TESTNET_V3_CHAIN_ID,
             network_id: network_id.to_string(),
-            signer: canonical_signer_address(&call.public_key.bytes),
+            signer: identity_address,
+            identity_authorization: Some(identity_authorization),
+            authorization_purpose: SYNQ_CALL_AUTHORIZATION_PURPOSE.to_string(),
             payload_hash,
             bytecode_hash: None,
             manifest_hash: None,
@@ -1648,6 +2279,49 @@ pub(crate) mod test_support {
         )
         .expect("derive SynQ address");
         (public_key, private_key, address)
+    }
+
+    fn test_identity_authorization(
+        authorization_public_key: &[u8],
+        authorization_private_key: &[u8],
+        authorization_purpose: &str,
+    ) -> IdentityAuthorizationBindingCarrier {
+        let mut manager = crate::crypto::pqc::PQCManager::new();
+        let (identity_public, identity_private) = manager
+            .generate_keypair(crate::crypto::pqc::PQCAlgorithm::FNDSA)
+            .expect("test identity keypair");
+        let authorization_public = crate::crypto::pqc::PQCPublicKey {
+            algorithm: crate::crypto::pqc::PQCAlgorithm::MLDSA87,
+            key_data: authorization_public_key.to_vec(),
+            key_id: "test-synq-authorization".to_string(),
+            created_at: 0,
+        };
+        let authorization_private = crate::crypto::pqc::PQCPrivateKey {
+            algorithm: crate::crypto::pqc::PQCAlgorithm::MLDSA87,
+            key_data: authorization_private_key.to_vec(),
+            public_key_id: authorization_public.key_id.clone(),
+            created_at: 0,
+        };
+        let binding = crate::identity_auth::create_single_key_binding_with_scopes(
+            "test-synq-identity",
+            "syna",
+            &identity_public,
+            &identity_private,
+            "synq-key",
+            &authorization_public,
+            &authorization_private,
+            &[crate::identity_auth::AuthorizationScope::testnet(
+                crate::identity_auth::SYNQ_ADMISSION_AUTHORIZATION_DOMAIN,
+                authorization_purpose,
+            )],
+            "2026-08-22T00:00:00Z",
+        )
+        .expect("test SynQ identity authorization binding");
+        IdentityAuthorizationBindingCarrier::new(
+            crate::identity_auth::SYNQ_ADMISSION_AUTHORIZATION_DOMAIN,
+            binding,
+        )
+        .expect("test SynQ identity authorization carrier")
     }
 
     fn signing_payload(
@@ -1719,7 +2393,7 @@ mod tests {
 
     #[test]
     fn synq_deploy_carrier_verifies_through_pqsynq() {
-        let summary = verify_synq_deploy_for_chain_admission(
+        let summary = verify_synq_deploy_for_offline_creation(
             &deploy_carrier(SYNERGY_TESTNET_V3_NETWORK_ID),
             TEST_NOW,
         )
@@ -1728,6 +2402,31 @@ mod tests {
         assert_eq!(summary.algorithm, "ML-DSA-87");
         assert!(summary.verified_at_admission);
         assert_eq!(summary.bytecode_hash, Some(hash(1)));
+    }
+
+    #[test]
+    fn synq_chain_admission_requires_exact_current_binding_commitment() {
+        let carrier = deploy_carrier(SYNERGY_TESTNET_V3_NETWORK_ID);
+        let current_hash = carrier
+            .identity_authorization
+            .as_ref()
+            .expect("test carrier")
+            .binding
+            .binding_payload_sha3_256
+            .clone();
+        verify_synq_deploy_for_chain_admission_at_current_binding(
+            &carrier,
+            TEST_NOW,
+            &current_hash,
+        )
+        .expect("exact finalized binding commitment admits");
+        let error = verify_synq_deploy_for_chain_admission_at_current_binding(
+            &carrier,
+            TEST_NOW,
+            &"00".repeat(32),
+        )
+        .expect_err("stale carrier must not pass canonical-current admission");
+        assert_eq!(error.code(), "AEGIS-AUTH-BINDING");
     }
 
     /// The account domain (deploy/call) must reject every other domain's
@@ -1777,19 +2476,19 @@ mod tests {
         let args = br#"["authority","6"]"#.to_vec();
         let carrier =
             deploy_carrier_with_constructor_args(SYNERGY_TESTNET_V3_NETWORK_ID, args.clone());
-        verify_synq_deploy_for_chain_admission(&carrier, TEST_NOW)
+        verify_synq_deploy_for_offline_creation(&carrier, TEST_NOW)
             .expect("non-empty constructor args verify");
 
         let mut tampered = carrier;
         tampered.constructor_args = Some(br#"["authority","7"]"#.to_vec());
-        let error = verify_synq_deploy_for_chain_admission(&tampered, TEST_NOW)
+        let error = verify_synq_deploy_for_offline_creation(&tampered, TEST_NOW)
             .expect_err("constructor argument tampering rejected");
         assert_eq!(error.code(), "AEGIS-CANON");
     }
 
     #[test]
     fn synq_call_carrier_verifies_through_pqsynq() {
-        let summary = verify_synq_call_for_chain_admission(
+        let summary = verify_synq_call_for_offline_creation(
             &call_carrier(SYNERGY_TESTNET_V3_NETWORK_ID),
             TEST_NOW,
         )
@@ -1803,7 +2502,7 @@ mod tests {
     fn wrong_chain_preserves_aegis_chain_code() {
         let mut carrier = deploy_carrier(SYNERGY_TESTNET_V3_NETWORK_ID);
         carrier.chain_id = 999;
-        let error = verify_synq_deploy_for_chain_admission(&carrier, TEST_NOW)
+        let error = verify_synq_deploy_for_offline_creation(&carrier, TEST_NOW)
             .expect_err("wrong chain rejected");
         assert_eq!(error.code(), "AEGIS-CHAIN");
     }
@@ -1823,9 +2522,24 @@ mod tests {
         deploy.signature.bytes[0] ^= 0x01;
         carrier.encoded_pqsynq_envelope = serde_json::to_vec(&deploy).unwrap();
 
-        let error = verify_synq_deploy_for_chain_admission(&carrier, TEST_NOW)
+        let error = verify_synq_deploy_for_offline_creation(&carrier, TEST_NOW)
             .expect_err("invalid signature rejected");
         assert_eq!(error.code(), "AEGIS-SIG");
+    }
+
+    #[test]
+    fn envelope_selected_authorization_purpose_is_rejected() {
+        let mut deploy = deploy_carrier(SYNERGY_TESTNET_V3_NETWORK_ID);
+        deploy.authorization_purpose = SYNQ_CALL_AUTHORIZATION_PURPOSE.to_string();
+        let error = verify_synq_deploy_for_offline_creation(&deploy, TEST_NOW)
+            .expect_err("deploy must not select the call authorization purpose");
+        assert_eq!(error.code(), "AEGIS-CANON");
+
+        let mut call = call_carrier(SYNERGY_TESTNET_V3_NETWORK_ID);
+        call.authorization_purpose = SYNQ_DEPLOY_AUTHORIZATION_PURPOSE.to_string();
+        let error = verify_synq_call_for_offline_creation(&call, TEST_NOW)
+            .expect_err("call must not select the deploy authorization purpose");
+        assert_eq!(error.code(), "AEGIS-CANON");
     }
 
     #[test]
@@ -1833,7 +2547,7 @@ mod tests {
         let mut carrier = deploy_carrier(SYNERGY_TESTNET_V3_NETWORK_ID);
         carrier.bytecode = Some(Vec::new());
 
-        let error = verify_synq_deploy_for_chain_admission(&carrier, TEST_NOW)
+        let error = verify_synq_deploy_for_offline_creation(&carrier, TEST_NOW)
             .expect_err("partial artifacts must fail");
         assert_eq!(error.code(), "SYNQ-ARTIFACT-AVAILABILITY");
     }
@@ -1845,21 +2559,42 @@ mod tests {
         carrier.abi_json = Some(String::new());
         carrier.manifest_json = Some(String::new());
 
-        let error = verify_synq_deploy_for_chain_admission(&carrier, TEST_NOW)
+        let error = verify_synq_deploy_for_offline_creation(&carrier, TEST_NOW)
             .expect_err("oversized artifacts must fail");
         assert_eq!(error.code(), "SYNQ-ARTIFACT-SIZE");
     }
 
     #[test]
+    fn oversized_inner_envelope_rejects_before_identity_crypto() {
+        let mut carrier = deploy_carrier(SYNERGY_TESTNET_V3_NETWORK_ID);
+        carrier.encoded_pqsynq_envelope = vec![0; MAX_SYNQ_ENCODED_PQSYNQ_ENVELOPE_BYTES + 1];
+        let binding = &mut carrier
+            .identity_authorization
+            .as_mut()
+            .expect("test identity carrier")
+            .binding;
+        binding.proofs.identity_root.signature.clear();
+        binding.proofs.authorization_key_possession.clear();
+
+        let error = verify_synq_deploy_for_offline_creation(&carrier, TEST_NOW)
+            .expect_err("pre-crypto carrier bound must reject first");
+        assert_eq!(error.code(), "SYNQ-CARRIER-SIZE");
+    }
+
+    #[test]
     fn pqsynq_deploy_bytes_wrap_into_versioned_admission_carrier() {
         let source = deploy_carrier(SYNERGY_TESTNET_V3_NETWORK_ID);
-        let bytes = build_deploy_admission_carrier_from_pqsynq_bytes(
-            SYNERGY_TESTNET_V3_CHAIN_ID,
-            SYNERGY_TESTNET_V3_NETWORK_ID,
-            &source.encoded_pqsynq_envelope,
-            TEST_NOW,
-        )
-        .expect("wrap deploy envelope");
+        let envelope =
+            build_deploy_admission_envelope_from_pqsynq_bytes_with_identity_authorization(
+                SYNERGY_TESTNET_V3_CHAIN_ID,
+                SYNERGY_TESTNET_V3_NETWORK_ID,
+                &source.encoded_pqsynq_envelope,
+                source.identity_authorization.clone().expect("test carrier"),
+                &source.authorization_purpose,
+                TEST_NOW,
+            )
+            .expect("wrap deploy envelope");
+        let bytes = encode_synq_admission_carrier(&envelope).expect("encode deploy carrier");
         let decoded = decode_synq_admission_carrier(&bytes)
             .expect("decode carrier")
             .expect("carrier present");
@@ -1872,13 +2607,16 @@ mod tests {
     #[test]
     fn pqsynq_call_bytes_wrap_into_versioned_admission_carrier() {
         let source = call_carrier(SYNERGY_TESTNET_V3_NETWORK_ID);
-        let bytes = build_call_admission_carrier_from_pqsynq_bytes(
+        let envelope = build_call_admission_envelope_from_pqsynq_bytes_with_identity_authorization(
             SYNERGY_TESTNET_V3_CHAIN_ID,
             SYNERGY_TESTNET_V3_NETWORK_ID,
             &source.encoded_pqsynq_envelope,
+            source.identity_authorization.clone().expect("test carrier"),
+            &source.authorization_purpose,
             TEST_NOW,
         )
         .expect("wrap call envelope");
+        let bytes = encode_synq_admission_carrier(&envelope).expect("encode call carrier");
         let decoded = decode_synq_admission_carrier(&bytes)
             .expect("decode carrier")
             .expect("carrier present");

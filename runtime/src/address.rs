@@ -1,22 +1,15 @@
-//! Address generation and validation utilities for the Synergy network.
-//!
-//! All addresses conform to SNTS-01: SHA3-256 of the public-key bytes,
-//! extraction of 5-bit groups, Bech32m encoding, exactly 41 characters.
-//! Implementation mirrors the canonical `synergy-address-engine` (`synergy-keygen`).
+//! Activated SNTS-01 v1.3 / Address Engine v1 derivation and validation.
 
-use bech32::{u5, Variant};
+use crate::snts_registry::{
+    expected_address_length, expected_data_symbols, namespace, IdentifierClass, NamespaceStatus,
+};
+use bech32::{ToBase32, Variant};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 
-/// Target address length per SNTS-01.
-pub const TARGET_ADDRESS_LEN: usize = 41;
-/// Canonical protocol burn address. This is a reserved sentinel, not a
-/// spendable Bech32m account.
-pub const NETWORK_BURN_ADDRESS: &str = "syn00000000000000000000000000000000000000";
-/// Bech32m checksum length (6 characters).
-const CHECKSUM_LEN: usize = 6;
-/// Separator character ('1') length.
-const SEPARATOR_LEN: usize = 1;
+pub const NETWORK_BURN_ADDRESS: &str = "syn0000000000000000000000000000000";
+pub const STANDARD_ACCOUNT_PREFIX: &str = "syna";
+pub const FN_DSA_1024_PUBLIC_KEY_BYTES: usize = 1_793;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AddressKind {
@@ -34,182 +27,263 @@ pub enum AddressKind {
 pub struct AddressRegistryEntry {
     pub active: bool,
     pub address_type: AddressKind,
+    pub classification: IdentifierClass,
 }
 
-/// Extracts exactly `count` 5-bit values from a byte slice (big-endian bit order).
-/// Identical to the extraction algorithm in `synergy-address-engine/src/address.rs`.
-fn extract_base32_values(hash: &[u8], count: usize) -> Vec<u5> {
-    let mut values = Vec::with_capacity(count);
-    for i in 0..count {
-        let bit_offset = i * 5;
-        let byte_idx = bit_offset / 8;
-        let bit_idx = bit_offset % 8;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedAddress {
+    pub hrp: String,
+    pub data_words: Vec<u8>,
+    pub classification: IdentifierClass,
+}
 
-        let val = if bit_idx <= 3 {
-            (hash[byte_idx] >> (3 - bit_idx)) & 0x1f
-        } else {
-            let high_bits = (hash[byte_idx] << (bit_idx - 3)) & 0x1f;
-            let low_bits = if byte_idx + 1 < hash.len() {
-                hash[byte_idx + 1] >> (11 - bit_idx)
-            } else {
-                0
-            };
-            high_bits | low_bits
-        };
+pub fn data_words_from_preimage(hrp: &str, preimage: &[u8]) -> Result<Vec<u8>, String> {
+    let expected = expected_data_symbols(hrp)?;
+    Ok(Sha3_256::digest(preimage)
+        .to_base32()
+        .into_iter()
+        .take(expected)
+        .map(|word| word.to_u8())
+        .collect())
+}
 
-        values.push(u5::try_from_u8(val).expect("5-bit value must be 0..31"));
+fn derive_native_address_from_bytes(prefix: &str, preimage: &[u8]) -> Result<String, String> {
+    let entry = namespace(prefix).ok_or_else(|| format!("unknown namespace '{prefix}'"))?;
+    if entry.status != NamespaceStatus::Active
+        || !entry.classification.is_native_address()
+        || entry.encoding != "bech32m_v1"
+    {
+        return Err(format!(
+            "namespace '{prefix}' is not an active native address namespace"
+        ));
     }
-    values
+    let expected = expected_data_symbols(prefix)?;
+    let data = Sha3_256::digest(preimage)
+        .to_base32()
+        .into_iter()
+        .take(expected)
+        .collect::<Vec<_>>();
+    debug_assert_eq!(data.len(), expected);
+    let address = bech32::encode(prefix, data, Variant::Bech32m)
+        .map_err(|error| format!("Bech32m encode failed: {error}"))?;
+    if address.len() != expected_address_length(prefix) {
+        return Err("Bech32m encoder emitted a non-canonical length".to_string());
+    }
+    Ok(address)
 }
 
-/// Core derivation: SHA3-256(`public_key_bytes`) → extract 5-bit groups → Bech32m encode.
-/// The number of data characters is derived from the prefix length so that the
-/// total encoded address is exactly `TARGET_ADDRESS_LEN` (41) characters.
-fn derive_address_from_bytes(prefix: &str, public_key_bytes: &[u8]) -> String {
-    let data_char_count = TARGET_ADDRESS_LEN - prefix.len() - SEPARATOR_LEN - CHECKSUM_LEN;
-
-    let mut hasher = Sha3_256::new();
-    hasher.update(public_key_bytes);
-    let hash = hasher.finalize();
-
-    let base32_data = extract_base32_values(&hash, data_char_count);
-
-    bech32::encode(prefix, base32_data, Variant::Bech32m)
-        .unwrap_or_else(|e| panic!("Bech32m encode failed for prefix '{}': {}", prefix, e))
+/// Derives a key-controlled address from a canonical raw FN-DSA-1024
+/// verification key. Operational authorization keys are not address roots.
+pub fn derive_key_controlled_address(
+    prefix: &str,
+    public_key_bytes: &[u8],
+) -> Result<String, String> {
+    let entry = namespace(prefix).ok_or_else(|| format!("unknown namespace '{prefix}'"))?;
+    if entry.status != NamespaceStatus::Active
+        || entry.classification != IdentifierClass::KeyControlledAddress
+    {
+        return Err(format!(
+            "namespace '{prefix}' is not an active key-controlled address namespace"
+        ));
+    }
+    if public_key_bytes.len() != FN_DSA_1024_PUBLIC_KEY_BYTES {
+        return Err(format!(
+            "key-controlled address derivation requires exactly {FN_DSA_1024_PUBLIC_KEY_BYTES} canonical raw FN-DSA-1024 verification-key bytes"
+        ));
+    }
+    derive_native_address_from_bytes(prefix, public_key_bytes)
 }
 
-/// Bech32m prefix for a Standard Account (SNTS-01 `syna`).
-///
-/// This is the canonical public identity of an ML-DSA-87 account on
-/// Testnet-v3: the account itself, an operational authority, a SynQ deploy or
-/// call signer, and `msg.sender` are all this one value. There is deliberately
-/// no second public address format for the same key — execution-domain
-/// separation lives in the signed payload, not in a second HRP.
-pub const STANDARD_ACCOUNT_PREFIX: &str = "syna";
-
-/// Derives the canonical Standard Account address from raw public-key bytes.
-pub fn derive_standard_account_address(public_key_bytes: &[u8]) -> String {
-    derive_address_from_bytes(STANDARD_ACCOUNT_PREFIX, public_key_bytes)
+/// Applies Address Engine v1 to an owning standard's canonical object preimage.
+pub fn derive_object_address(prefix: &str, canonical_preimage: &[u8]) -> Result<String, String> {
+    let entry = namespace(prefix).ok_or_else(|| format!("unknown namespace '{prefix}'"))?;
+    if entry.status != NamespaceStatus::Active
+        || entry.classification != IdentifierClass::ObjectAddress
+    {
+        return Err(format!(
+            "namespace '{prefix}' is not an active object-address namespace"
+        ));
+    }
+    if canonical_preimage.is_empty() {
+        return Err(
+            "object-address derivation requires a non-empty canonical preimage owned by the relevant standard"
+                .to_string(),
+        );
+    }
+    derive_native_address_from_bytes(prefix, canonical_preimage)
 }
 
-/// True when `address` is the Standard Account address of `public_key_bytes`.
+fn decode_nonempty_lower_hex(field: &str, value: &str) -> Result<Vec<u8>, String> {
+    if value.is_empty()
+        || value.len() % 2 != 0
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(format!(
+            "{field} must be non-empty, even-length lowercase hexadecimal"
+        ));
+    }
+    hex::decode(value).map_err(|error| format!("decode {field}: {error}"))
+}
+
+fn validator_class_prefix(class: u8) -> Result<String, String> {
+    if !(1..=5).contains(&class) {
+        return Err(format!(
+            "validator class must be in the canonical range 1..=5, found {class}"
+        ));
+    }
+    Ok(format!("synv{class}"))
+}
+
+fn cluster_group_prefix(group: u8) -> Result<String, String> {
+    if !(1..=5).contains(&group) {
+        return Err(format!(
+            "cluster group must be in the canonical range 1..=5, found {group}"
+        ));
+    }
+    Ok(format!("syngrp{group}"))
+}
+
+pub fn decode_address(address: &str) -> Result<DecodedAddress, String> {
+    if address == NETWORK_BURN_ADDRESS {
+        return Err("the synthetic burn constant is not a Bech32m address".to_string());
+    }
+    if address.is_empty() || address != address.to_ascii_lowercase() {
+        return Err("address must use lowercase canonical text".to_string());
+    }
+    let (hrp, data, variant) =
+        bech32::decode(address).map_err(|error| format!("Bech32 decode failed: {error}"))?;
+    if variant != Variant::Bech32m {
+        return Err("address checksum variant must be Bech32m".to_string());
+    }
+    let entry = namespace(&hrp).ok_or_else(|| format!("unknown namespace '{hrp}'"))?;
+    if entry.status != NamespaceStatus::Active {
+        return Err(format!("namespace '{hrp}' is reserved"));
+    }
+    if !entry.classification.is_native_address() || entry.encoding != "bech32m_v1" {
+        return Err(format!(
+            "namespace '{hrp}' does not encode native addresses"
+        ));
+    }
+    if address.len() != expected_address_length(&hrp) {
+        return Err(format!(
+            "address length must be {} for HRP '{hrp}'",
+            expected_address_length(&hrp)
+        ));
+    }
+    let expected = expected_data_symbols(&hrp)?;
+    if data.len() != expected {
+        return Err(format!(
+            "address data must contain {expected} symbols for HRP '{hrp}'"
+        ));
+    }
+    Ok(DecodedAddress {
+        hrp,
+        data_words: data.into_iter().map(|word| word.to_u8()).collect(),
+        classification: entry.classification,
+    })
+}
+
+pub fn derive_standard_account_address(public_key_bytes: &[u8]) -> Result<String, String> {
+    derive_key_controlled_address(STANDARD_ACCOUNT_PREFIX, public_key_bytes)
+}
+
 pub fn is_standard_account_of(address: &str, public_key_bytes: &[u8]) -> bool {
-    !public_key_bytes.is_empty() && derive_standard_account_address(public_key_bytes) == address
+    !public_key_bytes.is_empty()
+        && decode_address(address).is_ok_and(|decoded| decoded.hrp == STANDARD_ACCOUNT_PREFIX)
+        && derive_standard_account_address(public_key_bytes).is_ok_and(|derived| derived == address)
 }
 
-/// Decodes a hex-encoded public-key string to raw bytes.  If the string is
-/// not valid hex it falls back to the raw UTF-8 bytes of the string so that
-/// non-hex seeds (e.g. cluster seeds) are still hashed deterministically.
-fn key_bytes_from_str(public_key: &str) -> Vec<u8> {
-    hex::decode(public_key).unwrap_or_else(|_| public_key.as_bytes().to_vec())
+pub fn generate_wallet_address(public_key_hex: &str) -> Result<String, String> {
+    let public_key = decode_nonempty_lower_hex("wallet public key", public_key_hex)?;
+    derive_key_controlled_address("synw", &public_key)
 }
 
-/// Generates a 41-character Synergy wallet address using the `synw` prefix.
-///
-/// `public_key` must be a hex-encoded public key (as produced by the key
-/// generation layer).  Deterministic: same key always yields the same address.
-pub fn generate_wallet_address(public_key: &str) -> String {
-    derive_address_from_bytes("synw", &key_bytes_from_str(public_key))
+pub fn generate_validator_address(public_key_hex: &str, class: u8) -> Result<String, String> {
+    let prefix = validator_class_prefix(class)?;
+    let public_key = decode_nonempty_lower_hex("validator public key", public_key_hex)?;
+    derive_key_controlled_address(&prefix, &public_key)
 }
 
-/// Generates a validator node address using the `synv{1-5}` prefix.
-/// `group` is clamped to [1, 5].
-pub fn generate_validator_address(public_key: &str, group: u8) -> String {
-    let group = group.clamp(1, 5);
-    let prefix = format!("synv{}", group);
-    derive_address_from_bytes(&prefix, &key_bytes_from_str(public_key))
+pub fn generate_class_based_address(public_key: &[u8], class: u8) -> Result<String, String> {
+    let prefix = validator_class_prefix(class)?;
+    derive_key_controlled_address(&prefix, public_key)
 }
 
-/// Generates a class-based validator address using the `synv{1-5}` prefix.
-/// `public_key` is raw public-key bytes (not hex-encoded).
-/// `class` is clamped to [1, 5].
-pub fn generate_class_based_address(public_key: &[u8], class: u8) -> String {
-    let class = class.clamp(1, 5);
-    let prefix = format!("synv{}", class);
-    derive_address_from_bytes(&prefix, public_key)
+/// Applies Address Engine v1 to a canonical key/object preimage. Reserved,
+/// typed-identifier, and unknown namespaces fail closed.
+pub fn generate_generic_address(
+    prefix: &str,
+    canonical_preimage_hex: &str,
+) -> Result<String, String> {
+    let entry = namespace(prefix).ok_or_else(|| format!("unknown namespace '{prefix}'"))?;
+    if entry.classification != IdentifierClass::ObjectAddress {
+        return Err(format!(
+            "generic address derivation accepts only object-address namespaces, found '{prefix}'"
+        ));
+    }
+    let canonical_preimage =
+        decode_nonempty_lower_hex("canonical object preimage", canonical_preimage_hex)?;
+    derive_object_address(prefix, &canonical_preimage)
 }
 
-/// Generates a Synergy address with any caller-supplied prefix.
-/// The prefix must yield a positive `data_char_count`; callers are responsible
-/// for supplying a valid prefix defined in the address formatting specification.
-pub fn generate_generic_address(prefix: &str, public_key: &str) -> String {
-    derive_address_from_bytes(prefix, &key_bytes_from_str(public_key))
-}
-
-/// Returns true when `address` is the canonical SNTS-01 address for the raw
-/// public-key bytes and the address's own Bech32m prefix.
 pub fn address_matches_public_key(address: &str, public_key_bytes: &[u8]) -> bool {
-    let Ok((prefix, _, variant)) = bech32::decode(address) else {
-        return false;
-    };
-    variant == Variant::Bech32m
-        && is_valid_address(address)
-        && derive_address_from_bytes(&prefix, public_key_bytes) == address
+    !public_key_bytes.is_empty()
+        && decode_address(address).is_ok_and(|decoded| {
+            decoded.classification == IdentifierClass::KeyControlledAddress
+                && derive_key_controlled_address(&decoded.hrp, public_key_bytes)
+                    .is_ok_and(|derived| derived == address)
+        })
 }
 
-/// Generates the protocol-controlled FeeCollector address with the `synf` prefix.
-pub fn generate_fee_collector_address(seed: &str) -> String {
-    derive_address_from_bytes("synf", seed.as_bytes())
+pub fn generate_fee_collector_address(seed: &str) -> Result<String, String> {
+    derive_object_address("synf", seed.as_bytes())
 }
 
-/// Generates a cluster address using the `syngrp{1-5}` prefix (7 characters).
-/// The seed (typically a cluster ID + validator addresses string) is hashed
-/// deterministically; no timestamp entropy is introduced.
-pub fn generate_cluster_address(seed: &str, group: u8) -> String {
-    let group = group.clamp(1, 5);
-    let prefix = format!("syngrp{}", group);
-    derive_address_from_bytes(&prefix, seed.as_bytes())
+pub fn generate_cluster_address(seed: &str, group: u8) -> Result<String, String> {
+    if seed.is_empty() {
+        return Err("cluster address derivation requires a non-empty canonical seed".to_string());
+    }
+    let prefix = cluster_group_prefix(group)?;
+    derive_object_address(&prefix, seed.as_bytes())
 }
 
-/// Generates the permanent testnet cluster identifier using the `syngrp1` family.
-pub fn generate_validator_cluster_address(seed: &str) -> String {
-    derive_address_from_bytes("syngrp1", seed.as_bytes())
+pub fn generate_validator_cluster_address(seed: &str) -> Result<String, String> {
+    derive_object_address("syngrp1", seed.as_bytes())
 }
 
-/// Returns `true` if `address` is a structurally valid Synergy Bech32m address:
-/// exactly 41 characters, starts with `syn`, and passes Bech32m checksum validation.
 pub fn is_valid_address(address: &str) -> bool {
-    if is_network_burn_address(address) {
-        return true;
-    }
-    if address.len() != TARGET_ADDRESS_LEN {
-        return false;
-    }
-    if !address.starts_with("syn") {
-        return false;
-    }
-    match bech32::decode(address) {
-        Ok((_, _, variant)) => variant == Variant::Bech32m,
-        Err(_) => false,
-    }
+    address == NETWORK_BURN_ADDRESS || decode_address(address).is_ok()
 }
 
 pub fn is_valid_cluster_address(address: &str) -> bool {
-    address.len() == TARGET_ADDRESS_LEN
-        && address.starts_with("syngrp1")
-        && matches!(address_kind(address), AddressKind::ValidatorCluster)
-        && matches!(bech32::decode(address), Ok((_, _, Variant::Bech32m)))
+    decode_address(address).is_ok_and(|decoded| {
+        matches!(
+            decoded.hrp.as_str(),
+            "syngrp1" | "syngrp2" | "syngrp3" | "syngrp4" | "syngrp5"
+        )
+    })
+}
+
+fn kind_for_hrp(hrp: &str) -> AddressKind {
+    match hrp {
+        "synw" | "syns" | "syna" | "synz" | "synm" | "synu" | "synl" => AddressKind::Wallet,
+        "synv1" | "synv2" | "synv3" | "synv4" | "synv5" => AddressKind::Validator,
+        "synf" => AddressKind::FeeCollector,
+        "syngrp1" | "syngrp2" | "syngrp3" | "syngrp4" | "syngrp5" => AddressKind::ValidatorCluster,
+        "synq" | "sync" => AddressKind::Contract,
+        _ => AddressKind::System,
+    }
 }
 
 pub fn address_kind(address: &str) -> AddressKind {
-    if is_network_burn_address(address) {
+    if address == NETWORK_BURN_ADDRESS {
         AddressKind::BurnAddress
-    } else if address.starts_with("synf") {
-        AddressKind::FeeCollector
-    } else if address.starts_with("syngrp1") {
-        AddressKind::ValidatorCluster
-    } else if address.starts_with("synv") {
-        AddressKind::Validator
-    } else if address.starts_with("synw") || address.starts_with("synu") {
-        AddressKind::Wallet
-    } else if address.starts_with("synq") || address.starts_with("sync") {
-        AddressKind::Contract
-    } else if address.starts_with("synb") {
-        AddressKind::BurnAddress
-    } else if address.starts_with("syn") {
-        AddressKind::System
     } else {
-        AddressKind::Unknown
+        decode_address(address)
+            .map(|decoded| kind_for_hrp(&decoded.hrp))
+            .unwrap_or(AddressKind::Unknown)
     }
 }
 
@@ -218,19 +292,15 @@ pub fn is_network_burn_address(address: &str) -> bool {
 }
 
 pub fn registry_entry_for_prefix(prefix: &str) -> Option<AddressRegistryEntry> {
-    let address_type = match prefix {
-        "synf" => AddressKind::FeeCollector,
-        "syngrp1" => AddressKind::ValidatorCluster,
-        "synw" | "synu" => AddressKind::Wallet,
-        "synv1" | "synv2" | "synv3" | "synv4" | "synv5" => AddressKind::Validator,
-        "synq" | "sync" => AddressKind::Contract,
-        "synb" => AddressKind::BurnAddress,
-        _ => return None,
-    };
-
+    let entry = namespace(prefix)?;
     Some(AddressRegistryEntry {
-        active: true,
-        address_type,
+        active: entry.status == NamespaceStatus::Active,
+        address_type: if entry.classification.is_native_address() {
+            kind_for_hrp(prefix)
+        } else {
+            AddressKind::Unknown
+        },
+        classification: entry.classification,
     })
 }
 
@@ -251,233 +321,165 @@ pub fn is_spendable_user_address(address: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bech32::u5;
 
-    /// A fixed 32-byte test public key (all zeros for determinism).
-    const ZERO_KEY_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
-    const ZERO_KEY_BYTES: &[u8] = &[0u8; 32];
+    const OBJECT_PREIMAGE_HEX: &str =
+        "0000000000000000000000000000000000000000000000000000000000000000";
 
-    #[test]
-    fn wallet_address_is_41_chars() {
-        let addr = generate_wallet_address(ZERO_KEY_HEX);
-        assert_eq!(
-            addr.len(),
-            TARGET_ADDRESS_LEN,
-            "wallet address must be 41 chars, got: {}",
-            addr
-        );
+    fn zero_identity_key() -> Vec<u8> {
+        vec![0_u8; FN_DSA_1024_PUBLIC_KEY_BYTES]
     }
 
     #[test]
-    fn canonical_network_burn_address_is_protocol_controlled() {
-        assert_eq!(NETWORK_BURN_ADDRESS.len(), TARGET_ADDRESS_LEN);
+    fn fixed_length_and_leading_big_endian_words_are_exact() {
+        let public_key = zero_identity_key();
+        let public_key_hex = hex::encode(&public_key);
+        let digest = Sha3_256::digest(&public_key);
+        let wallet = generate_wallet_address(&public_key_hex).unwrap();
+        let validator = generate_validator_address(&public_key_hex, 1).unwrap();
+        let cluster = generate_cluster_address("cluster", 1).unwrap();
+        assert_eq!(wallet.len(), 41);
+        assert_eq!(validator.len(), 41);
+        assert_eq!(cluster.len(), 41);
+        let expected_words = digest
+            .to_base32()
+            .into_iter()
+            .take(expected_data_symbols("synw").unwrap())
+            .map(|word| word.to_u8())
+            .collect::<Vec<_>>();
+        assert_eq!(decode_address(&wallet).unwrap().data_words, expected_words);
+        assert!(address_matches_public_key(&wallet, &public_key));
+    }
+
+    #[test]
+    fn canonical_burn_is_synthetic_and_protocol_controlled() {
+        assert_eq!(NETWORK_BURN_ADDRESS.len(), 34);
         assert!(is_valid_address(NETWORK_BURN_ADDRESS));
-        assert!(is_network_burn_address(NETWORK_BURN_ADDRESS));
+        assert!(bech32::decode(NETWORK_BURN_ADDRESS).is_err());
         assert_eq!(address_kind(NETWORK_BURN_ADDRESS), AddressKind::BurnAddress);
         assert!(is_protocol_controlled_address(NETWORK_BURN_ADDRESS));
         assert!(!is_spendable_user_address(NETWORK_BURN_ADDRESS));
     }
 
     #[test]
-    fn wallet_address_starts_with_synw() {
-        let addr = generate_wallet_address(ZERO_KEY_HEX);
-        assert!(
-            addr.starts_with("synw"),
-            "wallet address must start with synw, got: {}",
-            addr
-        );
+    fn decoder_rejects_wrong_checksum_class_case_payload_and_padding() {
+        let wallet = generate_wallet_address(&hex::encode(zero_identity_key())).unwrap();
+        let mut checksum = wallet.clone().into_bytes();
+        let last = checksum.len() - 1;
+        checksum[last] = if checksum[last] == b'q' { b'p' } else { b'q' };
+        assert!(!is_valid_address(&String::from_utf8(checksum).unwrap()));
+        assert!(!is_valid_address(&wallet.to_ascii_uppercase()));
+        let typed = bech32::encode(
+            "syntxn",
+            vec![u5::try_from_u8(0).unwrap(); expected_data_symbols("syntxn").unwrap()],
+            Variant::Bech32m,
+        )
+        .unwrap();
+        assert!(!is_valid_address(&typed));
+        let reserved = bech32::encode(
+            "syne",
+            vec![u5::try_from_u8(0).unwrap(); expected_data_symbols("syne").unwrap()],
+            Variant::Bech32m,
+        )
+        .unwrap();
+        assert!(!is_valid_address(&reserved));
+        let short = bech32::encode(
+            "synw",
+            vec![u5::try_from_u8(0).unwrap(); expected_data_symbols("synw").unwrap() - 1],
+            Variant::Bech32m,
+        )
+        .unwrap();
+        assert!(!is_valid_address(&short));
+        let mut padded = vec![u5::try_from_u8(0).unwrap(); expected_data_symbols("synw").unwrap()];
+        padded.push(u5::try_from_u8(0).unwrap());
+        assert!(!is_valid_address(
+            &bech32::encode("synw", padded, Variant::Bech32m).unwrap()
+        ));
+        assert!(!is_valid_address(
+            &bech32::encode(
+                "synw",
+                vec![u5::try_from_u8(0).unwrap(); expected_data_symbols("synw").unwrap()],
+                Variant::Bech32,
+            )
+            .unwrap()
+        ));
     }
 
     #[test]
-    fn wallet_address_is_deterministic() {
-        let a = generate_wallet_address(ZERO_KEY_HEX);
-        let b = generate_wallet_address(ZERO_KEY_HEX);
-        assert_eq!(a, b, "wallet address must be deterministic");
-    }
-
-    #[test]
-    fn wallet_address_is_valid_bech32m() {
-        let addr = generate_wallet_address(ZERO_KEY_HEX);
-        assert!(
-            is_valid_address(&addr),
-            "wallet address must pass is_valid_address: {}",
-            addr
-        );
-    }
-
-    #[test]
-    fn wallet_address_matches_raw_public_key_bytes() {
-        let addr = generate_wallet_address(ZERO_KEY_HEX);
-        assert!(address_matches_public_key(&addr, ZERO_KEY_BYTES));
-        assert!(!address_matches_public_key(&addr, &[1u8; 32]));
-    }
-
-    #[test]
-    fn validator_address_is_41_chars() {
-        for group in 1u8..=5 {
-            let addr = generate_validator_address(ZERO_KEY_HEX, group);
-            assert_eq!(
-                addr.len(),
-                TARGET_ADDRESS_LEN,
-                "validator address group {} must be 41 chars: {}",
-                group,
-                addr
-            );
-        }
-    }
-
-    #[test]
-    fn validator_address_prefix() {
-        for group in 1u8..=5 {
-            let addr = generate_validator_address(ZERO_KEY_HEX, group);
-            let expected_prefix = format!("synv{}", group);
-            assert!(
-                addr.starts_with(&expected_prefix),
-                "expected prefix {}, got: {}",
-                expected_prefix,
-                addr
-            );
-        }
-    }
-
-    #[test]
-    fn validator_address_group_clamping() {
-        let addr_0 = generate_validator_address(ZERO_KEY_HEX, 0);
-        let addr_1 = generate_validator_address(ZERO_KEY_HEX, 1);
-        assert_eq!(addr_0, addr_1, "group 0 should clamp to group 1");
-
-        let addr_6 = generate_validator_address(ZERO_KEY_HEX, 6);
-        let addr_5 = generate_validator_address(ZERO_KEY_HEX, 5);
-        assert_eq!(addr_6, addr_5, "group 6 should clamp to group 5");
-    }
-
-    #[test]
-    fn class_based_address_is_41_chars() {
-        let addr = generate_class_based_address(ZERO_KEY_BYTES, 1);
+    fn wrappers_remain_deterministic_and_classified() {
+        let public_key = zero_identity_key();
+        let public_key_hex = hex::encode(&public_key);
         assert_eq!(
-            addr.len(),
-            TARGET_ADDRESS_LEN,
-            "class-based address must be 41 chars: {}",
-            addr
+            generate_class_based_address(&public_key, 3).unwrap(),
+            generate_validator_address(&public_key_hex, 3).unwrap()
         );
+        assert!(generate_validator_address(&public_key_hex, 0).is_err());
+        assert!(generate_validator_address(&public_key_hex, 6).is_err());
+        assert!(generate_validator_address("", 1).is_err());
+        assert!(generate_validator_address("not-hex", 1).is_err());
+        assert!(generate_class_based_address(&[], 1).is_err());
+        assert!(!address_matches_public_key(
+            &generate_wallet_address(&public_key_hex).unwrap(),
+            &[]
+        ));
+        assert!(generate_class_based_address(&public_key, 0).is_err());
+        assert!(generate_cluster_address("cluster", 0).is_err());
+        assert!(generate_cluster_address("cluster", 6).is_err());
+        assert!(is_valid_cluster_address(
+            &generate_cluster_address("cluster", 5).unwrap()
+        ));
+        let cluster = generate_validator_cluster_address("network:genesis:0:0").unwrap();
+        assert!(is_valid_cluster_address(&cluster));
+        assert_eq!(address_kind(&cluster), AddressKind::ValidatorCluster);
+        let fee = generate_fee_collector_address("fee-collector").unwrap();
+        assert_eq!(address_kind(&fee), AddressKind::FeeCollector);
+        assert!(is_protocol_controlled_address(&fee));
+        let contract = generate_generic_address("sync", OBJECT_PREIMAGE_HEX).unwrap();
+        assert_eq!(address_kind(&contract), AddressKind::Contract);
     }
 
     #[test]
-    fn class_based_matches_validator_for_same_key() {
-        // generate_class_based_address takes raw bytes; generate_validator_address takes hex.
-        // They should produce the same address for the same underlying key.
-        let addr_class = generate_class_based_address(ZERO_KEY_BYTES, 3);
-        let addr_val = generate_validator_address(ZERO_KEY_HEX, 3);
+    fn registry_rejects_typed_and_reserved_as_addresses() {
+        let typed = registry_entry_for_prefix("syntxn").unwrap();
+        assert!(typed.active);
+        assert_eq!(typed.classification, IdentifierClass::TypedIdentifier);
+        assert_eq!(typed.address_type, AddressKind::Unknown);
+        assert!(registry_entry_for_prefix("synixn").is_none());
+    }
+
+    #[test]
+    fn published_vectors_reproduce_in_core_runtime() {
+        let artifact: serde_json::Value = serde_json::from_str(include_str!(
+            "../standards/snts-01-address-engine-v1-vectors.json"
+        ))
+        .unwrap();
         assert_eq!(
-            addr_class, addr_val,
-            "class-based and validator addresses must match for the same key"
+            artifact["source_document_sha256"],
+            crate::snts_registry::SOURCE_DOCUMENT_SHA256
         );
-    }
-
-    #[test]
-    fn cluster_address_is_41_chars() {
-        let addr = generate_cluster_address("test-cluster-seed", 1);
-        assert_eq!(
-            addr.len(),
-            TARGET_ADDRESS_LEN,
-            "cluster address must be 41 chars: {}",
-            addr
-        );
-    }
-
-    #[test]
-    fn cluster_address_prefix() {
-        for group in 1u8..=5 {
-            let addr = generate_cluster_address("seed", group);
-            let expected_prefix = format!("syngrp{}", group);
-            assert!(
-                addr.starts_with(&expected_prefix),
-                "expected prefix {}, got: {}",
-                expected_prefix,
-                addr
-            );
+        assert_eq!(artifact["vectors"].as_array().unwrap().len(), 29);
+        for vector in artifact["vectors"].as_array().unwrap() {
+            let input = hex::decode(vector["input_hex"].as_str().unwrap()).unwrap();
+            let hrp = vector["hrp"].as_str().unwrap();
+            let address = match namespace(hrp).unwrap().classification {
+                IdentifierClass::KeyControlledAddress => {
+                    derive_key_controlled_address(hrp, &input).unwrap()
+                }
+                IdentifierClass::ObjectAddress => derive_object_address(hrp, &input).unwrap(),
+                other => panic!("vector has non-address classification {other:?}"),
+            };
+            assert_eq!(address, vector["expected_address"]);
+            let decoded = decode_address(&address).unwrap();
+            let expected_words = vector["expected_data_words"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|word| word.as_u64().unwrap() as u8)
+                .collect::<Vec<_>>();
+            assert_eq!(decoded.data_words, expected_words);
         }
-    }
-
-    #[test]
-    fn cluster_address_is_deterministic() {
-        let a = generate_cluster_address("deterministic-seed-value", 2);
-        let b = generate_cluster_address("deterministic-seed-value", 2);
-        assert_eq!(a, b, "cluster address must be deterministic");
-    }
-
-    #[test]
-    fn fee_collector_prefix_is_registered_as_system_account() {
-        let entry = registry_entry_for_prefix("synf").expect("synf registry entry");
-        assert!(entry.active);
-        assert_eq!(entry.address_type, AddressKind::FeeCollector);
-
-        let fee_collector = generate_fee_collector_address("fee-collector");
-        assert_eq!(fee_collector.len(), TARGET_ADDRESS_LEN);
-        assert!(fee_collector.starts_with("synf"));
-        assert!(is_protocol_controlled_address(&fee_collector));
-        assert!(!is_spendable_user_address(&fee_collector));
-    }
-
-    #[test]
-    fn syngrp1_cluster_address_is_protocol_controlled() {
-        let addr = generate_validator_cluster_address("network:genesis:0:0");
-        assert_eq!(addr.len(), TARGET_ADDRESS_LEN);
-        assert!(addr.starts_with("syngrp1"));
-        assert!(is_valid_cluster_address(&addr));
-        assert_eq!(address_kind(&addr), AddressKind::ValidatorCluster);
-        assert!(is_protocol_controlled_address(&addr));
-        assert!(!is_spendable_user_address(&addr));
-    }
-
-    #[test]
-    fn generic_address_is_41_chars() {
-        let addr = generate_generic_address("sync", ZERO_KEY_HEX);
-        assert_eq!(
-            addr.len(),
-            TARGET_ADDRESS_LEN,
-            "generic address must be 41 chars: {}",
-            addr
-        );
-        assert!(addr.starts_with("sync1"));
-        assert_eq!(address_kind(&addr), AddressKind::Contract);
-    }
-
-    #[test]
-    fn is_valid_address_rejects_wrong_length() {
-        assert!(!is_valid_address("synw1short"));
-        assert!(!is_valid_address(&"synw1".repeat(10)));
-    }
-
-    #[test]
-    fn is_valid_address_rejects_non_syn_prefix() {
-        // Build a string of the right length that doesn't start with 'syn'.
-        let fake = format!("{:041}", "abcdefghijklmnopqrstuvwxyz0123456789abcde");
-        assert!(!is_valid_address(&fake));
-    }
-
-    #[test]
-    fn is_valid_address_accepts_generated_addresses() {
-        let addresses = [
-            generate_wallet_address(ZERO_KEY_HEX),
-            generate_validator_address(ZERO_KEY_HEX, 1),
-            generate_class_based_address(ZERO_KEY_BYTES, 2),
-            generate_cluster_address("seed", 3),
-            generate_generic_address("synq", ZERO_KEY_HEX),
-            generate_generic_address("sync", ZERO_KEY_HEX),
-        ];
-        for addr in &addresses {
-            assert!(is_valid_address(addr), "expected valid address: {}", addr);
+        for vector in artifact["negative_vectors"].as_array().unwrap() {
+            assert!(decode_address(vector["value"].as_str().unwrap()).is_err());
         }
-    }
-
-    #[test]
-    fn different_keys_produce_different_addresses() {
-        let key_a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let key_b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-        assert_ne!(
-            generate_wallet_address(key_a),
-            generate_wallet_address(key_b),
-            "different keys must produce different addresses"
-        );
     }
 }

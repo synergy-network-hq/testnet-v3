@@ -1,5 +1,11 @@
 # Community Validator Onboarding Runbook
 
+Status: **historical pre-P3 offline tooling reference.** The Chain `1264` /
+`synergy-testnet-v3` examples below are preserved test-fixture commands, not
+instructions for Chain `1266` / network `testnet` / `posy/3.0`. Do not adapt or
+run them for P3. P3 onboarding requires a finalized v3-to-v3 transition and a
+dedicated P3 runbook after executed-transition authority is qualified.
+
 This runbook covers dry-run onboarding preflight, bundle planning, dry-run
 vote-only join checks, and offline activation eligibility gates. It does not
 authorize live validator activation, validator restarts, key changes, WireGuard

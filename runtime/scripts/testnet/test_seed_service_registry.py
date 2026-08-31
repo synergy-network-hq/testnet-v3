@@ -17,7 +17,12 @@ SPEC.loader.exec_module(seed)
 
 
 class SeedServiceRegistryTests(unittest.TestCase):
-    def make_state(self, *, default_ttl_seconds: int = 120):
+    def make_state(
+        self,
+        *,
+        default_ttl_seconds: int = 120,
+        allow_private_qualification_endpoints: bool = False,
+    ):
         config = seed.SeedConfig(
             label="test-seed",
             seed_id="seed-test",
@@ -26,6 +31,10 @@ class SeedServiceRegistryTests(unittest.TestCase):
             max_ttl_seconds=3600,
             static_dialback_on_start=False,
             state_file="",
+            allow_private_qualification_endpoints=allow_private_qualification_endpoints,
+            public_bootstrap_roles=(
+                ["validator"] if allow_private_qualification_endpoints else ["relayer"]
+            ),
         )
         state = seed.SeedState(config)
         state._dialback = lambda endpoint: (True, None)
@@ -84,6 +93,29 @@ class SeedServiceRegistryTests(unittest.TestCase):
                 self.assertEqual(status, HTTPStatus.BAD_REQUEST)
                 self.assertFalse(response["accepted"])
                 self.assertIn("reason", response)
+
+    def test_qualification_seed_accepts_only_loopback_private_endpoints(self) -> None:
+        state = self.make_state(allow_private_qualification_endpoints=True)
+        for endpoint in ("127.0.0.1:5602", "localhost:5603", "[::1]:5604"):
+            with self.subTest(endpoint=endpoint):
+                status, response = state.register(
+                    self.registry_payload(endpoint),
+                    observed_remote_ip="127.0.0.1",
+                    replicate=False,
+                )
+                self.assertEqual(status, HTTPStatus.OK)
+                self.assertTrue(response["accepted"])
+                self.assertIn(endpoint, state.peer_list_payload()["peers"])
+
+        for endpoint in ("10.0.0.1:5605", "192.168.1.10:5606"):
+            with self.subTest(endpoint=endpoint):
+                status, response = state.register(
+                    self.registry_payload(endpoint),
+                    observed_remote_ip="127.0.0.1",
+                    replicate=False,
+                )
+                self.assertEqual(status, HTTPStatus.BAD_REQUEST)
+                self.assertFalse(response["accepted"])
 
     def test_seed_expires_stale_dynamic_peers(self) -> None:
         state = self.make_state(default_ttl_seconds=30)

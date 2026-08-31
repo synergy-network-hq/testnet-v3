@@ -7,6 +7,9 @@ pub mod messages;
 pub mod networking;
 pub(crate) mod validator_transport_registry;
 
+#[cfg(test)]
+mod protected_ciphertext_adversarial_tests;
+
 use self::networking::P2PNetwork;
 use crate::block::BlockChain;
 use crate::config::NodeConfig;

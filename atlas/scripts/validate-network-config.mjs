@@ -4,7 +4,8 @@ import { pathToFileURL } from 'node:url';
 
 const HEX_64 = /^[a-f0-9]{64}$/;
 const HEX_8 = /^[a-f0-9]{8}$/;
-const REQUIRED_SECTION_NAMES = ['token_metadata', 'validator_registry', 'contracts', 'fee_reward', 'posy_etdag'];
+const REQUIRED_SECTION_NAMES = ['token_metadata', 'validator_registry', 'contracts', 'fee_reward', 'coordinated_round_robin'];
+const P1_PRODUCERS = ['validator-2', 'validator-3', 'validator-4', 'validator-5', 'validator-6'];
 
 function fail(message) {
   throw new Error(`Invalid Atlas Testnet-v3 network configuration: ${message}`);
@@ -37,6 +38,7 @@ export function validateNetworkConfig(config) {
   const input = asObject(config, 'configuration');
   if (input.schema_version !== 1) fail('schema_version must be 1');
   if (input.chain_id !== 1266) fail('chain_id must be 1266');
+  if (input.chain_incarnation !== 4) fail('chain_incarnation must be 4');
   if (input.network_id !== 'synergy-testnet-v3') fail('network_id must be synergy-testnet-v3');
   if (!HEX_64.test(input.genesis_hash || '')) fail('genesis_hash must be a lowercase 32-byte hash');
   if (!HEX_8.test(input.network_magic || '')) fail('network_magic must be a lowercase 4-byte value');
@@ -58,8 +60,18 @@ export function validateNetworkConfig(config) {
     requiredUrl(section.source_url, `${name}.source_url`);
     requiredDigest(section.sha256, `${name}.sha256`);
   }
-  if (!Number.isInteger(input.posy_etdag.target_block_time_ms) || input.posy_etdag.target_block_time_ms <= 0) {
-    fail('posy_etdag.target_block_time_ms must be a positive integer');
+  const coordinated = input.coordinated_round_robin;
+  if (coordinated.mode !== 'coordinated_round_robin_v1') {
+    fail('coordinated_round_robin.mode must be coordinated_round_robin_v1');
+  }
+  if (coordinated.coordinator_id !== 'validator-1') {
+    fail('coordinated_round_robin.coordinator_id must be validator-1');
+  }
+  if (JSON.stringify(coordinated.producer_ids) !== JSON.stringify(P1_PRODUCERS)) {
+    fail('coordinated_round_robin.producer_ids must be validator-2 through validator-6 in order');
+  }
+  if (coordinated.producer_turn_timeout_ms !== 4000) {
+    fail('coordinated_round_robin.producer_turn_timeout_ms must be 4000');
   }
 
   return {
@@ -85,6 +97,7 @@ async function main() {
   const config = await readAndValidateConfig(path);
   process.stdout.write(`${JSON.stringify({
     chain_id: config.chain_id,
+    chain_incarnation: config.chain_incarnation,
     network_id: config.network_id,
     genesis_hash: config.genesis_hash,
     network_magic: config.network_magic,

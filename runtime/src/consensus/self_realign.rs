@@ -8,7 +8,7 @@ use crate::crypto::aegis_pqvm::{
 };
 use crate::synergy_types::{
     AegisPqKeyId, AegisPqKeyRole, AegisPqPublicKey, AegisPqSignature, CanonicalSerialize, Epoch,
-    SYNERGY_TESTNET_V3_CHAIN_ID, SYNERGY_TESTNET_V3_NETWORK_ID,
+    SYNERGY_TESTNET_V3_CHAIN_ID, SYNERGY_TESTNET_V3_NETWORK_ID, TESTNET_V3_CHAIN_INCARNATION,
 };
 use serde::de::{IgnoredAny, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
@@ -417,6 +417,7 @@ pub struct SnapshotQcEvidence {
 pub struct SnapshotManifest {
     pub manifest_version: u32,
     pub chain_id: u64,
+    pub chain_incarnation: u64,
     pub chain_id_hex: String,
     pub network_id: String,
     pub genesis_hash: String,
@@ -493,6 +494,7 @@ pub struct SnapshotBuildInput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotVerificationPolicy {
     pub expected_chain_id: u64,
+    pub expected_chain_incarnation: u64,
     pub expected_network_id: String,
     pub expected_genesis_hash: String,
     pub expected_snapshot_class: Option<String>,
@@ -509,6 +511,7 @@ impl Default for SnapshotVerificationPolicy {
     fn default() -> Self {
         Self {
             expected_chain_id: SYNERGY_TESTNET_V3_CHAIN_ID,
+            expected_chain_incarnation: TESTNET_V3_CHAIN_INCARNATION,
             expected_network_id: SYNERGY_TESTNET_V3_NETWORK_ID.to_string(),
             expected_genesis_hash: expected_genesis_hash(),
             expected_snapshot_class: None,
@@ -1161,6 +1164,7 @@ pub fn create_snapshot_manifest(input: SnapshotBuildInput) -> Result<SnapshotMan
     Ok(SnapshotManifest {
         manifest_version: SNAPSHOT_MANIFEST_VERSION,
         chain_id: SYNERGY_TESTNET_V3_CHAIN_ID,
+        chain_incarnation: TESTNET_V3_CHAIN_INCARNATION,
         chain_id_hex: "0x4f0".to_string(),
         network_id: SYNERGY_TESTNET_V3_NETWORK_ID.to_string(),
         genesis_hash: expected_genesis_hash(),
@@ -1230,6 +1234,9 @@ pub fn verify_signed_snapshot_manifest(
     }
     if manifest.chain_id != policy.expected_chain_id {
         errors.push("snapshot manifest wrong chain_id".to_string());
+    }
+    if manifest.chain_incarnation != policy.expected_chain_incarnation {
+        errors.push("snapshot manifest wrong chain_incarnation".to_string());
     }
     if manifest.chain_id_hex != "0x4f0" {
         errors.push("snapshot manifest wrong chain_id_hex".to_string());
@@ -1796,14 +1803,7 @@ fn verify_manifest_signature(signed: &SignedSnapshotManifest) -> Result<(), Stri
     )
     .map_err(|error| error.to_string())?;
     let current_payload = manifest.canonical_bytes()?;
-    match verify_manifest_signature_payload(&verifier, signed, &current_payload) {
-        Ok(()) => Ok(()),
-        Err(current_error) => {
-            let legacy_payload = legacy_snapshot_manifest_canonical_bytes(manifest)?;
-            verify_manifest_signature_payload(&verifier, signed, &legacy_payload)
-                .map_err(|_| current_error)
-        }
-    }
+    verify_manifest_signature_payload(&verifier, signed, &current_payload)
 }
 
 fn verify_manifest_signature_payload(
@@ -1823,107 +1823,6 @@ fn verify_manifest_signature_payload(
             &signed.aegis_pq_signature,
         )
         .map_err(|error| error.to_string())
-}
-
-#[derive(Serialize)]
-struct LegacySnapshotManifestRef<'a> {
-    manifest_version: u32,
-    chain_id: u64,
-    chain_id_hex: &'a str,
-    network_id: &'a str,
-    genesis_hash: &'a str,
-    snapshot_class: &'a str,
-    allowed_restore_roles: &'a [String],
-    snapshot_height: u64,
-    snapshot_block_hash: &'a str,
-    parent_hash: &'a str,
-    state_root: Option<&'a String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    consensus_fork: Option<&'a ConsensusForkMigration>,
-    canonical_lock_height: u64,
-    canonical_lock_hash: &'a str,
-    qc_evidence: LegacySnapshotQcEvidenceRef<'a>,
-    active_validator_set: &'a [String],
-    quorum_threshold: u64,
-    files: &'a [SnapshotFileEntry],
-    full_archive_sha256: &'a str,
-    created_at: u64,
-    source_node_id: &'a str,
-    source_role: &'a str,
-    runtime_checksum: &'a str,
-    source_node_quarantined: bool,
-    source_node_majority_branch: bool,
-    conflict_height_hash: Option<&'a String>,
-    manifest_signer_uma_id: &'a str,
-    manifest_signing_key_id: &'a AegisPqKeyId,
-    manifest_signer_public_key: &'a AegisPqPublicKey,
-    manifest_signature_epoch: u64,
-}
-
-#[derive(Serialize)]
-struct LegacySnapshotQcEvidenceRef<'a> {
-    committed_qc_height: u64,
-    committed_qc_hash: &'a str,
-    vote_count: u64,
-    signer_set: &'a [String],
-    aegis_pqc_verified: bool,
-    duplicate_signer_check_passed: bool,
-    active_validator_count: usize,
-    active_validator_set_is_genesis_5: bool,
-    relayers_rpc_support_counted_toward_quorum: bool,
-}
-
-fn legacy_snapshot_manifest_canonical_bytes(
-    manifest: &SnapshotManifest,
-) -> Result<Vec<u8>, String> {
-    let legacy = LegacySnapshotManifestRef {
-        manifest_version: manifest.manifest_version,
-        chain_id: manifest.chain_id,
-        chain_id_hex: &manifest.chain_id_hex,
-        network_id: &manifest.network_id,
-        genesis_hash: &manifest.genesis_hash,
-        snapshot_class: &manifest.snapshot_class,
-        allowed_restore_roles: &manifest.allowed_restore_roles,
-        snapshot_height: manifest.snapshot_height,
-        snapshot_block_hash: &manifest.snapshot_block_hash,
-        parent_hash: &manifest.parent_hash,
-        state_root: manifest.state_root.as_ref(),
-        consensus_fork: manifest.consensus_fork.as_ref(),
-        canonical_lock_height: manifest.canonical_lock_height,
-        canonical_lock_hash: &manifest.canonical_lock_hash,
-        qc_evidence: LegacySnapshotQcEvidenceRef {
-            committed_qc_height: manifest.qc_evidence.committed_qc_height,
-            committed_qc_hash: &manifest.qc_evidence.committed_qc_hash,
-            vote_count: manifest.qc_evidence.vote_count,
-            signer_set: &manifest.qc_evidence.signer_set,
-            aegis_pqc_verified: manifest.qc_evidence.aegis_pqc_verified,
-            duplicate_signer_check_passed: manifest.qc_evidence.duplicate_signer_check_passed,
-            active_validator_count: manifest.qc_evidence.active_validator_count,
-            active_validator_set_is_genesis_5: manifest
-                .qc_evidence
-                .active_validator_set_meets_baseline,
-            relayers_rpc_support_counted_toward_quorum: manifest
-                .qc_evidence
-                .relayers_rpc_support_counted_toward_quorum,
-        },
-        active_validator_set: &manifest.active_validator_set,
-        quorum_threshold: manifest.quorum_threshold,
-        files: &manifest.files,
-        full_archive_sha256: &manifest.full_archive_sha256,
-        created_at: manifest.created_at,
-        source_node_id: &manifest.source_node_id,
-        source_role: &manifest.source_role,
-        runtime_checksum: &manifest.runtime_checksum,
-        source_node_quarantined: manifest.source_node_quarantined,
-        source_node_majority_branch: manifest.source_node_majority_branch,
-        conflict_height_hash: manifest.conflict_height_hash.as_ref(),
-        manifest_signer_uma_id: &manifest.manifest_signer_uma_id,
-        manifest_signing_key_id: &manifest.manifest_signing_key_id,
-        manifest_signer_public_key: &manifest.manifest_signer_public_key,
-        manifest_signature_epoch: manifest.manifest_signature_epoch,
-    };
-    serde_json::to_vec(&legacy)
-        .map_err(|error| format!("legacy canonical serialize failed: {error}"))
 }
 
 fn verify_snapshot_relative_path(relative_path: &str) -> Result<(), String> {
@@ -2544,11 +2443,22 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_manifest_requires_chain_id_1264() {
+    fn snapshot_manifest_requires_chain_id_1266() {
         let mut signed = signed_manifest();
         signed.manifest.chain_id = 1263;
         let report = verify(&signed);
         assert!(report.errors.iter().any(|error| error.contains("chain_id")));
+    }
+
+    #[test]
+    fn snapshot_manifest_rejects_old_chain_incarnation() {
+        let mut signed = signed_manifest();
+        signed.manifest.chain_incarnation = 3;
+        let report = verify(&signed);
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("chain_incarnation")));
     }
 
     #[test]

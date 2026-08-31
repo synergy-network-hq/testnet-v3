@@ -1,0 +1,101 @@
+name: PoSy V3 PR Verification
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/posy-v3-pr-verification.yml"
+      - "docs/posy-v3/**"
+      - "genesis-contracts/**"
+      - "launch/**"
+      - "network-identifiers.testnet-v3.identity-assigned.json"
+      - "runtime/**"
+      - "scripts/**"
+  workflow_dispatch:
+
+concurrency:
+  group: posy-v3-pr-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  CARGO_BUILD_JOBS: "1"
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  verify:
+    name: P3 tests and distinct five-node harnesses
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Checkout locked SynQ source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          lock=launch/POSY_V3_PR_DEPENDENCIES.lock.json
+          [[ "$(jq -er '.schema' "$lock")" == "synergy-posy-v3-pr-dependencies-v1" ]]
+          [[ "$(jq -er '.status' "$lock")" == "PR_QUALIFICATION_INPUT_NOT_RELEASE_APPROVAL" ]]
+          [[ "$(jq -er '.chain_id' "$lock")" == "1266" ]]
+          [[ "$(jq -er '.network_id' "$lock")" == "testnet" ]]
+          [[ "$(jq -er '.release_id' "$lock")" == "testnet-v3" ]]
+          [[ "$(jq -er '.protocol_version' "$lock")" == "posy/3.0" ]]
+          source_base="$(jq -er '.core.source_base_revision' "$lock")"
+          base_ref="origin/${GITHUB_BASE_REF:-main}"
+          [[ "$(git merge-base HEAD "$base_ref")" == "$source_base" ]]
+
+          synq_revision="$(jq -er '.synq.revision' "$lock")"
+          synq_root="${GITHUB_WORKSPACE}/../synq-language"
+          auth=()
+          if [[ -n "${GH_TOKEN:-}" ]]; then
+            header="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+            auth=(-c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${header}")
+          fi
+          git init --quiet "$synq_root"
+          git -C "$synq_root" remote add origin https://github.com/synergy-network-hq/synq-language.git
+          git -C "$synq_root" "${auth[@]}" fetch --depth 1 origin "$synq_revision"
+          git -C "$synq_root" checkout --detach --quiet FETCH_HEAD
+          git -C "$synq_root" "${auth[@]}" submodule update --init --recursive
+          [[ "$(git -C "$synq_root" rev-parse HEAD)" == "$synq_revision" ]]
+          expected_synq_aegis="$(jq -er '.synq.aegis_pqsynq_submodule_revision' "$lock")"
+          [[ "$(git -C "$synq_root" rev-parse HEAD:aegis-pqsynq)" == "$expected_synq_aegis" ]]
+          expected_core_aegis="$(jq -er '.aegis.revision' "$lock")"
+          [[ "$(git rev-parse HEAD:runtime/aegis-pqvm)" == "$expected_core_aegis" ]]
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang cmake pkg-config libssl-dev unzip
+
+      - name: Run serial PoSy V3 PR verification
+        shell: bash
+        env:
+          POSY_V3_EVIDENCE_DIR: ${{ runner.temp }}/posy-v3-pr-evidence
+        run: runtime/scripts/testnet/verify-posy-v3-pr.sh full
+
+      - name: Upload bounded verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: posy-v3-pr-evidence-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/posy-v3-pr-evidence/*.json
+            ${{ runner.temp }}/posy-v3-pr-evidence/*.list
+            ${{ runner.temp }}/posy-v3-pr-evidence/*.log
+            ${{ runner.temp }}/posy-v3-pr-evidence/*.txt

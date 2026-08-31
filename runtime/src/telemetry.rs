@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::config::NodeConfig;
+use crate::config::{NodeConfig, ResolvedConsensusMode};
 use crate::gas::constants::BLOCK_GAS_LIMIT;
 use crate::info;
 use crate::rpc::rpc_server::{SHARED_CHAIN, SYNC_MANAGER, TX_POOL};
@@ -15,8 +15,50 @@ const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8"
 
 type ChainMetricsSnapshot = (u64, u64, u64, u64, u64, u64, u64, u64, f64, f64, f64);
 
+/// A process-local view of the signed P1 coordinator lifecycle.  It carries
+/// only public finality/assignment identities; no signing material, proposal
+/// body, or mempool data is ever exposed through metrics.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CoordinatedConsensusTelemetrySnapshot {
+    pub active: bool,
+    pub finalized_height: u64,
+    pub finalized_block_id: String,
+    pub finalized_producer_id: String,
+    pub finalized_producer_round: u64,
+    pub assigned_height: u64,
+    pub assigned_producer_round: u64,
+    pub assigned_producer_id: String,
+    pub missed_turns_total: u64,
+}
+
 lazy_static::lazy_static! {
     static ref LAST_CHAIN_METRICS_SNAPSHOT: Mutex<Option<ChainMetricsSnapshot>> = Mutex::new(None);
+    static ref COORDINATED_CONSENSUS_TELEMETRY: Mutex<CoordinatedConsensusTelemetrySnapshot> =
+        Mutex::new(CoordinatedConsensusTelemetrySnapshot::default());
+}
+
+/// Publishes the P1 validator worker's durable state after every lifecycle
+/// transition.  The role runtime owns the source state; this module only
+/// renders a read-only copy for qualification and monitoring.
+pub fn publish_coordinated_consensus_telemetry(snapshot: CoordinatedConsensusTelemetrySnapshot) {
+    if let Ok(mut telemetry) = COORDINATED_CONSENSUS_TELEMETRY.lock() {
+        *telemetry = snapshot;
+    }
+}
+
+/// Clears P1 worker telemetry during a controlled worker shutdown so a later
+/// non-P1 startup in the same process cannot inherit stale consensus state.
+pub fn clear_coordinated_consensus_telemetry() {
+    if let Ok(mut telemetry) = COORDINATED_CONSENSUS_TELEMETRY.lock() {
+        *telemetry = CoordinatedConsensusTelemetrySnapshot::default();
+    }
+}
+
+fn coordinated_consensus_telemetry_snapshot() -> CoordinatedConsensusTelemetrySnapshot {
+    COORDINATED_CONSENSUS_TELEMETRY
+        .lock()
+        .map(|telemetry| telemetry.clone())
+        .unwrap_or_default()
 }
 
 pub fn start_metrics_server(bind_address: &str, config: NodeConfig, start_time: SystemTime) {
@@ -787,6 +829,417 @@ fn render_metrics(config: &NodeConfig, start_time: SystemTime) -> String {
         "synergy_qrpc_fallback_total {qrpc_fallback_total}\n"
     ));
 
+    // These series are sourced directly from the operational typed PoSy
+    // coordinator. Observer/indexing timestamps are deliberately excluded:
+    // Atlas and release monitoring must not infer consensus health from
+    // database insertion time.
+    let typed = crate::consensus::typed_coordinator::typed_consensus_telemetry_snapshot();
+    let pqc = crate::crypto::aegis_pqvm::pqc_verification_metrics_snapshot();
+    let p2p_handshakes = crate::p2p::networking::p2p_handshake_metrics_snapshot();
+    push_metric_header(
+        &mut body,
+        "p2p_verified_handshakes_total",
+        "P2P handshakes successfully verified with the real post-quantum implementation.",
+        "counter",
+    );
+    body.push_str(&format!(
+        "p2p_verified_handshakes_total{{algorithm=\"ML-DSA-65\"}} {}\n",
+        p2p_handshakes.mldsa65_verified
+    ));
+    body.push_str(&format!(
+        "p2p_verified_handshakes_total{{algorithm=\"FN-DSA-1024\"}} {}\n",
+        p2p_handshakes.fndsa_verified
+    ));
+    push_metric_header(
+        &mut body,
+        "consensus_finalized_height",
+        "Latest height finalized by the typed validator coordinator.",
+        "gauge",
+    );
+    body.push_str(&format!(
+        "consensus_finalized_height {}\n",
+        typed.finalized_height
+    ));
+    push_metric_header(
+        &mut body,
+        "consensus_finalized_block_id",
+        "Identity of the latest block finalized directly by typed consensus.",
+        "gauge",
+    );
+    body.push_str(&format!(
+        "consensus_finalized_block_id{{block_id=\"{}\"}} 1\n",
+        escape_label_value(&typed.finalized_block_id)
+    ));
+    push_metric_header(
+        &mut body,
+        "consensus_finalized_round",
+        "Round that finalized the latest typed block.",
+        "gauge",
+    );
+    body.push_str(&format!(
+        "consensus_finalized_round {}\n",
+        typed.finalized_round
+    ));
+    push_metric_header(
+        &mut body,
+        "consensus_finality_interval_seconds",
+        "Wall-clock interval between the latest two local typed finality commits.",
+        "gauge",
+    );
+    body.push_str(&format!(
+        "consensus_finality_interval_seconds {:.6}\n",
+        typed.finality_interval_millis as f64 / 1_000.0
+    ));
+    let mut finality_intervals = typed
+        .finality_intervals_millis
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+    finality_intervals.sort_unstable();
+    let finality_sample_count = finality_intervals.len();
+    let finality_mean_millis = if finality_sample_count == 0 {
+        0.0
+    } else {
+        finality_intervals
+            .iter()
+            .map(|value| *value as f64)
+            .sum::<f64>()
+            / finality_sample_count as f64
+    };
+    let percentile_millis = |percentile: usize| -> u64 {
+        if finality_intervals.is_empty() {
+            return 0;
+        }
+        let rank = (percentile * finality_intervals.len()).div_ceil(100);
+        finality_intervals[rank.saturating_sub(1).min(finality_intervals.len() - 1)]
+    };
+    for (name, help, value) in [
+        (
+            "consensus_finality_interval_mean_seconds",
+            "Mean typed finality interval over the latest 10,000 finalized-block intervals.",
+            finality_mean_millis / 1_000.0,
+        ),
+        (
+            "consensus_finality_interval_median_seconds",
+            "Median typed finality interval over the latest 10,000 finalized-block intervals.",
+            percentile_millis(50) as f64 / 1_000.0,
+        ),
+        (
+            "consensus_finality_interval_p95_seconds",
+            "P95 typed finality interval over the latest 10,000 finalized-block intervals.",
+            percentile_millis(95) as f64 / 1_000.0,
+        ),
+        (
+            "consensus_finality_interval_sample_count",
+            "Number of typed finality intervals retained for direct health qualification.",
+            finality_sample_count as f64,
+        ),
+    ] {
+        push_metric_header(&mut body, name, help, "gauge");
+        body.push_str(&format!("{name} {value:.6}\n"));
+    }
+    push_metric_header(
+        &mut body,
+        "consensus_phase_duration_seconds",
+        "Most recently completed typed consensus phase duration.",
+        "gauge",
+    );
+    for (phase, millis) in &typed.phase_duration_millis {
+        body.push_str(&format!(
+            "consensus_phase_duration_seconds{{phase=\"{}\"}} {:.6}\n",
+            escape_label_value(phase),
+            *millis as f64 / 1_000.0
+        ));
+    }
+    let round_zero_ratio = if typed.finalized_blocks == 0 {
+        0.0
+    } else {
+        typed.round_zero_finalized_blocks as f64 / typed.finalized_blocks as f64
+    };
+    let startup_phase = if typed.startup_phase.is_empty() {
+        "UNINITIALIZED"
+    } else {
+        typed.startup_phase.as_str()
+    };
+    push_metric_header(
+        &mut body,
+        "consensus_startup_phase_info",
+        "Current typed-consensus startup/readiness phase.",
+        "gauge",
+    );
+    body.push_str(&format!(
+        "consensus_startup_phase_info{{phase=\"{}\"}} 1\n",
+        escape_label_value(startup_phase)
+    ));
+    push_metric_header(
+        &mut body,
+        "consensus_ready",
+        "One only after recovery, mailbox, peer readiness, and release barrier complete.",
+        "gauge",
+    );
+    body.push_str(&format!(
+        "consensus_ready {}\n",
+        u8::from(startup_phase == "RUNNING")
+    ));
+    for (name, help, value) in [
+        (
+            "consensus_round_zero_ratio",
+            "Fraction of locally finalized typed blocks committed in round zero.",
+            round_zero_ratio,
+        ),
+        (
+            "consensus_current_height",
+            "Current typed consensus height.",
+            typed.current_height as f64,
+        ),
+        (
+            "consensus_current_round",
+            "Current typed consensus round.",
+            typed.current_round as f64,
+        ),
+        (
+            "consensus_prepared_height",
+            "Height of the current durable prepared certificate.",
+            typed.prepared_height as f64,
+        ),
+        (
+            "consensus_prepared_round",
+            "Round of the current durable prepared certificate.",
+            typed.prepared_round as f64,
+        ),
+        (
+            "consensus_mailbox_depth",
+            "Messages in the typed startup buffer and bounded coordinator mailbox quotas.",
+            typed.mailbox_depth as f64,
+        ),
+    ] {
+        push_metric_header(&mut body, name, help, "gauge");
+        body.push_str(&format!("{name} {value}\n"));
+    }
+    push_metric_header(
+        &mut body,
+        "consensus_prepared_candidate",
+        "Candidate identity held by the latest durable prepared certificate.",
+        "gauge",
+    );
+    body.push_str(&format!(
+        "consensus_prepared_candidate{{candidate_id=\"{}\"}} 1\n",
+        escape_label_value(&typed.prepared_candidate)
+    ));
+    for (name, help, value) in [
+        (
+            "consensus_highest_qc_height",
+            "Height of the highest durable typed finality quorum certificate.",
+            typed.highest_qc_height,
+        ),
+        (
+            "consensus_highest_tc_round",
+            "Next round authorized by the highest durable timeout certificate.",
+            typed.highest_tc_round,
+        ),
+    ] {
+        push_metric_header(&mut body, name, help, "gauge");
+        body.push_str(&format!("{name} {value}\n"));
+    }
+    for (name, help, label, value) in [
+        (
+            "consensus_highest_qc_block_id",
+            "Candidate bound by the highest durable finality QC.",
+            "block_id",
+            typed.highest_qc_block_id.as_str(),
+        ),
+        (
+            "consensus_highest_qc_root",
+            "Canonical root of the highest durable finality QC.",
+            "root",
+            typed.highest_qc_root.as_str(),
+        ),
+        (
+            "consensus_highest_tc_root",
+            "Canonical root of the highest durable timeout certificate.",
+            "root",
+            typed.highest_tc_root.as_str(),
+        ),
+    ] {
+        push_metric_header(&mut body, name, help, "gauge");
+        body.push_str(&format!(
+            "{name}{{{label}=\"{}\"}} 1\n",
+            escape_label_value(value)
+        ));
+    }
+    if let Some(identity) = crate::desired_state::verified_desired_state_identity() {
+        push_metric_header(
+            &mut body,
+            "chain1266_desired_state_info",
+            "Exact verified release, source, artifact, config, Genesis, and state identity.",
+            "gauge",
+        );
+        body.push_str(&format!(
+            concat!(
+                "chain1266_desired_state_info{{release_id=\"{}\",node_id=\"{}\",role_profile=\"{}\",",
+                "chain_id=\"{}\",chain_incarnation=\"{}\",genesis_hash=\"{}\",validator_set_root=\"{}\",",
+                "consensus_state_schema_version=\"{}\",state_namespace=\"{}\",testnet_v3_revision=\"{}\",",
+                "synq_revision=\"{}\",aegis_revision=\"{}\",binary_sha256=\"{}\",configuration_sha256=\"{}\",",
+                "desired_state_sha256=\"{}\",desired_state_signature_sha256=\"{}\",state_root=\"{}\"}} 1\n"
+            ),
+            escape_label_value(&identity.release_id),
+            escape_label_value(&identity.node_id),
+            escape_label_value(&identity.role_profile),
+            identity.chain_id,
+            identity.chain_incarnation,
+            escape_label_value(&identity.genesis_hash),
+            escape_label_value(&identity.validator_set_root),
+            identity.consensus_state_schema_version,
+            escape_label_value(&identity.directory_namespace),
+            escape_label_value(&identity.testnet_v3_revision),
+            escape_label_value(&identity.synq_revision),
+            escape_label_value(&identity.aegis_revision),
+            escape_label_value(&identity.binary_sha256),
+            escape_label_value(&identity.configuration_sha256),
+            escape_label_value(&identity.desired_state_sha256),
+            escape_label_value(&identity.desired_state_signature_sha256),
+            escape_label_value(&identity.state_root),
+        ));
+    }
+    for (name, help, values) in [
+        (
+            "consensus_messages_received_total",
+            "Typed consensus messages received by type.",
+            &typed.messages_received,
+        ),
+        (
+            "consensus_messages_deduplicated_total",
+            "Typed consensus messages suppressed as exact replays by type.",
+            &typed.messages_deduplicated,
+        ),
+        (
+            "consensus_messages_rejected_precrypto_total",
+            "Typed messages rejected before PQ verification by reason.",
+            &typed.messages_rejected_precrypto,
+        ),
+        (
+            "consensus_rebroadcast_total",
+            "Typed consensus rebroadcasts by message type.",
+            &typed.rebroadcasts,
+        ),
+    ] {
+        push_metric_header(&mut body, name, help, "counter");
+        let label_name = if name == "consensus_messages_rejected_precrypto_total" {
+            "reason"
+        } else {
+            "type"
+        };
+        for (label, value) in values {
+            body.push_str(&format!(
+                "{name}{{{label_name}=\"{}\"}} {value}\n",
+                escape_label_value(label)
+            ));
+        }
+    }
+    for (name, help, value, metric_type) in [
+        (
+            "pqc_verification_requests_total",
+            "Uncached PQ verification jobs submitted to the bounded worker pool.",
+            pqc.requests as f64,
+            "counter",
+        ),
+        (
+            "pqc_verification_cache_hits_total",
+            "Positive PQ verification cache hits.",
+            pqc.cache_hits as f64,
+            "counter",
+        ),
+        (
+            "pqc_verification_cache_misses_total",
+            "Positive PQ verification cache misses.",
+            pqc.cache_misses as f64,
+            "counter",
+        ),
+        (
+            "pqc_verification_duration_seconds",
+            "Cumulative worker time spent performing uncached PQ verification.",
+            pqc.verification_duration_micros as f64 / 1_000_000.0,
+            "counter",
+        ),
+        (
+            "pqc_verification_queue_depth",
+            "Current bounded PQ verification queue depth.",
+            pqc.queue_depth as f64,
+            "gauge",
+        ),
+        (
+            "pqc_verification_cache_evictions",
+            "Positive PQ verification cache evictions.",
+            pqc.cache_evictions as f64,
+            "counter",
+        ),
+        (
+            "pqc_verification_queue_rejections",
+            "PQ verification jobs rejected by bounded backpressure.",
+            pqc.queue_rejections as f64,
+            "counter",
+        ),
+        (
+            "consensus_restarts_total",
+            "Typed coordinator restarts durably observed after the first successful start.",
+            typed.restarts as f64,
+            "counter",
+        ),
+    ] {
+        push_metric_header(&mut body, name, help, metric_type);
+        body.push_str(&format!("{name} {value}\n"));
+    }
+
+    for (name, help, value) in [
+        (
+            "consensus_message_deduplications",
+            "Total exact typed-consensus envelope deduplications.",
+            typed.messages_deduplicated.values().copied().sum::<u64>() as f64,
+        ),
+        (
+            "consensus_precrypto_rejections",
+            "Total typed messages rejected before PQ verification.",
+            typed
+                .messages_rejected_precrypto
+                .values()
+                .copied()
+                .sum::<u64>() as f64,
+        ),
+        (
+            "consensus_rebroadcasts",
+            "Total typed consensus rebroadcasts.",
+            typed.rebroadcasts.values().copied().sum::<u64>() as f64,
+        ),
+        (
+            "consensus_restart_count",
+            "Durable typed-coordinator restart count.",
+            typed.restarts as f64,
+        ),
+        (
+            "pqc_verification_requests",
+            "Uncached PQ verification requests.",
+            pqc.requests as f64,
+        ),
+        (
+            "pqc_verification_cache_hits",
+            "Positive PQ verification cache hits.",
+            pqc.cache_hits as f64,
+        ),
+        (
+            "pqc_verification_cache_misses",
+            "Positive PQ verification cache misses.",
+            pqc.cache_misses as f64,
+        ),
+        (
+            "pqc_verification_duration",
+            "Cumulative PQ verification worker duration in seconds.",
+            pqc.verification_duration_micros as f64 / 1_000_000.0,
+        ),
+    ] {
+        push_metric_header(&mut body, name, help, "counter");
+        body.push_str(&format!("{name} {value}\n"));
+    }
+
     push_metric_header(
         &mut body,
         "synergy_mempool_pending_transactions",
@@ -1129,7 +1582,147 @@ fn render_metrics(config: &NodeConfig, start_time: SystemTime) -> String {
         "synergy_process_start_time_seconds {start_time_seconds}\n"
     ));
 
+    render_coordinated_consensus_metrics(&mut body, config);
+
     body
+}
+
+/// Renders P1-only finality and turn-state evidence.  The legacy typed-PoSy
+/// series above remain backward-compatible operational diagnostics, but are
+/// never used as evidence for a coordinated release.  These series appear
+/// only when the loaded config resolves to the explicit P1 mode.
+fn render_coordinated_consensus_metrics(body: &mut String, config: &NodeConfig) {
+    let Ok(ResolvedConsensusMode::CoordinatedRoundRobinV1(coordinated_config)) = config
+        .consensus
+        .resolve_mode(config.blockchain.chain_id, &config.network.network_id)
+    else {
+        return;
+    };
+
+    let validator = coordinated_consensus_telemetry_snapshot();
+    let observer = crate::consensus::coordinated_finality_observer::coordinated_finality_observer_telemetry_tip();
+    let (
+        source,
+        active,
+        finalized_height,
+        finalized_block_id,
+        finalized_producer_id,
+        finalized_producer_round,
+        assigned_height,
+        assigned_producer_round,
+        assigned_producer_id,
+        missed_turns_total,
+    ) = if validator.active {
+        (
+            "validator",
+            1_u8,
+            validator.finalized_height,
+            validator.finalized_block_id,
+            validator.finalized_producer_id,
+            validator.finalized_producer_round,
+            validator.assigned_height,
+            validator.assigned_producer_round,
+            validator.assigned_producer_id,
+            validator.missed_turns_total,
+        )
+    } else if let Some(observer) = observer {
+        (
+            "observer",
+            1_u8,
+            observer.finalized_height,
+            observer.finalized_block_id,
+            observer.finalized_producer_id,
+            observer.finalized_producer_round,
+            0,
+            0,
+            String::new(),
+            0,
+        )
+    } else {
+        (
+            "uninitialized",
+            0_u8,
+            0,
+            String::new(),
+            String::new(),
+            0,
+            0,
+            0,
+            String::new(),
+            0,
+        )
+    };
+
+    push_metric_header(
+        body,
+        "coordinated_consensus_mode_info",
+        "Configured coordinated-round-robin P1 mode and source of its independently verified finality.",
+        "gauge",
+    );
+    body.push_str(&format!(
+        "coordinated_consensus_mode_info{{mode=\"{}\",coordinator_id=\"{}\",source=\"{source}\"}} 1\n",
+        escape_label_value(&coordinated_config.consensus_version),
+        escape_label_value(&coordinated_config.coordinator_id),
+    ));
+    push_metric_header(
+        body,
+        "coordinated_consensus_active",
+        "One only after the P1 validator worker or non-signing finality observer is installed.",
+        "gauge",
+    );
+    body.push_str(&format!(
+        "coordinated_consensus_active{{source=\"{source}\"}} {active}\n"
+    ));
+    push_metric_header(
+        body,
+        "coordinated_consensus_finalized_height",
+        "Latest independently verified P1 finalized height; observer values are replicated finality, not database insertion height.",
+        "gauge",
+    );
+    body.push_str(&format!(
+        "coordinated_consensus_finalized_height{{source=\"{source}\"}} {finalized_height}\n"
+    ));
+    push_metric_header(
+        body,
+        "coordinated_consensus_finalized_block_id",
+        "Digest of the latest independently verified P1 finalized block.",
+        "gauge",
+    );
+    body.push_str(&format!(
+        "coordinated_consensus_finalized_block_id{{source=\"{source}\",block_id=\"{}\"}} 1\n",
+        escape_label_value(&finalized_block_id)
+    ));
+    push_metric_header(
+        body,
+        "coordinated_consensus_finalized_producer_info",
+        "Producer and producer round bound by the latest signed P1 coordinator commit.",
+        "gauge",
+    );
+    body.push_str(&format!(
+        "coordinated_consensus_finalized_producer_info{{source=\"{source}\",producer_id=\"{}\",producer_round=\"{finalized_producer_round}\"}} 1\n",
+        escape_label_value(&finalized_producer_id)
+    ));
+    if source == "validator" {
+        push_metric_header(
+            body,
+            "coordinated_consensus_assignment_info",
+            "Current signed P1 assignment, or the next deterministic producer turn when no assignment is pending.",
+            "gauge",
+        );
+        body.push_str(&format!(
+            "coordinated_consensus_assignment_info{{height=\"{assigned_height}\",producer_round=\"{assigned_producer_round}\",producer_id=\"{}\"}} 1\n",
+            escape_label_value(&assigned_producer_id)
+        ));
+        push_metric_header(
+            body,
+            "coordinated_consensus_missed_turns_total",
+            "Durably evidenced P1 producer turns skipped without advancing block height.",
+            "counter",
+        );
+        body.push_str(&format!(
+            "coordinated_consensus_missed_turns_total {missed_turns_total}\n"
+        ));
+    }
 }
 
 fn push_metric_header(body: &mut String, name: &str, help: &str, metric_type: &str) {
@@ -1255,6 +1848,92 @@ mod tests {
         assert!(body.contains("role=\"validator\""));
         assert!(body.contains("node_id=\"GenVal-01\""));
         assert!(body.contains("validator_address=\"synv1test\""));
+        for metric in [
+            "consensus_finalized_height",
+            "consensus_finalized_round",
+            "consensus_finality_interval_seconds",
+            "consensus_finality_interval_mean_seconds",
+            "consensus_finality_interval_median_seconds",
+            "consensus_finality_interval_p95_seconds",
+            "consensus_finality_interval_sample_count",
+            "consensus_phase_duration_seconds",
+            "consensus_round_zero_ratio",
+            "consensus_current_round",
+            "consensus_prepared_height",
+            "consensus_prepared_round",
+            "consensus_mailbox_depth",
+            "consensus_messages_received_total",
+            "consensus_messages_deduplicated_total",
+            "consensus_messages_rejected_precrypto_total",
+            "pqc_verification_requests_total",
+            "pqc_verification_cache_hits_total",
+            "pqc_verification_cache_misses_total",
+            "pqc_verification_duration_seconds",
+            "pqc_verification_queue_depth",
+            "consensus_rebroadcast_total",
+            "consensus_restarts_total",
+            "consensus_startup_phase_info",
+            "consensus_ready",
+        ] {
+            assert!(
+                body.contains(&format!("# HELP {metric} ")),
+                "missing release-gate metric {metric}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_metrics_exposes_signed_p1_finality_without_typed_relabeling() {
+        let mut config = NodeConfig::default();
+        config.blockchain.chain_id = 1266;
+        config.network.network_id = "synergy-testnet-v3".to_string();
+        config.consensus.mode =
+            crate::consensus::coordinated_round_robin::COORDINATED_ROUND_ROBIN_V1.to_string();
+        config.consensus.coordinator_id = "validator-1".to_string();
+        config.consensus.producer_ids = (2..=6).map(|index| format!("validator-{index}")).collect();
+
+        super::publish_coordinated_consensus_telemetry(
+            super::CoordinatedConsensusTelemetrySnapshot {
+                active: true,
+                finalized_height: 73,
+                finalized_block_id: "p1-finalized-block".to_string(),
+                finalized_producer_id: "validator-4".to_string(),
+                finalized_producer_round: 2,
+                assigned_height: 74,
+                assigned_producer_round: 0,
+                assigned_producer_id: "validator-5".to_string(),
+                missed_turns_total: 3,
+            },
+        );
+        let mut body = String::new();
+        super::render_coordinated_consensus_metrics(&mut body, &config);
+        super::clear_coordinated_consensus_telemetry();
+
+        assert!(body.contains(
+            "coordinated_consensus_mode_info{mode=\"coordinated_round_robin_v1\",coordinator_id=\"validator-1\",source=\"validator\"} 1"
+        ));
+        assert!(body.contains("coordinated_consensus_finalized_height{source=\"validator\"} 73"));
+        assert!(body.contains(
+            "coordinated_consensus_finalized_block_id{source=\"validator\",block_id=\"p1-finalized-block\"} 1"
+        ));
+        assert!(body.contains(
+            "coordinated_consensus_assignment_info{height=\"74\",producer_round=\"0\",producer_id=\"validator-5\"} 1"
+        ));
+        assert!(body.contains("coordinated_consensus_missed_turns_total 3"));
+    }
+
+    #[test]
+    fn non_p1_config_does_not_emit_coordinated_consensus_metrics() {
+        super::publish_coordinated_consensus_telemetry(
+            super::CoordinatedConsensusTelemetrySnapshot {
+                active: true,
+                ..Default::default()
+            },
+        );
+        let mut body = String::new();
+        super::render_coordinated_consensus_metrics(&mut body, &NodeConfig::default());
+        super::clear_coordinated_consensus_telemetry();
+        assert!(!body.contains("coordinated_consensus_mode_info"));
     }
 
     #[test]

@@ -1,0 +1,76 @@
+# R11 unsigned 500 ms qualification candidate; NOT deployment authorization.
+# Legacy integer-second cadence aliases are intentionally omitted.
+
+[identity]
+node_id = "validator-05"
+role = "validator"
+address = "synv11cxug3akr7w7x2ms8wghhlxnqkdue0e980az"
+
+[role]
+compiled_profile = "validator_node"
+
+[network]
+id = 1266
+network_id = "testnet"
+name = "Synergy Testnet-v3 R11 Local Qualification"
+p2p_port = 5605
+rpc_port = 6205
+ws_port = 6305
+max_peers = 16
+additional_dial_targets = ["127.0.0.1:5602","127.0.0.1:5603","127.0.0.1:5604","127.0.0.1:5606"]
+
+[blockchain]
+target_block_time_ms = 500
+max_gas_limit = "0x2fefd8"
+chain_id = 1266
+
+[consensus]
+algorithm = "posy/3.0"
+mode = "posy_simplified_v3"
+target_block_time_ms = 500
+coordinator_id = ""
+producer_ids = []
+producer_turn_timeout_ms = 0
+consensus_parameter_root_sha3_512 = "4a1cbf3e0b759dddd4daecf1d34ba647075dc4210db42dda0f547399de1fd506cdc8b4cf6b677a100f04d59994c1e811b26cd00b616d7ef61275fb9e49776cd9"
+
+[p2p]
+listen_address = "127.0.0.1:5605"
+public_address = "127.0.0.1:5605"
+discovery_listen_address = "127.0.0.1:5705"
+discovery_public_address = "127.0.0.1:5705"
+node_name = "validator-05"
+enable_discovery = false
+enable_peer_exchange = false
+reject_private_advertise_addrs = false
+discovery_port = 5705
+heartbeat_interval = 1
+bootstrap_refresh_secs = 1
+
+[logging]
+log_level = "info"
+log_file = "logs/validator-05.log"
+enable_console = true
+max_file_size = 10485760
+max_files = 5
+
+[rpc]
+bind_address = "127.0.0.1:6205"
+enable_http = true
+http_port = 6205
+enable_ws = true
+ws_port = 6305
+enable_grpc = false
+grpc_port = 6405
+cors_enabled = false
+cors_origins = []
+
+[storage]
+database = "rocksdb"
+path = "data/chain"
+enable_pruning = true
+pruning_interval = 86400
+
+[r11_qualification]
+environment = "LOCAL_R11_QUALIFICATION"
+candidate_status = "UNSIGNED_NOT_AUTHORIZED_FOR_LIVE_DEPLOYMENT"
+legacy_integer_second_cadence_omitted = true

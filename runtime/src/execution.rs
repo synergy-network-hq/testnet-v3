@@ -1,6 +1,9 @@
-use crate::crypto::aegis_pqvm::{SYNERGY_RECEIPT_ROOT_V1, SYNERGY_STATE_ROOT_V1};
+use crate::crypto::aegis_pqvm::SYNERGY_RECEIPT_ROOT_V1;
 use crate::sts::{StsSignedPayload, StsState};
-use crate::synergy_types::{Block, CanonicalSerialize, Hash, Transaction, TxId};
+use crate::synergy_types::{
+    Block, CanonicalSerialize, Hash, Transaction, TxId, SYNERGY_TESTNET_V3_CHAIN_ID,
+    SYNERGY_TESTNET_V3_NETWORK_ID, SYNERGY_TESTNET_V3_RELEASE_ID,
+};
 use crate::synq_admission::SynQVerificationSummary;
 use crate::synq_execution::{
     execute_synq_transaction_at, sts_host_context_from_sts_state, SynQAivmReceiptSummary,
@@ -10,9 +13,35 @@ use aivm_core::state::ContractState;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{OnceLock, RwLock};
 
-pub const TESTNET_V3_GENESIS_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
-pub const TESTNET_V3_GENESIS_CHAIN_ID: u64 = 1266;
-pub const TESTNET_V3_GENESIS_RUNTIME_NETWORK_ID: &str = "synergy-testnet-v3";
+pub const TESTNET_V3_GENESIS_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
+pub const SYNERGY_STATE_ROOT_V2: &str = "SYNERGY_STATE_ROOT_V2";
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityAuthorizationBindingCommitment {
+    pub binding_payload_sha3_256: String,
+    pub identity_root_public_key_sha3_256: String,
+    pub effective_at_unix: u64,
+}
+
+impl IdentityAuthorizationBindingCommitment {
+    fn from_verified_binding(
+        binding: &crate::identity_auth::IdentityAuthorizationBinding,
+        consensus_timestamp_unix: u64,
+    ) -> Result<Self, String> {
+        crate::identity_auth::verify_binding_at(binding, consensus_timestamp_unix)?;
+        let effective_at = chrono::DateTime::parse_from_rfc3339(&binding.effective_at)
+            .map_err(|error| format!("identity binding effective_at is invalid: {error}"))?
+            .timestamp();
+        let effective_at_unix = u64::try_from(effective_at)
+            .map_err(|_| "identity binding effective_at precedes the Unix epoch".to_string())?;
+        Ok(Self {
+            binding_payload_sha3_256: binding.binding_payload_sha3_256.clone(),
+            identity_root_public_key_sha3_256: binding.identity_root.public_key_sha3_256.clone(),
+            effective_at_unix,
+        })
+    }
+}
 
 /// The only RPC-visible execution state is a clone of the state that the
 /// finalized typed coordinator has already accepted.  It is deliberately not
@@ -73,6 +102,18 @@ pub(crate) fn finalized_execution_state_snapshot() -> Result<ExecutionState, Str
         })
 }
 
+pub(crate) fn finalized_identity_authorization_binding_hash(
+    identity_address: &str,
+) -> Result<String, String> {
+    finalized_execution_state_snapshot()?
+        .identity_authorization_bindings
+        .get(identity_address)
+        .map(|commitment| commitment.binding_payload_sha3_256.clone())
+        .ok_or_else(|| {
+            format!("identity {identity_address} has no canonical finalized authorization binding")
+        })
+}
+
 /// Remove the availability cache whenever the typed role stops.  A stopped
 /// node must not continue answering reads from a state that can no longer
 /// advance with finalized consensus.
@@ -86,6 +127,7 @@ pub(crate) fn remove_finalized_execution_state_snapshot() {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionState {
     pub balances_nwei: BTreeMap<String, u128>,
+    pub identity_authorization_bindings: BTreeMap<String, IdentityAuthorizationBindingCommitment>,
     pub sts_state: StsState,
     pub fee_events: Vec<FeeChargedEvent>,
     pub burn_events: Vec<BurnAddressTransferEvent>,
@@ -101,6 +143,7 @@ impl ExecutionState {
     pub fn new() -> Self {
         Self {
             balances_nwei: BTreeMap::new(),
+            identity_authorization_bindings: BTreeMap::new(),
             sts_state: StsState::new(),
             fee_events: Vec::new(),
             burn_events: Vec::new(),
@@ -118,32 +161,137 @@ impl ExecutionState {
         self
     }
 
-    pub fn mark_authorized(&mut self, tx: &Transaction) -> Result<TxId, String> {
+    pub fn install_genesis_identity_authorization_binding(
+        &mut self,
+        binding: &crate::identity_auth::IdentityAuthorizationBinding,
+    ) -> Result<(), String> {
+        let effective_at = chrono::DateTime::parse_from_rfc3339(&binding.effective_at)
+            .map_err(|error| format!("identity binding effective_at is invalid: {error}"))?
+            .timestamp();
+        let effective_at_unix = u64::try_from(effective_at)
+            .map_err(|_| "identity binding effective_at precedes the Unix epoch".to_string())?;
+        let commitment = IdentityAuthorizationBindingCommitment::from_verified_binding(
+            binding,
+            effective_at_unix,
+        )?;
+        match self
+            .identity_authorization_bindings
+            .get(&binding.identity_address)
+        {
+            Some(existing) if existing == &commitment => Ok(()),
+            Some(_) => Err(format!(
+                "Genesis contains conflicting identity authorization bindings for {}",
+                binding.identity_address
+            )),
+            None => {
+                self.identity_authorization_bindings
+                    .insert(binding.identity_address.clone(), commitment);
+                Ok(())
+            }
+        }
+    }
+
+    pub fn apply_identity_authorization_binding_transition(
+        &mut self,
+        binding: &crate::identity_auth::IdentityAuthorizationBinding,
+        expected_current_binding_payload_sha3_256: &str,
+        consensus_timestamp_unix: u64,
+    ) -> Result<(), String> {
+        let next = IdentityAuthorizationBindingCommitment::from_verified_binding(
+            binding,
+            consensus_timestamp_unix,
+        )?;
+        let current = self
+            .identity_authorization_bindings
+            .get(&binding.identity_address)
+            .ok_or_else(|| {
+                format!(
+                    "identity {} has no canonical binding to rotate",
+                    binding.identity_address
+                )
+            })?;
+        if current.binding_payload_sha3_256 != expected_current_binding_payload_sha3_256 {
+            return Err(
+                "identity binding transition does not extend current finalized state".to_string(),
+            );
+        }
+        if current.identity_root_public_key_sha3_256 != next.identity_root_public_key_sha3_256 {
+            return Err(
+                "identity binding transition attempted to replace the FN-DSA identity root"
+                    .to_string(),
+            );
+        }
+        if next.effective_at_unix <= current.effective_at_unix {
+            return Err(
+                "identity binding transition effective_at must strictly increase".to_string(),
+            );
+        }
+        if next.binding_payload_sha3_256 == current.binding_payload_sha3_256 {
+            return Err("identity binding transition does not change the binding".to_string());
+        }
+        self.identity_authorization_bindings
+            .insert(binding.identity_address.clone(), next);
+        Ok(())
+    }
+
+    pub fn current_identity_authorization_binding_hash(
+        &self,
+        identity_address: &str,
+    ) -> Option<&str> {
+        self.identity_authorization_bindings
+            .get(identity_address)
+            .map(|commitment| commitment.binding_payload_sha3_256.as_str())
+    }
+
+    pub(crate) fn mark_authorized(&mut self, tx: &Transaction) -> Result<TxId, String> {
         self.mark_authorized_at(tx, current_unix_timestamp())
     }
 
-    pub fn mark_authorized_at(
+    pub(crate) fn mark_authorized_at(
         &mut self,
         tx: &Transaction,
         consensus_timestamp_unix: u64,
     ) -> Result<TxId, String> {
         let tx_id = tx_id(tx)?;
-        self.verified_authorizations
-            .insert(tx_id.clone(), tx.canonical_tx_bytes_hash()?);
-        match crate::synq_admission::verify_transaction_payload_for_chain_admission(
-            tx,
-            consensus_timestamp_unix,
-        ) {
+        let synq_result = if crate::synq_admission::is_synq_admission_carrier(&tx.payload) {
+            let envelope = crate::synq_admission::decode_synq_admission_carrier(&tx.payload)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "SynQ carrier prefix decoded without an envelope".to_string())?;
+            let carrier = envelope.identity_authorization.as_ref().ok_or_else(|| {
+                "SynQ network admission is missing its identity authorization carrier".to_string()
+            })?;
+            let current_hash = self
+                .current_identity_authorization_binding_hash(&carrier.binding.identity_address)
+                .ok_or_else(|| {
+                    format!(
+                        "identity {} has no canonical binding in the parent execution state",
+                        carrier.binding.identity_address
+                    )
+                })?;
+            crate::synq_admission::verify_transaction_payload_for_chain_admission_at_current_binding(
+                tx,
+                consensus_timestamp_unix,
+                current_hash,
+            )
+        } else {
+            Ok(None)
+        };
+        match synq_result {
             Ok(Some(summary)) => {
                 self.synq_verifications.insert(tx_id.clone(), summary);
             }
             Ok(None) => {}
             Err(error) => {
+                self.verified_authorizations.remove(&tx_id);
+                self.synq_verifications.remove(&tx_id);
                 self.synq_errors
                     .insert(tx_id.clone(), (error.code().to_string(), error.to_string()));
                 return Err(error.to_string());
             }
         }
+        self.synq_errors.remove(&tx_id);
+        self.verified_authorizations
+            .insert(tx_id.clone(), tx.canonical_tx_bytes_hash()?);
         Ok(tx_id)
     }
 }
@@ -163,13 +311,16 @@ pub struct GenesisArtifactSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GenesisExecutionSnapshot {
     pub schema_version: u32,
     pub chain_id: u64,
-    pub runtime_network_id: String,
+    pub network_id: String,
+    pub release_id: String,
     pub state_root: String,
     pub aivm_state_root: String,
     pub balances_nwei: BTreeMap<String, u128>,
+    pub identity_authorization_bindings: BTreeMap<String, IdentityAuthorizationBindingCommitment>,
     pub sts_state: StsState,
     pub fee_events: Vec<FeeChargedEvent>,
     pub burn_events: Vec<BurnAddressTransferEvent>,
@@ -182,11 +333,13 @@ impl GenesisExecutionSnapshot {
     pub fn capture_testnet_v3(state: &ExecutionState) -> Result<Self, String> {
         Ok(Self {
             schema_version: TESTNET_V3_GENESIS_SNAPSHOT_SCHEMA_VERSION,
-            chain_id: TESTNET_V3_GENESIS_CHAIN_ID,
-            runtime_network_id: TESTNET_V3_GENESIS_RUNTIME_NETWORK_ID.to_string(),
+            chain_id: SYNERGY_TESTNET_V3_CHAIN_ID,
+            network_id: SYNERGY_TESTNET_V3_NETWORK_ID.to_string(),
+            release_id: SYNERGY_TESTNET_V3_RELEASE_ID.to_string(),
             state_root: compute_state_root_after(state)?.to_hex(),
             aivm_state_root: hex::encode(state.synq_aivm_state.state_root()),
             balances_nwei: state.balances_nwei.clone(),
+            identity_authorization_bindings: state.identity_authorization_bindings.clone(),
             sts_state: state.sts_state.clone(),
             fee_events: state.fee_events.clone(),
             burn_events: state.burn_events.clone(),
@@ -210,12 +363,13 @@ impl GenesisExecutionSnapshot {
                 self.schema_version
             ));
         }
-        if self.chain_id != TESTNET_V3_GENESIS_CHAIN_ID
-            || self.runtime_network_id != TESTNET_V3_GENESIS_RUNTIME_NETWORK_ID
+        if self.chain_id != SYNERGY_TESTNET_V3_CHAIN_ID
+            || self.network_id != SYNERGY_TESTNET_V3_NETWORK_ID
+            || self.release_id != SYNERGY_TESTNET_V3_RELEASE_ID
         {
             return Err(format!(
-                "Testnet-v3 genesis execution snapshot chain/network mismatch: chain_id={} network={}",
-                self.chain_id, self.runtime_network_id
+                "Testnet-v3 genesis execution snapshot chain/network/release mismatch: chain_id={} network_id={} release_id={}",
+                self.chain_id, self.network_id, self.release_id
             ));
         }
         let mut synq_artifacts = BTreeMap::new();
@@ -244,8 +398,42 @@ impl GenesisExecutionSnapshot {
                 ));
             }
         }
+        for (identity_address, commitment) in &self.identity_authorization_bindings {
+            let decoded = crate::address::decode_address(identity_address).map_err(|error| {
+                format!(
+                    "Testnet-v3 genesis execution snapshot identity address {identity_address} is invalid: {error}"
+                )
+            })?;
+            if decoded.classification != crate::snts_registry::IdentifierClass::KeyControlledAddress
+            {
+                return Err(format!(
+                    "Testnet-v3 genesis execution snapshot identity {identity_address} is not key-controlled"
+                ));
+            }
+            for (field, value) in [
+                (
+                    "binding payload",
+                    commitment.binding_payload_sha3_256.as_str(),
+                ),
+                (
+                    "identity root",
+                    commitment.identity_root_public_key_sha3_256.as_str(),
+                ),
+            ] {
+                if value.len() != 64
+                    || value
+                        .bytes()
+                        .any(|byte| !byte.is_ascii_digit() && !(b'a'..=b'f').contains(&byte))
+                {
+                    return Err(format!(
+                        "Testnet-v3 genesis execution snapshot {field} commitment for {identity_address} is not lowercase SHA3-256 hex"
+                    ));
+                }
+            }
+        }
         let state = ExecutionState {
             balances_nwei: self.balances_nwei.clone(),
+            identity_authorization_bindings: self.identity_authorization_bindings.clone(),
             sts_state: self.sts_state.clone(),
             fee_events: self.fee_events.clone(),
             burn_events: self.burn_events.clone(),
@@ -279,6 +467,7 @@ pub struct FeeChargedEvent {
     pub tx_id: TxId,
     pub payer: String,
     pub fee_collector_address: String,
+    /// Ordinary-gas execution fee (`gas_used * base_fee_per_gas`).
     pub gas_fee_nwei: u128,
     pub amount_protocol_fee_nwei: u128,
     pub storage_fee_nwei: u128,
@@ -286,6 +475,17 @@ pub struct FeeChargedEvent {
     pub total_network_fee_nwei: u128,
     pub block_height: u64,
     pub success: bool,
+    /// --- Canonical Live Gas Pricing (fee market) additions, additive and
+    /// `#[serde(default)]` so events recorded before this change continue
+    /// to decode (as zero-valued / inactive fee-market accounting). ---
+    #[serde(default)]
+    pub pq_gas_used: u64,
+    #[serde(default)]
+    pub pq_execution_fee_nwei: u128,
+    #[serde(default)]
+    pub fee_market_active: bool,
+    #[serde(default)]
+    pub fee_market_version: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -321,7 +521,19 @@ pub struct TransactionReceipt {
     pub synq_aivm: Option<SynQAivmReceiptSummary>,
     pub synq_error_code: Option<String>,
     pub synq_error_message: Option<String>,
+    /// Auditable fee breakdown for this transaction. When
+    /// `fee_breakdown.fee_market_active` is `true`, `base_execution_fee_nwei`
+    /// / `pq_execution_fee_nwei` / `execution_fee_total_nwei` on this
+    /// breakdown were computed from real `gas_used` /
+    /// `TransactionReceipt::pq_gas_used` against the protocol
+    /// `base_fee_per_gas`, per `crate::gas::fee_market`. When `false`, this
+    /// is legacy pre-fee-market pricing (sender-declared `max_fee_nwei`).
     pub fee_breakdown: Option<crate::gas::NetworkFeeBreakdown>,
+    /// PQ gas consumed by this transaction (AIVM `PqGasMeter`), tracked
+    /// independently of `gas_used` at every layer. `0` for transactions
+    /// with no PQ execution component.
+    #[serde(default)]
+    pub pq_gas_used: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -330,13 +542,41 @@ pub struct ExecutionResult {
     pub receipts: Vec<TransactionReceipt>,
     pub state_root_after: Hash,
     pub receipt_root: Hash,
+    /// Sum of `TransactionReceipt::gas_used` across every receipt in this
+    /// block. The block builder writes this into
+    /// `BlockHeader::gas_used`; independent replay (block validation)
+    /// recomputes it the same way and must match the declared value.
+    pub gas_used_total: u64,
+    /// Sum of `TransactionReceipt::pq_gas_used` across every receipt,
+    /// tracked independently of `gas_used_total` (never combined).
+    pub pq_gas_used_total: u64,
+    /// The fee market this execution actually charged under, derived from
+    /// `block.header` (see `execute_block`). `None` means this block predates
+    /// fee-market activation (`fee_market_version == 0`).
+    pub applied_fee_market: Option<crate::gas::fee_market::AppliedFeeMarket>,
 }
 
+/// Executes every transaction in `block` against a clone of `state`.
+///
+/// The block's declared `base_fee_per_gas_nwei` / `pq_gas_multiplier` /
+/// `fee_market_version` (`block.header`) are treated as authoritative input
+/// here -- this function does not itself recompute or validate that the
+/// declared base fee is correct; it charges transactions against whatever
+/// the header declares. That is intentional and safe as long as every
+/// caller that accepts a block from a peer *also* independently verifies
+/// `block.header.base_fee_per_gas_nwei ==
+/// fee_market::next_base_fee_per_gas(parent_header)` before or alongside
+/// calling this function (see
+/// `consensus::coordinated_runtime::verify_producer_block` /
+/// `execute_coordinated_block`) -- otherwise two nodes that disagreed on the
+/// header's correctness would still agree on its *execution*, which is not
+/// sufficient to reject a dishonest proposer.
 pub fn execute_block(block: &Block, state: &ExecutionState) -> Result<ExecutionResult, String> {
     let graph = build_execution_graph(&block.transactions)?;
     let batches = split_into_parallel_batches(&graph);
     let mut working_state = state.clone();
     let mut receipts = Vec::new();
+    let applied_fee_market = fee_market_from_header(&block.header);
     let synq_context = SynQExecutionContext {
         runtime_block_height: block.header.height.0,
         runtime_block_timestamp_unix: block
@@ -344,6 +584,7 @@ pub fn execute_block(block: &Block, state: &ExecutionState) -> Result<ExecutionR
             .timestamp_ms_consensus_bounded
             .saturating_div(1_000),
         sts_host: None,
+        applied_fee_market,
     };
     for batch in batches {
         let mut batch_receipts = execute_batch_parallel(
@@ -357,11 +598,49 @@ pub fn execute_block(block: &Block, state: &ExecutionState) -> Result<ExecutionR
     receipts = merge_results_in_canonical_order(receipts);
     let state_root_after = compute_state_root_after(&working_state)?;
     let receipt_root = compute_receipt_root(&receipts)?;
+    let gas_used_total = receipts
+        .iter()
+        .try_fold(0u64, |total, receipt| total.checked_add(receipt.gas_used))
+        .ok_or_else(|| "block gas_used_total overflow".to_string())?;
+    let pq_gas_used_total = receipts
+        .iter()
+        .try_fold(0u64, |total, receipt| {
+            total.checked_add(receipt.pq_gas_used)
+        })
+        .ok_or_else(|| "block pq_gas_used_total overflow".to_string())?;
     Ok(ExecutionResult {
         state: working_state,
         receipts,
         state_root_after,
         receipt_root,
+        gas_used_total,
+        pq_gas_used_total,
+        applied_fee_market,
+    })
+}
+
+/// Derives the fee market a block's header declares, or `None` if the
+/// header predates activation (`fee_market_version == 0`) or is malformed
+/// (e.g. `pq_gas_multiplier` overflow) -- a malformed declared fee market is
+/// never silently treated as "active with a fabricated price"; it falls
+/// back to legacy charging, and the separate header-validation check (see
+/// `execute_block` docs) is responsible for rejecting the block outright.
+fn fee_market_from_header(
+    header: &crate::synergy_types::BlockHeader,
+) -> Option<crate::gas::fee_market::AppliedFeeMarket> {
+    if header.fee_market_version == 0 {
+        return None;
+    }
+    let effective_pq_gas_price_nwei = crate::gas::fee_market::effective_pq_gas_price(
+        header.base_fee_per_gas_nwei,
+        header.pq_gas_multiplier,
+    )
+    .ok()?;
+    Some(crate::gas::fee_market::AppliedFeeMarket {
+        base_fee_per_gas_nwei: header.base_fee_per_gas_nwei,
+        pq_gas_multiplier: header.pq_gas_multiplier,
+        effective_pq_gas_price_nwei,
+        fee_market_version: header.fee_market_version,
     })
 }
 
@@ -438,6 +717,8 @@ pub fn compute_state_root_after(state: &ExecutionState) -> Result<Hash, String> 
     #[derive(serde::Serialize)]
     struct StateRootPayload<'a> {
         balances_nwei: &'a BTreeMap<String, u128>,
+        identity_authorization_bindings:
+            &'a BTreeMap<String, IdentityAuthorizationBindingCommitment>,
         sts_state: &'a StsState,
         fee_events: &'a [FeeChargedEvent],
         burn_events: &'a [BurnAddressTransferEvent],
@@ -453,6 +734,7 @@ pub fn compute_state_root_after(state: &ExecutionState) -> Result<Hash, String> 
         .collect::<Vec<_>>();
     let payload = StateRootPayload {
         balances_nwei: &state.balances_nwei,
+        identity_authorization_bindings: &state.identity_authorization_bindings,
         sts_state: &state.sts_state,
         fee_events: &state.fee_events,
         burn_events: &state.burn_events,
@@ -461,7 +743,7 @@ pub fn compute_state_root_after(state: &ExecutionState) -> Result<Hash, String> 
         synq_aivm_state_root: state.synq_aivm_state.state_root(),
     };
     serde_json::to_vec(&payload)
-        .map(|bytes| Hash::from_domain_bytes(SYNERGY_STATE_ROOT_V1, &bytes))
+        .map(|bytes| Hash::from_domain_bytes(SYNERGY_STATE_ROOT_V2, &bytes))
         .map_err(|error| format!("state root serialize failed: {error}"))
 }
 
@@ -504,10 +786,17 @@ fn execute_transaction(
     let synq_verification = state.synq_verifications.get(&id).cloned();
     let synq_error = state.synq_errors.get(&id).cloned();
     let payload = std::str::from_utf8(&tx.payload).unwrap_or_default();
+    let applied_fee_market = synq_context.applied_fee_market;
 
     if crate::address::is_network_burn_address(&sender) {
-        let estimated_fee =
-            canonical_network_fee_breakdown(tx, tx.gas_limit.min(21_000), tx.max_fee_nwei, true)?;
+        let estimated_fee = canonical_network_fee_breakdown(
+            tx,
+            tx.gas_limit.min(21_000),
+            0,
+            tx.max_fee_nwei,
+            true,
+            applied_fee_market.as_ref(),
+        )?;
         return Ok(TransactionReceipt {
             tx_id: id,
             status: ReceiptStatus::Failed,
@@ -519,6 +808,7 @@ fn execute_transaction(
             synq_error_code: synq_error.as_ref().map(|(code, _)| code.clone()),
             synq_error_message: synq_error.map(|(_, message)| message),
             fee_breakdown: Some(estimated_fee),
+            pq_gas_used: 0,
         });
     }
 
@@ -526,8 +816,14 @@ fn execute_transaction(
         Ok(burn) => burn,
         Err(error) => {
             let gas_used = tx.gas_limit.min(21_000);
-            let fee_breakdown =
-                canonical_network_fee_breakdown(tx, gas_used, tx.max_fee_nwei, false)?;
+            let fee_breakdown = canonical_network_fee_breakdown(
+                tx,
+                gas_used,
+                0,
+                tx.max_fee_nwei,
+                false,
+                applied_fee_market.as_ref(),
+            )?;
             if state.balances_nwei.get(&sender).copied().unwrap_or(0)
                 >= fee_breakdown.total_network_fee_nwei
             {
@@ -552,6 +848,7 @@ fn execute_transaction(
                 synq_error_code: synq_error.as_ref().map(|(code, _)| code.clone()),
                 synq_error_message: synq_error.map(|(_, message)| message),
                 fee_breakdown: Some(fee_breakdown),
+                pq_gas_used: 0,
             });
         }
     };
@@ -559,8 +856,14 @@ fn execute_transaction(
         .as_ref()
         .map(|burn| burn.amount_nwei)
         .unwrap_or(tx.amount_nwei);
-    let estimated_fee =
-        canonical_network_fee_breakdown(tx, tx.gas_limit.min(21_000), tx.max_fee_nwei, true)?;
+    let estimated_fee = canonical_network_fee_breakdown(
+        tx,
+        tx.gas_limit.min(21_000),
+        0,
+        tx.max_fee_nwei,
+        true,
+        applied_fee_market.as_ref(),
+    )?;
     let sender_balance = state.balances_nwei.get(&sender).copied().unwrap_or(0);
     let total_debit = transfer_amount_nwei
         .checked_add(estimated_fee.total_network_fee_nwei)
@@ -577,6 +880,7 @@ fn execute_transaction(
             synq_error_code: synq_error.as_ref().map(|(code, _)| code.clone()),
             synq_error_message: synq_error.map(|(_, message)| message),
             fee_breakdown: Some(estimated_fee),
+            pq_gas_used: 0,
         });
     }
 
@@ -605,12 +909,42 @@ fn execute_transaction(
         .as_ref()
         .map(|receipt| receipt.gas_used)
         .unwrap_or_else(|| tx.gas_limit.min(21_000));
+    // PQ gas is tracked independently of ordinary gas at every layer (never
+    // combined before reporting): AIVM's `PqGasMeter` output on the SynQ
+    // receipt, or `0` for transactions with no PQ execution component
+    // (e.g. plain native transfers, which are not run through AIVM).
+    let pq_gas_used = synq_aivm
+        .as_ref()
+        .map(|receipt| receipt.pqc_gas_used)
+        .unwrap_or(0);
 
     if synq_aivm
         .as_ref()
         .is_some_and(|receipt| receipt.status != "succeeded")
     {
-        let fee_breakdown = canonical_network_fee_breakdown(tx, gas_used, tx.max_fee_nwei, false)?;
+        let fee_breakdown = canonical_network_fee_breakdown(
+            tx,
+            gas_used,
+            pq_gas_used,
+            tx.max_fee_nwei,
+            false,
+            applied_fee_market.as_ref(),
+        )?;
+        if let Some(cap_error) = max_fee_cap_violation(&fee_breakdown, tx.max_fee_nwei) {
+            return Ok(TransactionReceipt {
+                tx_id: id,
+                status: ReceiptStatus::Failed,
+                gas_used,
+                error: cap_error,
+                state_root_after: compute_state_root_after(state)?,
+                synq_verification,
+                synq_aivm,
+                synq_error_code: synq_error.as_ref().map(|(code, _)| code.clone()),
+                synq_error_message: synq_error.map(|(_, message)| message),
+                fee_breakdown: Some(fee_breakdown),
+                pq_gas_used,
+            });
+        }
         charge_fee_to_collector(state, &sender, fee_breakdown.total_network_fee_nwei)?;
         record_fee_event(
             state,
@@ -635,10 +969,33 @@ fn execute_transaction(
             synq_error_code: synq_error.as_ref().map(|(code, _)| code.clone()),
             synq_error_message: synq_error.map(|(_, message)| message),
             fee_breakdown: Some(fee_breakdown),
+            pq_gas_used,
         });
     }
 
-    let fee_breakdown = canonical_network_fee_breakdown(tx, gas_used, tx.max_fee_nwei, true)?;
+    let fee_breakdown = canonical_network_fee_breakdown(
+        tx,
+        gas_used,
+        pq_gas_used,
+        tx.max_fee_nwei,
+        true,
+        applied_fee_market.as_ref(),
+    )?;
+    if let Some(cap_error) = max_fee_cap_violation(&fee_breakdown, tx.max_fee_nwei) {
+        return Ok(TransactionReceipt {
+            tx_id: id,
+            status: ReceiptStatus::Failed,
+            gas_used,
+            error: cap_error,
+            state_root_after: compute_state_root_after(state)?,
+            synq_verification,
+            synq_aivm,
+            synq_error_code: synq_error.as_ref().map(|(code, _)| code.clone()),
+            synq_error_message: synq_error.map(|(_, message)| message),
+            fee_breakdown: Some(fee_breakdown),
+            pq_gas_used,
+        });
+    }
     let total_debit = transfer_amount_nwei
         .checked_add(fee_breakdown.total_network_fee_nwei)
         .ok_or_else(|| "transaction total debit overflow".to_string())?;
@@ -655,6 +1012,7 @@ fn execute_transaction(
             synq_error_code: synq_error.as_ref().map(|(code, _)| code.clone()),
             synq_error_message: synq_error.map(|(_, message)| message),
             fee_breakdown: Some(fee_breakdown),
+            pq_gas_used,
         });
     }
 
@@ -740,7 +1098,27 @@ fn execute_transaction(
         synq_error_code: synq_error.as_ref().map(|(code, _)| code.clone()),
         synq_error_message: synq_error.map(|(_, message)| message),
         fee_breakdown: Some(fee_breakdown),
+        pq_gas_used,
     })
+}
+
+/// Returns a receipt-ready error string when the protocol-computed
+/// execution fee would exceed the sender's declared `max_fee_nwei` cap.
+/// Only meaningful once the fee market is active (`fee_breakdown
+/// .fee_market_active`); before activation the legacy path always charges
+/// exactly `max_fee_nwei`, so it can never exceed itself.
+fn max_fee_cap_violation(
+    fee_breakdown: &crate::gas::NetworkFeeBreakdown,
+    max_fee_nwei: u128,
+) -> Option<String> {
+    if fee_breakdown.fee_market_active && fee_breakdown.execution_fee_total_nwei > max_fee_nwei {
+        Some(format!(
+            "MAX_FEE_PER_GAS_TOO_LOW: protocol execution fee {} nWei exceeds declared max_fee_nwei {} nWei",
+            fee_breakdown.execution_fee_total_nwei, max_fee_nwei
+        ))
+    } else {
+        None
+    }
 }
 
 fn execute_sts_transaction(
@@ -757,7 +1135,10 @@ fn execute_sts_transaction(
         .gas_limit
         .min(crate::sts::estimate_sts_gas(&sts_payload.tx));
     let synq_error = state.synq_errors.get(&id).cloned();
-    let fee_breakdown = canonical_network_fee_breakdown(tx, gas_used, fee_nwei, false)?;
+    // STS payloads do not execute through AIVM: no PQ gas component, and
+    // (for now, out of scope for this change) STS fees stay on the legacy
+    // flat `max_fee_nwei` charge regardless of fee-market activation.
+    let fee_breakdown = canonical_network_fee_breakdown(tx, gas_used, 0, fee_nwei, false, None)?;
 
     if sender_balance < fee_nwei {
         return Ok(TransactionReceipt {
@@ -771,6 +1152,7 @@ fn execute_sts_transaction(
             synq_error_code: synq_error.as_ref().map(|(code, _)| code.clone()),
             synq_error_message: synq_error.map(|(_, message)| message),
             fee_breakdown: Some(fee_breakdown),
+            pq_gas_used: 0,
         });
     }
 
@@ -800,6 +1182,7 @@ fn execute_sts_transaction(
                 synq_error_code: synq_error.as_ref().map(|(code, _)| code.clone()),
                 synq_error_message: synq_error.map(|(_, message)| message),
                 fee_breakdown: Some(fee_breakdown),
+                pq_gas_used: 0,
             })
         }
         Err(error) => {
@@ -822,6 +1205,7 @@ fn execute_sts_transaction(
                 synq_error_code: synq_error.as_ref().map(|(code, _)| code.clone()),
                 synq_error_message: synq_error.map(|(_, message)| message),
                 fee_breakdown: Some(fee_breakdown),
+                pq_gas_used: 0,
             })
         }
     }
@@ -872,6 +1256,10 @@ fn record_fee_event(
         total_network_fee_nwei: fee_breakdown.total_network_fee_nwei,
         block_height,
         success,
+        pq_gas_used: fee_breakdown.pq_gas_used,
+        pq_execution_fee_nwei: fee_breakdown.pq_execution_fee_nwei,
+        fee_market_active: fee_breakdown.fee_market_active,
+        fee_market_version: fee_breakdown.fee_market_version,
     });
     if fee_breakdown.total_network_fee_nwei > 0 {
         if let Ok(mut ledger) = crate::rewards::REWARD_LEDGER.lock() {
@@ -887,13 +1275,35 @@ fn record_fee_event(
     }
 }
 
+/// Computes the auditable, itemized fee breakdown for a transaction.
+///
+/// When `applied_fee_market` is `Some` (the fee market is active at this
+/// block's height), the ordinary-gas and PQ-gas execution fees are computed
+/// from *actual* `gas_used` / `pq_gas_used` against the protocol
+/// `base_fee_per_gas`, via `crate::gas::fee_market::calculate_execution_fee`
+/// -- exactly `gas_used * base_fee_per_gas` and
+/// `pq_gas_used * effective_pq_gas_price`, itemized and never combined
+/// before being reported. `gas_fee_cap_nwei` (the sender's declared
+/// `max_fee_nwei`) is *not* charged directly in this branch; it is only
+/// enforced as an affordability ceiling by the caller
+/// (`max_fee_cap_violation`), so unused gas is naturally "refunded" by
+/// simply never being charged.
+///
+/// When `applied_fee_market` is `None` (legacy / pre-fee-market blocks),
+/// behavior is preserved byte-for-byte from before this change: the
+/// sender's `gas_fee_cap_nwei` is charged in full, with an implied
+/// "base fee" derived only for display (`gas_fee_cap_nwei / gas_used`).
 fn canonical_network_fee_breakdown(
     tx: &Transaction,
     gas_used: u64,
-    gas_fee_nwei: u128,
+    pq_gas_used: u64,
+    gas_fee_cap_nwei: u128,
     include_amount_fee: bool,
+    applied_fee_market: Option<&crate::gas::fee_market::AppliedFeeMarket>,
 ) -> Result<crate::gas::NetworkFeeBreakdown, String> {
-    use crate::gas::{calculate_network_fee, FeeSchedule, NetworkFeeInput, ValuationStatus};
+    use crate::gas::{
+        calculate_network_fee, fee_schedule_for_runtime, NetworkFeeInput, ValuationStatus,
+    };
 
     let payload = std::str::from_utf8(&tx.payload).unwrap_or_default();
     let (tx_type, asset_id, amount_raw, amount_equiv, valuation_status) =
@@ -904,10 +1314,46 @@ fn canonical_network_fee_breakdown(
     } else {
         ValuationStatus::NotRequired
     };
-    let base_fee_per_gas_nwei = if gas_used == 0 {
-        0
-    } else {
-        u64::try_from(gas_fee_nwei / (gas_used as u128)).unwrap_or(u64::MAX)
+
+    let (
+        gas_fee_nwei,
+        base_fee_per_gas_nwei,
+        pq_gas_multiplier,
+        effective_pq_gas_price_nwei,
+        pq_execution_fee_nwei,
+        fee_market_active,
+        fee_market_version,
+    ) = match applied_fee_market {
+        Some(applied) => {
+            let breakdown =
+                crate::gas::fee_market::calculate_execution_fee(gas_used, pq_gas_used, applied)
+                    .map_err(|error| error.to_string())?;
+            (
+                breakdown.base_execution_fee_nwei,
+                applied.base_fee_per_gas_nwei,
+                applied.pq_gas_multiplier,
+                applied.effective_pq_gas_price_nwei,
+                breakdown.pq_execution_fee_nwei,
+                true,
+                applied.fee_market_version,
+            )
+        }
+        None => {
+            let derived_base_fee_per_gas = if gas_used == 0 {
+                0
+            } else {
+                u64::try_from(gas_fee_cap_nwei / (gas_used as u128)).unwrap_or(u64::MAX)
+            };
+            (
+                gas_fee_cap_nwei,
+                derived_base_fee_per_gas,
+                0u64,
+                0u64,
+                0u128,
+                false,
+                0u32,
+            )
+        }
     };
 
     calculate_network_fee(
@@ -923,8 +1369,14 @@ fn canonical_network_fee_breakdown(
             gas_fee_nwei,
             storage_fee_nwei: 0,
             priority_fee_nwei: 0,
+            pq_gas_used,
+            pq_gas_multiplier,
+            effective_pq_gas_price_nwei,
+            pq_execution_fee_nwei,
+            fee_market_active,
+            fee_market_version,
         },
-        &FeeSchedule::default(),
+        fee_schedule_for_runtime()?,
     )
 }
 
@@ -1217,6 +1669,13 @@ mod tests {
                 dag_version: 1,
                 aegis_pqvm_version: "aegis-pqvm".to_string(),
                 timestamp_ms_consensus_bounded: 0,
+                base_fee_per_gas_nwei: 0,
+                gas_used: 0,
+                gas_limit: 0,
+                pq_gas_used: 0,
+                pq_gas_limit: 0,
+                pq_gas_multiplier: 0,
+                fee_market_version: 0,
             },
             transactions,
             proposer_signature: AegisPqSignature {
@@ -1561,6 +2020,7 @@ mod tests {
                 domain: "SYNQ_CONTRACT_DEPLOY_V1".to_string(),
                 algorithm: "ML-DSA-87".to_string(),
                 signer: "syna1fixture".to_string(),
+                identity_authorization_payload_sha3_256: None,
                 payload_hash: [7; 32],
                 bytecode_hash: Some([1; 32]),
                 manifest_hash: Some([2; 32]),
@@ -1621,10 +2081,12 @@ mod tests {
         };
         let deploy_payload = fixture.deploy_payload(true);
         let contract_address = fixture.contract_address();
-        let contract_address_text = synergy_contract_address_from_pqsynq_address(&contract_address);
+        let contract_address_text = synergy_contract_address_from_pqsynq_address(&contract_address)
+            .expect("canonical SynQ contract address derives from the deterministic fixture");
         assert_ne!(
             contract_address_text,
             crate::address::derive_standard_account_address(&fixture.public_key.bytes)
+                .expect("fixture FN-DSA public key derives a canonical account address")
         );
         let increment_payload = fixture.call_payload(
             contract_address,

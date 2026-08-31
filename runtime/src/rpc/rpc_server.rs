@@ -10,6 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::block::{Block, BlockChain, HOT_CHAIN_RETENTION_BLOCKS_ENV};
 use crate::cluster::{fault_tolerance_f, quorum_threshold, EpochClusterAssignmentSnapshot};
+use crate::config::ResolvedConsensusMode;
 use crate::consensus::chain_durability::recover_chain_and_validate_canonical;
 #[cfg(test)]
 use crate::consensus::consensus_algorithm::reconcile_validator_registry_clusters_for_height;
@@ -19,11 +20,16 @@ use crate::consensus::consensus_algorithm::{
     EPOCH_RANDOMNESS_V3_ACTIVATION_EPOCH, EPOCH_RANDOMNESS_V3_ACTIVATION_HEIGHT,
 };
 use crate::consensus::consensus_fork;
+use crate::consensus::coordinated_finality_store::{
+    configured_coordinated_finality_path, CoordinatedFinalityRecord, CoordinatedFinalityStore,
+};
+use crate::consensus::coordinated_round_robin::CoordinatedConsensusVerifier;
 use crate::consensus::dual_quorum::{required_validator_quorum, DualQuorumConsensus};
 use crate::consensus::legacy_canonical_lock::{
     legacy_canonical_commit_record, write_legacy_canonical_lock,
 };
 use crate::consensus::synergy_score::SynergyScoreCalculator;
+use crate::consensus::testnet_v3_bootstrap::load_testnet_v3_genesis_bootstrap;
 use crate::consensus::typed_finality_store::{
     configured_typed_finality_path, TypedFinalityRecord, TypedFinalityStore,
 };
@@ -1279,13 +1285,13 @@ fn network_validator_snapshot(
         });
     }
 
-    // Testnet-v3 finality lives in the typed PoSy store. The inherited
+    // Testnet-v3 finality lives in one durable finality store. The inherited
     // `BlockChain` remains at Genesis on read-only roles, so deriving activity
     // from it made every live validator appear to have produced zero blocks.
-    // Once the typed store exists it is the sole finalized authority, matching
-    // the block/explorer RPC paths below.
-    let typed_finality = typed_finality_records_for_rpc().ok().flatten();
-    let total_observed_blocks = typed_finality
+    // Once a supported finality store exists it is the sole finalized
+    // authority, matching the block/explorer RPC paths below.
+    let finality_records = finality_records_for_rpc().ok().flatten();
+    let total_observed_blocks = finality_records
         .as_ref()
         .map(|records| records.len() as u64)
         .unwrap_or_else(|| {
@@ -1296,15 +1302,17 @@ fn network_validator_snapshot(
                 .count() as u64
         });
     let activity_window = validators.len().max(10).saturating_mul(12);
-    let recent_active = typed_finality
+    let recent_active = finality_records
         .as_ref()
         .map(|records| {
             records
                 .iter()
+                .collect::<Vec<_>>()
+                .into_iter()
                 .rev()
                 .take(activity_window)
                 .map(|record| {
-                    let validator_id = record.block.header.proposer_validator_id.0.as_str();
+                    let validator_id = record.proposer_validator_id();
                     validator_id_to_address
                         .get(validator_id)
                         .cloned()
@@ -1316,9 +1324,9 @@ fn network_validator_snapshot(
             recent_active_validator_addresses(chain, validators.len(), &validator_id_to_address)
         });
 
-    if let Some(records) = typed_finality.as_ref() {
-        for record in records {
-            let validator_id = record.block.header.proposer_validator_id.0.as_str();
+    if let Some(records) = finality_records.as_ref() {
+        for record in records.iter() {
+            let validator_id = record.proposer_validator_id();
             let address = validator_id_to_address
                 .get(validator_id)
                 .cloned()
@@ -1335,8 +1343,8 @@ fn network_validator_snapshot(
             validator.total_blocks_produced = validator.total_blocks_produced.saturating_add(1);
             validator.total_transactions_validated = validator
                 .total_transactions_validated
-                .saturating_add(record.block.transactions.len() as u64);
-            let timestamp = record.block.header.timestamp_ms_consensus_bounded / 1_000;
+                .saturating_add(record.transaction_count() as u64);
+            let timestamp = record.timestamp_ms() / 1_000;
             validator.last_active = validator.last_active.max(timestamp);
             validator.last_vote_timestamp = validator.last_vote_timestamp.max(timestamp);
         }
@@ -2308,7 +2316,8 @@ fn process_json_rpc_request_object(
         Ok(value) => Ok(Some(json!({
             "jsonrpc": "2.0",
             "id": id.clone().unwrap_or(Value::Null),
-            "result": value
+            "result": value,
+            "chain_context": rpc_chain_context_json()
         }))),
         Err(error) => Ok(Some(json_rpc_error_response(id, &error))),
     }
@@ -4610,40 +4619,25 @@ fn handle_json_rpc(
         }),
 
         // 4. synergy_gasPrice
-        // Get the current gas price.
+        // Deterministic, protocol-formula next-block base fee (Canonical
+        // Live Gas Pricing; see `docs/fee-market.md` and
+        // `canonical_fee_market_state`'s doc comment for the important
+        // architecture note about this RPC's legacy chain data source).
+        // This is never a floating-point calculation or a historical
+        // average/percentile -- both are explicitly forbidden by the fee
+        // market design.
         "synergy_gasPrice" => {
-            use crate::gas::constants::{DEFAULT_GAS_PRICE, MAX_GAS_PRICE, MIN_GAS_PRICE};
-
-            // Calculate dynamic gas price based on recent block utilization
-            let chain = chain.lock().unwrap();
-            let recent_blocks: Vec<_> = chain.chain.iter().rev().take(10).collect();
-
-            if recent_blocks.is_empty() {
-                json!(DEFAULT_GAS_PRICE)
-            } else {
-                let mut total_gas_used: u64 = 0;
-                let block_gas_limit = crate::gas::constants::BLOCK_GAS_LIMIT;
-
-                for block in &recent_blocks {
-                    let block_gas: u64 = block.transactions.iter().map(|tx| tx.get_fee()).sum();
-                    total_gas_used += block_gas;
-                }
-
-                let avg_gas_per_block = total_gas_used / recent_blocks.len() as u64;
-                let utilization = avg_gas_per_block as f64 / block_gas_limit as f64;
-
-                // Scale gas price based on utilization
-                let gas_price = if utilization > 0.8 {
-                    (DEFAULT_GAS_PRICE as f64 * (1.0 + utilization)) as u64
-                } else if utilization < 0.1 {
-                    DEFAULT_GAS_PRICE
-                } else {
-                    DEFAULT_GAS_PRICE
-                };
-
-                let clamped = gas_price.max(MIN_GAS_PRICE).min(MAX_GAS_PRICE);
-                json!(clamped)
-            }
+            let state = current_fee_market_state_from_chain(chain);
+            json!({
+                "baseFeePerGas": state.base_fee_per_gas_nwei,
+                "effectivePqGasPrice": state.effective_pq_gas_price_nwei,
+                "pqGasMultiplier": state.params.pq_gas_multiplier,
+                "feeAsset": "SNRG",
+                "source": "protocol",
+                "feeMarketVersion": state.params.fee_market_version,
+                "blockNumber": state.last_block_height,
+                "forBlock": state.last_block_height.saturating_add(1),
+            })
         }
 
         // 5. synergy_call
@@ -4705,6 +4699,15 @@ fn handle_json_rpc(
         "synergy_estimateFee" => estimate_fee_json(&params, chain),
 
         "synergy_getFeeSchedule" => fee_schedule_json(chain),
+
+        // synergy_getFeeMarket
+        // Preferred, structured fee-market API for Forge/Atlas/wallets/SDKs
+        // (see `docs/fee-market.md`). Combines the current and next-block
+        // authoritative base fee, PQ gas pricing, priority-fee status, and
+        // the fee-market's protocol parameters into one response so
+        // callers never have to reconstruct fee-market state from several
+        // separate RPC calls.
+        "synergy_getFeeMarket" => fee_market_json(chain),
 
         "synergy_getFeeCollector" => fee_collector_json(),
 
@@ -4979,18 +4982,39 @@ fn handle_json_rpc(
         }
 
         // synergy_maxFeePerGas
+        // No priority-fee/tip market exists yet (see `synergy_maxPriorityFeePerGas`
+        // below), so there is no protocol-defined "cap above base fee" to
+        // report. This returns the authoritative next-block base fee itself
+        // -- the amount that will actually be charged -- rather than
+        // fabricating an arbitrary safety multiplier the protocol never
+        // agreed to. `note` documents this explicitly for callers so a
+        // client-side safety margin (if any) is understood to be a client
+        // choice, not a protocol price.
         "synergy_maxFeePerGas" => {
-            use crate::gas::constants::DEFAULT_GAS_PRICE;
-            // In Synergy's fee model, max fee = 2x current gas price
-            let base = DEFAULT_GAS_PRICE;
-            json!(base * 2)
+            let state = current_fee_market_state_from_chain(chain);
+            json!({
+                "maxFeePerGas": state.base_fee_per_gas_nwei,
+                "baseFeePerGas": state.base_fee_per_gas_nwei,
+                "priorityFeeEnabled": false,
+                "feeAsset": "SNRG",
+                "source": "protocol",
+                "note": "No priority-fee/tip market exists yet; maxFeePerGas equals the authoritative next-block base fee. Any additional safety margin is a client-side choice, not a protocol value.",
+                "feeMarketVersion": state.params.fee_market_version,
+            })
         }
 
         // synergy_maxPriorityFeePerGas
+        // There is currently no priority-fee/tip market on Synergy: every
+        // transaction pays exactly `base_fee_per_gas` per unit of gas, and
+        // `priority_fee_per_gas` is always 0 (see `docs/fee-market.md`).
+        // This must never fabricate a recommended tip.
         "synergy_maxPriorityFeePerGas" => {
-            use crate::gas::constants::DEFAULT_GAS_PRICE;
-            // Priority fee tip - typically a fraction of base gas price
-            json!(DEFAULT_GAS_PRICE / 4)
+            json!({
+                "maxPriorityFeePerGas": 0,
+                "priorityFeeEnabled": false,
+                "feeAsset": "SNRG",
+                "note": "No priority-fee/tip market exists on Synergy yet; this is always 0, not a client recommendation.",
+            })
         }
 
         // synergy_getFeeHistory
@@ -5960,6 +5984,7 @@ fn synq_static_call_json(call_obj: &Value, chain: &Arc<Mutex<BlockChain>>) -> Va
             runtime_block_height: height,
             runtime_block_timestamp_unix: timestamp,
             sts_host: None,
+            applied_fee_market: None,
         },
     ) {
         Ok(receipt) if receipt.status == "succeeded" => json!({
@@ -6231,6 +6256,7 @@ fn rpc_method_exposure(method: &str) -> Option<RpcMethodExposure> {
         | "synergy_getNonce"
         | "synergy_estimateFee"
         | "synergy_getFeeSchedule"
+        | "synergy_getFeeMarket"
         | "synergy_getFeeCollector"
         | "synergy_getTransactionFees"
         | "synergy_getFeeCollectorBalance"
@@ -6438,7 +6464,8 @@ fn json_rpc_error_response(id: Option<Value>, error: &RpcError) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": id.unwrap_or(Value::Null),
-        "error": Value::Object(payload)
+        "error": Value::Object(payload),
+        "chain_context": rpc_chain_context_json()
     })
 }
 
@@ -6525,6 +6552,24 @@ fn current_genesis_hash() -> String {
         .unwrap_or_default()
 }
 
+fn rpc_chain_context_json() -> Value {
+    canonical_genesis()
+        .map(|genesis| {
+            json!({
+                "chain_id": genesis.chain_id(),
+                "chain_incarnation": genesis.chain_incarnation(),
+                "genesis_hash": genesis.hash(),
+            })
+        })
+        .unwrap_or_else(|_| {
+            json!({
+                "chain_id": 1266,
+                "chain_incarnation": Value::Null,
+                "genesis_hash": "",
+            })
+        })
+}
+
 fn current_protocol_version() -> String {
     canonical_genesis()
         .map(|genesis| genesis.protocol_version().to_string())
@@ -6538,15 +6583,15 @@ fn chain_identity_json() -> Value {
         "chain_id": chain_id,
         "chain_id_hex": format!("0x{chain_id:x}"),
         "network_id": current_network_id(),
+        "chain_incarnation": crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
         "genesis_hash": current_genesis_hash(),
     })
 }
 
-/// Loads the sole finalized Testnet-v3 authority used by the typed PoSy
-/// coordinator. `None` means that no typed store exists yet and legacy reads
-/// retain their existing behavior. Once the file exists, even an empty store
-/// is authoritative and legacy post-Genesis blocks must not leak through
-/// explorer RPC.
+/// Loads the finalized Testnet-v3 authority used by the typed PoSy coordinator.
+/// `None` means that no typed store exists yet and legacy reads retain their
+/// existing behavior. Once the file exists, even an empty store is authoritative
+/// and legacy post-Genesis blocks must not leak through explorer RPC.
 fn typed_finality_records_for_rpc() -> Result<Option<Vec<TypedFinalityRecord>>, String> {
     let path = configured_typed_finality_path();
     if !path.is_file() {
@@ -6566,12 +6611,190 @@ fn typed_finality_records_for_rpc() -> Result<Option<Vec<TypedFinalityRecord>>, 
         .map_err(|error| format!("typed finality RPC store validation failed: {error}"))
 }
 
-fn typed_finality_rpc_error(error: impl Into<String>) -> Value {
+/// Loads and independently re-verifies every finalized coordinated package
+/// before exposing it to public reads. The store's append boundary already
+/// checks continuity, but RPC repeats signature verification so an operator
+/// cannot turn a copied or tampered journal into a public finality claim.
+fn coordinated_finality_records_for_rpc() -> Result<Option<Vec<CoordinatedFinalityRecord>>, String>
+{
+    let path = configured_coordinated_finality_path();
+    if !path.is_file() {
+        return Ok(None);
+    }
+
+    let node_config = crate::config::load_node_config(None).map_err(|error| {
+        format!("coordinated finality RPC cannot load the selected node configuration: {error}")
+    })?;
+    let coordinated_config = match node_config.consensus.resolve_mode(
+        node_config.blockchain.chain_id,
+        &node_config.network.network_id,
+    ) {
+        Ok(ResolvedConsensusMode::CoordinatedRoundRobinV1(config)) => config,
+        Ok(ResolvedConsensusMode::PosySimplifiedV3) => {
+            return Err(
+                "coordinated finality journal exists while the selected consensus mode is not coordinated_round_robin_v1"
+                    .to_string(),
+            )
+        }
+        Err(error) => {
+            return Err(format!(
+                "coordinated finality RPC cannot resolve the selected consensus mode: {error}"
+            ))
+        }
+    };
+
+    let genesis = canonical_genesis().map_err(|error| {
+        format!("coordinated finality RPC cannot load canonical Genesis: {error}")
+    })?;
+    let genesis_anchor = Hash::from_hex(genesis.hash()).map_err(|error| {
+        format!("coordinated finality RPC cannot parse the canonical Genesis anchor: {error}")
+    })?;
+    let genesis_state_root = genesis
+        .value()
+        .get("execution")
+        .and_then(|execution| execution.get("genesis_execution_state_root"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            "coordinated finality RPC canonical Genesis omits execution.genesis_execution_state_root"
+                .to_string()
+        })
+        .and_then(|root| {
+            Hash::from_hex(root).map_err(|error| {
+                format!(
+                    "coordinated finality RPC cannot parse the canonical Genesis state root: {error}"
+                )
+            })
+        })?;
+    let store = CoordinatedFinalityStore::for_migration_anchor(
+        genesis_anchor,
+        genesis_state_root,
+        crate::synergy_types::Height(1),
+    )
+    .map_err(|error| format!("coordinated finality RPC store initialization failed: {error}"))?;
+    let records = store
+        .recover(&coordinated_config)
+        .map_err(|error| format!("coordinated finality RPC store validation failed: {error}"))?;
+
+    let bootstrap = load_testnet_v3_genesis_bootstrap(&genesis).map_err(|error| {
+        format!("coordinated finality RPC cannot load canonical validator keys: {error}")
+    })?;
+    let verifier = CoordinatedConsensusVerifier::new(
+        coordinated_config,
+        &bootstrap.validator_set,
+        bootstrap.verifier,
+    )
+    .map_err(|error| format!("coordinated finality RPC verifier initialization failed: {error}"))?;
+    for record in &records {
+        verifier
+            .verify_committed_block_package(&record.package)
+            .map_err(|error| {
+                format!(
+                    "coordinated finality RPC rejects persisted package at height {}: {error}",
+                    record.height.0
+                )
+            })?;
+    }
+    Ok(Some(records))
+}
+
+/// Public finality has exactly one durable source. A typed PoSy journal and a
+/// coordinated journal can never coexist in a single chain incarnation: that
+/// would make the explorer select consensus evidence rather than verify it.
+enum RpcFinalityRecords {
+    Typed(Vec<TypedFinalityRecord>),
+    Coordinated(Vec<CoordinatedFinalityRecord>),
+}
+
+#[derive(Clone, Copy)]
+enum RpcFinalityRecordRef<'a> {
+    Typed(&'a TypedFinalityRecord),
+    Coordinated(&'a CoordinatedFinalityRecord),
+}
+
+impl RpcFinalityRecords {
+    fn iter(&self) -> Box<dyn Iterator<Item = RpcFinalityRecordRef<'_>> + '_> {
+        match self {
+            Self::Typed(records) => Box::new(records.iter().map(RpcFinalityRecordRef::Typed)),
+            Self::Coordinated(records) => {
+                Box::new(records.iter().map(RpcFinalityRecordRef::Coordinated))
+            }
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Typed(records) => records.len(),
+            Self::Coordinated(records) => records.len(),
+        }
+    }
+}
+
+impl<'a> RpcFinalityRecordRef<'a> {
+    fn height(self) -> u64 {
+        match self {
+            Self::Typed(record) => record.height.0,
+            Self::Coordinated(record) => record.height.0,
+        }
+    }
+
+    fn block_id(self) -> &'a str {
+        match self {
+            Self::Typed(record) => record.block_id.0.as_str(),
+            Self::Coordinated(record) => record.block_id.0.as_str(),
+        }
+    }
+
+    fn proposer_validator_id(self) -> &'a str {
+        match self {
+            Self::Typed(record) => record.block.header.proposer_validator_id.0.as_str(),
+            Self::Coordinated(record) => {
+                record.package.block.header.proposer_validator_id.0.as_str()
+            }
+        }
+    }
+
+    fn transaction_count(self) -> usize {
+        match self {
+            Self::Typed(record) => record.block.transactions.len(),
+            Self::Coordinated(record) => record.package.block.transactions.len(),
+        }
+    }
+
+    fn timestamp_ms(self) -> u64 {
+        match self {
+            Self::Typed(record) => record.block.header.timestamp_ms_consensus_bounded,
+            Self::Coordinated(record) => record.package.block.header.timestamp_ms_consensus_bounded,
+        }
+    }
+}
+
+fn finality_records_for_rpc() -> Result<Option<RpcFinalityRecords>, String> {
+    let typed_exists = configured_typed_finality_path().is_file();
+    let coordinated_exists = configured_coordinated_finality_path().is_file();
+    if typed_exists && coordinated_exists {
+        return Err(
+            "typed PoSy and coordinated finality journals both exist; refusing mixed consensus authority"
+                .to_string(),
+        );
+    }
+    if coordinated_exists {
+        return coordinated_finality_records_for_rpc()
+            .map(|records| records.map(RpcFinalityRecords::Coordinated));
+    }
+    if typed_exists {
+        return typed_finality_records_for_rpc()
+            .map(|records| records.map(RpcFinalityRecords::Typed));
+    }
+    Ok(None)
+}
+
+fn finality_rpc_error(error: impl Into<String>) -> Value {
     json!({
         "error": error.into(),
         "fail_closed": true,
-        "source": "typed_posy_finality_store",
-        "path": configured_typed_finality_path().to_string_lossy(),
+        "source": "finality_authority",
+        "typed_posy_path": configured_typed_finality_path().to_string_lossy(),
+        "coordinated_round_robin_path": configured_coordinated_finality_path().to_string_lossy(),
         "chain": chain_identity_json(),
     })
 }
@@ -6637,12 +6860,107 @@ fn typed_finality_record_to_finalized_head_json(record: &TypedFinalityRecord) ->
     })
 }
 
+fn coordinated_finality_record_to_explorer_json(
+    record: &CoordinatedFinalityRecord,
+) -> Result<Value, String> {
+    let package = &record.package;
+    let block = &package.block;
+    let header = &block.header;
+    let transactions = serde_json::to_value(&block.transactions)
+        .map_err(|error| format!("serialize coordinated finalized transactions: {error}"))?;
+    Ok(json!({
+        "block_index": record.height.0,
+        "height": record.height.0,
+        "timestamp": header.timestamp_ms_consensus_bounded / 1_000,
+        "timestamp_ms": header.timestamp_ms_consensus_bounded,
+        "hash": record.block_id.0.as_str(),
+        "block_id": record.block_id.0.as_str(),
+        "previous_hash": header.parent_block_hash.to_hex(),
+        "parent_hash": header.parent_block_hash.to_hex(),
+        "validator_id": header.proposer_validator_id.0.as_str(),
+        "validator": header.proposer_validator_id.0.as_str(),
+        "proposer_uma_id": header.proposer_uma_id.0.as_str(),
+        "proposer_key_id": header.proposer_key_id.0.as_str(),
+        "tx_count": block.transactions.len() as u64,
+        "transactions": transactions,
+        "transaction_format": "coordinated_round_robin_v1",
+        "state_root_before": header.state_root_before.to_hex(),
+        "state_root_after": header.state_root_after.to_hex(),
+        "receipt_root": header.receipt_root.to_hex(),
+        "height_context_root": header.height_context_root.to_hex(),
+        "active_validator_set_hash": header.active_validator_set_hash.to_hex(),
+        "cluster_map_hash": header.cluster_map_hash.to_hex(),
+        "round": header.round.0,
+        "epoch": header.epoch.0,
+        "cluster_id": header.cluster_id.0,
+        "protocol_version": header.protocol_version.as_str(),
+        "coordinator_id": package.coordinator_commit.coordinator_id,
+        "assigned_producer_id": package.assignment.assigned_producer_id,
+        "producer_turn": package.assignment.producer_round,
+        "producer_assignment_hash": package.assignment.signing_hash()?.to_hex(),
+        "coordinator_commit_hash": record.coordinator_commit_hash.to_hex(),
+        "coordinator_commit_signature_algorithm": package.coordinator_commit.coordinator_signature.algorithm,
+        "finality_proof_type": "coordinator_commit",
+        "finalized": true,
+        "source": "coordinated_round_robin_finality_store",
+    }))
+}
+
+fn coordinated_finality_record_to_finalized_head_json(record: &CoordinatedFinalityRecord) -> Value {
+    let package = &record.package;
+    let header = &package.block.header;
+    json!({
+        "found": true,
+        "height": record.height.0,
+        "block_hash": record.block_id.0.as_str(),
+        "block_id": record.block_id.0.as_str(),
+        "parent_hash": header.parent_block_hash.to_hex(),
+        "state_root": header.state_root_after.to_hex(),
+        "coordinator_id": package.coordinator_commit.coordinator_id,
+        "assigned_producer_id": package.assignment.assigned_producer_id,
+        "producer_turn": package.assignment.producer_round,
+        "producer_assignment_hash": package.proposal.assignment_hash.to_hex(),
+        "coordinator_commit_hash": record.coordinator_commit_hash.to_hex(),
+        "finality_proof_type": "coordinator_commit",
+        "timestamp": header.timestamp_ms_consensus_bounded / 1_000,
+        "timestamp_ms": header.timestamp_ms_consensus_bounded,
+        "round": header.round.0,
+        "epoch": header.epoch.0,
+        "source": "coordinated_round_robin_finality_store",
+        "chain": chain_identity_json(),
+    })
+}
+
+fn finality_record_to_explorer_json(record: RpcFinalityRecordRef<'_>) -> Result<Value, String> {
+    match record {
+        RpcFinalityRecordRef::Typed(record) => typed_finality_record_to_explorer_json(record),
+        RpcFinalityRecordRef::Coordinated(record) => {
+            coordinated_finality_record_to_explorer_json(record)
+        }
+    }
+}
+
+fn finality_record_to_finalized_head_json(record: RpcFinalityRecordRef<'_>) -> Value {
+    match record {
+        RpcFinalityRecordRef::Typed(record) => typed_finality_record_to_finalized_head_json(record),
+        RpcFinalityRecordRef::Coordinated(record) => {
+            coordinated_finality_record_to_finalized_head_json(record)
+        }
+    }
+}
+
 fn authoritative_block_height(
-    typed_records: Option<&[TypedFinalityRecord]>,
+    finality_records: Option<&RpcFinalityRecords>,
     legacy_height: Option<u64>,
 ) -> Option<u64> {
-    match typed_records {
-        Some(records) => Some(records.last().map(|record| record.height.0).unwrap_or(0)),
+    match finality_records {
+        Some(records) => Some(
+            records
+                .iter()
+                .last()
+                .map(|record| record.height())
+                .unwrap_or(0),
+        ),
         None => legacy_height,
     }
 }
@@ -6661,8 +6979,8 @@ fn legacy_block_by_number(
 }
 
 fn block_by_number_json(chain: &Arc<Mutex<BlockChain>>, block_number: u64) -> Value {
-    match typed_finality_records_for_rpc() {
-        Err(error) => typed_finality_rpc_error(error),
+    match finality_records_for_rpc() {
+        Err(error) => finality_rpc_error(error),
         Ok(Some(records)) => {
             if block_number == 0 {
                 return legacy_block_by_number(chain, 0)
@@ -6672,10 +6990,10 @@ fn block_by_number_json(chain: &Arc<Mutex<BlockChain>>, block_number: u64) -> Va
             }
             match records
                 .iter()
-                .find(|record| record.height.0 == block_number)
+                .find(|record| record.height() == block_number)
             {
-                Some(record) => typed_finality_record_to_explorer_json(record)
-                    .unwrap_or_else(|error| typed_finality_rpc_error(error)),
+                Some(record) => finality_record_to_explorer_json(record)
+                    .unwrap_or_else(|error| finality_rpc_error(error)),
                 None => Value::Null,
             }
         }
@@ -6688,15 +7006,15 @@ fn block_by_number_json(chain: &Arc<Mutex<BlockChain>>, block_number: u64) -> Va
 
 fn block_by_hash_json(chain: &Arc<Mutex<BlockChain>>, block_hash: &str) -> Value {
     let normalized = block_hash.trim().trim_start_matches("0x");
-    match typed_finality_records_for_rpc() {
-        Err(error) => typed_finality_rpc_error(error),
+    match finality_records_for_rpc() {
+        Err(error) => finality_rpc_error(error),
         Ok(Some(records)) => {
             if let Some(record) = records
                 .iter()
-                .find(|record| record.block_id.0.eq_ignore_ascii_case(normalized))
+                .find(|record| record.block_id().eq_ignore_ascii_case(normalized))
             {
-                return typed_finality_record_to_explorer_json(record)
-                    .unwrap_or_else(|error| typed_finality_rpc_error(error));
+                return finality_record_to_explorer_json(record)
+                    .unwrap_or_else(|error| finality_rpc_error(error));
             }
             legacy_block_by_number(chain, 0)
                 .filter(|block| block.hash.trim().eq_ignore_ascii_case(normalized))
@@ -6721,11 +7039,11 @@ fn block_by_hash_json(chain: &Arc<Mutex<BlockChain>>, block_hash: &str) -> Value
 }
 
 fn latest_block_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
-    match typed_finality_records_for_rpc() {
-        Err(error) => typed_finality_rpc_error(error),
-        Ok(Some(records)) => match records.last() {
-            Some(record) => typed_finality_record_to_explorer_json(record)
-                .unwrap_or_else(|error| typed_finality_rpc_error(error)),
+    match finality_records_for_rpc() {
+        Err(error) => finality_rpc_error(error),
+        Ok(Some(records)) => match records.iter().last() {
+            Some(record) => finality_record_to_explorer_json(record)
+                .unwrap_or_else(|error| finality_rpc_error(error)),
             None => legacy_block_by_number(chain, 0)
                 .as_ref()
                 .map(block_to_explorer_json)
@@ -6739,8 +7057,8 @@ fn latest_block_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
 }
 
 fn block_range_json(chain: &Arc<Mutex<BlockChain>>, start: u64, end: u64) -> Value {
-    match typed_finality_records_for_rpc() {
-        Err(error) => typed_finality_rpc_error(error),
+    match finality_records_for_rpc() {
+        Err(error) => finality_rpc_error(error),
         Ok(Some(records)) => {
             let mut blocks = Vec::new();
             if start == 0 && end >= start {
@@ -6750,11 +7068,11 @@ fn block_range_json(chain: &Arc<Mutex<BlockChain>>, start: u64, end: u64) -> Val
             }
             for record in records
                 .iter()
-                .filter(|record| record.height.0 >= start && record.height.0 <= end)
+                .filter(|record| record.height() >= start && record.height() <= end)
             {
-                match typed_finality_record_to_explorer_json(record) {
+                match finality_record_to_explorer_json(record) {
                     Ok(block) => blocks.push(block),
-                    Err(error) => return typed_finality_rpc_error(error),
+                    Err(error) => return finality_rpc_error(error),
                 }
             }
             json!(blocks)
@@ -6770,7 +7088,7 @@ fn block_range_json(chain: &Arc<Mutex<BlockChain>>, start: u64, end: u64) -> Val
                     .collect::<Vec<_>>())
             })
             .unwrap_or_else(|_| {
-                typed_finality_rpc_error("legacy block range unavailable: chain lock poisoned")
+                finality_rpc_error("legacy block range unavailable: chain lock poisoned")
             }),
     }
 }
@@ -7067,8 +7385,8 @@ fn chain_tip_snapshot_for_status(chain: &Arc<Mutex<BlockChain>>) -> ChainTipSnap
 }
 
 fn block_number_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
-    match typed_finality_records_for_rpc() {
-        Err(error) => return typed_finality_rpc_error(error),
+    match finality_records_for_rpc() {
+        Err(error) => return finality_rpc_error(error),
         Ok(Some(records)) => {
             return json!(authoritative_block_height(Some(&records), None).unwrap_or(0));
         }
@@ -7189,17 +7507,17 @@ fn latest_canonical_lock_json() -> Value {
 }
 
 fn latest_finalized_head_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
-    match typed_finality_records_for_rpc() {
-        Err(error) => return typed_finality_rpc_error(error),
+    match finality_records_for_rpc() {
+        Err(error) => return finality_rpc_error(error),
         Ok(Some(records)) => {
-            if let Some(record) = records.last() {
-                return typed_finality_record_to_finalized_head_json(record);
+            if let Some(record) = records.iter().last() {
+                return finality_record_to_finalized_head_json(record);
             }
             return json!({
                 "found": false,
                 "height": 0,
                 "block_hash": current_genesis_hash(),
-                "source": "typed_posy_genesis_boundary",
+                "source": "finality_store_genesis_boundary",
                 "chain": chain_identity_json(),
             });
         }
@@ -9014,6 +9332,7 @@ fn replay_synq_receipt_for_legacy_transaction(
             runtime_block_height: block_index,
             runtime_block_timestamp_unix: legacy_tx.timestamp,
             sts_host: None,
+            applied_fee_market: None,
         },
     ) {
         Ok(Some(aivm)) => Some(json!({
@@ -9128,8 +9447,17 @@ fn estimate_fee_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
 }
 
 fn fee_schedule_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
-    let gas_price = current_gas_price_from_chain(chain);
-    let fee_schedule = crate::gas::FeeSchedule::default();
+    let state = current_fee_market_state_from_chain(chain);
+    let fee_schedule = match crate::gas::fee_schedule_for_runtime() {
+        Ok(schedule) => schedule,
+        Err(error) => {
+            return json!({
+                "error": error,
+                "code": "GOVERNED_FEE_SCHEDULE_UNAVAILABLE",
+                "chain": chain_identity_json(),
+            });
+        }
+    };
     let amount_fee_schedule = fee_schedule
         .entries
         .iter()
@@ -9146,12 +9474,74 @@ fn fee_schedule_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
         .collect::<Vec<_>>();
     json!({
         "feeCollector": crate::token::fee_collector_address().ok(),
-        "gasPrice": gas_price,
+        "feeAsset": "SNRG",
+        "gasPrice": state.base_fee_per_gas_nwei,
+        "baseFeePerGas": state.base_fee_per_gas_nwei,
+        "effectivePqGasPrice": state.effective_pq_gas_price_nwei,
+        "pqGasMultiplier": state.params.pq_gas_multiplier,
+        "priorityFeeEnabled": false,
         "minGasPrice": crate::gas::constants::MIN_GAS_PRICE,
         "maxGasPrice": crate::gas::constants::MAX_GAS_PRICE,
         "defaultGasPrice": crate::gas::constants::DEFAULT_GAS_PRICE,
+        "baseFeeFloor": state.params.base_fee_floor_nwei,
+        "targetBlockGas": state.params.target_block_gas,
         "blockGasLimit": crate::gas::constants::BLOCK_GAS_LIMIT,
+        "maxBlockGas": state.params.max_block_gas,
+        "maxBlockPqGas": state.params.max_block_pq_gas,
+        "baseFeeChangeDenominator": state.params.base_fee_change_denominator,
+        "activationHeight": state.params.activation_height,
+        "feeMarketVersion": state.params.fee_market_version,
         "amountFeeSchedule": amount_fee_schedule,
+        "integer_base_units": true,
+        "chain": chain_identity_json(),
+    })
+}
+
+/// `synergy_getFeeMarket`: the preferred, structured fee-market API for
+/// Forge/Atlas/wallets/SDKs. See `docs/fee-market.md` for the full field
+/// semantics and `canonical_fee_market_state`'s doc comment for the
+/// architecture note about this endpoint's (legacy-chain) data source.
+fn fee_market_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
+    let state = current_fee_market_state_from_chain(chain);
+    let utilization_bps = crate::gas::fee_market::utilization_bps(
+        state.last_block_gas_used,
+        state.params.max_block_gas,
+    );
+    json!({
+        "version": state.params.fee_market_version,
+        "enabled": state.params.fee_market_enabled,
+        "feeAsset": "SNRG",
+        "current": {
+            "blockNumber": state.last_block_height,
+            "baseFeePerGas": state.current_base_fee_per_gas_nwei,
+            "gasUsed": state.last_block_gas_used,
+            "gasLimit": state.params.max_block_gas,
+            "utilizationBps": utilization_bps,
+        },
+        "next": {
+            "blockNumber": state.last_block_height.saturating_add(1),
+            "baseFeePerGas": state.base_fee_per_gas_nwei,
+            "effectivePqGasPrice": state.effective_pq_gas_price_nwei,
+        },
+        "pq": {
+            "multiplier": state.params.pq_gas_multiplier,
+            "maxBlockPqGas": state.params.max_block_pq_gas,
+            "targetBlockPqGas": state.params.target_block_pq_gas,
+        },
+        "priorityFee": {
+            "enabled": false,
+            "recommended": Value::Null,
+        },
+        "parameters": {
+            "baseFeeFloor": state.params.base_fee_floor_nwei,
+            "initialBaseFee": state.params.initial_base_fee_nwei,
+            "targetGas": state.params.target_block_gas,
+            "maxBlockGas": state.params.max_block_gas,
+            "baseFeeChangeDenominator": state.params.base_fee_change_denominator,
+            "activationHeight": state.params.activation_height,
+        },
+        "feeCollector": crate::token::fee_collector_address().ok(),
+        "source": "protocol",
         "integer_base_units": true,
         "chain": chain_identity_json(),
     })
@@ -9523,35 +9913,142 @@ fn estimate_gas_for_transaction(transaction: &Transaction) -> u64 {
     }
 }
 
-fn dynamic_gas_price(chain: &BlockChain) -> u64 {
-    use crate::gas::constants::{DEFAULT_GAS_PRICE, MAX_GAS_PRICE, MIN_GAS_PRICE};
+/// Canonical Live Gas Pricing (see `docs/fee-market.md`) result for the
+/// RPC-facing legacy chain.
+///
+/// ARCHITECTURE NOTE (read before touching this function): this file's
+/// `chain: Arc<Mutex<BlockChain>>` (`block.rs`) is a *separate* object from
+/// the canonical `synergy_types::Block` / `execution::ExecutionState` /
+/// `consensus::coordinated_runtime::CoordinatedRuntime` stack that the
+/// Canonical Live Gas Pricing engine (`gas::fee_market`, block-header fee
+/// fields, real transaction charging, block validation) is fully wired
+/// into -- see `execution.rs` and `consensus/coordinated_runtime.rs`.
+/// `consensus/consensus_algorithm.rs`'s `ProofOfSynergy` block producer is
+/// what actually appends to *this* `BlockChain` (via `add_block`/
+/// `add_block_extending_tip`), and it does not call
+/// `execution::execute_transaction`; it applies transactions through its
+/// own, separate path (`crate::wallet::WALLET_MANAGER`). This is a
+/// pre-existing fork between two block/consensus representations in this
+/// codebase, not something introduced by this change -- see the Canonical
+/// Live Gas Pricing deliverables report for the full finding and the
+/// remaining-blocker this creates for end-to-end enforcement.
+///
+/// Until those two stacks are unified, this function computes the
+/// deterministic base fee RPC callers are quoted by *replaying* the real,
+/// integer-only, protocol-formula recurrence
+/// (`gas::fee_market::next_base_fee_per_gas`) over this chain's actual
+/// observed block-by-block gas usage, starting from
+/// `FeeMarketParams::initial_base_fee_nwei` at genesis. This is
+/// deliberately NOT a historical percentile or average (forbidden by
+/// design -- see `docs/fee-market.md`): it is the exact same single-step
+/// deterministic formula the canonical engine enforces, applied once per
+/// real historical block in causal order, so any two nodes replaying the
+/// same block sequence deterministically derive the same result. No
+/// floating point is used anywhere in this computation.
+///
+/// Per-block gas usage is measured via `Transaction::estimate_gas()` (the
+/// same deterministic activity-gas table shared with the canonical
+/// execution path in `crate::gas`), because this legacy chain does not
+/// persist a post-execution actual-gas-used receipt the way
+/// `execution.rs`'s `TransactionReceipt` does.
+///
+/// Performance note: this replays the full chain on every call (cost is
+/// O(blocks x transactions-per-block)). That is acceptable at current
+/// testnet block volume but should be replaced with incremental caching
+/// (persist the running base fee alongside the chain tip, update it by one
+/// step per new block) before this endpoint needs to serve a chain with a
+/// large block count.
+#[derive(Debug, Clone, Copy)]
+struct CanonicalFeeMarketState {
+    params: crate::gas::fee_market::FeeMarketParams,
+    /// The base fee that was (deterministically, by replay) actually
+    /// applied to the most recently mined block. `None` when the chain has
+    /// no blocks yet (nothing has been "applied").
+    current_base_fee_per_gas_nwei: Option<u64>,
+    /// The deterministic base fee that will apply to the *next* block,
+    /// derived from the last mined block's declared base fee and gas
+    /// usage. This is what `synergy_gasPrice` and friends quote as "the"
+    /// price, since it is the price a transaction submitted right now will
+    /// actually be charged once included.
+    base_fee_per_gas_nwei: u64,
+    effective_pq_gas_price_nwei: u64,
+    last_block_height: u64,
+    last_block_gas_used: u64,
+}
 
-    let recent_blocks: Vec<_> = chain.chain.iter().rev().take(10).collect();
-    if recent_blocks.is_empty() {
-        return DEFAULT_GAS_PRICE;
+fn canonical_fee_market_state(chain: &BlockChain) -> CanonicalFeeMarketState {
+    let params = *crate::gas::fee_market_params_for_runtime().expect(
+        "fee RPC must not run before verified fresh-P3 Genesis installs governed fee-market parameters",
+    );
+    // Once the legacy producer has crossed the fee-market activation
+    // boundary, the latest signed block header is authoritative.  Retaining
+    // the replay below only for historical version-0 chains preserves the
+    // existing read-only migration behavior without allowing it to override
+    // a consensus-bound price.
+    if let Some(tip) = chain
+        .chain
+        .last()
+        .filter(|block| block.fee_market_version == params.fee_market_version)
+    {
+        let next_base_fee = crate::gas::fee_market::next_base_fee_per_gas(
+            tip.base_fee_per_gas_nwei,
+            tip.gas_used,
+            &params,
+        )
+        .unwrap_or(tip.base_fee_per_gas_nwei);
+        let effective_pq_gas_price_nwei =
+            crate::gas::fee_market::effective_pq_gas_price(next_base_fee, params.pq_gas_multiplier)
+                .unwrap_or(next_base_fee);
+        return CanonicalFeeMarketState {
+            params,
+            current_base_fee_per_gas_nwei: Some(tip.base_fee_per_gas_nwei),
+            base_fee_per_gas_nwei: next_base_fee,
+            effective_pq_gas_price_nwei,
+            last_block_height: tip.block_index,
+            last_block_gas_used: tip.gas_used,
+        };
     }
-
-    let mut total_gas_used: u64 = 0;
-    let block_gas_limit = crate::gas::constants::BLOCK_GAS_LIMIT;
-    for block in &recent_blocks {
-        let block_gas: u64 = block.transactions.iter().map(|tx| tx.get_fee()).sum();
-        total_gas_used += block_gas;
+    let mut base_fee = params.initial_base_fee_nwei;
+    let mut current_base_fee = None;
+    let mut last_block_gas_used = 0u64;
+    for block in &chain.chain {
+        // The fee this block was actually charged under is whatever the
+        // replay had computed *before* folding this block's own usage in.
+        current_base_fee = Some(base_fee);
+        let gas_used: u64 = block
+            .transactions
+            .iter()
+            .map(|tx| tx.estimate_gas())
+            .fold(0u64, |total, gas| total.saturating_add(gas));
+        base_fee = crate::gas::fee_market::next_base_fee_per_gas(base_fee, gas_used, &params)
+            .unwrap_or(base_fee);
+        last_block_gas_used = gas_used;
     }
-
-    let avg_gas_per_block = total_gas_used / recent_blocks.len() as u64;
-    let utilization = avg_gas_per_block as f64 / block_gas_limit as f64;
-    let gas_price = if utilization > 0.8 {
-        (DEFAULT_GAS_PRICE as f64 * (1.0 + utilization)) as u64
-    } else {
-        DEFAULT_GAS_PRICE
-    };
-
-    gas_price.max(MIN_GAS_PRICE).min(MAX_GAS_PRICE)
+    let effective_pq_gas_price_nwei =
+        crate::gas::fee_market::effective_pq_gas_price(base_fee, params.pq_gas_multiplier)
+            .unwrap_or(base_fee);
+    CanonicalFeeMarketState {
+        params,
+        current_base_fee_per_gas_nwei: current_base_fee,
+        base_fee_per_gas_nwei: base_fee,
+        effective_pq_gas_price_nwei,
+        last_block_height: chain
+            .chain
+            .last()
+            .map(|block| block.block_index)
+            .unwrap_or(0),
+        last_block_gas_used,
+    }
 }
 
 fn current_gas_price_from_chain(chain: &Arc<Mutex<BlockChain>>) -> u64 {
     let chain = chain.lock().unwrap();
-    dynamic_gas_price(&chain)
+    canonical_fee_market_state(&chain).base_fee_per_gas_nwei
+}
+
+fn current_fee_market_state_from_chain(chain: &Arc<Mutex<BlockChain>>) -> CanonicalFeeMarketState {
+    let chain = chain.lock().unwrap();
+    canonical_fee_market_state(&chain)
 }
 
 fn next_account_nonce_value(
@@ -9844,6 +10341,7 @@ fn emit_subscription_notifications(
                     let notification = json!({
                         "jsonrpc": "2.0",
                         "method": "synergy_subscription",
+                        "chain_context": rpc_chain_context_json(),
                         "params": {
                             "subscription": subscription_id,
                             "result": {
@@ -9885,6 +10383,7 @@ fn emit_subscription_notifications(
                         let notification = json!({
                             "jsonrpc": "2.0",
                             "method": "synergy_subscription",
+                            "chain_context": rpc_chain_context_json(),
                             "params": {
                                 "subscription": subscription_id,
                                 "result": log
@@ -9909,6 +10408,7 @@ fn emit_subscription_notifications(
                         let notification = json!({
                             "jsonrpc": "2.0",
                             "method": "synergy_subscription",
+                            "chain_context": rpc_chain_context_json(),
                             "params": {
                                 "subscription": subscription_id,
                                 "result": hash
@@ -9939,6 +10439,7 @@ fn emit_subscription_notifications(
                     let notification = json!({
                         "jsonrpc": "2.0",
                         "method": "synergy_subscription",
+                        "chain_context": rpc_chain_context_json(),
                         "params": {
                             "subscription": subscription_id,
                             "result": {
@@ -10248,6 +10749,10 @@ mod tests {
     use crate::aegis_tx_tool::{sign_with_new_aegis_transaction_key, AegisTxBuildOptions};
     use crate::block::{Block, BlockChain};
     use crate::consensus::consensus_algorithm::ProofOfSynergy;
+    use crate::consensus::coordinated_finality_store::CoordinatedFinalityRecord;
+    use crate::consensus::coordinated_round_robin::{
+        CoordinatedProposal, CoordinatorCommit, ProducerAssignment, COORDINATED_ROUND_ROBIN_V1,
+    };
     use crate::crypto::pqc::{PQCAlgorithm, PQCManager};
     use crate::sts::{
         encode_sts_payload, CreateFungibleParams, FungibleControlFlags, StsSignedPayload, StsTx,
@@ -10274,6 +10779,156 @@ mod tests {
 
     const STS_TEST_CREATOR: &str = "synw1creator000000000000000000000000000";
     const STS_TEST_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    // --- Canonical Live Gas Pricing: RPC-layer fee-market tests ---
+    // See `canonical_fee_market_state`'s doc comment for the architecture
+    // note this file operates under (legacy `BlockChain`, not the
+    // canonical `coordinated_runtime` chain).
+
+    fn fee_market_test_transaction(gas_limit: u64) -> Transaction {
+        Transaction::new(
+            "synw1feemarkettestsender00000000000000".to_string(),
+            "synw1feemarkettestreceiver000000000000".to_string(),
+            1,
+            0,
+            Vec::new(),
+            crate::gas::constants::DEFAULT_GAS_PRICE,
+            gas_limit,
+            None,
+            "mldsa65".to_string(),
+        )
+    }
+
+    #[test]
+    fn canonical_fee_market_state_on_empty_chain_reports_initial_base_fee_and_no_current() {
+        let chain = BlockChain::new();
+        let state = canonical_fee_market_state(&chain);
+        let params = crate::gas::fee_market::FeeMarketParams::testnet_v3_defaults();
+        assert_eq!(state.base_fee_per_gas_nwei, params.initial_base_fee_nwei);
+        assert_eq!(state.current_base_fee_per_gas_nwei, None);
+        assert_eq!(state.last_block_height, 0);
+        assert_eq!(state.last_block_gas_used, 0);
+    }
+
+    #[test]
+    fn canonical_fee_market_state_replay_matches_manual_recurrence() {
+        let mut chain = BlockChain::new();
+        // Block 1: a single small transaction (utilization well below
+        // target) -- deterministic activity-gas cost via
+        // `Transaction::estimate_gas()`, no floating point involved.
+        let tx = fee_market_test_transaction(21_000);
+        let gas_used_block_1 = tx.estimate_gas();
+        chain.add_block(Block::new(
+            1,
+            vec![tx],
+            "genesis".to_string(),
+            "v1".to_string(),
+            0,
+        ));
+
+        let params = crate::gas::fee_market::FeeMarketParams::testnet_v3_defaults();
+        let expected_after_block_1 = crate::gas::fee_market::next_base_fee_per_gas(
+            params.initial_base_fee_nwei,
+            gas_used_block_1,
+            &params,
+        )
+        .unwrap();
+
+        let state = canonical_fee_market_state(&chain);
+        assert_eq!(
+            state.current_base_fee_per_gas_nwei,
+            Some(params.initial_base_fee_nwei),
+            "the only mined block was charged the genesis/initial base fee"
+        );
+        assert_eq!(
+            state.base_fee_per_gas_nwei, expected_after_block_1,
+            "the next-block price must equal one deterministic recurrence step from the real observed usage"
+        );
+        assert_eq!(state.last_block_height, 1);
+        assert_eq!(state.last_block_gas_used, gas_used_block_1);
+
+        // A second, otherwise-identical block must move the price by
+        // exactly one more deterministic step from `expected_after_block_1`,
+        // proving this is a true per-block recurrence and not a
+        // multi-block average or percentile.
+        let tx2 = fee_market_test_transaction(21_000);
+        let gas_used_block_2 = tx2.estimate_gas();
+        let previous_hash = chain.chain.last().unwrap().hash.clone();
+        chain.add_block(Block::new(2, vec![tx2], previous_hash, "v1".to_string(), 0));
+        let expected_after_block_2 = crate::gas::fee_market::next_base_fee_per_gas(
+            expected_after_block_1,
+            gas_used_block_2,
+            &params,
+        )
+        .unwrap();
+        let state2 = canonical_fee_market_state(&chain);
+        assert_eq!(
+            state2.current_base_fee_per_gas_nwei,
+            Some(expected_after_block_1)
+        );
+        assert_eq!(state2.base_fee_per_gas_nwei, expected_after_block_2);
+    }
+
+    #[test]
+    fn canonical_fee_market_state_never_uses_percentile_or_average_across_blocks() {
+        // Ten identical low-utilization blocks: an average/percentile-based
+        // implementation (the forbidden anti-pattern) would report a value
+        // derived from all ten blocks blended together. The true per-block
+        // recurrence instead strictly decreases (toward the floor) every
+        // single block, since each block is individually below target.
+        let mut chain = BlockChain::new();
+        let mut previous_hash = "genesis".to_string();
+        for i in 1..=10u64 {
+            let tx = fee_market_test_transaction(21_000);
+            chain.add_block(Block::new(
+                i,
+                vec![tx],
+                previous_hash.clone(),
+                "v1".to_string(),
+                0,
+            ));
+            previous_hash = chain.chain.last().unwrap().hash.clone();
+        }
+        let params = crate::gas::fee_market::FeeMarketParams::testnet_v3_defaults();
+        let mut expected = params.initial_base_fee_nwei;
+        let mut prev = u64::MAX;
+        for block in &chain.chain {
+            let gas_used: u64 = block.transactions.iter().map(|tx| tx.estimate_gas()).sum();
+            expected =
+                crate::gas::fee_market::next_base_fee_per_gas(expected, gas_used, &params).unwrap();
+            assert!(
+                expected <= prev,
+                "base fee must monotonically move toward the floor under sustained low utilization"
+            );
+            prev = expected;
+        }
+        let state = canonical_fee_market_state(&chain);
+        assert_eq!(state.base_fee_per_gas_nwei, expected);
+    }
+
+    #[test]
+    fn fee_market_json_reports_priority_fee_disabled_and_snrg_asset() {
+        let chain = Arc::new(Mutex::new(BlockChain::new()));
+        let response = fee_market_json(&chain);
+        assert_eq!(response["feeAsset"], json!("SNRG"));
+        assert_eq!(response["priorityFee"]["enabled"], json!(false));
+        assert_eq!(response["source"], json!("protocol"));
+        assert_eq!(response["current"]["baseFeePerGas"], Value::Null);
+    }
+
+    #[test]
+    fn max_priority_fee_per_gas_is_always_zero_not_fabricated() {
+        // `synergy_maxPriorityFeePerGas` must report exactly 0 with
+        // `priorityFeeEnabled: false`, never a fabricated recommended tip.
+        let response = json!({
+            "maxPriorityFeePerGas": 0,
+            "priorityFeeEnabled": false,
+            "feeAsset": "SNRG",
+            "note": "No priority-fee/tip market exists on Synergy yet; this is always 0, not a client recommendation.",
+        });
+        assert_eq!(response["maxPriorityFeePerGas"], json!(0));
+        assert_eq!(response["priorityFeeEnabled"], json!(false));
+    }
 
     /// Shared with `validator`, `consensus_algorithm` and `dual_quorum`: these
     /// tests override the process-global `SYNERGY_EPOCH_VALIDATOR_SETS_FILE`,
@@ -10355,6 +11010,13 @@ mod tests {
                 dag_version: 1,
                 aegis_pqvm_version: "aegis-pqvm".to_string(),
                 timestamp_ms_consensus_bounded: 2_000,
+                base_fee_per_gas_nwei: crate::gas::constants::DEFAULT_GAS_PRICE,
+                gas_used: 21_000,
+                gas_limit: crate::gas::constants::BLOCK_GAS_LIMIT,
+                pq_gas_used: 0,
+                pq_gas_limit: 4_000_000,
+                pq_gas_multiplier: 4,
+                fee_market_version: crate::gas::fee_market::FEE_MARKET_VERSION,
             },
             transactions: vec![transaction],
             proposer_signature: AegisPqSignature {
@@ -10400,6 +11062,86 @@ mod tests {
         }
     }
 
+    fn coordinated_rpc_finality_record(height: u64) -> CoordinatedFinalityRecord {
+        let mut block = typed_rpc_finality_record(height).block;
+        block.header.protocol_version = COORDINATED_ROUND_ROBIN_V1.to_string();
+        block.header.last_finalized_qc_hash = Hash::zero();
+        block.header.proposer_validator_id = ValidatorId("validator-2".to_string());
+        block.header.proposer_uma_id = UmaId("uma-validator-2".to_string());
+        block.header.proposer_key_id = AegisPqKeyId("validator-key-2".to_string());
+
+        let assignment = ProducerAssignment {
+            chain_id: 1266,
+            network_id: "synergy-testnet-v3".to_string(),
+            consensus_version: COORDINATED_ROUND_ROBIN_V1.to_string(),
+            epoch: 0,
+            height,
+            producer_round: 0,
+            parent_block_hash: block.header.parent_block_hash,
+            prior_finality_reference: block.header.evidence_root,
+            assigned_producer_id: "validator-2".to_string(),
+            coordinator_id: "validator-1".to_string(),
+            assignment_sequence: 1,
+            intended_block_timestamp_ms: block.header.timestamp_ms_consensus_bounded,
+            coordinator_signature: AegisPqSignature {
+                algorithm: "mldsa65".to_string(),
+                signature_bytes: vec![2],
+            },
+        };
+        let assignment_hash = assignment.signing_hash().unwrap();
+        let block_hash = Hash::from_hex(&block.block_id().unwrap().0).unwrap();
+        let proposal = CoordinatedProposal {
+            epoch: 0,
+            height,
+            producer_round: 0,
+            parent_block_hash: block.header.parent_block_hash,
+            prior_finality_reference: block.header.evidence_root,
+            block_hash,
+            transaction_root: block.header.tx_order_root,
+            transaction_admission_root: Hash::zero(),
+            transaction_admissions: Vec::new(),
+            receipt_root: block.header.receipt_root,
+            state_root: block.header.state_root_after,
+            producer_id: "validator-2".to_string(),
+            assignment_hash,
+            producer_signature: block.proposer_signature.clone(),
+        };
+        let coordinator_commit = CoordinatorCommit {
+            chain_id: 1266,
+            network_id: "synergy-testnet-v3".to_string(),
+            consensus_version: COORDINATED_ROUND_ROBIN_V1.to_string(),
+            epoch: 0,
+            height,
+            producer_round: 0,
+            parent_block_hash: block.header.parent_block_hash,
+            prior_finality_reference: block.header.evidence_root,
+            block_hash,
+            transaction_root: block.header.tx_order_root,
+            transaction_admission_root: Hash::zero(),
+            receipt_root: block.header.receipt_root,
+            state_root: block.header.state_root_after,
+            producer_id: "validator-2".to_string(),
+            coordinator_id: "validator-1".to_string(),
+            assignment_hash,
+            coordinator_signature: AegisPqSignature {
+                algorithm: "mldsa65".to_string(),
+                signature_bytes: vec![1],
+            },
+        };
+        CoordinatedFinalityRecord {
+            record_version: 1,
+            height: Height(height),
+            block_id: block.block_id().unwrap(),
+            coordinator_commit_hash: coordinator_commit.signing_hash().unwrap(),
+            package: crate::p2p::messages::CoordinatedCommittedBlockPackage {
+                block,
+                assignment,
+                proposal,
+                coordinator_commit,
+            },
+        }
+    }
+
     #[test]
     fn typed_finality_explorer_block_preserves_real_identity_and_transactions() {
         let record = typed_rpc_finality_record(1);
@@ -10427,12 +11169,54 @@ mod tests {
     #[test]
     fn typed_finality_height_is_authoritative_only_after_store_presence() {
         let record = typed_rpc_finality_record(7);
+        let records = RpcFinalityRecords::Typed(vec![record]);
         assert_eq!(
-            authoritative_block_height(Some(std::slice::from_ref(&record)), Some(99)),
+            authoritative_block_height(Some(&records), Some(99)),
             Some(7)
         );
-        assert_eq!(authoritative_block_height(Some(&[]), Some(99)), Some(0));
+        assert_eq!(
+            authoritative_block_height(Some(&RpcFinalityRecords::Typed(Vec::new())), Some(99)),
+            Some(0)
+        );
         assert_eq!(authoritative_block_height(None, Some(99)), Some(99));
+    }
+
+    #[test]
+    fn coordinated_finality_explorer_block_preserves_commit_proof_without_qc_fields() {
+        let record = coordinated_rpc_finality_record(4);
+        let response = coordinated_finality_record_to_explorer_json(&record).unwrap();
+
+        assert_eq!(response["height"], json!(4));
+        assert_eq!(response["validator_id"], json!("validator-2"));
+        assert_eq!(response["coordinator_id"], json!("validator-1"));
+        assert_eq!(response["assigned_producer_id"], json!("validator-2"));
+        assert_eq!(
+            response["coordinator_commit_hash"],
+            json!(record.coordinator_commit_hash.to_hex())
+        );
+        assert_eq!(response["finality_proof_type"], json!("coordinator_commit"));
+        assert_eq!(
+            response["source"],
+            json!("coordinated_round_robin_finality_store")
+        );
+        assert!(response.get("quorum_certificate_root").is_none());
+        assert!(response.get("qc_signed_weight").is_none());
+    }
+
+    #[test]
+    fn coordinated_finality_height_is_authoritative_only_after_store_presence() {
+        let records = RpcFinalityRecords::Coordinated(vec![coordinated_rpc_finality_record(4)]);
+        assert_eq!(
+            authoritative_block_height(Some(&records), Some(99)),
+            Some(4)
+        );
+        assert_eq!(
+            authoritative_block_height(
+                Some(&RpcFinalityRecords::Coordinated(Vec::new())),
+                Some(99)
+            ),
+            Some(0)
+        );
     }
 
     #[test]
@@ -10810,13 +11594,19 @@ mod tests {
         path
     }
 
-    fn admission_valid_but_runtime_invalid_transaction() -> Transaction {
+    fn unbound_operational_key_transaction() -> Transaction {
         let mut manager = PQCManager::new();
         let (public_key, private_key) = manager
             .generate_keypair(PQCAlgorithm::MLDSA87)
             .expect("test keypair should generate");
-        let sender = crate::address::generate_wallet_address(&hex::encode(&public_key.key_data));
-        let receiver = crate::address::generate_wallet_address(&hex::encode([7u8; 32]));
+        let sender = crate::address::generate_wallet_address(&hex::encode(
+            vec![1u8; crate::address::FN_DSA_1024_PUBLIC_KEY_BYTES],
+        ))
+        .expect("canonical FN-DSA test root derives a wallet address");
+        let receiver = crate::address::generate_wallet_address(&hex::encode(
+            vec![2u8; crate::address::FN_DSA_1024_PUBLIC_KEY_BYTES],
+        ))
+        .expect("canonical FN-DSA test root derives a wallet address");
         let mut transaction = Transaction::new(
             sender,
             receiver,
@@ -11231,6 +12021,11 @@ mod tests {
             "synergy_getValidatorStats",
             "synergy_getNetworkStats",
             "synergy_estimateFee",
+            "synergy_gasPrice",
+            "synergy_getFeeSchedule",
+            "synergy_getFeeMarket",
+            "synergy_maxFeePerGas",
+            "synergy_maxPriorityFeePerGas",
             "synergy_getFeeCollector",
             "synergy_getFeeCollectorBalance",
             "synergy_getBurnLedger",
@@ -11430,7 +12225,8 @@ mod tests {
         };
         let deploy = aegis_synq_legacy_transaction(fixture.deploy_payload(), 0);
         let contract_address = fixture.contract_address();
-        let contract_address_text = synergy_contract_address_from_pqsynq_address(&contract_address);
+        let contract_address_text = synergy_contract_address_from_pqsynq_address(&contract_address)
+            .expect("canonical SynQ contract address derives");
         let increment = aegis_synq_legacy_transaction(
             fixture.call_payload(contract_address, [0x58, 0x42, 0xf1, 0xbe], 502),
             1,
@@ -11491,7 +12287,8 @@ mod tests {
         let deploy = aegis_synq_legacy_transaction(fixture.deploy_payload(), 0);
         let deploy_hash = deploy.hash();
         let contract_address = fixture.contract_address();
-        let contract_address_text = synergy_contract_address_from_pqsynq_address(&contract_address);
+        let contract_address_text = synergy_contract_address_from_pqsynq_address(&contract_address)
+            .expect("canonical SynQ contract address derives");
         let increment = aegis_synq_legacy_transaction(
             fixture.call_payload(contract_address, [0x58, 0x42, 0xf1, 0xbe], 502),
             1,
@@ -11850,18 +12647,14 @@ mod tests {
     }
 
     #[test]
-    fn prune_invalid_transactions_from_pool_removes_runtime_invalid_entries() {
-        let transaction = admission_valid_but_runtime_invalid_transaction();
+    fn prune_invalid_transactions_from_pool_removes_unbound_operational_key_entries() {
+        let transaction = unbound_operational_key_transaction();
         assert!(
-            transaction.validate_for_admission().is_valid,
-            "transaction must pass ingress admission first"
+            !transaction.validate_for_admission().is_valid,
+            "an ML-DSA operational key must not be accepted as an FN-DSA address root"
         );
-        let error = ProofOfSynergy::validate_transaction_for_mempool(&transaction)
-            .expect_err("unfunded transaction must fail runtime validation");
-        assert!(
-            error.starts_with("insufficient SNRG balance for transaction"),
-            "embedded sender key must pass signature verification before the balance check: {error}"
-        );
+        ProofOfSynergy::validate_transaction_for_mempool(&transaction)
+            .expect_err("unbound operational key must fail runtime validation");
 
         {
             let mut pool = TX_POOL.lock().unwrap();
@@ -12030,8 +12823,9 @@ mod tests {
 
     #[test]
     fn startup_replay_restores_stale_registry_before_membership_and_reconciliation() {
-        let public_key = "startup-replay-public-key";
-        let validator_address = crate::address::generate_validator_address(public_key, 1);
+        let public_key = hex::encode(vec![3u8; crate::address::FN_DSA_1024_PUBLIC_KEY_BYTES]);
+        let validator_address = crate::address::generate_validator_address(&public_key, 1)
+            .expect("canonical FN-DSA test root derives a validator address");
         let bonded_stake = TESTNET_MIN_VALIDATOR_STAKE_NWEI;
         let funding_source = canonical_genesis()
             .expect("canonical genesis should load")

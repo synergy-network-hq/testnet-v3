@@ -1,0 +1,24 @@
+classification=MEASURED
+capture_role=pre_measurement
+mode=all-safe
+utc=2026-08-15T00:07:10Z
+Darwin Justins-Mini.lan 25.5.0 Darwin Kernel Version 25.5.0: Tue Jun  9 22:27:52 PDT 2026; root:xnu-12377.121.10~1/RELEASE_ARM64_T8112 arm64
+ProductName:		macOS
+ProductVersion:		26.5.2
+BuildVersion:		25F84
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+binary: rustc
+commit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452
+commit-date: 2026-07-14
+host: aarch64-apple-darwin
+release: 1.97.1
+LLVM version: 22.1.6
+cargo 1.97.1 (c980f4866 2026-06-30)
+19:07  up 3 days,  5:05, 1 user, load averages: 4.16 2.84 2.70
+Mac14,3
+arm64
+8
+8
+8589934592
+vm.swapusage: total = 5120.00M  used = 3507.69M  free = 1612.31M  (encrypted)
+Now drawing from 'AC Power'

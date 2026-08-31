@@ -1,0 +1,43 @@
+{
+  "classification": "DERIVED",
+  "raw_sample_count": 308,
+  "summary_group_count": 301,
+  "failed_safety_sample_count": 1,
+  "failed_safety_results": [
+    "panic_caught"
+  ],
+  "bootstrap_resamples": 2000,
+  "bootstrap_confidence": 0.95,
+  "bootstrap_statistic": "median",
+  "bootstrap_seed": "sha256 of grouping key",
+  "percentile_method": "linear interpolation at (n-1)*p",
+  "outlier_policy": "MAD flags reported; all samples retained",
+  "inputs": [
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/diagnostic-runner-micro-v1/raw/diagnostic-runner-micro-v1-primitive.csv",
+      "sha256": "3896fdd7a376b74cb086b3abc01d0638b066508f1a92d19b082c7ac97e56701a",
+      "rows": "130"
+    },
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/diagnostic-runner-micro-v1/raw/diagnostic-runner-micro-v1-aegis.csv",
+      "sha256": "6655d3bdfa413a95b34052b4a35bf91ab72747df38f041e7d1cb1f7b28ad5ab7",
+      "rows": "144"
+    },
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/diagnostic-runner-micro-v1/raw/diagnostic-runner-micro-v1-lifecycle.csv",
+      "sha256": "2504cedb509006f2f639b9aefec9c719928b273bb0b698e7dd489d35f4a646d7",
+      "rows": "20"
+    },
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/diagnostic-runner-micro-v1/raw/diagnostic-runner-micro-v1-cold-start.csv",
+      "sha256": "17171459774bfae46b73f775f9042718f05a3dec1994048682e3c7911dbbf56e",
+      "rows": "14"
+    }
+  ],
+  "plots": [
+    "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/diagnostic-runner-micro-v1/derived/primitive-sign-verify-512B.svg",
+    "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/diagnostic-runner-micro-v1/derived/aegis-cache-miss-vs-hit-512B.svg",
+    "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/diagnostic-runner-micro-v1/derived/verification-message-scaling.svg",
+    "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/diagnostic-runner-micro-v1/derived/cryptographic-object-sizes.svg"
+  ]
+}

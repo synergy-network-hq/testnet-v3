@@ -1,5 +1,10 @@
 # Proof Of Synergy Validator Lifecycle
 
+> Proposed profile note: lifecycle state can determine membership at a
+> declared epoch boundary, but it never performs live-set leader skipping. In
+> an activated `posy/3.0` epoch, proposal authority comes only from the frozen
+> epoch ring, height, ten-block lease, and verified sequential TC offset.
+
 The offline onboarding lifecycle is:
 
 1. Enrollment token verification.

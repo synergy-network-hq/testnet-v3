@@ -5,6 +5,44 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::OnceLock;
+
+/// Canonical JSON transport for consensus-facing nWei bounds.
+///
+/// JSON numbers cannot represent the full `u128` domain without either a
+/// serializer failure or precision loss in common consumers.  Fresh P3 binds
+/// these values into ETDAG artifacts, so encode them as canonical decimal
+/// strings and reject alternate spellings on input.
+mod canonical_u128_decimal {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &u128, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&value.to_string())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<u128, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let decimal = String::deserialize(deserializer)?;
+        if decimal.is_empty()
+            || (decimal.len() > 1 && decimal.starts_with('0'))
+            || !decimal.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Err(serde::de::Error::custom(
+                "u128 values must be canonical unsigned decimal strings",
+            ));
+        }
+        decimal.parse::<u128>().map_err(serde::de::Error::custom)
+    }
+}
+
+/// Canonical live gas pricing (protocol-authoritative dynamic base fee).
+/// See `fee_market` module docs for the full design and formula.
+pub mod fee_market;
 
 pub mod constants {
     pub const SNRG_DECIMALS: u32 = 9;
@@ -676,7 +714,9 @@ impl ValuationStatus {
 pub struct FeeScheduleEntry {
     pub tx_type: TransactionFeeType,
     pub amount_fee_bps: u64,
+    #[serde(with = "canonical_u128_decimal")]
     pub min_amount_fee_nwei: u128,
+    #[serde(with = "canonical_u128_decimal")]
     pub max_amount_fee_nwei: u128,
     pub valuation_required: bool,
     pub storage_fee_enabled: bool,
@@ -685,6 +725,116 @@ pub struct FeeScheduleEntry {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FeeSchedule {
     pub entries: Vec<FeeScheduleEntry>,
+}
+
+/// The schedule committed by the fresh P3 Genesis ETDAG fee artifact.
+///
+/// It is populated exactly once during verified Genesis startup.  Generic
+/// Rust defaults remain available for isolated historical/unit utilities,
+/// but live P3 transaction execution and RPC must obtain this value through
+/// [`governed_fee_schedule`].
+static GOVERNED_FEE_SCHEDULE: OnceLock<FeeSchedule> = OnceLock::new();
+
+/// The dynamic base-fee policy committed by the fresh P3 Genesis ETDAG fee
+/// artifact.  It shares the same governed artifact root as the transaction
+/// schedule, so Wallet pricing never falls back to a code default.
+static GOVERNED_FEE_MARKET_PARAMS: OnceLock<fee_market::FeeMarketParams> = OnceLock::new();
+
+pub(crate) fn install_governed_fee_schedule(schedule: FeeSchedule) -> Result<(), String> {
+    if schedule.entries.is_empty() {
+        return Err("governed fee schedule must contain at least one entry".to_string());
+    }
+    if let Some(existing) = GOVERNED_FEE_SCHEDULE.get() {
+        if existing == &schedule {
+            return Ok(());
+        }
+        return Err(
+            "a different governed fee schedule is already installed in this process".to_string(),
+        );
+    }
+    GOVERNED_FEE_SCHEDULE.set(schedule).map_err(|_| {
+        "governed fee schedule installation raced with another initializer".to_string()
+    })
+}
+
+pub(crate) fn install_governed_fee_market_params(
+    params: fee_market::FeeMarketParams,
+) -> Result<(), String> {
+    params
+        .validate()
+        .map_err(|error| format!("invalid governed fee-market parameters: {error}"))?;
+    if !params.fee_market_enabled || params.activation_height != 1 {
+        return Err("governed fresh-P3 fee market must be enabled from block one".to_string());
+    }
+    if params.initial_base_fee_nwei < params.base_fee_floor_nwei {
+        return Err("governed fee-market initial base fee is below its floor".to_string());
+    }
+    if let Some(existing) = GOVERNED_FEE_MARKET_PARAMS.get() {
+        if existing == &params {
+            return Ok(());
+        }
+        return Err(
+            "different governed fee-market parameters are already installed in this process"
+                .to_string(),
+        );
+    }
+    GOVERNED_FEE_MARKET_PARAMS.set(params).map_err(|_| {
+        "governed fee-market parameter installation raced with another initializer".to_string()
+    })
+}
+
+/// Returns the only fee schedule permitted for a live fresh-P3 process.
+/// Startup must install it from the integrity-checked governed Genesis
+/// binding before accepting transactions or serving fee RPCs.
+pub fn governed_fee_schedule() -> Result<&'static FeeSchedule, String> {
+    GOVERNED_FEE_SCHEDULE.get().ok_or_else(|| {
+        "governed fee schedule is unavailable; fresh PoSy startup has not verified Genesis"
+            .to_string()
+    })
+}
+
+/// Returns the only dynamic base-fee parameters permitted for a live fresh-P3
+/// process. Startup installs these from the same ETDAG fee artifact as the
+/// transaction schedule before a node may produce, validate, or quote blocks.
+pub fn governed_fee_market_params() -> Result<&'static fee_market::FeeMarketParams, String> {
+    GOVERNED_FEE_MARKET_PARAMS.get().ok_or_else(|| {
+        "governed fee-market parameters are unavailable; fresh PoSy startup has not verified Genesis"
+            .to_string()
+    })
+}
+
+/// Internal runtime accessor.  Production is always fail-closed; isolated
+/// unit tests retain an in-memory default only so historical fee-math tests
+/// do not need to construct a full signed Genesis process.
+pub(crate) fn fee_schedule_for_runtime() -> Result<&'static FeeSchedule, String> {
+    #[cfg(not(test))]
+    {
+        governed_fee_schedule()
+    }
+    #[cfg(test)]
+    {
+        static TEST_FEE_SCHEDULE: OnceLock<FeeSchedule> = OnceLock::new();
+        Ok(GOVERNED_FEE_SCHEDULE
+            .get()
+            .unwrap_or_else(|| TEST_FEE_SCHEDULE.get_or_init(FeeSchedule::default)))
+    }
+}
+
+/// Internal dynamic-fee accessor. Production never falls back to inherited
+/// defaults; isolated unit tests retain a local deterministic fixture.
+pub(crate) fn fee_market_params_for_runtime() -> Result<&'static fee_market::FeeMarketParams, String>
+{
+    #[cfg(not(test))]
+    {
+        governed_fee_market_params()
+    }
+    #[cfg(test)]
+    {
+        static TEST_FEE_MARKET_PARAMS: OnceLock<fee_market::FeeMarketParams> = OnceLock::new();
+        Ok(GOVERNED_FEE_MARKET_PARAMS.get().unwrap_or_else(|| {
+            TEST_FEE_MARKET_PARAMS.get_or_init(fee_market::FeeMarketParams::testnet_v3_defaults)
+        }))
+    }
 }
 
 impl FeeSchedule {
@@ -808,9 +958,38 @@ pub struct NetworkFeeInput {
     pub valuation_status: ValuationStatus,
     pub gas_used: u64,
     pub base_fee_per_gas_nwei: u64,
+    /// Ordinary-gas execution fee: `gas_used * base_fee_per_gas_nwei` when
+    /// the fee market is active for this transaction's block, or the legacy
+    /// activity-gas fee when it is not (see `fee_market_active`). Never
+    /// includes the PQ execution fee -- that is itemized separately below
+    /// and only combined into `total_network_fee_nwei` at the end.
     pub gas_fee_nwei: u128,
     pub storage_fee_nwei: u128,
     pub priority_fee_nwei: u128,
+    /// --- Canonical Live Gas Pricing (fee market) additions ---
+    /// PQ gas consumed (AIVM `PqGasMeter`), reported independently of
+    /// ordinary `gas_used`. `0` for transactions with no PQ execution
+    /// component (e.g. plain native transfers).
+    #[serde(default)]
+    pub pq_gas_used: u64,
+    #[serde(default)]
+    pub pq_gas_multiplier: u64,
+    #[serde(default)]
+    pub effective_pq_gas_price_nwei: u64,
+    /// `pq_gas_used * effective_pq_gas_price_nwei`, checked by the caller
+    /// (`crate::gas::fee_market::calculate_execution_fee`) before being
+    /// passed in here.
+    #[serde(default)]
+    pub pq_execution_fee_nwei: u128,
+    /// Whether `base_fee_per_gas_nwei` / the PQ fields above came from the
+    /// protocol-authoritative fee market (`true`) or from legacy
+    /// pre-activation / sender-declared pricing (`false`). Surfaced on the
+    /// breakdown so RPC/Atlas/Forge never mistake a legacy value for a
+    /// live protocol price.
+    #[serde(default)]
+    pub fee_market_active: bool,
+    #[serde(default)]
+    pub fee_market_version: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -826,12 +1005,34 @@ pub struct NetworkFeeBreakdown {
     pub amount_fee_bps: u64,
     pub gas_used: u64,
     pub base_fee_per_gas_nwei: u64,
+    /// Ordinary-gas execution fee only (`gas_used * base_fee_per_gas_nwei`).
+    /// Kept under its historical name for backward compatibility; equal to
+    /// `base_execution_fee_nwei`.
     pub gas_fee_nwei: u128,
     pub amount_protocol_fee_nwei: u128,
     pub storage_fee_nwei: u128,
     pub priority_fee_nwei: u128,
+    /// `total_network_fee_nwei = execution_fee_total_nwei +
+    /// amount_protocol_fee_nwei + storage_fee_nwei + priority_fee_nwei`.
+    /// Protocol fees (amount-based) are never labeled as gas.
     pub total_network_fee_nwei: u128,
     pub fee_collector_address: String,
+    /// --- Canonical Live Gas Pricing (fee market) additions ---
+    pub pq_gas_used: u64,
+    pub pq_gas_multiplier: u64,
+    pub effective_pq_gas_price_nwei: u64,
+    /// Alias of `gas_fee_nwei`, spelled out for API clarity per the
+    /// documented receipt schema.
+    pub base_execution_fee_nwei: u128,
+    pub pq_execution_fee_nwei: u128,
+    /// `base_execution_fee_nwei + pq_execution_fee_nwei`. Ordinary and PQ
+    /// gas fees are always available individually above; this is provided
+    /// purely as the auditable sum, never as a replacement for the
+    /// itemized values.
+    pub execution_fee_total_nwei: u128,
+    pub fee_asset: String,
+    pub fee_market_active: bool,
+    pub fee_market_version: u32,
 }
 
 pub fn calculate_network_fee(
@@ -856,8 +1057,12 @@ pub fn calculate_network_fee(
                 .min(entry.max_amount_fee_nwei)
         };
 
-    let total_network_fee = input
+    let execution_fee_total = input
         .gas_fee_nwei
+        .checked_add(input.pq_execution_fee_nwei)
+        .ok_or_else(|| "execution fee total overflow".to_string())?;
+
+    let total_network_fee = execution_fee_total
         .checked_add(amount_protocol_fee)
         .and_then(|value| value.checked_add(input.storage_fee_nwei))
         .and_then(|value| value.checked_add(input.priority_fee_nwei))
@@ -881,6 +1086,15 @@ pub fn calculate_network_fee(
         priority_fee_nwei: input.priority_fee_nwei,
         total_network_fee_nwei: total_network_fee,
         fee_collector_address: crate::token::fee_collector_address()?,
+        pq_gas_used: input.pq_gas_used,
+        pq_gas_multiplier: input.pq_gas_multiplier,
+        effective_pq_gas_price_nwei: input.effective_pq_gas_price_nwei,
+        base_execution_fee_nwei: input.gas_fee_nwei,
+        pq_execution_fee_nwei: input.pq_execution_fee_nwei,
+        execution_fee_total_nwei: execution_fee_total,
+        fee_asset: "SNRG".to_string(),
+        fee_market_active: input.fee_market_active,
+        fee_market_version: input.fee_market_version,
     })
 }
 
@@ -1059,6 +1273,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fee_schedule_u128_bounds_use_canonical_decimal_json() {
+        let schedule = FeeSchedule::default();
+        let encoded = serde_json::to_value(&schedule).expect("fee schedule serializes");
+        let first = &encoded["entries"][0];
+        assert_eq!(first["min_amount_fee_nwei"], "0");
+        assert_eq!(first["max_amount_fee_nwei"], u128::MAX.to_string());
+        assert_eq!(
+            serde_json::from_value::<FeeSchedule>(encoded).expect("canonical fee schedule parses"),
+            schedule
+        );
+    }
+
+    #[test]
+    fn fee_schedule_rejects_noncanonical_u128_json() {
+        let mut encoded =
+            serde_json::to_value(FeeSchedule::default()).expect("fee schedule serializes");
+        encoded["entries"][0]["max_amount_fee_nwei"] = serde_json::json!("00");
+        assert!(serde_json::from_value::<FeeSchedule>(encoded).is_err());
+    }
+
+    #[test]
     fn nwei_formats_without_floating_point() {
         let amount = NWei::from_snrg_units(2, 500_000_000).expect("valid fractional nWei");
         assert_eq!(amount.as_nwei(), 2_500_000_000);
@@ -1192,6 +1427,12 @@ mod tests {
                 gas_fee_nwei: 77_000,
                 storage_fee_nwei: 11,
                 priority_fee_nwei: 7,
+                pq_gas_used: 0,
+                pq_gas_multiplier: 0,
+                effective_pq_gas_price_nwei: 0,
+                pq_execution_fee_nwei: 0,
+                fee_market_active: false,
+                fee_market_version: 0,
             },
             &FeeSchedule::default(),
         )
@@ -1217,6 +1458,12 @@ mod tests {
                 gas_fee_nwei: 40_000,
                 storage_fee_nwei: 0,
                 priority_fee_nwei: 0,
+                pq_gas_used: 0,
+                pq_gas_multiplier: 0,
+                effective_pq_gas_price_nwei: 0,
+                pq_execution_fee_nwei: 0,
+                fee_market_active: false,
+                fee_market_version: 0,
             },
             &FeeSchedule::default(),
         )

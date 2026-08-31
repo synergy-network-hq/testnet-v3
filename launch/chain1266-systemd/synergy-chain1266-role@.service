@@ -1,0 +1,27 @@
+[Unit]
+Description=Synergy Chain 1266 immutable role instance %i
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/synergy/chain1266/%i.env
+EnvironmentFile=-/run/synergy-chain1266/%i.env
+ExecStart=/usr/local/libexec/synergy/chain1266-role-service
+Restart=no
+KillMode=mixed
+TimeoutStopSec=30
+LimitNOFILE=8192
+MemoryMax=4G
+CPUQuota=100%
+Nice=5
+NoNewPrivileges=yes
+PrivateDevices=no
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target
