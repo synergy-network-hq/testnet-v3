@@ -57,9 +57,9 @@ fn has_runtime_config_dir(path: &Path) -> bool {
     }
 
     // NCP's deployed node layout deliberately keeps its only operator-facing
-    // files at the node root: config.toml and genesis.json.  Do not require a
+    // files at the node root: config.toml and frozen genesis.sgen.  Do not require a
     // source-checkout-style config/ directory merely to identify that root.
-    path.join("config.toml").is_file() && path.join("genesis.json").is_file()
+    path.join("config.toml").is_file() && path.join("genesis.sgen").is_file()
 }
 
 fn search_runtime_root_from(start: &Path) -> Option<PathBuf> {
@@ -427,7 +427,7 @@ mod tests {
         let _lock = env_lock().lock().expect("env lock should be available");
         let workspace = TempWorkspace::new();
         std::fs::write(workspace.root.join("config.toml"), "chain_id = 1266\n").unwrap();
-        std::fs::write(workspace.root.join("genesis.json"), "{}\n").unwrap();
+        std::fs::write(workspace.root.join("genesis.sgen"), b"SGEN\x01\x00").unwrap();
         let _project_root = EnvVarGuard::clear("SYNERGY_PROJECT_ROOT");
         let _config_path = EnvVarGuard::set(
             "SYNERGY_CONFIG_PATH",
