@@ -213,7 +213,19 @@ fn load_canonical_genesis_from_path(path: PathBuf) -> Result<GenesisDocument, St
     if path.extension().and_then(|extension| extension.to_str()) == Some("sgen") {
         let verified = crate::sgen::verify_sgen_bytes(&bytes)
             .map_err(|error| format!("verify canonical SGEN {}: {error}", path.display()))?;
-        let mut document = load_canonical_genesis_from_value(verified.reconstructed_document, path)?;
+        // An SGEN's typed payload and authority signatures are the canonical
+        // Genesis commitment. Its compatibility JSON intentionally excludes
+        // replay/snapshot material from the legacy integrity projection, then
+        // reconstructs the signed H0 operations in memory for execution. Do
+        // not reject that reconstructed view against a JSON-only root; verify
+        // the signed payload and deterministic H0 execution instead.
+        crate::sgen::verify_h0_execution(&verified)
+            .map_err(|error| format!("verify canonical SGEN H0 execution: {error}"))?;
+        let mut document = load_canonical_genesis_from_value_with_legacy_integrity(
+            verified.reconstructed_document,
+            path,
+            false,
+        )?;
         // The SGEN payload identity is the canonical Genesis hash. The
         // internally reconstructed legacy document retains its own integrity
         // hash only to validate the fields it supplies during the migration.
@@ -235,6 +247,14 @@ fn load_canonical_genesis_from_path(path: PathBuf) -> Result<GenesisDocument, St
 fn load_canonical_genesis_from_value(
     value: Value,
     path: PathBuf,
+) -> Result<GenesisDocument, String> {
+    load_canonical_genesis_from_value_with_legacy_integrity(value, path, true)
+}
+
+fn load_canonical_genesis_from_value_with_legacy_integrity(
+    value: Value,
+    path: PathBuf,
+    validate_legacy_integrity: bool,
 ) -> Result<GenesisDocument, String> {
     validate_no_placeholders(&value)?;
     reject_test_fixture_genesis(&value, &path)?;
@@ -301,7 +321,9 @@ fn load_canonical_genesis_from_value(
     let token = parse_token_config(&value)?;
     let consensus_parameters = load_candidate_consensus_parameters(&value)?;
 
-    validate_integrity_hashes(&value)?;
+    if validate_legacy_integrity {
+        validate_integrity_hashes(&value)?;
+    }
 
     let genesis_hash = required_string(&value, &["integrity", "genesis_hash"])?;
     if genesis_hash.is_empty() {
@@ -2478,6 +2500,17 @@ mod tests {
         assert_eq!(document.network_id(), 1266);
         assert_eq!(document.validators().len(), 5);
         assert_eq!(document.network_magic_bytes(), expected_magic);
+    }
+
+    #[test]
+    fn runtime_loader_accepts_the_frozen_signed_sgen() {
+        let sgen = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../launch/canonical-sgen-ceremony-20260828/genesis.sgen");
+        let document = load_canonical_genesis_from_path(sgen)
+            .expect("the frozen signed SGEN must load through the runtime path");
+        assert_eq!(document.chain_id(), 1266);
+        assert_eq!(document.consensus_version(), "posy/3.0");
+        assert_eq!(document.validators().len(), 5);
     }
 
     #[test]

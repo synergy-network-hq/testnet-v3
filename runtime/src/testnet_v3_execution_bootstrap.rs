@@ -432,6 +432,18 @@ fn load_finalized_execution_state_from_value(
         .get("genesis_deployment")
         .filter(|value| value.is_object())
         .ok_or_else(|| "finalized Genesis is missing genesis_deployment".to_string())?;
+    // The signed SGEN reconstructs its exact 9-deploy/27-initialization H0
+    // operation list in memory. That authenticated replay is the finalized
+    // boundary for the live PoSy v3 chain; it is not the retired snapshot
+    // profile below, which used a 25-call initialization count.
+    if let Some(operations_value) = deployment.get("signed_replay_operations") {
+        return replay_finalized_execution_state_from_operations(
+            genesis,
+            finalized,
+            deployment,
+            operations_value,
+        );
+    }
     if required_string(deployment, "status")? != "EXECUTED_AND_BOUND"
         || deployment.get("deployment_count").and_then(Value::as_u64) != Some(9)
         || deployment
@@ -441,15 +453,6 @@ fn load_finalized_execution_state_from_value(
         || required_string(deployment, "genesis_deployer_lifecycle")? != "PermanentlyRetired"
     {
         return Err("finalized Genesis deployment boundary is incomplete".to_string());
-    }
-
-    if let Some(operations_value) = deployment.get("signed_replay_operations") {
-        return replay_finalized_execution_state_from_operations(
-            genesis,
-            finalized,
-            deployment,
-            operations_value,
-        );
     }
 
     // Historical finalized documents can still be audited from their embedded
@@ -632,11 +635,16 @@ fn require_supported_execution_genesis_protocol(
             .ok_or_else(|| format!("{context} requires a finalized coordinated P1 manifest"))?
             .require_coordinated_round_robin_manifest()
             .map(|_| ()),
-        crate::consensus::simplified_posy::POSY_SIMPLIFIED_PROTOCOL_VERSION => genesis
-            .consensus_parameters()
-            .ok_or_else(|| format!("{context} requires a finalized simplified PoSy v3 manifest"))?
-            .require_simplified_posy_manifest()
-            .map(|_| ()),
+        crate::consensus::simplified_posy::POSY_SIMPLIFIED_PROTOCOL_VERSION => {
+            // Fresh PoSy v3 binds its final manifest directly in the
+            // Genesis activation record. It deliberately does not carry the
+            // retired `consensus_parameters` compatibility wrapper.
+            crate::consensus::simplified_posy::load_genesis_bound_simplified_activation(
+                genesis.value(),
+            )?
+            .ok_or_else(|| format!("{context} requires a finalized simplified PoSy v3 activation"))?
+            .validate()
+        }
         _ => Err(format!("{context} has invalid protocol binding")),
     }
 }
