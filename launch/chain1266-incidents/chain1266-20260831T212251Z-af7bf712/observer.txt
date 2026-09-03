@@ -1,0 +1,265 @@
+SECTION=SYSTEMD
+MainPID=0
+NRestarts=0
+ExecMainStatus=15
+MemoryCurrent=[not set]
+CPUUsageNSec=5326950000
+ActiveState=inactive
+SubState=dead
+ConfigSHA256=fb46973d33a7faa10bfd8043d799a4e5eb00a7daf40aa3c1e8c48f6ec565888c
+GenesisSHA256=ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf
+SECTION=METRICS
+
+SECTION=JOURNAL
+2026-08-03T12:37:08.004341+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:37:08.004341+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "209.145.48.117:53810"
+2026-08-03T12:37:08.004341+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:37:09.472101+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:37:09 UTC] [INFO] [p2p] Received status
+2026-08-03T12:37:09.472101+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:37:09.472101+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:37:09.472101+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "relay1.synergynode.xyz:5622"
+2026-08-03T12:37:09.472101+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:37:10.742122+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:37:10 UTC] [INFO] [p2p] Received status
+2026-08-03T12:37:10.742122+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:37:10.742122+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:37:10.742122+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "94.72.117.108:44430"
+2026-08-03T12:37:10.742122+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:37:13.052189+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:37:13 UTC] [INFO] [p2p] Received status
+2026-08-03T12:37:13.052189+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:37:13.052189+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:37:13.052189+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "209.145.48.117:53810"
+2026-08-03T12:37:13.052189+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:37:13.230193+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:37:13 UTC] [INFO] [p2p] Resolved bootstrap dial targets
+2026-08-03T12:37:13.230193+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:37:13.230193+02:00 vmi3238610 chain1266-role-service[1273497]:   "targets": "[\"relay1.synergynode.xyz:5622\", \"relay2.synergynode.xyz:5622\", \"relay3.synergynode.xyz:5622\"]"
+2026-08-03T12:37:13.230193+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:37:16.200959+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:37:16 UTC] [INFO] [p2p] Received status
+2026-08-03T12:37:16.200959+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:37:16.200959+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:37:16.200959+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "94.72.117.108:44430"
+2026-08-03T12:37:16.200959+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:37:28.036649+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:37:28 UTC] [INFO] [p2p] Resolved bootstrap dial targets
+2026-08-03T12:37:28.036649+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:37:28.036649+02:00 vmi3238610 chain1266-role-service[1273497]:   "targets": "[\"relay1.synergynode.xyz:5622\", \"relay2.synergynode.xyz:5622\", \"relay3.synergynode.xyz:5622\"]"
+2026-08-03T12:37:28.036649+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:37:28.067563+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:37:28 UTC] [INFO] [p2p] Received status
+2026-08-03T12:37:28.067563+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:37:28.067563+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:37:28.067563+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "209.145.48.117:53810"
+2026-08-03T12:37:28.067563+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:37:28.236997+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:37:28 UTC] [INFO] [p2p] Received status
+2026-08-03T12:37:28.236997+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:37:28.236997+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:37:28.236997+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "94.72.117.108:44430"
+2026-08-03T12:37:28.236997+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:37:30.945569+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:37:30 UTC] [INFO] [p2p] Received status
+2026-08-03T12:37:30.945569+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:37:30.945569+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:37:30.945569+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "relay1.synergynode.xyz:5622"
+2026-08-03T12:37:30.945569+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:37:34.093476+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:37:34 UTC] [INFO] [p2p] Received status
+2026-08-03T12:37:34.093476+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:37:34.093476+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:37:34.093476+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "209.145.48.117:53810"
+2026-08-03T12:37:34.093476+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:37:38.120737+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:37:38 UTC] [INFO] [p2p] Received status
+2026-08-03T12:37:38.120737+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:37:38.120737+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:37:38.120737+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "94.72.117.108:44430"
+2026-08-03T12:37:38.120737+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:37:38.634562+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:37:38 UTC] [INFO] [p2p] Resolved bootstrap dial targets
+2026-08-03T12:37:38.634562+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:37:38.634562+02:00 vmi3238610 chain1266-role-service[1273497]:   "targets": "[\"relay1.synergynode.xyz:5622\", \"relay2.synergynode.xyz:5622\", \"relay3.synergynode.xyz:5622\"]"
+2026-08-03T12:37:38.634562+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:37:38.972562+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:37:38 UTC] [INFO] [p2p] Received status
+2026-08-03T12:37:38.972562+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:37:38.972562+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:37:38.972562+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "209.145.48.117:53810"
+2026-08-03T12:37:38.972562+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:37:40.495974+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:37:40 UTC] [INFO] [p2p] Received status
+2026-08-03T12:37:40.495974+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:37:40.495974+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:37:40.495974+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "relay1.synergynode.xyz:5622"
+2026-08-03T12:37:40.495974+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:37:52.968293+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:37:52 UTC] [INFO] [p2p] Resolved bootstrap dial targets
+2026-08-03T12:37:52.968293+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:37:52.968293+02:00 vmi3238610 chain1266-role-service[1273497]:   "targets": "[\"relay1.synergynode.xyz:5622\", \"relay2.synergynode.xyz:5622\", \"relay3.synergynode.xyz:5622\"]"
+2026-08-03T12:37:52.968293+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:37:52.990902+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:37:52 UTC] [INFO] [p2p] Received status
+2026-08-03T12:37:52.990902+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:37:52.990902+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:37:52.990902+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "relay1.synergynode.xyz:5622"
+2026-08-03T12:37:52.990902+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:37:53.081440+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:37:53 UTC] [INFO] [p2p] Received status
+2026-08-03T12:37:53.081440+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:37:53.081440+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:37:53.081440+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "209.145.48.117:53810"
+2026-08-03T12:37:53.081440+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:37:53.461392+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:37:53 UTC] [INFO] [p2p] Received status
+2026-08-03T12:37:53.461392+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:37:53.461392+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:37:53.461392+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "94.72.117.108:44430"
+2026-08-03T12:37:53.461392+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:37:57.631236+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:37:57 UTC] [INFO] [p2p] Received status
+2026-08-03T12:37:57.631236+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:37:57.631236+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:37:57.631236+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "209.145.48.117:53810"
+2026-08-03T12:37:57.631236+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:37:57.856166+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:37:57 UTC] [INFO] [p2p] Received status
+2026-08-03T12:37:57.856166+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:37:57.856166+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:37:57.856166+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "relay1.synergynode.xyz:5622"
+2026-08-03T12:37:57.856166+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:38:03.276557+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:38:03 UTC] [INFO] [p2p] Received status
+2026-08-03T12:38:03.276557+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:38:03.276557+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:38:03.276557+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "209.145.48.117:53810"
+2026-08-03T12:38:03.276557+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:38:03.608227+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:38:03 UTC] [INFO] [p2p] Received status
+2026-08-03T12:38:03.608227+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:38:03.608227+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:38:03.608227+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "relay1.synergynode.xyz:5622"
+2026-08-03T12:38:03.608227+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:38:04.016308+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:38:04 UTC] [INFO] [p2p] Resolved bootstrap dial targets
+2026-08-03T12:38:04.016308+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:38:04.016308+02:00 vmi3238610 chain1266-role-service[1273497]:   "targets": "[\"relay1.synergynode.xyz:5622\", \"relay2.synergynode.xyz:5622\", \"relay3.synergynode.xyz:5622\"]"
+2026-08-03T12:38:04.016308+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:38:04.356215+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:38:04 UTC] [INFO] [p2p] Received status
+2026-08-03T12:38:04.356215+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:38:04.356215+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:38:04.356215+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "94.72.117.108:44430"
+2026-08-03T12:38:04.356215+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:38:07.463419+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:38:07 UTC] [INFO] [p2p] Received status
+2026-08-03T12:38:07.463419+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:38:07.463419+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:38:07.463419+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "209.145.48.117:53810"
+2026-08-03T12:38:07.463419+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:38:07.853597+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:38:07 UTC] [INFO] [p2p] Received status
+2026-08-03T12:38:07.853597+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:38:07.853597+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:38:07.853597+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "relay1.synergynode.xyz:5622"
+2026-08-03T12:38:07.853597+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:38:18.202187+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:38:18 UTC] [INFO] [p2p] Resolved bootstrap dial targets
+2026-08-03T12:38:18.202187+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:38:18.202187+02:00 vmi3238610 chain1266-role-service[1273497]:   "targets": "[\"relay1.synergynode.xyz:5622\", \"relay2.synergynode.xyz:5622\", \"relay3.synergynode.xyz:5622\"]"
+2026-08-03T12:38:18.202187+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:38:18.227850+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:38:18 UTC] [INFO] [p2p] Received status
+2026-08-03T12:38:18.227850+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:38:18.227850+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:38:18.227850+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "94.72.117.108:44430"
+2026-08-03T12:38:18.227850+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:38:18.423210+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:38:18 UTC] [INFO] [p2p] Received status
+2026-08-03T12:38:18.423210+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:38:18.423210+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:38:18.423210+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "209.145.48.117:53810"
+2026-08-03T12:38:18.423210+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:38:18.592819+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:38:18 UTC] [INFO] [p2p] Received status
+2026-08-03T12:38:18.592819+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:38:18.592819+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:38:18.592819+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "relay1.synergynode.xyz:5622"
+2026-08-03T12:38:18.592819+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:38:23.882363+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:38:23 UTC] [INFO] [p2p] Received status
+2026-08-03T12:38:23.882363+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:38:23.882363+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:38:23.882363+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "209.145.48.117:53810"
+2026-08-03T12:38:23.882363+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:38:24.066335+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:38:24 UTC] [INFO] [p2p] Received status
+2026-08-03T12:38:24.066335+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:38:24.066335+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:38:24.066335+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "relay1.synergynode.xyz:5622"
+2026-08-03T12:38:24.066335+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:38:27.789980+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:38:27 UTC] [INFO] [p2p] Received status
+2026-08-03T12:38:27.789980+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:38:27.789980+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:38:27.789980+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "94.72.117.108:44430"
+2026-08-03T12:38:27.789980+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:38:28.576634+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:38:28 UTC] [INFO] [p2p] Received status
+2026-08-03T12:38:28.576634+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:38:28.576634+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:38:28.576634+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "relay1.synergynode.xyz:5622"
+2026-08-03T12:38:28.576634+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:38:28.932796+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:38:28 UTC] [INFO] [p2p] Received status
+2026-08-03T12:38:28.932796+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:38:28.932796+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:38:28.932796+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "209.145.48.117:53810"
+2026-08-03T12:38:28.932796+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:38:29.207061+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:38:29 UTC] [INFO] [p2p] Resolved bootstrap dial targets
+2026-08-03T12:38:29.207061+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:38:29.207061+02:00 vmi3238610 chain1266-role-service[1273497]:   "targets": "[\"relay1.synergynode.xyz:5622\", \"relay2.synergynode.xyz:5622\", \"relay3.synergynode.xyz:5622\"]"
+2026-08-03T12:38:29.207061+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:38:43.518729+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:38:43 UTC] [INFO] [p2p] Resolved bootstrap dial targets
+2026-08-03T12:38:43.518729+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:38:43.518729+02:00 vmi3238610 chain1266-role-service[1273497]:   "targets": "[\"relay1.synergynode.xyz:5622\", \"relay2.synergynode.xyz:5622\", \"relay3.synergynode.xyz:5622\"]"
+2026-08-03T12:38:43.518729+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:38:43.553574+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:38:43 UTC] [INFO] [p2p] Received status
+2026-08-03T12:38:43.553574+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:38:43.553574+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:38:43.553574+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "209.145.48.117:53810"
+2026-08-03T12:38:43.553574+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:38:43.785454+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:38:43 UTC] [INFO] [p2p] Received status
+2026-08-03T12:38:43.785454+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:38:43.785454+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:38:43.785454+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "94.72.117.108:44430"
+2026-08-03T12:38:43.785454+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:38:44.009544+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:38:44 UTC] [INFO] [p2p] Received status
+2026-08-03T12:38:44.009544+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:38:44.009544+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:38:44.009544+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "relay1.synergynode.xyz:5622"
+2026-08-03T12:38:44.009544+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:38:48.609471+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:38:48 UTC] [INFO] [p2p] Received status
+2026-08-03T12:38:48.609471+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:38:48.609471+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:38:48.609471+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "relay1.synergynode.xyz:5622"
+2026-08-03T12:38:48.609471+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:38:48.940636+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:38:48 UTC] [INFO] [p2p] Received status
+2026-08-03T12:38:48.940636+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:38:48.940636+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:38:48.940636+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "209.145.48.117:53810"
+2026-08-03T12:38:48.940636+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:38:53.056450+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:38:53 UTC] [INFO] [p2p] Received status
+2026-08-03T12:38:53.056450+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:38:53.056450+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:38:53.056450+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "94.72.117.108:44430"
+2026-08-03T12:38:53.056450+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:38:53.829454+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:38:53 UTC] [INFO] [p2p] Received status
+2026-08-03T12:38:53.829454+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:38:53.829454+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:38:53.829454+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "209.145.48.117:53810"
+2026-08-03T12:38:53.829454+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:38:54.087902+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:38:54 UTC] [INFO] [p2p] Received status
+2026-08-03T12:38:54.087902+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:38:54.087902+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:38:54.087902+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "relay1.synergynode.xyz:5622"
+2026-08-03T12:38:54.087902+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:38:54.241279+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:38:54 UTC] [INFO] [p2p] Resolved bootstrap dial targets
+2026-08-03T12:38:54.241279+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:38:54.241279+02:00 vmi3238610 chain1266-role-service[1273497]:   "targets": "[\"relay1.synergynode.xyz:5622\", \"relay2.synergynode.xyz:5622\", \"relay3.synergynode.xyz:5622\"]"
+2026-08-03T12:38:54.241279+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:38:58.804193+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:38:58 UTC] [INFO] [p2p] Received status
+2026-08-03T12:38:58.804193+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:38:58.804193+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:38:58.804193+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "94.72.117.108:44430"
+2026-08-03T12:38:58.804193+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:38:59.137492+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:38:59 UTC] [INFO] [p2p] Received status
+2026-08-03T12:38:59.137492+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:38:59.137492+02:00 vmi3238610 chain1266-role-service[1273497]:   "height": 0,
+2026-08-03T12:38:59.137492+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "209.145.48.117:53810"
+2026-08-03T12:38:59.137492+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:39:06.585163+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:39:06 UTC] [INFO] [p2p] Peer disconnected
+2026-08-03T12:39:06.585163+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:39:06.585163+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "relay1.synergynode.xyz:5622"
+2026-08-03T12:39:06.585163+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:39:06.909328+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:39:06 UTC] [INFO] [p2p] Peer disconnected
+2026-08-03T12:39:06.909328+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:39:06.909328+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "94.72.117.108:44430"
+2026-08-03T12:39:06.909328+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:39:07.181142+02:00 vmi3238610 chain1266-role-service[1273497]: [2026-08-03 10:39:07 UTC] [INFO] [p2p] Peer disconnected
+2026-08-03T12:39:07.181142+02:00 vmi3238610 chain1266-role-service[1273497]:   Metadata: {
+2026-08-03T12:39:07.181142+02:00 vmi3238610 chain1266-role-service[1273497]:   "peer": "209.145.48.117:53810"
+2026-08-03T12:39:07.181142+02:00 vmi3238610 chain1266-role-service[1273497]: }
+2026-08-03T12:39:08.473436+02:00 vmi3238610 systemd[1]: Stopping synergy-chain1266-role@observer.service - Synergy Chain 1266 immutable role instance observer...
+2026-08-03T12:39:08.518317+02:00 vmi3238610 systemd[1]: synergy-chain1266-role@observer.service: Deactivated successfully.
+2026-08-03T12:39:08.519340+02:00 vmi3238610 systemd[1]: Stopped synergy-chain1266-role@observer.service - Synergy Chain 1266 immutable role instance observer.
+2026-08-03T12:39:08.519891+02:00 vmi3238610 systemd[1]: synergy-chain1266-role@observer.service: Consumed 5.326s CPU time.
+
+SECTION=FAULTS

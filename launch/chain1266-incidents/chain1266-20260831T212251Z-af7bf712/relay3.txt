@@ -1,0 +1,265 @@
+SECTION=SYSTEMD
+ActiveState=inactive
+SubState=dead
+MainPID=0
+NRestarts=0
+ExecMainStatus=15
+MemoryCurrent=[not set]
+CPUUsageNSec=18149442000
+ConfigSHA256=7c30c5a7d44a54c392232eded5acbde67bd7aed4c8756cf41f9868bcdd0708a6
+GenesisSHA256=ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf
+SECTION=METRICS
+
+SECTION=JOURNAL
+2026-08-03T12:38:52.407116+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:38:52.407116+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "error": "Connection refused (os error 111)",
+2026-08-03T12:38:52.407116+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "peer": "archive.synergynode.xyz:5615",
+2026-08-03T12:38:52.407116+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "transport": "archive.synergynode.xyz:5615"
+2026-08-03T12:38:52.407116+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:38:52.415888+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:38:52 UTC] [INFO] [p2p] Received status
+2026-08-03T12:38:52.415888+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:38:52.415888+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "height": 0,
+2026-08-03T12:38:52.415888+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "peer": "209.145.50.9:5622"
+2026-08-03T12:38:52.415888+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:38:52.423666+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:38:52 UTC] [INFO] [p2p] Received status
+2026-08-03T12:38:52.423666+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:38:52.423666+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "height": 0,
+2026-08-03T12:38:52.423666+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "peer": "74.208.227.23:55116"
+2026-08-03T12:38:52.423666+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:38:52.863828+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:38:52 UTC] [INFO] [p2p] Peer disconnected
+2026-08-03T12:38:52.863828+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:38:52.863828+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "peer": "bootnode2.synergynode.xyz:5620"
+2026-08-03T12:38:52.863828+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:38:52.920473+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:38:52 UTC] [INFO] [p2p] Received status
+2026-08-03T12:38:52.920473+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:38:52.920473+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "height": 0,
+2026-08-03T12:38:52.920473+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "peer": "167.86.83.83:58248"
+2026-08-03T12:38:52.920473+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:38:52.920917+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:38:52 UTC] [INFO] [p2p] Peer disconnected
+2026-08-03T12:38:52.920917+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:38:52.920917+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "peer": "bootnode3.synergynode.xyz:5620"
+2026-08-03T12:38:52.920917+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:38:53.309598+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:38:53 UTC] [WARN] [p2p] Rejecting peer handshake for canonical testnet identity mismatch
+2026-08-03T12:38:53.309598+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:38:53.309598+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "local_chain_id": 1266,
+2026-08-03T12:38:53.309598+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "local_genesis_hash": "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",
+2026-08-03T12:38:53.309598+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "local_network_id": 1266,
+2026-08-03T12:38:53.309598+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "local_network_magic_bytes": "7661a387",
+2026-08-03T12:38:53.309598+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "node_id": "bootnode1",
+2026-08-03T12:38:53.309598+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "peer": "bootnode1.synergynode.xyz:5620",
+2026-08-03T12:38:53.309598+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "reason": "chain_incarnation differs: expected 4, remote None"
+2026-08-03T12:38:53.309598+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:38:53.310307+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:38:53 UTC] [INFO] [p2p] Peer disconnected
+2026-08-03T12:38:53.310307+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:38:53.310307+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "peer": "bootnode1.synergynode.xyz:5620"
+2026-08-03T12:38:53.310307+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:38:53.311012+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:38:53 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T12:38:53.311012+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:38:53.311012+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "source_peer": "94.72.117.108:50610",
+2026-08-03T12:38:53.311012+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "target": "archive.synergynode.xyz:5615"
+2026-08-03T12:38:53.311012+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:38:53.311012+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:38:53 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T12:38:53.311012+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:38:53.311012+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "source_peer": "94.72.117.108:50610",
+2026-08-03T12:38:53.311012+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "target": "bootnode1.synergynode.xyz:5620"
+2026-08-03T12:38:53.311012+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:38:53.311564+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:38:53 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T12:38:53.311564+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:38:53.311564+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "source_peer": "94.72.117.108:50610",
+2026-08-03T12:38:53.311564+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "target": "bootnode2.synergynode.xyz:5620"
+2026-08-03T12:38:53.311564+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:38:53.311564+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:38:53 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T12:38:53.311564+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:38:53.311564+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "source_peer": "94.72.117.108:50610",
+2026-08-03T12:38:53.311564+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "target": "bootnode3.synergynode.xyz:5620"
+2026-08-03T12:38:53.311564+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:38:53.311564+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:38:53 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T12:38:53.311564+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:38:53.311564+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "source_peer": "94.72.117.108:50610",
+2026-08-03T12:38:53.311564+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "target": "synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc"
+2026-08-03T12:38:53.311564+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:38:53.311564+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:38:53 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T12:38:53.311564+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:38:53.311564+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "source_peer": "94.72.117.108:50610",
+2026-08-03T12:38:53.311564+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "target": "synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu"
+2026-08-03T12:38:53.311564+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:38:53.311564+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:38:53 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T12:38:53.311564+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:38:53.311564+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "source_peer": "94.72.117.108:50610",
+2026-08-03T12:38:53.311564+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "target": "synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj"
+2026-08-03T12:38:53.311564+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:38:53.312463+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:38:53 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T12:38:53.312463+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:38:53.312463+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "source_peer": "94.72.117.108:50610",
+2026-08-03T12:38:53.312463+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "target": "synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk"
+2026-08-03T12:38:53.312463+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:38:53.312463+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:38:53 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T12:38:53.312463+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:38:53.312463+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "source_peer": "94.72.117.108:50610",
+2026-08-03T12:38:53.312463+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "target": "synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg"
+2026-08-03T12:38:53.312463+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:38:53.312463+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:38:53 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T12:38:53.312463+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:38:53.312463+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "source_peer": "94.72.117.108:50610",
+2026-08-03T12:38:53.312463+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "target": "synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t"
+2026-08-03T12:38:53.312463+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:38:53.423367+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:38:53 UTC] [INFO] [p2p] Received status
+2026-08-03T12:38:53.423367+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:38:53.423367+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "height": 0,
+2026-08-03T12:38:53.423367+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "peer": "94.72.117.108:50610"
+2026-08-03T12:38:53.423367+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:38:54.031035+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:38:54 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T12:38:54.031035+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:38:54.031035+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "source_peer": "relay1.synergynode.xyz:5622",
+2026-08-03T12:38:54.031035+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "target": "archive.synergynode.xyz:5615"
+2026-08-03T12:38:54.031035+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:38:54.031035+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:38:54 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T12:38:54.031035+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:38:54.031035+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "source_peer": "relay1.synergynode.xyz:5622",
+2026-08-03T12:38:54.031035+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "target": "bootnode1.synergynode.xyz:5620"
+2026-08-03T12:38:54.031558+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:38:54.031558+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:38:54 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T12:38:54.031558+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:38:54.031558+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "source_peer": "relay1.synergynode.xyz:5622",
+2026-08-03T12:38:54.031558+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "target": "bootnode2.synergynode.xyz:5620"
+2026-08-03T12:38:54.031558+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:38:54.031558+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:38:54 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T12:38:54.031558+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:38:54.031558+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "source_peer": "relay1.synergynode.xyz:5622",
+2026-08-03T12:38:54.031558+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "target": "bootnode3.synergynode.xyz:5620"
+2026-08-03T12:38:54.031558+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:38:54.035836+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:38:54 UTC] [INFO] [p2p] Received status
+2026-08-03T12:38:54.035836+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:38:54.035836+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "height": 0,
+2026-08-03T12:38:54.035836+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "peer": "relay1.synergynode.xyz:5622"
+2026-08-03T12:38:54.035836+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:38:57.177848+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:38:57 UTC] [INFO] [p2p] Incoming peer connection
+2026-08-03T12:38:57.177848+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:38:57.177848+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "peer": "157.245.226.240:37250"
+2026-08-03T12:38:57.177848+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:38:57.236724+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:38:57 UTC] [WARN] [p2p] Rejecting peer handshake for canonical testnet identity mismatch
+2026-08-03T12:38:57.236724+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:38:57.236724+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "local_chain_id": 1266,
+2026-08-03T12:38:57.236724+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "local_genesis_hash": "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",
+2026-08-03T12:38:57.236724+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "local_network_id": 1266,
+2026-08-03T12:38:57.236724+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "local_network_magic_bytes": "7661a387",
+2026-08-03T12:38:57.236724+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "node_id": "bootnode3",
+2026-08-03T12:38:57.236724+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "peer": "157.245.226.240:37250",
+2026-08-03T12:38:57.236724+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "reason": "chain_incarnation differs: expected 4, remote None"
+2026-08-03T12:38:57.236724+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:38:59.080269+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:38:59 UTC] [INFO] [p2p] Incoming peer connection
+2026-08-03T12:38:59.080269+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:38:59.080269+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "peer": "146.190.210.121:41932"
+2026-08-03T12:38:59.080269+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:38:59.129008+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:38:59 UTC] [WARN] [p2p] Rejecting peer handshake for canonical testnet identity mismatch
+2026-08-03T12:38:59.129008+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:38:59.129008+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "local_chain_id": 1266,
+2026-08-03T12:38:59.129008+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "local_genesis_hash": "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",
+2026-08-03T12:38:59.129008+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "local_network_id": 1266,
+2026-08-03T12:38:59.129008+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "local_network_magic_bytes": "7661a387",
+2026-08-03T12:38:59.129008+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "node_id": "bootnode2",
+2026-08-03T12:38:59.129008+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "peer": "146.190.210.121:41932",
+2026-08-03T12:38:59.129008+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "reason": "chain_incarnation differs: expected 4, remote None"
+2026-08-03T12:38:59.129008+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:39:00.944796+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:39:00 UTC] [INFO] [p2p] Incoming peer connection
+2026-08-03T12:39:00.944796+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:39:00.944796+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "peer": "170.64.187.206:46930"
+2026-08-03T12:39:00.944796+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:39:01.152779+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:39:01 UTC] [WARN] [p2p] Rejecting peer handshake for canonical testnet identity mismatch
+2026-08-03T12:39:01.152779+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:39:01.152779+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "local_chain_id": 1266,
+2026-08-03T12:39:01.152779+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "local_genesis_hash": "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",
+2026-08-03T12:39:01.152779+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "local_network_id": 1266,
+2026-08-03T12:39:01.152779+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "local_network_magic_bytes": "7661a387",
+2026-08-03T12:39:01.152779+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "node_id": "bootnode1",
+2026-08-03T12:39:01.152779+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "peer": "170.64.187.206:46930",
+2026-08-03T12:39:01.152779+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "reason": "chain_incarnation differs: expected 4, remote None"
+2026-08-03T12:39:01.152779+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:39:02.447585+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:39:02 UTC] [WARN] [p2p] Failed to dial peer
+2026-08-03T12:39:02.447585+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:39:02.447585+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "error": "Connection refused (os error 111)",
+2026-08-03T12:39:02.447585+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "peer": "archive.synergynode.xyz:5615",
+2026-08-03T12:39:02.447585+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "transport": "archive.synergynode.xyz:5615"
+2026-08-03T12:39:02.447585+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:39:02.459848+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:39:02 UTC] [INFO] [p2p] Received status
+2026-08-03T12:39:02.459848+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:39:02.459848+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "height": 0,
+2026-08-03T12:39:02.459848+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "peer": "209.145.50.9:5622"
+2026-08-03T12:39:02.459848+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:39:02.509325+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:39:02 UTC] [WARN] [p2p] Rejecting peer handshake for canonical testnet identity mismatch
+2026-08-03T12:39:02.509325+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:39:02.509325+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "local_chain_id": 1266,
+2026-08-03T12:39:02.509325+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "local_genesis_hash": "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",
+2026-08-03T12:39:02.509325+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "local_network_id": 1266,
+2026-08-03T12:39:02.509325+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "local_network_magic_bytes": "7661a387",
+2026-08-03T12:39:02.509325+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "node_id": "bootnode2",
+2026-08-03T12:39:02.509325+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "peer": "bootnode2.synergynode.xyz:5620",
+2026-08-03T12:39:02.509325+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "reason": "chain_incarnation differs: expected 4, remote None"
+2026-08-03T12:39:02.509325+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:39:02.565138+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:39:02 UTC] [INFO] [p2p] Received status
+2026-08-03T12:39:02.565138+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:39:02.565138+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "height": 0,
+2026-08-03T12:39:02.565138+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "peer": "167.86.83.83:58248"
+2026-08-03T12:39:02.565138+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:39:02.864584+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:39:02 UTC] [INFO] [p2p] Peer disconnected
+2026-08-03T12:39:02.864584+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:39:02.864584+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "peer": "bootnode3.synergynode.xyz:5620"
+2026-08-03T12:39:02.864584+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:39:03.020360+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:39:03 UTC] [INFO] [p2p] Peer disconnected
+2026-08-03T12:39:03.020360+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:39:03.020360+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "peer": "bootnode1.synergynode.xyz:5620"
+2026-08-03T12:39:03.020360+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:39:03.020724+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:39:03 UTC] [WARN] [p2p] Rejecting peer handshake for canonical testnet identity mismatch
+2026-08-03T12:39:03.020724+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:39:03.020724+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "local_chain_id": 1266,
+2026-08-03T12:39:03.020724+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "local_genesis_hash": "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",
+2026-08-03T12:39:03.020724+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "local_network_id": 1266,
+2026-08-03T12:39:03.020724+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "local_network_magic_bytes": "7661a387",
+2026-08-03T12:39:03.020724+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "node_id": "bootnode1",
+2026-08-03T12:39:03.020724+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "peer": "bootnode1.synergynode.xyz:5620",
+2026-08-03T12:39:03.020724+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "reason": "chain_incarnation differs: expected 4, remote None"
+2026-08-03T12:39:03.020724+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:39:03.422164+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:39:03 UTC] [INFO] [p2p] Received status
+2026-08-03T12:39:03.422164+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:39:03.422164+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "height": 0,
+2026-08-03T12:39:03.422164+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "peer": "74.208.227.23:55116"
+2026-08-03T12:39:03.422164+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:39:04.197338+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:39:04 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T12:39:04.197338+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:39:04.197338+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "source_peer": "relay1.synergynode.xyz:5622",
+2026-08-03T12:39:04.197338+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "target": "archive.synergynode.xyz:5615"
+2026-08-03T12:39:04.197338+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:39:04.197947+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:39:04 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T12:39:04.197947+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:39:04.197947+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "source_peer": "relay1.synergynode.xyz:5622",
+2026-08-03T12:39:04.197947+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "target": "bootnode1.synergynode.xyz:5620"
+2026-08-03T12:39:04.197947+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:39:04.197947+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:39:04 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T12:39:04.197947+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:39:04.197947+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "source_peer": "relay1.synergynode.xyz:5622",
+2026-08-03T12:39:04.197947+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "target": "bootnode2.synergynode.xyz:5620"
+2026-08-03T12:39:04.197947+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:39:04.197947+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:39:04 UTC] [INFO] [p2p] Dialing discovered peer
+2026-08-03T12:39:04.197947+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:39:04.197947+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "source_peer": "relay1.synergynode.xyz:5622",
+2026-08-03T12:39:04.197947+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "target": "bootnode3.synergynode.xyz:5620"
+2026-08-03T12:39:04.197947+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:39:04.204248+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:39:04 UTC] [INFO] [p2p] Received status
+2026-08-03T12:39:04.204248+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:39:04.204248+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "height": 0,
+2026-08-03T12:39:04.204248+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "peer": "relay1.synergynode.xyz:5622"
+2026-08-03T12:39:04.204248+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:39:06.586911+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:39:06 UTC] [INFO] [p2p] Peer disconnected
+2026-08-03T12:39:06.586911+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:39:06.586911+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "peer": "relay1.synergynode.xyz:5622"
+2026-08-03T12:39:06.586911+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:39:06.908872+02:00 synergy-relayer3 chain1266-role-service[2230869]: [2026-08-03 10:39:06 UTC] [INFO] [p2p] Peer disconnected
+2026-08-03T12:39:06.908872+02:00 synergy-relayer3 chain1266-role-service[2230869]:   Metadata: {
+2026-08-03T12:39:06.908872+02:00 synergy-relayer3 chain1266-role-service[2230869]:   "peer": "94.72.117.108:50610"
+2026-08-03T12:39:06.908872+02:00 synergy-relayer3 chain1266-role-service[2230869]: }
+2026-08-03T12:39:07.162729+02:00 synergy-relayer3 systemd[1]: Stopping synergy-chain1266-role@relay3.service - Synergy Chain 1266 immutable role instance relay3...
+2026-08-03T12:39:07.182545+02:00 synergy-relayer3 systemd[1]: synergy-chain1266-role@relay3.service: Deactivated successfully.
+2026-08-03T12:39:07.182885+02:00 synergy-relayer3 systemd[1]: Stopped synergy-chain1266-role@relay3.service - Synergy Chain 1266 immutable role instance relay3.
+2026-08-03T12:39:07.183337+02:00 synergy-relayer3 systemd[1]: synergy-chain1266-role@relay3.service: Consumed 18.149s CPU time over 5min 35.524s wall clock time, 58.7M memory peak.
+
+SECTION=FAULTS

@@ -3943,3 +3943,64 @@ ATLAS_P1_RELEASE_AUTHORIZATION_VERIFIED release_id=chain1266-incarnation-4-rc30 
 - `atlas-api`: `PASS` — CHAIN1266_ROLE_STOPPED
 - `atlas-indexer`: `PASS` — CHAIN1266_ROLE_STOPPED
 
+
+## Incident chain1266-20260831T212251Z-af7bf712 — 2026-08-31T21:22:51Z
+
+- Operational state: `DEGRADED`
+- Chain: `1266`, incarnation: `4`
+- Trigger(s): `BOOTNODE3_SEED3_REBUILD_AUTHORIZED`
+- Common/min/max finalized height: `0` / `0` / `0`
+- Responsible/affected node(s): `atlas-api`, `atlas-indexer`, `explorer-indexer`, `observer`, `relay1`, `relay2`, `relay3`, `rpc-gateway`, `validator-node-01`, `validator-node-02`, `validator-node-03`, `validator-node-04`, `validator-node-05`, `validator-node-06`
+- Automatic action: compact read-only evidence capture; no validator mutation
+- Outcome: `OPEN`
+- Evidence bundle: `/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/launch/chain1266-incidents/chain1266-20260831T212251Z-af7bf712`
+
+
+## Controlled operation — 2026-08-31T21:26:50Z
+
+- Operation: `BOOTNODE3_SEED3_HOST_REBUILD`
+- Incident: `chain1266-20260831T212251Z-af7bf712`
+- Chain: `1266`, incarnation: `4`
+- Exact target: DigitalOcean droplet `bootnode3`, ID `561617688`, public IP `157.245.226.240`
+- `provider-rebuild`: `PASS` — existing disk wiped and rebuilt from `ubuntu-26-04-x64`; action `3379903283` completed at `2026-08-31T21:24:31Z`
+- `ssh-host-key`: `PASS` — fresh Ed25519 host key observed after rebuild; stale local host-key entries removed
+- `operator-key`: `PENDING` — fresh public key registered with DigitalOcean as key ID `59003720`, but the rebuilt pre-existing droplet did not inject it into `authorized_keys`
+- `recovery-access`: `PENDING` — DigitalOcean password-reset action `3379906733` requested; authenticated provider console is ready for private user entry of the emailed temporary password
+- `bootnode3`: `STOPPED` — no Testnet-v3 service staged or activated yet
+- `seed3`: `STOPPED` — no Testnet-v3 service staged or activated yet
+- Outcome: `PARTIAL`; no validator mutation performed
+
+
+## Controlled operation — 2026-09-01T00:43:43Z
+
+- Operation: `BOOTNODE3_SEED3_RC30_RECOVERY`
+- Incident: `chain1266-20260831T212251Z-af7bf712`
+- Release: `chain1266-incarnation-4-rc30`
+- Chain: `1266`, incarnation: `4`
+- `recovery-access`: `PASS` — a fresh operator Ed25519 public key was installed and verified with `BatchMode=yes`, `IdentitiesOnly=yes`, and `IdentityAgent=none`; password SSH was then disabled and root login restricted to public-key authentication
+- `host-hardening`: `PASS` — Ubuntu 26.04 packages updated; 2 GiB persistent swap, UFW, Fail2ban, unattended upgrades, and Prometheus node exporter installed; no Docker runtime installed
+- `release-integrity`: `PASS` — the complete RC30 `SHA256SUMS` verified; installed Genesis SHA-256 `ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf` and observer-light binary SHA-256 `cff8b91e82195ddcf99ab287382c3c69c789305f3e2f88701e7febd07dfff014`
+- `mixed-top-level-candidate`: `REJECTED` — preflight found the current top-level production Genesis and existing service/config bindings were from different release candidates; nothing from that mixed staging area was installed or activated
+- `seed3`: `PASS` — `synergy-testnet-v3-seed@seed3.service` active and linked into `multi-user.target` for restart persistence; local, public-IP, and `bootnode3.synergynode.xyz:5621` health checks returned `ok=true`, `status=healthy`, and three active static public peers
+- `bootnode3-attempt-1`: `FAIL_CLOSED` — RC30 generated unit/runtime environment omitted `SYNERGY_DESIRED_STATE_MANIFEST`; service stopped before opening listeners or chain state
+- `bootnode3-attempt-2`: `FAIL_CLOSED` — after installing the exact signed RC30 desired-state, detached signature, and consensus-activation artifacts, the runtime rejected startup because the signed desired state omits the `bootnode3` configuration hash
+- `bootnode3`: `BLOCKED_INACTIVE` — no signed release candidate present under `launch/` contains a `bootnode3` desired-state configuration binding; the signed artifact was not edited or bypassed
+- `validators`: `UNCHANGED` — no validator mutation performed; prior incident evidence remains common/min/max finalized height `0` / `0` / `0`
+- Outcome: `PARTIAL` — Seed3 recovered and externally verified; Bootnode3 safely staged but inactive pending a newly generated and governance-signed desired state that binds its exact configuration hash
+
+
+## Controlled operation — 2026-09-01T01:28:00Z
+
+- Operation: `TESTNET_V3_NETBIRD_NCP_CUTOVER_PREPARATION`
+- Chain: `1266`, network: `testnet`, protocol: `posy/3.0`
+- Canonical SGEN SHA-256: `439e18b91d71be45fa2ec8ba87167689e06413790303fe3568375498d73b3a8b`
+- Canonical NCP revision: `3a27f92fe398da20f10e54b541afe4cd45320330`
+- `source-gate`: `PASS` — SGEN 5/5, H1/H2 bootstrap 8/8, ProtectedPipeline 23/23, and P2P 203/203 focused tests passed
+- `netbird-coordinator`: `HEALTHY` — existing native coordinator retained; no rebuild
+- `validator-02`: `PREPARED` — legacy `sy-vpn` retained; NetBird client present but not enrolled
+- `validator-03`: `PENDING` — legacy `sy-vpn` retained; NetBird client installation/enrollment pending
+- `validator-04`: `BLOCKED_ACCESS` — SSH public-key authentication rejected; no mutation attempted
+- `validator-05`: `PENDING` — legacy `sy-vpn` retained; NetBird client installation/enrollment pending
+- `validator-06`: `PENDING` — legacy `sy-vpn` retained; NetBird client installation/enrollment pending
+- Safety boundary: legacy transport remains authoritative until NCP proves NetBird management, assigned address, peer connectivity, and rollback-safe cutover on each validator
+- Outcome: `IN_PROGRESS`
