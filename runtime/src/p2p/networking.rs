@@ -12451,7 +12451,7 @@ fn peer_target_allowed_by_local_scope(config: &NodeConfig, value: &str) -> bool 
 }
 
 fn is_validator_vpn_dial_address(value: &str) -> bool {
-    is_canonical_innernet_dial_address(value, 10)
+    is_canonical_netbird_validator_dial_address(value)
 }
 
 fn is_current_validator_vpn_dial_address(value: &str) -> bool {
@@ -12460,13 +12460,12 @@ fn is_current_validator_vpn_dial_address(value: &str) -> bool {
             && is_private_qualification_innernet_dial_address(value, 10))
 }
 
-fn is_canonical_innernet_dial_address(value: &str, third_octet: u8) -> bool {
-    // The fresh public P3 provider uses 10.69.10.0/24 for validators and
-    // 10.69.1.0/24 for relayers.  The test-only 10.70 fixtures remain accepted
-    // below solely so isolated historical unit fixtures do not become a
-    // production routing fallback.
-    is_innernet_dial_address(value, 69, third_octet)
-        || (cfg!(test) && is_innernet_dial_address(value, 70, third_octet))
+fn is_canonical_netbird_validator_dial_address(value: &str) -> bool {
+    // Validator transport is the coordinator's assigned 10.69.0.0/16
+    // NetBird network.  Allocation is dynamic, so a validator must not assume
+    // a historical /24 when accepting a seed-discovered candidate route.
+    is_innernet_dial_address_in_subnet(value, 69)
+        || (cfg!(test) && is_innernet_dial_address(value, 70, 10))
 }
 
 fn is_private_qualification_innernet_dial_address(value: &str, third_octet: u8) -> bool {
@@ -12488,6 +12487,26 @@ fn is_innernet_dial_address(value: &str, second_octet: u8, third_octet: u8) -> b
             octets[0] == 10
                 && octets[1] == second_octet
                 && octets[2] == third_octet
+                && (1..=254).contains(&octets[3])
+        })
+        .unwrap_or(false)
+}
+
+fn is_innernet_dial_address_in_subnet(value: &str, second_octet: u8) -> bool {
+    let Some(normalized) = parse_bootnode_dial_address(value) else {
+        return false;
+    };
+    let Some((_, port)) = normalized.rsplit_once(':') else {
+        return false;
+    };
+    if port.parse::<u16>().ok() != Some(VALIDATOR_P2P_PORT) {
+        return false;
+    }
+    validator_vpn_dial_octets(&normalized)
+        .map(|octets| {
+            octets[0] == 10
+                && octets[1] == second_octet
+                && octets[2] <= 255
                 && (1..=254).contains(&octets[3])
         })
         .unwrap_or(false)
@@ -16227,6 +16246,8 @@ mod tests {
         assert!(is_validator_vpn_relayer_dial_address("10.70.20.1:5622"));
         assert!(is_validator_vpn_relayer_dial_address("10.70.20.254:5622"));
         assert!(is_validator_vpn_dial_address("10.69.10.1:5622"));
+        assert!(is_validator_vpn_dial_address("10.69.132.92:5622"));
+        assert!(is_validator_vpn_dial_address("10.69.210.197:5622"));
         assert!(!is_validator_vpn_relayer_dial_address("10.69.0.1:5622"));
         assert!(!is_validator_vpn_dial_address("10.70.10.0:5622"));
         assert!(!is_validator_vpn_relayer_dial_address("10.70.20.255:5622"));
