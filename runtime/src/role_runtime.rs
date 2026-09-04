@@ -1441,18 +1441,21 @@ fn ensure_node_config_matches_finalized_consensus_parameters(
     config: &NodeConfig,
     genesis: &GenesisDocument,
 ) -> Result<(), String> {
-    let parameters = genesis.consensus_parameters().ok_or_else(|| {
-        "canonical Testnet-v3 Genesis has no finalized consensus parameter manifest".to_string()
-    })?;
-    match &parameters.manifest {
-        crate::consensus_parameters::FinalizedConsensusParameterManifest::SimplifiedPoSyV3(
-            manifest,
-        ) => ensure_node_config_matches_simplified_posy_parameters(config, manifest),
-        _ => Err(
-            "this release accepts only the finalized fresh testnet-v3 posy/3.0 manifest"
-                .to_string(),
-        ),
+    if let Some(parameters) = genesis.consensus_parameters() {
+        return match &parameters.manifest {
+            crate::consensus_parameters::FinalizedConsensusParameterManifest::SimplifiedPoSyV3(
+                manifest,
+            ) => ensure_node_config_matches_simplified_posy_parameters(config, manifest),
+            _ => Err(
+                "this release accepts only the finalized fresh testnet-v3 posy/3.0 manifest"
+                    .to_string(),
+            ),
+        };
     }
+
+    let activation = load_genesis_bound_simplified_activation(genesis.value())?
+        .ok_or_else(|| "canonical Testnet-v3 Genesis has no finalized simplified PoSy v3 activation".to_string())?;
+    ensure_node_config_matches_simplified_posy_parameters(config, &activation.manifest)
 }
 
 fn ensure_node_config_matches_simplified_posy_parameters(
@@ -6627,6 +6630,21 @@ mod tests {
         )
         .unwrap_err()
         .contains("node configuration disagrees with the finalized fresh simplified PoSy manifest"));
+    }
+
+    #[test]
+    fn node_config_accepts_the_frozen_sgen_activation_manifest() {
+        let sgen = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../launch/canonical-sgen-ceremony-20260828/genesis.sgen");
+        let genesis = crate::genesis::load_genesis_from_path(sgen)
+            .expect("the frozen signed SGEN must load through the runtime path");
+        assert!(genesis.consensus_parameters().is_none());
+
+        ensure_node_config_matches_finalized_consensus_parameters(
+            &NodeConfig::default(),
+            &genesis,
+        )
+        .expect("the frozen SGEN activation manifest must authorize the default v3 node config");
     }
 
     #[test]

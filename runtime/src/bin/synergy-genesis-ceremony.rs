@@ -18,8 +18,8 @@ use synergy_testnet::execution::{ExecutionState, GenesisExecutionSnapshot};
 use synergy_testnet::genesis_deployment::*;
 use synergy_testnet::posy_simplified_parameters::POSY_SIMPLIFIED_FRESH_GENESIS_BOUNDARY;
 use synergy_testnet::sgen::{
-    compile_sgen, compile_unsigned_sgen, payload_from_h0_evidence, verify_sgen_file,
-    verify_unsigned_sgen_file, verify_h0_execution, SgenAuthoritySigner,
+    compile_sgen, compile_unsigned_sgen, payload_from_h0_evidence, reissue_verified_sgen_payload,
+    verify_sgen_file, verify_unsigned_sgen_file, verify_h0_execution, SgenAuthoritySigner,
 };
 use synergy_testnet::synq_execution::SynQContractArtifact;
 use zeroize::Zeroize;
@@ -933,6 +933,99 @@ fn run_compose_sgen(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Rebinds a previously verified, signed SGEN to an approved launch cadence.
+/// This command never unlocks authority custody and refuses to overwrite an
+/// output. The resulting unsigned SGEN must pass verification before the
+/// existing three-authority ceremony is invoked separately.
+fn run_reissue_sgen(args: &[String]) -> Result<(), String> {
+    let mut source_sgen = None;
+    let mut target_block_time_ms = None;
+    let mut governance_decision_id = None;
+    let mut output = None;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--source-sgen" => {
+                source_sgen = Some(parse_path_argument(args, index, "--source-sgen")?);
+                index += 2;
+            }
+            "--target-block-time-ms" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| "--target-block-time-ms requires a value".to_string())?;
+                target_block_time_ms = Some(value.parse::<u64>().map_err(|_| {
+                    "--target-block-time-ms must be an unsigned integer".to_string()
+                })?);
+                index += 2;
+            }
+            "--governance-decision-id" => {
+                governance_decision_id = Some(
+                    args.get(index + 1)
+                        .ok_or_else(|| "--governance-decision-id requires a value".to_string())?
+                        .clone(),
+                );
+                index += 2;
+            }
+            "--output" => {
+                output = Some(parse_path_argument(args, index, "--output")?);
+                index += 2;
+            }
+            other => return Err(format!("unknown reissue-sgen option {other}")),
+        }
+    }
+    let (source_sgen, target_block_time_ms, governance_decision_id, output) = match (
+        source_sgen,
+        target_block_time_ms,
+        governance_decision_id,
+        output,
+    ) {
+        (
+            Some(source_sgen),
+            Some(target_block_time_ms),
+            Some(governance_decision_id),
+            Some(output),
+        ) => (
+            source_sgen,
+            target_block_time_ms,
+            governance_decision_id,
+            output,
+        ),
+        _ => return Err("usage: synergy-genesis-ceremony reissue-sgen --source-sgen genesis.sgen --target-block-time-ms 500 --governance-decision-id ID --output genesis.unsigned.sgen".to_string()),
+    };
+    if output.exists() {
+        return Err(format!(
+            "refusing to overwrite existing unsigned SGEN {}",
+            output.display()
+        ));
+    }
+    let prior = verify_sgen_file(&source_sgen)?;
+    let prior_genesis_hash = prior.genesis_hash.clone();
+    let (payload, decision_sha256) =
+        reissue_verified_sgen_payload(&prior, target_block_time_ms, &governance_decision_id)?;
+    let bytes = compile_unsigned_sgen(payload)?;
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create SGEN output directory: {error}"))?;
+    }
+    std::fs::write(&output, bytes)
+        .map_err(|error| format!("write {}: {error}", output.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&output, std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("restrict {}: {error}", output.display()))?;
+    }
+    let reissued = verify_unsigned_sgen_file(&output)?;
+    verify_h0_execution(&reissued)
+        .map_err(|error| format!("reissued SGEN deterministic H0 execution failed: {error}"))?;
+    println!("PRIOR_GENESIS_HASH={prior_genesis_hash}");
+    println!("TARGET_BLOCK_TIME_MS={target_block_time_ms}");
+    println!("GOVERNANCE_DECISION_SHA256={decision_sha256}");
+    println!("H0_EXECUTION=PASS");
+    println!("COMPLETE=UNSIGNED_SGEN_REISSUED");
+    Ok(())
+}
+
 /// Completes the same three-authority ceremony over an already-finalized JSON
 /// authoring document. JSON is an authoring input only: the no-clobber output
 /// is the single runtime `genesis.sgen` artifact and carries the signed H0
@@ -993,6 +1086,9 @@ fn run() -> Result<(), String> {
     }
     if args.first().map(String::as_str) == Some("compose-sgen") {
         return run_compose_sgen(&args);
+    }
+    if args.first().map(String::as_str) == Some("reissue-sgen") {
+        return run_reissue_sgen(&args);
     }
     if args.first().map(String::as_str) == Some("sign-sgen") {
         reject_non_interactive_passphrases(&args)?;

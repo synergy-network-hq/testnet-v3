@@ -29,10 +29,21 @@ use crate::genesis::recompute_testnet_v3_candidate_integrity;
 use crate::execution::ExecutionState;
 use crate::genesis_deployment::{replay_genesis_deployment_from_signed_operations, GenesisReplayOperation};
 use crate::consensus::simplified_posy::GenesisBoundSimplifiedActivation;
+use crate::consensus_parameters::load_finalized_consensus_parameters_from_bytes;
+use crate::etdag_governance::{
+    build_etdag_governed_membership_anchor, EtdagFeeScheduleArtifact, EtdagFeeScheduleManifest,
+    EtdagGovernedGenesisBinding, EtdagParameterArtifact, EtdagParameterManifest,
+    ETDAG_GOVERNED_GENESIS_BINDING_SCHEMA_VERSION, ETDAG_GOVERNED_GENESIS_BINDING_STATUS,
+};
+use crate::genesis::{
+    bind_testnet_v3_genesis_etdag_membership_anchor,
+    bind_testnet_v3_genesis_simplified_posy_authorities,
+    load_genesis_bound_etdag_governance,
+};
 use crate::synq_execution::derive_synergy_contract_address_from_deploy_with_identity_address;
 use crate::synergy_types::{CanonicalSerialize, ClusterId, Epoch, Hash};
 use pqsynq::Sign;
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -450,7 +461,116 @@ pub fn payload_from_h0_evidence(
     validate_payload_shape(&payload)?;
     Ok(payload)
 }
+fn reissue_etdag_binding(document: &Value) -> Result<EtdagGovernedGenesisBinding, String> {
+    if document.get("etdag_governance").is_some() {
+        return load_genesis_bound_etdag_governance(document);
+    }
+    let parameter_manifest: EtdagParameterManifest = serde_json::from_slice(include_bytes!(
+        "../../launch/posy-v3-etdag-governance-inputs/etdag-parameter-manifest.input.json"
+    ))
+    .map_err(|error| format!("parse canonical ETDAG parameter manifest: {error}"))?;
+    let fee_schedule_manifest: EtdagFeeScheduleManifest = serde_json::from_slice(include_bytes!(
+        "../../launch/posy-v3-etdag-governance-inputs/etdag-fee-schedule-manifest.input.json"
+    ))
+    .map_err(|error| format!("parse canonical ETDAG fee schedule manifest: {error}"))?;
+    let binding = EtdagGovernedGenesisBinding {
+        schema_version: ETDAG_GOVERNED_GENESIS_BINDING_SCHEMA_VERSION,
+        status: ETDAG_GOVERNED_GENESIS_BINDING_STATUS.to_string(),
+        parameter_artifact: EtdagParameterArtifact::from_manifest(parameter_manifest)?,
+        fee_schedule_artifact: EtdagFeeScheduleArtifact::from_manifest(fee_schedule_manifest)?,
+    };
+    binding.validate()?;
+    Ok(binding)
+}
 
+
+
+/// Rebinds a verified canonical SGEN to a newly governed cadence without
+/// recovering or reconstructing its signed H0 envelopes. The prior SGEN is
+/// the only accepted H0 source; identities, membership, ETDAG policy, and all
+/// H0 execution roots must remain identical.
+pub fn reissue_verified_sgen_payload(
+    verified: &VerifiedSgen,
+    target_block_time_ms: u64,
+    governance_decision_id: &str,
+) -> Result<(SgenPayloadV1, String), String> {
+    if !(100..=1_500).contains(&target_block_time_ms) {
+        return Err("reissued SGEN target block time must be within 100..=1500 ms".to_string());
+    }
+    if governance_decision_id.trim().is_empty() {
+        return Err("reissued SGEN requires a non-empty governance decision ID".to_string());
+    }
+    let mut document = verified.reconstructed_document.clone();
+    let mut activation: GenesisBoundSimplifiedActivation = serde_json::from_value(
+        document.pointer("/consensus/posy_v3_activation").cloned().ok_or_else(|| {
+            "verified SGEN has no simplified PoSy activation".to_string()
+        })?,
+    )
+    .map_err(|error| format!("decode verified SGEN activation: {error}"))?;
+    let prior_operations = verified.payload.h0_operations.clone();
+    let prior_execution_root = verified.payload.expected_execution_state_root.clone();
+    let prior_aivm_root = verified.payload.expected_aivm_state_root.clone();
+    let prior_receipt_root = verified.payload.expected_receipt_root.clone();
+    let prior_membership_root = verified.payload.membership_root.clone();
+
+    activation.manifest.target_block_time_ms = target_block_time_ms;
+    activation.manifest.governance_approval_id = Some(governance_decision_id.to_string());
+    activation.governance_decision_id = governance_decision_id.to_string();
+    activation.parameter_root_sha3_512 = activation.manifest.root()?.to_hex();
+    activation.validate()?;
+    let canonical_manifest = activation.manifest.canonical_bytes()?;
+    let parameters = load_finalized_consensus_parameters_from_bytes(&canonical_manifest)?;
+    let etdag_binding = reissue_etdag_binding(&document)?;
+    let decision_context = json!({
+        "schema": "synergy-testnet-v3-sgen-cadence-reissue-v1",
+        "prior_sgen_hash": verified.genesis_hash,
+        "governance_decision_id": governance_decision_id,
+        "target_block_time_ms": target_block_time_ms,
+        "parameter_root_sha3_512": activation.parameter_root_sha3_512,
+        "h0_execution_state_root": prior_execution_root,
+        "h0_aivm_state_root": prior_aivm_root,
+        "h0_receipt_root": prior_receipt_root,
+    });
+    let release_decision_sha256 =
+        hex::encode(Sha256::digest(canonical_json(&decision_context).as_bytes()));
+    document
+        .as_object_mut()
+        .ok_or_else(|| "verified SGEN document is not an object".to_string())?
+        .remove("etdag_membership_anchor");
+    bind_testnet_v3_genesis_simplified_posy_authorities(
+        &mut document,
+        &parameters,
+        &release_decision_sha256,
+        &activation,
+        &etdag_binding,
+    )?;
+    let anchor = build_etdag_governed_membership_anchor(
+        etdag_binding.parameter_artifact.manifest.governance_decision_id.clone(),
+        required_string(&document, "/integrity/genesis_hash")?,
+        required_string(
+            &document,
+            "/genesis_deployment/post_deployment_execution_state_root",
+        )?,
+        &activation,
+    )?;
+    bind_testnet_v3_genesis_etdag_membership_anchor(&mut document, &anchor)?;
+    document["integrity"]["etdag_membership_root_sha3_512"] = Value::String(prior_membership_root.clone());
+    let payload = payload_from_finalized_document(&document)?;
+    if payload.h0_operations != prior_operations
+        || payload.expected_execution_state_root != prior_execution_root
+        || payload.expected_aivm_state_root != prior_aivm_root
+        || payload.expected_receipt_root != prior_receipt_root
+        || payload.membership_root != prior_membership_root
+    {
+        return Err("SGEN cadence reissue changed protected H0 or membership material".to_string());
+    }
+    if payload.target_block_time_ms != target_block_time_ms
+        || payload.parameter_root == verified.payload.parameter_root
+    {
+        return Err("SGEN cadence reissue did not bind a new governed parameter root".to_string());
+    }
+    Ok((payload, release_decision_sha256))
+}
 fn encode_file(payload: &[u8], digest: [u8; 32], signatures: &[SgenSignature]) -> Result<Vec<u8>, String> {
     if payload.len() > MAX_PAYLOAD_BYTES || !(signatures.is_empty() || signatures.len() == 3) { return Err("invalid SGEN framing".to_string()); }
     let mut out = Vec::with_capacity(44 + payload.len() + signatures.iter().map(|entry| entry.signature.len() + 3).sum::<usize>());
@@ -767,5 +887,38 @@ mod tests {
         let (wrong_public, _) = mldsa87::keypair();
         authorities.get_mut(REGISTRY_ROLE).unwrap().public_key = wrong_public.as_bytes().to_vec();
         assert!(verify_sgen_bytes_against(&encoded, Some(&authorities)).unwrap_err().contains("signature"));
+    }
+#[test]
+    fn reissue_frozen_sgen_to_500ms_preserves_h0_and_rebinds_governed_context() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../launch/canonical-sgen-ceremony-20260828/genesis.sgen");
+        let original = verify_sgen_file(path).unwrap();
+        let (payload, decision_sha256) = reissue_verified_sgen_payload(
+            &original,
+            500,
+            "SNRG-GOV-POSY-P3-GENESIS-20260904-500MS",
+        )
+        .unwrap();
+        let bytes = compile_unsigned_sgen(payload).unwrap();
+        let reissued = verify_unsigned_sgen_bytes(&bytes).unwrap();
+
+        assert_eq!(reissued.payload.target_block_time_ms, 500);
+        assert_ne!(reissued.payload.parameter_root, original.payload.parameter_root);
+        assert_eq!(reissued.payload.membership_root, original.payload.membership_root);
+        assert_eq!(reissued.payload.h0_operations, original.payload.h0_operations);
+        assert_eq!(reissued.payload.expected_execution_state_root, original.payload.expected_execution_state_root);
+        assert_eq!(reissued.payload.expected_aivm_state_root, original.payload.expected_aivm_state_root);
+        assert_eq!(reissued.payload.expected_receipt_root, original.payload.expected_receipt_root);
+        assert_eq!(reissued.payload.h0_operations.len(), H0_OPERATION_COUNT);
+        assert_eq!(decision_sha256.len(), 64);
+        assert_eq!(
+            reissued
+                .reconstructed_document
+                .pointer("/consensus/posy_v3_activation/manifest/target_block_time_ms")
+                .and_then(Value::as_u64),
+            Some(500)
+        );
+        verify_h0_execution(&original).unwrap();
+        verify_h0_execution(&reissued).unwrap();
     }
 }
