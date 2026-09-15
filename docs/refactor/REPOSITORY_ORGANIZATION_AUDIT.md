@@ -101,4 +101,4 @@ No source or ambiguous artifact was deleted. Cleanup removed only the safe gener
 
 ## Preservation status
 
-At creation of this audit, the branch exists locally but has not yet been committed or pushed. Preservation is incomplete until the final local branch HEAD exactly equals the remote branch HEAD and the publish manifest records that equality.
+The first preservation commit is `df17c9264443f9e2e1182bc3e351e69cc8a143d9`. It was pushed to `origin/reconcile/core-protocol-root-2026-09-15`, and the canonical Val4 local HEAD exactly equaled the remote branch HEAD at that checkpoint. The subsequent read-only organization inventory and final manifest are committed on the same branch; final branch equality is verified again after their push.
