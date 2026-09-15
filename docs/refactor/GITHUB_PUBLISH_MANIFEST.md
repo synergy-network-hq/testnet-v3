@@ -71,9 +71,10 @@ The unchanged Grafana configuration surfaced sample/default password-shaped assi
 This section is finalized after each preservation push.
 
 - First preservation commit: `df17c9264443f9e2e1182bc3e351e69cc8a143d9`
-- Consolidation-inventory commit: `3eda543abaf9f1f25571b00c6b9653fc993fa57d`
-- Verified preserved-content local HEAD: `3eda543abaf9f1f25571b00c6b9653fc993fa57d`
-- Verified preserved-content remote branch HEAD: `3eda543abaf9f1f25571b00c6b9653fc993fa57d`
+- Initial consolidation-inventory commit: `3eda543abaf9f1f25571b00c6b9653fc993fa57d`
+- Complete consolidation-plan commit: `d54b1b6b5615f6f8cbb12fb4f296c404ee5c5e4c`
+- Verified preserved-content local HEAD: `d54b1b6b5615f6f8cbb12fb4f296c404ee5c5e4c`
+- Verified preserved-content remote branch HEAD: `d54b1b6b5615f6f8cbb12fb4f296c404ee5c5e4c`
 - Equality verification at content checkpoint: **YES**
 - Manifest verification record: this file's containing commit; it is the only commit after the verified content checkpoint, and the branch tip is reverified after push.
 - Force push used: **NO**
