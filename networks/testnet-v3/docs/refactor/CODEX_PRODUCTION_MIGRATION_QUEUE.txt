@@ -1,0 +1,242 @@
+# Persistent Phase 1 production migration queue
+# Update individual entries only; do not regenerate during this sprint.
+# SOURCE_OWNERSHIP_QUEUE_COMPLETE: all entries IMPLEMENTED; CALLERS_MIGRATED and LEGACY_REMOVED remain separately tracked.
+
+IMPLEMENTED | synergy-node | src/services/network.rs | authenticated transport session and protocol adapter ownership
+IMPLEMENTED | synergy-node | src/services/sync.rs | verified Sync protocol ingress and readiness ownership
+IMPLEMENTED | synergy-node | src/services/etdag.rs | protected ingress, finalized H+5 context, and execution handoff ownership
+IMPLEMENTED | synergy-node | src/services/execution.rs | ETDAG execution input dispatch and finalized-state handoff ownership
+IMPLEMENTED | synergy-node | src/services/posy.rs | verified authority binding, signature provider, and single-driver ownership
+IMPLEMENTED | synergy-db | src/export.rs | production source ownership
+IMPLEMENTED | synergy-db | src/inspect.rs | production source ownership
+IMPLEMENTED | synergy-db | src/migrate.rs | production source ownership
+IMPLEMENTED | synergy-db | src/repair.rs | production source ownership
+IMPLEMENTED | synergy-db | src/verify.rs | production source ownership
+IMPLEMENTED | synergy-genesis | src/builder.rs | production source ownership
+IMPLEMENTED | synergy-genesis | src/etdag.rs | production source ownership
+IMPLEMENTED | synergy-genesis | src/network.rs | production source ownership
+IMPLEMENTED | synergy-genesis | src/signing.rs | production source ownership
+IMPLEMENTED | synergy-genesis | src/validator_set.rs | production source ownership
+IMPLEMENTED | synergy-genesis | src/verify.rs | production source ownership
+IMPLEMENTED | synergy-keytool | src/aegis_keys.rs | production source ownership
+IMPLEMENTED | synergy-keytool | src/consensus_keys.rs | production source ownership
+IMPLEMENTED | synergy-keytool | src/etdag_keys.rs | production source ownership
+IMPLEMENTED | synergy-keytool | src/inspect.rs | production source ownership
+IMPLEMENTED | synergy-keytool | src/node_identity.rs | production source ownership
+IMPLEMENTED | synergy-keytool | src/rotation.rs | production source ownership
+IMPLEMENTED | synergy-manifest | src/build.rs | production source ownership
+IMPLEMENTED | synergy-manifest | src/diff.rs | production source ownership
+IMPLEMENTED | synergy-manifest | src/inspect.rs | production source ownership
+IMPLEMENTED | synergy-manifest | src/sign.rs | production source ownership
+IMPLEMENTED | synergy-manifest | src/verify.rs | production source ownership
+IMPLEMENTED | synergy-node | src/commands/ai.rs | production source ownership
+IMPLEMENTED | synergy-node | src/commands/config.rs | production source ownership
+IMPLEMENTED | synergy-node | src/commands/cross_chain.rs | production source ownership
+IMPLEMENTED | synergy-node | src/commands/database.rs | production source ownership
+IMPLEMENTED | synergy-node | src/commands/doctor.rs | production source ownership
+IMPLEMENTED | synergy-node | src/commands/etdag.rs | production source ownership
+IMPLEMENTED | synergy-node | src/commands/health.rs | production source ownership
+IMPLEMENTED | synergy-node | src/commands/identity.rs | production source ownership
+IMPLEMENTED | synergy-node | src/commands/init.rs | production source ownership
+IMPLEMENTED | synergy-node | src/commands/join.rs | production source ownership
+IMPLEMENTED | synergy-node | src/commands/keys.rs | production source ownership
+IMPLEMENTED | synergy-node | src/commands/leave.rs | production source ownership
+IMPLEMENTED | synergy-node | src/commands/manifest.rs | production source ownership
+IMPLEMENTED | synergy-node | src/commands/peers.rs | production source ownership
+IMPLEMENTED | synergy-node | src/commands/posy.rs | production source ownership
+IMPLEMENTED | synergy-node | src/commands/readiness.rs | production source ownership
+IMPLEMENTED | synergy-node | src/commands/restart.rs | production source ownership
+IMPLEMENTED | synergy-node | src/commands/role.rs | production source ownership
+IMPLEMENTED | synergy-node | src/commands/sentry.rs | production source ownership
+IMPLEMENTED | synergy-node | src/commands/snapshot.rs | production source ownership
+IMPLEMENTED | synergy-node | src/commands/status.rs | production source ownership
+IMPLEMENTED | synergy-node | src/commands/stop.rs | production source ownership
+IMPLEMENTED | synergy-node | src/commands/sync.rs | production source ownership
+IMPLEMENTED | synergy-node | src/commands/telemetry.rs | production source ownership
+IMPLEMENTED | synergy-node | src/commands/upgrade.rs | production source ownership
+IMPLEMENTED | synergy-node | src/commands/validator.rs | production source ownership
+IMPLEMENTED | synergy-node | src/commands/version.rs | production source ownership
+IMPLEMENTED | synergy-node | src/commands/vpn.rs | production source ownership
+IMPLEMENTED | synergy-node | src/output/human.rs | production source ownership
+IMPLEMENTED | synergy-node | src/output/json.rs | production source ownership
+IMPLEMENTED | synergy-node | src/output/mod.rs | production source ownership
+IMPLEMENTED | synergy-ai | src/assurance/evaluation.rs | production source ownership
+IMPLEMENTED | synergy-ai | src/assurance/independence.rs | production source ownership
+IMPLEMENTED | synergy-ai | src/assurance/mod.rs | production source ownership
+IMPLEMENTED | synergy-ai | src/assurance/reputation.rs | production source ownership
+IMPLEMENTED | synergy-ai | src/assurance/verification.rs | production source ownership
+IMPLEMENTED | synergy-ai | src/capability.rs | production source ownership
+IMPLEMENTED | synergy-ai | src/compute/agent.rs | production source ownership
+IMPLEMENTED | synergy-ai | src/compute/inference.rs | production source ownership
+IMPLEMENTED | synergy-ai | src/compute/mod.rs | production source ownership
+IMPLEMENTED | synergy-ai | src/compute/training.rs | production source ownership
+IMPLEMENTED | synergy-ai | src/coordination/federated.rs | production source ownership
+IMPLEMENTED | synergy-ai | src/coordination/mod.rs | production source ownership
+IMPLEMENTED | synergy-ai | src/coordination/routing.rs | production source ownership
+IMPLEMENTED | synergy-ai | src/coordination/scheduler.rs | production source ownership
+IMPLEMENTED | synergy-ai | src/data/dataset_provenance.rs | production source ownership
+IMPLEMENTED | synergy-ai | src/data/mod.rs | production source ownership
+IMPLEMENTED | synergy-ai | src/data/model_repository.rs | production source ownership
+IMPLEMENTED | synergy-ai | src/data/vector_memory.rs | production source ownership
+IMPLEMENTED | synergy-ai | src/job.rs | production source ownership
+IMPLEMENTED | synergy-ai | src/metrics.rs | production source ownership
+IMPLEMENTED | synergy-ai | src/policy.rs | production source ownership
+IMPLEMENTED | synergy-ai | src/provider.rs | production source ownership
+IMPLEMENTED | synergy-ai | src/receipt.rs | production source ownership
+IMPLEMENTED | synergy-aivm | src/metrics.rs | production source ownership
+IMPLEMENTED | synergy-aivm | src/resources.rs | production source ownership
+IMPLEMENTED | synergy-aivm | src/runtime.rs | production source ownership
+IMPLEMENTED | synergy-aivm | src/sandbox.rs | production source ownership
+IMPLEMENTED | synergy-aivm | src/validation.rs | production source ownership
+IMPLEMENTED | synergy-crypto | src/constant_time.rs | production source ownership
+IMPLEMENTED | synergy-crypto | src/domain.rs | production source ownership
+IMPLEMENTED | synergy-crypto | src/encoding.rs | production source ownership
+IMPLEMENTED | synergy-crypto | src/hash.rs | production source ownership
+IMPLEMENTED | synergy-crypto | src/kem/ml_kem.rs | production source ownership
+IMPLEMENTED | synergy-crypto | src/kem/mod.rs | production source ownership
+IMPLEMENTED | synergy-crypto | src/key_provider/filesystem.rs | production source ownership
+IMPLEMENTED | synergy-crypto | src/key_provider/hsm.rs | production source ownership
+IMPLEMENTED | synergy-crypto | src/key_provider/mod.rs | production source ownership
+IMPLEMENTED | synergy-crypto | src/key_provider/provider.rs | production source ownership
+IMPLEMENTED | synergy-crypto | src/key_provider/remote.rs | production source ownership
+IMPLEMENTED | synergy-crypto | src/key_provider/tpm.rs | production source ownership
+IMPLEMENTED | synergy-crypto | src/random.rs | production source ownership
+IMPLEMENTED | synergy-crypto | src/signatures/fn_dsa.rs | production source ownership
+IMPLEMENTED | synergy-crypto | src/signatures/ml_dsa.rs | production source ownership
+IMPLEMENTED | synergy-crypto | src/signatures/mod.rs | production source ownership
+IMPLEMENTED | synergy-crypto | src/signatures/sphincs.rs | production source ownership
+IMPLEMENTED | synergy-crypto | src/signatures/verifier.rs | production source ownership
+IMPLEMENTED | synergy-crypto | src/symmetric/aes_gcm.rs | production source ownership
+IMPLEMENTED | synergy-crypto | src/symmetric/mod.rs | production source ownership
+IMPLEMENTED | synergy-data-availability | src/audit.rs | production source ownership
+IMPLEMENTED | synergy-data-availability | src/proof.rs | production source ownership
+IMPLEMENTED | synergy-data-availability | src/retention.rs | production source ownership
+IMPLEMENTED | synergy-data-availability | src/serve.rs | production source ownership
+IMPLEMENTED | synergy-data-availability | src/shard.rs | production source ownership
+IMPLEMENTED | synergy-data-availability | src/store.rs | production source ownership
+IMPLEMENTED | synergy-etdag-client | src/encrypt.rs | canonical protected client ownership
+IMPLEMENTED | synergy-etdag-client | src/envelope.rs | canonical protected client ownership
+IMPLEMENTED | synergy-etdag-client | src/ingress_keys.rs | canonical protected client ownership
+IMPLEMENTED | synergy-etdag-client | src/padding.rs | canonical protected client ownership
+IMPLEMENTED | synergy-etdag-client | src/receipt.rs | canonical protected client ownership
+IMPLEMENTED | synergy-etdag-client | src/submit.rs | canonical protected client ownership
+IMPLEMENTED | synergy-etdag-client | src/target_context.rs | canonical protected client ownership
+IMPLEMENTED | synergy-execution | src/dispatcher/governance.rs | authority-backed governance dispatch boundary; concrete runtime providers and service wiring remain
+IMPLEMENTED | synergy-execution | src/dispatcher/sxcp.rs | deterministic SXCP dispatch boundary; concrete runtime providers and service wiring remain
+IMPLEMENTED | synergy-execution | src/dispatcher/synq.rs | deterministic SynQ dispatch boundary; concrete runtime providers and service wiring remain
+IMPLEMENTED | synergy-execution | src/dispatcher/system.rs | authority-backed system dispatch boundary; concrete runtime providers and service wiring remain
+IMPLEMENTED | synergy-execution | src/rollback.rs | speculative execution checkpoint and candidate discard boundary; concrete runtime providers and service wiring remain
+IMPLEMENTED | synergy-governance | src/activation.rs | production source ownership
+IMPLEMENTED | synergy-governance | src/audit.rs | production source ownership
+IMPLEMENTED | synergy-governance | src/authorization.rs | production source ownership
+IMPLEMENTED | synergy-governance | src/constitution.rs | production source ownership
+IMPLEMENTED | synergy-governance | src/emergency.rs | production source ownership
+IMPLEMENTED | synergy-governance | src/proposal.rs | production source ownership
+IMPLEMENTED | synergy-governance | src/vote.rs | production source ownership
+IMPLEMENTED | synergy-identity | src/duplicate_guard.rs | production source ownership
+IMPLEMENTED | synergy-identity | src/node_id.rs | production source ownership
+IMPLEMENTED | synergy-identity | src/proof_of_possession.rs | production source ownership
+IMPLEMENTED | synergy-identity | src/rotation.rs | production source ownership
+IMPLEMENTED | synergy-identity | src/store.rs | production source ownership
+IMPLEMENTED | synergy-manifest | src/chain_identity.rs | production source ownership
+IMPLEMENTED | synergy-manifest | src/consensus_binding.rs | production source ownership
+IMPLEMENTED | synergy-manifest | src/etdag_binding.rs | production source ownership
+IMPLEMENTED | synergy-manifest | src/genesis_binding.rs | production source ownership
+IMPLEMENTED | synergy-manifest | src/protocol_versions.rs | production source ownership
+IMPLEMENTED | synergy-manifest | src/release_binding.rs | production source ownership
+IMPLEMENTED | synergy-manifest | src/role_binding.rs | production source ownership
+IMPLEMENTED | synergy-manifest | src/signature.rs | production source ownership
+IMPLEMENTED | synergy-manifest | src/transport_binding.rs | production source ownership
+IMPLEMENTED | synergy-p2p-protocols | src/observer.rs | production source ownership
+IMPLEMENTED | synergy-p2p-protocols | src/state_sync.rs | authenticated verified-Sync delivery adapter; semantic evidence verification and node service wiring remain
+IMPLEMENTED | synergy-p2p-protocols | src/sxcp.rs | production source ownership
+IMPLEMENTED | synergy-posy | src/clustering/membership.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-posy | src/clustering/verification.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-posy | src/domains.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-posy | src/membership/deactivation.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-posy | src/membership/expulsion.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-posy | src/membership/jailing.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-posy | src/membership/shadow.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-posy | src/membership/slashing.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-posy | src/metrics.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-posy | src/persistence/fsync.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-posy | src/persistence/signing_authority.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-posy | src/proposal/recovery.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-posy | src/recovery/replay.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-posy | src/version.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-roles | src/authority_plane.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-roles | src/capability.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-roles | src/ports.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-roles | src/profile.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-roles | src/registry.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-roles | src/role.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-roles | src/service_graph.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-roles | src/validation.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-snapshot | src/builder.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-snapshot | src/chunk.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-snapshot | src/manifest.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-snapshot | src/restore.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-snapshot | src/retention.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-snapshot | src/signer.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-snapshot | src/uploader.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-snapshot | src/verifier.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-state | src/proof.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-storage | src/column/blocks.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-storage | src/column/consensus.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-storage | src/column/etdag.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-storage | src/column/metadata.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-storage | src/column/mod.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-storage | src/column/peers.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-storage | src/column/state.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-storage | src/transaction.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-sxcp | src/adapters/bitcoin.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-sxcp | src/adapters/ethereum.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-sxcp | src/adapters/mod.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-sxcp | src/adapters/solana.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-sxcp | src/capability.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-sxcp | src/finality.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-sxcp | src/independence.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-sxcp | src/proof.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-sxcp | src/protocol.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-sxcp | src/receipt.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-sxcp | src/relay.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-sxcp | src/vault.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-sxcp | src/verifier.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-sync | src/block/responder.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-sync | src/metrics.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-sync | src/sources/archive.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-sync | src/sources/peer.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-sync | src/sources/scoring.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-sync | src/sources/snapshot.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-synq | src/storage.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-synq | src/tracing.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-uma | src/adapters/bitcoin.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-uma | src/adapters/ethereum.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-uma | src/adapters/mod.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-uma | src/adapters/solana.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-uma | src/address.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-uma | src/coordinator.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-uma | src/mapping.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-uma | src/registry.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-uma | src/verifier.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-validator-management | src/activation.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-validator-management | src/expulsion.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-validator-management | src/health.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-validator-management | src/jailing.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-validator-management | src/migration.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-validator-management | src/onboarding.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-validator-management | src/registry.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-validator-management | src/removal.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-validator-management | src/shadow.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-validator-management | src/slashing.rs | production source ownership; callers remain migrating
+IMPLEMENTED | synergy-execution | src/candidate.rs | complete execution candidate ownership with account-root and block-commitment validation; callers migrating
+IMPLEMENTED | synergy-sync | src/wire.rs | authenticated head and sequential finalized-candidate protocol ownership; snapshot callers remain
+IMPLEMENTED | synergy-posy | src/sync_witness.rs | three-QC and timeout-closure Sync replay evidence ownership; epoch-crossing callers remain
+IMPLEMENTED | synergy-execution | src/dispatcher/mod.rs | canonical action router ownership; service caller wiring remains
+IMPLEMENTED | synergy-tx-ingress | src/governance.rs | proposal/authorization-bound activation ingress boundary; runtime operation callers remain
+IMPLEMENTED | node-platform | Cargo.toml | all canonical production crates registered as workspace members
+
+IMPLEMENTED | synergy-sync/synergy-node | SyncWireMessage + ingress snapshot chunk queues | authenticated manifest/state-root anchored chunk transport with conflict-safe durable resume; finalized restore caller remains
+
+IMPLEMENTED | synergy-address | src/{lib.rs,snts_registry.rs} | canonical SNTS-01 Address Engine v1 derivation and validation owner
+IMPLEMENTED | synergy-state | src/transition.rs | durable verified snapshot commit owner allowing authenticated restore height jumps

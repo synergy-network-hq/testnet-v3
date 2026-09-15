@@ -1,0 +1,13 @@
+[package]
+name = "synergy-rpc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+synergy-health = { path = "../synergy-health" }
+synergy-protocol-types = { path = "../synergy-protocol-types" }

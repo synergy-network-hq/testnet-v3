@@ -1,0 +1,12 @@
+[package]
+name = "synergy-validator-management"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+synergy-posy = { path = "../synergy-posy" }

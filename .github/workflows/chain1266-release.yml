@@ -48,20 +48,20 @@ jobs:
           }
           git config gpg.format ssh
           git config gpg.ssh.allowedSignersFile \
-            "$GITHUB_WORKSPACE/launch/CHAIN_1266_RELEASE_SIGNERS"
+            "$GITHUB_WORKSPACE/networks/testnet-v3/launch/CHAIN_1266_RELEASE_SIGNERS"
           git verify-tag "$GITHUB_REF_NAME"
           testnet_revision="$(git rev-list -n 1 "$GITHUB_REF_NAME")"
           [[ "$testnet_revision" == "$GITHUB_SHA" ]]
-          runtime_version="$(awk -F'"' '/^version = / { print $2; exit }' runtime/src/Cargo.toml)"
+          runtime_version="$(awk -F'"' '/^version = / { print $2; exit }' networks/testnet-v3/runtime/src/Cargo.toml)"
           [[ "$runtime_version" == "20.0.0" ]]
 
-          lock=launch/CHAIN_1266_DEPENDENCIES.lock.json
+          lock=networks/testnet-v3/launch/CHAIN_1266_DEPENDENCIES.lock.json
           jq -e '.schema_version == 1' "$lock" >/dev/null
           synq_revision="$(jq -er '.synq.revision' "$lock")"
           aegis_revision="$(jq -er '.aegis.revision' "$lock")"
           [[ "$synq_revision" =~ ^[0-9a-f]{40}$ ]]
           [[ "$aegis_revision" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$(git rev-parse "${GITHUB_SHA}:runtime/aegis-pqvm")" == "$aegis_revision" ]]
+          [[ "$(git rev-parse "${GITHUB_SHA}:node-platform/crates/aegis-pqvm")" == "$aegis_revision" ]]
 
           echo "release_id=chain1266-incarnation-4-rc${release_number}" >>"$GITHUB_OUTPUT"
           echo "testnet_revision=$testnet_revision" >>"$GITHUB_OUTPUT"
@@ -97,7 +97,7 @@ jobs:
           git -C "$synq_root" checkout --detach --quiet FETCH_HEAD
           git -C "$synq_root" "${auth[@]}" submodule update --init --recursive
           [[ "$(git -C "$synq_root" rev-parse HEAD)" == "$SYNQ_REVISION" ]]
-          expected_submodule="$(jq -er '.synq.submodules["aegis-pqsynq"]' launch/CHAIN_1266_DEPENDENCIES.lock.json)"
+          expected_submodule="$(jq -er '.synq.submodules["aegis-pqsynq"]' networks/testnet-v3/launch/CHAIN_1266_DEPENDENCIES.lock.json)"
           [[ "$(git -C "$synq_root/aegis-pqsynq" rev-parse HEAD)" == "$expected_submodule" ]]
 
       - uses: dtolnay/rust-toolchain@stable
@@ -110,7 +110,7 @@ jobs:
       - name: Run complete Ring 1 matrix
         env:
           CHAIN1266_QUALIFICATION_REPORT_DIR: ${{ runner.temp }}/chain1266-ring1
-        run: scripts/chain1266/run-ring1-fault-matrix.sh
+        run: networks/testnet-v3/scripts/chain1266/run-ring1-fault-matrix.sh
 
       - uses: actions/upload-artifact@v4
         with:
@@ -169,7 +169,7 @@ jobs:
           SYNERGY_AEGIS_SOURCE_REVISION: ${{ needs.resolve-signed-tag.outputs.aegis_revision }}
         run: |
           set -euo pipefail
-          cargo build --locked --release --manifest-path runtime/Cargo.toml \
+          cargo build --locked --release --manifest-path networks/testnet-v3/runtime/Cargo.toml \
             --package synergy-testnet \
             --bin synergy-validator-node \
             --bin synergy-relayer-node \
@@ -197,31 +197,31 @@ jobs:
             verify-chain1266-release-authorization \
             testnet-v3-genesis-release-approval
           do
-            install -m 0755 "runtime/target/release/$binary" "$out/bin/$binary"
+            install -m 0755 "networks/testnet-v3/runtime/target/release/$binary" "$out/bin/$binary"
             "$out/bin/$binary" --version >/dev/null 2>&1 || true
           done
-          cp genesis.testnet-v3.identity-assigned.json "$out/genesis.json"
-          cp launch/production-genesis-ceremony/testnet-v3-genesis-release-approval.json \
+          cp networks/testnet-v3/genesis.testnet-v3.identity-assigned.json "$out/genesis.json"
+          cp networks/testnet-v3/launch/production-genesis-ceremony/testnet-v3-genesis-release-approval.json \
             "$out/genesis-release-approval.json"
-          cp launch/CHAIN_1266_DEPENDENCIES.lock.json "$out/dependencies.lock.json"
-          cp -R launch/chain1266-systemd "$out/systemd"
-          cp -R atlas "$out/atlas"
-          cp -R launch/production-node-configs/validators "$out/config/"
-          cp -R launch/production-node-configs/relayers "$out/config/"
-          cp -R launch/production-node-configs/rpc-gateway "$out/config/"
-          cp -R launch/production-node-configs/explorer-indexer "$out/config/"
-          cp -R launch/production-node-configs/observer "$out/config/"
+          cp networks/testnet-v3/launch/CHAIN_1266_DEPENDENCIES.lock.json "$out/dependencies.lock.json"
+          cp -R networks/testnet-v3/launch/chain1266-systemd "$out/systemd"
+          cp -R networks/testnet-v3/atlas "$out/atlas"
+          cp -R networks/testnet-v3/launch/production-node-configs/validators "$out/config/"
+          cp -R networks/testnet-v3/launch/production-node-configs/relayers "$out/config/"
+          cp -R networks/testnet-v3/launch/production-node-configs/rpc-gateway "$out/config/"
+          cp -R networks/testnet-v3/launch/production-node-configs/explorer-indexer "$out/config/"
+          cp -R networks/testnet-v3/launch/production-node-configs/observer "$out/config/"
           "$out/bin/testnet-v3-genesis-release-approval" \
             --verify \
-            --candidate launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json \
-            --authorities launch/TESTNET_V3_PRODUCTION_AUTHORITIES.json \
-            --approval launch/production-genesis-ceremony/testnet-v3-genesis-release-approval.json
+            --candidate networks/testnet-v3/launch/production-genesis-ceremony/genesis.testnet-v3.final-candidate.json \
+            --authorities networks/testnet-v3/launch/TESTNET_V3_PRODUCTION_AUTHORITIES.json \
+            --approval networks/testnet-v3/launch/production-genesis-ceremony/testnet-v3-genesis-release-approval.json
 
       - name: Refuse stale Genesis-bound configurations
         shell: bash
         run: |
           set -euo pipefail
-          genesis_hash="$(jq -er '.integrity.genesis_hash' genesis.testnet-v3.identity-assigned.json)"
+          genesis_hash="$(jq -er '.integrity.genesis_hash' networks/testnet-v3/genesis.testnet-v3.identity-assigned.json)"
           while IFS= read -r config; do
             grep -Fq "genesis_hash = \"${genesis_hash}\"" "$config" || {
               echo "Stale Genesis binding in $config" >&2
@@ -239,7 +239,7 @@ jobs:
               echo "P1 coordinator binding is missing from $config" >&2
               exit 1
             }
-          done < <(find launch/production-node-configs/{validators,relayers,rpc-gateway,explorer-indexer,observer} -type f -name '*.toml' -print)
+          done < <(find networks/testnet-v3/launch/production-node-configs/{validators,relayers,rpc-gateway,explorer-indexer,observer} -type f -name '*.toml' -print)
 
       - name: Generate exact desired-state manifest and checksums
         shell: bash
@@ -258,7 +258,7 @@ jobs:
             --synq-revision "$SYNQ_REVISION"
             --aegis-revision "$AEGIS_REVISION"
             --genesis "$out/genesis.json"
-            --start-authority launch/TESTNET_V3_CHAIN_START_AUTHORITY.json
+            --start-authority networks/testnet-v3/launch/TESTNET_V3_CHAIN_START_AUTHORITY.json
             --artifact "validator_node=$out/bin/synergy-validator-node"
             --artifact "relayer_node=$out/bin/synergy-relayer-node"
             --artifact "observer_light_node=$out/bin/synergy-observer-light-node"
@@ -402,7 +402,7 @@ jobs:
           CHAIN1266_RELEASE_DIR: ${{ runner.temp }}/chain1266-release
           CHAIN1266_QUALIFICATION_ROOT: ${{ runner.temp }}/chain1266-ring2
           CHAIN1266_RING2_ATLAS_DATABASE_URL: postgresql://atlas_qualification:atlas_qualification@127.0.0.1:5432/atlas_chain1266
-        run: scripts/chain1266/run-ring2-private-qualification.sh
+        run: networks/testnet-v3/scripts/chain1266/run-ring2-private-qualification.sh
 
       - uses: actions/upload-artifact@v4
         with:

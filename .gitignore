@@ -17,20 +17,20 @@ node_modules/
 .release-cache/
 .codex-worktrees/
 outputs/
-artifacts/*
-!artifacts/.gitkeep
-!artifacts/SHA256SUMS
-!artifacts/*.json
-!artifacts/*.sig
+/networks/testnet-v3/artifacts/*
+!/networks/testnet-v3/artifacts/.gitkeep
+!/networks/testnet-v3/artifacts/SHA256SUMS
+!/networks/testnet-v3/artifacts/*.json
+!/networks/testnet-v3/artifacts/*.sig
 
 # Generated contract compilation output and local test transcripts
-genesis-contracts/staged-governance-v1/*.abi.json
-genesis-contracts/staged-governance-v1/*.compiled.synq
-genesis-contracts/staged-governance-v1/*.manifest.json
-launch/evidence/toolchain-and-build/*.txt
+networks/testnet-v3/genesis-contracts/staged-governance-v1/*.abi.json
+networks/testnet-v3/genesis-contracts/staged-governance-v1/*.compiled.synq
+networks/testnet-v3/genesis-contracts/staged-governance-v1/*.manifest.json
+networks/testnet-v3/launch/evidence/toolchain-and-build/*.txt
 
 # Generated reconciliation payloads can embed copied configuration values.
-launch/evidence/posy-workbook-code-reconciliation/*.adjudicated.json
+networks/testnet-v3/launch/evidence/posy-workbook-code-reconciliation/*.adjudicated.json
 
 # BEGIN SYNERGY MANAGED REPOSITORY HYGIENE
 # Common OS and editor metadata
@@ -114,13 +114,13 @@ PROVENANCE-*.json
 
 # BEGIN TESTNET V3 GENERATED ARTIFACT HYGIENE
 # Generated Chain 1266 release/deployment bundles belong in release storage.
-/launch/chain1266-promotable-rc*/
-/launch/atlas-consumer-rc*-hashfix-*/
-/launch/atlas-p1-staging/
-/launch/rc*-transfer.*/
+/networks/testnet-v3/launch/chain1266-promotable-rc*/
+/networks/testnet-v3/launch/atlas-consumer-rc*-hashfix-*/
+/networks/testnet-v3/launch/atlas-p1-staging/
+/networks/testnet-v3/launch/rc*-transfer.*/
 
 # Local node identity secrets must never enter Git history.
-/testnet-v3-identity-files/*.env
-/testnet-v3-identity-files/*.env.*
-/testnet-v3-identity-files/*passphrase*
+/networks/testnet-v3/testnet-v3-identity-files/*.env
+/networks/testnet-v3/testnet-v3-identity-files/*.env.*
+/networks/testnet-v3/testnet-v3-identity-files/*passphrase*
 # END TESTNET V3 GENERATED ARTIFACT HYGIENE

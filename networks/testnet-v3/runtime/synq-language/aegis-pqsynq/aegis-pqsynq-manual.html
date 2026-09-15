@@ -1,0 +1,742 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aegis PQSynQ | SynQ VM & Compiler Post-Quantum Facade</title>
+    <style>
+        :root{--purple-deepest:#1a0a2e;--purple-deep:#2d1b69;--purple-mid:#6b21a8;--purple-bright:#9333ea;--purple-light:#c084fc;--purple-pale:#f3e8ff;--text-dark:#1e1b4b;--text-body:#374151;--text-muted:#6b7280;--bg-white:#ffffff;--bg-section:#f9f5ff;--code-bg:#1e1b4b;--code-text:#e2e8f0;--border-light:#e9d5ff;--shadow-card:0 4px 24px rgba(107,33,168,0.10);}
+        *{margin:0;padding:0;box-sizing:border-box;}
+        body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;color:var(--text-body);background:var(--bg-white);line-height:1.7;font-size:15px;}
+        .cover{background:linear-gradient(135deg,var(--purple-deepest) 0%,var(--purple-deep) 45%,var(--purple-mid) 100%);color:white;min-height:100vh;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;padding:60px 40px;position:relative;overflow:hidden;}
+        .cover::before{content:'';position:absolute;width:600px;height:600px;border-radius:50%;background:radial-gradient(circle,rgba(147,51,234,0.25) 0%,transparent 70%);top:-150px;right:-150px;}
+        .cover::after{content:'';position:absolute;width:400px;height:400px;border-radius:50%;background:radial-gradient(circle,rgba(192,132,252,0.15) 0%,transparent 70%);bottom:-100px;left:-100px;}
+        .cover-badge{background:rgba(255,255,255,0.12);border:1px solid rgba(255,255,255,0.25);border-radius:24px;padding:6px 20px;font-size:12px;letter-spacing:2px;text-transform:uppercase;margin-bottom:32px;position:relative;z-index:1;}
+        .cover-logo{font-size:13px;letter-spacing:3px;text-transform:uppercase;color:var(--purple-light);margin-bottom:16px;position:relative;z-index:1;}
+        .cover h1{font-size:52px;font-weight:800;letter-spacing:-1px;line-height:1.1;margin-bottom:8px;position:relative;z-index:1;}
+        .cover h1 span{color:var(--purple-light);}
+        .cover-subtitle{font-size:22px;color:rgba(255,255,255,0.75);margin-bottom:40px;position:relative;z-index:1;}
+        .cover-divider{width:80px;height:3px;background:linear-gradient(90deg,var(--purple-light),transparent);margin:0 auto 40px;position:relative;z-index:1;}
+        .cover-meta{display:flex;gap:48px;flex-wrap:wrap;justify-content:center;position:relative;z-index:1;}
+        .cover-meta-item{text-align:center;}.cover-meta-item .label{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--purple-light);display:block;margin-bottom:4px;}.cover-meta-item .value{font-size:15px;font-weight:600;color:white;}
+        .cover-footer{position:absolute;bottom:32px;left:0;right:0;text-align:center;font-size:12px;color:rgba(255,255,255,0.4);z-index:1;}
+        .container{max-width:900px;margin:0 auto;padding:60px 40px;}
+        .legal-notice{background:var(--purple-pale);border-left:4px solid var(--purple-mid);border-radius:0 8px 8px 0;padding:28px 32px;margin:40px 0;font-size:13px;color:var(--text-dark);line-height:1.8;}
+        .legal-notice h3{font-size:11px;letter-spacing:2px;text-transform:uppercase;color:var(--purple-mid);margin-bottom:12px;}
+        .toc{list-style:none;}.toc>li{border-bottom:1px solid var(--border-light);padding:10px 0;}.toc>li:last-child{border-bottom:none;}
+        .toc a{display:flex;justify-content:space-between;align-items:center;text-decoration:none;color:var(--text-dark);font-weight:500;}.toc a:hover{color:var(--purple-mid);}
+        .toc-num{background:var(--purple-mid);color:white;width:28px;height:28px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;margin-right:14px;flex-shrink:0;}
+        .toc-title{flex:1;}.toc-dots{flex:1;margin:0 8px;border-bottom:1px dotted var(--purple-border);}.toc-page{color:var(--purple-mid);font-size:13px;flex-shrink:0;}
+        .section-label{font-size:11px;letter-spacing:3px;text-transform:uppercase;color:var(--purple-mid);margin-bottom:8px;font-weight:600;}
+        h2{font-size:32px;font-weight:800;color:var(--text-dark);line-height:1.2;margin-bottom:20px;border-bottom:3px solid var(--purple-pale);padding-bottom:16px;}
+        h2 .accent{color:var(--purple-mid);}
+        h3{font-size:20px;font-weight:700;color:var(--text-dark);margin:32px 0 12px;}
+        h4{font-size:16px;font-weight:600;color:var(--purple-deep);margin:24px 0 8px;}
+        p{margin-bottom:16px;}
+        .callout{border-radius:10px;padding:20px 24px;margin:24px 0;display:flex;gap:16px;align-items:flex-start;}
+        .callout-info{background:linear-gradient(135deg,#ede9fe,#f3e8ff);border:1px solid var(--purple-border);}.callout-warning{background:#fffbeb;border:1px solid #fcd34d;}.callout-success{background:#f0fdf4;border:1px solid #86efac;}
+        .callout-icon{font-size:20px;flex-shrink:0;margin-top:2px;}.callout-body{flex:1;}.callout-body strong{display:block;margin-bottom:4px;color:var(--text-dark);}
+        .card-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:20px;margin:24px 0;}
+        .card{background:var(--bg-white);border:1px solid var(--border-light);border-radius:12px;padding:24px;box-shadow:var(--shadow-card);}
+        .card-icon{width:44px;height:44px;border-radius:10px;background:linear-gradient(135deg,var(--purple-deep),var(--purple-mid));display:flex;align-items:center;justify-content:center;font-size:20px;margin-bottom:14px;}
+        .card h4{margin:0 0 8px;font-size:15px;color:var(--text-dark);}.card p{margin:0;font-size:13px;color:var(--text-muted);line-height:1.5;}
+        .algo-table{width:100%;border-collapse:collapse;margin:24px 0;font-size:14px;}.algo-table thead tr{background:linear-gradient(90deg,var(--purple-deep),var(--purple-mid));color:white;}
+        .algo-table th{padding:14px 16px;text-align:left;font-weight:600;font-size:12px;letter-spacing:0.5px;}.algo-table td{padding:12px 16px;border-bottom:1px solid var(--border-light);vertical-align:top;}
+        .algo-table tbody tr:hover{background:var(--bg-section);}.algo-table tbody tr:nth-child(even){background:#fbf7ff;}
+        .badge{display:inline-block;padding:2px 10px;border-radius:12px;font-size:11px;font-weight:600;letter-spacing:0.5px;}
+        .badge-green{background:#dcfce7;color:#166534;}.badge-blue{background:#dbeafe;color:#1e40af;}.badge-amber{background:#fef3c7;color:#92400e;}.badge-purple{background:var(--purple-pale);color:var(--purple-deep);}
+        pre{background:var(--code-bg);color:var(--code-text);border-radius:10px;padding:24px 28px;overflow-x:auto;font-family:'Cascadia Code','Fira Code','Consolas',monospace;font-size:13px;line-height:1.7;margin:20px 0;border-left:4px solid var(--purple-bright);}
+        code{background:var(--purple-pale);color:var(--purple-deep);padding:2px 7px;border-radius:4px;font-family:'Cascadia Code','Fira Code',monospace;font-size:13px;}
+        pre code{background:none;color:inherit;padding:0;}
+        .comment{color:#94a3b8;font-style:italic;}.keyword{color:#c084fc;}.string{color:#86efac;}.type{color:#67e8f9;}.fn-name{color:#fbbf24;}
+        .section-hero{background:linear-gradient(135deg,var(--purple-deep) 0%,var(--purple-mid) 100%);border-radius:16px;padding:36px 40px;color:white;margin:32px 0;display:flex;align-items:center;gap:24px;}
+        .section-hero-icon{font-size:40px;flex-shrink:0;}.section-hero h3{color:white;margin:0 0 6px;font-size:22px;}.section-hero p{color:rgba(255,255,255,0.80);margin:0;font-size:14px;}
+        .step-list{list-style:none;margin:20px 0;}.step-list li{display:flex;gap:16px;align-items:flex-start;margin-bottom:20px;}
+        .step-num{width:32px;height:32px;border-radius:50%;background:linear-gradient(135deg,var(--purple-mid),var(--purple-bright));color:white;font-weight:700;font-size:14px;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+        .step-content{flex:1;padding-top:4px;}.step-content strong{display:block;margin-bottom:4px;color:var(--text-dark);}
+        .pill-list{display:flex;flex-wrap:wrap;gap:10px;margin:16px 0;}
+        .pill{background:var(--purple-pale);border:1px solid var(--purple-border);color:var(--purple-deep);border-radius:20px;padding:6px 16px;font-size:13px;font-weight:500;}
+        .divider{height:1px;background:linear-gradient(90deg,transparent,var(--purple-border),transparent);margin:48px 0;}
+        .doc-footer{background:var(--purple-deepest);color:rgba(255,255,255,0.5);padding:40px;text-align:center;font-size:12px;line-height:1.8;}
+        .doc-footer strong{color:var(--purple-light);}
+    </style>
+</head>
+<body>
+
+<!-- COVER PAGE -->
+<div class="cover">
+    <div class="cover-badge">Smart Contract VM & Compiler</div>
+    <div class="cover-logo">Aegis Platform</div>
+    <h1>Aegis <span>PQSynQ</span></h1>
+    <p class="cover-subtitle">SynQ VM & Compiler Post-Quantum Cryptography Facade</p>
+    <div class="cover-divider"></div>
+    <div class="cover-meta">
+        <div class="cover-meta-item">
+            <span class="label">Module</span>
+            <span class="value">aegis-pqsynq</span>
+        </div>
+        <div class="cover-meta-item">
+            <span class="label">Type</span>
+            <span class="value">PQC Facade Crate</span>
+        </div>
+        <div class="cover-meta-item">
+            <span class="label">Status</span>
+            <span class="value">Production</span>
+        </div>
+    </div>
+    <div class="cover-footer">
+        <strong>Synergy Engineering Labs</strong> | Patent Pending | Copyright © 2026
+    </div>
+</div>
+
+<!-- CONTAINER -->
+<div class="container">
+
+<!-- LEGAL NOTICE -->
+<div class="legal-notice">
+    <h3>Legal & Proprietary Notice</h3>
+    <p>Aegis PQSynQ is a proprietary post-quantum cryptography facade for the SynQ VM and compiler ecosystem. SynQ is Synergy Engineering Labs' own smart contract VM and compiler language. This module provides the cryptographic backbone for SynQ programs. All algorithms are NIST-standardized. Unauthorized reproduction, distribution, or use is strictly prohibited. This manual is confidential and intended for authorized SynQ developers only.</p>
+</div>
+
+<!-- TABLE OF CONTENTS -->
+<h2>Table of Contents</h2>
+<ol class="toc">
+    <li><a href="#section-1"><span class="toc-num">1</span><span class="toc-title">Introduction & SynQ Ecosystem</span><span class="toc-dots"></span><span class="toc-page">5</span></a></li>
+    <li><a href="#section-2"><span class="toc-num">2</span><span class="toc-title">Architecture & Facade Pattern</span><span class="toc-dots"></span><span class="toc-page">12</span></a></li>
+    <li><a href="#section-3"><span class="toc-num">3</span><span class="toc-title">Algorithm Support & Configuration</span><span class="toc-dots"></span><span class="toc-page">19</span></a></li>
+    <li><a href="#section-4"><span class="toc-num">4</span><span class="toc-title">Dependency Setup & Integration</span><span class="toc-dots"></span><span class="toc-page">26</span></a></li>
+    <li><a href="#section-5"><span class="toc-num">5</span><span class="toc-title">KEM & Signature API Reference</span><span class="toc-dots"></span><span class="toc-page">33</span></a></li>
+    <li><a href="#section-6"><span class="toc-num">6</span><span class="toc-title">Trait-Based Abstraction & Factories</span><span class="toc-dots"></span><span class="toc-page">40</span></a></li>
+    <li><a href="#section-7"><span class="toc-num">7</span><span class="toc-title">Domain Separation & Contextual Signing</span><span class="toc-dots"></span><span class="toc-page">47</span></a></li>
+    <li><a href="#section-8"><span class="toc-num">8</span><span class="toc-title">SynQ Smart Contract Patterns</span><span class="toc-dots"></span><span class="toc-page">54</span></a></li>
+    <li><a href="#section-9"><span class="toc-num">9</span><span class="toc-title">Testing, Validation & Deployment</span><span class="toc-dots"></span><span class="toc-page">61</span></a></li>
+</ol>
+
+<div class="divider"></div>
+
+<!-- SECTION 1: INTRODUCTION & SYNQ ECOSYSTEM -->
+<div id="section-1">
+    <div class="divider"></div>
+    <div class="section-label">Section 1</div>
+    <h2>Introduction & <span class="accent">SynQ Ecosystem</span></h2>
+    <div class="section-hero">
+        <div class="section-hero-icon">⚙️</div>
+        <div>
+            <h3>Post-Quantum Smart Contracts</h3>
+            <p>Aegis PQSynQ is the cryptographic backbone of the SynQ smart contract VM.</p>
+        </div>
+    </div>
+    <p>Aegis PQSynQ is a specialized post-quantum cryptography facade crate designed for the SynQ VM and compiler ecosystem. SynQ is Synergy Engineering Labs' own smart contract virtual machine and domain-specific language, analogous to EVM for Ethereum or Move for Aptos. PQSynQ provides all NIST-standardized post-quantum algorithm families through a clean, trait-based API that SynQ programs use for transaction signing, smart contract attestation, quantum-safe channel establishment, and verifiable randomness.</p>
+    <h3>Key Features</h3>
+    <ul class="pill-list">
+        <li>ML-KEM-512/768/1024 (key encapsulation)</li>
+        <li>ML-DSA-44/65/87 (digital signatures)</li>
+        <li>HQC-KEM-128/192/256 (alternative KEM)</li>
+        <li>FN-DSA-512/1024 (alternative signature)</li>
+        <li>Contextual signing with domain separation</li>
+        <li>wasm32 compatible (--no-default-features)</li>
+        <li>Zero-copy trait-based abstractions</li>
+    </ul>
+    <h3>Canonical Import</h3>
+    <pre><code><span class="comment">// In your SynQ Cargo.toml</span>
+[dependencies]
+pqsynq = { package = <span class="string">"aegis-pqsynq"</span>, path = <span class="string">"../aegis-pqsynq/pqsynq"</span> }</code></pre>
+    <div class="callout callout-info">
+        <div class="callout-icon">ℹ️</div>
+        <div class="callout-body">
+            <strong>SynQ Context</strong>
+            SynQ programs use aegis-pqsynq to sign transactions (ensuring only the correct sender can execute), verify smart contract state transitions (preventing double-spending or invalid state changes), establish quantum-safe channels between VM participants, and generate verifiable randomness for protocol operations. All cryptographic operations are deterministic and auditable.
+        </div>
+    </div>
+</div>
+
+<!-- SECTION 2: ARCHITECTURE & FACADE PATTERN -->
+<div id="section-2">
+    <div class="divider"></div>
+    <div class="section-label">Section 2</div>
+    <h2>Architecture & <span class="accent">Facade Pattern</span></h2>
+    <div class="section-hero">
+        <div class="section-hero-icon">🏗️</div>
+        <div>
+            <h3>Trait-Based Abstraction</h3>
+            <p>Clean API hides algorithm complexity; swap implementations without breaking contracts.</p>
+        </div>
+    </div>
+    <h3>Two Core Traits</h3>
+    <p>PQSynQ exposes two main traits: <code>KeyEncapsulation</code> (KEM) and <code>DigitalSignature</code>. All algorithms implement these traits:</p>
+    <pre><code><span class="keyword">pub trait</span> <span class="type">KeyEncapsulation</span> {
+    <span class="keyword">fn</span> <span class="fn-name">keygen</span>(&<span class="keyword">mut</span> <span class="type">self</span>) -> Result<(Vec<u8>, Vec<u8>)>;
+    <span class="keyword">fn</span> <span class="fn-name">encapsulate</span>(&<span class="keyword">mut</span> <span class="type">self</span>, pk: &[u8]) -> Result<(Vec<u8>, Vec<u8>)>;
+    <span class="keyword">fn</span> <span class="fn-name">decapsulate</span>(&<span class="keyword">mut</span> <span class="type">self</span>, ct: &[u8], sk: &[u8]) -> Result<Vec<u8>>;
+}
+
+<span class="keyword">pub trait</span> <span class="type">DigitalSignature</span> {
+    <span class="keyword">fn</span> <span class="fn-name">keygen</span>(&<span class="keyword">mut</span> <span class="type">self</span>) -> Result<(Vec<u8>, Vec<u8>)>;
+    <span class="keyword">fn</span> <span class="fn-name">detached_sign</span>(&<span class="keyword">mut</span> <span class="type">self</span>, msg: &[u8], sk: &[u8]) -> Result<Vec<u8>>;
+    <span class="keyword">fn</span> <span class="fn-name">verify_detached</span>(&<span class="keyword">mut</span> <span class="type">self</span>, msg: &[u8], sig: &[u8], pk: &[u8]) -> Result<bool>;
+    <span class="keyword">fn</span> <span class="fn-name">sign_ctx</span>(&<span class="keyword">mut</span> <span class="type">self</span>, msg: &[u8], sk: &[u8], ctx: &[u8]) -> Result<Vec<u8>>;
+    <span class="keyword">fn</span> <span class="fn-name">verify_ctx</span>(&<span class="keyword">mut</span> <span class="type">self</span>, msg: &[u8], sig: &[u8], pk: &[u8], ctx: &[u8]) -> Result<bool>;
+}</code></pre>
+    <h3>Algorithm Factories</h3>
+    <p>Create algorithm instances via factory functions:</p>
+    <pre><code><span class="keyword">let</span> kem = Kem::<span class="fn-name">mlkem512</span>();       <span class="comment">// ML-KEM-512</span>
+<span class="keyword">let</span> kem = Kem::<span class="fn-name">mlkem768</span>();       <span class="comment">// ML-KEM-768</span>
+<span class="keyword">let</span> kem = Kem::<span class="fn-name">hqckem128</span>();      <span class="comment">// HQC-KEM-128</span>
+
+<span class="keyword">let</span> sig = Sign::<span class="fn-name">mldsa44</span>();        <span class="comment">// ML-DSA-44</span>
+<span class="keyword">let</span> sig = Sign::<span class="fn-name">mldsa65</span>();        <span class="comment">// ML-DSA-65</span>
+<span class="keyword">let</span> sig = Sign::<span class="fn-name">fndsa512</span>();       <span class="comment">// FN-DSA-512</span></code></pre>
+    <div class="card-grid">
+        <div class="card">
+            <div class="card-icon">🎯</div>
+            <h4>Trait Abstraction</h4>
+            <p>Algorithms implement standard traits; contracts don't care about implementation details.</p>
+        </div>
+        <div class="card">
+            <div class="card-icon">🔄</div>
+            <h4>Pluggable Implementations</h4>
+            <p>Swap algorithms by selecting different factory; no contract code changes.</p>
+        </div>
+        <div class="card">
+            <div class="card-icon">⚡</div>
+            <h4>Zero-Copy API</h4>
+            <p>Operates on byte slices; minimal allocation overhead.</p>
+        </div>
+    </div>
+</div>
+
+<!-- SECTION 3: ALGORITHM SUPPORT & CONFIGURATION -->
+<div id="section-3">
+    <div class="divider"></div>
+    <div class="section-label">Section 3</div>
+    <h2>Algorithm Support & <span class="accent">Configuration</span></h2>
+    <div class="section-hero">
+        <div class="section-hero-icon">🔐</div>
+        <div>
+            <h3>Six NIST Families for SynQ</h3>
+            <p>Complete algorithm coverage with feature-gated optional support.</p>
+        </div>
+    </div>
+    <h3>Default Algorithms</h3>
+    <table class="algo-table">
+        <thead>
+            <tr>
+                <th>Category</th>
+                <th>Algorithm</th>
+                <th>Feature Flag</th>
+                <th>Default</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td><strong>KEM</strong></td>
+                <td>ML-KEM-512, ML-KEM-768, ML-KEM-1024</td>
+                <td>mlkem</td>
+                <td><span class="badge badge-green">Enabled</span></td>
+            </tr>
+            <tr>
+                <td><strong>KEM</strong></td>
+                <td>HQC-KEM-128, HQC-KEM-192, HQC-KEM-256</td>
+                <td>hqckem</td>
+                <td><span class="badge badge-amber">Optional</span></td>
+            </tr>
+            <tr>
+                <td><strong>Signature</strong></td>
+                <td>ML-DSA-44, ML-DSA-65, ML-DSA-87</td>
+                <td>mldsa</td>
+                <td><span class="badge badge-green">Enabled</span></td>
+            </tr>
+            <tr>
+                <td><strong>Signature</strong></td>
+                <td>FN-DSA-512, FN-DSA-1024</td>
+                <td>fndsa</td>
+                <td><span class="badge badge-green">Enabled</span></td>
+            </tr>
+        </tbody>
+    </table>
+    <h3>Feature Configuration</h3>
+    <pre><code><span class="comment">// Cargo.toml: Default features (std, mlkem, mldsa, fndsa)</span>
+pqsynq = { package = <span class="string">"aegis-pqsynq"</span>, path = <span class="string">"../aegis-pqsynq/pqsynq"</span> }
+
+<span class="comment">// Minimal build (no_std, only ML-KEM)</span>
+pqsynq = { package = <span class="string">"aegis-pqsynq"</span>, path = <span class="string">"../aegis-pqsynq/pqsynq"</span>, default-features = <span class="keyword">false</span>, features = [<span class="string">"mlkem"</span>] }
+
+<span class="comment">// Full support (all algorithms)</span>
+pqsynq = { package = <span class="string">"aegis-pqsynq"</span>, path = <span class="string">"../aegis-pqsynq/pqsynq"</span>, features = [<span class="string">"full"</span>] }
+
+<span class="comment">// wasm32 build</span>
+pqsynq = { package = <span class="string">"aegis-pqsynq"</span>, path = <span class="string">"../aegis-pqsynq/pqsynq"</span>, default-features = <span class="keyword">false</span> }</code></pre>
+    <h3>Validation Gates (All Passing)</h3>
+    <ul class="pill-list">
+        <li>cargo fmt --all --check</li>
+        <li>cargo clippy -p aegis-pqsynq --all-targets --all-features -- -D warnings</li>
+        <li>cargo test -p aegis-pqsynq --all-features --all-targets</li>
+        <li>cargo check -p aegis-pqsynq --no-default-features</li>
+        <li>cargo check -p aegis-pqsynq --target wasm32-unknown-unknown --no-default-features</li>
+    </ul>
+    <div class="callout callout-success">
+        <div class="callout-icon">✓</span></div>
+        <div class="callout-body">
+            <strong>Recommended for SynQ Contracts</strong>
+            Use default features (std + mlkem + mldsa + fndsa) for full flexibility. For constrained embedded SynQ runtimes, disable std and select only necessary algorithms.
+        </div>
+    </div>
+</div>
+
+<!-- SECTION 4: DEPENDENCY SETUP & INTEGRATION -->
+<div id="section-4">
+    <div class="divider"></div>
+    <div class="section-label">Section 4</div>
+    <h2>Dependency Setup & <span class="accent">Integration</span></h2>
+    <div class="section-hero">
+        <div class="section-hero-icon">🔧</div>
+        <div>
+            <h3>Add PQSynQ to Your SynQ Project</h3>
+            <p>One-step integration into your smart contract VM.</p>
+        </div>
+    </div>
+    <h3>Integration Steps</h3>
+    <ol class="step-list">
+        <li>
+            <div class="step-num">1</div>
+            <div class="step-content">
+                <strong>Add to Cargo.toml</strong>
+                Add the canonical import under [dependencies].
+            </div>
+        </li>
+        <li>
+            <div class="step-num">2</div>
+            <div class="step-content">
+                <strong>Import in Your Code</strong>
+                <code>use pqsynq::{Kem, Sign};</code>
+            </div>
+        </li>
+        <li>
+            <div class="step-num">3</div>
+            <div class="step-content">
+                <strong>Create Algorithm Instances</strong>
+                Use factory functions to instantiate specific algorithms.
+            </div>
+        </li>
+        <li>
+            <div class="step-num">4</div>
+            <div class="step-content">
+                <strong>Perform Cryptographic Operations</strong>
+                Call keygen, sign, verify, encapsulate, decapsulate via trait methods.
+            </div>
+        </li>
+    </ol>
+    <h3>Minimal SynQ Contract Example</h3>
+    <pre><code><span class="keyword">use</span> pqsynq::{Kem, Sign};
+
+<span class="keyword">pub contract</span> QuantumSafeVault {
+    <span class="keyword">fn</span> <span class="fn-name">setup</span>(&<span class="keyword">mut</span> <span class="type">self</span>) {
+        <span class="comment">// Generate signature keypair for contract owner</span>
+        <span class="keyword">let</span> <span class="keyword">mut</span> signer = Sign::<span class="fn-name">mldsa44</span>();
+        <span class="keyword">let</span> (vk, sk) = signer.<span class="fn-name">keygen</span>().unwrap();
+        
+        <span class="comment">// Store public key for later verification</span>
+        <span class="type">self</span>.owner_pubkey = vk;
+    }
+    
+    <span class="keyword">pub fn</span> <span class="fn-name">withdraw</span>(
+        &<span class="keyword">mut</span> <span class="type">self</span>,
+        amount: u64,
+        signature: &[u8],
+        owner_sk: &[u8],
+    ) -> <span class="type">Result</span> {
+        <span class="comment">// Verify withdrawal is signed by owner</span>
+        <span class="keyword">let</span> <span class="keyword">mut</span> signer = Sign::<span class="fn-name">mldsa44</span>();
+        <span class="keyword">let</span> msg = format!(<span class="string">"withdraw:{}"</span>, amount).as_bytes().to_vec();
+        
+        <span class="keyword">let</span> is_valid = signer.<span class="fn-name">verify_detached</span>(
+            &msg,
+            signature,
+            &<span class="type">self</span>.owner_pubkey
+        )?;
+        
+        <span class="keyword">if</span> !is_valid {
+            <span class="keyword">return</span> Err(<span class="string">"Invalid signature"</span>);
+        }
+        
+        <span class="comment">// Process withdrawal</span>
+        <span class="type">self</span>.balance -= amount;
+        Ok(())
+    }
+}</code></pre>
+</div>
+
+<!-- SECTION 5: KEM & SIGNATURE API REFERENCE -->
+<div id="section-5">
+    <div class="divider"></div>
+    <div class="section-label">Section 5</div>
+    <h2>KEM & Signature <span class="accent">API Reference</span></h2>
+    <div class="section-hero">
+        <div class="section-hero-icon">📚</div>
+        <div>
+            <h3>Complete Function Reference</h3>
+            <p>All public API functions documented with examples.</p>
+        </div>
+    </div>
+    <h3>Key Encapsulation (KEM) Example</h3>
+    <pre><code><span class="keyword">use</span> pqsynq::{Kem, KeyEncapsulation};
+
+<span class="keyword">fn</span> <span class="fn-name">kem_roundtrip</span>() -> Result<()> {
+    <span class="keyword">let</span> <span class="keyword">mut</span> kem = Kem::<span class="fn-name">mlkem512</span>();
+    
+    <span class="comment">// Receiver: generate keypair</span>
+    <span class="keyword">let</span> (pk, sk) = kem.<span class="fn-name">keygen</span>()?;
+    
+    <span class="comment">// Sender: encapsulate to receiver's public key</span>
+    <span class="keyword">let</span> (ciphertext, shared_secret_sender) = kem.<span class="fn-name">encapsulate</span>(&pk)?;
+    
+    <span class="comment">// Receiver: decapsulate ciphertext to recover shared secret</span>
+    <span class="keyword">let</span> shared_secret_receiver = kem.<span class="fn-name">decapsulate</span>(&ciphertext, &sk)?;
+    
+    <span class="comment">// Verify both sides recovered same secret</span>
+    <span class="keyword">assert_eq!</span>(shared_secret_sender, shared_secret_receiver);
+    
+    Ok(())
+}</code></pre>
+    <h3>Digital Signature Example</h3>
+    <pre><code><span class="keyword">use</span> pqsynq::{Sign, DigitalSignature};
+
+<span class="keyword">fn</span> <span class="fn-name">signature_roundtrip</span>() -> Result<()> {
+    <span class="keyword">let</span> <span class="keyword">mut</span> signer = Sign::<span class="fn-name">mldsa44</span>();
+    
+    <span class="comment">// Signer: generate keypair</span>
+    <span class="keyword">let</span> (vk, sk) = signer.<span class="fn-name">keygen</span>()?;
+    
+    <span class="comment">// Signer: detached sign a message</span>
+    <span class="keyword">let</span> message = <span class="string">b"Important transaction"</span>;
+    <span class="keyword">let</span> signature = signer.<span class="fn-name">detached_sign</span>(message, &sk)?;
+    
+    <span class="comment">// Verifier: verify signature</span>
+    <span class="keyword">let</span> is_valid = signer.<span class="fn-name">verify_detached</span>(message, &signature, &vk)?;
+    <span class="keyword">assert!</span>(is_valid);
+    
+    Ok(())
+}</code></pre>
+    <h3>Error Type</h3>
+    <pre><code><span class="keyword">pub enum</span> <span class="type">PqcError</span> {
+    KeygenFailed,
+    EncapFailed,
+    DecapFailed,
+    SignFailed,
+    VerifyFailed,
+    NotImplemented,        <span class="comment">// For unsupported operations</span>
+    InvalidInput,
+}</code></pre>
+</div>
+
+<!-- SECTION 6: TRAIT-BASED ABSTRACTION & FACTORIES -->
+<div id="section-6">
+    <div class="divider"></div>
+    <div class="section-label">Section 6</div>
+    <h2>Trait-Based Abstraction & <span class="accent">Factories</span></h2>
+    <div class="section-hero">
+        <div class="section-hero-icon">🏗️</div>
+        <div>
+            <h3>Composable Cryptography</h3>
+            <p>Switch algorithms without changing contract logic.</p>
+        </div>
+    </div>
+    <h3>KEM Factories</h3>
+    <pre><code><span class="keyword">impl</span> Kem {
+    <span class="keyword">pub fn</span> <span class="fn-name">mlkem512</span>() -> <span class="type">Self</span> { <span class="comment">/* ... */</span> }
+    <span class="keyword">pub fn</span> <span class="fn-name">mlkem768</span>() -> <span class="type">Self</span> { <span class="comment">/* ... */</span> }
+    <span class="keyword">pub fn</span> <span class="fn-name">mlkem1024</span>() -> <span class="type">Self</span> { <span class="comment">/* ... */</span> }
+    <span class="keyword">pub fn</span> <span class="fn-name">hqckem128</span>() -> <span class="type">Self</span> { <span class="comment">/* ... */</span> }
+    <span class="keyword">pub fn</span> <span class="fn-name">hqckem192</span>() -> <span class="type">Self</span> { <span class="comment">/* ... */</span> }
+    <span class="keyword">pub fn</span> <span class="fn-name">hqckem256</span>() -> <span class="type">Self</span> { <span class="comment">/* ... */</span> }
+}</code></pre>
+    <h3>Signature Factories</h3>
+    <pre><code><span class="keyword">impl</span> Sign {
+    <span class="keyword">pub fn</span> <span class="fn-name">mldsa44</span>() -> <span class="type">Self</span> { <span class="comment">/* ... */</span> }
+    <span class="keyword">pub fn</span> <span class="fn-name">mldsa65</span>() -> <span class="type">Self</span> { <span class="comment">/* ... */</span> }
+    <span class="keyword">pub fn</span> <span class="fn-name">mldsa87</span>() -> <span class="type">Self</span> { <span class="comment">/* ... */</span> }
+    <span class="keyword">pub fn</span> <span class="fn-name">fndsa512</span>() -> <span class="type">Self</span> { <span class="comment">/* ... */</span> }
+    <span class="keyword">pub fn</span> <span class="fn-name">fndsa1024</span>() -> <span class="type">Self</span> { <span class="comment">/* ... */</span> }
+}</code></pre>
+    <div class="callout callout-info">
+        <div class="callout-icon">ℹ️</div>
+        <div class="callout-body">
+            <strong>Algorithm Selection in SynQ</strong>
+            For most SynQ contracts, ML-KEM-512 (smallest KEM) and ML-DSA-44 (smallest signature) provide excellent post-quantum security with minimal overhead. Use larger variants only if your threat model requires 256+ bits of effective security.
+        </div>
+    </div>
+</div>
+
+<!-- SECTION 7: DOMAIN SEPARATION & CONTEXTUAL SIGNING -->
+<div id="section-7">
+    <div class="divider"></div>
+    <div class="section-label">Section 7</div>
+    <h2>Domain Separation & <span class="accent">Contextual Signing</span></h2>
+    <div class="section-hero">
+        <div class="section-hero-icon">🔒</div>
+        <div>
+            <h3>Prevent Signature Reuse Across Contexts</h3>
+            <p>Domain separation ensures signatures are bound to specific SynQ contract types.</p>
+        </div>
+    </div>
+    <h3>Contextual Signature API</h3>
+    <p>ML-DSA supports <code>sign_ctx(msg, sk, context)</code> and <code>verify_ctx(msg, sig, pk, context)</code>. This prevents signature replay attacks across different contract types.</p>
+    <pre><code><span class="keyword">use</span> pqsynq::{Sign, DigitalSignature};
+
+<span class="comment">// Contract A: Payment transfer</span>
+<span class="keyword">let</span> <span class="keyword">mut</span> signer = Sign::<span class="fn-name">mldsa44</span>();
+<span class="keyword">let</span> msg = <span class="string">b"transfer:100"</span>;
+<span class="keyword">let</span> ctx = <span class="string">b"synq-contract-payment-v1"</span>;  <span class="comment">// Domain separation</span>
+<span class="keyword">let</span> sig_a = signer.<span class="fn-name">sign_ctx</span>(msg, &sk, ctx)?;
+
+<span class="comment">// Contract B: Voting (different context)</span>
+<span class="keyword">let</span> ctx_b = <span class="string">b"synq-contract-voting-v1"</span>;  <span class="comment">// Different domain</span>
+<span class="keyword">let</span> sig_b = signer.<span class="fn-name">sign_ctx</span>(msg, &sk, ctx_b)?;
+
+<span class="comment">// sig_a cannot be used in voting context (and vice versa)</span>
+<span class="keyword">let</span> valid = signer.<span class="fn-name">verify_ctx</span>(msg, &sig_a, &vk, ctx_b)?;  <span class="comment">// Returns false</span></code></pre>
+    <h3>FN-DSA Note</h3>
+    <p>FN-DSA does not support contextual signing. If you use FN-DSA, you must implement domain separation manually by prepending context to the message:</p>
+    <pre><code><span class="keyword">let</span> <span class="keyword">mut</span> signer = Sign::<span class="fn-name">fndsa512</span>();
+<span class="keyword">let</span> ctx = <span class="string">b"synq-contract-type-v1"</span>;
+<span class="keyword">let</span> msg_with_ctx = [ctx.as_slice(), msg].concat();
+<span class="keyword">let</span> sig = signer.<span class="fn-name">detached_sign</span>(&msg_with_ctx, &sk)?;</code></pre>
+    <div class="callout callout-success">
+        <div class="callout-icon">✓</div>
+        <div class="callout-body">
+            <strong>Domain Separation Best Practice</strong>
+            Always use context-aware signatures (sign_ctx/verify_ctx) when available. If using FN-DSA, prepend a context identifier to all messages. This prevents signature reuse across different SynQ contract types.
+        </div>
+    </div>
+</div>
+
+<!-- SECTION 8: SYNQ SMART CONTRACT PATTERNS -->
+<div id="section-8">
+    <div class="divider"></div>
+    <div class="section-label">Section 8</div>
+    <h2>SynQ Smart Contract <span class="accent">Patterns</span></h2>
+    <div class="section-hero">
+        <div class="section-hero-icon">⚡</div>
+        <div>
+            <h3>Common PQC Usage Patterns</h3>
+            <p>Real-world smart contract examples using aegis-pqsynq.</p>
+        </div>
+    </div>
+    <h3>Pattern 1: Transaction Signature Verification</h3>
+    <pre><code><span class="keyword">pub contract</span> PQWallet {
+    <span class="keyword">pub fn</span> <span class="fn-name">execute_transaction</span>(
+        &<span class="keyword">mut</span> <span class="type">self</span>,
+        recipient: Address,
+        amount: u64,
+        signature: &[u8],
+    ) -> Result<()> {
+        <span class="comment">// Only owner can execute (verified via ML-DSA signature)</span>
+        <span class="keyword">let</span> <span class="keyword">mut</span> signer = Sign::<span class="fn-name">mldsa44</span>();
+        <span class="keyword">let</span> tx_msg = format!(<span class="string">"tx:{}:{}"</span>, recipient, amount);
+        
+        <span class="keyword">let</span> is_valid = signer.<span class="fn-name">sign_ctx</span>(
+            tx_msg.as_bytes(),
+            &signature,
+            &<span class="type">self</span>.owner_pubkey,
+            <span class="string">b"synq-wallet-transaction-v1"</span>
+        )?;
+        
+        <span class="keyword">if</span> !is_valid {
+            <span class="keyword">return</span> Err(<span class="string">"Signature invalid"</span>);
+        }
+        
+        <span class="type">self</span>.balance -= amount;
+        emit_transfer(recipient, amount);
+        Ok(())
+    }
+}</code></pre>
+    <h3>Pattern 2: Quantum-Safe Session Establishment</h3>
+    <pre><code><span class="keyword">pub contract</span> PQChannel {
+    <span class="keyword">pub fn</span> <span class="fn-name">initiate_handshake</span>(
+        &<span class="keyword">mut</span> <span class="type">self</span>,
+        peer_ml_kem_pk: &[u8],
+        peer_signature_pk: &[u8],
+    ) -> Result<Vec<u8>> {
+        <span class="comment">// Establish quantum-safe session via ML-KEM key exchange</span>
+        <span class="keyword">let</span> <span class="keyword">mut</span> kem = Kem::<span class="fn-name">mlkem512</span>();
+        <span class="keyword">let</span> (ciphertext, session_secret) = kem.<span class="fn-name">encapsulate</span>(peer_ml_kem_pk)?;
+        
+        <span class="comment">// Sign ciphertext to prove ownership of this contract</span>
+        <span class="keyword">let</span> <span class="keyword">mut</span> signer = Sign::<span class="fn-name">mldsa44</span>();
+        <span class="keyword">let</span> sig = signer.<span class="fn-name">sign_ctx</span>(
+            &ciphertext,
+            &<span class="type">self</span>.my_signature_sk,
+            <span class="string">b"synq-channel-handshake-v1"</span>
+        )?;
+        
+        <span class="comment">// Store session secret for future encrypted communication</span>
+        <span class="type">self</span>.session_key = kdf_session(&session_secret)?;
+        
+        Ok([ciphertext, sig].concat())
+    }
+}</code></pre>
+    <h3>Pattern 3: Attestation & Proof</h3>
+    <pre><code><span class="keyword">pub contract</span> PQAttestor {
+    <span class="keyword">pub fn</span> <span class="fn-name">issue_attestation</span>(
+        &<span class="keyword">mut</span> <span class="type">self</span>,
+        claim: &[u8],
+    ) -> Result<Vec<u8>> {
+        <span class="comment">// Attestor signs claim with ML-DSA-44</span>
+        <span class="keyword">let</span> <span class="keyword">mut</span> signer = Sign::<span class="fn-name">mldsa44</span>();
+        <span class="keyword">let</span> attestation = signer.<span class="fn-name">sign_ctx</span>(
+            claim,
+            &<span class="type">self</span>.attestor_sk,
+            <span class="string">b"synq-attestation-v1"</span>
+        )?;
+        
+        Ok(attestation)
+    }
+    
+    <span class="keyword">pub fn</span> <span class="fn-name">verify_attestation</span>(
+        &<span class="keyword">mut</span> <span class="type">self</span>,
+        claim: &[u8],
+        attestation: &[u8],
+        attestor_pk: &[u8],
+    ) -> Result<bool> {
+        <span class="keyword">let</span> <span class="keyword">mut</span> signer = Sign::<span class="fn-name">mldsa44</span>();
+        signer.<span class="fn-name">verify_ctx</span>(
+            claim,
+            attestation,
+            attestor_pk,
+            <span class="string">b"synq-attestation-v1"</span>
+        )
+    }
+}</code></pre>
+</div>
+
+<!-- SECTION 9: TESTING, VALIDATION & DEPLOYMENT -->
+<div id="section-9">
+    <div class="divider"></div>
+    <div class="section-label">Section 9</div>
+    <h2>Testing, Validation & <span class="accent">Deployment</span></h2>
+    <div class="section-hero">
+        <div class="section-hero-icon">✅</div>
+        <div>
+            <h3>Production-Ready Validation</h3>
+            <p>All strict gates passing; ready for smart contract deployment.</p>
+        </div>
+    </div>
+    <h3>Build Validation Commands</h3>
+    <ol class="step-list">
+        <li>
+            <div class="step-num">1</div>
+            <div class="step-content">
+                <strong>Format Check</strong>
+                <code>cargo fmt -p aegis-pqsynq --all --check</code>
+            </div>
+        </li>
+        <li>
+            <div class="step-num">2</div>
+            <div class="step-content">
+                <strong>Linting (Strict)</strong>
+                <code>cargo clippy -p aegis-pqsynq --all-targets --all-features --no-deps -- -D warnings</code>
+            </div>
+        </li>
+        <li>
+            <div class="step-num">3</div>
+            <div class="step-content">
+                <strong>Unit Tests</strong>
+                <code>cargo test -p aegis-pqsynq --all-features --all-targets --locked</code>
+            </div>
+        </li>
+        <li>
+            <div class="step-num">4</div>
+            <div class="step-content">
+                <strong>no_std Check</strong>
+                <code>cargo check -p aegis-pqsynq --no-default-features --locked</code>
+            </div>
+        </li>
+        <li>
+            <div class="step-num">5</div>
+            <div class="step-content">
+                <strong>wasm32 Check</strong>
+                <code>cargo check -p aegis-pqsynq --target wasm32-unknown-unknown --no-default-features --locked</code>
+            </div>
+        </li>
+    </ol>
+    <h3>NIST KAT Validation</h3>
+    <p>All algorithms validated against NIST Known-Answer Test vectors in <code>5-nist-kat-vectors/</code>. Before deployment, verify:</p>
+    <ul class="pill-list">
+        <li>ML-KEM-512/768/1024 keygen, encapsulate, decapsulate</li>
+        <li>ML-DSA-44/65/87 keygen, sign, verify</li>
+        <li>HQC-KEM-128/192/256 operations</li>
+        <li>FN-DSA-512/1024 operations</li>
+    </ul>
+    <h3>Smart Contract Testing Checklist</h3>
+    <ol class="step-list">
+        <li>
+            <div class="step-num">1</div>
+            <div class="step-content">
+                <strong>Unit Tests on Algorithms</strong>
+                Test keygen, sign, verify, encapsulate, decapsulate independently.
+            </div>
+        </li>
+        <li>
+            <div class="step-num">2</div>
+            <div class="step-content">
+                <strong>Integration Tests in SynQ Contract</strong>
+                Test full transaction signing and verification flow.
+            </div>
+        </li>
+        <li>
+            <div class="step-num">3</div>
+            <div class="step-content">
+                <strong>Domain Separation Testing</strong>
+                Verify signatures fail when context is changed.
+            </div>
+        </li>
+        <li>
+            <div class="step-num">4</div>
+            <div class="step-content">
+                <strong>Error Handling</strong>
+                Ensure invalid inputs return appropriate PqcError variants.
+            </div>
+        </li>
+        <li>
+            <div class="step-num">5</div>
+            <div class="step-content">
+                <strong>Performance Profiling</strong>
+                Measure signature/KEM operation times on target hardware.
+            </div>
+        </li>
+        <li>
+            <div class="step-num">6</div>
+            <div class="step-content">
+                <strong>Audit & Code Review</strong>
+                Have cryptography expert review contract PQC usage patterns.
+            </div>
+        </li>
+    </ol>
+    <h3>Documentation Resources</h3>
+    <ul class="pill-list">
+        <li>USER_MANUAL.md — Full API reference</li>
+        <li>CHANGELOG.md — Version history</li>
+        <li>PRODUCTION_CHECKLIST.md — Pre-deployment verification</li>
+        <li>5-nist-kat-vectors/ — Reference test vectors</li>
+        <li>3-benchmark-tests/ — Performance baseline</li>
+    </ul>
+    <div class="callout callout-info">
+        <div class="callout-icon">ℹ️</div>
+        <div class="callout-body">
+            <strong>SynQ Contract Deployment Checklist</strong>
+            All build gates passing (fmt, clippy -D warnings, tests, no_std, wasm32). NIST KAT vectors validated. Smart contract unit and integration tests passing. Domain separation correctly implemented. Error handling complete. Ready for mainnet deployment.
+        </div>
+    </div>
+</div>
+
+<!-- FOOTER -->
+<div class="divider"></div>
+<div class="doc-footer">
+    <p><strong>Aegis PQSynQ</strong> | SynQ VM & Compiler Post-Quantum Cryptography Facade<br>
+    © 2026 <strong>Synergy Engineering Labs</strong> | Patent Pending<br>
+    Document Version 1.0 | Module Status: Production Ready</p>
+</div>
+
+</div>
+</body>
+</html>

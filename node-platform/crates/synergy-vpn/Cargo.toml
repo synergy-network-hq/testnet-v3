@@ -1,0 +1,12 @@
+[package]
+name = "synergy-vpn"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+synergy-network = { path = "../synergy-network" }
+synergy-protocol-types = { path = "../synergy-protocol-types" }
+synergy-address = { path = "../synergy-address" }

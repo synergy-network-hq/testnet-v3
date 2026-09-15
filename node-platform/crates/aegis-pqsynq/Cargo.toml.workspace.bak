@@ -1,0 +1,46 @@
+[workspace]
+members = [
+    "aegis_crypto_core",
+    "pqsynq",
+    # Reuse the previously-working pqrust crates from `aegis-pqrust/`.
+    # (These crates expect to be built inside a workspace because they use
+    # `workspace = true` for shared deps like pqrust-internals/traits.)
+    "../aegis-pqrust/pqrust/pqrust",
+    "../aegis-pqrust/pqrust-traits",
+    "../aegis-pqrust/pqrust-internals",
+    "../aegis-pqrust/pqrust-mlkem",
+    "../aegis-pqrust/pqrust-mldsa",
+    "../aegis-pqrust/pqrust-fndsa",
+    "../aegis-pqrust/pqrust-slhdsa",
+    "../aegis-pqrust/pqrust-hqckem",
+    "../aegis-pqrust/pqrust-cmce",
+]
+default-members = ["aegis_crypto_core"]
+resolver = "2"
+
+
+[profile.dev]
+opt-level = 0
+debug = true
+overflow-checks = true
+
+[profile.release]
+opt-level = 3
+lto = true
+debug = false
+panic = "abort"
+
+# Force all workspace crates to use consistent dependency versions
+[workspace.dependencies]
+pqrust = { path = "../aegis-pqrust/pqrust/pqrust" }
+pqrust-traits = { path = "../aegis-pqrust/pqrust-traits", default-features = false, features = ["std"] }
+pqrust-internals = { path = "../aegis-pqrust/pqrust-internals" }
+pqrust-mlkem = { path = "../aegis-pqrust/pqrust-mlkem" }
+pqrust-mldsa = { path = "../aegis-pqrust/pqrust-mldsa" }
+pqrust-fndsa = { path = "../aegis-pqrust/pqrust-fndsa" }
+pqrust-slhdsa = { path = "../aegis-pqrust/pqrust-slhdsa" }
+pqrust-hqckem = { path = "../aegis-pqrust/pqrust-hqckem" }
+pqrust-cmce = { path = "../aegis-pqrust/pqrust-cmce" }
+
+# NIST reference bindings live at the repo root.
+pqnist = { path = "../aegis-pqnist/bindings" }

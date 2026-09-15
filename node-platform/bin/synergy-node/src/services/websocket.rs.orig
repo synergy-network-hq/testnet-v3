@@ -1,0 +1,125 @@
+use std::sync::Arc;
+
+use synergy_config::RpcConfiguration;
+use synergy_node_core::{
+    CancellationToken, Criticality, ManagedService, RestartPolicy, RuntimeView, ServiceHealth,
+    ServiceId, ServiceReadiness, ServiceSpec,
+};
+use synergy_rpc::{
+    methods::BlockQuery,
+    provider::{CanonicalReadProvider, FinalizedBlockView},
+};
+use synergy_ws::{
+    blocks::block_event, finality::finality_event, node::node_event, server::WsServer,
+    transactions::transaction_event,
+};
+
+pub fn registration(
+    configuration: &RpcConfiguration,
+    runtime: RuntimeView,
+    hub: Arc<WsServer>,
+    query_store: Arc<dyn CanonicalReadProvider>,
+) -> Result<(ServiceSpec, Box<dyn ManagedService>), String> {
+    if !configuration.enabled {
+        return Err("WebSocket service cannot be registered when RPC is disabled".into());
+    }
+    Ok((
+        ServiceSpec {
+            id: ServiceId::new("websocket")?,
+            dependencies: vec![ServiceId::new("network")?, ServiceId::new("rpc")?],
+            criticality: Criticality::Required,
+            restart_policy: RestartPolicy::OnFailure { max_attempts: 3 },
+        },
+        Box::new(WebSocketService {
+            runtime,
+            hub,
+            query_store,
+            sequence: 0,
+            last_node_state: None,
+            last_finalized_height: None,
+            started: false,
+        }),
+    ))
+}
+
+struct WebSocketService {
+    runtime: RuntimeView,
+    hub: Arc<WsServer>,
+    query_store: Arc<dyn CanonicalReadProvider>,
+    sequence: u64,
+    last_node_state: Option<(String, bool)>,
+    last_finalized_height: Option<u64>,
+    started: bool,
+}
+
+impl ManagedService for WebSocketService {
+    fn start(&mut self, cancellation: &CancellationToken) -> Result<(), String> {
+        if cancellation.is_cancelled() {
+            return Err("WebSocket service start was cancelled".into());
+        }
+        self.started = true;
+        self.publish_runtime_state()
+    }
+
+    fn poll(&mut self) -> Result<(), String> {
+        if !self.started {
+            return Err("WebSocket event producer is stopped".into());
+        }
+        self.publish_runtime_state()
+    }
+
+    fn stop(&mut self) -> Result<(), String> {
+        self.started = false;
+        self.last_node_state = None;
+        Ok(())
+    }
+
+    fn health(&self) -> ServiceHealth {
+        if self.started {
+            ServiceHealth::Healthy
+        } else {
+            ServiceHealth::Unhealthy {
+                reason: "WebSocket event producer is stopped".into(),
+            }
+        }
+    }
+
+    fn readiness(&self) -> ServiceReadiness {
+        if self.started {
+            ServiceReadiness::Ready
+        } else {
+            ServiceReadiness::Blocked {
+                reason: "WebSocket event producer is stopped".into(),
+            }
+        }
+    }
+}
+
+impl WebSocketService {
+    fn publish_runtime_state(&mut self) -> Result<(), String> {
+        let snapshot = self
+            .runtime
+            .read()
+            .map_err(|_| "WebSocket runtime observation state is unavailable")?;
+        let state = serde_json::to_value(&snapshot.lifecycle)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_else(|| format!("{:?}", snapshot.lifecycle));
+        let ready = snapshot.ready();
+        drop(snapshot);
+        if self.last_node_state.as_ref() == Some(&(state.clone(), ready)) {
+            return Ok(());
+        }
+        self.sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or("WebSocket event sequence overflow")?;
+        let event = node_event(self.sequence, state.clone(), ready)
+            .map_err(|error| format!("construct WebSocket node event: {error:?}"))?;
+        self.hub
+            .publish(event)
+            .map_err(|error| format!("publish WebSocket node event: {error:?}"))?;
+        self.last_node_state = Some((state, ready));
+        Ok(())
+    }
+}

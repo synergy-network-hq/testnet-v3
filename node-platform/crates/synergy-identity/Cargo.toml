@@ -1,0 +1,15 @@
+[package]
+name = "synergy-identity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+synergy-aegis = { path = "../synergy-aegis" }
+synergy-protocol-types = { path = "../synergy-protocol-types" }
+
+[dev-dependencies]
+serde_json.workspace = true

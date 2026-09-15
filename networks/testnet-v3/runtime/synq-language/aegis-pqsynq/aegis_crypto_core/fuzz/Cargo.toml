@@ -1,0 +1,21 @@
+[package]
+name = "aegis_crypto_core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.aegis_crypto_core]
+path = ".."
+
+[[bin]]
+name = "mlkem_decapsulation"
+path = "fuzz_targets/mlkem_decapsulation.rs"
+test = false
+doc = false
+bench = false

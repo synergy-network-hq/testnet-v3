@@ -1,0 +1,18 @@
+[package]
+name = "synergy-manifest-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "synergy-manifest"
+path = "src/main.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha3.workspace = true
+synergy-aegis = { path = "../../crates/synergy-aegis" }
+synergy-storage = { path = "../../crates/synergy-storage" }

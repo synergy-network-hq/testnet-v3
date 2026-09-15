@@ -1,0 +1,13 @@
+[package]
+name="synergy-aivm"
+version.workspace=true
+edition.workspace=true
+license.workspace=true
+rust-version.workspace=true
+publish=false
+
+[dependencies]
+serde.workspace=true
+sha3.workspace=true
+synergy-ai={path="../synergy-ai"}
+synergy-synq={path="../synergy-synq"}

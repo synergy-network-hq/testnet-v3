@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "vectors_file": "pinned_vectors.json",
+  "sha256": "6111d148a96364acc8fa0375e0da67b3c65fd57d0f37be28d6cb58383bafd70e",
+  "source": "Generated locally from current crate implementation; deterministic replay fixtures for regression guarding.",
+  "generated_by": "cargo run -p aegis-pqsynq --example generate_pinned_vectors --features full",
+  "generated_at_utc": "2026-08-15T02:33:38Z",
+  "profile": "synq-pq-full"
+}

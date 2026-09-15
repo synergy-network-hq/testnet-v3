@@ -1,0 +1,135 @@
+[package]
+name = "aegis_crypto_core"
+version = "0.1.0"
+authors = ["Justin Hutzler <justin@synergy-network.io>"]
+edition = "2021"
+description = "Aegis: Unified WebAssembly, Rust, and Python PQ cryptography core with FIPS 203 ML-KEM, FIPS 204 ML-DSA, FIPS 206 FN-DSA, HQC, and SLH-DSA support. Classic McEliece is experimental and disabled by default."
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/synergy-network-hq/aegis"
+homepage = "https://synergy-network.io"
+documentation = "https://docs.rs/aegis_crypto_core"
+keywords = ["post-quantum", "cryptography", "wasm", "rust"]
+categories = ["cryptography", "wasm", "no-std"]
+publish = true
+
+[workspace]
+resolver = "2"
+
+[lib]
+name = "aegis_crypto_core"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[[bench]]
+name = "performance_benchmarks"
+harness = false
+
+[dependencies]
+wasm-bindgen = { version = "0.2", optional = true }
+js-sys = { version = "0.3.61", optional = true }
+zerocopy = "0.8.26"
+pyo3 = { version = "0.25", optional = true, features = ["extension-module"] }
+pqrust-mlkem = { path = "../../pqrust/pqrust-mlkem", optional = true }
+pqrust-mldsa = { path = "../../pqrust/pqrust-mldsa", optional = true }
+pqrust-slhdsa = { path = "../../pqrust/pqrust-slhdsa", optional = true }
+pqrust-fndsa = { path = "../../pqrust/pqrust-fndsa", optional = true }
+pqrust-hqckem = { path = "../../pqrust/pqrust-hqckem", optional = true }
+pqrust-cmce = { path = "../../pqrust/pqrust-cmce", optional = true }
+pqrust-traits = { path = "../../pqrust/pqrust-traits", optional = true }
+sha3 = "0.10"
+blake3 = "1.5"
+subtle = "2.5"
+zeroize = "1.8"
+getrandom = { version = "0.3", features = ["std", "wasm_js"] }
+rand = { version = "0.8", default-features = false, features = [
+  "std",
+  "rand_chacha",
+] }
+hex = "0.4"
+base64 = "0.22.1"
+# WASM and web dependencies
+web-sys = { version = "0.3", optional = true, features = [
+  "Request",
+  "RequestInit",
+  "RequestMode",
+  "Response",
+  "Window",
+] }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+
+# Server dependencies (not for WASM)
+axum = { version = "0.7", optional = true }
+tokio = { version = "1.0", optional = true, features = ["full"] }
+tower-http = { version = "0.5", optional = true, features = ["cors"] }
+serde = { version = "1.0", optional = true, features = ["derive"] }
+serde_json = { version = "1.0", optional = true }
+# pqnist = { workspace = true, optional = true }
+
+[[bin]]
+name = "generate_benchmarks_csv"
+path = "src/bin/generate_benchmarks_csv.rs"
+required-features = ["std"]
+
+[dev-dependencies]
+criterion = "0.7.0"
+wasm-bindgen-test = "0.3"
+
+[build-dependencies]
+cc = "1.0"
+
+
+[features]
+default = [
+  "mlkem",
+  "mldsa",
+  "fndsa",
+  "slhdsa",
+  "hqc",
+]
+std = []
+wasm = ["dep:wasm-bindgen", "dep:js-sys"]
+js-bindings = ["dep:wasm-bindgen", "dep:js-sys"]
+python-bindings = ["dep:pyo3"]
+mlkem = ["dep:pqrust-mlkem", "dep:pqrust-traits"]
+mldsa = ["dep:pqrust-mldsa", "dep:pqrust-traits"]
+fndsa = ["dep:pqrust-fndsa", "dep:pqrust-traits"]
+slhdsa = ["dep:pqrust-slhdsa", "dep:pqrust-traits"]
+hqc = ["dep:pqrust-hqckem", "dep:pqrust-traits"]
+cmce = ["dep:pqrust-cmce", "dep:pqrust-traits"]
+# NIST Reference WASM implementations
+nist-wasm = ["dep:web-sys", "dep:wasm-bindgen-futures"]
+# WASM-only build (excludes all PQC crates with C dependencies)
+wasm-only = ["nist-wasm", "wasm"]
+# WASM-compatible build (includes PQC algorithms but excludes server dependencies)
+wasm-compatible = ["mlkem", "mldsa", "fndsa", "slhdsa", "hqc", "wasm", "nist-wasm"]
+# Pure WASM build using pqwasm files (no pqrust dependencies)
+wasm-pure = ["wasm", "nist-wasm"]
+# WASM build that avoids getrandom conflicts
+wasm-clean = ["wasm", "nist-wasm"]
+# Node.js compatible WASM build (minimal, no problematic deps)
+wasm-nodejs = ["wasm", "nist-wasm"]
+# Pure Node.js build (excludes all pqrust and getrandom dependencies)
+wasm-nodejs-pure = ["wasm"]
+# Minimal WASM build for Node.js (only core functionality, no external deps)
+wasm-minimal = ["wasm"]
+# Server features
+server = [
+  "dep:axum",
+  "dep:tokio",
+  "dep:tower-http",
+  "dep:serde",
+  "dep:serde_json",
+]
+# nist-ref = ["dep:pqnist"]
+
+
+[badges]
+github-actions = { repository = "synergy-network-hq/aegis", workflow = "CI" }
+
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu", "wasm32-unknown-unknown"]
+
+[package.metadata.release]
+no-dev-version = true

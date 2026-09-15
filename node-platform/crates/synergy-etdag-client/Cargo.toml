@@ -1,0 +1,10 @@
+[package]
+name = "synergy-etdag-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+synergy-etdag = { path = "../synergy-etdag" }

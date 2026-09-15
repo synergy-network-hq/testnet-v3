@@ -1,0 +1,9 @@
+[package]
+name = "synergy-node-core"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Shared lifecycle and management types for Synergy nodes"
+
+[dependencies]
+serde = { workspace = true }

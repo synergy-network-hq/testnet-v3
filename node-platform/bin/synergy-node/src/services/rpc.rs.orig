@@ -1,0 +1,915 @@
+use std::collections::{BTreeSet, VecDeque};
+use std::fs;
+use std::io::{ErrorKind, Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use serde::de::DeserializeOwned;
+use serde_json::{json, Value};
+use sha1::{Digest, Sha1};
+use synergy_config::RpcConfiguration;
+use synergy_execution::ExecutionCandidate;
+use synergy_node_core::{
+    CancellationToken, Criticality, ManagedService, RestartPolicy, RuntimeView, ServiceHealth,
+    ServiceId, ServiceReadiness, ServiceSpec,
+};
+use synergy_posy::{FinalityStore, FinalizedBlockRecord};
+use synergy_rpc::{
+    auth::PublicOnlyAuthenticator,
+    methods::{
+        AccountQuery, BlockQuery, TransactionQuery, ACCOUNT_GET, BLOCK_GET, CHAIN_STATUS,
+        ETDAG_STATUS, NODE_STATUS, POSY_STATUS, SYNC_STATUS, SYSTEM_VERSION, TRANSACTION_GET,
+    },
+    middleware::RpcLimits,
+    provider::{
+        CanonicalReadProvider, FinalizedAccountView, FinalizedBlockView,
+        FinalizedTransactionView,
+    },
+    rate_limit::{RateLimit, RpcRateLimiter},
+    server::RpcServer,
+    RpcDispatcher, RpcError,
+};
+use synergy_state::FinalizedStateStore;
+use synergy_storage::AtomicStore;
+use synergy_transaction::ReceiptStatus;
+use synergy_ws::{server::WsServer, WsTopic};
+
+const MAX_QUERY_RECORD_BYTES: usize = 64 * 1024 * 1024;
+
+/// Reads only the durable records jointly owned by execution, PoSy finality,
+/// and finalized state. Every public result is re-bound across all three
+/// owners; a speculative execution candidate is never exposed as finalized.
+pub(crate) struct CanonicalQueryStore {
+    data_directory: PathBuf,
+    candidates: AtomicStore,
+}
+
+impl CanonicalQueryStore {
+    pub(crate) fn load(data_directory: impl Into<PathBuf>) -> Result<Self, String> {
+        let data_directory = data_directory.into();
+        let candidates = AtomicStore::new(
+            data_directory.join("execution-candidates"),
+            MAX_QUERY_RECORD_BYTES,
+        )
+        .map_err(|error| format!("open canonical RPC candidate store: {error}"))?;
+        Ok(Self {
+            data_directory,
+            candidates,
+        })
+    }
+
+    fn state_store(&self) -> Result<FinalizedStateStore, RpcError> {
+        FinalizedStateStore::load(self.data_directory.join("execution-state"))
+            .map_err(|error| RpcError::unavailable(format!("open finalized state: {error:?}")))
+    }
+
+    fn finality_store(&self) -> Result<FinalityStore, RpcError> {
+        FinalityStore::new(self.data_directory.join("posy"))
+            .map_err(|error| RpcError::unavailable(format!("open PoSy finality: {error}")))
+    }
+
+    fn candidate_at(&self, height: u64) -> Result<Option<ExecutionCandidate>, RpcError> {
+        let path = format!("candidate/{height:020}.json");
+        if !self
+            .candidates
+            .exists(&path)
+            .map_err(|error| RpcError::unavailable(format!("stat execution candidate: {error}")))?
+        {
+            return Ok(None);
+        }
+        let bytes = self
+            .candidates
+            .read_bounded(&path)
+            .map_err(|error| RpcError::unavailable(format!("read execution candidate: {error}")))?;
+        let candidate: ExecutionCandidate = serde_json::from_slice(&bytes)
+            .map_err(|error| RpcError::unavailable(format!("decode execution candidate: {error}")))?;
+        if candidate.height != height {
+            return Err(RpcError::unavailable(
+                "execution candidate is stored under the wrong height",
+            ));
+        }
+        candidate
+            .validate()
+            .map_err(|error| RpcError::unavailable(format!("verify execution candidate: {error}")))?;
+        for (transaction, receipt) in candidate.transactions.iter().zip(&candidate.receipts) {
+            let transaction_id = transaction
+                .id()
+                .map_err(|error| RpcError::unavailable(format!("verify transaction: {error:?}")))?;
+            if receipt.transaction_id != transaction_id || !receipt.validate() {
+                return Err(RpcError::unavailable(
+                    "execution candidate contains an invalid transaction receipt",
+                ));
+            }
+        }
+        Ok(Some(candidate))
+    }
+
+    fn candidate_heights(&self) -> Result<Vec<u64>, RpcError> {
+        let directory = self
+            .data_directory
+            .join("execution-candidates")
+            .join("candidate");
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(RpcError::unavailable(format!(
+                    "enumerate execution candidates: {error}"
+                )))
+            }
+        };
+        let mut heights = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                RpcError::unavailable(format!("enumerate execution candidate: {error}"))
+            })?;
+            let file_type = entry.file_type().map_err(|error| {
+                RpcError::unavailable(format!("inspect execution candidate: {error}"))
+            })?;
+            if !file_type.is_file() {
+                continue;
+            }
+            let file_name = entry.file_name();
+            let file_name = file_name.to_str().ok_or_else(|| {
+                RpcError::unavailable("execution candidate has a non-UTF-8 file name")
+            })?;
+            if !file_name.ends_with(".json") {
+                continue;
+            }
+            let height = file_name
+                .strip_suffix(".json")
+                .and_then(|stem| stem.parse::<u64>().ok())
+                .filter(|height| *height > 0)
+                .ok_or_else(|| {
+                    RpcError::unavailable("execution candidate has a non-canonical file name")
+                })?;
+            heights.push(height);
+        }
+        heights.sort_unstable();
+        heights.dedup();
+        Ok(heights)
+    }
+
+    fn finalized_at(
+        &self,
+        height: u64,
+    ) -> Result<Option<(ExecutionCandidate, FinalizedBlockRecord)>, RpcError> {
+        let state_store = self.state_store()?;
+        let commitment = match state_store
+            .history_at(height)
+            .map_err(|error| RpcError::unavailable(format!("read finalized history: {error:?}")))?
+        {
+            Some(commitment) => commitment,
+            None => match state_store.current() {
+                Some(current) if current.finalized_height == height => current.clone(),
+                _ => return Ok(None),
+            },
+        };
+        let finality = self
+            .finality_store()?
+            .get(height)
+            .map_err(|error| RpcError::unavailable(format!("read PoSy finality: {error}")))?
+            .ok_or_else(|| {
+                RpcError::unavailable("finalized state lacks its canonical PoSy finality record")
+            })?;
+        let candidate = self.candidate_at(height)?.ok_or_else(|| {
+            RpcError::unavailable("finalized state lacks its canonical execution candidate")
+        })?;
+        if commitment.finalized_block_id != finality.block_id
+            || commitment.finalized_block_id != candidate.block_id
+            || commitment.state_root != candidate.state_root
+            || finality.protected_execution_root != candidate.protected_execution_root
+        {
+            return Err(RpcError::unavailable(
+                "canonical block, finality, and state commitments disagree",
+            ));
+        }
+        Ok(Some((candidate, finality)))
+    }
+
+    fn view(
+        candidate: ExecutionCandidate,
+        finality: FinalizedBlockRecord,
+    ) -> Result<FinalizedBlockView, RpcError> {
+        let transactions = candidate
+            .transactions
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| RpcError::unavailable(format!("encode transaction view: {error}")))?;
+        let receipts = candidate
+            .receipts
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| RpcError::unavailable(format!("encode receipt view: {error}")))?;
+        Ok(FinalizedBlockView {
+            height: candidate.height,
+            block_hash: candidate.block_id,
+            parent_block_hash: candidate.parent_block_id,
+            protected_execution_root: candidate.protected_execution_root,
+            state_root: candidate.state_root,
+            finality_certificate_id: finality.finality_certificate_id,
+            transactions,
+            receipts,
+        })
+    }
+}
+
+impl CanonicalReadProvider for CanonicalQueryStore {
+    fn latest_finalized_height(&self) -> Result<Option<u64>, RpcError> {
+        let state_store = self.state_store()?;
+        let Some(height) = state_store.current().map(|state| state.finalized_height) else {
+            return Ok(None);
+        };
+        self.finalized_at(height)?
+            .ok_or_else(|| RpcError::unavailable("latest finalized data is incomplete"))?;
+        Ok(Some(height))
+    }
+
+    fn block(&self, query: &BlockQuery) -> Result<Option<FinalizedBlockView>, RpcError> {
+        query.validate()?;
+        if let Some(height) = query.height {
+            return self
+                .finalized_at(height)?
+                .map(|(candidate, finality)| Self::view(candidate, finality))
+                .transpose();
+        }
+        let requested_hash = query.hash.as_deref().ok_or_else(|| {
+            RpcError::invalid_params("provide exactly one block height or hash")
+        })?;
+        for height in self.candidate_heights()?.into_iter().rev() {
+            let Some((candidate, finality)) = self.finalized_at(height)? else {
+                continue;
+            };
+            if candidate.block_id == requested_hash {
+                return Self::view(candidate, finality).map(Some);
+            }
+        }
+        Ok(None)
+    }
+
+    fn transaction(
+        &self,
+        query: &TransactionQuery,
+    ) -> Result<Option<FinalizedTransactionView>, RpcError> {
+        query.validate()?;
+        for height in self.candidate_heights()?.into_iter().rev() {
+            let Some((candidate, finality)) = self.finalized_at(height)? else {
+                continue;
+            };
+            for (transaction, receipt) in candidate.transactions.iter().zip(&candidate.receipts) {
+                let transaction_id = transaction
+                    .id()
+                    .map_err(|error| RpcError::unavailable(format!("derive transaction id: {error:?}")))?;
+                if transaction_id.0 != query.transaction_id {
+                    continue;
+                }
+                let status = match receipt.status {
+                    ReceiptStatus::Applied => "applied",
+                    ReceiptStatus::Reverted => "reverted",
+                };
+                return Ok(Some(FinalizedTransactionView {
+                    transaction_id: transaction_id.0,
+                    block_height: candidate.height,
+                    block_hash: candidate.block_id,
+                    finality_certificate_id: finality.finality_certificate_id,
+                    status: status.into(),
+                    transaction: serde_json::to_value(transaction).map_err(|error| {
+                        RpcError::unavailable(format!("encode transaction view: {error}"))
+                    })?,
+                    receipt: serde_json::to_value(receipt).map_err(|error| {
+                        RpcError::unavailable(format!("encode receipt view: {error}"))
+                    })?,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    fn account(&self, query: &AccountQuery) -> Result<Option<FinalizedAccountView>, RpcError> {
+        query.validate()?;
+        let height = match query.at_height {
+            Some(height) => height,
+            None => match self.latest_finalized_height()? {
+                Some(height) => height,
+                None => return Ok(None),
+            },
+        };
+        let Some((candidate, _)) = self.finalized_at(height)? else {
+            return Ok(None);
+        };
+        let state_store = self.state_store()?;
+        let world = state_store
+            .world_state_at(height)
+            .map_err(|error| RpcError::unavailable(format!("read finalized account state: {error:?}")))?
+            .ok_or_else(|| RpcError::unavailable("finalized commitment lacks account state"))?;
+        let Some(account) = world.accounts.get(&query.address) else {
+            return Ok(None);
+        };
+        Ok(Some(FinalizedAccountView {
+            address: query.address.clone(),
+            finalized_height: height,
+            finalized_block_hash: candidate.block_id,
+            state_root: candidate.state_root,
+            balance_nwei: account.balance_nwei.to_string(),
+            nonce: account.nonce,
+            code_hash: account.code_hash.clone(),
+        }))
+    }
+}
+const MAX_HTTP_HEADER_BYTES: usize = 8 * 1024;
+const MAX_ACCEPTS_PER_POLL: usize = 32;
+const MAX_WS_EVENTS_PER_POLL: usize = 64;
+const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+pub fn registration(
+    configuration: &RpcConfiguration,
+    runtime: RuntimeView,
+    query_store: Arc<dyn CanonicalReadProvider>,
+    websocket_hub: Arc<WsServer>,
+) -> Result<(ServiceSpec, Box<dyn ManagedService>), String> {
+    if !configuration.enabled {
+        return Err("RPC service cannot be registered when RPC is disabled".into());
+    }
+    let listen_address = configuration
+        .listen_address
+        .ok_or_else(|| "enabled RPC requires a configured listen address".to_string())?;
+    let limits = RpcLimits {
+        max_body_bytes: configuration.max_request_bytes,
+        max_concurrent_requests: configuration.max_concurrent_requests,
+        request_timeout_ms: 5_000,
+    }
+    .validate()
+    .map_err(|error| error.message)?;
+    Ok((
+        ServiceSpec {
+            id: ServiceId::new("rpc")?,
+            dependencies: vec![ServiceId::new("network")?, ServiceId::new("health")?],
+            criticality: Criticality::Required,
+            restart_policy: RestartPolicy::OnFailure { max_attempts: 3 },
+        },
+        Box::new(RpcService {
+            listen_address,
+            limits,
+            runtime,
+            query_store,
+            websocket_hub,
+            websocket_connections: Vec::new(),
+            next_websocket_id: 0,
+            listener: None,
+            server: None,
+        }),
+    ))
+}
+
+struct RuntimeDispatcher {
+    runtime: RuntimeView,
+    query_store: Arc<dyn CanonicalReadProvider>,
+}
+
+impl RuntimeDispatcher {
+    fn service(&self, id: &str) -> Result<Value, RpcError> {
+        let snapshot = self
+            .runtime
+            .read()
+            .map_err(|_| RpcError::unavailable("runtime observation state is unavailable"))?;
+        let service = snapshot
+            .service(id)
+            .ok_or_else(|| RpcError::unavailable(format!("{id} service is not registered")))?;
+        serde_json::to_value(service)
+            .map_err(|_| RpcError::unavailable("runtime service observation is not serializable"))
+    }
+}
+
+impl RpcDispatcher for RuntimeDispatcher {
+    fn dispatch(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        match method {
+            SYSTEM_VERSION => Ok(json!({
+                "node": env!("CARGO_PKG_VERSION"),
+                "rpc": "1",
+            })),
+            NODE_STATUS => {
+                let snapshot = self.runtime.read().map_err(|_| {
+                    RpcError::unavailable("runtime observation state is unavailable")
+                })?;
+                Ok(json!({
+                    "node_name": &snapshot.node_name,
+                    "role": &snapshot.role,
+                    "chain_id": snapshot.chain_id,
+                    "lifecycle": &snapshot.lifecycle,
+                    "ready": snapshot.ready(),
+                }))
+            }
+            CHAIN_STATUS => {
+                let snapshot = self.runtime.read().map_err(|_| {
+                    RpcError::unavailable("runtime observation state is unavailable")
+                })?;
+                Ok(json!({
+                    "chain_id": snapshot.chain_id,
+                    "lifecycle": &snapshot.lifecycle,
+                    "ready": snapshot.ready(),
+                }))
+            }
+            SYNC_STATUS => self.service("sync"),
+            POSY_STATUS => self.service("posy"),
+            ETDAG_STATUS => self.service("etdag"),
+            BLOCK_GET => encode_query_result(
+                self.query_store.block(&decode_params::<BlockQuery>(params)?)?,
+            ),
+            TRANSACTION_GET => encode_query_result(
+                self.query_store
+                    .transaction(&decode_params::<TransactionQuery>(params)?)?,
+            ),
+            ACCOUNT_GET => encode_query_result(
+                self.query_store
+                    .account(&decode_params::<AccountQuery>(params)?)?,
+            ),
+            _ => Err(RpcError::method_not_found()),
+        }
+    }
+}
+
+fn decode_params<T: DeserializeOwned>(params: Value) -> Result<T, RpcError> {
+    serde_json::from_value(params)
+        .map_err(|error| RpcError::invalid_params(format!("invalid method parameters: {error}")))
+}
+
+fn encode_query_result<T: serde::Serialize>(result: Option<T>) -> Result<Value, RpcError> {
+    serde_json::to_value(result)
+        .map_err(|error| RpcError::unavailable(format!("serialize query result: {error}")))
+}
+
+struct RpcService {
+    listen_address: std::net::SocketAddr,
+    limits: RpcLimits,
+    runtime: RuntimeView,
+    websocket_hub: Arc<WsServer>,
+    websocket_connections: Vec<WsConnection>,
+    next_websocket_id: u64,
+    listener: Option<TcpListener>,
+    server: Option<RpcServer<RuntimeDispatcher, PublicOnlyAuthenticator>>,
+}
+
+impl ManagedService for RpcService {
+    fn start(&mut self, cancellation: &CancellationToken) -> Result<(), String> {
+        if cancellation.is_cancelled() {
+            return Err("RPC service start was cancelled".into());
+        }
+        let limiter = RpcRateLimiter::new(
+            RateLimit {
+                requests: 128,
+                window_ms: 1_000,
+            },
+            self.limits.max_concurrent_requests,
+        )
+        .map_err(|error| error.message)?;
+        let listener = TcpListener::bind(self.listen_address)
+            .map_err(|error| format!("bind RPC listener {}: {error}", self.listen_address))?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| format!("configure RPC listener: {error}"))?;
+        self.server = Some(
+            RpcServer::new(
+                Arc::new(RuntimeDispatcher {
+                    runtime: Arc::clone(&self.runtime),
+                }),
+                Arc::new(PublicOnlyAuthenticator),
+                self.limits,
+                limiter,
+            )
+            .map_err(|error| error.message)?,
+        );
+        self.listener = Some(listener);
+        Ok(())
+    }
+
+    fn poll(&mut self) -> Result<(), String> {
+        for _ in 0..MAX_ACCEPTS_PER_POLL {
+            let accepted = self
+                .listener
+                .as_ref()
+                .ok_or("RPC listener is stopped")?
+                .accept();
+            let (stream, peer) = match accepted {
+                Ok(connection) => connection,
+                Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                Err(error) => return Err(format!("accept RPC connection: {error}")),
+            };
+            let _ = self.serve_connection(stream, &peer.to_string());
+        }
+        self.poll_websockets()
+    }
+
+    fn stop(&mut self) -> Result<(), String> {
+        for connection in self.websocket_connections.drain(..) {
+            let _ = self.websocket_hub.unsubscribe(&connection.subscriber_id);
+        }
+        self.listener = None;
+        self.server = None;
+        Ok(())
+    }
+
+    fn health(&self) -> ServiceHealth {
+        if self.server.is_some() && self.listener.is_some() {
+            ServiceHealth::Healthy
+        } else {
+            ServiceHealth::Unhealthy {
+                reason: "RPC and WebSocket request boundary is stopped".into(),
+            }
+        }
+    }
+
+    fn readiness(&self) -> ServiceReadiness {
+        if self.server.is_some() && self.listener.is_some() {
+            ServiceReadiness::Ready
+        } else {
+            ServiceReadiness::Blocked {
+                reason: "RPC and WebSocket listener is stopped".into(),
+            }
+        }
+    }
+}
+
+impl RpcService {
+    fn serve_connection(&mut self, mut stream: TcpStream, client_id: &str) -> Result<(), String> {
+        let timeout = Duration::from_millis(self.limits.request_timeout_ms);
+        stream
+            .set_read_timeout(Some(timeout))
+            .and_then(|_| stream.set_write_timeout(Some(timeout)))
+            .map_err(|error| format!("configure RPC connection: {error}"))?;
+        let read_limit = self
+            .limits
+            .max_body_bytes
+            .checked_add(MAX_HTTP_HEADER_BYTES)
+            .ok_or("RPC read bound overflow")?;
+        let mut bytes = Vec::new();
+        let header_end = loop {
+            let mut buffer = [0u8; 4096];
+            let read = stream
+                .read(&mut buffer)
+                .map_err(|error| format!("read RPC request: {error}"))?;
+            if read == 0 {
+                return Err("RPC connection closed before headers completed".into());
+            }
+            bytes.extend_from_slice(&buffer[..read]);
+            if bytes.len() > read_limit {
+                return self.write_http(&mut stream, 413, b"request exceeds RPC bound");
+            }
+            if let Some(position) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                if position > MAX_HTTP_HEADER_BYTES {
+                    return self.write_http(&mut stream, 413, b"RPC headers exceed bound");
+                }
+                break position;
+            }
+        };
+        let headers = std::str::from_utf8(&bytes[..header_end])
+            .map_err(|_| "RPC HTTP headers are not UTF-8")?;
+        let mut lines = headers.split("\r\n");
+        let request_line = lines.next().ok_or("RPC request line is missing")?;
+        let header_lines = lines.collect::<Vec<_>>();
+        if request_line == "GET /ws HTTP/1.1" && is_websocket_upgrade(&header_lines) {
+            return self.upgrade_websocket(stream, client_id, &header_lines, bytes, header_end + 4);
+        }
+        if request_line != "POST / HTTP/1.1" && request_line != "POST /rpc HTTP/1.1" {
+            return self.write_http(&mut stream, 405, b"RPC requires POST / or POST /rpc");
+        }
+        let content_length = header_value(&header_lines, "content-length")
+            .and_then(|value| value.parse::<usize>().ok())
+            .ok_or("RPC request lacks valid Content-Length")?;
+        if content_length > self.limits.max_body_bytes {
+            return self.write_http(&mut stream, 413, b"RPC body exceeds bound");
+        }
+        let message_length = (header_end + 4)
+            .checked_add(content_length)
+            .ok_or("RPC request length overflow")?;
+        while bytes.len() < message_length {
+            let mut buffer = [0u8; 4096];
+            let read = stream
+                .read(&mut buffer)
+                .map_err(|error| format!("read RPC body: {error}"))?;
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..read]);
+            if bytes.len() > message_length {
+                return self.write_http(&mut stream, 400, b"invalid RPC request length");
+            }
+        }
+        if bytes.len() != message_length {
+            return self.write_http(&mut stream, 400, b"invalid RPC request length");
+        }
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| "system clock precedes Unix epoch")?
+            .as_millis()
+            .try_into()
+            .map_err(|_| "RPC clock value overflow")?;
+        let response = self
+            .server
+            .as_ref()
+            .ok_or("RPC request server is stopped")?
+            .handle_bytes(client_id, None, now_ms, &bytes[header_end + 4..]);
+        self.write_http(&mut stream, 200, &response)
+    }
+
+    fn upgrade_websocket(
+        &mut self,
+        mut stream: TcpStream,
+        client_id: &str,
+        headers: &[&str],
+        bytes: Vec<u8>,
+        body_start: usize,
+    ) -> Result<(), String> {
+        let key = header_value(headers, "sec-websocket-key")
+            .ok_or("WebSocket upgrade lacks Sec-WebSocket-Key")?;
+        let decoded = BASE64
+            .decode(key)
+            .map_err(|_| "WebSocket key is not valid base64")?;
+        if decoded.len() != 16 || header_value(headers, "sec-websocket-version") != Some("13") {
+            return self.write_http(&mut stream, 400, b"unsupported WebSocket handshake");
+        }
+        let mut digest = Sha1::new();
+        digest.update(key.as_bytes());
+        digest.update(WEBSOCKET_GUID.as_bytes());
+        let accept = BASE64.encode(digest.finalize());
+        let response = format!(
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+        );
+        stream
+            .write_all(response.as_bytes())
+            .and_then(|_| stream.flush())
+            .map_err(|error| format!("write WebSocket upgrade: {error}"))?;
+        stream
+            .set_read_timeout(None)
+            .and_then(|_| stream.set_write_timeout(None))
+            .and_then(|_| stream.set_nonblocking(true))
+            .map_err(|error| format!("configure WebSocket stream: {error}"))?;
+        self.next_websocket_id = self
+            .next_websocket_id
+            .checked_add(1)
+            .ok_or("WebSocket connection identifier overflow")?;
+        let subscriber_id = format!("{client_id}#{}", self.next_websocket_id);
+        self.websocket_hub
+            .subscribe(subscriber_id.clone(), all_topics())
+            .map_err(|error| format!("subscribe WebSocket client: {error:?}"))?;
+        self.websocket_connections.push(WsConnection {
+            stream,
+            subscriber_id,
+            read_buffer: bytes[body_start..].to_vec(),
+            writes: VecDeque::new(),
+            write_offset: 0,
+        });
+        Ok(())
+    }
+
+    fn poll_websockets(&mut self) -> Result<(), String> {
+        let mut retained = Vec::with_capacity(self.websocket_connections.len());
+        for mut connection in self.websocket_connections.drain(..) {
+            match connection.poll(&self.websocket_hub, self.limits.max_body_bytes)? {
+                true => retained.push(connection),
+                false => {
+                    let _ = self.websocket_hub.unsubscribe(&connection.subscriber_id);
+                }
+            }
+        }
+        self.websocket_connections = retained;
+        Ok(())
+    }
+
+    fn write_http(&self, stream: &mut TcpStream, status: u16, body: &[u8]) -> Result<(), String> {
+        let (reason, content_type) = match status {
+            200 => ("OK", "application/json"),
+            400 => ("Bad Request", "text/plain; charset=utf-8"),
+            405 => ("Method Not Allowed", "text/plain; charset=utf-8"),
+            413 => ("Payload Too Large", "text/plain; charset=utf-8"),
+            _ => ("Error", "text/plain; charset=utf-8"),
+        };
+        let header = format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream
+            .write_all(header.as_bytes())
+            .and_then(|_| stream.write_all(body))
+            .and_then(|_| stream.flush())
+            .map_err(|error| format!("write RPC response: {error}"))
+    }
+}
+
+struct WsConnection {
+    stream: TcpStream,
+    subscriber_id: String,
+    read_buffer: Vec<u8>,
+    writes: VecDeque<Vec<u8>>,
+    write_offset: usize,
+}
+
+impl WsConnection {
+    fn poll(&mut self, hub: &WsServer, max_payload_bytes: usize) -> Result<bool, String> {
+        let read_bound = max_payload_bytes
+            .checked_add(MAX_HTTP_HEADER_BYTES)
+            .ok_or("WebSocket read bound overflow")?;
+        loop {
+            let mut buffer = [0u8; 4096];
+            match self.stream.read(&mut buffer) {
+                Ok(0) => return Ok(false),
+                Ok(read) => {
+                    self.read_buffer.extend_from_slice(&buffer[..read]);
+                    if self.read_buffer.len() > read_bound {
+                        return Ok(false);
+                    }
+                }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                Err(_) => return Ok(false),
+            }
+        }
+        if !self.consume_frames(hub, max_payload_bytes)? {
+            return Ok(false);
+        }
+        for event in hub
+            .drain(&self.subscriber_id, MAX_WS_EVENTS_PER_POLL)
+            .map_err(|error| format!("drain WebSocket events: {error:?}"))?
+        {
+            let payload = serde_json::to_vec(&event)
+                .map_err(|error| format!("encode WebSocket event: {error}"))?;
+            self.writes.push_back(server_frame(0x1, &payload));
+        }
+        while let Some(frame) = self.writes.front() {
+            match self.stream.write(&frame[self.write_offset..]) {
+                Ok(0) => return Ok(false),
+                Ok(written) => {
+                    self.write_offset += written;
+                    if self.write_offset == frame.len() {
+                        self.writes.pop_front();
+                        self.write_offset = 0;
+                    }
+                }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                Err(_) => return Ok(false),
+            }
+        }
+        Ok(true)
+    }
+
+    fn consume_frames(&mut self, hub: &WsServer, max_payload_bytes: usize) -> Result<bool, String> {
+        loop {
+            let Some((consumed, opcode, payload)) =
+                client_frame(&self.read_buffer, max_payload_bytes)?
+            else {
+                return Ok(true);
+            };
+            self.read_buffer.drain(..consumed);
+            match opcode {
+                0x1 => {
+                    if !payload.is_empty() {
+                        let topics = requested_topics(&payload)?;
+                        hub.subscribe(self.subscriber_id.clone(), topics)
+                            .map_err(|error| format!("update WebSocket subscription: {error:?}"))?;
+                    }
+                }
+                0x8 => return Ok(false),
+                0x9 => self.writes.push_back(server_frame(0xA, &payload)),
+                0xA => {}
+                _ => return Ok(false),
+            }
+        }
+    }
+}
+
+fn header_value<'a>(headers: &'a [&str], name: &str) -> Option<&'a str> {
+    headers.iter().find_map(|line| {
+        line.split_once(':').and_then(|(candidate, value)| {
+            candidate.eq_ignore_ascii_case(name).then_some(value.trim())
+        })
+    })
+}
+
+fn is_websocket_upgrade(headers: &[&str]) -> bool {
+    header_value(headers, "upgrade").is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
+        && header_value(headers, "connection").is_some_and(|value| {
+            value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
+        })
+}
+
+fn all_topics() -> BTreeSet<WsTopic> {
+    [
+        WsTopic::Blocks,
+        WsTopic::Finality,
+        WsTopic::Transactions,
+        WsTopic::Node,
+    ]
+    .into_iter()
+    .collect()
+}
+
+fn requested_topics(payload: &[u8]) -> Result<BTreeSet<WsTopic>, String> {
+    let value: Value = serde_json::from_slice(payload)
+        .map_err(|_| "WebSocket subscription request is not valid JSON")?;
+    let topics = value
+        .get("topics")
+        .and_then(Value::as_array)
+        .ok_or("WebSocket subscription request requires a topics array")?;
+    let mut selected = BTreeSet::new();
+    for topic in topics {
+        selected.insert(match topic.as_str() {
+            Some("blocks") => WsTopic::Blocks,
+            Some("finality") => WsTopic::Finality,
+            Some("transactions") => WsTopic::Transactions,
+            Some("node") => WsTopic::Node,
+            _ => return Err("WebSocket subscription contains an unsupported topic".into()),
+        });
+    }
+    if selected.is_empty() {
+        return Err("WebSocket subscription topics cannot be empty".into());
+    }
+    Ok(selected)
+}
+
+fn client_frame(
+    bytes: &[u8],
+    max_payload_bytes: usize,
+) -> Result<Option<(usize, u8, Vec<u8>)>, String> {
+    if bytes.len() < 2 {
+        return Ok(None);
+    }
+    let final_frame = bytes[0] & 0x80 != 0;
+    let opcode = bytes[0] & 0x0F;
+    if !final_frame || !matches!(opcode, 0x1 | 0x8 | 0x9 | 0xA) || bytes[1] & 0x80 == 0 {
+        return Err("unsupported WebSocket frame".into());
+    }
+    let mut cursor = 2usize;
+    let length_code = bytes[1] & 0x7F;
+    let payload_length = match length_code {
+        0..=125 => usize::from(length_code),
+        126 => {
+            if bytes.len() < cursor + 2 {
+                return Ok(None);
+            }
+            let length = u16::from_be_bytes([bytes[cursor], bytes[cursor + 1]]);
+            cursor += 2;
+            usize::from(length)
+        }
+        127 => {
+            if bytes.len() < cursor + 8 {
+                return Ok(None);
+            }
+            let mut encoded = [0u8; 8];
+            encoded.copy_from_slice(&bytes[cursor..cursor + 8]);
+            cursor += 8;
+            usize::try_from(u64::from_be_bytes(encoded))
+                .map_err(|_| "WebSocket frame length exceeds platform bounds")?
+        }
+        _ => unreachable!(),
+    };
+    if payload_length > max_payload_bytes
+        || matches!(opcode, 0x8 | 0x9 | 0xA) && payload_length > 125
+    {
+        return Err("WebSocket frame exceeds configured bound".into());
+    }
+    if bytes.len() < cursor + 4 {
+        return Ok(None);
+    }
+    let mask = [
+        bytes[cursor],
+        bytes[cursor + 1],
+        bytes[cursor + 2],
+        bytes[cursor + 3],
+    ];
+    cursor += 4;
+    let frame_end = cursor
+        .checked_add(payload_length)
+        .ok_or("WebSocket frame length overflow")?;
+    if bytes.len() < frame_end {
+        return Ok(None);
+    }
+    let payload = bytes[cursor..frame_end]
+        .iter()
+        .enumerate()
+        .map(|(index, byte)| byte ^ mask[index % 4])
+        .collect();
+    Ok(Some((frame_end, opcode, payload)))
+}
+
+fn server_frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(payload.len() + 10);
+    frame.push(0x80 | opcode);
+    match payload.len() {
+        length @ 0..=125 => frame.push(length as u8),
+        length @ 126..=65_535 => {
+            frame.push(126);
+            frame.extend_from_slice(&(length as u16).to_be_bytes());
+        }
+        length => {
+            frame.push(127);
+            frame.extend_from_slice(&(length as u64).to_be_bytes());
+        }
+    }
+    frame.extend_from_slice(payload);
+    frame
+}

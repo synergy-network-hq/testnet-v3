@@ -1,0 +1,13 @@
+[package]
+name = "synergy-tx-ingress"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+synergy-etdag = { path = "../synergy-etdag" }
+synergy-governance = { path = "../synergy-governance" }
+synergy-transaction = { path = "../synergy-transaction" }

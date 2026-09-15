@@ -1,0 +1,52 @@
+[package]
+name = "synergy-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+base64.workspace = true
+ctrlc = "3"
+serde_json.workspace = true
+sha1.workspace = true
+serde.workspace = true
+synergy-block = { path = "../../crates/synergy-block" }
+synergy-transaction = { path = "../../crates/synergy-transaction" }
+synergy-admin-api = { path = "../../crates/synergy-admin-api" }
+synergy-config = { path = "../../crates/synergy-config" }
+synergy-data-availability = { path = "../../crates/synergy-data-availability" }
+synergy-etdag = { path = "../../crates/synergy-etdag" }
+synergy-execution = { path = "../../crates/synergy-execution" }
+synergy-health = { path = "../../crates/synergy-health" }
+synergy-identity = { path = "../../crates/synergy-identity" }
+synergy-manifest = { path = "../../crates/synergy-manifest" }
+synergy-node-core = { path = "../../crates/synergy-node-core" }
+synergy-network = { path = "../../crates/synergy-network" }
+synergy-protocol-types = { path = "../../crates/synergy-protocol-types" }
+synergy-posy = { path = "../../crates/synergy-posy" }
+synergy-p2p-protocols = { path = "../../crates/synergy-p2p-protocols" }
+synergy-rpc = { path = "../../crates/synergy-rpc" }
+synergy-snapshot = { path = "../../crates/synergy-snapshot" }
+synergy-storage = { path = "../../crates/synergy-storage" }
+synergy-transport-registry = { path = "../../crates/synergy-transport-registry" }
+synergy-state = { path = "../../crates/synergy-state" }
+synergy-sync = { path = "../../crates/synergy-sync" }
+synergy-telemetry = { path = "../../crates/synergy-telemetry" }
+synergy-vpn = { path = "../../crates/synergy-vpn" }
+synergy-ws = { path = "../../crates/synergy-ws" }
+synergy-aegis = { path = "../../crates/synergy-aegis" }
+synergy-crypto = { path = "../../crates/synergy-crypto" }
+synergy-roles = { path = "../../crates/synergy-roles" }
+synergy-validator-management = { path = "../../crates/synergy-validator-management" }
+synergy-address = { path = "../../crates/synergy-address" }
+synergy-aivm = { path = "../../crates/synergy-aivm" }
+synergy-synq = { path = "../../crates/synergy-synq" }
+synergy-naming = { path = "../../crates/synergy-naming" }
+synergy-node-ownership = { path = "../../crates/synergy-node-ownership" }
+synergy-rewards = { path = "../../crates/synergy-rewards" }
+
+synergy-governance = { path = "../../crates/synergy-governance" }
+synergy-sxcp = { path = "../../crates/synergy-sxcp" }
+synergy-uma = { path = "../../crates/synergy-uma" }

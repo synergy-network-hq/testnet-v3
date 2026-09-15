@@ -1,0 +1,42 @@
+#ifndef SPX_PARAMS_H
+#define SPX_PARAMS_H
+
+#define SPX_NAMESPACE(s) PQCLEAN_SPHINCSSHAKE256SSIMPLE_AVX2_##s
+
+#define SPX_N 32
+
+#define SPX_FULL_HEIGHT 64
+
+#define SPX_D 8
+
+#define SPX_FORS_HEIGHT 14
+#define SPX_FORS_TREES 22
+
+#define SPX_WOTS_W 16
+
+#define SPX_ADDR_BYTES 32
+
+#define SPX_WOTS_LOGW 4
+
+#define SPX_WOTS_LEN1 (8 * SPX_N / SPX_WOTS_LOGW)
+
+#define SPX_WOTS_LEN2 3
+
+#define SPX_WOTS_LEN (SPX_WOTS_LEN1 + SPX_WOTS_LEN2)
+#define SPX_WOTS_BYTES (SPX_WOTS_LEN * SPX_N)
+#define SPX_WOTS_PK_BYTES SPX_WOTS_BYTES
+
+#define SPX_TREE_HEIGHT (SPX_FULL_HEIGHT / SPX_D)
+
+#define SPX_FORS_MSG_BYTES ((SPX_FORS_HEIGHT * SPX_FORS_TREES + 7) / 8)
+#define SPX_FORS_BYTES ((SPX_FORS_HEIGHT + 1) * SPX_FORS_TREES * SPX_N)
+#define SPX_FORS_PK_BYTES SPX_N
+
+#define SPX_BYTES (SPX_N + SPX_FORS_BYTES + (SPX_D * SPX_WOTS_BYTES) +\
+                   (SPX_FULL_HEIGHT * SPX_N))
+#define SPX_PK_BYTES (2 * SPX_N)
+#define SPX_SK_BYTES ((2 * SPX_N) + SPX_PK_BYTES)
+
+#include "shake_offsets.h"
+
+#endif

@@ -1,0 +1,13 @@
+[package]
+name = "synergy-synq"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+sha3.workspace = true
+synergy-transaction = { path = "../synergy-transaction" }
+synergy-aegis = { path = "../synergy-aegis" }

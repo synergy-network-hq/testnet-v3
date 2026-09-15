@@ -1,0 +1,16 @@
+[package]
+name = "synergy-execution"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+synergy-block = { path = "../synergy-block" }
+synergy-etdag = { path = "../synergy-etdag" }
+synergy-state = { path = "../synergy-state" }
+synergy-transaction = { path = "../synergy-transaction" }
+synergy-synq = { path = "../synergy-synq" }

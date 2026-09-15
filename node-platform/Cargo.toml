@@ -1,0 +1,76 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/synergy-protocol-types",
+    "crates/synergy-node-core",
+    "crates/synergy-admin-api",
+    "crates/synergy-network",
+    "crates/synergy-p2p-protocols",
+    "crates/synergy-vpn",
+    "crates/synergy-transport-registry",
+    "crates/synergy-sync",
+    "crates/synergy-identity",
+    "crates/synergy-naming",
+    "crates/synergy-node-ownership",
+    "crates/synergy-rewards",
+    "crates/synergy-aegis",
+    "crates/synergy-ai",
+    "crates/synergy-aivm",
+    "crates/synergy-crypto",
+    "crates/synergy-data-availability",
+    "crates/synergy-governance",
+    "crates/aegis-pqvm",
+    "crates/aegis-pqsynq/pqsynq",
+    "crates/synergy-config",
+    "crates/synergy-manifest",
+    "crates/synergy-health",
+    "crates/synergy-telemetry",
+    "crates/synergy-posy",
+    "crates/synergy-etdag",
+    "crates/synergy-transaction",
+    "crates/synergy-tx-ingress",
+    "crates/synergy-etdag-client",
+    "crates/synergy-block",
+    "crates/synergy-execution",
+    "crates/synergy-synq",
+    "crates/synergy-storage",
+    "crates/synergy-state",
+    "crates/synergy-roles",
+    "crates/synergy-snapshot",
+    "crates/synergy-sxcp",
+    "crates/synergy-uma",
+    "crates/synergy-validator-management",
+    "crates/synergy-version",
+    "crates/synergy-rpc",
+    "crates/synergy-ws",
+    "bin/synergy-node",
+    "bin/synergy-db",
+    "bin/synergy-genesis",
+    "bin/synergy-keytool",
+    "bin/synergy-manifest",
+]
+exclude = [
+    "crates/aegis-pqvm/vendor/pqcrypto-internals",
+    "crates/aegis-pqvm/vendor/pqcrypto-traits",
+    "crates/aegis-pqvm/vendor/pqrust-fndsa",
+    "crates/aegis-pqvm/vendor/pqrust-hqckem",
+    "crates/aegis-pqvm/vendor/pqrust-internals",
+    "crates/aegis-pqvm/vendor/pqrust-mldsa",
+    "crates/aegis-pqvm/vendor/pqrust-mlkem",
+    "crates/aegis-pqvm/vendor/pqrust-traits",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.85"
+
+[workspace.dependencies]
+base64 = "0.22"
+ed25519-dalek = "2"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = "0.10"
+sha3 = "0.10"

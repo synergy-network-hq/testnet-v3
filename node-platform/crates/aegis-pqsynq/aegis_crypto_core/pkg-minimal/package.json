@@ -1,0 +1,21 @@
+{
+  "name": "aegis-crypto-core-minimal",
+  "version": "0.1.0",
+  "description": "Minimal AEGIS WASM build for Node.js (dependency-free)",
+  "main": "aegis_crypto_core_minimal.js",
+  "types": "aegis_crypto_core_minimal.d.ts",
+  "type": "module",
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "keywords": ["cryptography", "wasm", "nodejs", "minimal"],
+  "files": [
+    "aegis_crypto_core_minimal_bg.wasm",
+    "aegis_crypto_core_minimal.js",
+    "aegis_crypto_core_minimal.d.ts",
+    "pqwasm/"
+  ],
+  "scripts": {
+    "test": "node test-minimal.js"
+  }
+}

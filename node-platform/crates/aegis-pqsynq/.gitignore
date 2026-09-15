@@ -1,0 +1,21 @@
+# This folder contains the existing aegis-pqsynq checkout plus generated manuals.
+.DS_Store
+
+# Build output and local dependencies
+target/
+**/target/
+node_modules/
+
+# Local configuration, logs, and temporary files
+.env
+.env.*
+!.env.example
+*.log
+*.tmp
+*.temp
+*~
+
+# Local WASI SDK installation
+wasi-sdk-20.0/
+**/wasi-sdk-20.0/
+**/tools/wasi-sdk-20.0/

@@ -1,0 +1,256 @@
+//! Deterministic execution of ETDAG-authorized protected transaction input.
+//!
+//! ETDAG owns protected admission/order/reveal. Execution owns deterministic
+//! transition application and receipts. PoSy alone owns agreement and finality.
+
+mod candidate;
+mod context;
+mod dispatcher;
+mod executor;
+mod fees;
+mod receipts;
+mod rollback;
+mod scheduler;
+mod transition;
+mod validation;
+
+pub use candidate::ExecutionCandidate;
+pub use context::{AuthorizedReveal, DeterministicExecutionInput, ExecutionInputError};
+pub use dispatcher::{
+    ActionRoute, CanonicalNativeDispatchError, CanonicalTransactionDispatcher,
+    DispatchContextError, GovernanceDispatchError, GovernanceDispatcher, GovernanceOperation,
+    NativeDispatchError, NativeDispatcher, NativeOperation, NativeTransferDispatcher,
+    RoutedDispatchError, SxcpDispatchError, SxcpDispatcher, SxcpExecutor, SynqDispatchError,
+    SynqDispatcher, SynqHostFactory, SynqRuntime, SynqRuntimeAdapter, SystemDispatchError,
+    SystemDispatcher, SystemOperation, TransactionDispatch, TransactionExecutionContext,
+    TransactionExecutor,
+};
+pub use executor::DeterministicExecutor;
+pub use fees::{FeeSchedule, FeeSettlement};
+pub use receipts::{BlockExecutionOutcome, ExecutionError, ExecutionOutcome};
+pub use rollback::{ExecutionCheckpoint, RollbackError};
+pub use scheduler::BlockExecutionScheduler;
+pub use transition::DeterministicStateTransition;
+pub use validation::BlockExecutionError;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use synergy_etdag::{EtdagDigest, ProtectedRevealAuthorization, TargetAdmissionContextV3};
+
+    fn digest(label: &str) -> EtdagDigest {
+        EtdagDigest::from_domain_bytes("synergy-execution-test", label.as_bytes())
+    }
+
+    fn context() -> TargetAdmissionContextV3 {
+        TargetAdmissionContextV3 {
+            context_version: 1,
+            chain_id: 1266,
+            network_id: "synergy-testnet-v3".into(),
+            protocol_version: "posy-v3".into(),
+            epoch: 1,
+            source_finalized_height: 10,
+            target_height: 15,
+            source_finality_context_root: "source".into(),
+            active_validator_set_root: "set".into(),
+            validator_consensus_key_root: "keys".into(),
+            frozen_voting_weight_root: "weight".into(),
+            cluster_schedule_version: "v3".into(),
+            finalized_epoch_seed_root: "seed".into(),
+            assigned_height_schedule_root: "schedule".into(),
+            cluster_map_root: "map".into(),
+            assigned_cluster_id: 1,
+            assigned_cluster_membership_root: "members".into(),
+            assigned_cluster_validator_count: 5,
+            assigned_cluster_total_voting_weight: 10,
+            consensus_parameter_root: "params".into(),
+            cryptographic_profile_root: "crypto".into(),
+            ingress_kem_registry_root: digest("kem"),
+        }
+    }
+
+    fn reveal(id: &str, key: &str) -> AuthorizedReveal {
+        let context = context();
+        let context_root = context.root().unwrap();
+        AuthorizedReveal {
+            envelope_id: digest(id),
+            target_height: 15,
+            content_blind_order_key: digest(key),
+            plaintext: vec![1, 2, 3],
+            reveal_authorization: ProtectedRevealAuthorization {
+                authorization_version: 1,
+                context_root,
+                target_height: 15,
+                protected_batch_root: digest("batch"),
+                finality_reference: digest("finality"),
+            },
+        }
+    }
+
+    fn input(mut reveals: Vec<AuthorizedReveal>) -> DeterministicExecutionInput {
+        reveals.sort_by(|left, right| {
+            left.content_blind_order_key
+                .cmp(&right.content_blind_order_key)
+        });
+        DeterministicExecutionInput::new(context(), digest("batch"), digest("transcript"), reveals)
+            .unwrap()
+    }
+
+    struct RecordingTransition;
+    impl DeterministicStateTransition for RecordingTransition {
+        type State = Vec<String>;
+        type Error = ();
+        fn apply(
+            &self,
+            state: &mut Self::State,
+            reveal: &AuthorizedReveal,
+        ) -> Result<(), Self::Error> {
+            state.push(reveal.envelope_id.0.clone());
+            Ok(())
+        }
+        fn state_root(&self, state: &Self::State) -> String {
+            format!("root-{}", state.join(","))
+        }
+    }
+
+    #[test]
+    fn accepts_h_plus_five_authorized_reveals_without_finality_authority() {
+        let input = input(vec![reveal("first", "a"), reveal("second", "b")]);
+        assert!(!input.is_empty());
+        assert!(!input.may_determine_finality());
+    }
+
+    #[test]
+    fn rejects_duplicate_or_incomplete_reveals() {
+        let one = reveal("one", "a");
+        let duplicate = AuthorizedReveal {
+            content_blind_order_key: digest("b"),
+            ..one.clone()
+        };
+        assert!(matches!(
+            DeterministicExecutionInput::new(
+                context(),
+                digest("batch"),
+                digest("transcript"),
+                vec![one, duplicate]
+            ),
+            Err(ExecutionInputError::DuplicateEnvelope(_))
+        ));
+        let invalid = AuthorizedReveal {
+            reveal_authorization: ProtectedRevealAuthorization {
+                target_height: 14,
+                ..reveal("other", "c").reveal_authorization
+            },
+            ..reveal("other", "c")
+        };
+        assert!(matches!(
+            DeterministicExecutionInput::new(
+                context(),
+                digest("batch"),
+                digest("transcript"),
+                vec![invalid]
+            ),
+            Err(ExecutionInputError::InvalidRevealAuthorization(_))
+        ));
+    }
+
+    #[test]
+    fn empty_authorized_input_is_explicitly_valid_for_empty_block_progress() {
+        assert!(input(Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn executor_applies_only_etdag_order_and_never_claims_finality() {
+        let input = input(vec![reveal("first", "a"), reveal("second", "b")]);
+        let mut state = Vec::new();
+        let executor = DeterministicExecutor;
+        let outcome = executor
+            .execute(&input, &RecordingTransition, &mut state)
+            .unwrap();
+        assert_eq!(state.len(), 2);
+        assert_eq!(
+            outcome
+                .applied_envelope_ids
+                .iter()
+                .map(|id| id.0.clone())
+                .collect::<Vec<_>>(),
+            state
+        );
+        assert!(!executor.may_determine_finality());
+    }
+
+    struct FailOnSecondTransition;
+    impl DeterministicStateTransition for FailOnSecondTransition {
+        type State = Vec<String>;
+        type Error = &'static str;
+
+        fn apply(
+            &self,
+            state: &mut Self::State,
+            reveal: &AuthorizedReveal,
+        ) -> Result<(), Self::Error> {
+            state.push(reveal.envelope_id.0.clone());
+            if state.len() == 3 {
+                Err("second transition failed")
+            } else {
+                Ok(())
+            }
+        }
+
+        fn state_root(&self, state: &Self::State) -> String {
+            format!("root-{}", state.len())
+        }
+    }
+
+    struct EmptyRootTransition;
+    impl DeterministicStateTransition for EmptyRootTransition {
+        type State = Vec<String>;
+        type Error = ();
+
+        fn apply(
+            &self,
+            state: &mut Self::State,
+            reveal: &AuthorizedReveal,
+        ) -> Result<(), Self::Error> {
+            state.push(reveal.envelope_id.0.clone());
+            Ok(())
+        }
+
+        fn state_root(&self, _state: &Self::State) -> String {
+            " ".into()
+        }
+    }
+
+    #[test]
+    fn failed_transition_and_invalid_root_leave_caller_state_unchanged() {
+        let input = input(vec![reveal("first", "a"), reveal("second", "b")]);
+        let original = vec!["existing".to_string()];
+        let mut state = original.clone();
+        assert_eq!(
+            DeterministicExecutor.execute(&input, &FailOnSecondTransition, &mut state),
+            Err(ExecutionError::Transition("second transition failed"))
+        );
+        assert_eq!(state, original);
+
+        assert_eq!(
+            DeterministicExecutor.execute(&input, &EmptyRootTransition, &mut state),
+            Err(ExecutionError::EmptyStateRoot)
+        );
+        assert_eq!(state, original);
+    }
+
+    #[test]
+    fn executor_revalidates_mutated_public_input_before_state_mutation() {
+        let mut input = input(vec![reveal("first", "a")]);
+        input.ordered_reveals[0].reveal_authorization.target_height = 14;
+        let original = vec!["existing".to_string()];
+        let mut state = original.clone();
+        assert!(matches!(
+            DeterministicExecutor.execute(&input, &RecordingTransition, &mut state),
+            Err(ExecutionError::Input(
+                ExecutionInputError::InvalidRevealAuthorization(_)
+            ))
+        ));
+        assert_eq!(state, original);
+    }
+}

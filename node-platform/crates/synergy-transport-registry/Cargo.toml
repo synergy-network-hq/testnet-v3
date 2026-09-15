@@ -1,0 +1,16 @@
+[package]
+name = "synergy-transport-registry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+base64.workspace = true
+ed25519-dalek.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+synergy-network = { path = "../synergy-network" }
+synergy-protocol-types = { path = "../synergy-protocol-types" }
+synergy-vpn = { path = "../synergy-vpn" }

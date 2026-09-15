@@ -1,0 +1,16 @@
+[package]
+name = "synergy-keytool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+aegis-pqvm = { path = "../../crates/aegis-pqvm", default-features = false, features = ["mlkem", "mldsa"] }
+pqrust-traits = { path = "../../crates/aegis-pqvm/vendor/pqcrypto-traits" }
+serde.workspace = true
+serde_json.workspace = true
+sha3.workspace = true
+synergy-aegis = { path = "../../crates/synergy-aegis" }
+synergy-identity = { path = "../../crates/synergy-identity" }

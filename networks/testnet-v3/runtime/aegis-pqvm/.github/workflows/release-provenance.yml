@@ -1,0 +1,61 @@
+name: PQVM Release Provenance and SBOM
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release-artifacts:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release artifacts
+        run: |
+          cd aegis-pqvm
+          cargo build --release --all-features --locked
+
+      - name: Generate checksums and manifest
+        run: |
+          cd aegis-pqvm
+          ./scripts/generate_release_manifest.sh
+
+      - name: Generate CycloneDX SBOM
+        run: |
+          cd aegis-pqvm
+          ./scripts/generate_sbom.sh
+
+      - name: Build customer package
+        run: |
+          cd aegis-pqvm
+          ./scripts/package_customer_bundle.sh
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            aegis-pqvm/artifacts/checksums/*.sha256
+            aegis-pqvm/artifacts/sbom/*
+            aegis-pqvm/artifacts/package/*.tgz
+
+      - name: Upload release evidence bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: pqvm-release-evidence
+          path: |
+            aegis-pqvm/artifacts/checksums/*
+            aegis-pqvm/artifacts/sbom/*
+            aegis-pqvm/artifacts/package/*
+            aegis-pqvm/artifacts/provenance/*

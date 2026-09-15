@@ -4,12 +4,12 @@ on:
   pull_request:
     paths:
       - ".github/workflows/posy-v3-pr-verification.yml"
-      - "docs/posy-v3/**"
-      - "genesis-contracts/**"
-      - "launch/**"
-      - "network-identifiers.testnet-v3.identity-assigned.json"
-      - "runtime/**"
-      - "scripts/**"
+      - "protocol/posy-v3/**"
+      - "networks/testnet-v3/genesis-contracts/**"
+      - "networks/testnet-v3/launch/**"
+      - "networks/testnet-v3/network-identifiers.testnet-v3.identity-assigned.json"
+      - "node-platform/**"
+      - "networks/testnet-v3/scripts/**"
   workflow_dispatch:
 
 concurrency:
@@ -43,7 +43,7 @@ jobs:
           GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
         run: |
           set -euo pipefail
-          lock=launch/POSY_V3_PR_DEPENDENCIES.lock.json
+          lock=networks/testnet-v3/launch/POSY_V3_PR_DEPENDENCIES.lock.json
           [[ "$(jq -er '.schema' "$lock")" == "synergy-posy-v3-pr-dependencies-v1" ]]
           [[ "$(jq -er '.status' "$lock")" == "PR_QUALIFICATION_INPUT_NOT_RELEASE_APPROVAL" ]]
           [[ "$(jq -er '.chain_id' "$lock")" == "1266" ]]
@@ -70,7 +70,7 @@ jobs:
           expected_synq_aegis="$(jq -er '.synq.aegis_pqsynq_submodule_revision' "$lock")"
           [[ "$(git -C "$synq_root" rev-parse HEAD:aegis-pqsynq)" == "$expected_synq_aegis" ]]
           expected_core_aegis="$(jq -er '.aegis.revision' "$lock")"
-          [[ "$(git rev-parse HEAD:runtime/aegis-pqvm)" == "$expected_core_aegis" ]]
+          [[ "$(git rev-parse HEAD:node-platform/crates/aegis-pqvm)" == "$expected_core_aegis" ]]
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -85,7 +85,7 @@ jobs:
         shell: bash
         env:
           POSY_V3_EVIDENCE_DIR: ${{ runner.temp }}/posy-v3-pr-evidence
-        run: runtime/scripts/testnet/verify-posy-v3-pr.sh full
+        run: networks/testnet-v3/runtime/scripts/testnet/verify-posy-v3-pr.sh full
 
       - name: Upload bounded verification evidence
         if: always()

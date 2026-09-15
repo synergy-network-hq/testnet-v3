@@ -1,0 +1,122 @@
+{
+  "name": "aegis-crypto-core",
+  "version": "1.0.1",
+  "description": "Aegis: Unified WebAssembly, Rust, and Python PQ cryptography core with ML-KEM, ML-DSA, Falcon, HQC-KEM, SPHINCS+ support. Complete NIST post-quantum cryptography implementation with 100+ WASM variants.",
+  "main": "aegis_crypto_core/pkg/aegis_crypto_core.js",
+  "types": "aegis_crypto_core/pkg/aegis_crypto_core.d.ts",
+  "type": "module",
+  "workspaces": [
+    "pqc/pqnodejs",
+    "pqc/pqwasm",
+    "pqc/pqpython",
+    "pqc/pqvm",
+    "pqc/pqmobile",
+    "pqc/pqclean",
+    "pqc/pqrust",
+    "pqc/pqhw",
+    "pqc/pqwasi",
+    "pqc/pqnostd",
+    "pqc/pqsmart"
+  ],
+  "files": [
+    "aegis_crypto_core/pkg/aegis_crypto_core.js",
+    "aegis_crypto_core/pkg/aegis_crypto_core_bg.wasm",
+    "aegis_crypto_core/pkg/aegis_crypto_core.d.ts",
+    "pqwasm/refimp/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "cd aegis_crypto_core && wasm-pack build --target web --out-dir pkg --features wasm,nist-wasm",
+    "build:node": "cd aegis_crypto_core && wasm-pack build --target nodejs --out-dir pkg --features wasm,nist-wasm",
+    "build:bundler": "cd aegis_crypto_core && wasm-pack build --target bundler --out-dir pkg --features wasm,nist-wasm",
+    "build:all": "npm run build:core && npm run build:nodejs && npm run build:browser && npm run build:python && npm run build:vm && npm run build:mobile && npm run build:clean && npm run build:c-rust && npm run build:hw && npm run build:wasi && npm run build:nostd && npm run build:platform",
+    "build:core": "cd aegis_crypto_core && wasm-pack build --target web --out-dir pkg --features wasm,nist-wasm",
+    "build:nodejs": "echo 'Node.js package ready - WASM files already built'",
+    "build:browser": "echo 'Browser package ready - WASM files already built'",
+    "build:python": "cd pqc/pqpython && echo 'Python package ready - build with: python setup.py build_ext --inplace'",
+    "build:vm": "cd pqc/pqvm && cargo build --release",
+    "build:mobile": "cd pqc/pqmobile && echo 'Mobile builds require platform-specific toolchains'",
+    "build:clean": "cd pqc/pqclean && make",
+    "build:c-rust": "cd pqc/pqrust && cargo build --release",
+    "build:hw": "cd pqc/pqhw && echo 'Hardware builds require FPGA/ASIC tools'",
+    "build:wasi": "cd pqc/pqwasi && echo 'WASI builds require wasi-sdk'",
+    "build:nostd": "cd pqc/pqnostd && cargo build --release --no-default-features",
+    "build:pqsmart": "cd pqc/pqsmart && echo 'Smart platform builds require architecture-specific toolchains'",
+    "test": "cd aegis_crypto_core && cargo test --features wasm,nist-wasm",
+    "test:all": "npm run test:core && npm run test:nodejs && npm run test:browser && npm run test:python && npm run test:vm && npm run test:mobile && npm run test:clean && npm run test:c-rust && npm run test:hw && npm run test:wasi && npm run test:nostd && npm run test:pqsmart",
+    "test:core": "cd aegis_crypto_core && cargo test --features wasm,nist-wasm",
+    "test:nodejs": "cd pqc/pqnodejs && npm test",
+    "test:browser": "echo 'Open pqc/pqwasm/test-browser.html in browser to test'",
+    "test:python": "cd pqc/pqpython && python test_pqpython.py",
+    "test:vm": "cd pqc/pqvm && cargo test",
+    "test:mobile": "cd pqc/pqmobile && echo 'Mobile tests require device/simulator access'",
+    "test:clean": "cd pqc/pqclean && make test",
+    "test:c-rust": "cd pqc/pqrust && cargo test",
+    "test:hw": "cd pqc/pqhw && echo 'Hardware tests require FPGA/ASIC verification'",
+    "test:wasi": "cd pqc/pqwasi && echo 'WASI tests require WASI runtime'",
+    "test:nostd": "cd pqc/pqnostd && cargo test --no-default-features",
+    "test:pqsmart": "cd pqc/pqsmart && echo 'Smart platform tests require target hardware validation'",
+    "test:wasm": "cd aegis_crypto_core && wasm-pack test --headless --firefox",
+    "clean": "cd aegis_crypto_core && cargo clean && cd ../../pqc/pqnodejs && rm -rf node_modules && cd ../pqpython && rm -rf build *.so && cd ../pqvm && cargo clean",
+    "clean:all": "npm run clean:core && npm run clean:nodejs && npm run clean:browser && npm run clean:python && npm run clean:vm && npm run clean:mobile && npm run clean:clean && npm run clean:c-rust && npm run clean:hw && npm run clean:wasi && npm run clean:nostd && npm run clean:pqsmart",
+    "clean:core": "cd aegis_crypto_core && cargo clean",
+    "clean:nodejs": "cd pqc/pqnodejs && rm -rf node_modules",
+    "clean:browser": "echo 'No cleanup needed for browser package'",
+    "clean:python": "cd pqc/pqpython && rm -rf build *.so",
+    "clean:vm": "cd pqc/pqvm && cargo clean",
+    "clean:mobile": "echo 'No cleanup needed for mobile package'",
+    "clean:clean": "cd pqc/pqclean && make clean",
+    "clean:c-rust": "cd pqc/pqrust && cargo clean",
+    "clean:hw": "echo 'No cleanup needed for hardware package'",
+    "clean:wasi": "echo 'No cleanup needed for WASI package'",
+    "clean:nostd": "cd pqc/pqnostd && cargo clean",
+    "clean:pqsmart": "echo 'No cleanup needed for smart platform package'",
+    "prepublishOnly": "node -e \"console.log('Skipping build: using prebuilt pkg and pqwasm assets')\""
+  },
+  "keywords": [
+    "post-quantum",
+    "cryptography",
+    "wasm",
+    "rust",
+    "ml-kem",
+    "ml-dsa",
+    "falcon",
+    "fips-203",
+    "fips-204",
+    "fips-206",
+    "hqc-kem",
+    "sphincs+",
+    "slh-dsa",
+    "fn-dsa",
+    "nist",
+    "quantum-resistant",
+    "classic-mceliece"
+  ],
+  "author": "Justin Hutzler <justin@synergy-network.io>",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/synergy-network-hq/aegis.git"
+  },
+  "homepage": "https://synergy-network.io",
+  "bugs": {
+    "url": "https://github.com/synergy-network-hq/aegis/issues"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "wasm-pack": "^0.12.1"
+  },
+  "collaborators": [
+    "Justin Hutzler <justin@synergy-network.io>"
+  ],
+  "sideEffects": [
+    ".@synergy-network/aegis_crypto_core@synergy-network/pkg@synergy-network/snippets@synergy-network/*"
+  ]
+}

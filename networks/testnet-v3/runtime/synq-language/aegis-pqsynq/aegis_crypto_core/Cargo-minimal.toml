@@ -1,0 +1,25 @@
+[package]
+name = "aegis-crypto-core-minimal"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["console"] }
+base64 = "0.22"
+console_error_panic_hook = "0.1"
+
+[dependencies.subtle]
+version = "2.5"
+default-features = false
+
+[features]
+default = ["wasm"]
+wasm = ["wasm-bindgen", "js-sys"]
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
