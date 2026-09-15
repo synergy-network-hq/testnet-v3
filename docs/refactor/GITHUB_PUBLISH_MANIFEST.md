@@ -70,15 +70,20 @@ The unchanged Grafana configuration surfaced sample/default password-shaped assi
 
 This section is finalized after each preservation push.
 
-- First preservation commit: `PENDING`
-- Final manifest/consolidation commit: `PENDING`
-- Final local branch HEAD: `PENDING`
-- Final remote branch HEAD: `PENDING`
-- Equality verification: `PENDING`
+- First preservation commit: `df17c9264443f9e2e1182bc3e351e69cc8a143d9`
+- Consolidation-inventory commit: `3eda543abaf9f1f25571b00c6b9653fc993fa57d`
+- Verified preserved-content local HEAD: `3eda543abaf9f1f25571b00c6b9653fc993fa57d`
+- Verified preserved-content remote branch HEAD: `3eda543abaf9f1f25571b00c6b9653fc993fa57d`
+- Equality verification at content checkpoint: **YES**
+- Manifest verification record: this file's containing commit; it is the only commit after the verified content checkpoint, and the branch tip is reverified after push.
 - Force push used: **NO**
 - Main branch merged or rebased: **NO**
 - Production deployment performed: **NO**
 
 ## Post-preservation inventory
 
-Cross-repository inventory begins only after the first preservation commit is present on the remote branch. Its findings and AJ-authored commit ledger are recorded in `docs/refactor/REPOSITORY_CONSOLIDATION_PLAN.md`. No repository is consolidated, archived, deleted, or rewritten during that read-only inventory.
+Cross-repository inventory began only after the first preservation commit was present on the remote branch. Its findings and AJ-authored commit ledger are recorded in `docs/refactor/REPOSITORY_CONSOLIDATION_PLAN.md`. No repository was consolidated, archived, deleted, or rewritten during that read-only inventory.
+
+The inventory covered all 47 organization repositories and performed detailed branch/tag/PR/tree/dependency inspection for `testnet-v3`, `testnet`, `synq-language`, `synq-internal`, `synergy-aivm`, `aegis-pqvm`, `aegis-pqsynq`, `forge-v3`, and `synergy-forge`.
+
+Critical result: AJ-authored commit `b8ec31dd`, documented as the AIVM bitwise/shift implementation on deleted or unavailable branch `fix/synq-admission-chain-migration`, does not resolve in any current organization repository and was not found in Val4 Git object databases. This is a **CRITICAL PRESERVATION BLOCKER**. No related repository/branch archival or destructive consolidation is permitted until the full object or a verifiable patch is recovered and durably referenced.
