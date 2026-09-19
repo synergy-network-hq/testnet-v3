@@ -3943,3 +3943,225 @@ ATLAS_P1_RELEASE_AUTHORIZATION_VERIFIED release_id=chain1266-incarnation-4-rc30 
 - `atlas-api`: `PASS` — CHAIN1266_ROLE_STOPPED
 - `atlas-indexer`: `PASS` — CHAIN1266_ROLE_STOPPED
 
+
+---
+
+## C1266-2026-09-04-001 — Testnet-v3 recovery and NetBird five-validator launch
+
+**Status:** Open
+**Severity:** P0
+**Detected:** 2026-09-04 UTC
+**First bad height:** No live Testnet-v3 height established
+**Last agreed finalized height:** None
+**Last agreed finalized block ID:** None
+
+### Affected and responsible nodes
+
+- Affected: validators 02 through 06 and BootSeed hosts 1 through 3.
+- Responsible component under current investigation: recovered launch deployment state and seed/runtime availability. No validator identity, stake, ownership binding, or canonical SGEN is implicated or will be regenerated.
+
+### Recovery actions and outcomes
+
+1. **Relocated the canonical execution workspace to synergy-val4 after external-volume recovery.**
+   **Outcome:** Testnet-v3 revision 4aa6ae8463b1deababfe6b222dbc9251b1938ba1 is a clean Val4 checkout; the recovered NCP source containing the headless dynamic-NetBird support is present on Val4. No validator or seed service changed in this action.
+2. **Read the historical Chain 1266 incident record before mutation.**
+   **Outcome:** historical qualification branches and static-peer/legacy transport paths will not be used; the next action is canonical seed-service recovery only.
+
+### Residual risks and next observation
+
+- Verify all three seed HTTP endpoints, then deploy only verified validator/NCP artifacts through NCP and diagnose the first missing live transition if H1 does not finalize.
+
+### Source evidence
+
+- /home/node/synergy-network/01-Core-Protocol/testnet-v3
+3. **Installed the current seed1 script, guard, configuration, unit, and an assumed current source genesis file.**
+   **Outcome:** seed1 guard failed closed with ; the unit requires the separately pinned seed-support genesis SHA-256 , while the top-level source genesis has a different hash. No validator changed and seeds2-3 were untouched.
+4. **Selected the exact guard-approved seed-support genesis from healthy seed3 for seed services only.**
+   **Outcome:** pending installation and health verification on seeds1-3; this does not modify or distribute validator genesis configuration.
+
+5. **Built the headless NCP control CLI from the recovered Val4 source and validated both focused NetBird advertisement tests.**
+   **Outcome:** release binary deployment to validators 02 through 06 is beginning; no validator runtime or identity is changed by this step.
+
+6. **Completed frozen native validator build and verified the canonical SGEN hash.**
+   **Outcome:** deploying validator binary SHA-256 eead22289f1b4e215418aa9a605e50862fab283121363a29e9d1e8034d7bb56b to validators 02 through 06 before NCP-controlled preflight; SGEN SHA-256 is 439e18b91d71be45fa2ec8ba87167689e06413790303fe3568375498d73b3a8b.
+
+
+7. **Amendment to action 3.** The guard failure was a genesis SHA-256 mismatch. The expected seed-support genesis hash was ee554cfb93bbe760540721e91ba69404716180621e2fc0e6483c87576fa7f253.
+   **Outcome:** the exact support file was verified from the healthy Seed3 service before installation; this seed-only support file is not a validator genesis input.
+
+8. **Seed service recovery.**
+   **Outcome:** Seed1, Seed2, and Seed3 are active with local health checks passing. Seed1 has the required inbound TCP/5621 firewall allowance. No legacy seed service was enabled.
+
+9. **Headless NCP deployment.**
+   **Outcome:** the canonical headless NCP CLI was installed on validator-02 through validator-06; all installed binaries match SHA-256 035779d614d5a7de4b9ecb3c56531b55ce1cd9373434360eb561d365bc2f9eeb.
+
+10. **Canonical validator runtime deployment.**
+   **Outcome:** the canonical validator binary was installed on validator-02 through validator-06; all installed binaries match SHA-256 eead22289f1b4e215418aa9a605e50862fab283121363a29e9d1e8034d7bb56b. Live NCP preflight is next.
+
+11. **validator-02 live NCP start.**
+   **Outcome:** NCP verified NetBird health and launched the canonical binary, but the process exited before H0 at the configuration-authority gate: canonical Testnet-v3 Genesis has no finalized consensus parameter manifest.
+
+12. **Live missing transition isolation.**
+   **Outcome:** the frozen signed SGEN verifies and carries the Genesis-bound simplified PoSy v3 activation. The runtime startup guard still requires the retired JSON consensus_parameters compatibility wrapper, even though the SGEN loader intentionally uses the activation binding. No Genesis, identity, transport, or remaining validator was modified. The next change is limited to making that guard accept the signed activation manifest.
+
+13. **SGEN activation runtime compatibility correction.**
+   **Outcome:** the startup configuration guard now validates the verified Genesis-bound simplified PoSy v3 activation when the frozen signed SGEN intentionally omits the retired consensus_parameters JSON wrapper. Focused frozen-SGEN regression test passed. Rebuilt validator SHA-256: f251bc8d7cca999db65dbd5c446b08225fd0313a60aa87ce21a0b99ffefeee91. Deploying to validator-02 for the live rerun.
+
+14. **validator-02 SGEN configuration comparison.**
+   **Outcome:** the repaired activation guard reached the next check and rejected the NCP-generated 500 ms override. The frozen SGEN commits a 2000 ms cadence. This is a configuration handoff defect: NCP must reconcile its managed config to the frozen SGEN cadence, and the runtime NCP parser must accept that exact signed cadence. No runtime, Genesis, identity, or transport change is being made.
+
+15. **Cadence correction and SGEN reissue authorization.**
+   **Outcome:** the operator set the required cadence to 500 ms, within the current 100-1500 ms launch envelope, and authorized a replacement signed SGEN using the existing authorities. The uncompleted 2000 ms NCP/runtime configuration path was reverted before deployment. The reissue must preserve the same membership, authority set, identities, and 36 deterministic H0 operations; only the governed cadence parameter may change. No validator has been started from the obsolete 2000 ms SGEN.
+
+16. **Correction to action 15: governed derivative rebinding.**
+   **Outcome:** changing the approved 500 ms cadence necessarily changes the simplified PoSy activation root, parameter root, release-decision digest, Genesis hash, and ETDAG membership-anchor commitment. The five-validator membership root, identities, authority roster, all 36 H0 operation bytes, and all H0 execution roots remain required to be identical.
+
+17. **Unsigned 500 ms SGEN staging and verification.**
+   **Outcome:** the no-overwrite reissue command produced build/testnet-v3/sgen-500ms/genesis.unsigned.sgen with file SHA-256 662fed4caf4915348304fc7618ef30c1a32a82562eb02fbb840c3d9511272217. It verifies Chain 1266, testnet, posy/3.0, validators 02-06, 36 H0 operations, target 500 ms, membership root 4a059c97a3bf88216a9fc94fa81304dc26303424bc04620dc47d47f64f11ce9b, execution root 55ca242d074ea2844520d7c6fd4c26af3b35904e6173357ac4c18516e88ffdc6, AIVM root 9c11bc3f6ef9379fdd875ecdc887301af3239197aa1fd0a8fc490785dd5c3854, and receipt root fbf68f46186d661fbdf19d30003ae541a5d056f440dac6bc20e93676f05e271a. The existing authority signer has not been invoked; no custody data was opened and no validator state changed.
+
+
+## C1266-2026-09-05-001 — Replace lost Genesis authority custody and resume 500 ms launch
+
+**Status:** Open
+**Severity:** P0
+**Detected:** 2026-09-05 00:55 UTC
+**First bad height:** Pre-H0; no running canonical validator observed
+**Last agreed finalized height:** Not established
+**Last agreed finalized block ID:** Not established
+
+### Affected and responsible nodes
+Validators 02-06. The immediate blocker is missing August 23 Genesis authority custody, not validator identity or NetBird transport.
+
+### Symptoms and evidence
+The operator's supplied continuation authorizes creation of replacement bundles after the recovery search did not recover the three current authority bundles. The earlier instruction approves 500 ms nominal cadence. Val4 canonical Testnet source is clean at 84869dcaa952c5f8c2448338e115794af75d4e4c. The 500 ms staged SGEN verifies unsigned, with five validators and 36 H0 operations; it has not been deployed. All five NCP runtimes report stopped. NetBird reports management/signal connected and four connected peers on every validator. Val2 has validator binary f251bc8d7cca999db65dbd5c446b08225fd0313a60aa87ce21a0b99ffefeee91; Val3-6 retain eead22289f1b4e215418aa9a605e50862fab283121363a29e9d1e8034d7bb56b.
+
+### Confirmed cause
+The SGEN verifier embeds the authority public freeze at compile time. Replacing missing authority keys therefore requires coherent public bindings and rebuilt verifier binaries. H0 carries independently signed authority operations; replacing only outer signatures must not silently leave the on-chain governance and registry under inaccessible keys. The full replacement boundary is being checked before key creation.
+
+### Recovery actions and outcomes
+1. Read the applicable operating instructions and incident log, then verified Val4, staged unsigned SGEN, native Address Engine and fleet readiness.
+   Outcome: no node or custody mutation; Linux keygen verified as x86-64 ELF SHA256 8ba3a9a3b27712447629eef0c95fb69934ffeed5456d1119882b50f062876403.
+2. Inspected the canonical Address Engine generation path and GitHub source.
+   Outcome: retired generate-authority is unusable; current migration tool matches upstream blob 29dbba7f5191bc07ae17dea7f244107265b9cf4c and has no general three-role Genesis bundle generator. No retired guard has been bypassed.
+
+### Final outcome
+Open. Signing, replacement custody, canonical deployment, H0/H1-H20 and restart/import validation remain pending.
+
+### Residual risks and next observation
+Preserve all validator keys, owner/stake bindings and dynamic discovery. Verify replacement authority scope, encrypted custody and durable locations, then coherent SGEN/runtime trust before startup.
+
+### Source evidence
+User attachment 84587a55-dc91-490c-b25a-f13516d2597b; canonical Val4 runtime/src/sgen.rs, runtime/src/bin/synergy-genesis-ceremony.rs and Address Engine src/bin/migrate_snts07_artifact.rs.
+
+### C1266-2026-09-05-001 — custody generation checkpoint (2026-09-05T05:32Z)
+
+- New canonical Address Engine helper passes 4 release tests: CLI rejection, prior profile, no-clobber/private publication, ephemeral cryptographic round trip and both binding scopes.
+- Public-only dry run verified all three old bindings, prior freeze SHA256 f52a13c6b3b89f85996af26e9d2c676c18269170d4aa44b3be5339d0fce8fafa; no keys generated by dry run.
+- Existing workbook Testnet-v3 Identities has separate custody passphrases for each root and authorization row. Reuse those exact values through non-echoing SSH terminal prompts; no secrets in arguments, logs, files, or tool output.
+- Canonical replacement output reserved for /home/node/synergy-network/28-Operations-Infrastructure/credentials/testnet-v3-authorities-20260905. Parent directory was absent and has now been created mode0700. Effective boundary records current 2026-09-05T05:32:02Z, preceding configured H0 GENESIS_NOW_UNIX1800000000.
+- Generation, independent public verification, encrypted backup, workbook update, H0 recomposition, deployment and chain-running evidence remain pending.
+
+### C1266-2026-09-05-001 — replacement custody and public records verified (2026-09-05T05:50Z)
+
+- Created3 replacement authorities using existing workbook Testnet-v3 Identities passphrases, 12 non-echoing terminal prompts. All cryptographic generation checks passed. No secrets emitted or stored in plaintext.
+- Custody manifest SHA25655660bdafc7634ea6ea9c74a1875ee00f659a018aed862a9bbe0eb56d0569790; all26 artifacts hash/mode0600 checked remotely and exact encrypted backup verified at Mac credentials/testnet-v3-authorities-20260905.
+- Sole credentials workbook updated in place61 public metadata cells and reimported. Existing credential cells/styles preserved, no workbook copy/sidecar. Serializer initially rejected x: namespace/date-cell differences before saving; corrected prefix/numeric handling. ZipInfo metadata reuse caused in-memory CRC failure before saving; copying ZipInfo corrected it. Readback and unchanged package-part verification passed.
+- New public freeze SHA256e27772ff64005cb50a2fd3b79808bdf3850b5ca744dd4fe3d5fd862c158df522 validates exact prior authority linkage. Published canonical freeze and retained prior public evidence build/authority-replacement-20260905/prior-authority-freeze.json.
+-13 freeze tests and9 executed-source projection tests pass, plus4 AE generator tests. New500ms predeployment source dcf09ddb9e33b7432374731e28248194353d99672e14c0383390f7fdc2e31aff preserves validators02–06 and36 allocations.
+- First runtime build rejected omitted ceremony feature (no code defect); corrected --features ceremony build running. Signed genesis and H0 replay not yet proven. User clarifies wallet edits belong to other task; this task must supply compiled public governed trust package only, then continue authorized chain work.
+
+### C1266-2026-09-05-001 — public trust package completed; live chain pending
+
+- Dry-run and execute passed identical candidate input7a68783bb25ccfea3ed9f9c1c92c7ec17bca8e8a854b87560c5583a0674be226, all9deploy27init receipts. H0 execution5524d1159428eaf8ab0c05a6cebe904785cc81ee59ec75d8474ddf095e46df8f, AIVM1c2fe2bda1221d06851dfc4cf5f81fba11c0ff529f33435b3ad9ce0eaa756ece, receipta5463763a46bbec2d87aea7dfb7b4d885ebb4fcc9b7ca27b19627b584b0b584b.
+- First signed composition1b77c7... lacked governed ETDAG policy. Exporter refused it. Root cause: predeployment builder clears ETDAG and compose did not bind it. Fixed payload_from_h0_evidence to atomically bind approved canonical ETDAG/consensus before signing; preserve500ms activation and all H0/member roots. Added3 regression tests; all9SGEN tests pass including historical signature fixture pinned to original public authority and SGEN SHA.
+- Final signed Genesis hash ebf217e760f48cdf6d102d417b64848461edd3b0382acbdb7a6c8fcd847241af; output build/testnet-v3/authority-replacement-20260905/final/genesis.sgen. All3 canonical ML-DSA signatures and deterministic H0 replay verified by exporter. Old pre-policy signed artifact is not release authority.
+- Public trust JSON SHA2568eb4a162c0245141b39773ffc37d959c69462290ee67a2f25b0a5f658fb50b1b. Public ZIP SHA2561e51523024bb04955491949fdaa3140d2a39f96b7fde77f7cc0ebe049ab17164. Contains JSON, signed SGEN, README, checksums only; secret-field checks passed. Archive readback matches every member.
+- Exporter initial path emitted serde OsStr Unix-byte object; archive validator caught it before delivery. Changed filename to checkedUTF8str, rebuilt, re-exported and validated.
+- Public anchor is derived using canonical chain function and finalSGEN hash; no independent membership signature claimed. Native chain schema supplied; other-task wallet normalizer requires alignment if incompatible. No wallet edits performed.
+- Live validators remain unmodified by this checkpoint. No H1/H20, runtime deployment or restart/rejoin claim. User requested immediate public authority package handoff to separate wallet task. Next chain step rebuild/deploy matching validator runtime+finalSGEN via canonical NCP and verify live progress. Git commit/push and production-authority-view reconciliation remain pending.
+
+## 2026-09-05 Testnet-v3 NetBird and fresh-authority launch update
+
+- Validator NetBird static addresses are governed as `validator-02=10.69.10.2`, `validator-03=10.69.10.3`, `validator-04=10.69.10.4`, `validator-05=10.69.10.5`, and `validator-06=10.69.10.6`; `10.69.10.1` remains reserved for future validator-01. The previously observed `10.69.132/210/110/248/112.x` addresses are not used for validator transport.
+- The fresh public transport registry is SHA-256 `67b67bbec6d1db7720a1353f238c40b7cfd9bed19ee4fdc610ced82711b72b56`; the signed snapshot is SHA-256 `5fa08118c21755ce5ecf88901417f2ac4bc3bf0a82e8c76eea76e878b8f6a6cc` and is served locally on each validator through the loopback snapshot proxy.
+- Fresh governed Genesis is installed on validator-02..06 with genesis hash `ebf217e760f48cdf6d102d417b64848461edd3b0382acbdb7a6c8fcd847241af`, `posy/3.0`, and the 500 ms finalized activation manifest.
+- Runtime source was corrected so the simplified driver and protected Genesis bootstrap normalize the fresh `/consensus/posy_v3_activation` manifest into the finalized Genesis-bound consensus parameter object. The release binary was built and deployed to all five validators (SHA-256 `77a9fb3ad36afc94c2de373bfc816c181b09c3e455cef9722d3559baf176dcba`).
+- NCP source was corrected so every managed validator child inherits `SYNERGY_PROJECT_ROOT`, `SYNERGY_CONFIG_PATH`, and `SYNERGY_GENESIS_FILE`. `cargo check --bin synergy-control` and the focused runtime-status test passed; the rebuilt NCP binary was deployed to all five validators (SHA-256 `0660f871b284587b22b7d639c2bddf6e15f08fc294bb4469f1bba471d3ff7fe7`).
+- Current launch blocker: fresh Genesis derives epoch-context root `6e74560089534934cb51aa52f66173a42b0c5c9739c9b803cb8f5bef349a9455`, but the required public ingress-KEM registry artifact for normal protected H3 is absent. Existing registry files are bound to the retired root `48828a060571115c84bc3d0797e1f21b1cda9221211f23774a07f33591744263` and older Genesis; they must not be relabeled or copied as fresh authority.
+- Validator processes were stopped after this failed-closed check. No chain finality or height advancement is claimed. The remaining required input is the governed public H3 ingress-KEM registry (and subsequent heights as required), with no private KEM custody material.
+
+### 2026-09-05 full startup-path preflight
+
+A complete preflight was run before another launch attempt. Confirmed:
+
+- All five validator SGEN files have SHA-256 `8373bba021f291f4f1d5ee39a9a1dcc1bffb3d5fb24f4f763acb257668745bcc` and the fresh genesis derives epoch-context root `6e74560089534934cb51aa52f66173a42b0c5c9739c9b803cb8f5bef349a9455`.
+- All five installed validator binaries are the same runtime build (`77a9fb3ad36afc94c2de373bfc816c181b09c3e455cef9722d3559baf176dcba`); all five NCP binaries are the same environment-propagating build (`9564118bb97ad8fc743d9593723fef0b0daa1106971783aa0515328dc8edbb38`).
+- Every validator has the same public transport registry and `/etc/synergy/chain1266/transport-snapshot.env`, binding the signed snapshot to `10.69.10.2` through `10.69.10.6`; no old unauthorized validator addresses appear in that transport state.
+- The fresh public trust package contains only README, checksums, signed/unsigned Genesis, and trust JSON. It contains no ingress-KEM public bundle or registry artifact.
+- Validator data roots show the fresh finality metadata directory on validator-03, -05, and -06, while -02 and -04 stopped earlier at peer-readiness because the other nodes failed closed. This is a consequence of the common artifact blocker, not a separate authority mismatch.
+- Runtime source inspection found two legacy typed-PoSy `genesis.consensus_parameters()` requirements at lines 1931 and 2136, but the active fresh simplified startup path reaches the explicit fresh activation fallback and does not report those paths. They remain out of scope until a typed profile is selected.
+- Boot/seed preflight found all three seed services still on the retired Genesis/`posy/2.2` authority. Bootnode/seed NetBird peers are absent, and no dedicated support-node 10.69 range has been governed. These are independent post-validator blockers.
+
+The full blocker set is therefore: (1) missing governed fresh public ingress-KEM registries beginning at H3; (2) boot/seed services still require fresh authority/configuration and dedicated NetBird enrollment; and (3) the dedicated boot/seed third-octet range is not specified in current authority. No further validator launch was attempted after this preflight.
+
+
+### 2026-09-05 production call-path audit correction
+
+The preceding claim of a complete startup-path preflight is withdrawn: file presence, hashes and startup guards did not examine the downstream producers. No successful finalized height was established.
+
+Confirmed additional source defects: ProductionProtectedPipelineLifecycle.on_finalization returns before successor target registration for H1/H2 bootstrap commitments; OrderSeed events are only constructed in tests, despite an implemented production finality-bound verifier; normal startup installs evidence receiving but no cutoff/reveal producer, and assemble_target_execution_input has no production caller. These are implementation gaps, not requests for the operator to invent public artifacts. They remain unresolved pending verified repairs.
+
+Transport repair checkpoint: replacement audit worker changed all five loopback proxies to fetch the exact HTTPS snapshot URL on every request and replaced the root directory HTTP server with an exact-route loopback handler running as nobody. Parent independently observed HTTP200 and identical proxy SHA256 f32cb919bcc28560025191439c44fc4a21416863a2e7b3106f40cce8354dc3f7 on validators02..06. Invalid-route and complete payload verification remain pending. The former HTTP directory contained the signer private file; no private file was fetched or output. No key rotation was performed.
+
+Two original/replacement audit worker sets encountered model/workspace usage limits. Parent continues execution. Next scoped source repair removes bootstrap finalization's early return and adds a callback regression; no chain restart until production prerequisite gaps are resolved.
+
+
+### 2026-09-05 verified repairs and admission/finality dependency conflict
+
+- Snapshot repairs independently verified: all five loopback proxies run identical SHA256 f32cb919bcc28560025191439c44fc4a21416863a2e7b3106f40cce8354dc3f7 and return HTTP200; Val4 proxy and coordinator serve signed snapshot SHA256 5fa08118c21755ce5ecf88901417f2ac4bc3bf0a82e8c76eea76e878b8f6a6cc. An isolated HTTP test returned two changing upstream responses, rejected other routes with404 and failed upstream requests with502. Hub runs as nobody, listens only on127.0.0.1:8642, returns404 for directory/unrelated routes. Backups have suffix pre-20260905-safe-serving (hub unit) and pre-20260905-safe-refresh (validator proxy).
+- Runtime source now invokes the existing production order-seed verifier with exact durable finalized authority at initial and successor registration. H1/H2 callbacks no longer skip successor registration. No cutoff, availability or reveal proof is fabricated by these repairs.
+- Regression first failed because the test read the durable envelope as a bare record; corrected to decode its record member. The next run proved creation and seed verification but exposed a real repeated-registration conflict. Corrected only identical normal-target/source/storage registration to be idempotent; changed target or storage remains rejected. Latest focused regression run is pending in /tmp/posy-lifecycle-regression-20260905.log. No rebuilt runtime deployed at this checkpoint.
+- New critical dependency conflict: protected_material.rs requires the H(n+1) pre-reveal commitment before proposing Hn. protected_pipeline_runtime.rs creates target F+3 only after finalization of F. state.rs commits H1 only when QC(H3) is accepted. Therefore H3 cannot be proposed without H4, while H4 cannot be created before QC(H3). PROTECTED_PIPELINE_PROTOCOL.md explicitly says exact three-height lookahead; POSY-00E section9 specifies three-QC finality. Fixing producer wiring alone cannot resolve this cycle.
+- Proposed governed resolution awaiting explicit operator decision: preserve three-QC finality and H1/H2 bootstrap; preserve H3 as first normal target from H0; prepare steady-state targets four heights ahead from verified historical finality, with matching historical-source validation and governed policy/signature reissue. This proposal has NOT been applied to the frozen protocol, Genesis or wallet trust package. Generic continuation messages are not treated as authorization to alter frozen consensus rules.
+- Remaining implementation gaps include fresh ML-KEM-1024 ingress custody/public publication and live VAC/cutoff/reveal/assembly producers. The installed validator04 public identity exposes ML-KEM-768 entropy, not an ML-KEM-1024 ingress key. Known ingress-custody filename searches under /var/lib/synergy on all five hosts and the Val4 credential directory returned no matches; this bounded search is not proof against every possible archival filename.
+- NetBird executable is /opt/synergy/ncp/bin/netbird (not on sudo PATH). Val4 currently reports10.69.10.4/16 with management and signal connected. No addresses or identity keys changed during this repair pass.
+
+
+### 2026-09-05 protected regression closure and fleet state
+
+- The bootstrap/successor/seed and duplicate-registration regression group passed: 3 tests, 0 failures (/tmp/posy-lifecycle-regression-20260905.log).
+- The broader protected filter initially passed47 and failed3. Two older adapter test sources lacked load_pre_reveal_commitment, so build_local correctly returned not-ready; the third test incorrectly required the legacy Genesis consensus_parameters field. No production readiness guard was relaxed. Adapter fixtures now supply a separate, cryptographically certified child-height commitment, and an added negative test requires no proposal when execution is ready but that child commitment is missing. Genesis parameter normalization was extracted into one function shared by the driver and its activation test.
+- Final command: cd runtime && cargo test --release -p synergy-testnet --lib protected -- --test-threads=2. Result: 51 passed, 0 failed, 1486 filtered out; execution5.18s. Output /tmp/posy-protected-regression-20260905.log. This is a scoped regression suite, not a complete test-suite or fleet finality claim.
+- Independent ncp-validator-status calls on validators02,03,04,05,06 all returned running:false. The newly validated source has NOT been deployed. Existing live transport repair remains distinct from runtime source validation.
+- Still pending: explicit resolution of the frozen exact-H+3/three-QC dependency conflict; production ingress ML-KEM-1024 custody and public registry publication; transaction availability/cutoff/reveal/execution-assembly producer integration; public boot/seed authority and NetBird enrollment; autonomous desired-address allocation beyond the initial five. No new Genesis signature, changed consensus policy, rotated identity, or validator IP mutation was performed in this checkpoint.
+
+
+### 2026-09-06 governed amendment authorized and implementation resumed
+
+User explicitly authorized the proposed four-height admission amendment and signed trust reissue: yes, whatever is needed to get the chain going. This supersedes the preceding pending-approval status. No further approval is required for that amendment or necessary launch repairs. Preserve the three-QC finality rule, Genesis-bound H1/H2 bootstrap, H3 first normal target, validator identities, and chosen VPN addressing.
+
+A new worker group began independently inspecting admission/history, additive ingress custody, and NetBird completion. All three encountered account usage limits before reporting completed changes. Parent continues directly and must verify any partial files before use. No reset credit was consumed.
+
+Implementation in progress: governed source/target helper supports existing offset3 and amended offset4 (F0 prepares H3 and H4); production target/ordering validation uses the governed helper; finality sink retains records/state roots only after full certificate and execution replay; adapter validates exact historical admission authority; startup restores the pending target window from that verified history. Cargo check is running in /tmp/posy-admission-check-20260906.log. No deployment or authority re-signing yet.
+
+
+### 2026-09-06 verified admission and ingress checkpoint; Terra workers
+
+- Admission/history amendment passed cargo check and 51 protected release tests; focused governed-source helper and three real-QC finality tests passed. Logs: /tmp/posy-admission-check-20260906.log and /tmp/posy-amendment-tests-20260906.log. This is source validation, not deployed finality.
+- Additive ML-KEM-1024 ingress custody was provisioned on validators02..06 without replacing consensus identities. Each public record is authenticated by the existing frozen ML-DSA-65 validator key. Runtime public verifier initially rejected the algorithm spelling: frozen runtime keys use mldsa65, while Address Engine public identity uses ML-DSA-65. Corrected the representation check, retaining signature verification. Actual five-record bundle now passes signed SGEN membership verification and H3/H4/H5 registry derivation.
+- Public bundle SHA256 fb2e82a24f87d7303b71c80b739d745817d83c5598608108b539483267ded290 independently verified installed on all five at node_root/data/posy-v3-ingress-identities.json. Private ingress custody remains encrypted under identity/etdag-ingress-kem.enc.json; no secret printed.
+- Production assembly call sites are implemented; cargo check passed /tmp/posy-assembly-check-20260906.log. New wire variants for real vertex proposals and VAC votes require pending producer/coordinator integration.
+- Cutoff audit found a substantive agreement defect: different valid four-of-five marker subsets can contain unequal certified transaction ancestor closures and produce different cuts. Real cryptographic counterexample test added; repair binds exact target-T frontier into existing T-2 PoSy proposal and authenticated VC. No extra voting round or fabricated proof is authorized.
+- User requested gpt-5.6-terra for subagents due Astra usage. Three replacement Terra workers now own cutoff agreement, live producer, and NetBird completion. Earlier workers errored on account usage limits; no reset was consumed. Shell ENOENT on replacements came from absent configured SSD cwd; workdir /, login false resolves remote SSH.
+- No new runtime deployment, new Genesis signature, or advancing finalized block verified at this checkpoint.
+
+
+### 2026-09-06 full dependency correction and integrated source checkpoint
+
+The four-height proposal is superseded BEFORE signing/deployment. Binding target T frontier in existing proposal T-2 introduces a dependency missing from the earlier H/H+1-only test: proposal H3 also requires H5 admission; offset4 sources H5 from F1, which cannot finalize before QC(H3). The full graph therefore needs offset5. Genesis prepares H3/H4/H5 and steady state F+5; three-QC finality and H1/H2 Genesis bootstrap are unchanged. The existing explicit authorization for necessary launch amendments applies. Canonical unsigned manifest now uses offset5 under SNRG-GOV-ETDAG-P3-ADMISSION-20260906-01; no signed authority or deployed consensus policy changed. Added governed_five_height_admission_breaks_full_cutoff_reveal_finality_cycle across 9999 proposal heights, including the old offset4 counterexample.
+
+All replacement workers were explicitly created with gpt-5.6-terra as requested. They later failed with workspace out-of-credits even after the user reported an account usage reset. Parent continued source integration; no additional reset credit used. Terra producer initially omitted pre-VC frontier production, durable local proposal persistence, individual-vote authentication before cache, and marker-specific voting. Parent corrected these paths and added real cryptographic quorum/invalid-vote/fsync-before-publication regression. Remaining integrated runtime/restart evidence is pending.
+
+Material now commits exact frontier into the protected execution root (absence preserves legacy transcript bytes), validates frozen target and verified historical finality, and retains the genuine existing PoSy VC with the durable cutoff frontier. Marker selection requires exact certified parents and signer-independent candidate ID. Coordinator/role code queues production work and emits cutoff/reveal only from verified VC callbacks. First integrated cargo check passed /tmp/posy-frontier-integration-check-20260906.log before later producer/durability changes.
+
+Edit failures: an import was inserted before Rust inner module documentation and a nonexistent TargetAdmissionContext epoch_context_root was referenced; corrected using actual target epoch/seed/frozen roots. A receiver-validation insertion initially matched the earlier activated-adapter implementation and placed it in build_local. Repeated compile exposed that there are two SimplifiedMaterialAdapter impls; corrected using the exact `for SimplifiedProtectedMaterialAdapter<A>` boundary with expected_finalized signature assertion. Later producer imports were missed because rustfmt had removed BTreeSet; corrected against actual import. No failed build was deployed. Current focused release test log /tmp/posy-frontier-protected-tests-20260906-r4.log; real fleet finality remains unverified.
