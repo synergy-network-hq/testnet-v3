@@ -13,6 +13,7 @@ members = [
     "crates/synergy-naming",
     "crates/synergy-node-ownership",
     "crates/synergy-rewards",
+    "crates/synergy-updater",
     "crates/synergy-aegis",
     "crates/synergy-ai",
     "crates/synergy-aivm",
