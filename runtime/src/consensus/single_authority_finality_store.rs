@@ -201,9 +201,10 @@ fn read_frame_at(bytes: &[u8], offset: u64) -> Result<FrameRead, String> {
              the frame is complete-length, so this is treated as corruption, not a torn tail"
         ));
     }
-    let record: SingleAuthorityFinalityRecord = serde_json::from_slice(payload).map_err(|error| {
-        format!("decode single-authority finality record at offset {offset}: {error}")
-    })?;
+    let record: SingleAuthorityFinalityRecord =
+        serde_json::from_slice(payload).map_err(|error| {
+            format!("decode single-authority finality record at offset {offset}: {error}")
+        })?;
     Ok(FrameRead::Complete {
         record: Box::new(record),
         end_offset: frame_end as u64,
@@ -214,7 +215,10 @@ fn read_frame_at(bytes: &[u8], offset: u64) -> Result<FrameRead, String> {
 /// read at EOF is deliberately reported as `IncompleteEof`; all complete
 /// malformed frames remain hard errors just as in `read_frame_at`.
 fn read_frame_from_reader<R: Read>(reader: &mut R, offset: u64) -> Result<FrameRead, String> {
-    fn read_exact_or_incomplete<R: Read>(reader: &mut R, buffer: &mut [u8]) -> Result<bool, String> {
+    fn read_exact_or_incomplete<R: Read>(
+        reader: &mut R,
+        buffer: &mut [u8],
+    ) -> Result<bool, String> {
         let mut read = 0;
         while read < buffer.len() {
             match reader.read(&mut buffer[read..]) {
@@ -266,9 +270,10 @@ fn read_frame_from_reader<R: Read>(reader: &mut R, offset: u64) -> Result<FrameR
              the frame is complete-length, so this is treated as corruption, not a torn tail"
         ));
     }
-    let record: SingleAuthorityFinalityRecord = serde_json::from_slice(&payload).map_err(|error| {
-        format!("decode single-authority finality record at offset {offset}: {error}")
-    })?;
+    let record: SingleAuthorityFinalityRecord =
+        serde_json::from_slice(&payload).map_err(|error| {
+            format!("decode single-authority finality record at offset {offset}: {error}")
+        })?;
     Ok(FrameRead::Complete {
         record: Box::new(record),
         end_offset: offset + FRAME_PREFIX_LEN as u64 + payload_len + FRAME_CHECKSUM_LEN as u64,
@@ -384,7 +389,7 @@ impl SingleAuthorityFinalityStore {
         }
         if log_path == head_path {
             return Err(
-                "single-authority finality log and head must be distinct files".to_string()
+                "single-authority finality log and head must be distinct files".to_string(),
             );
         }
         if binding.authority_id.is_empty() {
@@ -490,6 +495,32 @@ impl SingleAuthorityFinalityStore {
         &self,
         retain: usize,
     ) -> Result<SingleAuthorityStartupRecovery, String> {
+        self.scan_startup_with_tail(retain, true, |_| Ok(()))
+    }
+
+    /// Streams every finality record through the supplied binding validator,
+    /// retaining only the requested tail. Inspection never advances the head
+    /// or modifies the log, including when validation rejects old history.
+    pub fn inspect_startup_with_tail<F>(
+        &self,
+        retain: usize,
+        validate: F,
+    ) -> Result<SingleAuthorityStartupRecovery, String>
+    where
+        F: FnMut(&SingleAuthorityFinalityRecord) -> Result<(), String>,
+    {
+        self.scan_startup_with_tail(retain, false, validate)
+    }
+
+    fn scan_startup_with_tail<F>(
+        &self,
+        retain: usize,
+        advance_head: bool,
+        mut validate: F,
+    ) -> Result<SingleAuthorityStartupRecovery, String>
+    where
+        F: FnMut(&SingleAuthorityFinalityRecord) -> Result<(), String>,
+    {
         let head = self.load_head()?;
         let mut offset = 0u64;
         let mut truncated = false;
@@ -526,7 +557,12 @@ impl SingleAuthorityFinalityStore {
                     }
                     FrameRead::Complete { record, end_offset } => {
                         validate_record_shape(&record, &self.binding)?;
-                        validate_linkage(previous.as_ref(), &record, self.binding.first_authority_height)?;
+                        validate_linkage(
+                            previous.as_ref(),
+                            &record,
+                            self.binding.first_authority_height,
+                        )?;
+                        validate(&record)?;
                         if retain > 0 {
                             if recent.len() == retain {
                                 recent.pop_front();
@@ -570,16 +606,16 @@ impl SingleAuthorityFinalityStore {
                         head.height
                     ));
                 }
-                if head.height < latest.height {
+                if head.height < latest.height && advance_head {
                     self.commit_head(latest, offset)?;
                     head_advanced = true;
                 }
             }
-            (None, Some(latest)) => {
+            (None, Some(latest)) if advance_head => {
                 self.commit_head(latest, offset)?;
                 head_advanced = true;
             }
-            (None, None) => {}
+            (None, _) => {}
         }
 
         Ok(SingleAuthorityStartupRecovery {
@@ -602,10 +638,7 @@ impl SingleAuthorityFinalityStore {
     ///
     /// Idempotent for an exact duplicate of the current tail (crash between
     /// append-fsync and head-advance replays safely without rewriting).
-    pub fn append_finalized(
-        &self,
-        record: &SingleAuthorityFinalityRecord,
-    ) -> Result<u64, String> {
+    pub fn append_finalized(&self, record: &SingleAuthorityFinalityRecord) -> Result<u64, String> {
         validate_record_shape(record, &self.binding)?;
         let recovery = self.recover()?;
         if let Some(tail) = recovery.records.last() {
@@ -619,7 +652,11 @@ impl SingleAuthorityFinalityStore {
                 ));
             }
         }
-        validate_linkage(recovery.records.last(), record, self.binding.first_authority_height)?;
+        validate_linkage(
+            recovery.records.last(),
+            record,
+            self.binding.first_authority_height,
+        )?;
         if recovery.truncated_trailing_frame {
             self.truncate_to(recovery.durable_end_offset)?;
         }
@@ -708,11 +745,9 @@ impl SingleAuthorityFinalityStore {
         };
         let bytes = serde_json::to_vec(&head)
             .map_err(|error| format!("encode single-authority finalized head: {error}"))?;
-        let temp_path = self.head_path.with_extension(format!(
-            "tmp-{}-{}",
-            std::process::id(),
-            record.height
-        ));
+        let temp_path =
+            self.head_path
+                .with_extension(format!("tmp-{}-{}", std::process::id(), record.height));
         if let Some(parent) = self.head_path.parent() {
             fs::create_dir_all(parent)
                 .map_err(|error| format!("create head directory {}: {error}", parent.display()))?;

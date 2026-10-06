@@ -11,7 +11,8 @@ use base64::{engine::general_purpose, Engine as _};
 
 const GENESIS_HASH: &str = "e25f4d99ec61e7c2db362549e6d950391ee13c7c21f4e51c6bbd051f063cd4e8";
 const RELEASE_ID: &str = "chain1266-single-authority-rc1";
-const AUTHORITY_FINGERPRINT: &str = "sha256:0f9c1d2b3a4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8";
+const AUTHORITY_FINGERPRINT: &str =
+    "sha256:0f9c1d2b3a4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8";
 const EXECUTION_FINGERPRINT: &str = "sha256:execution-configuration";
 
 struct StartAuthority {
@@ -172,8 +173,7 @@ fn d09_v1_authorization_cannot_select_the_v2_driver() {
         .sign(&authority.private, &v1_style_payload)
         .expect("sign v1-style payload");
     let mut cross_domain = sign(&authority, &state);
-    cross_domain.signature_base64 =
-        general_purpose::STANDARD.encode(&v1_signature.signature_data);
+    cross_domain.signature_base64 = general_purpose::STANDARD.encode(&v1_signature.signature_data);
     let error = resolve(&state, &cross_domain, &expectation()).unwrap_err();
     assert!(error.contains("verification failed"), "{error}");
 
@@ -280,7 +280,10 @@ fn d13b_launch_constants_are_enforced_on_the_signed_binding() {
     };
     let signed = sign(&authority, &state);
     let error = resolve(&state, &signed, &expectation()).unwrap_err();
-    assert!(error.contains("requires authority authority-node-01"), "{error}");
+    assert!(
+        error.contains("requires authority authority-node-01"),
+        "{error}"
+    );
 
     // Wrong target block time.
     let mut state = single_authority_state();
@@ -319,7 +322,10 @@ fn d13b_launch_constants_are_enforced_on_the_signed_binding() {
     };
     let signed = sign(&authority, &state);
     let error = resolve(&state, &signed, &expectation()).unwrap_err();
-    assert!(error.contains("null pending consensus transition"), "{error}");
+    assert!(
+        error.contains("null pending consensus transition"),
+        "{error}"
+    );
 
     // A non-ML-DSA-65 authority block key.
     let state = single_authority_state();
@@ -415,4 +421,89 @@ fn d16_envelope_must_match_the_supplied_document() {
         error.contains("does not match the signed envelope"),
         "{error}"
     );
+}
+
+#[test]
+fn durable_preflight_rejects_old_foreign_release_without_mutating_state() {
+    use super::single_authority_finality_store::*;
+    use crate::synergy_types::Hash;
+    use std::fs;
+    let root = std::env::temp_dir().join(format!(
+        "sa-preflight-{}-{}-chain-1266-incarnation-5",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).unwrap();
+    let paths = SingleAuthorityDurablePaths {
+        finality_log_path: root.join("finality.log"),
+        finality_head_path: root.join("finality.head.json"),
+        signing_journal_path: root.join("signing.json"),
+        committed_block_log_path: root.join("blocks.ndjson"),
+        execution_state_path: root.join("execution.json"),
+        receipt_log_path: root.join("receipts.log"),
+    };
+    let plan = SingleAuthorityStartupPlan {
+        chain_id: LAUNCH_CHAIN_ID,
+        chain_incarnation: LAUNCH_CHAIN_INCARNATION,
+        network_id: LAUNCH_NETWORK_ID.into(),
+        release_id: RELEASE_ID.into(),
+        directory_namespace: "chain-1266/incarnation-5".into(),
+        genesis_hash: GENESIS_HASH.into(),
+        authority_id: LAUNCH_AUTHORITY_ID.into(),
+        authority_public_key_fingerprint: AUTHORITY_FINGERPRINT.into(),
+        target_block_time_ms: LAUNCH_TARGET_BLOCK_TIME_MS,
+        authority_start_height: 1,
+    };
+    let store = SingleAuthorityFinalityStore::at_paths(
+        paths.finality_log_path.clone(),
+        paths.finality_head_path.clone(),
+        SingleAuthorityChainBinding {
+            first_authority_height: 1,
+            chain_id: plan.chain_id,
+            chain_incarnation: plan.chain_incarnation,
+            authority_id: plan.authority_id.clone(),
+            authority_public_key_fingerprint: plan.authority_public_key_fingerprint.clone(),
+        },
+    )
+    .unwrap();
+    let mut parent = Hash::zero();
+    let mut end = 0;
+    for height in 1..=8_200u64 {
+        let record = SingleAuthorityFinalityRecord {
+            schema_version: SINGLE_AUTHORITY_FINALITY_SCHEMA_VERSION,
+            chain_id: plan.chain_id,
+            chain_incarnation: plan.chain_incarnation,
+            consensus_protocol: SINGLE_AUTHORITY_CONSENSUS_PROTOCOL.into(),
+            release_id: if height == 2 {
+                "foreign-release".into()
+            } else {
+                plan.release_id.clone()
+            },
+            height,
+            block_hash: Hash::from_domain_bytes("preflight-test", &height.to_be_bytes()),
+            parent_hash: parent,
+            state_root: Hash([1; 32]),
+            transaction_root: Hash([2; 32]),
+            receipt_root: Hash([3; 32]),
+            authority_id: plan.authority_id.clone(),
+            authority_public_key_fingerprint: plan.authority_public_key_fingerprint.clone(),
+            authority_signature_base64: "dGVzdC1zaWduYXR1cmU=".into(),
+            finalized_timestamp_ms: 1_700_000_000_000 + height * 1_000,
+        };
+        end = store.append_frame_at(&record, end).unwrap();
+        parent = record.block_hash;
+        if height == 8_200 {
+            store.commit_head(&record, end).unwrap();
+        }
+    }
+    let original_head = fs::read(&paths.finality_head_path).unwrap();
+    let error = require_durable_binding_agreement(&plan, &paths).unwrap_err();
+    assert!(error.contains("different release"), "{error}");
+    assert_eq!(fs::read(&paths.finality_head_path).unwrap(), original_head);
+    assert!(!paths.signing_journal_path.exists());
+    assert_eq!(fs::metadata(&paths.finality_log_path).unwrap().len(), end);
+    fs::remove_dir_all(root).unwrap();
 }

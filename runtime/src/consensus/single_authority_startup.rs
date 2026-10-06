@@ -305,14 +305,24 @@ pub fn require_durable_binding_agreement(
     )?;
     // A log or head written under a different incarnation cannot be recovered
     // under this binding, so this is the incarnation gate for finality.
-    let recovery = store.recover()?;
+    let recovery = store.inspect_startup_with_tail(0, |record| {
+        if record.chain_incarnation != plan.chain_incarnation || record.chain_id != plan.chain_id {
+            return Err(
+                "durable finality record is bound to a different chain incarnation".to_string(),
+            );
+        }
+        if record.release_id != plan.release_id {
+            return Err("durable finality record is bound to a different release".to_string());
+        }
+        Ok(())
+    })?;
     if let Some(head) = store.load_head()? {
         if head.chain_incarnation != plan.chain_incarnation || head.chain_id != plan.chain_id {
             return Err(
                 "durable finalized head is bound to a different chain incarnation".to_string(),
             );
         }
-        match recovery.latest() {
+        match recovery.finalized.as_ref() {
             Some(latest)
                 if latest.height == head.height && latest.block_hash == head.block_hash => {}
             Some(latest) => {
@@ -324,16 +334,6 @@ pub fn require_durable_binding_agreement(
             None => {
                 return Err("durable head exists with no finality records".to_string());
             }
-        }
-    }
-    for record in &recovery.records {
-        if record.chain_incarnation != plan.chain_incarnation || record.chain_id != plan.chain_id {
-            return Err(
-                "durable finality record is bound to a different chain incarnation".to_string(),
-            );
-        }
-        if record.release_id != plan.release_id {
-            return Err("durable finality record is bound to a different release".to_string());
         }
     }
 
@@ -350,7 +350,8 @@ pub fn require_durable_binding_agreement(
         release_id: plan.release_id.clone(),
     };
     let finalized_tip = recovery
-        .latest()
+        .finalized
+        .as_ref()
         .map(|record| (record.height, record.block_hash));
     journal.reconcile_finalized_head(
         &namespace,

@@ -87,7 +87,10 @@ fn record_at(height: u64, parent: Hash, block: Hash) -> SingleAuthorityFinalityR
 }
 
 /// Appends a chain 0..=n and commits the head after each, like the driver does.
-fn seed_chain(store: &SingleAuthorityFinalityStore, count: u64) -> Vec<SingleAuthorityFinalityRecord> {
+fn seed_chain(
+    store: &SingleAuthorityFinalityStore,
+    count: u64,
+) -> Vec<SingleAuthorityFinalityRecord> {
     let mut out = Vec::new();
     let mut parent = Hash::zero();
     for height in 0..count {
@@ -151,7 +154,10 @@ fn t04_conflicting_duplicate_height_fails() {
 
     let conflicting = record_at(0, Hash::zero(), hash_of(9));
     let error = store.append_finalized(&conflicting).unwrap_err();
-    assert!(error.contains("already finalized with a different block"), "{error}");
+    assert!(
+        error.contains("already finalized with a different block"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -221,7 +227,10 @@ fn t11_wrong_authority_fingerprint_fails() {
     let mut record = record_at(0, Hash::zero(), hash_of(1));
     record.authority_public_key_fingerprint = "sha256:someoneelse".to_string();
     let error = store.append_finalized(&record).unwrap_err();
-    assert!(error.contains("foreign authority key fingerprint"), "{error}");
+    assert!(
+        error.contains("foreign authority key fingerprint"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -292,7 +301,10 @@ fn t29_startup_recovery_streams_history_and_retains_only_requested_tail() {
 
 /// Appends raw bytes past the end of a healthy, head-committed log.
 fn append_raw(dir: &TempDir, bytes: &[u8]) {
-    let mut file = OpenOptions::new().append(true).open(dir.log()).expect("open log");
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(dir.log())
+        .expect("open log");
     file.write_all(bytes).expect("write raw");
     file.sync_all().expect("sync");
 }
@@ -306,7 +318,9 @@ fn t15_short_frame_prefix_after_head_is_recoverable() {
 
     append_raw(&dir, b"S1FR\x00\x00");
 
-    let recovery = open_store(&dir).recover().expect("torn prefix is recoverable");
+    let recovery = open_store(&dir)
+        .recover()
+        .expect("torn prefix is recoverable");
     assert_eq!(recovery.records, seeded);
     assert!(recovery.truncated_trailing_frame);
     assert_eq!(recovery.durable_end_offset, committed_len);
@@ -326,7 +340,9 @@ fn t16_short_payload_after_head_is_recoverable() {
     torn.extend_from_slice(&[0u8; 10]);
     append_raw(&dir, &torn);
 
-    let recovery = open_store(&dir).recover().expect("torn payload is recoverable");
+    let recovery = open_store(&dir)
+        .recover()
+        .expect("torn payload is recoverable");
     assert_eq!(recovery.records, seeded);
     assert!(recovery.truncated_trailing_frame);
 }
@@ -347,7 +363,9 @@ fn t17_short_checksum_after_head_is_recoverable() {
     torn.extend_from_slice(&[0u8; 8]);
     append_raw(&dir, &torn);
 
-    let recovery = open_store(&dir).recover().expect("torn checksum is recoverable");
+    let recovery = open_store(&dir)
+        .recover()
+        .expect("torn checksum is recoverable");
     assert_eq!(recovery.records, seeded);
     assert!(recovery.truncated_trailing_frame);
 }
@@ -451,7 +469,9 @@ fn t23_head_ahead_of_durable_log_fails_closed() {
 
     // Forge a head claiming a height the log never durably reached.
     let phantom = record_at(7, hash_of(6), hash_of(7));
-    store.commit_head(&phantom, 999_999).expect("write forged head");
+    store
+        .commit_head(&phantom, 999_999)
+        .expect("write forged head");
 
     let error = open_store(&dir).recover_startup_state().unwrap_err();
     assert!(error.contains("exceeds durable finality height"), "{error}");
@@ -465,7 +485,9 @@ fn t24_head_and_log_disagree_at_same_height_fails_closed() {
     let end = fs::metadata(dir.log()).unwrap().len();
 
     let impostor = record_at(1, hash_of(1), hash_of(200));
-    store.commit_head(&impostor, end).expect("write divergent head");
+    store
+        .commit_head(&impostor, end)
+        .expect("write divergent head");
 
     let error = open_store(&dir).recover_startup_state().unwrap_err();
     assert!(error.contains("head hash disagrees"), "{error}");
@@ -497,12 +519,16 @@ fn t26_multiple_valid_records_after_stale_head_are_deterministic() {
         parent = block;
     }
 
-    let first = open_store(&dir).recover_startup_state().expect("recover once");
+    let first = open_store(&dir)
+        .recover_startup_state()
+        .expect("recover once");
     assert_eq!(first.next_height, 4);
     assert!(first.head_advanced_during_recovery);
 
     // Second recovery must be stable and must not advance again.
-    let second = open_store(&dir).recover_startup_state().expect("recover twice");
+    let second = open_store(&dir)
+        .recover_startup_state()
+        .expect("recover twice");
     assert_eq!(second.next_height, 4);
     assert!(!second.head_advanced_during_recovery);
     assert_eq!(first.finalized, second.finalized);
@@ -527,10 +553,79 @@ fn t27_recovery_never_truncates_committed_history() {
     // Only a subsequent append may truncate the uncommitted tail.
     let next = record_at(3, hash_of(3), hash_of(4));
     let store = open_store(&dir);
-    let end = store.append_finalized(&next).expect("append after torn tail");
+    let end = store
+        .append_finalized(&next)
+        .expect("append after torn tail");
     store.commit_head(&next, end).expect("head");
 
     let recovery = open_store(&dir).recover().expect("recover");
     assert_eq!(recovery.records.len(), 4);
     assert_eq!(recovery.records[3], next);
+}
+
+#[test]
+fn inspection_streams_all_records_without_retaining_history_or_writing_head() {
+    let dir = TempDir::new("bounded-inspection");
+    let store = open_store(&dir);
+    let mut parent = Hash::zero();
+    let mut end = 0;
+    for height in 0..10_000 {
+        let record = record_at(height, parent, hash_of(1u8.wrapping_add(height as u8)));
+        end = store.append_frame_at(&record, end).expect("append frame");
+        parent = record.block_hash;
+    }
+    let mut visited = 0;
+    let result = store
+        .inspect_startup_with_tail(0, |_| {
+            visited += 1;
+            Ok(())
+        })
+        .expect("inspect");
+    assert_eq!(visited, 10_000);
+    assert!(result.recent_records.is_empty());
+    assert_eq!(result.finalized.unwrap().height, 9_999);
+    assert!(!result.head_advanced_during_recovery);
+    assert!(!dir.head().exists(), "inspection must not create a head");
+    assert_eq!(fs::metadata(dir.log()).unwrap().len(), end);
+}
+
+#[test]
+fn inspection_rejects_foreign_release_outside_retained_tail_without_writes() {
+    let dir = TempDir::new("foreign-release-inspection");
+    let store = open_store(&dir);
+    let mut parent = Hash::zero();
+    let mut end = 0;
+    for height in 0..20 {
+        let mut record = record_at(height, parent, hash_of(1u8.wrapping_add(height as u8)));
+        if height == 3 {
+            record.release_id = "foreign-release".into();
+        }
+        end = store.append_frame_at(&record, end).expect("append frame");
+        parent = record.block_hash;
+    }
+    let error = store
+        .inspect_startup_with_tail(2, |record| {
+            if record.release_id != "chain1266-single-authority-rc1" {
+                return Err("foreign release".into());
+            }
+            Ok(())
+        })
+        .unwrap_err();
+    assert_eq!(error, "foreign release");
+    assert!(!dir.head().exists());
+    assert_eq!(fs::metadata(dir.log()).unwrap().len(), end);
+}
+
+#[test]
+fn inspection_leaves_a_stale_head_unchanged() {
+    let dir = TempDir::new("stale-head-inspection");
+    let store = open_store(&dir);
+    seed_chain(&store, 2);
+    let original_head = fs::read(dir.head()).unwrap();
+    let end = fs::metadata(dir.log()).unwrap().len();
+    let next = record_at(2, hash_of(2), hash_of(3));
+    store.append_frame_at(&next, end).unwrap();
+    let result = store.inspect_startup_with_tail(0, |_| Ok(())).unwrap();
+    assert_eq!(result.finalized.unwrap().height, 2);
+    assert_eq!(fs::read(dir.head()).unwrap(), original_head);
 }
