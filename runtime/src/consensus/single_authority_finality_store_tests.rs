@@ -274,7 +274,11 @@ fn t29_startup_recovery_streams_history_and_retains_only_requested_tail() {
     // Use the O(1) append primitive so this is a real on-disk archive that is
     // longer than the retained suffix without making the test quadratic.
     for height in 0..32 {
-        let record = record_at(height, parent, hash_of(1u8.wrapping_add(height as u8)));
+        let record = record_at(
+            height,
+            parent,
+            Hash::from_domain_bytes("bounded-inspection-test", &height.to_be_bytes()),
+        );
         end = store
             .append_frame_at(&record, end)
             .expect("append durable frame");
@@ -470,7 +474,7 @@ fn t23_head_ahead_of_durable_log_fails_closed() {
     // Forge a head claiming a height the log never durably reached.
     let phantom = record_at(7, hash_of(6), hash_of(7));
     store
-        .commit_head(&phantom, 999_999)
+        .commit_head(&phantom, fs::metadata(dir.log()).unwrap().len())
         .expect("write forged head");
 
     let error = open_store(&dir).recover_startup_state().unwrap_err();
