@@ -6505,7 +6505,17 @@ fn enforce_rpc_exposure_policy(
 
     match exposure {
         RpcMethodExposure::PublicRead => Ok(()),
-        RpcMethodExposure::PublicClient if is_service_access_role => Ok(()),
+        RpcMethodExposure::PublicClient
+            if is_service_access_role
+                || native_aegis_admission_enabled(
+                    method,
+                    canonical_genesis()
+                        .map(crate::rpc::single_authority_finality_rpc::genesis_binds_single_authority)
+                        .unwrap_or(false),
+                ) =>
+        {
+            Ok(())
+        }
         RpcMethodExposure::PublicClient => Err(build_exposure_error(
             method,
             exposure,
