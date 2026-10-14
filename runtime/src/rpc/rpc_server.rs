@@ -2697,6 +2697,10 @@ fn rpc_bool_param(params: &Value, object_key: &str, array_index: usize) -> Optio
         })
 }
 
+fn native_aegis_admission_enabled(method: &str, bound_to_current_chain: bool) -> bool {
+    method == "synergy_submitAegisTransaction" && bound_to_current_chain
+}
+
 fn handle_json_rpc(
     method: &str,
     params: Value,
@@ -2706,6 +2710,12 @@ fn handle_json_rpc(
     // Temporarily disabled AIVM for quick compile
     // aivm_runtime: &Arc<AIVMRuntime>,
 ) -> Value {
+    let native_transaction_admission = native_aegis_admission_enabled(
+        method,
+        canonical_genesis()
+            .map(crate::rpc::single_authority_finality_rpc::genesis_binds_single_authority)
+            .unwrap_or(false),
+    );
     if matches!(
         method,
         "synergy_sendTransaction"
@@ -2713,11 +2723,11 @@ fn handle_json_rpc(
             | "synergy_submitAegisDagTransaction"
             | "synergy_submitAegisDagTransactionBatch"
             | "synergy_submitAegisTransactionBatch"
-    ) {
+    ) && !native_transaction_admission {
         return json!({
             "success": false,
             "code": crate::etdag::ERR_PLAINTEXT_USER_TX_DISABLED,
-            "error": "Ordinary plaintext transaction submission is disabled after Testnet-v3 ETDAG activation",
+            "error": "This transaction method is unavailable on Synergy Testnet v3, chain 1266",
             "required_method": "synergy_submitEncryptedTransaction",
             "automatic_plaintext_fallback": false,
         });
@@ -12065,7 +12075,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_plaintext_submit_routes_are_classified_but_fail_closed_in_execution() {
+    fn unsupported_submit_routes_fail_closed_while_native_aegis_admission_is_available() {
         let mut headers = HashMap::new();
         headers.insert("x-forwarded-for".to_string(), "198.51.100.22".to_string());
         let context = RpcRequestContext {
@@ -12077,7 +12087,6 @@ mod tests {
 
         for method in [
             "synergy_sendTransaction",
-            "synergy_submitAegisTransaction",
             "synergy_submitAegisTransactionBatch",
             "synergy_submitAegisDagTransaction",
             "synergy_submitAegisDagTransactionBatch",
@@ -12104,6 +12113,9 @@ mod tests {
             );
             assert_eq!(result["automatic_plaintext_fallback"], json!(false));
         }
+        assert!(native_aegis_admission_enabled("synergy_submitAegisTransaction", true));
+        assert!(!native_aegis_admission_enabled("synergy_submitAegisTransaction", false));
+        assert!(!native_aegis_admission_enabled("synergy_sendTransaction", true));
         let pending = handle_json_rpc(
             "synergy_getDagGraph",
             json!([]),

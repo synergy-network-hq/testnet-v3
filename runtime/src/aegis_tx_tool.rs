@@ -11,6 +11,8 @@ use std::convert::TryFrom;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const AEGIS_TX_CARRIER_PREFIX: &str = "aegis-pqvm-tx-v1:";
+/// The faucet float is bound to this custody identity by the signed v3 Genesis.
+pub const TESTNET_V3_FAUCET_ADDRESS: &str = "syns10a8prj2pvm3lwtd2zf8ke54zhq8ux3804kl2";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AegisTxBuildOptions {
@@ -401,7 +403,14 @@ pub fn verify_aegis_submission_envelope_at(
     }
     let expected_sender =
         crate::address::generate_wallet_address(&hex::encode(&envelope.public_key.key_bytes));
-    if envelope.transaction.sender_uma_or_account != expected_sender {
+    let genesis_faucet_signer = envelope.transaction.sender_uma_or_account
+        == TESTNET_V3_FAUCET_ADDRESS
+        && envelope.public_key.algorithm == "fndsa"
+        && crate::address::address_matches_public_key(
+            TESTNET_V3_FAUCET_ADDRESS,
+            &envelope.public_key.key_bytes,
+        );
+    if envelope.transaction.sender_uma_or_account != expected_sender && !genesis_faucet_signer {
         return Err(format!(
             "Aegis transaction sender does not match transaction public key-derived address; expected {expected_sender}, got {}",
             envelope.transaction.sender_uma_or_account

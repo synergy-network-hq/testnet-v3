@@ -283,9 +283,9 @@ impl Transaction {
             };
         }
 
-        // Governed Testnet-v3 profile: user/account transactions are ML-DSA-87.
-        // ML-DSA-65 (consensus domain) and FN-DSA (address-derivation material)
-        // are rejected here by design — cross-domain reuse must fail closed.
+        // Native user transactions require ML-DSA-87. An Aegis carrier is
+        // reverified before execution. The signed Genesis faucet identity is
+        // the sole FN-DSA carrier exception for the active testnet float.
         match self.signature_algorithm.as_str() {
             "mldsa87" => {}
             // Internal validator Aegis carrier: ML-DSA-65 is admissible ONLY for a
@@ -293,6 +293,9 @@ impl Transaction {
             // cannot be interpreted as a user transaction. Its signature is
             // verified separately by validate_legacy_aegis_carrier_transaction.
             "mldsa65" if crate::aegis_tx_tool::is_legacy_aegis_carrier_transaction(self) => {}
+            "fndsa"
+                if self.sender == crate::aegis_tx_tool::TESTNET_V3_FAUCET_ADDRESS
+                    && crate::aegis_tx_tool::is_legacy_aegis_carrier_transaction(self) => {}
             _ => {
                 return TransactionValidationResult {
                     is_valid: false,

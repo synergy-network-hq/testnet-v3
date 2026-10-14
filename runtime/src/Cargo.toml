@@ -80,6 +80,10 @@ name = "chain1266-single-authority-bootstrap"
 path = "bin/chain1266-single-authority-bootstrap.rs"
 
 [[bin]]
+name = "synergy-faucet-sign"
+path = "bin/synergy-faucet-sign.rs"
+
+[[bin]]
 name = "build-chain1266-desired-state"
 path = "bin/build-chain1266-desired-state.rs"
 
