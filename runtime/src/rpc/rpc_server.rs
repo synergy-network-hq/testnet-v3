@@ -4426,6 +4426,13 @@ fn handle_json_rpc(
 
         "synergy_getAllBalances" => {
             if let Some(address) = params.get(0).and_then(|v| v.as_str()) {
+                if current_chain_uses_single_authority() {
+                    let balance = canonical_snrg_balance_json(address);
+                    if balance.get("error").is_some() {
+                        return balance;
+                    }
+                    return json!({"SNRG": balance});
+                }
                 let token_manager = TOKEN_MANAGER.clone();
                 json!(token_manager.get_all_balances(address))
             } else {

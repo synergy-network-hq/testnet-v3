@@ -8,7 +8,7 @@ Updated 2026-10-15 UTC. This is a developer-facing inventory of the current publ
 | --- | --- | --- |
 | `https://rpc.synergy-network.io/` | Native JSON-RPC 2.0 over HTTPS | Primary read and signed-transaction endpoint. Two Cloudflare-proxied gateway origins serve this hostname. |
 | `https://testnet-core-rpc.synergy-network.io/` | JSON-RPC 2.0 over HTTPS | Public read-only Worker forwarding its allowlisted methods to the live native RPC gateway after verifying chain 1266. It rejects transaction writes. |
-| `https://testnet-rpc.synergy-network.io/` | Native JSON-RPC 2.0 over HTTPS | Existing native RPC alias. |
+| `https://testnet-rpc.synergy-network.io/` | JSON-RPC 2.0 over HTTPS | Wallet-compatible alias. Its root route forwards native reads and signed writes, and derives legacy `synergy_getAllBalances` SNRG from finalized `synergy_getTokenBalance`. |
 | `wss://testnet-core-ws.synergy-network.io/` | Native WebSocket | Core subscription transport. Requires a WebSocket upgrade. |
 | `wss://testnet-ws.synergy-network.io/` | Native WebSocket | Alias of the core WebSocket endpoint. |
 | `https://testnet-evm-rpc.synergy-network.io/` | JSON-RPC 2.0 over HTTPS | Currently answers Synergy RPC. `eth_chainId` returned method-not-found during this audit; do not assume Ethereum JSON-RPC compatibility from the hostname. |
@@ -23,7 +23,7 @@ Updated 2026-10-15 UTC. This is a developer-facing inventory of the current publ
 | `https://forge.synergy-network.io/api/wallet-pairing/healthz` | HTTP GET JSON | Synergy Wallet pairing relay health. |
 | `https://forge.synergy-network.io/api/wallet-pairing/sessions` | HTTP POST JSON | Start a wallet pairing session; related session/request endpoints are listed in the Atlas OpenAPI inventory below. |
 
-The previous observer host now serves as a second RPC Gateway behind the existing `rpc`, `testnet-core-rpc`, and `testnet-core-ws` DNS names. Their aliases retain their existing URLs. Both origins tunnel to the same live chain; the second gateway is not a separate validator or independent state source. The `testnet-core-rpc` Worker routes allowed reads to the native `rpc` hostname; the `testnet-rpc` alias reaches the native gateway directly.
+The previous observer host now serves as a second RPC Gateway behind the existing `rpc`, `testnet-core-rpc`, and `testnet-core-ws` DNS names. Their aliases retain their existing URLs. Both origins tunnel to the same live chain; the second gateway is not a separate validator or independent state source. The `testnet-core-rpc` Worker routes allowed reads to the native `rpc` hostname. The exact root route of `testnet-rpc` uses the same chain-checked Worker for wallet balance compatibility; other paths retain their native routing.
 
 ## Native JSON-RPC request
 
@@ -36,6 +36,8 @@ curl -fsS https://rpc.synergy-network.io/ \
 ```
 
 The response includes chain context and a method-specific `result` or `error`. A successful HTTP status does not guarantee that the JSON-RPC call succeeded; inspect `error`. Useful current reads include `synergy_networkId`, `synergy_chainId`, `synergy_getFinalizedHead`, `synergy_getBlockNumber`, `synergy_getBlockByNumber`, `synergy_getAccountNonce`, and `synergy_getTokenBalance` (address and token symbol). The native signed-transfer submission method `synergy_submitAegisTransaction` accepts one Aegis envelope in `params[0]`; a live faucet payout finalized through it. Plain `synergy_sendTransaction` and DAG/batch submission methods remain gated. Do not use the read-only core facade for writes.
+
+**Wallet balance compatibility:** `synergy_getTokenBalance` with `[address, "SNRG"]` reads the finalized native balance. At the `testnet-rpc` root, `synergy_getAllBalances` returns that same value as `{"SNRG": amount_nwei}` for installed Synergy Wallet clients. The authority's direct aggregate handler still returns an empty map until its prepared runtime fix is deployed.
 
 **Receipt compatibility note:** the current authority returns a finalized `synergy_getTransactionReceipt` payload inside JSON-RPC `error.data` because its generic wrapper mistakes an empty execution-error field for an RPC error. The faucet accepts only a hash-matched finalized receipt from that field. Other clients should use this field only after checking the chain context, transaction hash, finalized flag, and status. A runtime fix is prepared; the public RPC response is not yet in its intended `result` shape.
 
@@ -151,3 +153,4 @@ The following registered routes came from the live `/api/v1/openapi.json` schema
 - Forge adapter and faucet gates: `14-Forge/forge-v3/app/api/rpc/route.ts`, `app/api/faucet/route.ts`, `app/api/network-snapshot/route.ts` in the Forge repository.
 - Atlas route catalog: [live OpenAPI schema](https://testnet-atlas-api.synergy-network.io/api/v1/openapi.json).
 - Live checks on 2026-10-14/15 UTC: native `rpc`, read-only `testnet-core-rpc`, and native `testnet-rpc` all returned chain 1266 and advancing finalized heads (3,255,810–3,255,812 after the Worker update); a write to the core read facade returned JSON-RPC `-32601`. Both gateway origins returned HTTP 200 on observed proxied requests. Atlas `/api/v1/network/summary` returned chain 1266 but its indexed head lagged live finality during this audit; use the native RPC for current chain state. `eth_chainId` on the EVM-named host returned JSON-RPC method-not-found. A 10 SNRG faucet payout finalized as transaction `syntxn-441013965ff89449f66d0d62b0f3efacb42d595f23ff13ddddd74efa7fe3241a`; direct and Forge faucet GET returned chain 1266, and repeat POST returned HTTP 429 cooldown on both routes.
+- On 2026-10-15 UTC, `devpup.syn` resolved to `synw1jmtpyjw62nxgattrcjc2tx2hezwj6rka5war` in the live node's local SynID registry. The wallet's faucet payout was finalized at block 3,255,799 under transaction `syntxn-3d55bd65c7710ff6fbb577cbf21d7a584c55c4637776f088d1f4549c25ab3e5d`; the RPC-returned admission hash now drives faucet confirmation. The wallet-compatible `testnet-rpc` root returned `{"SNRG":10000000000}` with chain ID 1266, matching `synergy_getBalance`. This local SynID mapping is operational data, not a signed on-chain ownership record.
