@@ -1,14 +1,14 @@
 # Synergy Testnet v3 (chain 1266): RPC and API catalog
 
-Updated 2026-10-14. This is a developer-facing inventory of the current public endpoints and the methods/routes registered in the running Testnet v3 stack. The chain identity is `synergy-testnet-v3`, chain ID `1266` (`0x4f2`). Check the chain identity in every integration response before acting on it.
+Updated 2026-10-15 UTC. This is a developer-facing inventory of the current public endpoints and the methods/routes registered in the running Testnet v3 stack. The chain identity is `synergy-testnet-v3`, chain ID `1266` (`0x4f2`). Check the chain identity in every integration response before acting on it.
 
 ## Public endpoints
 
 | Endpoint | Interface | Current use |
 | --- | --- | --- |
 | `https://rpc.synergy-network.io/` | Native JSON-RPC 2.0 over HTTPS | Primary read and signed-transaction endpoint. Two Cloudflare-proxied gateway origins serve this hostname. |
-| `https://testnet-core-rpc.synergy-network.io/` | JSON-RPC 2.0 over HTTPS | Public read facade; it does not forward transaction writes. |
-| `https://testnet-rpc.synergy-network.io/` | JSON-RPC 2.0 over HTTPS | Alias of the core RPC facade. |
+| `https://testnet-core-rpc.synergy-network.io/` | JSON-RPC 2.0 over HTTPS | Public read-only Worker forwarding its allowlisted methods to the live native RPC gateway after verifying chain 1266. It rejects transaction writes. |
+| `https://testnet-rpc.synergy-network.io/` | Native JSON-RPC 2.0 over HTTPS | Existing native RPC alias. |
 | `wss://testnet-core-ws.synergy-network.io/` | Native WebSocket | Core subscription transport. Requires a WebSocket upgrade. |
 | `wss://testnet-ws.synergy-network.io/` | Native WebSocket | Alias of the core WebSocket endpoint. |
 | `https://testnet-evm-rpc.synergy-network.io/` | JSON-RPC 2.0 over HTTPS | Currently answers Synergy RPC. `eth_chainId` returned method-not-found during this audit; do not assume Ethereum JSON-RPC compatibility from the hostname. |
@@ -16,14 +16,14 @@ Updated 2026-10-14. This is a developer-facing inventory of the current public e
 | `https://testnet-atlas-api.synergy-network.io/api/v1/openapi.json` | OpenAPI JSON | Live Atlas route schema. Route registration does not imply anonymous access or active chain capability. |
 | `https://forge.synergy-network.io/api/rpc` | HTTP POST JSON | Forge read-only RPC adapter with its own method allowlist and Atlas fallback. |
 | `https://forge.synergy-network.io/api/network-snapshot` | HTTP GET JSON | Forge network summary assembled from RPC and Atlas. |
-| `https://forge.synergy-network.io/api/faucet` | HTTP GET/POST JSON | Forge faucet view and request proxy. POST accepts `recipient` or `address`. It verifies chain 1266 before forwarding. |
-| `https://testnet-faucet.synergy-network.io/api/faucet/info` | HTTP GET JSON | Faucet identity, amount, balance, and cooldown. The legacy upstream still advertises chain 1264 at this update; payout requests must remain gated until the v3 service is verified. |
+| `https://forge.synergy-network.io/api/faucet` | HTTP GET/POST JSON | Live Forge faucet view and request proxy. POST accepts `recipient` or `address` and verifies chain 1266 before forwarding. |
+| `https://testnet-faucet.synergy-network.io/api/faucet/info` | HTTP GET JSON | Live v3 faucet identity, 10 SNRG amount, balance, and 24-hour cooldown. |
 | `https://testnet-faucet.synergy-network.io/api/faucet/stats` | HTTP GET JSON | Faucet request statistics. |
-| `https://testnet-faucet.synergy-network.io/api/faucet/request` | HTTP POST JSON | Direct faucet request (`recipient` or `address`); currently gated by the v3 migration. |
+| `https://testnet-faucet.synergy-network.io/api/faucet/request` | HTTP POST JSON | Live direct faucet request (`recipient` or `address`). Repeat requests for the same wallet are subject to the 24-hour cooldown. |
 | `https://forge.synergy-network.io/api/wallet-pairing/healthz` | HTTP GET JSON | Synergy Wallet pairing relay health. |
 | `https://forge.synergy-network.io/api/wallet-pairing/sessions` | HTTP POST JSON | Start a wallet pairing session; related session/request endpoints are listed in the Atlas OpenAPI inventory below. |
 
-The previous observer host now serves as a second RPC Gateway behind the existing `rpc`, `testnet-core-rpc`, and `testnet-core-ws` DNS names. Their aliases retain their existing URLs. Both origins tunnel to the same live chain; the second gateway is not a separate validator or independent state source.
+The previous observer host now serves as a second RPC Gateway behind the existing `rpc`, `testnet-core-rpc`, and `testnet-core-ws` DNS names. Their aliases retain their existing URLs. Both origins tunnel to the same live chain; the second gateway is not a separate validator or independent state source. The `testnet-core-rpc` Worker routes allowed reads to the native `rpc` hostname; the `testnet-rpc` alias reaches the native gateway directly.
 
 ## Native JSON-RPC request
 
@@ -35,7 +35,9 @@ curl -fsS https://rpc.synergy-network.io/ \
   --data '{"jsonrpc":"2.0","id":1,"method":"synergy_networkId","params":[]}'
 ```
 
-The response includes chain context and a method-specific `result` or `error`. A successful HTTP status does not guarantee that the JSON-RPC call succeeded; inspect `error`. Useful current reads include `synergy_networkId`, `synergy_chainId`, `synergy_getFinalizedHead`, `synergy_getBlockNumber`, `synergy_getBlockByNumber`, `synergy_getAccountNonce`, `synergy_getTokenBalance` (address and token symbol), and `synergy_getTransactionReceipt` (transaction hash). The native signed-transfer submission method is `synergy_submitAegisTransaction` with one Aegis envelope in `params[0]`; it is being activated for the v3 faucet. Plain `synergy_sendTransaction` and DAG/batch submission methods remain gated. Do not use the read-only core facade for writes.
+The response includes chain context and a method-specific `result` or `error`. A successful HTTP status does not guarantee that the JSON-RPC call succeeded; inspect `error`. Useful current reads include `synergy_networkId`, `synergy_chainId`, `synergy_getFinalizedHead`, `synergy_getBlockNumber`, `synergy_getBlockByNumber`, `synergy_getAccountNonce`, and `synergy_getTokenBalance` (address and token symbol). The native signed-transfer submission method `synergy_submitAegisTransaction` accepts one Aegis envelope in `params[0]`; a live faucet payout finalized through it. Plain `synergy_sendTransaction` and DAG/batch submission methods remain gated. Do not use the read-only core facade for writes.
+
+**Receipt compatibility note:** the current authority returns a finalized `synergy_getTransactionReceipt` payload inside JSON-RPC `error.data` because its generic wrapper mistakes an empty execution-error field for an RPC error. The faucet accepts only a hash-matched finalized receipt from that field. Other clients should use this field only after checking the chain context, transaction hash, finalized flag, and status. A runtime fix is prepared; the public RPC response is not yet in its intended `result` shape.
 
 The following inventory distinguishes **registered exposure** from a proven active feature. Some registered methods require parameters, an initialized subsystem, an authorization context, or data that the current deployment does not have. Readiness, finality, and receipts from the live network remain the authority for a specific call. No method in this catalog implies that PoSy or ETDAG is active on this chain.
 
@@ -148,4 +150,4 @@ The following registered routes came from the live `/api/v1/openapi.json` schema
 - Runtime exposure policy and handler: `runtime/src/rpc/rpc_server.rs`.
 - Forge adapter and faucet gates: `14-Forge/forge-v3/app/api/rpc/route.ts`, `app/api/faucet/route.ts`, `app/api/network-snapshot/route.ts` in the Forge repository.
 - Atlas route catalog: [live OpenAPI schema](https://testnet-atlas-api.synergy-network.io/api/v1/openapi.json).
-- Live checks on 2026-10-14: the three HTTPS Synergy RPC hostnames returned chain 1266 on 30 of 30 requests; the second gateway returned HTTP 200 on observed proxied requests; Atlas `/api/v1/network/summary` returned chain 1266; `eth_chainId` on the EVM-named host returned JSON-RPC method-not-found.
+- Live checks on 2026-10-14/15 UTC: native `rpc`, read-only `testnet-core-rpc`, and native `testnet-rpc` all returned chain 1266 and advancing finalized heads (3,255,810–3,255,812 after the Worker update); a write to the core read facade returned JSON-RPC `-32601`. Both gateway origins returned HTTP 200 on observed proxied requests. Atlas `/api/v1/network/summary` returned chain 1266 but its indexed head lagged live finality during this audit; use the native RPC for current chain state. `eth_chainId` on the EVM-named host returned JSON-RPC method-not-found. A 10 SNRG faucet payout finalized as transaction `syntxn-441013965ff89449f66d0d62b0f3efacb42d595f23ff13ddddd74efa7fe3241a`; direct and Forge faucet GET returned chain 1266, and repeat POST returned HTTP 429 cooldown on both routes.

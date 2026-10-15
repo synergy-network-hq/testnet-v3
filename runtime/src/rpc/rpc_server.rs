@@ -8122,7 +8122,7 @@ fn transaction_receipt_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> V
                         "to": tx.receiver,
                         "gasUsed": receipt.gas_used,
                         "status": status,
-                        "error": receipt.error,
+                        "executionError": receipt.error,
                         "feeCharged": receipt.fee_breakdown.as_ref().map(|fee| u128_rpc_value(fee.total_network_fee_nwei)),
                         "finalized": true,
                         "chain": chain_identity_json(),
