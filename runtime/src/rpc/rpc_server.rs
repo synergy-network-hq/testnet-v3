@@ -3370,7 +3370,11 @@ fn handle_json_rpc(
                 .or_else(|| config.as_ref().map(|cfg| cfg.network.name.clone()));
             let network_id = config.as_ref().map(|cfg| cfg.network.id);
             let chain_id = config.as_ref().map(|cfg| cfg.blockchain.chain_id);
-            let consensus = config.as_ref().map(|cfg| cfg.consensus.algorithm.clone());
+            let consensus = if current_chain_uses_single_authority() {
+                Some("Synergy Testnet v3".to_string())
+            } else {
+                config.as_ref().map(|cfg| cfg.consensus.algorithm.clone())
+            };
             let syncing = SYNC_MANAGER.try_lock().ok().map(|manager| {
                 !matches!(manager.get_state(), SyncState::Synced | SyncState::Idle)
             });
@@ -3539,6 +3543,9 @@ fn handle_json_rpc(
                 params.get(0).and_then(|v| v.as_str()),
                 params.get(1).and_then(|v| v.as_str()),
             ) {
+                if token.eq_ignore_ascii_case("SNRG") && current_chain_uses_single_authority() {
+                    return canonical_snrg_balance_json(address);
+                }
                 let token_manager = TOKEN_MANAGER.clone();
                 json!(token_manager.get_balance(address, token))
             } else {
@@ -4654,6 +4661,10 @@ fn handle_json_rpc(
         // Get the transaction count (nonce) for an address.
         "synergy_getTransactionCount" => {
             if let Some(address) = params.get(0).and_then(|v| v.as_str()) {
+                if current_chain_uses_single_authority() {
+                    return get_account_nonce(&json!([address]), tx_pool, chain)
+                        .unwrap_or_else(|error| json!({"error": error.message, "code": error.code}));
+                }
                 let _block_tag = params.get(1).and_then(|v| v.as_str()).unwrap_or("latest");
 
                 // Count confirmed transactions sent by this address
@@ -4687,6 +4698,9 @@ fn handle_json_rpc(
         // Get the SNRG balance for an address (standardized method).
         "synergy_getBalance" => {
             if let Some(address) = params.get(0).and_then(|v| v.as_str()) {
+                if current_chain_uses_single_authority() {
+                    return canonical_snrg_balance_json(address);
+                }
                 let token_manager = TOKEN_MANAGER.clone();
                 let balance = token_manager.get_balance(address, "SNRG");
                 json!(balance)
@@ -4697,7 +4711,11 @@ fn handle_json_rpc(
 
         "synergy_getAccount" => {
             if let Some(address) = params.get(0).and_then(|v| v.as_str()) {
-                let balance = TOKEN_MANAGER.get_balance(address, "SNRG");
+                let balance = if current_chain_uses_single_authority() {
+                    canonical_snrg_balance_json(address)
+                } else {
+                    json!(TOKEN_MANAGER.get_balance(address, "SNRG"))
+                };
                 let nonce = get_account_nonce(&params, tx_pool, chain).unwrap_or_else(|error| {
                     json!({
                         "error": error.message,
@@ -6022,6 +6040,19 @@ fn handle_json_rpc(
 /// persistence; RPC itself has no path to fabricate or mutate it.
 fn finalized_synq_query_state() -> Result<crate::execution::ExecutionState, String> {
     crate::execution::finalized_execution_state_snapshot()
+}
+
+fn current_chain_uses_single_authority() -> bool {
+    canonical_genesis()
+        .map(crate::rpc::single_authority_finality_rpc::genesis_binds_single_authority)
+        .unwrap_or(false)
+}
+
+fn canonical_snrg_balance_json(address: &str) -> Value {
+    match finalized_synq_query_state() {
+        Ok(state) => u128_rpc_value(*state.balances_nwei.get(address).unwrap_or(&0)),
+        Err(error) => json!({"error": error}),
+    }
 }
 
 fn synq_static_call_json(call_obj: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
@@ -7977,6 +8008,23 @@ fn transaction_lookup_json(
     let Some(tx_hash) = params.get(0).and_then(Value::as_str) else {
         return json!({"error": "Missing transaction hash parameter"});
     };
+    if let Ok(genesis) = canonical_genesis() {
+        if crate::rpc::single_authority_finality_rpc::genesis_binds_single_authority(genesis) {
+            match crate::rpc::single_authority_finality_rpc::single_authority_cached_transaction_for_rpc(genesis, tx_hash) {
+                Ok(Some((entry, index, _))) => {
+                    let block = entry.body.as_ref().expect("cached authority entry has a body");
+                    return tx_to_explorer_json(&block.transactions[index], "confirmed", Some(block.block_index), Some(index));
+                }
+                Err(error) => return json!({"error": error}),
+                Ok(None) => {}
+            }
+            let pool = tx_pool.lock().unwrap();
+            if let Some(tx) = pool.iter().find(|tx| tx.hash().eq_ignore_ascii_case(tx_hash)) {
+                return tx_to_explorer_json(tx, "pending", None, None);
+            }
+            return Value::Null;
+        }
+    }
     let normalized = tx_hash.strip_prefix("0x").unwrap_or(tx_hash).to_lowercase();
     let raw_hash_search = normalized
         .strip_prefix("syntxn-")
@@ -8055,6 +8103,36 @@ fn transaction_status_json(
 }
 
 fn transaction_receipt_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
+    if let Ok(genesis) = canonical_genesis() {
+        if crate::rpc::single_authority_finality_rpc::genesis_binds_single_authority(genesis) {
+            let Some(query) = params.get(0).and_then(Value::as_str) else {
+                return json!({"error": "Missing transaction hash parameter"});
+            };
+            return match crate::rpc::single_authority_finality_rpc::single_authority_cached_transaction_for_rpc(genesis, query) {
+                Ok(Some((entry, index, Some(receipt)))) => {
+                    let block = entry.body.as_ref().expect("cached authority entry has a body");
+                    let tx = &block.transactions[index];
+                    let status = if receipt.status == crate::execution::ReceiptStatus::Success { "0x1" } else { "0x0" };
+                    json!({
+                        "transactionHash": tx.hash(),
+                        "transactionIndex": index,
+                        "blockHash": block.hash,
+                        "blockNumber": block.block_index,
+                        "from": tx.sender,
+                        "to": tx.receiver,
+                        "gasUsed": receipt.gas_used,
+                        "status": status,
+                        "error": receipt.error,
+                        "feeCharged": receipt.fee_breakdown.as_ref().map(|fee| u128_rpc_value(fee.total_network_fee_nwei)),
+                        "finalized": true,
+                        "chain": chain_identity_json(),
+                    })
+                }
+                Ok(_) => Value::Null,
+                Err(error) => json!({"error": error}),
+            };
+        }
+    }
     let index_path = configured_synq_receipt_index_path();
     transaction_receipt_json_with_index_path(params, chain, Some(&index_path))
 }
@@ -10111,6 +10189,19 @@ fn get_account_nonce(
         .and_then(|value| value.as_str())
         .ok_or_else(|| RpcError::new(-32602, "Missing address parameter"))?;
 
+    if let Ok(genesis) = canonical_genesis() {
+        if crate::rpc::single_authority_finality_rpc::genesis_binds_single_authority(genesis) {
+            let mut next_nonce = crate::rpc::single_authority_finality_rpc::single_authority_next_nonce_for_rpc(genesis, address)
+                .map_err(|error| RpcError::new(-32071, error))?
+                .unwrap_or(0);
+            let pool = tx_pool.lock().unwrap();
+            for tx in pool.iter().filter(|tx| tx.sender.eq_ignore_ascii_case(address)) {
+                next_nonce = next_nonce.max(tx.nonce.saturating_add(1));
+            }
+            return Ok(json!(next_nonce));
+        }
+    }
+
     let mut next_nonce = 0u64;
 
     if let Ok(wallet_manager) = WALLET_MANAGER.lock() {
@@ -11140,7 +11231,7 @@ mod tests {
         );
         assert_eq!(
             block_one["consensus_protocol"],
-            json!("single_authority_v1")
+            json!("Synergy Testnet v3")
         );
         assert_eq!(block_one["validator_id"], json!(SA_AUTHORITY_ADDRESS));
         assert_eq!(block_one["authority_address"], json!(SA_AUTHORITY_ADDRESS));

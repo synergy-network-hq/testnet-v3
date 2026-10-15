@@ -4686,10 +4686,17 @@ impl ProofOfSynergy {
 
         Self::validate_transaction_nonce_for_mempool(tx)?;
 
-        // 2. Verify sender balance via token manager to reflect on-chain state
-        let token_manager = TOKEN_MANAGER.clone();
         let required = snrg_balance_required_for_transaction(tx);
-        if token_manager.get_balance(&tx.sender, "SNRG") < required {
+        let balance = if canonical_genesis()
+            .map(crate::rpc::single_authority_finality_rpc::genesis_binds_single_authority)
+            .unwrap_or(false)
+        {
+            *crate::execution::finalized_execution_state_snapshot()?
+                .balances_nwei.get(&tx.sender).unwrap_or(&0)
+        } else {
+            u128::from(TOKEN_MANAGER.clone().get_balance(&tx.sender, "SNRG"))
+        };
+        if balance < u128::from(required) {
             return Err(format!(
                 "insufficient SNRG balance for transaction; required {required}"
             ));
@@ -4708,6 +4715,18 @@ impl ProofOfSynergy {
     pub(crate) fn validate_transaction_nonce_for_mempool(
         tx: &crate::transaction::Transaction,
     ) -> Result<(), String> {
+        if let Ok(genesis) = canonical_genesis() {
+            if crate::rpc::single_authority_finality_rpc::genesis_binds_single_authority(genesis) {
+                let next_nonce = crate::rpc::single_authority_finality_rpc::single_authority_next_nonce_for_rpc(genesis, &tx.sender)?
+                    .ok_or_else(|| "Synergy Testnet v3 committed nonce index is unavailable".to_string())?;
+                let committed = if next_nonce == 0 { Vec::new() } else { vec![next_nonce - 1] };
+                let tx_hash = tx.hash();
+                let pending = TX_POOL.lock().unwrap().iter()
+                    .filter(|entry| entry.sender.eq_ignore_ascii_case(&tx.sender) && entry.hash() != tx_hash)
+                    .map(|entry| (entry.hash(), entry.nonce)).collect::<Vec<_>>();
+                return Self::validate_transaction_nonce_for_ordering(tx.nonce, &committed, &pending);
+            }
+        }
         let mut committed_sender_nonces = {
             let chain = SHARED_CHAIN.lock().unwrap();
             chain

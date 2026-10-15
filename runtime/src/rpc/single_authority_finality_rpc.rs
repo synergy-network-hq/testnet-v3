@@ -15,10 +15,13 @@ use crate::consensus::single_authority_finality_store::{
     SINGLE_AUTHORITY_FINALITY_SCHEMA_VERSION,
 };
 use crate::genesis::GenesisDocument;
+use crate::execution::TransactionReceipt;
+use crate::consensus::single_authority_execution::SingleAuthorityReceiptFrame;
 use crate::synergy_types::{SYNERGY_TESTNET_V3_CHAIN_ID, TESTNET_V3_CHAIN_INCARNATION};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 /// A bounded in-process projection of the finality/body tail.  The authority
@@ -31,11 +34,13 @@ const SINGLE_AUTHORITY_RPC_CACHE_CAPACITY: usize = 8_192;
 struct CachedSingleAuthorityRpcEntry {
     record: SingleAuthorityFinalityRecord,
     body: Block,
+    receipts: Option<Vec<TransactionReceipt>>,
 }
 
 #[derive(Debug, Default)]
 struct SingleAuthorityRpcCache {
     entries: BTreeMap<u64, CachedSingleAuthorityRpcEntry>,
+    committed_nonce_index: BTreeMap<String, u64>,
 }
 
 fn single_authority_rpc_cache() -> &'static Mutex<SingleAuthorityRpcCache> {
@@ -94,8 +99,13 @@ fn cached_entry_is_consistent(entry: &CachedSingleAuthorityRpcEntry) -> bool {
 /// and reconciled during startup.  This does not read or write durable state.
 pub fn replace_single_authority_rpc_cache(
     entries: Vec<(SingleAuthorityFinalityRecord, Block)>,
+    committed_nonce_index: BTreeMap<String, u64>,
+    receipt_log_path: &Path,
 ) -> Result<(), String> {
-    let mut cache = SingleAuthorityRpcCache::default();
+    let mut cache = SingleAuthorityRpcCache {
+        committed_nonce_index,
+        ..SingleAuthorityRpcCache::default()
+    };
     for (record, body) in entries
         .into_iter()
         .rev()
@@ -104,18 +114,19 @@ pub fn replace_single_authority_rpc_cache(
         .into_iter()
         .rev()
     {
-        let entry = CachedSingleAuthorityRpcEntry { record, body };
+        let entry = CachedSingleAuthorityRpcEntry { record, body, receipts: None };
         if !cached_entry_is_consistent(&entry) {
             return Err(format!(
-                "single-authority RPC cache entry at height {} disagrees with finalized history",
+                "Synergy Testnet v3 RPC cache entry at height {} disagrees with finalized history",
                 entry.record.height
             ));
         }
         cache.entries.insert(entry.record.height, entry);
     }
+    load_recent_receipts(&mut cache, receipt_log_path)?;
     let mut guard = single_authority_rpc_cache()
         .lock()
-        .map_err(|_| "single-authority RPC cache lock poisoned".to_string())?;
+        .map_err(|_| "Synergy Testnet v3 RPC cache lock poisoned".to_string())?;
     *guard = cache;
     Ok(())
 }
@@ -123,14 +134,22 @@ pub fn replace_single_authority_rpc_cache(
 /// Adds the next finalized block to the bounded in-process RPC tail.  A cache
 /// failure must never affect consensus after durable finality has completed,
 /// so an inconsistent update simply clears the acceleration cache.
-pub fn push_single_authority_rpc_cache_entry(record: SingleAuthorityFinalityRecord, body: Block) {
-    let entry = CachedSingleAuthorityRpcEntry { record, body };
+pub fn push_single_authority_rpc_cache_entry(
+    record: SingleAuthorityFinalityRecord,
+    body: Block,
+    receipts: Vec<TransactionReceipt>,
+) {
+    let entry = CachedSingleAuthorityRpcEntry { record, body, receipts: Some(receipts) };
     if !cached_entry_is_consistent(&entry) {
         return;
     }
     let Ok(mut cache) = single_authority_rpc_cache().lock() else {
         return;
     };
+    for tx in &entry.body.transactions {
+        let nonce = cache.committed_nonce_index.entry(tx.sender.to_ascii_lowercase()).or_insert(tx.nonce);
+        *nonce = (*nonce).max(tx.nonce);
+    }
     cache.entries.insert(entry.record.height, entry);
     while cache.entries.len() > SINGLE_AUTHORITY_RPC_CACHE_CAPACITY {
         let Some(oldest_height) = cache.entries.keys().next().copied() else {
@@ -138,6 +157,73 @@ pub fn push_single_authority_rpc_cache_entry(record: SingleAuthorityFinalityReco
         };
         cache.entries.remove(&oldest_height);
     }
+}
+
+/// Rehydrate only a bounded suffix of the already-reconciled durable receipt
+/// journal. The first partial line is discarded after a bounded seek.
+fn load_recent_receipts(cache: &mut SingleAuthorityRpcCache, path: &Path) -> Result<(), String> {
+    if cache.entries.is_empty() { return Ok(()); }
+    let mut file = fs::File::open(path)
+        .map_err(|error| format!("open Synergy Testnet v3 receipt tail {}: {error}", path.display()))?;
+    let len = file.metadata().map_err(|error| error.to_string())?.len();
+    let start = len.saturating_sub(32 * 1024 * 1024);
+    file.seek(SeekFrom::Start(start)).map_err(|error| error.to_string())?;
+    let mut reader = BufReader::new(file);
+    if start > 0 {
+        let mut partial = Vec::new();
+        reader.read_until(b'\n', &mut partial).map_err(|error| error.to_string())?;
+    }
+    for line in reader.lines() {
+        let line = line.map_err(|error| error.to_string())?;
+        if line.trim().is_empty() { continue; }
+        let frame: SingleAuthorityReceiptFrame = serde_json::from_str(&line)
+            .map_err(|error| format!("parse Synergy Testnet v3 receipt tail: {error}"))?;
+        if let Some(entry) = cache.entries.get_mut(&frame.height) {
+            if !frame.block_hash.eq_ignore_ascii_case(&entry.body.hash)
+                || frame.receipt_root != entry.record.receipt_root
+                || frame.state_root_after != entry.record.state_root
+                || frame.receipts.len() != entry.body.transactions.len()
+            {
+                return Err(format!("Synergy Testnet v3 receipt at height {} disagrees with finality", frame.height));
+            }
+            entry.receipts = Some(frame.receipts);
+        }
+    }
+    Ok(())
+}
+
+pub fn single_authority_next_nonce_for_rpc(
+    genesis: &GenesisDocument,
+    address: &str,
+) -> Result<Option<u64>, String> {
+    if !genesis_binds_single_authority(genesis) { return Ok(None); }
+    let cache = single_authority_rpc_cache().lock()
+        .map_err(|_| "Synergy Testnet v3 RPC cache lock poisoned".to_string())?;
+    if cache.entries.is_empty() { return Err("Synergy Testnet v3 RPC cache is unavailable".to_string()); }
+    Ok(Some(cache.committed_nonce_index.get(&address.to_ascii_lowercase())
+        .map(|nonce| nonce.saturating_add(1)).unwrap_or(0)))
+}
+
+pub fn single_authority_cached_transaction_for_rpc(
+    genesis: &GenesisDocument,
+    query: &str,
+) -> Result<Option<(SingleAuthorityRpcEntry, usize, Option<TransactionReceipt>)>, String> {
+    if !genesis_binds_single_authority(genesis) { return Ok(None); }
+    let authority_address = genesis_authority_address(genesis)?;
+    let normalized = query.strip_prefix("0x").unwrap_or(query).to_ascii_lowercase();
+    let raw = normalized.strip_prefix("syntxn-").or_else(|| normalized.strip_prefix("synxxn-")).unwrap_or(&normalized);
+    let cache = single_authority_rpc_cache().lock()
+        .map_err(|_| "Synergy Testnet v3 RPC cache lock poisoned".to_string())?;
+    for entry in cache.entries.values().rev() {
+        if !cached_entry_is_consistent(entry) { continue; }
+        for (index, tx) in entry.body.transactions.iter().enumerate() {
+            if tx.hash().eq_ignore_ascii_case(&normalized) || tx.raw_hash().eq_ignore_ascii_case(raw) {
+                return Ok(Some((cached_entry_to_rpc(entry, &authority_address), index,
+                    entry.receipts.as_ref().and_then(|receipts| receipts.get(index)).cloned())));
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn cached_entry_to_rpc(
@@ -165,7 +251,7 @@ pub fn single_authority_cached_entry_for_rpc(
     let authority_address = genesis_authority_address(genesis)?;
     let cache = single_authority_rpc_cache()
         .lock()
-        .map_err(|_| "single-authority RPC cache lock poisoned".to_string())?;
+        .map_err(|_| "Synergy Testnet v3 RPC cache lock poisoned".to_string())?;
     Ok(cache
         .entries
         .get(&height)
@@ -195,7 +281,7 @@ pub fn single_authority_cached_range_for_rpc(
     }
     let cache = single_authority_rpc_cache()
         .lock()
-        .map_err(|_| "single-authority RPC cache lock poisoned".to_string())?;
+        .map_err(|_| "Synergy Testnet v3 RPC cache lock poisoned".to_string())?;
     let mut entries = Vec::with_capacity((end - first + 1) as usize);
     for height in first..=end {
         let Some(entry) = cache.entries.get(&height) else {
@@ -285,11 +371,10 @@ fn single_authority_store_for_rpc(
     let head_path = root.join("single-authority-finality.head.json");
 
     if !log_path.is_file() {
-        return Err(format!(
-            "single_authority_v1 finality journal {} is unavailable; RPC will not answer from \
-             another consensus journal",
-            log_path.display()
-        ));
+        return Err(
+            "Synergy Testnet v3 finality journal is unavailable; RPC will not answer from another consensus journal"
+                .to_string(),
+        );
     }
 
     SingleAuthorityFinalityStore::at_paths(
@@ -323,28 +408,28 @@ pub fn single_authority_finalized_head_for_rpc(
 
     if head.schema_version != SINGLE_AUTHORITY_FINALITY_SCHEMA_VERSION {
         return Err(format!(
-            "single_authority_v1 finalized head has unsupported schema {}",
+            "Synergy Testnet v3 finalized head has unsupported schema {}",
             head.schema_version
         ));
     }
     if head.chain_id != genesis.chain_id() || head.chain_incarnation != genesis.chain_incarnation()
     {
         return Err(
-            "single_authority_v1 finalized head chain identity disagrees with Genesis".to_string(),
+            "Synergy Testnet v3 finalized head chain identity disagrees with Genesis".to_string(),
         );
     }
     if head.height < store.binding().first_authority_height {
         return Err(format!(
-            "single_authority_v1 finalized head has invalid authority height {}",
+            "Synergy Testnet v3 finalized head has invalid authority height {}",
             head.height
         ));
     }
     let log_len = fs::metadata(store.log_path())
-        .map_err(|error| format!("stat single_authority_v1 finality journal: {error}"))?
+        .map_err(|error| format!("stat Synergy Testnet v3 finality journal: {error}"))?
         .len();
     if head.finality_log_end_offset == 0 || head.finality_log_end_offset > log_len {
         return Err(format!(
-            "single_authority_v1 finalized head offset {} is outside finality journal length {}",
+            "Synergy Testnet v3 finalized head offset {} is outside finality journal length {}",
             head.finality_log_end_offset, log_len
         ));
     }
@@ -368,10 +453,10 @@ pub fn single_authority_entries_for_rpc(
     let authority_address = genesis_authority_address(genesis)?;
     let cache = single_authority_rpc_cache()
         .lock()
-        .map_err(|_| "single-authority RPC cache lock poisoned".to_string())?;
+        .map_err(|_| "Synergy Testnet v3 RPC cache lock poisoned".to_string())?;
     if cache.entries.is_empty() {
         return Err(
-            "single-authority bounded RPC tail is unavailable; durable-history recovery is disabled"
+            "Synergy Testnet v3 bounded RPC tail is unavailable; durable-history recovery is disabled"
                 .to_string(),
         );
     }
@@ -379,7 +464,7 @@ pub fn single_authority_entries_for_rpc(
     for entry in cache.entries.values() {
         if !cached_entry_is_consistent(entry) {
             return Err(format!(
-                "single-authority bounded RPC tail has an inconsistent entry at height {}",
+                "Synergy Testnet v3 bounded RPC tail has an inconsistent entry at height {}",
                 entry.record.height
             ));
         }
@@ -396,7 +481,7 @@ pub fn entry_to_explorer_json(
 
     let transactions = match entry.body.as_ref() {
         Some(block) => serde_json::to_value(&block.transactions)
-            .map_err(|error| format!("serialize single-authority transactions: {error}"))?,
+            .map_err(|error| format!("serialize Synergy Testnet v3 transactions: {error}"))?,
         None => serde_json::Value::Array(Vec::new()),
     };
     let record = &entry.record;
@@ -414,9 +499,9 @@ pub fn entry_to_explorer_json(
         "authority_id": record.authority_id.clone(),
         "authority_address": entry.authority_address.clone(),
         "authority_public_key_fingerprint": record.authority_public_key_fingerprint.clone(),
-        "consensus_protocol": record.consensus_protocol.clone(),
-        "protocol_version": record.consensus_protocol.clone(),
-        "release_id": record.release_id.clone(),
+        "consensus_protocol": "Synergy Testnet v3",
+        "protocol_version": "Synergy Testnet v3",
+        "release_id": "synergy-testnet-v3-chain-1266",
         "chain_id": record.chain_id,
         "chain_incarnation": record.chain_incarnation,
         "state_root": record.state_root.to_hex(),
@@ -425,12 +510,12 @@ pub fn entry_to_explorer_json(
         "receipt_root": record.receipt_root.to_hex(),
         "tx_count": entry.transaction_count() as u64,
         "transactions": transactions,
-        "transaction_format": SINGLE_AUTHORITY_CONSENSUS_PROTOCOL,
+        "transaction_format": "synergy_native_v3",
         "finality_status": "finalized",
         "finalized": true,
         "finality_proof_type": "authority_signature",
-        "finality_source": "single_authority_finality_store",
-        "source": "single_authority_finality_store",
+        "finality_source": "canonical_finality_store",
+        "source": "canonical_finality_store",
         "chain": crate::rpc::rpc_server::chain_identity_json(),
     }))
 }
@@ -447,10 +532,10 @@ pub fn entry_to_finalized_head_json(entry: &SingleAuthorityRpcEntry) -> serde_js
         "parent_hash": record.parent_hash.to_hex(),
         "state_root": record.state_root.to_hex(),
         "receipt_root": record.receipt_root.to_hex(),
-        "consensus_protocol": record.consensus_protocol.clone(),
+        "consensus_protocol": "Synergy Testnet v3",
         "authority_id": record.authority_id.clone(),
         "authority_address": entry.authority_address.clone(),
-        "release_id": record.release_id.clone(),
+        "release_id": "synergy-testnet-v3-chain-1266",
         "finalized_timestamp_ms": record.finalized_timestamp_ms,
         "finality_status": "finalized",
     })

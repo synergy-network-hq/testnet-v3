@@ -175,7 +175,11 @@ impl SingleAuthorityDriver {
                 Ok((record.clone(), body))
             })
             .collect::<Result<Vec<_>, String>>()?;
-        crate::rpc::single_authority_finality_rpc::replace_single_authority_rpc_cache(rpc_tail)?;
+        crate::rpc::single_authority_finality_rpc::replace_single_authority_rpc_cache(
+            rpc_tail,
+            committed_nonce_index.clone(),
+            &inputs.receipt_log_path,
+        )?;
 
         Ok(Self {
             inputs,
@@ -461,6 +465,7 @@ impl SingleAuthorityDriver {
         crate::rpc::single_authority_finality_rpc::push_single_authority_rpc_cache_entry(
             record,
             block.clone(),
+            execution.receipts.clone(),
         );
         self.execution_state = execution.state;
         self.parent = FinalizedParent {
