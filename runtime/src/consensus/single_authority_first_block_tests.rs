@@ -204,3 +204,123 @@ fn f02_restart_resumes_at_height_two_without_resigning_height_one() {
         "restart must not regenerate the height-1 signature"
     );
 }
+
+#[test]
+fn f03_restart_replays_legacy_signed_empty_candidate_without_resigning() {
+    let dir = TempDir::new("f03-legacy-signed-candidate");
+    let cfg = inputs(&dir);
+    let public = cfg.authority_public_key.clone();
+    let private = cfg.authority_private_key.clone();
+    let fingerprint = cfg.authority_public_key_fingerprint.clone();
+
+    let (expected_hash, expected_signature);
+    {
+        let mut driver = SingleAuthorityDriver::start(cfg).expect("start");
+        driver
+            .produce_next_block(Vec::new())
+            .expect("finalize parent");
+
+        let timestamp = driver.chain().last().expect("parent body").timestamp;
+        let block = crate::block::Block::new_with_timestamp(
+            2,
+            Vec::new(),
+            driver.finalized_parent().block_hash.clone(),
+            "authority-node-01".to_string(),
+            0,
+            timestamp,
+        );
+        let signature = driver
+            .stage_signed_candidate_for_restart_test(block.clone(), false)
+            .expect("stage legacy signed candidate");
+        expected_hash = block.hash;
+        expected_signature = signature;
+        assert!(
+            !driver.pending_candidate_exists_for_test(2),
+            "fixture must reproduce the pre-candidate-store legacy crash"
+        );
+    }
+
+    let mut restart = inputs(&dir);
+    restart.authority_public_key = public;
+    restart.authority_private_key = private;
+    restart.authority_public_key_fingerprint = fingerprint;
+    let mut driver = SingleAuthorityDriver::start(restart).expect("restart");
+    let replayed = driver
+        .produce_next_block(Vec::new())
+        .expect("replay signed candidate");
+    assert_eq!(replayed.hash, expected_hash);
+    assert_eq!(replayed.block_signature, expected_signature);
+    assert_eq!(driver.finalized_parent().height, 2);
+    let journal = SingleAuthoritySigningJournal::at_path(dir.0.join("signing-journal.json"));
+    assert!(journal.entry_for_height(2).unwrap().is_none());
+}
+
+#[test]
+fn f04_chain1266_height_3556906_signed_subject_is_exact_empty_block() {
+    let expected = "2ef836db353bd0df214a38f978de4500975d3b902221ed6a1a62d78001785430";
+    let parent = "f67e0504769bc3ecb8d39a445cb987a6f74ba282cbb89a4c91201b5a3ef139f9";
+    let matches = (1_792_359_664..=1_792_359_666)
+        .filter(|timestamp| {
+            crate::block::Block::new_with_timestamp(
+                3_556_906,
+                Vec::new(),
+                parent.to_string(),
+                "authority-node-01".to_string(),
+                0,
+                *timestamp,
+            )
+            .hash
+                == expected
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matches,
+        vec![1_792_359_665],
+        "the durable signed subject must identify one exact empty block timestamp"
+    );
+}
+
+#[test]
+fn f05_restart_replays_staged_signed_candidate_without_resigning() {
+    let dir = TempDir::new("f05-staged-signed-candidate");
+    let cfg = inputs(&dir);
+    let public = cfg.authority_public_key.clone();
+    let private = cfg.authority_private_key.clone();
+    let fingerprint = cfg.authority_public_key_fingerprint.clone();
+
+    let (expected_hash, expected_signature);
+    {
+        let mut driver = SingleAuthorityDriver::start(cfg).expect("start");
+        driver
+            .produce_next_block(Vec::new())
+            .expect("finalize parent");
+
+        let block = crate::block::Block::new_with_timestamp(
+            2,
+            Vec::new(),
+            driver.finalized_parent().block_hash.clone(),
+            "authority-node-01".to_string(),
+            0,
+            driver.chain().last().expect("parent body").timestamp + 1,
+        );
+        let signature = driver
+            .stage_signed_candidate_for_restart_test(block.clone(), true)
+            .expect("stage signed candidate");
+        expected_hash = block.hash;
+        expected_signature = signature;
+        assert!(driver.pending_candidate_exists_for_test(2));
+    }
+
+    let mut restart = inputs(&dir);
+    restart.authority_public_key = public;
+    restart.authority_private_key = private;
+    restart.authority_public_key_fingerprint = fingerprint;
+    let mut driver = SingleAuthorityDriver::start(restart).expect("restart");
+    let replayed = driver
+        .produce_next_block(Vec::new())
+        .expect("replay staged signed candidate");
+    assert_eq!(replayed.hash, expected_hash);
+    assert_eq!(replayed.block_signature, expected_signature);
+    assert_eq!(driver.finalized_parent().height, 2);
+    assert!(!driver.pending_candidate_exists_for_test(2));
+}

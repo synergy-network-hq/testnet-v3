@@ -9,10 +9,10 @@
 
 use super::single_authority_execution::{
     append_receipt_frame, authorize_for_execution, genesis_anchor_block, load_execution_state,
-    persist_execution_state, recover_receipt_tip,
-    recover_single_authority_committed_body_tail, record_committed_block_nonces,
-    require_state_root_agreement, typed_transactions_for_block_with_nonce_index,
-    SingleAuthorityReceiptFrame, SINGLE_AUTHORITY_RUNTIME_TAIL_CAPACITY,
+    persist_execution_state, record_committed_block_nonces, recover_receipt_tip,
+    recover_single_authority_committed_body_tail, require_state_root_agreement,
+    typed_transactions_for_block_with_nonce_index, SingleAuthorityReceiptFrame,
+    SINGLE_AUTHORITY_RUNTIME_TAIL_CAPACITY,
 };
 use super::single_authority_finality_store::*;
 use super::single_authority_signing_journal::*;
@@ -25,8 +25,22 @@ use crate::execution::{
 };
 use crate::synergy_types::{Hash, Height};
 use crate::transaction::Transaction;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::PathBuf;
+
+const SINGLE_AUTHORITY_PENDING_CANDIDATE_SCHEMA_VERSION: u32 = 1;
+const LEGACY_EMPTY_CANDIDATE_TIMESTAMP_SEARCH_SECS: u64 = 90 * 24 * 60 * 60;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PendingSingleAuthorityCandidate {
+    schema_version: u32,
+    subject: SingleAuthoritySigningSubject,
+    block: Block,
+}
 
 /// Everything the driver needs. Deliberately carries no coordinated fields.
 pub struct SingleAuthorityRuntimeInputs {
@@ -274,18 +288,264 @@ impl SingleAuthorityDriver {
 }
 
 impl SingleAuthorityDriver {
+    fn pending_candidate_path(&self, height: u64) -> PathBuf {
+        PathBuf::from(format!(
+            "{}.pending-height-{height}.json",
+            self.inputs.signing_journal_path.display()
+        ))
+    }
+
+    fn load_pending_candidate(
+        &self,
+        height: u64,
+    ) -> Result<Option<PendingSingleAuthorityCandidate>, String> {
+        let path = self.pending_candidate_path(height);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let bytes = fs::read(&path)
+            .map_err(|error| format!("read pending single-authority candidate: {error}"))?;
+        let candidate: PendingSingleAuthorityCandidate = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("decode pending single-authority candidate: {error}"))?;
+        if candidate.schema_version != SINGLE_AUTHORITY_PENDING_CANDIDATE_SCHEMA_VERSION {
+            return Err(format!(
+                "pending single-authority candidate schema {} is unsupported",
+                candidate.schema_version
+            ));
+        }
+        self.validate_pending_candidate(&candidate)?;
+        Ok(Some(candidate))
+    }
+
+    fn persist_pending_candidate(
+        &self,
+        candidate: &PendingSingleAuthorityCandidate,
+    ) -> Result<(), String> {
+        self.validate_pending_candidate(candidate)?;
+        let path = self.pending_candidate_path(candidate.subject.height);
+        let bytes = serde_json::to_vec(candidate)
+            .map_err(|error| format!("encode pending single-authority candidate: {error}"))?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!("create pending single-authority candidate directory: {error}")
+            })?;
+        }
+        let temp = PathBuf::from(format!("{}.tmp-{}", path.display(), std::process::id()));
+        {
+            let mut file = File::create(&temp)
+                .map_err(|error| format!("create pending single-authority candidate: {error}"))?;
+            file.write_all(&bytes)
+                .and_then(|_| file.sync_all())
+                .map_err(|error| format!("write pending single-authority candidate: {error}"))?;
+        }
+        fs::rename(&temp, &path)
+            .map_err(|error| format!("replace pending single-authority candidate: {error}"))?;
+        if let Some(parent) = path.parent() {
+            let _ = File::open(parent).and_then(|directory| directory.sync_all());
+        }
+        Ok(())
+    }
+
+    fn validate_pending_candidate(
+        &self,
+        candidate: &PendingSingleAuthorityCandidate,
+    ) -> Result<(), String> {
+        candidate.subject.validate()?;
+        let block = &candidate.block;
+        if candidate.subject.height != self.next_height()
+            || block.block_index != self.next_height()
+            || block.previous_hash != self.parent.block_hash
+            || candidate.subject.parent_hash != Hash::from_hex(&self.parent.block_hash)?
+            || candidate.subject.canonical_block_hash != Hash::from_hex(&block.hash)?
+            || block.hash != block.recompute_hash()
+        {
+            return Err("pending single-authority candidate disagrees with the durable finalized parent or canonical block hash".to_string());
+        }
+        let digest = Hash::from_domain_bytes(
+            "SYNERGY_CHAIN1266_SINGLE_AUTHORITY_PAYLOAD",
+            block.hash.as_bytes(),
+        );
+        if candidate.subject.canonical_signing_payload_digest != digest {
+            return Err(
+                "pending single-authority candidate has a non-canonical signing payload digest"
+                    .to_string(),
+            );
+        }
+        if candidate.subject.chain_id != self.inputs.chain_id
+            || candidate.subject.chain_incarnation != self.inputs.chain_incarnation
+            || candidate.subject.authority_id != self.inputs.authority_id
+            || candidate.subject.authority_key_id != self.inputs.authority_key_id
+            || candidate.subject.release_id != self.inputs.release_id
+        {
+            return Err(
+                "pending single-authority candidate is outside the active authority binding"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    fn subject_for_block(&self, block: &Block) -> Result<SingleAuthoritySigningSubject, String> {
+        Ok(SingleAuthoritySigningSubject {
+            schema_version: SINGLE_AUTHORITY_JOURNAL_SCHEMA_VERSION,
+            chain_id: self.inputs.chain_id,
+            chain_incarnation: self.inputs.chain_incarnation,
+            consensus_protocol: SINGLE_AUTHORITY_CONSENSUS_PROTOCOL.to_string(),
+            authority_id: self.inputs.authority_id.clone(),
+            authority_key_id: self.inputs.authority_key_id.clone(),
+            release_id: self.inputs.release_id.clone(),
+            height: block.block_index,
+            parent_hash: Hash::from_hex(&self.parent.block_hash)?,
+            canonical_block_hash: Hash::from_hex(&block.hash)?,
+            canonical_signing_payload_digest: Hash::from_domain_bytes(
+                "SYNERGY_CHAIN1266_SINGLE_AUTHORITY_PAYLOAD",
+                block.hash.as_bytes(),
+            ),
+        })
+    }
+
+    fn recover_legacy_signed_empty_candidate(
+        &self,
+        entry: &SingleAuthorityJournalEntry,
+    ) -> Result<PendingSingleAuthorityCandidate, String> {
+        let parent_timestamp = self
+            .chain
+            .last()
+            .map(|block| block.timestamp)
+            .ok_or_else(|| {
+                "cannot recover signed candidate without its parent block".to_string()
+            })?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| format!("read current time for signed-candidate recovery: {error}"))?
+            .as_secs();
+        let end =
+            now.min(parent_timestamp.saturating_add(LEGACY_EMPTY_CANDIDATE_TIMESTAMP_SEARCH_SECS));
+        for timestamp in parent_timestamp..=end {
+            let block = Block::new_with_timestamp(
+                entry.subject.height,
+                Vec::new(),
+                self.parent.block_hash.clone(),
+                self.inputs.authority_id.clone(),
+                0,
+                timestamp,
+            );
+            if Hash::from_hex(&block.hash)? == entry.subject.canonical_block_hash {
+                let candidate = PendingSingleAuthorityCandidate {
+                    schema_version: SINGLE_AUTHORITY_PENDING_CANDIDATE_SCHEMA_VERSION,
+                    subject: self.subject_for_block(&block)?,
+                    block,
+                };
+                if candidate.subject != entry.subject {
+                    return Err(
+                        "reconstructed legacy candidate does not match the durable signed subject"
+                            .to_string(),
+                    );
+                }
+                return Ok(candidate);
+            }
+        }
+        Err(format!(
+            "signed height {} has no durable candidate body and its exact empty block could not be reconstructed within the bounded timestamp window",
+            entry.subject.height
+        ))
+    }
+
+    #[cfg(test)]
+    pub(super) fn stage_signed_candidate_for_restart_test(
+        &mut self,
+        block: Block,
+        persist_candidate: bool,
+    ) -> Result<Vec<u8>, String> {
+        use base64::{engine::general_purpose, Engine as _};
+
+        let subject = self.subject_for_block(&block)?;
+        if persist_candidate {
+            self.persist_pending_candidate(&PendingSingleAuthorityCandidate {
+                schema_version: SINGLE_AUTHORITY_PENDING_CANDIDATE_SCHEMA_VERSION,
+                subject: subject.clone(),
+                block: block.clone(),
+            })?;
+        }
+        match self.journal.authorize_before_signature(&subject)? {
+            SingleAuthoritySigningDecision::SignFresh => {}
+            decision => {
+                return Err(format!(
+                    "restart-test candidate unexpectedly returned {decision:?}"
+                ));
+            }
+        }
+        let mut manager = PQCManager::new();
+        let signature = manager
+            .sign(&self.inputs.authority_private_key, block.hash.as_bytes())?
+            .signature_data;
+        self.journal.record_signature(
+            &subject,
+            &SingleAuthoritySignatureRecord {
+                signature_algorithm: SINGLE_AUTHORITY_SIGNATURE_ALGORITHM.to_string(),
+                signature_base64: general_purpose::STANDARD.encode(&signature),
+                authority_public_key_fingerprint: self
+                    .inputs
+                    .authority_public_key_fingerprint
+                    .clone(),
+            },
+        )?;
+        Ok(signature)
+    }
+
+    #[cfg(test)]
+    pub(super) fn pending_candidate_exists_for_test(&self, height: u64) -> bool {
+        self.pending_candidate_path(height).exists()
+    }
+
     /// Produce and finalize exactly one block at the next height.
     pub fn produce_next_block(&mut self, transactions: Vec<Transaction>) -> Result<Block, String> {
         let height = self.next_height();
 
-        // 1. Canonical block construction on the DURABLE finalized parent.
-        let mut block = Block::new(
-            height,
-            transactions,
-            self.parent.block_hash.clone(),
-            self.inputs.authority_id.clone(),
-            0,
-        );
+        // 1. Recover the exact staged body before consulting wall-clock time.
+        // A signed slot must replay its original body and signature after a
+        // crash; constructing a new timestamped body would create a second
+        // subject for the same height and must remain fail-closed.
+        let journal_entry = self.journal.entry_for_height(height)?;
+        let candidate = match self.load_pending_candidate(height)? {
+            Some(candidate) => candidate,
+            None => match journal_entry.as_ref() {
+                Some(entry) if entry.signature.is_some() => {
+                    let candidate = self.recover_legacy_signed_empty_candidate(entry)?;
+                    self.persist_pending_candidate(&candidate)?;
+                    candidate
+                }
+                Some(_) => {
+                    return Err(format!(
+                        "height {height} was authorized without a durable candidate body or signature"
+                    ));
+                }
+                None => {
+                    let block = Block::new(
+                        height,
+                        transactions,
+                        self.parent.block_hash.clone(),
+                        self.inputs.authority_id.clone(),
+                        0,
+                    );
+                    let candidate = PendingSingleAuthorityCandidate {
+                        schema_version: SINGLE_AUTHORITY_PENDING_CANDIDATE_SCHEMA_VERSION,
+                        subject: self.subject_for_block(&block)?,
+                        block,
+                    };
+                    self.persist_pending_candidate(&candidate)?;
+                    candidate
+                }
+            },
+        };
+        if let Some(entry) = journal_entry.as_ref() {
+            if entry.subject != candidate.subject {
+                return Err(format!(
+                    "height {height} pending candidate disagrees with the durable signing journal"
+                ));
+            }
+        }
+        let mut block = candidate.block;
         // `Block::hash` is blake3 hex, so this round-trips exactly via to_hex()
         // and a recovered parent reproduces the identical canonical block id.
         let block_hash = Hash::from_hex(&block.hash)?;
@@ -301,22 +561,7 @@ impl SingleAuthorityDriver {
         let transaction_root = Hash::from_hex(&block.transactions_root)?;
 
         // 2. Signing subject bound to the exact canonical block.
-        let subject = SingleAuthoritySigningSubject {
-            schema_version: SINGLE_AUTHORITY_JOURNAL_SCHEMA_VERSION,
-            chain_id: self.inputs.chain_id,
-            chain_incarnation: self.inputs.chain_incarnation,
-            consensus_protocol: SINGLE_AUTHORITY_CONSENSUS_PROTOCOL.to_string(),
-            authority_id: self.inputs.authority_id.clone(),
-            authority_key_id: self.inputs.authority_key_id.clone(),
-            release_id: self.inputs.release_id.clone(),
-            height,
-            parent_hash: Hash::from_hex(&self.parent.block_hash)?,
-            canonical_block_hash: block_hash,
-            canonical_signing_payload_digest: Hash::from_domain_bytes(
-                "SYNERGY_CHAIN1266_SINGLE_AUTHORITY_PAYLOAD",
-                block.hash.as_bytes(),
-            ),
-        };
+        let subject = candidate.subject;
 
         // 3. Authorize BEFORE signing; replay an existing signature, never re-sign.
         let signature_bytes = match self.journal.authorize_before_signature(&subject)? {
@@ -473,6 +718,20 @@ impl SingleAuthorityDriver {
             block_hash: block.hash.clone(),
             state_root,
         };
+        let pending_path = self.pending_candidate_path(subject.height);
+        match fs::remove_file(&pending_path) {
+            Ok(()) => {
+                if let Some(parent) = pending_path.parent() {
+                    let _ = File::open(parent).and_then(|directory| directory.sync_all());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "remove finalized single-authority pending candidate: {error}"
+                ));
+            }
+        }
         Ok(())
     }
 }
