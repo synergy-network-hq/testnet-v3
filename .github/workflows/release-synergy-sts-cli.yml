@@ -26,7 +26,7 @@ jobs:
             asset: synergy-sts-linux-amd64
           - runner: ubuntu-24.04-arm
             asset: synergy-sts-linux-arm64
-          - runner: macos-13
+          - runner: macos-15-intel
             asset: synergy-sts-macos-amd64
           - runner: macos-14
             asset: synergy-sts-macos-arm64
