@@ -2,9 +2,9 @@
 
 ## Protocol And Token Standards Reference
 
-**Network scope:** Synergy testnet
+**Network scope:** `synergy-testnet-v3`
 
-**Chain ID:** `1264`
+**Chain ID:** `1266`
 
 **STS payload version:** `synergy-sts-v1`
 
@@ -13,6 +13,8 @@
 This document is the protocol reference for the Synergy Token System (STS). It explains what each standard represents, the rules that the network enforces, and how wallets, applications, and Atlas should interpret STS objects. It is intentionally separate from the [STS CLI Guide](STS_CLI_GUIDE.md), which explains installation and command usage.
 
 STS is native runtime state. A token, collection, multi-asset item, or credential is created by a signed Synergy transaction carrying an STS payload; it is not deployed as a user smart contract. The network validates the payload, applies the state transition atomically, records events, and charges the transaction fee in native SNRG.
+
+`synergy-sts-v1` remains the wire prefix for this activation because the STS operation schema has not changed. Its governed domain is now exactly chain ID `1266` and network ID `synergy-testnet-v3`. Legacy Chain 1264 or generic `testnet` payloads fail network validation and are not reinterpreted, migrated, or accepted silently.
 
 ## Contents
 
@@ -62,7 +64,7 @@ An STS object ID is an identifier only. It must never be treated as a private-ke
 
 1. A creator prepares an STS payload for one operation.
 2. The creator reviews the operation, expected object ID where applicable, authorities, supply rules, metadata commitments, and fee estimate.
-3. A wallet signs the carrier transaction on chain ID `1264`.
+3. A wallet signs the carrier transaction on chain ID `1266`.
 4. The network validates the transaction and the STS operation together. Invalid operations do not partially mutate token state.
 5. After finalization, STS state, events, and balances are queryable through the STS RPC API and indexable by Atlas.
 
@@ -129,7 +131,7 @@ Choose the narrowest standard that matches the required behavior. A token should
 STS payloads are valid only when all of the following match:
 
 - Payload version is `1`.
-- Payload chain ID is `1264`.
+- Payload chain ID is `1266`.
 - Payload network is `testnet`.
 - The enclosing Synergy transaction is validly authorized by the sender wallet.
 
@@ -560,7 +562,7 @@ Wallets, exchanges, and explorers should use a layered model:
 - Never hide B2 flags, B3 policies, supply authority, or NF2 lifecycle restrictions.
 - Never permit a UI to imply that a token image can be changed after its first set.
 - Never store or display raw credential content as if it were on-chain STS data.
-- Never submit an STS payload constructed for a chain other than `1264`.
+- Never submit an STS payload constructed for a chain other than `1266`.
 - Never interpret an unfinalized client artifact as successful issuance.
 
 ## Transaction, API, And Explorer Model
@@ -601,7 +603,7 @@ Asset-specific presentation can evolve over time. Integrators should rely on STS
 ### Before issuing
 
 - Select the narrowest STS standard that satisfies the actual asset requirement.
-- Confirm the target is testnet chain ID `1264`.
+- Confirm the target is testnet chain ID `1266`.
 - Choose a unique, non-impersonating name and symbol.
 - Express all supply values in exact base units and choose `0` through `9` decimals.
 - Decide whether mint authority should exist, and set a maximum supply when appropriate.
@@ -665,4 +667,4 @@ The exact availability of an operation is still subject to class, configured fla
 
 ## Scope Note
 
-This reference describes the current native STS testnet implementation on chain ID `1264`. It is a technical description of protocol behavior, not investment advice, a listing guarantee, or a substitute for independent security review. Applications that custody funds, make eligibility decisions, or serve regulated users should perform their own security, compliance, privacy, and operational review before relying on an STS asset.
+This reference describes the current native STS testnet implementation on chain ID `1266`. It is a technical description of protocol behavior, not investment advice, a listing guarantee, or a substitute for independent security review. Applications that custody funds, make eligibility decisions, or serve regulated users should perform their own security, compliance, privacy, and operational review before relying on an STS asset.

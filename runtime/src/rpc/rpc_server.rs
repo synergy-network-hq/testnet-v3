@@ -2723,7 +2723,8 @@ fn handle_json_rpc(
             | "synergy_submitAegisDagTransaction"
             | "synergy_submitAegisDagTransactionBatch"
             | "synergy_submitAegisTransactionBatch"
-    ) && !native_transaction_admission {
+    ) && !native_transaction_admission
+    {
         return json!({
             "success": false,
             "code": crate::etdag::ERR_PLAINTEXT_USER_TX_DISABLED,
@@ -8026,7 +8027,10 @@ fn transaction_lookup_json(
                 Ok(None) => {}
             }
             let pool = tx_pool.lock().unwrap();
-            if let Some(tx) = pool.iter().find(|tx| tx.hash().eq_ignore_ascii_case(tx_hash)) {
+            if let Some(tx) = pool
+                .iter()
+                .find(|tx| tx.hash().eq_ignore_ascii_case(tx_hash))
+            {
                 return tx_to_explorer_json(tx, "pending", None, None);
             }
             return Value::Null;
@@ -8969,6 +8973,51 @@ fn sts_events_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
 }
 
 fn sts_state_from_snapshot_or_chain(chain: &BlockChain) -> Result<StsReplayReport, RpcError> {
+    // Chain 1266 single-authority execution already commits STS state into the
+    // canonical execution-state root and publishes it only after finality.
+    // Never let the legacy standalone STS snapshot shadow that consensus-owned
+    // state (the old snapshot may identify chain 1264 or lag the finalized tip).
+    if current_chain_uses_single_authority() {
+        let finalized = finalized_synq_query_state().map_err(|error| {
+            RpcError::new(
+                -32021,
+                format!(
+                    "STS state unavailable: finalized Chain 1266 execution state is not ready: {error}"
+                ),
+            )
+        })?;
+        let genesis = canonical_genesis().map_err(|error| {
+            RpcError::new(
+                -32021,
+                format!("STS state unavailable: canonical Genesis is not ready: {error}"),
+            )
+        })?;
+        let head =
+            crate::rpc::single_authority_finality_rpc::single_authority_finalized_head_for_rpc(
+                genesis,
+            )
+            .map_err(|error| {
+                RpcError::new(
+                    -32021,
+                    format!(
+                        "STS state unavailable: finalized Chain 1266 head is not ready: {error}"
+                    ),
+                )
+            })?
+            .ok_or_else(|| {
+                RpcError::new(
+                    -32021,
+                    "STS state unavailable: finalized Chain 1266 head is not ready".to_string(),
+                )
+            })?;
+        return Ok(sts_report_from_finalized_execution_state(
+            chain,
+            finalized,
+            head.height,
+            head.block_hash.to_hex(),
+        ));
+    }
+
     match crate::sts::load_sts_state_snapshot() {
         Ok(Some(snapshot)) => {
             let latest_height = chain
@@ -9012,6 +9061,31 @@ fn sts_state_from_snapshot_or_chain(chain: &BlockChain) -> Result<StsReplayRepor
             -32021,
             format!("STS state unavailable: finalized STS snapshot is invalid: {error}"),
         )),
+    }
+}
+
+fn sts_report_from_finalized_execution_state(
+    chain: &BlockChain,
+    finalized: crate::execution::ExecutionState,
+    finalized_height: u64,
+    finalized_block_hash: String,
+) -> StsReplayReport {
+    StsReplayReport {
+        source: "finalized_chain1266_execution_state",
+        state: finalized.sts_state,
+        chain_start_height: chain
+            .chain
+            .first()
+            .map(|block| block.block_index)
+            .unwrap_or(finalized_height),
+        latest_height: finalized_height,
+        snapshot_block_hash: Some(finalized_block_hash),
+        snapshot_updated_at: None,
+        scanned_blocks: 0,
+        scanned_transactions: 0,
+        applied_transactions: 0,
+        skipped_payloads: 0,
+        errors: Vec::new(),
     }
 }
 
@@ -9107,6 +9181,8 @@ fn sts_replay_metadata_json(report: &StsReplayReport) -> Value {
         "scanned_blocks": report.scanned_blocks,
         "scanned_transactions": report.scanned_transactions,
         "applied_transactions": report.applied_transactions,
+        "rpc_replay_performed": report.scanned_blocks > 0,
+        "event_count": report.state.events.len(),
         "skipped_payloads": report.skipped_payloads,
         "errors": report.errors,
     })
@@ -10198,11 +10274,17 @@ fn get_account_nonce(
 
     if let Ok(genesis) = canonical_genesis() {
         if crate::rpc::single_authority_finality_rpc::genesis_binds_single_authority(genesis) {
-            let mut next_nonce = crate::rpc::single_authority_finality_rpc::single_authority_next_nonce_for_rpc(genesis, address)
+            let mut next_nonce =
+                crate::rpc::single_authority_finality_rpc::single_authority_next_nonce_for_rpc(
+                    genesis, address,
+                )
                 .map_err(|error| RpcError::new(-32071, error))?
                 .unwrap_or(0);
             let pool = tx_pool.lock().unwrap();
-            for tx in pool.iter().filter(|tx| tx.sender.eq_ignore_ascii_case(address)) {
+            for tx in pool
+                .iter()
+                .filter(|tx| tx.sender.eq_ignore_ascii_case(address))
+            {
                 next_nonce = next_nonce.max(tx.nonce.saturating_add(1));
             }
             return Ok(json!(next_nonce));
@@ -11236,10 +11318,7 @@ mod tests {
             block_one["hash"],
             json!(entries[0].record.block_hash.to_hex())
         );
-        assert_eq!(
-            block_one["consensus_protocol"],
-            json!("Synergy Testnet v3")
-        );
+        assert_eq!(block_one["consensus_protocol"], json!("Synergy Testnet v3"));
         assert_eq!(block_one["validator_id"], json!(SA_AUTHORITY_ADDRESS));
         assert_eq!(block_one["authority_address"], json!(SA_AUTHORITY_ADDRESS));
         assert_eq!(block_one["finality_status"], json!("finalized"));
@@ -11521,6 +11600,39 @@ mod tests {
                 .fungible_balance(STS_TEST_CREATOR, &definition.token_id),
             1_000_000
         );
+    }
+
+    #[test]
+    fn sts_single_authority_reads_finalized_execution_state() {
+        let chain = sts_test_chain(sts_test_payload_hex());
+        let payload = StsSignedPayload::new(StsTx::CreateFungible(sts_test_create_params()));
+        let mut finalized = crate::execution::ExecutionState::new();
+        finalized
+            .sts_state
+            .apply_signed_payload(STS_TEST_CREATOR, &payload)
+            .expect("finalized STS payload applies");
+
+        let report = sts_report_from_finalized_execution_state(
+            &chain,
+            finalized,
+            77,
+            "finalized-hash-77".to_string(),
+        );
+        let definition = report
+            .state
+            .fungible_definitions()
+            .into_iter()
+            .next()
+            .expect("finalized token exists");
+
+        assert_eq!(report.source, "finalized_chain1266_execution_state");
+        assert_eq!(report.latest_height, 77);
+        assert_eq!(
+            report.snapshot_block_hash.as_deref(),
+            Some("finalized-hash-77")
+        );
+        assert_eq!(report.scanned_blocks, 0);
+        assert_eq!(definition.symbol, "TGLD");
     }
 
     #[test]
@@ -12221,9 +12333,18 @@ mod tests {
             );
             assert_eq!(result["automatic_plaintext_fallback"], json!(false));
         }
-        assert!(native_aegis_admission_enabled("synergy_submitAegisTransaction", true));
-        assert!(!native_aegis_admission_enabled("synergy_submitAegisTransaction", false));
-        assert!(!native_aegis_admission_enabled("synergy_sendTransaction", true));
+        assert!(native_aegis_admission_enabled(
+            "synergy_submitAegisTransaction",
+            true
+        ));
+        assert!(!native_aegis_admission_enabled(
+            "synergy_submitAegisTransaction",
+            false
+        ));
+        assert!(!native_aegis_admission_enabled(
+            "synergy_sendTransaction",
+            true
+        ));
         let pending = handle_json_rpc(
             "synergy_getDagGraph",
             json!([]),

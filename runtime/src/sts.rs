@@ -8,8 +8,8 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const STS_TESTNET_CHAIN_ID: u64 = 1_264;
-pub const STS_TESTNET_NETWORK: &str = "testnet";
+pub const STS_TESTNET_CHAIN_ID: u64 = 1_266;
+pub const STS_TESTNET_NETWORK: &str = "synergy-testnet-v3";
 pub const STS_PAYLOAD_PREFIX: &[u8] = b"synergy-sts-v1:";
 pub const STS_STATE_SNAPSHOT_PATH: &str = "data/sts_state.json";
 pub const NATIVE_SNRG_SYMBOL: &str = "SNRG";
@@ -4387,6 +4387,8 @@ mod tests {
 
     #[test]
     fn finalized_sts_snapshot_round_trip_uses_chain_1266() {
+        assert_eq!(STS_TESTNET_CHAIN_ID, 1_266);
+        assert_eq!(STS_TESTNET_NETWORK, "synergy-testnet-v3");
         let path = temp_sts_snapshot_path("snapshot-round-trip");
         let mut snapshot = StsStateSnapshot::empty_at(77, "block-hash-77");
         let token_id = snapshot

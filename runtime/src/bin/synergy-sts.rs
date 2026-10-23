@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 use synergy_testnet::address::address_matches_public_key;
-use synergy_testnet::crypto::pqc::{PQCAlgorithm, PQCManager, PQCPrivateKey, PQCPublicKey};
+use synergy_testnet::aegis_tx_tool::AegisTxSubmissionEnvelope;
+use synergy_testnet::crypto::aegis_pqvm::{AegisPqKeyLifecycleRecord, AegisPqvmSigner};
+use synergy_testnet::crypto::pqc::{PQCAlgorithm, PQCPrivateKey, PQCPublicKey};
 use synergy_testnet::sts::{
     decode_sts_payload, encode_sts_payload, estimate_sts_gas, native_snrg_definition,
     validate_sts_object_id, CreateCredentialSchemaParams, CreateFungibleParams,
@@ -14,10 +16,15 @@ use synergy_testnet::sts::{
     MultiAssetItemType, MultiAssetTransferPolicy, StsSignedPayload, StsState, StsTx, TokenClass,
     NATIVE_SNRG_PLACEHOLDER_ADDRESS, STS_TESTNET_CHAIN_ID, STS_TESTNET_NETWORK,
 };
-use synergy_testnet::synergy_types::{SYNERGY_TESTNET_V3_CHAIN_ID, SYNERGY_TESTNET_V3_NETWORK_ID};
-use synergy_testnet::transaction::Transaction;
+use synergy_testnet::synergy_types::{
+    AegisPqKeyId, AegisPqKeyRole, AegisPqSignature, ChainId, Epoch, Height, NetworkId,
+    Transaction as AegisTransaction, UmaId, SYNERGY_TESTNET_V3_CHAIN_ID,
+    SYNERGY_TESTNET_V3_NETWORK_ID, TESTNET_V3_CHAIN_INCARNATION,
+};
 
-const DEFAULT_RPC_URL: &str = "https://testnet-core-rpc.synergy-network.io";
+const DEFAULT_RPC_URL: &str = "https://testnet-rpc.synergy-network.io";
+const TESTNET_V3_GENESIS_HASH: &str =
+    "2272fe2b48c6e2019b27223f61ba8d8a82b58656fe9daab50c81f224a301ca74";
 const DEFAULT_GAS_PRICE_NWEI: u64 = 40;
 const DEFAULT_SUBMIT_TIMEOUT_SECONDS: u64 = 30;
 const DEFAULT_STS_GAS_LIMIT_BUFFER: u64 = 25_000;
@@ -63,40 +70,40 @@ fn usage() {
     eprintln!(
         "synergy-sts
 
-Build and submit native Synergy Token System payloads for testnet. By default,
-commands emit deterministic payload artifacts. Add --submit with a decrypted
-Synergy wallet file to sign a Synergy transaction, pay gas in SNRG, and submit
-through the normal transaction path.
+Build and submit native Synergy Token System payloads for Chain 1266 testnet v3.
+By default, commands emit deterministic payload artifacts. Add --submit with a
+decrypted Synergy wallet file to create and verify an Aegis ML-DSA-87 envelope,
+pay gas in SNRG, and submit through the typed transaction ingress.
 
 Usage:
   synergy-sts native-info [--output json] [--out <path>]
   synergy-sts decode --payload-hex <hex> [--output json|payload-json] [--out <path>]
   synergy-sts decode --file <artifact.json-or-hex> [--output json|payload-json] [--out <path>]
   synergy-sts estimate --payload-hex <hex> [--gas-price-nwei <u64>]
-  synergy-sts submit --payload-hex <hex>|--file <artifact.json-or-hex> --wallet <wallet.dec.json> [--wallet-public <wallet.pub.json>] [--rpc-url <url>] [--gas-price-nwei <u64>] [--gas-limit <u64>] [--nonce <u64>] [--carrier-amount-nwei <u64>]
-  synergy-sts token create --network testnet --class b1|b2|b3 --name <name> --symbol <symbol> --decimals <0-9> --initial-supply <base_units> [--from <creator>] [--creator-nonce <u64>] [--created-at <u64>] [--max-supply <base_units>] [--metadata-uri <uri> --metadata-hash <sha3_256_hex>] [--metadata-file <path>] [--image-uri <uri> --image-hash <sha3_256_hex>] [--image-file <path>] [--no-mint-authority|--mint-authority <addr>] [--metadata-authority <addr>] [--can-freeze] [--can-pause] [--can-clawback] [--policy <template>] [--submit --wallet <wallet.dec.json>] [--output json|payload-hex|payload-json] [--out <path>]
-  synergy-sts token mint --network testnet --token <synb*> --to <owner> --amount <base_units> --from <authority> [--timestamp <u64>]
-  synergy-sts token transfer --network testnet --token <synb*> --from <owner> --to <owner> --amount <base_units> [--timestamp <u64>]
-  synergy-sts token burn --network testnet --token <synb*> --from <owner> --amount <base_units> [--timestamp <u64>]
-  synergy-sts token set-image --network testnet --token <synb*> --image-uri <uri> --image-hash <sha3_256_hex> --from <creator> [--image-file <path>] [--timestamp <u64>]
-  synergy-sts token freeze --network testnet --token <synb2*> --owner <owner> --from <authority> [--timestamp <u64>]
-  synergy-sts token thaw --network testnet --token <synb2*> --owner <owner> --from <authority> [--timestamp <u64>]
-  synergy-sts token pause --network testnet --token <synb2*> --from <authority> [--timestamp <u64>]
-  synergy-sts token unpause --network testnet --token <synb2*> --from <authority> [--timestamp <u64>]
-  synergy-sts token clawback --network testnet --token <synb2*> --source <owner> --to <owner> --amount <base_units> --from <authority> [--timestamp <u64>]
-  synergy-sts token snapshot --network testnet --token <synb3*> --from <authority> [--timestamp <u64>]
-  synergy-sts nft create-collection --network testnet --class nf1|nf2 --name <name> --symbol <symbol> --from <creator> --creator-nonce <u64> [--metadata-uri <uri> --metadata-hash <sha3_256_hex>] [--metadata-file <path>] [--image-uri <uri> --image-hash <sha3_256_hex>] [--royalty-bps <0-10000> --royalty-recipient <addr>] [--non-transferable] [--requires-issuer-approval]
-  synergy-sts nft mint --network testnet --collection <synn*> --to <owner> --from <authority> [--metadata-uri <uri> --metadata-hash <sha3_256_hex>] [--metadata-file <path>] [--expires-at <u64>] [--non-transferable] [--requires-issuer-approval]
-  synergy-sts nft transfer --network testnet --nft <synn*> --from <owner-or-authority> --owner <current-owner> --to <owner> [--timestamp <u64>]
-  synergy-sts nft burn --network testnet --nft <synn*> --from <owner-or-authority> --owner <current-owner> [--timestamp <u64>]
-  synergy-sts nft revoke|use|freeze|thaw --network testnet --nft <synn*> --from <authority-or-owner> [--timestamp <u64>]
-  synergy-sts ma create --network testnet --name <name> --symbol <symbol> --from <creator> --creator-nonce <u64> [--metadata-uri <uri> --metadata-hash <sha3_256_hex>] [--metadata-file <path>]
-  synergy-sts ma create-item --network testnet --collection <synj*> --item-id <u64> --type fungible|non_fungible|semi_fungible --name <name> --symbol <symbol> --decimals <0-9> --from <authority> [--max-supply <base_units>] [--transfer-policy open|non_transferable|authority_only]
-  synergy-sts ma mint|transfer|burn --network testnet --collection <synj*> --item-id <u64> --amount <base_units> --from <owner-or-authority> [--to <owner>]
-  synergy-sts ma batch-transfer --network testnet --collection <synj*> --from <owner> --to <owner> --item <item_id>:<amount> [--item <item_id>:<amount> ...]
-  synergy-sts credential schema create --network testnet --schema-id <id> --name <name> --schema-hash <sha3_256_hex> --from <issuer> [--description-hash <sha3_256_hex>]
-  synergy-sts credential issue --network testnet --schema-id <id> --subject <addr> --subject-commitment <sha3_256_hex> --credential-hash <sha3_256_hex> --from <issuer> [--expires-at <u64>]
-  synergy-sts credential revoke|suspend|restore|expire|verify-status --network testnet --credential <synk*> --from <issuer-or-caller> [--reason-hash <sha3_256_hex>]
+  synergy-sts submit --payload-hex <hex>|--file <artifact.json-or-hex> --wallet <wallet.dec.json> [--wallet-public <wallet.pub.json>] [--rpc-url <url>] [--gas-price-nwei <u64>] [--max-fee-nwei <u128>] [--gas-limit <u64>] [--nonce <u64>] [--carrier-amount-nwei <u64>] [--epoch <u64>] [--ttl-height <u64>] [--timeout-seconds <u64>] [--no-wait]
+  synergy-sts token create --network synergy-testnet-v3 --class b1|b2|b3 --name <name> --symbol <symbol> --decimals <0-9> --initial-supply <base_units> [--from <creator>] [--creator-nonce <u64>] [--created-at <u64>] [--max-supply <base_units>] [--metadata-uri <uri> --metadata-hash <sha3_256_hex>] [--metadata-file <path>] [--image-uri <uri> --image-hash <sha3_256_hex>] [--image-file <path>] [--no-mint-authority|--mint-authority <addr>] [--metadata-authority <addr>] [--can-freeze] [--can-pause] [--can-clawback] [--policy <template>] [--submit --wallet <wallet.dec.json>] [--output json|payload-hex|payload-json] [--out <path>]
+  synergy-sts token mint --network synergy-testnet-v3 --token <synb*> --to <owner> --amount <base_units> --from <authority> [--timestamp <u64>]
+  synergy-sts token transfer --network synergy-testnet-v3 --token <synb*> --from <owner> --to <owner> --amount <base_units> [--timestamp <u64>]
+  synergy-sts token burn --network synergy-testnet-v3 --token <synb*> --from <owner> --amount <base_units> [--timestamp <u64>]
+  synergy-sts token set-image --network synergy-testnet-v3 --token <synb*> --image-uri <uri> --image-hash <sha3_256_hex> --from <creator> [--image-file <path>] [--timestamp <u64>]
+  synergy-sts token freeze --network synergy-testnet-v3 --token <synb2*> --owner <owner> --from <authority> [--timestamp <u64>]
+  synergy-sts token thaw --network synergy-testnet-v3 --token <synb2*> --owner <owner> --from <authority> [--timestamp <u64>]
+  synergy-sts token pause --network synergy-testnet-v3 --token <synb2*> --from <authority> [--timestamp <u64>]
+  synergy-sts token unpause --network synergy-testnet-v3 --token <synb2*> --from <authority> [--timestamp <u64>]
+  synergy-sts token clawback --network synergy-testnet-v3 --token <synb2*> --source <owner> --to <owner> --amount <base_units> --from <authority> [--timestamp <u64>]
+  synergy-sts token snapshot --network synergy-testnet-v3 --token <synb3*> --from <authority> [--timestamp <u64>]
+  synergy-sts nft create-collection --network synergy-testnet-v3 --class nf1|nf2 --name <name> --symbol <symbol> --from <creator> --creator-nonce <u64> [--metadata-uri <uri> --metadata-hash <sha3_256_hex>] [--metadata-file <path>] [--image-uri <uri> --image-hash <sha3_256_hex>] [--royalty-bps <0-10000> --royalty-recipient <addr>] [--non-transferable] [--requires-issuer-approval]
+  synergy-sts nft mint --network synergy-testnet-v3 --collection <synn*> --to <owner> --from <authority> [--metadata-uri <uri> --metadata-hash <sha3_256_hex>] [--metadata-file <path>] [--expires-at <u64>] [--non-transferable] [--requires-issuer-approval]
+  synergy-sts nft transfer --network synergy-testnet-v3 --nft <synn*> --from <owner-or-authority> --owner <current-owner> --to <owner> [--timestamp <u64>]
+  synergy-sts nft burn --network synergy-testnet-v3 --nft <synn*> --from <owner-or-authority> --owner <current-owner> [--timestamp <u64>]
+  synergy-sts nft revoke|use|freeze|thaw --network synergy-testnet-v3 --nft <synn*> --from <authority-or-owner> [--timestamp <u64>]
+  synergy-sts ma create --network synergy-testnet-v3 --name <name> --symbol <symbol> --from <creator> --creator-nonce <u64> [--metadata-uri <uri> --metadata-hash <sha3_256_hex>] [--metadata-file <path>]
+  synergy-sts ma create-item --network synergy-testnet-v3 --collection <synj*> --item-id <u64> --type fungible|non_fungible|semi_fungible --name <name> --symbol <symbol> --decimals <0-9> --from <authority> [--max-supply <base_units>] [--transfer-policy open|non_transferable|authority_only]
+  synergy-sts ma mint|transfer|burn --network synergy-testnet-v3 --collection <synj*> --item-id <u64> --amount <base_units> --from <owner-or-authority> [--to <owner>]
+  synergy-sts ma batch-transfer --network synergy-testnet-v3 --collection <synj*> --from <owner> --to <owner> --item <item_id>:<amount> [--item <item_id>:<amount> ...]
+  synergy-sts credential schema create --network synergy-testnet-v3 --schema-id <id> --name <name> --schema-hash <sha3_256_hex> --from <issuer> [--description-hash <sha3_256_hex>]
+  synergy-sts credential issue --network synergy-testnet-v3 --schema-id <id> --subject <addr> --subject-commitment <sha3_256_hex> --credential-hash <sha3_256_hex> --from <issuer> [--expires-at <u64>]
+  synergy-sts credential revoke|suspend|restore|expire|verify-status --network synergy-testnet-v3 --credential <synk*> --from <issuer-or-caller> [--reason-hash <sha3_256_hex>]
 
 Policy examples:
   --policy snapshot_v1
@@ -105,11 +112,17 @@ Policy examples:
   --policy max_wallet_v1:max_balance=1000000000
 
 Submit options:
-  --submit                      Sign and submit the STS payload on chain.
-  --wallet <wallet.dec.json>    Decrypted Synergy wallet JSON with address/private_key.
+  --submit                      Sign and submit an Aegis ML-DSA-87 STS envelope on chain.
+  --wallet <wallet.dec.json>    Decrypted ML-DSA-87 wallet JSON with address/private_key.
   --wallet-public <pub.json>    Optional public-key JSON. If omitted, a sibling .pub.json is used.
-  --rpc-url <url>               Defaults to https://testnet-core-rpc.synergy-network.io.
+  --rpc-url <url>               Defaults to https://testnet-rpc.synergy-network.io.
+  --gas-price-nwei <u64>        Used to calculate the default max fee from estimated gas; defaults to 40.
+  --max-fee-nwei <u128>         Explicit typed transaction fee cap; defaults to estimated gas times gas price.
   --carrier-amount-nwei <u64>   Defaults to 1 nWei self-carrier for current public RPC compatibility.
+  --epoch <u64>                 Aegis key lifecycle epoch; defaults to 0.
+  --ttl-height <u64>            Expiry height; defaults to finalized head plus 120.
+  --timeout-seconds <u64>       RPC and receipt wait timeout; defaults to 30.
+  --no-wait                     Return after ingress acceptance without polling a receipt.
 "
     );
 }
@@ -259,7 +272,7 @@ fn submit_payload_command(args: &[String]) -> Result<(), String> {
     let sender = sender_arg(args, "--from")?;
     let mut report = payload_report(payload.clone(), payload_hex.clone(), None, None, None)?;
     let gas = estimate_sts_gas(&payload.tx);
-    let submission = submit_payload(args, &sender, &payload_hex, gas)?;
+    let submission = submit_payload(args, &sender, &payload_hex, gas, None)?;
     let report_object = report
         .as_object_mut()
         .ok_or_else(|| "payload report was not an object".to_string())?;
@@ -1051,11 +1064,13 @@ struct WalletMaterial {
 #[derive(Debug, Clone)]
 struct CarrierTransactionOptions {
     nonce: u64,
-    gas_price_nwei: u64,
+    max_fee_nwei: u128,
     gas_limit: u64,
     carrier_amount_nwei: u64,
     receiver: String,
     timestamp: u64,
+    epoch: u64,
+    ttl_height: u64,
 }
 
 struct RpcClient {
@@ -1072,7 +1087,11 @@ impl RpcClient {
         Ok(Self { url, client })
     }
 
-    fn call(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
+    fn request(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
         let body = json!({
             "jsonrpc": "2.0",
             "method": method,
@@ -1097,7 +1116,12 @@ impl RpcClient {
                 return Err(format!("RPC {method} error: {error}"));
             }
         }
-        Ok(value
+        Ok(value)
+    }
+
+    fn call(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
+        Ok(self
+            .request(method, params)?
             .get("result")
             .cloned()
             .unwrap_or(serde_json::Value::Null))
@@ -1105,15 +1129,145 @@ impl RpcClient {
 }
 
 fn submit_payload(
-    _args: &[String],
-    _sender: &str,
-    _payload_hex: &str,
-    _estimated_gas: u64,
+    args: &[String],
+    sender: &str,
+    payload_hex: &str,
+    estimated_gas: u64,
+    expected_token_id: Option<&str>,
 ) -> Result<serde_json::Value, String> {
-    Err(
-        "ERR_PLAINTEXT_USER_TX_DISABLED: STS submission must be sealed locally as a PoSy v2.2 ETDAG envelope before any network-facing RPC; this command will not transmit the plaintext carrier"
-            .to_string(),
-    )
+    let wallet = load_wallet_material(args)?;
+    if wallet.address != sender {
+        return Err("wallet address does not match STS sender".to_string());
+    }
+    let rpc_url = optional_arg(args, "--rpc-url")
+        .or_else(|| std::env::var("SYNERGY_RPC_URL").ok())
+        .unwrap_or_else(|| DEFAULT_RPC_URL.to_string());
+    let timeout_seconds =
+        optional_u64_arg(args, "--timeout-seconds")?.unwrap_or(DEFAULT_SUBMIT_TIMEOUT_SECONDS);
+    let rpc = RpcClient::new(rpc_url.clone(), timeout_seconds)?;
+    let rpc_identity = verify_rpc_chain_identity(&rpc)?;
+
+    let nonce = match optional_u64_arg(args, "--nonce")? {
+        Some(nonce) => nonce,
+        None => parse_json_u64(
+            &rpc.call("synergy_getAccountNonce", json!([sender]))?,
+            "synergy_getAccountNonce",
+        )?,
+    };
+    let finalized_head = rpc.call("synergy_getFinalizedHead", json!([]))?;
+    let finalized_height = parse_json_u64(
+        finalized_head
+            .get("height")
+            .ok_or_else(|| "synergy_getFinalizedHead missing height".to_string())?,
+        "synergy_getFinalizedHead.height",
+    )?;
+    let gas_limit = optional_u64_arg(args, "--gas-limit")?
+        .unwrap_or_else(|| estimated_gas.saturating_add(DEFAULT_STS_GAS_LIMIT_BUFFER));
+    if gas_limit < estimated_gas {
+        return Err(format!(
+            "--gas-limit {gas_limit} is below the STS estimate {estimated_gas}"
+        ));
+    }
+    let gas_price_nwei =
+        optional_u64_arg(args, "--gas-price-nwei")?.unwrap_or(DEFAULT_GAS_PRICE_NWEI);
+    let default_max_fee_nwei = u128::from(estimated_gas)
+        .checked_mul(u128::from(gas_price_nwei))
+        .ok_or_else(|| "estimated STS max fee overflow".to_string())?;
+    let options = CarrierTransactionOptions {
+        nonce,
+        max_fee_nwei: optional_u128_arg(args, "--max-fee-nwei")?.unwrap_or(default_max_fee_nwei),
+        gas_limit,
+        carrier_amount_nwei: optional_u64_arg(args, "--carrier-amount-nwei")?
+            .unwrap_or(DEFAULT_STS_CARRIER_AMOUNT_NWEI),
+        receiver: optional_arg(args, "--receiver").unwrap_or_else(|| sender.to_string()),
+        timestamp: current_timestamp()?,
+        epoch: optional_u64_arg(args, "--epoch")?.unwrap_or(0),
+        ttl_height: optional_u64_arg(args, "--ttl-height")?
+            .unwrap_or_else(|| finalized_height.saturating_add(120)),
+    };
+    if options.max_fee_nwei == 0 {
+        return Err("transaction max fee must be greater than zero".to_string());
+    }
+    if options.ttl_height <= finalized_height {
+        return Err(format!(
+            "transaction TTL height {} must be above finalized height {finalized_height}",
+            options.ttl_height
+        ));
+    }
+    let native_balance_nwei = parse_json_u128(
+        &rpc.call("synergy_getBalance", json!([sender]))?,
+        "synergy_getBalance",
+    )?;
+    if native_balance_nwei < options.max_fee_nwei {
+        return Err(format!(
+            "insufficient native SNRG balance: have {native_balance_nwei} nWei, require at least {} nWei for the STS fee cap",
+            options.max_fee_nwei
+        ));
+    }
+    let envelope = build_signed_sts_carrier_transaction(&wallet, sender, payload_hex, options)?;
+    let ttl_height = envelope.transaction.ttl_height.0;
+    let max_fee_nwei = envelope.transaction.max_fee_nwei;
+    let signature_algorithm = envelope.transaction.aegis_pq_signature.algorithm.clone();
+    let verification = rpc.call("synergy_verifyAegisTransaction", json!([&envelope]))?;
+    if verification.get("valid").and_then(|value| value.as_bool()) != Some(true) {
+        return Err(format!(
+            "RPC rejected the locally valid Aegis transaction during preflight: {verification}"
+        ));
+    }
+    let submission = rpc.call("synergy_submitAegisTransaction", json!([&envelope]))?;
+    if submission.get("success").and_then(|value| value.as_bool()) != Some(true) {
+        return Err(format!("STS submission was rejected: {submission}"));
+    }
+    let tx_hash = submission
+        .get("tx_hash")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "accepted STS submission did not return tx_hash".to_string())?
+        .to_string();
+    let receipt = if has_flag(args, "--no-wait") {
+        None
+    } else {
+        let receipt = wait_for_transaction_receipt(&rpc, &tx_hash, timeout_seconds)?;
+        require_successful_receipt(&receipt, &tx_hash)?;
+        Some(receipt)
+    };
+    let token_verification = match (receipt.as_ref(), expected_token_id) {
+        (Some(_), Some(token_id)) => {
+            let token = rpc.call("sts_getToken", json!([token_id]))?;
+            let returned_id = token
+                .get("item")
+                .and_then(|item| item.get("token_id"))
+                .and_then(|value| value.as_str());
+            if token.get("success").and_then(|value| value.as_bool()) != Some(true)
+                || returned_id != Some(token_id)
+            {
+                return Err(format!(
+                    "finalized STS create receipt did not produce expected token {token_id}: {token}"
+                ));
+            }
+            Some(token)
+        }
+        _ => None,
+    };
+    Ok(json!({
+        "success": true,
+        "rpc_url": rpc_url,
+        "chain_id": STS_TESTNET_CHAIN_ID,
+        "network": SYNERGY_TESTNET_V3_NETWORK_ID,
+        "sender": sender,
+        "nonce": nonce,
+        "native_balance_nwei_at_submission": native_balance_nwei.to_string(),
+        "finalized_height_at_submission": finalized_height,
+        "ttl_height": ttl_height,
+        "max_fee_nwei": max_fee_nwei.to_string(),
+        "signature_algorithm": signature_algorithm,
+        "wallet_source": wallet.source,
+        "rpc_identity": rpc_identity,
+        "rpc_envelope_verification": verification,
+        "submission": submission,
+        "finalized": receipt.is_some(),
+        "receipt": receipt,
+        "token_verification": token_verification,
+    }))
 }
 
 fn build_signed_sts_carrier_transaction(
@@ -1121,43 +1275,174 @@ fn build_signed_sts_carrier_transaction(
     sender: &str,
     payload_hex: &str,
     options: CarrierTransactionOptions,
-) -> Result<Transaction, String> {
+) -> Result<AegisTxSubmissionEnvelope, String> {
     if wallet.address != sender {
         return Err("wallet address does not match transaction sender".to_string());
     }
-    let mut tx = Transaction {
-        chain_id: SYNERGY_TESTNET_V3_CHAIN_ID,
-        network_id: SYNERGY_TESTNET_V3_NETWORK_ID.to_string(),
-        sender: sender.to_string(),
-        receiver: options.receiver,
-        amount: options.carrier_amount_nwei,
-        nonce: options.nonce,
-        signature: Vec::new(),
-        signer_public_key: Vec::new(),
-        timestamp: options.timestamp,
-        gas_price: options.gas_price_nwei,
-        gas_limit: options.gas_limit,
-        data: Some(payload_hex.to_string()),
-        signature_algorithm: "mldsa87".to_string(),
+    let payload = hex::decode(payload_hex)
+        .map_err(|error| format!("invalid STS payload hex for submission: {error}"))?;
+    let key_id = AegisPqKeyId(wallet.address.clone());
+    let mut signer = AegisPqvmSigner::initialize_required().map_err(|error| error.to_string())?;
+    let public_key = PQCPublicKey {
+        algorithm: PQCAlgorithm::MLDSA87,
+        key_data: wallet.public_key.clone(),
+        key_id: key_id.0.clone(),
+        created_at: options.timestamp,
     };
     let private_key = PQCPrivateKey {
-        algorithm: PQCAlgorithm::FNDSA,
+        algorithm: PQCAlgorithm::MLDSA87,
         key_data: wallet.private_key.clone(),
-        public_key_id: wallet.address.clone(),
+        public_key_id: key_id.0.clone(),
         created_at: options.timestamp,
     };
-    let public_key = PQCPublicKey {
-        algorithm: PQCAlgorithm::FNDSA,
-        key_data: wallet.public_key.clone(),
-        key_id: wallet.address.clone(),
-        created_at: options.timestamp,
+    signer
+        .register_existing_keypair(
+            sender,
+            public_key,
+            private_key,
+            vec![AegisPqKeyRole::Transaction],
+            Epoch(options.epoch),
+        )
+        .map_err(|error| error.to_string())?;
+
+    let mut transaction = AegisTransaction {
+        version: 1,
+        chain_id: ChainId(SYNERGY_TESTNET_V3_CHAIN_ID),
+        network_id: NetworkId(SYNERGY_TESTNET_V3_NETWORK_ID.to_string()),
+        epoch: Epoch(options.epoch),
+        sender_uma_or_account: sender.to_string(),
+        receiver_uma_or_account: options.receiver,
+        account_nonce_or_sequence: options.nonce,
+        amount_nwei: u128::from(options.carrier_amount_nwei),
+        gas_limit: options.gas_limit,
+        max_fee_nwei: options.max_fee_nwei,
+        ttl_height: Height(options.ttl_height),
+        explicit_dependencies: Vec::new(),
+        read_set_hint: Vec::new(),
+        write_set_hint: vec!["sts:global".to_string()],
+        payload,
+        signer_uma_id: UmaId(sender.to_string()),
+        aegis_pq_key_id: key_id.clone(),
+        aegis_pq_signature: AegisPqSignature {
+            algorithm: String::new(),
+            signature_bytes: Vec::new(),
+        },
     };
-    let mut manager = PQCManager::new();
-    tx.sign_with_public_key(&public_key, &private_key, &mut manager)?;
-    Ok(tx)
+    transaction.aegis_pq_signature = signer
+        .sign_transaction(&transaction.signing_bytes()?, &key_id)
+        .map_err(|error| error.to_string())?;
+    let public_key = signer
+        .public_key_record(&key_id)
+        .map_err(|error| error.to_string())?;
+    let lifecycle_record = AegisPqKeyLifecycleRecord {
+        uma_id: sender.to_string(),
+        key_id,
+        roles: vec![AegisPqKeyRole::Transaction],
+        active_from_epoch: Epoch(options.epoch),
+        active_until_epoch: None,
+        revoked_from_epoch: None,
+    };
+    let envelope = AegisTxSubmissionEnvelope {
+        transaction,
+        public_key,
+        lifecycle_record,
+    };
+    synergy_testnet::aegis_tx_tool::verify_aegis_submission_envelope(&envelope)?;
+    synergy_testnet::aegis_tx_tool::legacy_transaction_from_aegis_envelope(&envelope)?;
+    Ok(envelope)
 }
 
-fn verify_rpc_native_asset(rpc: &RpcClient) -> Result<(), String> {
+fn wait_for_transaction_receipt(
+    rpc: &RpcClient,
+    tx_hash: &str,
+    timeout_seconds: u64,
+) -> Result<serde_json::Value, String> {
+    let started = std::time::Instant::now();
+    loop {
+        let receipt = rpc.call("synergy_getTransactionReceipt", json!([tx_hash]))?;
+        if !receipt.is_null() {
+            return Ok(receipt);
+        }
+        if started.elapsed() >= Duration::from_secs(timeout_seconds) {
+            return Err(format!(
+                "timed out after {timeout_seconds}s waiting for finalized receipt {tx_hash}"
+            ));
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn require_successful_receipt(receipt: &serde_json::Value, tx_hash: &str) -> Result<(), String> {
+    if receipt.get("status").and_then(|value| value.as_str()) != Some("0x1") {
+        return Err(format!(
+            "finalized STS transaction {tx_hash} failed: {receipt}"
+        ));
+    }
+    if receipt.get("finalized").and_then(|value| value.as_bool()) == Some(false) {
+        return Err(format!(
+            "STS transaction {tx_hash} returned a non-finalized receipt: {receipt}"
+        ));
+    }
+    Ok(())
+}
+
+fn verify_rpc_chain_identity(rpc: &RpcClient) -> Result<serde_json::Value, String> {
+    let identity = rpc.call("synergy_chainId", json!([]))?;
+    let chain_id = parse_json_u64(
+        identity
+            .get("chain_id")
+            .ok_or_else(|| "synergy_chainId missing chain_id".to_string())?,
+        "synergy_chainId.chain_id",
+    )?;
+    let chain_incarnation = parse_json_u64(
+        identity
+            .get("chain_incarnation")
+            .ok_or_else(|| "synergy_chainId missing chain_incarnation".to_string())?,
+        "synergy_chainId.chain_incarnation",
+    )?;
+    let network_id = identity
+        .get("network_id")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "synergy_chainId missing network_id".to_string())?;
+    let genesis_hash = identity
+        .get("genesis_hash")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "synergy_chainId missing genesis_hash".to_string())?;
+    if chain_id != SYNERGY_TESTNET_V3_CHAIN_ID
+        || chain_incarnation != TESTNET_V3_CHAIN_INCARNATION
+        || network_id != SYNERGY_TESTNET_V3_NETWORK_ID
+        || genesis_hash != TESTNET_V3_GENESIS_HASH
+    {
+        return Err(format!(
+            "RPC identity mismatch: required chain {SYNERGY_TESTNET_V3_CHAIN_ID}, incarnation {TESTNET_V3_CHAIN_INCARNATION}, network {SYNERGY_TESTNET_V3_NETWORK_ID}, Genesis {TESTNET_V3_GENESIS_HASH}; got {identity}"
+        ));
+    }
+
+    let capabilities = rpc.call("synergy_getAegisCapabilities", json!([]))?;
+    let has_tx_domain = capabilities
+        .get("domains")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .any(|item| item.as_str() == Some("SYNERGY_TX_V1"))
+        })
+        .unwrap_or(false);
+    let has_tx_role = capabilities
+        .get("roles")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .any(|item| item.as_str() == Some("Transaction"))
+        })
+        .unwrap_or(false);
+    if !has_tx_domain || !has_tx_role {
+        return Err(format!(
+            "RPC does not advertise the required Aegis transaction capability: {capabilities}"
+        ));
+    }
+
     let native = rpc.call("sts_getNativeAsset", json!([]))?;
     let chain_id = parse_json_u64(
         native
@@ -1177,7 +1462,17 @@ fn verify_rpc_native_asset(rpc: &RpcClient) -> Result<(), String> {
     {
         return Err("RPC native SNRG token_address must be null".to_string());
     }
-    Ok(())
+    if native.get("network").and_then(|value| value.as_str()) != Some(SYNERGY_TESTNET_V3_NETWORK_ID)
+    {
+        return Err(format!(
+            "RPC native asset network does not match {SYNERGY_TESTNET_V3_NETWORK_ID}: {native}"
+        ));
+    }
+    Ok(json!({
+        "chain": identity,
+        "aegis_capabilities": capabilities,
+        "native_asset": native,
+    }))
 }
 
 fn parse_json_u64(value: &serde_json::Value, label: &str) -> Result<u64, String> {
@@ -1306,7 +1601,12 @@ fn decode_key_material_input(input: &str) -> Result<Vec<u8>, String> {
     let mut normalized = input.trim().trim_matches('"').trim();
     if let Some((prefix, value)) = normalized.split_once(':') {
         let prefix = prefix.to_ascii_lowercase();
-        if prefix.contains("fndsa") || prefix.contains("fn-dsa") || prefix.contains("falcon") {
+        if prefix.contains("mldsa87")
+            || prefix.contains("ml-dsa-87")
+            || prefix.contains("fndsa")
+            || prefix.contains("fn-dsa")
+            || prefix.contains("falcon")
+        {
             normalized = value.trim();
         }
     }
@@ -1366,6 +1666,7 @@ fn print_payload(
             sender,
             value["payload_hex"].as_str().unwrap_or_default(),
             gas,
+            expected_token_id.as_deref(),
         )?;
         value
             .as_object_mut()
@@ -1820,6 +2121,8 @@ fn sha3_256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use synergy_testnet::address::generate_wallet_address;
+    use synergy_testnet::crypto::pqc::PQCManager;
 
     #[test]
     fn parses_supported_policy_templates() {
@@ -1842,6 +2145,10 @@ mod tests {
     fn rejects_non_testnet_network() {
         let args = vec!["--network".to_string(), "mainnet".to_string()];
         assert!(require_testnet(&args).is_err());
+        let legacy = vec!["--network".to_string(), "testnet".to_string()];
+        assert!(require_testnet(&legacy).is_err());
+        let governed = vec!["--network".to_string(), "synergy-testnet-v3".to_string()];
+        assert!(require_testnet(&governed).is_ok());
     }
 
     #[test]
@@ -1866,5 +2173,61 @@ mod tests {
             "synb11w7523v07vcc4n28knfnvyt6lq8649mey8p5ywd"
         )
         .is_err());
+    }
+
+    #[test]
+    fn builds_and_verifies_chain1266_mldsa87_submission_envelope() {
+        let mut manager = PQCManager::new();
+        let (public_key, private_key) = manager
+            .generate_keypair(PQCAlgorithm::MLDSA87)
+            .expect("generate ML-DSA-87 test keypair");
+        let address = generate_wallet_address(&hex::encode(&public_key.key_data));
+        let wallet = WalletMaterial {
+            address: address.clone(),
+            public_key: public_key.key_data,
+            private_key: private_key.key_data,
+            source: "test".to_string(),
+        };
+        let payload = StsSignedPayload::new(StsTx::TransferFungible {
+            token_id: "synb11w7523v07vcc4n28knfnvyt6lq8649mey8p5ywd".to_string(),
+            from: address.clone(),
+            to: address.clone(),
+            amount: 1,
+            timestamp: 1_700_000_000,
+        });
+        let payload_hex = hex::encode(encode_sts_payload(&payload).unwrap());
+        let envelope = build_signed_sts_carrier_transaction(
+            &wallet,
+            &address,
+            &payload_hex,
+            CarrierTransactionOptions {
+                nonce: 7,
+                max_fee_nwei: 4_000_000,
+                gas_limit: 100_000,
+                carrier_amount_nwei: DEFAULT_STS_CARRIER_AMOUNT_NWEI,
+                receiver: address.clone(),
+                timestamp: 1_700_000_000,
+                epoch: 0,
+                ttl_height: 9_999,
+            },
+        )
+        .expect("build verified envelope");
+
+        assert_eq!(envelope.transaction.chain_id.0, 1_266);
+        assert_eq!(
+            envelope.transaction.network_id.0,
+            SYNERGY_TESTNET_V3_NETWORK_ID
+        );
+        assert_eq!(envelope.transaction.aegis_pq_signature.algorithm, "mldsa87");
+        synergy_testnet::aegis_tx_tool::verify_aegis_submission_envelope(&envelope)
+            .expect("envelope remains valid");
+    }
+
+    #[test]
+    fn decodes_mldsa87_prefixed_key_material() {
+        assert_eq!(
+            decode_key_material_input("ML-DSA-87:0102ff").unwrap(),
+            vec![1, 2, 255]
+        );
     }
 }

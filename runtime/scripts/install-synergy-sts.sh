@@ -45,7 +45,7 @@ Install options:
 Examples:
   curl -fsSL https://github.com/synergy-network-hq/synergy-sts-cli-releases/releases/latest/download/install-synergy-sts.sh | bash
   ./scripts/install-synergy-sts.sh --from-source .
-  ./scripts/install-synergy-sts.sh --version synergy-sts-v15.0.14 --install-dir /usr/local/bin
+  ./scripts/install-synergy-sts.sh --version synergy-sts-v20.0.0 --install-dir /usr/local/bin
 USAGE
 }
 

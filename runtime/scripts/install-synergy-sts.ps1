@@ -45,7 +45,7 @@ Install options:
 
 Examples:
   .\scripts\install-synergy-sts.ps1 -FromSource .
-  .\scripts\install-synergy-sts.ps1 -Version synergy-sts-v15.0.11 -AddToPath
+  .\scripts\install-synergy-sts.ps1 -Version synergy-sts-v20.0.0 -AddToPath
 "@
 }
 

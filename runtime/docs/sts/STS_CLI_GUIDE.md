@@ -12,10 +12,10 @@ Current scope in this branch:
 - Payload decode and gas/fee estimation.
 - Metadata-file hashing with SHA3-256.
 - Token image URI/hash attachment at creation and one-time post-create image setting.
-- On-chain submission through `synergy_sendTransaction` using a Synergy wallet key file.
+- On-chain submission through `synergy_submitAegisTransaction` using a Synergy ML-DSA-87 wallet key file.
 - Native SNRG gas/transaction fee payment from the submitting wallet.
 
-By default the CLI emits deterministic STS payload artifacts for review. Add `--submit --wallet <wallet.dec.json>` to sign the Synergy carrier transaction, pay gas in native SNRG, and submit the payload through the public RPC transaction path.
+By default the CLI emits deterministic STS payload artifacts for review. Add `--submit --wallet <wallet.dec.json>` to build and locally verify a typed Aegis ML-DSA-87 envelope, pay the native SNRG fee, submit it through the signed transaction ingress, and wait for its receipt.
 
 ## Install From GitHub Releases
 
@@ -46,7 +46,7 @@ Install a specific release tag:
 
 ```bash
 curl -fsSL https://github.com/synergy-network-hq/synergy-sts-cli-releases/releases/latest/download/install-synergy-sts.sh \
-  | bash -s -- --version synergy-sts-v15.0.14
+  | bash -s -- --version synergy-sts-v20.0.0
 ```
 
 Install to a different directory:
@@ -74,7 +74,7 @@ The installer verifies release `.sha256` checksums by default. Advanced users ca
 
 ```bash
 ./install-synergy-sts.sh \
-  --url https://github.com/synergy-network-hq/synergy-sts-cli-releases/releases/download/synergy-sts-v15.0.14/synergy-sts-linux-amd64 \
+  --url https://github.com/synergy-network-hq/synergy-sts-cli-releases/releases/download/synergy-sts-v20.0.0/synergy-sts-linux-amd64 \
   --sha256 <expected_sha256>
 ```
 
@@ -164,14 +164,14 @@ Recommended workflow:
 1. Loads the submitting Synergy wallet from `--wallet`.
 2. Loads the wallet public key from the same JSON, from `--wallet-public`, or from a sibling `.pub.json` file.
 3. Verifies the public key derives the wallet address.
-4. Reads the current account nonce, gas price, native SNRG balance, and native SNRG identity from the RPC endpoint.
-5. Builds a Synergy transaction whose `data` field is the STS `payload_hex`.
-6. Signs the transaction with FN-DSA and embeds the signer public key.
-7. Submits it with `synergy_sendTransaction`.
+4. Verifies the RPC reports Chain 1266, incarnation 5, network ID `synergy-testnet-v3`, the canonical Genesis hash, Aegis transaction capability, and native SNRG; then reads the current finalized head, account nonce, and native SNRG balance.
+5. Builds a typed Chain 1266 Aegis transaction whose payload is the decoded `synergy-sts-v1:` bytes.
+6. Signs the domain-separated transaction with ML-DSA-87, embeds the public key and transaction-role lifecycle record, and verifies the complete envelope locally and through `synergy_verifyAegisTransaction`.
+7. Submits it with `synergy_submitAegisTransaction` and, unless `--no-wait` is set, requires a successful finalized `synergy_getTransactionReceipt`. Create commands then query `sts_getToken` and refuse to report success unless the expected deterministic token ID exists in finalized state.
 
 Wallet file requirements:
 
-- `--wallet` must point to decrypted Synergy wallet JSON containing `address` and `private_key`.
+- `--wallet` must point to decrypted Synergy ML-DSA-87 wallet JSON containing `address` and `private_key`.
 - The public key can be in the same file as `public_key`, in `--wallet-public <wallet.pub.json>`, or in a sibling file such as `faucet.pub.json` next to `faucet.dec.json`.
 - The CLI refuses to submit when the wallet public key does not derive the wallet address.
 - The CLI refuses to submit when `--from` does not match the wallet address.
@@ -179,19 +179,19 @@ Wallet file requirements:
 Default RPC:
 
 ```bash
-https://testnet-core-rpc.synergy-network.io
+https://testnet-rpc.synergy-network.io
 ```
 
 Override it with:
 
 ```bash
---rpc-url https://testnet-core-rpc.synergy-network.io
+--rpc-url https://testnet-rpc.synergy-network.io
 ```
 
 You can also set:
 
 ```bash
-export SYNERGY_RPC_URL=https://testnet-core-rpc.synergy-network.io
+export SYNERGY_RPC_URL=https://testnet-rpc.synergy-network.io
 export SYNERGY_WALLET_FILE=/path/to/wallet.dec.json
 ```
 
@@ -201,7 +201,7 @@ When `--submit` is present, `--from` and `--creator-nonce` can be omitted. The C
 
 ```bash
 synergy-sts token create \
-  --network testnet \
+  --network synergy-testnet-v3 \
   --class b1 \
   --name "CLI Gold" \
   --symbol CLIG \
@@ -221,14 +221,16 @@ The response includes the payload review fields and a `submission` object:
   "payload_hex": "73796e657267792d7374732d76313a...",
   "sender": "synw1...",
   "submission": {
-    "submitted": true,
-    "tx_hash": "syntxn-...",
-    "mempool_status": "queued",
+    "success": true,
+    "finalized": true,
     "nonce": 21,
-    "gas_price_nwei": 40,
-    "gas_limit": 150000,
-    "carrier_amount_nwei": 1,
-    "fee_cap_nwei": "6000001"
+    "max_fee_nwei": "5000000",
+    "signature_algorithm": "mldsa87",
+    "submission": {
+      "success": true,
+      "tx_hash": "syntxn-..."
+    },
+    "receipt": {}
   }
 }
 ```
@@ -239,7 +241,7 @@ Build and review first:
 
 ```bash
 synergy-sts token create \
-  --network testnet \
+  --network synergy-testnet-v3 \
   --class b1 \
   --name "Review First" \
   --symbol RVW \
@@ -262,15 +264,20 @@ synergy-sts submit \
 
 ### Gas And Carrier Amount
 
-Fees are paid in native SNRG from the submitting wallet. The CLI estimates STS operation gas locally and reads the current RPC gas price when `--gas-price-nwei` is omitted.
+Fees are paid in native SNRG from the submitting wallet. The CLI estimates STS operation gas locally and uses 40 nWei as the default fee-rate input. The default typed fee cap is `estimated_gas * gas_price_nwei`; `--max-fee-nwei` can override it explicitly.
 
 Submit options:
 
 ```bash
 --gas-price-nwei <u64>       Override RPC gas price.
+--max-fee-nwei <u128>        Override the typed transaction fee cap.
 --gas-limit <u64>            Override estimated gas plus safety buffer.
 --nonce <u64>                Override RPC account nonce.
 --carrier-amount-nwei <u64>  Native SNRG carrier amount.
+--epoch <u64>                Set the Aegis key lifecycle epoch; defaults to 0.
+--ttl-height <u64>           Set expiry height; defaults to finalized head plus 120.
+--timeout-seconds <u64>      Set RPC and receipt wait timeout; defaults to 30.
+--no-wait                    Return after ingress acceptance without receipt polling.
 ```
 
 The public RPC path currently accepts a one-nwei self-carrier by default. That has no practical balance-transfer effect beyond the SNRG fee charge because the receiver defaults to the sender. Protocol builds with zero-value STS carrier admission can use:
@@ -285,7 +292,7 @@ Every payload-producing command accepts `--submit --wallet`.
 
 ```bash
 synergy-sts token mint \
-  --network testnet \
+  --network synergy-testnet-v3 \
   --token synb1... \
   --to synw1holder... \
   --amount 250000000 \
@@ -293,7 +300,7 @@ synergy-sts token mint \
   --wallet ./mint-authority.dec.json
 
 synergy-sts token transfer \
-  --network testnet \
+  --network synergy-testnet-v3 \
   --token synb1... \
   --to synw1recipient... \
   --amount 100000000 \
@@ -301,7 +308,7 @@ synergy-sts token transfer \
   --wallet ./holder.dec.json
 
 synergy-sts token set-image \
-  --network testnet \
+  --network synergy-testnet-v3 \
   --token synb1... \
   --image-uri https://example.com/token.png \
   --image-file ./token.png \
@@ -311,7 +318,7 @@ synergy-sts token set-image \
 
 ## Read-Only STS RPC
 
-The runtime exposes read-only STS RPC methods for wallets, SDKs, and explorer checks. These methods rebuild STS view state by replaying committed `synergy-sts-v1:` payloads from `data/chain.json`; if the local hot chain is compacted and no longer starts at genesis, the methods return `success: false` instead of pretending the STS registry is empty.
+The runtime exposes read-only STS RPC methods for wallets, SDKs, and explorer checks. On the Chain 1266 single-authority runtime, these methods read the consensus-owned finalized execution state. The legacy standalone `data/sts_state.json` snapshot cannot shadow or replace that authoritative state. Other runtime modes may use a verified finalized STS snapshot or complete committed-chain replay and fail closed when neither is available.
 
 Supported method names:
 
@@ -424,7 +431,7 @@ The CLI can hash a metadata file:
 
 ```bash
 synergy-sts token create \
-  --network testnet \
+  --network synergy-testnet-v3 \
   --class b1 \
   --name "Testnet Gold" \
   --symbol TGLD \
@@ -454,8 +461,8 @@ Store token metadata on IPFS, Arweave, or HTTPS and pass its SHA3-256 hash with 
 ```json
 {
   "schema": "synergy.sts.token.metadata.v1",
-  "chain_id": 1264,
-  "network": "testnet",
+  "chain_id": 1266,
+  "network": "synergy-testnet-v3",
   "standard": "sts-fungible-v1",
   "asset": {
     "class": "b1",
@@ -525,8 +532,8 @@ NFT collection metadata uses the same top-level structure with `"standard": "sts
 ```json
 {
   "schema": "synergy.sts.nft.metadata.v1",
-  "chain_id": 1264,
-  "network": "testnet",
+  "chain_id": 1266,
+  "network": "synergy-testnet-v3",
   "standard": "sts-nft-instance-v1",
   "collection": {
     "collection_id": "synn1...",
@@ -568,8 +575,8 @@ Multi-asset metadata uses `"standard": "sts-multi-asset-v1"`. Collection metadat
 ```json
 {
   "schema": "synergy.sts.multi_asset.metadata.v1",
-  "chain_id": 1264,
-  "network": "testnet",
+  "chain_id": 1266,
+  "network": "synergy-testnet-v3",
   "standard": "sts-multi-asset-v1",
   "collection": {
     "collection_id": "synj...",
@@ -603,8 +610,8 @@ Credential metadata must avoid private data. Put only schema hashes, credential 
 ```json
 {
   "schema": "synergy.sts.credential.metadata.v1",
-  "chain_id": 1264,
-  "network": "testnet",
+  "chain_id": 1266,
+  "network": "synergy-testnet-v3",
   "standard": "sts-credential-v1",
   "issuer": {
     "address": "synw1...",
@@ -634,7 +641,7 @@ Token images can be set at creation:
 
 ```bash
 synergy-sts token create \
-  --network testnet \
+  --network synergy-testnet-v3 \
   --class b1 \
   --name "Testnet Gold" \
   --symbol TGLD \
@@ -654,7 +661,7 @@ Or after creation, exactly once, by the token creator:
 
 ```bash
 synergy-sts token set-image \
-  --network testnet \
+  --network synergy-testnet-v3 \
   --token synb1... \
   --image-uri ipfs://bafy.../logo.png \
   --image-file ./logo.png \
@@ -678,7 +685,7 @@ B1 is the basic fungible class. It does not allow freeze, pause, clawback, allow
 
 ```bash
 synergy-sts token create \
-  --network testnet \
+  --network synergy-testnet-v3 \
   --class b1 \
   --name "Testnet Gold" \
   --symbol TGLD \
@@ -712,7 +719,7 @@ B2 allows managed issuer powers, but dangerous powers must be declared at creati
 
 ```bash
 synergy-sts token create \
-  --network testnet \
+  --network synergy-testnet-v3 \
   --class b2 \
   --name "Managed USD" \
   --symbol MUSD \
@@ -732,11 +739,11 @@ synergy-sts token create \
 B2 control commands require a `synb2...` token ID:
 
 ```bash
-synergy-sts token freeze --network testnet --token synb2... --owner synw1... --from synw1...
-synergy-sts token thaw --network testnet --token synb2... --owner synw1... --from synw1...
-synergy-sts token pause --network testnet --token synb2... --from synw1...
-synergy-sts token unpause --network testnet --token synb2... --from synw1...
-synergy-sts token clawback --network testnet --token synb2... --source synw1... --to synw1... --amount 1000 --from synw1...
+synergy-sts token freeze --network synergy-testnet-v3 --token synb2... --owner synw1... --from synw1...
+synergy-sts token thaw --network synergy-testnet-v3 --token synb2... --owner synw1... --from synw1...
+synergy-sts token pause --network synergy-testnet-v3 --token synb2... --from synw1...
+synergy-sts token unpause --network synergy-testnet-v3 --token synb2... --from synw1...
+synergy-sts token clawback --network synergy-testnet-v3 --token synb2... --source synw1... --to synw1... --amount 1000 --from synw1...
 ```
 
 ## Create B3 Policy Token
@@ -752,7 +759,7 @@ Unsupported policy templates fail closed.
 
 ```bash
 synergy-sts token create \
-  --network testnet \
+  --network synergy-testnet-v3 \
   --class b3 \
   --name "Governance Token" \
   --symbol GOV \
@@ -772,7 +779,7 @@ synergy-sts token create \
 Create a B3 snapshot payload:
 
 ```bash
-synergy-sts token snapshot --network testnet --token synb3... --from synw1... --out ./gov-snapshot.json
+synergy-sts token snapshot --network synergy-testnet-v3 --token synb3... --from synw1... --out ./gov-snapshot.json
 ```
 
 ## Mint, Transfer, Burn
@@ -781,7 +788,7 @@ Mint:
 
 ```bash
 synergy-sts token mint \
-  --network testnet \
+  --network synergy-testnet-v3 \
   --token synb1... \
   --to synw1recipient000000000000000000000000 \
   --amount 5000000000 \
@@ -793,7 +800,7 @@ Transfer:
 
 ```bash
 synergy-sts token transfer \
-  --network testnet \
+  --network synergy-testnet-v3 \
   --token synb1... \
   --from synw1sender00000000000000000000000000 \
   --to synw1recipient000000000000000000000000 \
@@ -805,7 +812,7 @@ Burn:
 
 ```bash
 synergy-sts token burn \
-  --network testnet \
+  --network synergy-testnet-v3 \
   --token synb1... \
   --from synw1holder00000000000000000000000000 \
   --amount 1000000000 \
@@ -818,7 +825,7 @@ Create an NF1 collection:
 
 ```bash
 synergy-sts nft create-collection \
-  --network testnet \
+  --network synergy-testnet-v3 \
   --class nf1 \
   --name "Synergy Badges" \
   --symbol SBADGE \
@@ -837,7 +844,7 @@ Create an NF2 controlled collection:
 
 ```bash
 synergy-sts nft create-collection \
-  --network testnet \
+  --network synergy-testnet-v3 \
   --class nf2 \
   --name "Access Passes" \
   --symbol PASS \
@@ -853,7 +860,7 @@ Mint an NFT:
 
 ```bash
 synergy-sts nft mint \
-  --network testnet \
+  --network synergy-testnet-v3 \
   --collection synn1... \
   --to synw1owner00000000000000000000000000 \
   --metadata-uri ipfs://bafy.../badge-1.json \
@@ -865,14 +872,14 @@ synergy-sts nft mint \
 Transfer, burn, and controlled lifecycle commands:
 
 ```bash
-synergy-sts nft transfer --network testnet --nft synn1... --from synw1owner... --to synw1next...
-synergy-sts nft burn --network testnet --nft synn1... --from synw1owner...
-synergy-sts nft freeze --network testnet --nft synn2... --from synw1issuer...
-synergy-sts nft thaw --network testnet --nft synn2... --from synw1issuer...
-synergy-sts nft revoke --network testnet --nft synn2... --from synw1issuer...
-synergy-sts nft use --network testnet --nft synn2... --from synw1owner...
-synergy-sts nft update-metadata --network testnet --nft synn1... --metadata-uri ipfs://bafy.../updated.json --metadata-file ./updated.json --from synw1metadata...
-synergy-sts nft verify-collection --network testnet --collection synn1... --from synw1collectionauthority...
+synergy-sts nft transfer --network synergy-testnet-v3 --nft synn1... --from synw1owner... --to synw1next...
+synergy-sts nft burn --network synergy-testnet-v3 --nft synn1... --from synw1owner...
+synergy-sts nft freeze --network synergy-testnet-v3 --nft synn2... --from synw1issuer...
+synergy-sts nft thaw --network synergy-testnet-v3 --nft synn2... --from synw1issuer...
+synergy-sts nft revoke --network synergy-testnet-v3 --nft synn2... --from synw1issuer...
+synergy-sts nft use --network synergy-testnet-v3 --nft synn2... --from synw1owner...
+synergy-sts nft update-metadata --network synergy-testnet-v3 --nft synn1... --metadata-uri ipfs://bafy.../updated.json --metadata-file ./updated.json --from synw1metadata...
+synergy-sts nft verify-collection --network synergy-testnet-v3 --collection synn1... --from synw1collectionauthority...
 ```
 
 NF1 assets are standard transferable NFTs. NF2 assets can enforce issuer approval, expiry, revocation, freeze/thaw, and single-use status. NFT IDs and collection IDs are deterministic `synn1` or `synn2` Bech32m object IDs; they are not signable wallet addresses.
@@ -883,7 +890,7 @@ Create a multi-asset collection:
 
 ```bash
 synergy-sts ma create \
-  --network testnet \
+  --network synergy-testnet-v3 \
   --name "Game Inventory" \
   --symbol GINV \
   --metadata-uri ipfs://bafy.../inventory.json \
@@ -899,7 +906,7 @@ Create items inside the collection:
 
 ```bash
 synergy-sts ma create-item \
-  --network testnet \
+  --network synergy-testnet-v3 \
   --collection synj... \
   --item-id 1 \
   --type fungible \
@@ -917,12 +924,12 @@ synergy-sts ma create-item \
 Mint, transfer, burn, and batch operations:
 
 ```bash
-synergy-sts ma mint --network testnet --collection synj... --item-id 1 --amount 100 --to synw1owner... --from synw1creator...
-synergy-sts ma transfer --network testnet --collection synj... --item-id 1 --amount 10 --from synw1owner... --to synw1next...
-synergy-sts ma burn --network testnet --collection synj... --item-id 1 --amount 5 --from synw1owner...
-synergy-sts ma batch-mint --network testnet --collection synj... --item 1:100 --item 2:1 --to synw1owner... --from synw1creator...
-synergy-sts ma batch-transfer --network testnet --collection synj... --item 1:10 --item 2:1 --from synw1owner... --to synw1next...
-synergy-sts ma batch-burn --network testnet --collection synj... --item 1:5 --item 2:1 --from synw1owner...
+synergy-sts ma mint --network synergy-testnet-v3 --collection synj... --item-id 1 --amount 100 --to synw1owner... --from synw1creator...
+synergy-sts ma transfer --network synergy-testnet-v3 --collection synj... --item-id 1 --amount 10 --from synw1owner... --to synw1next...
+synergy-sts ma burn --network synergy-testnet-v3 --collection synj... --item-id 1 --amount 5 --from synw1owner...
+synergy-sts ma batch-mint --network synergy-testnet-v3 --collection synj... --item 1:100 --item 2:1 --to synw1owner... --from synw1creator...
+synergy-sts ma batch-transfer --network synergy-testnet-v3 --collection synj... --item 1:10 --item 2:1 --from synw1owner... --to synw1next...
+synergy-sts ma batch-burn --network synergy-testnet-v3 --collection synj... --item 1:5 --item 2:1 --from synw1owner...
 ```
 
 Batch multi-asset operations are atomic in the runtime: if any item in the batch fails policy, supply, balance, or duplication checks, the whole batch fails.
@@ -933,7 +940,7 @@ Create a credential schema:
 
 ```bash
 synergy-sts credential schema create \
-  --network testnet \
+  --network synergy-testnet-v3 \
   --schema-id kyc-basic-v1 \
   --name "KYC Basic" \
   --schema-hash aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
@@ -946,7 +953,7 @@ Issue a credential using a subject address or a precomputed subject commitment:
 
 ```bash
 synergy-sts credential issue \
-  --network testnet \
+  --network synergy-testnet-v3 \
   --schema-id kyc-basic-v1 \
   --subject synw1subject000000000000000000000000 \
   --credential-hash cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
@@ -958,11 +965,11 @@ synergy-sts credential issue \
 Manage credential status:
 
 ```bash
-synergy-sts credential verify-status --network testnet --credential synk... --from synw1issuer...
-synergy-sts credential suspend --network testnet --credential synk... --from synw1issuer...
-synergy-sts credential restore --network testnet --credential synk... --from synw1issuer...
-synergy-sts credential revoke --network testnet --credential synk... --reason-hash dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd --from synw1issuer...
-synergy-sts credential expire --network testnet --credential synk... --from synw1issuer...
+synergy-sts credential verify-status --network synergy-testnet-v3 --credential synk... --from synw1issuer...
+synergy-sts credential suspend --network synergy-testnet-v3 --credential synk... --from synw1issuer...
+synergy-sts credential restore --network synergy-testnet-v3 --credential synk... --from synw1issuer...
+synergy-sts credential revoke --network synergy-testnet-v3 --credential synk... --reason-hash dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd --from synw1issuer...
+synergy-sts credential expire --network synergy-testnet-v3 --credential synk... --from synw1issuer...
 ```
 
 Credential IDs are non-transferable `synk` object IDs. They are derived from chain ID, issuer, subject commitment, schema ID, credential hash, and issue timestamp.
@@ -976,8 +983,8 @@ Decoded create payload shape:
 ```json
 {
   "version": 1,
-  "chain_id": 1264,
-  "network": "testnet",
+  "chain_id": 1266,
+  "network": "synergy-testnet-v3",
   "tx": {
     "op": "create_fungible",
     "data": {
@@ -1036,14 +1043,15 @@ The CLI fails closed when:
 - The wallet is encrypted, missing `private_key`, or missing a matching `public_key`.
 - The wallet public key does not derive the wallet address.
 - The wallet address does not match the submitted `--from` address.
-- The RPC native asset check does not return chain ID `1264`, native SNRG, and `token_address: null`.
+- The RPC native asset check does not return chain ID `1266`, native SNRG, and `token_address: null`.
 - The wallet SNRG balance is below the calculated fee cap.
-- `synergy_sendTransaction` rejects the signed transaction.
+- The wallet material cannot produce a valid ML-DSA-87 signature and Aegis envelope.
+- `synergy_submitAegisTransaction` rejects the signed envelope.
 
 ## Current Limitations
 
 - `--wallet` expects decrypted wallet JSON. The CLI does not unlock encrypted wallet files or prompt for seed phrases.
-- `--submit` queues a signed transaction and returns the transaction hash. It does not block until finality; use `sts_getToken`, `sts_getBalance`, `sts_getEvents`, or Atlas after the transaction finalizes.
+- `--submit` waits for a finalized receipt by default. A timeout returns `finalized: false` without claiming failure or finality; use the transaction hash to query later. `--no-wait` returns immediately after ingress acceptance.
 - The public RPC-compatible default carrier amount is `1` nWei sent from the wallet back to itself. Use `--carrier-amount-nwei 0` only when the target RPC/runtime has zero-value STS carrier admission deployed.
 - Hardware-wallet and interactive Synergy Wallet app signing are not part of this CLI release. This release signs from local Synergy wallet material.
 
