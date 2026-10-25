@@ -81,11 +81,35 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential clang cmake pkg-config libssl-dev unzip
 
+      - name: Resolve security dependency locks for diagnosis
+        run: |
+          cargo update --manifest-path runtime/Cargo.toml -p quinn-proto -p rustls -p rustls-webpki -p webpki-roots@1 -p crossbeam-epoch -p anyhow -p tokio
+          cargo update --manifest-path research/aegis-bench/Cargo.toml -p quinn-proto -p rustls -p rustls-webpki -p webpki-roots@1 -p crossbeam-epoch -p anyhow -p tokio
+          cargo update --manifest-path runtime/synq-language/aegis-pqsynq/aegis_crypto_core/Cargo.toml -p crossbeam-epoch -p tokio
+          cargo update --manifest-path runtime/synq-language/aegis-pqsynq/aegis_crypto_core/Cargo.toml -p tokio --precise 1.54.1
+          cargo update --manifest-path runtime/synq-language/Cargo.toml -p crossbeam-epoch -p anyhow
+
+      - name: Upload resolved security dependency locks
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-lock-refresh
+          retention-days: 1
+          path: |
+            runtime/Cargo.lock
+            research/aegis-bench/Cargo.lock
+            runtime/synq-language/aegis-pqsynq/aegis_crypto_core/Cargo.lock
+            runtime/synq-language/Cargo.lock
+
       - name: Run serial PoSy V3 PR verification
         shell: bash
         env:
           POSY_V3_EVIDENCE_DIR: ${{ runner.temp }}/posy-v3-pr-evidence
         run: runtime/scripts/testnet/verify-posy-v3-pr.sh full
+
+      - name: Verify patched Wasm runtime
+        run: |
+          cargo test --locked --manifest-path runtime/Cargo.toml --package aivm-core --lib vm::wasm_runner::tests
+          cargo test --locked --manifest-path runtime/Cargo.toml --package aivm-core --lib execution::tests::accepts_wasm_artifacts
 
       - name: Upload bounded verification evidence
         if: always()

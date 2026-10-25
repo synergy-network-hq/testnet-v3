@@ -6,6 +6,9 @@ on:
       - ".github/workflows/dependency-security.yml"
       - "runtime/sxcp/sxcp_external_chains/evm/**"
       - "runtime/synq-language/sdk/**"
+      - "runtime/**/Cargo.toml"
+      - "runtime/**/Cargo.lock"
+      - "research/aegis-bench/Cargo.lock"
   workflow_dispatch:
 
 permissions:
@@ -53,3 +56,19 @@ jobs:
       - run: npm audit --audit-level=low
       - run: npm run typecheck
       - run: npm run test:integration
+
+
+  rust-audit:
+    name: Rust dependency vulnerability and unsoundness audit
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Audit all active lockfiles
+        run: |
+          cargo audit --file runtime/Cargo.lock --deny unsound --no-yanked
+          cargo audit --file research/aegis-bench/Cargo.lock --deny unsound --no-yanked --no-fetch
+          cargo audit --file runtime/synq-language/aegis-pqsynq/aegis_crypto_core/Cargo.lock --deny unsound --no-yanked --no-fetch
+          cargo audit --file runtime/synq-language/Cargo.lock --deny unsound --no-yanked --no-fetch
