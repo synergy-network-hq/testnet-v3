@@ -44,3 +44,11 @@ wasmtime = "45.0.2"
 [patch.crates-io]
 pqcrypto-internals = { path = "vendor/aegis-pqvm/vendor/pqcrypto-internals" }
 pqcrypto-traits = { path = "vendor/aegis-pqvm/vendor/pqcrypto-traits" }
+
+# Runtime test linking previously exhausted the local development volume.
+# These settings affect test artifacts only; production profiles and protocol
+# semantics are unchanged. They reduce debug-object duplication so focused and
+# eventual integration tests can retain filesystem headroom.
+[profile.test]
+debug = 0
+incremental = false
