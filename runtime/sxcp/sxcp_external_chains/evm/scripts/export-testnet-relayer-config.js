@@ -1,4 +1,4 @@
-const { loadDeployment, parseArgs, saveRuntime } = require("./lib/common");
+import { loadDeployment, parseArgs, saveRuntime } from "./lib/common.js";
 
 function ensureDeployment(name) {
   const deployment = loadDeployment(name);

@@ -1,11 +1,13 @@
-const hre = require("hardhat");
-const {
+import { network } from "hardhat";
+import {
   loadDeployment,
   loadRuntime,
   parseArgs,
   rpcUrlForNetwork,
   saveRuntime,
-} = require("./lib/common");
+} from "./lib/common.js";
+
+const { ethers, networkName } = await network.create(parseArgs(process.argv.slice(2)).network);
 
 function parsePrivateKeys(raw) {
   if (!raw) return [];
@@ -18,15 +20,15 @@ function parsePrivateKeys(raw) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const source = args.source;
-  const destination = args.destination || hre.network.name;
+  const destination = args.destination || networkName;
 
   if (!source) {
     throw new Error("Missing --source <network>");
   }
 
-  if (destination !== hre.network.name) {
+  if (destination !== networkName) {
     throw new Error(
-      `Run this script on --network ${destination}. Current network: ${hre.network.name}`
+      `Run this script on --network ${destination}. Current network: ${networkName}`
     );
   }
 
@@ -34,11 +36,11 @@ async function main() {
   const destinationDeployment = loadDeployment(destination);
   const intent = loadRuntime(`latest-intent-${source}-to-${destination}.json`);
 
-  const destinationHub = await hre.ethers.getContractAt(
+  const destinationHub = await ethers.getContractAt(
     "SXCPIntentHub",
     destinationDeployment.contracts.sxcpIntentHub
   );
-  const witnessRegistry = await hre.ethers.getContractAt(
+  const witnessRegistry = await ethers.getContractAt(
     "WitnessRegistry",
     destinationDeployment.contracts.witnessRegistry
   );
@@ -48,7 +50,7 @@ async function main() {
     throw new Error(`Missing RPC URL env var for source network ${source}`);
   }
 
-  const sourceProvider = new hre.ethers.JsonRpcProvider(sourceRpcUrl);
+  const sourceProvider = new ethers.JsonRpcProvider(sourceRpcUrl);
   const observedSourceHead = await sourceProvider.getBlockNumber();
 
   const sourceChainId = Number(sourceDeployment.chainId);
@@ -58,8 +60,8 @@ async function main() {
 
   const stateProofRoot =
     process.env.STATE_PROOF_ROOT ||
-    hre.ethers.keccak256(
-      hre.ethers.solidityPacked(
+    ethers.keccak256(
+      ethers.solidityPacked(
         ["bytes32", "bytes32", "uint256", "uint64", "uint64", "uint256", "uint256"],
         [
           intent.intentId,
@@ -92,7 +94,7 @@ async function main() {
   }
 
   const wallets = relayerKeys
-    .map((key) => new hre.ethers.Wallet(key))
+    .map((key) => new ethers.Wallet(key))
     .sort((a, b) => a.address.toLowerCase().localeCompare(b.address.toLowerCase()));
 
   const signers = wallets.map((wallet) => wallet.address);
@@ -110,7 +112,7 @@ async function main() {
 
   const signatures = [];
   for (const wallet of wallets) {
-    signatures.push(await wallet.signMessage(hre.ethers.getBytes(digest)));
+    signatures.push(await wallet.signMessage(ethers.getBytes(digest)));
   }
 
   const tx = await destinationHub.verifyAttestationBundle(
