@@ -1453,8 +1453,11 @@ fn ensure_node_config_matches_finalized_consensus_parameters(
         };
     }
 
-    let activation = load_genesis_bound_simplified_activation(genesis.value())?
-        .ok_or_else(|| "canonical Testnet-v3 Genesis has no finalized simplified PoSy v3 activation".to_string())?;
+    let activation =
+        load_genesis_bound_simplified_activation(genesis.value())?.ok_or_else(|| {
+            "canonical Testnet-v3 Genesis has no finalized simplified PoSy v3 activation"
+                .to_string()
+        })?;
     ensure_node_config_matches_simplified_posy_parameters(config, &activation.manifest)
 }
 
@@ -6640,11 +6643,10 @@ mod tests {
             .expect("the frozen signed SGEN must load through the runtime path");
         assert!(genesis.consensus_parameters().is_none());
 
-        ensure_node_config_matches_finalized_consensus_parameters(
-            &NodeConfig::default(),
-            &genesis,
-        )
-        .expect("the frozen SGEN activation manifest must authorize the default v3 node config");
+        ensure_node_config_matches_finalized_consensus_parameters(&NodeConfig::default(), &genesis)
+            .expect(
+                "the frozen SGEN activation manifest must authorize the default v3 node config",
+            );
     }
 
     #[test]

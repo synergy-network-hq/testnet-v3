@@ -2505,8 +2505,14 @@ mod tests {
         let mut state = ExecutionState::new();
         let error = execute_genesis_deployment(&mut state, &plan, &authorities, &parameters)
             .expect_err("a sixth validator must exceed a nonzero maximum");
-        assert!(error.contains("Validator limit reached"), "unexpected error: {error}");
-        assert!(state.synq_contracts.is_empty(), "failed Genesis remains atomic");
+        assert!(
+            error.contains("Validator limit reached"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            state.synq_contracts.is_empty(),
+            "failed Genesis remains atomic"
+        );
     }
 
     #[test]
