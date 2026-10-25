@@ -5,10 +5,14 @@ import { createHash } from "node:crypto";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const patches = JSON.parse(fs.readFileSync(path.join(root, "patches/zod4-compat.json"), "utf8"));
+const lock = JSON.parse(fs.readFileSync(path.join(root, "package-lock.json"), "utf8"));
 const hash = (text) => createHash("sha256").update(text).digest("hex");
 
 for (const patch of patches) {
-  const packageRoot = path.join(root, "node_modules", patch.package);
+  const installations = Object.keys(lock.packages).filter((entry) => entry.endsWith(`node_modules/${patch.package}`));
+  if (installations.length === 0) throw new Error(`Missing dependency: ${patch.package}`);
+  for (const installation of installations) {
+  const packageRoot = path.join(root, installation);
   const installed = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8"));
   if (installed.version !== patch.version) {
     throw new Error(`Review the Zod 4 compatibility patch before updating ${patch.package}`);
@@ -29,5 +33,6 @@ for (const patch of patches) {
     throw new Error(`Compatibility patch checksum mismatch: ${patch.package}/${patch.file}`);
   }
   fs.writeFileSync(target, text);
-  console.log(`Applied Zod 4 compatibility: ${patch.package}/${patch.file}`);
+  console.log(`Applied Zod 4 compatibility: ${installation}/${patch.file}`);
+  }
 }
