@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   evm:
-    name: EVM contract tests and production dependency audit
+    name: EVM contract tests and complete dependency audit
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     defaults:
@@ -31,7 +31,8 @@ jobs:
           cache: npm
           cache-dependency-path: runtime/sxcp/sxcp_external_chains/evm/package-lock.json
       - run: npm ci --ignore-scripts --no-fund
-      - run: npm audit --omit=dev --audit-level=low
+      - run: npm run postinstall
+      - run: npm audit --audit-level=low
       - run: npm test
 
   sdk:
