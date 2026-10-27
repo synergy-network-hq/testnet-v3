@@ -1,0 +1,342 @@
+{
+  "$id": "https://schemas.synergy.network/node-config/v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "admin_socket_path": {
+      "type": "string"
+    },
+    "aegis_key_bindings_path": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "aegis_signing_key_path": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "chain_id": {
+      "type": "integer"
+    },
+    "consensus": {
+      "additionalProperties": false,
+      "properties": {
+        "authority_binding": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "authority_trust_key_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_rounds_behind": {
+          "type": "integer"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "proposal_timeout_ms": {
+          "type": "integer"
+        },
+        "round_timeout_ms": {
+          "type": "integer"
+        },
+        "signing_key_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "etdag": {
+      "additionalProperties": false,
+      "properties": {
+        "admission_queue_capacity": {
+          "type": "integer"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "ingress_kem_secret_key_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_vertex_bytes": {
+          "type": "integer"
+        },
+        "proposal_material_wait_ms": {
+          "type": "integer"
+        },
+        "protected_lookahead": {
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "genesis_path": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "manifest_path": {
+      "type": "string"
+    },
+    "network": {
+      "additionalProperties": false,
+      "properties": {
+        "advertised_addresses": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "dial_timeout_ms": {
+          "type": "integer"
+        },
+        "idle_connection_timeout_ms": {
+          "type": "integer"
+        },
+        "listen_addresses": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "network_id": {
+      "type": "string"
+    },
+    "node_name": {
+      "type": "string"
+    },
+    "p2p": {
+      "additionalProperties": false,
+      "properties": {
+        "gossip_fanout": {
+          "type": "integer"
+        },
+        "max_authenticated_peers": {
+          "type": "integer"
+        },
+        "max_frame_bytes": {
+          "type": "integer"
+        },
+        "max_pending_handshakes": {
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "public_identity_path": {
+      "type": "string"
+    },
+    "role": {
+      "type": "string"
+    },
+    "rpc": {
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "listen_address": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_concurrent_requests": {
+          "type": "integer"
+        },
+        "max_request_bytes": {
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "schema_version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "storage": {
+      "additionalProperties": false,
+      "properties": {
+        "data_directory": {
+          "type": "string"
+        },
+        "max_open_files": {
+          "type": "integer"
+        },
+        "minimum_free_bytes": {
+          "type": "integer"
+        },
+        "prune_finalized_history_after_blocks": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "wal_sync": {
+          "type": "string"
+        },
+        "world_memory_budget_bytes": {
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "telemetry": {
+      "additionalProperties": false,
+      "properties": {
+        "log_format": {
+          "type": "string"
+        },
+        "metrics_listen_address": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "service_name": {
+          "type": "string"
+        },
+        "trace_sample_per_million": {
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "update": {
+      "additionalProperties": false,
+      "properties": {
+        "allow_rollback": {
+          "type": "boolean"
+        },
+        "catalog_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "channel": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "installed_sequence": {
+          "type": "integer"
+        },
+        "maximum_artifact_bytes": {
+          "type": "integer"
+        },
+        "minimum_free_bytes": {
+          "type": "integer"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "release_signer_key_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "release_signer_public_key_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "staging_directory": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "vpn": {
+      "additionalProperties": false,
+      "properties": {
+        "attestation_public_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "interface_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "type": "string"
+        },
+        "provider_plan_sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "signed_registry_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "transport_context": {
+          "additionalProperties": false,
+          "properties": {
+            "network": {
+              "type": "string"
+            },
+            "protocol_version": {
+              "type": "string"
+            },
+            "registry_id": {
+              "type": "string"
+            },
+            "release_id": {
+              "type": "string"
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema_version",
+    "node_name",
+    "role",
+    "chain_id",
+    "network_id",
+    "manifest_path",
+    "public_identity_path",
+    "admin_socket_path",
+    "storage"
+  ],
+  "title": "Canonical native NodeConfiguration",
+  "type": "object"
+}

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "role": "validator",
+  "consensus": {
+    "mode": "validate_and_vote",
+    "proposal_timeout_ms": 2000,
+    "round_timeout_ms": 5000,
+    "max_rounds_behind": 64
+  },
+  "etdag": {
+    "enabled": true,
+    "protected_lookahead": 5,
+    "admission_queue_capacity": 4096,
+    "max_vertex_bytes": 2097152,
+    "proposal_material_wait_ms": 1500
+  },
+  "storage": {
+    "wal_sync": "every_commit",
+    "world_memory_budget_bytes": 1073741824,
+    "max_open_files": 128,
+    "minimum_free_bytes": 2147483648,
+    "prune_finalized_history_after_blocks": 64
+  },
+  "resources": {
+    "MemoryMax": 1073741824,
+    "MemorySwapMax": 0,
+    "LimitNOFILE": 65536,
+    "TasksMax": 512
+  }
+}
