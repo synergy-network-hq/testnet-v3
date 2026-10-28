@@ -1,0 +1,78 @@
+[
+  {
+    "package": "hardhat",
+    "version": "3.21.0",
+    "file": "dist/src/internal/builtin-plugins/solidity-test/config.js",
+    "sha256": "f93a9f3107556f0a85f84368dc1272f253275452fb34373cc068d46072077a7b",
+    "patchedSha256": "7b0a33913ba71806514dc72d131152428b1a1854cebaca4e2bfa8e67f1de87b3",
+    "replacements": [
+      {
+        "before": "z.record(sensitiveStringSchema)",
+        "after": "z.record(z.string(), sensitiveStringSchema)",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "package": "hardhat",
+    "version": "3.21.0",
+    "file": "dist/src/internal/builtin-plugins/network-manager/type-validation.js",
+    "sha256": "4447d499cbd1f6cddad6dc530b901b30686511eec67e5a7387f3b8e81969d4d4",
+    "patchedSha256": "5344cf8b59ac161612505a74dc61f8da500094acba2f2202ab218f81d53ad288",
+    "replacements": [
+      {
+        "before": "z.record(conditionalUnionType([",
+        "after": "z.record(z.string(), conditionalUnionType([",
+        "count": 1
+      },
+      {
+        "before": "z.record(z.string())",
+        "after": "z.record(z.string(), z.string())",
+        "count": 2
+      },
+      {
+        "before": "z.record(networkUserConfigSchema)",
+        "after": "z.record(z.string(), networkUserConfigSchema)",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "package": "@nomicfoundation/hardhat-zod-utils",
+    "version": "3.0.5",
+    "file": "dist/src/index.js",
+    "sha256": "8e10e6327da319ea5491bad7fe686fa0653cfc6db270457743eaca800a84c04e",
+    "patchedSha256": "e0e467e3cf718c075bb9ca3de46fe42498df1fd999612ce97450ec7072273208",
+    "replacements": [
+      {
+        "before": "z.function()",
+        "after": "z.custom((value) => typeof value === \"function\", \"Expected a function\")",
+        "count": 4
+      },
+      {
+        "before": "result.error.errors.map",
+        "after": "result.error.issues.map",
+        "count": 1
+      },
+      {
+        "before": ".never({\n    errorMap: () => ({\n        message: errorMessage,\n    }),\n})",
+        "after": ".never({ error: errorMessage })",
+        "count": 1
+      }
+    ]
+  },
+  {
+    "package": "@nomicfoundation/hardhat-mocha",
+    "version": "4.0.1",
+    "file": "dist/src/hookHandlers/config.js",
+    "sha256": "1af537e3e867c51e7c267eb89a96f736ec1460a51da87469b3c455f403bd57d8",
+    "patchedSha256": "5114030589215b6cf23989c12ef54bb74697efc7b614d605fb60bcbea8d0f4a5",
+    "replacements": [
+      {
+        "before": "z.function()",
+        "after": "z.custom((value) => typeof value === \"function\", \"Expected a function\")",
+        "count": 8
+      }
+    ]
+  }
+]

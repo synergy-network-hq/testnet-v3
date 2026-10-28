@@ -13,7 +13,7 @@ recovery priority order):
    `backend/src/routes/presaleRoutes.js` (purchase recorder, authorized
    minter, reconciliation endpoint).
 4. Canonical genesis `contracts.sale_claim` init_params: inventory
-   2,226,000,000 SNRG (= SAL-A01 register amount), release modes
+   2,240,000,000 SNRG (= SAL-A01 register amount), release modes
    `claim | vesting | refund | settlement`, admin authority DAO-A01.
 
 ## Established presale model (verified from sources)
@@ -41,7 +41,7 @@ recovery priority order):
 
 The distribution-pipeline endpoint: it converts **attested Ethereum
 `ReceiptRedeemed` records** into SNRG settlement on Synergy, funded by the
-2.226B SNRG SAL-A01 inventory, honoring each voucher's on-chain vesting terms.
+2.24B SNRG SAL-A01 inventory, honoring each voucher's on-chain vesting terms.
 
 ### External-chain verification mechanism (not invented)
 
@@ -67,7 +67,7 @@ tokenId are both recorded; each can settle exactly once.
    vesting schedule; integer arithmetic; no overclaim/double claim. [§8.2]
 4. `refund`/`settlement` modes: admin-authorized dispositions for failed or
    disputed purchases, bounded by the unredeemed entitlement. [init_params]
-5. Inventory conservation: total settled + refunded ≤ 2,226,000,000 SNRG.
+5. Inventory conservation: total settled + refunded ≤ 2,240,000,000 SNRG.
 6. Access control: attestor-set and mode administration only by DAO-A01
    authority; no manual bypass mint path. [spec §10]
 7. Deterministic events for every registration, claim, refund, settlement;

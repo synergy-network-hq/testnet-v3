@@ -1,0 +1,300 @@
+{
+  "chain": {
+    "chain_id": 1266,
+    "incarnation": 4
+  },
+  "created_utc": "2026-08-02T20:07:05Z",
+  "deletion_scope": "chain-derived state only; protected material excluded",
+  "nodes": [
+    {
+      "node_id": "validator-node-01",
+      "targets": [
+        {
+          "bytes_on_disk": 4096,
+          "exists": true,
+          "preserved_entries": [],
+          "root": "/var/lib/synergy/validator/data",
+          "top_level_entries": 0
+        },
+        {
+          "bytes_on_disk": 4096,
+          "exists": true,
+          "preserved_entries": [],
+          "root": "/var/lib/synergy/validator/chain-1266/incarnation-4/data",
+          "top_level_entries": 1
+        }
+      ]
+    },
+    {
+      "node_id": "validator-node-02",
+      "targets": [
+        {
+          "bytes_on_disk": 4096,
+          "exists": true,
+          "preserved_entries": [],
+          "root": "/var/lib/synergy/validator/data",
+          "top_level_entries": 0
+        },
+        {
+          "bytes_on_disk": 4096,
+          "exists": true,
+          "preserved_entries": [],
+          "root": "/var/lib/synergy/validator/chain-1266/incarnation-4/data",
+          "top_level_entries": 1
+        }
+      ]
+    },
+    {
+      "node_id": "validator-node-03",
+      "targets": [
+        {
+          "bytes_on_disk": 4096,
+          "exists": true,
+          "preserved_entries": [],
+          "root": "/var/lib/synergy/validator/data",
+          "top_level_entries": 0
+        },
+        {
+          "bytes_on_disk": 4096,
+          "exists": true,
+          "preserved_entries": [],
+          "root": "/var/lib/synergy/validator/chain-1266/incarnation-4/data",
+          "top_level_entries": 1
+        }
+      ]
+    },
+    {
+      "node_id": "validator-node-04",
+      "targets": [
+        {
+          "bytes_on_disk": 25600,
+          "exists": true,
+          "preserved_entries": [],
+          "root": "/var/lib/synergy/validator/data",
+          "top_level_entries": 0
+        },
+        {
+          "bytes_on_disk": 26624,
+          "exists": true,
+          "preserved_entries": [],
+          "root": "/var/lib/synergy/validator/chain-1266/incarnation-4/data",
+          "top_level_entries": 1
+        }
+      ]
+    },
+    {
+      "node_id": "validator-node-05",
+      "targets": [
+        {
+          "bytes_on_disk": 4096,
+          "exists": true,
+          "preserved_entries": [],
+          "root": "/var/lib/synergy/validator/data",
+          "top_level_entries": 0
+        },
+        {
+          "bytes_on_disk": 4096,
+          "exists": true,
+          "preserved_entries": [],
+          "root": "/var/lib/synergy/validator/chain-1266/incarnation-4/data",
+          "top_level_entries": 1
+        }
+      ]
+    },
+    {
+      "node_id": "validator-node-06",
+      "targets": [
+        {
+          "bytes_on_disk": 4096,
+          "exists": true,
+          "preserved_entries": [],
+          "root": "/var/lib/synergy/validator/data",
+          "top_level_entries": 0
+        },
+        {
+          "bytes_on_disk": 4096,
+          "exists": true,
+          "preserved_entries": [],
+          "root": "/var/lib/synergy/validator/chain-1266/incarnation-4/data",
+          "top_level_entries": 1
+        }
+      ]
+    },
+    {
+      "node_id": "relay1",
+      "targets": [
+        {
+          "bytes_on_disk": 4096,
+          "exists": true,
+          "preserved_entries": [],
+          "root": "/var/lib/synergy/testnet-v3/relay1/data",
+          "top_level_entries": 0
+        },
+        {
+          "bytes_on_disk": 4096,
+          "exists": true,
+          "preserved_entries": [],
+          "root": "/var/lib/synergy/testnet-v3/relay1/chain-1266/incarnation-4/data",
+          "top_level_entries": 1
+        }
+      ]
+    },
+    {
+      "node_id": "relay2",
+      "targets": [
+        {
+          "bytes_on_disk": 4096,
+          "exists": true,
+          "preserved_entries": [],
+          "root": "/var/lib/synergy/testnet-v3/relay2/data",
+          "top_level_entries": 0
+        },
+        {
+          "bytes_on_disk": 4096,
+          "exists": true,
+          "preserved_entries": [],
+          "root": "/var/lib/synergy/testnet-v3/relay2/chain-1266/incarnation-4/data",
+          "top_level_entries": 1
+        }
+      ]
+    },
+    {
+      "node_id": "relay3",
+      "targets": [
+        {
+          "bytes_on_disk": 4096,
+          "exists": true,
+          "preserved_entries": [],
+          "root": "/var/lib/synergy/testnet-v3/relay3/data",
+          "top_level_entries": 0
+        },
+        {
+          "bytes_on_disk": 4096,
+          "exists": true,
+          "preserved_entries": [],
+          "root": "/var/lib/synergy/testnet-v3/relay3/chain-1266/incarnation-4/data",
+          "top_level_entries": 1
+        }
+      ]
+    },
+    {
+      "node_id": "rpc-gateway",
+      "targets": [
+        {
+          "bytes_on_disk": 4096,
+          "exists": true,
+          "preserved_entries": [],
+          "root": "/var/lib/synergy-testnet-v3-rpc-gateway/data",
+          "top_level_entries": 0
+        },
+        {
+          "bytes_on_disk": 0,
+          "exists": false,
+          "preserved_entries": [],
+          "root": "/var/lib/synergy/testnet-v3/rpc-gateway/data",
+          "top_level_entries": 0
+        },
+        {
+          "bytes_on_disk": 4096,
+          "exists": true,
+          "preserved_entries": [],
+          "root": "/var/lib/synergy/testnet-v3/rpc-gateway/chain-1266/incarnation-4/data",
+          "top_level_entries": 1
+        }
+      ]
+    },
+    {
+      "node_id": "explorer-indexer",
+      "targets": [
+        {
+          "bytes_on_disk": 4096,
+          "exists": true,
+          "preserved_entries": [],
+          "root": "/var/lib/synergy-testnet-v3-explorer-indexer/data",
+          "top_level_entries": 0
+        },
+        {
+          "bytes_on_disk": 0,
+          "exists": false,
+          "preserved_entries": [],
+          "root": "/var/lib/synergy/testnet-v3/explorer-indexer/data",
+          "top_level_entries": 0
+        },
+        {
+          "bytes_on_disk": 4096,
+          "exists": true,
+          "preserved_entries": [],
+          "root": "/var/lib/synergy/testnet-v3/explorer-indexer/chain-1266/incarnation-4/data",
+          "top_level_entries": 1
+        }
+      ]
+    },
+    {
+      "node_id": "observer",
+      "targets": [
+        {
+          "bytes_on_disk": 0,
+          "exists": false,
+          "preserved_entries": [],
+          "root": "/var/lib/synergy/observer/data",
+          "top_level_entries": 0
+        },
+        {
+          "bytes_on_disk": 0,
+          "exists": false,
+          "preserved_entries": [],
+          "root": "/var/lib/synergy/testnet-v3/observer/data",
+          "top_level_entries": 0
+        },
+        {
+          "bytes_on_disk": 4096,
+          "exists": true,
+          "preserved_entries": [],
+          "root": "/var/lib/synergy/observer/chain-1266/incarnation-4/data",
+          "top_level_entries": 1
+        }
+      ]
+    },
+    {
+      "node_id": "atlas-api",
+      "targets": [
+        {
+          "bytes_on_disk": 0,
+          "exists": false,
+          "preserved_entries": [],
+          "root": "/var/lib/synergy/testnet-v3/atlas/api/data",
+          "top_level_entries": 0
+        },
+        {
+          "bytes_on_disk": 4096,
+          "exists": true,
+          "preserved_entries": [],
+          "root": "/var/lib/synergy/testnet-v3/atlas/api/chain-1266/incarnation-4/data",
+          "top_level_entries": 1
+        }
+      ]
+    },
+    {
+      "node_id": "atlas-indexer",
+      "targets": [
+        {
+          "bytes_on_disk": 0,
+          "exists": false,
+          "preserved_entries": [],
+          "root": "/var/lib/synergy/testnet-v3/atlas/indexer/data",
+          "top_level_entries": 0
+        },
+        {
+          "bytes_on_disk": 4096,
+          "exists": true,
+          "preserved_entries": [],
+          "root": "/var/lib/synergy/testnet-v3/atlas/indexer/chain-1266/incarnation-4/data",
+          "top_level_entries": 1
+        }
+      ]
+    }
+  ],
+  "release_id": "chain1266-incarnation-4-rc18",
+  "result": "DRY_RUN_ONLY",
+  "schema_version": 1
+}

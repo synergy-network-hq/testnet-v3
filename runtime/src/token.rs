@@ -1333,19 +1333,22 @@ impl TokenManager {
             }
             return crate::address::generate_validator_cluster_address(&format!(
                 "reward-escrow:{address}"
-            ));
+            ))
+            .expect("non-empty reward-escrow seed must derive a cluster address");
         }
 
         if let Some(cluster_id) = validator.cluster_id {
             return crate::address::generate_validator_cluster_address(&format!(
                 "reward-escrow:cluster:{cluster_id}"
-            ));
+            ))
+            .expect("non-empty reward-escrow seed must derive a cluster address");
         }
 
         crate::address::generate_validator_cluster_address(&format!(
             "reward-escrow:validator:{}",
             validator.address
         ))
+        .expect("non-empty reward-escrow seed must derive a cluster address")
     }
 
     fn score_after_unit_penalty(units: u64, penalty_per_unit_bps: u64) -> u64 {
@@ -2084,6 +2087,33 @@ impl TokenManager {
         block_height: u64,
         block_hash: &str,
     ) -> Result<String, String> {
+        self.process_transaction_in_finalized_block_with_fee_market(
+            tx,
+            block_height,
+            block_hash,
+            None,
+        )
+    }
+
+    /// Apply a finalized transaction using the consensus-bound base fee of
+    /// its containing block.  `None` is retained only for replay of
+    /// pre-activation version-0 blocks.
+    pub fn process_transaction_in_finalized_block_with_fee_market(
+        &self,
+        tx: &Transaction,
+        block_height: u64,
+        block_hash: &str,
+        applied_base_fee_per_gas_nwei: Option<u64>,
+    ) -> Result<String, String> {
+        let fee = match applied_base_fee_per_gas_nwei {
+            Some(base_fee_per_gas_nwei) => {
+                tx.network_fee_breakdown_with_gas(tx.estimate_gas(), base_fee_per_gas_nwei)?
+                    .total_network_fee_nwei
+            }
+            None => tx.get_total_network_fee_nwei(),
+        };
+        let fee =
+            u64::try_from(fee).map_err(|_| "finalized transaction fee exceeds u64".to_string())?;
         if let Some(data_str) = tx.data.as_deref() {
             if crate::sts::transaction_data_may_contain_sts_payload(data_str) {
                 let tx_hash = tx.hash();
@@ -2091,7 +2121,6 @@ impl TokenManager {
                     return Ok("STS transaction already processed".to_string());
                 }
 
-                let fee = tx.get_total_network_fee_u64()?;
                 self.charge_snrg_fee(&tx.sender, fee)?;
                 let report = crate::sts::process_finalized_sts_transaction_data(
                     &tx.sender,
@@ -2129,7 +2158,6 @@ impl TokenManager {
                         ) {
                             let tx_hash = tx.hash();
                             let already_processed = self.transfer_hash_exists(&tx_hash);
-                            let fee = tx.get_total_network_fee_u64()?;
                             let result = self.transfer_tokens_with_metadata(
                                 &tx.sender,
                                 to,
@@ -2163,7 +2191,6 @@ impl TokenManager {
                             stake_info.get("token").and_then(|v| v.as_str()),
                             stake_info.get("amount").and_then(|v| v.as_u64()),
                         ) {
-                            let fee = tx.get_total_network_fee_u64()?;
                             self.charge_snrg_fee(&tx.sender, fee)?;
                             let result =
                                 self.stake_tokens(&tx.sender, validator, token_symbol, amount)?;
@@ -2191,7 +2218,6 @@ impl TokenManager {
                                 .and_then(|v| v.as_str()),
                             burn_info.get("amount").and_then(|v| v.as_u64()),
                         ) {
-                            let fee = tx.get_total_network_fee_u64()?;
                             self.charge_snrg_fee(&tx.sender, fee)?;
                             let result = self.burn_tokens_with_metadata(
                                 &tx.sender,
@@ -2212,7 +2238,6 @@ impl TokenManager {
         if tx.amount > 0 && !tx.receiver.trim().is_empty() {
             let tx_hash = tx.hash();
             let already_processed = self.transfer_hash_exists(&tx_hash);
-            let fee = tx.get_total_network_fee_u64()?;
             let result = self.transfer_tokens_with_metadata(
                 &tx.sender,
                 &tx.receiver,
@@ -2315,7 +2340,12 @@ impl TokenManager {
                     continue;
                 }
 
-                match self.process_transaction_in_block(tx, block.block_index) {
+                match self.process_transaction_in_finalized_block_with_fee_market(
+                    tx,
+                    block.block_index,
+                    &block.hash,
+                    block.applied_fee_market_base_fee(),
+                ) {
                     Ok(_) => applied += 1,
                     Err(_) => failed += 1,
                 }
@@ -2656,6 +2686,37 @@ mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    /// Deterministic 1793-byte raw FN-DSA-1024 verification-key material for
+    /// address-derivation tests. Address Engine v1 intentionally receives the
+    /// canonical raw key shape, not an arbitrary label or legacy seed string.
+    fn fndsa_public_key_hex(label: &str) -> String {
+        let mut public_key = Vec::with_capacity(crate::address::FN_DSA_1024_PUBLIC_KEY_BYTES);
+        let mut counter = 0u64;
+        while public_key.len() < crate::address::FN_DSA_1024_PUBLIC_KEY_BYTES {
+            let mut hasher = Sha3_256::new();
+            hasher.update(b"synergy-token-test-fndsa-1024-public-key-v1");
+            hasher.update((label.len() as u64).to_be_bytes());
+            hasher.update(label.as_bytes());
+            hasher.update(counter.to_be_bytes());
+            public_key.extend_from_slice(&hasher.finalize());
+            counter = counter
+                .checked_add(1)
+                .expect("test key counter cannot overflow");
+        }
+        public_key.truncate(crate::address::FN_DSA_1024_PUBLIC_KEY_BYTES);
+        hex::encode(public_key)
+    }
+
+    fn wallet_test_address(label: &str) -> String {
+        crate::address::generate_wallet_address(&fndsa_public_key_hex(label))
+            .expect("1793-byte FN-DSA test key must derive a wallet address")
+    }
+
+    fn validator_test_address(label: &str) -> String {
+        crate::address::generate_validator_address(&fndsa_public_key_hex(label), 1)
+            .expect("1793-byte FN-DSA test key must derive a validator address")
+    }
+
     #[test]
     fn testnet_v3_resolver_uses_deployed_reward_distributor_address() {
         let mut candidate: Value = serde_json::from_str(include_str!(
@@ -2783,9 +2844,11 @@ mod tests {
         missed_blocks: u64,
         status: crate::validator::ValidatorStatus,
     ) -> crate::validator::Validator {
+        let public_key = fndsa_public_key_hex(address_seed);
         let mut validator = crate::validator::Validator::new(
-            crate::address::generate_validator_address(address_seed, 1),
-            format!("{address_seed}-public-key"),
+            crate::address::generate_validator_address(&public_key, 1)
+                .expect("1793-byte FN-DSA test key must derive a validator address"),
+            public_key,
             address_seed.to_string(),
             50_000 * 1_000_000_000,
         );
@@ -2817,7 +2880,7 @@ mod tests {
                 Some(2_000),
                 true,
                 true,
-                crate::address::generate_wallet_address("legacy-custom-token-creator"),
+                wallet_test_address("legacy-custom-token-creator"),
             )
             .expect("custom token should be created");
 
@@ -2916,7 +2979,7 @@ mod tests {
     #[test]
     fn explicit_burn_records_supply_reducing_burn() {
         let manager = TokenManager::new();
-        let burner = crate::address::generate_wallet_address("explicit-burn-sender");
+        let burner = wallet_test_address("explicit-burn-sender");
         seed_snrg_balance(&manager, &burner, 1_000_000);
 
         manager
@@ -2943,7 +3006,7 @@ mod tests {
     #[test]
     fn direct_transfer_to_burn_address_is_locked_not_supply_reduced() {
         let manager = TokenManager::new();
-        let sender = crate::address::generate_wallet_address("burn-transfer-sender");
+        let sender = wallet_test_address("burn-transfer-sender");
         seed_snrg_balance(&manager, &sender, 1_000_000);
 
         manager
@@ -2977,7 +3040,7 @@ mod tests {
     fn network_burn_address_cannot_initiate_transfers() {
         let manager = TokenManager::new();
         seed_snrg_balance(&manager, NETWORK_BURN_ADDRESS, 100_000);
-        let receiver = crate::address::generate_wallet_address("burn-transfer-receiver");
+        let receiver = wallet_test_address("burn-transfer-receiver");
 
         let err = manager
             .transfer_tokens(NETWORK_BURN_ADDRESS, &receiver, SNRG_SYMBOL, 1, 0)
@@ -3030,8 +3093,8 @@ mod tests {
         let _ledger_guard = crate::rewards::reward_ledger_test_guard();
         reset_reward_ledger();
         let manager = TokenManager::new();
-        let sender = crate::address::generate_wallet_address("fee-accumulator-sender");
-        let receiver = crate::address::generate_wallet_address("fee-accumulator-receiver");
+        let sender = wallet_test_address("fee-accumulator-sender");
+        let receiver = wallet_test_address("fee-accumulator-receiver");
         let tx = Transaction::new(
             sender.clone(),
             receiver,
@@ -3071,9 +3134,10 @@ mod tests {
         let _ledger_guard = crate::rewards::reward_ledger_test_guard();
         reset_reward_ledger();
         let manager = TokenManager::new();
-        let cluster = crate::address::generate_validator_cluster_address("reward-cluster-a");
-        let payout_a = crate::address::generate_wallet_address("reward-payout-a");
-        let payout_b = crate::address::generate_wallet_address("reward-payout-b");
+        let cluster = crate::address::generate_validator_cluster_address("reward-cluster-a")
+            .expect("non-empty reward cluster seed must derive an address");
+        let payout_a = wallet_test_address("reward-payout-a");
+        let payout_b = wallet_test_address("reward-payout-b");
         let validators = vec![
             crate::rewards::ValidatorPhase1Input {
                 cluster_address: cluster.clone(),
@@ -3183,9 +3247,9 @@ mod tests {
         seed_snrg_balance(&manager, DAO_TREASURY_ADDRESS, 0);
         seed_snrg_balance(&manager, TREASURY_RECOVERY_WALLET_ADDRESS, 0);
 
-        let sender = crate::address::generate_wallet_address("reward-scenario-sender");
-        let receiver_a = crate::address::generate_wallet_address("reward-scenario-receiver-a");
-        let receiver_b = crate::address::generate_wallet_address("reward-scenario-receiver-b");
+        let sender = wallet_test_address("reward-scenario-sender");
+        let receiver_a = wallet_test_address("reward-scenario-receiver-a");
+        let receiver_b = wallet_test_address("reward-scenario-receiver-b");
         seed_snrg_balance(&manager, &sender, 250_000_000_000);
 
         let one_snrg = Transaction::new(
@@ -3270,7 +3334,8 @@ mod tests {
         }
 
         let cluster =
-            crate::address::generate_validator_cluster_address("three-validator-reward-scenario");
+            crate::address::generate_validator_cluster_address("three-validator-reward-scenario")
+                .expect("non-empty reward cluster seed must derive an address");
         seed_snrg_balance(&manager, &cluster, 0);
         let validators = vec![
             reward_scenario_validator(
@@ -3344,8 +3409,9 @@ mod tests {
             .distribute_epoch_fees_from_collector(90, 101)
             .expect("epoch distribution should apply");
 
-        let cluster = crate::address::generate_validator_cluster_address("roundtrip-cluster");
-        let payout = crate::address::generate_wallet_address("roundtrip-payout");
+        let cluster = crate::address::generate_validator_cluster_address("roundtrip-cluster")
+            .expect("non-empty roundtrip cluster seed must derive an address");
+        let payout = wallet_test_address("roundtrip-payout");
         let validators = vec![crate::rewards::ValidatorPhase1Input {
             cluster_address: cluster.clone(),
             validator_id: "roundtrip-validator".to_string(),
@@ -3427,9 +3493,8 @@ mod tests {
     #[test]
     fn staking_transaction_is_not_intercepted_as_native_transfer() {
         let manager = TokenManager::new();
-        let staker = crate::address::generate_wallet_address("staking-transaction-staker");
-        let validator =
-            crate::address::generate_validator_address("staking-transaction-validator", 1);
+        let staker = wallet_test_address("staking-transaction-staker");
+        let validator = validator_test_address("staking-transaction-validator");
 
         let tx = Transaction::new(
             staker.clone(),
@@ -3460,8 +3525,8 @@ mod tests {
     #[test]
     fn replay_chain_transactions_restores_staking_state() {
         let manager = TokenManager::new();
-        let staker = crate::address::generate_wallet_address("staking-replay-staker");
-        let validator = crate::address::generate_validator_address("staking-replay-validator", 1);
+        let staker = wallet_test_address("staking-replay-staker");
+        let validator = validator_test_address("staking-replay-validator");
         let tx = Transaction::new(
             staker.clone(),
             validator.clone(),

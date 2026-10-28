@@ -1,0 +1,57 @@
+{
+  "case_ids": [
+    "canonical_val1_assignment",
+    "p1_config_exactly_one_coordinator_five_producers",
+    "dedicated_authenticated_consensus_ingress",
+    "no_legacy_consensus_fallback",
+    "strict_val2_to_val6_rotation",
+    "timeout_skips_turn_not_height",
+    "replacement_assignment_recovers_lagging_validator",
+    "stale_producer_round_rejected",
+    "coordinator_cannot_equivocate_at_height",
+    "coordinator_cursor_is_durable",
+    "assignment_and_block_signatures_are_durable",
+    "independent_execution_of_user_transaction",
+    "runtime_timeout_preserves_height",
+    "coordinator_persists_committed_finality",
+    "exact_finality_packages_are_anchored",
+    "support_observer_verifies_without_signing",
+    "user_admission_is_exact_and_deterministic",
+    "fresh_reset_requires_genesis_only",
+    "fresh_reset_rejects_stale_p1_finality",
+    "support_roles_are_non_signing_observers"
+  ],
+  "cases_passed": 20,
+  "cases_total": 20,
+  "consensus_mode": "coordinated_round_robin_v1",
+  "failed_case": null,
+  "finished_utc": "2026-08-03T07:25:16Z",
+  "p1_invariants": {
+    "all_validators_execute_identically": true,
+    "assignment_and_commit_signatures_required": true,
+    "coordinator_id": "validator-1",
+    "durable_signing_and_restart_replay": true,
+    "fresh_reset_requires_block_zero_genesis": true,
+    "legacy_posy_qc_vc_tc_vote_aggregation_disabled": true,
+    "producer_ids": [
+      "validator-2",
+      "validator-3",
+      "validator-4",
+      "validator-5",
+      "validator-6"
+    ],
+    "support_roles_verify_without_signing": true,
+    "timeout_skips_producer_turn_not_height": true,
+    "val1_is_not_a_normal_producer": true
+  },
+  "result": "PASS",
+  "ring": 1,
+  "schema_version": 2,
+  "source": {
+    "aegis_revision": "b51884a661e3aed4bb242ecbced47f3d8777b313",
+    "synq_revision": "3f7886701ffee4303a24fa6c6584b792a5e36254",
+    "testnet_v3_revision": "52ededa1fe30093734350537f789450b68793520"
+  },
+  "started_utc": "2026-08-03T07:21:08Z",
+  "validator_count": 6
+}

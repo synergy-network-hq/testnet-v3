@@ -12,11 +12,15 @@ use crate::execution::{execute_block, ExecutionState};
 use crate::synergy_types::Transaction;
 use crate::synergy_types::{
     AegisPqKeyRole, AegisPqSignature, Block, BlockHeader, BlockId, CanonicalSerialize, ClusterId,
-    ClusterMap, Epoch, Hash, Height, HeightConsensusContext, ProtocolConfig, QuorumCertificate,
-    Round, TimeoutCertificate, ValidationCertificate, ValidatorRecord, ValidatorSet,
-    ValidatorStatus, Vote, VotePhase,
+    ClusterMap, ConsensusSubject, Epoch, Hash, Height, HeightConsensusContext, ProtocolConfig,
+    QuorumCertificate, Round, TimeoutCertificate, ValidationCertificate, ValidatorRecord,
+    ValidatorSet, ValidatorStatus, Vote, VotePhase,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Deref;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const MAX_CONSENSUS_TIMESTAMP_FUTURE_DRIFT_MS: u64 = 30_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -41,12 +45,93 @@ pub struct LocalConsensusContext {
     pub latest_finalized_height: Height,
     pub latest_finalized_block_hash: Hash,
     pub latest_finalized_state_root: Hash,
+    pub latest_finalized_timestamp_ms: u64,
     pub round: Round,
     pub evidence_root: Hash,
     pub app_version: u32,
     pub execution_version: u32,
     pub dag_version: u32,
     pub aegis_pqvm_version: String,
+}
+
+fn bounded_consensus_timestamp_ms(previous_timestamp_ms: u64) -> Result<u64, String> {
+    let wall_clock_ms: u64 = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("typed PoSy consensus clock failure: {error}"))?
+        .as_millis()
+        .try_into()
+        .map_err(|_| "typed PoSy consensus clock exceeds u64".to_string())?;
+    Ok(wall_clock_ms.max(previous_timestamp_ms.saturating_add(1)))
+}
+
+fn validate_consensus_timestamp(
+    timestamp_ms: u64,
+    previous_timestamp_ms: u64,
+) -> Result<(), String> {
+    if timestamp_ms == 0 || timestamp_ms <= previous_timestamp_ms {
+        return Err(
+            "typed proposal consensus timestamp is not after its finalized parent".to_string(),
+        );
+    }
+    let wall_clock_ms: u64 = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("typed PoSy validation clock failure: {error}"))?
+        .as_millis()
+        .try_into()
+        .map_err(|_| "typed PoSy validation clock exceeds u64".to_string())?;
+    if timestamp_ms > wall_clock_ms.saturating_add(MAX_CONSENSUS_TIMESTAMP_FUTURE_DRIFT_MS) {
+        return Err(
+            "typed proposal consensus timestamp exceeds the future-drift bound".to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// A vote that has passed the complete frozen-context, lifecycle, role, and
+/// ML-DSA verification path exactly once.
+///
+/// Certificate assembly accepts this type so it cannot accidentally invoke
+/// the cryptographic verifier again for locally retained votes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedVote {
+    vote: Vote,
+    subject: ConsensusSubject,
+    subject_digest: Hash,
+}
+
+impl VerifiedVote {
+    fn from_verified(vote: Vote) -> Result<Self, String> {
+        let subject = vote.consensus_subject()?;
+        let subject_digest = subject.digest()?;
+        Ok(Self {
+            vote,
+            subject,
+            subject_digest,
+        })
+    }
+
+    /// The typed driver may call this only immediately after
+    /// `TypedPosyCoordinator::accept_vote` returned `VoteAccepted` for the
+    /// exact same envelope.
+    pub(crate) fn from_coordinator_acceptance(vote: Vote) -> Result<Self, String> {
+        Self::from_verified(vote)
+    }
+
+    pub fn subject(&self) -> &ConsensusSubject {
+        &self.subject
+    }
+
+    pub fn subject_digest(&self) -> Hash {
+        self.subject_digest
+    }
+}
+
+impl Deref for VerifiedVote {
+    type Target = Vote;
+
+    fn deref(&self) -> &Self::Target {
+        &self.vote
+    }
 }
 
 pub struct ProofOfSynergyBft {
@@ -116,12 +201,15 @@ impl ProofOfSynergyBft {
         // `#[cfg(test)]`-only `utils::test_temp_root` and did not compile at
         // all. Conditional *compilation* is what was meant here.
         #[cfg(test)]
-        let signing_authority =
+        let signing_authority = {
+            static TEST_SIGNING_SEQUENCE: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
             DurableConsensusSigningAuthority::at_path(crate::utils::test_temp_root(format!(
-                "synergy-posy-signing-{}-{:p}.json",
+                "synergy-posy-signing-{}-{}.json",
                 std::process::id(),
-                verifier
-            )));
+                TEST_SIGNING_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            )))
+        };
         #[cfg(not(test))]
         let signing_authority = DurableConsensusSigningAuthority::process_wide();
         Self::new_with_signing_authority(
@@ -287,7 +375,25 @@ impl ProofOfSynergyBft {
                 execution_version: context.execution_version,
                 dag_version: context.dag_version,
                 aegis_pqvm_version: context.aegis_pqvm_version.clone(),
-                timestamp_ms_consensus_bounded: 0,
+                timestamp_ms_consensus_bounded: bounded_consensus_timestamp_ms(
+                    context.latest_finalized_timestamp_ms,
+                )?,
+                // Canonical Live Gas Pricing (see `docs/fee-market.md`) is
+                // wired into the currently-active `coordinated_runtime`
+                // single-authority path only. The multi-validator PoSy
+                // consensus path here is not the active path per the
+                // testnet v3 architecture, so it deliberately keeps the
+                // legacy fee_market_version 0 marker rather than declaring
+                // a real base fee it cannot yet enforce. Wiring the fee
+                // market into PoSy block production/validation is tracked
+                // as follow-up work, not silently skipped.
+                base_fee_per_gas_nwei: 0,
+                gas_used: 0,
+                gas_limit: 0,
+                pq_gas_used: 0,
+                pq_gas_limit: 0,
+                pq_gas_multiplier: 0,
+                fee_market_version: 0,
             },
             transactions,
             proposer_signature: AegisPqSignature {
@@ -309,7 +415,14 @@ impl ProofOfSynergyBft {
         block.header.state_root_after = execution.state_root_after;
         block.header.receipt_root = execution.receipt_root;
         self.require_candidate_carry_forward(&context.height_context, context.round, &block)?;
-        self.authorize_proposal_before_signature(&block, proposer, &context.height_context)?;
+        let authorization =
+            self.proposal_signing_authorization(&block, proposer, &context.height_context)?;
+        if let Some(recorded) = self
+            .signing_authority
+            .recorded_signed_proposal_for_slot(&authorization)?
+        {
+            return Ok(recorded);
+        }
         let header_bytes = block.header.canonical_bytes()?;
         block.proposer_signature = signer
             .sign_domain(
@@ -318,6 +431,8 @@ impl ProofOfSynergyBft {
                 &proposer.consensus_public_key.key_id,
             )
             .map_err(|error| error.to_string())?;
+        self.signing_authority
+            .record_signed_proposal(&authorization, &block)?;
         Ok(block)
     }
 
@@ -404,7 +519,25 @@ impl ProofOfSynergyBft {
                 execution_version: context.execution_version,
                 dag_version: context.dag_version,
                 aegis_pqvm_version: context.aegis_pqvm_version.clone(),
-                timestamp_ms_consensus_bounded: 0,
+                timestamp_ms_consensus_bounded: bounded_consensus_timestamp_ms(
+                    context.latest_finalized_timestamp_ms,
+                )?,
+                // Canonical Live Gas Pricing (see `docs/fee-market.md`) is
+                // wired into the currently-active `coordinated_runtime`
+                // single-authority path only. The multi-validator PoSy
+                // consensus path here is not the active path per the
+                // testnet v3 architecture, so it deliberately keeps the
+                // legacy fee_market_version 0 marker rather than declaring
+                // a real base fee it cannot yet enforce. Wiring the fee
+                // market into PoSy block production/validation is tracked
+                // as follow-up work, not silently skipped.
+                base_fee_per_gas_nwei: 0,
+                gas_used: 0,
+                gas_limit: 0,
+                pq_gas_used: 0,
+                pq_gas_limit: 0,
+                pq_gas_multiplier: 0,
+                fee_market_version: 0,
             },
             transactions: Vec::new(),
             proposer_signature: AegisPqSignature {
@@ -416,7 +549,14 @@ impl ProofOfSynergyBft {
         block.header.state_root_after = execution.state_root_after;
         block.header.receipt_root = execution.receipt_root;
         self.require_candidate_carry_forward(&context.height_context, context.round, &block)?;
-        self.authorize_proposal_before_signature(&block, proposer, &context.height_context)?;
+        let authorization =
+            self.proposal_signing_authorization(&block, proposer, &context.height_context)?;
+        if let Some(recorded) = self
+            .signing_authority
+            .recorded_signed_proposal_for_slot(&authorization)?
+        {
+            return Ok(recorded);
+        }
         block.proposer_signature = signer
             .sign_domain(
                 SYNERGY_BLOCK_V1,
@@ -424,6 +564,8 @@ impl ProofOfSynergyBft {
                 &proposer.consensus_public_key.key_id,
             )
             .map_err(|error| error.to_string())?;
+        self.signing_authority
+            .record_signed_proposal(&authorization, &block)?;
         Ok(block)
     }
 
@@ -501,6 +643,10 @@ impl ProofOfSynergyBft {
         {
             return Err("core proposal parent/height/state context mismatch".to_string());
         }
+        validate_consensus_timestamp(
+            block.header.timestamp_ms_consensus_bounded,
+            context.latest_finalized_timestamp_ms,
+        )?;
         self.require_candidate_carry_forward(height_context, block.header.round, block)?;
         if block.header.protocol_version != height_context.protocol_version
             || block.header.epoch != height_context.epoch
@@ -677,7 +823,25 @@ impl ProofOfSynergyBft {
                 execution_version: context.execution_version,
                 dag_version: context.dag_version,
                 aegis_pqvm_version: context.aegis_pqvm_version.clone(),
-                timestamp_ms_consensus_bounded: 0,
+                timestamp_ms_consensus_bounded: bounded_consensus_timestamp_ms(
+                    context.latest_finalized_timestamp_ms,
+                )?,
+                // Canonical Live Gas Pricing (see `docs/fee-market.md`) is
+                // wired into the currently-active `coordinated_runtime`
+                // single-authority path only. The multi-validator PoSy
+                // consensus path here is not the active path per the
+                // testnet v3 architecture, so it deliberately keeps the
+                // legacy fee_market_version 0 marker rather than declaring
+                // a real base fee it cannot yet enforce. Wiring the fee
+                // market into PoSy block production/validation is tracked
+                // as follow-up work, not silently skipped.
+                base_fee_per_gas_nwei: 0,
+                gas_used: 0,
+                gas_limit: 0,
+                pq_gas_used: 0,
+                pq_gas_limit: 0,
+                pq_gas_multiplier: 0,
+                fee_market_version: 0,
             },
             transactions,
             proposer_signature: AegisPqSignature {
@@ -707,7 +871,14 @@ impl ProofOfSynergyBft {
         block.header.state_root_after = execution.state_root_after;
         block.header.receipt_root = execution.receipt_root;
         self.require_candidate_carry_forward(&context.height_context, context.round, &block)?;
-        self.authorize_proposal_before_signature(&block, proposer, &context.height_context)?;
+        let authorization =
+            self.proposal_signing_authorization(&block, proposer, &context.height_context)?;
+        if let Some(recorded) = self
+            .signing_authority
+            .recorded_signed_proposal_for_slot(&authorization)?
+        {
+            return Ok(recorded);
+        }
         block.proposer_signature = signer
             .sign_domain(
                 SYNERGY_BLOCK_V1,
@@ -715,6 +886,8 @@ impl ProofOfSynergyBft {
                 &proposer.consensus_public_key.key_id,
             )
             .map_err(|error| error.to_string())?;
+        self.signing_authority
+            .record_signed_proposal(&authorization, &block)?;
         Ok(block)
     }
 
@@ -744,6 +917,10 @@ impl ProofOfSynergyBft {
         {
             return Err("protected proposal parent/height/state context mismatch".to_string());
         }
+        validate_consensus_timestamp(
+            block.header.timestamp_ms_consensus_bounded,
+            context.latest_finalized_timestamp_ms,
+        )?;
         self.require_candidate_carry_forward(height_context, block.header.round, block)?;
         if block.header.protocol_version != height_context.protocol_version
             || block.header.epoch != height_context.epoch
@@ -1123,12 +1300,14 @@ impl ProofOfSynergyBft {
                 epoch: height_context.epoch,
                 height: height_context.height,
                 round: closing_round,
+                cluster_id: height_context.assigned_cluster_id,
                 height_context_root: height_context.root()?,
                 validator_id: validator.validator_id.clone(),
                 key_id: validator.consensus_public_key.key_id.clone(),
                 phase: ConsensusSigningPhase::Timeout,
                 candidate_id: None,
                 highest_prepared_vc_root: None,
+                conflict_unlock_tc_id: None,
             },
         )?;
         if let Some(recorded) = recorded {
@@ -1171,7 +1350,7 @@ impl ProofOfSynergyBft {
         votes: &[Vote],
         height_context: &HeightConsensusContext,
         expected_phase: VotePhase,
-    ) -> Result<Vec<Vote>, String> {
+    ) -> Result<Vec<VerifiedVote>, String> {
         height_context.validate_against(
             &self.validator_set,
             &self.cluster_map,
@@ -1216,7 +1395,7 @@ impl ProofOfSynergyBft {
             self.verifier
                 .verify_vote_signature_checked(vote, validator, expected_context_root)
                 .map_err(|error| error.to_string())?;
-            verified.push(vote.clone());
+            verified.push(VerifiedVote::from_verified(vote.clone())?);
         }
         Ok(verified)
     }
@@ -1227,10 +1406,28 @@ impl ProofOfSynergyBft {
         height_context: &HeightConsensusContext,
         expected_phase: VotePhase,
     ) -> Result<QuorumCertificate, String> {
+        let verified = self.collect_votes(votes, height_context, expected_phase.clone())?;
+        self.build_certificate_from_verified(&verified, height_context, expected_phase)
+    }
+
+    fn build_certificate_from_verified(
+        &mut self,
+        verified: &[VerifiedVote],
+        height_context: &HeightConsensusContext,
+        expected_phase: VotePhase,
+    ) -> Result<QuorumCertificate, String> {
         self.phase = ConsensusPhase::FormingQc;
-        let verified = self.collect_votes(votes, height_context, expected_phase)?;
         if verified.is_empty() {
             return Err("cannot form QC without votes".to_string());
+        }
+        // Network arrival order is not certificate identity. Canonical signer
+        // order makes signature/key arrays match bitmap order and gives every
+        // replica the same representation for the same selected signer set.
+        let mut canonical_votes = verified.to_vec();
+        canonical_votes.sort_by(|left, right| left.validator_id.cmp(&right.validator_id));
+        let verified = canonical_votes.as_slice();
+        if verified.iter().any(|vote| vote.phase != expected_phase) {
+            return Err("verified vote batch contains the wrong consensus phase".to_string());
         }
         let first = &verified[0];
         match first.phase {
@@ -1250,7 +1447,7 @@ impl ProofOfSynergyBft {
         }
         let mut timeout_prepared_subject: Option<(BlockId, Hash)> = None;
         if first.phase == VotePhase::Timeout {
-            for vote in &verified {
+            for vote in verified {
                 if vote.highest_prepared_vc_root.is_some() != !vote.block_id.0.is_empty() {
                     return Err(
                         "timeout vote prepared VC root and candidate must appear together"
@@ -1301,7 +1498,7 @@ impl ProofOfSynergyBft {
         let mut signatures = Vec::new();
         let mut key_ids = Vec::new();
         let mut signed_weight = 0u64;
-        for vote in &verified {
+        for vote in verified {
             if (vote.phase != VotePhase::Timeout && vote.block_id != first.block_id)
                 || vote.height != first.height
                 || vote.round != first.round
@@ -1356,6 +1553,86 @@ impl ProofOfSynergyBft {
         Ok(qc)
     }
 
+    pub(crate) fn form_vc_from_verified(
+        &mut self,
+        votes: &[VerifiedVote],
+        height_context: &HeightConsensusContext,
+    ) -> Result<ValidationCertificate, String> {
+        let certificate =
+            self.build_certificate_from_verified(votes, height_context, VotePhase::Validate)?;
+        Ok(ValidationCertificate {
+            certificate_version: certificate.qc_version,
+            chain_id: certificate.chain_id,
+            network_id: certificate.network_id,
+            protocol_version: certificate.protocol_version,
+            height: certificate.height,
+            round: certificate.round,
+            epoch: certificate.epoch,
+            cluster_id: certificate.cluster_id,
+            height_context_root: certificate.height_context_root,
+            candidate_id: certificate.block_id,
+            active_validator_set_hash: certificate.active_validator_set_hash,
+            cluster_map_hash: certificate.cluster_map_hash,
+            threshold_weight_required: certificate.threshold_weight_required,
+            signed_weight: certificate.signed_weight,
+            signer_bitmap: certificate.signer_bitmap,
+            aegis_pq_signatures: certificate.aegis_pq_signatures,
+            aegis_pq_key_ids: certificate.aegis_pq_key_ids,
+        })
+    }
+
+    pub(crate) fn form_qc_from_verified(
+        &mut self,
+        votes: &[VerifiedVote],
+        height_context: &HeightConsensusContext,
+    ) -> Result<QuorumCertificate, String> {
+        self.build_certificate_from_verified(votes, height_context, VotePhase::Finality)
+    }
+
+    pub(crate) fn form_tc_from_verified(
+        &mut self,
+        votes: &[VerifiedVote],
+        height_context: &HeightConsensusContext,
+    ) -> Result<TimeoutCertificate, String> {
+        let certificate =
+            self.build_certificate_from_verified(votes, height_context, VotePhase::Timeout)?;
+        let carry_forward_candidate_id = if certificate.block_id.0.is_empty() {
+            None
+        } else {
+            Some(certificate.block_id)
+        };
+        let mut canonical_timeout_votes = votes.iter().collect::<Vec<_>>();
+        canonical_timeout_votes.sort_by(|left, right| left.validator_id.cmp(&right.validator_id));
+        Ok(TimeoutCertificate {
+            certificate_version: 2,
+            chain_id: certificate.chain_id,
+            network_id: certificate.network_id,
+            protocol_version: certificate.protocol_version,
+            height: certificate.height,
+            closing_round: certificate.round,
+            next_round: Round(certificate.round.0.saturating_add(1)),
+            epoch: certificate.epoch,
+            cluster_id: certificate.cluster_id,
+            height_context_root: certificate.height_context_root,
+            highest_prepared_vc_root: certificate.highest_prepared_vc_root,
+            carry_forward_candidate_id,
+            active_validator_set_hash: certificate.active_validator_set_hash,
+            cluster_map_hash: certificate.cluster_map_hash,
+            threshold_weight_required: certificate.threshold_weight_required,
+            signed_weight: certificate.signed_weight,
+            signer_bitmap: certificate.signer_bitmap,
+            aegis_pq_signatures: certificate.aegis_pq_signatures,
+            aegis_pq_key_ids: certificate.aegis_pq_key_ids,
+            timeout_vote_subjects: canonical_timeout_votes
+                .iter()
+                .map(|vote| crate::synergy_types::TimeoutVoteSubject {
+                    block_id: vote.block_id.clone(),
+                    highest_prepared_vc_root: vote.highest_prepared_vc_root,
+                })
+                .collect(),
+        })
+    }
+
     pub fn form_vc(
         &mut self,
         votes: &[Vote],
@@ -1406,6 +1683,8 @@ impl ProofOfSynergyBft {
         } else {
             Some(certificate.block_id)
         };
+        let mut canonical_timeout_votes = votes.iter().collect::<Vec<_>>();
+        canonical_timeout_votes.sort_by(|left, right| left.validator_id.cmp(&right.validator_id));
         let tc = TimeoutCertificate {
             certificate_version: 2,
             chain_id: certificate.chain_id,
@@ -1426,7 +1705,7 @@ impl ProofOfSynergyBft {
             signer_bitmap: certificate.signer_bitmap,
             aegis_pq_signatures: certificate.aegis_pq_signatures,
             aegis_pq_key_ids: certificate.aegis_pq_key_ids,
-            timeout_vote_subjects: votes
+            timeout_vote_subjects: canonical_timeout_votes
                 .iter()
                 .map(|vote| crate::synergy_types::TimeoutVoteSubject {
                     block_id: vote.block_id.clone(),
@@ -1610,7 +1889,19 @@ impl ProofOfSynergyBft {
         carried.header.proposer_validator_id = next_proposer.validator_id.clone();
         carried.header.proposer_uma_id = next_proposer.validator_uma_id.clone();
         carried.header.proposer_key_id = next_proposer.consensus_public_key.key_id.clone();
-        self.authorize_proposal_before_signature(&carried, next_proposer, height_context)?;
+        let authorization =
+            self.proposal_signing_authorization(&carried, next_proposer, height_context)?;
+        if let Some(recorded) = self
+            .signing_authority
+            .recorded_signed_proposal_for_slot(&authorization)?
+        {
+            if recorded.candidate_id()? != candidate_id {
+                return Err(
+                    "durable carried proposal does not match the required candidate".to_string(),
+                );
+            }
+            return Ok(recorded);
+        }
         carried.proposer_signature = signer
             .sign_domain(
                 SYNERGY_BLOCK_V1,
@@ -1618,6 +1909,8 @@ impl ProofOfSynergyBft {
                 &next_proposer.consensus_public_key.key_id,
             )
             .map_err(|error| error.to_string())?;
+        self.signing_authority
+            .record_signed_proposal(&authorization, &carried)?;
         if carried.candidate_id()? != candidate_id {
             return Err("prepared candidate changed during carry-forward".to_string());
         }
@@ -1653,28 +1946,29 @@ impl ProofOfSynergyBft {
         false
     }
 
-    fn authorize_proposal_before_signature(
+    fn proposal_signing_authorization(
         &self,
         block: &Block,
         proposer: &ValidatorRecord,
         height_context: &HeightConsensusContext,
-    ) -> Result<Hash, String> {
+    ) -> Result<ConsensusSigningAuthorization, String> {
         let candidate_id = block.candidate_id()?;
-        self.signing_authority
-            .authorize_before_signature(&ConsensusSigningAuthorization {
-                chain_id: height_context.chain_id,
-                network_id: height_context.network_id.clone(),
-                protocol_version: height_context.protocol_version.clone(),
-                epoch: height_context.epoch,
-                height: height_context.height,
-                round: block.header.round,
-                height_context_root: height_context.root()?,
-                validator_id: proposer.validator_id.clone(),
-                key_id: proposer.consensus_public_key.key_id.clone(),
-                phase: ConsensusSigningPhase::Proposal,
-                candidate_id: Some(candidate_id),
-                highest_prepared_vc_root: None,
-            })
+        Ok(ConsensusSigningAuthorization {
+            chain_id: height_context.chain_id,
+            network_id: height_context.network_id.clone(),
+            protocol_version: height_context.protocol_version.clone(),
+            epoch: height_context.epoch,
+            height: height_context.height,
+            round: block.header.round,
+            cluster_id: height_context.assigned_cluster_id,
+            height_context_root: height_context.root()?,
+            validator_id: proposer.validator_id.clone(),
+            key_id: proposer.consensus_public_key.key_id.clone(),
+            phase: ConsensusSigningPhase::Proposal,
+            candidate_id: Some(candidate_id),
+            highest_prepared_vc_root: None,
+            conflict_unlock_tc_id: None,
+        })
     }
 
     fn observe_valid_boc(
@@ -1853,6 +2147,7 @@ mod tests {
             latest_finalized_height: Height(0),
             latest_finalized_block_hash: Hash::zero(),
             latest_finalized_state_root: Hash::zero(),
+            latest_finalized_timestamp_ms: 0,
             round: Round(0),
             evidence_root: Hash::zero(),
             app_version: 1,
@@ -1864,6 +2159,53 @@ mod tests {
 
     fn empty_state() -> ExecutionState {
         ExecutionState::new()
+    }
+
+    #[test]
+    fn proposal_restart_reuses_the_exact_durable_signed_envelope() {
+        let (mut signer, set, cluster, protocol) = setup_validators();
+        let verifier = signer.verifier();
+        let authority = temp_signing_authority("exact-proposal-restart");
+        let ctx = context(&set, &cluster, &protocol);
+        let proposer = {
+            let consensus = ProofOfSynergyBft::new_with_signing_authority(
+                verifier.clone(),
+                set.clone(),
+                cluster.clone(),
+                protocol.clone(),
+                authority.clone(),
+            );
+            consensus
+                .proposer_for(&ctx.height_context, Round(0))
+                .expect("round-zero proposer")
+        };
+        let mut first_process = ProofOfSynergyBft::new_with_signing_authority(
+            verifier.clone(),
+            set.clone(),
+            cluster.clone(),
+            protocol.clone(),
+            authority.clone(),
+        );
+        let first = first_process
+            .propose_core_block(&mut signer, &proposer, &ctx, &empty_state())
+            .expect("first proposal is atomically journaled");
+
+        let mut restarted = ProofOfSynergyBft::new_with_signing_authority(
+            verifier, set, cluster, protocol, authority,
+        );
+        let replay = restarted
+            .propose_core_block(&mut signer, &proposer, &ctx, &empty_state())
+            .expect("restart recovers the exact signed proposal");
+
+        assert_eq!(replay, first);
+        assert_eq!(
+            replay.candidate_id().unwrap(),
+            first.candidate_id().unwrap()
+        );
+        assert_eq!(
+            replay.proposer_signature.signature_bytes,
+            first.proposer_signature.signature_bytes
+        );
     }
 
     #[test]
@@ -2446,6 +2788,7 @@ mod tests {
                 b"protected-parent",
             ),
             latest_finalized_state_root: Hash::zero(),
+            latest_finalized_timestamp_ms: 0,
             round: Round(0),
             evidence_root: Hash::from_domain_bytes("test-evidence", b"protected"),
             app_version: 2,

@@ -656,6 +656,7 @@ impl ArchiveValidatorConfig {
 pub struct SnapshotManifest {
     pub snapshot_version: u32,
     pub chain_id: ChainId,
+    pub chain_incarnation: u64,
     pub network_id: NetworkId,
     pub genesis_hash: Hash,
     pub snapshot_height: Height,
@@ -708,6 +709,7 @@ pub struct SnapshotCatalogEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotCatalog {
     pub chain_id: ChainId,
+    pub chain_incarnation: u64,
     pub network_id: NetworkId,
     pub genesis_hash: Hash,
     pub archive_node_id: String,
@@ -767,8 +769,9 @@ impl ArchiveValidatorNode {
         self.config.validate()?;
         if manifest.chain_id != self.config.chain_id
             || manifest.network_id != self.config.network_id
+            || manifest.chain_incarnation != crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
         {
-            return Err("snapshot manifest chain/network mismatch".to_string());
+            return Err("snapshot manifest chain/incarnation/network mismatch".to_string());
         }
         signer
             .sign_domain(
@@ -785,6 +788,12 @@ impl ArchiveValidatorNode {
         catalog: &SnapshotCatalog,
     ) -> Result<AegisPqSignature, String> {
         self.config.validate()?;
+        if catalog.chain_id != self.config.chain_id
+            || catalog.network_id != self.config.network_id
+            || catalog.chain_incarnation != crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION
+        {
+            return Err("snapshot catalog chain/incarnation/network mismatch".to_string());
+        }
         signer
             .sign_domain(
                 SYNERGY_ARCHIVE_SNAPSHOT_CATALOG_V1,
@@ -802,6 +811,9 @@ pub fn verify_snapshot_manifest(
     verifier: &AegisPqvmVerifier,
 ) -> Result<(), String> {
     manifest.chain_id.require_testnet_v3()?;
+    if manifest.chain_incarnation != crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION {
+        return Err("snapshot chain_incarnation mismatch".to_string());
+    }
     manifest.network_id.require_testnet_v3()?;
     if manifest.genesis_hash != expected_genesis_hash {
         return Err("snapshot genesis_hash mismatch".to_string());
@@ -1175,6 +1187,7 @@ mod tests {
         let manifest = SnapshotManifest {
             snapshot_version: 1,
             chain_id: ChainId::synergy_testnet_v3(),
+            chain_incarnation: crate::synergy_types::TESTNET_V3_CHAIN_INCARNATION,
             network_id: NetworkId::synergy_testnet_v3(),
             genesis_hash: Hash::from_domain_bytes("genesis", b"test"),
             snapshot_height: Height(10_000),

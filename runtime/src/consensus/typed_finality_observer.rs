@@ -210,6 +210,11 @@ impl TypedFinalityObserver {
             .map_err(|error| {
                 format!("typed finality observer rejects an unbound parameter manifest: {error}")
             })?;
+        consensus_parameters
+            .require_posy_manifest()
+            .map_err(|error| {
+                format!("typed finality observer rejects non-PoSy parameters: {error}")
+            })?;
         consensus_parameters.manifest.validate_finalized()?;
         if consensus_parameters.root
             != consensus_parameters

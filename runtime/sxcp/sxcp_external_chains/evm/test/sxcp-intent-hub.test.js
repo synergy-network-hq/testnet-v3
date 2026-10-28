@@ -1,5 +1,8 @@
-const { expect } = require("chai");
-const { ethers } = require("hardhat");
+import { expect } from "chai";
+import { network } from "hardhat";
+
+const { ethers } = await network.create("hardhat");
+const PQC_ALGORITHM_ID = 1;
 
 async function deploySuite() {
   const [admin, relayerA, relayerB, relayerC] = await ethers.getSigners();
@@ -91,7 +94,8 @@ describe("SXCPIntentHub", function () {
       sourceLogIndex,
       expiry,
       epochId,
-      stateProofRoot
+      stateProofRoot,
+      PQC_ALGORITHM_ID
     );
 
     const signerTuples = sortSignerTuples([
@@ -102,10 +106,13 @@ describe("SXCPIntentHub", function () {
 
     const selected = signerTuples.slice(0, 2);
     const signers = selected.map((item) => item.signer.address);
-    const signatures = [];
-    for (const item of selected) {
-      signatures.push(await item.signer.signMessage(ethers.getBytes(digest)));
-    }
+    // Structural contract fixtures only. Off-chain PQC verification is outside this unit test.
+    const commitments = selected.map(({ signer }) =>
+      ethers.keccak256(ethers.solidityPacked(
+        ["uint8", "bytes", "bytes", "bytes32"],
+        [PQC_ALGORITHM_ID, signer.address, ethers.toUtf8Bytes("test-only signature fixture"), digest]
+      ))
+    );
 
     const tx = await intentHub.verifyAttestationBundle(
       sourceChainId,
@@ -118,11 +125,12 @@ describe("SXCPIntentHub", function () {
       expiry,
       epochId,
       stateProofRoot,
+      PQC_ALGORITHM_ID,
       signers,
-      signatures
+      commitments
     );
     const receipt = await tx.wait();
-    const eventTopic = intentHub.interface.getEvent("AttestationVerified").topicHash;
+    const eventTopic = intentHub.interface.getEvent("PQCAttestationVerified").topicHash;
     const intentHubAddress = (await intentHub.getAddress()).toLowerCase();
     const eventLog = receipt.logs.find(
       (log) =>
@@ -160,12 +168,13 @@ describe("SXCPIntentHub", function () {
       0,
       expiry,
       1,
-      stateProofRoot
+      stateProofRoot,
+      PQC_ALGORITHM_ID
     );
 
     const signer = relayerA;
     const signers = [signer.address];
-    const signatures = [await signer.signMessage(ethers.getBytes(digest))];
+    const commitments = [ethers.keccak256(ethers.toUtf8Bytes("test-only commitment fixture"))];
 
     let reverted = false;
     try {
@@ -180,12 +189,13 @@ describe("SXCPIntentHub", function () {
         expiry,
         1,
         stateProofRoot,
+        PQC_ALGORITHM_ID,
         signers,
-        signatures
+        commitments
       );
     } catch (error) {
       reverted = true;
-      expect(String(error.message)).to.include("reverted");
+      expect(String(error.message)).to.include("below threshold");
     }
     expect(reverted).to.equal(true);
   });

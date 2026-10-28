@@ -26,6 +26,21 @@ snapshot worker re-enable.
   exact-height hash parity where available.
 - Archive services remain disabled until canonical reseed passes.
 
+## Proposed PoSy v3 stall and SafetyHalt boundary
+
+In a future activated five-validator `posy/3.0` epoch, four distinct valid
+signatures and strict `3 * signed_weight > 2 * total_frozen_weight` are required
+for both QC and TC. One unavailable validator can preserve progress only when
+the frozen weight distribution also passes the leave-one-out liveness check.
+With two unavailable validators, or insufficient frozen weight, the correct
+result is a safe stall. Operators must not lower quorum or force a successor.
+
+A proposal timeout authorizes only a Timeout Vote. Proposal authority changes
+only after a valid sequential TC, and the TC does not clear or bypass the
+durable QC lock. Conflicting valid QCs enter the existing durable SafetyHalt;
+routine recovery cannot clear it. Escalate the evidence roots for protocol and
+governance review and leave consensus signing disabled.
+
 ## Triage Order
 
 1. Confirm whether public RPC still advances by reading latest height and latest

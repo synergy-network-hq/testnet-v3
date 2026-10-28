@@ -330,6 +330,34 @@ pub fn load_local_validator_keypair(
     load_local_validator_keypair_for_height(0, validator_address, validator_manager)
 }
 
+/// Installs an Aegis-unlocked consensus key in the process-local signer cache.
+///
+/// The caller must obtain `encoded_private_key` directly from encrypted Aegis
+/// custody and keep it in memory only.  This function verifies it against the
+/// Genesis/governed public key before accepting it; it never writes private
+/// material to disk and does not loosen any normal file-based legacy path.
+pub fn install_aegis_unlocked_validator_key(
+    height: u64,
+    validator_address: &str,
+    encoded_private_key: &str,
+    validator_manager: &ValidatorManager,
+) -> Result<(), String> {
+    let expected =
+        expected_validator_public_key_for_height(height, validator_address, validator_manager)?;
+    validate_consensus_key_algorithm_for_height(height, &expected.algorithm)?;
+    let private_key = private_key_from_encoded(
+        &expected,
+        encoded_private_key.trim(),
+        "Aegis encrypted validator custody".to_string(),
+    )?;
+    ensure_private_key_matches_public_key(validator_address, &expected, &private_key)?;
+    LOCAL_VALIDATOR_SIGNING_KEYS
+        .lock()
+        .map_err(|_| "validator signing-key cache lock poisoned".to_string())?
+        .insert(validator_address.to_string(), (expected, private_key));
+    Ok(())
+}
+
 pub fn load_local_validator_keypair_for_height(
     height: u64,
     validator_address: &str,

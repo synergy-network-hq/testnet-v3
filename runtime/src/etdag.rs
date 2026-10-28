@@ -1,4 +1,4 @@
-//! PoSy v2.2 encrypted transaction DAG (ETDAG).
+//! PoSy v3 governed encrypted transaction DAG (ETDAG).
 //!
 //! This module is the consensus-critical sealed-ingress and protected-ordering
 //! implementation.  It intentionally does not reuse the legacy plaintext
@@ -6,13 +6,14 @@
 //! and ordering are certified under the immutable target-height context, and
 //! plaintext is released only after the BOC/VC reveal gate.
 
+use crate::consensus::simplified_posy::POSY_SIMPLIFIED_PROTOCOL_VERSION;
 use crate::consensus_parameters::{ConsensusParameterRoot, EtdagActivationPermit};
 use crate::crypto::aegis_pqvm::{AegisPqKeyLifecycleRecord, AegisPqvmSigner, AegisPqvmVerifier};
 use crate::synergy_types::{
-    AegisPqKeyId, AegisPqKeyRole, AegisPqPublicKey, AegisPqSignature, CanonicalSerialize, ChainId,
-    ClusterId, ClusterMap, Epoch, Hash, Height, HeightConsensusContext, NetworkId,
+    AegisPqKeyId, AegisPqKeyRole, AegisPqPublicKey, AegisPqSignature, BlockId, CanonicalSerialize,
+    ChainId, ClusterId, ClusterMap, Epoch, Hash, Height, HeightConsensusContext, NetworkId,
     ProtectedBatchCommitment, ProtocolConfig, QuorumCertificate, Round, Transaction, UmaId,
-    ValidatorId, ValidatorRecord, ValidatorSet, ValidatorStatus, VotePhase, POSY_PROTOCOL_VERSION,
+    ValidatorId, ValidatorRecord, ValidatorSet, ValidatorStatus, VotePhase,
     TESTNET_V3_CLUSTER_SCHEDULE_VERSION,
 };
 use aes_gcm::aead::{Aead, KeyInit, Payload};
@@ -26,10 +27,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const ETDAG_PROFILE_ID: &str = "POSY-ETDAG-v2.2-rc1";
+pub const ETDAG_PROFILE_ID: &str = "POSY-ETDAG-v3.0";
 pub const ETDAG_LANE_ID: &str = "ordinary-user";
 pub const ERR_PLAINTEXT_USER_TX_DISABLED: &str = "ERR_PLAINTEXT_USER_TX_DISABLED";
 pub const ETDAG_JOURNAL_FORMAT: &str = "synergy-etdag-safety-journal-v1";
@@ -59,23 +60,37 @@ pub const MAX_CALL_DEPTH: usize = 64;
 pub const CIPHERTEXT_SIZE_CLASSES: &[usize] =
     &[512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072];
 
-pub const DOMAIN_ETE_OUTER: &str = "PoSy/ETDAG/ETE/Outer/v2";
-pub const DOMAIN_VERTEX: &str = "PoSy/ETDAG/Vertex/v2";
-pub const DOMAIN_VAC: &str = "PoSy/ETDAG/VAC/v2";
-pub const DOMAIN_DCC: &str = "PoSy/ETDAG/DCC/v2";
-pub const DOMAIN_BATCH_VALIDATE: &str = "PoSy/ETDAG/BatchValidate/v2";
-pub const DOMAIN_BATCH_FINALITY: &str = "PoSy/ETDAG/BatchFinality/v2";
-pub const DOMAIN_BATCH_TIMEOUT: &str = "PoSy/ETDAG/BatchTimeout/v2";
-pub const DOMAIN_DECRYPT_SHARE: &str = "PoSy/ETDAG/DecryptShare/v2";
-pub const DOMAIN_TARGET_ADMISSION: &str = "PoSy/ETDAG/TargetAdmission/v2";
+pub const DOMAIN_ETE_OUTER: &str = "PoSy/ETDAG/ETE/Outer/v3";
+pub const DOMAIN_VERTEX: &str = "PoSy/ETDAG/Vertex/v3";
+pub const DOMAIN_VAC: &str = "PoSy/ETDAG/VAC/v3";
+pub const DOMAIN_DCC: &str = "PoSy/ETDAG/DCC/v3";
+pub const DOMAIN_BATCH_VALIDATE: &str = "PoSy/ETDAG/BatchValidate/v3";
+pub const DOMAIN_BATCH_FINALITY: &str = "PoSy/ETDAG/BatchFinality/v3";
+pub const DOMAIN_BATCH_TIMEOUT: &str = "PoSy/ETDAG/BatchTimeout/v3";
+pub const DOMAIN_DECRYPT_SHARE: &str = "PoSy/ETDAG/DecryptShare/v3";
+pub const DOMAIN_TARGET_ADMISSION: &str = "PoSy/ETDAG/TargetAdmission/v3";
 /// Commits the 512-bit canonical finalized-context digest into the 256-bit
 /// root field used by the target-admission context.  The domain prevents a
 /// raw 32-byte consensus hash from being substituted for the full ETDAG
 /// finality context.
 pub const DOMAIN_TARGET_ADMISSION_SOURCE_FINALITY: &str =
-    "PoSy/ETDAG/TargetAdmission/SourceFinality/v2";
-pub const DOMAIN_ORDER_SEED: &str = "PoSy/ETDAG/OrderSeed/v2";
-pub const DOMAIN_ORDER_KEY: &str = "PoSy/ETDAG/Order/v2";
+    "PoSy/ETDAG/TargetAdmission/SourceFinality/v3";
+pub const DOMAIN_ORDER_SEED: &str = "PoSy/ETDAG/OrderSeed/v3";
+pub const DOMAIN_ORDER_KEY: &str = "PoSy/ETDAG/Order/v3";
+pub const PROTECTED_PIPELINE_VERSION: u32 = 1;
+pub const DOMAIN_PROTECTED_CUT_MARKER_EVIDENCE: &str =
+    "PoSy/ProtectedPipeline/CutMarkerEvidence/v1";
+pub const DOMAIN_PROTECTED_CUT_SEMANTIC: &str = "PoSy/ProtectedPipeline/CutSemantic/v1";
+pub const DOMAIN_PROTECTED_CUT_PROOF: &str = "PoSy/ProtectedPipeline/CutProof/v1";
+pub const DOMAIN_PROTECTED_ORDER_ROOT: &str = "PoSy/ProtectedPipeline/OrderRoot/v1";
+pub const DOMAIN_PROTECTED_BATCH: &str = "PoSy/ProtectedPipeline/Batch/v1";
+pub const DOMAIN_NEXT_PROTECTED_BATCH_COMMITMENT: &str =
+    "PoSy/ProtectedPipeline/NextBatchCommitment/v1";
+pub const DOMAIN_PROTECTED_REVEAL_AUTHORIZATION: &str =
+    "PoSy/ProtectedPipeline/RevealAuthorization/v1";
+pub const DOMAIN_PROTECTED_REVEAL_SHARE: &str = "PoSy/ProtectedPipeline/RevealShare/v1";
+pub const DOMAIN_PROTECTED_REVEAL_TRANSCRIPT: &str = "PoSy/ProtectedPipeline/RevealTranscript/v1";
+pub const DOMAIN_PROTECTED_EXECUTION_INPUT: &str = "PoSy/ProtectedPipeline/ExecutionInput/v1";
 
 fn require_process_wide_consensus_signing_allowed() -> Result<(), String> {
     #[cfg(test)]
@@ -189,14 +204,14 @@ impl EtdagParameters {
             .map(|value| *value as u64)
             .collect::<Vec<_>>();
         if self.ciphertext_size_classes != expected {
-            return Err("ETDAG ciphertext size classes do not match v2.2".to_string());
+            return Err("ETDAG ciphertext size classes do not match v3.0".to_string());
         }
         Ok(())
     }
 
     pub fn root(&self) -> Result<EtdagDigest, String> {
         self.validate()?;
-        EtdagDigest::from_canonical("PoSy/ETDAG/Parameters/v2", self)
+        EtdagDigest::from_canonical("PoSy/ETDAG/Parameters/v3", self)
     }
 }
 
@@ -255,9 +270,32 @@ impl TargetAdmissionContext {
         cluster_map: &ClusterMap,
         protocol_config: &ProtocolConfig,
     ) -> Result<Self, String> {
-        validate_target_admission_spec(&spec)?;
         protocol_config.chain_id.require_testnet_v3()?;
-        protocol_config.network_id.require_testnet_v3()?;
+        protocol_config.network_id.require_fresh_posy_testnet_v3()?;
+        Self::derive_with_parameter_root(spec, validator_set, cluster_map, protocol_config.hash()?)
+    }
+
+    /// Derive an admission context for a schedule-neutral consensus protocol
+    /// from its exact finalized 512-bit manifest root.
+    pub fn derive_schedule_neutral(
+        spec: TargetAdmissionContextSpec,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        consensus_parameter_root: ConsensusParameterRoot,
+    ) -> Result<Self, String> {
+        Self::derive_with_parameter_root(spec, validator_set, cluster_map, consensus_parameter_root)
+    }
+
+    fn derive_with_parameter_root(
+        spec: TargetAdmissionContextSpec,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        consensus_parameter_root: ConsensusParameterRoot,
+    ) -> Result<Self, String> {
+        validate_target_admission_spec(&spec)?;
+        if consensus_parameter_root.is_zero() {
+            return Err("target admission consensus parameter root is missing".to_string());
+        }
         if validator_set.epoch != spec.epoch || cluster_map.epoch != spec.epoch {
             return Err("target admission epoch does not match frozen topology".to_string());
         }
@@ -299,7 +337,7 @@ impl TargetAdmissionContext {
         let context = Self {
             context_version: TARGET_ADMISSION_CONTEXT_VERSION,
             chain_id: ChainId::synergy_testnet_v3(),
-            network_id: NetworkId::synergy_testnet_v3(),
+            network_id: NetworkId::fresh_posy_testnet_v3(),
             protocol_version: spec.protocol_version,
             epoch: spec.epoch,
             target_height: spec.target_height,
@@ -316,7 +354,7 @@ impl TargetAdmissionContext {
             assigned_cluster_membership_root: membership_root,
             assigned_cluster_validator_count: member_count,
             assigned_cluster_total_voting_weight: total_weight,
-            consensus_parameter_root: protocol_config.hash()?,
+            consensus_parameter_root,
             cryptographic_profile_root: spec.cryptographic_profile_root,
             ingress_kem_registry_root: spec.ingress_kem_registry_root,
         };
@@ -334,9 +372,9 @@ impl TargetAdmissionContext {
 
     pub fn validate(&self) -> Result<(), String> {
         self.chain_id.require_testnet_v3()?;
-        self.network_id.require_testnet_v3()?;
+        self.network_id.require_fresh_posy_testnet_v3()?;
         if self.context_version != TARGET_ADMISSION_CONTEXT_VERSION
-            || self.protocol_version != POSY_PROTOCOL_VERSION
+            || self.protocol_version != POSY_SIMPLIFIED_PROTOCOL_VERSION
             || self.cluster_schedule_version != TESTNET_V3_CLUSTER_SCHEDULE_VERSION
         {
             return Err("unsupported target admission context version".to_string());
@@ -401,6 +439,21 @@ impl TargetAdmissionContext {
     ) -> Result<(), String> {
         self.validate_validator_and_cluster_bindings(validator_set, cluster_map)?;
         if self.consensus_parameter_root != protocol_config.hash()? {
+            return Err("target admission parameter root mismatch".to_string());
+        }
+        Ok(())
+    }
+
+    /// Validate the immutable topology and the exact finalized parameter root
+    /// without importing a consensus scheduler's runtime configuration.
+    pub fn validate_against_parameter_root(
+        &self,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        consensus_parameter_root: ConsensusParameterRoot,
+    ) -> Result<(), String> {
+        self.validate_validator_and_cluster_bindings(validator_set, cluster_map)?;
+        if self.consensus_parameter_root != consensus_parameter_root {
             return Err("target admission parameter root mismatch".to_string());
         }
         Ok(())
@@ -489,7 +542,7 @@ impl TargetAdmissionContext {
 }
 
 fn validate_target_admission_spec(spec: &TargetAdmissionContextSpec) -> Result<(), String> {
-    if spec.protocol_version != POSY_PROTOCOL_VERSION
+    if spec.protocol_version != POSY_SIMPLIFIED_PROTOCOL_VERSION
         || spec.cluster_schedule_version != TESTNET_V3_CLUSTER_SCHEDULE_VERSION
     {
         return Err("unsupported target admission context specification".to_string());
@@ -545,7 +598,9 @@ impl InnerTransactionV2 {
             return Err("wrong ETDAG lane".to_string());
         }
         self.transaction.chain_id.require_testnet_v3()?;
-        self.transaction.network_id.require_testnet_v3()?;
+        self.transaction
+            .network_id
+            .require_fresh_posy_testnet_v3()?;
         if self.transaction.epoch.0 == u64::MAX {
             return Err("inner transaction epoch is invalid".to_string());
         }
@@ -633,7 +688,7 @@ impl IngressKemKeyRegistry {
     pub fn root(&self) -> Result<EtdagDigest, String> {
         self.validate_shape()?;
         EtdagDigest::from_canonical(
-            "PoSy/ETDAG/IngressKemKeyRegistry/v2",
+            "PoSy/ETDAG/IngressKemKeyRegistry/v3",
             &(
                 self.registry_version,
                 self.chain_id,
@@ -649,9 +704,9 @@ impl IngressKemKeyRegistry {
 
     pub fn validate_shape(&self) -> Result<(), String> {
         self.chain_id.require_testnet_v3()?;
-        self.network_id.require_testnet_v3()?;
+        self.network_id.require_fresh_posy_testnet_v3()?;
         if self.registry_version != INGRESS_KEM_REGISTRY_VERSION
-            || self.protocol_version != POSY_PROTOCOL_VERSION
+            || self.protocol_version != POSY_SIMPLIFIED_PROTOCOL_VERSION
             || self.target_height.0 == 0
             || self.records.is_empty()
         {
@@ -740,7 +795,7 @@ pub struct ShareCapsule {
 
 impl ShareCapsule {
     pub fn digest(&self) -> Result<EtdagDigest, String> {
-        EtdagDigest::from_canonical("PoSy/ETDAG/ShareCapsule/v2", self)
+        EtdagDigest::from_canonical("PoSy/ETDAG/ShareCapsule/v3", self)
     }
 }
 
@@ -852,7 +907,7 @@ impl EncryptedTransactionEnvelope {
     }
 
     pub fn recompute_commitment(&self) -> Result<EtdagDigest, String> {
-        EtdagDigest::from_canonical("PoSy/ETDAG/TxCommitment/v2", &self.unsigned())
+        EtdagDigest::from_canonical("PoSy/ETDAG/TxCommitment/v3", &self.unsigned())
     }
 
     pub fn validate_structure(
@@ -863,10 +918,10 @@ impl EncryptedTransactionEnvelope {
         parameters.validate()?;
         height_context.validate()?;
         self.chain_id.require_testnet_v3()?;
-        self.network_id.require_testnet_v3()?;
+        self.network_id.require_fresh_posy_testnet_v3()?;
         if self.envelope_version != 2
             || self.profile_id != ETDAG_PROFILE_ID
-            || self.protocol_version != POSY_PROTOCOL_VERSION
+            || self.protocol_version != POSY_SIMPLIFIED_PROTOCOL_VERSION
             || self.lane_id != ETDAG_LANE_ID
         {
             return Err("unsupported ETDAG envelope version/profile".to_string());
@@ -958,9 +1013,9 @@ impl SealedTransactionBundle {
             }
         }
         let commitment_root =
-            EtdagDigest::from_canonical("PoSy/ETDAG/ShareCommitmentRoot/v2", &commitments)?;
+            EtdagDigest::from_canonical("PoSy/ETDAG/ShareCommitmentRoot/v3", &commitments)?;
         let capsule_root =
-            EtdagDigest::from_canonical("PoSy/ETDAG/ShareCapsuleRoot/v2", &capsules)?;
+            EtdagDigest::from_canonical("PoSy/ETDAG/ShareCapsuleRoot/v3", &capsules)?;
         if commitment_root != self.envelope.share_commitment_root
             || capsule_root != self.envelope.share_capsule_root
         {
@@ -1112,9 +1167,9 @@ pub fn seal_transaction<R: RngCore + CryptoRng>(
     share_commitments.sort_by(|left, right| left.validator_id.cmp(&right.validator_id));
     share_capsules.sort_by(|left, right| left.validator_id.cmp(&right.validator_id));
     let share_commitment_root =
-        EtdagDigest::from_canonical("PoSy/ETDAG/ShareCommitmentRoot/v2", &share_commitments)?;
+        EtdagDigest::from_canonical("PoSy/ETDAG/ShareCommitmentRoot/v3", &share_commitments)?;
     let share_capsule_root =
-        EtdagDigest::from_canonical("PoSy/ETDAG/ShareCapsuleRoot/v2", &share_capsules)?;
+        EtdagDigest::from_canonical("PoSy/ETDAG/ShareCapsuleRoot/v3", &share_capsules)?;
 
     let mut envelope = EncryptedTransactionEnvelope {
         envelope_version: 2,
@@ -1191,7 +1246,7 @@ fn key_commitment(key: &[u8; 32], aad: &[u8]) -> EtdagDigest {
     let mut bytes = Vec::with_capacity(32 + aad.len());
     bytes.extend_from_slice(key);
     bytes.extend_from_slice(aad);
-    EtdagDigest::from_domain_bytes("PoSy/ETDAG/KeyCommitment/v2", &bytes)
+    EtdagDigest::from_domain_bytes("PoSy/ETDAG/KeyCommitment/v3", &bytes)
 }
 
 fn share_commitment(
@@ -1201,7 +1256,7 @@ fn share_commitment(
     target_height: Height,
 ) -> Result<EtdagDigest, String> {
     EtdagDigest::from_canonical(
-        "PoSy/ETDAG/ShareCommitment/v2",
+        "PoSy/ETDAG/ShareCommitment/v3",
         &(
             validator_id.clone(),
             share.clone(),
@@ -1314,7 +1369,7 @@ pub fn decrypt_share_capsule(
 
 fn derive_capsule_key(shared_secret: &[u8], context: &[u8]) -> [u8; 32] {
     let mut hasher = Sha3_512::new();
-    hasher.update(b"PoSy/ETDAG/CapsuleKey/v2");
+    hasher.update(b"PoSy/ETDAG/CapsuleKey/v3");
     hasher.update((shared_secret.len() as u64).to_be_bytes());
     hasher.update(shared_secret);
     hasher.update((context.len() as u64).to_be_bytes());
@@ -1549,7 +1604,7 @@ impl EtdagVoteTranscript {
     pub fn validate_against(&self, context: &TargetAdmissionContext) -> Result<(), String> {
         context.validate()?;
         self.chain_id.require_testnet_v3()?;
-        self.network_id.require_testnet_v3()?;
+        self.network_id.require_fresh_posy_testnet_v3()?;
         self.candidate_digest.validate("ETDAG candidate digest")?;
         if self
             .highest_prepared_bvc_digest
@@ -1558,7 +1613,7 @@ impl EtdagVoteTranscript {
         {
             return Err("highest prepared BVC digest cannot be zero".to_string());
         }
-        if self.protocol_version != POSY_PROTOCOL_VERSION
+        if self.protocol_version != POSY_SIMPLIFIED_PROTOCOL_VERSION
             || self.profile_id != ETDAG_PROFILE_ID
             || self.lane_id != ETDAG_LANE_ID
             || self.chain_id != context.chain_id
@@ -1581,7 +1636,7 @@ impl EtdagVoteTranscript {
     }
 
     pub fn digest(&self) -> Result<EtdagDigest, String> {
-        EtdagDigest::from_canonical("PoSy/ETDAG/VoteTranscript/v2", self)
+        EtdagDigest::from_canonical("PoSy/ETDAG/VoteTranscript/v3", self)
     }
 }
 
@@ -1620,6 +1675,20 @@ struct TargetAdmissionCertificateTranscript {
 }
 
 impl TargetAdmissionCertificate {
+    pub fn without_votes(context: &TargetAdmissionContext) -> Result<Self, String> {
+        context.validate()?;
+        Ok(Self {
+            certificate_version: 2,
+            target_context_root: context.root()?,
+            ingress_kem_registry_root: context.ingress_kem_registry_root.clone(),
+            source_finalized_height: context.source_finalized_height,
+            source_finality_context_root: context.source_finality_context_root,
+            signer_count: 0,
+            signed_weight: 0,
+            votes: Vec::new(),
+        })
+    }
+
     /// Returns the canonical pre-signature transcript for this exact target
     /// admission certificate.  Offline custody tooling may request these
     /// bytes, but signature acceptance remains exclusively in [`Self::verify`]
@@ -1675,26 +1744,13 @@ impl TargetAdmissionCertificate {
                 );
             }
             prior = Some(&vote.signer_validator_id);
-            let member = members
-                .iter()
-                .find(|member| member.validator_id == vote.signer_validator_id)
-                .ok_or_else(|| {
-                    "target admission certificate signer is outside assigned cluster".to_string()
-                })?;
-            if member.consensus_public_key.key_id != vote.signer_key_id {
-                return Err("target admission signer key does not match frozen key".to_string());
-            }
-            verifier
-                .verify_domain_signature(
-                    DOMAIN_TARGET_ADMISSION,
-                    &transcript,
-                    &member.validator_uma_id.0,
-                    &vote.signer_key_id,
-                    context.epoch,
-                    AegisPqKeyRole::ConsensusVote,
-                    &vote.signature,
-                )
-                .map_err(|error| error.to_string())?;
+            let member = verify_target_admission_vote_with_transcript(
+                vote,
+                &transcript,
+                verifier,
+                context,
+                &members,
+            )?;
             signed_weight = signed_weight
                 .checked_add(member.voting_weight)
                 .ok_or_else(|| "target admission signed weight overflow".to_string())?;
@@ -1713,6 +1769,89 @@ impl TargetAdmissionCertificate {
         }
         Ok(())
     }
+}
+
+fn verify_target_admission_vote_with_transcript<'a>(
+    vote: &EtdagSignedVote,
+    transcript: &[u8],
+    verifier: &AegisPqvmVerifier,
+    context: &TargetAdmissionContext,
+    members: &'a [ValidatorRecord],
+) -> Result<&'a ValidatorRecord, String> {
+    let member = members
+        .iter()
+        .find(|member| member.validator_id == vote.signer_validator_id)
+        .ok_or_else(|| {
+            "target admission certificate signer is outside assigned cluster".to_string()
+        })?;
+    if member.consensus_public_key.key_id != vote.signer_key_id {
+        return Err("target admission signer key does not match frozen key".to_string());
+    }
+    verifier
+        .verify_domain_signature(
+            DOMAIN_TARGET_ADMISSION,
+            transcript,
+            &member.validator_uma_id.0,
+            &vote.signer_key_id,
+            context.epoch,
+            AegisPqKeyRole::ConsensusVote,
+            &vote.signature,
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(member)
+}
+
+pub fn verify_target_admission_vote(
+    vote: &EtdagSignedVote,
+    verifier: &AegisPqvmVerifier,
+    context: &TargetAdmissionContext,
+    validator_set: &ValidatorSet,
+    cluster_map: &ClusterMap,
+) -> Result<(), String> {
+    context.validate_validator_and_cluster_bindings(validator_set, cluster_map)?;
+    let members = validator_set
+        .active_for_epoch(context.epoch)
+        .active_for_cluster(context.assigned_cluster_id);
+    let certificate = TargetAdmissionCertificate::without_votes(context)?;
+    verify_target_admission_vote_with_transcript(
+        vote,
+        &certificate.signing_bytes(context)?,
+        verifier,
+        context,
+        &members,
+    )?;
+    Ok(())
+}
+
+pub fn form_target_admission_certificate(
+    context: &TargetAdmissionContext,
+    mut votes: Vec<EtdagSignedVote>,
+    verifier: &AegisPqvmVerifier,
+    validator_set: &ValidatorSet,
+    cluster_map: &ClusterMap,
+) -> Result<TargetAdmissionCertificate, String> {
+    votes.sort_by(|left, right| left.signer_validator_id.cmp(&right.signer_validator_id));
+    let members = validator_set
+        .active_for_epoch(context.epoch)
+        .active_for_cluster(context.assigned_cluster_id);
+    let signed_weight = votes.iter().try_fold(0u64, |total, vote| {
+        let member = members
+            .iter()
+            .find(|member| member.validator_id == vote.signer_validator_id)
+            .ok_or_else(|| {
+                "target admission certificate signer is outside assigned cluster".to_string()
+            })?;
+        total
+            .checked_add(member.voting_weight)
+            .ok_or_else(|| "target admission signed weight overflow".to_string())
+    })?;
+    let mut certificate = TargetAdmissionCertificate::without_votes(context)?;
+    certificate.signer_count = u64::try_from(votes.len())
+        .map_err(|_| "target admission signer count exceeds u64".to_string())?;
+    certificate.signed_weight = signed_weight;
+    certificate.votes = votes;
+    certificate.verify(verifier, context, validator_set, cluster_map)?;
+    Ok(certificate)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1738,8 +1877,29 @@ impl TargetAdmissionPackage {
             .verify(verifier, &self.context, validator_set, cluster_map)
     }
 
+    /// Schedule-neutral verification used by simplified consensus. The
+    /// finalized manifest root is supplied directly; no legacy runtime
+    /// configuration is synthesized to stand in for it.
+    pub fn verify_against_parameter_root(
+        &self,
+        verifier: &AegisPqvmVerifier,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        consensus_parameter_root: ConsensusParameterRoot,
+    ) -> Result<(), String> {
+        self.context.validate_against_parameter_root(
+            validator_set,
+            cluster_map,
+            consensus_parameter_root,
+        )?;
+        self.ingress_kem_registry
+            .validate_against(&self.context, validator_set)?;
+        self.certificate
+            .verify(verifier, &self.context, validator_set, cluster_map)
+    }
+
     pub fn package_digest(&self) -> Result<EtdagDigest, String> {
-        EtdagDigest::from_canonical("PoSy/ETDAG/TargetAdmissionPackage/v2", self)
+        EtdagDigest::from_canonical("PoSy/ETDAG/TargetAdmissionPackage/v3", self)
     }
 }
 
@@ -1754,7 +1914,7 @@ pub struct EtdagCertificate {
 
 impl EtdagCertificate {
     pub fn digest(&self) -> Result<EtdagDigest, String> {
-        EtdagDigest::from_canonical("PoSy/ETDAG/Certificate/v2", self)
+        EtdagDigest::from_canonical("PoSy/ETDAG/Certificate/v3", self)
     }
 
     pub fn verify(
@@ -1904,6 +2064,17 @@ struct VoteAuthorizationRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct TargetAdmissionAuthorizationRecord {
+    validator_id: ValidatorId,
+    key_id: AegisPqKeyId,
+    epoch: Epoch,
+    target_height: Height,
+    assigned_cluster_id: ClusterId,
+    target_context_root: Hash,
+    transcript_digest: EtdagDigest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct DecryptReleaseRecord {
     epoch: Epoch,
     target_height: Height,
@@ -1917,12 +2088,29 @@ struct DecryptReleaseRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ProtectedDecryptReleaseRecord {
+    epoch: Epoch,
+    target_height: Height,
+    cluster_id: ClusterId,
+    validator_id: ValidatorId,
+    authorization_root: EtdagDigest,
+    next_commitment_root: EtdagDigest,
+    protected_batch_root: EtdagDigest,
+    tx_commitment: EtdagDigest,
+    share_digest: EtdagDigest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct EtdagDurableJournal {
     format: String,
     nonce_reservations: Vec<NonceReservationRecord>,
     admission_closes: Vec<AdmissionCloseRecord>,
     vote_authorizations: Vec<VoteAuthorizationRecord>,
+    #[serde(default)]
+    target_admission_authorizations: Vec<TargetAdmissionAuthorizationRecord>,
     decrypt_releases: Vec<DecryptReleaseRecord>,
+    #[serde(default)]
+    protected_decrypt_releases: Vec<ProtectedDecryptReleaseRecord>,
 }
 
 impl Default for EtdagDurableJournal {
@@ -1932,7 +2120,9 @@ impl Default for EtdagDurableJournal {
             nonce_reservations: Vec::new(),
             admission_closes: Vec::new(),
             vote_authorizations: Vec::new(),
+            target_admission_authorizations: Vec::new(),
             decrypt_releases: Vec::new(),
+            protected_decrypt_releases: Vec::new(),
         }
     }
 }
@@ -1990,6 +2180,10 @@ impl EtdagAdmissionPackageStore {
         protocol_config: &ProtocolConfig,
     ) -> Result<EtdagDigest, String> {
         package.verify(verifier, validator_set, cluster_map, protocol_config)?;
+        self.install_preverified(package)
+    }
+
+    fn install_preverified(&self, package: &TargetAdmissionPackage) -> Result<EtdagDigest, String> {
         let package_digest = package.package_digest()?;
         let _guard = ETDAG_ADMISSION_STORE_LOCK
             .get_or_init(|| Mutex::new(()))
@@ -2246,6 +2440,59 @@ impl EtdagSafetyJournal {
         })
     }
 
+    pub fn authorize_target_admission_before_signature(
+        &self,
+        context: &TargetAdmissionContext,
+        validator: &ValidatorRecord,
+        certificate: &TargetAdmissionCertificate,
+    ) -> Result<EtdagDigest, String> {
+        require_process_wide_consensus_signing_allowed()?;
+        context.validate()?;
+        if validator.status != ValidatorStatus::Active
+            || !validator.is_active_for_epoch(context.epoch)
+            || validator.cluster_id != context.assigned_cluster_id
+            || validator.consensus_public_key.key_id.0.trim().is_empty()
+        {
+            return Err("target admission signer is outside its frozen authority".to_string());
+        }
+        let expected = TargetAdmissionCertificate::without_votes(context)?;
+        if certificate != &expected {
+            return Err("target admission signer received a noncanonical transcript".to_string());
+        }
+        let transcript = certificate.signing_bytes(context)?;
+        let transcript_digest =
+            EtdagDigest::from_domain_bytes(DOMAIN_TARGET_ADMISSION, &transcript);
+        self.with_journal(|journal| {
+            let record = TargetAdmissionAuthorizationRecord {
+                validator_id: validator.validator_id.clone(),
+                key_id: validator.consensus_public_key.key_id.clone(),
+                epoch: context.epoch,
+                target_height: context.target_height,
+                assigned_cluster_id: context.assigned_cluster_id,
+                target_context_root: context.root()?,
+                transcript_digest: transcript_digest.clone(),
+            };
+            if let Some(existing) =
+                journal
+                    .target_admission_authorizations
+                    .iter()
+                    .find(|existing| {
+                        existing.validator_id == record.validator_id
+                            && existing.epoch == record.epoch
+                            && existing.target_height == record.target_height
+                            && existing.assigned_cluster_id == record.assigned_cluster_id
+                    })
+            {
+                if existing == &record {
+                    return Ok((transcript_digest.clone(), false));
+                }
+                return Err("ETDAG_TARGET_ADMISSION_SIGNING_CONFLICT".to_string());
+            }
+            journal.target_admission_authorizations.push(record);
+            Ok((transcript_digest.clone(), true))
+        })
+    }
+
     pub fn authorize_decrypt_release(
         &self,
         gate: &RevealGate,
@@ -2280,6 +2527,50 @@ impl EtdagSafetyJournal {
                 return Err("ETDAG_DECRYPT_RELEASE_CONFLICT".to_string());
             }
             journal.decrypt_releases.push(record);
+            Ok(((), true))
+        })
+    }
+
+    pub fn authorize_protected_decrypt_release(
+        &self,
+        authorization: &ProtectedRevealAuthorization,
+        commitment: &NextProtectedBatchCommitment,
+        batch: &DeterministicProtectedBatch,
+        context: &TargetAdmissionContext,
+        validator_id: &ValidatorId,
+        tx_commitment: EtdagDigest,
+        share_digest: EtdagDigest,
+    ) -> Result<(), String> {
+        require_process_wide_consensus_signing_allowed()?;
+        authorization.validate_against(context, commitment, batch)?;
+        if !batch.ordered_transaction_ids.contains(&tx_commitment) {
+            return Err("protected decrypt release is outside committed batch".to_string());
+        }
+        let record = ProtectedDecryptReleaseRecord {
+            epoch: context.epoch,
+            target_height: context.target_height,
+            cluster_id: context.assigned_cluster_id,
+            validator_id: validator_id.clone(),
+            authorization_root: authorization.root()?,
+            next_commitment_root: commitment.root()?,
+            protected_batch_root: batch.protected_batch_root.clone(),
+            tx_commitment,
+            share_digest,
+        };
+        self.with_journal(|journal| {
+            if let Some(existing) = journal.protected_decrypt_releases.iter().find(|existing| {
+                existing.epoch == record.epoch
+                    && existing.target_height == record.target_height
+                    && existing.cluster_id == record.cluster_id
+                    && existing.validator_id == record.validator_id
+                    && existing.tx_commitment == record.tx_commitment
+            }) {
+                if existing == &record {
+                    return Ok(((), false));
+                }
+                return Err("PROTECTED_DECRYPT_RELEASE_CONFLICT".to_string());
+            }
+            journal.protected_decrypt_releases.push(record);
             Ok(((), true))
         })
     }
@@ -2482,6 +2773,28 @@ pub fn sign_etdag_vote(
     })
 }
 
+pub fn sign_target_admission_vote(
+    signer: &mut AegisPqvmSigner,
+    journal: &EtdagSafetyJournal,
+    context: &TargetAdmissionContext,
+    validator: &ValidatorRecord,
+) -> Result<EtdagSignedVote, String> {
+    let certificate = TargetAdmissionCertificate::without_votes(context)?;
+    journal.authorize_target_admission_before_signature(context, validator, &certificate)?;
+    let signature = signer
+        .sign_domain(
+            DOMAIN_TARGET_ADMISSION,
+            &certificate.signing_bytes(context)?,
+            &validator.consensus_public_key.key_id,
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(EtdagSignedVote {
+        signer_validator_id: validator.validator_id.clone(),
+        signer_key_id: validator.consensus_public_key.key_id.clone(),
+        signature,
+    })
+}
+
 pub fn sign_vac_vote(
     signer: &mut AegisPqvmSigner,
     journal: &EtdagSafetyJournal,
@@ -2584,6 +2897,704 @@ impl CertifiedEnvelopeRef {
     }
 }
 
+/// Canonical proof that authenticated cutoff evidence deterministically selects
+/// one semantic encrypted-data cut. The exact marker evidence root may vary
+/// across valid quorum subsets; `cut_root` may not.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProtectedCutProof {
+    pub proof_version: u32,
+    pub chain_id: ChainId,
+    pub network_id: NetworkId,
+    pub protocol_version: String,
+    pub profile_id: String,
+    pub epoch: Epoch,
+    pub target_height: Height,
+    pub cluster_id: ClusterId,
+    pub target_context_root: Hash,
+    pub validator_set_commitment: Hash,
+    pub parameter_root: ConsensusParameterRoot,
+    pub cutoff_vc_context_root: Hash,
+    pub cutoff_marker_digests: Vec<EtdagDigest>,
+    pub cutoff_marker_evidence_root: EtdagDigest,
+    /// Canonical transaction-ancestor closure selected by the authenticated
+    /// cutoff. Marker vertices are evidence for the cutoff and are bound by
+    /// `cutoff_marker_evidence_root`; they are intentionally excluded here so
+    /// valid quorum subsets cannot change the semantic `cut_root`.
+    pub causal_closure_digests: Vec<EtdagDigest>,
+    pub causal_closure_root: EtdagDigest,
+    pub eligible_envelopes: Vec<CertifiedEnvelopeRef>,
+    pub eligible_set_root: EtdagDigest,
+    pub cut_root: EtdagDigest,
+}
+
+#[derive(Serialize, Deserialize, PartialEq)]
+struct ProtectedCutSemantic {
+    proof_version: u32,
+    chain_id: ChainId,
+    network_id: NetworkId,
+    protocol_version: String,
+    profile_id: String,
+    epoch: Epoch,
+    target_height: Height,
+    cluster_id: ClusterId,
+    target_context_root: Hash,
+    validator_set_commitment: Hash,
+    parameter_root: ConsensusParameterRoot,
+    cutoff_vc_context_root: Hash,
+    causal_closure_root: EtdagDigest,
+    eligible_set_root: EtdagDigest,
+}
+
+impl ProtectedCutProof {
+    pub fn semantic_root(&self) -> Result<EtdagDigest, String> {
+        EtdagDigest::from_canonical(
+            DOMAIN_PROTECTED_CUT_SEMANTIC,
+            &ProtectedCutSemantic {
+                proof_version: self.proof_version,
+                chain_id: self.chain_id,
+                network_id: self.network_id.clone(),
+                protocol_version: self.protocol_version.clone(),
+                profile_id: self.profile_id.clone(),
+                epoch: self.epoch,
+                target_height: self.target_height,
+                cluster_id: self.cluster_id,
+                target_context_root: self.target_context_root,
+                validator_set_commitment: self.validator_set_commitment,
+                parameter_root: self.parameter_root,
+                cutoff_vc_context_root: self.cutoff_vc_context_root,
+                causal_closure_root: self.causal_closure_root.clone(),
+                eligible_set_root: self.eligible_set_root.clone(),
+            },
+        )
+    }
+
+    pub fn proof_root(&self) -> Result<EtdagDigest, String> {
+        EtdagDigest::from_canonical(DOMAIN_PROTECTED_CUT_PROOF, self)
+    }
+
+    pub fn validate_declared_roots(&self, context: &TargetAdmissionContext) -> Result<(), String> {
+        context.validate()?;
+        if self.proof_version != PROTECTED_PIPELINE_VERSION
+            || self.chain_id != context.chain_id
+            || self.network_id != context.network_id
+            || self.protocol_version != context.protocol_version
+            || self.profile_id != ETDAG_PROFILE_ID
+            || self.epoch != context.epoch
+            || self.target_height != context.target_height
+            || self.cluster_id != context.assigned_cluster_id
+            || self.target_context_root != context.root()?
+            || self.validator_set_commitment != context.active_validator_set_root
+            || self.parameter_root != context.consensus_parameter_root
+            || self.cutoff_vc_context_root.is_zero()
+        {
+            return Err("protected cut proof context mismatch".to_string());
+        }
+        let required = certificate_quorum(context.assigned_cluster_validator_count as usize)?;
+        if self.cutoff_marker_digests.len() < required
+            || !strictly_sorted_unique(&self.cutoff_marker_digests)
+            || !strictly_sorted_unique(&self.causal_closure_digests)
+        {
+            return Err("protected cut proof evidence is not canonical quorum data".to_string());
+        }
+        let mut prior: Option<&EtdagDigest> = None;
+        for envelope in &self.eligible_envelopes {
+            envelope.validate()?;
+            if prior.is_some_and(|value| value >= &envelope.tx_commitment) {
+                return Err("protected cut eligible set is not strictly canonical".to_string());
+            }
+            prior = Some(&envelope.tx_commitment);
+        }
+        let marker_root = EtdagDigest::from_canonical(
+            DOMAIN_PROTECTED_CUT_MARKER_EVIDENCE,
+            &self.cutoff_marker_digests,
+        )?;
+        let closure_root = EtdagDigest::from_canonical(
+            "PoSy/ProtectedPipeline/CausalClosure/v1",
+            &self.causal_closure_digests,
+        )?;
+        let eligible_root = EtdagDigest::from_canonical(
+            "PoSy/ProtectedPipeline/EligibleSet/v1",
+            &self.eligible_envelopes,
+        )?;
+        if self.cutoff_marker_evidence_root != marker_root
+            || self.causal_closure_root != closure_root
+            || self.eligible_set_root != eligible_root
+            || self.cut_root != self.semantic_root()?
+        {
+            return Err("protected cut proof declared roots mismatch".to_string());
+        }
+        Ok(())
+    }
+}
+
+fn strictly_sorted_unique<T: Ord>(values: &[T]) -> bool {
+    values.windows(2).all(|pair| pair[0] < pair[1])
+}
+
+/// Deterministic protected batch derived from one semantic cut and one
+/// consensus-provided ordering seed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeterministicProtectedBatch {
+    pub batch_version: u32,
+    pub chain_id: ChainId,
+    pub network_id: NetworkId,
+    pub protocol_version: String,
+    pub profile_id: String,
+    pub epoch: Epoch,
+    pub target_height: Height,
+    pub cluster_id: ClusterId,
+    pub target_context_root: Hash,
+    pub validator_set_commitment: Hash,
+    pub parameter_root: ConsensusParameterRoot,
+    pub cut_root: EtdagDigest,
+    pub eligible_set_root: EtdagDigest,
+    pub order_seed: EtdagDigest,
+    pub ordered_transaction_ids: Vec<EtdagDigest>,
+    pub order_root: EtdagDigest,
+    pub protected_count: u64,
+    pub protected_gas: u64,
+    pub protected_bytes: u64,
+    pub protected_batch_root: EtdagDigest,
+}
+
+#[derive(Serialize, Deserialize, PartialEq)]
+struct ProtectedBatchSemantic {
+    batch_version: u32,
+    chain_id: ChainId,
+    network_id: NetworkId,
+    protocol_version: String,
+    profile_id: String,
+    epoch: Epoch,
+    target_height: Height,
+    cluster_id: ClusterId,
+    target_context_root: Hash,
+    validator_set_commitment: Hash,
+    parameter_root: ConsensusParameterRoot,
+    cut_root: EtdagDigest,
+    eligible_set_root: EtdagDigest,
+    order_seed: EtdagDigest,
+    order_root: EtdagDigest,
+    protected_count: u64,
+    protected_gas: u64,
+    protected_bytes: u64,
+}
+
+impl DeterministicProtectedBatch {
+    pub fn semantic_root(&self) -> Result<EtdagDigest, String> {
+        EtdagDigest::from_canonical(
+            DOMAIN_PROTECTED_BATCH,
+            &ProtectedBatchSemantic {
+                batch_version: self.batch_version,
+                chain_id: self.chain_id,
+                network_id: self.network_id.clone(),
+                protocol_version: self.protocol_version.clone(),
+                profile_id: self.profile_id.clone(),
+                epoch: self.epoch,
+                target_height: self.target_height,
+                cluster_id: self.cluster_id,
+                target_context_root: self.target_context_root,
+                validator_set_commitment: self.validator_set_commitment,
+                parameter_root: self.parameter_root,
+                cut_root: self.cut_root.clone(),
+                eligible_set_root: self.eligible_set_root.clone(),
+                order_seed: self.order_seed.clone(),
+                order_root: self.order_root.clone(),
+                protected_count: self.protected_count,
+                protected_gas: self.protected_gas,
+                protected_bytes: self.protected_bytes,
+            },
+        )
+    }
+
+    pub fn validate_declared_roots(&self) -> Result<(), String> {
+        if self.batch_version != PROTECTED_PIPELINE_VERSION
+            || self.profile_id != ETDAG_PROFILE_ID
+            || self.target_height.0 == 0
+            || self.target_context_root.is_zero()
+            || self.validator_set_commitment.is_zero()
+            || self.order_seed.is_zero()
+            || self.protected_count != self.ordered_transaction_ids.len() as u64
+            || self
+                .ordered_transaction_ids
+                .iter()
+                .collect::<BTreeSet<_>>()
+                .len()
+                != self.ordered_transaction_ids.len()
+        {
+            return Err("invalid deterministic protected batch".to_string());
+        }
+        let order_root = EtdagDigest::from_canonical(
+            DOMAIN_PROTECTED_ORDER_ROOT,
+            &self.ordered_transaction_ids,
+        )?;
+        if self.order_root != order_root || self.protected_batch_root != self.semantic_root()? {
+            return Err("deterministic protected batch declared roots mismatch".to_string());
+        }
+        Ok(())
+    }
+}
+
+/// Exact protected batch that the parent PoSy proposal must commit for the
+/// target execution height. This is derived, never proposer-selected.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NextProtectedBatchCommitment {
+    pub commitment_version: u32,
+    pub chain_id: ChainId,
+    pub network_id: NetworkId,
+    pub protocol_version: String,
+    pub epoch: Epoch,
+    pub target_height: Height,
+    pub cluster_id: ClusterId,
+    pub target_context_root: Hash,
+    pub validator_set_commitment: Hash,
+    pub parameter_root: ConsensusParameterRoot,
+    pub cut_root: EtdagDigest,
+    pub eligible_set_root: EtdagDigest,
+    pub order_seed: EtdagDigest,
+    pub order_root: EtdagDigest,
+    pub protected_batch_root: EtdagDigest,
+    pub protected_count: u64,
+    pub protected_gas: u64,
+    pub protected_bytes: u64,
+}
+
+impl NextProtectedBatchCommitment {
+    pub fn root(&self) -> Result<EtdagDigest, String> {
+        EtdagDigest::from_canonical(DOMAIN_NEXT_PROTECTED_BATCH_COMMITMENT, self)
+    }
+
+    pub fn validate_against(
+        &self,
+        context: &TargetAdmissionContext,
+        batch: &DeterministicProtectedBatch,
+    ) -> Result<(), String> {
+        self.validate_against_context(context)?;
+        self.validate_against_batch(batch)?;
+        Ok(())
+    }
+
+    /// Validate the target binding that is available before reveal. Batch
+    /// equality remains a separate execution-readiness check.
+    pub fn validate_against_context(&self, context: &TargetAdmissionContext) -> Result<(), String> {
+        context.validate()?;
+        if self.chain_id != context.chain_id
+            || self.network_id != context.network_id
+            || self.protocol_version != context.protocol_version
+            || self.epoch != context.epoch
+            || self.target_height != context.target_height
+            || self.cluster_id != context.assigned_cluster_id
+            || self.target_context_root != context.root()?
+            || self.validator_set_commitment != context.active_validator_set_root
+            || self.parameter_root != context.consensus_parameter_root
+        {
+            return Err("next protected-batch target context mismatch".to_string());
+        }
+        self.root()?
+            .validate("next protected-batch commitment root")
+    }
+
+    pub fn validate_against_batch(
+        &self,
+        batch: &DeterministicProtectedBatch,
+    ) -> Result<(), String> {
+        batch.validate_declared_roots()?;
+        if self.commitment_version != PROTECTED_PIPELINE_VERSION
+            || self.chain_id != batch.chain_id
+            || self.network_id != batch.network_id
+            || self.protocol_version != batch.protocol_version
+            || self.epoch != batch.epoch
+            || self.target_height != batch.target_height
+            || self.cluster_id != batch.cluster_id
+            || self.target_context_root != batch.target_context_root
+            || self.validator_set_commitment != batch.validator_set_commitment
+            || self.parameter_root != batch.parameter_root
+            || self.cut_root != batch.cut_root
+            || self.eligible_set_root != batch.eligible_set_root
+            || self.order_seed != batch.order_seed
+            || self.order_root != batch.order_root
+            || self.protected_batch_root != batch.protected_batch_root
+            || self.protected_count != batch.protected_count
+            || self.protected_gas != batch.protected_gas
+            || self.protected_bytes != batch.protected_bytes
+        {
+            return Err("next protected-batch commitment mismatch".to_string());
+        }
+        self.root()?
+            .validate("next protected-batch commitment root")
+    }
+}
+
+/// Exact PoSy proposal-validation authority that opens reveal for one target.
+///
+/// This is a typed binding to the parent proposal and its authenticated n-1
+/// ECHO certificate. It is not an ETDAG vote or a READY message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProtectedRevealAuthorization {
+    pub authorization_version: u32,
+    pub chain_id: ChainId,
+    pub network_id: NetworkId,
+    pub protocol_version: String,
+    pub epoch: Epoch,
+    pub target_height: Height,
+    pub cluster_id: ClusterId,
+    pub target_context_root: Hash,
+    pub validator_set_commitment: Hash,
+    pub parameter_root: ConsensusParameterRoot,
+    pub parent_proposal_id: BlockId,
+    pub parent_block_id: BlockId,
+    pub next_commitment_root: EtdagDigest,
+    pub protected_batch_root: EtdagDigest,
+    pub proposal_validation_certificate_root: Hash,
+    pub certificate_evidence_root: EtdagDigest,
+}
+
+impl ProtectedRevealAuthorization {
+    pub fn root(&self) -> Result<EtdagDigest, String> {
+        EtdagDigest::from_canonical(DOMAIN_PROTECTED_REVEAL_AUTHORIZATION, self)
+    }
+
+    pub fn validate_against(
+        &self,
+        context: &TargetAdmissionContext,
+        commitment: &NextProtectedBatchCommitment,
+        batch: &DeterministicProtectedBatch,
+    ) -> Result<(), String> {
+        commitment.validate_against(context, batch)?;
+        self.validate_against_commitment(context, commitment)?;
+        if self.protected_batch_root != batch.protected_batch_root {
+            return Err("protected reveal authorization batch mismatch".to_string());
+        }
+        Ok(())
+    }
+
+    /// Validate the pre-reveal authorization against the parent-committed
+    /// target commitment. The concrete protected batch is deliberately not
+    /// required until reveal completes and execution input is assembled.
+    pub fn validate_against_commitment(
+        &self,
+        context: &TargetAdmissionContext,
+        commitment: &NextProtectedBatchCommitment,
+    ) -> Result<(), String> {
+        commitment.validate_against_context(context)?;
+        if self.authorization_version != PROTECTED_PIPELINE_VERSION
+            || self.chain_id != context.chain_id
+            || self.network_id != context.network_id
+            || self.protocol_version != context.protocol_version
+            || self.epoch != context.epoch
+            || self.target_height != context.target_height
+            || self.cluster_id != context.assigned_cluster_id
+            || self.target_context_root != context.root()?
+            || self.validator_set_commitment != context.active_validator_set_root
+            || self.parameter_root != context.consensus_parameter_root
+            || self.parent_proposal_id.0.trim().is_empty()
+            || self.parent_block_id.0.trim().is_empty()
+            || self.next_commitment_root != commitment.root()?
+            || self.protected_batch_root != commitment.protected_batch_root
+            || self.proposal_validation_certificate_root.is_zero()
+            || self.certificate_evidence_root.is_zero()
+        {
+            return Err("protected reveal authorization mismatch".to_string());
+        }
+        self.root()?.validate("protected reveal authorization root")
+    }
+}
+
+/// Concrete, authenticated execution material for the R11 protected pipeline.
+/// No root-only or caller-selected plaintext path is accepted by verification.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeterministicProtectedExecutionInput {
+    pub material_version: u32,
+    pub source: ProtectedBatchSource,
+    pub target_context: ProtectedExecutionTargetContext,
+    pub cut_proof: Option<ProtectedCutProof>,
+    pub protected_batch: DeterministicProtectedBatch,
+    pub next_commitment: NextProtectedBatchCommitment,
+    pub reveal_authorization: Option<ProtectedRevealAuthorization>,
+    pub envelopes: BTreeMap<EtdagDigest, EncryptedTransactionEnvelope>,
+    pub reveal_shares: BTreeMap<EtdagDigest, Vec<ProtectedRevealShareMessage>>,
+    pub ordered_transactions: Vec<InnerTransactionV2>,
+    pub reveal_transcript_root: EtdagDigest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ProtectedExecutionTargetContext {
+    GenesisBootstrap {
+        height_context: HeightConsensusContext,
+    },
+    NormalEtdag {
+        admission_context: TargetAdmissionContext,
+    },
+}
+
+impl DeterministicProtectedExecutionInput {
+    pub fn digest(&self) -> Result<EtdagDigest, String> {
+        EtdagDigest::from_canonical(DOMAIN_PROTECTED_EXECUTION_INPUT, self)
+    }
+
+    pub fn verify_and_extract_transactions(
+        &self,
+        verifier: &AegisPqvmVerifier,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        parameters: &EtdagParameters,
+    ) -> Result<Vec<Transaction>, String> {
+        if self.material_version != PROTECTED_PIPELINE_VERSION {
+            return Err("unsupported protected execution material version".to_string());
+        }
+        match self.source {
+            ProtectedBatchSource::GenesisBootstrap => {
+                self.verify_bootstrap_empty(validator_set, cluster_map)
+            }
+            ProtectedBatchSource::NormalEtdag | ProtectedBatchSource::NormalEtdagSteadyState => {
+                self.verify_normal(verifier, validator_set, cluster_map, parameters)
+            }
+        }
+    }
+
+    fn verify_bootstrap_empty(
+        &self,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+    ) -> Result<Vec<Transaction>, String> {
+        let height_context = match &self.target_context {
+            ProtectedExecutionTargetContext::GenesisBootstrap { height_context } => height_context,
+            ProtectedExecutionTargetContext::NormalEtdag { .. } => {
+                return Err("Genesis protected execution has normal admission context".to_string())
+            }
+        };
+        height_context.validate_validator_and_cluster_bindings(validator_set, cluster_map)?;
+        self.next_commitment
+            .validate_against_batch(&self.protected_batch)?;
+        if !matches!(height_context.height.0, 1 | 2)
+            || self.protected_batch.chain_id != height_context.chain_id
+            || self.protected_batch.network_id != height_context.network_id
+            || self.protected_batch.protocol_version != height_context.protocol_version
+            || self.protected_batch.epoch != height_context.epoch
+            || self.protected_batch.target_height != height_context.height
+            || self.protected_batch.cluster_id != height_context.assigned_cluster_id
+            || self.protected_batch.target_context_root != height_context.root()?
+            || self.protected_batch.validator_set_commitment
+                != height_context.active_validator_set_root
+            || self.protected_batch.parameter_root != height_context.consensus_parameter_root
+            || self.cut_proof.is_some()
+            || self.reveal_authorization.is_some()
+            || !self.envelopes.is_empty()
+            || !self.reveal_shares.is_empty()
+            || !self.ordered_transactions.is_empty()
+            || self.protected_batch.protected_count != 0
+            || self.protected_batch.protected_gas != 0
+            || self.protected_batch.protected_bytes != 0
+            || !self.protected_batch.ordered_transaction_ids.is_empty()
+        {
+            return Err(
+                "Genesis protected execution input is not the canonical empty H1/H2 batch"
+                    .to_string(),
+            );
+        }
+        let empty = BTreeMap::<EtdagDigest, Vec<ProtectedRevealShareMessage>>::new();
+        if self.reveal_transcript_root != protected_reveal_transcript_root(&empty)? {
+            return Err("Genesis protected reveal transcript root mismatch".to_string());
+        }
+        Ok(Vec::new())
+    }
+
+    fn verify_normal(
+        &self,
+        verifier: &AegisPqvmVerifier,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        parameters: &EtdagParameters,
+    ) -> Result<Vec<Transaction>, String> {
+        let target_context = match &self.target_context {
+            ProtectedExecutionTargetContext::NormalEtdag { admission_context } => admission_context,
+            ProtectedExecutionTargetContext::GenesisBootstrap { .. } => {
+                return Err("normal protected execution has Genesis height context".to_string())
+            }
+        };
+        target_context.validate_validator_and_cluster_bindings(validator_set, cluster_map)?;
+        self.next_commitment
+            .validate_against(target_context, &self.protected_batch)?;
+        match (self.source, target_context.target_height.0) {
+            (ProtectedBatchSource::NormalEtdag, 3) => {}
+            (ProtectedBatchSource::NormalEtdagSteadyState, height) if height >= 4 => {}
+            _ => return Err("protected execution source/height boundary mismatch".to_string()),
+        }
+        parameters.validate()?;
+        let cut = self
+            .cut_proof
+            .as_ref()
+            .ok_or_else(|| "normal protected execution is missing cut proof".to_string())?;
+        cut.validate_declared_roots(target_context)?;
+        if self.protected_batch.cut_root != cut.cut_root
+            || self.protected_batch.eligible_set_root != cut.eligible_set_root
+        {
+            return Err("protected execution batch does not match semantic cut".to_string());
+        }
+        let expected_order = canonical_content_blind_order(
+            &cut.eligible_envelopes,
+            &self.protected_batch.order_seed,
+            parameters.max_protected_gas,
+            parameters.max_protected_bytes,
+        )?;
+        let expected_ids = expected_order
+            .iter()
+            .map(|reference| reference.tx_commitment.clone())
+            .collect::<Vec<_>>();
+        let expected_gas = expected_order.iter().try_fold(0u64, |total, reference| {
+            total
+                .checked_add(reference.gas_class_units)
+                .ok_or_else(|| "protected gas total overflow".to_string())
+        })?;
+        let expected_bytes = expected_order.iter().try_fold(0u64, |total, reference| {
+            total
+                .checked_add(reference.ciphertext_bytes)
+                .ok_or_else(|| "protected byte total overflow".to_string())
+        })?;
+        if self.protected_batch.ordered_transaction_ids != expected_ids
+            || self.protected_batch.protected_gas != expected_gas
+            || self.protected_batch.protected_bytes != expected_bytes
+        {
+            return Err("protected execution order/capacity derivation mismatch".to_string());
+        }
+
+        let authorization = self.reveal_authorization.as_ref().ok_or_else(|| {
+            "normal protected execution is missing proposal VC reveal authorization".to_string()
+        })?;
+        authorization.validate_against(
+            target_context,
+            &self.next_commitment,
+            &self.protected_batch,
+        )?;
+        let expected_set = expected_ids.iter().cloned().collect::<BTreeSet<_>>();
+        if self.envelopes.keys().cloned().collect::<BTreeSet<_>>() != expected_set
+            || self.reveal_shares.keys().cloned().collect::<BTreeSet<_>>() != expected_set
+            || self.ordered_transactions.len() != expected_ids.len()
+        {
+            return Err("protected execution concrete material set mismatch".to_string());
+        }
+        let references = cut
+            .eligible_envelopes
+            .iter()
+            .map(|reference| (reference.tx_commitment.clone(), reference))
+            .collect::<BTreeMap<_, _>>();
+        let threshold =
+            decryption_threshold(target_context.assigned_cluster_validator_count as usize)?;
+        let mut transactions = Vec::with_capacity(expected_ids.len());
+        for (index, commitment) in expected_ids.iter().enumerate() {
+            let envelope = self
+                .envelopes
+                .get(commitment)
+                .ok_or_else(|| "protected execution is missing ordered envelope".to_string())?;
+            if &envelope.tx_commitment != commitment {
+                return Err("protected execution envelope map key mismatch".to_string());
+            }
+            envelope.validate_structure(target_context, parameters)?;
+            envelope.verify_outer_signature(verifier)?;
+            let reference = references.get(commitment).ok_or_else(|| {
+                "protected execution envelope is outside semantic cut".to_string()
+            })?;
+            if envelope.sender_id != reference.sender_id
+                || envelope.nonce_slot != reference.nonce_slot
+                || envelope.ciphertext.len() as u64 != reference.ciphertext_bytes
+                || envelope.gas_class as u64 != reference.gas_class_units
+                || envelope.fee_class != reference.fee_class
+            {
+                return Err("protected execution envelope metadata mismatch".to_string());
+            }
+            let messages = self
+                .reveal_shares
+                .get(commitment)
+                .ok_or_else(|| "protected execution is missing reveal shares".to_string())?;
+            let mut validators = BTreeSet::new();
+            let mut share_indices = BTreeSet::new();
+            for message in messages {
+                if !validators.insert(message.validator_id.clone())
+                    || !share_indices.insert(message.share.index)
+                {
+                    return Err(
+                        "protected execution contains duplicate reveal authority".to_string()
+                    );
+                }
+                verify_protected_reveal_share(
+                    message,
+                    authorization,
+                    &self.next_commitment,
+                    &self.protected_batch,
+                    verifier,
+                    target_context,
+                    validator_set,
+                )?;
+                if &message.tx_commitment != commitment {
+                    return Err("protected reveal share transaction binding mismatch".to_string());
+                }
+            }
+            if messages.len() < threshold {
+                return Err("protected execution has insufficient reveal shares".to_string());
+            }
+            let shares = messages
+                .iter()
+                .map(|message| message.share.clone())
+                .collect::<Vec<_>>();
+            let decrypted = decrypt_inner_transaction(envelope, &shares, threshold)?;
+            if self.ordered_transactions.get(index) != Some(&decrypted) {
+                return Err("protected execution plaintext does not match ciphertext".to_string());
+            }
+            verifier
+                .verify_transaction_signature_checked(&decrypted.transaction)
+                .map_err(|error| error.to_string())?;
+            transactions.push(decrypted.transaction);
+        }
+        if self.reveal_transcript_root != protected_reveal_transcript_root(&self.reveal_shares)? {
+            return Err("protected reveal transcript root mismatch".to_string());
+        }
+        self.digest()?
+            .validate("protected execution input digest")?;
+        Ok(transactions)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ProtectedPipelinePhase {
+    Collecting,
+    CutoffReady,
+    CutReady,
+    OrderReady,
+    CommittedInParent,
+    RevealAuthorized,
+    Revealing,
+    ReadyForExecution,
+    Consumed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ProtectedBatchSource {
+    GenesisBootstrap,
+    NormalEtdag,
+    NormalEtdagSteadyState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProtectedPipelineDiagnostic {
+    pub target_height: Height,
+    pub phase: ProtectedPipelinePhase,
+    pub source: ProtectedBatchSource,
+    pub availability_count: u64,
+    pub cutoff_marker_count: u64,
+    pub cut_ready: bool,
+    pub order_ready: bool,
+    pub parent_commitment: bool,
+    pub reveal_authorized: bool,
+    pub reveal_share_count: u64,
+    pub execution_ready: bool,
+    pub proposal_seen: bool,
+    pub vc_seen: bool,
+    pub qc_seen: bool,
+    pub finalized: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TransactionVertex {
     pub vertex_version: u32,
@@ -2669,7 +3680,7 @@ impl TransactionVertex {
     }
 
     pub fn digest(&self) -> Result<EtdagDigest, String> {
-        EtdagDigest::from_canonical("PoSy/ETDAG/TransactionVertex/v2", &self.unsigned())
+        EtdagDigest::from_canonical("PoSy/ETDAG/TransactionVertex/v3", &self.unsigned())
     }
 
     pub fn validate(
@@ -2681,7 +3692,7 @@ impl TransactionVertex {
         context.validate()?;
         if self.vertex_version != 2
             || self.profile_id != ETDAG_PROFILE_ID
-            || self.protocol_version != POSY_PROTOCOL_VERSION
+            || self.protocol_version != POSY_SIMPLIFIED_PROTOCOL_VERSION
             || self.chain_id != context.chain_id
             || self.network_id != context.network_id
             || self.epoch != context.epoch
@@ -2728,7 +3739,7 @@ impl TransactionVertex {
             }
         }
         let computed_envelope_root =
-            EtdagDigest::from_canonical("PoSy/ETDAG/VertexEnvelopeRoot/v2", &envelopes)?;
+            EtdagDigest::from_canonical("PoSy/ETDAG/VertexEnvelopeRoot/v3", &envelopes)?;
         let gas = envelopes.iter().try_fold(0u64, |sum, envelope| {
             sum.checked_add(envelope.gas_class_units)
                 .ok_or_else(|| "ETDAG vertex gas overflow".to_string())
@@ -2787,7 +3798,7 @@ pub fn sign_vertex(
     parents.dedup();
     envelopes.sort_by(|left, right| left.tx_commitment.cmp(&right.tx_commitment));
     let envelope_root =
-        EtdagDigest::from_canonical("PoSy/ETDAG/VertexEnvelopeRoot/v2", &envelopes)?;
+        EtdagDigest::from_canonical("PoSy/ETDAG/VertexEnvelopeRoot/v3", &envelopes)?;
     let declared_gas_units = envelopes.iter().try_fold(0u64, |sum, envelope| {
         sum.checked_add(envelope.gas_class_units)
             .ok_or_else(|| "ETDAG vertex gas overflow".to_string())
@@ -2875,7 +3886,7 @@ pub struct DagCutCandidate {
 
 impl DagCutCandidate {
     pub fn digest(&self) -> Result<EtdagDigest, String> {
-        EtdagDigest::from_canonical("PoSy/ETDAG/DagCutCandidate/v2", self)
+        EtdagDigest::from_canonical("PoSy/ETDAG/DagCutCandidate/v3", self)
     }
 
     pub fn validate(&self, context: &TargetAdmissionContext) -> Result<(), String> {
@@ -2919,11 +3930,11 @@ impl DagCutCandidate {
             prior = Some(&envelope.tx_commitment);
         }
         let causal_closure_root = EtdagDigest::from_canonical(
-            "PoSy/ETDAG/CausalClosureRoot/v2",
+            "PoSy/ETDAG/CausalClosureRoot/v3",
             &self.causal_closure_digests,
         )?;
         let eligible_commitment_root = EtdagDigest::from_canonical(
-            "PoSy/ETDAG/EligibleCommitmentRoot/v2",
+            "PoSy/ETDAG/EligibleCommitmentRoot/v3",
             &self.eligible_envelopes,
         )?;
         if self.causal_closure_root != causal_closure_root
@@ -2943,7 +3954,7 @@ pub struct DagCutCertificate {
 
 impl DagCutCertificate {
     pub fn digest(&self) -> Result<EtdagDigest, String> {
-        EtdagDigest::from_canonical("PoSy/ETDAG/DCC/v2", self)
+        EtdagDigest::from_canonical("PoSy/ETDAG/DCC/v3", self)
     }
 
     pub fn verify(
@@ -3068,9 +4079,9 @@ pub fn build_dag_cut_candidate(
     }
     let eligible_envelopes = eligible.into_values().collect::<Vec<_>>();
     let causal_closure_root =
-        EtdagDigest::from_canonical("PoSy/ETDAG/CausalClosureRoot/v2", &closure_digests)?;
+        EtdagDigest::from_canonical("PoSy/ETDAG/CausalClosureRoot/v3", &closure_digests)?;
     let eligible_commitment_root =
-        EtdagDigest::from_canonical("PoSy/ETDAG/EligibleCommitmentRoot/v2", &eligible_envelopes)?;
+        EtdagDigest::from_canonical("PoSy/ETDAG/EligibleCommitmentRoot/v3", &eligible_envelopes)?;
     Ok(DagCutCandidate {
         target_height: context.target_height,
         target_context_root: context.root()?,
@@ -3166,7 +4177,7 @@ pub fn canonical_finality_context_digest<T: CanonicalSerialize>(
     canonical_finality_context_without_signatures: &T,
 ) -> Result<EtdagDigest, String> {
     EtdagDigest::from_canonical(
-        "PoSy/ETDAG/CanonicalFinalityContext/v2",
+        "PoSy/ETDAG/CanonicalFinalityContext/v3",
         canonical_finality_context_without_signatures,
     )
 }
@@ -3361,7 +4372,7 @@ pub struct BatchCandidate {
 
 impl BatchCandidate {
     pub fn digest(&self) -> Result<EtdagDigest, String> {
-        EtdagDigest::from_canonical("PoSy/ETDAG/BatchCandidate/v2", self)
+        EtdagDigest::from_canonical("PoSy/ETDAG/BatchCandidate/v3", self)
     }
 
     pub fn validate(&self, dcc: &DagCutCandidate) -> Result<(), String> {
@@ -3378,7 +4389,7 @@ impl BatchCandidate {
             return Err("ETDAG batch candidate contains duplicate commitments".to_string());
         }
         let root = EtdagDigest::from_canonical(
-            "PoSy/ETDAG/OrderedCommitmentRoot/v2",
+            "PoSy/ETDAG/OrderedCommitmentRoot/v3",
             &self.ordered_commitments,
         )?;
         if root != self.ordered_commitment_root {
@@ -3458,15 +4469,15 @@ pub fn build_batch_candidate(
         canonical_finality_context_digest,
         order_seed,
         ordered_commitment_root: EtdagDigest::from_canonical(
-            "PoSy/ETDAG/OrderedCommitmentRoot/v2",
+            "PoSy/ETDAG/OrderedCommitmentRoot/v3",
             &ordered_commitments,
         )?,
         deferred_commitment_root: EtdagDigest::from_canonical(
-            "PoSy/ETDAG/DeferredCommitmentRoot/v2",
+            "PoSy/ETDAG/DeferredCommitmentRoot/v3",
             &deferred,
         )?,
         dependency_graph_root: EtdagDigest::from_canonical(
-            "PoSy/ETDAG/DependencyGraphRoot/v2",
+            "PoSy/ETDAG/DependencyGraphRoot/v3",
             &dcc.eligible_envelopes,
         )?,
         ordered_commitments,
@@ -3491,7 +4502,7 @@ pub struct BatchValidationCertificate {
 
 impl BatchValidationCertificate {
     pub fn digest(&self) -> Result<EtdagDigest, String> {
-        EtdagDigest::from_canonical("PoSy/ETDAG/BVC/v2", self)
+        EtdagDigest::from_canonical("PoSy/ETDAG/BVC/v3", self)
     }
 
     pub fn verify(
@@ -3519,7 +4530,7 @@ pub struct BatchOrderCertificate {
 
 impl BatchOrderCertificate {
     pub fn digest(&self) -> Result<EtdagDigest, String> {
-        EtdagDigest::from_canonical("PoSy/ETDAG/BOC/v2", self)
+        EtdagDigest::from_canonical("PoSy/ETDAG/BOC/v3", self)
     }
 
     pub fn verify(
@@ -3621,7 +4632,7 @@ pub struct ExecutionManifest {
 
 impl ExecutionManifest {
     pub fn root(&self) -> Result<EtdagDigest, String> {
-        EtdagDigest::from_canonical("PoSy/ETDAG/ExecutionManifest/v2", self)
+        EtdagDigest::from_canonical("PoSy/ETDAG/ExecutionManifest/v3", self)
     }
 
     pub fn validate_exact(&self, batch_candidate: &BatchCandidate) -> Result<(), String> {
@@ -3649,6 +4660,228 @@ impl ExecutionManifest {
         }
         Ok(())
     }
+}
+
+/// Threshold reveal share bound to the exact R11 parent commitment and PoSy
+/// proposal-validation certificate, rather than the retired BOC reveal gate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProtectedRevealShareMessage {
+    pub share_version: u32,
+    pub chain_id: ChainId,
+    pub network_id: NetworkId,
+    pub protocol_version: String,
+    pub profile_id: String,
+    pub epoch: Epoch,
+    pub target_height: Height,
+    pub target_context_root: Hash,
+    pub cluster_id: ClusterId,
+    pub authorization_root: EtdagDigest,
+    pub next_commitment_root: EtdagDigest,
+    pub protected_batch_root: EtdagDigest,
+    pub tx_commitment: EtdagDigest,
+    pub validator_id: ValidatorId,
+    pub share: ShamirShare,
+    pub share_commitment: EtdagDigest,
+    pub parameter_root: ConsensusParameterRoot,
+    pub key_id: AegisPqKeyId,
+    pub signature: AegisPqSignature,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct UnsignedProtectedRevealShare {
+    share_version: u32,
+    chain_id: ChainId,
+    network_id: NetworkId,
+    protocol_version: String,
+    profile_id: String,
+    epoch: Epoch,
+    target_height: Height,
+    target_context_root: Hash,
+    cluster_id: ClusterId,
+    authorization_root: EtdagDigest,
+    next_commitment_root: EtdagDigest,
+    protected_batch_root: EtdagDigest,
+    tx_commitment: EtdagDigest,
+    validator_id: ValidatorId,
+    share: ShamirShare,
+    share_commitment: EtdagDigest,
+    parameter_root: ConsensusParameterRoot,
+    key_id: AegisPqKeyId,
+}
+
+impl ProtectedRevealShareMessage {
+    fn unsigned(&self) -> UnsignedProtectedRevealShare {
+        UnsignedProtectedRevealShare {
+            share_version: self.share_version,
+            chain_id: self.chain_id,
+            network_id: self.network_id.clone(),
+            protocol_version: self.protocol_version.clone(),
+            profile_id: self.profile_id.clone(),
+            epoch: self.epoch,
+            target_height: self.target_height,
+            target_context_root: self.target_context_root,
+            cluster_id: self.cluster_id,
+            authorization_root: self.authorization_root.clone(),
+            next_commitment_root: self.next_commitment_root.clone(),
+            protected_batch_root: self.protected_batch_root.clone(),
+            tx_commitment: self.tx_commitment.clone(),
+            validator_id: self.validator_id.clone(),
+            share: self.share.clone(),
+            share_commitment: self.share_commitment.clone(),
+            parameter_root: self.parameter_root,
+            key_id: self.key_id.clone(),
+        }
+    }
+}
+
+pub fn release_protected_reveal_share(
+    signer: &mut AegisPqvmSigner,
+    journal: &EtdagSafetyJournal,
+    authorization: &ProtectedRevealAuthorization,
+    commitment: &NextProtectedBatchCommitment,
+    batch: &DeterministicProtectedBatch,
+    context: &TargetAdmissionContext,
+    validator: &ValidatorRecord,
+    tx_commitment: EtdagDigest,
+    share: ShamirShare,
+) -> Result<ProtectedRevealShareMessage, String> {
+    authorization.validate_against(context, commitment, batch)?;
+    share.validate()?;
+    if !batch.ordered_transaction_ids.contains(&tx_commitment) {
+        return Err("protected reveal share is outside committed batch".to_string());
+    }
+    let share_commitment = share_commitment(
+        &validator.validator_id,
+        &share,
+        context.root()?,
+        context.target_height,
+    )?;
+    let share_digest =
+        EtdagDigest::from_canonical("PoSy/ProtectedPipeline/ReleasedShare/v1", &share)?;
+    journal.authorize_protected_decrypt_release(
+        authorization,
+        commitment,
+        batch,
+        context,
+        &validator.validator_id,
+        tx_commitment.clone(),
+        share_digest,
+    )?;
+    let mut message = ProtectedRevealShareMessage {
+        share_version: PROTECTED_PIPELINE_VERSION,
+        chain_id: context.chain_id,
+        network_id: context.network_id.clone(),
+        protocol_version: context.protocol_version.clone(),
+        profile_id: ETDAG_PROFILE_ID.to_string(),
+        epoch: context.epoch,
+        target_height: context.target_height,
+        target_context_root: context.root()?,
+        cluster_id: context.assigned_cluster_id,
+        authorization_root: authorization.root()?,
+        next_commitment_root: commitment.root()?,
+        protected_batch_root: batch.protected_batch_root.clone(),
+        tx_commitment,
+        validator_id: validator.validator_id.clone(),
+        share,
+        share_commitment,
+        parameter_root: context.consensus_parameter_root,
+        key_id: validator.consensus_public_key.key_id.clone(),
+        signature: AegisPqSignature {
+            algorithm: String::new(),
+            signature_bytes: Vec::new(),
+        },
+    };
+    message.signature = signer
+        .sign_domain(
+            DOMAIN_PROTECTED_REVEAL_SHARE,
+            &message.unsigned().canonical_bytes()?,
+            &message.key_id,
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(message)
+}
+
+pub fn verify_protected_reveal_share(
+    message: &ProtectedRevealShareMessage,
+    authorization: &ProtectedRevealAuthorization,
+    commitment: &NextProtectedBatchCommitment,
+    batch: &DeterministicProtectedBatch,
+    verifier: &AegisPqvmVerifier,
+    context: &TargetAdmissionContext,
+    validator_set: &ValidatorSet,
+) -> Result<(), String> {
+    authorization.validate_against(context, commitment, batch)?;
+    message.share.validate()?;
+    if message.share_version != PROTECTED_PIPELINE_VERSION
+        || message.chain_id != context.chain_id
+        || message.network_id != context.network_id
+        || message.protocol_version != context.protocol_version
+        || message.profile_id != ETDAG_PROFILE_ID
+        || message.epoch != context.epoch
+        || message.target_height != context.target_height
+        || message.target_context_root != context.root()?
+        || message.cluster_id != context.assigned_cluster_id
+        || message.authorization_root != authorization.root()?
+        || message.next_commitment_root != commitment.root()?
+        || message.protected_batch_root != batch.protected_batch_root
+        || message.parameter_root != context.consensus_parameter_root
+        || !batch
+            .ordered_transaction_ids
+            .contains(&message.tx_commitment)
+    {
+        return Err("protected reveal share exact binding mismatch".to_string());
+    }
+    let member = validator_set
+        .active_for_epoch(context.epoch)
+        .active_for_cluster(context.assigned_cluster_id)
+        .into_iter()
+        .find(|member| member.validator_id == message.validator_id)
+        .ok_or_else(|| "protected reveal share signer is not in cluster".to_string())?;
+    if member.consensus_public_key.key_id != message.key_id {
+        return Err("protected reveal share key mismatch".to_string());
+    }
+    let expected = share_commitment(
+        &message.validator_id,
+        &message.share,
+        context.root()?,
+        context.target_height,
+    )?;
+    if expected != message.share_commitment {
+        return Err("protected reveal share commitment mismatch".to_string());
+    }
+    verifier
+        .verify_domain_signature(
+            DOMAIN_PROTECTED_REVEAL_SHARE,
+            &message.unsigned().canonical_bytes()?,
+            &member.validator_uma_id.0,
+            &message.key_id,
+            context.epoch,
+            AegisPqKeyRole::ConsensusVote,
+            &message.signature,
+        )
+        .map_err(|error| error.to_string())
+}
+
+pub fn protected_reveal_transcript_root(
+    shares_by_commitment: &BTreeMap<EtdagDigest, Vec<ProtectedRevealShareMessage>>,
+) -> Result<EtdagDigest, String> {
+    let mut canonical = Vec::new();
+    for (commitment, messages) in shares_by_commitment {
+        let mut messages = messages.clone();
+        messages.sort_by(|left, right| {
+            left.validator_id
+                .cmp(&right.validator_id)
+                .then_with(|| left.share.index.cmp(&right.share.index))
+        });
+        if messages
+            .iter()
+            .any(|message| &message.tx_commitment != commitment)
+        {
+            return Err("protected reveal transcript map key mismatch".to_string());
+        }
+        canonical.push((commitment.clone(), messages));
+    }
+    EtdagDigest::from_canonical(DOMAIN_PROTECTED_REVEAL_TRANSCRIPT, &canonical)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3734,7 +4967,7 @@ pub fn release_decrypt_share(
         context.root()?,
         context.target_height,
     )?;
-    let share_digest = EtdagDigest::from_canonical("PoSy/ETDAG/ReleasedShare/v2", &share)?;
+    let share_digest = EtdagDigest::from_canonical("PoSy/ETDAG/ReleasedShare/v3", &share)?;
     journal.authorize_decrypt_release(
         gate,
         &validator.validator_id,
@@ -3953,7 +5186,7 @@ pub fn decrypt_share_transcript_root(
         }
         canonical.push((commitment.clone(), messages));
     }
-    EtdagDigest::from_canonical("PoSy/ETDAG/PublicDecryptShareTranscript/v2", &canonical)
+    EtdagDigest::from_canonical("PoSy/ETDAG/PublicDecryptShareTranscript/v3", &canonical)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3968,6 +5201,12 @@ pub struct ProtectedBlockInput {
 }
 
 impl ProtectedBlockInput {
+    /// Stable digest used by schedule-neutral protected-material stores.
+    /// Verification remains mandatory before this digest gains authority.
+    pub fn digest(&self) -> Result<EtdagDigest, String> {
+        protected_input_digest(self)
+    }
+
     pub fn verify_and_extract_transactions(
         &self,
         verifier: &AegisPqvmVerifier,
@@ -4129,7 +5368,7 @@ impl ProtectedBlockInput {
             encrypted_set_root: self.dcc.candidate.eligible_commitment_root.0.clone(),
             protected_order_root: batch.ordered_commitment_root.0.clone(),
             public_reveal_transcript_root: EtdagDigest::from_canonical(
-                "PoSy/ETDAG/PublicOrderedReveal/v2",
+                "PoSy/ETDAG/PublicOrderedReveal/v3",
                 &self.reveal,
             )?
             .0,
@@ -4249,6 +5488,49 @@ impl EtdagProtectedInputStore {
             cluster_map,
             parameters,
         )?;
+        self.install_verified_entry(
+            target_admission_package_digest,
+            protected_input,
+            height_context.height,
+            expected_finality_context_digest,
+        )
+    }
+
+    fn install_verified_schedule_neutral(
+        &self,
+        target_admission_package_digest: EtdagDigest,
+        protected_input: &ProtectedBlockInput,
+        target_context: &TargetAdmissionContext,
+        expected_finality_context_digest: &EtdagDigest,
+        verifier: &AegisPqvmVerifier,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        parameters: &EtdagParameters,
+    ) -> Result<EtdagDigest, String> {
+        verify_certified_protected_input_schedule_neutral(
+            protected_input,
+            target_context,
+            expected_finality_context_digest,
+            verifier,
+            validator_set,
+            cluster_map,
+            parameters,
+        )?;
+        self.install_verified_entry(
+            target_admission_package_digest,
+            protected_input,
+            target_context.target_height,
+            expected_finality_context_digest,
+        )
+    }
+
+    fn install_verified_entry(
+        &self,
+        target_admission_package_digest: EtdagDigest,
+        protected_input: &ProtectedBlockInput,
+        height: Height,
+        expected_finality_context_digest: &EtdagDigest,
+    ) -> Result<EtdagDigest, String> {
         target_admission_package_digest.validate("target admission package digest")?;
         if target_admission_package_digest.is_zero() {
             return Err("ETDAG_PROTECTED_INPUT_MISSING_ADMISSION_PACKAGE".to_string());
@@ -4258,7 +5540,6 @@ impl EtdagProtectedInputStore {
         if serialized_bytes > MAX_ETDAG_PROTECTED_INPUT_STORE_SERIALIZED_BYTES as u64 {
             return Err("ETDAG_PROTECTED_INPUT_STORE_ENTRY_TOO_LARGE".to_string());
         }
-        let height = height_context.height;
         let entry = EtdagProtectedInputStoreEntry {
             target_admission_package_digest,
             canonical_finality_context_digest: expected_finality_context_digest.clone(),
@@ -4327,6 +5608,46 @@ impl EtdagProtectedInputStore {
             &entry.protected_input,
             target_context,
             height_context,
+            expected_finality_context_digest,
+            verifier,
+            validator_set,
+            cluster_map,
+            parameters,
+        )?;
+        Ok(entry.protected_input.clone())
+    }
+
+    fn load_verified_schedule_neutral(
+        &self,
+        target_admission_package_digest: &EtdagDigest,
+        target_context: &TargetAdmissionContext,
+        expected_finality_context_digest: &EtdagDigest,
+        verifier: &AegisPqvmVerifier,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        parameters: &EtdagParameters,
+    ) -> Result<ProtectedBlockInput, String> {
+        let _guard = ETDAG_PROTECTED_INPUT_STORE_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| "ETDAG protected-input store lock poisoned".to_string())?;
+        let store = self.load_unlocked()?;
+        let entry = store
+            .entries
+            .get(&target_context.target_height)
+            .ok_or_else(|| {
+                "ETDAG_PROTECTED_INPUT_NOT_READY: no verified protected input for target height"
+                    .to_string()
+            })?;
+        if &entry.target_admission_package_digest != target_admission_package_digest
+            || &entry.canonical_finality_context_digest != expected_finality_context_digest
+        {
+            return Err("ETDAG_PROTECTED_INPUT_CONTEXT_MISMATCH".to_string());
+        }
+        verify_protected_input_store_entry(target_context.target_height, entry)?;
+        verify_certified_protected_input_schedule_neutral(
+            &entry.protected_input,
+            target_context,
             expected_finality_context_digest,
             verifier,
             validator_set,
@@ -4440,7 +5761,7 @@ impl EtdagProtectedInputStore {
 
 fn protected_input_digest(protected_input: &ProtectedBlockInput) -> Result<EtdagDigest, String> {
     EtdagDigest::from_canonical(
-        "PoSy/ETDAG/CertifiedProtectedBlockInput/v2",
+        "PoSy/ETDAG/CertifiedProtectedBlockInput/v3",
         protected_input,
     )
 }
@@ -4508,6 +5829,47 @@ fn verify_certified_protected_input(
     expected_finality_context_digest.validate("expected canonical finality context digest")?;
     if expected_finality_context_digest.is_zero() {
         return Err("ETDAG_PROTECTED_INPUT_MISSING_FINALITY_CONTEXT".to_string());
+    }
+    if protected_input
+        .boc
+        .bvc
+        .batch_candidate
+        .canonical_finality_context_digest
+        != *expected_finality_context_digest
+    {
+        return Err("ETDAG_PROTECTED_INPUT_FINALITY_CONTEXT_MISMATCH".to_string());
+    }
+    protected_input
+        .verify_and_extract_transactions(
+            verifier,
+            target_context,
+            validator_set,
+            cluster_map,
+            parameters,
+        )
+        .map(|_| ())
+}
+
+fn verify_certified_protected_input_schedule_neutral(
+    protected_input: &ProtectedBlockInput,
+    target_context: &TargetAdmissionContext,
+    expected_finality_context_digest: &EtdagDigest,
+    verifier: &AegisPqvmVerifier,
+    validator_set: &ValidatorSet,
+    cluster_map: &ClusterMap,
+    parameters: &EtdagParameters,
+) -> Result<(), String> {
+    target_context.validate_validator_and_cluster_bindings(validator_set, cluster_map)?;
+    expected_finality_context_digest.validate("expected canonical finality context digest")?;
+    if expected_finality_context_digest.is_zero() {
+        return Err("ETDAG_PROTECTED_INPUT_MISSING_FINALITY_CONTEXT".to_string());
+    }
+    let target_height = target_context.target_height;
+    if protected_input.dcc.candidate.target_height != target_height
+        || protected_input.boc.bvc.batch_candidate.target_height != target_height
+        || protected_input.reveal.target_height != target_height
+    {
+        return Err("ETDAG_PROTECTED_INPUT_TARGET_HEIGHT_MISMATCH".to_string());
     }
     if protected_input
         .boc
@@ -4664,10 +6026,116 @@ impl EtdagCertifiedInputIngress {
     }
 }
 
-static CERTIFIED_INPUT_INGRESS: OnceLock<Mutex<Option<EtdagCertifiedInputIngress>>> =
+/// Finalized-chain authority used by schedule-neutral ETDAG ingress.
+/// Implementations must reject a target context whose source-finality fields
+/// do not equal their current durable finalized state.
+pub trait EtdagScheduleNeutralFinalityAuthority: Send + Sync {
+    fn canonical_finality_context_digest(
+        &self,
+        target_context: &TargetAdmissionContext,
+    ) -> Result<EtdagDigest, String>;
+}
+
+/// Authenticated ETDAG ingress for consensus protocols whose scheduling is
+/// not represented by [`HeightConsensusContext`].
+pub struct EtdagScheduleNeutralCertifiedInputIngress {
+    coordinator: EtdagProtectedInputCoordinator,
+    finality_authority: Arc<dyn EtdagScheduleNeutralFinalityAuthority>,
+    verifier: AegisPqvmVerifier,
+    validator_set: ValidatorSet,
+    cluster_map: ClusterMap,
+    consensus_parameter_root: ConsensusParameterRoot,
+    parameters: EtdagParameters,
+}
+
+impl EtdagScheduleNeutralCertifiedInputIngress {
+    pub fn new(
+        coordinator: EtdagProtectedInputCoordinator,
+        finality_authority: Arc<dyn EtdagScheduleNeutralFinalityAuthority>,
+        verifier: AegisPqvmVerifier,
+        validator_set: ValidatorSet,
+        cluster_map: ClusterMap,
+        consensus_parameter_root: ConsensusParameterRoot,
+        parameters: EtdagParameters,
+    ) -> Result<Self, String> {
+        let active = validator_set.active_for_epoch(validator_set.epoch);
+        active.validate_unique_validator_and_key_ids()?;
+        if active.validators.is_empty()
+            || cluster_map.epoch != validator_set.epoch
+            || cluster_map != cluster_map.canonicalized()
+            || consensus_parameter_root.is_zero()
+        {
+            return Err("invalid schedule-neutral ETDAG ingress authority".to_string());
+        }
+        cluster_map.validate_complete_balanced_assignment(&active)?;
+        parameters.validate()?;
+        Ok(Self {
+            coordinator,
+            finality_authority,
+            verifier,
+            validator_set,
+            cluster_map,
+            consensus_parameter_root,
+            parameters,
+        })
+    }
+
+    fn authorize_peer(&self, peer: &EtdagAuthenticatedIngressPeer) -> Result<(), String> {
+        let validator = self
+            .validator_set
+            .validators
+            .iter()
+            .find(|validator| validator.validator_id == peer.validator_id)
+            .ok_or_else(|| "ETDAG_CERTIFIED_INPUT_UNTRUSTED_PEER".to_string())?;
+        if validator.status != ValidatorStatus::Active
+            || !validator.is_active_for_epoch(self.validator_set.epoch)
+            || validator.validator_uma_id != peer.validator_uma_id
+            || validator.consensus_public_key.key_id != peer.consensus_key_id
+        {
+            return Err("ETDAG_CERTIFIED_INPUT_UNTRUSTED_PEER".to_string());
+        }
+        Ok(())
+    }
+
+    pub fn admit_from_authenticated_peer(
+        &self,
+        peer: &EtdagAuthenticatedIngressPeer,
+        artifact: &CertifiedProtectedInputArtifact,
+    ) -> Result<EtdagDigest, String> {
+        artifact.validate_wire_size()?;
+        self.authorize_peer(peer)?;
+        artifact.admission_package.verify_against_parameter_root(
+            &self.verifier,
+            &self.validator_set,
+            &self.cluster_map,
+            self.consensus_parameter_root,
+        )?;
+        let finality_digest = self
+            .finality_authority
+            .canonical_finality_context_digest(&artifact.admission_package.context)?;
+        self.coordinator
+            .admit_certified_public_input_schedule_neutral(
+                &artifact.admission_package,
+                &artifact.protected_input,
+                &finality_digest,
+                &self.verifier,
+                &self.validator_set,
+                &self.cluster_map,
+                self.consensus_parameter_root,
+                &self.parameters,
+            )
+    }
+}
+
+enum InstalledEtdagCertifiedInputIngress {
+    Typed(EtdagCertifiedInputIngress),
+    ScheduleNeutral(EtdagScheduleNeutralCertifiedInputIngress),
+}
+
+static CERTIFIED_INPUT_INGRESS: OnceLock<Mutex<Option<InstalledEtdagCertifiedInputIngress>>> =
     OnceLock::new();
 
-fn certified_input_ingress_slot() -> &'static Mutex<Option<EtdagCertifiedInputIngress>> {
+fn certified_input_ingress_slot() -> &'static Mutex<Option<InstalledEtdagCertifiedInputIngress>> {
     CERTIFIED_INPUT_INGRESS.get_or_init(|| Mutex::new(None))
 }
 
@@ -4696,7 +6164,24 @@ pub(crate) fn install_etdag_certified_input_ingress(
     if slot.is_some() {
         return Err("ETDAG certified-input ingress is already installed".to_string());
     }
-    *slot = Some(ingress);
+    *slot = Some(InstalledEtdagCertifiedInputIngress::Typed(ingress));
+    Ok(())
+}
+
+/// Install a finalized-manifest-permitted schedule-neutral ingress authority.
+pub(crate) fn install_schedule_neutral_etdag_certified_input_ingress(
+    _activation_permit: EtdagActivationPermit,
+    ingress: EtdagScheduleNeutralCertifiedInputIngress,
+) -> Result<(), String> {
+    let mut slot = certified_input_ingress_slot()
+        .lock()
+        .map_err(|_| "ETDAG certified-input ingress lock is poisoned".to_string())?;
+    if slot.is_some() {
+        return Err("ETDAG certified-input ingress is already installed".to_string());
+    }
+    *slot = Some(InstalledEtdagCertifiedInputIngress::ScheduleNeutral(
+        ingress,
+    ));
     Ok(())
 }
 
@@ -4714,6 +6199,11 @@ pub fn rotate_etdag_certified_input_ingress(
     let current = slot
         .as_ref()
         .ok_or_else(|| "ETDAG certified-input ingress is not installed".to_string())?;
+    let InstalledEtdagCertifiedInputIngress::Typed(current) = current else {
+        return Err(
+            "ETDAG schedule-neutral ingress cannot be rotated by the typed scheduler".to_string(),
+        );
+    };
     let expected_height = current
         .height_context
         .height
@@ -4730,7 +6220,7 @@ pub fn rotate_etdag_certified_input_ingress(
     {
         return Err("ETDAG_CERTIFIED_INPUT_INGRESS_FINALITY_ROOT_NOT_ADVANCED".to_string());
     }
-    *slot = Some(successor);
+    *slot = Some(InstalledEtdagCertifiedInputIngress::Typed(successor));
     Ok(())
 }
 
@@ -4762,7 +6252,14 @@ pub fn dispatch_etdag_certified_input(
     let peer = authenticated_peer.ok_or_else(|| {
         "ETDAG_CERTIFIED_INPUT_UNAUTHENTICATED_PEER: refusing protected input".to_string()
     })?;
-    ingress.admit_from_authenticated_peer(&peer, &artifact)
+    match ingress {
+        InstalledEtdagCertifiedInputIngress::Typed(ingress) => {
+            ingress.admit_from_authenticated_peer(&peer, &artifact)
+        }
+        InstalledEtdagCertifiedInputIngress::ScheduleNeutral(ingress) => {
+            ingress.admit_from_authenticated_peer(&peer, &artifact)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -4846,6 +6343,72 @@ impl EtdagProtectedInputCoordinator {
         )
     }
 
+    /// Verify and durably admit protected input without importing the legacy
+    /// height scheduler into the caller's consensus protocol.
+    ///
+    /// The certified admission package remains the sole authority for ETDAG
+    /// topology and H+3 bindings. The caller supplies only the independently
+    /// derived canonical finality digest used by deterministic batch order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn admit_certified_public_input_schedule_neutral(
+        &self,
+        admission_package: &TargetAdmissionPackage,
+        protected_input: &ProtectedBlockInput,
+        expected_finality_context_digest: &EtdagDigest,
+        verifier: &AegisPqvmVerifier,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        consensus_parameter_root: ConsensusParameterRoot,
+        parameters: &EtdagParameters,
+    ) -> Result<EtdagDigest, String> {
+        CertifiedProtectedInputArtifact {
+            admission_package: admission_package.clone(),
+            protected_input: protected_input.clone(),
+        }
+        .validate_wire_size()?;
+        admission_package.verify_against_parameter_root(
+            verifier,
+            validator_set,
+            cluster_map,
+            consensus_parameter_root,
+        )?;
+        let admission_digest = self
+            .admission_store
+            .install_preverified(admission_package)?;
+        self.protected_input_store
+            .install_verified_schedule_neutral(
+                admission_digest,
+                protected_input,
+                &admission_package.context,
+                expected_finality_context_digest,
+                verifier,
+                validator_set,
+                cluster_map,
+                parameters,
+            )
+    }
+
+    /// Install a fully certified admission package before its separately
+    /// certified protected input arrives. This grants no proposal authority:
+    /// [`Self::load_ready_protected_material_schedule_neutral`] still requires
+    /// the matching protected input and re-verifies both records.
+    pub fn install_certified_admission_package_schedule_neutral(
+        &self,
+        admission_package: &TargetAdmissionPackage,
+        verifier: &AegisPqvmVerifier,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        consensus_parameter_root: ConsensusParameterRoot,
+    ) -> Result<EtdagDigest, String> {
+        admission_package.verify_against_parameter_root(
+            verifier,
+            validator_set,
+            cluster_map,
+            consensus_parameter_root,
+        )?;
+        self.admission_store.install_preverified(admission_package)
+    }
+
     /// Load a proposal-ready protected input only after re-verifying the
     /// durable proof package and its matching certified admission package.
     #[allow(clippy::too_many_arguments)]
@@ -4881,6 +6444,79 @@ impl EtdagProtectedInputCoordinator {
             cluster_map,
             parameters,
         )
+    }
+
+    /// Re-verify and load the exact certified admission context for one target
+    /// height without accepting proposer or round schedule input.
+    pub fn load_verified_target_admission_context_schedule_neutral(
+        &self,
+        target_height: Height,
+        verifier: &AegisPqvmVerifier,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        consensus_parameter_root: ConsensusParameterRoot,
+    ) -> Result<TargetAdmissionContext, String> {
+        let admission_package = self
+            .admission_store
+            .get(target_height)?
+            .ok_or_else(|| {
+                "ETDAG_PROTECTED_INPUT_NOT_READY: no certified target-admission package for target height"
+                    .to_string()
+            })?;
+        admission_package.verify_against_parameter_root(
+            verifier,
+            validator_set,
+            cluster_map,
+            consensus_parameter_root,
+        )?;
+        if admission_package.context.target_height != target_height {
+            return Err("ETDAG_PROTECTED_INPUT_TARGET_HEIGHT_MISMATCH".to_string());
+        }
+        Ok(admission_package.context)
+    }
+
+    /// Re-verify and load the exact durable protected material paired with its
+    /// certified admission context, while leaving consensus scheduling to the
+    /// simplified protocol.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_ready_protected_material_schedule_neutral(
+        &self,
+        target_height: Height,
+        expected_finality_context_digest: &EtdagDigest,
+        verifier: &AegisPqvmVerifier,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        consensus_parameter_root: ConsensusParameterRoot,
+        parameters: &EtdagParameters,
+    ) -> Result<(TargetAdmissionContext, ProtectedBlockInput), String> {
+        let target_context = self.load_verified_target_admission_context_schedule_neutral(
+            target_height,
+            verifier,
+            validator_set,
+            cluster_map,
+            consensus_parameter_root,
+        )?;
+        let admission_package = self
+            .admission_store
+            .get(target_height)?
+            .ok_or_else(|| {
+                "ETDAG_PROTECTED_INPUT_NOT_READY: no certified target-admission package for target height"
+                    .to_string()
+            })?;
+        if admission_package.context != target_context {
+            return Err("ETDAG_ADMISSION_PACKAGE_CONFLICT".to_string());
+        }
+        let admission_digest = admission_package.package_digest()?;
+        let protected_input = self.protected_input_store.load_verified_schedule_neutral(
+            &admission_digest,
+            &target_context,
+            expected_finality_context_digest,
+            verifier,
+            validator_set,
+            cluster_map,
+            parameters,
+        )?;
+        Ok((target_context, protected_input))
     }
 
     /// Returns the immutable admission context paired with a target height
@@ -5043,8 +6679,8 @@ pub(crate) mod tests {
         let ingress_registry = IngressKemKeyRegistry {
             registry_version: INGRESS_KEM_REGISTRY_VERSION,
             chain_id: ChainId::synergy_testnet_v3(),
-            network_id: NetworkId::synergy_testnet_v3(),
-            protocol_version: POSY_PROTOCOL_VERSION.to_string(),
+            network_id: NetworkId::fresh_posy_testnet_v3(),
+            protocol_version: POSY_SIMPLIFIED_PROTOCOL_VERSION.to_string(),
             epoch,
             target_height: height_context.height,
             assigned_cluster_id: height_context.assigned_cluster_id,
@@ -5052,7 +6688,7 @@ pub(crate) mod tests {
         };
         let context = TargetAdmissionContext::derive(
             TargetAdmissionContextSpec {
-                protocol_version: POSY_PROTOCOL_VERSION.to_string(),
+                protocol_version: POSY_SIMPLIFIED_PROTOCOL_VERSION.to_string(),
                 epoch,
                 target_height: height_context.height,
                 source_finalized_height: Height(height_context.height.0 - 3),
@@ -5127,7 +6763,7 @@ pub(crate) mod tests {
         let mut transaction = Transaction {
             version: 2,
             chain_id: ChainId::synergy_testnet_v3(),
-            network_id: NetworkId::synergy_testnet_v3(),
+            network_id: NetworkId::fresh_posy_testnet_v3(),
             epoch: Epoch(0),
             sender_uma_or_account: sender.validator_uma_id.0.clone(),
             receiver_uma_or_account: "recipient".to_string(),
@@ -5179,7 +6815,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn target_admission_package(
+    pub(crate) fn target_admission_package(
         fixture: &mut Fixture,
         context: TargetAdmissionContext,
     ) -> TargetAdmissionPackage {
@@ -5477,6 +7113,168 @@ pub(crate) mod tests {
             envelopes,
             decrypt_shares,
         }
+    }
+
+    pub(crate) fn complete_r11_execution_input(
+        fixture: &mut Fixture,
+    ) -> DeterministicProtectedExecutionInput {
+        use crate::consensus::protected_pipeline::{
+            construct_protected_cut_proof, derive_next_protected_batch_commitment,
+            derive_protected_batch,
+        };
+
+        let members = cluster_members(fixture);
+        let (bundle, secret_keys, _) = sealed_fixture(fixture);
+        let commitment = bundle.envelope.tx_commitment.clone();
+        let reference = CertifiedEnvelopeRef {
+            tx_commitment: commitment.clone(),
+            sender_id: bundle.envelope.sender_id.clone(),
+            nonce_slot: bundle.envelope.nonce_slot,
+            certified_dag_round: 0,
+            gas_class_units: bundle.envelope.gas_class as u64,
+            ciphertext_bytes: bundle.envelope.ciphertext.len() as u64,
+            fee_class: bundle.envelope.fee_class,
+            protocol_dependencies: Vec::new(),
+        };
+        let (certified_vertices, legacy_cut) = certified_cut_fixture(fixture, vec![reference]);
+        let verifier = fixture.signer.verifier();
+        let cut_proof = construct_protected_cut_proof(
+            &fixture.context,
+            certified_vertices.iter(),
+            &legacy_cut.cutoff_marker_digests,
+            &verifier,
+            &fixture.validator_set,
+            &fixture.cluster_map,
+        )
+        .expect("R11 semantic cut proof");
+        let order_seed = EtdagDigest::from_domain_bytes(
+            "PoSy/ProtectedPipeline/TestOrderSeed/v1",
+            b"height-eight",
+        );
+        let protected_batch = derive_protected_batch(
+            &fixture.context,
+            &cut_proof,
+            &order_seed,
+            &EtdagParameters::default(),
+        )
+        .expect("R11 protected batch");
+        let next_commitment =
+            derive_next_protected_batch_commitment(&fixture.context, &cut_proof, &protected_batch)
+                .expect("R11 next commitment");
+        let authorization = ProtectedRevealAuthorization {
+            authorization_version: PROTECTED_PIPELINE_VERSION,
+            chain_id: fixture.context.chain_id,
+            network_id: fixture.context.network_id.clone(),
+            protocol_version: fixture.context.protocol_version.clone(),
+            epoch: fixture.context.epoch,
+            target_height: fixture.context.target_height,
+            cluster_id: fixture.context.assigned_cluster_id,
+            target_context_root: fixture.context.root().unwrap(),
+            validator_set_commitment: fixture.context.active_validator_set_root,
+            parameter_root: fixture.context.consensus_parameter_root,
+            parent_proposal_id: BlockId::from("parent-proposal-height-seven"),
+            parent_block_id: BlockId::from("parent-block-height-six"),
+            next_commitment_root: next_commitment.root().unwrap(),
+            protected_batch_root: protected_batch.protected_batch_root.clone(),
+            proposal_validation_certificate_root: Hash::from_domain_bytes(
+                "PoSy/ProtectedPipeline/TestProposalVc/v1",
+                b"height-seven-proposal-vc",
+            ),
+            certificate_evidence_root: EtdagDigest::from_domain_bytes(
+                "PoSy/ProtectedPipeline/TestProposalVcEvidence/v1",
+                b"n-minus-one-authenticated-echoes",
+            ),
+        };
+        let threshold =
+            decryption_threshold(fixture.context.assigned_cluster_validator_count as usize)
+                .unwrap();
+        let journal = temp_journal("complete-r11-reveal");
+        let mut messages = Vec::new();
+        let mut raw_shares = Vec::new();
+        for index in 0..threshold {
+            let share = decrypt_share_capsule(
+                &bundle.envelope,
+                &bundle.share_capsules[index],
+                &secret_keys[index],
+            )
+            .unwrap();
+            raw_shares.push(share.clone());
+            messages.push(
+                release_protected_reveal_share(
+                    &mut fixture.signer,
+                    &journal,
+                    &authorization,
+                    &next_commitment,
+                    &protected_batch,
+                    &fixture.context,
+                    &members[index],
+                    commitment.clone(),
+                    share,
+                )
+                .expect("R11 protected reveal share"),
+            );
+        }
+        let inner = decrypt_inner_transaction(&bundle.envelope, &raw_shares, threshold).unwrap();
+        let reveal_shares = BTreeMap::from([(commitment.clone(), messages)]);
+        DeterministicProtectedExecutionInput {
+            material_version: PROTECTED_PIPELINE_VERSION,
+            source: ProtectedBatchSource::NormalEtdagSteadyState,
+            target_context: ProtectedExecutionTargetContext::NormalEtdag {
+                admission_context: fixture.context.clone(),
+            },
+            cut_proof: Some(cut_proof),
+            protected_batch,
+            next_commitment,
+            reveal_authorization: Some(authorization),
+            envelopes: BTreeMap::from([(commitment, bundle.envelope)]),
+            reveal_transcript_root: protected_reveal_transcript_root(&reveal_shares).unwrap(),
+            reveal_shares,
+            ordered_transactions: vec![inner],
+        }
+    }
+
+    #[test]
+    fn r11_execution_input_replays_exact_ciphertext_and_rejects_root_only_tampering() {
+        let mut fixture = fixture(5, None);
+        let verifier = fixture.signer.verifier();
+        let input = complete_r11_execution_input(&mut fixture);
+        let transactions = input
+            .verify_and_extract_transactions(
+                &verifier,
+                &fixture.validator_set,
+                &fixture.cluster_map,
+                &EtdagParameters::default(),
+            )
+            .expect("exact R11 protected execution material");
+        assert_eq!(transactions.len(), 1);
+
+        let mut missing_ciphertext = input.clone();
+        missing_ciphertext.envelopes.clear();
+        assert!(missing_ciphertext
+            .verify_and_extract_transactions(
+                &verifier,
+                &fixture.validator_set,
+                &fixture.cluster_map,
+                &EtdagParameters::default(),
+            )
+            .unwrap_err()
+            .contains("concrete material set mismatch"));
+
+        let mut wrong_vc = input;
+        wrong_vc
+            .reveal_authorization
+            .as_mut()
+            .unwrap()
+            .proposal_validation_certificate_root = Hash::zero();
+        assert!(wrong_vc
+            .verify_and_extract_transactions(
+                &verifier,
+                &fixture.validator_set,
+                &fixture.cluster_map,
+                &EtdagParameters::default(),
+            )
+            .unwrap_err()
+            .contains("reveal authorization mismatch"));
     }
 
     fn sealed_fixture(
@@ -6325,7 +8123,7 @@ pub(crate) mod tests {
             canonical_finality_context_digest: EtdagDigest::from_domain_bytes("finality", b"six"),
             order_seed: EtdagDigest::from_domain_bytes("seed", b"eight"),
             ordered_commitment_root: EtdagDigest::from_canonical(
-                "PoSy/ETDAG/OrderedCommitmentRoot/v2",
+                "PoSy/ETDAG/OrderedCommitmentRoot/v3",
                 &commitments,
             )
             .unwrap(),
@@ -6524,6 +8322,23 @@ pub(crate) mod tests {
             .contains("authenticated ciphertext plaintext"));
     }
 
+    struct ExactScheduleNeutralFinalityAuthority {
+        expected_context: TargetAdmissionContext,
+        digest: EtdagDigest,
+    }
+
+    impl EtdagScheduleNeutralFinalityAuthority for ExactScheduleNeutralFinalityAuthority {
+        fn canonical_finality_context_digest(
+            &self,
+            target_context: &TargetAdmissionContext,
+        ) -> Result<EtdagDigest, String> {
+            if target_context != &self.expected_context {
+                return Err("test schedule-neutral finality context mismatch".to_string());
+            }
+            Ok(self.digest.clone())
+        }
+    }
+
     #[test]
     fn certified_input_ingress_requires_local_context_authenticated_peer_and_untampered_proof() {
         static INGRESS_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -6584,6 +8399,31 @@ pub(crate) mod tests {
             dispatch_etdag_certified_input(Some(authenticated_peer.clone()), artifact.clone())
                 .unwrap();
         assert_eq!(digest, protected_input_digest(&protected).unwrap());
+        remove_etdag_certified_input_ingress().unwrap();
+
+        let schedule_neutral_ingress = EtdagScheduleNeutralCertifiedInputIngress::new(
+            temp_protected_input_coordinator("network-ingress-schedule-neutral"),
+            Arc::new(ExactScheduleNeutralFinalityAuthority {
+                expected_context: artifact.admission_package.context.clone(),
+                digest: expected_finality_context.clone(),
+            }),
+            verifier.clone(),
+            fixture.validator_set.clone(),
+            fixture.cluster_map.clone(),
+            artifact.admission_package.context.consensus_parameter_root,
+            EtdagParameters::default(),
+        )
+        .unwrap();
+        install_schedule_neutral_etdag_certified_input_ingress(
+            EtdagActivationPermit::test_only(),
+            schedule_neutral_ingress,
+        )
+        .unwrap();
+        assert_eq!(
+            dispatch_etdag_certified_input(Some(authenticated_peer.clone()), artifact.clone(),)
+                .unwrap(),
+            protected_input_digest(&protected).unwrap()
+        );
         remove_etdag_certified_input_ingress().unwrap();
 
         let untrusted_ingress = EtdagCertifiedInputIngress::new(

@@ -1,0 +1,102 @@
+{
+  "classification": "DERIVED",
+  "raw_sample_count": 204230,
+  "summary_group_count": 967,
+  "failed_safety_sample_count": 50,
+  "failed_safety_results": [
+    "panic_caught"
+  ],
+  "bootstrap_resamples": 2000,
+  "bootstrap_confidence": 0.95,
+  "bootstrap_statistic": "median",
+  "bootstrap_seed": "sha256 of grouping key",
+  "percentile_method": "linear interpolation at (n-1)*p",
+  "outlier_policy": "MAD flags reported; all samples retained",
+  "inputs": [
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/publication-m2-20260815-v1/raw/publication-m2-20260815-v1-aegis.csv",
+      "sha256": "e9ece79a0e4c24b99991fe8134dbaf0c3d57f969fe56e7b0bcd14e9580b5eca4",
+      "rows": "55800"
+    },
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/publication-m2-20260815-v1/raw/publication-m2-20260815-v1-cold-start.csv",
+      "sha256": "e555a7b5eb53622caba87d364c1b4c0ff5a63e2384f0398df177e2f81de8f9cd",
+      "rows": "210"
+    },
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/publication-m2-20260815-v1/raw/publication-m2-20260815-v1-lifecycle.csv",
+      "sha256": "8e85adf1997e1ba8b675ba03cfcba1678347ffa8f0782771531695c6a6278587",
+      "rows": "3160"
+    },
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/publication-m2-20260815-v1/raw/publication-m2-20260815-v1-load-workers1.csv",
+      "sha256": "77fdc3c083a62885c08f928b00bc34900a600f5d0d05bae8c2693a33869f1e51",
+      "rows": "800"
+    },
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/publication-m2-20260815-v1/raw/publication-m2-20260815-v1-load-workers2.csv",
+      "sha256": "ede9ee4ead727b12b0c76a55119dd7cd77fd940f00f3a675c56d0aa0c6fa4389",
+      "rows": "800"
+    },
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/publication-m2-20260815-v1/raw/publication-m2-20260815-v1-load-workers4.csv",
+      "sha256": "44240134d96148fe3003408d73423ed355c64ffa373c5262251a70e31ae39d7a",
+      "rows": "800"
+    },
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/publication-m2-20260815-v1/raw/publication-m2-20260815-v1-primitive.csv",
+      "sha256": "6f17313973f1d37a46fb2bc87f7c073a8964162bcc99bc7e7338654c6bcea91e",
+      "rows": "58350"
+    },
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/publication-m2-20260815-v1/raw/publication-m2-20260815-v1-protocol.csv",
+      "sha256": "c8dd7ef155701e10933f95eb1f29e6fd5ae613d809a9162502b0afec0ca41841",
+      "rows": "79510"
+    },
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/publication-load-m2-20260815-v2/raw/publication-load-m2-20260815-v2-load-workers1.csv",
+      "sha256": "2cfbc581ebc9eecbdfaae45378254da0c1e516cd523b3e4ac120eb90ec8a5140",
+      "rows": "800"
+    },
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/publication-load-m2-20260815-v2/raw/publication-load-m2-20260815-v2-load-workers2.csv",
+      "sha256": "bc27804bc5ea24da85b940ae3c6a2638d69a74397ae1ec7293788150bdc36eef",
+      "rows": "800"
+    },
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/publication-load-m2-20260815-v2/raw/publication-load-m2-20260815-v2-load-workers4.csv",
+      "sha256": "d947520cf8ebf9749051353422be041f22270729758b84769ba60930935bfdaa",
+      "rows": "800"
+    },
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/publication-load-m2-20260815-v3/raw/publication-load-m2-20260815-v3-load-workers1.csv",
+      "sha256": "483ee2a27fa1a0c0b89e86f2469a2ef8be95543f0c5cff1f97360683adc57508",
+      "rows": "800"
+    },
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/publication-load-m2-20260815-v3/raw/publication-load-m2-20260815-v3-load-workers2.csv",
+      "sha256": "b0554e34fac28bee81742b4da42067ee4a817cc1be3a07952937b6a526dbbd33",
+      "rows": "800"
+    },
+    {
+      "path": "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/runs/publication-load-m2-20260815-v3/raw/publication-load-m2-20260815-v3-load-workers4.csv",
+      "sha256": "76963da1ba6d2ce1ee679759c91ece1202d295c7ee9c92fea511fe1e6de4a7a6",
+      "rows": "800"
+    }
+  ],
+  "plots": [
+    "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/publication/primitive-sign-verify-512B.svg",
+    "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/publication/signature-layer-comparison-512B.svg",
+    "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/publication/aegis-cache-miss-vs-hit-512B.svg",
+    "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/publication/verification-message-scaling.svg",
+    "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/publication/transaction-component-latency-512B.svg",
+    "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/publication/transaction-byte-overhead.svg",
+    "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/publication/coordinated-block-wire-scaling.svg",
+    "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/publication/coordinated-network-message-scaling.svg",
+    "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/publication/controlled-load-throughput.svg",
+    "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/publication/controlled-load-tail-latency.svg",
+    "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/publication/controlled-load-cpu-vs-throughput.svg",
+    "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/publication/cold-start-latency.svg",
+    "/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3/research/aegis-bench/results/publication/cryptographic-object-sizes.svg"
+  ]
+}

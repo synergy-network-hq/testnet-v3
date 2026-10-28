@@ -1,17 +1,9 @@
 #!/usr/bin/env python3
-"""Generate Testnet-v3 node configs from finalized, public launch records.
+"""Retired coordinated-round-robin Testnet-v3 node-config generator.
 
-This tool intentionally contains no private key, passphrase, or live-node logic.
-It fails closed unless the supplied Genesis is deployment-bound, its exact
-ML-DSA-87 governance approval has been verified by the runtime verifier, and a
-matching Phase-7/8 apply-integrity record proves that the candidate was applied.
-The generated files are deterministic and are bound to the exact Genesis,
-topology, VPN registry, consensus manifest root, approval, and apply record.
-
-The coordinator-signed validator transport registry is deliberately not produced
-here.  Runtime production code will not use static validator VPN transports as a
-fallback, so publication of that signed registry remains an independent launch
-gate.
+This source is retained only for review of the prior deployment flow. It is
+fail-closed because it models an inactive validator-01 coordinator instead of
+the fresh simplified-PoSy v3 Genesis set, validator-02 through validator-06.
 """
 
 from __future__ import annotations
@@ -30,10 +22,23 @@ from pathlib import Path
 from typing import Any
 
 
-GENERATOR_VERSION = "testnet-v3-node-configs/v6"
+GENERATOR_VERSION = "testnet-v3-node-configs/v7-coordinated-round-robin-p1-retired"
 CHAIN_ID = 1266
 NETWORK_ID = "synergy-testnet-v3"
 VALIDATOR_P2P_PORT = 5622
+COORDINATED_CONSENSUS_MODE = "coordinated_round_robin_v1"
+COORDINATED_COORDINATOR_ID = "validator-01"
+COORDINATED_PRODUCER_IDS = (
+    "validator-02",
+    "validator-03",
+    "validator-04",
+    "validator-05",
+    "validator-06",
+)
+RETIRED_REASON = (
+    "retired coordinated-round-robin generator cannot produce fresh PoSy v3 configs; "
+    "use a finalized simplified-PoSy v3 generator bound to validator-02 through validator-06"
+)
 RELEASE_INTEGRITY_STATUS = "PHASE_7_8_APPLIED_PENDING_RELEASE_GATES"
 RELEASE_APPROVAL_RESULT = "RELEASE_APPROVAL_VERIFIED"
 UNRESOLVED_PLACEHOLDER = re.compile(r"<[A-Z][A-Z0-9_:-]*>")
@@ -421,6 +426,7 @@ def verify_release_authorization(
     release_integrity_path: Path,
     authorities_path: Path,
     approval_verifier: Path,
+    allow_verified_record_relocation: bool = False,
 ) -> dict[str, str]:
     """Verify both signed governance approval and post-apply integrity evidence.
 
@@ -448,7 +454,7 @@ def verify_release_authorization(
         fail("Phase-7/8 release integrity record is not in the applied release-gates state")
 
     applied_genesis = require_path_within_repository(root, release.get("genesis_file"), "release integrity genesis_file")
-    if genesis_path.resolve() != applied_genesis:
+    if not allow_verified_record_relocation and genesis_path.resolve() != applied_genesis:
         fail("Supplied Genesis is not the exact canonical Genesis named by release integrity evidence")
     if not applied_genesis.is_file():
         fail(f"Release integrity canonical Genesis does not exist: {applied_genesis}")
@@ -479,7 +485,7 @@ def verify_release_authorization(
     approved_artifact = recorded_path(
         root, release.get("release_approval_artifact"), "release integrity release_approval_artifact"
     )
-    if approval_path.resolve() != approved_artifact:
+    if not allow_verified_record_relocation and approval_path.resolve() != approved_artifact:
         fail("Supplied approval artifact is not the exact artifact named by release integrity evidence")
     approval_sha256 = sha256_file(approval_path)
     if approval_sha256 != require_sha256(
@@ -821,28 +827,17 @@ def toml_config(
         "chain_id = 1266",
         "",
         "[consensus]",
-        'algorithm = "posy/2.2"',
+        f"algorithm = {q(COORDINATED_CONSENSUS_MODE)}",
+        f"mode = {q(COORDINATED_CONSENSUS_MODE)}",
+        f"coordinator_id = {q(COORDINATED_COORDINATOR_ID)}",
+        f"producer_ids = {array(COORDINATED_PRODUCER_IDS)}",
         "block_time_secs = 2",
         "epoch_length = 1000",
         "target_block_time_ms = 2000",
-        "proposal_timeout_ms = 1500",
-        "prevote_timeout_ms = 1500",
-        "precommit_timeout_ms = 1500",
-        "max_round_timeout_ms = 10000",
+        "producer_turn_timeout_ms = 4000",
         "min_validators = 6",
         "validator_cluster_size = 6",
-        "validator_vote_threshold = 5",
-        "synergy_score_decay_rate = 0.05",
-        "vrf_enabled = true",
-        "vrf_seed_epoch_interval = 1000",
-        "max_synergy_points_per_epoch = 100",
-        "max_tasks_per_validator = 10",
         "allow_genesis_status_bypass = false",
-        "",
-        "[consensus.reward_weighting]",
-        "task_accuracy = 0.5",
-        "uptime = 0.3",
-        "collaboration = 0.2",
         "",
         "[p2p]",
         f"listen_address = {q(listen_address)}",
@@ -1713,6 +1708,7 @@ def build_outputs(
     registry_path: Path,
     release_binding: dict[str, str],
 ) -> tuple[dict[Path, str], dict[str, Any], dict[Path, bytes]]:
+    fail(RETIRED_REASON)
     genesis = read_json_object(genesis_path, "Genesis")
     registry = read_json_object(registry_path, "VPN registry")
     with topology_path.open("rb") as handle:
@@ -2143,6 +2139,14 @@ def main() -> int:
         default=repository_root() / "runtime/target/debug/testnet-v3-genesis-release-approval",
         help="built Rust release-approval verifier (never a signing tool)",
     )
+    parser.add_argument(
+        "--allow-verified-record-relocation",
+        action="store_true",
+        help=(
+            "allow remote staging copies when their Genesis and approval bytes "
+            "still match the signed Phase-7/8 record and the Rust verifier"
+        ),
+    )
     parser.add_argument("--output-dir", type=Path, help="generated config output directory")
     mode = parser.add_mutually_exclusive_group(required=False)
     mode.add_argument("--apply", action="store_true", help="publish a newly generated tree (backs up an existing tree)")
@@ -2150,6 +2154,7 @@ def main() -> int:
     mode.add_argument("--self-test", action="store_true", help="exercise deterministic rendering without publishing")
     args = parser.parse_args()
     try:
+        fail(RETIRED_REASON)
         for path in (args.genesis, args.topology, args.vpn_public_registry):
             if not path.is_file():
                 fail(f"Required input does not exist: {path}")
@@ -2174,6 +2179,7 @@ def main() -> int:
             release_integrity_path=args.release_integrity,
             authorities_path=args.authorities_file,
             approval_verifier=args.approval_verifier,
+            allow_verified_record_relocation=args.allow_verified_record_relocation,
         )
         outputs, manifest, deployment_payloads = build_outputs(
             args.genesis, args.topology, args.vpn_public_registry, release_binding

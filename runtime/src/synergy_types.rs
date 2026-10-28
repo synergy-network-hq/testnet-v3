@@ -7,8 +7,22 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 pub const SYNERGY_TESTNET_V3_CHAIN_ID: u64 = 1266;
-pub const SYNERGY_TESTNET_V3_NETWORK_ID: &str = "synergy-testnet-v3";
-pub const POSY_PROTOCOL_VERSION: &str = "posy/2.2";
+/// Canonical SNTS-09 technical network identifier. Newly emitted, signed, or
+/// consensus-bound material must use this value.
+pub const SYNERGY_TESTNET_V3_NETWORK_ID: &str = "testnet";
+/// Versioned release identity, kept separate from the technical network ID.
+pub const SYNERGY_TESTNET_V3_RELEASE_ID: &str = "testnet-v3";
+/// Retired single-authority-chain identifier. Explicit migration readers may
+/// consume it, but fresh PoSy artifacts must never emit it.
+pub const SYNERGY_TESTNET_V3_LEGACY_NETWORK_ID: &str = "synergy-testnet-v3";
+/// Compatibility spelling retained for existing fresh-P3 loaders.
+pub const TESTNET_V3_CANONICAL_NETWORK_ID: &str = SYNERGY_TESTNET_V3_NETWORK_ID;
+pub const TESTNET_V3_CHAIN_INCARNATION: u64 = 4;
+/// Fresh block-zero PoSy P3 must not share the P1 consensus-signing domain.
+pub const TESTNET_V3_FRESH_P3_CHAIN_INCARNATION: u64 = 5;
+pub const TESTNET_V3_CONSENSUS_STATE_SCHEMA_VERSION: u32 = 4;
+/// The sole active Testnet-v3 consensus wire/version identifier.
+pub const POSY_PROTOCOL_VERSION: &str = "posy/3.0";
 pub const TESTNET_V3_CONSENSUS_SIGNATURE_ALGORITHM: &str = "mldsa65";
 pub const TESTNET_V3_MLDSA65_PUBLIC_KEY_BYTES: usize = 1_952;
 pub const HEIGHT_CONSENSUS_CONTEXT_VERSION: u32 = 1;
@@ -62,12 +76,27 @@ impl NetworkId {
         Self(SYNERGY_TESTNET_V3_NETWORK_ID.to_string())
     }
 
+    pub fn fresh_posy_testnet_v3() -> Self {
+        Self(SYNERGY_TESTNET_V3_NETWORK_ID.to_string())
+    }
+
     pub fn require_testnet_v3(&self) -> Result<(), String> {
         if self.0 == SYNERGY_TESTNET_V3_NETWORK_ID {
             Ok(())
         } else {
             Err(format!(
                 "wrong network_id: expected {}, found {}",
+                SYNERGY_TESTNET_V3_NETWORK_ID, self.0
+            ))
+        }
+    }
+
+    pub fn require_fresh_posy_testnet_v3(&self) -> Result<(), String> {
+        if self.0 == SYNERGY_TESTNET_V3_NETWORK_ID {
+            Ok(())
+        } else {
+            Err(format!(
+                "wrong fresh PoSy network_id: expected {}, found {}",
                 SYNERGY_TESTNET_V3_NETWORK_ID, self.0
             ))
         }
@@ -413,9 +442,31 @@ impl HeightConsensusContext {
         cluster_map: &ClusterMap,
         protocol_config: &ProtocolConfig,
     ) -> Result<Self, String> {
-        spec_validate(&spec)?;
         protocol_config.chain_id.require_testnet_v3()?;
         protocol_config.network_id.require_testnet_v3()?;
+        Self::derive_from_finalized_parameter_root(
+            spec,
+            validator_set,
+            cluster_map,
+            protocol_config.hash()?,
+        )
+    }
+
+    /// Derive a height context from the exact consensus-parameter root already
+    /// committed by Genesis or a verified epoch transition.  Production
+    /// bootstrap cannot manufacture a mutable [`ProtocolConfig`]; callers
+    /// therefore supply the immutable, independently verified root rather
+    /// than a test default.
+    pub fn derive_from_finalized_parameter_root(
+        spec: HeightConsensusContextSpec,
+        validator_set: &ValidatorSet,
+        cluster_map: &ClusterMap,
+        consensus_parameter_root: ConsensusParameterRoot,
+    ) -> Result<Self, String> {
+        spec_validate(&spec)?;
+        if consensus_parameter_root.is_zero() {
+            return Err("height context consensus parameter root is missing".to_string());
+        }
         if validator_set.epoch != spec.epoch {
             return Err("height context validator-set epoch mismatch".to_string());
         }
@@ -471,8 +522,6 @@ impl HeightConsensusContext {
             "SYNERGY_POSY_LEADER_SCHEDULE_V1",
             &leader_schedule.canonical_bytes()?,
         );
-        let consensus_parameter_root = protocol_config.hash()?;
-
         let context = Self {
             context_version: HEIGHT_CONSENSUS_CONTEXT_VERSION,
             chain_id: ChainId::synergy_testnet_v3(),
@@ -876,6 +925,49 @@ pub struct BlockHeader {
     pub dag_version: u32,
     pub aegis_pqvm_version: String,
     pub timestamp_ms_consensus_bounded: u64,
+    /// --- Canonical Live Gas Pricing (fee market) ---
+    /// Added under fee-market schema/activation version
+    /// `crate::gas::fee_market::FEE_MARKET_VERSION`. `#[serde(default)]`
+    /// so blocks persisted before this field existed continue to decode:
+    /// they implicitly carry `fee_market_version: 0`, which callers must
+    /// treat as "no protocol base fee enforced" (legacy pre-activation
+    /// block), never as `base_fee_per_gas_nwei: 0` being a real price.
+    ///
+    /// The protocol-authoritative base fee applied to every transaction in
+    /// this block, in nWei per ordinary gas unit. Deterministically derived
+    /// from the parent block's `base_fee_per_gas_nwei` and `gas_used` via
+    /// `crate::gas::fee_market::next_base_fee_per_gas`; never chosen by the
+    /// block producer.
+    #[serde(default)]
+    pub base_fee_per_gas_nwei: u64,
+    /// Total ordinary gas consumed by this block's transactions.
+    #[serde(default)]
+    pub gas_used: u64,
+    /// Ordinary gas capacity for this block (`FeeMarketParams::max_block_gas`
+    /// at the height this block was produced).
+    #[serde(default)]
+    pub gas_limit: u64,
+    /// Total PQ gas consumed by this block's transactions (AIVM
+    /// `PqGasMeter` output, summed across receipts). Tracked and reported
+    /// separately from ordinary `gas_used` at every layer -- never combined.
+    #[serde(default)]
+    pub pq_gas_used: u64,
+    /// PQ gas capacity for this block (`FeeMarketParams::max_block_pq_gas`).
+    #[serde(default)]
+    pub pq_gas_limit: u64,
+    /// The PQ gas price multiplier applied in this block
+    /// (`FeeMarketParams::pq_gas_multiplier`), persisted so historical
+    /// blocks remain interpretable even if the multiplier changes later.
+    #[serde(default)]
+    pub pq_gas_multiplier: u64,
+    /// Fee-market schema version in effect for this block. `0` means the
+    /// legacy pre-fee-market rules applied (block precedes
+    /// `FeeMarketParams::activation_height`); `>= 1` means
+    /// `base_fee_per_gas_nwei` is protocol-enforced and this block was
+    /// rejected by every validating node unless its declared value matched
+    /// `next_base_fee_per_gas(parent)` exactly.
+    #[serde(default)]
+    pub fee_market_version: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -918,12 +1010,118 @@ struct StableBlockCandidate {
     transactions: Vec<Transaction>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum VotePhase {
     Validate,
     Finality,
     Timeout,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ConsensusSubjectPhase {
+    Proposal,
+    /// Authenticated reliable-delivery transport evidence; never an ordinary
+    /// block vote or direct finality input.
+    ProposalEcho,
+    /// Authenticated reliable-delivery transport evidence; never an ordinary
+    /// block vote or direct finality input.
+    ProposalReady,
+    /// The sole ordinary block-vote phase in simplified PoSy.
+    Vote,
+    Validate,
+    Finality,
+    Timeout,
+}
+
+impl From<&VotePhase> for ConsensusSubjectPhase {
+    fn from(value: &VotePhase) -> Self {
+        match value {
+            VotePhase::Validate => Self::Validate,
+            VotePhase::Finality => Self::Finality,
+            VotePhase::Timeout => Self::Timeout,
+        }
+    }
+}
+
+/// Canonical logical identity of one typed PoSy consensus decision.
+///
+/// Cryptographic evidence proves this subject but is deliberately absent from
+/// it. In particular, signer ordering/subsets, signature bytes, signer
+/// bitmaps, certificate serialization, and proof roots must never make two
+/// otherwise identical decisions compare unequal.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ConsensusSubject {
+    pub domain: ConsensusDomain,
+    pub chain_id: ChainId,
+    pub network_id: NetworkId,
+    pub protocol_version: String,
+    pub epoch: Epoch,
+    pub height: Height,
+    pub round: Round,
+    pub cluster_id: ClusterId,
+    pub height_context_root: Hash,
+    pub phase: ConsensusSubjectPhase,
+    pub candidate_id: Option<BlockId>,
+    /// The round at which this subject itself prepares/finalizes a candidate.
+    ///
+    /// Timeout carry evidence currently commits to the prepared certificate
+    /// root rather than embedding its round, so timeout subjects leave this
+    /// field absent and compare their carried candidate independently of the
+    /// selected proof representation.
+    pub prepared_round: Option<Round>,
+}
+
+impl ConsensusSubject {
+    pub fn digest(&self) -> Result<Hash, String> {
+        self.domain.validate()?;
+        if self.domain.chain_id != self.chain_id {
+            return Err("canonical consensus subject domain chain mismatch".to_string());
+        }
+        let bytes = serde_json::to_vec(self)
+            .map_err(|error| format!("canonical consensus subject serialize failed: {error}"))?;
+        Ok(Hash::from_domain_bytes(
+            "SYNERGY_CONSENSUS_SUBJECT_V1",
+            &bytes,
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ConsensusDomain {
+    pub chain_id: ChainId,
+    pub chain_incarnation: u64,
+    pub genesis_hash: Hash,
+}
+
+impl ConsensusDomain {
+    pub fn validate(&self) -> Result<(), String> {
+        self.chain_id.require_testnet_v3()?;
+        if self.chain_incarnation != TESTNET_V3_FRESH_P3_CHAIN_INCARNATION
+            || self.genesis_hash.is_zero()
+        {
+            return Err("wrong or incomplete Chain 1266 consensus domain".to_string());
+        }
+        Ok(())
+    }
+
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, String> {
+        self.validate()?;
+        serde_json::to_vec(self)
+            .map_err(|error| format!("canonical consensus domain serialize failed: {error}"))
+    }
+}
+
+pub fn current_consensus_domain() -> Result<ConsensusDomain, String> {
+    let genesis = crate::genesis::canonical_genesis()?;
+    let domain = ConsensusDomain {
+        chain_id: ChainId(genesis.chain_id()),
+        chain_incarnation: genesis.chain_incarnation(),
+        genesis_hash: Hash::from_hex(genesis.hash())?,
+    };
+    domain.validate()?;
+    Ok(domain)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -989,6 +1187,42 @@ impl Vote {
         })
         .map_err(|error| format!("vote signing payload serialize failed: {error}"))
     }
+
+    pub fn consensus_subject(&self) -> Result<ConsensusSubject, String> {
+        let carries_candidate = !self.block_id.0.is_empty();
+        match self.phase {
+            VotePhase::Validate | VotePhase::Finality => {
+                if !carries_candidate || self.highest_prepared_vc_root.is_some() {
+                    return Err(
+                        "validate/finality vote has a malformed consensus subject".to_string()
+                    );
+                }
+            }
+            VotePhase::Timeout => {
+                if carries_candidate != self.highest_prepared_vc_root.is_some() {
+                    return Err(
+                        "timeout vote prepared proof and candidate must appear together"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        Ok(ConsensusSubject {
+            domain: current_consensus_domain()?,
+            chain_id: self.chain_id,
+            network_id: self.network_id.clone(),
+            protocol_version: self.protocol_version.clone(),
+            epoch: self.epoch,
+            height: self.height,
+            round: self.round,
+            cluster_id: self.cluster_id,
+            height_context_root: self.height_context_root,
+            phase: ConsensusSubjectPhase::from(&self.phase),
+            candidate_id: carries_candidate.then(|| self.block_id.clone()),
+            prepared_round: matches!(self.phase, VotePhase::Validate | VotePhase::Finality)
+                .then_some(self.round),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1020,6 +1254,43 @@ impl QuorumCertificate {
             "SYNERGY_QUORUM_CERTIFICATE_V1",
             &self.canonical_bytes()?,
         ))
+    }
+
+    pub fn consensus_subject(&self) -> Result<ConsensusSubject, String> {
+        let carries_candidate = !self.block_id.0.is_empty();
+        match self.phase {
+            VotePhase::Validate | VotePhase::Finality => {
+                if !carries_candidate || self.highest_prepared_vc_root.is_some() {
+                    return Err(
+                        "validate/finality certificate has a malformed consensus subject"
+                            .to_string(),
+                    );
+                }
+            }
+            VotePhase::Timeout => {
+                if carries_candidate != self.highest_prepared_vc_root.is_some() {
+                    return Err(
+                        "timeout certificate prepared proof and candidate must appear together"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        Ok(ConsensusSubject {
+            domain: current_consensus_domain()?,
+            chain_id: self.chain_id,
+            network_id: self.network_id.clone(),
+            protocol_version: self.protocol_version.clone(),
+            epoch: self.epoch,
+            height: self.height,
+            round: self.round,
+            cluster_id: self.cluster_id,
+            height_context_root: self.height_context_root,
+            phase: ConsensusSubjectPhase::from(&self.phase),
+            candidate_id: carries_candidate.then(|| self.block_id.clone()),
+            prepared_round: matches!(self.phase, VotePhase::Validate | VotePhase::Finality)
+                .then_some(self.round),
+        })
     }
 
     /// The deterministic finalized-authority binding for the next height.
@@ -1105,6 +1376,10 @@ impl ValidationCertificate {
         ))
     }
 
+    pub fn consensus_subject(&self) -> Result<ConsensusSubject, String> {
+        self.as_verification_certificate().consensus_subject()
+    }
+
     pub fn as_verification_certificate(&self) -> QuorumCertificate {
         QuorumCertificate {
             qc_version: self.certificate_version,
@@ -1176,6 +1451,10 @@ impl TimeoutCertificate {
             "SYNERGY_TIMEOUT_CERTIFICATE_V1",
             &self.canonical_bytes()?,
         ))
+    }
+
+    pub fn consensus_subject(&self) -> Result<ConsensusSubject, String> {
+        self.as_verification_certificate().consensus_subject()
     }
 
     pub fn as_verification_certificate(&self) -> QuorumCertificate {
@@ -1974,6 +2253,20 @@ mod tests {
     }
 
     #[test]
+    fn consensus_domain_accepts_only_the_fresh_p3_incarnation() {
+        let fresh = ConsensusDomain {
+            chain_id: ChainId::synergy_testnet_v3(),
+            chain_incarnation: TESTNET_V3_FRESH_P3_CHAIN_INCARNATION,
+            genesis_hash: root("fresh-p3-genesis"),
+        };
+        assert!(fresh.validate().is_ok());
+
+        let mut retired = fresh;
+        retired.chain_incarnation = TESTNET_V3_CHAIN_INCARNATION;
+        assert!(retired.validate().is_err());
+    }
+
+    #[test]
     fn finality_context_root_excludes_valid_qc_signer_subset_evidence() {
         let certificate = QuorumCertificate {
             qc_version: 1,
@@ -2069,6 +2362,13 @@ mod tests {
             dag_version: 1,
             aegis_pqvm_version: "aegis-pqvm-test".to_string(),
             timestamp_ms_consensus_bounded: 1000,
+            base_fee_per_gas_nwei: 40,
+            gas_used: 12_345,
+            gas_limit: 30_000_000,
+            pq_gas_used: 678,
+            pq_gas_limit: 4_000_000,
+            pq_gas_multiplier: 4,
+            fee_market_version: 1,
         };
         let a = header.canonical_bytes().expect("canonical bytes");
         let b = header.canonical_bytes().expect("canonical bytes");

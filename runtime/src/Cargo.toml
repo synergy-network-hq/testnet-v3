@@ -13,6 +13,7 @@ bincode = { workspace = true }
 hex = { workspace = true }
 sha3 = { workspace = true }
 lazy_static = { workspace = true }
+zeroize = { workspace = true }
 sha2 = "0.10"
 
 # Additional dependencies
@@ -66,6 +67,42 @@ path = "bin/synergy-validator-node.rs"
 [[bin]]
 name = "synergy-relayer-node"
 path = "bin/synergy-relayer-node.rs"
+
+[[bin]]
+name = "synergy-observer-light-node"
+path = "bin/synergy-observer-light-node.rs"
+
+[[bin]]
+name = "advance-testnet-v3-chain-incarnation"
+path = "bin/advance-testnet-v3-chain-incarnation.rs"
+
+[[bin]]
+name = "build-chain1266-desired-state"
+path = "bin/build-chain1266-desired-state.rs"
+
+[[bin]]
+name = "build-chain1266-consensus-activation"
+path = "bin/build-chain1266-consensus-activation.rs"
+
+[[bin]]
+name = "build-chain1266-private-ring-material"
+path = "bin/build-chain1266-private-ring-material.rs"
+
+[[bin]]
+name = "sign-chain1266-start-command"
+path = "bin/sign-chain1266-start-command.rs"
+
+[[bin]]
+name = "sign-chain1266-desired-state"
+path = "bin/sign-chain1266-desired-state.rs"
+
+[[bin]]
+name = "sign-chain1266-consensus-activation"
+path = "bin/sign-chain1266-consensus-activation.rs"
+
+[[bin]]
+name = "verify-chain1266-release-authorization"
+path = "bin/verify-chain1266-release-authorization.rs"
 
 [[bin]]
 name = "generate-node-keys"
@@ -128,6 +165,26 @@ name = "testnet-v3-genesis-release-approval"
 path = "bin/testnet-v3-genesis-release-approval.rs"
 
 [[bin]]
+name = "testnet-v3-etdag-governed-artifacts"
+path = "bin/testnet-v3-etdag-governed-artifacts.rs"
+
+[[bin]]
+name = "prepare-fresh-posy-v3-genesis"
+path = "bin/prepare-fresh-posy-v3-genesis.rs"
+
+[[bin]]
+name = "assemble-local-r11-public-artifacts"
+path = "bin/assemble-local-r11-public-artifacts.rs"
+
+[[bin]]
+name = "generate-local-r11-genesis-execution-bundle"
+path = "bin/generate-local-r11-genesis-execution-bundle.rs"
+
+[[bin]]
+name = "bind-local-r11-execution-bundle-candidate"
+path = "bin/bind-local-r11-execution-bundle-candidate.rs"
+
+[[bin]]
 name = "testnet-v3-etdag-admission"
 path = "bin/testnet-v3-etdag-admission.rs"
 
@@ -143,11 +200,22 @@ path = "bin/bind-testnet-v3-consensus-genesis.rs"
 name = "audit-testnet-v3-address-migration"
 path = "bin/audit-testnet-v3-address-migration.rs"
 
+[[bin]]
+name = "posy-simplified-five-node-harness"
+path = "bin/posy-simplified-five-node-harness.rs"
+
+[[bin]]
+name = "posy-simplified-five-driver-harness"
+path = "bin/posy-simplified-five-driver-harness.rs"
+
 [features]
 # Opt-in: the genesis ceremony links the Synergy Address Engine for its approved
 # custody decryptor. Kept behind a feature so the default library build and the
 # release five-run gate are unaffected.
 ceremony = []
+# Development-only escape hatch for exercising the ceremony against an
+# uninstalled Address Engine. Production ceremony builds must not enable this.
+ceremony-dev-engine-override = ["ceremony"]
 
 [[bin]]
 name = "synergy-genesis-ceremony"

@@ -1,5 +1,11 @@
 # Protocol State-Sync Repair Runbook
 
+Status: **historical pre-P3 offline fixture procedure.** Its Chain `1264` /
+`synergy-testnet-v3` examples are retained as compatibility evidence only and
+must not be used for the fresh Chain `1266` / network `testnet` / `posy/3.0`
+chain. P3 repair requires independently verified P3 material, QC/TC ancestry,
+typed Genesis or v3 transition authority, and separate qualification.
+
 This runbook is for offline planning and deterministic test fixtures. It does
 not authorize live validator restarts, binary deployment, archive snapshot use,
 or mutation of live validator chain data.

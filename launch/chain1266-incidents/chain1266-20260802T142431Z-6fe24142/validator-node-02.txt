@@ -1,0 +1,19 @@
+SECTION=SYSTEMD
+MainPID=0
+NRestarts=0
+ExecMainStatus=1
+MemoryCurrent=[not set]
+CPUUsageNSec=647752000
+ActiveState=failed
+SubState=failed
+ConfigSHA256=2edf94d2cde5f0e3b17c0ac3bef167f420ca774a4fd393c65c5a40b7510a21a3
+GenesisSHA256=ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf
+SECTION=METRICS
+
+SECTION=JOURNAL
+Hint: You are currently not seeing messages from other users and the system.
+      Users in groups 'adm', 'systemd-journal' can see all messages.
+      Pass -q to turn off this notice.
+-- No entries --
+
+SECTION=FAULTS

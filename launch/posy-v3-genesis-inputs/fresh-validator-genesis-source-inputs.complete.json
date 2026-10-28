@@ -1,0 +1,23 @@
+{
+  "all_addresses_rederived": true,
+  "all_bundle_hashes_verified": true,
+  "all_peer_ids_rederived": true,
+  "all_public_key_profiles_verified": true,
+  "allocation_bindings_verified": true,
+  "artifact_type": "testnet-v3-fresh-validator-genesis-source-inputs-completion",
+  "chain_id": 1266,
+  "exact_initial_active_validator_ids_verified": true,
+  "exact_validator_ids_verified": true,
+  "initial_active_validator_count": 5,
+  "initial_inactive_validator_count": 16,
+  "network_id": "testnet",
+  "protocol_version": "posy/3.0",
+  "public_only": true,
+  "publication_protocol": "no-clobber-completion-last",
+  "release_id": "testnet-v3",
+  "schema_version": 1,
+  "source_inputs_file": "fresh-validator-genesis-source-inputs.json",
+  "source_inputs_sha256": "fb4a1d273a65817b10ffff8d8239bc6db53492879f84b6f6d1ac1453c479a9e4",
+  "status": "COMPLETE",
+  "validator_count": 21
+}

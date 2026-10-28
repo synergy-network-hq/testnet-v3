@@ -18,6 +18,7 @@ bincode = "2.0.1"
 hex = "0.4.3"
 sha3 = "0.10"
 lazy_static = "1.4"
+zeroize = "1.8.2"
 
 # Post-Quantum Cryptography
 pqcrypto = "0.18"
@@ -38,8 +39,16 @@ rand = "0.8"
 # aegis-pqvm-pallet = { path = "./node_modules/aegis-pqvm/substrate/pallet" }
 
 # WebAssembly VM
-wasmtime = "45.0.2"
+wasmtime = "48.0.7"
 
 [patch.crates-io]
 pqcrypto-internals = { path = "vendor/aegis-pqvm/vendor/pqcrypto-internals" }
 pqcrypto-traits = { path = "vendor/aegis-pqvm/vendor/pqcrypto-traits" }
+
+# Runtime test linking previously exhausted the local development volume.
+# These settings affect test artifacts only; production profiles and protocol
+# semantics are unchanged. They reduce debug-object duplication so focused and
+# eventual integration tests can retain filesystem headroom.
+[profile.test]
+debug = 0
+incremental = false

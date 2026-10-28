@@ -525,7 +525,7 @@ fn keygen(
         algorithm: compiler::artifacts::SYNQ_TESTNET_SIGNATURE_ALGORITHM.to_string(),
         chain_id: compiler::artifacts::SYNQ_TESTNET_CHAIN_ID,
         network_id: network_id.clone(),
-        address: address.to_testnet_debug_string(),
+        address: address.to_execution_signer_id(),
         public_key_hex: hex::encode(&public_key_bytes),
         private_key_hex: hex::encode(&private_key_bytes),
     };
@@ -621,7 +621,7 @@ fn sign_deploy(options: SignDeployOptions<'_>) -> Result<(), String> {
         &NetworkId(network_id.clone()),
     )
     .map_err(|e| format!("aegis-pqsynq address derivation failed: {e}"))?;
-    if signer_address.to_testnet_debug_string() != key.address {
+    if signer_address.to_execution_signer_id() != key.address {
         return Err(
             "Private key file public key does not derive to its recorded SynQ address".to_string(),
         );
@@ -724,7 +724,7 @@ fn verify_deploy(
         })?;
 
     println!("✓ Deploy envelope verified through aegis-pqsynq");
-    println!("deployer={}", verified.deployer.to_testnet_debug_string());
+    println!("deployer={}", verified.deployer.to_execution_signer_id());
     println!("domain=SYNQ_CONTRACT_DEPLOY_V1");
     println!("algorithm=ML-DSA-87");
     println!("chain_id={chain}");
@@ -798,7 +798,7 @@ fn sign_call(options: SignCallOptions<'_>) -> Result<(), String> {
         &NetworkId(network_id.clone()),
     )
     .map_err(|e| format!("aegis-pqsynq address derivation failed: {e}"))?;
-    if signer_address.to_testnet_debug_string() != key.address {
+    if signer_address.to_execution_signer_id() != key.address {
         return Err(
             "Private key file public key does not derive to its recorded SynQ address".to_string(),
         );
@@ -864,7 +864,7 @@ fn sign_call(options: SignCallOptions<'_>) -> Result<(), String> {
     println!("args_hash={}", hex::encode(encoded_args_hash));
     println!(
         "contract={}",
-        envelope.contract_address.to_testnet_debug_string()
+        envelope.contract_address.to_execution_signer_id()
     );
     println!("signer={}", key.address);
     println!("payload_hash={}", hex::encode(payload_hash));
@@ -901,10 +901,10 @@ fn verify_call(
         .map_err(|e| format!("aegis-pqsynq call verification failed: {} ({e})", e.code()))?;
 
     println!("✓ Call envelope verified through aegis-pqsynq");
-    println!("caller={}", verified.caller.to_testnet_debug_string());
+    println!("caller={}", verified.caller.to_execution_signer_id());
     println!(
         "contract={}",
-        verified.contract_address.to_testnet_debug_string()
+        verified.contract_address.to_execution_signer_id()
     );
     println!("domain=SYNQ_CONTRACT_CALL_V1");
     println!("algorithm=ML-DSA-87");

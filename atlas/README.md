@@ -13,6 +13,11 @@ economics, and PoSy/ETDAG inputs are complete.
 network ID, genesis hash, finalized head, validator registry, fee schedule,
 ETDAG status, and token endpoint before Atlas is permitted to ingest data.
 
-Do not run `ops/reset-schema.sh` until the signed final Testnet-v3 network
-manifest and a live Testnet-v3 RPC endpoint are available. The script verifies
-the RPC identity before it writes metadata or enables indexer work.
+The full-reset controller first runs `ops/reset-schema.sh --offline-reset`
+while every chain role is stopped. That mode validates the signed-release
+network configuration, destroys all old chain-derived tables, creates an
+empty incarnation-aware schema, and deliberately leaves `atlas_network`
+unbound. After the direct validator 100-block OPERATIONAL gate, the controller
+runs the normal mode: it verifies the live RPC identity, recreates the still
+empty schema, binds the incarnation-4 network row, and only then starts Atlas
+ingestion.

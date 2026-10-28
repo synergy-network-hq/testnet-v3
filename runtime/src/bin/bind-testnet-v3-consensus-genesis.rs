@@ -92,13 +92,18 @@ fn main() {
     let root = repo();
     let parameters = load_finalized_consensus_parameters(root.join(PARAMETERS_FILE))
         .unwrap_or_else(|error| fail(format!("load finalized parameters: {error}")));
-    if parameters.manifest.governance_approval_id != DECISION_ID
-        || parameters.manifest.epoch_length_slots != Some(1_000)
-        || parameters.manifest.target_block_time_ms != 2_000
-        || parameters.manifest.proposal_timeout_ms != 1_500
-        || parameters.manifest.prevote_timeout_ms != 1_500
-        || parameters.manifest.precommit_timeout_ms != 1_500
-        || parameters.manifest.max_round_timeout_ms != 10_000
+    let manifest = parameters.manifest.as_posy().unwrap_or_else(|error| {
+        fail(format!(
+            "legacy PoSy binding requires PoSy parameters: {error}"
+        ))
+    });
+    if manifest.governance_approval_id != DECISION_ID
+        || manifest.epoch_length_slots != Some(1_000)
+        || manifest.target_block_time_ms != 2_000
+        || manifest.proposal_timeout_ms != 1_500
+        || manifest.prevote_timeout_ms != 1_500
+        || manifest.precommit_timeout_ms != 1_500
+        || manifest.max_round_timeout_ms != 10_000
     {
         fail("manifest does not match the approved Testnet-v3 launch timing profile");
     }

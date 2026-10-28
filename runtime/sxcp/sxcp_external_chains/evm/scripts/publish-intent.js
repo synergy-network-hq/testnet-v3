@@ -1,9 +1,11 @@
-const hre = require("hardhat");
-const { loadDeployment, parseArgs, saveRuntime } = require("./lib/common");
+import { network } from "hardhat";
+import { loadDeployment, parseArgs, saveRuntime } from "./lib/common.js";
+
+const { ethers, networkName } = await network.create(parseArgs(process.argv.slice(2)).network);
 
 function buildIntentId(sender, sourceChainId, destinationChainId, scopeDigest, salt) {
-  return hre.ethers.keccak256(
-    hre.ethers.solidityPacked(
+  return ethers.keccak256(
+    ethers.solidityPacked(
       ["address", "uint256", "uint256", "bytes32", "string"],
       [sender, sourceChainId, destinationChainId, scopeDigest, salt]
     )
@@ -12,34 +14,34 @@ function buildIntentId(sender, sourceChainId, destinationChainId, scopeDigest, s
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const source = args.source || hre.network.name;
+  const source = args.source || networkName;
   const destination = args.destination;
 
   if (!destination) {
     throw new Error("Missing --destination <network>");
   }
 
-  if (source !== hre.network.name) {
-    throw new Error(`Run this script on --network ${source}. Current network: ${hre.network.name}`);
+  if (source !== networkName) {
+    throw new Error(`Run this script on --network ${source}. Current network: ${networkName}`);
   }
 
   const sourceDeployment = loadDeployment(source);
   const destinationDeployment = loadDeployment(destination);
   const destinationChainId = Number(destinationDeployment.chainId);
 
-  const [sender] = await hre.ethers.getSigners();
-  const sourceNetwork = await hre.ethers.provider.getNetwork();
+  const [sender] = await ethers.getSigners();
+  const sourceNetwork = await ethers.provider.getNetwork();
   const sourceChainId = Number(sourceNetwork.chainId);
 
   const scopeText = process.env.INTENT_SCOPE_TEXT || "SXCP_TESTNET_SCOPE:SEPOLIA_AMOY";
-  const scopeDigest = hre.ethers.keccak256(hre.ethers.toUtf8Bytes(scopeText));
+  const scopeDigest = ethers.keccak256(ethers.toUtf8Bytes(scopeText));
   const expirySeconds = Number(process.env.INTENT_EXPIRY_SECONDS || 3600);
   const expiry = Math.floor(Date.now() / 1000) + expirySeconds;
   const nonce = BigInt(process.env.INTENT_NONCE || Date.now());
   const salt = process.env.INTENT_SALT || `${Date.now()}`;
   const intentId = buildIntentId(sender.address, sourceChainId, destinationChainId, scopeDigest, salt);
 
-  const intentHub = await hre.ethers.getContractAt(
+  const intentHub = await ethers.getContractAt(
     "SXCPIntentHub",
     sourceDeployment.contracts.sxcpIntentHub
   );

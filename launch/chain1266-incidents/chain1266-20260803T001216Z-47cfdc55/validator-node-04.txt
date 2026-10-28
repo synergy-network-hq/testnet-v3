@@ -1,0 +1,15 @@
+SECTION=SYSTEMD
+MainPID=0
+NRestarts=0
+ExecMainStatus=1
+MemoryCurrent=[not set]
+CPUUsageNSec=368483150000
+ActiveState=failed
+SubState=failed
+ConfigSHA256=cec4f21314799f6e167a6f115ada49caf7b9c33f4f520ad7583e9f75b2692ba4
+GenesisSHA256=ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf
+SECTION=METRICS
+
+SECTION=JOURNAL
+
+SECTION=FAULTS

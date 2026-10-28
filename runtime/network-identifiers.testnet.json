@@ -299,7 +299,7 @@
     "gas_fee_formula": "fee_nWei = gas_limit * gas_price_nWei",
     "gas_unit": "nWei",
     "mainnet_name": "Synergy Token",
-    "name": "Synergy Testnet Token",
+    "name": "Synergy Testnet Coin",
     "nwei_per_snrg": "1000000000",
     "symbol": "SNRG"
   },
@@ -450,7 +450,7 @@
       "chainName": "Synergy Testnet",
       "nativeCurrency": {
         "decimals": 9,
-        "name": "Synergy Testnet Token",
+        "name": "Synergy Testnet Coin",
         "symbol": "SNRG"
       },
       "rpcUrls": [

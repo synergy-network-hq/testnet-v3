@@ -123,13 +123,19 @@ def normalize_endpoint_parts(host: str, port: int) -> EndpointParts | None:
     return EndpointParts(host=clean_host, port=port, endpoint=endpoint)
 
 
-def endpoint_rejection_reason(endpoint: str) -> str | None:
+def endpoint_rejection_reason(
+    endpoint: str,
+    *,
+    allow_qualification_loopback: bool = False,
+) -> str | None:
     parts = parse_endpoint(endpoint)
     if not parts:
         return "missing or invalid public_endpoint"
 
     host = parts.host.lower().rstrip(".")
     if host in PRIVATE_HOSTNAMES:
+        if allow_qualification_loopback:
+            return None
         return "private hostname is not allowed"
     if host == "0.0.0.0":
         return "unspecified address is not allowed"
@@ -142,6 +148,8 @@ def endpoint_rejection_reason(endpoint: str) -> str | None:
     if ip.is_unspecified:
         return "unspecified address is not allowed"
     if ip.is_loopback:
+        if allow_qualification_loopback:
+            return None
         return "loopback address is not allowed"
     if ip.is_link_local:
         return "link-local address is not allowed"
@@ -196,6 +204,7 @@ class SeedConfig:
     dnsaddr_bootstrap: list[str] = field(default_factory=list)
     replication_peers: list[str] = field(default_factory=list)
     public_bootstrap_roles: list[str] = field(default_factory=lambda: ["relayer"])
+    allow_private_qualification_endpoints: bool = False
 
 
 class SeedState:
@@ -238,7 +247,10 @@ class SeedState:
             if not record:
                 continue
             endpoint = record["public_endpoint"]
-            if endpoint_rejection_reason(endpoint):
+            if endpoint_rejection_reason(
+                endpoint,
+                allow_qualification_loopback=self.config.allow_private_qualification_endpoints,
+            ):
                 continue
             if self.config.static_dialback_on_start or entry.get("require_dialback"):
                 self._refresh_dialback(record, now)
@@ -386,7 +398,10 @@ class SeedState:
         parts = parse_endpoint(endpoint)
         if not parts:
             return False, "invalid endpoint"
-        reason = endpoint_rejection_reason(parts.endpoint)
+        reason = endpoint_rejection_reason(
+            parts.endpoint,
+            allow_qualification_loopback=self.config.allow_private_qualification_endpoints,
+        )
         if reason:
             return False, reason
         try:
@@ -424,7 +439,10 @@ class SeedState:
             if role and record.get("role") != role:
                 continue
             endpoint = str(record.get("public_endpoint") or "")
-            if endpoint_rejection_reason(endpoint):
+            if endpoint_rejection_reason(
+                endpoint,
+                allow_qualification_loopback=self.config.allow_private_qualification_endpoints,
+            ):
                 continue
             if not record.get("static") and (
                 record.get("dialback_status") != "success"
@@ -567,7 +585,10 @@ class SeedState:
                 "seed_id": self.config.seed_id,
             }
         endpoint = record["public_endpoint"]
-        reason = endpoint_rejection_reason(endpoint)
+        reason = endpoint_rejection_reason(
+            endpoint,
+            allow_qualification_loopback=self.config.allow_private_qualification_endpoints,
+        )
         if reason:
             return HTTPStatus.BAD_REQUEST, {
                 "ok": False,
@@ -621,7 +642,14 @@ class SeedState:
         active = {str(record["public_endpoint"]) for record in self.public_bootstrap_records()}
         active.update(CANONICAL_PUBLIC_RELAYER_RECOMMENDATIONS)
         active.discard(exclude)
-        return sorted(endpoint for endpoint in active if not endpoint_rejection_reason(endpoint))
+        return sorted(
+            endpoint
+            for endpoint in active
+            if not endpoint_rejection_reason(
+                endpoint,
+                allow_qualification_loopback=self.config.allow_private_qualification_endpoints,
+            )
+        )
 
     def clear(self) -> None:
         self.dynamic_peers.clear()
@@ -789,6 +817,9 @@ def load_config(path: Path) -> SeedConfig:
         dnsaddr_bootstrap=list(payload.get("dnsaddr_bootstrap", [])),
         replication_peers=list(payload.get("replication_peers", [])),
         public_bootstrap_roles=list(payload.get("public_bootstrap_roles", ["relayer"])),
+        allow_private_qualification_endpoints=bool(
+            payload.get("allow_private_qualification_endpoints", False)
+        ),
     )
 
 
@@ -798,6 +829,14 @@ def main() -> None:
     args = parser.parse_args()
 
     config = load_config(Path(args.config).expanduser())
+    if (
+        config.allow_private_qualification_endpoints
+        and os.environ.get("SYNERGY_CHAIN1266_QUALIFICATION_MODE") != "1"
+    ):
+        raise SystemExit(
+            "allow_private_qualification_endpoints requires "
+            "SYNERGY_CHAIN1266_QUALIFICATION_MODE=1"
+        )
     state = SeedState(config)
     server = ThreadingHTTPServer((config.listen_host, config.port), SeedHandler)
     server.daemon_threads = True

@@ -6,14 +6,16 @@
 //! height.  It is cleared atomically after the height finalizes.
 
 use crate::consensus::typed_finality_store::TypedFinalityStore;
-use crate::synergy_types::{Block, Hash, Height, TimeoutCertificate, ValidationCertificate};
+use crate::synergy_types::{
+    Block, BlockId, Epoch, Hash, Height, Round, TimeoutCertificate, ValidationCertificate,
+};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const TYPED_PREPARED_RECORD_VERSION: u32 = 1;
+pub const TYPED_PREPARED_RECORD_VERSION: u32 = 2;
 const STORE_VERSION: u32 = TYPED_PREPARED_RECORD_VERSION;
 const TYPED_PREPARED_FILE: &str = "typed-posy-prepared.json";
 
@@ -21,9 +23,16 @@ const TYPED_PREPARED_FILE: &str = "typed-posy-prepared.json";
 pub struct TypedPreparedRecord {
     pub record_version: u32,
     pub height: Height,
+    pub epoch: Epoch,
+    pub current_round: Round,
     pub height_context_root: Hash,
+    pub active_validator_set_hash: Hash,
+    pub prepared_round: Round,
+    pub prepared_candidate_id: BlockId,
     pub block: Block,
     pub validation_certificate: ValidationCertificate,
+    /// Highest verified round-transition authority known when this atomic
+    /// recovery snapshot was persisted.
     pub timeout_certificate: Option<TimeoutCertificate>,
 }
 
@@ -81,7 +90,14 @@ impl TypedPreparedStore {
         let record = TypedPreparedRecord {
             record_version: STORE_VERSION,
             height: block.header.height,
+            epoch: block.header.epoch,
+            current_round: timeout_certificate
+                .map(|certificate| certificate.next_round)
+                .unwrap_or(block.header.round),
             height_context_root: block.header.height_context_root,
+            active_validator_set_hash: block.header.active_validator_set_hash,
+            prepared_round: validation_certificate.round,
+            prepared_candidate_id: block.candidate_id()?,
             block: block.clone(),
             validation_certificate: validation_certificate.clone(),
             timeout_certificate: timeout_certificate.cloned(),
@@ -257,10 +273,18 @@ fn validate_record(record: &TypedPreparedRecord) -> Result<(), String> {
     if record.record_version != STORE_VERSION
         || record.height.0 == 0
         || record.height_context_root.is_zero()
+        || record.active_validator_set_hash.is_zero()
         || record.block.header.height != record.height
+        || record.block.header.epoch != record.epoch
         || record.block.header.height_context_root != record.height_context_root
+        || record.block.header.active_validator_set_hash != record.active_validator_set_hash
         || record.validation_certificate.height != record.height
+        || record.validation_certificate.epoch != record.epoch
         || record.validation_certificate.height_context_root != record.height_context_root
+        || record.validation_certificate.active_validator_set_hash
+            != record.active_validator_set_hash
+        || record.validation_certificate.round != record.prepared_round
+        || record.prepared_candidate_id != record.block.candidate_id()?
         || record.validation_certificate.candidate_id != record.block.candidate_id()?
     {
         return Err("typed PoSy prepared record has inconsistent block/VC bindings".to_string());
@@ -274,12 +298,20 @@ fn validate_record(record: &TypedPreparedRecord) -> Result<(), String> {
             && tc.next_round == record.block.header.round
             && record.validation_certificate.round == record.block.header.round;
         if tc.height != record.height
+            || tc.epoch != record.epoch
             || tc.height_context_root != record.height_context_root
+            || tc.active_validator_set_hash != record.active_validator_set_hash
             || tc.next_round.0 <= tc.closing_round.0
+            || record.current_round != tc.next_round
             || (!carries_prepared && !authorizes_prepared_round)
         {
             return Err("typed PoSy prepared record has inconsistent TC bindings".to_string());
         }
+    } else if record.current_round != record.block.header.round {
+        return Err(
+            "typed PoSy prepared record current round lacks timeout-certificate authority"
+                .to_string(),
+        );
     }
     Ok(())
 }

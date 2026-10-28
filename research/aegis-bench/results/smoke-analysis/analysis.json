@@ -1,0 +1,33 @@
+{
+  "classification": "DERIVED",
+  "raw_sample_count": 208,
+  "summary_group_count": 180,
+  "failed_safety_sample_count": 1,
+  "failed_safety_results": [
+    "panic_caught"
+  ],
+  "bootstrap_resamples": 2000,
+  "bootstrap_confidence": 0.95,
+  "bootstrap_statistic": "median",
+  "bootstrap_seed": "sha256 of grouping key",
+  "percentile_method": "linear interpolation at (n-1)*p",
+  "outlier_policy": "MAD flags reported; all samples retained",
+  "inputs": [
+    {
+      "path": "research/aegis-bench/results/smoke-primitive.csv",
+      "sha256": "09eb830306d6e94183b291134751a3bbbd693932e43c265b30e154d2a4cc30ad",
+      "rows": "96"
+    },
+    {
+      "path": "research/aegis-bench/results/smoke-aegis.csv",
+      "sha256": "e87adbe947e3755b24a911684d0fa570f75f65b5ce7a2e8c59905bf7e5ac1a24",
+      "rows": "112"
+    }
+  ],
+  "plots": [
+    "research/aegis-bench/results/smoke-analysis/primitive-sign-verify-512B.svg",
+    "research/aegis-bench/results/smoke-analysis/aegis-cache-miss-vs-hit-512B.svg",
+    "research/aegis-bench/results/smoke-analysis/verification-message-scaling.svg",
+    "research/aegis-bench/results/smoke-analysis/cryptographic-object-sizes.svg"
+  ]
+}

@@ -28,6 +28,7 @@ function identityFrom(result) {
   const source = Object.keys(identity).length ? identity : root;
   return {
     chainId: source.chain_id ?? source.chainId,
+    chainIncarnation: source.chain_incarnation ?? source.chainIncarnation,
     networkId: source.network_id ?? source.networkId,
     genesisHash: source.genesis_hash ?? source.genesisHash,
   };
@@ -36,6 +37,7 @@ function identityFrom(result) {
 export async function preflightLiveRpc(config, fetchImpl = fetch) {
   const identity = identityFrom(await rpcCall(config.endpoints.rpc, 'synergy_chainId', fetchImpl));
   if (identity.chainId !== config.chain_id) fail(`RPC chain ID ${String(identity.chainId)} does not match ${config.chain_id}`);
+  if (identity.chainIncarnation !== config.chain_incarnation) fail(`RPC chain incarnation ${String(identity.chainIncarnation)} does not match ${config.chain_incarnation}`);
   if (identity.networkId !== config.network_id) fail(`RPC network ID ${String(identity.networkId)} does not match ${config.network_id}`);
   if (identity.genesisHash !== config.genesis_hash) fail('RPC genesis hash does not match the final network manifest');
 

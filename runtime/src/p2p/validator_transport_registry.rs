@@ -1,4 +1,11 @@
-//! Signed validator transports published by the Innernet coordinator.
+//! Signed validator transports for the fresh Testnet-v3 VPN provider.
+//!
+//! There is intentionally no built-in provider URL or signing key.  A
+//! release must install the public transport-snapshot endpoint and its public
+//! verification key explicitly; otherwise production validator transport
+//! admission stays closed.  This prevents a fresh P3 node from silently
+//! consulting a retired overlay merely because no fresh provider has been
+//! configured yet.
 
 use base64::{engine::general_purpose, Engine as _};
 use ed25519_dalek::{Signature, VerifyingKey};
@@ -13,14 +20,16 @@ use std::path::PathBuf;
 use std::sync::RwLock;
 use std::time::Duration;
 
-const DEFAULT_SNAPSHOT_URL: &str =
-    "https://vpn-coordinator.synergy-network.io/v1/mesh/transports/current";
-const SNAPSHOT_URL_ENV: &str = "SYNERGY_VALIDATOR_TRANSPORT_SNAPSHOT_URL";
-const PUBLIC_KEY_ENV: &str = "SYNERGY_INNERNET_COORDINATOR_PUBLIC_KEY";
-const DEFAULT_PUBLIC_KEY: &str = "ed25519:0tA5eh5BHCPxXFUlHtb5+GOJFPqLhmnxDOqli39Y+iI=";
-const EXPECTED_NETWORK: &str = "synergy-innernet-membership-v1";
-const EXPECTED_MIGRATION_ID: &str = "synergy-testnet-innernet-v19-14450ae4d67455c7";
-const EXPECTED_VERSION: u32 = 1;
+const SNAPSHOT_URL_ENV: &str = "SYNERGY_TESTNET_V3_VALIDATOR_TRANSPORT_SNAPSHOT_URL";
+const PUBLIC_KEY_ENV: &str = "SYNERGY_TESTNET_V3_TRANSPORT_ATTESTATION_PUBLIC_KEY";
+const PROVIDER_PLAN_SHA256_ENV: &str = "SYNERGY_TESTNET_V3_TRANSPORT_PROVIDER_PLAN_SHA256";
+const EXPECTED_NETWORK: &str = "synergy-testnet-v3-validator-transport-v1";
+const EXPECTED_REGISTRY_ID: &str = "synergy-testnet-v3-block-zero-transport-v1";
+const EXPECTED_VERSION: u32 = 2;
+const EXPECTED_CHAIN_ID: u64 = 1266;
+const EXPECTED_NETWORK_ID: &str = "testnet";
+const EXPECTED_RELEASE_ID: &str = "testnet-v3";
+const EXPECTED_PROTOCOL_VERSION: &str = "posy/3.0";
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_SNAPSHOT_BYTES: usize = 256 * 1024;
 
@@ -34,7 +43,12 @@ struct ValidatorTransport {
 struct ValidatorTransportSnapshot {
     version: u32,
     network: String,
-    migration_id: String,
+    registry_id: String,
+    chain_id: u64,
+    network_id: String,
+    release_id: String,
+    protocol_version: String,
+    provider_plan_sha256: String,
     configuration_version: u64,
     transports: Vec<ValidatorTransport>,
     signature: String,
@@ -42,9 +56,15 @@ struct ValidatorTransportSnapshot {
 
 #[derive(Debug, Clone)]
 struct TrustedRegistry {
-    migration_id: String,
+    registry_id: String,
     generation: u64,
     transports: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+struct TransportSnapshotTrust {
+    verifying_key: VerifyingKey,
+    provider_plan_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,12 +101,13 @@ pub(crate) fn has_validator_transports() -> bool {
 }
 
 pub(crate) fn refresh_validator_transports() -> Result<ValidatorTransportRefresh, String> {
-    let snapshot_url =
-        std::env::var(SNAPSHOT_URL_ENV).unwrap_or_else(|_| DEFAULT_SNAPSHOT_URL.to_string());
+    let snapshot_url = std::env::var(SNAPSHOT_URL_ENV).map_err(|_| {
+        format!("fresh validator transport snapshot URL is not configured ({SNAPSHOT_URL_ENV})")
+    })?;
     let url = validate_snapshot_url(&snapshot_url)?;
-    let verifying_key = configured_public_key()?;
+    let trust = configured_transport_snapshot_trust()?;
     if !has_validator_transports() {
-        load_persisted_snapshot(&verifying_key)?;
+        load_persisted_snapshot(&trust)?;
     }
     let client = reqwest::blocking::Client::builder()
         .timeout(SNAPSHOT_TIMEOUT)
@@ -119,7 +140,7 @@ pub(crate) fn refresh_validator_transports() -> Result<ValidatorTransportRefresh
     }
     let snapshot = serde_json::from_slice::<ValidatorTransportSnapshot>(&bytes)
         .map_err(|error| format!("invalid validator transport snapshot JSON: {error}"))?;
-    accept_snapshot(&snapshot, &verifying_key)
+    accept_snapshot(&snapshot, &trust)
 }
 
 fn validate_snapshot_url(raw: &str) -> Result<Url, String> {
@@ -138,36 +159,52 @@ fn validate_snapshot_url(raw: &str) -> Result<Url, String> {
     Ok(url)
 }
 
-fn configured_public_key() -> Result<VerifyingKey, String> {
-    let value = std::env::var(PUBLIC_KEY_ENV).unwrap_or_else(|_| DEFAULT_PUBLIC_KEY.to_string());
-    decode_public_key(&value)
+fn configured_transport_snapshot_trust() -> Result<TransportSnapshotTrust, String> {
+    let value = std::env::var(PUBLIC_KEY_ENV).map_err(|_| {
+        format!(
+            "fresh validator transport attestation public key is not configured ({PUBLIC_KEY_ENV})"
+        )
+    })?;
+    let provider_plan_sha256 = std::env::var(PROVIDER_PLAN_SHA256_ENV).map_err(|_| {
+        format!(
+            "fresh validator transport provider-plan hash is not configured ({PROVIDER_PLAN_SHA256_ENV})"
+        )
+    })?;
+    if !is_lower_hex_64(&provider_plan_sha256) {
+        return Err(
+            "fresh validator transport provider-plan hash must be lowercase SHA-256".to_string(),
+        );
+    }
+    Ok(TransportSnapshotTrust {
+        verifying_key: decode_public_key(&value)?,
+        provider_plan_sha256,
+    })
 }
 
 fn decode_public_key(value: &str) -> Result<VerifyingKey, String> {
-    let encoded = value
-        .trim()
-        .strip_prefix("ed25519:")
-        .ok_or_else(|| "coordinator public key must use the ed25519: prefix".to_string())?;
+    let encoded = value.trim().strip_prefix("ed25519:").ok_or_else(|| {
+        "transport attestation public key must use the ed25519: prefix".to_string()
+    })?;
     let bytes: [u8; 32] = general_purpose::STANDARD
         .decode(encoded)
-        .map_err(|error| format!("invalid coordinator public key base64: {error}"))?
+        .map_err(|error| format!("invalid transport attestation public key base64: {error}"))?
         .try_into()
-        .map_err(|_| "coordinator public key must decode to 32 bytes".to_string())?;
+        .map_err(|_| "transport attestation public key must decode to 32 bytes".to_string())?;
     VerifyingKey::from_bytes(&bytes)
-        .map_err(|error| format!("invalid coordinator Ed25519 public key: {error}"))
+        .map_err(|error| format!("invalid transport attestation Ed25519 public key: {error}"))
 }
 
 fn accept_snapshot(
     snapshot: &ValidatorTransportSnapshot,
-    verifying_key: &VerifyingKey,
+    trust: &TransportSnapshotTrust,
 ) -> Result<ValidatorTransportRefresh, String> {
-    let transports = validate_and_verify_snapshot(snapshot, verifying_key)?;
+    let transports = validate_and_verify_snapshot(snapshot, trust)?;
     install_snapshot(snapshot, transports)
 }
 
 fn validate_and_verify_snapshot(
     snapshot: &ValidatorTransportSnapshot,
-    verifying_key: &VerifyingKey,
+    trust: &TransportSnapshotTrust,
 ) -> Result<HashMap<String, String>, String> {
     if snapshot.version != EXPECTED_VERSION {
         return Err(format!(
@@ -181,11 +218,24 @@ fn validate_and_verify_snapshot(
             snapshot.network
         ));
     }
-    if snapshot.migration_id != EXPECTED_MIGRATION_ID {
+    if snapshot.registry_id != EXPECTED_REGISTRY_ID {
         return Err(format!(
-            "unexpected validator transport snapshot migration_id {}",
-            snapshot.migration_id
+            "unexpected validator transport snapshot registry_id {}",
+            snapshot.registry_id
         ));
+    }
+    if snapshot.chain_id != EXPECTED_CHAIN_ID
+        || snapshot.network_id != EXPECTED_NETWORK_ID
+        || snapshot.release_id != EXPECTED_RELEASE_ID
+        || snapshot.protocol_version != EXPECTED_PROTOCOL_VERSION
+    {
+        return Err("unexpected validator transport snapshot fresh-P3 network tuple".to_string());
+    }
+    if snapshot.provider_plan_sha256 != trust.provider_plan_sha256 {
+        return Err(
+            "validator transport snapshot does not bind the configured fresh provider plan"
+                .to_string(),
+        );
     }
     if snapshot.configuration_version == 0 {
         return Err(
@@ -233,7 +283,8 @@ fn validate_and_verify_snapshot(
 
     let signed_payload = signed_payload_bytes(snapshot)?;
     let signature = decode_signature(&snapshot.signature)?;
-    verifying_key
+    trust
+        .verifying_key
         .verify_strict(&signed_payload, &signature)
         .map_err(|_| "invalid validator transport snapshot signature".to_string())?;
     Ok(map)
@@ -256,7 +307,12 @@ fn signed_payload_bytes(snapshot: &ValidatorTransportSnapshot) -> Result<Vec<u8>
     serde_json::to_vec(&json!({
         "version": snapshot.version,
         "network": snapshot.network,
-        "migration_id": snapshot.migration_id,
+        "registry_id": snapshot.registry_id,
+        "chain_id": snapshot.chain_id,
+        "network_id": snapshot.network_id,
+        "release_id": snapshot.release_id,
+        "protocol_version": snapshot.protocol_version,
+        "provider_plan_sha256": snapshot.provider_plan_sha256,
         "configuration_version": snapshot.configuration_version,
         "transports": snapshot.transports,
     }))
@@ -267,13 +323,13 @@ fn persisted_snapshot_path() -> PathBuf {
     crate::utils::resolve_data_path("data/validator_transport_registry.json")
 }
 
-fn load_persisted_snapshot(verifying_key: &VerifyingKey) -> Result<(), String> {
+fn load_persisted_snapshot(trust: &TransportSnapshotTrust) -> Result<(), String> {
     let path = persisted_snapshot_path();
-    load_persisted_snapshot_from_path(verifying_key, &path)
+    load_persisted_snapshot_from_path(trust, &path)
 }
 
 fn load_persisted_snapshot_from_path(
-    verifying_key: &VerifyingKey,
+    trust: &TransportSnapshotTrust,
     path: &std::path::Path,
 ) -> Result<(), String> {
     if !path.is_file() {
@@ -298,13 +354,13 @@ fn load_persisted_snapshot_from_path(
                 path.display()
             )
         })?;
-    let transports = validate_and_verify_snapshot(&snapshot, verifying_key)?;
+    let transports = validate_and_verify_snapshot(&snapshot, trust)?;
     let mut state = LAST_KNOWN_GOOD
         .write()
         .map_err(|_| "validator transport registry lock is poisoned".to_string())?;
     install_snapshot_into(
         &mut state,
-        &snapshot.migration_id,
+        &snapshot.registry_id,
         snapshot.configuration_version,
         transports,
     )?;
@@ -353,7 +409,7 @@ fn install_snapshot(
     let previous = state.clone();
     let result = install_snapshot_into(
         &mut state,
-        &snapshot.migration_id,
+        &snapshot.registry_id,
         snapshot.configuration_version,
         transports,
     )?;
@@ -368,14 +424,14 @@ fn install_snapshot(
 
 fn install_snapshot_into(
     state: &mut Option<TrustedRegistry>,
-    migration_id: &str,
+    registry_id: &str,
     generation: u64,
     transports: HashMap<String, String>,
 ) -> Result<ValidatorTransportRefresh, String> {
     match state.as_ref() {
         None => {
             *state = Some(TrustedRegistry {
-                migration_id: migration_id.to_string(),
+                registry_id: registry_id.to_string(),
                 generation,
                 transports,
             });
@@ -384,9 +440,9 @@ fn install_snapshot_into(
                 changed: true,
             })
         }
-        Some(previous) if previous.migration_id != migration_id => Err(format!(
-            "validator transport snapshot migration changed from {} to {}",
-            previous.migration_id, migration_id
+        Some(previous) if previous.registry_id != registry_id => Err(format!(
+            "validator transport snapshot registry changed from {} to {}",
+            previous.registry_id, registry_id
         )),
         Some(previous) if generation < previous.generation => Err(format!(
             "validator transport snapshot rollback: generation {} is older than {}",
@@ -407,7 +463,7 @@ fn install_snapshot_into(
         }
         Some(_) => {
             *state = Some(TrustedRegistry {
-                migration_id: migration_id.to_string(),
+                registry_id: registry_id.to_string(),
                 generation,
                 transports,
             });
@@ -428,6 +484,13 @@ fn is_canonical_validator_address(value: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
 }
 
+fn is_lower_hex_64(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn is_valid_validator_dial_address(value: &str) -> bool {
     let Some((host, port)) = value.rsplit_once(':') else {
         return false;
@@ -435,7 +498,7 @@ fn is_valid_validator_dial_address(value: &str) -> bool {
     if port != "5622" {
         return false;
     }
-    let Some(suffix) = host.strip_prefix("10.70.10.") else {
+    let Some(suffix) = host.strip_prefix("10.69.10.") else {
         return false;
     };
     if suffix.is_empty() || (suffix.len() > 1 && suffix.starts_with('0')) {
@@ -461,7 +524,12 @@ mod tests {
         let mut snapshot = ValidatorTransportSnapshot {
             version: EXPECTED_VERSION,
             network: EXPECTED_NETWORK.to_string(),
-            migration_id: EXPECTED_MIGRATION_ID.to_string(),
+            registry_id: EXPECTED_REGISTRY_ID.to_string(),
+            chain_id: EXPECTED_CHAIN_ID,
+            network_id: EXPECTED_NETWORK_ID.to_string(),
+            release_id: EXPECTED_RELEASE_ID.to_string(),
+            protocol_version: EXPECTED_PROTOCOL_VERSION.to_string(),
+            provider_plan_sha256: "a".repeat(64),
             configuration_version: generation,
             transports: vec![ValidatorTransport {
                 validator_address: "synv1validator0001".to_string(),
@@ -478,53 +546,65 @@ mod tests {
         snapshot
     }
 
-    fn keypair() -> (SigningKey, VerifyingKey) {
+    fn keypair() -> (SigningKey, TransportSnapshotTrust) {
         let signing_key = SigningKey::from_bytes(&TEST_SEED);
-        let verifying_key = signing_key.verifying_key();
-        (signing_key, verifying_key)
+        let trust = TransportSnapshotTrust {
+            verifying_key: signing_key.verifying_key(),
+            provider_plan_sha256: "a".repeat(64),
+        };
+        (signing_key, trust)
     }
 
     #[test]
     fn valid_signature_is_accepted() {
-        let (signing_key, verifying_key) = keypair();
-        let snapshot = signed_snapshot(&signing_key, 1, "10.70.10.1:5622");
-        let transports = validate_and_verify_snapshot(&snapshot, &verifying_key).unwrap();
+        let (signing_key, trust) = keypair();
+        let snapshot = signed_snapshot(&signing_key, 1, "10.69.10.1:5622");
+        let transports = validate_and_verify_snapshot(&snapshot, &trust).unwrap();
         assert_eq!(
             transports.get("synv1validator0001"),
-            Some(&"10.70.10.1:5622".to_string())
+            Some(&"10.69.10.1:5622".to_string())
         );
     }
 
     #[test]
     fn tampering_rejection() {
-        let (signing_key, verifying_key) = keypair();
-        let mut snapshot = signed_snapshot(&signing_key, 1, "10.70.10.1:5622");
-        snapshot.migration_id = "tampered".to_string();
-        let error = validate_and_verify_snapshot(&snapshot, &verifying_key).unwrap_err();
-        assert!(error.contains("migration_id"));
+        let (signing_key, trust) = keypair();
+        let mut snapshot = signed_snapshot(&signing_key, 1, "10.69.10.1:5622");
+        snapshot.registry_id = "tampered".to_string();
+        let error = validate_and_verify_snapshot(&snapshot, &trust).unwrap_err();
+        assert!(error.contains("registry_id"));
+    }
+
+    #[test]
+    fn provider_plan_binding_mismatch_is_rejected_before_signature_use() {
+        let (signing_key, trust) = keypair();
+        let mut snapshot = signed_snapshot(&signing_key, 1, "10.69.10.1:5622");
+        snapshot.provider_plan_sha256 = "b".repeat(64);
+        let error = validate_and_verify_snapshot(&snapshot, &trust).unwrap_err();
+        assert!(error.contains("provider plan"));
     }
 
     #[test]
     fn invalid_transport_is_rejected() {
-        let (signing_key, verifying_key) = keypair();
-        let snapshot = signed_snapshot(&signing_key, 1, "10.70.11.1:5622");
-        let error = validate_and_verify_snapshot(&snapshot, &verifying_key).unwrap_err();
+        let (signing_key, trust) = keypair();
+        let snapshot = signed_snapshot(&signing_key, 1, "10.69.11.1:5622");
+        let error = validate_and_verify_snapshot(&snapshot, &trust).unwrap_err();
         assert!(error.contains("dial address"));
     }
 
     #[test]
     fn identical_same_generation_is_unchanged() {
         let mut state = None;
-        let (signing_key, verifying_key) = keypair();
-        let snapshot = signed_snapshot(&signing_key, 7, "10.70.10.7:5622");
-        let transports = validate_and_verify_snapshot(&snapshot, &verifying_key).unwrap();
+        let (signing_key, trust) = keypair();
+        let snapshot = signed_snapshot(&signing_key, 7, "10.69.10.7:5622");
+        let transports = validate_and_verify_snapshot(&snapshot, &trust).unwrap();
         assert!(
-            install_snapshot_into(&mut state, EXPECTED_MIGRATION_ID, 7, transports.clone())
+            install_snapshot_into(&mut state, EXPECTED_REGISTRY_ID, 7, transports.clone())
                 .unwrap()
                 .changed
         );
         let result =
-            install_snapshot_into(&mut state, EXPECTED_MIGRATION_ID, 7, transports).unwrap();
+            install_snapshot_into(&mut state, EXPECTED_REGISTRY_ID, 7, transports).unwrap();
         assert_eq!(result.generation, 7);
         assert!(!result.changed);
     }
@@ -532,13 +612,13 @@ mod tests {
     #[test]
     fn same_generation_with_different_map_is_equivocation() {
         let mut state = None;
-        let (signing_key, verifying_key) = keypair();
-        let first = signed_snapshot(&signing_key, 8, "10.70.10.8:5622");
-        let second = signed_snapshot(&signing_key, 8, "10.70.10.9:5622");
-        let first_transports = validate_and_verify_snapshot(&first, &verifying_key).unwrap();
-        let second_transports = validate_and_verify_snapshot(&second, &verifying_key).unwrap();
-        install_snapshot_into(&mut state, EXPECTED_MIGRATION_ID, 8, first_transports).unwrap();
-        let error = install_snapshot_into(&mut state, EXPECTED_MIGRATION_ID, 8, second_transports)
+        let (signing_key, trust) = keypair();
+        let first = signed_snapshot(&signing_key, 8, "10.69.10.8:5622");
+        let second = signed_snapshot(&signing_key, 8, "10.69.10.9:5622");
+        let first_transports = validate_and_verify_snapshot(&first, &trust).unwrap();
+        let second_transports = validate_and_verify_snapshot(&second, &trust).unwrap();
+        install_snapshot_into(&mut state, EXPECTED_REGISTRY_ID, 8, first_transports).unwrap();
+        let error = install_snapshot_into(&mut state, EXPECTED_REGISTRY_ID, 8, second_transports)
             .unwrap_err();
         assert!(error.contains("equivocation"));
     }
@@ -546,33 +626,33 @@ mod tests {
     #[test]
     fn older_generation_is_rollback() {
         let mut state = None;
-        let (signing_key, verifying_key) = keypair();
-        let newer = signed_snapshot(&signing_key, 9, "10.70.10.9:5622");
-        let older = signed_snapshot(&signing_key, 8, "10.70.10.8:5622");
-        let newer_transports = validate_and_verify_snapshot(&newer, &verifying_key).unwrap();
-        let older_transports = validate_and_verify_snapshot(&older, &verifying_key).unwrap();
-        install_snapshot_into(&mut state, EXPECTED_MIGRATION_ID, 9, newer_transports).unwrap();
-        let error = install_snapshot_into(&mut state, EXPECTED_MIGRATION_ID, 8, older_transports)
+        let (signing_key, trust) = keypair();
+        let newer = signed_snapshot(&signing_key, 9, "10.69.10.9:5622");
+        let older = signed_snapshot(&signing_key, 8, "10.69.10.8:5622");
+        let newer_transports = validate_and_verify_snapshot(&newer, &trust).unwrap();
+        let older_transports = validate_and_verify_snapshot(&older, &trust).unwrap();
+        install_snapshot_into(&mut state, EXPECTED_REGISTRY_ID, 9, newer_transports).unwrap();
+        let error = install_snapshot_into(&mut state, EXPECTED_REGISTRY_ID, 8, older_transports)
             .unwrap_err();
         assert!(error.contains("rollback"));
     }
 
     #[test]
-    fn different_migration_is_rejected_even_at_newer_generation() {
+    fn different_registry_is_rejected_even_at_newer_generation() {
         let mut state = None;
         let mut first = HashMap::new();
         first.insert(
             "synv1validator0001".to_string(),
-            "10.70.10.1:5622".to_string(),
+            "10.69.10.1:5622".to_string(),
         );
-        install_snapshot_into(&mut state, EXPECTED_MIGRATION_ID, 1, first.clone()).unwrap();
-        let error = install_snapshot_into(&mut state, "other-migration", 2, first).unwrap_err();
-        assert!(error.contains("migration changed"));
+        install_snapshot_into(&mut state, EXPECTED_REGISTRY_ID, 1, first.clone()).unwrap();
+        let error = install_snapshot_into(&mut state, "other-registry", 2, first).unwrap_err();
+        assert!(error.contains("registry changed"));
     }
 
     #[test]
     fn corrupted_persisted_snapshot_fails_closed() {
-        let (_signing_key, verifying_key) = keypair();
+        let (_signing_key, trust) = keypair();
         let path = crate::utils::test_temp_root(format!(
             "synergy-validator-transport-corrupt-{}-{}.json",
             std::process::id(),
@@ -580,7 +660,7 @@ mod tests {
         ));
         fs::write(&path, b"{not-valid-json").expect("corrupt snapshot fixture should write");
 
-        let error = load_persisted_snapshot_from_path(&verifying_key, &path)
+        let error = load_persisted_snapshot_from_path(&trust, &path)
             .expect_err("corrupted persisted transport state must fail closed");
         assert!(error.contains("invalid persisted validator transport snapshot"));
 

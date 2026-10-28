@@ -1,5 +1,11 @@
 # Public RPC And Atlas Backend Safety
 
+Status: **historical pre-P3 offline tooling and routing reference.** The Chain
+`1264` / `synergy-testnet-v3` command and listed live-routing observations are
+not P3 launch inputs. Do not apply them to fresh Chain `1266` / network
+`testnet` / `posy/3.0`; publish and qualify a P3-specific RPC/Atlas runbook
+after canonical P3 RPC nodes exist.
+
 This runbook covers offline confidence evaluation for public RPC and Atlas
 backend evidence. It does not authorize validator restarts, backend routing
 changes, archive re-enable, snapshot publication, quorum changes, or chain-state

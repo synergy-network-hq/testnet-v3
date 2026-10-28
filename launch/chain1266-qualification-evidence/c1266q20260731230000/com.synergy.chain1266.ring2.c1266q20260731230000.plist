@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.synergy.chain1266.ring2.c1266q20260731230000</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Volumes/xcode/Synergy-Network-Projects/network-components/01-Testnetv3/scripts/chain1266/run-ring2-real-host-qualification.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Volumes/xcode/Synergy-Network-Projects/network-components/01-Testnetv3</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>CHAIN1266_SSH_CONTROL_PATH</key>
+    <string>/Volumes/xcode/.c1266/%C</string>
+    <key>CHAIN1266_RING2_RELEASE_DIR</key>
+    <string>/tmp/chain1266-compile-20260731/ring2-private-release-6f10899</string>
+    <key>CHAIN1266_RING2_RELEASE_ID</key>
+    <string>chain1266-incarnation-4-rc1</string>
+    <key>CHAIN1266_RING2_OUTPUT_DIR</key>
+    <string>/Volumes/xcode/Synergy-Network-Projects/network-components/01-Testnetv3/launch/chain1266-qualification-evidence/c1266q20260731230000</string>
+    <key>CHAIN1266_RING2_RUN_ID</key>
+    <string>c1266q20260731230000</string>
+    <key>CHAIN1266_RING2_TARGET_HEIGHT</key>
+    <string>10000</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Volumes/xcode/Synergy-Network-Projects/network-components/01-Testnetv3/launch/chain1266-qualification-evidence/c1266q20260731230000/runner.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Volumes/xcode/Synergy-Network-Projects/network-components/01-Testnetv3/launch/chain1266-qualification-evidence/c1266q20260731230000/runner.stderr.log</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <false/>
+</dict>
+</plist>

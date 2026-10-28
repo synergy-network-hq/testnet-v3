@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="650" viewBox="0 0 1200 650">
+<rect width="100%" height="100%" fill="white"/>
+<g font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" fill="#1d2733">
+<text x="600.0" y="35.0" font-size="18" text-anchor="middle">Aegis policy/domain verification: cache miss vs exact replay</text>
+<line x1="110" y1="460.0" x2="1165" y2="460.0" stroke="#d9e0e6" stroke-width="1"/>
+<text x="98.0" y="464.0" font-size="11" text-anchor="end">10^0</text>
+<line x1="110" y1="330.0" x2="1165" y2="330.0" stroke="#d9e0e6" stroke-width="1"/>
+<text x="98.0" y="334.0" font-size="11" text-anchor="end">10^1</text>
+<line x1="110" y1="200.0" x2="1165" y2="200.0" stroke="#d9e0e6" stroke-width="1"/>
+<text x="98.0" y="204.0" font-size="11" text-anchor="end">10^2</text>
+<line x1="110" y1="70.0" x2="1165" y2="70.0" stroke="#d9e0e6" stroke-width="1"/>
+<text x="98.0" y="74.0" font-size="11" text-anchor="end">10^3</text>
+<rect x="134.6" y="347.2" width="126.6" height="112.8" fill="#99B898"/>
+<text x="197.9" y="478.0" font-size="9" text-anchor="end" transform="rotate(-38 197.9 478.0)">FN-DSA-1024 / cache_hit</text>
+<rect x="310.5" y="203.8" width="126.6" height="256.2" fill="#6C5B7B"/>
+<text x="373.8" y="478.0" font-size="9" text-anchor="end" transform="rotate(-38 373.8 478.0)">FN-DSA-1024 / cache_miss</text>
+<rect x="486.3" y="325.0" width="126.6" height="135.0" fill="#99B898"/>
+<text x="549.6" y="478.0" font-size="9" text-anchor="end" transform="rotate(-38 549.6 478.0)">ML-DSA-65 / cache_hit</text>
+<rect x="662.1" y="191.1" width="126.6" height="268.9" fill="#6C5B7B"/>
+<text x="725.4" y="478.0" font-size="9" text-anchor="end" transform="rotate(-38 725.4 478.0)">ML-DSA-65 / cache_miss</text>
+<rect x="838.0" y="313.6" width="126.6" height="146.4" fill="#99B898"/>
+<text x="901.2" y="478.0" font-size="9" text-anchor="end" transform="rotate(-38 901.2 478.0)">ML-DSA-87 / cache_hit</text>
+<rect x="1013.8" y="166.0" width="126.6" height="294.0" fill="#6C5B7B"/>
+<text x="1077.1" y="478.0" font-size="9" text-anchor="end" transform="rotate(-38 1077.1 478.0)">ML-DSA-87 / cache_miss</text>
+<line x1="110" y1="70" x2="110" y2="460" stroke="#1d2733"/>
+<line x1="110" y1="460" x2="1165" y2="460" stroke="#1d2733"/>
+<text x="25.0" y="265.0" font-size="12" text-anchor="middle" transform="rotate(-90 25.0 265.0)">Median latency (microseconds, log scale)</text>
+</g></svg>

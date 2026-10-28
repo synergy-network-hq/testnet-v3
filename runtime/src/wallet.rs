@@ -104,7 +104,7 @@ impl WalletManager {
         let (sign_public, sign_private) = pqc_manager.generate_keypair(PQCAlgorithm::MLDSA87)?;
         let (kem_public, kem_private) = pqc_manager.generate_keypair(PQCAlgorithm::MLKEM1024)?;
 
-        let address = generate_wallet_address(&hex::encode(&sign_public.key_data));
+        let address = generate_wallet_address(&hex::encode(&sign_public.key_data))?;
 
         Ok((
             address,
@@ -124,7 +124,7 @@ impl WalletManager {
         ))
     }
 
-    pub fn generate_address(public_key: &str) -> String {
+    pub fn generate_address(public_key: &str) -> Result<String, String> {
         // Delegate wallet address generation to the address module for
         // consistent formatting.
         generate_wallet_address(public_key)
@@ -152,7 +152,7 @@ impl WalletManager {
         public_key: String,
         private_key: String,
     ) -> Result<String, String> {
-        let address = Self::generate_address(&public_key);
+        let address = Self::generate_address(&public_key)?;
         let (kem_public, kem_private) = Self::generate_mlkem_keypair()?;
 
         let mut wallet =
@@ -565,7 +565,7 @@ impl WalletManager {
 
         // Generate public key from private key (simplified)
         let public_key = hex::encode(format!("pub_{}", private_key).as_bytes());
-        let address = Self::generate_address(&public_key);
+        let address = Self::generate_address(&public_key)?;
 
         // Create wallet from imported keypair
         self.create_wallet_from_keypair(public_key, private_key.to_string())?;
@@ -960,6 +960,14 @@ mod tests {
     use crate::transaction::Transaction;
     use std::fs;
 
+    fn validator_test_address(fill: u8) -> String {
+        crate::address::generate_validator_address(
+            &hex::encode(vec![fill; crate::address::FN_DSA_1024_PUBLIC_KEY_BYTES]),
+            1,
+        )
+        .expect("canonical FN-DSA test root derives a validator address")
+    }
+
     fn credit_test_snrg(
         token_manager: &crate::token::TokenManager,
         address: &str,
@@ -1042,7 +1050,7 @@ mod tests {
         let staker = wallet_manager
             .create_wallet()
             .expect("wallet creation should succeed");
-        let validator = crate::address::generate_validator_address("wallet-stake-gas", 7);
+        let validator = validator_test_address(7);
         let token_manager = crate::token::TokenManager::new();
         let amount = 50_000_000_000_000u64;
         credit_test_snrg(&token_manager, &staker, amount);
@@ -1183,7 +1191,7 @@ mod tests {
         let staker = wallet_manager
             .create_wallet()
             .expect("wallet creation should succeed");
-        let validator = crate::address::generate_validator_address("wallet-custom-stake", 8);
+        let validator = validator_test_address(8);
         let token_manager = crate::token::TokenManager::new();
         let amount = 500_000u64;
         token_manager

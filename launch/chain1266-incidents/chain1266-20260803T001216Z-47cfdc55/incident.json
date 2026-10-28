@@ -1,0 +1,2100 @@
+{
+  "actions": [
+    {
+      "action": "READ_ONLY_COMPACT_EVIDENCE_CAPTURE",
+      "outcome": "COMPLETE",
+      "utc": "2026-08-03T00:12:16Z"
+    }
+  ],
+  "affected_nodes": [
+    "relay1",
+    "validator-node-02",
+    "validator-node-03",
+    "validator-node-04",
+    "validator-node-05",
+    "validator-node-06"
+  ],
+  "chain": {
+    "chain_id": 1266,
+    "genesis_hash": "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",
+    "incarnation": 4
+  },
+  "detected_utc": "2026-08-03T00:12:16Z",
+  "height": {
+    "common": 0,
+    "maximum": 0,
+    "minimum": 0
+  },
+  "incident_id": "chain1266-20260803T001216Z-47cfdc55",
+  "operational_state": "CRITICAL",
+  "schema_version": 1,
+  "snapshots": [
+    {
+      "collected_utc": "2026-08-03T00:12:13Z",
+      "duration_seconds": 0.332,
+      "node_id": "validator-node-01",
+      "parsed": {
+        "faults": [],
+        "metrics": {
+          "chain1266_desired_state_info": {
+            "labels": {
+              "_revision": "39e0e812f1c97bf9c0f3bb4791c883ecab5ea6ea",
+              "aegis_revision": "b51884a661e3aed4bb242ecbced47f3d8777b313",
+              "chain_id": "1266",
+              "chain_incarnation": "4",
+              "consensus_state_schema_version": "4",
+              "genesis_hash": "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",
+              "node_id": "validator-node-01",
+              "release_id": "chain1266-incarnation-4-rc18",
+              "role_profile": "validator_node",
+              "state_namespace": "chain-1266/incarnation-4",
+              "state_root": "/var/lib/synergy/validator/chain-1266/incarnation-4/data",
+              "synq_revision": "3f7886701ffee4303a24fa6c6584b792a5e36254",
+              "validator_set_root": "90c44da3ff3a2d94d9396953ae71baa21727610779531666e4aad6b2d03c71d1"
+            },
+            "value": 1.0
+          },
+          "consensus_current_height": 0.0,
+          "consensus_current_round": 0.0,
+          "consensus_finality_interval_mean_seconds": 0.0,
+          "consensus_finality_interval_median_seconds": 0.0,
+          "consensus_finality_interval_p95_seconds": 0.0,
+          "consensus_finality_interval_sample_count": 0.0,
+          "consensus_finality_interval_seconds": 0.0,
+          "consensus_finalized_block_id": {
+            "labels": {
+              "block_id": ""
+            },
+            "value": 1.0
+          },
+          "consensus_finalized_height": 0.0,
+          "consensus_finalized_round": 0.0,
+          "consensus_highest_qc_block_id": {
+            "labels": {
+              "block_id": ""
+            },
+            "value": 1.0
+          },
+          "consensus_highest_qc_height": 0.0,
+          "consensus_highest_qc_root": {
+            "labels": {
+              "root": ""
+            },
+            "value": 1.0
+          },
+          "consensus_highest_tc_root": {
+            "labels": {
+              "root": ""
+            },
+            "value": 1.0
+          },
+          "consensus_highest_tc_round": 0.0,
+          "consensus_mailbox_depth": 0.0,
+          "consensus_message_deduplications": 0.0,
+          "consensus_precrypto_rejections": 0.0,
+          "consensus_prepared_candidate": {
+            "labels": {
+              "candidate_id": ""
+            },
+            "value": 1.0
+          },
+          "consensus_prepared_height": 0.0,
+          "consensus_prepared_round": 0.0,
+          "consensus_ready": 0.0,
+          "consensus_rebroadcasts": 0.0,
+          "consensus_restart_count": 0.0,
+          "consensus_restarts_total": 0.0,
+          "consensus_round_zero_ratio": 0.0,
+          "consensus_startup_phase_info": {
+            "labels": {
+              "phase": "UNINITIALIZED"
+            },
+            "value": 1.0
+          },
+          "coordinated_consensus_active": {
+            "labels": {
+              "source": "validator"
+            },
+            "value": 1.0
+          },
+          "coordinated_consensus_assignment_info": {
+            "labels": {
+              "height": "412",
+              "producer_id": "validator-5",
+              "producer_round": "1817"
+            },
+            "value": 1.0
+          },
+          "coordinated_consensus_finalized_block_id": {
+            "labels": {
+              "block_id": "0b3c8c22374d977817b96b95099890b29c561c56004a16d10e4945b50154c784",
+              "source": "validator"
+            },
+            "value": 1.0
+          },
+          "coordinated_consensus_finalized_height": {
+            "labels": {
+              "source": "validator"
+            },
+            "value": 411.0
+          },
+          "coordinated_consensus_finalized_producer_info": {
+            "labels": {
+              "producer_id": "validator-2",
+              "producer_round": "0",
+              "source": "validator"
+            },
+            "value": 1.0
+          },
+          "coordinated_consensus_missed_turns_total": 1818.0,
+          "coordinated_consensus_mode_info": {
+            "labels": {
+              "coordinator_id": "validator-1",
+              "mode": "coordinated_round_robin_v1",
+              "source": "validator"
+            },
+            "value": 1.0
+          },
+          "p2p_verified_handshakes_total": {
+            "labels": {
+              "algorithm": "FN-DSA-1024"
+            },
+            "value": 1.0
+          },
+          "pqc_verification_cache_evictions": 0.0,
+          "pqc_verification_cache_hits": 822.0,
+          "pqc_verification_cache_hits_total": 822.0,
+          "pqc_verification_cache_misses": 2647.0,
+          "pqc_verification_cache_misses_total": 2647.0,
+          "pqc_verification_duration": 1.085109,
+          "pqc_verification_duration_seconds": 1.085109,
+          "pqc_verification_queue_depth": 0.0,
+          "pqc_verification_queue_rejections": 0.0,
+          "pqc_verification_requests": 2647.0,
+          "pqc_verification_requests_total": 2647.0,
+          "synergy_chain_block_gas_limit": 30000000.0,
+          "synergy_chain_blocks_total": 1.0,
+          "synergy_chain_height": 0.0,
+          "synergy_chain_last_block_age_seconds": 10671133.0,
+          "synergy_chain_last_block_timestamp_seconds": 1775044800.0,
+          "synergy_chain_latest_block_gas_nwei": 0.0,
+          "synergy_chain_latest_block_interval_seconds": 0.0,
+          "synergy_chain_latest_block_transactions": 0.0,
+          "synergy_chain_recent_avg_block_time_seconds": 0.0,
+          "synergy_chain_recent_avg_gas_nwei_per_block": 0.0,
+          "synergy_chain_recent_avg_transactions_per_block": 0.0,
+          "synergy_chain_recent_gas_utilization_ratio": 0.0,
+          "synergy_chain_recent_transactions_total": 0.0,
+          "synergy_chain_transactions_total": 0.0,
+          "synergy_configured_peer_targets_total": 23.0,
+          "synergy_consensus_active_validator_count": 1.0,
+          "synergy_consensus_config": {
+            "labels": {
+              "setting": "min_validators"
+            },
+            "value": 6.0
+          },
+          "synergy_consensus_effective_vote_timeout_seconds": 0.0,
+          "synergy_consensus_leader_info": {
+            "labels": {
+              "leader": "",
+              "reason": ""
+            },
+            "value": 1.0
+          },
+          "synergy_consensus_timeout_mode": {
+            "labels": {
+              "mode": ""
+            },
+            "value": 1.0
+          },
+          "synergy_consensus_votes_collected": 0.0,
+          "synergy_consensus_votes_required": 0.0,
+          "synergy_current_consensus_height": 0.0,
+          "synergy_current_consensus_round": 0.0,
+          "synergy_expired_transaction_drop_total": 0.0,
+          "synergy_live_validator_count": 1.0,
+          "synergy_mempool_fee_nwei_total": 0.0,
+          "synergy_mempool_gas_limit_total": 0.0,
+          "synergy_mempool_gas_price_nwei": {
+            "labels": {
+              "stat": "max"
+            },
+            "value": 0.0
+          },
+          "synergy_mempool_pending_transactions": 0.0,
+          "synergy_node_info": {
+            "labels": {
+              "network": "synergy-testnet-v3",
+              "node_id": "validator-node-01",
+              "node_name": "validator-node-01",
+              "role": "validator",
+              "validator_address": "synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t"
+            },
+            "value": 1.0
+          },
+          "synergy_node_uptime_seconds": 14204.0,
+          "synergy_p2p_best_validator_peer_height": 0.0,
+          "synergy_p2p_peer_blocks_received_total": {
+            "labels": {
+              "peer": "relay2.synergynode.xyz:5622"
+            },
+            "value": 0.0
+          },
+          "synergy_p2p_peer_blocks_sent_total": {
+            "labels": {
+              "peer": "relay2.synergynode.xyz:5622"
+            },
+            "value": 0.0
+          },
+          "synergy_p2p_peer_height": {
+            "labels": {
+              "peer": "relay2.synergynode.xyz:5622"
+            },
+            "value": 0.0
+          },
+          "synergy_p2p_peer_info": {
+            "labels": {
+              "direction": "outgoing",
+              "node_id": "relay2",
+              "peer": "relay2.synergynode.xyz:5622",
+              "validator_address": "relay2"
+            },
+            "value": 1.0
+          },
+          "synergy_p2p_peer_last_seen_age_seconds": {
+            "labels": {
+              "peer": "relay2.synergynode.xyz:5622"
+            },
+            "value": 6.0
+          },
+          "synergy_p2p_peer_status_age_seconds": {
+            "labels": {
+              "peer": "relay2.synergynode.xyz:5622"
+            },
+            "value": 10.0
+          },
+          "synergy_p2p_peer_txs_received_total": {
+            "labels": {
+              "peer": "relay2.synergynode.xyz:5622"
+            },
+            "value": 0.0
+          },
+          "synergy_p2p_peer_txs_sent_total": {
+            "labels": {
+              "peer": "relay2.synergynode.xyz:5622"
+            },
+            "value": 0.0
+          },
+          "synergy_p2p_peers_connected": 1.0,
+          "synergy_p2p_status_ready_validators": 1.0,
+          "synergy_process_start_time_seconds": 1785701729.0,
+          "synergy_proposal_cache_discard_total": 0.0,
+          "synergy_qrpc_fallback_total": 0.0,
+          "synergy_registry_active_validator_count": 6.0,
+          "synergy_sync_gap_blocks": 0.0,
+          "synergy_sync_highest_block": 0.0,
+          "synergy_sync_in_progress": 0.0,
+          "synergy_sync_info": {
+            "labels": {
+              "state": "idle"
+            },
+            "value": 1.0
+          },
+          "synergy_sync_progress_percent": 100.0,
+          "synergy_sync_starting_block": 0.0,
+          "synergy_validator_average_block_time_seconds": {
+            "labels": {
+              "name": "Synergy Validator 3",
+              "status": "active",
+              "validator": "synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj"
+            },
+            "value": 5.0
+          },
+          "synergy_validator_blocks_produced_total": {
+            "labels": {
+              "name": "Synergy Validator 3",
+              "status": "active",
+              "validator": "synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj"
+            },
+            "value": 0.0
+          },
+          "synergy_validator_clusters_total": 1.0,
+          "synergy_validator_consecutive_missed_votes": {
+            "labels": {
+              "name": "Synergy Validator 3",
+              "status": "active",
+              "validator": "synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj"
+            },
+            "value": 0.0
+          },
+          "synergy_validator_equivocation_evidence_total": {
+            "labels": {
+              "name": "Synergy Validator 3",
+              "status": "active",
+              "validator": "synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj"
+            },
+            "value": 0.0
+          },
+          "synergy_validator_missed_blocks_total": {
+            "labels": {
+              "name": "Synergy Validator 3",
+              "status": "active",
+              "validator": "synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj"
+            },
+            "value": 0.0
+          },
+          "synergy_validator_missed_vote_window": {
+            "labels": {
+              "name": "Synergy Validator 3",
+              "status": "active",
+              "validator": "synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj"
+            },
+            "value": 0.0
+          },
+          "synergy_validator_pending_total": 0.0,
+          "synergy_validator_registry_total": 6.0,
+          "synergy_validator_stake_nwei": {
+            "labels": {
+              "name": "Synergy Validator 3",
+              "status": "active",
+              "validator": "synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj"
+            },
+            "value": 50000000000000.0
+          },
+          "synergy_validator_status_total": {
+            "labels": {
+              "status": "slashed"
+            },
+            "value": 0.0
+          },
+          "synergy_validator_synergy_score": {
+            "labels": {
+              "name": "Synergy Validator 3",
+              "status": "active",
+              "validator": "synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj"
+            },
+            "value": 100.0
+          },
+          "synergy_validator_transactions_validated_total": {
+            "labels": {
+              "name": "Synergy Validator 3",
+              "status": "active",
+              "validator": "synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj"
+            },
+            "value": 0.0
+          },
+          "synergy_validator_uptime_percent": {
+            "labels": {
+              "name": "Synergy Validator 3",
+              "status": "active",
+              "validator": "synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj"
+            },
+            "value": 100.0
+          }
+        },
+        "systemd": {
+          "ActiveState": "active",
+          "CPUUsageNSec": "7435160577000",
+          "ConfigSHA256": "84b0a693cd4de28afc216264add67bb52db75ad06a42af0773e04b24b7a24d3b",
+          "ExecMainStatus": "0",
+          "GenesisSHA256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+          "MainPID": "3506332",
+          "MemoryCurrent": "387481600",
+          "NRestarts": "0",
+          "SubState": "running"
+        }
+      },
+      "role": "validator",
+      "service": "synergy-chain1266-role@validator-node-01.service",
+      "ssh_alias": "synergy-val1",
+      "ssh_error": "",
+      "ssh_exit": 0
+    },
+    {
+      "collected_utc": "2026-08-03T00:12:13Z",
+      "duration_seconds": 0.284,
+      "node_id": "validator-node-02",
+      "parsed": {
+        "faults": [],
+        "metrics": {},
+        "systemd": {
+          "ActiveState": "failed",
+          "CPUUsageNSec": "416816021000",
+          "ConfigSHA256": "946ad3b6ab9c81c193764b552285b324b46df627fb5446698770dd8a063079e2",
+          "ExecMainStatus": "1",
+          "GenesisSHA256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+          "MainPID": "0",
+          "MemoryCurrent": "[not set]",
+          "NRestarts": "0",
+          "SubState": "failed"
+        }
+      },
+      "role": "validator",
+      "service": "synergy-chain1266-role@validator-node-02.service",
+      "ssh_alias": "synergy-val2",
+      "ssh_error": "",
+      "ssh_exit": 0
+    },
+    {
+      "collected_utc": "2026-08-03T00:12:13Z",
+      "duration_seconds": 0.263,
+      "node_id": "validator-node-03",
+      "parsed": {
+        "faults": [],
+        "metrics": {},
+        "systemd": {
+          "ActiveState": "failed",
+          "CPUUsageNSec": "7173075000",
+          "ExecMainStatus": "1",
+          "MainPID": "0",
+          "MemoryCurrent": "[not set]",
+          "NRestarts": "0",
+          "SubState": "failed"
+        }
+      },
+      "role": "validator",
+      "service": "synergy-chain1266-role@validator-node-03.service",
+      "ssh_alias": "synergy-val3",
+      "ssh_error": "",
+      "ssh_exit": 0
+    },
+    {
+      "collected_utc": "2026-08-03T00:12:13Z",
+      "duration_seconds": 0.311,
+      "node_id": "validator-node-04",
+      "parsed": {
+        "faults": [],
+        "metrics": {},
+        "systemd": {
+          "ActiveState": "failed",
+          "CPUUsageNSec": "368483150000",
+          "ConfigSHA256": "cec4f21314799f6e167a6f115ada49caf7b9c33f4f520ad7583e9f75b2692ba4",
+          "ExecMainStatus": "1",
+          "GenesisSHA256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+          "MainPID": "0",
+          "MemoryCurrent": "[not set]",
+          "NRestarts": "0",
+          "SubState": "failed"
+        }
+      },
+      "role": "validator",
+      "service": "synergy-chain1266-role@validator-node-04.service",
+      "ssh_alias": "synergy-val4",
+      "ssh_error": "",
+      "ssh_exit": 0
+    },
+    {
+      "collected_utc": "2026-08-03T00:12:13Z",
+      "duration_seconds": 0.505,
+      "node_id": "validator-node-05",
+      "parsed": {
+        "faults": [],
+        "metrics": {},
+        "systemd": {
+          "ActiveState": "failed",
+          "CPUUsageNSec": "404749406000",
+          "ConfigSHA256": "03cda85cfcd4e50f7d2dc5077d866fb906b914507efe04ae051303fc9852e30b",
+          "ExecMainStatus": "1",
+          "GenesisSHA256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+          "MainPID": "0",
+          "MemoryCurrent": "[not set]",
+          "NRestarts": "0",
+          "SubState": "failed"
+        }
+      },
+      "role": "validator",
+      "service": "synergy-chain1266-role@validator-node-05.service",
+      "ssh_alias": "synergy-val5",
+      "ssh_error": "",
+      "ssh_exit": 0
+    },
+    {
+      "collected_utc": "2026-08-03T00:12:13Z",
+      "duration_seconds": 0.245,
+      "node_id": "validator-node-06",
+      "parsed": {
+        "faults": [],
+        "metrics": {},
+        "systemd": {
+          "ActiveState": "failed",
+          "CPUUsageNSec": "400329361000",
+          "ConfigSHA256": "e3fec992b89c914c6d55e07776f2434d846f4a482bc818460cb14e296db5f42c",
+          "ExecMainStatus": "1",
+          "GenesisSHA256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+          "MainPID": "0",
+          "MemoryCurrent": "[not set]",
+          "NRestarts": "0",
+          "SubState": "failed"
+        }
+      },
+      "role": "validator",
+      "service": "synergy-chain1266-role@validator-node-06.service",
+      "ssh_alias": "synergy-val6",
+      "ssh_error": "",
+      "ssh_exit": 0
+    },
+    {
+      "collected_utc": "2026-08-03T00:12:16Z",
+      "duration_seconds": 3.367,
+      "node_id": "relay1",
+      "parsed": {
+        "faults": [],
+        "metrics": {},
+        "systemd": {
+          "ActiveState": "active",
+          "CPUUsageNSec": "719379751000",
+          "ConfigSHA256": "38b52a01739260944908f876314cc59149bbd540f60eacd2e6e4104ea9fece2d",
+          "ExecMainStatus": "0",
+          "ExecutablePath": "/opt/synergy/chain1266/releases/chain1266-incarnation-4-rc18/bin/synergy-relayer-node",
+          "ExecutableSHA256": "a7d985583bfbabebf3a67d00ba9f2ffc2e7bb58bf26cf1c717dda0d5095bfa1b",
+          "GenesisSHA256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+          "MainPID": "3979454",
+          "MemoryCurrent": "63180800",
+          "NRestarts": "0",
+          "SubState": "running"
+        }
+      },
+      "role": "relayer",
+      "service": "synergy-chain1266-role@relay1.service",
+      "ssh_alias": "synergy-relayer1",
+      "ssh_error": "",
+      "ssh_exit": 0
+    },
+    {
+      "collected_utc": "2026-08-03T00:12:13Z",
+      "duration_seconds": 0.776,
+      "node_id": "relay2",
+      "parsed": {
+        "faults": [],
+        "metrics": {
+          "chain1266_desired_state_info": {
+            "labels": {
+              "_revision": "39e0e812f1c97bf9c0f3bb4791c883ecab5ea6ea",
+              "aegis_revision": "b51884a661e3aed4bb242ecbced47f3d8777b313",
+              "chain_id": "1266",
+              "chain_incarnation": "4",
+              "consensus_state_schema_version": "4",
+              "genesis_hash": "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",
+              "node_id": "relay2",
+              "release_id": "chain1266-incarnation-4-rc18",
+              "role_profile": "relayer_node",
+              "state_namespace": "chain-1266/incarnation-4",
+              "state_root": "/var/lib/synergy/testnet-v3/relay2/chain-1266/incarnation-4/data",
+              "synq_revision": "3f7886701ffee4303a24fa6c6584b792a5e36254",
+              "validator_set_root": "90c44da3ff3a2d94d9396953ae71baa21727610779531666e4aad6b2d03c71d1"
+            },
+            "value": 1.0
+          },
+          "consensus_current_height": 0.0,
+          "consensus_current_round": 0.0,
+          "consensus_finality_interval_mean_seconds": 0.0,
+          "consensus_finality_interval_median_seconds": 0.0,
+          "consensus_finality_interval_p95_seconds": 0.0,
+          "consensus_finality_interval_sample_count": 0.0,
+          "consensus_finality_interval_seconds": 0.0,
+          "consensus_finalized_block_id": {
+            "labels": {
+              "block_id": ""
+            },
+            "value": 1.0
+          },
+          "consensus_finalized_height": 0.0,
+          "consensus_finalized_round": 0.0,
+          "consensus_highest_qc_block_id": {
+            "labels": {
+              "block_id": ""
+            },
+            "value": 1.0
+          },
+          "consensus_highest_qc_height": 0.0,
+          "consensus_highest_qc_root": {
+            "labels": {
+              "root": ""
+            },
+            "value": 1.0
+          },
+          "consensus_highest_tc_root": {
+            "labels": {
+              "root": ""
+            },
+            "value": 1.0
+          },
+          "consensus_highest_tc_round": 0.0,
+          "consensus_mailbox_depth": 0.0,
+          "consensus_message_deduplications": 0.0,
+          "consensus_precrypto_rejections": 0.0,
+          "consensus_prepared_candidate": {
+            "labels": {
+              "candidate_id": ""
+            },
+            "value": 1.0
+          },
+          "consensus_prepared_height": 0.0,
+          "consensus_prepared_round": 0.0,
+          "consensus_ready": 0.0,
+          "consensus_rebroadcasts": 0.0,
+          "consensus_restart_count": 0.0,
+          "consensus_restarts_total": 0.0,
+          "consensus_round_zero_ratio": 0.0,
+          "consensus_startup_phase_info": {
+            "labels": {
+              "phase": "UNINITIALIZED"
+            },
+            "value": 1.0
+          },
+          "coordinated_consensus_active": {
+            "labels": {
+              "source": "observer"
+            },
+            "value": 1.0
+          },
+          "coordinated_consensus_finalized_block_id": {
+            "labels": {
+              "block_id": "0b3c8c22374d977817b96b95099890b29c561c56004a16d10e4945b50154c784",
+              "source": "observer"
+            },
+            "value": 1.0
+          },
+          "coordinated_consensus_finalized_height": {
+            "labels": {
+              "source": "observer"
+            },
+            "value": 411.0
+          },
+          "coordinated_consensus_finalized_producer_info": {
+            "labels": {
+              "producer_id": "validator-2",
+              "producer_round": "0",
+              "source": "observer"
+            },
+            "value": 1.0
+          },
+          "coordinated_consensus_mode_info": {
+            "labels": {
+              "coordinator_id": "validator-1",
+              "mode": "coordinated_round_robin_v1",
+              "source": "observer"
+            },
+            "value": 1.0
+          },
+          "p2p_verified_handshakes_total": {
+            "labels": {
+              "algorithm": "FN-DSA-1024"
+            },
+            "value": 7.0
+          },
+          "pqc_verification_cache_evictions": 0.0,
+          "pqc_verification_cache_hits": 0.0,
+          "pqc_verification_cache_hits_total": 0.0,
+          "pqc_verification_cache_misses": 1250.0,
+          "pqc_verification_cache_misses_total": 1250.0,
+          "pqc_verification_duration": 0.397537,
+          "pqc_verification_duration_seconds": 0.397537,
+          "pqc_verification_queue_depth": 0.0,
+          "pqc_verification_queue_rejections": 0.0,
+          "pqc_verification_requests": 1250.0,
+          "pqc_verification_requests_total": 1250.0,
+          "synergy_chain_block_gas_limit": 30000000.0,
+          "synergy_chain_blocks_total": 1.0,
+          "synergy_chain_height": 0.0,
+          "synergy_chain_last_block_age_seconds": 10671133.0,
+          "synergy_chain_last_block_timestamp_seconds": 1775044800.0,
+          "synergy_chain_latest_block_gas_nwei": 0.0,
+          "synergy_chain_latest_block_interval_seconds": 0.0,
+          "synergy_chain_latest_block_transactions": 0.0,
+          "synergy_chain_recent_avg_block_time_seconds": 0.0,
+          "synergy_chain_recent_avg_gas_nwei_per_block": 0.0,
+          "synergy_chain_recent_avg_transactions_per_block": 0.0,
+          "synergy_chain_recent_gas_utilization_ratio": 0.0,
+          "synergy_chain_recent_transactions_total": 0.0,
+          "synergy_chain_transactions_total": 0.0,
+          "synergy_configured_peer_targets_total": 17.0,
+          "synergy_consensus_active_validator_count": 6.0,
+          "synergy_consensus_config": {
+            "labels": {
+              "setting": "min_validators"
+            },
+            "value": 6.0
+          },
+          "synergy_consensus_effective_vote_timeout_seconds": 0.0,
+          "synergy_consensus_leader_info": {
+            "labels": {
+              "leader": "",
+              "reason": ""
+            },
+            "value": 1.0
+          },
+          "synergy_consensus_timeout_mode": {
+            "labels": {
+              "mode": ""
+            },
+            "value": 1.0
+          },
+          "synergy_consensus_votes_collected": 0.0,
+          "synergy_consensus_votes_required": 0.0,
+          "synergy_current_consensus_height": 0.0,
+          "synergy_current_consensus_round": 0.0,
+          "synergy_expired_transaction_drop_total": 0.0,
+          "synergy_live_validator_count": 6.0,
+          "synergy_mempool_fee_nwei_total": 0.0,
+          "synergy_mempool_gas_limit_total": 0.0,
+          "synergy_mempool_gas_price_nwei": {
+            "labels": {
+              "stat": "max"
+            },
+            "value": 0.0
+          },
+          "synergy_mempool_pending_transactions": 0.0,
+          "synergy_node_info": {
+            "labels": {
+              "network": "synergy-testnet-v3",
+              "node_id": "relay2",
+              "node_name": "relay2",
+              "role": "relayer",
+              "validator_address": ""
+            },
+            "value": 1.0
+          },
+          "synergy_node_uptime_seconds": 14219.0,
+          "synergy_p2p_best_validator_peer_height": 0.0,
+          "synergy_p2p_peer_blocks_received_total": {
+            "labels": {
+              "peer": "relay1.synergynode.xyz:5622"
+            },
+            "value": 0.0
+          },
+          "synergy_p2p_peer_blocks_sent_total": {
+            "labels": {
+              "peer": "relay1.synergynode.xyz:5622"
+            },
+            "value": 0.0
+          },
+          "synergy_p2p_peer_height": {
+            "labels": {
+              "peer": "relay1.synergynode.xyz:5622"
+            },
+            "value": 0.0
+          },
+          "synergy_p2p_peer_info": {
+            "labels": {
+              "direction": "incoming",
+              "node_id": "relay1",
+              "peer": "relay1.synergynode.xyz:5622",
+              "validator_address": "relay1"
+            },
+            "value": 1.0
+          },
+          "synergy_p2p_peer_last_seen_age_seconds": {
+            "labels": {
+              "peer": "relay1.synergynode.xyz:5622"
+            },
+            "value": 1.0
+          },
+          "synergy_p2p_peer_status_age_seconds": {
+            "labels": {
+              "peer": "relay1.synergynode.xyz:5622"
+            },
+            "value": 6.0
+          },
+          "synergy_p2p_peer_txs_received_total": {
+            "labels": {
+              "peer": "relay1.synergynode.xyz:5622"
+            },
+            "value": 0.0
+          },
+          "synergy_p2p_peer_txs_sent_total": {
+            "labels": {
+              "peer": "relay1.synergynode.xyz:5622"
+            },
+            "value": 0.0
+          },
+          "synergy_p2p_peers_connected": 6.0,
+          "synergy_p2p_status_ready_validators": 6.0,
+          "synergy_process_start_time_seconds": 1785701714.0,
+          "synergy_proposal_cache_discard_total": 0.0,
+          "synergy_qrpc_fallback_total": 0.0,
+          "synergy_registry_active_validator_count": 0.0,
+          "synergy_sync_gap_blocks": 0.0,
+          "synergy_sync_highest_block": 0.0,
+          "synergy_sync_in_progress": 0.0,
+          "synergy_sync_info": {
+            "labels": {
+              "state": "idle"
+            },
+            "value": 1.0
+          },
+          "synergy_sync_progress_percent": 100.0,
+          "synergy_sync_starting_block": 0.0,
+          "synergy_validator_clusters_total": 0.0,
+          "synergy_validator_pending_total": 0.0,
+          "synergy_validator_registry_total": 0.0,
+          "synergy_validator_status_total": {
+            "labels": {
+              "status": "slashed"
+            },
+            "value": 0.0
+          }
+        },
+        "systemd": {
+          "ActiveState": "active",
+          "CPUUsageNSec": "1758892483000",
+          "ConfigSHA256": "deed4bf2da9f82f53005c5acac01722dd3da8d31aaaf4fb41147c91527ece54b",
+          "ExecMainStatus": "0",
+          "ExecutablePath": "/opt/synergy/chain1266/releases/chain1266-incarnation-4-rc18/bin/synergy-relayer-node",
+          "ExecutableSHA256": "a7d985583bfbabebf3a67d00ba9f2ffc2e7bb58bf26cf1c717dda0d5095bfa1b",
+          "GenesisSHA256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+          "MainPID": "1212939",
+          "MemoryCurrent": "463052800",
+          "NRestarts": "0",
+          "SubState": "running"
+        }
+      },
+      "role": "relayer",
+      "service": "synergy-chain1266-role@relay2.service",
+      "ssh_alias": "synergy-relayer2",
+      "ssh_error": "",
+      "ssh_exit": 0
+    },
+    {
+      "collected_utc": "2026-08-03T00:12:13Z",
+      "duration_seconds": 0.571,
+      "node_id": "relay3",
+      "parsed": {
+        "faults": [],
+        "metrics": {
+          "chain1266_desired_state_info": {
+            "labels": {
+              "_revision": "39e0e812f1c97bf9c0f3bb4791c883ecab5ea6ea",
+              "aegis_revision": "b51884a661e3aed4bb242ecbced47f3d8777b313",
+              "chain_id": "1266",
+              "chain_incarnation": "4",
+              "consensus_state_schema_version": "4",
+              "genesis_hash": "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",
+              "node_id": "relay3",
+              "release_id": "chain1266-incarnation-4-rc18",
+              "role_profile": "relayer_node",
+              "state_namespace": "chain-1266/incarnation-4",
+              "state_root": "/var/lib/synergy/testnet-v3/relay3/chain-1266/incarnation-4/data",
+              "synq_revision": "3f7886701ffee4303a24fa6c6584b792a5e36254",
+              "validator_set_root": "90c44da3ff3a2d94d9396953ae71baa21727610779531666e4aad6b2d03c71d1"
+            },
+            "value": 1.0
+          },
+          "consensus_current_height": 0.0,
+          "consensus_current_round": 0.0,
+          "consensus_finality_interval_mean_seconds": 0.0,
+          "consensus_finality_interval_median_seconds": 0.0,
+          "consensus_finality_interval_p95_seconds": 0.0,
+          "consensus_finality_interval_sample_count": 0.0,
+          "consensus_finality_interval_seconds": 0.0,
+          "consensus_finalized_block_id": {
+            "labels": {
+              "block_id": ""
+            },
+            "value": 1.0
+          },
+          "consensus_finalized_height": 0.0,
+          "consensus_finalized_round": 0.0,
+          "consensus_highest_qc_block_id": {
+            "labels": {
+              "block_id": ""
+            },
+            "value": 1.0
+          },
+          "consensus_highest_qc_height": 0.0,
+          "consensus_highest_qc_root": {
+            "labels": {
+              "root": ""
+            },
+            "value": 1.0
+          },
+          "consensus_highest_tc_root": {
+            "labels": {
+              "root": ""
+            },
+            "value": 1.0
+          },
+          "consensus_highest_tc_round": 0.0,
+          "consensus_mailbox_depth": 0.0,
+          "consensus_message_deduplications": 0.0,
+          "consensus_precrypto_rejections": 0.0,
+          "consensus_prepared_candidate": {
+            "labels": {
+              "candidate_id": ""
+            },
+            "value": 1.0
+          },
+          "consensus_prepared_height": 0.0,
+          "consensus_prepared_round": 0.0,
+          "consensus_ready": 0.0,
+          "consensus_rebroadcasts": 0.0,
+          "consensus_restart_count": 0.0,
+          "consensus_restarts_total": 0.0,
+          "consensus_round_zero_ratio": 0.0,
+          "consensus_startup_phase_info": {
+            "labels": {
+              "phase": "UNINITIALIZED"
+            },
+            "value": 1.0
+          },
+          "coordinated_consensus_active": {
+            "labels": {
+              "source": "observer"
+            },
+            "value": 1.0
+          },
+          "coordinated_consensus_finalized_block_id": {
+            "labels": {
+              "block_id": "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",
+              "source": "observer"
+            },
+            "value": 1.0
+          },
+          "coordinated_consensus_finalized_height": {
+            "labels": {
+              "source": "observer"
+            },
+            "value": 0.0
+          },
+          "coordinated_consensus_finalized_producer_info": {
+            "labels": {
+              "producer_id": "",
+              "producer_round": "0",
+              "source": "observer"
+            },
+            "value": 1.0
+          },
+          "coordinated_consensus_mode_info": {
+            "labels": {
+              "coordinator_id": "validator-1",
+              "mode": "coordinated_round_robin_v1",
+              "source": "observer"
+            },
+            "value": 1.0
+          },
+          "p2p_verified_handshakes_total": {
+            "labels": {
+              "algorithm": "FN-DSA-1024"
+            },
+            "value": 6.0
+          },
+          "pqc_verification_cache_evictions": 0.0,
+          "pqc_verification_cache_hits": 0.0,
+          "pqc_verification_cache_hits_total": 0.0,
+          "pqc_verification_cache_misses": 6.0,
+          "pqc_verification_cache_misses_total": 6.0,
+          "pqc_verification_duration": 0.00162,
+          "pqc_verification_duration_seconds": 0.00162,
+          "pqc_verification_queue_depth": 0.0,
+          "pqc_verification_queue_rejections": 0.0,
+          "pqc_verification_requests": 6.0,
+          "pqc_verification_requests_total": 6.0,
+          "synergy_chain_block_gas_limit": 30000000.0,
+          "synergy_chain_blocks_total": 1.0,
+          "synergy_chain_height": 0.0,
+          "synergy_chain_last_block_age_seconds": 10671133.0,
+          "synergy_chain_last_block_timestamp_seconds": 1775044800.0,
+          "synergy_chain_latest_block_gas_nwei": 0.0,
+          "synergy_chain_latest_block_interval_seconds": 0.0,
+          "synergy_chain_latest_block_transactions": 0.0,
+          "synergy_chain_recent_avg_block_time_seconds": 0.0,
+          "synergy_chain_recent_avg_gas_nwei_per_block": 0.0,
+          "synergy_chain_recent_avg_transactions_per_block": 0.0,
+          "synergy_chain_recent_gas_utilization_ratio": 0.0,
+          "synergy_chain_recent_transactions_total": 0.0,
+          "synergy_chain_transactions_total": 0.0,
+          "synergy_configured_peer_targets_total": 17.0,
+          "synergy_consensus_active_validator_count": 6.0,
+          "synergy_consensus_config": {
+            "labels": {
+              "setting": "min_validators"
+            },
+            "value": 6.0
+          },
+          "synergy_consensus_effective_vote_timeout_seconds": 0.0,
+          "synergy_consensus_leader_info": {
+            "labels": {
+              "leader": "",
+              "reason": ""
+            },
+            "value": 1.0
+          },
+          "synergy_consensus_timeout_mode": {
+            "labels": {
+              "mode": ""
+            },
+            "value": 1.0
+          },
+          "synergy_consensus_votes_collected": 0.0,
+          "synergy_consensus_votes_required": 0.0,
+          "synergy_current_consensus_height": 0.0,
+          "synergy_current_consensus_round": 0.0,
+          "synergy_expired_transaction_drop_total": 0.0,
+          "synergy_live_validator_count": 6.0,
+          "synergy_mempool_fee_nwei_total": 0.0,
+          "synergy_mempool_gas_limit_total": 0.0,
+          "synergy_mempool_gas_price_nwei": {
+            "labels": {
+              "stat": "max"
+            },
+            "value": 0.0
+          },
+          "synergy_mempool_pending_transactions": 0.0,
+          "synergy_node_info": {
+            "labels": {
+              "network": "synergy-testnet-v3",
+              "node_id": "relay3",
+              "node_name": "relay3",
+              "role": "relayer",
+              "validator_address": ""
+            },
+            "value": 1.0
+          },
+          "synergy_node_uptime_seconds": 14219.0,
+          "synergy_p2p_best_validator_peer_height": 0.0,
+          "synergy_p2p_peer_blocks_received_total": {
+            "labels": {
+              "peer": "209.145.50.9:5622"
+            },
+            "value": 0.0
+          },
+          "synergy_p2p_peer_blocks_sent_total": {
+            "labels": {
+              "peer": "209.145.50.9:5622"
+            },
+            "value": 0.0
+          },
+          "synergy_p2p_peer_height": {
+            "labels": {
+              "peer": "209.145.50.9:5622"
+            },
+            "value": 0.0
+          },
+          "synergy_p2p_peer_info": {
+            "labels": {
+              "direction": "outgoing",
+              "node_id": "observer",
+              "peer": "209.145.50.9:5622",
+              "validator_address": "observer"
+            },
+            "value": 1.0
+          },
+          "synergy_p2p_peer_last_seen_age_seconds": {
+            "labels": {
+              "peer": "209.145.50.9:5622"
+            },
+            "value": 1.0
+          },
+          "synergy_p2p_peer_status_age_seconds": {
+            "labels": {
+              "peer": "209.145.50.9:5622"
+            },
+            "value": 8.0
+          },
+          "synergy_p2p_peer_txs_received_total": {
+            "labels": {
+              "peer": "209.145.50.9:5622"
+            },
+            "value": 0.0
+          },
+          "synergy_p2p_peer_txs_sent_total": {
+            "labels": {
+              "peer": "209.145.50.9:5622"
+            },
+            "value": 0.0
+          },
+          "synergy_p2p_peers_connected": 5.0,
+          "synergy_p2p_status_ready_validators": 6.0,
+          "synergy_process_start_time_seconds": 1785701714.0,
+          "synergy_proposal_cache_discard_total": 0.0,
+          "synergy_qrpc_fallback_total": 0.0,
+          "synergy_registry_active_validator_count": 0.0,
+          "synergy_sync_gap_blocks": 0.0,
+          "synergy_sync_highest_block": 0.0,
+          "synergy_sync_in_progress": 0.0,
+          "synergy_sync_info": {
+            "labels": {
+              "state": "idle"
+            },
+            "value": 1.0
+          },
+          "synergy_sync_progress_percent": 100.0,
+          "synergy_sync_starting_block": 0.0,
+          "synergy_validator_clusters_total": 0.0,
+          "synergy_validator_pending_total": 0.0,
+          "synergy_validator_registry_total": 0.0,
+          "synergy_validator_status_total": {
+            "labels": {
+              "status": "slashed"
+            },
+            "value": 0.0
+          }
+        },
+        "systemd": {
+          "ActiveState": "active",
+          "CPUUsageNSec": "739768766000",
+          "ConfigSHA256": "7c30c5a7d44a54c392232eded5acbde67bd7aed4c8756cf41f9868bcdd0708a6",
+          "ExecMainStatus": "0",
+          "ExecutablePath": "/opt/synergy/chain1266/releases/chain1266-incarnation-4-rc18/bin/synergy-relayer-node",
+          "ExecutableSHA256": "a7d985583bfbabebf3a67d00ba9f2ffc2e7bb58bf26cf1c717dda0d5095bfa1b",
+          "GenesisSHA256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+          "MainPID": "2169916",
+          "MemoryCurrent": "66195456",
+          "NRestarts": "0",
+          "SubState": "running"
+        }
+      },
+      "role": "relayer",
+      "service": "synergy-chain1266-role@relay3.service",
+      "ssh_alias": "synergy-relayer3",
+      "ssh_error": "",
+      "ssh_exit": 0
+    },
+    {
+      "collected_utc": "2026-08-03T00:12:14Z",
+      "duration_seconds": 0.987,
+      "node_id": "rpc-gateway",
+      "parsed": {
+        "faults": [],
+        "metrics": {
+          "chain1266_desired_state_info": {
+            "labels": {
+              "_revision": "39e0e812f1c97bf9c0f3bb4791c883ecab5ea6ea",
+              "aegis_revision": "b51884a661e3aed4bb242ecbced47f3d8777b313",
+              "chain_id": "1266",
+              "chain_incarnation": "4",
+              "consensus_state_schema_version": "4",
+              "genesis_hash": "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",
+              "node_id": "rpc-gateway",
+              "release_id": "chain1266-incarnation-4-rc18",
+              "role_profile": "rpc_gateway_node",
+              "state_namespace": "chain-1266/incarnation-4",
+              "state_root": "/var/lib/synergy/testnet-v3/rpc-gateway/chain-1266/incarnation-4/data",
+              "synq_revision": "3f7886701ffee4303a24fa6c6584b792a5e36254",
+              "validator_set_root": "90c44da3ff3a2d94d9396953ae71baa21727610779531666e4aad6b2d03c71d1"
+            },
+            "value": 1.0
+          },
+          "consensus_current_height": 0.0,
+          "consensus_current_round": 0.0,
+          "consensus_finality_interval_mean_seconds": 0.0,
+          "consensus_finality_interval_median_seconds": 0.0,
+          "consensus_finality_interval_p95_seconds": 0.0,
+          "consensus_finality_interval_sample_count": 0.0,
+          "consensus_finality_interval_seconds": 0.0,
+          "consensus_finalized_block_id": {
+            "labels": {
+              "block_id": ""
+            },
+            "value": 1.0
+          },
+          "consensus_finalized_height": 0.0,
+          "consensus_finalized_round": 0.0,
+          "consensus_highest_qc_block_id": {
+            "labels": {
+              "block_id": ""
+            },
+            "value": 1.0
+          },
+          "consensus_highest_qc_height": 0.0,
+          "consensus_highest_qc_root": {
+            "labels": {
+              "root": ""
+            },
+            "value": 1.0
+          },
+          "consensus_highest_tc_root": {
+            "labels": {
+              "root": ""
+            },
+            "value": 1.0
+          },
+          "consensus_highest_tc_round": 0.0,
+          "consensus_mailbox_depth": 0.0,
+          "consensus_message_deduplications": 0.0,
+          "consensus_precrypto_rejections": 0.0,
+          "consensus_prepared_candidate": {
+            "labels": {
+              "candidate_id": ""
+            },
+            "value": 1.0
+          },
+          "consensus_prepared_height": 0.0,
+          "consensus_prepared_round": 0.0,
+          "consensus_ready": 0.0,
+          "consensus_rebroadcasts": 0.0,
+          "consensus_restart_count": 0.0,
+          "consensus_restarts_total": 0.0,
+          "consensus_round_zero_ratio": 0.0,
+          "consensus_startup_phase_info": {
+            "labels": {
+              "phase": "UNINITIALIZED"
+            },
+            "value": 1.0
+          },
+          "coordinated_consensus_active": {
+            "labels": {
+              "source": "observer"
+            },
+            "value": 1.0
+          },
+          "coordinated_consensus_finalized_block_id": {
+            "labels": {
+              "block_id": "0b3c8c22374d977817b96b95099890b29c561c56004a16d10e4945b50154c784",
+              "source": "observer"
+            },
+            "value": 1.0
+          },
+          "coordinated_consensus_finalized_height": {
+            "labels": {
+              "source": "observer"
+            },
+            "value": 411.0
+          },
+          "coordinated_consensus_finalized_producer_info": {
+            "labels": {
+              "producer_id": "validator-2",
+              "producer_round": "0",
+              "source": "observer"
+            },
+            "value": 1.0
+          },
+          "coordinated_consensus_mode_info": {
+            "labels": {
+              "coordinator_id": "validator-1",
+              "mode": "coordinated_round_robin_v1",
+              "source": "observer"
+            },
+            "value": 1.0
+          },
+          "p2p_verified_handshakes_total": {
+            "labels": {
+              "algorithm": "FN-DSA-1024"
+            },
+            "value": 3.0
+          },
+          "pqc_verification_cache_evictions": 0.0,
+          "pqc_verification_cache_hits": 0.0,
+          "pqc_verification_cache_hits_total": 0.0,
+          "pqc_verification_cache_misses": 1236.0,
+          "pqc_verification_cache_misses_total": 1236.0,
+          "pqc_verification_duration": 0.582376,
+          "pqc_verification_duration_seconds": 0.582376,
+          "pqc_verification_queue_depth": 0.0,
+          "pqc_verification_queue_rejections": 0.0,
+          "pqc_verification_requests": 1236.0,
+          "pqc_verification_requests_total": 1236.0,
+          "synergy_chain_block_gas_limit": 30000000.0,
+          "synergy_chain_blocks_total": 1.0,
+          "synergy_chain_height": 0.0,
+          "synergy_chain_last_block_age_seconds": 10671133.0,
+          "synergy_chain_last_block_timestamp_seconds": 1775044800.0,
+          "synergy_chain_latest_block_gas_nwei": 0.0,
+          "synergy_chain_latest_block_interval_seconds": 0.0,
+          "synergy_chain_latest_block_transactions": 0.0,
+          "synergy_chain_recent_avg_block_time_seconds": 0.0,
+          "synergy_chain_recent_avg_gas_nwei_per_block": 0.0,
+          "synergy_chain_recent_avg_transactions_per_block": 0.0,
+          "synergy_chain_recent_gas_utilization_ratio": 0.0,
+          "synergy_chain_recent_transactions_total": 0.0,
+          "synergy_chain_transactions_total": 0.0,
+          "synergy_configured_peer_targets_total": 13.0,
+          "synergy_consensus_active_validator_count": 4.0,
+          "synergy_consensus_config": {
+            "labels": {
+              "setting": "min_validators"
+            },
+            "value": 6.0
+          },
+          "synergy_consensus_effective_vote_timeout_seconds": 0.0,
+          "synergy_consensus_leader_info": {
+            "labels": {
+              "leader": "",
+              "reason": ""
+            },
+            "value": 1.0
+          },
+          "synergy_consensus_timeout_mode": {
+            "labels": {
+              "mode": ""
+            },
+            "value": 1.0
+          },
+          "synergy_consensus_votes_collected": 0.0,
+          "synergy_consensus_votes_required": 0.0,
+          "synergy_current_consensus_height": 0.0,
+          "synergy_current_consensus_round": 0.0,
+          "synergy_expired_transaction_drop_total": 0.0,
+          "synergy_live_validator_count": 4.0,
+          "synergy_mempool_fee_nwei_total": 0.0,
+          "synergy_mempool_gas_limit_total": 0.0,
+          "synergy_mempool_gas_price_nwei": {
+            "labels": {
+              "stat": "max"
+            },
+            "value": 0.0
+          },
+          "synergy_mempool_pending_transactions": 0.0,
+          "synergy_node_info": {
+            "labels": {
+              "network": "synergy-testnet-v3",
+              "node_id": "rpc-gateway",
+              "node_name": "rpc-gateway",
+              "role": "rpc_gateway",
+              "validator_address": ""
+            },
+            "value": 1.0
+          },
+          "synergy_node_uptime_seconds": 14219.0,
+          "synergy_p2p_best_validator_peer_height": 0.0,
+          "synergy_p2p_peer_blocks_received_total": {
+            "labels": {
+              "peer": "relay2.synergynode.xyz:5622"
+            },
+            "value": 0.0
+          },
+          "synergy_p2p_peer_blocks_sent_total": {
+            "labels": {
+              "peer": "relay2.synergynode.xyz:5622"
+            },
+            "value": 0.0
+          },
+          "synergy_p2p_peer_height": {
+            "labels": {
+              "peer": "relay2.synergynode.xyz:5622"
+            },
+            "value": 0.0
+          },
+          "synergy_p2p_peer_info": {
+            "labels": {
+              "direction": "outgoing",
+              "node_id": "relay2",
+              "peer": "relay2.synergynode.xyz:5622",
+              "validator_address": "relay2"
+            },
+            "value": 1.0
+          },
+          "synergy_p2p_peer_last_seen_age_seconds": {
+            "labels": {
+              "peer": "relay2.synergynode.xyz:5622"
+            },
+            "value": 2.0
+          },
+          "synergy_p2p_peer_status_age_seconds": {
+            "labels": {
+              "peer": "relay2.synergynode.xyz:5622"
+            },
+            "value": 3.0
+          },
+          "synergy_p2p_peer_txs_received_total": {
+            "labels": {
+              "peer": "relay2.synergynode.xyz:5622"
+            },
+            "value": 0.0
+          },
+          "synergy_p2p_peer_txs_sent_total": {
+            "labels": {
+              "peer": "relay2.synergynode.xyz:5622"
+            },
+            "value": 0.0
+          },
+          "synergy_p2p_peers_connected": 3.0,
+          "synergy_p2p_status_ready_validators": 4.0,
+          "synergy_process_start_time_seconds": 1785701714.0,
+          "synergy_proposal_cache_discard_total": 0.0,
+          "synergy_qrpc_fallback_total": 0.0,
+          "synergy_registry_active_validator_count": 0.0,
+          "synergy_sync_gap_blocks": 0.0,
+          "synergy_sync_highest_block": 0.0,
+          "synergy_sync_in_progress": 0.0,
+          "synergy_sync_info": {
+            "labels": {
+              "state": "idle"
+            },
+            "value": 1.0
+          },
+          "synergy_sync_progress_percent": 100.0,
+          "synergy_sync_starting_block": 0.0,
+          "synergy_validator_clusters_total": 0.0,
+          "synergy_validator_pending_total": 0.0,
+          "synergy_validator_registry_total": 0.0,
+          "synergy_validator_status_total": {
+            "labels": {
+              "status": "slashed"
+            },
+            "value": 0.0
+          }
+        },
+        "systemd": {
+          "ActiveState": "active",
+          "CPUUsageNSec": "655316571000",
+          "ConfigSHA256": "d38a240ec91ba4d0438cc166e5f1a7e0b5e9caaa0d9a39862ef1b6a436a1b689",
+          "ExecMainStatus": "0",
+          "ExecutablePath": "/opt/synergy/chain1266/releases/chain1266-incarnation-4-rc18/bin/synergy-rpc-gateway-node",
+          "ExecutableSHA256": "517f1989d83672b8ead7e18073c8e435d8c877e8369bc7c766a6e444776172a9",
+          "GenesisSHA256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+          "MainPID": "997650",
+          "MemoryCurrent": "62676992",
+          "NRestarts": "0",
+          "SubState": "running"
+        }
+      },
+      "role": "rpc_gateway",
+      "service": "synergy-chain1266-role@rpc-gateway.service",
+      "ssh_alias": "synergy-rpc",
+      "ssh_error": "",
+      "ssh_exit": 0
+    },
+    {
+      "collected_utc": "2026-08-03T00:12:13Z",
+      "duration_seconds": 0.401,
+      "node_id": "explorer-indexer",
+      "parsed": {
+        "faults": [],
+        "metrics": {
+          "chain1266_desired_state_info": {
+            "labels": {
+              "_revision": "39e0e812f1c97bf9c0f3bb4791c883ecab5ea6ea",
+              "aegis_revision": "b51884a661e3aed4bb242ecbced47f3d8777b313",
+              "chain_id": "1266",
+              "chain_incarnation": "4",
+              "consensus_state_schema_version": "4",
+              "genesis_hash": "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",
+              "node_id": "explorer-indexer",
+              "release_id": "chain1266-incarnation-4-rc18",
+              "role_profile": "indexer_and_explorer_node",
+              "state_namespace": "chain-1266/incarnation-4",
+              "state_root": "/var/lib/synergy/testnet-v3/explorer-indexer/chain-1266/incarnation-4/data",
+              "synq_revision": "3f7886701ffee4303a24fa6c6584b792a5e36254",
+              "validator_set_root": "90c44da3ff3a2d94d9396953ae71baa21727610779531666e4aad6b2d03c71d1"
+            },
+            "value": 1.0
+          },
+          "consensus_current_height": 0.0,
+          "consensus_current_round": 0.0,
+          "consensus_finality_interval_mean_seconds": 0.0,
+          "consensus_finality_interval_median_seconds": 0.0,
+          "consensus_finality_interval_p95_seconds": 0.0,
+          "consensus_finality_interval_sample_count": 0.0,
+          "consensus_finality_interval_seconds": 0.0,
+          "consensus_finalized_block_id": {
+            "labels": {
+              "block_id": ""
+            },
+            "value": 1.0
+          },
+          "consensus_finalized_height": 0.0,
+          "consensus_finalized_round": 0.0,
+          "consensus_highest_qc_block_id": {
+            "labels": {
+              "block_id": ""
+            },
+            "value": 1.0
+          },
+          "consensus_highest_qc_height": 0.0,
+          "consensus_highest_qc_root": {
+            "labels": {
+              "root": ""
+            },
+            "value": 1.0
+          },
+          "consensus_highest_tc_root": {
+            "labels": {
+              "root": ""
+            },
+            "value": 1.0
+          },
+          "consensus_highest_tc_round": 0.0,
+          "consensus_mailbox_depth": 0.0,
+          "consensus_message_deduplications": 0.0,
+          "consensus_precrypto_rejections": 0.0,
+          "consensus_prepared_candidate": {
+            "labels": {
+              "candidate_id": ""
+            },
+            "value": 1.0
+          },
+          "consensus_prepared_height": 0.0,
+          "consensus_prepared_round": 0.0,
+          "consensus_ready": 0.0,
+          "consensus_rebroadcasts": 0.0,
+          "consensus_restart_count": 0.0,
+          "consensus_restarts_total": 0.0,
+          "consensus_round_zero_ratio": 0.0,
+          "consensus_startup_phase_info": {
+            "labels": {
+              "phase": "UNINITIALIZED"
+            },
+            "value": 1.0
+          },
+          "coordinated_consensus_active": {
+            "labels": {
+              "source": "observer"
+            },
+            "value": 1.0
+          },
+          "coordinated_consensus_finalized_block_id": {
+            "labels": {
+              "block_id": "0b3c8c22374d977817b96b95099890b29c561c56004a16d10e4945b50154c784",
+              "source": "observer"
+            },
+            "value": 1.0
+          },
+          "coordinated_consensus_finalized_height": {
+            "labels": {
+              "source": "observer"
+            },
+            "value": 411.0
+          },
+          "coordinated_consensus_finalized_producer_info": {
+            "labels": {
+              "producer_id": "validator-2",
+              "producer_round": "0",
+              "source": "observer"
+            },
+            "value": 1.0
+          },
+          "coordinated_consensus_mode_info": {
+            "labels": {
+              "coordinator_id": "validator-1",
+              "mode": "coordinated_round_robin_v1",
+              "source": "observer"
+            },
+            "value": 1.0
+          },
+          "p2p_verified_handshakes_total": {
+            "labels": {
+              "algorithm": "FN-DSA-1024"
+            },
+            "value": 3.0
+          },
+          "pqc_verification_cache_evictions": 0.0,
+          "pqc_verification_cache_hits": 0.0,
+          "pqc_verification_cache_hits_total": 0.0,
+          "pqc_verification_cache_misses": 12284306.0,
+          "pqc_verification_cache_misses_total": 12284306.0,
+          "pqc_verification_duration": 3490.392599,
+          "pqc_verification_duration_seconds": 3490.392599,
+          "pqc_verification_queue_depth": 0.0,
+          "pqc_verification_queue_rejections": 0.0,
+          "pqc_verification_requests": 12284305.0,
+          "pqc_verification_requests_total": 12284305.0,
+          "synergy_chain_block_gas_limit": 30000000.0,
+          "synergy_chain_blocks_total": 1.0,
+          "synergy_chain_height": 0.0,
+          "synergy_chain_last_block_age_seconds": 10671133.0,
+          "synergy_chain_last_block_timestamp_seconds": 1775044800.0,
+          "synergy_chain_latest_block_gas_nwei": 0.0,
+          "synergy_chain_latest_block_interval_seconds": 0.0,
+          "synergy_chain_latest_block_transactions": 0.0,
+          "synergy_chain_recent_avg_block_time_seconds": 0.0,
+          "synergy_chain_recent_avg_gas_nwei_per_block": 0.0,
+          "synergy_chain_recent_avg_transactions_per_block": 0.0,
+          "synergy_chain_recent_gas_utilization_ratio": 0.0,
+          "synergy_chain_recent_transactions_total": 0.0,
+          "synergy_chain_transactions_total": 0.0,
+          "synergy_configured_peer_targets_total": 13.0,
+          "synergy_consensus_active_validator_count": 4.0,
+          "synergy_consensus_config": {
+            "labels": {
+              "setting": "min_validators"
+            },
+            "value": 6.0
+          },
+          "synergy_consensus_effective_vote_timeout_seconds": 0.0,
+          "synergy_consensus_leader_info": {
+            "labels": {
+              "leader": "",
+              "reason": ""
+            },
+            "value": 1.0
+          },
+          "synergy_consensus_timeout_mode": {
+            "labels": {
+              "mode": ""
+            },
+            "value": 1.0
+          },
+          "synergy_consensus_votes_collected": 0.0,
+          "synergy_consensus_votes_required": 0.0,
+          "synergy_current_consensus_height": 0.0,
+          "synergy_current_consensus_round": 0.0,
+          "synergy_expired_transaction_drop_total": 0.0,
+          "synergy_live_validator_count": 4.0,
+          "synergy_mempool_fee_nwei_total": 0.0,
+          "synergy_mempool_gas_limit_total": 0.0,
+          "synergy_mempool_gas_price_nwei": {
+            "labels": {
+              "stat": "max"
+            },
+            "value": 0.0
+          },
+          "synergy_mempool_pending_transactions": 0.0,
+          "synergy_node_info": {
+            "labels": {
+              "network": "synergy-testnet-v3",
+              "node_id": "explorer-indexer",
+              "node_name": "explorer-indexer",
+              "role": "indexer_explorer",
+              "validator_address": ""
+            },
+            "value": 1.0
+          },
+          "synergy_node_uptime_seconds": 13240.0,
+          "synergy_p2p_best_validator_peer_height": 0.0,
+          "synergy_p2p_peer_blocks_received_total": {
+            "labels": {
+              "peer": "relay3.synergynode.xyz:5622"
+            },
+            "value": 0.0
+          },
+          "synergy_p2p_peer_blocks_sent_total": {
+            "labels": {
+              "peer": "relay3.synergynode.xyz:5622"
+            },
+            "value": 0.0
+          },
+          "synergy_p2p_peer_height": {
+            "labels": {
+              "peer": "relay3.synergynode.xyz:5622"
+            },
+            "value": 0.0
+          },
+          "synergy_p2p_peer_info": {
+            "labels": {
+              "direction": "outgoing",
+              "node_id": "relay3",
+              "peer": "relay3.synergynode.xyz:5622",
+              "validator_address": "relay3"
+            },
+            "value": 1.0
+          },
+          "synergy_p2p_peer_last_seen_age_seconds": {
+            "labels": {
+              "peer": "relay3.synergynode.xyz:5622"
+            },
+            "value": 8.0
+          },
+          "synergy_p2p_peer_status_age_seconds": {
+            "labels": {
+              "peer": "relay3.synergynode.xyz:5622"
+            },
+            "value": 9.0
+          },
+          "synergy_p2p_peer_txs_received_total": {
+            "labels": {
+              "peer": "relay3.synergynode.xyz:5622"
+            },
+            "value": 0.0
+          },
+          "synergy_p2p_peer_txs_sent_total": {
+            "labels": {
+              "peer": "relay3.synergynode.xyz:5622"
+            },
+            "value": 0.0
+          },
+          "synergy_p2p_peers_connected": 3.0,
+          "synergy_p2p_status_ready_validators": 4.0,
+          "synergy_process_start_time_seconds": 1785702693.0,
+          "synergy_proposal_cache_discard_total": 0.0,
+          "synergy_qrpc_fallback_total": 188.0,
+          "synergy_registry_active_validator_count": 0.0,
+          "synergy_sync_gap_blocks": 0.0,
+          "synergy_sync_highest_block": 0.0,
+          "synergy_sync_in_progress": 0.0,
+          "synergy_sync_info": {
+            "labels": {
+              "state": "synced"
+            },
+            "value": 1.0
+          },
+          "synergy_sync_progress_percent": 100.0,
+          "synergy_sync_starting_block": 0.0,
+          "synergy_validator_clusters_total": 0.0,
+          "synergy_validator_pending_total": 0.0,
+          "synergy_validator_registry_total": 0.0,
+          "synergy_validator_status_total": {
+            "labels": {
+              "status": "slashed"
+            },
+            "value": 0.0
+          }
+        },
+        "systemd": {
+          "ActiveState": "active",
+          "CPUUsageNSec": "8695045021000",
+          "ConfigSHA256": "54e7e93d20b3d834f255172cb176f5f88cdc51b09043dd21cfbb7b4dfe7666dd",
+          "ExecMainStatus": "0",
+          "ExecutablePath": "/opt/synergy/chain1266/releases/chain1266-incarnation-4-rc18/bin/synergy-indexer-and-explorer-node",
+          "ExecutableSHA256": "4f02844a267210ce21faee5d966cd99bdb5f4b961ac213084813534e5e7384c7",
+          "GenesisSHA256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+          "MainPID": "1126738",
+          "MemoryCurrent": "208580608",
+          "NRestarts": "0",
+          "SubState": "running"
+        }
+      },
+      "role": "explorer_indexer",
+      "service": "synergy-chain1266-role@explorer-indexer.service",
+      "ssh_alias": "synergy-index",
+      "ssh_error": "",
+      "ssh_exit": 0
+    },
+    {
+      "collected_utc": "2026-08-03T00:12:14Z",
+      "duration_seconds": 1.219,
+      "node_id": "observer",
+      "parsed": {
+        "faults": [],
+        "metrics": {
+          "chain1266_desired_state_info": {
+            "labels": {
+              "_revision": "39e0e812f1c97bf9c0f3bb4791c883ecab5ea6ea",
+              "aegis_revision": "b51884a661e3aed4bb242ecbced47f3d8777b313",
+              "chain_id": "1266",
+              "chain_incarnation": "4",
+              "consensus_state_schema_version": "4",
+              "genesis_hash": "c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",
+              "node_id": "observer",
+              "release_id": "chain1266-incarnation-4-rc18",
+              "role_profile": "observer_light_node",
+              "state_namespace": "chain-1266/incarnation-4",
+              "state_root": "/var/lib/synergy/observer/chain-1266/incarnation-4/data",
+              "synq_revision": "3f7886701ffee4303a24fa6c6584b792a5e36254",
+              "validator_set_root": "90c44da3ff3a2d94d9396953ae71baa21727610779531666e4aad6b2d03c71d1"
+            },
+            "value": 1.0
+          },
+          "consensus_current_height": 0.0,
+          "consensus_current_round": 0.0,
+          "consensus_finality_interval_mean_seconds": 0.0,
+          "consensus_finality_interval_median_seconds": 0.0,
+          "consensus_finality_interval_p95_seconds": 0.0,
+          "consensus_finality_interval_sample_count": 0.0,
+          "consensus_finality_interval_seconds": 0.0,
+          "consensus_finalized_block_id": {
+            "labels": {
+              "block_id": ""
+            },
+            "value": 1.0
+          },
+          "consensus_finalized_height": 0.0,
+          "consensus_finalized_round": 0.0,
+          "consensus_highest_qc_block_id": {
+            "labels": {
+              "block_id": ""
+            },
+            "value": 1.0
+          },
+          "consensus_highest_qc_height": 0.0,
+          "consensus_highest_qc_root": {
+            "labels": {
+              "root": ""
+            },
+            "value": 1.0
+          },
+          "consensus_highest_tc_root": {
+            "labels": {
+              "root": ""
+            },
+            "value": 1.0
+          },
+          "consensus_highest_tc_round": 0.0,
+          "consensus_mailbox_depth": 0.0,
+          "consensus_message_deduplications": 0.0,
+          "consensus_precrypto_rejections": 0.0,
+          "consensus_prepared_candidate": {
+            "labels": {
+              "candidate_id": ""
+            },
+            "value": 1.0
+          },
+          "consensus_prepared_height": 0.0,
+          "consensus_prepared_round": 0.0,
+          "consensus_ready": 0.0,
+          "consensus_rebroadcasts": 0.0,
+          "consensus_restart_count": 0.0,
+          "consensus_restarts_total": 0.0,
+          "consensus_round_zero_ratio": 0.0,
+          "consensus_startup_phase_info": {
+            "labels": {
+              "phase": "UNINITIALIZED"
+            },
+            "value": 1.0
+          },
+          "coordinated_consensus_active": {
+            "labels": {
+              "source": "uninitialized"
+            },
+            "value": 0.0
+          },
+          "coordinated_consensus_finalized_block_id": {
+            "labels": {
+              "block_id": "",
+              "source": "uninitialized"
+            },
+            "value": 1.0
+          },
+          "coordinated_consensus_finalized_height": {
+            "labels": {
+              "source": "uninitialized"
+            },
+            "value": 0.0
+          },
+          "coordinated_consensus_finalized_producer_info": {
+            "labels": {
+              "producer_id": "",
+              "producer_round": "0",
+              "source": "uninitialized"
+            },
+            "value": 1.0
+          },
+          "coordinated_consensus_mode_info": {
+            "labels": {
+              "coordinator_id": "validator-1",
+              "mode": "coordinated_round_robin_v1",
+              "source": "uninitialized"
+            },
+            "value": 1.0
+          },
+          "p2p_verified_handshakes_total": {
+            "labels": {
+              "algorithm": "FN-DSA-1024"
+            },
+            "value": 3.0
+          },
+          "pqc_verification_cache_evictions": 0.0,
+          "pqc_verification_cache_hits": 0.0,
+          "pqc_verification_cache_hits_total": 0.0,
+          "pqc_verification_cache_misses": 3.0,
+          "pqc_verification_cache_misses_total": 3.0,
+          "pqc_verification_duration": 0.000705,
+          "pqc_verification_duration_seconds": 0.000705,
+          "pqc_verification_queue_depth": 0.0,
+          "pqc_verification_queue_rejections": 0.0,
+          "pqc_verification_requests": 3.0,
+          "pqc_verification_requests_total": 3.0,
+          "synergy_chain_block_gas_limit": 30000000.0,
+          "synergy_chain_blocks_total": 1.0,
+          "synergy_chain_height": 0.0,
+          "synergy_chain_last_block_age_seconds": 10671133.0,
+          "synergy_chain_last_block_timestamp_seconds": 1775044800.0,
+          "synergy_chain_latest_block_gas_nwei": 0.0,
+          "synergy_chain_latest_block_interval_seconds": 0.0,
+          "synergy_chain_latest_block_transactions": 0.0,
+          "synergy_chain_recent_avg_block_time_seconds": 0.0,
+          "synergy_chain_recent_avg_gas_nwei_per_block": 0.0,
+          "synergy_chain_recent_avg_transactions_per_block": 0.0,
+          "synergy_chain_recent_gas_utilization_ratio": 0.0,
+          "synergy_chain_recent_transactions_total": 0.0,
+          "synergy_chain_transactions_total": 0.0,
+          "synergy_configured_peer_targets_total": 13.0,
+          "synergy_consensus_active_validator_count": 4.0,
+          "synergy_consensus_config": {
+            "labels": {
+              "setting": "min_validators"
+            },
+            "value": 6.0
+          },
+          "synergy_consensus_effective_vote_timeout_seconds": 0.0,
+          "synergy_consensus_leader_info": {
+            "labels": {
+              "leader": "",
+              "reason": ""
+            },
+            "value": 1.0
+          },
+          "synergy_consensus_timeout_mode": {
+            "labels": {
+              "mode": ""
+            },
+            "value": 1.0
+          },
+          "synergy_consensus_votes_collected": 0.0,
+          "synergy_consensus_votes_required": 0.0,
+          "synergy_current_consensus_height": 0.0,
+          "synergy_current_consensus_round": 0.0,
+          "synergy_expired_transaction_drop_total": 0.0,
+          "synergy_live_validator_count": 4.0,
+          "synergy_mempool_fee_nwei_total": 0.0,
+          "synergy_mempool_gas_limit_total": 0.0,
+          "synergy_mempool_gas_price_nwei": {
+            "labels": {
+              "stat": "max"
+            },
+            "value": 0.0
+          },
+          "synergy_mempool_pending_transactions": 0.0,
+          "synergy_node_info": {
+            "labels": {
+              "network": "synergy-testnet-v3",
+              "node_id": "observer",
+              "node_name": "observer",
+              "role": "observer_light",
+              "validator_address": ""
+            },
+            "value": 1.0
+          },
+          "synergy_node_uptime_seconds": 14218.0,
+          "synergy_p2p_best_validator_peer_height": 0.0,
+          "synergy_p2p_peer_blocks_received_total": {
+            "labels": {
+              "peer": "relay1.synergynode.xyz:5622"
+            },
+            "value": 0.0
+          },
+          "synergy_p2p_peer_blocks_sent_total": {
+            "labels": {
+              "peer": "relay1.synergynode.xyz:5622"
+            },
+            "value": 0.0
+          },
+          "synergy_p2p_peer_height": {
+            "labels": {
+              "peer": "relay1.synergynode.xyz:5622"
+            },
+            "value": 0.0
+          },
+          "synergy_p2p_peer_info": {
+            "labels": {
+              "direction": "incoming",
+              "node_id": "relay1",
+              "peer": "relay1.synergynode.xyz:5622",
+              "validator_address": "relay1"
+            },
+            "value": 1.0
+          },
+          "synergy_p2p_peer_last_seen_age_seconds": {
+            "labels": {
+              "peer": "relay1.synergynode.xyz:5622"
+            },
+            "value": 0.0
+          },
+          "synergy_p2p_peer_status_age_seconds": {
+            "labels": {
+              "peer": "relay1.synergynode.xyz:5622"
+            },
+            "value": 8.0
+          },
+          "synergy_p2p_peer_txs_received_total": {
+            "labels": {
+              "peer": "relay1.synergynode.xyz:5622"
+            },
+            "value": 0.0
+          },
+          "synergy_p2p_peer_txs_sent_total": {
+            "labels": {
+              "peer": "relay1.synergynode.xyz:5622"
+            },
+            "value": 0.0
+          },
+          "synergy_p2p_peers_connected": 3.0,
+          "synergy_p2p_status_ready_validators": 4.0,
+          "synergy_process_start_time_seconds": 1785701715.0,
+          "synergy_proposal_cache_discard_total": 0.0,
+          "synergy_qrpc_fallback_total": 0.0,
+          "synergy_registry_active_validator_count": 0.0,
+          "synergy_sync_gap_blocks": 0.0,
+          "synergy_sync_highest_block": 0.0,
+          "synergy_sync_in_progress": 0.0,
+          "synergy_sync_info": {
+            "labels": {
+              "state": "unknown"
+            },
+            "value": 1.0
+          },
+          "synergy_sync_progress_percent": 0.0,
+          "synergy_sync_starting_block": 0.0,
+          "synergy_validator_clusters_total": 0.0,
+          "synergy_validator_pending_total": 0.0,
+          "synergy_validator_registry_total": 0.0,
+          "synergy_validator_status_total": {
+            "labels": {
+              "status": "slashed"
+            },
+            "value": 0.0
+          }
+        },
+        "systemd": {
+          "ActiveState": "active",
+          "CPUUsageNSec": "157574912000",
+          "ConfigSHA256": "fb46973d33a7faa10bfd8043d799a4e5eb00a7daf40aa3c1e8c48f6ec565888c",
+          "ExecMainStatus": "0",
+          "ExecutablePath": "/opt/synergy/chain1266/releases/chain1266-incarnation-4-rc18/bin/synergy-observer-light-node",
+          "ExecutableSHA256": "6e1dd5749792eba23cb7b5ffb274bccba219c96a208941bbf991558906c18edd",
+          "GenesisSHA256": "ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf",
+          "MainPID": "1251601",
+          "MemoryCurrent": "30208000",
+          "NRestarts": "0",
+          "SubState": "running"
+        }
+      },
+      "role": "observer",
+      "service": "synergy-chain1266-role@observer.service",
+      "ssh_alias": "synergy-observer",
+      "ssh_error": "",
+      "ssh_exit": 0
+    },
+    {
+      "collected_utc": "2026-08-03T00:12:13Z",
+      "duration_seconds": 0.366,
+      "node_id": "atlas-api",
+      "parsed": {
+        "faults": [],
+        "metrics": {},
+        "systemd": {
+          "ActiveState": "active",
+          "CPUUsageNSec": "32272791000",
+          "ExecMainStatus": "0",
+          "ExecutablePath": "/usr/bin/node",
+          "ExecutableSHA256": "93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068",
+          "MainPID": "1124841",
+          "MemoryCurrent": "59797504",
+          "NRestarts": "0",
+          "SubState": "running"
+        }
+      },
+      "role": "atlas_api",
+      "service": "synergy-testnet-v3-atlas-api.service",
+      "ssh_alias": "synergy-index",
+      "ssh_error": "",
+      "ssh_exit": 0
+    },
+    {
+      "collected_utc": "2026-08-03T00:12:14Z",
+      "duration_seconds": 0.367,
+      "node_id": "atlas-indexer",
+      "parsed": {
+        "faults": [],
+        "metrics": {},
+        "systemd": {
+          "ActiveState": "active",
+          "CPUUsageNSec": "35339774000",
+          "ExecMainStatus": "0",
+          "ExecutablePath": "/usr/bin/node",
+          "ExecutableSHA256": "93956de2e59480474a7b46571da1651180b1a050cdf32641ebec4ce6e478e068",
+          "MainPID": "1125611",
+          "MemoryCurrent": "43556864",
+          "NRestarts": "0",
+          "SubState": "running"
+        }
+      },
+      "role": "atlas_indexer",
+      "service": "synergy-testnet-v3-atlas-indexer.service",
+      "ssh_alias": "synergy-index",
+      "ssh_error": "",
+      "ssh_exit": 0
+    }
+  ],
+  "status": "OPEN",
+  "triggers": [
+    "DESIRED_STATE_MISMATCH:validator-node-02",
+    "DESIRED_STATE_MISMATCH:validator-node-03",
+    "DESIRED_STATE_MISMATCH:validator-node-04",
+    "DESIRED_STATE_MISMATCH:validator-node-05",
+    "DESIRED_STATE_MISMATCH:validator-node-06",
+    "DOWNSTREAM_IDENTITY_MISMATCH:relay1",
+    "FEWER_THAN_FIVE_ACTIVE_VALIDATORS"
+  ]
+}

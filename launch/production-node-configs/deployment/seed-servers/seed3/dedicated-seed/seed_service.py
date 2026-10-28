@@ -123,7 +123,18 @@ def normalize_endpoint_parts(host: str, port: int) -> EndpointParts | None:
     return EndpointParts(host=clean_host, port=port, endpoint=endpoint)
 
 
-def endpoint_rejection_reason(endpoint: str) -> str | None:
+def is_netbird_validator_endpoint(endpoint: str) -> bool:
+    parts = parse_endpoint(endpoint)
+    if not parts or parts.port != 5622:
+        return False
+    try:
+        address = ipaddress.ip_address(parts.host)
+    except ValueError:
+        return False
+    return isinstance(address, ipaddress.IPv4Address) and address in ipaddress.ip_network("10.69.0.0/16")
+
+
+def endpoint_rejection_reason(endpoint: str, *, allow_netbird_validator: bool = False) -> str | None:
     parts = parse_endpoint(endpoint)
     if not parts:
         return "missing or invalid public_endpoint"
@@ -137,6 +148,9 @@ def endpoint_rejection_reason(endpoint: str) -> str | None:
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
+        return None
+
+    if allow_netbird_validator and is_netbird_validator_endpoint(endpoint):
         return None
 
     if ip.is_unspecified:
@@ -238,7 +252,10 @@ class SeedState:
             if not record:
                 continue
             endpoint = record["public_endpoint"]
-            if endpoint_rejection_reason(endpoint):
+            if endpoint_rejection_reason(
+                endpoint,
+                allow_netbird_validator=record.get("role") == "validator",
+            ):
                 continue
             if self.config.static_dialback_on_start or entry.get("require_dialback"):
                 self._refresh_dialback(record, now)
@@ -424,10 +441,13 @@ class SeedState:
             if role and record.get("role") != role:
                 continue
             endpoint = str(record.get("public_endpoint") or "")
-            if endpoint_rejection_reason(endpoint):
+            if endpoint_rejection_reason(
+                endpoint,
+                allow_netbird_validator=record.get("role") == "validator",
+            ):
                 continue
             if not record.get("static") and (
-                record.get("dialback_status") != "success"
+                record.get("dialback_status") not in {"success", "transport_candidate"}
                 or record.get("health_status") != "healthy"
             ):
                 continue
@@ -567,7 +587,10 @@ class SeedState:
                 "seed_id": self.config.seed_id,
             }
         endpoint = record["public_endpoint"]
-        reason = endpoint_rejection_reason(endpoint)
+        reason = endpoint_rejection_reason(
+            endpoint,
+            allow_netbird_validator=record.get("role") == "validator",
+        )
         if reason:
             return HTTPStatus.BAD_REQUEST, {
                 "ok": False,
@@ -581,7 +604,15 @@ class SeedState:
             record["health_status"] = "pending"
         record["failure_count"] = int(existing.get("failure_count") or record.get("failure_count") or 0)
         record["dialback_last_success"] = str(existing.get("dialback_last_success") or record.get("dialback_last_success") or "")
-        self._refresh_dialback(record, now)
+        if is_netbird_validator_endpoint(endpoint) and record["role"] == "validator":
+            # Seed registration supplies only a transport candidate.  NetBird
+            # validator routes are private to the coordinator and cannot be
+            # public-dialed by this service; the validator runtime performs
+            # the required synv, chain, and protocol authentication.
+            record["dialback_status"] = "transport_candidate"
+            record["health_status"] = "healthy"
+        else:
+            self._refresh_dialback(record, now)
         self.dynamic_peers[endpoint] = record
         self._save()
         if replicate:

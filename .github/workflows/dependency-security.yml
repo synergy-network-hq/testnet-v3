@@ -1,0 +1,74 @@
+name: Dependency Security Validation
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/dependency-security.yml"
+      - "runtime/sxcp/sxcp_external_chains/evm/**"
+      - "runtime/synq-language/sdk/**"
+      - "runtime/**/Cargo.toml"
+      - "runtime/**/Cargo.lock"
+      - "research/aegis-bench/Cargo.lock"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-security-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  evm:
+    name: EVM contract tests and complete dependency audit
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: runtime/sxcp/sxcp_external_chains/evm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: runtime/sxcp/sxcp_external_chains/evm/package-lock.json
+      - run: npm ci --ignore-scripts --no-fund
+      - run: npm run postinstall
+      - run: npm audit --audit-level=low
+      - run: npm test
+
+  sdk:
+    name: SynQ SDK types, integration tests, and dependency audit
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: runtime/synq-language/sdk
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: runtime/synq-language/sdk/package-lock.json
+      - run: npm ci --ignore-scripts --no-fund
+      - run: npm audit --audit-level=low
+      - run: npm run typecheck
+      - run: npm run test:integration
+
+
+  rust-audit:
+    name: Rust dependency vulnerability and unsoundness audit
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Audit all active lockfiles
+        run: |
+          cargo audit --file runtime/Cargo.lock --deny unsound --no-yanked
+          cargo audit --file research/aegis-bench/Cargo.lock --deny unsound --no-yanked --no-fetch
+          cargo audit --file runtime/synq-language/aegis-pqsynq/aegis_crypto_core/Cargo.lock --deny unsound --no-yanked --no-fetch
+          cargo audit --file runtime/synq-language/Cargo.lock --deny unsound --no-yanked --no-fetch

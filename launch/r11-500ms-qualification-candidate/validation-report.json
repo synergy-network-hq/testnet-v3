@@ -1,0 +1,29 @@
+{
+  "GENERATED_CANDIDATE": {
+    "path": "genesis-predeployment-candidate.unsigned.json",
+    "sha256": "333606db79c7e851d38dc61ff912e827ed5604fdb2b4f3beb656f36c0a7cd976"
+  },
+  "NEW_TIMING": 500,
+  "OLD_TIMING": 2000,
+  "SOURCE_INPUT": {
+    "path": "launch/posy-v3-genesis-inputs/fresh-p3-genesis-predeployment-public-input.json",
+    "sha256": "d00d9e46a1398c423a8ad36cb48677fcb22b283fe3600028e1d32170f14370b7"
+  },
+  "SOURCE_MANIFEST": {
+    "parameter_root_sha3_512": "655ce5e10e15f4ab4fd06c7ce33518197d59d0e0930c088538bbe8abb5b39a9a2abb3f6efd765e918513c3fd13c4fc0540fe6930dba5699eaeb24a7cebd5a2bb",
+    "path": "launch/posy-v3-etdag-governance-inputs/posy-simplified-parameter-manifest.for-release.json",
+    "sha256": "da2b6fa43c9818059ebf899020d3b283d11f689a4a901438a4d67baa7665e932"
+  },
+  "candidate_parameter_manifest_sha256": "c997e12c1b9787853a4bd44f69a0de0d34a65bed014c4c3fe3f43d409f3f9074",
+  "candidate_parameter_root_sha3_512": "4a1cbf3e0b759dddd4daecf1d34ba647075dc4210db42dda0f547399de1fd506cdc8b4cf6b677a100f04d59994c1e811b26cd00b616d7ef61275fb9e49776cd9",
+  "rendered_validator_count": 5,
+  "result": "R11_500MS_QUALIFICATION_CANDIDATE_WRITTEN",
+  "runtime_config_status": "MILLISECOND_CADENCE_FIELDS_BOUND",
+  "validation": {
+    "candidate_timing_ms": 500,
+    "candidate_within_100_to_1100_ms": true,
+    "no_governance_signature_fabricated": true,
+    "source_preserved": true,
+    "source_timing_ms": 2000
+  }
+}

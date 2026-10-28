@@ -1,5 +1,10 @@
 # Strict Fleet Status Runbook
 
+Status: **historical pre-P3 offline tooling reference.** The Chain `1264` /
+`synergy-testnet-v3` command below is not a valid command for fresh Chain
+`1266` / network `testnet` / `posy/3.0`. A P3 fleet-status command and evidence
+schema must be qualified separately before operational use.
+
 This runbook covers the offline fleet doctor. It does not authorize live
 validator restarts, binary deployment, or chain-state mutation.
 

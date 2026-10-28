@@ -28,7 +28,7 @@ ROOT = os.environ.get(
 )
 CEREMONY_VERSION = "tnv3-correspondence-1"
 CHAIN_ID = 1266
-NETWORK_ID = "synergy-testnet-v3"
+NETWORK_ID = "testnet"
 
 # identity classes required for launch and the key roles each must prove
 REQUIRED = {
@@ -89,7 +89,7 @@ def cmd_prepare(args):
             }
         )
 
-    for v in g["validators"]:  # six active validators
+    for v in g["validators"]:  # exact Genesis-active validator set
         aid = v["allocation_account_id"]
         add(aid, f"active validator {v['validator_id']} consensus", "consensus_key",
             v["consensus_public_key"], v["consensus_key_type"])

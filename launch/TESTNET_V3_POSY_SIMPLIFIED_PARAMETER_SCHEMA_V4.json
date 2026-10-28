@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://synergy-network.io/schemas/testnet-v3-posy-simplified-parameters-v4.json",
+  "title": "Testnet-v3 PoSy simplified consensus parameter manifest",
+  "description": "Governance proposal schema for a separate block-zero PoSy v3 chain. Schema validity does not authorize activation; the runtime additionally requires canonical byte encoding, FINALIZED status, approval, and the fresh Genesis block-one boundary.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "release_id", "status", "governance_approval_id",
+    "chain_id", "network_id", "protocol_version", "activation_boundary",
+    "activation_epoch", "activation_height", "epoch_length_blocks",
+    "active_validator_count", "consensus_cluster_count", "healthy_path",
+    "ordinary_vote_phases", "normal_qc_types", "exceptional_certificate",
+    "chained_qc_commit_depth", "leader_schedule_domain",
+    "leader_schedule_rank_bits", "leader_schedule_weighted",
+    "leader_lease_blocks", "takeover_rule", "count_quorum_rule",
+    "required_distinct_signers", "weight_quorum_rule",
+    "consensus_signature_algorithm", "allow_quorum_reduction",
+    "allow_local_leader_election", "require_single_validator_failure_liveness",
+    "signer_journal_required", "safety_halt_on_conflicting_valid_qcs",
+    "etdag_finality_separation_required", "protected_execution_binding_required",
+    "initial_etdag_activation", "target_block_time_ms", "proposal_timeout_ms", "vote_timeout_ms",
+    "max_round_timeout_ms", "performance_targets"
+  ],
+  "properties": {
+    "schema_version": {"const": 4},
+    "release_id": {"const": "testnet-v3"},
+    "status": {"enum": ["PROPOSED_NOT_ACTIVATED", "FINALIZED"]},
+    "governance_approval_id": {"type": ["string", "null"], "minLength": 1},
+    "chain_id": {"const": 1266},
+    "network_id": {"const": "testnet"},
+    "protocol_version": {"const": "posy/3.0"},
+    "activation_boundary": {"const": "fresh_genesis_block_zero"},
+    "activation_epoch": {"type": ["integer", "null"], "minimum": 0},
+    "activation_height": {"type": ["integer", "null"], "minimum": 1},
+    "epoch_length_blocks": {"type": "integer", "minimum": 1},
+    "active_validator_count": {
+      "description": "Frozen validator count for the initial activation epoch only. Later finalized v3 epoch contexts may contain a larger set and derive quorum dynamically.",
+      "const": 5
+    },
+    "consensus_cluster_count": {"const": 1},
+    "healthy_path": {"const": ["PROPOSAL", "VOTE", "QC"]},
+    "ordinary_vote_phases": {"const": 1},
+    "normal_qc_types": {"const": 1},
+    "exceptional_certificate": {"const": "TC"},
+    "chained_qc_commit_depth": {"const": 3},
+    "leader_schedule_domain": {"const": "PoSy/LeaderSchedule/v3"},
+    "leader_schedule_rank_bits": {"const": 512},
+    "leader_schedule_weighted": {"const": false},
+    "leader_lease_blocks": {"const": 10},
+    "takeover_rule": {"const": "sequential_strict_dual_quorum_tc_for_current_lease"},
+    "count_quorum_rule": {"const": "3*signed_count>2*active_validator_count"},
+    "required_distinct_signers": {
+      "description": "Derived strict count quorum for the initial five-validator activation epoch only; later epochs recompute floor(2*n/3)+1 from their frozen set.",
+      "const": 4
+    },
+    "weight_quorum_rule": {"const": "3*signed_weight>2*total_frozen_weight"},
+    "consensus_signature_algorithm": {"const": "mldsa65"},
+    "allow_quorum_reduction": {"const": false},
+    "allow_local_leader_election": {"const": false},
+    "require_single_validator_failure_liveness": {"const": true},
+    "signer_journal_required": {"const": true},
+    "safety_halt_on_conflicting_valid_qcs": {"const": true},
+    "etdag_finality_separation_required": {"const": true},
+    "protected_execution_binding_required": {"const": true},
+    "initial_etdag_activation": {"const": "governed_genesis_binding_required"},
+    "target_block_time_ms": {"type": "integer", "minimum": 1},
+    "proposal_timeout_ms": {"type": "integer", "minimum": 1},
+    "vote_timeout_ms": {"type": "integer", "minimum": 1},
+    "max_round_timeout_ms": {"type": "integer", "minimum": 1},
+    "performance_targets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "proposal_latency_ms", "qc_formation_latency_ms",
+        "chained_finality_latency_ms", "tc_recovery_latency_ms",
+        "finality_p95_ms", "finality_p99_ms"
+      ],
+      "properties": {
+        "proposal_latency_ms": {"type": "integer", "minimum": 1},
+        "qc_formation_latency_ms": {"type": "integer", "minimum": 1},
+        "chained_finality_latency_ms": {"type": "integer", "minimum": 1},
+        "tc_recovery_latency_ms": {"type": "integer", "minimum": 1},
+        "finality_p95_ms": {"type": "integer", "minimum": 1},
+        "finality_p99_ms": {"type": "integer", "minimum": 1}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "PROPOSED_NOT_ACTIVATED"}}},
+      "then": {
+        "properties": {
+          "governance_approval_id": {"type": "null"},
+          "activation_epoch": {"type": "null"},
+          "activation_height": {"type": "null"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "FINALIZED"}}},
+      "then": {
+        "properties": {
+          "governance_approval_id": {"type": "string", "minLength": 1},
+          "activation_epoch": {"const": 0},
+          "activation_height": {"const": 1}
+        }
+      }
+    }
+  ]
+}

@@ -7,6 +7,32 @@ const TOTAL_SUPPLY_NWEI: u128 = 12_000_000_000_000_000_000;
 const CHAIN_ID: u64 = 1266;
 const CAIP2: &str = "synergy:testnet";
 
+/// Integration tests compile as their own crate, so they cannot use Core's
+/// `#[cfg(test)]` scratch-root helper. Keep cleanup scoped to this test instead
+/// of leaking directories when an assertion fails midway through the loop.
+struct TestTempDir {
+    path: PathBuf,
+}
+
+impl TestTempDir {
+    fn create(name: impl AsRef<Path>) -> Self {
+        let path = std::env::temp_dir().join(name);
+        fs::create_dir(&path)
+            .unwrap_or_else(|err| panic!("create temporary directory {}: {err}", path.display()));
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TestTempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -357,15 +383,13 @@ fn independent_temp_dir_hash_recompute_matches() {
         .unwrap()
         .to_string();
     for index in 0..3 {
-        let dir = crate::utils::test_temp_root(format!(
+        let dir = TestTempDir::create(format!(
             "synergy-genesis-hash-test-{index}-{}",
             std::process::id()
         ));
-        fs::create_dir_all(&dir).unwrap();
-        let copy = dir.join("genesis.testnet.json");
+        let copy = dir.path().join("genesis.testnet.json");
         fs::copy(&source, &copy).unwrap();
         let copied = read_json(&copy);
         assert_eq!(hash_json(&genesis_hash_payload(&copied)), expected);
-        fs::remove_dir_all(&dir).unwrap();
     }
 }

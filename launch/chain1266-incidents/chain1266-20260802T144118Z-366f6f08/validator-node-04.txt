@@ -1,0 +1,431 @@
+SECTION=SYSTEMD
+MainPID=1113777
+NRestarts=0
+ExecMainStatus=0
+MemoryCurrent=49893376
+CPUUsageNSec=1396538000
+ActiveState=active
+SubState=running
+ConfigSHA256=c60773e43c1c7cd73e4e89460946fb4ccbf18a55fe468c7a530b7f83bbe7cb87
+GenesisSHA256=ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf
+SECTION=METRICS
+# HELP synergy_node_info Static identity and role labels for this Synergy node.
+# TYPE synergy_node_info gauge
+synergy_node_info{network="Synergy Testnet",role="validator",node_id="validator-node-04",node_name="validator-node-04",validator_address="synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg"} 1
+# HELP synergy_chain_height Latest block height in the shared chain state.
+# TYPE synergy_chain_height gauge
+synergy_chain_height 0
+# HELP synergy_chain_blocks_total Number of blocks currently held in memory.
+# TYPE synergy_chain_blocks_total gauge
+synergy_chain_blocks_total 1
+# HELP synergy_chain_last_block_timestamp_seconds Unix timestamp for the latest block in the shared chain state.
+# TYPE synergy_chain_last_block_timestamp_seconds gauge
+synergy_chain_last_block_timestamp_seconds 1775044800
+# HELP synergy_chain_last_block_age_seconds Age of the latest local block, in seconds.
+# TYPE synergy_chain_last_block_age_seconds gauge
+synergy_chain_last_block_age_seconds 10636877
+# HELP synergy_chain_latest_block_transactions Number of transactions included in the latest local block.
+# TYPE synergy_chain_latest_block_transactions gauge
+synergy_chain_latest_block_transactions 0
+# HELP synergy_chain_latest_block_gas_nwei Total transaction fee units in the latest local block, measured in nWei.
+# TYPE synergy_chain_latest_block_gas_nwei gauge
+synergy_chain_latest_block_gas_nwei 0
+# HELP synergy_chain_latest_block_interval_seconds Seconds between the latest block and its local parent.
+# TYPE synergy_chain_latest_block_interval_seconds gauge
+synergy_chain_latest_block_interval_seconds 0
+# HELP synergy_chain_transactions_total Total number of transactions currently held in local chain state.
+# TYPE synergy_chain_transactions_total gauge
+synergy_chain_transactions_total 0
+# HELP synergy_chain_recent_transactions_total Transactions included in the latest 100 local blocks.
+# TYPE synergy_chain_recent_transactions_total gauge
+synergy_chain_recent_transactions_total 0
+# HELP synergy_chain_recent_avg_block_time_seconds Average block interval across the latest 100 local blocks.
+# TYPE synergy_chain_recent_avg_block_time_seconds gauge
+synergy_chain_recent_avg_block_time_seconds 0.000
+# HELP synergy_chain_recent_avg_transactions_per_block Average transaction count per block across the latest 100 local blocks.
+# TYPE synergy_chain_recent_avg_transactions_per_block gauge
+synergy_chain_recent_avg_transactions_per_block 0.000
+# HELP synergy_chain_recent_avg_gas_nwei_per_block Average transaction fee units per block across the latest 100 local blocks, measured in nWei.
+# TYPE synergy_chain_recent_avg_gas_nwei_per_block gauge
+synergy_chain_recent_avg_gas_nwei_per_block 0.000
+# HELP synergy_chain_block_gas_limit Configured maximum gas per block.
+# TYPE synergy_chain_block_gas_limit gauge
+synergy_chain_block_gas_limit 30000000
+# HELP synergy_chain_recent_gas_utilization_ratio Average recent block gas divided by the configured block gas limit.
+# TYPE synergy_chain_recent_gas_utilization_ratio gauge
+synergy_chain_recent_gas_utilization_ratio 0.000000
+# HELP synergy_validator_registry_total Number of validators tracked in the local registry.
+# TYPE synergy_validator_registry_total gauge
+synergy_validator_registry_total 6
+# HELP synergy_validator_pending_total Number of validator registrations still pending approval.
+# TYPE synergy_validator_pending_total gauge
+synergy_validator_pending_total 0
+# HELP synergy_validator_status_total Number of validators in each status bucket.
+# TYPE synergy_validator_status_total gauge
+synergy_validator_status_total{status="active"} 6
+synergy_validator_status_total{status="inactive"} 0
+synergy_validator_status_total{status="jailed"} 0
+synergy_validator_status_total{status="slashed"} 0
+# HELP synergy_validator_clusters_total Number of validator clusters in the local registry.
+# TYPE synergy_validator_clusters_total gauge
+synergy_validator_clusters_total 1
+# HELP synergy_configured_peer_targets_total Total configured peer bootstrap targets for this node.
+# TYPE synergy_configured_peer_targets_total gauge
+synergy_configured_peer_targets_total 23
+# HELP synergy_live_validator_count Validators currently observed as live over the P2P status path.
+# TYPE synergy_live_validator_count gauge
+synergy_live_validator_count 5
+# HELP synergy_consensus_active_validator_count Validators currently eligible for consensus from live P2P status evidence.
+# TYPE synergy_consensus_active_validator_count gauge
+synergy_consensus_active_validator_count 5
+# HELP synergy_registry_active_validator_count Validators marked active in the local validator registry.
+# TYPE synergy_registry_active_validator_count gauge
+synergy_registry_active_validator_count 6
+# HELP synergy_current_consensus_height Most recent consensus height observed by the local round runner.
+# TYPE synergy_current_consensus_height gauge
+synergy_current_consensus_height 0
+# HELP synergy_current_consensus_round Most recent consensus round observed by the local round runner.
+# TYPE synergy_current_consensus_round gauge
+synergy_current_consensus_round 0
+# HELP synergy_consensus_timeout_mode Current consensus timeout mode, labelled as fast or recovery.
+# TYPE synergy_consensus_timeout_mode gauge
+synergy_consensus_timeout_mode{mode=""} 1
+# HELP synergy_consensus_effective_vote_timeout_seconds Effective vote timeout used for the current consensus round.
+# TYPE synergy_consensus_effective_vote_timeout_seconds gauge
+synergy_consensus_effective_vote_timeout_seconds 0
+# HELP synergy_consensus_votes_collected Votes collected in the most recently observed consensus round.
+# TYPE synergy_consensus_votes_collected gauge
+synergy_consensus_votes_collected 0
+# HELP synergy_consensus_votes_required Votes required for quorum in the most recently observed consensus round.
+# TYPE synergy_consensus_votes_required gauge
+synergy_consensus_votes_required 0
+# HELP synergy_consensus_leader_info Leader identity for the most recently observed consensus round.
+# TYPE synergy_consensus_leader_info gauge
+synergy_consensus_leader_info{leader="",reason=""} 1
+# HELP synergy_proposal_cache_discard_total Cached block proposals discarded because they were unsafe to reuse.
+# TYPE synergy_proposal_cache_discard_total counter
+synergy_proposal_cache_discard_total 0
+# HELP synergy_expired_transaction_drop_total Expired transactions dropped before block proposal construction.
+# TYPE synergy_expired_transaction_drop_total counter
+synergy_expired_transaction_drop_total 0
+# HELP synergy_qrpc_fallback_total qRPC read requests served from last-known-good or fallback state.
+# TYPE synergy_qrpc_fallback_total counter
+synergy_qrpc_fallback_total 0
+# HELP p2p_verified_handshakes_total P2P handshakes successfully verified with the real post-quantum implementation.
+# TYPE p2p_verified_handshakes_total counter
+p2p_verified_handshakes_total{algorithm="ML-DSA-65"} 5
+p2p_verified_handshakes_total{algorithm="FN-DSA-1024"} 0
+# HELP consensus_finalized_height Latest height finalized by the typed validator coordinator.
+# TYPE consensus_finalized_height gauge
+consensus_finalized_height 0
+# HELP consensus_finalized_block_id Identity of the latest block finalized directly by typed consensus.
+# TYPE consensus_finalized_block_id gauge
+consensus_finalized_block_id{block_id=""} 1
+# HELP consensus_finalized_round Round that finalized the latest typed block.
+# TYPE consensus_finalized_round gauge
+consensus_finalized_round 0
+# HELP consensus_finality_interval_seconds Wall-clock interval between the latest two local typed finality commits.
+# TYPE consensus_finality_interval_seconds gauge
+consensus_finality_interval_seconds 0.000000
+# HELP consensus_finality_interval_mean_seconds Mean typed finality interval over the latest 10,000 finalized-block intervals.
+# TYPE consensus_finality_interval_mean_seconds gauge
+consensus_finality_interval_mean_seconds 0.000000
+# HELP consensus_finality_interval_median_seconds Median typed finality interval over the latest 10,000 finalized-block intervals.
+# TYPE consensus_finality_interval_median_seconds gauge
+consensus_finality_interval_median_seconds 0.000000
+# HELP consensus_finality_interval_p95_seconds P95 typed finality interval over the latest 10,000 finalized-block intervals.
+# TYPE consensus_finality_interval_p95_seconds gauge
+consensus_finality_interval_p95_seconds 0.000000
+# HELP consensus_finality_interval_sample_count Number of typed finality intervals retained for direct health qualification.
+# TYPE consensus_finality_interval_sample_count gauge
+consensus_finality_interval_sample_count 0.000000
+# HELP consensus_phase_duration_seconds Most recently completed typed consensus phase duration.
+# TYPE consensus_phase_duration_seconds gauge
+# HELP consensus_startup_phase_info Current typed-consensus startup/readiness phase.
+# TYPE consensus_startup_phase_info gauge
+consensus_startup_phase_info{phase="PAUSED_READY"} 1
+# HELP consensus_ready One only after recovery, mailbox, peer readiness, and release barrier complete.
+# TYPE consensus_ready gauge
+consensus_ready 0
+# HELP consensus_round_zero_ratio Fraction of locally finalized typed blocks committed in round zero.
+# TYPE consensus_round_zero_ratio gauge
+consensus_round_zero_ratio 0
+# HELP consensus_current_height Current typed consensus height.
+# TYPE consensus_current_height gauge
+consensus_current_height 1
+# HELP consensus_current_round Current typed consensus round.
+# TYPE consensus_current_round gauge
+consensus_current_round 0
+# HELP consensus_prepared_height Height of the current durable prepared certificate.
+# TYPE consensus_prepared_height gauge
+consensus_prepared_height 0
+# HELP consensus_prepared_round Round of the current durable prepared certificate.
+# TYPE consensus_prepared_round gauge
+consensus_prepared_round 0
+# HELP consensus_mailbox_depth Messages in the typed startup buffer and bounded coordinator mailbox quotas.
+# TYPE consensus_mailbox_depth gauge
+consensus_mailbox_depth 0
+# HELP consensus_prepared_candidate Candidate identity held by the latest durable prepared certificate.
+# TYPE consensus_prepared_candidate gauge
+consensus_prepared_candidate{candidate_id=""} 1
+# HELP consensus_highest_qc_height Height of the highest durable typed finality quorum certificate.
+# TYPE consensus_highest_qc_height gauge
+consensus_highest_qc_height 0
+# HELP consensus_highest_tc_round Next round authorized by the highest durable timeout certificate.
+# TYPE consensus_highest_tc_round gauge
+consensus_highest_tc_round 0
+# HELP consensus_highest_qc_block_id Candidate bound by the highest durable finality QC.
+# TYPE consensus_highest_qc_block_id gauge
+consensus_highest_qc_block_id{block_id=""} 1
+# HELP consensus_highest_qc_root Canonical root of the highest durable finality QC.
+# TYPE consensus_highest_qc_root gauge
+consensus_highest_qc_root{root=""} 1
+# HELP consensus_highest_tc_root Canonical root of the highest durable timeout certificate.
+# TYPE consensus_highest_tc_root gauge
+consensus_highest_tc_root{root=""} 1
+# HELP chain1266_desired_state_info Exact verified release, source, artifact, config, Genesis, and state identity.
+# TYPE chain1266_desired_state_info gauge
+chain1266_desired_state_info{release_id="chain1266-incarnation-4-rc14",node_id="validator-node-04",role_profile="validator_node",chain_id="1266",chain_incarnation="4",genesis_hash="c087b6b7c1aae6f13f4c0140ba9a230a12dea0fa52b611777dee69369457de3d",validator_set_root="90c44da3ff3a2d94d9396953ae71baa21727610779531666e4aad6b2d03c71d1",consensus_state_schema_version="4",state_namespace="chain-1266/incarnation-4",testnet_v3_revision="8466df988e41c43a45b1f8cebe4391a6f098571d",synq_revision="3f7886701ffee4303a24fa6c6584b792a5e36254",aegis_revision="b51884a661e3aed4bb242ecbced47f3d8777b313",binary_sha256="8b251e1dc9227c0e32b2884c505992f8dbf9da2ff689e1f88aea760ffcca1621",configuration_sha256="c60773e43c1c7cd73e4e89460946fb4ccbf18a55fe468c7a530b7f83bbe7cb87",desired_state_sha256="7562c649483a2661ed177d13036f01b25b8ff31baa12c88419042b6e58c754e2",desired_state_signature_sha256="ec73ec10a246590308d0ff83034d56c15ccb0fb485608b03e8c27e4c9cd1827c",state_root="/var/lib/synergy/validator/chain-1266/incarnation-4/data"} 1
+# HELP consensus_messages_received_total Typed consensus messages received by type.
+# TYPE consensus_messages_received_total counter
+# HELP consensus_messages_deduplicated_total Typed consensus messages suppressed as exact replays by type.
+# TYPE consensus_messages_deduplicated_total counter
+# HELP consensus_messages_rejected_precrypto_total Typed messages rejected before PQ verification by reason.
+# TYPE consensus_messages_rejected_precrypto_total counter
+# HELP consensus_rebroadcast_total Typed consensus rebroadcasts by message type.
+# TYPE consensus_rebroadcast_total counter
+# HELP pqc_verification_requests_total Uncached PQ verification jobs submitted to the bounded worker pool.
+# TYPE pqc_verification_requests_total counter
+pqc_verification_requests_total 5
+# HELP pqc_verification_cache_hits_total Positive PQ verification cache hits.
+# TYPE pqc_verification_cache_hits_total counter
+pqc_verification_cache_hits_total 0
+# HELP pqc_verification_cache_misses_total Positive PQ verification cache misses.
+# TYPE pqc_verification_cache_misses_total counter
+pqc_verification_cache_misses_total 5
+# HELP pqc_verification_duration_seconds Cumulative worker time spent performing uncached PQ verification.
+# TYPE pqc_verification_duration_seconds counter
+pqc_verification_duration_seconds 0.003067
+# HELP pqc_verification_queue_depth Current bounded PQ verification queue depth.
+# TYPE pqc_verification_queue_depth gauge
+pqc_verification_queue_depth 0
+# HELP pqc_verification_cache_evictions Positive PQ verification cache evictions.
+# TYPE pqc_verification_cache_evictions counter
+pqc_verification_cache_evictions 0
+# HELP pqc_verification_queue_rejections PQ verification jobs rejected by bounded backpressure.
+# TYPE pqc_verification_queue_rejections counter
+pqc_verification_queue_rejections 0
+# HELP consensus_restarts_total Typed coordinator restarts durably observed after the first successful start.
+# TYPE consensus_restarts_total counter
+consensus_restarts_total 0
+# HELP consensus_message_deduplications Total exact typed-consensus envelope deduplications.
+# TYPE consensus_message_deduplications counter
+consensus_message_deduplications 0
+# HELP consensus_precrypto_rejections Total typed messages rejected before PQ verification.
+# TYPE consensus_precrypto_rejections counter
+consensus_precrypto_rejections 0
+# HELP consensus_rebroadcasts Total typed consensus rebroadcasts.
+# TYPE consensus_rebroadcasts counter
+consensus_rebroadcasts 0
+# HELP consensus_restart_count Durable typed-coordinator restart count.
+# TYPE consensus_restart_count counter
+consensus_restart_count 0
+# HELP pqc_verification_requests Uncached PQ verification requests.
+# TYPE pqc_verification_requests counter
+pqc_verification_requests 5
+# HELP pqc_verification_cache_hits Positive PQ verification cache hits.
+# TYPE pqc_verification_cache_hits counter
+pqc_verification_cache_hits 0
+# HELP pqc_verification_cache_misses Positive PQ verification cache misses.
+# TYPE pqc_verification_cache_misses counter
+pqc_verification_cache_misses 5
+# HELP pqc_verification_duration Cumulative PQ verification worker duration in seconds.
+# TYPE pqc_verification_duration counter
+pqc_verification_duration 0.003067
+# HELP synergy_mempool_pending_transactions Transactions waiting in the local node transaction pool.
+# TYPE synergy_mempool_pending_transactions gauge
+synergy_mempool_pending_transactions 0
+# HELP synergy_mempool_gas_limit_total Sum of gas limits for transactions waiting in the local transaction pool.
+# TYPE synergy_mempool_gas_limit_total gauge
+synergy_mempool_gas_limit_total 0
+# HELP synergy_mempool_fee_nwei_total Total fee units for transactions waiting in the local transaction pool, measured in nWei.
+# TYPE synergy_mempool_fee_nwei_total gauge
+synergy_mempool_fee_nwei_total 0
+# HELP synergy_mempool_gas_price_nwei Gas price distribution for transactions waiting in the local transaction pool.
+# TYPE synergy_mempool_gas_price_nwei gauge
+synergy_mempool_gas_price_nwei{stat="min"} 0
+synergy_mempool_gas_price_nwei{stat="avg"} 0.000
+synergy_mempool_gas_price_nwei{stat="max"} 0
+# HELP synergy_sync_info Current sync state label for this node.
+# TYPE synergy_sync_info gauge
+synergy_sync_info{state="idle"} 1
+# HELP synergy_sync_in_progress Whether this node is currently syncing, represented as 0 or 1.
+# TYPE synergy_sync_in_progress gauge
+synergy_sync_in_progress 0
+# HELP synergy_sync_highest_block Highest block height observed by the sync manager.
+# TYPE synergy_sync_highest_block gauge
+synergy_sync_highest_block 0
+# HELP synergy_sync_starting_block Block height where the current sync run started.
+# TYPE synergy_sync_starting_block gauge
+synergy_sync_starting_block 0
+# HELP synergy_sync_gap_blocks Difference between the highest observed sync height and this node's local height.
+# TYPE synergy_sync_gap_blocks gauge
+synergy_sync_gap_blocks 0
+# HELP synergy_sync_progress_percent Current sync progress percentage reported by the sync manager.
+# TYPE synergy_sync_progress_percent gauge
+synergy_sync_progress_percent 100.000
+# HELP synergy_p2p_peers_connected Connected P2P peers visible to this node.
+# TYPE synergy_p2p_peers_connected gauge
+synergy_p2p_peers_connected 4
+# HELP synergy_p2p_status_ready_validators Connected validators with status data ready for consensus membership checks.
+# TYPE synergy_p2p_status_ready_validators gauge
+synergy_p2p_status_ready_validators 5
+# HELP synergy_p2p_best_validator_peer_height Best block height reported by connected validator peers.
+# TYPE synergy_p2p_best_validator_peer_height gauge
+synergy_p2p_best_validator_peer_height 0
+# HELP synergy_p2p_peer_info Static peer labels for currently connected peers.
+# TYPE synergy_p2p_peer_info gauge
+# HELP synergy_p2p_peer_height Last block height reported by each connected peer.
+# TYPE synergy_p2p_peer_height gauge
+# HELP synergy_p2p_peer_last_seen_age_seconds Seconds since each connected peer was last seen.
+# TYPE synergy_p2p_peer_last_seen_age_seconds gauge
+# HELP synergy_p2p_peer_status_age_seconds Seconds since each connected peer last sent status data.
+# TYPE synergy_p2p_peer_status_age_seconds gauge
+# HELP synergy_p2p_peer_blocks_sent_total Blocks sent to each connected peer by this process.
+# TYPE synergy_p2p_peer_blocks_sent_total counter
+# HELP synergy_p2p_peer_blocks_received_total Blocks received from each connected peer by this process.
+# TYPE synergy_p2p_peer_blocks_received_total counter
+# HELP synergy_p2p_peer_txs_sent_total Transactions sent to each connected peer by this process.
+# TYPE synergy_p2p_peer_txs_sent_total counter
+# HELP synergy_p2p_peer_txs_received_total Transactions received from each connected peer by this process.
+# TYPE synergy_p2p_peer_txs_received_total counter
+synergy_p2p_peer_info{peer="synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk",direction="incoming",node_id="validator-node-02",validator_address="synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk"} 1
+synergy_p2p_peer_height{peer="synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk"} 0
+synergy_p2p_peer_last_seen_age_seconds{peer="synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk"} 3
+synergy_p2p_peer_status_age_seconds{peer="synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk"} 3
+synergy_p2p_peer_blocks_sent_total{peer="synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk"} 0
+synergy_p2p_peer_blocks_received_total{peer="synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk"} 0
+synergy_p2p_peer_txs_sent_total{peer="synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk"} 0
+synergy_p2p_peer_txs_received_total{peer="synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk"} 0
+synergy_p2p_peer_info{peer="synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc",direction="incoming",node_id="validator-node-06",validator_address="synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc"} 1
+synergy_p2p_peer_height{peer="synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc"} 0
+synergy_p2p_peer_last_seen_age_seconds{peer="synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc"} 3
+synergy_p2p_peer_status_age_seconds{peer="synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc"} 3
+synergy_p2p_peer_blocks_sent_total{peer="synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc"} 0
+synergy_p2p_peer_blocks_received_total{peer="synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc"} 0
+synergy_p2p_peer_txs_sent_total{peer="synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc"} 0
+synergy_p2p_peer_txs_received_total{peer="synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc"} 0
+synergy_p2p_peer_info{peer="synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj",direction="incoming",node_id="validator-node-03",validator_address="synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj"} 1
+synergy_p2p_peer_height{peer="synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj"} 0
+synergy_p2p_peer_last_seen_age_seconds{peer="synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj"} 3
+synergy_p2p_peer_status_age_seconds{peer="synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj"} 3
+synergy_p2p_peer_blocks_sent_total{peer="synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj"} 0
+synergy_p2p_peer_blocks_received_total{peer="synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj"} 0
+synergy_p2p_peer_txs_sent_total{peer="synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj"} 0
+synergy_p2p_peer_txs_received_total{peer="synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj"} 0
+synergy_p2p_peer_info{peer="synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t",direction="incoming",node_id="validator-node-01",validator_address="synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t"} 1
+synergy_p2p_peer_height{peer="synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t"} 0
+synergy_p2p_peer_last_seen_age_seconds{peer="synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t"} 3
+synergy_p2p_peer_status_age_seconds{peer="synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t"} 3
+synergy_p2p_peer_blocks_sent_total{peer="synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t"} 0
+synergy_p2p_peer_blocks_received_total{peer="synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t"} 0
+synergy_p2p_peer_txs_sent_total{peer="synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t"} 0
+synergy_p2p_peer_txs_received_total{peer="synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t"} 0
+# HELP synergy_consensus_config Consensus timing and quorum configuration values.
+# TYPE synergy_consensus_config gauge
+synergy_consensus_config{setting="block_time_secs"} 2
+synergy_consensus_config{setting="vote_timeout_secs"} 2
+synergy_consensus_config{setting="block_timeout_secs"} 6
+synergy_consensus_config{setting="leader_timeout_secs"} 0
+synergy_consensus_config{setting="validator_vote_threshold"} 5
+synergy_consensus_config{setting="min_validators"} 6
+# HELP synergy_validator_blocks_produced_total Blocks produced by each validator according to the local registry.
+# TYPE synergy_validator_blocks_produced_total counter
+# HELP synergy_validator_transactions_validated_total Transactions validated by each validator according to the local registry.
+# TYPE synergy_validator_transactions_validated_total counter
+# HELP synergy_validator_missed_blocks_total Missed blocks recorded for each validator according to the local registry.
+# TYPE synergy_validator_missed_blocks_total counter
+# HELP synergy_validator_average_block_time_seconds Average block time recorded for each validator according to the local registry.
+# TYPE synergy_validator_average_block_time_seconds gauge
+# HELP synergy_validator_uptime_percent Uptime percentage recorded for each validator according to the local registry.
+# TYPE synergy_validator_uptime_percent gauge
+# HELP synergy_validator_synergy_score Synergy score recorded for each validator according to the local registry.
+# TYPE synergy_validator_synergy_score gauge
+# HELP synergy_validator_stake_nwei Stake amount recorded for each validator according to the local registry.
+# TYPE synergy_validator_stake_nwei gauge
+# HELP synergy_validator_consecutive_missed_votes Consecutive missed votes recorded for each validator according to the local registry.
+# TYPE synergy_validator_consecutive_missed_votes gauge
+# HELP synergy_validator_missed_vote_window Rolling missed-vote window recorded for each validator according to the local registry.
+# TYPE synergy_validator_missed_vote_window gauge
+# HELP synergy_validator_equivocation_evidence_total Equivocation evidence count recorded for each validator according to the local registry.
+# TYPE synergy_validator_equivocation_evidence_total counter
+synergy_validator_blocks_produced_total{validator="synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk",name="Synergy Validator 2",status="active"} 0
+synergy_validator_transactions_validated_total{validator="synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk",name="Synergy Validator 2",status="active"} 0
+synergy_validator_missed_blocks_total{validator="synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk",name="Synergy Validator 2",status="active"} 0
+synergy_validator_average_block_time_seconds{validator="synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk",name="Synergy Validator 2",status="active"} 5.000
+synergy_validator_uptime_percent{validator="synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk",name="Synergy Validator 2",status="active"} 100.000
+synergy_validator_synergy_score{validator="synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk",name="Synergy Validator 2",status="active"} 100.000000
+synergy_validator_stake_nwei{validator="synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk",name="Synergy Validator 2",status="active"} 50000000000000
+synergy_validator_consecutive_missed_votes{validator="synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk",name="Synergy Validator 2",status="active"} 0
+synergy_validator_missed_vote_window{validator="synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk",name="Synergy Validator 2",status="active"} 0
+synergy_validator_equivocation_evidence_total{validator="synv11k0vlmkt5gyp3czlgvlfm5yqkxu5nyvp4ekk",name="Synergy Validator 2",status="active"} 0
+synergy_validator_blocks_produced_total{validator="synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj",name="Synergy Validator 3",status="active"} 0
+synergy_validator_transactions_validated_total{validator="synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj",name="Synergy Validator 3",status="active"} 0
+synergy_validator_missed_blocks_total{validator="synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj",name="Synergy Validator 3",status="active"} 0
+synergy_validator_average_block_time_seconds{validator="synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj",name="Synergy Validator 3",status="active"} 5.000
+synergy_validator_uptime_percent{validator="synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj",name="Synergy Validator 3",status="active"} 100.000
+synergy_validator_synergy_score{validator="synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj",name="Synergy Validator 3",status="active"} 100.000000
+synergy_validator_stake_nwei{validator="synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj",name="Synergy Validator 3",status="active"} 50000000000000
+synergy_validator_consecutive_missed_votes{validator="synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj",name="Synergy Validator 3",status="active"} 0
+synergy_validator_missed_vote_window{validator="synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj",name="Synergy Validator 3",status="active"} 0
+synergy_validator_equivocation_evidence_total{validator="synv11jk9pprkz7faykn4ez7hzaj2q7lg04l2fjgj",name="Synergy Validator 3",status="active"} 0
+synergy_validator_blocks_produced_total{validator="synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t",name="Synergy Validator 1",status="active"} 0
+synergy_validator_transactions_validated_total{validator="synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t",name="Synergy Validator 1",status="active"} 0
+synergy_validator_missed_blocks_total{validator="synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t",name="Synergy Validator 1",status="active"} 0
+synergy_validator_average_block_time_seconds{validator="synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t",name="Synergy Validator 1",status="active"} 5.000
+synergy_validator_uptime_percent{validator="synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t",name="Synergy Validator 1",status="active"} 100.000
+synergy_validator_synergy_score{validator="synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t",name="Synergy Validator 1",status="active"} 100.000000
+synergy_validator_stake_nwei{validator="synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t",name="Synergy Validator 1",status="active"} 50000000000000
+synergy_validator_consecutive_missed_votes{validator="synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t",name="Synergy Validator 1",status="active"} 0
+synergy_validator_missed_vote_window{validator="synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t",name="Synergy Validator 1",status="active"} 0
+synergy_validator_equivocation_evidence_total{validator="synv11yc4cjehqjm6fp0ey4ppjptv0p3cwdy6r79t",name="Synergy Validator 1",status="active"} 0
+synergy_validator_blocks_produced_total{validator="synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg",name="Synergy Validator 4",status="active"} 0
+synergy_validator_transactions_validated_total{validator="synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg",name="Synergy Validator 4",status="active"} 0
+synergy_validator_missed_blocks_total{validator="synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg",name="Synergy Validator 4",status="active"} 0
+synergy_validator_average_block_time_seconds{validator="synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg",name="Synergy Validator 4",status="active"} 5.000
+synergy_validator_uptime_percent{validator="synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg",name="Synergy Validator 4",status="active"} 100.000
+synergy_validator_synergy_score{validator="synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg",name="Synergy Validator 4",status="active"} 100.000000
+synergy_validator_stake_nwei{validator="synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg",name="Synergy Validator 4",status="active"} 50000000000000
+synergy_validator_consecutive_missed_votes{validator="synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg",name="Synergy Validator 4",status="active"} 0
+synergy_validator_missed_vote_window{validator="synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg",name="Synergy Validator 4",status="active"} 0
+synergy_validator_equivocation_evidence_total{validator="synv11s7hag82s6d9f8urrv5cl40lyeamxelthpeg",name="Synergy Validator 4",status="active"} 0
+synergy_validator_blocks_produced_total{validator="synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu",name="Synergy Validator 5",status="active"} 0
+synergy_validator_transactions_validated_total{validator="synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu",name="Synergy Validator 5",status="active"} 0
+synergy_validator_missed_blocks_total{validator="synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu",name="Synergy Validator 5",status="active"} 0
+synergy_validator_average_block_time_seconds{validator="synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu",name="Synergy Validator 5",status="active"} 5.000
+synergy_validator_uptime_percent{validator="synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu",name="Synergy Validator 5",status="active"} 100.000
+synergy_validator_synergy_score{validator="synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu",name="Synergy Validator 5",status="active"} 100.000000
+synergy_validator_stake_nwei{validator="synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu",name="Synergy Validator 5",status="active"} 50000000000000
+synergy_validator_consecutive_missed_votes{validator="synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu",name="Synergy Validator 5",status="active"} 0
+synergy_validator_missed_vote_window{validator="synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu",name="Synergy Validator 5",status="active"} 0
+synergy_validator_equivocation_evidence_total{validator="synv11cl92kxcx4jyzusecqydrxc8aj3hsgscrvtu",name="Synergy Validator 5",status="active"} 0
+synergy_validator_blocks_produced_total{validator="synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc",name="Synergy Validator 6",status="active"} 0
+synergy_validator_transactions_validated_total{validator="synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc",name="Synergy Validator 6",status="active"} 0
+synergy_validator_missed_blocks_total{validator="synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc",name="Synergy Validator 6",status="active"} 0
+synergy_validator_average_block_time_seconds{validator="synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc",name="Synergy Validator 6",status="active"} 5.000
+synergy_validator_uptime_percent{validator="synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc",name="Synergy Validator 6",status="active"} 100.000
+synergy_validator_synergy_score{validator="synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc",name="Synergy Validator 6",status="active"} 100.000000
+synergy_validator_stake_nwei{validator="synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc",name="Synergy Validator 6",status="active"} 50000000000000
+synergy_validator_consecutive_missed_votes{validator="synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc",name="Synergy Validator 6",status="active"} 0
+synergy_validator_missed_vote_window{validator="synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc",name="Synergy Validator 6",status="active"} 0
+synergy_validator_equivocation_evidence_total{validator="synv1129lck2uvz73f59wd3yame0w04qnrdpmmmfc",name="Synergy Validator 6",status="active"} 0
+# HELP synergy_node_uptime_seconds Process uptime in seconds.
+# TYPE synergy_node_uptime_seconds counter
+synergy_node_uptime_seconds 126
+# HELP synergy_process_start_time_seconds Unix timestamp for the current process start time.
+# TYPE synergy_process_start_time_seconds gauge
+synergy_process_start_time_seconds 1785681551
+
+SECTION=JOURNAL
+
+SECTION=FAULTS

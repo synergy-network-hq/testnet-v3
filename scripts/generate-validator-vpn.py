@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""
-Testnet-v3 validator/relayer WireGuard VPN generator.
+"""Retired Testnet-v3 validator/relayer WireGuard VPN generator.
 
-Generates the complete VPN material set for the governed Testnet-v3 addressing
-plan (runtime/node-control-panel/docs/control-panel/validator-vpn-coordinator.md):
+This source is retained for review only and cannot generate or overwrite VPN
+material. The current public addressing plan is:
 
-    supernet    10.70.0.0/16
-    coordinator 10.70.0.1
-    validators  10.70.10.1 .. 10.70.10.21   (validator-1 .. validator-21)
-    relayers    10.70.20.1 .. 10.70.20.3    (relayer-1 .. relayer-3)
+    supernet    10.69.0.0/16
+    coordinator 10.69.0.1
+    validators  10.69.10.1 .. 10.69.10.21   (validator-01 .. validator-21)
+    relayers    10.69.1.1 .. 10.69.1.3       (relayer-1 .. relayer-3)
 
 Identity model — four separate layers, never conflated:
     route            public IP / VPN IP / port   (reach the machine)
@@ -16,11 +15,8 @@ Identity model — four separate layers, never conflated:
     node identity    synv... address + PoP       (identify the Synergy peer)
     consensus id     validator addr + cons. key  (authorize consensus)
 
-All 24 participants are pre-provisioned as full-mesh peers so that activating
-validators 7..21 later requires no edit to already-deployed configs.
-
-Private keys are written ONLY into each node's identity folder (0600, dir 0700).
-Public evidence contains public keys and hashes only.
+The replacement workflow must consume the exact credentials workbook and the
+fresh validator ceremony instead of embedded endpoints or legacy folders.
 """
 
 import base64
@@ -40,34 +36,26 @@ IDENTITY_ROOT = ROOT / "testnet-v3-identity-files"
 LAUNCH = ROOT / "launch"
 
 CHAIN_ID = 1266
-NETWORK_ID = "synergy-testnet-v3"
-CONFIG_VERSION = "tnv3-vpn-1"
-SUPERNET = "10.70.0.0/16"
-COORD_VPN_IP = "10.70.0.1"
+NETWORK_ID = "testnet"
+CONFIG_VERSION = "testnet-v3-vpn-retired"
+SUPERNET = "10.69.0.0/16"
+COORD_VPN_IP = "10.69.0.1"
 COORD_PORT = 51820
 WG_PORT = 51820
 KEEPALIVE = 25
 IFACE = "sy-vpn"
 
-# Public endpoints from the node credentials workbook ("Node Credentials" sheet).
-# Only machines that are currently assigned have an endpoint; validators 7..21
-# have identities but no machine yet and therefore no Endpoint line (they dial
-# out and their endpoint is learned on connect — roaming peers).
-WORKBOOK_ENDPOINTS = {
-    "validator-1": "62.146.182.207",
-    "validator-2": "62.146.182.208",
-    "validator-3": "62.146.182.209",
-    "validator-4": "73.79.66.255",       # shared public IP with Archive Validator
-    "validator-5": "194.163.183.166",
-    "validator-6": "157.173.192.45",
-    "relayer-1": "195.26.241.95",
-    "relayer-2": "94.72.117.108",
-    "relayer-3": "209.145.48.117",
-}
+# Route metadata must be read from the exact credentials workbook by the
+# replacement workflow. This retired source deliberately embeds no endpoints.
+WORKBOOK_ENDPOINTS = {}
 
-# Validators activated at Testnet-v3 launch; 7..21 are provisioned but inactive.
-ACTIVE_VALIDATORS = {f"validator-{i}" for i in range(1, 7)}
+# validator-01 and validator-07 through validator-21 remain inactive at Genesis.
+ACTIVE_VALIDATORS = {f"validator-{i:02d}" for i in range(2, 7)}
 ACTIVE_RELAYERS = {"relayer-1", "relayer-2", "relayer-3"}
+RETIRED_REASON = (
+    "retired WireGuard generator cannot publish Testnet-v3 VPN material; "
+    "use the workbook-backed 10.69 replacement workflow"
+)
 
 
 def genkey():
@@ -114,11 +102,12 @@ def write_public(path: Path, content: str):
 
 def build_participants():
     """Map governed VPN slots onto the real Testnet-v3 identity folders."""
+    raise RuntimeError(RETIRED_REASON)
     parts = []
     for i in range(1, 22):
-        folder = IDENTITY_ROOT / f"VNS-A{i + 1:02d}_tnv3-val-stake-{i:02d}"
+        folder = IDENTITY_ROOT / f"VNS-A{i + 1:02d}_validator-{i:02d}"
         manifest = json.loads((folder / "manifest.json").read_text())
-        name = f"validator-{i}"
+        name = f"validator-{i:02d}"
         parts.append(
             {
                 "name": name,
@@ -128,7 +117,7 @@ def build_participants():
                 "alias": manifest["alias"],
                 "synv_address": manifest["address"],
                 "workbook_node": manifest.get("workbook_node"),
-                "vpn_ip": f"10.70.10.{i}",
+                "vpn_ip": f"10.69.10.{i}",
                 "public_ip": WORKBOOK_ENDPOINTS.get(name),
                 "folder": folder,
                 "activation_status": "active"
@@ -149,7 +138,7 @@ def build_participants():
                 "alias": manifest["alias"],
                 "synv_address": manifest["address"],
                 "workbook_node": manifest.get("workbook_node"),
-                "vpn_ip": f"10.70.20.{i}",
+                "vpn_ip": f"10.69.1.{i}",
                 "public_ip": WORKBOOK_ENDPOINTS.get(name),
                 "folder": folder,
                 "activation_status": "active"
@@ -224,6 +213,7 @@ PrivateKey = <loaded from coordinator-wireguard-private.key>
 
 
 def main():
+    sys.exit(f"FATAL: {RETIRED_REASON}")
     generated_at = datetime.now(timezone.utc).isoformat()
     parts = build_participants()
 

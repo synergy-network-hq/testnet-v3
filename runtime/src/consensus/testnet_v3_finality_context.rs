@@ -265,6 +265,7 @@ impl FinalizedTypedContextProvider {
             latest_finalized_height: record.height,
             latest_finalized_block_hash: block_hash,
             latest_finalized_state_root: record.block.header.state_root_after,
+            latest_finalized_timestamp_ms: record.block.header.timestamp_ms_consensus_bounded,
             round: Round(0),
             evidence_root: record.quorum_certificate.finality_context_root()?,
             app_version: 1,
@@ -335,7 +336,12 @@ fn same_post_finality_context(
         && current.latest_finalized_height == finalized.height
         && current.latest_finalized_block_hash == finalized_block_hash
         && current.latest_finalized_state_root == finalized.block.header.state_root_after
-        && current.round == finalized.block.header.round
+        // A valid QC can arrive after this replica has advanced through one
+        // or more timeout rounds at the same height. The certified block
+        // round is therefore a lower bound on the local round, not an exact
+        // equality requirement. QC verification already binds the height,
+        // candidate, membership, incarnation, and parameter context.
+        && current.round.0 >= finalized.block.header.round.0
         && current.evidence_root == predecessor.evidence_root
         && current.app_version == predecessor.app_version
         && current.execution_version == predecessor.execution_version
@@ -455,6 +461,13 @@ mod tests {
                 dag_version: 1,
                 aegis_pqvm_version: "aegis-pqvm".to_string(),
                 timestamp_ms_consensus_bounded: 1,
+                base_fee_per_gas_nwei: 0,
+                gas_used: 0,
+                gas_limit: 0,
+                pq_gas_used: 0,
+                pq_gas_limit: 0,
+                pq_gas_multiplier: 0,
+                fee_market_version: 0,
             },
             transactions: Vec::new(),
             proposer_signature: AegisPqSignature {

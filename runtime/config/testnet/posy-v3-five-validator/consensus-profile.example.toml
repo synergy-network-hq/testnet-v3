@@ -1,0 +1,58 @@
+# PROPOSAL ONLY - NOT FOR LIVE DEPLOYMENT
+
+[profile]
+status = "PROPOSED_NOT_ACTIVATED"
+protocol_version = "posy/3.0"
+profile_schema_version = 1
+consensus_parameter_schema_version = 4
+activation_boundary = "fresh_genesis_block_zero"
+activation_epoch = 0
+activation_height = 1
+
+[network]
+chain_id = 1266
+network_id = "testnet"
+release_id = "testnet-v3"
+genesis_root = "REQUIRED_FINALIZED_GENESIS_ROOT"
+
+[local_validator]
+validator_id = "REQUIRED_APPROVED_VALIDATOR_ID"
+consensus_key_id = "REQUIRED_APPROVED_ML_DSA_65_KEY_ID"
+
+[frozen_epoch]
+epoch_seed_root = "REQUIRED_GENESIS_BOUND_SCHEDULE_SEED_ROOT"
+parameter_root = "REQUIRED_FINALIZED_POSY_V3_PARAMETER_ROOT"
+active_validator_set_root = "REQUIRED_FIVE_VALIDATOR_SET_ROOT"
+validator_consensus_key_root = "REQUIRED_FIVE_KEY_ROOT"
+frozen_voting_weight_root = "REQUIRED_FIVE_WEIGHT_ROOT"
+leader_ring_root = "REQUIRED_DERIVED_RING_ROOT"
+active_validator_count = 5 # Initial epoch only; later finalized sets are dynamic.
+cluster_count = 1
+
+[consensus]
+leader_schedule_domain = "PoSy/LeaderSchedule/v3"
+leader_schedule_rank_bits = 512
+leader_schedule_weighted = false
+leader_lease_blocks = 10
+required_distinct_signers = 4 # Derived initial 4-of-5 value, not a later-epoch override.
+weight_quorum_rule = "3*signed_weight>2*total_frozen_weight"
+chained_qc_commit_depth = 3
+proposal_timeout_ms = 1500
+vote_timeout_ms = 1500
+max_round_timeout_ms = 10000
+consensus_signature_algorithm = "mldsa65"
+signer_journal_required = true
+local_leader_election_allowed = false
+quorum_reduction_allowed = false
+
+[etdag]
+initial_activation = "governed_genesis_binding_required"
+parameter_root = "REQUIRED_GOVERNED_ETDAG_PARAMETER_ROOT"
+fee_schedule_root = "REQUIRED_GOVERNED_ETDAG_FEE_SCHEDULE_ROOT"
+membership_anchor_digest = "REQUIRED_GENESIS_BOUND_ETDAG_MEMBERSHIP_ANCHOR_DIGEST"
+
+[safety]
+protected_execution_binding_required = true
+etdag_finality_separation_required = true
+conflicting_valid_qc_action = "SafetyHalt"
+state_sync_requires_verified_qc_tc_chain = true

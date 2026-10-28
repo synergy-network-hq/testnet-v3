@@ -1,0 +1,17 @@
+SECTION=SYSTEMD
+MainPID=3979454
+NRestarts=0
+ExecMainStatus=0
+MemoryCurrent=63180800
+CPUUsageNSec=719379751000
+ActiveState=active
+SubState=running
+ExecutablePath=/opt/synergy/chain1266/releases/chain1266-incarnation-4-rc18/bin/synergy-relayer-node
+ExecutableSHA256=a7d985583bfbabebf3a67d00ba9f2ffc2e7bb58bf26cf1c717dda0d5095bfa1b
+ConfigSHA256=38b52a01739260944908f876314cc59149bbd540f60eacd2e6e4104ea9fece2d
+GenesisSHA256=ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf
+SECTION=METRICS
+
+SECTION=JOURNAL
+
+SECTION=FAULTS

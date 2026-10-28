@@ -1,0 +1,11 @@
+classification=MEASURED_AND_DERIVED
+run_id=diagnostic-runner-micro-v1
+mode=micro
+source_commit=9d3ab807a08ef4cf1077dbc23213e2314ce37c87
+environment_id=macmini-m2-macos26.5.2-rust1.97.1-aarch64-20260814
+genesis_sha256=ee554c197a878cbfdaf7d470a0274ab2859a7a0c14c87e425908a69c6fbb51cf
+keygen_iterations=1
+operation_iterations=1
+warmup_iterations=1
+cold_processes=2
+completed_utc=2026-08-14T23:29:03Z
