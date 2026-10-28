@@ -2,18 +2,19 @@
   "name": "sxcp-evm-testnet-kit",
   "version": "0.1.0",
   "private": true,
-  "type": "commonjs",
+  "type": "module",
   "scripts": {
     "clean": "hardhat clean",
     "compile": "hardhat compile",
     "test": "hardhat test",
-    "deploy:sepolia": "hardhat run scripts/deploy-suite.js --network sepolia",
-    "deploy:amoy": "hardhat run scripts/deploy-suite.js --network amoy",
-    "wire:sepolia-to-amoy": "hardhat run scripts/wire-endpoint.js --network sepolia --source sepolia --remote amoy",
-    "wire:amoy-to-sepolia": "hardhat run scripts/wire-endpoint.js --network amoy --source amoy --remote sepolia",
+    "deploy:sepolia": "hardhat compile && node scripts/deploy-suite.js --network sepolia",
+    "deploy:amoy": "hardhat compile && node scripts/deploy-suite.js --network amoy",
+    "wire:sepolia-to-amoy": "hardhat compile && node scripts/wire-endpoint.js --network sepolia --source sepolia --remote amoy",
+    "wire:amoy-to-sepolia": "hardhat compile && node scripts/wire-endpoint.js --network amoy --source amoy --remote sepolia",
     "export:testnet-config": "node scripts/export-testnet-relayer-config.js --source sepolia --destination amoy",
-    "demo:publish:sepolia": "hardhat run scripts/publish-intent.js --network sepolia --source sepolia --destination amoy",
-    "demo:attest:on-amoy": "hardhat run scripts/submit-attestation.js --network amoy --source sepolia --destination amoy"
+    "demo:publish:sepolia": "hardhat compile && node scripts/publish-intent.js --network sepolia --source sepolia --destination amoy",
+    "demo:attest:on-amoy": "hardhat compile && node scripts/submit-attestation.js --network amoy --source sepolia --destination amoy",
+    "postinstall": "node scripts/prepare-dependencies.js"
   },
   "dependencies": {
     "@openzeppelin/contracts": "^5.2.0",
@@ -22,13 +23,21 @@
     "ws": "^8.21.0"
   },
   "overrides": {
+    "adm-zip": "^0.6.1",
     "esbuild": "^0.28.1",
-    "ws": "^8.21.0"
+    "undici": "^7.29.0",
+    "ws": "^8.21.0",
+    "zod": "4.6.7",
+    "@nomicfoundation/hardhat-zod-utils": "3.0.5"
   },
   "devDependencies": {
-    "@nomicfoundation/hardhat-ethers": "^4.0.6",
+    "@nomicfoundation/hardhat-ethers": "^4.2.1",
     "chai": "^4.5.0",
     "ethers": "^6.15.0",
-    "hardhat": "^3.15.0"
+    "hardhat": "3.21.0",
+    "@nomicfoundation/hardhat-mocha": "4.0.1",
+    "mocha": "^12.0.0",
+    "zod": "4.6.7",
+    "@nomicfoundation/hardhat-zod-utils": "3.0.5"
   }
 }

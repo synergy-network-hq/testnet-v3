@@ -25,14 +25,26 @@
 //! reconstructed document so the binary payload, not JSON formatting, is the
 //! canonical authority boundary.
 
-use crate::genesis::recompute_testnet_v3_candidate_integrity;
-use crate::execution::ExecutionState;
-use crate::genesis_deployment::{replay_genesis_deployment_from_signed_operations, GenesisReplayOperation};
 use crate::consensus::simplified_posy::GenesisBoundSimplifiedActivation;
-use crate::synq_execution::derive_synergy_contract_address_from_deploy_with_identity_address;
+use crate::consensus_parameters::load_finalized_consensus_parameters_from_bytes;
+use crate::etdag_governance::{
+    build_etdag_governed_membership_anchor, EtdagFeeScheduleArtifact, EtdagFeeScheduleManifest,
+    EtdagGovernedGenesisBinding, EtdagParameterArtifact, EtdagParameterManifest,
+    ETDAG_GOVERNED_GENESIS_BINDING_SCHEMA_VERSION, ETDAG_GOVERNED_GENESIS_BINDING_STATUS,
+};
+use crate::execution::ExecutionState;
+use crate::genesis::recompute_testnet_v3_candidate_integrity;
+use crate::genesis::{
+    bind_testnet_v3_genesis_etdag_membership_anchor,
+    bind_testnet_v3_genesis_simplified_posy_authorities, load_genesis_bound_etdag_governance,
+};
+use crate::genesis_deployment::{
+    replay_genesis_deployment_from_signed_operations, GenesisReplayOperation,
+};
 use crate::synergy_types::{CanonicalSerialize, ClusterId, Epoch, Hash};
+use crate::synq_execution::derive_synergy_contract_address_from_deploy_with_identity_address;
 use pqsynq::Sign;
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -130,14 +142,20 @@ fn signature_message(digest: &[u8; 32]) -> Vec<u8> {
     message
 }
 
-pub fn compile_sgen(payload: SgenPayloadV1, signers: &[SgenAuthoritySigner]) -> Result<Vec<u8>, String> {
+pub fn compile_sgen(
+    payload: SgenPayloadV1,
+    signers: &[SgenAuthoritySigner],
+) -> Result<Vec<u8>, String> {
     validate_payload_shape(&payload)?;
     let payload_bytes = encode_payload(&payload)?;
     let digest = payload_digest(&payload_bytes);
     let canonical = canonical_testnet_authorities()?;
     let mut signer_by_role = BTreeMap::new();
     for signer in signers {
-        if signer_by_role.insert(signer.role.as_str(), signer).is_some() {
+        if signer_by_role
+            .insert(signer.role.as_str(), signer)
+            .is_some()
+        {
             return Err("SGEN authority signer roles must be unique".to_string());
         }
     }
@@ -147,16 +165,28 @@ pub fn compile_sgen(payload: SgenPayloadV1, signers: &[SgenAuthoritySigner]) -> 
         let signer = signer_by_role
             .get(expected.role.as_str())
             .ok_or_else(|| format!("SGEN ceremony is missing {}", expected.role))?;
-        if signer.identity_address != expected.identity_address || signer.public_key != expected.public_key {
-            return Err(format!("SGEN signer does not match frozen authority {}", expected.role));
+        if signer.identity_address != expected.identity_address
+            || signer.public_key != expected.public_key
+        {
+            return Err(format!(
+                "SGEN signer does not match frozen authority {}",
+                expected.role
+            ));
         }
         let signature = Sign::mldsa87()
-            .sign_ctx(&message, &signer.private_key, SGEN_AUTHORITY_SIGNATURE_DOMAIN)
+            .sign_ctx(
+                &message,
+                &signer.private_key,
+                SGEN_AUTHORITY_SIGNATURE_DOMAIN,
+            )
             .map_err(|error| format!("SGEN {} signature failed: {error}", expected.role))?;
         if signature.len() > MAX_SIGNATURE_BYTES {
             return Err("SGEN ML-DSA-87 signature exceeds its bounded encoding".to_string());
         }
-        signatures.push(SgenSignature { role: expected.role.clone(), signature });
+        signatures.push(SgenSignature {
+            role: expected.role.clone(),
+            signature,
+        });
     }
     encode_file(&payload_bytes, digest, &signatures)
 }
@@ -184,7 +214,8 @@ pub fn verify_sgen_bytes(bytes: &[u8]) -> Result<VerifiedSgen, String> {
 
 pub fn verify_unsigned_sgen_file(path: impl AsRef<Path>) -> Result<VerifiedSgen, String> {
     let path = path.as_ref();
-    let bytes = fs::read(path).map_err(|error| format!("read unsigned SGEN {}: {error}", path.display()))?;
+    let bytes = fs::read(path)
+        .map_err(|error| format!("read unsigned SGEN {}: {error}", path.display()))?;
     verify_unsigned_sgen_bytes(&bytes)
 }
 
@@ -212,7 +243,9 @@ pub fn verify_h0_execution(verified: &VerifiedSgen) -> Result<(), String> {
         .get(8)
         .ok_or_else(|| "SGEN H0 operations omit TeamVesting deployment".to_string())?;
     let deployment: pqsynq::ContractDeployEnvelope = serde_json::from_slice(
-        &team_vesting_operation.admission_envelope.encoded_pqsynq_envelope,
+        &team_vesting_operation
+            .admission_envelope
+            .encoded_pqsynq_envelope,
     )
     .map_err(|error| format!("decode SGEN TeamVesting deployment: {error}"))?;
     let team_vesting_address = derive_synergy_contract_address_from_deploy_with_identity_address(
@@ -237,15 +270,24 @@ pub fn verify_h0_execution(verified: &VerifiedSgen) -> Result<(), String> {
             .ok_or_else(|| "SGEN Genesis balance amount is missing".to_string())?
             .parse::<u128>()
             .map_err(|error| format!("parse SGEN Genesis balance: {error}"))?;
-        if state.balances_nwei.insert(address.to_string(), amount).is_some() {
+        if state
+            .balances_nwei
+            .insert(address.to_string(), amount)
+            .is_some()
+        {
             return Err("SGEN Genesis repeats a balance address".to_string());
         }
     }
-    let manifest_hash = Hash::from_hex(&required_string(document, "/genesis_deployment/deployment_manifest_hash")?)
-        .map_err(|error| format!("decode SGEN deployment manifest hash: {error}"))?;
-    let replay = replay_genesis_deployment_from_signed_operations(&mut state, manifest_hash, &operations)?;
+    let manifest_hash = Hash::from_hex(&required_string(
+        document,
+        "/genesis_deployment/deployment_manifest_hash",
+    )?)
+    .map_err(|error| format!("decode SGEN deployment manifest hash: {error}"))?;
+    let replay =
+        replay_genesis_deployment_from_signed_operations(&mut state, manifest_hash, &operations)?;
     if replay.post_deployment_state_root.to_hex() != verified.payload.expected_execution_state_root
-        || hex::encode(state.synq_aivm_state.state_root()) != verified.payload.expected_aivm_state_root
+        || hex::encode(state.synq_aivm_state.state_root())
+            != verified.payload.expected_aivm_state_root
         || replay.receipt_root.to_hex() != verified.payload.expected_receipt_root
     {
         return Err("SGEN deterministic H0 roots do not match the signed payload".to_string());
@@ -257,14 +299,26 @@ fn verify_sgen_bytes_against(
     bytes: &[u8],
     authorities: Option<&BTreeMap<String, SgenAuthorityPublic>>,
 ) -> Result<VerifiedSgen, String> {
-    if bytes.len() > MAX_FILE_BYTES { return Err("SGEN exceeds the v1 file limit".to_string()); }
+    if bytes.len() > MAX_FILE_BYTES {
+        return Err("SGEN exceeds the v1 file limit".to_string());
+    }
     let mut decoder = Decoder::new(bytes);
-    if decoder.take_exact(4)? != SGEN_MAGIC { return Err("SGEN magic is invalid".to_string()); }
-    if decoder.u16()? != SGEN_VERSION { return Err("SGEN format version is unsupported".to_string()); }
-    if decoder.u8()? != SGEN_PAYLOAD_ENCODING_BORSH_LE { return Err("SGEN payload encoding is unsupported".to_string()); }
-    if decoder.u8()? != SGEN_SIGNATURE_ALGORITHM_MLDSA87 { return Err("SGEN authority signature algorithm is unsupported".to_string()); }
+    if decoder.take_exact(4)? != SGEN_MAGIC {
+        return Err("SGEN magic is invalid".to_string());
+    }
+    if decoder.u16()? != SGEN_VERSION {
+        return Err("SGEN format version is unsupported".to_string());
+    }
+    if decoder.u8()? != SGEN_PAYLOAD_ENCODING_BORSH_LE {
+        return Err("SGEN payload encoding is unsupported".to_string());
+    }
+    if decoder.u8()? != SGEN_SIGNATURE_ALGORITHM_MLDSA87 {
+        return Err("SGEN authority signature algorithm is unsupported".to_string());
+    }
     let length = decoder.u32()? as usize;
-    if length == 0 || length > MAX_PAYLOAD_BYTES { return Err("SGEN payload length is invalid".to_string()); }
+    if length == 0 || length > MAX_PAYLOAD_BYTES {
+        return Err("SGEN payload length is invalid".to_string());
+    }
     let digest = decoder.array_32()?;
     let signature_count = decoder.u8()? as usize;
     let expected_signature_count = if authorities.is_some() { 3 } else { 0 };
@@ -276,7 +330,9 @@ fn verify_sgen_bytes_against(
         });
     }
     let payload_bytes = decoder.take_exact(length)?.to_vec();
-    if payload_digest(&payload_bytes) != digest { return Err("SGEN payload digest does not match its canonical bytes".to_string()); }
+    if payload_digest(&payload_bytes) != digest {
+        return Err("SGEN payload digest does not match its canonical bytes".to_string());
+    }
     let payload = decode_payload(&payload_bytes)?;
     validate_payload_shape(&payload)?;
     let message = signature_message(&digest);
@@ -284,40 +340,75 @@ fn verify_sgen_bytes_against(
     let mut signatures = Vec::with_capacity(3);
     for _ in 0..signature_count {
         let role = role_from_code(decoder.u8()?)?.to_string();
-        if !seen.insert(role.clone()) { return Err("SGEN contains duplicate authority signatures".to_string()); }
+        if !seen.insert(role.clone()) {
+            return Err("SGEN contains duplicate authority signatures".to_string());
+        }
         let signature = decoder.bytes_u16(MAX_SIGNATURE_BYTES)?;
         let authority = authorities
             .expect("signed SGEN signature count is nonzero")
             .get(&role)
             .ok_or_else(|| "SGEN signature has an unknown authority role".to_string())?;
         let valid = Sign::mldsa87()
-            .verify_ctx(&message, &signature, &authority.public_key, SGEN_AUTHORITY_SIGNATURE_DOMAIN)
+            .verify_ctx(
+                &message,
+                &signature,
+                &authority.public_key,
+                SGEN_AUTHORITY_SIGNATURE_DOMAIN,
+            )
             .map_err(|error| format!("SGEN {role} signature is malformed: {error}"))?;
-        if !valid { return Err(format!("SGEN {role} authority signature is invalid")); }
+        if !valid {
+            return Err(format!("SGEN {role} authority signature is invalid"));
+        }
         signatures.push(SgenSignature { role, signature });
     }
-    if !decoder.is_empty() { return Err("SGEN contains unexpected trailing data".to_string()); }
+    if !decoder.is_empty() {
+        return Err("SGEN contains unexpected trailing data".to_string());
+    }
     let reconstructed_document = reconstruct_document(&payload)?;
     validate_document_binding(&payload, &reconstructed_document)?;
-    Ok(VerifiedSgen { header: SgenHeader { payload_length: length as u32, payload_digest: digest }, payload, signatures, genesis_hash: hex::encode(digest), reconstructed_document })
+    Ok(VerifiedSgen {
+        header: SgenHeader {
+            payload_length: length as u32,
+            payload_digest: digest,
+        },
+        payload,
+        signatures,
+        genesis_hash: hex::encode(digest),
+        reconstructed_document,
+    })
 }
 
 pub fn payload_from_finalized_document(value: &Value) -> Result<SgenPayloadV1, String> {
-    let deployment = value.get("genesis_deployment").and_then(Value::as_object)
+    let deployment = value
+        .get("genesis_deployment")
+        .and_then(Value::as_object)
         .ok_or_else(|| "SGEN requires finalized genesis_deployment".to_string())?;
-    let operations = deployment.get("signed_replay_operations").and_then(Value::as_array)
+    let operations = deployment
+        .get("signed_replay_operations")
+        .and_then(Value::as_array)
         .ok_or_else(|| "SGEN requires embedded signed H0 operations".to_string())?;
-    if operations.len() != H0_OPERATION_COUNT { return Err(format!("SGEN requires exactly {H0_OPERATION_COUNT} H0 operations")); }
+    if operations.len() != H0_OPERATION_COUNT {
+        return Err(format!(
+            "SGEN requires exactly {H0_OPERATION_COUNT} H0 operations"
+        ));
+    }
     let mut operation_bytes = Vec::with_capacity(operations.len());
     for operation in operations {
         let parsed: GenesisReplayOperation = serde_json::from_value(operation.clone())
             .map_err(|error| format!("SGEN H0 operation is malformed: {error}"))?;
-        let canonical = canonical_json(&serde_json::to_value(parsed).map_err(|error| format!("canonicalize SGEN H0 operation: {error}"))?);
-        if canonical.len() > MAX_OPERATION_BYTES { return Err("SGEN H0 operation exceeds v1 size limit".to_string()); }
+        let canonical = canonical_json(
+            &serde_json::to_value(parsed)
+                .map_err(|error| format!("canonicalize SGEN H0 operation: {error}"))?,
+        );
+        if canonical.len() > MAX_OPERATION_BYTES {
+            return Err("SGEN H0 operation exceeds v1 size limit".to_string());
+        }
         operation_bytes.push(canonical.into_bytes());
     }
     let mut legacy = value.clone();
-    let deployment = legacy.get_mut("genesis_deployment").and_then(Value::as_object_mut)
+    let deployment = legacy
+        .get_mut("genesis_deployment")
+        .and_then(Value::as_object_mut)
         .ok_or_else(|| "SGEN cannot remove missing signed H0 operation field".to_string())?;
     deployment.remove("signed_replay_operations");
     // These historical records are audit evidence, not inputs to H0. SGEN
@@ -333,7 +424,9 @@ pub fn payload_from_finalized_document(value: &Value) -> Result<SgenPayloadV1, S
         "initialization_receipts_sha256",
         "authority_record_sha256",
         "contract_derivation_record_sha256",
-    ] { deployment.remove(field); }
+    ] {
+        deployment.remove(field);
+    }
     recompute_testnet_v3_candidate_integrity(&mut legacy)
         .map_err(|error| format!("recompute snapshot-free SGEN legacy bindings: {error}"))?;
     let legacy_document = canonical_json(&legacy).into_bytes();
@@ -347,8 +440,14 @@ pub fn payload_from_finalized_document(value: &Value) -> Result<SgenPayloadV1, S
         target_block_time_ms: required_u64(value, "/consensus/target_block_time_ms")?,
         parameter_root: required_string(value, "/integrity/consensus_parameter_root_sha3_512")?,
         membership_root: legacy_membership_root(value)?,
-        expected_execution_state_root: required_string(value, "/genesis_deployment/post_deployment_execution_state_root")?,
-        expected_aivm_state_root: required_string(value, "/genesis_deployment/post_deployment_aivm_state_root")?,
+        expected_execution_state_root: required_string(
+            value,
+            "/genesis_deployment/post_deployment_execution_state_root",
+        )?,
+        expected_aivm_state_root: required_string(
+            value,
+            "/genesis_deployment/post_deployment_aivm_state_root",
+        )?,
         expected_receipt_root: required_string(value, "/genesis_deployment/receipt_root")?,
         legacy_document,
         h0_operations: operation_bytes,
@@ -381,7 +480,9 @@ pub fn payload_from_h0_evidence(
         .as_array()
         .ok_or_else(|| "SGEN H0 operations evidence is not an array".to_string())?;
     if operations.len() != H0_OPERATION_COUNT {
-        return Err(format!("SGEN requires exactly {H0_OPERATION_COUNT} H0 operations"));
+        return Err(format!(
+            "SGEN requires exactly {H0_OPERATION_COUNT} H0 operations"
+        ));
     }
     let mut operation_bytes = Vec::with_capacity(operations.len());
     for operation in operations {
@@ -397,7 +498,8 @@ pub fn payload_from_h0_evidence(
         operation_bytes.push(canonical.into_bytes());
     }
 
-    let execution_root = required_string(execution_status, "/post_deployment_execution_state_root")?;
+    let execution_root =
+        required_string(execution_status, "/post_deployment_execution_state_root")?;
     let aivm_root = required_string(execution_status, "/post_deployment_aivm_state_root")?;
     let receipt_root = required_string(execution_status, "/receipt_root")?;
 
@@ -409,12 +511,30 @@ pub fn payload_from_h0_evidence(
         .get_mut("genesis_deployment")
         .and_then(Value::as_object_mut)
         .ok_or_else(|| "SGEN source is missing genesis_deployment".to_string())?;
-    deployment.insert("signed_replay_operations".to_string(), Value::Array(operations.clone()));
-    deployment.insert("deployment_count".to_string(), Value::from(DEPLOYMENT_COUNT));
-    deployment.insert("initialization_count".to_string(), Value::from(INITIALIZATION_COUNT));
-    deployment.insert("post_deployment_execution_state_root".to_string(), Value::String(execution_root.clone()));
-    deployment.insert("post_deployment_aivm_state_root".to_string(), Value::String(aivm_root.clone()));
-    deployment.insert("receipt_root".to_string(), Value::String(receipt_root.clone()));
+    deployment.insert(
+        "signed_replay_operations".to_string(),
+        Value::Array(operations.clone()),
+    );
+    deployment.insert(
+        "deployment_count".to_string(),
+        Value::from(DEPLOYMENT_COUNT),
+    );
+    deployment.insert(
+        "initialization_count".to_string(),
+        Value::from(INITIALIZATION_COUNT),
+    );
+    deployment.insert(
+        "post_deployment_execution_state_root".to_string(),
+        Value::String(execution_root.clone()),
+    );
+    deployment.insert(
+        "post_deployment_aivm_state_root".to_string(),
+        Value::String(aivm_root.clone()),
+    );
+    deployment.insert(
+        "receipt_root".to_string(),
+        Value::String(receipt_root.clone()),
+    );
     for field in [
         "execution_state",
         "execution_status_sha256",
@@ -450,10 +570,135 @@ pub fn payload_from_h0_evidence(
     validate_payload_shape(&payload)?;
     Ok(payload)
 }
+fn reissue_etdag_binding(document: &Value) -> Result<EtdagGovernedGenesisBinding, String> {
+    if document.get("etdag_governance").is_some() {
+        return load_genesis_bound_etdag_governance(document);
+    }
+    let parameter_manifest: EtdagParameterManifest = serde_json::from_slice(include_bytes!(
+        "../../launch/posy-v3-etdag-governance-inputs/etdag-parameter-manifest.input.json"
+    ))
+    .map_err(|error| format!("parse canonical ETDAG parameter manifest: {error}"))?;
+    let fee_schedule_manifest: EtdagFeeScheduleManifest = serde_json::from_slice(include_bytes!(
+        "../../launch/posy-v3-etdag-governance-inputs/etdag-fee-schedule-manifest.input.json"
+    ))
+    .map_err(|error| format!("parse canonical ETDAG fee schedule manifest: {error}"))?;
+    let binding = EtdagGovernedGenesisBinding {
+        schema_version: ETDAG_GOVERNED_GENESIS_BINDING_SCHEMA_VERSION,
+        status: ETDAG_GOVERNED_GENESIS_BINDING_STATUS.to_string(),
+        parameter_artifact: EtdagParameterArtifact::from_manifest(parameter_manifest)?,
+        fee_schedule_artifact: EtdagFeeScheduleArtifact::from_manifest(fee_schedule_manifest)?,
+    };
+    binding.validate()?;
+    Ok(binding)
+}
 
-fn encode_file(payload: &[u8], digest: [u8; 32], signatures: &[SgenSignature]) -> Result<Vec<u8>, String> {
-    if payload.len() > MAX_PAYLOAD_BYTES || !(signatures.is_empty() || signatures.len() == 3) { return Err("invalid SGEN framing".to_string()); }
-    let mut out = Vec::with_capacity(44 + payload.len() + signatures.iter().map(|entry| entry.signature.len() + 3).sum::<usize>());
+/// Rebinds a verified canonical SGEN to a newly governed cadence without
+/// recovering or reconstructing its signed H0 envelopes. The prior SGEN is
+/// the only accepted H0 source; identities, membership, ETDAG policy, and all
+/// H0 execution roots must remain identical.
+pub fn reissue_verified_sgen_payload(
+    verified: &VerifiedSgen,
+    target_block_time_ms: u64,
+    governance_decision_id: &str,
+) -> Result<(SgenPayloadV1, String), String> {
+    if !(100..=1_500).contains(&target_block_time_ms) {
+        return Err("reissued SGEN target block time must be within 100..=1500 ms".to_string());
+    }
+    if governance_decision_id.trim().is_empty() {
+        return Err("reissued SGEN requires a non-empty governance decision ID".to_string());
+    }
+    let mut document = verified.reconstructed_document.clone();
+    let mut activation: GenesisBoundSimplifiedActivation = serde_json::from_value(
+        document
+            .pointer("/consensus/posy_v3_activation")
+            .cloned()
+            .ok_or_else(|| "verified SGEN has no simplified PoSy activation".to_string())?,
+    )
+    .map_err(|error| format!("decode verified SGEN activation: {error}"))?;
+    let prior_operations = verified.payload.h0_operations.clone();
+    let prior_execution_root = verified.payload.expected_execution_state_root.clone();
+    let prior_aivm_root = verified.payload.expected_aivm_state_root.clone();
+    let prior_receipt_root = verified.payload.expected_receipt_root.clone();
+    let prior_membership_root = verified.payload.membership_root.clone();
+
+    activation.manifest.target_block_time_ms = target_block_time_ms;
+    activation.manifest.governance_approval_id = Some(governance_decision_id.to_string());
+    activation.governance_decision_id = governance_decision_id.to_string();
+    activation.parameter_root_sha3_512 = activation.manifest.root()?.to_hex();
+    activation.validate()?;
+    let canonical_manifest = activation.manifest.canonical_bytes()?;
+    let parameters = load_finalized_consensus_parameters_from_bytes(&canonical_manifest)?;
+    let etdag_binding = reissue_etdag_binding(&document)?;
+    let decision_context = json!({
+        "schema": "synergy-testnet-v3-sgen-cadence-reissue-v1",
+        "prior_sgen_hash": verified.genesis_hash,
+        "governance_decision_id": governance_decision_id,
+        "target_block_time_ms": target_block_time_ms,
+        "parameter_root_sha3_512": activation.parameter_root_sha3_512,
+        "h0_execution_state_root": prior_execution_root,
+        "h0_aivm_state_root": prior_aivm_root,
+        "h0_receipt_root": prior_receipt_root,
+    });
+    let release_decision_sha256 =
+        hex::encode(Sha256::digest(canonical_json(&decision_context).as_bytes()));
+    document
+        .as_object_mut()
+        .ok_or_else(|| "verified SGEN document is not an object".to_string())?
+        .remove("etdag_membership_anchor");
+    bind_testnet_v3_genesis_simplified_posy_authorities(
+        &mut document,
+        &parameters,
+        &release_decision_sha256,
+        &activation,
+        &etdag_binding,
+    )?;
+    let anchor = build_etdag_governed_membership_anchor(
+        etdag_binding
+            .parameter_artifact
+            .manifest
+            .governance_decision_id
+            .clone(),
+        required_string(&document, "/integrity/genesis_hash")?,
+        required_string(
+            &document,
+            "/genesis_deployment/post_deployment_execution_state_root",
+        )?,
+        &activation,
+    )?;
+    bind_testnet_v3_genesis_etdag_membership_anchor(&mut document, &anchor)?;
+    document["integrity"]["etdag_membership_root_sha3_512"] =
+        Value::String(prior_membership_root.clone());
+    let payload = payload_from_finalized_document(&document)?;
+    if payload.h0_operations != prior_operations
+        || payload.expected_execution_state_root != prior_execution_root
+        || payload.expected_aivm_state_root != prior_aivm_root
+        || payload.expected_receipt_root != prior_receipt_root
+        || payload.membership_root != prior_membership_root
+    {
+        return Err("SGEN cadence reissue changed protected H0 or membership material".to_string());
+    }
+    if payload.target_block_time_ms != target_block_time_ms
+        || payload.parameter_root == verified.payload.parameter_root
+    {
+        return Err("SGEN cadence reissue did not bind a new governed parameter root".to_string());
+    }
+    Ok((payload, release_decision_sha256))
+}
+fn encode_file(
+    payload: &[u8],
+    digest: [u8; 32],
+    signatures: &[SgenSignature],
+) -> Result<Vec<u8>, String> {
+    if payload.len() > MAX_PAYLOAD_BYTES || !(signatures.is_empty() || signatures.len() == 3) {
+        return Err("invalid SGEN framing".to_string());
+    }
+    let mut out = Vec::with_capacity(
+        44 + payload.len()
+            + signatures
+                .iter()
+                .map(|entry| entry.signature.len() + 3)
+                .sum::<usize>(),
+    );
     out.extend_from_slice(&SGEN_MAGIC);
     out.extend_from_slice(&SGEN_VERSION.to_le_bytes());
     out.push(SGEN_PAYLOAD_ENCODING_BORSH_LE);
@@ -465,9 +710,13 @@ fn encode_file(payload: &[u8], digest: [u8; 32], signatures: &[SgenSignature]) -
     let mut expected = 1u8;
     for signature in signatures {
         let code = role_code(&signature.role)?;
-        if code != expected { return Err("SGEN authority signatures are not in canonical order".to_string()); }
+        if code != expected {
+            return Err("SGEN authority signatures are not in canonical order".to_string());
+        }
         expected += 1;
-        if signature.signature.is_empty() || signature.signature.len() > MAX_SIGNATURE_BYTES { return Err("SGEN signature length is invalid".to_string()); }
+        if signature.signature.is_empty() || signature.signature.len() > MAX_SIGNATURE_BYTES {
+            return Err("SGEN signature length is invalid".to_string());
+        }
         out.push(code);
         out.extend_from_slice(&(signature.signature.len() as u16).to_le_bytes());
         out.extend_from_slice(&signature.signature);
@@ -491,7 +740,9 @@ fn encode_payload(payload: &SgenPayloadV1) -> Result<Vec<u8>, String> {
     push_string(&mut out, &payload.expected_receipt_root)?;
     push_bytes_u32(&mut out, &payload.legacy_document, MAX_DOCUMENT_BYTES)?;
     out.extend_from_slice(&(payload.h0_operations.len() as u32).to_le_bytes());
-    for operation in &payload.h0_operations { push_bytes_u32(&mut out, operation, MAX_OPERATION_BYTES)?; }
+    for operation in &payload.h0_operations {
+        push_bytes_u32(&mut out, operation, MAX_OPERATION_BYTES)?;
+    }
     Ok(out)
 }
 
@@ -513,24 +764,35 @@ fn decode_payload(bytes: &[u8]) -> Result<SgenPayloadV1, String> {
         legacy_document: decoder.bytes_u32(MAX_DOCUMENT_BYTES)?,
         h0_operations: {
             let count = decoder.u32()? as usize;
-            if count != H0_OPERATION_COUNT { return Err("SGEN H0 operation count is invalid".to_string()); }
+            if count != H0_OPERATION_COUNT {
+                return Err("SGEN H0 operation count is invalid".to_string());
+            }
             let mut operations = Vec::with_capacity(count);
-            for _ in 0..count { operations.push(decoder.bytes_u32(MAX_OPERATION_BYTES)?); }
+            for _ in 0..count {
+                operations.push(decoder.bytes_u32(MAX_OPERATION_BYTES)?);
+            }
             operations
         },
     };
-    if !decoder.is_empty() { return Err("SGEN payload contains trailing data".to_string()); }
+    if !decoder.is_empty() {
+        return Err("SGEN payload contains trailing data".to_string());
+    }
     Ok(payload)
 }
 
 fn reconstruct_document(payload: &SgenPayloadV1) -> Result<Value, String> {
     let mut document: Value = serde_json::from_slice(&payload.legacy_document)
         .map_err(|error| format!("SGEN internal document is invalid: {error}"))?;
-    if canonical_json(&document).as_bytes() != payload.legacy_document.as_slice() { return Err("SGEN internal document is not canonical".to_string()); }
+    if canonical_json(&document).as_bytes() != payload.legacy_document.as_slice() {
+        return Err("SGEN internal document is not canonical".to_string());
+    }
     let mut operations = Vec::with_capacity(H0_OPERATION_COUNT);
     for (index, bytes) in payload.h0_operations.iter().enumerate() {
-        let value: Value = serde_json::from_slice(bytes).map_err(|error| format!("SGEN H0 operation {index} is invalid: {error}"))?;
-        if canonical_json(&value).as_bytes() != bytes.as_slice() { return Err(format!("SGEN H0 operation {index} is not canonical")); }
+        let value: Value = serde_json::from_slice(bytes)
+            .map_err(|error| format!("SGEN H0 operation {index} is invalid: {error}"))?;
+        if canonical_json(&value).as_bytes() != bytes.as_slice() {
+            return Err(format!("SGEN H0 operation {index} is not canonical"));
+        }
         let _operation: GenesisReplayOperation = serde_json::from_value(value.clone())
             .map_err(|error| format!("SGEN H0 operation {index} is malformed: {error}"))?;
         // Deployment and initialization sequence numbers occupy separate
@@ -539,27 +801,54 @@ fn reconstruct_document(payload: &SgenPayloadV1) -> Result<Value, String> {
         // would reject the already-signed canonical call sequence.
         operations.push(value);
     }
-    let deployment = document.get_mut("genesis_deployment").and_then(Value::as_object_mut)
+    let deployment = document
+        .get_mut("genesis_deployment")
+        .and_then(Value::as_object_mut)
         .ok_or_else(|| "SGEN internal document lacks genesis_deployment".to_string())?;
-    if deployment.contains_key("signed_replay_operations") { return Err("SGEN internal document duplicates H0 operations".to_string()); }
-    deployment.insert("signed_replay_operations".to_string(), Value::Array(operations));
+    if deployment.contains_key("signed_replay_operations") {
+        return Err("SGEN internal document duplicates H0 operations".to_string());
+    }
+    deployment.insert(
+        "signed_replay_operations".to_string(),
+        Value::Array(operations),
+    );
     Ok(document)
 }
 
 fn validate_payload_shape(payload: &SgenPayloadV1) -> Result<(), String> {
-    if payload.chain_id != 1266 || payload.network_id != "testnet" || payload.release_id != "testnet-v3" { return Err("SGEN has the wrong Chain 1266 / testnet identity".to_string()); }
-    if payload.protocol_version != "1.0.0" || payload.consensus_version != "posy/3.0" { return Err("SGEN has an unsupported protocol version".to_string()); }
+    if payload.chain_id != 1266
+        || payload.network_id != "testnet"
+        || payload.release_id != "testnet-v3"
+    {
+        return Err("SGEN has the wrong Chain 1266 / testnet identity".to_string());
+    }
+    if payload.protocol_version != "1.0.0" || payload.consensus_version != "posy/3.0" {
+        return Err("SGEN has an unsupported protocol version".to_string());
+    }
     // The SGEN must preserve the already-executed canonical H0 parameter set.
     // Timing qualification is measured after H4; composing Genesis must never
     // silently rewrite a signed, deterministic H0 epoch.
-    if payload.target_block_time_ms == 0 { return Err("SGEN target block time is invalid".to_string()); }
-    if payload.legacy_document.is_empty() || payload.legacy_document.len() > MAX_DOCUMENT_BYTES { return Err("SGEN internal document length is invalid".to_string()); }
-    if payload.h0_operations.len() != H0_OPERATION_COUNT { return Err("SGEN must contain exactly 36 H0 operations".to_string()); }
+    if payload.target_block_time_ms == 0 {
+        return Err("SGEN target block time is invalid".to_string());
+    }
+    if payload.legacy_document.is_empty() || payload.legacy_document.len() > MAX_DOCUMENT_BYTES {
+        return Err("SGEN internal document length is invalid".to_string());
+    }
+    if payload.h0_operations.len() != H0_OPERATION_COUNT {
+        return Err("SGEN must contain exactly 36 H0 operations".to_string());
+    }
     if !is_lower_hex(&payload.parameter_root, 128) {
         return Err("SGEN parameter root is not canonical SHA3-512".to_string());
     }
-    for value in [&payload.membership_root, &payload.expected_execution_state_root, &payload.expected_aivm_state_root, &payload.expected_receipt_root] {
-        if !is_lower_hex(value, 64) { return Err("SGEN contains a non-canonical root".to_string()); }
+    for value in [
+        &payload.membership_root,
+        &payload.expected_execution_state_root,
+        &payload.expected_aivm_state_root,
+        &payload.expected_receipt_root,
+    ] {
+        if !is_lower_hex(value, 64) {
+            return Err("SGEN contains a non-canonical root".to_string());
+        }
     }
     Ok(())
 }
@@ -571,22 +860,49 @@ fn validate_document_binding(payload: &SgenPayloadV1, document: &Value) -> Resul
         || required_string(document, "/network/protocol_version")? != payload.protocol_version
         || required_string(document, "/network/consensus_version")? != payload.consensus_version
         || required_u64(document, "/header/timestamp")? != payload.activation_timestamp
-        || required_u64(document, "/consensus/target_block_time_ms")? != payload.target_block_time_ms
+        || required_u64(document, "/consensus/target_block_time_ms")?
+            != payload.target_block_time_ms
         || document_parameter_root(document)? != payload.parameter_root
         || direct_membership_root(document)? != payload.membership_root
-        || required_string(document, "/genesis_deployment/post_deployment_execution_state_root")? != payload.expected_execution_state_root
-        || required_string(document, "/genesis_deployment/post_deployment_aivm_state_root")? != payload.expected_aivm_state_root
-        || required_string(document, "/genesis_deployment/receipt_root")? != payload.expected_receipt_root
-    { return Err("SGEN typed payload fields disagree with its internal Genesis document".to_string()); }
-    let validators = document.get("validators").and_then(Value::as_array).ok_or_else(|| "SGEN Genesis validators are missing".to_string())?;
+        || required_string(
+            document,
+            "/genesis_deployment/post_deployment_execution_state_root",
+        )? != payload.expected_execution_state_root
+        || required_string(
+            document,
+            "/genesis_deployment/post_deployment_aivm_state_root",
+        )? != payload.expected_aivm_state_root
+        || required_string(document, "/genesis_deployment/receipt_root")?
+            != payload.expected_receipt_root
+    {
+        return Err(
+            "SGEN typed payload fields disagree with its internal Genesis document".to_string(),
+        );
+    }
+    let validators = document
+        .get("validators")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "SGEN Genesis validators are missing".to_string())?;
     let mut identities = BTreeSet::new();
     for validator in validators {
-        let identity = validator.get("validator_id").and_then(Value::as_str).ok_or_else(|| "SGEN validator identity is missing".to_string())?;
-        if !identities.insert(identity) { return Err("SGEN contains duplicate validator identity".to_string()); }
+        let identity = validator
+            .get("validator_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "SGEN validator identity is missing".to_string())?;
+        if !identities.insert(identity) {
+            return Err("SGEN contains duplicate validator identity".to_string());
+        }
     }
-    if validators.is_empty() { return Err("SGEN validator set is empty".to_string()); }
-    let operations = document.pointer("/genesis_deployment/signed_replay_operations").and_then(Value::as_array).ok_or_else(|| "SGEN H0 operations are missing".to_string())?;
-    if operations.len() != H0_OPERATION_COUNT { return Err("SGEN H0 operation count is invalid".to_string()); }
+    if validators.is_empty() {
+        return Err("SGEN validator set is empty".to_string());
+    }
+    let operations = document
+        .pointer("/genesis_deployment/signed_replay_operations")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "SGEN H0 operations are missing".to_string())?;
+    if operations.len() != H0_OPERATION_COUNT {
+        return Err("SGEN H0 operation count is invalid".to_string());
+    }
     let mut deployment_count = 0usize;
     let mut initialization_count = 0usize;
     for entry in operations {
@@ -597,32 +913,93 @@ fn validate_document_binding(payload: &SgenPayloadV1, document: &Value) -> Resul
             crate::synq_admission::SynQAdmissionKind::Call => initialization_count += 1,
         }
     }
-    if deployment_count != DEPLOYMENT_COUNT || initialization_count != INITIALIZATION_COUNT { return Err("SGEN H0 operation semantics are invalid".to_string()); }
+    if deployment_count != DEPLOYMENT_COUNT || initialization_count != INITIALIZATION_COUNT {
+        return Err("SGEN H0 operation semantics are invalid".to_string());
+    }
     Ok(())
 }
 
 fn canonical_testnet_authorities() -> Result<BTreeMap<String, SgenAuthorityPublic>, String> {
-    let value: Value = serde_json::from_str(include_str!("../../launch/posy-v3-genesis-inputs/fresh-genesis-authority-freeze.json"))
-        .map_err(|error| format!("parse built-in Testnet-v3 authority freeze: {error}"))?;
-    let entries = value.get("authorities").and_then(Value::as_array).ok_or_else(|| "built-in authority freeze is malformed".to_string())?;
+    let value: Value = serde_json::from_str(include_str!(
+        "../../launch/posy-v3-genesis-inputs/fresh-genesis-authority-freeze.json"
+    ))
+    .map_err(|error| format!("parse built-in Testnet-v3 authority freeze: {error}"))?;
+    let entries = value
+        .get("authorities")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "built-in authority freeze is malformed".to_string())?;
     let mut result = BTreeMap::new();
     for role in [DEPLOYER_ROLE, GOVERNANCE_ROLE, REGISTRY_ROLE] {
-        let entry = entries.iter().find(|entry| entry.get("role_id").and_then(Value::as_str) == Some(role)).ok_or_else(|| "built-in authority role is missing".to_string())?;
-        let identity_address = entry.get("identity_address").and_then(Value::as_str).ok_or_else(|| "built-in authority identity is missing".to_string())?.to_string();
-        let public_key = entry.pointer("/authorization_public/public_key").and_then(Value::as_str).ok_or_else(|| "built-in authority public key is missing".to_string())?;
-        let public_key = hex::decode(public_key).map_err(|_| "built-in authority public key is invalid".to_string())?;
-        if public_key.len() != 2592 { return Err("built-in authority public key is not ML-DSA-87".to_string()); }
-        result.insert(role.to_string(), SgenAuthorityPublic { role: role.to_string(), identity_address, public_key });
+        let entry = entries
+            .iter()
+            .find(|entry| entry.get("role_id").and_then(Value::as_str) == Some(role))
+            .ok_or_else(|| "built-in authority role is missing".to_string())?;
+        let identity_address = entry
+            .get("identity_address")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "built-in authority identity is missing".to_string())?
+            .to_string();
+        let public_key = entry
+            .pointer("/authorization_public/public_key")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "built-in authority public key is missing".to_string())?;
+        let public_key = hex::decode(public_key)
+            .map_err(|_| "built-in authority public key is invalid".to_string())?;
+        if public_key.len() != 2592 {
+            return Err("built-in authority public key is not ML-DSA-87".to_string());
+        }
+        result.insert(
+            role.to_string(),
+            SgenAuthorityPublic {
+                role: role.to_string(),
+                identity_address,
+                public_key,
+            },
+        );
     }
     Ok(result)
 }
 
-fn role_code(role: &str) -> Result<u8, String> { match role { DEPLOYER_ROLE => Ok(1), GOVERNANCE_ROLE => Ok(2), REGISTRY_ROLE => Ok(3), _ => Err("unknown SGEN authority role".to_string()) } }
-fn role_from_code(code: u8) -> Result<&'static str, String> { match code { 1 => Ok(DEPLOYER_ROLE), 2 => Ok(GOVERNANCE_ROLE), 3 => Ok(REGISTRY_ROLE), _ => Err("unknown SGEN authority role code".to_string()) } }
-fn push_string(out: &mut Vec<u8>, value: &str) -> Result<(), String> { push_bytes_u32(out, value.as_bytes(), MAX_STRING_BYTES) }
-fn push_bytes_u32(out: &mut Vec<u8>, value: &[u8], max: usize) -> Result<(), String> { if value.len() > max { return Err("SGEN field exceeds its v1 bound".to_string()); } out.extend_from_slice(&(value.len() as u32).to_le_bytes()); out.extend_from_slice(value); Ok(()) }
-fn required_u64(value: &Value, pointer: &str) -> Result<u64, String> { value.pointer(pointer).and_then(Value::as_u64).ok_or_else(|| format!("SGEN document is missing {pointer}")) }
-fn required_string(value: &Value, pointer: &str) -> Result<String, String> { value.pointer(pointer).and_then(Value::as_str).map(str::to_string).ok_or_else(|| format!("SGEN document is missing {pointer}")) }
+fn role_code(role: &str) -> Result<u8, String> {
+    match role {
+        DEPLOYER_ROLE => Ok(1),
+        GOVERNANCE_ROLE => Ok(2),
+        REGISTRY_ROLE => Ok(3),
+        _ => Err("unknown SGEN authority role".to_string()),
+    }
+}
+fn role_from_code(code: u8) -> Result<&'static str, String> {
+    match code {
+        1 => Ok(DEPLOYER_ROLE),
+        2 => Ok(GOVERNANCE_ROLE),
+        3 => Ok(REGISTRY_ROLE),
+        _ => Err("unknown SGEN authority role code".to_string()),
+    }
+}
+fn push_string(out: &mut Vec<u8>, value: &str) -> Result<(), String> {
+    push_bytes_u32(out, value.as_bytes(), MAX_STRING_BYTES)
+}
+fn push_bytes_u32(out: &mut Vec<u8>, value: &[u8], max: usize) -> Result<(), String> {
+    if value.len() > max {
+        return Err("SGEN field exceeds its v1 bound".to_string());
+    }
+    out.extend_from_slice(&(value.len() as u32).to_le_bytes());
+    out.extend_from_slice(value);
+    Ok(())
+}
+fn required_u64(value: &Value, pointer: &str) -> Result<u64, String> {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("SGEN document is missing {pointer}"))
+}
+fn required_string(value: &Value, pointer: &str) -> Result<String, String> {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| format!("SGEN document is missing {pointer}"))
+}
 fn document_parameter_root(value: &Value) -> Result<String, String> {
     value
         .pointer("/consensus/posy_v3_activation/parameter_root_sha3_512")
@@ -677,23 +1054,111 @@ fn legacy_membership_root(value: &Value) -> Result<String, String> {
         .map(str::to_string)
         .ok_or_else(|| "SGEN document is missing the ETDAG membership root".to_string())
 }
-fn is_lower_hex(value: &str, length: usize) -> bool { value.len() == length && value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) }
+fn is_lower_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
 
-fn canonical_json(value: &Value) -> String { match value { Value::Null => "null".to_string(), Value::Bool(entry) => entry.to_string(), Value::Number(entry) => entry.to_string(), Value::String(entry) => serde_json::to_string(entry).expect("JSON string serialization"), Value::Array(entries) => format!("[{}]", entries.iter().map(canonical_json).collect::<Vec<_>>().join(",")), Value::Object(entries) => { let mut keys = entries.keys().collect::<Vec<_>>(); keys.sort(); format!("{{{}}}", keys.into_iter().map(|key| format!("{}:{}", serde_json::to_string(key).expect("JSON key serialization"), canonical_json(&entries[key]))).collect::<Vec<_>>().join(",")) } } }
+fn canonical_json(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(entry) => entry.to_string(),
+        Value::Number(entry) => entry.to_string(),
+        Value::String(entry) => serde_json::to_string(entry).expect("JSON string serialization"),
+        Value::Array(entries) => format!(
+            "[{}]",
+            entries
+                .iter()
+                .map(canonical_json)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        Value::Object(entries) => {
+            let mut keys = entries.keys().collect::<Vec<_>>();
+            keys.sort();
+            format!(
+                "{{{}}}",
+                keys.into_iter()
+                    .map(|key| format!(
+                        "{}:{}",
+                        serde_json::to_string(key).expect("JSON key serialization"),
+                        canonical_json(&entries[key])
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        }
+    }
+}
 
-struct Decoder<'a> { bytes: &'a [u8], cursor: usize }
+struct Decoder<'a> {
+    bytes: &'a [u8],
+    cursor: usize,
+}
 impl<'a> Decoder<'a> {
-    fn new(bytes: &'a [u8]) -> Self { Self { bytes, cursor: 0 } }
-    fn is_empty(&self) -> bool { self.cursor == self.bytes.len() }
-    fn take_exact(&mut self, length: usize) -> Result<&'a [u8], String> { let end = self.cursor.checked_add(length).ok_or_else(|| "SGEN length overflow".to_string())?; let result = self.bytes.get(self.cursor..end).ok_or_else(|| "SGEN is truncated".to_string())?; self.cursor = end; Ok(result) }
-    fn u8(&mut self) -> Result<u8, String> { Ok(self.take_exact(1)?[0]) }
-    fn u16(&mut self) -> Result<u16, String> { Ok(u16::from_le_bytes(self.take_exact(2)?.try_into().expect("length checked"))) }
-    fn u32(&mut self) -> Result<u32, String> { Ok(u32::from_le_bytes(self.take_exact(4)?.try_into().expect("length checked"))) }
-    fn u64(&mut self) -> Result<u64, String> { Ok(u64::from_le_bytes(self.take_exact(8)?.try_into().expect("length checked"))) }
-    fn array_32(&mut self) -> Result<[u8; 32], String> { Ok(self.take_exact(32)?.try_into().expect("length checked")) }
-    fn bytes_u16(&mut self, max: usize) -> Result<Vec<u8>, String> { let length = self.u16()? as usize; if length == 0 || length > max { return Err("SGEN u16 field length is invalid".to_string()); } Ok(self.take_exact(length)?.to_vec()) }
-    fn bytes_u32(&mut self, max: usize) -> Result<Vec<u8>, String> { let length = self.u32()? as usize; if length > max { return Err("SGEN u32 field length is invalid".to_string()); } Ok(self.take_exact(length)?.to_vec()) }
-    fn string(&mut self, max: usize) -> Result<String, String> { let bytes = self.bytes_u32(max)?; let value = String::from_utf8(bytes).map_err(|_| "SGEN string is not UTF-8".to_string())?; if value.is_empty() { return Err("SGEN string is empty".to_string()); } Ok(value) }
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, cursor: 0 }
+    }
+    fn is_empty(&self) -> bool {
+        self.cursor == self.bytes.len()
+    }
+    fn take_exact(&mut self, length: usize) -> Result<&'a [u8], String> {
+        let end = self
+            .cursor
+            .checked_add(length)
+            .ok_or_else(|| "SGEN length overflow".to_string())?;
+        let result = self
+            .bytes
+            .get(self.cursor..end)
+            .ok_or_else(|| "SGEN is truncated".to_string())?;
+        self.cursor = end;
+        Ok(result)
+    }
+    fn u8(&mut self) -> Result<u8, String> {
+        Ok(self.take_exact(1)?[0])
+    }
+    fn u16(&mut self) -> Result<u16, String> {
+        Ok(u16::from_le_bytes(
+            self.take_exact(2)?.try_into().expect("length checked"),
+        ))
+    }
+    fn u32(&mut self) -> Result<u32, String> {
+        Ok(u32::from_le_bytes(
+            self.take_exact(4)?.try_into().expect("length checked"),
+        ))
+    }
+    fn u64(&mut self) -> Result<u64, String> {
+        Ok(u64::from_le_bytes(
+            self.take_exact(8)?.try_into().expect("length checked"),
+        ))
+    }
+    fn array_32(&mut self) -> Result<[u8; 32], String> {
+        Ok(self.take_exact(32)?.try_into().expect("length checked"))
+    }
+    fn bytes_u16(&mut self, max: usize) -> Result<Vec<u8>, String> {
+        let length = self.u16()? as usize;
+        if length == 0 || length > max {
+            return Err("SGEN u16 field length is invalid".to_string());
+        }
+        Ok(self.take_exact(length)?.to_vec())
+    }
+    fn bytes_u32(&mut self, max: usize) -> Result<Vec<u8>, String> {
+        let length = self.u32()? as usize;
+        if length > max {
+            return Err("SGEN u32 field length is invalid".to_string());
+        }
+        Ok(self.take_exact(length)?.to_vec())
+    }
+    fn string(&mut self, max: usize) -> Result<String, String> {
+        let bytes = self.bytes_u32(max)?;
+        let value = String::from_utf8(bytes).map_err(|_| "SGEN string is not UTF-8".to_string())?;
+        if value.is_empty() {
+            return Err("SGEN string is empty".to_string());
+        }
+        Ok(value)
+    }
 }
 
 #[cfg(test)]
@@ -702,30 +1167,83 @@ mod tests {
     use aegis_pqvm::pqc::signatures::mldsa::mldsa87;
     use pqrust_traits::sign::{PublicKey as _, SecretKey as _};
 
-    fn payload() -> SgenPayloadV1 { SgenPayloadV1 { chain_id: 1266, network_id: "testnet".to_string(), release_id: "testnet-v3".to_string(), protocol_version: "1.0.0".to_string(), consensus_version: "posy/3.0".to_string(), activation_timestamp: 1, target_block_time_ms: 500, parameter_root: "11".repeat(64), membership_root: "22".repeat(32), expected_execution_state_root: "33".repeat(32), expected_aivm_state_root: "44".repeat(32), expected_receipt_root: "55".repeat(32), legacy_document: br#"{}"#.to_vec(), h0_operations: vec![b"{}".to_vec(); H0_OPERATION_COUNT] } }
+    fn payload() -> SgenPayloadV1 {
+        SgenPayloadV1 {
+            chain_id: 1266,
+            network_id: "testnet".to_string(),
+            release_id: "testnet-v3".to_string(),
+            protocol_version: "1.0.0".to_string(),
+            consensus_version: "posy/3.0".to_string(),
+            activation_timestamp: 1,
+            target_block_time_ms: 500,
+            parameter_root: "11".repeat(64),
+            membership_root: "22".repeat(32),
+            expected_execution_state_root: "33".repeat(32),
+            expected_aivm_state_root: "44".repeat(32),
+            expected_receipt_root: "55".repeat(32),
+            legacy_document: br#"{}"#.to_vec(),
+            h0_operations: vec![b"{}".to_vec(); H0_OPERATION_COUNT],
+        }
+    }
 
     #[test]
     fn payload_encoding_is_deterministic() {
-        assert_eq!(encode_payload(&payload()).unwrap(), encode_payload(&payload()).unwrap());
+        assert_eq!(
+            encode_payload(&payload()).unwrap(),
+            encode_payload(&payload()).unwrap()
+        );
     }
 
     #[test]
     fn decoder_rejects_magic_version_length_and_trailing_bytes() {
         let raw = encode_payload(&payload()).unwrap();
         let digest = payload_digest(&raw);
-        let signatures = vec![SgenSignature { role: DEPLOYER_ROLE.to_string(), signature: vec![1] }, SgenSignature { role: GOVERNANCE_ROLE.to_string(), signature: vec![1] }, SgenSignature { role: REGISTRY_ROLE.to_string(), signature: vec![1] }];
+        let signatures = vec![
+            SgenSignature {
+                role: DEPLOYER_ROLE.to_string(),
+                signature: vec![1],
+            },
+            SgenSignature {
+                role: GOVERNANCE_ROLE.to_string(),
+                signature: vec![1],
+            },
+            SgenSignature {
+                role: REGISTRY_ROLE.to_string(),
+                signature: vec![1],
+            },
+        ];
         let encoded = encode_file(&raw, digest, &signatures).unwrap();
-        let mut wrong_magic = encoded.clone(); wrong_magic[0] = b'X'; assert!(verify_sgen_bytes(&wrong_magic).unwrap_err().contains("magic"));
-        let mut wrong_version = encoded.clone(); wrong_version[4] = 2; assert!(verify_sgen_bytes(&wrong_version).unwrap_err().contains("version"));
-        let mut truncated = encoded.clone(); truncated.pop(); assert!(verify_sgen_bytes(&truncated).is_err());
-        let mut corrupted = encoded.clone(); corrupted[16] ^= 1; assert!(verify_sgen_bytes(&corrupted).unwrap_err().contains("digest"));
-        let mut trailing = encoded; trailing.push(0); assert!(verify_sgen_bytes(&trailing).is_err());
+        let mut wrong_magic = encoded.clone();
+        wrong_magic[0] = b'X';
+        assert!(verify_sgen_bytes(&wrong_magic)
+            .unwrap_err()
+            .contains("magic"));
+        let mut wrong_version = encoded.clone();
+        wrong_version[4] = 2;
+        assert!(verify_sgen_bytes(&wrong_version)
+            .unwrap_err()
+            .contains("version"));
+        let mut truncated = encoded.clone();
+        truncated.pop();
+        assert!(verify_sgen_bytes(&truncated).is_err());
+        let mut corrupted = encoded.clone();
+        corrupted[16] ^= 1;
+        assert!(verify_sgen_bytes(&corrupted)
+            .unwrap_err()
+            .contains("digest"));
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert!(verify_sgen_bytes(&trailing).is_err());
     }
 
     #[test]
     fn payload_rejects_wrong_chain_and_operation_count() {
-        let mut wrong_chain = payload(); wrong_chain.chain_id = 1; assert!(validate_payload_shape(&wrong_chain).is_err());
-        let mut wrong_operations = payload(); wrong_operations.h0_operations.pop(); assert!(validate_payload_shape(&wrong_operations).is_err());
+        let mut wrong_chain = payload();
+        wrong_chain.chain_id = 1;
+        assert!(validate_payload_shape(&wrong_chain).is_err());
+        let mut wrong_operations = payload();
+        wrong_operations.h0_operations.pop();
+        assert!(validate_payload_shape(&wrong_operations).is_err());
     }
 
     #[test]
@@ -734,7 +1252,12 @@ mod tests {
         let digest = payload_digest(&raw);
         let encoded = encode_file(&raw, digest, &[]).unwrap();
         let unsigned_error = verify_unsigned_sgen_bytes(&encoded).unwrap_err();
-        assert!(unsigned_error.contains("document") || unsigned_error.contains("Genesis") || unsigned_error.contains("operation"), "{unsigned_error}");
+        assert!(
+            unsigned_error.contains("document")
+                || unsigned_error.contains("Genesis")
+                || unsigned_error.contains("operation"),
+            "{unsigned_error}"
+        );
         assert!(verify_sgen_bytes(&encoded)
             .unwrap_err()
             .contains("exactly three authority signatures"));
@@ -750,22 +1273,94 @@ mod tests {
         for role in [DEPLOYER_ROLE, GOVERNANCE_ROLE, REGISTRY_ROLE] {
             let (public, secret) = mldsa87::keypair();
             let public_key = public.as_bytes().to_vec();
-            let signature = Sign::mldsa87().sign_ctx(&message, secret.as_bytes(), SGEN_AUTHORITY_SIGNATURE_DOMAIN).unwrap();
-            authorities.insert(role.to_string(), SgenAuthorityPublic { role: role.to_string(), identity_address: format!("test-{role}"), public_key });
-            signatures.push(SgenSignature { role: role.to_string(), signature });
+            let signature = Sign::mldsa87()
+                .sign_ctx(&message, secret.as_bytes(), SGEN_AUTHORITY_SIGNATURE_DOMAIN)
+                .unwrap();
+            authorities.insert(
+                role.to_string(),
+                SgenAuthorityPublic {
+                    role: role.to_string(),
+                    identity_address: format!("test-{role}"),
+                    public_key,
+                },
+            );
+            signatures.push(SgenSignature {
+                role: role.to_string(),
+                signature,
+            });
         }
         let encoded = encode_file(&raw, digest, &signatures).unwrap();
         // All three real test-domain signatures verify before the deliberately
         // minimal test document is rejected by semantic validation.
         let semantic_error = verify_sgen_bytes_against(&encoded, Some(&authorities)).unwrap_err();
-        assert!(semantic_error.contains("document") || semantic_error.contains("Genesis") || semantic_error.contains("operation"), "{semantic_error}");
+        assert!(
+            semantic_error.contains("document")
+                || semantic_error.contains("Genesis")
+                || semantic_error.contains("operation"),
+            "{semantic_error}"
+        );
 
         let mut tampered = encoded.clone();
         *tampered.last_mut().unwrap() ^= 1;
-        assert!(verify_sgen_bytes_against(&tampered, Some(&authorities)).unwrap_err().contains("signature"));
+        assert!(verify_sgen_bytes_against(&tampered, Some(&authorities))
+            .unwrap_err()
+            .contains("signature"));
 
         let (wrong_public, _) = mldsa87::keypair();
         authorities.get_mut(REGISTRY_ROLE).unwrap().public_key = wrong_public.as_bytes().to_vec();
-        assert!(verify_sgen_bytes_against(&encoded, Some(&authorities)).unwrap_err().contains("signature"));
+        assert!(verify_sgen_bytes_against(&encoded, Some(&authorities))
+            .unwrap_err()
+            .contains("signature"));
+    }
+    #[test]
+    fn reissue_frozen_sgen_to_500ms_preserves_h0_and_rebinds_governed_context() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../launch/canonical-sgen-ceremony-20260828/genesis.sgen");
+        let original = verify_sgen_file(path).unwrap();
+        let (payload, decision_sha256) = reissue_verified_sgen_payload(
+            &original,
+            500,
+            "SNRG-GOV-POSY-P3-GENESIS-20260904-500MS",
+        )
+        .unwrap();
+        let bytes = compile_unsigned_sgen(payload).unwrap();
+        let reissued = verify_unsigned_sgen_bytes(&bytes).unwrap();
+
+        assert_eq!(reissued.payload.target_block_time_ms, 500);
+        assert_ne!(
+            reissued.payload.parameter_root,
+            original.payload.parameter_root
+        );
+        assert_eq!(
+            reissued.payload.membership_root,
+            original.payload.membership_root
+        );
+        assert_eq!(
+            reissued.payload.h0_operations,
+            original.payload.h0_operations
+        );
+        assert_eq!(
+            reissued.payload.expected_execution_state_root,
+            original.payload.expected_execution_state_root
+        );
+        assert_eq!(
+            reissued.payload.expected_aivm_state_root,
+            original.payload.expected_aivm_state_root
+        );
+        assert_eq!(
+            reissued.payload.expected_receipt_root,
+            original.payload.expected_receipt_root
+        );
+        assert_eq!(reissued.payload.h0_operations.len(), H0_OPERATION_COUNT);
+        assert_eq!(decision_sha256.len(), 64);
+        assert_eq!(
+            reissued
+                .reconstructed_document
+                .pointer("/consensus/posy_v3_activation/manifest/target_block_time_ms")
+                .and_then(Value::as_u64),
+            Some(500)
+        );
+        verify_h0_execution(&original).unwrap();
+        verify_h0_execution(&reissued).unwrap();
     }
 }

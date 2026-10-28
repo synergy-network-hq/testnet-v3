@@ -1,0 +1,154 @@
+name: Release Synergy STS CLI
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, for example synergy-sts-v20.0.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-synergy-sts-cli-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.asset }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            asset: synergy-sts-linux-amd64
+          - runner: ubuntu-24.04-arm
+            asset: synergy-sts-linux-arm64
+          - runner: macos-15-intel
+            asset: synergy-sts-macos-amd64
+          - runner: macos-14
+            asset: synergy-sts-macos-arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout locked SynQ source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          synq_revision="$(jq -er '.synq.revision' launch/CHAIN_1266_DEPENDENCIES.lock.json)"
+          [[ "$synq_revision" =~ ^[0-9a-f]{40}$ ]]
+          synq_root="${GITHUB_WORKSPACE}/../synq-language"
+          auth=()
+          if [[ -n "${GH_TOKEN:-}" ]]; then
+            header="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+            auth=(-c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${header}")
+          fi
+          git init --quiet "$synq_root"
+          git -C "$synq_root" remote add origin https://github.com/synergy-network-hq/synq-language.git
+          git -C "$synq_root" "${auth[@]}" fetch --depth 1 origin "$synq_revision"
+          git -C "$synq_root" checkout --detach --quiet FETCH_HEAD
+          git -C "$synq_root" "${auth[@]}" submodule update --init --recursive
+          [[ "$(git -C "$synq_root" rev-parse HEAD)" == "$synq_revision" ]]
+          expected_submodule="$(jq -er '.synq.submodules["aegis-pqsynq"]' launch/CHAIN_1266_DEPENDENCIES.lock.json)"
+          [[ "$(git -C "$synq_root/aegis-pqsynq" rev-parse HEAD)" == "$expected_submodule" ]]
+      - name: Select stable Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Verify requested version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' runtime/src/Cargo.toml | head -1)"
+          test -n "$version"
+          test "$RELEASE_TAG" = "synergy-sts-v${version}"
+      - name: Build locked release
+        shell: bash
+        run: cargo build --release --locked -p synergy-testnet --bin synergy-sts
+        working-directory: runtime
+        env:
+          CARGO_INCREMENTAL: "0"
+      - name: Stage binary and checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp runtime/target/release/synergy-sts "dist/${{ matrix.asset }}"
+          chmod 0755 "dist/${{ matrix.asset }}"
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd dist && sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256")
+          else
+            (cd dist && shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256")
+          fi
+          "dist/${{ matrix.asset }}" --version
+          "dist/${{ matrix.asset }}" native-info --output compact-json >/dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            dist/${{ matrix.asset }}
+            dist/${{ matrix.asset }}.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish CLI release
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Add installer and release notes
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          cp runtime/scripts/install-synergy-sts.sh dist/install-synergy-sts.sh
+          chmod 0755 dist/install-synergy-sts.sh
+          cat > dist/RELEASE_NOTES.md <<'EOF'
+          # Synergy STS CLI release
+
+          Chain 1266 Testnet-v3 release.
+
+          - Binds STS payloads to chain ID 1266 and network `synergy-testnet-v3`.
+          - Submits typed ML-DSA-87 Aegis transaction envelopes through the native ingress.
+          - Fails closed unless RPC identity, Genesis, Aegis capabilities, native asset, fee balance, and TTL pass preflight.
+          - Requires a successful finalized receipt and verifies newly created token IDs in finalized STS state.
+
+          Each platform binary includes a matching SHA-256 sidecar; the installer verifies it by default.
+          EOF
+      - name: Publish immutable release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo synergy-network-hq/synergy-sts-cli-releases >/dev/null 2>&1; then
+            echo "release $RELEASE_TAG already exists" >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" \
+            --repo synergy-network-hq/synergy-sts-cli-releases \
+            --title "Synergy STS CLI $RELEASE_TAG" \
+            --notes-file dist/RELEASE_NOTES.md \
+            dist/install-synergy-sts.sh \
+            dist/RELEASE_NOTES.md \
+            dist/synergy-sts-linux-amd64 \
+            dist/synergy-sts-linux-amd64.sha256 \
+            dist/synergy-sts-linux-arm64 \
+            dist/synergy-sts-linux-arm64.sha256 \
+            dist/synergy-sts-macos-amd64 \
+            dist/synergy-sts-macos-amd64.sha256 \
+            dist/synergy-sts-macos-arm64 \
+            dist/synergy-sts-macos-arm64.sha256

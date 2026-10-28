@@ -3943,3 +3943,78 @@ ATLAS_P1_RELEASE_AUTHORIZATION_VERIFIED release_id=chain1266-incarnation-4-rc30 
 - `atlas-api`: `PASS` — CHAIN1266_ROLE_STOPPED
 - `atlas-indexer`: `PASS` — CHAIN1266_ROLE_STOPPED
 
+
+---
+
+## C1266-2026-09-04-001 — Testnet-v3 recovery and NetBird five-validator launch
+
+**Status:** Open
+**Severity:** P0
+**Detected:** 2026-09-04 UTC
+**First bad height:** No live Testnet-v3 height established
+**Last agreed finalized height:** None
+**Last agreed finalized block ID:** None
+
+### Affected and responsible nodes
+
+- Affected: validators 02 through 06 and BootSeed hosts 1 through 3.
+- Responsible component under current investigation: recovered launch deployment state and seed/runtime availability. No validator identity, stake, ownership binding, or canonical SGEN is implicated or will be regenerated.
+
+### Recovery actions and outcomes
+
+1. **Relocated the canonical execution workspace to synergy-val4 after external-volume recovery.**
+   **Outcome:** Testnet-v3 revision 4aa6ae8463b1deababfe6b222dbc9251b1938ba1 is a clean Val4 checkout; the recovered NCP source containing the headless dynamic-NetBird support is present on Val4. No validator or seed service changed in this action.
+2. **Read the historical Chain 1266 incident record before mutation.**
+   **Outcome:** historical qualification branches and static-peer/legacy transport paths will not be used; the next action is canonical seed-service recovery only.
+
+### Residual risks and next observation
+
+- Verify all three seed HTTP endpoints, then deploy only verified validator/NCP artifacts through NCP and diagnose the first missing live transition if H1 does not finalize.
+
+### Source evidence
+
+- /home/node/synergy-network/01-Core-Protocol/testnet-v3
+3. **Installed the current seed1 script, guard, configuration, unit, and an assumed current source genesis file.**
+   **Outcome:** seed1 guard failed closed with ; the unit requires the separately pinned seed-support genesis SHA-256 , while the top-level source genesis has a different hash. No validator changed and seeds2-3 were untouched.
+4. **Selected the exact guard-approved seed-support genesis from healthy seed3 for seed services only.**
+   **Outcome:** pending installation and health verification on seeds1-3; this does not modify or distribute validator genesis configuration.
+
+5. **Built the headless NCP control CLI from the recovered Val4 source and validated both focused NetBird advertisement tests.**
+   **Outcome:** release binary deployment to validators 02 through 06 is beginning; no validator runtime or identity is changed by this step.
+
+6. **Completed frozen native validator build and verified the canonical SGEN hash.**
+   **Outcome:** deploying validator binary SHA-256 eead22289f1b4e215418aa9a605e50862fab283121363a29e9d1e8034d7bb56b to validators 02 through 06 before NCP-controlled preflight; SGEN SHA-256 is 439e18b91d71be45fa2ec8ba87167689e06413790303fe3568375498d73b3a8b.
+
+
+7. **Amendment to action 3.** The guard failure was a genesis SHA-256 mismatch. The expected seed-support genesis hash was ee554cfb93bbe760540721e91ba69404716180621e2fc0e6483c87576fa7f253.
+   **Outcome:** the exact support file was verified from the healthy Seed3 service before installation; this seed-only support file is not a validator genesis input.
+
+8. **Seed service recovery.**
+   **Outcome:** Seed1, Seed2, and Seed3 are active with local health checks passing. Seed1 has the required inbound TCP/5621 firewall allowance. No legacy seed service was enabled.
+
+9. **Headless NCP deployment.**
+   **Outcome:** the canonical headless NCP CLI was installed on validator-02 through validator-06; all installed binaries match SHA-256 035779d614d5a7de4b9ecb3c56531b55ce1cd9373434360eb561d365bc2f9eeb.
+
+10. **Canonical validator runtime deployment.**
+   **Outcome:** the canonical validator binary was installed on validator-02 through validator-06; all installed binaries match SHA-256 eead22289f1b4e215418aa9a605e50862fab283121363a29e9d1e8034d7bb56b. Live NCP preflight is next.
+
+11. **validator-02 live NCP start.**
+   **Outcome:** NCP verified NetBird health and launched the canonical binary, but the process exited before H0 at the configuration-authority gate: canonical Testnet-v3 Genesis has no finalized consensus parameter manifest.
+
+12. **Live missing transition isolation.**
+   **Outcome:** the frozen signed SGEN verifies and carries the Genesis-bound simplified PoSy v3 activation. The runtime startup guard still requires the retired JSON consensus_parameters compatibility wrapper, even though the SGEN loader intentionally uses the activation binding. No Genesis, identity, transport, or remaining validator was modified. The next change is limited to making that guard accept the signed activation manifest.
+
+13. **SGEN activation runtime compatibility correction.**
+   **Outcome:** the startup configuration guard now validates the verified Genesis-bound simplified PoSy v3 activation when the frozen signed SGEN intentionally omits the retired consensus_parameters JSON wrapper. Focused frozen-SGEN regression test passed. Rebuilt validator SHA-256: f251bc8d7cca999db65dbd5c446b08225fd0313a60aa87ce21a0b99ffefeee91. Deploying to validator-02 for the live rerun.
+
+14. **validator-02 SGEN configuration comparison.**
+   **Outcome:** the repaired activation guard reached the next check and rejected the NCP-generated 500 ms override. The frozen SGEN commits a 2000 ms cadence. This is a configuration handoff defect: NCP must reconcile its managed config to the frozen SGEN cadence, and the runtime NCP parser must accept that exact signed cadence. No runtime, Genesis, identity, or transport change is being made.
+
+15. **Cadence correction and SGEN reissue authorization.**
+   **Outcome:** the operator set the required cadence to 500 ms, within the current 100-1500 ms launch envelope, and authorized a replacement signed SGEN using the existing authorities. The uncompleted 2000 ms NCP/runtime configuration path was reverted before deployment. The reissue must preserve the same membership, authority set, identities, and 36 deterministic H0 operations; only the governed cadence parameter may change. No validator has been started from the obsolete 2000 ms SGEN.
+
+16. **Correction to action 15: governed derivative rebinding.**
+   **Outcome:** changing the approved 500 ms cadence necessarily changes the simplified PoSy activation root, parameter root, release-decision digest, Genesis hash, and ETDAG membership-anchor commitment. The five-validator membership root, identities, authority roster, all 36 H0 operation bytes, and all H0 execution roots remain required to be identical.
+
+17. **Unsigned 500 ms SGEN staging and verification.**
+   **Outcome:** the no-overwrite reissue command produced build/testnet-v3/sgen-500ms/genesis.unsigned.sgen with file SHA-256 662fed4caf4915348304fc7618ef30c1a32a82562eb02fbb840c3d9511272217. It verifies Chain 1266, testnet, posy/3.0, validators 02-06, 36 H0 operations, target 500 ms, membership root 4a059c97a3bf88216a9fc94fa81304dc26303424bc04620dc47d47f64f11ce9b, execution root 55ca242d074ea2844520d7c6fd4c26af3b35904e6173357ac4c18516e88ffdc6, AIVM root 9c11bc3f6ef9379fdd875ecdc887301af3239197aa1fd0a8fc490785dd5c3854, and receipt root fbf68f46186d661fbdf19d30003ae541a5d056f440dac6bc20e93676f05e271a. The existing authority signer has not been invoked; no custody data was opened and no validator state changed.

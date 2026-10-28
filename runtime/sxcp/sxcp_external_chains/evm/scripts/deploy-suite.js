@@ -1,5 +1,7 @@
-const hre = require("hardhat");
-const { saveDeployment } = require("./lib/common");
+import { network } from "hardhat";
+import { parseArgs, saveDeployment } from "./lib/common.js";
+
+const { ethers, networkName } = await network.create(parseArgs(process.argv.slice(2)).network);
 
 function parseAddressList(value) {
   if (!value) return [];
@@ -10,16 +12,16 @@ function parseAddressList(value) {
 }
 
 async function deployContract(name, args) {
-  const factory = await hre.ethers.getContractFactory(name);
+  const factory = await ethers.getContractFactory(name);
   const contract = await factory.deploy(...args);
   await contract.waitForDeployment();
   return contract;
 }
 
 async function main() {
-  const networkName = hre.network.name;
-  const [deployer] = await hre.ethers.getSigners();
-  const network = await hre.ethers.provider.getNetwork();
+  const networkName = networkName;
+  const [deployer] = await ethers.getSigners();
+  const network = await ethers.provider.getNetwork();
   const chainId = Number(network.chainId);
 
   const relayerAddresses = parseAddressList(process.env.INITIAL_RELAYER_ADDRESSES);

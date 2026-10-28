@@ -184,14 +184,15 @@ pub fn load_genesis_bound_simplified_activation(
     let Some(raw) = canonical_genesis.pointer(POSY_SIMPLIFIED_ACTIVATION_JSON_POINTER) else {
         return Ok(None);
     };
+    let network_id = canonical_genesis
+        .pointer("/network/network_id")
+        .or_else(|| canonical_genesis.pointer("/network/network_slug"))
+        .and_then(Value::as_str);
     if canonical_genesis
         .pointer("/network/chain_id")
         .and_then(Value::as_u64)
         != Some(SYNERGY_TESTNET_V3_CHAIN_ID)
-        || canonical_genesis
-            .pointer("/network/network_slug")
-            .and_then(Value::as_str)
-            != Some(TESTNET_V3_CANONICAL_NETWORK_ID)
+        || network_id != Some(TESTNET_V3_CANONICAL_NETWORK_ID)
     {
         return Err(
             "simplified activation binding is not attached to the canonical Testnet-v3 Genesis identity"
