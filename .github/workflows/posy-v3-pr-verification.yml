@@ -87,6 +87,11 @@ jobs:
           POSY_V3_EVIDENCE_DIR: ${{ runner.temp }}/posy-v3-pr-evidence
         run: runtime/scripts/testnet/verify-posy-v3-pr.sh full
 
+      - name: Verify patched Wasm runtime
+        run: |
+          cargo test --locked --manifest-path runtime/Cargo.toml --package aivm-core --lib vm::wasm_runner::tests
+          cargo test --locked --manifest-path runtime/Cargo.toml --package aivm-core --lib execution::tests::accepts_wasm_artifacts
+
       - name: Upload bounded verification evidence
         if: always()
         uses: actions/upload-artifact@v4

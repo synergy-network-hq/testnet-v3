@@ -7,7 +7,7 @@
   "protocol_version": "posy/3.0",
   "core": {
     "repository": "synergy-network-hq/testnet-v3",
-    "source_base_revision": "63a96a533fa3cad14d21671d5528e1162a4dbd6c"
+    "source_base_revision": "1f187072139df96d07c2689bdff952101af5bad6"
   },
   "synq": {
     "repository": "synergy-network-hq/synq-language",

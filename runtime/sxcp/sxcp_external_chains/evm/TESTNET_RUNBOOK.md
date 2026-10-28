@@ -14,9 +14,9 @@ V2 alignment:
 ## 1) Install
 
 ```bash
-cd /Users/devpup/Desktop/Testnet/synergy-testnet/sxcp/sxcp_external_chains/evm
+cd runtime/sxcp/sxcp_external_chains/evm
 cp .env.example .env
-npm install
+npm ci
 ```
 
 Fill `.env` with:
@@ -26,7 +26,7 @@ Fill `.env` with:
 - `DEPLOYER_PRIVATE_KEY`
 - `INITIAL_RELAYER_ADDRESSES` (comma-separated)
 - `INITIAL_THRESHOLD`
-- `RELAYER_PRIVATE_KEYS` (for demo attestation submission)
+- `PQC_ATTESTATION_BUNDLE_PATH` (verified bundle from the off-chain PQC relayer)
 
 ## 2) Deploy Both Chains
 
@@ -97,11 +97,20 @@ npm test
 The test validates:
 
 - Intent publication
-- Threshold signature validation
+- Threshold commitment and active-relayer validation
 - Attestation verification
 - Single-use attestation consumption
 
-## Notes
+## PQC bundle input
 
-- `SignatureVerifier` currently validates ECDSA bundles for testnet execution.
-- It is intentionally structured so the verifier can be swapped for PQC aggregation verification later without changing `SXCPIntentHub` flow.
+The attestation script consumes a JSON bundle verified by the off-chain PQC relayer.
+It requires `pqcAlgorithmId` (1, 2, or 3), `epochId`, `stateProofRoot`, `digest`,
+sorted unique `signers`, and matching nonzero 32-byte `pqcCommitments`.
+The script checks the digest against the current intent and destination chain.
+
+The current on-chain verifier checks commitment structure, relayer membership,
+ordering, and threshold. Cryptographic PQC signature verification occurs off-chain.
+The contract unit tests use explicitly labeled structural fixtures and do not
+establish off-chain PQC verification.
+
+Use Node.js 24.15 or later for the Hardhat 3 tooling.

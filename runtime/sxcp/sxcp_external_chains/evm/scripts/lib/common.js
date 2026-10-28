@@ -1,5 +1,8 @@
-const fs = require("fs");
-const path = require("path");
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 function parseArgs(argv) {
   const args = {};
@@ -70,7 +73,7 @@ function loadRuntime(fileName) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
 }
 
-module.exports = {
+export {
   chainIdForNetwork,
   ensureDir,
   loadDeployment,

@@ -29,7 +29,7 @@ harness = false
 wasm-bindgen = { version = "0.2", optional = true }
 js-sys = { version = "0.3.61", optional = true }
 zerocopy = "0.8.26"
-pyo3 = { version = "0.25", optional = true, features = ["extension-module"] }
+pyo3 = { version = "0.29", optional = true, features = ["extension-module"] }
 pqrust-mlkem = { path = "../../pqrust/pqrust-mlkem", optional = true }
 pqrust-mldsa = { path = "../../pqrust/pqrust-mldsa", optional = true }
 pqrust-slhdsa = { path = "../../pqrust/pqrust-slhdsa", optional = true }
