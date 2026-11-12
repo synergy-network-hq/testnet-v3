@@ -591,6 +591,15 @@ class Controller:
                               'VPN enrollment did not return a verified receipt. Inspect the VPN controller before issuing another credential.') from None
         return self.vpn_status()
 
+    def require_bound_validator_vpn(self):
+        current=self.vpn_status()
+        require(current['service_registered'] is True
+                and current['enrollment_recorded'] is True
+                and current['reconciliation_required'] is False
+                and current['server_bound'] is True and current['connected'] is True,
+                'Current native VPN must match the recorded, independently server-bound validator peer',
+                'vpn_readiness_required')
+
     def diagnostics(self):
         import lifecycle as life
         from synergy_linux import native
@@ -689,6 +698,7 @@ class Controller:
                     'managedAccountRemoval':host is not None,'forensicErasureProven':False}
         if op=='commission' and (self.exists(FORMATION_CUSTODY) or self.exists(FORMATION_INTENT)):
             from apqe_layout import FORMATION_PUBLIC_INPUTS
+            self.require_bound_validator_vpn()
             binding=self.genesis_binding()
             require(binding['bound'] is True,'Bind the existing custody to authenticated Genesis before commissioning')
             pins=self.policy().get('validator_commissioning_files')
@@ -697,6 +707,8 @@ class Controller:
                     'Exact host approval for public commissioning inputs required','authorization_required')
             self.authorize(request)
             return life.commission(self.root,self.root/'tmp/commissioning',formation_public_pins=pins)
+        if op in ('start','restart'):
+            self.require_bound_validator_vpn()
         self.authorize(request)
         if op=='install':
             # The canonical installer independently rejects nonempty roots.

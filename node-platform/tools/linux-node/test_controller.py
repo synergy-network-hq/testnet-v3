@@ -278,6 +278,35 @@ class ControllerTests(unittest.TestCase):
                       'peer_id':'authenticated-peer','ip':'100.64.20.1','wireguard_public_key':'expected'})
             self.assertTrue(self.controller.vpn_status()['server_bound'])
 
+    def test_formation_commission_start_and_restart_refuse_unbound_vpn_before_grant(self):
+        import lifecycle
+        import synergy_linux
+        (self.root/c.FORMATION_CUSTODY).mkdir(mode=0o700)
+        ready={'service_registered':True,'enrollment_recorded':True,
+               'reconciliation_required':False,'server_bound':True,'connected':True}
+        with patch.object(c.platform,'system',return_value='Linux'), \
+             patch.object(c.platform,'machine',return_value='x86_64'), \
+             patch.object(synergy_linux,'safe_root'), \
+             patch.object(self.controller,'vpn_status') as vpn, \
+             patch.object(self.controller,'genesis_binding') as binding, \
+             patch.object(self.controller,'authorize') as authorize, \
+             patch.object(lifecycle,'commission') as commission, \
+             patch.object(lifecycle,'start_check') as start_check, \
+             patch.object(lifecycle,'mutate_owned_service') as mutate:
+            for field in ready:
+                vpn.return_value={**ready,field:not ready[field]}
+                for operation in ('commission','start','restart'):
+                    with self.subTest(field=field,operation=operation), self.assertRaises(c.Refused) as refusal:
+                        self.controller.dispatch(request(operation))
+                    self.assertEqual(refusal.exception.code,'vpn_readiness_required')
+            for action in (binding,authorize,commission,start_check,mutate):action.assert_not_called()
+            vpn.return_value=ready
+            for operation in ('start','restart'):
+                self.assertEqual(self.controller.dispatch(request(operation))['requested'],operation)
+            self.assertEqual(authorize.call_count,2)
+            self.assertEqual(start_check.call_count,2)
+            self.assertEqual(mutate.call_count,2)
+
     def test_log_summary_keeps_only_bounded_complete_line_counts(self):
         logs=self.root/'logs'; logs.mkdir(mode=0o700)
         path=logs/'node.log'
