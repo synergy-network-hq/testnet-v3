@@ -13,8 +13,13 @@ mod manager;
 mod metrics;
 mod persistence;
 mod readiness;
+mod response_chunks;
 mod status;
 mod wire;
+pub use response_chunks::{
+    candidate_response_digest, CandidateResponseAssembly, CandidateResponseChunk,
+    CANDIDATE_CHUNK_BYTES, MAX_CANDIDATE_RESPONSE_BYTES, MAX_CANDIDATE_WITNESS_BYTES,
+};
 
 pub use block::{
     BlockCommitError, BlockImportCoordinator, BlockImportError, BlockImportReceipt, BlockRequest,
@@ -42,8 +47,11 @@ pub use state::{
 };
 pub use status::{SyncPhase, SyncStatus};
 pub use wire::{
+    decode_budgeted_candidate_response, decode_budgeted_sync_wire,
+    BudgetedFinalizedCandidateResponse, BudgetedSyncWireMessage, DecodedBudgetedSync,
     EpochAuthorityRequest, EpochAuthorityResponse, FinalizedCandidateRequest,
-    FinalizedCandidateResponse, SnapshotChunkRequest, SnapshotChunkResponse, SyncWireMessage,
+    FinalizedCandidateResponse, SnapshotChunkRequest, SnapshotChunkResponse, SyncResourceError,
+    SyncWireMessage,
 };
 
 #[cfg(test)]

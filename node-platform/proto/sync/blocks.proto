@@ -1,0 +1,3 @@
+syntax = "proto3"; package synergy.sync.v1;
+message BlockRangeRequest { uint64 from_height = 1; uint32 limit = 2; bytes anchor = 3; }
+message BlockRangeResponse { repeated bytes blocks = 1; bytes finality_proof = 2; }

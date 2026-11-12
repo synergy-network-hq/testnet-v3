@@ -1,0 +1,2 @@
+syntax = "proto3"; package synergy.etdag.v1;
+message OrderedCut { uint64 target_height = 1; repeated bytes vertex_ids = 2; bytes ordering_root = 3; }

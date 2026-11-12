@@ -2,8 +2,46 @@
 
 **Inventory date:** 2026-09-15  
 **Organization:** `synergy-network-hq`  
-**Mode:** read-only inventory and preservation planning only  
-**Consolidation/archive/deletion performed:** **NO**
+**Mode:** repository-history planning only; approved local filesystem reconciliation is recorded below
+**Repository consolidation/archive performed:** **NO**
+
+## 2026-10-30 user decision: one AIVM, separate from SynQ
+
+The user explicitly selected `05-AIVM/synergy-aivm` as the sole AIVM
+implementation source and `04-SynQ/synq-language` as the sole SynQ
+language/compiler source. AIVM is Synergy Network's only VM. It executes smart
+contracts and retains its broader governed execution responsibilities. Core
+Protocol may retain thin adapters only; historical `QuantumVM`, `SynQ/vm`,
+and copied node runtimes must not remain independent production VMs.
+
+This decision **supersedes** the older target-matrix row, proposed co-location
+of AIVM inside `synq-language`, the proposed archive of `synergy-aivm`,
+and sequence/approval text based on that proposal below. Those passages remain
+for provenance, not as current instructions. Reconcile language artifacts and
+AIVM runtime through versioned interfaces, preserve authored history, and
+retire duplicate editable VM implementations only after caller migration and
+functional proof. The 2026-10-30 local source/validation inventory is in
+`04-SynQ/synq-language/docs/architecture/SYNQ_SOURCE_RECONCILIATION_2026-10-30.md`.
+
+## Val4 filesystem reconciliation checkpoint - 2026-09-19
+
+Scope clarified by the user: local Val4 filesystem reconciliation only. GitHub repository merges, renames, branch changes, and archives are deferred.
+
+- Exactly one `node-platform` directory was found under `/home/node`, at `/home/node/Synergy-Network/01-Core-Protocol/node-platform`. No `chain1266-incarnation-*` directories were found under `/home/node`. The Core Protocol Git worktree list contains only the canonical checkout.
+- Exactly one directory named `testnet-v3` remains under `/home/node/Synergy-Network`: `01-Core-Protocol/networks/testnet-v3`. The exact `etdag` directory matches are separate protocol, test, fixture, and operations-evidence paths, not alternate ETDAG source owners.
+- The current Core Protocol branch is `reconcile/core-protocol-root-2026-09-15` at `b338dcc223c1ce33599e12c424858cd000772637`. Its worktree is not reconciled: 29,360 staged deletions (29,119 under the former `networks/testnet-v3/runtime`), 384 unstaged modifications, 27 unstaged deletions, and 22 untracked files were observed. These are in-progress changes, not authorization to commit, discard, or remove them.
+- AIVM: ten differing shared files were newer under `05-AIVM/synergy-aivm`; only `runtime/aivm-core/Cargo.lock` was newer in `synergy-aivm-snapshot`. The snapshot's two unique verifier files, `verifier/verifier-core/Cargo.lock` and `verifier/verifier-core/src/lib.rs`, were moved into the unsuffixed tree with hashes preserved. With exact user approval, the newer runtime lockfile replaced the older one; its retained SHA-256 is `3e239c6d0ada185a6b01fd80baaf1a8dc6c3f4c768705db935279972edec8049`. A final comparison confirmed the snapshot had no unique or newer files, and the exact snapshot directory was permanently removed. `synergy-aivm` is the single retained AIVM source tree.
+- Design static export: `Synergy Design System 2` was removed after its unique `DESIGN.md` was moved and verified. A later comparison found all 32 differing common files newer in `Synergy Design System--from-Downloads`, with 99 additional files there. `DESIGN.md` was moved into that newer tree; after exact approval and final comparison, the older unsuffixed export was permanently removed and the newer tree renamed `Synergy Design System`.
+- Design source: all 36 differing shared files were newer in unsuffixed `synergy-design-system`, which also had 23 unique files. The older `synergy-design-system--from-Downloads` had no unique files and was permanently removed after exact approval and final comparison. The unsuffixed source remains canonical.
+- Staking: all three differing Solidity source files were newer in `synergy-staking-v1 2`, which uniquely had `contracts.zip`. The older unsuffixed tree had no unique files. After exact approval and final comparison, the older tree was permanently removed and the newer tree renamed `synergy-staking-v1`. No contract build or deployment was performed.
+- Presale artifacts: `snrg-presale-staking 2` held only three unique CSV, JSON, and Markdown artifacts, not a second contract project. With no unsuffixed peer or local references to the suffixed path, it was renamed in place to `snrg-presale-staking`; file hashes were unchanged.
+- The AIVM lockfile conflict is resolved by retaining the newer file in the unsuffixed tree. Protected PoSy state and live releases remain outside this cleanup.
+- The two `99-Unclassified/New Folder With Items*` trees have disjoint file sets (3 unsuffixed files and 59 `--from-Downloads` files), not duplicate same-path files. Both were left untouched; a content-based classification is needed before renaming either.
+- Revision-named `/home/node/posy-*` directories and `03-Proof-of-Synergy-Consensus/posy-five-node-*` contain release-candidate or validator-state material. They are protected evidence/state candidates, not disposable duplicates; no contents were changed.
+- A targeted read-only search under `/opt/synergy` found only `/opt/synergy/chain1266/releases/chain1266-incarnation-5-20260825-r11-final` matching the old incarnation naming pattern. This is a protected live release, not a cleanup target; no release contents were changed.
+- The missing `b8ec31dd` implementation commit still did not resolve in the Git object databases found under `/home/node/Synergy-Network`. This is a separate repository-history issue, not a blocker to the local filesystem reconciliation. GitHub/history work remains deferred.
+
+Five exact older local folder trees were permanently removed with user approval; their older file versions are not recoverable from those folders. No alternate copies or backups were created. No protected release, Git branch, GitHub repository, or production service was changed. This filesystem observation does not certify organization-wide consolidation.
 
 ## Preservation prerequisite
 

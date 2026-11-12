@@ -1,0 +1,13 @@
+[Unit]
+Description=Synergy NetBird enrollment broker
+After=network-online.target netbird.service
+[Service]
+Type=simple
+User=synergy
+ExecStart=/usr/lib/synergy/vpn-enrollment-broker
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+[Install]
+WantedBy=multi-user.target

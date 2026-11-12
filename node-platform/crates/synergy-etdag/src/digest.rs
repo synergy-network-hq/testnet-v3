@@ -1,5 +1,5 @@
 use serde::Serialize;
-use sha3::{Digest, Sha3_512};
+use synergy_aegis::{AegisHashEngine, AegisSha3_256};
 
 use crate::EtdagError;
 
@@ -9,12 +9,15 @@ pub struct EtdagDigest(pub String);
 
 impl EtdagDigest {
     pub fn from_domain_bytes(domain: &str, bytes: &[u8]) -> Self {
-        let mut hasher = Sha3_512::new();
-        hasher.update((domain.len() as u64).to_be_bytes());
-        hasher.update(domain.as_bytes());
-        hasher.update((bytes.len() as u64).to_be_bytes());
-        hasher.update(bytes);
-        Self(format!("{:x}", hasher.finalize()))
+        let digest = AegisSha3_256
+            .sha3_512_segments(&[
+                &(domain.len() as u64).to_be_bytes(),
+                domain.as_bytes(),
+                &(bytes.len() as u64).to_be_bytes(),
+                bytes,
+            ])
+            .expect("fixed SHA3-512 is supported");
+        Self(digest.iter().map(|byte| format!("{byte:02x}")).collect())
     }
 
     pub fn from_canonical(domain: &str, value: &impl Serialize) -> Result<Self, EtdagError> {

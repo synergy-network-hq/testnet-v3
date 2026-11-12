@@ -1,0 +1,23 @@
+schema_version = 1
+role = "archive"
+plane = "public"
+capabilities = ["identity", "durable_storage", "telemetry", "health", "sync", "network_transport", "archive_read", "archive_write", "snapshot_serve", "snapshot_sign"]
+
+[ports]
+p2p = 24002
+admin = 26002
+metrics = 27002
+
+[storage]
+data_directory = "/var/lib/synergy-node/archive"
+maximum_bytes = 107374182400
+pruning = "role_policy"
+
+[keys]
+raw_export_forbidden = true
+posy_signing = false
+
+[readiness]
+requires_manifest = true
+requires_identity = true
+requires_healthy_dependencies = true

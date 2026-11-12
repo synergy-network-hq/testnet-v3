@@ -14,6 +14,15 @@ pub struct TransportConnection {
 }
 
 impl TransportConnection {
+    /// Borrow the sole socket for the APQE bounded handshake/record driver.
+    pub fn stream_mut(&mut self) -> &mut TcpStream {
+        &mut self.stream
+    }
+
+    /// Transfer the sole socket to the APQE incremental record driver.
+    pub fn into_stream(self) -> TcpStream {
+        self.stream
+    }
     pub(crate) fn new(stream: TcpStream, peer_addr: SocketAddr, inbound: bool) -> Self {
         Self {
             stream,

@@ -1,0 +1,23 @@
+schema_version = 1
+role = "observer-light"
+plane = "public"
+capabilities = ["identity", "telemetry", "health", "sync", "network_transport", "observe_consensus"]
+
+[ports]
+p2p = 24018
+admin = 26018
+metrics = 27018
+
+[storage]
+data_directory = "/var/lib/synergy-node/observer_light"
+maximum_bytes = 107374182400
+pruning = "role_policy"
+
+[keys]
+raw_export_forbidden = true
+posy_signing = false
+
+[readiness]
+requires_manifest = true
+requires_identity = true
+requires_healthy_dependencies = true

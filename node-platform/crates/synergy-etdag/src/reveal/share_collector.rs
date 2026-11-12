@@ -20,16 +20,15 @@ pub struct VerifiedShareCollector {
 impl VerifiedShareCollector {
     /// Creates a collector for one governed reveal slot.
     pub fn new(
-        authorization: ProtectedRevealAuthorization,
+        verified: super::VerifiedRevealAuthorization,
         envelope_id: EtdagDigest,
-        threshold: usize,
+        count_quorum: usize,
         member_count: usize,
     ) -> Result<Self, EtdagError> {
+        let authorization = verified.authorization().clone();
         authorization.validate()?;
         envelope_id.validate()?;
-        if threshold == 0 || member_count == 0 || threshold > member_count {
-            return Err(EtdagError::InvalidCapacity);
-        }
+        let threshold = crate::crypto::governed_reveal_threshold(member_count, count_quorum)?;
         Ok(Self {
             authorization,
             envelope_id,
@@ -47,6 +46,13 @@ impl VerifiedShareCollector {
         }
         if self.shares.contains_key(share.validator_id()) {
             return Err(EtdagError::DuplicateShare(share.validator_id().to_owned()));
+        }
+        if self
+            .shares
+            .values()
+            .any(|previous| previous.share_index() == share.share_index())
+        {
+            return Err(EtdagError::UnauthorizedReveal);
         }
         if self.shares.len() >= self.member_count {
             return Err(EtdagError::InvalidCapacity);

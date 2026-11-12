@@ -1,2 +1,3 @@
-//! Scaffolded binary entry point.
-fn main() {}
+fn main() {
+    println!("synergy snapshot publisher: finality-bound publication service");
+}

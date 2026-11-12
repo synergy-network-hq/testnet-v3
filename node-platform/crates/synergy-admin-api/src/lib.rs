@@ -429,7 +429,10 @@ mod tests {
         )
         .expect("local Admin API should return a typed response");
         assert_eq!(response.request_id, "req-1", "response: {response:?}");
-        assert_eq!(response.result.expect("success")["operation"], "health");
+        assert_eq!(
+            response.result.expect("success")["operation"]["operation"],
+            "health"
+        );
         server.shutdown();
         assert!(!path.exists());
     }

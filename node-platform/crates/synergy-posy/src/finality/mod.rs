@@ -1,5 +1,6 @@
 mod certificate;
 mod commit;
+#[allow(clippy::module_inception)]
 mod finality;
 mod verifier;
 

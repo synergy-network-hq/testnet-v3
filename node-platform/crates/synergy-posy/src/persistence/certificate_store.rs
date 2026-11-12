@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
+use super::evidence_store::EvidenceStore;
 use serde::{Deserialize, Serialize};
-use synergy_storage::{AtomicStore, StorageWrite};
+use synergy_storage::StorageWrite;
 
 use crate::{
     ConsensusSignatureVerifier, FrozenValidatorRegistry, PosyError, PosyResult,
@@ -9,7 +10,6 @@ use crate::{
 };
 
 const FORMAT: &str = "synergy-posy-verified-qc-v1";
-pub(super) const MAX_QC_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -25,12 +25,12 @@ struct DurableVerifiedQc {
 /// before it can become consensus authority.
 #[derive(Debug)]
 pub struct VerifiedQuorumCertificateStore {
-    store: AtomicStore,
+    store: EvidenceStore,
 }
 
 impl VerifiedQuorumCertificateStore {
     pub fn new(root: impl Into<PathBuf>) -> PosyResult<Self> {
-        let store = AtomicStore::new(root, MAX_QC_BYTES)
+        let store = EvidenceStore::open(root)
             .map_err(|error| PosyError::invalid(format!("open QC store: {error}")))?;
         Ok(Self { store })
     }
@@ -43,9 +43,7 @@ impl VerifiedQuorumCertificateStore {
         verifier: &impl ConsensusSignatureVerifier,
     ) -> PosyResult<bool> {
         let write = verified_qc_write(certificate, epoch, validators, verifier)?;
-        self.store
-            .put_once_atomic(&[write])
-            .map_err(persistence_error)
+        self.store.put_once_atomic(&[write])
     }
 
     pub fn get_verified(
@@ -56,17 +54,9 @@ impl VerifiedQuorumCertificateStore {
         verifier: &impl ConsensusSignatureVerifier,
     ) -> PosyResult<Option<SimplifiedQuorumCertificate>> {
         let path = record_path(height);
-        if !self
-            .store
-            .exists(&path)
-            .map_err(|error| PosyError::invalid(format!("stat QC: {error}")))?
-        {
+        let Some(bytes) = self.store.get(&path)? else {
             return Ok(None);
-        }
-        let bytes = self
-            .store
-            .read_bounded(&path)
-            .map_err(|error| PosyError::invalid(format!("read QC: {error}")))?;
+        };
         let record: DurableVerifiedQc = serde_json::from_slice(&bytes)
             .map_err(|error| PosyError::invalid(format!("decode QC: {error}")))?;
         if record.format != FORMAT
@@ -105,15 +95,6 @@ pub(super) fn verified_qc_write(
         relative_path: record_path(certificate.context.height),
         bytes,
     })
-}
-
-fn persistence_error(error: synergy_storage::StorageError) -> PosyError {
-    match error {
-        synergy_storage::StorageError::ConflictingWrite => {
-            PosyError::Conflict("different certified candidate already stored at height".into())
-        }
-        error => PosyError::NotReady(format!("persist QC: {error}")),
-    }
 }
 
 fn record_path(height: u64) -> PathBuf {
@@ -229,6 +210,7 @@ mod tests {
             store.put_verified(&conflict, &epoch, &validators, &verifier),
             Err(PosyError::Conflict(_))
         ));
+        fs::create_dir_all(root.join("verified-qcs/qc")).unwrap();
         fs::write(root.join(record_path(1)), b"{\"format\":\"bad\"}").unwrap();
         assert!(store
             .get_verified(1, &epoch, &validators, &verifier)

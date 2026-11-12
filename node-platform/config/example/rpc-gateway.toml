@@ -1,0 +1,6 @@
+schema_version = 1
+role = "rpc-gateway"
+network_manifest = "../../../networks/testnet-v3/network-manifest.json"
+data_directory = "/var/lib/synergy-node/rpc-gateway"
+admin_socket = "/run/synergy-node/rpc-gateway.sock"
+role_profile = "../../roles/rpc-gateway.toml"

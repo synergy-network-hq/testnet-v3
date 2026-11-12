@@ -25,7 +25,7 @@ def run(binaries, name, *args, succeeds=True):
     return result.stdout.decode(), result.stderr.decode()
 
 
-def generate(binaries, source, output):
+def generate(binaries, source, output, provider_args):
     output.mkdir(mode=0o700)
     public_input = json.loads((source / 'fresh-genesis-input.json').read_text())
     template = json.loads((source / 'val2.json').read_text())
@@ -57,7 +57,7 @@ def generate(binaries, source, output):
             genesis_unsigned = custody / f'genesis-{index}.json'
             authority_unsigned = custody / f'authority-{index}.json'
             run(binaries, 'synergy-keytool', 'prepare-fresh-genesis', input_path, genesis_unsigned, authority_unsigned)
-            run(binaries, 'synergy-genesis', 'sign', genesis_unsigned, key_id, secret, case / 'genesis.json')
+            run(binaries, 'synergy-genesis', 'sign', genesis_unsigned, key_id, secret, public, case / 'genesis.json', *provider_args)
             run(binaries, 'synergy-keytool', 'sign-authority', authority_unsigned, key_id, secret, public, case / 'authority.json')
             genesis = json.loads((case / 'genesis.json').read_text())
             save(case / 'manifest.json', {'chain_id': chain_id, 'network_id': network_id,
@@ -70,13 +70,13 @@ def generate(binaries, source, output):
         authority_unsigned = custody / 'legacy-authority-unsigned.json'
         save(input_path, unsigned)
         run(binaries, 'synergy-keytool', 'prepare-fresh-genesis', input_path, genesis_unsigned, authority_unsigned)
-        run(binaries, 'synergy-genesis', 'sign', genesis_unsigned, key_id, secret, output / 'legacy-genesis.json')
+        run(binaries, 'synergy-genesis', 'sign', genesis_unsigned, key_id, secret, public, output / 'legacy-genesis.json', *provider_args)
         run(binaries, 'synergy-keytool', 'sign-authority', authority_unsigned, key_id, secret, public, output / 'legacy-authority.json')
         # Contains public inputs and path conventions only. No private custody.
         save(output / 'configuration-template.json', template)
 
 
-def test(binaries, fixtures, evidence):
+def test(binaries, fixtures, evidence, provider_args):
     evidence.mkdir(mode=0o700)
     results = []
     template = json.loads((fixtures / 'configuration-template.json').read_text())
@@ -88,6 +88,7 @@ def test(binaries, fixtures, evidence):
         root = evidence / case.name
         root.mkdir()
         config = copy.deepcopy(template)
+        config['aegis_provider'] = {'report_path': provider_args[1], 'authenticated_report_sha256': provider_args[3]}
         config.update(chain_id=selected['chain_id'], network_id=selected['network_id'],
             genesis_path=str(case / 'genesis.json'), manifest_path=str(case / 'manifest.json'))
         config['consensus']['authority_binding'] = str(case / 'authority.json')
@@ -98,7 +99,7 @@ def test(binaries, fixtures, evidence):
         path = root / 'node.json'
         save(path, config)
         record(case.name, 'signed-genesis-and-authority', lambda: run(binaries, 'synergy-genesis', 'verify-binding',
-            case / 'genesis.json', fixtures / 'trust.pub', case / 'authority.json'))
+            case / 'genesis.json', fixtures / 'trust.pub', case / 'authority.json', *provider_args))
         record(case.name, 'authenticated-native-preflight', lambda: run(binaries, 'synergy-node', 'preflight', '--config', path))
         record(case.name, 'fresh-native-storage-initialization', lambda: run(binaries, 'synergy-node', 'init',
             '--node-name', case.name, '--role-name', 'validator', '--config', path, '--data-directory', root / 'data'))
@@ -131,7 +132,7 @@ def test(binaries, fixtures, evidence):
             save(bad_path, bad)
             record(case.name, label, lambda: run(binaries, 'synergy-node', 'preflight', '--config', bad_path, succeeds=False))
     record('legacy', 'historical-v1-signature-and-authority-preserved', lambda: run(binaries, 'synergy-genesis', 'verify-binding',
-        fixtures / 'legacy-genesis.json', fixtures / 'trust.pub', fixtures / 'legacy-authority.json'))
+        fixtures / 'legacy-genesis.json', fixtures / 'trust.pub', fixtures / 'legacy-authority.json', *provider_args))
     report = {'format': 'synergy-cross-network-native-v1', 'checks': results,
         'passed': len(results), 'failed': 0, 'posy_started': False,
         'binary_sha256': {name: hashlib.sha256((binaries / name).read_bytes()).hexdigest()
@@ -147,7 +148,10 @@ if __name__ == '__main__':
     parser.add_argument('--fixtures', type=Path, required=True)
     parser.add_argument('--generate-from', type=Path)
     parser.add_argument('--evidence', type=Path, required=True)
+    parser.add_argument('--apqe-report', type=Path, required=True)
+    parser.add_argument('--apqe-report-sha256', required=True)
     args = parser.parse_args()
+    provider_args = ['--apqe-report', str(args.apqe_report.resolve()), '--apqe-report-sha256', args.apqe_report_sha256]
     if args.generate_from:
-        generate(args.bin_dir.resolve(), args.generate_from.resolve(), args.fixtures.resolve())
-    test(args.bin_dir.resolve(), args.fixtures.resolve(), args.evidence.resolve())
+        generate(args.bin_dir.resolve(), args.generate_from.resolve(), args.fixtures.resolve(), provider_args)
+    test(args.bin_dir.resolve(), args.fixtures.resolve(), args.evidence.resolve(), provider_args)

@@ -49,8 +49,16 @@ members = [
     "bin/synergy-genesis",
     "bin/synergy-keytool",
     "bin/synergy-manifest",
+    "services/vpn-enrollment-broker",
+    "services/bootseed-registry",
+    "services/snapshot-publisher",
+    "simulation",
+    "tests",
+    "benches",
+    "tools",
 ]
 exclude = [
+    "fuzz",
     "crates/aegis-pqvm/vendor/pqcrypto-internals",
     "crates/aegis-pqvm/vendor/pqcrypto-traits",
     "crates/aegis-pqvm/vendor/pqrust-fndsa",
@@ -65,13 +73,25 @@ exclude = [
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-rust-version = "1.85"
+rust-version = "1.97"
 
 [workspace.dependencies]
 base64 = "0.22"
 ed25519-dalek = "2"
 libc = "0.2"
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 sha1 = "0.10"
 sha3 = "0.10"
+
+[profile.release]
+codegen-units = 1
+debug = 0
+incremental = false
+lto = "thin"
+panic = "abort"
+strip = "symbols"
+
+[profile.test]
+debug = 1
+incremental = false

@@ -1,43 +1,34 @@
 //! SynQ chain, network, and domain separation identifiers.
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use serde::{Deserialize, Serialize};
 
 use crate::error::AegisSynQError;
 
-pub const SYNERGY_TESTNET_CHAIN_ID: u64 = 1266;
-// The runtime network is `synergy-testnet-v3`, while the separately bound
-// SynQ contract domain is the approved `synergy-testnet` identifier.
-pub const SYNERGY_TESTNET_NETWORK: &str = "synergy-testnet";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChainId(pub u64);
-
-impl ChainId {
-    pub const fn testnet_1266() -> Self {
-        Self(SYNERGY_TESTNET_CHAIN_ID)
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkId(pub String);
 
 impl NetworkId {
-    pub fn testnet() -> Self {
-        Self(SYNERGY_TESTNET_NETWORK.to_string())
-    }
-
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
     pub fn numeric_id(&self) -> Result<u16, AegisSynQError> {
-        match self.0.as_str() {
-            SYNERGY_TESTNET_NETWORK => Ok(SYNERGY_TESTNET_CHAIN_ID as u16),
-            "devnet" => Ok(1),
-            "mainnet" => Ok(0),
-            _ => Err(AegisSynQError::InvalidNetwork),
+        if self.0.trim().is_empty() || self.0.len() > 128 || self.0.contains(char::is_control) {
+            return Err(AegisSynQError::InvalidNetwork);
         }
+        // Internal signer-format V2 tag. It is not a chain ID and is never
+        // used for admission: full chain/network values remain signed and checked.
+        use crate::hash::Sha256;
+        let mut digest = Sha256::new();
+        digest.update(b"SYNERGY_SYNQ_SIGNER_NETWORK_TAG_V2");
+        digest.update((self.0.len() as u64).to_be_bytes());
+        digest.update(self.0.as_bytes());
+        let hash = digest.finalize();
+        Ok(u16::from_be_bytes([hash[0], hash[1]]))
     }
 }
 

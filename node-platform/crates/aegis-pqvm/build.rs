@@ -8,10 +8,6 @@ fn feature_enabled(name: &str) -> bool {
     env::var_os(format!("CARGO_FEATURE_{}", key)).is_some()
 }
 
-fn historical_mlkem_source_dir(level: &str) -> String {
-    ["ky", "ber", level].concat()
-}
-
 fn compile_static_lib(name: &str, include_dirs: &[PathBuf], sources: &[PathBuf]) {
     let mut build = cc::Build::new();
     build
@@ -161,105 +157,50 @@ fn main() {
     let enable_aarch64 = target_arch == "aarch64" && feature_enabled("neon");
 
     if feature_enabled("mlkem") {
-        // The NIST MLKEM/ML-KEM reference implementation namespaces its SHAKE/SHA3
-        // functions behind `pqcrystals_fips202_ref_*` symbols (via fips202.h macros).
-        // We compile those symbols ONCE into a shared static lib to avoid duplicate
-        // definitions across ml-kem-{512,768,1024}_clean.
-        // The vendored NIST reference package keeps historical submission directory names.
-        let pqcrystals_fips202_ref_dir = PathBuf::from("vendor")
-            .join("pqnist")
-            .join("NIST-ml-kem")
-            .join("Reference_Implementation")
-            .join("crypto_kem")
-            .join(historical_mlkem_source_dir("512"));
-        if pqcrystals_fips202_ref_dir.exists() {
-            println!(
-                "cargo:rerun-if-changed={}",
-                pqcrystals_fips202_ref_dir.join("fips202.c").display()
-            );
-            compile_static_lib(
-                "pqcrystals_fips202_ref",
-                std::slice::from_ref(&pqcrystals_fips202_ref_dir),
-                &[pqcrystals_fips202_ref_dir.join("fips202.c")],
-            );
-        } else {
-            eprintln!(
-                "Warning: NIST fips202 reference directory not found: {}",
-                pqcrystals_fips202_ref_dir.display()
-            );
-        }
-
-        // ML-KEM implementations (NIST reference implementations, vendored under vendor/pqnist).
-        //
-        // Important: We compile the NIST reference sources into the *existing* library names that
-        // the generated Rust FFI expects (`ml-kem-512_clean`, etc.) and provide small C wrappers
-        // that export the `PQCLEAN_*` symbols.
-        //
-        // We deliberately do NOT compile the NIST `rng.c` / `fips202.c` / `sha*` sources to avoid
-        // duplicate symbols. Shared primitives come from `pqrust-internals`.
-
-        let nist_mlkem_root = PathBuf::from("vendor")
-            .join("pqnist")
-            .join("NIST-ml-kem")
-            .join("Reference_Implementation")
-            .join("crypto_kem");
-
-        // Build FIPS 203 ML-KEM libraries from the vendored NIST reference package.
-        let mlkem_configs = [
+        // The authenticated ML-KEM algorithm denotes FIPS 203, not the
+        // historical Kyber submission (whose shared-secret KDF is different).
+        // Use the same pinned PQCore source authority as the other primitives.
+        for (scheme, avx2_fwd, aarch64_fwd) in [
             (
                 "ml-kem-512",
-                historical_mlkem_source_dir("512"),
-                "ml-kem-512_clean.c",
                 "ml-kem-512_avx2_forward.c",
                 "ml-kem-512_aarch64_forward.c",
             ),
             (
                 "ml-kem-768",
-                historical_mlkem_source_dir("768"),
-                "ml-kem-768_clean.c",
                 "ml-kem-768_avx2_forward.c",
                 "ml-kem-768_aarch64_forward.c",
             ),
             (
                 "ml-kem-1024",
-                historical_mlkem_source_dir("1024"),
-                "ml-kem-1024_clean.c",
                 "ml-kem-1024_avx2_forward.c",
                 "ml-kem-1024_aarch64_forward.c",
             ),
-        ];
-
-        for (scheme, nist_subdir, clean_wrapper, avx2_fwd, aarch64_fwd) in mlkem_configs {
-            let nist_dir = nist_mlkem_root.join(nist_subdir);
-            if !nist_dir.exists() {
-                eprintln!(
-                    "Warning: NIST ML-KEM directory not found: {}",
-                    nist_dir.display()
-                );
-                continue;
-            }
-
-            // Clean lib: compile NIST reference sources + PQClean-symbol wrapper.
-            let mut sources = collect_sources(
-                &nist_dir,
-                &["rng.c", "fips202.c", "sha256.c", "sha512.c", "speed_print"],
+        ] {
+            let clean_dir = pqclean_root.join("crypto_kem").join(scheme).join("clean");
+            assert!(
+                clean_dir.join("kem.c").is_file(),
+                "missing pinned FIPS 203 source: {}",
+                clean_dir.display()
             );
-            sources.push(wrappers_dir.join(clean_wrapper));
-
-            let include_dirs = vec![pqrust_internals_include.clone(), nist_dir.clone()];
-            compile_static_lib(&format!("{}_clean", scheme), &include_dirs, &sources);
-
-            // Optimized libs (avx2/aarch64): forwarders that call the clean PQCLEAN_* symbols.
+            let sources = collect_sources(&clean_dir, &[]);
+            let includes = vec![
+                clean_dir,
+                pqrust_internals_include.clone(),
+                pqclean_common.clone(),
+            ];
+            compile_static_lib(&format!("{scheme}_clean"), &includes, &sources);
+            // These are dispatch forwarders, not separate cryptographic suites.
             if enable_avx2 {
                 compile_static_lib(
-                    &format!("{}_avx2", scheme),
+                    &format!("{scheme}_avx2"),
                     &[],
                     &[wrappers_dir.join(avx2_fwd)],
                 );
             }
             if enable_aarch64 {
                 compile_static_lib(
-                    &format!("{}_aarch64", scheme),
+                    &format!("{scheme}_aarch64"),
                     &[],
                     &[wrappers_dir.join(aarch64_fwd)],
                 );

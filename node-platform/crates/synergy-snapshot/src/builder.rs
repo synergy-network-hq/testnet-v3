@@ -6,6 +6,7 @@ use crate::{SnapshotChunk, SnapshotManifest, SnapshotSigningProvider};
 pub fn build_snapshot(
     digest: &impl AegisDigest,
     signer: &impl SnapshotSigningProvider,
+    chain_id: u64,
     network_id: &str,
     epoch: u64,
     height: u64,
@@ -15,7 +16,8 @@ pub fn build_snapshot(
     chunk_size: usize,
     state_bytes: &[u8],
 ) -> Result<(SnapshotManifest, Vec<SnapshotChunk>), String> {
-    if network_id.trim().is_empty()
+    if chain_id == 0
+        || network_id.trim().is_empty()
         || epoch == 0
         || height == 0
         || finalized_block_id.trim().is_empty()
@@ -27,7 +29,7 @@ pub fn build_snapshot(
         return Err("invalid snapshot build input".into());
     }
     let chunk_domain = CryptoDomain {
-        chain_id: 1266,
+        chain_id,
         network_id: network_id.into(),
         purpose: "snapshot-chunk-v1".into(),
         epoch: Some(epoch),
@@ -47,7 +49,7 @@ pub fn build_snapshot(
     let state_root = sha3_256(digest, &state_domain, state_bytes)?;
     let mut manifest = SnapshotManifest {
         format_version: 1,
-        chain_id: 1266,
+        chain_id,
         network_id: network_id.into(),
         epoch,
         height,

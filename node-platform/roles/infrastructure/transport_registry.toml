@@ -1,0 +1,6 @@
+schema_version = 1
+service = "transport-registry"
+capabilities = ["network_transport", "peer_discovery"]
+consensus_authority = false
+requires_signed_leases = true
+maximum_lease_seconds = 3600

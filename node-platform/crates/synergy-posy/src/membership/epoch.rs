@@ -24,6 +24,7 @@ pub struct SimplifiedEpochContext {
 }
 
 impl SimplifiedEpochContext {
+    #[allow(clippy::too_many_arguments)]
     pub fn from_frozen_registry(
         chain_id: u64,
         network_id: String,
@@ -64,7 +65,7 @@ impl SimplifiedEpochContext {
     }
 
     pub fn validate_against(&self, registry: &FrozenValidatorRegistry) -> PosyResult<()> {
-        if self.chain_id != 1266
+        if self.chain_id == 0
             || self.protocol_version != POSY_SIMPLIFIED_PROTOCOL_VERSION
             || self.epoch_start_height == 0
             || self.epoch_end_height < self.epoch_start_height

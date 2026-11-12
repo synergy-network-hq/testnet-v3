@@ -37,7 +37,17 @@ impl VerifiedDecryptShare {
         &self.message.key_id
     }
 
-    /// Returns the opaque threshold-decryption share bytes.
+    pub fn ingress_kem_key_id(&self) -> &str {
+        &self.message.ingress_kem_key_id
+    }
+    pub fn share_index(&self) -> u8 {
+        self.message.share_index
+    }
+    pub fn share_commitment(&self) -> &EtdagDigest {
+        &self.message.share_commitment
+    }
+
+    /// Returns the released canonical Shamir share bytes after signature verification.
     pub fn encrypted_share(&self) -> &[u8] {
         &self.message.encrypted_share
     }

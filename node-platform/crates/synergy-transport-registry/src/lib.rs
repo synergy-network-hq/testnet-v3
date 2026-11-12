@@ -6,7 +6,7 @@
 //! decisions.
 
 use std::collections::{BTreeMap, BTreeSet};
-use synergy_vpn::{OverlayScope, VpnRouteError, VpnRoutePolicy};
+use synergy_vpn::{validate_authenticated_route, OverlayScope, VpnRouteError};
 
 mod binding;
 mod cache;
@@ -27,8 +27,8 @@ pub use revocation::{Revocation, RevocationSet};
 pub use signer::TransportSnapshotSigner;
 pub use verifier::{
     verify_snapshot, verify_snapshot_bytes, SignedTransportSnapshot, SnapshotAcceptance,
-    SnapshotError, SnapshotInstall, SnapshotTransport, SnapshotTrust, VerifiedSnapshot,
-    MAX_SNAPSHOT_BYTES,
+    SnapshotContext, SnapshotError, SnapshotInstall, SnapshotTransport, SnapshotTrust,
+    VerifiedSnapshot, MAX_SNAPSHOT_BYTES,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,8 +59,10 @@ impl VerifiedTransportRegistry {
         let mut normalized = BTreeMap::new();
         let mut dial_addresses = BTreeSet::new();
         for mut route in routes {
-            let dial = VpnRoutePolicy::new(route.scope)
-                .validate(&route.identity, &route.dial_address)
+            if route.scope != OverlayScope::Validator {
+                return Err(RegistryError::InvalidRoute(VpnRouteError::WrongScope));
+            }
+            let dial = validate_authenticated_route(&route.identity, &route.dial_address)
                 .map_err(RegistryError::InvalidRoute)?;
             route.dial_address = dial;
             if !dial_addresses.insert(route.dial_address.clone()) {
@@ -166,7 +168,7 @@ mod tests {
                 1,
                 vec![route(
                     "synv11lrh6jcxaejkj4zv994j7qwn2rk6u3ar4emn",
-                    "10.70.3.2:5622"
+                    "8.8.8.8:5622"
                 )]
             ),
             Err(RegistryError::InvalidRoute(_))

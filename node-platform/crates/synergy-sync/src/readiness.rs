@@ -54,7 +54,11 @@ mod tests {
     fn unsigned_or_ineligible_advertisements_never_grant_readiness() {
         let selector = VerifiedSourceSelector::new("genesis");
         let liar = candidate("liar", 1_000_000);
-        assert!(!selector.readiness(0, &[liar.clone()], &[]).may_sign);
+        assert!(
+            !selector
+                .readiness(0, std::slice::from_ref(&liar), &[])
+                .may_sign
+        );
         let untrusted = SyncPeerCandidate {
             authenticated: false,
             ..liar
@@ -80,7 +84,7 @@ mod tests {
         };
         assert!(
             !selector
-                .readiness(11, &[peer.clone()], &[head.clone()])
+                .readiness(11, std::slice::from_ref(&peer), std::slice::from_ref(&head),)
                 .may_sign
         );
         assert!(selector.readiness(12, &[peer], &[head]).may_sign);

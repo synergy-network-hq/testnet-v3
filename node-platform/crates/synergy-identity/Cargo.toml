@@ -8,8 +8,12 @@ publish = false
 
 [dependencies]
 serde.workspace = true
+serde_json.workspace = true
+sha3.workspace = true
+hex = "0.4.3"
+chrono = { version = "=0.4.44", default-features = false, features = ["std"] }
+synergy-address = { path = "../synergy-address" }
+aegis-pqvm = { path = "../aegis-pqvm", default-features = false, features = ["mldsa", "fndsa"] }
+pqrust-traits = { path = "../aegis-pqvm/vendor/pqcrypto-traits" }
 synergy-aegis = { path = "../synergy-aegis" }
 synergy-protocol-types = { path = "../synergy-protocol-types" }
-
-[dev-dependencies]
-serde_json.workspace = true

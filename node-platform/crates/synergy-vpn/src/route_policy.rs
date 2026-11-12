@@ -1,4 +1,22 @@
 pub const VALIDATOR_P2P_PORT: u16 = 5622;
+
+/// Validates an endpoint whose identity, scope and exact address have already
+/// been authorized by a verified transport snapshot. Overlay allocation is
+/// supplied by that signed snapshot, not a historical installation's subnet.
+/// This shape check does not authenticate a route or grant membership.
+pub fn validate_authenticated_route(identity: &str, dial: &str) -> Result<String, VpnRouteError> {
+    normalize_validator_address(identity).ok_or(VpnRouteError::InvalidIdentity)?;
+    let address = dial
+        .parse::<std::net::SocketAddrV4>()
+        .map_err(|_| VpnRouteError::InvalidRoute)?;
+    if address.port() != VALIDATOR_P2P_PORT || address.to_string() != dial {
+        return Err(VpnRouteError::InvalidRoute);
+    }
+    if !address.ip().is_private() {
+        return Err(VpnRouteError::WrongScope);
+    }
+    Ok(dial.to_owned())
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverlayScope {
     Validator,
@@ -66,6 +84,48 @@ pub fn normalize_validator_address(value: &str) -> Option<String> {
 mod tests {
     use super::*;
     const ID: &str = "synv11lrh6jcxaejkj4zv994j7qwn2rk6u3ar4emn";
+    #[test]
+    fn authenticated_routes_use_signed_allocation_not_historical_subnet() {
+        for dial in [
+            "10.69.106.160:5622",
+            "10.69.11.219:5622",
+            "10.69.56.215:5622",
+            "10.69.184.171:5622",
+            "10.69.140.27:5622",
+            "172.20.1.2:5622",
+            "192.168.12.3:5622",
+        ] {
+            assert_eq!(validate_authenticated_route(ID, dial), Ok(dial.into()));
+        }
+        for dial in [
+            "8.8.8.8:5622",
+            "127.0.0.1:5622",
+            "0.0.0.0:5622",
+            "169.254.1.2:5622",
+            "224.0.0.1:5622",
+        ] {
+            assert_eq!(
+                validate_authenticated_route(ID, dial),
+                Err(VpnRouteError::WrongScope)
+            );
+        }
+        for dial in [
+            "10.69.11.219:5623",
+            "10.69.011.219:5622",
+            "10.69.11.219:05622",
+            "snr://peer@10.69.11.219:5622",
+            "validator.local:5622",
+        ] {
+            assert_eq!(
+                validate_authenticated_route(ID, dial),
+                Err(VpnRouteError::InvalidRoute)
+            );
+        }
+        assert_eq!(
+            validate_authenticated_route("invalid", "10.69.11.219:5622"),
+            Err(VpnRouteError::InvalidIdentity)
+        );
+    }
     #[test]
     fn validates_exact_frozen_validator_transport_shape() {
         let p = VpnRoutePolicy::new(OverlayScope::Validator);

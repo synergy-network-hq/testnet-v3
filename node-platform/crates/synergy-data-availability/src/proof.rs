@@ -21,7 +21,7 @@ pub trait ProofVerifier: AegisVerifier {
 
 impl AvailabilityProof {
     pub fn validate(&self) -> Result<(), String> {
-        if self.chain_id != 1266
+        if self.chain_id == 0
             || self.network_id.trim().is_empty()
             || self.object_root.trim().is_empty()
             || self.shard_root.trim().is_empty()

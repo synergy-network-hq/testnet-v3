@@ -48,6 +48,7 @@ pub mod address;
 pub mod algorithms;
 pub mod domain;
 pub mod error;
+mod hash;
 pub mod kem;
 pub mod keys;
 pub mod payload;

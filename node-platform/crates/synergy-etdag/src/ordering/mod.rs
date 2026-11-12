@@ -14,6 +14,6 @@ pub use cut_marker::ProtectedCutMarker;
 pub use order_key::{derive_content_blind_order_key, ContentBlindOrderKey};
 pub use order_root::protected_order_root;
 pub use proof::ProtectedOrderingProof;
-pub use protected_cut::ProtectedCutProof;
-pub use seed::derive_order_seed;
+pub use protected_cut::{CutoffMembers, ProtectedCutProof, VerifiedProtectedCut};
+pub use seed::{derive_order_seed, derive_target_order_seed};
 pub use verifier::verify_ordering_proof;

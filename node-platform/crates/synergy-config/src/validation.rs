@@ -5,11 +5,13 @@ use std::path::Path;
 use synergy_protocol_types::NodeRole;
 
 use crate::{
-    ConsensusMode, NodeConfiguration, VpnMode, CONFIG_SCHEMA_VERSION, GOVERNED_PROTECTED_LOOKAHEAD,
+    ConsensusMode, NodeConfiguration, UpdateMode, VpnMode, CONFIG_SCHEMA_VERSION,
+    GOVERNED_PROTECTED_LOOKAHEAD,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
+    NativeTransportNotQualified(NativeTransportPolicyError),
     UnsupportedSchema {
         found: u16,
         supported: u16,
@@ -27,7 +29,31 @@ pub enum ConfigError {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeTransportPolicyError {
+    ClassicalOverlayForbidden,
+    MissingPostQuantumAuthenticatedRecordLayer,
+}
+impl fmt::Display for NativeTransportPolicyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::ClassicalOverlayForbidden => "NetBird/WireGuard relies on classical asymmetric trust/session establishment and is forbidden as native security",
+            Self::MissingPostQuantumAuthenticatedRecordLayer => "native transport is not qualified: explicit APQE ML-KEM-1024 and authenticated AES-256 record protection is not implemented",
+        })
+    }
+}
+impl std::error::Error for NativeTransportPolicyError {}
+
 impl NodeConfiguration {
+    /// A signature-authenticated TCP socket is not a PQ confidentiality channel.
+    /// No configuration flag can waive this missing protocol implementation.
+    pub fn require_native_post_quantum_transport(&self) -> Result<(), NativeTransportPolicyError> {
+        if self.vpn.mode != VpnMode::Disabled {
+            return Err(NativeTransportPolicyError::ClassicalOverlayForbidden);
+        }
+        Err(NativeTransportPolicyError::MissingPostQuantumAuthenticatedRecordLayer)
+    }
+
     /// Validates the canonical new-platform configuration without consuming it.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.schema_version != CONFIG_SCHEMA_VERSION {
@@ -36,25 +62,108 @@ impl NodeConfiguration {
                 supported: CONFIG_SCHEMA_VERSION,
             });
         }
+        if self.vpn.mode != VpnMode::Disabled {
+            return Err(ConfigError::NativeTransportNotQualified(
+                NativeTransportPolicyError::ClassicalOverlayForbidden,
+            ));
+        }
         require_identifier("node_name", &self.node_name)?;
         if self.chain_id == 0 {
             return Err(invalid("chain_id", "must be nonzero"));
         }
         require_identifier("network_id", &self.network_id)?;
+        if let Some(provider) = &self.aegis_provider {
+            require_absolute("aegis_provider.report_path", &provider.report_path)?;
+            let digest = &provider.authenticated_report_sha256;
+            if digest.len() != 64
+                || !digest
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                return Err(invalid(
+                    "aegis_provider.authenticated_report_sha256",
+                    "requires 32 bytes of lowercase hex from an authenticated manifest",
+                ));
+            }
+        }
+        if let Some(transport) = &self.apqe_transport {
+            for digest in [
+                &transport.registry_trust_key_sha256,
+                &transport.genesis_trust_key_sha256,
+            ] {
+                if digest.len() != 64
+                    || !digest
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                {
+                    return Err(invalid(
+                        "apqe_transport.trust_fingerprint",
+                        "requires independently authenticated lowercase SHA-256 fingerprint",
+                    ));
+                }
+            }
+            if self.aegis_provider.is_none()
+                || self.genesis_path.is_none()
+                || self.consensus.authority_binding.is_none()
+                || self.consensus.authority_trust_key_path.is_none()
+                || !self.network_id.starts_with("posy-")
+                || !self.network_id.contains("-canary-")
+            {
+                return Err(invalid("apqe_transport", "requires isolated canary incarnation, explicit provider, signed Genesis and governed authority"));
+            }
+            for (name, path) in [
+                ("apqe_transport.registry_path", &transport.registry_path),
+                (
+                    "apqe_transport.registry_trust_key_path",
+                    &transport.registry_trust_key_path,
+                ),
+                ("apqe_transport.enrollment_path", &transport.enrollment_path),
+                ("apqe_transport.custody_path", &transport.custody_path),
+                (
+                    "apqe_transport.custody_unlock_path",
+                    &transport.custody_unlock_path,
+                ),
+            ] {
+                require_absolute(name, path)?;
+            }
+        }
+        if let Some(path) = self
+            .consensus
+            .authority_recovery_certificate_path
+            .as_deref()
+        {
+            require_absolute("consensus.authority_recovery_certificate_path", path)?;
+            if self.consensus.authority_binding.is_none()
+                || self.consensus.authority_trust_key_path.is_none()
+            {
+                return Err(invalid(
+                    "consensus.authority_recovery_certificate_path",
+                    "requires the original authority and Genesis trust pin",
+                ));
+            }
+        }
         require_absolute("manifest_path", &self.manifest_path)?;
         require_absolute("public_identity_path", &self.public_identity_path)?;
-        let aegis_bindings = self
-            .aegis_key_bindings_path
-            .as_deref()
-            .ok_or(ConfigError::EmptyField("aegis_key_bindings_path"))?;
-        let aegis_signing_key = self
-            .aegis_signing_key_path
-            .as_deref()
-            .ok_or(ConfigError::EmptyField("aegis_signing_key_path"))?;
-        require_absolute("aegis_key_bindings_path", aegis_bindings)?;
-        require_absolute("aegis_signing_key_path", aegis_signing_key)?;
+        if self.apqe_transport.is_none() {
+            let aegis_bindings = self
+                .aegis_key_bindings_path
+                .as_deref()
+                .ok_or(ConfigError::EmptyField("aegis_key_bindings_path"))?;
+            let aegis_signing_key = self
+                .aegis_signing_key_path
+                .as_deref()
+                .ok_or(ConfigError::EmptyField("aegis_signing_key_path"))?;
+            require_absolute("aegis_key_bindings_path", aegis_bindings)?;
+            require_absolute("aegis_signing_key_path", aegis_signing_key)?;
+        }
         require_absolute("admin_socket_path", &self.admin_socket_path)?;
         require_absolute("storage.data_directory", &self.storage.data_directory)?;
+        if self.storage.world_memory_budget_bytes == 0 {
+            return Err(invalid(
+                "storage.world_memory_budget_bytes",
+                "must be nonzero",
+            ));
+        }
 
         if self.network.listen_addresses.is_empty() {
             return Err(ConfigError::EmptyField("network.listen_addresses"));
@@ -138,20 +247,23 @@ impl NodeConfiguration {
                         )
                     })?;
                 require_absolute("consensus.authority_trust_key_path", trust)?;
-                let signing_key = self.consensus.signing_key_path.as_deref().ok_or_else(|| {
-                    role_error(
-                        "consensus.signing_key_path",
-                        "voting requires a provisioned consensus signing key",
-                    )
-                })?;
-                require_absolute("consensus.signing_key_path", signing_key)?;
+                if self.apqe_transport.is_none() {
+                    let signing_key =
+                        self.consensus.signing_key_path.as_deref().ok_or_else(|| {
+                            role_error(
+                                "consensus.signing_key_path",
+                                "voting requires a provisioned consensus signing key",
+                            )
+                        })?;
+                    require_absolute("consensus.signing_key_path", signing_key)?;
+                }
                 if !self.etdag.enabled {
                     return Err(role_error(
                         "etdag.enabled",
                         "validator voting requires verified ETDAG proposal material",
                     ));
                 }
-                if self.vpn.mode != VpnMode::Required {
+                if self.apqe_transport.is_none() && self.vpn.mode != VpnMode::Required {
                     return Err(role_error(
                         "vpn.mode",
                         "validator voting requires the authenticated validator overlay",
@@ -191,11 +303,14 @@ impl NodeConfiguration {
             }
         }
 
+        if let Some(path) = self.etdag.ingress_kem_secret_key_path.as_deref() {
+            require_absolute("etdag.ingress_kem_secret_key_path", path)?;
+        }
         if self.etdag.enabled {
-            if self.etdag.protected_lookahead != GOVERNED_PROTECTED_LOOKAHEAD {
+            if !(GOVERNED_PROTECTED_LOOKAHEAD..=16).contains(&self.etdag.protected_lookahead) {
                 return Err(invalid(
                     "etdag.protected_lookahead",
-                    "must preserve the governed H+5 policy",
+                    "must be within structural lookahead bounds 5..=16; signed authority selects the exact value",
                 ));
             }
             if self.etdag.admission_queue_capacity == 0
@@ -258,6 +373,64 @@ impl NodeConfiguration {
             ));
         }
 
+        if self.update.enabled {
+            let catalog = self
+                .update
+                .catalog_path
+                .as_deref()
+                .ok_or(ConfigError::EmptyField("update.catalog_path"))?;
+            let signer_key_id = self
+                .update
+                .release_signer_key_id
+                .as_deref()
+                .ok_or(ConfigError::EmptyField("update.release_signer_key_id"))?;
+            let signer_public_key = self
+                .update
+                .release_signer_public_key_path
+                .as_deref()
+                .ok_or(ConfigError::EmptyField(
+                    "update.release_signer_public_key_path",
+                ))?;
+            let staging = self
+                .update
+                .staging_directory
+                .as_deref()
+                .ok_or(ConfigError::EmptyField("update.staging_directory"))?;
+            require_absolute("update.catalog_path", catalog)?;
+            require_absolute("update.release_signer_public_key_path", signer_public_key)?;
+            require_absolute("update.staging_directory", staging)?;
+            if signer_key_id.trim().is_empty()
+                || signer_key_id.len() > 256
+                || signer_key_id.contains(char::is_control)
+            {
+                return Err(invalid(
+                    "update.release_signer_key_id",
+                    "must contain 1..=256 safe characters",
+                ));
+            }
+            if self.update.minimum_free_bytes == 0
+                || self.update.maximum_artifact_bytes == 0
+                || self.update.maximum_artifact_bytes > crate::DEFAULT_MAXIMUM_UPDATE_ARTIFACT_BYTES
+            {
+                return Err(invalid("update", "artifact and disk bounds are invalid"));
+            }
+            if self.update.mode == UpdateMode::InstallWhenHealthy && !self.update.allow_rollback {
+                return Err(invalid(
+                    "update.allow_rollback",
+                    "automatic installation requires rollback",
+                ));
+            }
+        } else if self.update.catalog_path.is_some()
+            || self.update.release_signer_key_id.is_some()
+            || self.update.release_signer_public_key_path.is_some()
+            || self.update.staging_directory.is_some()
+        {
+            return Err(invalid(
+                "update",
+                "disabled updates cannot carry release authority or staging paths",
+            ));
+        }
+
         match self.vpn.mode {
             VpnMode::Disabled => {
                 if self.vpn.interface_name.is_some()
@@ -276,23 +449,23 @@ impl NodeConfiguration {
                     .vpn
                     .interface_name
                     .as_deref()
-                    .ok_or_else(|| ConfigError::EmptyField("vpn.interface_name"))?;
+                    .ok_or(ConfigError::EmptyField("vpn.interface_name"))?;
                 require_interface_name(interface)?;
                 let registry = self
                     .vpn
                     .signed_registry_path
                     .as_deref()
-                    .ok_or_else(|| ConfigError::EmptyField("vpn.signed_registry_path"))?;
+                    .ok_or(ConfigError::EmptyField("vpn.signed_registry_path"))?;
                 require_absolute("vpn.signed_registry_path", registry)?;
                 let public_key = self
                     .vpn
                     .attestation_public_key
                     .as_deref()
                     .ok_or(ConfigError::EmptyField("vpn.attestation_public_key"))?;
-                if !public_key.starts_with("ed25519:") || public_key.len() > 128 {
+                if !public_key.starts_with("ml-dsa-87:") || public_key.len() != 3466 {
                     return Err(invalid(
                         "vpn.attestation_public_key",
-                        "must be a bounded ed25519: public key",
+                        "must be a canonical ml-dsa-87: public key; native classical trust is forbidden",
                     ));
                 }
                 let plan_hash = self
@@ -379,6 +552,9 @@ const fn role_error(field: &'static str, reason: &'static str) -> ConfigError {
 impl fmt::Display for ConfigError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::NativeTransportNotQualified(error) => {
+                write!(formatter, "native transport policy refused: {error}")
+            }
             Self::UnsupportedSchema { found, supported } => write!(
                 formatter,
                 "unsupported config schema {found}; this binary supports {supported}"

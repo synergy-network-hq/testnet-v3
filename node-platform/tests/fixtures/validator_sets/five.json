@@ -1,0 +1,25 @@
+{
+  "epoch": 1,
+  "validators": [
+    {
+      "id": "v1",
+      "weight": 1
+    },
+    {
+      "id": "v2",
+      "weight": 2
+    },
+    {
+      "id": "v3",
+      "weight": 3
+    },
+    {
+      "id": "v4",
+      "weight": 4
+    },
+    {
+      "id": "v5",
+      "weight": 5
+    }
+  ]
+}

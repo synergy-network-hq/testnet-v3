@@ -1,11 +1,12 @@
-use crate::{EtdagDigest, EtdagError, ProtectedRevealAuthorization};
+use super::VerifiedRevealAuthorization;
+use crate::{EtdagDigest, EtdagError};
 
 #[derive(Debug, Clone)]
 pub struct RevealGate {
     context_root: EtdagDigest,
     target_height: u64,
     protected_batch_root: EtdagDigest,
-    authorization: Option<ProtectedRevealAuthorization>,
+    authorization: Option<VerifiedRevealAuthorization>,
 }
 
 impl RevealGate {
@@ -26,10 +27,8 @@ impl RevealGate {
             authorization: None,
         })
     }
-    pub fn authorize(
-        &mut self,
-        authorization: ProtectedRevealAuthorization,
-    ) -> Result<(), EtdagError> {
+    pub fn authorize(&mut self, verified: VerifiedRevealAuthorization) -> Result<(), EtdagError> {
+        let authorization = verified.authorization();
         authorization.validate()?;
         if authorization.context_root != self.context_root
             || authorization.target_height != self.target_height
@@ -40,16 +39,16 @@ impl RevealGate {
         if self
             .authorization
             .as_ref()
-            .is_some_and(|existing| existing != &authorization)
+            .is_some_and(|existing| existing != &verified)
         {
             return Err(EtdagError::ConflictingArtifact(
                 "reveal authorization".into(),
             ));
         }
-        self.authorization = Some(authorization);
+        self.authorization = Some(verified);
         Ok(())
     }
-    pub fn authorization(&self) -> Result<&ProtectedRevealAuthorization, EtdagError> {
+    pub fn authorization(&self) -> Result<&VerifiedRevealAuthorization, EtdagError> {
         self.authorization
             .as_ref()
             .ok_or(EtdagError::UnauthorizedReveal)

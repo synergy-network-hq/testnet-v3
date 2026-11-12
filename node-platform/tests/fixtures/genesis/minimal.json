@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "chain_id": 1266,
+  "network_id": "fixture",
+  "validators": [
+    "synv1fixture"
+  ]
+}

@@ -12,6 +12,11 @@ mod registration;
 mod resolution;
 mod reverse_resolution;
 mod store;
+mod wallet;
+pub use wallet::{
+    normalize_wallet_syn_id, WalletSynIdRecord, WalletSynIdRegistry, MAX_WALLET_NAMING_BYTES,
+    WALLET_PROTOCOL_STATE_KEY,
+};
 
 use std::fmt;
 

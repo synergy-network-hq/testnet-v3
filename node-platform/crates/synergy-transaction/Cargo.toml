@@ -11,3 +11,10 @@ serde.workspace = true
 sha3.workspace = true
 synergy-protocol-types = { path = "../synergy-protocol-types" }
 synergy-address = { path = "../synergy-address" }
+synergy-identity = { path = "../synergy-identity" }
+
+[dev-dependencies]
+serde_json.workspace = true
+hex = "0.4.3"
+aegis-pqvm = { path = "../aegis-pqvm", default-features = false, features = ["mldsa", "fndsa"] }
+pqrust-traits = { path = "../aegis-pqvm/vendor/pqcrypto-traits" }

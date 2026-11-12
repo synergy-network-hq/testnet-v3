@@ -85,7 +85,11 @@ batch-specific view changes are not production liveness dependencies. Legacy
 decoding may remain temporarily during migration, but legacy artifacts neither
 authorize reveal nor satisfy proposal validity.
 
-## Height and reveal semantics
+## Historical R11 height and reveal semantics
+
+This section describes the earlier three-height profile. The fresh replacement
+uses the approved five-height profile and cutoff relationship defined below;
+the signed policy selects that profile explicitly.
 
 The governed ETDAG look-ahead is exactly three heights. Genesis is finalized
 height H0 and can derive the first normal target context for H3.
@@ -119,6 +123,15 @@ secret until the gate. Decryption and execution are deterministic, and the
 resulting execution commitment remains bound into the one ordinary PoSy vote
 and QC finality.
 
+The execution subject binds the exact verified reveal authorization (target,
+context, protected batch and stable parent candidate/VC identity), decoded
+transactions, resulting state and receipts. The exact signed reveal-share
+transcript remains authenticated threshold evidence in the durable audit and
+recovery record. Its particular valid signer subset, signature bytes and
+arrival order do not enter the PoSy-visible execution subject. Independent
+share verification, governed threshold decryption and recovery replay remain
+mandatory; a stable semantic commitment cannot substitute for those proofs.
+
 ## Recovery and diagnostics
 
 Durable state transitions are atomic, monotonic, restart-safe, and idempotent.
@@ -133,3 +146,39 @@ Every validator exposes a read-only per-height diagnostic containing target
 height, pipeline phase, availability and marker counts, cut/order/commitment/
 reveal/execution readiness, proposal/VC/QC observation, and finalization. The
 Node Control Panel consumes this schema but is not required for consensus.
+
+
+## Approved fresh-chain cutoff clarification — operator approval, 2026-10-08
+
+The operator explicitly approved this clarification in the current session on
+2026-10-08 (America/Chicago). Activation still requires the fresh signed
+Genesis/parameter profile to bind `cutoff_relationship = vc_event_context_v1`.
+Approval does not itself prove implementation, deployment or chain health.
+
+The current rules require proposal H to contain a completed certified cutoff
+frontier for H+2, while POSY-00D section0D.11 defines the first valid VC at H
+as the admission-closing event for H+2. The completed frontier therefore
+requires validation of the proposal that already requires that frontier.
+
+Approved replacement for only that commitment edge:
+
+1. Proposal H commits to the exact cutoff *event context* for target H+2:
+   chain/network/epoch, target admission context, H and governed parameter root.
+   This is a boundary descriptor, not evidence that cutoff has completed.
+2. The existing authenticated proposal-validation ECHO quorum VC(H) triggers
+   durable admission close for H+2. Nodes stop new VAC signatures for that
+   target and publish authenticated complete frontier markers.
+3. Quorum marker evidence and complete available ancestors determine the
+   protected batch for H+2. Proposal H+1 binds that exact next-batch commitment;
+   every validator independently verifies it before ECHO.
+4. VC(H+1) authorizes reveal for H+2. Proposal H+2 binds its executed result.
+
+H1/H2 remain Genesis-bound bootstrap execution; H3 is the first normal target.
+H0 opens H3/H4/H5 and finalized F opens F+5. Validator/weight quorums,
+ML-DSA checks, leader leases, ordinary votes and three-QC finality do not change.
+This uses existing PoSy validation evidence and adds no batch consensus round.
+A descriptor alone never authorizes an empty cut, reveal or execution.
+
+Acceptance requires a causal dependency test for H1 through H6, agreement
+under differing legitimate marker delivery, complete socket-runtime tests,
+and a signed fresh parameter/Genesis commitment before validator deployment.

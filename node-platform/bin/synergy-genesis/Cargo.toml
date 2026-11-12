@@ -14,3 +14,8 @@ synergy-aegis = { path = "../../crates/synergy-aegis" }
 synergy-etdag = { path = "../../crates/synergy-etdag" }
 synergy-posy = { path = "../../crates/synergy-posy" }
 synergy-storage = { path = "../../crates/synergy-storage" }
+
+synergy-state = { path = "../../crates/synergy-state" }
+
+[dev-dependencies]
+synergy-address-engine = { version = "=2.0.0", path = "../../../../21-Aegis-Engine/synergy-address-engine" }

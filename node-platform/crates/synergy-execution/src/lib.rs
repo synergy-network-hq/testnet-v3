@@ -4,17 +4,27 @@
 //! transition application and receipts. PoSy alone owns agreement and finality.
 
 mod candidate;
+mod candidate_store;
 mod context;
 mod dispatcher;
 mod executor;
 mod fees;
+mod processing_candidate;
+mod processing_groups;
+mod processing_registry;
 mod receipts;
 mod rollback;
 mod scheduler;
 mod transition;
 mod validation;
 
-pub use candidate::ExecutionCandidate;
+pub use candidate::{
+    decode_budgeted_candidate, reserve_execution_metadata, BudgetedExecutionCandidate,
+    CandidateResourceError, ExecutionCandidate,
+};
+pub use candidate_store::{
+    BudgetedCandidateStore, CandidateCommitment, CandidateStore, CandidateWorldStorage,
+};
 pub use context::{AuthorizedReveal, DeterministicExecutionInput, ExecutionInputError};
 pub use dispatcher::{
     ActionRoute, CanonicalNativeDispatchError, CanonicalTransactionDispatcher,
@@ -27,7 +37,22 @@ pub use dispatcher::{
 };
 pub use executor::DeterministicExecutor;
 pub use fees::{FeeSchedule, FeeSettlement};
-pub use receipts::{BlockExecutionOutcome, ExecutionError, ExecutionOutcome};
+pub use processing_candidate::{
+    processing_payload_root, ProcessingCandidateContext, ProcessingCandidateError,
+    ProcessingPayloadError, ProcessingPayloadProvider,
+};
+pub use processing_groups::{
+    processing_group_state, processing_group_transition, processing_member_claim,
+    processing_member_claim_optional, processing_order_tip, verify_processing_record_assignment,
+    ProcessingGroupState, ProcessingGroupTransition, ProcessingMemberClaim,
+};
+pub use processing_registry::{
+    ParentProcessingRegistry, ParentProcessingSelection, ProcessingReadinessVerifier,
+    ProcessingReadyRecord, ProcessingRegistryError, ProcessingRegistryTransition,
+};
+pub use receipts::{
+    BlockExecutionOutcome, BudgetedBlockExecutionOutcome, ExecutionError, ExecutionOutcome,
+};
 pub use rollback::{ExecutionCheckpoint, RollbackError};
 pub use scheduler::BlockExecutionScheduler;
 pub use transition::DeterministicStateTransition;
@@ -51,6 +76,7 @@ mod tests {
             epoch: 1,
             source_finalized_height: 10,
             target_height: 15,
+            target_height_offset: 5,
             source_finality_context_root: "source".into(),
             active_validator_set_root: "set".into(),
             validator_consensus_key_root: "keys".into(),

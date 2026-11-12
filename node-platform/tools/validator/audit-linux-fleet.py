@@ -26,11 +26,21 @@ def main():
     helper=importlib.util.module_from_spec(spec);spec.loader.exec_module(helper)
     policy=(SOURCE/'tools/linux-node/conformance.py').read_text()
     schema=json.loads((SOURCE/'schemas/node-config.schema.json').read_text())
-    data=json.dumps({'source':policy,'schema':schema,'manifest':json.loads(args.manifest.read_text())}).encode()
+    # An older installed release may not contain today's read-only schema
+    # checker. Send its exact local implementation in memory; never write
+    # new tooling into the installation merely to audit the old release.
+    library=(SOURCE/'tools/linux-node/synergy_linux.py').read_text()
+    data=json.dumps({'source':policy,'library':library,'schema':schema,
+                     'manifest':json.loads(args.manifest.read_text())}).encode()
     code='''import sys,json,datetime
 sys.dont_write_bytecode=True
 sys.path.insert(0,'/opt/Synergy/tools')
 payload=json.load(sys.stdin)
+import types
+library=types.ModuleType('synergy_linux')
+library.__file__='/opt/Synergy/tools/synergy_linux.py'
+exec(compile(payload['library'],library.__file__,'exec'),library.__dict__)
+sys.modules['synergy_linux']=library
 namespace={'__name__':'fleet_readonly'}
 exec(payload['source'],namespace)
 try:
@@ -46,6 +56,7 @@ print(json.dumps(r))'''
     fingerprints={v.get('configuration_fingerprint') for v in hosts.values()}
     result={'format':'synergy-five-validator-conformance-v1','selected_manifest':str(args.manifest),
             'conformance_policy_sha256':__import__('hashlib').sha256(policy.encode()).hexdigest(),
+            'schema_library_sha256':__import__('hashlib').sha256(library.encode()).hexdigest(),
             'conformant':all(v.get('conformant') for v in hosts.values()) and len(fingerprints)==1,
             'normalized_configuration_agrees':len(fingerprints)==1 and None not in fingerprints,'hosts':hosts}
     with args.output.open('x') as stream:json.dump(result,stream,indent=2);stream.write('\n')

@@ -52,5 +52,71 @@ never wipe a validator or regenerate identity/genesis to install a correction.
 Use `lifecycle.py remove` only under explicit destruction authorization: it checks
 attributed OS integrations and VPN retirement before deleting the one root.
 
-Current five-validator network and failed qualification remain STOPPED.
-No build, passing fixture or manifest grants permission to restart them.
+Fleet operating status belongs in the current implementation handoff, not this
+reusable package. A build, passing fixture or manifest does not itself authorize
+deployment, service startup or a qualification claim.
+
+## Explicit APQE commissioning and fresh-chain replacement
+
+The canonical package includes the authenticated provider report and libraries
+under `lib/apqe`. Native validator custody is provisioned independently as one
+six-role encrypted APQE bundle. Raw validator key generation (`identity-init`)
+is retired. `keys/apqe` contains only `validator.pub.json`, `enrollment.json`,
+`custody.json` and `unlock`; the latter two require mode0600. Native startup
+unlocks opaque role-bound custody and enforces the existing durable sign-once
+journal. Public preflight does not claim custody possession.
+
+The sealed `bin/apqe` executable provides `validator-preflight`,
+`validator-provision`, `validator-verify-enrollment` and
+`validator-check-custody`. Run `bin/apqe --help` for exact arguments. Provisioning
+uses the independently authenticated installed report digest, signed network
+binding and an interactive custody passphrase; it never grants membership.
+The fresh-network engineering provisioner uses the same APQE prepared-key API
+to bind the six independent roles after the common Genesis has been signed.
+
+Prepare the exact per-node `config/node.json`, six authenticated `network` files,
+and four custody inputs using the canonical provisioner. The operator must
+independently establish all-validator provisioning and all-pairs VPN readiness
+before calling `apqe_layout.seal_commissioning(stage, root,
+all_validators_ready=True, all_pairs_vpn_verified=True)`. This creates the bounded
+startup policy and exact commissioning input manifest, never an inferred release
+or production approval. Adopt uploaded package/stage into root ownership under
+`/var/tmp` with no group/other write access before privileged setup.
+
+A fresh installation uses the ordinary `synergy_linux.py install` followed by
+`lifecycle.py commission --root /opt/Synergy --staged <validated-node-inputs>`.
+Before any fleet member is replaced, run the standard read-only check on every
+host against that same sealed package and its own staged provisioning inputs:
+
+```
+python3 <new-package>/tools/lifecycle.py commission-check \
+  --root /opt/Synergy --package <new-package> --staged <validated-node-inputs>
+```
+
+An explicitly authorized fresh-chain replacement uses:
+
+```
+python3 <new-package>/tools/lifecycle.py replace-application \
+  --root /opt/Synergy --replace-root /opt/Synergy \
+  --package <new-package> --staged <validated-node-inputs>
+```
+
+Replacement requires the attributed node service stopped, the owned VPN active,
+a sealed package and exact staged inventory. It authenticates staged public
+Genesis, authority, active membership and transport registry with the new native
+binary BEFORE retiring old application bytes. It removes old chain history,
+old validator role custody and obsolete application configuration/software, then
+uses native initialization for a fresh data root. Unrelated wallet custody in
+`keys/wallets` is preserved and cannot authorize this validator. A durable intent
+blocks startup after interruption; only the identical validated package and stage
+can resume, cleaning partial fresh state that has never been allowed to start.
+No old signing history is imported into this explicitly new incarnation.
+
+The VPN namespace, client, executable, attributed service and running PID remain
+in place. The daemon may update its own mutable state during setup; the installer
+never writes that namespace. No VPN service stop, restart or reenrollment occurs.
+The existing node systemd limit remains1GiB with swap disabled. The engineering
+APQE session profile does not grant native authority to WireGuard or establish
+production/release approval. Every substantive repair belongs in this canonical
+master and the same sealed package is rolled out to each affected validator;
+individual host architecture patches are forbidden.

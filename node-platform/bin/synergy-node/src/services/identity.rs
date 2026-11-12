@@ -1,6 +1,6 @@
 use std::fmt;
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use synergy_identity::PublicNodeIdentity;
@@ -11,6 +11,14 @@ use synergy_node_core::{
 use synergy_protocol_types::{NodeClass, NodeRole};
 
 const MAX_PUBLIC_IDENTITY_BYTES: u64 = 64 * 1024;
+
+/// Reuses startup's bounded public-identity validation without starting a service.
+pub(crate) fn load_public_identity(
+    path: &Path,
+    role: NodeRole,
+) -> Result<PublicNodeIdentity, String> {
+    IdentityService::new(path.to_path_buf(), role).load()
+}
 
 pub fn registration(
     path: &Path,
@@ -150,7 +158,6 @@ enum IdentityState {
 #[derive(Debug)]
 pub enum IdentityAdapterError {
     InvalidServiceId(String),
-    Io(io::Error),
 }
 
 impl fmt::Display for IdentityAdapterError {
@@ -159,7 +166,6 @@ impl fmt::Display for IdentityAdapterError {
             Self::InvalidServiceId(error) => {
                 write!(formatter, "invalid identity service id: {error}")
             }
-            Self::Io(error) => write!(formatter, "identity I/O failed: {error}"),
         }
     }
 }

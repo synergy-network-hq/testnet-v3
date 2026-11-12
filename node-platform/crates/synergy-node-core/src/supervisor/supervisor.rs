@@ -1,4 +1,5 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
+use std::time::{Duration, Instant};
 
 use crate::{ServiceObservation, ServiceReadiness, SupervisorError};
 
@@ -7,6 +8,59 @@ use super::{
     ServiceSpec, ServiceState, ShutdownReport,
 };
 
+/// Fixed-capacity measurements; labels are registered service IDs only.
+#[derive(Debug, Clone)]
+pub struct PollTimingSample {
+    pub elapsed: Duration,
+    pub service_elapsed: Duration,
+    pub failed_service: Option<ServiceId>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ServicePollTiming {
+    pub calls: u64,
+    pub failures: u64,
+    pub total: Duration,
+    pub maximum: Duration,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PollTimings {
+    pub services: BTreeMap<ServiceId, ServicePollTiming>,
+    pub recent: VecDeque<PollTimingSample>,
+    pub passes: u64,
+    pub failed_passes: u64,
+    /// Measured pass time outside service.poll, including instrumentation.
+    pub overhead: Duration,
+}
+
+impl PollTimings {
+    fn service(&mut self, id: &ServiceId, elapsed: Duration, failed: bool) {
+        if !self.services.contains_key(id) && self.services.len() >= 64 {
+            return;
+        }
+        let value = self.services.entry(id.clone()).or_default();
+        value.calls = value.calls.saturating_add(1);
+        value.failures = value.failures.saturating_add(u64::from(failed));
+        value.total = value.total.saturating_add(elapsed);
+        value.maximum = value.maximum.max(elapsed);
+    }
+
+    fn pass(&mut self, sample: PollTimingSample) {
+        self.passes = self.passes.saturating_add(1);
+        self.failed_passes = self
+            .failed_passes
+            .saturating_add(u64::from(sample.failed_service.is_some()));
+        self.overhead = self
+            .overhead
+            .saturating_add(sample.elapsed.saturating_sub(sample.service_elapsed));
+        if self.recent.len() == 128 {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(sample);
+    }
+}
+
 /// Owns startup, bounded restart, health, and reverse-order shutdown for node services.
 pub struct Supervisor {
     graph: DependencyGraph,
@@ -14,6 +68,7 @@ pub struct Supervisor {
     states: BTreeMap<ServiceId, ServiceState>,
     restart_attempts: BTreeMap<ServiceId, u16>,
     cancellation: CancellationToken,
+    poll_timings: Option<PollTimings>,
 }
 
 impl Supervisor {
@@ -42,6 +97,7 @@ impl Supervisor {
             states,
             restart_attempts: BTreeMap::new(),
             cancellation: CancellationToken::default(),
+            poll_timings: None,
         })
     }
 
@@ -153,27 +209,60 @@ impl Supervisor {
     }
 
     /// Advances running subsystem event loops in dependency order.
+    /// Explicit opt-in; disabling discards measurements and reads no clock.
+    pub fn enable_poll_timing(&mut self, enabled: bool) {
+        self.poll_timings = enabled.then(PollTimings::default);
+    }
+
+    pub fn poll_timings(&self) -> Option<&PollTimings> {
+        self.poll_timings.as_ref()
+    }
+
     pub fn poll_all(&mut self) -> Result<(), SupervisorError> {
         if self.cancellation.is_cancelled() {
             return Err(SupervisorError::Cancelled);
         }
-        for id in self.graph.startup_order() {
-            if self.states.get(id) != Some(&ServiceState::Running) {
-                continue;
+        let started = self.poll_timings.as_ref().map(|_| Instant::now());
+        let mut service_elapsed = Duration::ZERO;
+        let mut failed_service = None;
+        let result = (|| {
+            for id in self.graph.startup_order() {
+                if self.states.get(id) != Some(&ServiceState::Running) {
+                    continue;
+                }
+                let service = self
+                    .services
+                    .get_mut(id)
+                    .ok_or_else(|| SupervisorError::ServiceUnavailable(id.clone()))?;
+                let service_started = started.map(|_| Instant::now());
+                let result = service.poll();
+                if let Some(service_started) = service_started {
+                    let elapsed = service_started.elapsed();
+                    service_elapsed = service_elapsed.saturating_add(elapsed);
+                    self.poll_timings
+                        .as_mut()
+                        .unwrap()
+                        .service(id, elapsed, result.is_err());
+                }
+                if let Err(message) = result {
+                    failed_service = Some(id.clone());
+                    self.states.insert(id.clone(), ServiceState::Failed);
+                    return Err(SupervisorError::PollFailed {
+                        service: id.clone(),
+                        message,
+                    });
+                }
             }
-            let service = self
-                .services
-                .get_mut(id)
-                .ok_or_else(|| SupervisorError::ServiceUnavailable(id.clone()))?;
-            if let Err(message) = service.poll() {
-                self.states.insert(id.clone(), ServiceState::Failed);
-                return Err(SupervisorError::PollFailed {
-                    service: id.clone(),
-                    message,
-                });
-            }
+            Ok(())
+        })();
+        if let Some(started) = started {
+            self.poll_timings.as_mut().unwrap().pass(PollTimingSample {
+                elapsed: started.elapsed(),
+                service_elapsed,
+                failed_service,
+            });
         }
-        Ok(())
+        result
     }
 
     pub fn observations(&self) -> Vec<ServiceObservation> {
@@ -286,5 +375,75 @@ impl Supervisor {
 impl Drop for Supervisor {
     fn drop(&mut self) {
         let _ = self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod poll_timing_tests {
+    use super::*;
+
+    #[test]
+    fn timing_storage_is_bounded_and_accounts_errors_and_overhead() {
+        let mut timing = PollTimings::default();
+        for i in 0..200 {
+            let id = ServiceId::new(format!("service-{i}")).unwrap();
+            timing.service(&id, Duration::from_millis(3), i % 2 == 0);
+            timing.pass(PollTimingSample {
+                elapsed: Duration::from_millis(5),
+                service_elapsed: Duration::from_millis(3),
+                failed_service: (i % 2 == 0).then_some(id),
+            });
+        }
+        assert_eq!(timing.services.len(), 64);
+        assert_eq!(timing.recent.len(), 128);
+        assert_eq!(timing.passes, 200);
+        assert_eq!(timing.failed_passes, 100);
+        assert_eq!(timing.overhead, Duration::from_millis(400));
+    }
+
+    struct FailingPoll;
+    impl ManagedService for FailingPoll {
+        fn start(&mut self, _: &CancellationToken) -> Result<(), String> {
+            Ok(())
+        }
+        fn stop(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn health(&self) -> ServiceHealth {
+            ServiceHealth::Healthy
+        }
+        fn poll(&mut self) -> Result<(), String> {
+            Err("test failure".into())
+        }
+    }
+
+    #[test]
+    fn timing_opt_in_preserves_fail_closed_poll_behavior() {
+        let id = ServiceId::new("test-owner").unwrap();
+        let spec = ServiceSpec {
+            id: id.clone(),
+            dependencies: vec![],
+            criticality: Criticality::Critical,
+            restart_policy: super::super::RestartPolicy::Never,
+        };
+        let mut supervisor = Supervisor::new(vec![(
+            spec,
+            Box::new(FailingPoll) as Box<dyn ManagedService>,
+        )])
+        .unwrap();
+        assert!(supervisor.poll_timings().is_none());
+        supervisor.start_all().unwrap();
+        supervisor.enable_poll_timing(true);
+        assert!(matches!(
+            supervisor.poll_all(),
+            Err(SupervisorError::PollFailed { .. })
+        ));
+        let timing = supervisor.poll_timings().unwrap();
+        assert_eq!(timing.services[&id].calls, 1);
+        assert_eq!(timing.services[&id].failures, 1);
+        assert_eq!(timing.failed_passes, 1);
+        assert_eq!(supervisor.service_state(&id), Some(ServiceState::Failed));
+        supervisor.enable_poll_timing(false);
+        assert!(supervisor.poll_timings().is_none());
     }
 }

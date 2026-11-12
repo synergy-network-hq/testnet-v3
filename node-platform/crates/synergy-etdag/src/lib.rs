@@ -25,11 +25,16 @@ pub mod profile;
 pub mod recovery;
 pub mod reveal;
 
-pub use admission::{EtdagAdmission, TargetAdmissionContext, TargetAdmissionContextV3};
+pub use admission::{
+    envelope_commitment, AdmissionRequest, EtdagAdmission, ProcessingAdmissionRequest,
+    ProcessingContext, ProcessingEnvelope, ProcessingEnvelopeAad, TargetAdmissionContext,
+    TargetAdmissionContextV3, WalletAdmission, WalletAdmissionContext, WalletProcessingAdmission,
+    ADMISSION_REQUEST_VERSION, PROCESSING_PROFILE_ID,
+};
 pub use availability::{certificate_quorum, AvailabilityCertificate, AvailabilityVote};
 pub use crypto::{
-    AeadCiphertext, AeadProvider, EncryptedTransactionEnvelope, EnvelopeNonce, IngressKemKeyRecord,
-    IngressKemKeyRegistry, IngressKemPublicKey, KemProvider, ShareCapsule,
+    AeadCiphertext, AeadProvider, EncryptedTransactionEnvelope, EnvelopeAad, EnvelopeNonce,
+    IngressKemKeyRecord, IngressKemKeyRegistry, IngressKemPublicKey, KemProvider, ShareCapsule,
 };
 pub use dag::{
     deterministic_topological_order, insert_vertex, validate_graph, EtdagGraph, TransactionVertex,
@@ -48,8 +53,9 @@ pub use ordering::{
     DeterministicProtectedBatch, ProtectedCutProof, ProtectedOrderingProof,
 };
 pub use parameters::{
-    EtdagParameters, CIPHERTEXT_SIZE_CLASSES, MAX_OUTSTANDING_NONCE_SLOTS, MIN_TARGET_HEIGHT_OFFSET,
+    EtdagParameters, CIPHERTEXT_SIZE_CLASSES, MAX_EXPERIMENTAL_TARGET_HEIGHT_OFFSET,
+    MAX_OUTSTANDING_NONCE_SLOTS, MIN_TARGET_HEIGHT_OFFSET,
 };
 pub use persistence::PersistentEtdagAdmission;
-pub use profile::ETDAG_PROFILE_ID;
+pub use profile::{ETDAG_EXPERIMENTAL_PROFILE_ID, ETDAG_PROFILE_ID};
 pub use reveal::{DecryptShareCollection, DecryptShareMessage, ProtectedRevealAuthorization};

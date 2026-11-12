@@ -1,0 +1,23 @@
+schema_version = 1
+role = "witness"
+plane = "public"
+capabilities = ["identity", "durable_storage", "telemetry", "health", "network_transport"]
+
+[ports]
+p2p = 24005
+admin = 26005
+metrics = 27005
+
+[storage]
+data_directory = "/var/lib/synergy-node/witness"
+maximum_bytes = 107374182400
+pruning = "role_policy"
+
+[keys]
+raw_export_forbidden = true
+posy_signing = false
+
+[readiness]
+requires_manifest = true
+requires_identity = true
+requires_healthy_dependencies = true

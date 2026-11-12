@@ -10,6 +10,10 @@ use crate::{
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SynQSecurityPolicy {
+    /// Historical serialized policies omit this field. Runtime policies always
+    /// select V2; V1 is retained for offline signed-vector verification only.
+    #[serde(default = "historical_signer_format")]
+    pub signer_format_version: u8,
     pub min_signature_security_level: SecurityLevel,
     pub allowed_tx_signature_algorithms: BTreeSet<AlgorithmId>,
     pub allowed_deploy_signature_algorithms: BTreeSet<AlgorithmId>,
@@ -24,23 +28,20 @@ pub struct SynQSecurityPolicy {
     pub required_network_id: Option<NetworkId>,
 }
 
+fn historical_signer_format() -> u8 {
+    1
+}
+
 impl SynQSecurityPolicy {
-    /// Testnet-1266 SynQ admission policy.
-    ///
-    /// Transactions, deploys and calls are the **account** domain and are
-    /// therefore ML-DSA-87. ML-DSA-65 is the **consensus** domain and is not
-    /// admissible here: allowing it would reintroduce exactly the cross-domain
-    /// conflation `launch/CRYPTOGRAPHIC_IDENTITY_PROFILE.md` forbids. Until
-    /// 2026-07-27 this policy named ML-DSA-65 for all three purposes, which
-    /// both violated that separation and would have rejected the governed
-    /// ML-DSA-87 genesis deployment signer.
-    pub fn testnet_1266_policy() -> Self {
+    /// Mandatory account-domain policy bound to the selected authenticated network.
+    pub fn for_network(chain_id: ChainId, network_id: NetworkId) -> Self {
         let mut tx = BTreeSet::new();
         tx.insert(AlgorithmId::MlDsa87);
         let deploy = tx.clone();
         let call = tx.clone();
 
         Self {
+            signer_format_version: 2,
             min_signature_security_level: SecurityLevel::Level3,
             allowed_tx_signature_algorithms: tx,
             allowed_deploy_signature_algorithms: deploy,
@@ -51,32 +52,8 @@ impl SynQSecurityPolicy {
             require_expiration: true,
             max_signature_size_bytes: 8 * 1024,
             max_public_key_size_bytes: 4 * 1024,
-            required_chain_id: Some(ChainId::testnet_1266()),
-            required_network_id: Some(NetworkId::testnet()),
+            required_chain_id: Some(chain_id),
+            required_network_id: Some(network_id),
         }
-    }
-
-    pub fn devnet_policy() -> Self {
-        let mut policy = Self::testnet_1266_policy();
-        policy.required_chain_id = None;
-        policy.required_network_id = Some(NetworkId(alloc::string::String::from("devnet")));
-        policy
-    }
-
-    pub fn mainnet_candidate_policy() -> Self {
-        let mut policy = Self::testnet_1266_policy();
-        policy.required_chain_id = None;
-        policy.required_network_id = Some(NetworkId(alloc::string::String::from("mainnet")));
-        policy
-    }
-
-    pub fn strict_policy() -> Self {
-        Self::testnet_1266_policy()
-    }
-}
-
-impl Default for SynQSecurityPolicy {
-    fn default() -> Self {
-        Self::testnet_1266_policy()
     }
 }

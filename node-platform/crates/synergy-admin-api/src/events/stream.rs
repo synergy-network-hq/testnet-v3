@@ -45,11 +45,15 @@ impl AdminEventStream {
         Ok(())
     }
 
-    pub fn next(&mut self) -> Option<AdminEvent> {
-        self.events.pop_front()
-    }
-
     pub fn depth(&self) -> usize {
         self.events.len()
+    }
+}
+
+impl Iterator for AdminEventStream {
+    type Item = AdminEvent;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.events.pop_front()
     }
 }

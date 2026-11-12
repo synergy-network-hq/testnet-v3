@@ -1,0 +1,6 @@
+schema_version = 1
+service = "snapshot-source"
+capabilities = ["snapshot_serve", "snapshot_sign", "archive_read"]
+requires_finality_proof = true
+maximum_concurrent_streams = 32
+retention_count = 8

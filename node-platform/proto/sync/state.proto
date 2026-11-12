@@ -1,0 +1,3 @@
+syntax = "proto3"; package synergy.sync.v1;
+message StateRequest { uint64 height = 1; repeated bytes keys = 2; }
+message StateResponse { bytes state_root = 1; repeated bytes values = 2; repeated bytes proofs = 3; }

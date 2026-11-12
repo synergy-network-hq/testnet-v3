@@ -4,26 +4,32 @@ use crate::licensing::{check_platform, VmPlatform};
 
 pub mod rpc;
 
-/// Synergy TESTNET chain id. Decimal `1264`, hex `0x4f0`.
-pub const TESTNET_CHAIN_ID: u64 = 1264;
-
-/// Synergy TESTNET chain id as returned by EVM JSON-RPC `eth_chainId`.
-pub const TESTNET_CHAIN_ID_HEX: &str = "0x4f0";
-
-/// Canonical Synergy TESTNET network id used by signed transaction/RPC envelopes.
-pub const TESTNET_NETWORK_ID: &str = "synergy-testnet-v2";
-
-/// Reserved Aegis PQVM EVM precompile address for Synergy TESTNET.
-///
-/// The address is deliberately outside the low EVM precompile range and embeds
-/// the Synergy TESTNET chain id (`0x04f0`) in the low two bytes.
-pub const EVM_PRECOMPILE_ADDRESS: [u8; 20] = [
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x04, 0xf0,
-];
-
-/// Reserved Aegis PQVM EVM precompile address as a checksummed-insensitive hex string.
-pub const EVM_PRECOMPILE_ADDRESS_HEX: &str = "0x00000000000000000000000000000000000004f0";
+/// Selected network settings supplied by authenticated host configuration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SynergyNetwork {
+    pub chain_id: u64,
+    pub network_id: String,
+    pub evm_precompile_address: String,
+}
+impl SynergyNetwork {
+    pub fn validate(&self) -> Result<(), IntegrationError> {
+        if self.chain_id == 0
+            || self.network_id.trim().is_empty()
+            || self.network_id.len() > 128
+            || self.network_id.contains(char::is_control)
+            || self.evm_precompile_address.len() != 42
+            || !self.evm_precompile_address.starts_with("0x")
+            || !self.evm_precompile_address[2..]
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit())
+        {
+            return Err(IntegrationError::InvalidPayload(
+                "invalid selected Synergy network",
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// Synergy testnet / mainnet host integration for AEG1 PQVM calls.
 ///

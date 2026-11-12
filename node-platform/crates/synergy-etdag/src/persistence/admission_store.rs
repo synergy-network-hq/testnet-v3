@@ -27,8 +27,7 @@ impl PersistentEtdagAdmission {
         context: TargetAdmissionContext,
         parameters: &EtdagParameters,
     ) -> Result<Self, EtdagError> {
-        context.validate()?;
-        parameters.validate()?;
+        context.validate_with_parameters(parameters)?;
         let store = synergy_storage::AtomicStore::new(root.as_ref(), 16 * 1024 * 1024)
             .map_err(storage_error)?;
         let admission = if store.exists("admission.json").map_err(storage_error)? {
@@ -103,6 +102,7 @@ mod tests {
 
     fn context() -> TargetAdmissionContext {
         TargetAdmissionContext {
+            target_height_offset: 5,
             source_finalized_height: 10,
             target_height: 15,
             active_validator_set_root: "set".into(),

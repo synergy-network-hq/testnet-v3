@@ -11,14 +11,18 @@ pub fn derive_vertex_id(vertex: &TransactionVertex) -> Result<EtdagDigest, Etdag
             "invalid ETDAG vertex identity fields".into(),
         ));
     }
-    EtdagDigest::from_canonical(
-        domains::DAG_VERTEX,
-        &(
-            &vertex.target_context_root,
-            vertex.target_height,
-            &vertex.envelope,
-            parents,
-            vertex.author_id.trim(),
-        ),
-    )
+    let body = (
+        &vertex.target_context_root,
+        vertex.target_height,
+        &vertex.envelope,
+        &vertex.envelope_ref,
+        parents,
+        vertex.author_id.trim(),
+    );
+    match &vertex.wallet_admission {
+        // Preserve the exact historical unsigned-body transcript for bare
+        // compatibility vertices; new proofs are part of the signed identity.
+        None => EtdagDigest::from_canonical(domains::DAG_VERTEX, &body),
+        Some(admission) => EtdagDigest::from_canonical(domains::DAG_VERTEX, &(body, admission)),
+    }
 }

@@ -8,6 +8,7 @@ pub enum TransportError {
     UnresolvedAddress,
     Capacity,
     Io(std::io::Error),
+    AcceptedStreamConfiguration(std::io::Error),
 }
 
 impl fmt::Display for TransportError {
@@ -16,6 +17,9 @@ impl fmt::Display for TransportError {
             Self::InvalidConfiguration(message) => write!(formatter, "{message}"),
             Self::UnresolvedAddress => write!(formatter, "transport address did not resolve"),
             Self::Capacity => write!(formatter, "transport connection capacity reached"),
+            Self::AcceptedStreamConfiguration(error) => {
+                write!(formatter, "accepted stream configuration failed: {error}")
+            }
             Self::Io(error) => write!(formatter, "transport I/O failed: {error}"),
         }
     }

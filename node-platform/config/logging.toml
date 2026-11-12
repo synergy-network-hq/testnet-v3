@@ -1,0 +1,6 @@
+schema_version = 1
+format = "json"
+level = "info"
+redact_secrets = true
+max_file_bytes = 134217728
+retained_files = 8

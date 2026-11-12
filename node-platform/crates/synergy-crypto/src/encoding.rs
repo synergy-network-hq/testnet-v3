@@ -8,7 +8,7 @@ pub fn hex_encode(bytes: &[u8]) -> String {
     out
 }
 pub fn hex_decode(value: &str, maximum: usize) -> Result<Vec<u8>, String> {
-    if value.len() % 2 != 0 || value.len() / 2 > maximum {
+    if !value.len().is_multiple_of(2) || value.len() / 2 > maximum {
         return Err("invalid bounded hex".into());
     }
     let bytes = value.as_bytes();

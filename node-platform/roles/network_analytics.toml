@@ -1,0 +1,22 @@
+schema_version = 1
+role = "network-analytics"
+plane = "operator"
+capabilities = ["identity", "durable_storage", "telemetry", "health", "export_analytics"]
+
+[ports]
+admin = 26009
+metrics = 27009
+
+[storage]
+data_directory = "/var/lib/synergy-node/network_analytics"
+maximum_bytes = 107374182400
+pruning = "role_policy"
+
+[keys]
+raw_export_forbidden = true
+posy_signing = false
+
+[readiness]
+requires_manifest = true
+requires_identity = true
+requires_healthy_dependencies = true

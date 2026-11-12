@@ -1,0 +1,2 @@
+syntax = "proto3"; package synergy.sync.v1;
+message Checkpoint { uint64 height = 1; uint64 epoch = 2; bytes block_hash = 3; bytes state_root = 4; bytes certificate = 5; }

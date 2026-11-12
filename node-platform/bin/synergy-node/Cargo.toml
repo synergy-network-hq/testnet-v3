@@ -6,10 +6,16 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+default = []
+qualification-timing = []
+
 [dependencies]
+synergy-address-engine = { version = "=2.0.0", path = "../../../../21-Aegis-Engine/synergy-address-engine" }
 base64.workspace = true
 ctrlc = "3"
-serde_json.workspace = true
+libc.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 sha1.workspace = true
 serde.workspace = true
 synergy-block = { path = "../../crates/synergy-block" }
@@ -50,3 +56,12 @@ synergy-rewards = { path = "../../crates/synergy-rewards" }
 synergy-governance = { path = "../../crates/synergy-governance" }
 synergy-sxcp = { path = "../../crates/synergy-sxcp" }
 synergy-uma = { path = "../../crates/synergy-uma" }
+synergy-updater = { path = "../../crates/synergy-updater" }
+
+synergy-genesis = { path = "../synergy-genesis" }
+
+
+[dev-dependencies]
+sha2 = "0.10"
+aegis-pqvm = { path = "../../crates/aegis-pqvm", default-features = false, features = ["mldsa"] }
+pqrust-traits = { path = "../../crates/aegis-pqvm/vendor/pqcrypto-traits" }

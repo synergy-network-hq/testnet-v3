@@ -1,0 +1,2 @@
+syntax = "proto3"; package synergy.p2p.v1;
+message Handshake { uint64 chain_id = 1; string network_id = 2; bytes genesis_hash = 3; string node_address = 4; repeated uint32 protocol_versions = 5; bytes nonce = 6; bytes signature = 7; }

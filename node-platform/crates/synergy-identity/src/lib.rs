@@ -1,11 +1,13 @@
 //! Public node identity validation and transport binding.
 //! This crate never stores or generates private credentials.
 
+pub mod authorization;
 mod duplicate_guard;
 mod key_binding;
 mod node_address;
 mod proof_of_possession;
 mod public_identity;
+pub mod registration;
 mod rotation;
 mod store;
 

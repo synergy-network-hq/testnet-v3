@@ -1,0 +1,22 @@
+schema_version = 1
+role = "aegis-cryptography"
+plane = "operator"
+capabilities = ["identity", "telemetry", "health", "provide_cryptography"]
+
+[ports]
+admin = 26010
+metrics = 27010
+
+[storage]
+data_directory = "/var/lib/synergy-node/aegis_cryptography"
+maximum_bytes = 107374182400
+pruning = "role_policy"
+
+[keys]
+raw_export_forbidden = true
+posy_signing = false
+
+[readiness]
+requires_manifest = true
+requires_identity = true
+requires_healthy_dependencies = true

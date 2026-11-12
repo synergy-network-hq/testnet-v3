@@ -3,7 +3,9 @@
 use crate::error::PqcError;
 use crate::traits::KeyEncapsulation;
 use crate::utils::check_buffer_size;
-use alloc::{format, vec::Vec};
+#[allow(unused_imports)]
+use alloc::format;
+use alloc::vec::Vec;
 
 #[cfg(feature = "hqckem")]
 use pqrust_hqckem::{hqckem128 as hqc128, hqckem192 as hqc192, hqckem256 as hqc256};

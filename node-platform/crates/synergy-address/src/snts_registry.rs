@@ -16,7 +16,6 @@ pub const SOURCE_DOCUMENT_SHA256: &str =
 pub const ADDRESS_ENGINE_VERSION: u32 = 1;
 pub const ADDRESS_TOTAL_LENGTH: usize = 41;
 pub const BECH32_CHECKSUM_SYMBOLS: usize = 6;
-pub const CANONICAL_BURN_ADDRESS: &str = "syn0000000000000000000000000000000";
 pub const EXPLICITLY_REJECTED_TYPED_PREFIX: &str = "synixn-";
 
 const CANONICAL_NAMESPACES: [&str; 36] = [

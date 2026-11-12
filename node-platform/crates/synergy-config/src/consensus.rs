@@ -21,6 +21,9 @@ pub struct ConsensusConfiguration {
     pub authority_binding: Option<PathBuf>,
     /// Pinned public ML-DSA-65 trust root that authenticates authority bindings.
     pub authority_trust_key_path: Option<PathBuf>,
+    /// Explicit quorum-authorized recovery certificate; never replaces the Genesis trust pin.
+    #[serde(default)]
+    pub authority_recovery_certificate_path: Option<PathBuf>,
     /// Provisioned ML-DSA-65 consensus key; voting still requires frozen authority.
     #[serde(default)]
     pub signing_key_path: Option<PathBuf>,
@@ -35,6 +38,7 @@ impl Default for ConsensusConfiguration {
             mode: ConsensusMode::Disabled,
             authority_binding: None,
             authority_trust_key_path: None,
+            authority_recovery_certificate_path: None,
             signing_key_path: None,
             proposal_timeout_ms: 2_000,
             round_timeout_ms: 5_000,

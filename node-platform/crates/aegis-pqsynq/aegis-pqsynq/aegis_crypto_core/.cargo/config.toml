@@ -1,0 +1,36 @@
+[target.wasm32-unknown-unknown]
+rustflags = [
+  "-C",
+  "target-feature=+crt-static",
+  # Force our memory settings to override wasm-pack's defaults
+  "-C",
+  "link-arg=--initial-memory=4194304",
+  "-C",
+  "link-arg=--max-memory=4194304",
+  # Additional memory configuration to ensure it's not overridden
+  "-C",
+  "link-arg=--import-memory",
+  "-C",
+  "link-arg=--export-memory",
+  # Override wasm-bindgen's memory settings
+  "-C",
+  "link-arg=--no-entry",
+  "-C",
+  "link-arg=--export-table",
+]
+
+# Also configure for wasm32-wasip1 target
+[target.wasm32-wasip1]
+rustflags = [
+  "-C",
+  "target-feature=+crt-static",
+  "-C",
+  "link-arg=--initial-memory=4194304",
+  "-C",
+  "link-arg=--max-memory=4194304",
+]
+
+# Set environment variables that wasm-bindgen respects
+[env]
+WASM_BINDGEN_WEAK_REF = "1"
+WASM_BINDGEN_EXTERNREF = "1"

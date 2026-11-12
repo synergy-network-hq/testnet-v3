@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.synergy.network/bootseed-record/v1",
+  "title": "bootseed-record",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "node_address",
+    "endpoint",
+    "expires_at",
+    "signature"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "node_address": {
+      "type": "string"
+    },
+    "endpoint": {
+      "type": "string"
+    },
+    "expires_at": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "signature": {
+      "$ref": "#/$defs/signature"
+    }
+  },
+  "$defs": {
+    "hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "signature": {
+      "type": "object",
+      "required": [
+        "key_id",
+        "algorithm",
+        "value"
+      ],
+      "properties": {
+        "key_id": {
+          "type": "string"
+        },
+        "algorithm": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

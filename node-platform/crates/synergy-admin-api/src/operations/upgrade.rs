@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub enum UpgradeOperation {
     Stage {
         release_id: String,
+        metadata_path: String,
         artifact_path: String,
     },
     Apply {
@@ -20,11 +21,14 @@ impl UpgradeOperation {
         let release_id = match self {
             Self::Stage {
                 release_id,
+                metadata_path,
                 artifact_path,
             } => {
-                if !std::path::Path::new(artifact_path).is_absolute() {
+                if !std::path::Path::new(metadata_path).is_absolute()
+                    || !std::path::Path::new(artifact_path).is_absolute()
+                {
                     return Err(crate::AdminError::invalid_request(
-                        "upgrade artifact path must be absolute",
+                        "upgrade metadata and artifact paths must be absolute",
                     ));
                 }
                 release_id

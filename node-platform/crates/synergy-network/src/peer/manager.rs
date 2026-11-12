@@ -287,6 +287,22 @@ impl PeerManager {
         r.disconnect_reason = Some(DisconnectReason::Banned);
         true
     }
+    pub fn unban(&mut self, peer: &str, now: u64) -> bool {
+        let Some(record) = self.peers.get_mut(peer) else {
+            return false;
+        };
+        if record.state != PeerState::Banned {
+            return false;
+        }
+        record.state = PeerState::Disconnected;
+        record.authenticated = false;
+        record.capabilities.clear();
+        record.ban_until = None;
+        record.retry_at = None;
+        record.disconnect_reason = None;
+        record.last_seen_at = now;
+        true
+    }
     pub fn snapshot(&self, peer: &str) -> Option<PeerSnapshot> {
         self.peers.get(peer).map(|r| PeerSnapshot {
             peer_id: peer.into(),
@@ -393,6 +409,9 @@ mod tests {
             p.admit("b", PeerDirection::Outbound, 99),
             Err(AdmissionError::Banned { until: None })
         );
+        assert!(p.unban("b", 100));
+        assert!(p.admit("b", PeerDirection::Outbound, 100).is_ok());
+        assert!(!p.unban("b", 101));
     }
     #[test]
     fn stale_detection_is_local_lifecycle_not_consensus() {

@@ -12,7 +12,7 @@ pub struct SynergyFinalityAnchor {
 
 impl SynergyFinalityAnchor {
     pub fn validate(&self) -> Result<(), String> {
-        if self.chain_id != 1266
+        if self.chain_id == 0
             || self.finalized_block_id.trim().is_empty()
             || self.finality_certificate_id.trim().is_empty()
         {

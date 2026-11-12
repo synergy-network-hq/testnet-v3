@@ -5,6 +5,7 @@ mod handler;
 mod mailbox;
 mod queue;
 mod retransmit;
+#[allow(clippy::module_inception)]
 mod router;
 
 pub use backpressure::{BackpressureState, BackpressureThresholds};

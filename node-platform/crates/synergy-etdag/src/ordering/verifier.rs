@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use crate::{protected_order_root, EtdagDigest, EtdagError, ProtectedOrderingProof};
+use crate::{protected_order_root, EtdagError, ProtectedOrderingProof};
 
 pub fn verify_ordering_proof(proof: &ProtectedOrderingProof) -> Result<(), EtdagError> {
     proof.validate_shape()?;

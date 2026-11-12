@@ -13,3 +13,4 @@ sha3.workspace = true
 blake3 = "1"
 synergy-protocol-types = { path = "../synergy-protocol-types" }
 synergy-storage = { path = "../synergy-storage" }
+rusqlite = { version = "0.32", features = ["bundled", "limits"] }

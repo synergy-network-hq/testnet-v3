@@ -1,5 +1,7 @@
 //! Aegis-owned post-quantum KEM boundary and PQVM implementation.
+#[cfg(test)]
 use aegis_pqvm::pqc::kem::mlkem::mlkem768;
+#[cfg(test)]
 use pqrust_traits::kem::{Ciphertext as _, PublicKey as _, SecretKey as _, SharedSecret as _};
 
 pub trait AegisKem: Send + Sync {
@@ -23,23 +25,39 @@ impl AegisKem for PqvmMlKem768 {
     }
 
     fn encapsulate(&self, public_key: &[u8]) -> Result<KemEncapsulation, KemError> {
-        let public_key =
-            mlkem768::PublicKey::from_bytes(public_key).map_err(|_| KemError::InvalidPublicKey)?;
-        let (shared_secret, ciphertext) = mlkem768::encapsulate(&public_key);
-        Ok(KemEncapsulation {
-            ciphertext: ciphertext.as_bytes().to_vec(),
-            shared_secret: shared_secret.as_bytes().to_vec(),
-        })
+        #[cfg(not(test))]
+        {
+            let _ = public_key;
+            Err(KemError::ProviderUnavailable)
+        }
+        #[cfg(test)]
+        {
+            let public_key = mlkem768::PublicKey::from_bytes(public_key)
+                .map_err(|_| KemError::InvalidPublicKey)?;
+            let (shared_secret, ciphertext) = mlkem768::encapsulate(&public_key);
+            Ok(KemEncapsulation {
+                ciphertext: ciphertext.as_bytes().to_vec(),
+                shared_secret: shared_secret.as_bytes().to_vec(),
+            })
+        }
     }
 
     fn decapsulate(&self, ciphertext: &[u8], secret_key: &[u8]) -> Result<Vec<u8>, KemError> {
-        let ciphertext = mlkem768::Ciphertext::from_bytes(ciphertext)
-            .map_err(|_| KemError::InvalidCiphertext)?;
-        let secret_key =
-            mlkem768::SecretKey::from_bytes(secret_key).map_err(|_| KemError::InvalidSecretKey)?;
-        Ok(mlkem768::decapsulate(&ciphertext, &secret_key)
-            .as_bytes()
-            .to_vec())
+        #[cfg(not(test))]
+        {
+            let _ = (ciphertext, secret_key);
+            Err(KemError::ProviderUnavailable)
+        }
+        #[cfg(test)]
+        {
+            let ciphertext = mlkem768::Ciphertext::from_bytes(ciphertext)
+                .map_err(|_| KemError::InvalidCiphertext)?;
+            let secret_key = mlkem768::SecretKey::from_bytes(secret_key)
+                .map_err(|_| KemError::InvalidSecretKey)?;
+            Ok(mlkem768::decapsulate(&ciphertext, &secret_key)
+                .as_bytes()
+                .to_vec())
+        }
     }
 }
 

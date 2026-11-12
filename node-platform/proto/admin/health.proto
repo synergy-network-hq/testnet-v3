@@ -1,0 +1,4 @@
+syntax = "proto3"; package synergy.admin.v1;
+message HealthRequest {}
+message HealthResponse { string status = 1; repeated DependencyHealth dependencies = 2; }
+message DependencyHealth { string name = 1; string status = 2; string detail = 3; }

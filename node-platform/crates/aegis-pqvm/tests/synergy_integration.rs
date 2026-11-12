@@ -1,10 +1,14 @@
 //! Synergy testnet integration smoke tests (AEG1 dispatch + route binding).
 
 use aegis_pqvm::integrations::abi::{self, Alg, Call, Op};
-use aegis_pqvm::integrations::synergy::{
-    rpc, SynergyIntegration, EVM_PRECOMPILE_ADDRESS, EVM_PRECOMPILE_ADDRESS_HEX, TESTNET_CHAIN_ID,
-    TESTNET_CHAIN_ID_HEX, TESTNET_NETWORK_ID,
-};
+use aegis_pqvm::integrations::synergy::{rpc, SynergyIntegration, SynergyNetwork};
+fn network() -> SynergyNetwork {
+    SynergyNetwork {
+        chain_id: 1264,
+        network_id: "synergy-testnet-v2".into(),
+        evm_precompile_address: "0x00000000000000000000000000000000000004f0".into(),
+    }
+}
 use aegis_pqvm::licensing::{self, Tier};
 use aegis_pqvm::mldsa::mldsa44;
 use pqrust_traits::sign::{DetachedSignature as _, PublicKey as _};
@@ -115,15 +119,17 @@ fn synergy_starter_tier_denies_platform() {
 }
 
 #[test]
-fn synergy_testnet_evm_constants_are_stable() {
-    assert_eq!(TESTNET_CHAIN_ID, 1264);
-    assert_eq!(TESTNET_CHAIN_ID_HEX, "0x4f0");
-    assert_eq!(TESTNET_NETWORK_ID, "synergy-testnet-v2");
-    assert_eq!(
-        EVM_PRECOMPILE_ADDRESS_HEX,
-        "0x00000000000000000000000000000000000004f0"
-    );
-    assert_eq!(&EVM_PRECOMPILE_ADDRESS[18..], &[0x04, 0xf0]);
+fn synergy_network_routes_derive_from_selected_configuration() {
+    for chain_id in [1264, 1266, 9001] {
+        let mut selected = network();
+        selected.chain_id = chain_id;
+        let route = rpc::EvmPrecompileRoute::for_network(&selected).unwrap();
+        assert_eq!(route.chain_id_hex, format!("0x{chain_id:x}"));
+        assert_eq!(route.network_id, selected.network_id);
+    }
+    let mut invalid = network();
+    invalid.chain_id = 0;
+    assert!(rpc::EvmPrecompileRoute::for_network(&invalid).is_err());
 }
 
 #[test]
@@ -140,9 +146,16 @@ fn synergy_rpc_contract_separates_public_and_trusted_methods() {
     assert!(rpc::TRUSTED_ONLY_METHODS.contains(&rpc::SynergyRpcMethod::AegisDispatchOffchain));
     assert!(rpc::SynergyRpcMethod::AegisDispatchOffchain.requires_trusted_transport());
     assert!(!rpc::SynergyRpcMethod::AegisDispatch.requires_trusted_transport());
-    assert_eq!(rpc::EVM_PRECOMPILE_ROUTE.chain_id_hex, TESTNET_CHAIN_ID_HEX);
     assert_eq!(
-        rpc::EVM_PRECOMPILE_ROUTE.address,
-        EVM_PRECOMPILE_ADDRESS_HEX
+        rpc::EvmPrecompileRoute::for_network(&network())
+            .unwrap()
+            .chain_id_hex,
+        "0x4f0"
+    );
+    assert_eq!(
+        rpc::EvmPrecompileRoute::for_network(&network())
+            .unwrap()
+            .address,
+        network().evm_precompile_address
     );
 }

@@ -24,6 +24,7 @@ impl BlockBuilder {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn build(
         self,
         network: synergy_transaction::NetworkBinding,

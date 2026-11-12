@@ -13,4 +13,13 @@ synergy-block = { path = "../synergy-block" }
 synergy-etdag = { path = "../synergy-etdag" }
 synergy-state = { path = "../synergy-state" }
 synergy-transaction = { path = "../synergy-transaction" }
+synergy-identity = { path = "../synergy-identity" }
 synergy-synq = { path = "../synergy-synq" }
+synergy-storage = { path = "../synergy-storage" }
+
+[dev-dependencies]
+hex = "0.4.3"
+sha3.workspace = true
+synergy-address = { path = "../synergy-address" }
+aegis-pqvm = { path = "../aegis-pqvm", default-features = false, features = ["mldsa", "fndsa"] }
+pqrust-traits = { path = "../aegis-pqvm/vendor/pqcrypto-traits" }

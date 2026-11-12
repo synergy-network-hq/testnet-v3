@@ -1,0 +1,2 @@
+syntax = "proto3"; package synergy.etdag.v1;
+message ProtectedIngress { uint64 chain_id = 1; string network_id = 2; uint64 target_height = 3; string sender_wallet = 4; uint64 nonce = 5; bytes envelope = 6; bytes public_key = 7; bytes signature = 8; }

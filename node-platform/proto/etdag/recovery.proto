@@ -1,0 +1,3 @@
+syntax = "proto3"; package synergy.etdag.v1;
+message RecoveryRequest { bytes vertex_id = 1; repeated uint32 missing_fragments = 2; }
+message RecoveryResponse { bytes vertex_id = 1; repeated bytes fragments = 2; }

@@ -112,10 +112,7 @@ fn replay_path(path: &Path, maximum: usize) -> Result<Vec<WalRecord>, StorageErr
     let mut file = std::fs::File::open(path).map_err(io_error)?;
     let mut records = Vec::new();
     let mut expected_sequence = 0u64;
-    loop {
-        let Some(sequence) = read_u64(&mut file)? else {
-            break;
-        };
+    while let Some(sequence) = read_u64(&mut file)? {
         let length = read_u64(&mut file)?.ok_or(StorageError::CorruptWal)?;
         let length = usize::try_from(length).map_err(|_| StorageError::RecordTooLarge {
             actual: usize::MAX,

@@ -16,6 +16,11 @@ ROOT = Path(__file__).resolve().parents[2]
 # These whole modules are included only by cfg(test) in services/mod.rs or posy.rs.
 TEST_MODULES = {f'bin/synergy-node/src/services/{name}_qualification.rs'
                 for name in ('etdag', 'posy', 'socket')}
+# Children of the explicitly cfg(test)-guarded PoSy/socket modules above.
+TEST_MODULES.update({'bin/synergy-node/src/services/posy_storage_qualification.rs',
+                     'bin/synergy-node/src/services/socket_qualification_tps.rs',
+                     'bin/synergy-node/src/services/socket_qualification_secure.rs',
+                     'bin/synergy-node/src/services/socket_qualification_secure_recovery.rs'})
 IDENTIFIER = re.compile(r'\b126[46]\b|0[xX]0*4[fF][02]\b|CHAIN.?126[46]|TESTNET.*CHAIN_ID', re.I)
 RESTRICTION = re.compile(r'\b(?:chain_id|chainId|CHAIN_ID)\b\s*(?::\s*u(?:16|32|64|128)\s*)?(?:!=|==|:|=)\s*(?:126[46]|0[xX]0*4[fF][02])\b')
 

@@ -1,0 +1,6 @@
+schema_version = 1
+role = "validator"
+network_manifest = "../../../networks/testnet-v3/network-manifest.json"
+data_directory = "/var/lib/synergy-node/validator"
+admin_socket = "/run/synergy-node/validator.sock"
+role_profile = "../../roles/validator.toml"

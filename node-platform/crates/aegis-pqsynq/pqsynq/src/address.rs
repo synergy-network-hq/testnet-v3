@@ -1,14 +1,14 @@
 //! SynQ address derivation.
 
+use crate::hash::Sha256;
 use alloc::{format, string::String};
 use serde::{de::Error as DeError, Deserialize, Deserializer, Serialize, Serializer};
-use sha2::{Digest, Sha256};
 
 use crate::{
     algorithms::AlgorithmId, domain::NetworkId, error::AegisSynQError, keys::SynQPublicKey,
 };
 
-pub const SYNQ_ADDRESS_VERSION: u8 = 1;
+pub const SYNQ_ADDRESS_VERSION: u8 = 2;
 pub const SYNQ_ADDRESS_LEN: usize = 41;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,12 +76,30 @@ pub fn derive_synq_address(
         return Err(AegisSynQError::MalformedPublicKey);
     }
 
-    let network_id = network.numeric_id()?;
+    derive_with_tag(
+        public_key,
+        algorithm,
+        SYNQ_ADDRESS_VERSION,
+        network.numeric_id()?,
+    )
+}
+
+/// Historical signer format: its tag is supplied by the pinned policy, never
+/// selected by a chain-name allowlist or the untrusted signed envelope.
+pub(crate) fn derive_with_tag(
+    public_key: &SynQPublicKey,
+    algorithm: AlgorithmId,
+    version: u8,
+    network_id: u16,
+) -> Result<SynQAddress, AegisSynQError> {
+    if public_key.bytes.is_empty() {
+        return Err(AegisSynQError::MalformedPublicKey);
+    }
     let public_key_hash = Sha256::digest(&public_key.bytes);
     let algorithm_id = algorithm.code();
 
     let mut bytes = [0_u8; SYNQ_ADDRESS_LEN];
-    bytes[0] = SYNQ_ADDRESS_VERSION;
+    bytes[0] = version;
     bytes[1..3].copy_from_slice(&network_id.to_be_bytes());
     bytes[3..5].copy_from_slice(&algorithm_id.to_be_bytes());
     bytes[5..37].copy_from_slice(&public_key_hash);

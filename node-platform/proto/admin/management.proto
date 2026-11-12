@@ -1,0 +1,4 @@
+syntax = "proto3"; package synergy.admin.v1;
+message ManagementRequest { uint32 schema_version = 1; string request_id = 2; string idempotency_key = 3; string subsystem = 4; bytes operation = 5; }
+message ManagementResponse { uint32 schema_version = 1; string request_id = 2; bytes result = 3; ProtocolError error = 4; }
+message ProtocolError { string code = 1; string message = 2; bool retryable = 3; }

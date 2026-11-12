@@ -2,6 +2,7 @@
 import copy
 import json
 import os
+import sqlite3
 from pathlib import Path
 import tempfile
 import unittest
@@ -10,6 +11,7 @@ import conformance as c
 import build_package as builder
 from configuration_schema import generate
 from synergy_linux import digest
+from test_consensus_schema import native_schema
 
 SOURCE=Path(__file__).resolve().parents[2]
 
@@ -52,6 +54,54 @@ class ConformanceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'undeclared'):c.installed(root,manifest)
             extra.rmdir();extra=root/'keys/root';extra.mkdir();secret=extra/'root.secret.key';secret.write_text('fixture');secret.chmod(0o700)
             with self.assertRaisesRegex(ValueError,'executable'):c.installed(root,manifest)
+
+    def test_native_recovery_journal_is_declared_without_a_wildcard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve()/'Synergy';root.mkdir();manifest,_=self.fixture(root)
+            directory=root/'data/consensus/posy';directory.mkdir(parents=True)
+            journal=directory/'recovery.json';journal.write_text('{}');journal.chmod(0o600)
+            self.assertTrue(c.installed(root,manifest)['conformant'])
+            (directory/'recovery-extra.json').write_text('{}')
+            with self.assertRaisesRegex(ValueError,'undeclared'):c.installed(root,manifest)
+
+    def test_live_delivery_atomic_stage_is_exactly_current_node_pid(self):
+        self.assertTrue(c.live_delivery_stage(
+            'data/consensus/posy/delivery.tmp-1234-9', 1234))
+        for relative,pid in (
+            ('data/consensus/posy/delivery.tmp-1235-9', 1234),
+            ('data/consensus/posy/delivery.tmp-1234-unbounded', 1234),
+            ('data/consensus/posy/other.tmp-1234-9', 1234),
+            ('data/consensus/posy/delivery.tmp-1234-9', None),
+        ):
+            self.assertFalse(c.live_delivery_stage(relative,pid))
+
+    def test_native_processing_group_digest_is_512_bits_not_block_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve()/'Synergy';root.mkdir();manifest,_=self.fixture(root)
+            directory=root/'data/blocks/processing-proposal-inputs-v1/certified-groups'
+            directory.mkdir(parents=True,mode=0o700)
+            member=directory/('ab'*64+'.json');member.write_text('{}');member.chmod(0o600)
+            self.assertTrue(c.installed(root,manifest)['conformant'])
+            member.rename(directory/('ab'*32+'.json'))
+            with self.assertRaisesRegex(ValueError,'undeclared'):c.installed(root,manifest)
+
+    def test_additive_archive_schema_and_exact_segment_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve()/'Synergy';root.mkdir();manifest,_=self.fixture(root)
+            directory=root/'data/consensus/posy';directory.mkdir(parents=True,mode=0o700)
+            archive=directory/'consensus-evidence-v1.sqlite3'
+            connection=sqlite3.connect(archive)
+            native_schema(connection)
+            connection.close();archive.chmod(0o600)
+            segments=directory/'archive';segments.mkdir(mode=0o700)
+            segment=segments/'segment-00000000000000000001.sya';segment.write_bytes(b'fixture');segment.chmod(0o600)
+            # Conformance validates footprint/schema. Native storage verifies frames.
+            self.assertTrue(c.installed(root,manifest)['conformant'])
+            connection=sqlite3.connect(archive);connection.execute('CREATE TABLE obsolete(fixture INTEGER)');connection.commit();connection.close()
+            with self.assertRaisesRegex(ValueError,'archive schema'):c.installed(root,manifest)
+            connection=sqlite3.connect(archive);connection.execute('DROP TABLE obsolete');connection.commit();connection.close()
+            segment.rename(segments/'segment-arbitrary.sya')
+            with self.assertRaisesRegex(ValueError,'undeclared'):c.installed(root,manifest)
 
     def test_software_and_selected_release_drift_fail(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -110,6 +160,18 @@ class ConformanceTests(unittest.TestCase):
             (root/'bin/synergy-node').chmod(0o700)
             link=Path(tmp).resolve()/'link';link.symlink_to(root)
             with self.assertRaisesRegex(ValueError,'non-symlink'):c.installed(link,manifest)
+
+    def test_builder_binds_native_archive_format_and_forward_boundary(self):
+        formats=builder.native_storage_formats()
+        self.assertEqual(formats['consensus_evidence_sqlite'],2)
+        self.assertEqual(formats['consensus_evidence_sqlite_readable'],[1,2])
+        self.assertEqual(formats['consensus_archive_segment_header'],'SNPARC02')
+        self.assertEqual(formats['downgrade_after_schema2_activation'],'unsupported')
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);p=root/'crates/synergy-posy/src/persistence';p.mkdir(parents=True)
+            (p/'evidence_store.rs').write_text('const FORMAT: i64 = 3;')
+            (p/'archive_segments.rs').write_text('const HEADER: &[u8; 8] = b"SNPARC03";')
+            with self.assertRaisesRegex(ValueError,'compatibility review'):builder.native_storage_formats(root)
 
     def test_builder_refuses_stale_master_members_before_sealing(self):
         with tempfile.TemporaryDirectory() as tmp:

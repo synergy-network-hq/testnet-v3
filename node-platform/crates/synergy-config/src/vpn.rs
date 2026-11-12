@@ -13,6 +13,8 @@ pub enum VpnMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VpnConfiguration {
+    #[serde(default)]
+    pub transport_context: Option<TransportContext>,
     pub mode: VpnMode,
     pub interface_name: Option<String>,
     pub signed_registry_path: Option<PathBuf>,
@@ -25,6 +27,7 @@ pub struct VpnConfiguration {
 impl Default for VpnConfiguration {
     fn default() -> Self {
         Self {
+            transport_context: None,
             mode: VpnMode::Disabled,
             interface_name: None,
             signed_registry_path: None,
@@ -32,4 +35,14 @@ impl Default for VpnConfiguration {
             provider_plan_sha256: None,
         }
     }
+}
+
+/// Names bound by the signed transport snapshot and selected network configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransportContext {
+    pub network: String,
+    pub registry_id: String,
+    pub release_id: String,
+    pub protocol_version: String,
 }

@@ -1,6 +1,4 @@
-use synergy_crypto::{
-    sha3_256, AegisDigest, AegisVerifier, CryptoDomain, KeyId, Signature, SigningContext,
-};
+use synergy_crypto::{sha3_256, AegisDigest, CryptoDomain, KeyId, Signature, SigningContext};
 
 use crate::{SnapshotChunk, SnapshotManifest, SnapshotVerificationProvider};
 

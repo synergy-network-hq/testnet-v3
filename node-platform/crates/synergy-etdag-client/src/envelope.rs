@@ -21,21 +21,31 @@ impl ClientEnvelope {
         encryptor: &impl ClientEncryptor,
         target: &VerifiedTargetContext,
         keys: &ActiveIngressKeys,
-        envelope_id: EtdagDigest,
         plaintext: &[u8],
     ) -> Result<Self, EnvelopeBuildError> {
         let payload = encrypt_for_target(encryptor, target, keys, plaintext)
             .map_err(EnvelopeBuildError::Encryption)?;
-        let envelope = EncryptedTransactionEnvelope {
-            envelope_id,
+        let mut envelope = EncryptedTransactionEnvelope {
+            envelope_version: 2,
+            envelope_id: EtdagDigest("0".repeat(128)),
             target_context_root: target
                 .context_root()
                 .map_err(|error| EnvelopeBuildError::Invalid(format!("{error:?}")))?,
             target_height: target.target_height(),
+            aad: payload.aad,
+            aead_nonce: payload.aead_nonce,
+            key_commitment: payload.key_commitment,
+            share_commitment_root: EtdagDigest("0".repeat(128)),
+            share_capsule_root: EtdagDigest("0".repeat(128)),
             ciphertext: payload.ciphertext,
             content_blind_order_key: payload.content_blind_order_key,
             share_capsules: payload.share_capsules,
         };
+        envelope
+            .refresh_capsule_roots()
+            .map_err(|e| EnvelopeBuildError::Invalid(format!("{e:?}")))?;
+        envelope.envelope_id = synergy_etdag::envelope_commitment(&envelope)
+            .map_err(|e| EnvelopeBuildError::Invalid(format!("{e:?}")))?;
         envelope
             .validate()
             .map_err(|error| EnvelopeBuildError::Invalid(format!("{error:?}")))?;

@@ -10,6 +10,42 @@ import synergy_linux as node
 import vpn
 
 class RefusalTests(unittest.TestCase):
+    def test_in_root_bootstrap_installs_only_pinned_master_into_empty_root(self):
+        import hashlib
+        from conformance import DIRECTORIES
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()/'Synergy'
+            stage = root/node.BOOTSTRAP_MASTER
+            stage.mkdir(parents=True, mode=0o700)
+            root.chmod(0o700); (root/'tmp').chmod(0o700)
+            for name in DIRECTORIES: (stage/name).mkdir(mode=0o700)
+            roles = ['validator'] + [f'role-{i}' for i in range(19)]
+            for role in roles: (stage/'roles'/role).mkdir(mode=0o700)
+            node.write_new(stage/'roles/roles.json', {'roles':roles,'implemented':['validator']})
+            for name in ('synergy-node','synergy-keytool','synergy-genesis','netbird'):
+                (stage/'bin'/name).write_bytes(b'\x7fELF\x02\x01\x01'+bytes(11)+b'\x3e\x00')
+            files={p.relative_to(stage).as_posix():hashlib.sha256(p.read_bytes()).hexdigest()
+                   for p in stage.rglob('*') if p.is_file()}
+            node.write_new(stage/'package.json', {'format':node.MARKER,'architecture':'x86_64','files':files})
+            pin=node.digest(stage/'package.json')
+            with patch.object(node,'_require_install_operator'), patch.object(lifecycle,'_mountinfo_text',return_value=''), patch.object(node,'native') as operation:
+                with self.assertRaisesRegex(ValueError,'digest'):
+                    node._staged_master(root,stage,'0'*64)
+                foreign=root/'existing'; foreign.write_text('must survive')
+                with self.assertRaisesRegex(ValueError,'existing installation'):
+                    node._staged_master(root,stage,pin)
+                self.assertEqual(foreign.read_text(),'must survive')
+                foreign.unlink()
+                operation.assert_not_called()
+                result=node.install(stage,root,'validator','offline-fixture',99999,'fixture',
+                                    staged_master_sha256=pin)
+                operation.assert_called_once_with([root/'bin/synergy-node','version'])
+            self.assertEqual(result['package_sha256'],pin)
+            self.assertFalse(result['consensus_started'])
+            self.assertFalse(stage.exists())
+            self.assertFalse((root/'data').exists())
+            self.assertFalse(list((root/'keys').iterdir()))
+
     def test_role_key_ids_are_unique_across_nodes_and_roles(self):
         ids = {node.operational_key_id(role, address) for role in ('p2p','consensus','ingress')
                for address in ('synv1identitya','synv1identityb')}

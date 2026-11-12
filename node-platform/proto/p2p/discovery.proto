@@ -1,0 +1,4 @@
+syntax = "proto3"; package synergy.p2p.v1;
+message DiscoveryQuery { repeated string capabilities = 1; uint32 limit = 2; }
+message DiscoveryResult { repeated PeerRecord peers = 1; }
+message PeerRecord { string node_address = 1; repeated string endpoints = 2; uint64 expires_at = 3; bytes signature = 4; }

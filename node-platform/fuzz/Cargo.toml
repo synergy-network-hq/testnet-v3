@@ -1,7 +1,96 @@
 [package]
-name = "synergy-scaffold-fuzz"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-rust-version.workspace = true
+name = "synergy-fuzz"
+version = "0.1.0"
+edition = "2021"
 publish = false
+[package.metadata]
+cargo-fuzz = true
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "block"
+path = "fuzz_targets/block.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "etdag_certificate"
+path = "fuzz_targets/etdag_certificate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "etdag_envelope"
+path = "fuzz_targets/etdag_envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "etdag_reveal"
+path = "fuzz_targets/etdag_reveal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "etdag_vertex"
+path = "fuzz_targets/etdag_vertex.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "handshake"
+path = "fuzz_targets/handshake.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "network_manifest"
+path = "fuzz_targets/network_manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "p2p_frame"
+path = "fuzz_targets/p2p_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "posy_certificate"
+path = "fuzz_targets/posy_certificate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "posy_vote"
+path = "fuzz_targets/posy_vote.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "snapshot_manifest"
+path = "fuzz_targets/snapshot_manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transaction"
+path = "fuzz_targets/transaction.rs"
+test = false
+doc = false
+bench = false

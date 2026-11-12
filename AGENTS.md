@@ -4,13 +4,13 @@
 
 The only authoritative Core Protocol checkout is:
 
-`/home/node/Synergy-Network/01-Core-Protocol`
+`/Volumes/PortableSSD/Synergy-Network/01-Core-Protocol`
 
-on `synergy-val4`.
+on this Mac’s external SSD (relocated; confirmed by the user 2026-10-08).
 
 The one canonical universal node implementation is:
 
-`/home/node/Synergy-Network/01-Core-Protocol/node-platform`
+`/Volumes/PortableSSD/Synergy-Network/01-Core-Protocol/node-platform`
 
 Network-specific governed artifacts belong below `networks/<network>/` and do
 not own the universal node implementation. The former Testnet-v3 monolithic
@@ -33,7 +33,7 @@ describe a checkout location but never define canonical file identity. Keep
 `IMPLEMENTED`, `CALLERS_MIGRATED`, `LEGACY_REMOVED`, and `VERIFIED` as distinct
 states.
 
-Production code must be edited directly in the Val4 `node-platform` directory.
+Production code must be edited directly in this local SSD `node-platform` directory.
 Never create source mirrors, staging worktrees, duplicate implementations,
 `*.current.*`, `*.remote.*`, `*.old.*`, `*.backup.*`, or alternate migration
 ledgers. Testnet-v3 execution-control files remain at
@@ -63,7 +63,7 @@ Do not create nested clones, long-lived worktrees, or copied Core Protocol or
 Testnet trees. A temporary worktree requires a named purpose, reconciliation
 into this checkout, and removal with `git worktree remove`. Testnet-v2 source
 and runtime artifacts are forbidden. The Node Control Panel source belongs only
-at `/Volumes/xcode/Synergy-Network/07-Node-Control-Panel`; do not copy it into
+at `/Volumes/PortableSSD/Synergy-Network/07-Node-Control-Panel`; do not copy it into
 Core Protocol.
 
 ## Agent operating system

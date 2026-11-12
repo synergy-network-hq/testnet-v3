@@ -1,6 +1,7 @@
 mod certificate;
 mod recovery;
 mod round_change;
+#[allow(clippy::module_inception)]
 mod timeout;
 
 pub use certificate::SimplifiedTimeoutCertificate;

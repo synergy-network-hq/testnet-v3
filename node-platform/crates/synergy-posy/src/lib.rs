@@ -6,6 +6,7 @@
 //! authority or determine finality.
 
 pub mod clustering;
+pub mod delivery;
 pub mod domains;
 pub mod engine;
 pub mod errors;
@@ -25,6 +26,7 @@ pub mod version;
 pub mod voting;
 
 pub use clustering::*;
+pub use delivery::*;
 pub use domains::*;
 pub use engine::*;
 pub use errors::PosyError;
@@ -34,7 +36,7 @@ pub use metrics::*;
 pub use network::*;
 pub use parameters::*;
 pub use persistence::{
-    JournalError, SignOnceJournal, SigningSlot, VerifiedQuorumCertificateStore,
+    JournalError, SignOnceJournal, SigningSlot, TimeoutSlotCursor, VerifiedQuorumCertificateStore,
     VerifiedTimeoutCertificateStore,
 };
 pub use proposal::*;

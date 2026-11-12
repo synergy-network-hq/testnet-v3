@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use crate::{Capability, RoleError, RoleProfile};
+use crate::{RoleError, RoleProfile};
 
 pub fn validate_profile_set(profiles: &[RoleProfile]) -> Result<(), RoleError> {
     if profiles.is_empty() {

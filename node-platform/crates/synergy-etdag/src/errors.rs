@@ -1,8 +1,11 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EtdagError {
     UnsupportedProfile,
+    CryptoProvider(String),
     InvalidTargetOffset,
     InvalidCapacity,
+    /// Local memory reservation is temporarily unavailable; this is not invalid protocol evidence.
+    ResourcePressure(String),
     InvalidCiphertextClasses,
     ContextMismatch,
     EmptyCiphertext,
@@ -15,7 +18,10 @@ pub enum EtdagError {
     UnknownParent(String),
     DuplicateVertex(String),
     Cycle,
-    InsufficientAvailability { signed: usize, required: usize },
+    InsufficientAvailability {
+        signed: usize,
+        required: usize,
+    },
     UnauthorizedReveal,
     DuplicateShare(String),
     InvalidExecutionInput,
@@ -26,7 +32,10 @@ pub enum EtdagError {
     ConflictingArtifact(String),
     MissingArtifact(String),
     Governance(String),
-    RevealThreshold { collected: usize, required: usize },
+    RevealThreshold {
+        collected: usize,
+        required: usize,
+    },
     Storage(String),
     Corrupt(String),
 }

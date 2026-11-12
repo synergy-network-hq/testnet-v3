@@ -6,15 +6,19 @@ use sha2::{Digest, Sha256};
 
 fn payload_fixture() -> SynQSigningPayload {
     let public_key = SynQPublicKey::new(vec![0x42, 0x51, 0x60, 0x7f, 0x88, 0x99]);
-    let signer_address =
-        derive_synq_address(&public_key, AlgorithmId::MlDsa65, &NetworkId::testnet()).unwrap();
+    let signer_address = derive_synq_address(
+        &public_key,
+        AlgorithmId::MlDsa65,
+        &NetworkId("synergy-testnet".into()),
+    )
+    .unwrap();
     let mut payload_hash = [0_u8; 32];
     payload_hash.copy_from_slice(&Sha256::digest(b"canonical payload test body"));
 
     SynQSigningPayload {
         domain_tag: DomainTag::SynqContractDeployV1,
-        chain_id: ChainId::testnet_1266(),
-        network_id: NetworkId::testnet(),
+        chain_id: ChainId(1266),
+        network_id: NetworkId("synergy-testnet".into()),
         protocol_version: 1,
         algorithm_id: AlgorithmId::MlDsa65,
         signature_purpose: SignaturePurpose::ContractDeploy,

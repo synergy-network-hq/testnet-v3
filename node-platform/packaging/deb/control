@@ -1,0 +1,8 @@
+Package: synergy-node
+Version: 0.1.0
+Section: net
+Priority: optional
+Architecture: amd64
+Maintainer: Synergy Network <operations@synergy-network.io>
+Depends: ca-certificates, netbird
+Description: Universal Synergy Network node

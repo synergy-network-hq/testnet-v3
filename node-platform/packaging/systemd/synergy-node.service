@@ -1,0 +1,24 @@
+[Unit]
+Description=Synergy universal node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=synergy
+Group=synergy
+EnvironmentFile=-/etc/synergy/node.env
+ExecStart=/usr/local/bin/synergy-node start --config /etc/synergy/node.json
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=1048576
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/synergy-node /run/synergy-node
+RuntimeDirectory=synergy-node
+StateDirectory=synergy-node
+
+[Install]
+WantedBy=multi-user.target

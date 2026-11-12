@@ -11,3 +11,6 @@ serde.workspace = true
 synergy-etdag = { path = "../synergy-etdag" }
 synergy-governance = { path = "../synergy-governance" }
 synergy-transaction = { path = "../synergy-transaction" }
+
+[dev-dependencies]
+synergy-address = { path = "../synergy-address" }

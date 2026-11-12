@@ -1,6 +1,4 @@
-use super::{
-    AdmissionQueue, IngressRateLimiter, IngressReplayProtection, ProtectedIngressReceipt,
-};
+use super::{AdmissionQueue, IngressRateLimiter, IngressReplayProtection, ProtectedIngressReceipt};
 use crate::admission::{
     AdmissionRequest, AdmissionResourceLimits, AdmissionSignatureVerifier, AdmissionValidator,
 };
@@ -15,6 +13,7 @@ pub struct ProtectedIngressService<V> {
 }
 
 impl<V: AdmissionSignatureVerifier> ProtectedIngressService<V> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         chain_id: u64,
         network_id: String,
@@ -63,15 +62,10 @@ impl<V: AdmissionSignatureVerifier> ProtectedIngressService<V> {
             sender_nonce: request.sender_nonce,
             accepted_at_millis: now_millis,
         };
-        self.rate_limiter
-            .record(&request.sender_wallet, now_millis);
+        self.rate_limiter.record(&request.sender_wallet, now_millis);
         self.replay.record(&request);
         self.queue.push(request);
         Ok(receipt)
-    }
-
-    pub fn next(&mut self) -> Option<AdmissionRequest> {
-        self.queue.pop()
     }
 
     pub fn close(&mut self) {
@@ -84,5 +78,13 @@ impl<V: AdmissionSignatureVerifier> ProtectedIngressService<V> {
 
     pub const fn may_determine_finality(&self) -> bool {
         false
+    }
+}
+
+impl<V: AdmissionSignatureVerifier> Iterator for ProtectedIngressService<V> {
+    type Item = AdmissionRequest;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.queue.pop()
     }
 }

@@ -1,0 +1,65 @@
+[package]
+name = "synergy-benchmarks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+[dependencies]
+criterion = "0.5"
+sha3.workspace = true
+
+[[bench]]
+name = "block_validation"
+path = "block_validation.rs"
+harness = false
+
+[[bench]]
+name = "certificate_validation"
+path = "certificate_validation.rs"
+harness = false
+
+[[bench]]
+name = "etdag_encryption"
+path = "etdag_encryption.rs"
+harness = false
+
+[[bench]]
+name = "etdag_ordering"
+path = "etdag_ordering.rs"
+harness = false
+
+[[bench]]
+name = "etdag_reveal"
+path = "etdag_reveal.rs"
+harness = false
+
+[[bench]]
+name = "etdag_validation"
+path = "etdag_validation.rs"
+harness = false
+
+[[bench]]
+name = "p2p"
+path = "p2p.rs"
+harness = false
+
+[[bench]]
+name = "posy_vote_processing"
+path = "posy_vote_processing.rs"
+harness = false
+
+[[bench]]
+name = "signature_verification"
+path = "signature_verification.rs"
+harness = false
+
+[[bench]]
+name = "state_transition"
+path = "state_transition.rs"
+harness = false
+
+[[bench]]
+name = "storage"
+path = "storage.rs"
+harness = false

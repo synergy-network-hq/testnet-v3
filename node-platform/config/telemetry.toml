@@ -1,0 +1,6 @@
+schema_version = 1
+metrics_enabled = true
+traces_enabled = true
+bind = "127.0.0.1:9464"
+include_peer_ids = false
+include_key_material = false

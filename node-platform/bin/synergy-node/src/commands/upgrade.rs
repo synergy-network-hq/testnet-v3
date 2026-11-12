@@ -5,12 +5,20 @@ use super::{absolute_path, nonempty};
 pub fn operation(
     action: &str,
     release_id: &str,
+    metadata_path: Option<&str>,
     artifact_path: Option<&str>,
 ) -> Result<AdminOperation, String> {
     let release_id = nonempty(release_id, "release ID", 256)?;
     let operation = match action {
         "stage" => UpgradeOperation::Stage {
             release_id,
+            metadata_path: absolute_path(
+                metadata_path.ok_or("stage requires a signed metadata path")?,
+                "upgrade metadata path",
+            )?
+            .to_str()
+            .ok_or("upgrade metadata path is not valid UTF-8")?
+            .to_string(),
             artifact_path: absolute_path(
                 artifact_path.ok_or("stage requires an artifact path")?,
                 "upgrade artifact path",

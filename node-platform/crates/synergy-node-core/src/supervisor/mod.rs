@@ -5,6 +5,7 @@ mod dependency_graph;
 mod restart_policy;
 mod service;
 mod shutdown;
+#[allow(clippy::module_inception)]
 mod supervisor;
 
 pub use cancellation::CancellationToken;
@@ -15,4 +16,4 @@ pub use service::{
     ServiceState,
 };
 pub use shutdown::ShutdownReport;
-pub use supervisor::Supervisor;
+pub use supervisor::{PollTimingSample, PollTimings, ServicePollTiming, Supervisor};

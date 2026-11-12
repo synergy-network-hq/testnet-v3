@@ -1,0 +1,11 @@
+{
+  "epoch": 1,
+  "height": 1,
+  "round": 1,
+  "signers": [
+    "v2",
+    "v3",
+    "v4",
+    "v5"
+  ]
+}

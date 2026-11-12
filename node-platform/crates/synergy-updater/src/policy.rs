@@ -25,6 +25,7 @@ impl AutomaticUpdatePolicy {
         if self.minimum_free_bytes == 0
             || self.maximum_artifact_bytes == 0
             || self.maximum_artifact_bytes > crate::MAXIMUM_ARTIFACT_BYTES
+            || (self.mode == UpdateMode::InstallWhenHealthy && !self.allow_rollback)
         {
             return Err("invalid update policy limits");
         }

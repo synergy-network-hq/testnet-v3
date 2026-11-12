@@ -1,0 +1,23 @@
+schema_version = 1
+role = "ai-assurance"
+plane = "public"
+capabilities = ["identity", "durable_storage", "telemetry", "health", "network_transport"]
+
+[ports]
+p2p = 24015
+admin = 26015
+metrics = 27015
+
+[storage]
+data_directory = "/var/lib/synergy-node/ai_assurance"
+maximum_bytes = 107374182400
+pruning = "role_policy"
+
+[keys]
+raw_export_forbidden = true
+posy_signing = false
+
+[readiness]
+requires_manifest = true
+requires_identity = true
+requires_healthy_dependencies = true

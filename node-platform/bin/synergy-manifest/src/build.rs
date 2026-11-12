@@ -35,8 +35,8 @@ pub struct UnsignedManifest {
 
 impl UnsignedManifest {
     pub fn validate(&self) -> Result<(), String> {
-        if self.format_version != 1
-            || self.chain_id != 1266
+        if !matches!(self.format_version, 1 | 2)
+            || self.chain_id == 0
             || !bounded_text(&self.network_id, 128)
             || !bounded_text(&self.release_version, 128)
             || !bounded_text(&self.manifest_authority_key_id, 128)
@@ -97,7 +97,12 @@ impl UnsignedManifest {
     pub fn manifest_hash(&self) -> Result<String, String> {
         let bytes = self.canonical_bytes()?;
         let mut hasher = Sha3_256::new();
-        hasher.update(b"SYNERGY_CHAIN1266_NETWORK_MANIFEST_V1");
+        // V1 is an immutable historical wire-format namespace, not a chain restriction.
+        hasher.update(if self.format_version == 1 {
+            b"SYNERGY_CHAIN1266_NETWORK_MANIFEST_V1".as_slice()
+        } else {
+            b"SYNERGY_NETWORK_MANIFEST_V2".as_slice()
+        });
         hasher.update((bytes.len() as u64).to_be_bytes());
         hasher.update(bytes);
         Ok(format!("{:x}", hasher.finalize()))

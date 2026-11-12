@@ -33,7 +33,7 @@ pub struct ReleaseMetadata {
 
 impl ReleaseMetadata {
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.format_version != 1
+        if self.format_version != 2
             || self.release_id.is_empty()
             || self.release_id.len() > 256
             || self.sequence == 0
@@ -54,8 +54,10 @@ impl ReleaseMetadata {
         Ok(())
     }
 
-    pub fn signing_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
-        serde_json::to_vec(self)
+    /// Version 2 binds the software-release domain and chain cryptographically.
+    /// Version 1 raw-JSON signatures are deliberately not accepted.
+    pub fn signing_bytes(&self, chain_id: u64) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(&("synergy.software.release.v2", chain_id, self))
     }
 }
 

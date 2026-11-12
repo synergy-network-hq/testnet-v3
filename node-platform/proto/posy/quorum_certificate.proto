@@ -1,0 +1,3 @@
+syntax = "proto3"; package synergy.posy.v1;
+message QuorumCertificate { uint64 epoch = 1; uint64 height = 2; uint64 round = 3; bytes block_hash = 4; repeated SignedVote votes = 5; }
+message SignedVote { string validator = 1; bytes signature = 2; uint64 frozen_weight = 3; }

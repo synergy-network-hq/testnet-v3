@@ -1,6 +1,4 @@
 //! Bounded, mutually authenticated P2P session I/O. No consensus authority.
-use std::fs::File;
-use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{
     mpsc::{self, Receiver, SyncSender},
@@ -9,9 +7,7 @@ use std::sync::{
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use synergy_aegis::{
-    AegisPolicy, GovernedKeyBindings, PqvmSigner, PqvmVerifier, SignatureAlgorithm,
-};
+use synergy_aegis::{GovernedKeyBindings, PqvmSigner, PqvmVerifier};
 use synergy_network::handshake::{
     build_handshake_proof, verify_handshake, AegisHandshakeSigner, AegisHandshakeVerifier,
     HandshakeChallenge, HandshakeMetadata, HandshakeOffer, HandshakeProof, PeerKeyAlgorithm,
@@ -41,9 +37,9 @@ pub struct SessionContext {
     pub chain_id: u64,
     pub bindings: Arc<GovernedKeyBindings>,
     pub verifier: Arc<AegisHandshakeVerifier<PqvmVerifier>>,
+    pub frame_verifier: PqvmVerifier,
     pub signer: Arc<PqvmSigner>,
     pub signing_key_id: synergy_aegis::KeyId,
-    pub policy: AegisPolicy,
     pub manager: Arc<Mutex<PeerManager>>,
     pub limits: FrameLimits,
     pub handshake_timeout: Duration,
@@ -54,6 +50,8 @@ pub struct SessionContext {
 pub struct OutboundPayload {
     pub protocol: ProtocolKind,
     pub payload: Vec<u8>,
+    #[cfg(feature = "qualification-timing")]
+    pub diagnostic_enqueued_at: Option<std::time::Instant>,
 }
 
 pub enum NetworkEvent {
@@ -68,7 +66,22 @@ pub enum NetworkEvent {
         session_id: SessionId,
         sender: SyncSender<OutboundPayload>,
         control: TransportConnection,
+        apqe_engineering_session: bool,
     },
+}
+
+/// Forward an authenticated frame into the bounded service queue. Queue
+/// pressure drops this frame like packet loss; it must not tear down the
+/// authenticated peer session. Reliable owners retry messages they need.
+fn enqueue_authenticated_frame(
+    events: &SyncSender<NetworkEvent>,
+    frame: InboundFrame,
+) -> Result<bool, &'static str> {
+    match events.try_send(NetworkEvent::Frame(frame)) {
+        Ok(()) => Ok(true),
+        Err(mpsc::TrySendError::Full(_)) => Ok(false),
+        Err(mpsc::TrySendError::Disconnected(_)) => Err("network ingress queue closed"),
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -183,9 +196,9 @@ fn now() -> Result<u64, String> {
 
 fn challenge() -> Result<HandshakeChallenge, String> {
     let mut nonce = [0u8; 32];
-    File::open("/dev/urandom")
-        .and_then(|mut file| file.read_exact(&mut nonce))
-        .map_err(|error| format!("obtain secure handshake nonce: {error}"))?;
+    synergy_aegis::AegisProtectedPrimitives
+        .random_bytes(&mut nonce)
+        .map_err(|_| "APQE handshake entropy unavailable".to_string())?;
     HandshakeChallenge::new(nonce, now()?, CHALLENGE_LIFETIME).map_err(|error| error.to_string())
 }
 
@@ -302,11 +315,8 @@ fn read_frames(
         .get(peer.node_address.as_str())
         .ok_or("authenticated peer has no governed key binding")?
         .clone();
-    let verifier = AegisFrameVerifier::new(
-        PqvmVerifier::new(context.policy.clone()).map_err(|error| error.to_string())?,
-        binding,
-        context.chain_id,
-    )?;
+    let verifier =
+        AegisFrameVerifier::new(context.frame_verifier.clone(), binding, context.chain_id)?;
     let mut next_sequence = 1u64;
     while !context.shutdown.load(Ordering::Acquire) {
         let mut header = [0u8; FRAME_HEADER_BYTES];
@@ -329,29 +339,69 @@ fn read_frames(
         let mut wire = Vec::with_capacity(total);
         wire.extend_from_slice(&header);
         wire.resize(total, 0);
+        #[cfg(feature = "qualification-timing")]
+        let diagnostic_read = super::qualification_timing::transport_span(
+            super::qualification_timing::TransportStage::ReadBody,
+            peer.node_address.as_str(),
+            peer.session_id.0,
+            next_sequence,
+            header[6],
+            payload_len,
+            &[],
+            None,
+        );
         connection
             .read_exact(&mut wire[FRAME_HEADER_BYTES..])
             .map_err(|error| error.to_string())?;
+        #[cfg(feature = "qualification-timing")]
+        diagnostic_read.finish(true);
         context.ingress.permit_overlay_peer(
             peer.node_address.as_str(),
             connection.peer_addr(),
             connection.is_inbound(),
             context.overlay_required,
         )?;
+        #[cfg(feature = "qualification-timing")]
+        let diagnostic_verify = super::qualification_timing::transport_span(
+            super::qualification_timing::TransportStage::Verify,
+            peer.node_address.as_str(),
+            peer.session_id.0,
+            next_sequence,
+            header[6],
+            payload_len,
+            &wire[FRAME_HEADER_BYTES..FRAME_HEADER_BYTES + payload_len],
+            None,
+        );
         let decoded = decode_authenticated(&wire, context.limits, &verifier)
             .map_err(|error| format!("verify authenticated frame: {error:?}"))?;
         if decoded.session_id() != peer.session_id || decoded.sequence() != next_sequence {
             return Err("cross-session or replayed authenticated frame".into());
         }
+        #[cfg(feature = "qualification-timing")]
+        diagnostic_verify.finish(true);
         next_sequence = next_sequence
             .checked_add(1)
             .ok_or("authenticated frame sequence exhausted")?;
         let frame = decoded
             .into_inbound(peer.clone(), context.limits.max_payload_bytes())
             .map_err(|error| error.to_string())?;
-        events
-            .try_send(NetworkEvent::Frame(frame))
-            .map_err(|_| "bounded network ingress queue is full or closed")?;
+        // A full service queue is transient backpressure, not an
+        // authentication or session-integrity failure. Keep reading the
+        // ordered stream; reliable owners retransmit messages as needed.
+        #[cfg(feature = "qualification-timing")]
+        let diagnostic_ingress = super::qualification_timing::transport_span(
+            super::qualification_timing::TransportStage::Ingress,
+            peer.node_address.as_str(),
+            peer.session_id.0,
+            next_sequence - 1,
+            header[6],
+            payload_len,
+            &frame.payload,
+            None,
+        );
+        let _diagnostic_admitted = enqueue_authenticated_frame(events, frame)?;
+        #[cfg(feature = "qualification-timing")]
+        diagnostic_ingress.finish(_diagnostic_admitted);
     }
     Ok(())
 }
@@ -377,12 +427,40 @@ fn write_frames(
         };
         let envelope = OutboundEnvelope::new(frame.protocol, session_id, sequence, &frame.payload)
             .map_err(|error| error.to_string())?;
+        #[cfg(feature = "qualification-timing")]
+        let diagnostic_sign = super::qualification_timing::transport_span(
+            super::qualification_timing::TransportStage::Sign,
+            &connection.peer_addr().to_string(),
+            session_id.0,
+            sequence,
+            synergy_network::protocol::protocol_id(frame.protocol),
+            frame.payload.len(),
+            &frame.payload,
+            frame
+                .diagnostic_enqueued_at
+                .map(|at| at.elapsed().as_nanos().min(u64::MAX as u128) as u64),
+        );
         let wire = encode_authenticated(envelope, context.limits, &signer)
             .map_err(|error| format!("sign outbound frame: {error:?}"))?;
+        #[cfg(feature = "qualification-timing")]
+        diagnostic_sign.finish(true);
+        #[cfg(feature = "qualification-timing")]
+        let diagnostic_write = super::qualification_timing::transport_span(
+            super::qualification_timing::TransportStage::Write,
+            &connection.peer_addr().to_string(),
+            session_id.0,
+            sequence,
+            synergy_network::protocol::protocol_id(frame.protocol),
+            frame.payload.len(),
+            &frame.payload,
+            None,
+        );
         connection
             .write_all(&wire)
             .map_err(|error| error.to_string())?;
         connection.flush().map_err(|error| error.to_string())?;
+        #[cfg(feature = "qualification-timing")]
+        diagnostic_write.finish(true);
         sequence = sequence
             .checked_add(1)
             .ok_or("outbound frame sequence exhausted")?;
@@ -398,30 +476,46 @@ fn run_authenticated_frames(
     connection_id: u64,
 ) -> Result<(), String> {
     let writer = connection.try_clone().map_err(|error| error.to_string())?;
+    let writer_control = connection.try_clone().map_err(|error| error.to_string())?;
+    let control = connection.try_clone().map_err(|error| error.to_string())?;
     let (sender, receiver) = mpsc::sync_channel(16);
     let alive = Arc::new(AtomicBool::new(true));
     let writer_alive = Arc::clone(&alive);
     let writer_context = context.clone();
     let session_id = peer.session_id;
     let handle = std::thread::spawn(move || {
-        write_frames(&writer_context, writer, session_id, receiver, writer_alive)
+        let result = write_frames(&writer_context, writer, session_id, receiver, writer_alive);
+        // A failed writer must release the reader on the same TCP session.
+        let _ = writer_control.shutdown();
+        result
     });
-    let control = connection.try_clone().map_err(|error| error.to_string())?;
-    events
+    let admitted = events
         .try_send(NetworkEvent::Authenticated {
             connection_id,
+            apqe_engineering_session: false,
             peer_id: peer.node_address.to_string(),
             session_id,
             sender,
             control,
         })
-        .map_err(|_| "network session event queue is full")?;
-    let result = read_frames(context, connection, peer, events);
-    alive.store(false, Ordering::Release);
-    let writer_result = handle
-        .join()
-        .map_err(|_| "outbound frame writer panicked")?;
+        .map_err(|_| "network session event queue is full".to_string());
+    let result = admitted.and_then(|()| read_frames(context, connection, peer, events));
+    let writer_result = finish_session_writer(connection, &alive, handle);
     result.and(writer_result)
+}
+
+fn finish_session_writer(
+    connection: &TransportConnection,
+    alive: &AtomicBool,
+    handle: std::thread::JoinHandle<Result<(), String>>,
+) -> Result<(), String> {
+    alive.store(false, Ordering::Release);
+    // Clear a blocked write before joining it, including admission failure.
+    // The caller then removes this exact session so normal route retries resume.
+    let _ = connection.shutdown();
+    handle
+        .join()
+        .map_err(|_| "outbound frame writer panicked")?
 }
 
 fn close(context: &SessionContext, peer: &AuthenticatedPeer, events: &SyncSender<NetworkEvent>) {
@@ -445,6 +539,10 @@ pub fn run_inbound(
     events: SyncSender<NetworkEvent>,
     connection_id: u64,
 ) -> Result<(), String> {
+    #[cfg(not(test))]
+    synergy_network::transport::require_native_session_profile()
+        .map_err(|error| error.to_string())?;
+
     connection
         .set_read_timeout(context.handshake_timeout)
         .map_err(|error| error.to_string())?;
@@ -525,6 +623,10 @@ pub fn run_outbound(
     connection_id: u64,
     expected_peer_id: &str,
 ) -> Result<(), String> {
+    #[cfg(not(test))]
+    synergy_network::transport::require_native_session_profile()
+        .map_err(|error| error.to_string())?;
+
     connection
         .set_read_timeout(context.handshake_timeout)
         .map_err(|error| error.to_string())?;
@@ -579,4 +681,97 @@ pub fn run_outbound(
     close(&context, &peer, &events);
     let _ = connection.shutdown();
     result
+}
+
+#[cfg(test)]
+mod ingress_queue_tests {
+    use super::*;
+
+    #[test]
+    fn full_frame_queue_drops_only_that_frame_and_keeps_accepting() {
+        let peer = AuthenticatedPeer::new(
+            "synv11lrh6jcxaejkj4zv994j7qwn2rk6u3ar4emn",
+            SessionId(1),
+            vec![],
+        )
+        .unwrap();
+        let frame = |payload| {
+            InboundFrame::new(peer.clone(), ProtocolKind::Posy, vec![payload], 8).unwrap()
+        };
+        let (sender, receiver) = mpsc::sync_channel(1);
+
+        assert_eq!(enqueue_authenticated_frame(&sender, frame(1)), Ok(true));
+        assert_eq!(enqueue_authenticated_frame(&sender, frame(2)), Ok(false));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(NetworkEvent::Frame(frame)) if frame.payload == [1]
+        ));
+        assert_eq!(enqueue_authenticated_frame(&sender, frame(3)), Ok(true));
+    }
+
+    #[test]
+    fn closed_frame_queue_is_reported() {
+        let peer = AuthenticatedPeer::new(
+            "synv11lrh6jcxaejkj4zv994j7qwn2rk6u3ar4emn",
+            SessionId(1),
+            vec![],
+        )
+        .unwrap();
+        let frame = InboundFrame::new(peer, ProtocolKind::Posy, vec![1], 8).unwrap();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        drop(receiver);
+        assert_eq!(
+            enqueue_authenticated_frame(&sender, frame),
+            Err("network ingress queue closed")
+        );
+    }
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    use synergy_network::transport::{TcpTransport, Transport, TransportTimeouts};
+
+    #[test]
+    fn failed_reader_cleanup_interrupts_blocked_socket_writer() {
+        let timeout = Duration::from_secs(30);
+        let transport = TcpTransport::new(TransportTimeouts {
+            connect: timeout,
+            handshake: timeout,
+            read: timeout,
+            write: timeout,
+        })
+        .unwrap();
+        let listener = transport.listen("127.0.0.1:0").unwrap();
+        let connection = transport.dial(listener.local_addr().unwrap()).unwrap();
+        let peer = loop {
+            if let Some(peer) = listener.accept().unwrap() {
+                break peer;
+            }
+            std::thread::yield_now();
+        };
+        let mut writer = connection.try_clone().unwrap();
+        let handle = std::thread::spawn(move || {
+            writer
+                .write_all(&vec![0; 32 * 1024 * 1024])
+                .map_err(|e| e.to_string())
+        });
+        // The peer deliberately does not read; this exceeds TCP buffering.
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            !handle.is_finished(),
+            "test did not exercise a blocked writer"
+        );
+        let (completed, result) = mpsc::channel();
+        let cleanup = std::thread::spawn(move || {
+            let outcome = finish_session_writer(&connection, &AtomicBool::new(true), handle);
+            completed.send(outcome).unwrap();
+        });
+        assert!(result
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .is_err());
+        cleanup.join().unwrap();
+        drop(peer);
+    }
 }

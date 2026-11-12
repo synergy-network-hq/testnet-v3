@@ -8,6 +8,8 @@ pub enum PosyError {
     Quorum(QuorumError),
     Conflict(String),
     NotReady(String),
+    /// Local resource admission pressure; no evidence is declared invalid.
+    ResourcePressure(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,7 +32,8 @@ impl fmt::Display for PosyError {
             | Self::UnknownValidator(message)
             | Self::Signature(message)
             | Self::Conflict(message)
-            | Self::NotReady(message) => formatter.write_str(message),
+            | Self::NotReady(message)
+            | Self::ResourcePressure(message) => formatter.write_str(message),
             Self::Quorum(error) => write!(formatter, "quorum error: {error:?}"),
         }
     }

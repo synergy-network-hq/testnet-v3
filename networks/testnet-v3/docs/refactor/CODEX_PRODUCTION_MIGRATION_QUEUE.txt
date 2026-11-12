@@ -134,7 +134,7 @@ IMPLEMENTED | synergy-governance | src/emergency.rs | production source ownershi
 IMPLEMENTED | synergy-governance | src/proposal.rs | production source ownership
 IMPLEMENTED | synergy-governance | src/vote.rs | production source ownership
 IMPLEMENTED | synergy-identity | src/duplicate_guard.rs | production source ownership
-IMPLEMENTED | synergy-identity | src/node_id.rs | production source ownership
+IMPLEMENTED | synergy-identity | src/node_address.rs | canonical NodeAddress production source ownership
 IMPLEMENTED | synergy-identity | src/proof_of_possession.rs | production source ownership
 IMPLEMENTED | synergy-identity | src/rotation.rs | production source ownership
 IMPLEMENTED | synergy-identity | src/store.rs | production source ownership
@@ -240,3 +240,11 @@ IMPLEMENTED | synergy-sync/synergy-node | SyncWireMessage + ingress snapshot chu
 
 IMPLEMENTED | synergy-address | src/{lib.rs,snts_registry.rs} | canonical SNTS-01 Address Engine v1 derivation and validation owner
 IMPLEMENTED | synergy-state | src/transition.rs | durable verified snapshot commit owner allowing authenticated restore height jumps
+
+IMPLEMENTED | synergy-updater | src/coordinator.rs | governed-signer/key-pinned verify-stage-drain-install-health-rollback-audit orchestration; concrete node callers remain
+
+CALLERS_MIGRATED | synergy-network/synergy-node | Admin peer lifecycle | typed disconnect/quarantine/timed-or-permanent-ban/unban synchronously apply to the canonical exact authenticated session, close transport, purge queued session state, and never grant PoSy authority
+
+CALLERS_MIGRATED | synergy-sync/synergy-node | Admin Sync control | typed CLI/Admin pause, resume, and explicit source retry synchronously reach the canonical SyncService; retry accepts only authenticated peers in the current verified Sync plan and preserves PoSy-only finality
+
+CALLERS_MIGRATED_PARTIAL | synergy-etdag/synergy-node | Admin ETDAG control | typed CLI/Admin pause/resume synchronously controls canonical authenticated ETDAG ingress and readiness while custody retention continues; artifact recovery remains fail closed pending exact source and shard selection

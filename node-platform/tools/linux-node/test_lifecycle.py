@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 import lifecycle as life
 import synergy_linux as node
+from test_consensus_schema import native_schema
 
 
 def save(path, data):
@@ -44,7 +45,7 @@ class LifecycleTests(unittest.TestCase):
         self.units=self.base/'etc/systemd/system';self.units.mkdir(parents=True)
         self.operations=[]
         self.stack=[]
-        for target,kwargs in [(life,{'_require_operator':lambda **kw:None,'UNIT_DIRECTORY':self.units}),]:
+        for target,kwargs in [(life,{'_require_operator':lambda **kw:None,'UNIT_DIRECTORY':self.units,'_mountinfo_text':lambda:''}),]:
             self.stack.append(patch.multiple(target,**kwargs));self.stack[-1].start()
         self.stack.append(patch.object(life,'native',side_effect=self.native));self.stack[-1].start()
     def tearDown(self):
@@ -91,7 +92,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(self.operations,[['systemctl','stop',life.UNITS[0]]])
     def test_unregistered_upgrade_preserves_runtime_bytes_inodes_and_has_no_global_actions(self):
         for name in ('keys/root/private.secret.key','data/history','config/node.json','vpn/default.json'):
-            save(self.root/name,b'custody-state-configuration')
+            save(self.root/name,b'{}' if name=='config/node.json' else b'custody-state-configuration')
         before={name:((self.root/name).stat().st_ino,(self.root/name).read_bytes()) for name in ('keys/root/private.secret.key','data/history','config/node.json','vpn/default.json')}
         with self.upgrade_context(): result=life.upgrade(self.root,self.candidate)
         self.assertFalse(result['vpn_stopped']);self.assertFalse(result['consensus_started'])
@@ -158,6 +159,29 @@ life.upgrade(root,candidate)
         with patch.object(life,'_unit_state',side_effect=states):life.register(self.root)
         self.assertTrue((self.units/life.UNITS[1]).is_file())
         self.assertEqual(self.operations,[['systemctl','daemon-reload']])
+
+    def test_uninstall_handles_systemd_disable_removing_linked_units(self):
+        self.register_fixture()
+        def states(unit):
+            if not (self.units/unit).exists(): return {'LoadState':'not-found','FragmentPath':'','MainPID':'0'}
+            return self.state(unit)
+        def systemctl(args,**kwargs):
+            if args[:2]==['systemctl','disable']:(self.units/args[2]).unlink()
+            return b'{}'
+        with patch.object(life,'_unit_state',side_effect=states),patch.object(life,'native',side_effect=systemctl),patch.object(life,'_assert_no_application_processes'):
+            result=life.remove(self.root,str(self.root))
+        self.assertTrue(result['logical_removal_verified'])
+        self.assertFalse(self.root.exists())
+        self.assertFalse(any(self.units.iterdir()))
+
+    def test_uninstall_refuses_foreign_replacement_after_disable(self):
+        self.register_fixture()
+        def systemctl(args,**kwargs):
+            if args[:2]==['systemctl','disable']:(self.units/args[2]).write_text('foreign replacement')
+            return b'{}'
+        with patch.object(life,'_unit_state',side_effect=self.state),patch.object(life,'native',side_effect=systemctl),patch.object(life,'_assert_no_application_processes'):
+            with self.assertRaisesRegex(ValueError,'drift'):life.remove(self.root,str(self.root))
+        self.assertTrue(self.root.exists())
     def test_interrupted_intent_staging_before_any_mutation_is_safe_to_retry(self):
         token=node.digest(self.candidate/'package.json')
         staged=self.root/'evidence'/('.upgrade-intent.json.upgrade-'+token[:16])
@@ -202,16 +226,22 @@ life.upgrade(root,candidate)
         process(51,'/usr/bin/sudo',['sudo','python3',str(self.root/'tools/lifecycle.py'),'upgrade','--root',str(self.root)])
         process(99,str(self.root/'bin/netbird'),['netbird','service','run'])
         with patch.object(life.os,'getppid',return_value=51):life._assert_no_application_processes(self.root,vpn_pid='99',proc=proc)
+        save(proc/'51/cmdline',b'\0'.join(x.encode() for x in ['sudo','-n','/usr/bin/python3','-I','-B',str(self.root/'tmp/controller/controller.py')]))
+        with patch.object(life.os,'getppid',return_value=51):life._assert_no_application_processes(self.root,vpn_pid='99',proc=proc)
+        save(proc/'51/cmdline',b'\0'.join(x.encode() for x in ['sudo','-n','/usr/bin/python3',str(self.root/'tmp/controller/controller.py')]))
+        with patch.object(life.os,'getppid',return_value=51):
+            with self.assertRaisesRegex(ValueError,'application process'):life._assert_no_application_processes(self.root,vpn_pid='99',proc=proc)
+        save(proc/'51/cmdline',b'\0'.join(x.encode() for x in ['sudo','-n','/usr/bin/python3','-I','-B',str(self.root/'tmp/controller/controller.py')]))
         process(100,str(self.root/'bin/synergy-node'),['synergy-node','start'])
         with patch.object(life.os,'getppid',return_value=51):
             with self.assertRaisesRegex(ValueError,'application process'):life._assert_no_application_processes(self.root,vpn_pid='99',proc=proc)
     def test_genuine_hot_journal_recovers_original_exact_bytes(self):
         save(self.root/'data/metadata/schema-version',b'synergy-node-storage:1')
         archive=self.root/'data/consensus/posy/consensus-evidence-v1.sqlite3';archive.parent.mkdir(parents=True,mode=0o700)
-        connection=sqlite3.connect(archive);connection.executescript('PRAGMA user_version=1;CREATE TABLE evidence(k INTEGER PRIMARY KEY,b BLOB);CREATE TABLE revisions(k INTEGER);CREATE TABLE legacy_timeout(k INTEGER);')
+        connection=sqlite3.connect(archive);native_schema(connection,1)
         old=b'original'*1048576
-        connection.execute('INSERT INTO evidence VALUES(1,?)',(old,));connection.commit();connection.close();archive.chmod(0o600)
-        code="import sqlite3,os,sys;c=sqlite3.connect(sys.argv[1]);c.execute('PRAGMA cache_size=-512');c.execute('PRAGMA cache_spill=1');c.execute('BEGIN IMMEDIATE');c.execute('UPDATE evidence SET b=?',(b\"changed!\"*1048576,));os._exit(91)"
+        connection.execute('INSERT INTO evidence VALUES(?,?,?,?,?)',('fixture',old,b'digest',None,None));connection.commit();connection.close();archive.chmod(0o600)
+        code="import sqlite3,os,sys;c=sqlite3.connect(sys.argv[1]);c.execute('PRAGMA cache_size=-512');c.execute('PRAGMA cache_spill=1');c.execute('BEGIN IMMEDIATE');c.execute('UPDATE evidence SET bytes=?',(b\"changed!\"*1048576,));os._exit(91)"
         result=subprocess.run([sys.executable,'-B','-c',code,str(archive)],check=False)
         self.assertEqual(result.returncode,91)
         journal=archive.with_name(archive.name+'-journal');self.assertTrue(journal.exists())
@@ -220,7 +250,7 @@ life.upgrade(root,candidate)
         before.close()
         self.assertEqual(life.recover_consensus_archives(self.root),{'recovered_existing_archives':1})
         after=sqlite3.connect(archive.as_uri()+'?mode=ro',uri=True)
-        self.assertEqual(after.execute('SELECT b FROM evidence').fetchone()[0],old);after.close()
+        self.assertEqual(after.execute('SELECT bytes FROM evidence').fetchone()[0],old);after.close()
         self.assertEqual((self.root/'data/metadata/schema-version').read_bytes(),b'synergy-node-storage:1')
     def test_recovery_never_creates_missing_archive_and_refuses_unsafe_paths(self):
         save(self.root/'data/metadata/schema-version',b'synergy-node-storage:1')
@@ -231,5 +261,115 @@ life.upgrade(root,candidate)
         with self.assertRaises(ValueError):life.recover_consensus_archives(self.root)
         archive.unlink();archive.touch()
         with self.assertRaisesRegex(ValueError,'empty'):life.recover_consensus_archives(self.root)
+
+    def test_schema2_recovery_preserves_bytes_and_refuses_unknown_schema(self):
+        save(self.root/'data/metadata/schema-version',b'synergy-node-storage:1')
+        archive=self.root/'data/consensus/posy/consensus-evidence-v1.sqlite3'
+        archive.parent.mkdir(parents=True,mode=0o700)
+        connection=sqlite3.connect(archive)
+        native_schema(connection)
+        connection.execute('INSERT INTO evidence VALUES(?,?,?,?,?)',('fixture',b'original safety fixture',b'digest',None,None))
+        connection.commit();connection.close();archive.chmod(0o600)
+        before=archive.read_bytes()
+        self.assertEqual(life.recover_consensus_archives(self.root),{'recovered_existing_archives':1})
+        self.assertEqual(archive.read_bytes(),before)
+        connection=sqlite3.connect(archive);connection.execute('PRAGMA user_version=3');connection.close()
+        with self.assertRaisesRegex(ValueError,'archive version'):life.recover_consensus_archives(self.root)
+
+    def test_concurrent_replacement_and_start_check_are_refused_by_same_lock(self):
+        with life._lifecycle_lock(self.root):
+            with patch.object(life,'verify_package') as verify:
+                with self.assertRaises(BlockingIOError):
+                    life.replace_application(self.root,self.candidate,self.base/'staged',str(self.root))
+                verify.assert_not_called()
+            with self.assertRaises(BlockingIOError): life.start_check(self.root)
+        self.assertEqual(self.operations,[])
+
+    def test_mount_guard_decodes_escaped_paths_and_preserves_old_bytes(self):
+        data=self.root/'data/old-chain';save(data,b'old safety state')
+        for mount in [str(self.root/'data/bind'),str(self.root),str(self.root/'keys/with space').replace(' ',r'\040')]:
+            with self.subTest(mount=mount), patch.object(life,'_mountinfo_text',return_value='36 29 0:30 / '+mount+' rw - ext4 /dev/test rw'):
+                with self.assertRaisesRegex(ValueError,'installation contains a mount'):
+                    life._reject_installation_mounts(self.root)
+            self.assertEqual(data.read_bytes(),b'old safety state')
+        with patch.object(life,'_mountinfo_text',return_value='36 29 0:30 / '+str(self.root)+'-other/data rw - ext4 /dev/test rw'):
+            life._reject_installation_mounts(self.root)
+
+    def test_application_replacement_resumes_partial_fresh_initialization_and_preserves_vpn(self):
+        import apqe_layout
+        self.register_fixture()
+        save(self.root/'bin/netbird',b'same-running-vpn');(self.root/'bin/netbird').chmod(0o700)
+        self.new['files']['bin/netbird']=node.digest(self.root/'bin/netbird')
+        save(self.candidate/'bin/netbird',b'same-running-vpn');(self.candidate/'bin/netbird').chmod(0o700)
+        save(self.candidate/'package.json',self.new)
+        for name in ('vpn/default.json','data/old-chain','keys/consensus/obsolete.secret.key'):
+            save(self.root/name,b'old-custody-or-chain')
+        save(self.root/'keys/wallets/unrelated/operator-registry.json',b'unrelated wallet custody')
+        staged=self.base/'staged';staged.mkdir(mode=0o700)
+        for name in apqe_layout.INPUTS:save(staged/name,b'{}')
+        inputs={'network_id':'fresh-network','chain_id':99,'node_name':'fresh-validator',
+                'files':{name:node.digest(staged/name) for name in apqe_layout.INPUTS}}
+        save(staged/'commissioning.json',inputs)
+        def owned(*args,**kwargs):
+            return {life.UNITS[0]:dict(self.state(life.UNITS[0]),ActiveState='inactive'),
+                    life.UNITS[1]:dict(self.state(life.UNITS[1]),ActiveState='active',MainPID='4321')}
+        original_apply=life._apply_commissioning
+        def failed_apply(root,stage,manifest):
+            # Simulate failure AFTER native initialization. Startup still has
+            # the durable intent, so these fresh bytes have never signed.
+            original_apply(root,stage,manifest)
+            save(root/'data/metadata/schema-version',b'synergy-node-storage:1')
+            raise RuntimeError('interrupted after init')
+        protected={name:((self.root/name).stat().st_ino,(self.root/name).read_bytes()) for name in
+                   ('bin/netbird','tools/netbird-client','vpn/default.json')}
+        with patch.object(life,'verify_package',return_value=self.new),             patch.object(life,'_validate_commissioning_native',return_value=inputs),             patch.object(apqe_layout,'validate_stage',return_value=inputs),             patch.object(life,'_attributed_units',side_effect=owned),             patch.object(life,'_assert_no_application_processes'),             patch.object(life,'_fresh_conformance',return_value={'conformant':True}):
+            with patch.object(life,'_mountinfo_text',return_value='36 29 0:30 / '+str(self.root/'data/bind')+' rw - ext4 /dev/test rw'):
+                with self.assertRaisesRegex(ValueError,'installation contains a mount'):
+                    life.replace_application(self.root,self.candidate,staged,str(self.root))
+            self.assertEqual((self.root/'data/old-chain').read_bytes(),b'old-custody-or-chain')
+            self.assertTrue((self.root/'keys/consensus/obsolete.secret.key').exists())
+            with patch.object(life,'_apply_commissioning',side_effect=failed_apply):
+                with self.assertRaisesRegex(RuntimeError,'interrupted after init'):
+                    life.replace_application(self.root,self.candidate,staged,str(self.root))
+            self.assertTrue((self.root/'evidence/application-replacement-intent.json').exists())
+            self.assertFalse((self.root/'data/old-chain').exists())
+            self.assertFalse((self.root/'keys/consensus').exists())
+            self.assertFalse((self.root/'snapshots').exists())
+            self.assertFalse((self.root/'recovery').exists())
+            native_state=self.root/'data/metadata/schema-version'
+            inode=native_state.stat().st_ino
+            installed_input=self.root/'config/node.json'
+            save(installed_input,b'wrong')
+            with self.assertRaisesRegex(ValueError,'installed commissioning input differs'):
+                life.finish_replacement(self.root,self.candidate,staged)
+            self.assertFalse((self.root/'snapshots').exists())
+            save(installed_input,(staged/'config/node.json').read_bytes())
+            with patch.object(life,'_apply_commissioning',side_effect=AssertionError('must not reinitialize')):
+                result=life.finish_replacement(self.root,self.candidate,staged)
+            self.assertEqual(native_state.stat().st_ino,inode)
+            for name in ('snapshots','recovery'):
+                self.assertTrue((self.root/name).is_dir())
+                self.assertEqual((self.root/name).stat().st_mode&0o777,0o700)
+            # Simulate the NEW node having run and stopped. Its journals and
+            # finalized state must survive a replay of the replacement command.
+            save(self.root/'data/consensus/posy/sign-once.json',b'new-node-signed-vote')
+            save(self.root/'data/state/execution/finalized-state.json',b'new-finalized-chain')
+            before={str(p):p.read_bytes() for p in (self.root/'data').rglob('*') if p.is_file()}
+            with patch.object(life,'_apply_commissioning',side_effect=AssertionError('must not reinitialize')):
+                repeated=life.replace_application(self.root,self.candidate,staged,str(self.root))
+            self.assertTrue(repeated['already_completed'])
+            self.assertFalse(repeated['application_changed'])
+            self.assertEqual(before,{str(p):p.read_bytes() for p in (self.root/'data').rglob('*') if p.is_file()})
+            altered=dict(inputs,cosmetic_change=True)
+            save(staged/'commissioning.json',altered)
+            with self.assertRaisesRegex(ValueError,'same-Genesis safety-state reset'):
+                life.replace_application(self.root,self.candidate,staged,str(self.root))
+            self.assertEqual(before,{str(p):p.read_bytes() for p in (self.root/'data').rglob('*') if p.is_file()})
+        self.assertTrue(result['application_replacement_completed']);self.assertFalse(result['state_reinitialized'])
+        self.assertFalse((self.root/'evidence/application-replacement-intent.json').exists())
+        for name,value in protected.items():
+            self.assertEqual(((self.root/name).stat().st_ino,(self.root/name).read_bytes()),value)
+        self.assertEqual((self.root/'keys/wallets/unrelated/operator-registry.json').read_bytes(),b'unrelated wallet custody')
+        self.assertFalse(any('systemctl' in operation for operation in self.operations))
 
 if __name__=='__main__':unittest.main()

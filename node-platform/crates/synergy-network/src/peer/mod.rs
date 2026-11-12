@@ -7,6 +7,7 @@ mod connection_limits;
 mod duplicate;
 mod health;
 mod manager;
+#[allow(clippy::module_inception)]
 mod peer;
 mod persistence;
 mod quarantine;

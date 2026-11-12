@@ -1,0 +1,23 @@
+schema_version = 1
+role = "consensus-audit"
+plane = "operator"
+capabilities = ["identity", "durable_storage", "telemetry", "health", "sync", "network_transport", "observe_consensus"]
+
+[ports]
+p2p = 24003
+admin = 26003
+metrics = 27003
+
+[storage]
+data_directory = "/var/lib/synergy-node/consensus_audit"
+maximum_bytes = 107374182400
+pruning = "role_policy"
+
+[keys]
+raw_export_forbidden = true
+posy_signing = false
+
+[readiness]
+requires_manifest = true
+requires_identity = true
+requires_healthy_dependencies = true

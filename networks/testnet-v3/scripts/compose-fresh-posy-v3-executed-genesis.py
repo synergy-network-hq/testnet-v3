@@ -3,12 +3,10 @@
 
 This command performs no deployment and has no custody access.  It refuses any
 evidence not bound to the exact fresh P3 predeployment input, ceremony
-authority freeze, allocation plan,
+authority freeze, matching V4 release authority record, allocation plan,
 resolved allocation artifact, validator adapter, and staged contract artifact
 set.  Derived receipt and Genesis integrity roots are
 recomputed locally; no root is copied from a historical Genesis document.
-The explicit --sgen-source path binds the ceremony freeze directly. Historical
-release composition additionally requires its matching V4 release authority view.
 """
 
 from __future__ import annotations
@@ -174,8 +172,10 @@ def require_array(value: Any, label: str) -> list[Any]:
     return value
 
 
-def validate_authority_freeze(ceremony_freeze: dict[str, Any]) -> list[dict[str, Any]]:
-    """Check the public freeze identity shared by both composition paths."""
+def validate_authority_cross_binding(
+    ceremony_freeze: dict[str, Any], release_authorities: dict[str, Any]
+) -> None:
+    """Bind ceremony custody evidence to the distinct V4 release authority view."""
     expected_freeze = {
         "schema_version": "synergy-testnet-v3-genesis-authority-freeze-v1",
         "artifact_type": "fresh-testnet-v3-genesis-authority-public-freeze",
@@ -193,14 +193,6 @@ def validate_authority_freeze(ceremony_freeze: dict[str, Any]) -> list[dict[str,
     if [entry.get("role_id") if isinstance(entry, dict) else None for entry in freeze_entries] != GENESIS_AUTHORITY_ROLES:
         fail("ceremony freeze authority role order is not canonical")
 
-    return freeze_entries
-
-
-def validate_authority_cross_binding(
-    ceremony_freeze: dict[str, Any], release_authorities: dict[str, Any]
-) -> None:
-    """Bind ceremony custody evidence to the distinct V4 release authority view."""
-    freeze_entries = validate_authority_freeze(ceremony_freeze)
     expected_release = {
         "version": 4,
         "artifact": "TESTNET_V3_PRODUCTION_AUTHORITIES",
@@ -276,30 +268,6 @@ def validate_authority_cross_binding(
                 if expected is None:
                     fail(f"governance ceremony freeze is missing {field}")
                 require_equal(release_entry.get(field), expected, f"governance V4 release authority {field}")
-
-
-def validate_sgen_source(source: dict[str, Any], authority_raw: bytes) -> None:
-    """Require the authorized five-validator 500 ms source without a V4 release."""
-    require_equal(
-        source.get("fresh_p3_public_input_binding", {}).get("fresh_authority_record_sha256"),
-        sha256(authority_raw),
-        "source ceremony authority freeze hash",
-    )
-    activation = require_object(
-        source.get("consensus", {}).get("posy_v3_activation"), "PoSy activation"
-    )
-    require_equal(activation.get("binding_status"), "FINALIZED_AND_GENESIS_BOUND", "activation status")
-    require_equal(
-        require_object(activation.get("manifest"), "PoSy manifest").get("target_block_time_ms"),
-        500,
-        "approved target block time",
-    )
-    validators = require_array(source.get("validators"), "source validators")
-    require_equal(
-        [require_object(entry, "validator").get("validator_id") for entry in validators],
-        [f"validator-{ordinal:02d}" for ordinal in range(2, 7)],
-        "initial validator IDs",
-    )
 
 
 def account_map(entries: Any, label: str) -> dict[str, dict[str, Any]]:
@@ -425,11 +393,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resolved-allocations", type=Path, required=True)
     parser.add_argument("--validator-inputs", type=Path, required=True)
     parser.add_argument("--authority-record", type=Path, required=True)
-    parser.add_argument("--release-authority-record", type=Path)
-    parser.add_argument(
-        "--sgen-source", action="store_true",
-        help="compose a 500 ms SGEN source bound directly to the ceremony authority freeze",
-    )
+    parser.add_argument("--release-authority-record", type=Path, required=True)
     parser.add_argument("--contracts-dir", type=Path, required=True)
     parser.add_argument("--execution-status", type=Path, required=True)
     parser.add_argument("--deployment-receipts", type=Path, required=True)
@@ -437,12 +401,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--signed-replay-operations", type=Path, required=True)
     parser.add_argument("--execution-state", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    args = parser.parse_args()
-    if not args.sgen_source and args.release_authority_record is None:
-        parser.error("--release-authority-record is required unless --sgen-source is selected")
-    if args.sgen_source and args.release_authority_record is not None:
-        parser.error("--sgen-source does not accept --release-authority-record")
-    return args
+    return parser.parse_args()
 
 
 def main() -> None:
@@ -452,11 +411,9 @@ def main() -> None:
     resolved, resolved_raw = read_json(args.resolved_allocations, "resolved allocations")
     validator, validator_raw = read_json(args.validator_inputs, "validator inputs")
     authority, authority_raw = read_json(args.authority_record, "ceremony authority freeze")
-    release_authority, release_authority_raw = ({}, b"")
-    if not args.sgen_source:
-        release_authority, release_authority_raw = read_json(
-            args.release_authority_record, "V4 release authority record"
-        )
+    release_authority, release_authority_raw = read_json(
+        args.release_authority_record, "V4 release authority record"
+    )
     status, status_raw = read_json(args.execution_status, "execution status")
     deployments_value, deployments_raw = read_json(args.deployment_receipts, "deployment receipts")
     initializations_value, initializations_raw = read_json(args.initialization_receipts, "initialization receipts")
@@ -470,11 +427,7 @@ def main() -> None:
     ):
         fail("object input decoded to a non-object")
 
-    if args.sgen_source:
-        validate_authority_freeze(authority)
-        validate_sgen_source(source, authority_raw)
-    else:
-        validate_authority_cross_binding(authority, release_authority)
+    validate_authority_cross_binding(authority, release_authority)
 
     if source.get("network", {}).get("chain_id") != CHAIN_ID or source.get("network", {}).get("network_id") != NETWORK_ID:
         fail("source Genesis is not Chain 1266 / technical network testnet")
@@ -631,14 +584,14 @@ def main() -> None:
             "execution_state_canonical_sha256"
         ],
         "ceremony_authority_freeze_sha256": sha256(authority_raw),
-        "authority_record_sha256": sha256(authority_raw if args.sgen_source else release_authority_raw),
+        "authority_record_sha256": sha256(release_authority_raw),
         "contracts": deployment_bindings,
         "deployment_receipts": deployments,
         "initialization_receipts": initializations,
         "signed_replay_operations": replay_operations_value,
         "execution_state": snapshot,
         "deployment_count": 9,
-        "initialization_count": 27,
+        "initialization_count": 25,
         "receipt_root": computed_receipt_root,
         "post_deployment_execution_state_root": status["post_deployment_execution_state_root"],
         "post_deployment_aivm_state_root": status["post_deployment_aivm_state_root"],

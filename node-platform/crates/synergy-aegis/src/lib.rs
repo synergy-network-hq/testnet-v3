@@ -4,6 +4,7 @@
 //! post-quantum implementations must be supplied by an approved provider and
 //! are never silently substituted by a classical or test algorithm.
 
+mod apqe;
 mod attestation;
 mod audit;
 mod binding;
@@ -12,12 +13,15 @@ mod entropy;
 mod kem;
 mod key_lifecycle;
 mod kms_bridge;
+mod native_provider;
 mod policy;
 mod pqsynq;
 mod pqvm;
+mod primitives;
 mod signer;
 mod verifier;
 
+pub use apqe::{ApqeIdentityVerifier, ApqeKem, ApqeSigner, ApqeVerifier};
 pub use attestation::{ProviderAttestation, ProviderAttestationError};
 pub use audit::{AuditEvent, AuditOperation, AuditOutcome, AuditSink};
 pub use binding::{BindingError, GovernedKeyBindings, GovernedNodeKeyBinding};
@@ -26,11 +30,13 @@ pub use entropy::{AegisEntropy, EntropyError, OperatingSystemEntropy};
 pub use kem::{AegisKem, KemEncapsulation, KemError, PqvmMlKem768};
 pub use key_lifecycle::{KeyId, KeyIdError, KeyPurpose, KeyRecord, KeyState, KeyTransitionError};
 pub use kms_bridge::{KmsBridge, KmsError, ProviderHealth};
+pub use native_provider::load_authenticated_native_engine;
 pub use policy::{AegisPolicy, PolicyError, SignatureAlgorithm};
 pub use pqsynq::{
     PqSynqError, PqSynqExecutionAuthorization, PqSynqVerifier, VerifiedPqSynqExecution,
     VerifiedPqSynqOperation,
 };
 pub use pqvm::{PqvmSigner, PqvmVerifier};
+pub use primitives::{AegisProtectedPrimitives, PrimitiveError};
 pub use signer::{AegisSigner, Signature, SigningContext, SigningError};
 pub use verifier::{AegisVerifier, VerificationError};

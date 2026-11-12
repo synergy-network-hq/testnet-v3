@@ -1,0 +1,2 @@
+syntax = "proto3"; package synergy.etdag.v1;
+message RevealShare { bytes vertex_id = 1; string validator = 2; bytes encrypted_share = 3; bytes signature = 4; }

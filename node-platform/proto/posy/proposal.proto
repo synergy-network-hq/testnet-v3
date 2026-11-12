@@ -1,0 +1,2 @@
+syntax = "proto3"; package synergy.posy.v1;
+message Proposal { uint64 epoch = 1; uint64 height = 2; uint64 round = 3; bytes block = 4; bytes parent_qc = 5; string proposer = 6; bytes signature = 7; }

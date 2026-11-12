@@ -11,7 +11,7 @@ pub enum ManifestError {
 
 impl NetworkManifest {
     pub fn validate_against(&self, expected: &Self) -> Result<(), ManifestError> {
-        if self.chain_id != 1266 {
+        if self.chain_id == 0 || self.chain_id != expected.chain_id {
             return Err(ManifestError::WrongChain);
         }
         if self.network_id != expected.network_id {
@@ -54,6 +54,26 @@ mod tests {
             other.validate_against(&manifest),
             Err(ManifestError::GenesisMismatch)
         );
+    }
+
+    #[test]
+    fn expected_chain_is_selected_and_cannot_be_taken_from_the_candidate() {
+        for chain_id in [1266, 9001, 9002] {
+            let mut expected = manifest();
+            expected.chain_id = chain_id;
+            assert!(expected.validate_against(&expected).is_ok());
+            let mut other = expected.clone();
+            other.chain_id += 1;
+            assert_eq!(
+                other.validate_against(&expected),
+                Err(ManifestError::WrongChain)
+            );
+            other.chain_id = 0;
+            assert_eq!(
+                other.validate_against(&other),
+                Err(ManifestError::WrongChain)
+            );
+        }
     }
 
     #[test]

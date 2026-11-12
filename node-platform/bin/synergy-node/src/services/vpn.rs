@@ -27,6 +27,7 @@ use synergy_vpn::{evaluate_readiness, NetbirdStatus, VpnReadiness, VpnState};
 const NETBIRD_BINARY_ENV: &str = "SYNERGY_NETBIRD_BINARY";
 const MAX_PUBLIC_IDENTITY_BYTES: u64 = 64 * 1024;
 const DIAL_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+const OBSERVATION_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Owns health observation of an already provisioned NetBird overlay. Setup
 /// credentials are intentionally never read by the node process.
@@ -50,7 +51,11 @@ pub fn registration(
         .signed_registry_path
         .clone()
         .ok_or_else(|| "VPN mode requires a signed transport registry path".to_string())?;
-    let trust = SnapshotTrust::from_encoded(
+    let context = configuration
+        .transport_context
+        .as_ref()
+        .ok_or("VPN mode requires an explicit selected transport context")?;
+    let trust = SnapshotTrust::from_encoded_with_provider(
         configuration
             .attestation_public_key
             .as_deref()
@@ -59,6 +64,15 @@ pub fn registration(
             .provider_plan_sha256
             .clone()
             .ok_or("VPN mode requires a pinned transport provider-plan hash")?,
+        synergy_transport_registry::SnapshotContext {
+            network: context.network.clone(),
+            registry_id: context.registry_id.clone(),
+            chain_id: node.chain_id,
+            network_id: node.network_id.clone(),
+            release_id: context.release_id.clone(),
+            protocol_version: context.protocol_version.clone(),
+        },
+        super::apqe_provider::load(node)?,
     )
     .map_err(|error| format!("construct pinned transport trust: {error}"))?;
     let identity_bytes = read_regular_bounded(
@@ -102,6 +116,7 @@ pub fn registration(
             ingress,
             last_dial: BTreeMap::new(),
             daemon: None,
+            last_observation: None,
             state: VpnState::Disconnected,
             status: None,
             failure: None,
@@ -121,6 +136,7 @@ struct VpnService {
     ingress: AuthenticatedIngress,
     last_dial: BTreeMap<String, Instant>,
     daemon: Option<CommandNetbirdDaemon>,
+    last_observation: Option<Instant>,
     state: VpnState,
     status: Option<NetbirdStatus>,
     failure: Option<String>,
@@ -146,6 +162,21 @@ fn read_regular_bounded(path: &Path, maximum: u64, label: &str) -> Result<Vec<u8
         return Err(format!("{label} changed shape while loading"));
     }
     Ok(bytes)
+}
+
+// Registry signatures/generations and daemon health are fully rechecked on
+// every observation. Dial retry scheduling remains independent on each tick.
+fn observe_when_due(
+    last: &mut Option<Instant>,
+    now: Instant,
+    observe: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    if last.is_some_and(|previous| now.duration_since(previous) < OBSERVATION_INTERVAL) {
+        return Ok(());
+    }
+    observe()?;
+    *last = Some(Instant::now());
+    Ok(())
 }
 
 impl VpnService {
@@ -244,9 +275,6 @@ impl VpnService {
         } else {
             VpnState::Disconnected
         };
-        if status.connected {
-            self.schedule_verified_dials()?;
-        }
         self.status = Some(status);
         self.failure = None;
         Ok(())
@@ -284,21 +312,34 @@ impl ManagedService for VpnService {
                 return Err(error);
             }
         }
+        self.last_observation = Some(Instant::now());
+        if self.failure.is_none() && self.state == VpnState::Connected {
+            self.schedule_verified_dials()?;
+        }
         Ok(())
     }
 
     fn poll(&mut self) -> Result<(), String> {
-        self.refresh_registry()?;
-        if let Err(error) = self.refresh() {
+        let mut last = self.last_observation;
+        let result = observe_when_due(&mut last, Instant::now(), || {
+            self.refresh_registry()?;
+            self.refresh()
+        });
+        self.last_observation = last;
+        if let Err(error) = result {
             self.failure = Some(error.clone());
             if self.required() {
                 return Err(error);
             }
         }
+        if self.failure.is_none() && self.state == VpnState::Connected {
+            self.schedule_verified_dials()?;
+        }
         Ok(())
     }
 
     fn stop(&mut self) -> Result<(), String> {
+        self.last_observation = None;
         self.daemon = None;
         self.last_dial.clear();
         self.status = None;
@@ -331,6 +372,17 @@ impl ManagedService for VpnService {
     }
 
     fn readiness(&self) -> ServiceReadiness {
+        if let Some(reason) = &self.failure {
+            return if self.required() {
+                ServiceReadiness::Blocked {
+                    reason: reason.clone(),
+                }
+            } else {
+                ServiceReadiness::Pending {
+                    reason: reason.clone(),
+                }
+            };
+        }
         let mut readiness = evaluate_readiness(self.required(), self.state, self.status.as_ref());
         if !matches!(readiness, VpnReadiness::Ready) && self.interface.trim().is_empty() {
             readiness = VpnReadiness::Blocked("VPN interface name is empty".into());
@@ -340,5 +392,48 @@ impl ManagedService for VpnService {
             VpnReadiness::Pending(reason) => ServiceReadiness::Pending { reason },
             VpnReadiness::Blocked(reason) => ServiceReadiness::Blocked { reason },
         }
+    }
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+    #[test]
+    fn runtime_ticks_do_not_repeat_status_process_and_due_failure_is_not_cached() {
+        let mut last = None;
+        let mut processes = 0;
+        {
+            let mut observe = || {
+                let result = std::process::Command::new("/bin/sh")
+                    .args(["-c", "exit 0"])
+                    .status()
+                    .map_err(|e| e.to_string())?;
+                assert!(result.success());
+                processes += 1;
+                Ok(())
+            };
+            observe_when_due(&mut last, Instant::now(), &mut observe).unwrap();
+            let initial = last.unwrap();
+            for tick in 1..20 {
+                observe_when_due(
+                    &mut last,
+                    initial + Duration::from_millis(tick * 50),
+                    &mut observe,
+                )
+                .unwrap();
+            }
+            observe_when_due(&mut last, initial + OBSERVATION_INTERVAL, &mut observe).unwrap();
+        }
+        assert_eq!(processes, 2);
+        let committed = last;
+        let error = observe_when_due(&mut last, committed.unwrap() + OBSERVATION_INTERVAL, || {
+            Err("fresh signed registry or NetBird status failed".into())
+        })
+        .unwrap_err();
+        assert!(error.contains("failed"));
+        assert_eq!(
+            last, committed,
+            "failed observation must not cache a success"
+        );
     }
 }

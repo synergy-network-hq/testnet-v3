@@ -1,0 +1,6 @@
+schema_version = 1
+role = "archive"
+network_manifest = "../../../networks/testnet-v3/network-manifest.json"
+data_directory = "/var/lib/synergy-node/archive"
+admin_socket = "/run/synergy-node/archive.sock"
+role_profile = "../../roles/archive.toml"

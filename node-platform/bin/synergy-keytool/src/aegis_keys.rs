@@ -5,8 +5,8 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sha3::{Digest, Sha3_256};
-use synergy_aegis::{KeyId, KeyPurpose, KeyRecord, KeyState};
+use synergy_aegis::{AegisHashEngine, AegisSha3_256};
+use synergy_aegis::{KeyId, KeyPurpose, KeyRecord};
 use synergy_identity::{NodeAddress, NodeClass};
 
 pub const MAX_KEY_BYTES: u64 = 64 * 1024;
@@ -59,8 +59,20 @@ impl KeyMetadata {
                 }
             }
             KeyPurpose::EtdagDecryption => {
-                if self.algorithm != "ML-KEM-768" {
-                    return Err("ETDAG key metadata must use ML-KEM-768".into());
+                let expected_bytes = match self.algorithm.as_str() {
+                    "ML-KEM-768" => {
+                        return Err(
+                            "ML-KEM-768 is entropy-only and cannot authorize protected ingress"
+                                .into(),
+                        )
+                    }
+                    "ML-KEM-1024" => aegis_pqvm::pqc::kem::mlkem::mlkem1024::public_key_bytes(),
+                    _ => {
+                        return Err("ETDAG key metadata has an unsupported ML-KEM algorithm".into())
+                    }
+                };
+                if self.record.public_key.len() != expected_bytes {
+                    return Err("ETDAG public key length differs from its ML-KEM algorithm".into());
                 }
             }
             KeyPurpose::NodeIdentity => {
@@ -79,11 +91,14 @@ pub struct WrittenBundle {
 }
 
 pub fn fingerprint(bytes: &[u8]) -> String {
-    let mut hasher = Sha3_256::new();
-    hasher.update(b"SYNERGY_KEY_FINGERPRINT_V1");
-    hasher.update((bytes.len() as u64).to_be_bytes());
-    hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    let digest = AegisSha3_256
+        .sha3_256_segments(&[
+            b"SYNERGY_KEY_FINGERPRINT_V1",
+            &(bytes.len() as u64).to_be_bytes(),
+            bytes,
+        ])
+        .expect("fixed SHA3-256 supported");
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 pub fn valid_consensus_node_address(value: &str) -> bool {
@@ -217,7 +232,7 @@ fn validate_output_directory(path: &Path) -> Result<PathBuf, String> {
     fs::canonicalize(path).map_err(|error| format!("resolve output directory: {error}"))
 }
 
-fn write_new(path: &Path, bytes: &[u8], private: bool) -> Result<(), String> {
+pub(crate) fn write_new(path: &Path, bytes: &[u8], private: bool) -> Result<(), String> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -233,7 +248,7 @@ fn write_new(path: &Path, bytes: &[u8], private: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn sync_directory(path: &Path) -> Result<(), String> {
+pub(crate) fn sync_directory(path: &Path) -> Result<(), String> {
     File::open(path)
         .and_then(|directory| directory.sync_all())
         .map_err(|error| format!("sync output directory: {error}"))

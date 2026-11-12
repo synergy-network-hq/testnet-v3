@@ -1,0 +1,6 @@
+schema_version = 1
+role = "ai-compute"
+network_manifest = "../../../networks/testnet-v3/network-manifest.json"
+data_directory = "/var/lib/synergy-node/ai-compute"
+admin_socket = "/run/synergy-node/ai-compute.sock"
+role_profile = "../../roles/ai-compute.toml"

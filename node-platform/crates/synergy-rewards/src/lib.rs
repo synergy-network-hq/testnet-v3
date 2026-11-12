@@ -9,6 +9,7 @@ mod account;
 mod authorization;
 mod ledger;
 mod store;
+pub mod validator_epochs;
 mod withdrawal;
 
 use std::fmt;
@@ -128,7 +129,12 @@ mod tests {
     }
 
     fn wallet(seed: u8) -> String {
-        synergy_address::generate_wallet_address(&format!("{seed:02x}").repeat(1_793)).unwrap()
+        match seed {
+            1 => "synw7E5F4552091A69125d5DfCb7b8C2659029395Bdf",
+            2 => "synw5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+            _ => panic!("no wallet fixture for {seed}"),
+        }
+        .to_owned()
     }
 
     fn finalized(height: u64) -> BlockReference {

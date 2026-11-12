@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+id synergy >/dev/null 2>&1 || useradd --system --home /var/lib/synergy-node --shell /usr/sbin/nologin synergy
+install -d -o synergy -g synergy -m 0750 /var/lib/synergy-node /run/synergy-node
+systemctl daemon-reload

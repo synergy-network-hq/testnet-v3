@@ -1,0 +1,7 @@
+schema_version = 1
+max_frame_bytes = 8388608
+max_admin_request_bytes = 1048576
+max_connections = 4096
+max_pending_requests = 2048
+max_snapshot_chunk_bytes = 4194304
+max_etdag_envelope_bytes = 1048576

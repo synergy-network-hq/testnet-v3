@@ -1,7 +1,10 @@
 [package]
-name = "synergy-scaffold-services-vpn-enrollment-broker"
+name = "synergy-vpn-enrollment-broker"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish = false
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

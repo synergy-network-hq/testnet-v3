@@ -24,8 +24,8 @@ fn signed_payload(
 ) -> (SynQSigningPayload, SynQSignature) {
     let payload = SynQSigningPayload {
         domain_tag,
-        chain_id: ChainId::testnet_1266(),
-        network_id: NetworkId::testnet(),
+        chain_id: ChainId(1266),
+        network_id: NetworkId("synergy-testnet".into()),
         protocol_version: 1,
         algorithm_id: AlgorithmId::MlDsa87,
         signature_purpose: purpose,
@@ -45,12 +45,20 @@ fn valid_deploy() -> (
     VerificationContext,
     ContractDeployEnvelope,
 ) {
-    let verifier = AegisSynQVerifier::testnet_1266();
-    let context = VerificationContext::testnet(NOW);
+    let verifier = AegisSynQVerifier::new(pqsynq::SynQSecurityPolicy::for_network(
+        ChainId(1266),
+        NetworkId("synergy-testnet".into()),
+    ));
+    let context =
+        VerificationContext::for_network(ChainId(1266), NetworkId("synergy-testnet".into()), NOW);
     let (public_key, secret_key) = Sign::mldsa87().keygen().unwrap();
     let public_key = SynQPublicKey::new(public_key);
     let signer_address = verifier
-        .derive_synq_address(&public_key, AlgorithmId::MlDsa87, NetworkId::testnet())
+        .derive_synq_address(
+            &public_key,
+            AlgorithmId::MlDsa87,
+            NetworkId("synergy-testnet".into()),
+        )
         .unwrap();
     let bytecode_hash = hash32(b"bytecode");
     let manifest_hash = hash32(b"manifest");
@@ -86,12 +94,20 @@ fn valid_deploy() -> (
 }
 
 fn valid_call() -> (AegisSynQVerifier, VerificationContext, ContractCallEnvelope) {
-    let verifier = AegisSynQVerifier::testnet_1266();
-    let context = VerificationContext::testnet(NOW);
+    let verifier = AegisSynQVerifier::new(pqsynq::SynQSecurityPolicy::for_network(
+        ChainId(1266),
+        NetworkId("synergy-testnet".into()),
+    ));
+    let context =
+        VerificationContext::for_network(ChainId(1266), NetworkId("synergy-testnet".into()), NOW);
     let (public_key, secret_key) = Sign::mldsa87().keygen().unwrap();
     let public_key = SynQPublicKey::new(public_key);
     let caller = verifier
-        .derive_synq_address(&public_key, AlgorithmId::MlDsa87, NetworkId::testnet())
+        .derive_synq_address(
+            &public_key,
+            AlgorithmId::MlDsa87,
+            NetworkId("synergy-testnet".into()),
+        )
         .unwrap();
     let contract_address = caller;
     let method_selector = [0xaa, 0xbb, 0xcc, 0xdd];
@@ -193,7 +209,7 @@ fn wrong_signer_fails() {
         .derive_synq_address(
             &other_public_key,
             AlgorithmId::MlDsa87,
-            NetworkId::testnet(),
+            NetworkId("synergy-testnet".into()),
         )
         .unwrap();
 
@@ -357,4 +373,64 @@ fn transaction_dispatch_preserves_security_errors() {
         verifier.verify_synq_transaction(&tx, &context).unwrap_err(),
         AegisSynQError::WrongDomain
     );
+}
+
+#[test]
+fn configured_networks_verify_and_reject_cross_incarnation_replay() {
+    let (pk, sk) = Sign::mldsa87().keygen().unwrap();
+    let pk = SynQPublicKey::new(pk);
+    for (chain, name) in [
+        (1266, "testnet-incarnation-a"),
+        (9001, "beta-fixture"),
+        (9002, "mainnet-fixture"),
+    ] {
+        let network = NetworkId(name.into());
+        let policy = pqsynq::SynQSecurityPolicy::for_network(ChainId(chain), network.clone());
+        let verifier = AegisSynQVerifier::new(policy);
+        let context = VerificationContext::for_network(ChainId(chain), network.clone(), NOW);
+        let signer = verifier
+            .derive_synq_address(&pk, AlgorithmId::MlDsa87, network.clone())
+            .unwrap();
+        let mut deploy = valid_deploy().2;
+        deploy.public_key = pk.clone();
+        deploy.signing_payload.chain_id = ChainId(chain);
+        deploy.signing_payload.network_id = network;
+        deploy.signing_payload.signer_address = signer;
+        deploy.signing_payload.payload_hash = hash_contract_deploy_body(
+            &deploy.bytecode_hash,
+            &deploy.manifest_hash,
+            &deploy.abi_hash,
+            signer.as_bytes(),
+            &deploy.constructor_args_hash,
+        );
+        deploy.signature = SynQSignature::new(
+            Sign::mldsa87()
+                .sign(
+                    &canonicalize_signing_payload(&deploy.signing_payload).unwrap(),
+                    &sk,
+                )
+                .unwrap(),
+        );
+        assert!(verifier.verify_contract_deploy(&deploy, &context).is_ok());
+        let other_chain = AegisSynQVerifier::new(pqsynq::SynQSecurityPolicy::for_network(
+            ChainId(chain + 1),
+            context.network_id.clone(),
+        ));
+        let other_context =
+            VerificationContext::for_network(ChainId(chain + 1), context.network_id.clone(), NOW);
+        assert!(other_chain
+            .verify_contract_deploy(&deploy, &other_context)
+            .is_err());
+        let other_name = NetworkId(format!("{name}-new-incarnation"));
+        let other = AegisSynQVerifier::new(pqsynq::SynQSecurityPolicy::for_network(
+            ChainId(chain),
+            other_name.clone(),
+        ));
+        assert!(other
+            .verify_contract_deploy(
+                &deploy,
+                &VerificationContext::for_network(ChainId(chain), other_name, NOW)
+            )
+            .is_err());
+    }
 }

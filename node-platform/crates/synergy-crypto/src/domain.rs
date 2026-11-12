@@ -9,13 +9,13 @@ pub struct CryptoDomain {
 }
 impl CryptoDomain {
     pub fn validate(&self) -> Result<(), String> {
-        if self.chain_id != 1266
+        if self.chain_id == 0
             || self.network_id.trim().is_empty()
             || self.network_id.len() > 128
             || self.purpose.trim().is_empty()
             || self.purpose.len() > 128
         {
-            return Err("invalid Chain 1266 cryptographic domain".into());
+            return Err("invalid configured cryptographic domain".into());
         }
         Ok(())
     }

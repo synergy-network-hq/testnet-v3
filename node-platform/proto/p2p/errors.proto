@@ -1,0 +1,2 @@
+syntax = "proto3"; package synergy.p2p.v1;
+message ProtocolError { uint32 code = 1; string message = 2; bool retryable = 3; }

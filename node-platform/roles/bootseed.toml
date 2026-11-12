@@ -1,0 +1,23 @@
+schema_version = 1
+role = "bootseed"
+plane = "public"
+capabilities = ["identity", "telemetry", "health", "network_transport", "peer_discovery"]
+
+[ports]
+p2p = 24019
+admin = 26019
+metrics = 27019
+
+[storage]
+data_directory = "/var/lib/synergy-node/bootseed"
+maximum_bytes = 107374182400
+pruning = "role_policy"
+
+[keys]
+raw_export_forbidden = true
+posy_signing = false
+
+[readiness]
+requires_manifest = true
+requires_identity = true
+requires_healthy_dependencies = true

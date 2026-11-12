@@ -1,0 +1,2 @@
+syntax = "proto3"; package synergy.etdag.v1;
+message AvailabilityAttestation { bytes vertex_id = 1; string validator = 2; bytes signature = 3; }

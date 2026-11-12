@@ -4,6 +4,9 @@ use crate::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+// Preserve the public recovery artifact constructor contract. Bounding decoded
+// wire/store input belongs to its recovery owner; boxing does not enforce it.
+#[allow(clippy::large_enum_variant)]
 pub enum RecoveryArtifact {
     ProtectedInput(EncryptedTransactionEnvelope),
     Vertex(TransactionVertex),

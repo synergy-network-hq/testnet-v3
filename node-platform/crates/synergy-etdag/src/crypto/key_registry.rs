@@ -51,6 +51,20 @@ impl IngressKemKeyRegistry {
         Ok(())
     }
 
+    /// Governed protected pipeline profile; generic registries remain independently usable.
+    pub fn validate_protected_profile(&self) -> Result<(), EtdagError> {
+        super::validate_key_schedule(self)?;
+        if self.records.iter().any(|record| {
+            record.public_key.algorithm != "ML-KEM-1024"
+                || record.public_key.public_key.len() != super::ML_KEM_1024_PUBLIC_KEY_BYTES
+        }) {
+            return Err(EtdagError::Governance(
+                "protected ingress requires ML-KEM-1024 public keys".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn root(&self) -> Result<EtdagDigest, EtdagError> {
         self.validate_shape()?;
         EtdagDigest::from_canonical("PoSy/ETDAG/IngressKemRegistry/v3", self)

@@ -1,0 +1,4 @@
+syntax = "proto3"; package synergy.sync.v1;
+message SnapshotManifestRequest { uint64 height = 1; }
+message SnapshotChunkRequest { bytes snapshot_id = 1; uint32 chunk_index = 2; }
+message SnapshotChunk { bytes snapshot_id = 1; uint32 chunk_index = 2; bytes data = 3; bytes hash = 4; }

@@ -12,12 +12,39 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct PqvmVerifier {
     policy: AegisPolicy,
+    apqe: Option<crate::ApqeVerifier>,
 }
 
 impl PqvmVerifier {
+    /// Explicit authoritative provider injection, preserving the canonical node trait.
+    pub fn with_apqe(
+        policy: AegisPolicy,
+        engine: std::sync::Arc<
+            std::sync::Mutex<synergy_address_engine::apqe::crypto_engine::CryptoEngine>,
+        >,
+    ) -> Result<Self, VerificationError> {
+        let apqe = crate::ApqeVerifier::new(engine, policy.clone())?;
+        Ok(Self {
+            policy,
+            apqe: Some(apqe),
+        })
+    }
+    /// Dedicated blocking transport workers may serialize overlapping native calls.
+    pub fn serialized_provider(mut self) -> Self {
+        self.apqe = self.apqe.map(crate::ApqeVerifier::serialized);
+        self
+    }
     pub fn new(policy: AegisPolicy) -> Result<Self, VerificationError> {
-        policy.validate().map_err(VerificationError::Policy)?;
-        Ok(Self { policy })
+        #[cfg(not(test))]
+        {
+            let _ = policy;
+            Err(VerificationError::Provider("explicit authenticated APQE provider required; embedded native verification is forbidden".into()))
+        }
+        #[cfg(test)]
+        {
+            policy.validate().map_err(VerificationError::Policy)?;
+            Ok(Self { policy, apqe: None })
+        }
     }
 }
 
@@ -29,6 +56,9 @@ impl AegisVerifier for PqvmVerifier {
         signature: &Signature,
         public_key: &[u8],
     ) -> Result<(), VerificationError> {
+        if let Some(apqe) = &self.apqe {
+            return apqe.verify(context, message, signature, public_key);
+        }
         context
             .validate()
             .map_err(|_| VerificationError::InvalidContext)?;
@@ -65,27 +95,65 @@ pub struct PqvmSigner {
     policy: AegisPolicy,
     key_id: KeyId,
     secret_key: Vec<u8>,
+    apqe: Option<crate::ApqeSigner>,
 }
 
 impl PqvmSigner {
+    /// Explicit APQE ML-DSA-65 ownership; no embedded implementation is called.
+    pub fn with_apqe(
+        policy: AegisPolicy,
+        key_id: KeyId,
+        public_key: &[u8],
+        secret_key: Vec<u8>,
+        engine: std::sync::Arc<
+            std::sync::Mutex<synergy_address_engine::apqe::crypto_engine::CryptoEngine>,
+        >,
+    ) -> Result<Self, SigningError> {
+        let apqe = crate::ApqeSigner::new(
+            engine,
+            policy.clone(),
+            key_id.clone(),
+            SignatureAlgorithm::MlDsa65,
+            public_key,
+            secret_key,
+        )?;
+        Ok(Self {
+            policy,
+            key_id,
+            secret_key: Vec::new(),
+            apqe: Some(apqe),
+        })
+    }
     pub fn from_secret_key_bytes(
         policy: AegisPolicy,
         key_id: KeyId,
         secret_key: Vec<u8>,
     ) -> Result<Self, SigningError> {
-        policy.validate().map_err(SigningError::Policy)?;
-        if !policy
-            .allowed_algorithms
-            .contains(&SignatureAlgorithm::MlDsa65)
-            || mldsa65::SecretKey::from_bytes(&secret_key).is_err()
+        #[cfg(not(test))]
         {
-            return Err(SigningError::KeyUnavailable);
+            let _ = (policy, key_id);
+            drop(synergy_address_engine::apqe::SecretBytes::from_bytes(
+                secret_key,
+            ));
+            Err(SigningError::Provider("explicit authenticated APQE provider required; embedded native signing is forbidden".into()))
         }
-        Ok(Self {
-            policy,
-            key_id,
-            secret_key,
-        })
+        #[cfg(test)]
+        {
+            policy.validate().map_err(SigningError::Policy)?;
+            if !policy
+                .allowed_algorithms
+                .contains(&SignatureAlgorithm::MlDsa65)
+                || mldsa65::SecretKey::from_bytes(&secret_key).is_err()
+            {
+                return Err(SigningError::KeyUnavailable);
+            }
+            Ok(Self {
+                policy,
+                key_id,
+                secret_key,
+                apqe: None,
+            })
+        }
     }
 }
 
@@ -98,6 +166,13 @@ impl Drop for PqvmSigner {
     }
 }
 
+impl PqvmSigner {
+    /// Dedicated blocking transport workers may serialize overlapping native calls.
+    pub fn serialized_provider(mut self) -> Self {
+        self.apqe = self.apqe.take().map(crate::ApqeSigner::serialized);
+        self
+    }
+}
 impl AegisSigner for PqvmSigner {
     fn sign(
         &self,
@@ -105,6 +180,9 @@ impl AegisSigner for PqvmSigner {
         context: &SigningContext,
         message: &[u8],
     ) -> Result<Signature, SigningError> {
+        if let Some(apqe) = &self.apqe {
+            return apqe.sign(key_id, context, message);
+        }
         context.validate()?;
         if key_id != &self.key_id {
             return Err(SigningError::KeyUnavailable);

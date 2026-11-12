@@ -1,0 +1,216 @@
+{
+  "network_id": "posy-apqe-canary-process-49028",
+  "genesis_hash": "2a770743814a98e61856efb85ebae1461dbac38a7b75ca65fb9f7ffe2e7011dc",
+  "tests": [
+    {
+      "name": "Canary RPC gateway implementation and negative tests",
+      "status": "passed",
+      "started_at": null,
+      "updated_at": "2026-11-09T11:34:43.135530+00:00",
+      "detail": "Component and native APQE tests passed; live gateway commissioned and public authenticated Chain 99999 reads verified. Sustained operation remains under fleet stability qualification."
+    },
+    {
+      "name": "Linux gateway build and shared package deployment",
+      "status": "passed",
+      "started_at": null,
+      "updated_at": "2026-11-09T11:03:39.718691+00:00",
+      "detail": "Canary gateway r2 commissioned on synergy-rpc and Val2 relay runs with sealed fleet r3. Authenticated readiness, native account balance/nonce, block certificate and restart recovery passed; legacy Chain 1266 remained isolated."
+    },
+    {
+      "name": "Canary gateway restricted VPN admission",
+      "status": "passed",
+      "started_at": null,
+      "updated_at": "2026-11-09T11:03:39.718691+00:00",
+      "detail": "Dedicated gateway peer enrolled and bound. TCP 8551 only through wt0; live APQE relay returned a finalized block and certificate matching direct validators."
+    },
+    {
+      "name": "Canary public DNS, HTTPS and CORS",
+      "status": "passed",
+      "started_at": null,
+      "updated_at": "2026-11-09T11:13:47.603619+00:00",
+      "detail": "Cloudflare proxied DNS and public CA HTTPS verified for canary-rpc.synergy-network.io. Chain 99999 finalized at height 3641. Unapproved browser Origin rejected. Desktop uses native HTTPS."
+    },
+    {
+      "name": "Wallet real APQE runtime adapter",
+      "status": "passed",
+      "started_at": null,
+      "updated_at": "2026-11-09T12:13:16.052763+00:00",
+      "detail": "Ordinary macOS syna pilot only: actual APQE custody, native HTTPS, encrypted signing, reviewed one-shot transfer and finalized readback verified. Protected D+P/mobile/browser remain unqualified and gated."
+    },
+    {
+      "name": "Canary Wallet transfer and finalized receipt",
+      "status": "passed",
+      "started_at": null,
+      "updated_at": "2026-11-09T12:11:09.728430+00:00",
+      "detail": "Actual macOS Wallet signed and user submitted once through public Canary RPC. Tx 6856d335\u2026b79414 applied at finalized H4638; verified certificate, gas, nonce and sender/recipient balances. Ordinary syna pilot; protected D+P remains unqualified."
+    },
+    {
+      "name": "Wallet persistence and failure handling",
+      "status": "passed",
+      "started_at": null,
+      "updated_at": "2026-11-09T12:13:16.052763+00:00",
+      "detail": "Clean read-only relaunch and private unlock restored exact H4638 finalized transfer and certificate from persisted history; live balance 1,160,000 nWei nonce1. Submission disabled. Initial queued acknowledgement remains historical beside authoritative finality."
+    },
+    {
+      "name": "Transport registry renewal compatibility and rollback",
+      "status": "passed",
+      "started_at": null,
+      "updated_at": "2026-11-09T11:00:35.330392+00:00",
+      "detail": "Generation 3 active on all five validators and the gateway. Same trust root; expires November 23 08:09:45 UTC. Interrupted-install tests passed. Recovery uses forward signed rotation."
+    },
+    {
+      "name": "Transport registry expiry monitoring",
+      "status": "passed",
+      "started_at": null,
+      "updated_at": "2026-11-09T11:00:35.330392+00:00",
+      "detail": "Live collector warned before cutover and cleared the warning after observing generation 3 active on all five validators."
+    },
+    {
+      "name": "Canary epoch boundary and validator restart diagnosis",
+      "status": "passed",
+      "started_at": null,
+      "updated_at": "2026-11-11T22:34:16.943998+00:00",
+      "detail": "Epoch-1 ends at H10000. A Sync request for a successor from a peer that did not have it caused fatal handling. Latest verified durable heights were H9998 on four validators and H9981 on Val5."
+    },
+    {
+      "name": "Atlas live layout and telemetry corrections",
+      "status": "passed",
+      "started_at": null,
+      "updated_at": "2026-11-09T09:52:04.915571+00:00",
+      "detail": "Deployed and verified in Chrome: five cards in one row, sixth authenticated-session chart, proposer highlight, common lag scale and live task statuses. Native checkpoint/delta totals are being connected without fake metrics."
+    },
+    {
+      "name": "Val5 catch-up and block-production latency",
+      "status": "passed",
+      "started_at": "2026-11-09T11:34:43.135530+00:00",
+      "updated_at": "2026-11-12T04:57:21.998607+00:00",
+      "detail": "Val5 recovered from H9981 to the common H9998, with four authenticated peers and 45 seconds without automatic restart. All five then matched exact block/state roots. The fleet is now stopped for a separate universal epoch-2 startup failure; sustained new finality is not yet accepted."
+    },
+    {
+      "name": "Certified checkpoint and recovery qualification",
+      "status": "pending",
+      "started_at": "2026-11-09T11:41:39.818479+00:00",
+      "updated_at": "2026-11-11T22:34:16.943998+00:00",
+      "detail": "Earlier Val5 checkpoint recovery and five-validator finality were demonstrated. Recovery across the current epoch boundary remains gated by the certified successor and shared master qualification."
+    },
+    {
+      "name": "Dedicated archive recovery and onboarding node",
+      "status": "pending",
+      "started_at": null,
+      "updated_at": "2026-11-09T11:42:53.766024+00:00",
+      "detail": "synergy-archive is the designated machine. After immediate fleet stabilization, commission through canonical shared architecture for authenticated recovery and validator onboarding; no ad hoc node edits."
+    },
+    {
+      "name": "Epoch-boundary Sync regression on disposable Linux",
+      "status": "passed",
+      "started_at": null,
+      "updated_at": "2026-11-11T22:34:16.943998+00:00",
+      "detail": "The release binary test ran with the native APQE provider. A peer without the requested signed successor stayed online and did not send an authority. Live rollout has not started."
+    },
+    {
+      "name": "Epoch-2 authority signing and witness verification",
+      "status": "passed",
+      "started_at": null,
+      "updated_at": "2026-11-12T04:57:21.998607+00:00",
+      "detail": "All five actual validators approved through opaque APQE. The same 5/5 certificate was independently verified and activated on all five validators and the gateway, preserving original Genesis and trust pins."
+    },
+    {
+      "name": "Epoch-2 transport and gateway admission",
+      "status": "passed",
+      "started_at": null,
+      "updated_at": "2026-11-12T04:57:21.998607+00:00",
+      "detail": "Signed generation-4 epoch-2 registry installed on all six hosts through the shared activation tool. Signed gateway admission installed on Val2 and synergy-rpc. Endpoints, membership and transport root preserved; services remain stopped for startup correction."
+    },
+    {
+      "name": "Shared validator master rollout",
+      "status": "passed",
+      "started_at": null,
+      "updated_at": "2026-11-12T04:57:21.998607+00:00",
+      "detail": "Master 314a7e342f57 installed and verified on all six hosts through shared lifecycle. Only the node executable changed. No manual architecture edits. All five validators are currently stopped after the new epoch startup failed closed."
+    },
+    {
+      "name": "APQE Wallet Link and paired transfer qualification",
+      "status": "pending",
+      "started_at": null,
+      "updated_at": "2026-11-11T22:34:16.943998+00:00",
+      "detail": "The ordinary standalone Wallet pilot passed earlier. Pairing, review, submission and finalized readback via the paired Wallet remain gated on restored Canary RPC and finality."
+    },
+    {
+      "name": "Lost-root recovery verifier on disposable Linux",
+      "started_at": null,
+      "status": "passed",
+      "detail": "Five focused recovery checks passed with real APQE: captured certified boundary, quorum enforcement, immutable approval reservations, signed registry continuation, and activation/restart matrix across two validator sets/epoch sizes. Stale state, missing execution dependencies, interrupted/repeated activation, gateway-only trust and preserved journals covered.",
+      "updated_at": "2026-11-12T01:34:55.445284+00:00"
+    },
+    {
+      "name": "Replacement authority signer custody",
+      "started_at": null,
+      "status": "passed",
+      "detail": "Native APQE generated encrypted ML-DSA-65 custody and verified decryption and possession. Unlock is in the local macOS login Keychain. Custody references, public fingerprint and the missing independent recovery-copy limitation were recorded in the sole Desktop credentials workbook before rollout.",
+      "updated_at": "2026-11-12T00:54:01.002796+00:00"
+    },
+    {
+      "name": "Authority keytool regression coverage",
+      "started_at": null,
+      "status": "passed",
+      "detail": "35 tests passed with real authenticated APQE on both macOS and disposable Linux. Embedded crypto remains disabled; obsolete Wallet CLI stays fail-closed.",
+      "updated_at": "2026-11-12T01:27:16.177456+00:00"
+    },
+    {
+      "name": "Recovered PoSy timeout-parent consistency",
+      "status": "passed",
+      "started_at": "2026-11-12T02:07:52.019286+00:00",
+      "updated_at": "2026-11-12T02:28:07.460831+00:00",
+      "detail": "Native replay regression passed and master88461d7b4700 deployed. All five actual nodes remained active beyond former timeout deadline, NRestarts0 and four authenticated peers each. Terminal timeout crash resolved; separate resumed Sync request stall blocks Val5 execution catchup."
+    },
+    {
+      "name": "Certified historical replay at terminal epoch",
+      "started_at": "2026-11-12T03:02:01.188386+00:00",
+      "status": "passed",
+      "updated_at": "2026-11-12T04:57:21.998607+00:00",
+      "detail": "Bounded certified replay without a live proposal-build request passed native tests. The retained five-node recovery passed in 20.23 seconds, and the fresh request/restart/reorder pipeline passed. Typed Head decoding removed the verified memory-accounting stall; no memory-budget increase."
+    },
+    {
+      "name": "Native APQE full terminal-epoch catchup integration",
+      "started_at": "2026-11-12T03:02:01.188386+00:00",
+      "status": "passed",
+      "updated_at": "2026-11-12T04:57:21.998607+00:00",
+      "detail": "Native APQE consensus/Sync component pipeline passed in 196.61 seconds: genuine 17-block gap, outstanding request restart, reordered authenticated responses and matching durable state/world across five. This does not qualify signed-Genesis recovery activation with all runtime owners; that separate gate is open."
+    },
+    {
+      "name": "Retire legacy Canary deployment",
+      "status": "in_progress",
+      "started_at": "2026-11-12T05:46:27.428761+00:00",
+      "updated_at": "2026-11-12T05:46:27.428761+00:00",
+      "detail": "Existing Canary is scheduled for retirement. Old-chain recovery and Epoch 2 rollout work have stopped. Validator deletion awaits replacement qualification and explicit cutover approval."
+    },
+    {
+      "name": "Portal and dApp Hub replacement source",
+      "status": "passed",
+      "started_at": "2026-11-12T05:46:27.428761+00:00",
+      "updated_at": "2026-11-12T05:46:27.428761+00:00",
+      "detail": "Verified all 718 handoff payloads. The active Portal and Hub checkouts descend from the supplied revisions. Full native Portal type check passed against the canonical NodeNetwork engine; no release or install qualification is implied."
+    },
+    {
+      "name": "Legacy validator artifact inventory",
+      "status": "in_progress",
+      "started_at": "2026-11-12T05:46:27.428761+00:00",
+      "updated_at": "2026-11-12T05:46:27.428761+00:00",
+      "detail": "Read-only metadata collected on Val2\u2013Val6. Out-of-root packages, checkpoint/recovery files and old service registrations need exact scope approval; shared host infrastructure is excluded."
+    },
+    {
+      "name": "NodeNetwork signed release and provisioning lifecycle",
+      "status": "in_progress",
+      "started_at": "2026-11-12T05:46:27.428761+00:00",
+      "updated_at": "2026-11-12T05:46:27.428761+00:00",
+      "detail": "Native bootstrap now refuses leftover validator services even with no installation root. Approved APQE publisher/release trust and complete application-driven install, custody, VPN, update and removal qualification remain open."
+    },
+    {
+      "name": "Replacement chain five-validator acceptance and Canary RPC",
+      "status": "pending",
+      "started_at": null,
+      "updated_at": "2026-11-12T05:46:27.428761+00:00",
+      "detail": "After disposable qualification and approved removal, provision five new validators through Portal and NodeNetwork. Verify fresh Genesis, authenticated peers, sustained matching finality and public RPC."
+    }
+  ]
+}

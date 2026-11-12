@@ -12,23 +12,26 @@ data.
 
 ## Source-integrity boundary
 
-The only Testnet-v3 development checkout is
-`/Volumes/xcode/Synergy-Network/01-Core-Protocol/testnet-v3`.
+The canonical Core Protocol checkout is
+`/Volumes/PortableSSD/Synergy-Network/01-Core-Protocol` on this Mac’s external
+SSD. Testnet-v3 governed artifacts are in this `networks/testnet-v3` directory;
+universal node implementation belongs in `node-platform` at the repository root.
+Follow the root instructions for the canonical migration ledgers.
 
 Do not create nested clones, long-lived worktrees, or copied Testnet trees. A
 temporary worktree must have a named purpose, be reconciled into this checkout
 before its task is complete, and then be removed with `git worktree remove`.
 Testnet-v2 source and runtime artifacts are forbidden in this tree. The Node
 Control Panel source belongs only at
-`/Volumes/xcode/Synergy-Network/07-Node-Control-Panel`; do not embed or copy it
+`/Volumes/PortableSSD/Synergy-Network/07-Node-Control-Panel`; do not embed or copy it
 under Testnet-v3.
 
 <!-- BEGIN GLOBAL AGENT OPERATING SYSTEM -->
 ## Global Agent Operating System
 
 Before beginning any task in this repository, read and follow the global Agent
-Operating System at `/Users/devpup/.codex/AGENTS.md`. Its canonical supporting
-package is `/Users/devpup/.codex/agent-operating-system`; resolve its
+Operating System at `/Users/jhutzler/.codex/AGENTS.md`. Its canonical supporting
+package is `/Users/jhutzler/.codex/agent-operating-system`; resolve its
 `MEMORY.md`, `.agent-memory/`, templates, and linter from that package root.
 Retrieve only the memory relevant to the current task.
 

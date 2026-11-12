@@ -20,6 +20,8 @@ pub struct AdmissionRequest {
     pub target_height: u64,
     pub sender_wallet: String,
     pub sender_nonce: u64,
+    pub gas_class_units: u64,
+    pub fee_class: u32,
     pub signature_algorithm: String,
     pub signer_public_key: Vec<u8>,
     pub envelope: EncryptedTransactionEnvelope,
@@ -35,16 +37,61 @@ struct UnsignedAdmissionRequest<'a> {
     target_height: u64,
     sender_wallet: &'a str,
     sender_nonce: u64,
+    gas_class_units: u64,
+    fee_class: u32,
     signature_algorithm: &'a str,
     signer_public_key: &'a [u8],
     envelope: &'a EncryptedTransactionEnvelope,
 }
 
+/// Wallet authorization retained with the vertex so peers can independently
+/// verify the original admission against finalized account authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WalletAdmission {
+    pub request: AdmissionRequest,
+    pub identity_authorization: synergy_identity::authorization::IdentityAuthorizationCarrier,
+}
+
+/// Public, actual open-target material for wallet encryption. Registry records
+/// carry ingress public keys only; this carrier confers no admission authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WalletAdmissionContext {
+    pub context: crate::TargetAdmissionContextV3,
+    pub parameters: crate::EtdagParameters,
+    pub ingress_keys: Vec<crate::IngressKemKeyRecord>,
+}
+
+impl WalletAdmissionContext {
+    pub fn validate(&self) -> Result<(), EtdagError> {
+        self.context.validate_with_parameters(&self.parameters)
+    }
+}
+
+/// Commit all encrypted-envelope fields except the identifier itself, using
+/// the existing envelope domain. The order key remains authenticated material.
+pub fn envelope_commitment(
+    envelope: &EncryptedTransactionEnvelope,
+) -> Result<EtdagDigest, EtdagError> {
+    let mut body = serde_json::to_value(envelope)
+        .map_err(|e| EtdagError::Corrupt(format!("encode envelope commitment: {e}")))?;
+    body.as_object_mut()
+        .ok_or_else(|| EtdagError::Corrupt("envelope commitment is not an object".into()))?
+        .remove("envelope_id");
+    EtdagDigest::from_canonical(crate::domains::ENVELOPE_ID, &body)
+}
+
 impl AdmissionRequest {
+    pub fn envelope_commitment(&self) -> Result<EtdagDigest, EtdagError> {
+        envelope_commitment(&self.envelope)
+    }
+
     pub fn validate_shape(&self) -> Result<(), EtdagError> {
         self.context_root.validate()?;
         self.envelope.validate()?;
         if self.request_version != ADMISSION_REQUEST_VERSION
+            || self.gas_class_units == 0
             || self.chain_id == 0
             || self.network_id.trim().is_empty()
             || self.network_id.len() > MAX_NETWORK_ID_BYTES
@@ -84,6 +131,8 @@ impl AdmissionRequest {
                 target_height: self.target_height,
                 sender_wallet: &self.sender_wallet,
                 sender_nonce: self.sender_nonce,
+                gas_class_units: self.gas_class_units,
+                fee_class: self.fee_class,
                 signature_algorithm: &self.signature_algorithm,
                 signer_public_key: &self.signer_public_key,
                 envelope: &self.envelope,

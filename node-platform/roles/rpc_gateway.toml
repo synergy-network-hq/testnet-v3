@@ -1,0 +1,24 @@
+schema_version = 1
+role = "rpc-gateway"
+plane = "public"
+capabilities = ["identity", "telemetry", "health", "network_transport", "public_rpc"]
+
+[ports]
+p2p = 24016
+rpc = 25016
+admin = 26016
+metrics = 27016
+
+[storage]
+data_directory = "/var/lib/synergy-node/rpc_gateway"
+maximum_bytes = 107374182400
+pruning = "role_policy"
+
+[keys]
+raw_export_forbidden = true
+posy_signing = false
+
+[readiness]
+requires_manifest = true
+requires_identity = true
+requires_healthy_dependencies = true

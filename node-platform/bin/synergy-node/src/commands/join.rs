@@ -1,8 +1,10 @@
 use std::path::PathBuf;
 
+use serde::Serialize;
+
 use super::absolute_path;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct JoinRequest {
     pub configuration_path: PathBuf,
     pub signed_manifest_path: PathBuf,

@@ -1,0 +1,24 @@
+schema_version = 1
+role = "indexer"
+plane = "public"
+capabilities = ["identity", "durable_storage", "telemetry", "health", "sync", "network_transport", "archive_read", "public_rpc"]
+
+[ports]
+p2p = 24017
+rpc = 25017
+admin = 26017
+metrics = 27017
+
+[storage]
+data_directory = "/var/lib/synergy-node/indexer"
+maximum_bytes = 107374182400
+pruning = "role_policy"
+
+[keys]
+raw_export_forbidden = true
+posy_signing = false
+
+[readiness]
+requires_manifest = true
+requires_identity = true
+requires_healthy_dependencies = true

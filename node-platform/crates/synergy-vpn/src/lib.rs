@@ -19,7 +19,10 @@ pub use metrics::VpnMetrics;
 pub use netbird::{NetbirdDaemon, NetbirdProfile, NetbirdStatus};
 pub use peer_binding::ValidatorPeerBinding;
 pub use readiness::{evaluate_readiness, VpnReadiness};
-pub use route_policy::{normalize_validator_address, OverlayScope, VpnRouteError, VpnRoutePolicy};
+pub use route_policy::{
+    normalize_validator_address, validate_authenticated_route, OverlayScope, VpnRouteError,
+    VpnRoutePolicy,
+};
 pub use sentry_binding::SentryPeerBinding;
 pub use state::VpnState;
 pub use transport_lease::SignedTransportLease;

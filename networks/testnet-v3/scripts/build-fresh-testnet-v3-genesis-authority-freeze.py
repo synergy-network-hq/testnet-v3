@@ -10,7 +10,6 @@ the Core Genesis ceremony needs to bind the three canonical identities.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
 import hashlib
 import json
 import os
@@ -166,162 +165,7 @@ def require_hash_matches(raw: bytes, expected: Any, label: str) -> str:
     return actual
 
 
-REPLACEMENT_MANIFEST = "authority-replacement.complete.json"
-REPLACEMENT_DERIVATION = "SNTS-01-v1.3-FN-DSA-1024-key-derived-authority-address"
-
-
-def derive_authority_address(public_key: bytes) -> str:
-    # SNTS-01 v1.3: first 30 base32 symbols of SHA3-256(raw FN key), Bech32m.
-    # Same polymod as the validator public adapter; no BLAKE3 dependency needed.
-    digest = hashlib.sha3_256(public_key).digest()
-    bits = int.from_bytes(digest, "big")
-    words = [(bits >> (256 - 5 * (index + 1))) & 31 for index in range(30)]
-    hrp = "syna"
-    values = [ord(c) >> 5 for c in hrp] + [0] + [ord(c) & 31 for c in hrp]
-    checksum = 1
-    generators = (0x3B6A57B2, 0x26508E6D, 0x1EA119FA, 0x3D4233DD, 0x2A1462B3)
-    for value in values + words + [0] * 6:
-        top = checksum >> 25
-        checksum = ((checksum & 0x1FFFFFF) << 5) ^ value
-        for index, generator in enumerate(generators):
-            if (top >> index) & 1:
-                checksum ^= generator
-    checksum ^= 0x2BC830A3
-    suffix = [(checksum >> (5 * (5 - index))) & 31 for index in range(6)]
-    alphabet = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
-    return hrp + "1" + "".join(alphabet[word] for word in words + suffix)
-
-
-def read_prior_freeze(path: Path) -> tuple[dict[str, dict[str, Any]], str]:
-    prior, raw = read_json(path, "prior authority freeze")
-    require_chain_tuple(prior, "prior authority freeze")
-    for field, expected in (
-        ("schema_version", "synergy-testnet-v3-genesis-authority-freeze-v1"),
-        ("artifact_type", "fresh-testnet-v3-genesis-authority-public-freeze"),
-        ("address_registry_version", REGISTRY_VERSION),
-        ("authority_count", 3), ("authority_role_ids", list(ROLES)),
-    ):
-        require_equal(prior.get(field), expected, f"prior freeze {field}")
-    entries = prior.get("authorities")
-    if not isinstance(entries, list) or len(entries) != 3:
-        fail("prior freeze requires exactly three authorities")
-    result = {}
-    addresses, keys = set(), set()
-    for role in ROLES:
-        matches = [entry for entry in entries
-                   if isinstance(entry, dict) and entry.get("role_id") == role]
-        if len(matches) != 1:
-            fail(f"prior freeze has missing or duplicate role {role}")
-        entry = matches[0]
-        root = entry.get("identity_root_public", {})
-        auth = entry.get("authorization_public", {})
-        for field, expected in (
-            ("schema_version", ROOT_SCHEMA), ("identity_id", role),
-            ("algorithm", ROOT_ALGORITHM), ("address_type", "WalletAccount"),
-            ("binary_encoding", "lowercase-hex"),
-        ):
-            require_equal(root.get(field), expected, f"{role} prior root {field}")
-        root_key = decode_hex(root.get("public_key"), ROOT_PUBLIC_KEY_BYTES,
-                              f"{role} prior root public key")
-        address = derive_authority_address(root_key)
-        require_equal(root.get("address"), address, f"{role} prior root address")
-        require_equal(entry.get("identity_address"), address, f"{role} prior identity address")
-        for field, expected in (
-            ("schema_version", AUTH_SCHEMAS[role]), ("role_id", role),
-            ("algorithm", AUTH_ALGORITHM), ("binary_encoding", "lowercase-hex"),
-        ):
-            require_equal(auth.get(field), expected, f"{role} prior authorization {field}")
-        digest = sha3_256_bytes(decode_hex(auth.get("public_key"), AUTH_PUBLIC_KEY_BYTES,
-                                         f"{role} prior authorization public key"))
-        binding = entry.get("identity_authorization_binding", {})
-        require_equal(binding.get("identity_id"), role, f"{role} prior binding identity ID")
-        require_equal(binding.get("identity_address"), address, f"{role} prior binding address")
-        require_equal(binding.get("identity_root", {}).get("public_key"), root["public_key"],
-                      f"{role} prior binding root key")
-        require_equal(binding.get("current_auth_key_hash"), digest, f"{role} prior binding key")
-        if address in addresses or digest in keys:
-            fail("prior freeze authority addresses and keys must be unique")
-        addresses.add(address)
-        keys.add(digest)
-        result[role] = {"address": address, "auth_digest": digest}
-    return result, sha256_bytes(raw)
-
-
-def validate_replacement_manifest(authority_root: Path, prior_sha256: str) -> tuple[dict[str, Any], str]:
-    manifest, raw = read_json(authority_root / REPLACEMENT_MANIFEST,
-                              "authority replacement completion")
-    require_completion_common(manifest, "authority replacement completion")
-    require_equal(manifest.get("schema_version"),
-                  "synergy-testnet-v3-authority-custody-replacement-completion-v1",
-                  "authority replacement completion schema")
-    require_equal(manifest.get("replacement_prior_freeze_sha256"), prior_sha256,
-                  "authority replacement prior freeze SHA-256")
-    require_equal(manifest.get("authority_role_ids"), list(ROLES), "replacement authority roles")
-    require_equal(manifest.get("authority_count"), 3, "replacement authority count")
-    effective_at = manifest.get("effective_at")
-    try:
-        if not isinstance(effective_at, str):
-            raise ValueError("missing timestamp")
-        parsed_effective = datetime.fromisoformat(effective_at.replace("Z", "+00:00"))
-        if parsed_effective.tzinfo is None:
-            raise ValueError("missing timezone")
-    except ValueError:
-        fail("authority replacement completion effective_at must be an RFC3339 timestamp")
-    hashes = manifest.get("artifact_sha256")
-    expected = {f"{role}/{name}" for role in ROLES for name in FILES.values()}
-    expected.update(f"{ROLES[1]}/{name}" for name in (
-        "release-authorization-binding.json", "release-authorization-binding.json.complete.json"))
-    if not isinstance(hashes, dict) or set(hashes) != expected:
-        fail("authority replacement completion artifact inventory is incomplete or unexpected")
-    for name in sorted(expected):
-        require_hash_matches(require_file(authority_root / name, f"replacement {name}"),
-                             hashes[name], f"replacement {name} SHA-256")
-    if not isinstance(manifest.get("replacement_reason"), str) or not manifest["replacement_reason"].strip():
-        fail("authority replacement completion requires a reason")
-    return manifest, sha256_bytes(raw)
-
-
-def validate_replacement_receipt(receipt: dict[str, Any], prior: dict[str, Any],
-                                 manifest: dict[str, Any], label: str) -> None:
-    for field, expected in (
-        ("replacement_prior_freeze_sha256", manifest["replacement_prior_freeze_sha256"]),
-        ("superseded_identity_address", prior["address"]),
-        ("superseded_public_key_sha3_256", prior["auth_digest"]),
-        ("replacement_reason", manifest["replacement_reason"]),
-        ("effective_at", manifest["effective_at"]),
-    ):
-        require_equal(receipt.get(field), expected, f"{label} {field}")
-
-
-def validate_replacement_history(binding: dict[str, Any], prior: dict[str, Any],
-                                 manifest: dict[str, Any], role: str) -> None:
-    history = binding.get("auth_key_history")
-    supersession = binding.get("supersession_history")
-    if not isinstance(history, list) or len(history) != 1:
-        fail(f"{role} replacement must record exactly one retired authorization key")
-    if not isinstance(supersession, list) or len(supersession) != 1:
-        fail(f"{role} replacement must record exactly one superseded identity")
-    require_equal(binding.get("effective_at"), manifest["effective_at"],
-                  f"{role} replacement effective boundary")
-    for field, expected in (
-        ("principal_id", role), ("algorithm", AUTH_ALGORITHM),
-        ("public_key_sha3_256", prior["auth_digest"]), ("status", "retired"),
-        ("retired_at", binding["effective_at"]), ("reason", manifest["replacement_reason"]),
-    ):
-        require_equal(history[0].get(field), expected, f"{role} replacement retired key {field}")
-    for field, expected in (
-        ("address", prior["address"]), ("derivation_standard", REPLACEMENT_DERIVATION),
-        ("status", "superseded"), ("reason", manifest["replacement_reason"]),
-    ):
-        require_equal(supersession[0].get(field), expected, f"{role} replacement supersession {field}")
-    if (binding.get("identity_address") == prior["address"]
-            or binding.get("current_auth_key_hash") == prior["auth_digest"]):
-        fail(f"{role} replacement must use a new identity root and authorization key")
-
-
-def validate_role(authority_root: Path, role: str,
-                  prior: dict[str, Any] | None = None,
-                  replacement: dict[str, Any] | None = None) -> dict[str, Any]:
+def validate_role(authority_root: Path, role: str) -> dict[str, Any]:
     role_dir = authority_root / role
     if role_dir.is_symlink() or not role_dir.is_dir():
         fail(f"authority role directory is missing or is a symlink: {role_dir}")
@@ -330,13 +174,6 @@ def validate_role(authority_root: Path, role: str,
     raws: dict[str, bytes] = {}
     for key, filename in FILES.items():
         docs[key], raws[key] = read_json(role_dir / filename, f"{role} {key}")
-
-    if replacement is None:
-        if any("replacement_prior_freeze_sha256" in doc for doc in docs.values()):
-            fail(f"{role} replacement requires explicit --prior-freeze and completion manifest")
-    else:
-        for key in ("identity_root_completion", "authorization_completion", "binding_completion"):
-            validate_replacement_receipt(docs[key], prior, replacement, f"{role} {key}")
 
     root = docs["identity_root_public"]
     require_equal(root.get("schema_version"), ROOT_SCHEMA,
@@ -466,14 +303,9 @@ def validate_role(authority_root: Path, role: str,
     current_auth_key_hash = sha3_256_bytes(auth_key)
     require_equal(binding.get("current_auth_key_hash"), current_auth_key_hash,
                   f"{role} current authorization-key digest")
-    if replacement is not None:
-        require_equal(address, derive_authority_address(root_key),
-                      f"{role} replacement FN identity address")
     key_history = binding.get("auth_key_history")
     supersession_history = binding.get("supersession_history")
-    if replacement is not None:
-        validate_replacement_history(binding, prior, replacement, role)
-    elif role == "SNRG-TESTNET-V3-GOVERNANCE-AUTHORITY":
+    if role == "SNRG-TESTNET-V3-GOVERNANCE-AUTHORITY":
         if not isinstance(key_history, list) or len(key_history) != 1:
             fail(f"{role} must record exactly one retired authorization key")
         retired = key_history[0]
@@ -636,10 +468,6 @@ def validate_role(authority_root: Path, role: str,
         require_equal(release_complete.get("binding_payload_sha3_256"),
                       release.get("binding_payload_sha3_256"),
                       f"{role} release binding payload digest")
-        if replacement is not None:
-            validate_replacement_receipt(release_complete, prior, replacement,
-                                         f"{role} release completion")
-            validate_replacement_history(release, prior, replacement, role)
         result["release_authorization_binding"] = release
         result["source_artifact_sha256"].update({
             "release_binding": sha256_bytes(release_raw),
@@ -667,17 +495,10 @@ def write_no_clobber(path: Path, raw: bytes) -> None:
             raise
 
 
-def build(authority_root: Path, prior_freeze: Path | None = None) -> dict[str, Any]:
+def build(authority_root: Path) -> dict[str, Any]:
     if authority_root.is_symlink() or not authority_root.is_dir():
         fail(f"authority root must be a real directory: {authority_root}")
-    prior, replacement, replacement_hash = None, None, None
-    if prior_freeze is not None:
-        prior, prior_hash = read_prior_freeze(prior_freeze)
-        replacement, replacement_hash = validate_replacement_manifest(authority_root, prior_hash)
-    elif (authority_root / REPLACEMENT_MANIFEST).exists():
-        fail("authority replacement requires explicit --prior-freeze")
-    authorities = [validate_role(authority_root, role,
-                                prior[role] if prior else None, replacement) for role in ROLES]
+    authorities = [validate_role(authority_root, role) for role in ROLES]
     addresses = [authority["identity_address"] for authority in authorities]
     if len(set(addresses)) != len(addresses):
         fail("Genesis authority identity addresses are not unique")
@@ -685,7 +506,7 @@ def build(authority_root: Path, prior_freeze: Path | None = None) -> dict[str, A
         authority["authorization_public"]["public_key"])) for authority in authorities]
     if len(set(auth_key_hashes)) != len(auth_key_hashes):
         fail("Genesis authority authorization keys are not unique")
-    freeze = {
+    return {
         "schema_version": "synergy-testnet-v3-genesis-authority-freeze-v1",
         "artifact_type": "fresh-testnet-v3-genesis-authority-public-freeze",
         "chain_id": CHAIN_ID,
@@ -698,15 +519,6 @@ def build(authority_root: Path, prior_freeze: Path | None = None) -> dict[str, A
         "authority_role_ids": list(ROLES),
         "authorities": authorities,
     }
-
-    if replacement is not None:
-        freeze["authority_replacement"] = {
-            "prior_freeze_sha256": replacement["replacement_prior_freeze_sha256"],
-            "completion_sha256": replacement_hash,
-            "effective_at": replacement["effective_at"],
-            "reason": replacement["replacement_reason"],
-        }
-    return freeze
 
 
 def production_authority_view(freeze: dict[str, Any], bundle_dir_prefix: str) -> dict[str, Any]:
@@ -759,7 +571,6 @@ def production_authority_view(freeze: dict[str, Any], bundle_dir_prefix: str) ->
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--authority-root", required=True, type=Path)
-    parser.add_argument("--prior-freeze", type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--completion", required=True, type=Path)
     parser.add_argument("--production-authorities-output", type=Path)
@@ -780,7 +591,7 @@ def main() -> int:
         if candidate is not None and (candidate.exists() or candidate.is_symlink()):
             fail(f"refusing to overwrite existing production authority output: {candidate}")
 
-    freeze = build(args.authority_root.resolve(strict=True), args.prior_freeze)
+    freeze = build(args.authority_root.resolve(strict=True))
     freeze_raw = canonical_json_bytes(freeze)
     completion = {
         "schema_version": "synergy-testnet-v3-genesis-authority-freeze-completion-v1",

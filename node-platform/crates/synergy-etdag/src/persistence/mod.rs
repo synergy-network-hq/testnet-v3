@@ -1,4 +1,8 @@
 mod admission_store;
+mod protected_pipeline;
+pub use protected_pipeline::{
+    CutRecoveryGeneration, ProtectedPipeline, ProtectedPipelineRecovery, ProtectedRecoveryVerifier,
+};
 mod certificate_store;
 mod graph_store;
 mod protected_input_store;

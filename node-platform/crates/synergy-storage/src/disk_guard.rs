@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::StorageError;
 
@@ -57,6 +57,8 @@ fn observe_available_bytes(path: &Path) -> Result<DiskObservation, StorageError>
     }
     // SAFETY: a successful `statvfs` call initialized the output structure.
     let statistics = unsafe { statistics.assume_init() };
+    // The statvfs integer widths differ between supported Unix targets.
+    #[allow(clippy::unnecessary_cast)]
     let available_bytes = (statistics.f_bavail as u64)
         .checked_mul(statistics.f_frsize as u64)
         .ok_or_else(|| StorageError::Io("filesystem free-space value overflowed".into()))?;
@@ -65,7 +67,7 @@ fn observe_available_bytes(path: &Path) -> Result<DiskObservation, StorageError>
 
 #[cfg(not(unix))]
 fn observe_available_bytes(path: &Path) -> Result<DiskObservation, StorageError> {
-    let _: PathBuf = path.to_path_buf();
+    let _ = path;
     Err(StorageError::Io(
         "filesystem free-space observation is unavailable on this platform".into(),
     ))

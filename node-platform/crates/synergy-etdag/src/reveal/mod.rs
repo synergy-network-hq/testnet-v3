@@ -8,7 +8,10 @@ mod share_collector;
 mod transcript;
 mod verifier;
 
-pub use authorization::ProtectedRevealAuthorization;
+pub use authorization::parent_reveal_reference;
+pub use authorization::{
+    ProtectedRevealAuthorization, RevealAuthorizationVerifier, VerifiedRevealAuthorization,
+};
 pub use collection::DecryptShareCollection;
 pub use decrypt::{decrypt_authorized_envelope, RevealedTransaction, ThresholdDecryptor};
 pub use decrypt_share::VerifiedDecryptShare;

@@ -16,11 +16,13 @@ pub use fee::FeeLimit;
 pub use id::TransactionId;
 pub use nonce::NonceWindow;
 pub use receipt::{ReceiptStatus, TransactionReceipt};
-pub use signature::{verify as verify_aegis_signature, AegisTransactionVerifier};
-pub use system_transaction::{TransactionAction, TransactionClass};
-pub use transaction::{
-    NetworkBinding, SignedTransaction, UnsignedTransaction, SYNERGY_TESTNET_V3_CHAIN_ID,
+pub use signature::{
+    verify as verify_aegis_signature,
+    verify_with_admission as verify_aegis_signature_with_admission, AegisTransactionVerifier,
+    TransactionAdmissionContext,
 };
+pub use system_transaction::{TransactionAction, TransactionClass};
+pub use transaction::{NetworkBinding, SignedTransaction, UnsignedTransaction};
 pub use validation::TransactionError;
 
 #[cfg(test)]
@@ -28,11 +30,13 @@ mod tests {
     use super::*;
 
     fn unsigned(nonce: u64) -> UnsignedTransaction {
+        let sender = synergy_address::derive_object_address("synq", b"test-sender").unwrap();
+        let receiver = synergy_address::derive_object_address("synq", b"test-receiver").unwrap();
         UnsignedTransaction {
-            network: NetworkBinding::testnet_v3("synergy-testnet-v3").unwrap(),
+            network: NetworkBinding::new(1266, "synergy-testnet-v3").unwrap(),
             class: TransactionClass::User,
-            sender: "syn1sender".into(),
-            receiver: "syn1receiver".into(),
+            sender,
+            receiver,
             amount_nwei: 7,
             nonce,
             fee_limit: FeeLimit {
@@ -40,7 +44,7 @@ mod tests {
                 max_fee_per_gas_nwei: 2,
             },
             timestamp_unix: 1,
-            payload: vec![1, 2],
+            payload: vec![],
         }
     }
 
@@ -49,6 +53,37 @@ mod tests {
         let transaction = unsigned(1);
         assert_eq!(transaction.id().unwrap(), transaction.id().unwrap());
         assert_ne!(transaction.id().unwrap(), unsigned(2).id().unwrap());
+    }
+
+    #[test]
+    fn selected_network_signature_rejects_cross_chain_and_same_chain_incarnation_replay() {
+        use aegis_pqvm::pqc::signatures::mldsa::mldsa87;
+        let (public, secret) = mldsa87::keypair();
+        for (chain_id, network) in [(1266, "testnet-a"), (9001, "beta"), (9002, "mainnet")] {
+            let mut tx = unsigned(1);
+            tx.network = NetworkBinding::new(chain_id, network).unwrap();
+            let bytes = tx.signing_bytes().unwrap();
+            let signature = mldsa87::detached_sign(&bytes, &secret);
+            assert!(mldsa87::verify_detached_signature(&signature, &bytes, &public).is_ok());
+            let original_id = tx.id().unwrap();
+            tx.network.chain_id += 1;
+            assert!(mldsa87::verify_detached_signature(
+                &signature,
+                &tx.signing_bytes().unwrap(),
+                &public
+            )
+            .is_err());
+            assert_ne!(tx.id().unwrap(), original_id);
+            tx.network.chain_id = chain_id;
+            tx.network.network_id.push_str("-new-incarnation");
+            assert!(mldsa87::verify_detached_signature(
+                &signature,
+                &tx.signing_bytes().unwrap(),
+                &public
+            )
+            .is_err());
+        }
+        assert!(NetworkBinding::new(0, "testnet").is_err());
     }
 
     #[test]

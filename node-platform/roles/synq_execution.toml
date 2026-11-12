@@ -1,0 +1,23 @@
+schema_version = 1
+role = "synq-execution"
+plane = "public"
+capabilities = ["identity", "durable_storage", "telemetry", "health", "network_transport", "execute_transactions", "serve_synq"]
+
+[ports]
+p2p = 24008
+admin = 26008
+metrics = 27008
+
+[storage]
+data_directory = "/var/lib/synergy-node/synq_execution"
+maximum_bytes = 107374182400
+pruning = "role_policy"
+
+[keys]
+raw_export_forbidden = true
+posy_signing = false
+
+[readiness]
+requires_manifest = true
+requires_identity = true
+requires_healthy_dependencies = true

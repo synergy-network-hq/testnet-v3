@@ -1,13 +1,21 @@
 use std::collections::BTreeSet;
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+use synergy_admin_api::audit::AdminAuditRecord;
 use synergy_admin_api::authorization::{AdminPermission, AuthorizationContext};
 use synergy_admin_api::operations::{
-    AdminOperation, NamingOperation, OwnershipOperation, RewardOperation, ValidatorOperation,
+    AdminOperation, ConfigOperation, EtdagOperation, LifecycleAction, LifecycleOperation,
+    NamingOperation, OwnershipOperation, PeerOperation, RewardOperation, StorageOperation,
+    SyncOperation, TelemetryOperation, UpgradeOperation, ValidatorOperation,
 };
 use synergy_admin_api::{AdminError, AdminRequest, AdminResponse, AdminService};
+use synergy_aegis::{AegisPolicy, KeyId, SignatureAlgorithm};
 use synergy_config::NodeConfiguration;
 use synergy_naming::{
     is_available, resolve, reverse_resolve, NamingRegistrySnapshot, NodeId,
@@ -22,11 +30,13 @@ use synergy_roles::Capability;
 use synergy_state::{FinalizedStateStore, WorldState};
 use synergy_storage::{AtomicStore, NodeStorageLayout};
 use synergy_transaction::TransactionAction;
+use synergy_updater::{stage_artifact, verify_release, SignedReleaseMetadata};
 use synergy_validator_management::{
     PersistentValidatorManagement, ValidatorApplication, ValidatorManagementCommand,
     ValidatorManagementStore,
 };
 
+use super::ingress::{EtdagControlAction, PeerControlAction, SyncControlAction};
 use crate::commands::start::service_capabilities;
 use crate::services::authority::VerifiedAuthority;
 use crate::services::ingress::AuthenticatedIngress;
@@ -40,6 +50,13 @@ use synergy_admin_api::local::LocalAdminServer;
 
 const MAX_VALIDATOR_MANAGEMENT_STATE_BYTES: usize = 8 * 1024 * 1024;
 const VALIDATOR_STATE_PATH: &str = "state.json";
+const MAX_UPDATE_METADATA_BYTES: u64 = 1024 * 1024;
+const MAX_UPDATE_PUBLIC_KEY_BYTES: u64 = 64 * 1024;
+const MAX_ADMIN_UPDATE_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_ADMIN_AUDIT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_ADMIN_AUDIT_RECORDS: usize = 8_192;
+const MAX_ADMIN_AUDIT_DETAIL_BYTES: usize = 512;
+const ADMIN_AUDIT_PATH: &str = "records.json";
 
 pub fn registration(
     configuration: &NodeConfiguration,
@@ -57,10 +74,23 @@ pub fn registration(
     let store =
         AtomicValidatorManagementStore::new(layout.consensus().join("validator-management"))?;
     let mut validator_management = PersistentValidatorManagement::load(store)?;
+    let audit = AtomicAdminAuditLog::load(layout.metadata().join("admin-audit"))?;
     if let Some(authority) = authority.as_ref() {
         validator_management.reconcile_frozen_authority(&authority.registry)?;
     }
-    let permissions = BTreeSet::from([AdminPermission::Read, AdminPermission::Validator]);
+    let permissions = BTreeSet::from([
+        AdminPermission::Read,
+        AdminPermission::Lifecycle,
+        AdminPermission::Configuration,
+        AdminPermission::Identity,
+        AdminPermission::Peers,
+        AdminPermission::Validator,
+        AdminPermission::Vpn,
+        AdminPermission::Consensus,
+        AdminPermission::Etdag,
+        AdminPermission::Storage,
+        AdminPermission::Upgrade,
+    ]);
 
     Ok((
         ServiceSpec {
@@ -80,6 +110,7 @@ pub fn registration(
             authority,
             ingress,
             validator_management: Arc::new(Mutex::new(validator_management)),
+            audit: Arc::new(Mutex::new(audit)),
             authorization: AuthorizationContext {
                 principal: format!("owner-local:{}", configuration.node_name),
                 permissions,
@@ -135,28 +166,156 @@ impl ValidatorManagementStore for AtomicValidatorManagementStore {
     }
 }
 
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct PersistedAdminAuditLog {
+    version: u32,
+    records: Vec<AdminAuditRecord>,
+}
+
+struct AtomicAdminAuditLog {
+    store: AtomicStore,
+    state: PersistedAdminAuditLog,
+}
+
+impl AtomicAdminAuditLog {
+    fn load(root: impl AsRef<Path>) -> Result<Self, String> {
+        let store = AtomicStore::new(root.as_ref(), MAX_ADMIN_AUDIT_BYTES)
+            .map_err(|error| format!("open Admin audit store: {error}"))?;
+        let state = if store
+            .exists(ADMIN_AUDIT_PATH)
+            .map_err(|error| format!("inspect Admin audit log: {error}"))?
+        {
+            let bytes = store
+                .read_bounded(ADMIN_AUDIT_PATH)
+                .map_err(|error| format!("read Admin audit log: {error}"))?;
+            let state: PersistedAdminAuditLog = serde_json::from_slice(&bytes)
+                .map_err(|error| format!("decode Admin audit log: {error}"))?;
+            if state.version != 1
+                || state.records.len() > MAX_ADMIN_AUDIT_RECORDS
+                || state.records.iter().enumerate().any(|(index, record)| {
+                    record.validate().is_err()
+                        || index > 0
+                            && record.sequence
+                                != state.records[index - 1].sequence.saturating_add(1)
+                })
+            {
+                return Err("Admin audit log failed canonical validation".into());
+            }
+            state
+        } else {
+            PersistedAdminAuditLog {
+                version: 1,
+                records: Vec::new(),
+            }
+        };
+        Ok(Self { store, state })
+    }
+
+    fn append_event(
+        &mut self,
+        request_id: &str,
+        principal: &str,
+        operation: &str,
+        outcome: &str,
+        detail: &str,
+    ) -> Result<(), AdminError> {
+        let sequence = self
+            .state
+            .records
+            .last()
+            .map_or(1, |record| record.sequence.saturating_add(1));
+        if sequence == u64::MAX {
+            return Err(AdminError::unavailable("Admin audit sequence is exhausted"));
+        }
+        let record = AdminAuditRecord {
+            sequence,
+            timestamp_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| AdminError::unavailable("system clock precedes Unix epoch"))?
+                .as_millis()
+                .try_into()
+                .map_err(|_| AdminError::unavailable("Admin audit timestamp overflow"))?,
+            request_id: if request_id.trim().is_empty() {
+                "<missing>".to_owned()
+            } else {
+                request_id.chars().take(256).collect()
+            },
+            principal: principal.to_owned(),
+            operation: operation.to_owned(),
+            outcome: outcome.to_owned(),
+            detail: detail.chars().take(MAX_ADMIN_AUDIT_DETAIL_BYTES).collect(),
+        };
+        record.validate()?;
+        let removed = if self.state.records.len() == MAX_ADMIN_AUDIT_RECORDS {
+            Some(self.state.records.remove(0))
+        } else {
+            None
+        };
+        self.state.records.push(record);
+        let encoded = serde_json::to_vec(&self.state)
+            .map_err(|error| AdminError::unavailable(format!("encode Admin audit log: {error}")))?;
+        if let Err(error) = self.store.write_atomic(ADMIN_AUDIT_PATH, &encoded) {
+            self.state.records.pop();
+            if let Some(record) = removed {
+                self.state.records.insert(0, record);
+            }
+            return Err(AdminError::unavailable(format!(
+                "persist Admin audit log: {error}"
+            )));
+        }
+        Ok(())
+    }
+}
+
 struct RuntimeAdminService {
     runtime: RuntimeView,
     configuration: NodeConfiguration,
     authority: Option<Arc<VerifiedAuthority>>,
     ingress: AuthenticatedIngress,
     validator_management: Arc<Mutex<PersistentValidatorManagement<AtomicValidatorManagementStore>>>,
+    audit: Arc<Mutex<AtomicAdminAuditLog>>,
+    cancellation: CancellationToken,
     authorization: AuthorizationContext,
 }
 
 impl AdminService for RuntimeAdminService {
     fn handle(&self, request: AdminRequest) -> AdminResponse {
+        let audit_label = request.operation.audit_label();
+        let shutdown_requested = matches!(
+            &request.operation,
+            AdminOperation::Lifecycle(LifecycleOperation {
+                action: LifecycleAction::Stop,
+                ..
+            })
+        );
         if let Err(error) = request.validate() {
+            let _ = self.append_audit(
+                &request.request_id,
+                audit_label,
+                "rejected",
+                &format!("{}: {}", error.code, error.message),
+            );
             return AdminResponse::failure(request.request_id, error);
         }
         if let Err(error) = self
             .authorization
             .require(request.operation.required_permission())
         {
+            let _ = self.append_audit(
+                &request.request_id,
+                audit_label,
+                "forbidden",
+                &format!("{}: {}", error.code, error.message),
+            );
+            return AdminResponse::failure(request.request_id, error);
+        }
+        if let Err(error) =
+            self.append_audit(&request.request_id, audit_label, "accepted", "authorized")
+        {
             return AdminResponse::failure(request.request_id, error);
         }
 
-        let request_id = request.request_id;
+        let request_id = request.request_id.clone();
         let result = match request.operation {
             AdminOperation::Read(operation) => self.handle_read(operation),
             AdminOperation::Validator(operation) => {
@@ -165,10 +324,33 @@ impl AdminService for RuntimeAdminService {
             AdminOperation::Ownership(operation) => self.handle_ownership(operation),
             AdminOperation::Naming(operation) => self.handle_naming(operation),
             AdminOperation::Rewards(operation) => self.handle_rewards(operation),
+            AdminOperation::Config(operation) => self.handle_config(operation),
+            AdminOperation::Storage(operation) => self.handle_storage(operation),
+            AdminOperation::Telemetry(operation) => self.handle_telemetry(operation),
+            AdminOperation::Upgrade(operation) => self.handle_upgrade(operation),
+            AdminOperation::Lifecycle(operation) => self.handle_lifecycle(operation),
+            AdminOperation::Peers(operation) => self.handle_peers(operation),
+            AdminOperation::Sync(operation) => self.handle_sync(operation),
+            AdminOperation::Etdag(operation) => self.handle_etdag(operation),
             _ => Err(AdminError::unavailable(
                 "Admin operation has no canonical runtime owner wired",
             )),
         };
+        let audit_result = match &result {
+            Ok(_) => self.append_audit(&request_id, audit_label, "succeeded", "completed"),
+            Err(error) => self.append_audit(
+                &request_id,
+                audit_label,
+                "failed",
+                &format!("{}: {}", error.code, error.message),
+            ),
+        };
+        if let Err(error) = audit_result {
+            return AdminResponse::failure(request_id, error);
+        }
+        if shutdown_requested && result.is_ok() {
+            self.cancellation.cancel();
+        }
         match result {
             Ok(value) => AdminResponse::success(request_id, value),
             Err(error) => AdminResponse::failure(request_id, error),
@@ -177,6 +359,301 @@ impl AdminService for RuntimeAdminService {
 }
 
 impl RuntimeAdminService {
+    fn append_audit(
+        &self,
+        request_id: &str,
+        operation: &str,
+        outcome: &str,
+        detail: &str,
+    ) -> Result<(), AdminError> {
+        self.audit
+            .lock()
+            .map_err(|_| AdminError::unavailable("Admin audit state lock is poisoned"))?
+            .append_event(
+                request_id,
+                &self.authorization.principal,
+                operation,
+                outcome,
+                detail,
+            )
+    }
+
+    fn handle_lifecycle(
+        &self,
+        operation: LifecycleOperation,
+    ) -> Result<serde_json::Value, AdminError> {
+        match operation.action {
+            LifecycleAction::Stop => Ok(json!({
+                "accepted": true,
+                "action": "stop",
+                "timeout_ms": operation.timeout_ms,
+                "shutdown": "supervised_reverse_dependency_order",
+            })),
+            LifecycleAction::Start | LifecycleAction::Restart | LifecycleAction::Drain => {
+                Err(AdminError::unavailable(
+                    "requested lifecycle transition requires an external lifecycle provider",
+                ))
+            }
+        }
+    }
+
+    fn handle_peers(&self, operation: PeerOperation) -> Result<serde_json::Value, AdminError> {
+        let action = match operation {
+            PeerOperation::Disconnect { peer_id } => PeerControlAction::Disconnect {
+                peer_id: canonical_peer_id(peer_id)?,
+            },
+            PeerOperation::Quarantine { peer_id, until } => PeerControlAction::Quarantine {
+                peer_id: canonical_peer_id(peer_id)?,
+                until,
+            },
+            PeerOperation::Ban { peer_id, until } => PeerControlAction::Ban {
+                peer_id: canonical_peer_id(peer_id)?,
+                until,
+            },
+            PeerOperation::Unban { peer_id } => PeerControlAction::Unban {
+                peer_id: canonical_peer_id(peer_id)?,
+            },
+        };
+        let peer_id = action.peer_id().to_owned();
+        let action_name = match action {
+            PeerControlAction::Disconnect { .. } => "disconnect",
+            PeerControlAction::Quarantine { .. } => "quarantine",
+            PeerControlAction::Ban { .. } => "ban",
+            PeerControlAction::Unban { .. } => "unban",
+        };
+        self.ingress
+            .request_peer_control(action, Duration::from_secs(5))
+            .map_err(AdminError::conflict)?;
+        Ok(json!({
+            "peer_id": peer_id,
+            "action": action_name,
+            "applied": true,
+            "authority": "authenticated_peer_lifecycle_only",
+        }))
+    }
+
+    fn handle_sync(&self, operation: SyncOperation) -> Result<serde_json::Value, AdminError> {
+        let (action, action_name, peer_id) = match operation {
+            SyncOperation::Pause => (SyncControlAction::Pause, "pause", None),
+            SyncOperation::Resume => (SyncControlAction::Resume, "resume", None),
+            SyncOperation::RetrySource { peer_id } => {
+                let peer_id = canonical_peer_id(peer_id)?;
+                (
+                    SyncControlAction::RetrySource {
+                        peer_id: peer_id.clone(),
+                    },
+                    "retry_source",
+                    Some(peer_id),
+                )
+            }
+        };
+        self.ingress
+            .request_sync_control(action, Duration::from_secs(5))
+            .map_err(AdminError::conflict)?;
+        Ok(json!({
+            "action": action_name,
+            "peer_id": peer_id,
+            "applied": true,
+            "authority": "authenticated_verified_sync_source_only",
+            "finality_authority": "posy_only",
+        }))
+    }
+
+    fn handle_etdag(&self, operation: EtdagOperation) -> Result<serde_json::Value, AdminError> {
+        let (action, action_name) = match operation {
+            EtdagOperation::PauseIngress => (EtdagControlAction::PauseIngress, "pause_ingress"),
+            EtdagOperation::ResumeIngress => (EtdagControlAction::ResumeIngress, "resume_ingress"),
+            EtdagOperation::RecoverArtifact { .. } => return Err(AdminError::unavailable(
+                "ETDAG artifact recovery requires an exact authenticated source and shard index",
+            )),
+        };
+        self.ingress
+            .request_etdag_control(action, Duration::from_secs(5))
+            .map_err(AdminError::conflict)?;
+        Ok(json!({
+            "action": action_name,
+            "applied": true,
+            "scope": "authenticated_etdag_ingress",
+            "finality_authority": "posy_only",
+        }))
+    }
+
+    fn handle_config(&self, operation: ConfigOperation) -> Result<serde_json::Value, AdminError> {
+        let (path, reload) = match operation {
+            ConfigOperation::Validate { path } => (path, false),
+            ConfigOperation::Reload { path } => (path, true),
+        };
+        let loaded = synergy_config::load(Path::new(&path)).map_err(|error| {
+            AdminError::invalid_request(format!("configuration rejected: {error}"))
+        })?;
+        if reload {
+            return Err(AdminError::unavailable(
+                "configuration reload requires deterministic service-graph reconstruction and is not performed in place",
+            ));
+        }
+        Ok(json!({
+            "valid": true,
+            "node_name": loaded.node_name,
+            "role": format!("{:?}", loaded.role).to_ascii_lowercase(),
+            "chain_id": loaded.chain_id,
+        }))
+    }
+
+    fn handle_storage(&self, operation: StorageOperation) -> Result<serde_json::Value, AdminError> {
+        match operation {
+            StorageOperation::Verify => {
+                let layout = NodeStorageLayout::new(
+                    self.configuration.storage.data_directory.clone(),
+                )
+                .map_err(|error| AdminError::unavailable(format!("open storage layout: {error}")))?;
+                for root in layout.columns() {
+                    let metadata = std::fs::symlink_metadata(&root).map_err(|error| {
+                        AdminError::unavailable(format!(
+                            "inspect storage root {}: {error}",
+                            root.display()
+                        ))
+                    })?;
+                    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                        return Err(AdminError::unavailable(format!(
+                            "storage root is not a canonical directory: {}",
+                            root.display()
+                        )));
+                    }
+                }
+                Ok(json!({"verified": true, "data_directory": layout.root()}))
+            }
+            StorageOperation::CreateSnapshot { .. } => Err(AdminError::unavailable(
+                "snapshot creation is finality-driven by the canonical Sync service",
+            )),
+            StorageOperation::Prune { .. } => Err(AdminError::unavailable(
+                "manual pruning is unavailable until the canonical retention executor owns the operation",
+            )),
+        }
+    }
+
+    fn handle_telemetry(
+        &self,
+        operation: TelemetryOperation,
+    ) -> Result<serde_json::Value, AdminError> {
+        match operation {
+            TelemetryOperation::Snapshot => self
+                .runtime
+                .read()
+                .map_err(|_| AdminError::unavailable("runtime observation state is unavailable"))
+                .and_then(|snapshot| {
+                    serde_json::to_value(&*snapshot).map_err(|error| {
+                        AdminError::unavailable(format!("encode runtime telemetry: {error}"))
+                    })
+                }),
+            TelemetryOperation::SetFilter { .. } => Err(AdminError::unavailable(
+                "runtime telemetry filter mutation has no canonical dynamic owner",
+            )),
+        }
+    }
+
+    fn handle_upgrade(&self, operation: UpgradeOperation) -> Result<serde_json::Value, AdminError> {
+        match operation {
+            UpgradeOperation::Stage {
+                release_id,
+                metadata_path,
+                artifact_path,
+            } => {
+                let update = &self.configuration.update;
+                if !update.enabled {
+                    return Err(AdminError::unavailable(
+                        "signed updates are disabled by canonical node configuration",
+                    ));
+                }
+                let signer_key_id = update.release_signer_key_id.as_deref().ok_or_else(|| {
+                    AdminError::unavailable("governed release signer key ID is unavailable")
+                })?;
+                let signer_public_key_path = update
+                    .release_signer_public_key_path
+                    .as_deref()
+                    .ok_or_else(|| {
+                        AdminError::unavailable("governed release public key path is unavailable")
+                    })?;
+                let staging_directory = update.staging_directory.as_deref().ok_or_else(|| {
+                    AdminError::unavailable("canonical update staging directory is unavailable")
+                })?;
+                let metadata_bytes = read_bounded_update_file(
+                    Path::new(&metadata_path),
+                    MAX_UPDATE_METADATA_BYTES,
+                    "signed release metadata",
+                )?;
+                let signed: SignedReleaseMetadata = serde_json::from_slice(&metadata_bytes)
+                    .map_err(|error| {
+                        AdminError::invalid_request(format!(
+                            "decode signed release metadata: {error}"
+                        ))
+                    })?;
+                if signed.release.release_id != release_id {
+                    return Err(AdminError::conflict(
+                        "requested release ID does not match signed metadata",
+                    ));
+                }
+                let maximum_artifact_bytes = update
+                    .maximum_artifact_bytes
+                    .min(MAX_ADMIN_UPDATE_ARTIFACT_BYTES);
+                let artifact = read_bounded_update_file(
+                    Path::new(&artifact_path),
+                    maximum_artifact_bytes,
+                    "release artifact",
+                )?;
+                let governed_public_key = read_bounded_update_file(
+                    signer_public_key_path,
+                    MAX_UPDATE_PUBLIC_KEY_BYTES,
+                    "governed release public key",
+                )?;
+                let governed_signer_key_id =
+                    KeyId::new(signer_key_id.to_owned()).map_err(|error| {
+                        AdminError::invalid_request(format!(
+                            "invalid governed release signer key ID: {error}"
+                        ))
+                    })?;
+                let verifier = super::apqe_provider::verifier(
+                    &self.configuration,
+                    AegisPolicy {
+                        allowed_algorithms: vec![SignatureAlgorithm::MlDsa65],
+                        maximum_message_bytes: MAX_UPDATE_METADATA_BYTES as usize,
+                        maximum_signature_bytes: 16 * 1024,
+                    },
+                )
+                .map_err(|error| {
+                    AdminError::unavailable(format!("construct Aegis release verifier: {error}"))
+                })?;
+                let verified = verify_release(
+                    &verifier,
+                    self.configuration.chain_id,
+                    update.installed_sequence,
+                    &governed_signer_key_id,
+                    &governed_public_key,
+                    signed,
+                    &artifact,
+                )
+                .map_err(|error| {
+                    AdminError::invalid_request(format!("release verification failed: {error:?}"))
+                })?;
+                let staged =
+                    stage_artifact(staging_directory, &verified, &artifact).map_err(|error| {
+                        AdminError::unavailable(format!("stage verified release: {error:?}"))
+                    })?;
+                Ok(json!({
+                    "release_id": staged.release_id,
+                    "staged_path": staged.path,
+                    "verified": true,
+                    "installed": false,
+                    "protocol_activated": false,
+                }))
+            }
+            UpgradeOperation::Apply { .. } | UpgradeOperation::Rollback { .. } => {
+                Err(AdminError::unavailable(
+                    "apply/rollback requires the supervised lifecycle updater provider",
+                ))
+            }
+        }
+    }
+
     fn handle_read(&self, operation: ManagementOperation) -> Result<serde_json::Value, AdminError> {
         let snapshot = self
             .runtime
@@ -511,10 +988,14 @@ impl RuntimeAdminService {
                 required_shadow_blocks,
             },
             ValidatorOperation::Authorize { node_address } => {
-                ValidatorManagementCommand::Authorize { validator_id: node_address.to_string() }
+                ValidatorManagementCommand::Authorize {
+                    validator_id: node_address.to_string(),
+                }
             }
             ValidatorOperation::BeginSynchronization { node_address } => {
-                ValidatorManagementCommand::BeginSynchronization { validator_id: node_address.to_string() }
+                ValidatorManagementCommand::BeginSynchronization {
+                    validator_id: node_address.to_string(),
+                }
             }
             ValidatorOperation::EnterShadow {
                 node_address,
@@ -533,7 +1014,9 @@ impl RuntimeAdminService {
                 verified_blocks,
             },
             ValidatorOperation::MarkReady { node_address } => {
-                ValidatorManagementCommand::MarkReady { validator_id: node_address.to_string() }
+                ValidatorManagementCommand::MarkReady {
+                    validator_id: node_address.to_string(),
+                }
             }
             ValidatorOperation::RequestActivation {
                 node_address,
@@ -543,7 +1026,9 @@ impl RuntimeAdminService {
                 authority: self.membership_authority(change_set_root)?,
             },
             ValidatorOperation::ConfirmFrozenAuthority { node_address } => {
-                ValidatorManagementCommand::ConfirmFrozenAuthority { validator_id: node_address.to_string() }
+                ValidatorManagementCommand::ConfirmFrozenAuthority {
+                    validator_id: node_address.to_string(),
+                }
             }
             ValidatorOperation::ScheduleJailing {
                 node_address,
@@ -655,6 +1140,45 @@ impl RuntimeAdminService {
     }
 }
 
+fn canonical_peer_id(peer_id: String) -> Result<String, AdminError> {
+    synergy_protocol_types::NodeAddress::parse(peer_id)
+        .map(|address| address.to_string())
+        .map_err(|error| {
+            AdminError::invalid_request(format!("invalid canonical peer NodeAddress: {error}"))
+        })
+}
+
+fn read_bounded_update_file(
+    path: &Path,
+    maximum_bytes: u64,
+    label: &str,
+) -> Result<Vec<u8>, AdminError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        AdminError::invalid_request(format!("inspect {label} {}: {error}", path.display()))
+    })?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > maximum_bytes
+    {
+        return Err(AdminError::invalid_request(format!(
+            "{label} must be a bounded regular non-symlink file"
+        )));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    File::open(path)
+        .and_then(|file| file.take(maximum_bytes + 1).read_to_end(&mut bytes))
+        .map_err(|error| {
+            AdminError::invalid_request(format!("read {label} {}: {error}", path.display()))
+        })?;
+    if bytes.is_empty() || bytes.len() as u64 > maximum_bytes {
+        return Err(AdminError::invalid_request(format!(
+            "{label} changed size while loading"
+        )));
+    }
+    Ok(bytes)
+}
+
 struct AdminApiService {
     socket_path: std::path::PathBuf,
     runtime: RuntimeView,
@@ -662,6 +1186,7 @@ struct AdminApiService {
     authority: Option<Arc<VerifiedAuthority>>,
     ingress: AuthenticatedIngress,
     validator_management: Arc<Mutex<PersistentValidatorManagement<AtomicValidatorManagementStore>>>,
+    audit: Arc<Mutex<AtomicAdminAuditLog>>,
     authorization: AuthorizationContext,
     #[cfg(unix)]
     server: Option<LocalAdminServer>,
@@ -683,13 +1208,15 @@ impl ManagedService for AdminApiService {
                     authority: self.authority.clone(),
                     ingress: self.ingress.clone(),
                     validator_management: Arc::clone(&self.validator_management),
+                    audit: Arc::clone(&self.audit),
+                    cancellation: cancellation.clone(),
                     authorization: self.authorization.clone(),
                 }),
             )
             .map_err(|error| format!("start owner-local Admin API: {}", error.message))?;
             self.server = Some(server);
             self.failure = None;
-            return Ok(());
+            Ok(())
         }
         #[cfg(not(unix))]
         {

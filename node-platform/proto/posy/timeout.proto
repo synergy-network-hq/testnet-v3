@@ -1,0 +1,2 @@
+syntax = "proto3"; package synergy.posy.v1;
+message Timeout { uint64 epoch = 1; uint64 height = 2; uint64 round = 3; bytes highest_qc = 4; string validator = 5; bytes signature = 6; }

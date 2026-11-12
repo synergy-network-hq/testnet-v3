@@ -1,0 +1,2 @@
+syntax = "proto3"; package synergy.posy.v1;
+message FinalityProof { bytes prepare_qc = 1; bytes precommit_qc = 2; bytes commit_qc = 3; uint64 finalized_height = 4; bytes finalized_hash = 5; }

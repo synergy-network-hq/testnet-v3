@@ -11,6 +11,7 @@ enum KemOperation {
 
 // Value types that can be stored on the stack
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum Value {
     I32(i32),
     I64(i64),
@@ -26,6 +27,7 @@ impl Value {
         }
     }
 
+    #[allow(dead_code)]
     pub fn as_i64(&self) -> Result<i64, VMError> {
         match self {
             Value::I64(v) => Ok(*v),
@@ -52,6 +54,7 @@ impl Value {
 
 // Bytecode header
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct Header {
     pub magic: u32,
     pub version: u8,
@@ -167,6 +170,7 @@ impl QuantumVM {
         }
     }
 
+    #[allow(dead_code)]
     pub fn remaining_gas(&self) -> u64 {
         self.gas_meter.remaining
     }
@@ -175,6 +179,7 @@ impl QuantumVM {
         self.gas_meter.consumed
     }
 
+    #[allow(dead_code)]
     pub fn consumed_pqc_gas(&self) -> u64 {
         self.gas_meter.pqc_consumed
     }

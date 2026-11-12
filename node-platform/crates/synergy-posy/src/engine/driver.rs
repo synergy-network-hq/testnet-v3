@@ -30,6 +30,9 @@ impl SimplifiedPosyDriver {
                 .state_machine
                 .accept_proposal(&proposal, verifier)
                 .map(|transition| vec![transition]),
+            ConsensusEvent::ProposalDelivery(_) => Err(crate::PosyError::invalid(
+                "delivery statements must pass authenticated material boundary",
+            )),
             ConsensusEvent::BlockVote(vote) => self.state_machine.accept_block_vote(vote, verifier),
             ConsensusEvent::TimeoutVote(vote) => {
                 self.state_machine.accept_timeout_vote(vote, verifier)

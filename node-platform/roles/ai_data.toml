@@ -1,0 +1,23 @@
+schema_version = 1
+role = "ai-data"
+plane = "public"
+capabilities = ["identity", "durable_storage", "telemetry", "health", "network_transport"]
+
+[ports]
+p2p = 24014
+admin = 26014
+metrics = 27014
+
+[storage]
+data_directory = "/var/lib/synergy-node/ai_data"
+maximum_bytes = 107374182400
+pruning = "role_policy"
+
+[keys]
+raw_export_forbidden = true
+posy_signing = false
+
+[readiness]
+requires_manifest = true
+requires_identity = true
+requires_healthy_dependencies = true

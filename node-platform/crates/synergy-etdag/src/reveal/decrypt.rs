@@ -62,7 +62,10 @@ pub fn decrypt_authorized_envelope(
 
     for share in shares.shares() {
         let matching_capsule = envelope.share_capsules.iter().any(|capsule| {
-            capsule.validator_id == share.validator_id() && capsule.key_id == share.key_id()
+            capsule.validator_id == share.validator_id()
+                && capsule.ingress_kem_key_id == share.ingress_kem_key_id()
+                && capsule.share_index == share.share_index()
+                && &capsule.share_commitment == share.share_commitment()
         });
         if !matching_capsule {
             return Err(EtdagError::UnauthorizedValidator(

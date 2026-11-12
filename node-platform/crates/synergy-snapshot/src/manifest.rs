@@ -58,7 +58,7 @@ impl SnapshotManifest {
 
     pub fn validate_shape(&self) -> Result<(), String> {
         if self.format_version != 1
-            || self.chain_id != 1266
+            || self.chain_id == 0
             || self.network_id.trim().is_empty()
             || self.network_id.len() > 128
             || self.epoch == 0

@@ -1,0 +1,6 @@
+schema_version = 1
+role = "indexer"
+network_manifest = "../../../networks/testnet-v3/network-manifest.json"
+data_directory = "/var/lib/synergy-node/indexer"
+admin_socket = "/run/synergy-node/indexer.sock"
+role_profile = "../../roles/indexer.toml"

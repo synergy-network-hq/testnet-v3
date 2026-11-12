@@ -63,12 +63,12 @@ pub struct VerificationContext {
 }
 
 impl VerificationContext {
-    pub fn testnet(now_unix: u64) -> Self {
+    pub fn for_network(chain_id: ChainId, network_id: NetworkId, now_unix: u64) -> Self {
         Self {
-            chain_id: ChainId::testnet_1266(),
-            network_id: NetworkId::testnet(),
+            chain_id,
+            network_id: network_id.clone(),
             now_unix,
-            policy: SynQSecurityPolicy::testnet_1266_policy(),
+            policy: SynQSecurityPolicy::for_network(chain_id, network_id),
         }
     }
 }

@@ -9,8 +9,8 @@ use std::time::Duration;
 use synergy_config::{load, ConfigLoadError, ConsensusMode, NodeConfiguration, VpnMode};
 use synergy_node_core::{
     LifecycleController, LifecycleTransitionError, ManagedService, NodeLifecycleState,
-    RuntimeSnapshot, RuntimeView, ServiceId, ServiceReadiness, ServiceSpec, StartupPlan,
-    Supervisor, SupervisorError,
+    RuntimeSnapshot, RuntimeView, ServiceHealth, ServiceId, ServiceObservation, ServiceReadiness,
+    ServiceSpec, ServiceState, StartupPlan, Supervisor, SupervisorError,
 };
 use synergy_protocol_types::NodeRole;
 use synergy_roles::{
@@ -20,8 +20,8 @@ use synergy_roles::{
 use synergy_ws::server::WsServer;
 
 use crate::services::{
-    admin, authority, etdag, execution, health, identity, ingress, network, posy, rpc, sentry,
-    storage, sync, telemetry, vpn, websocket,
+    admin, authority, etdag, execution, health, identity, ingress, network, posy, preparation,
+    protected_admission, rpc, sentry, storage, sync, telemetry, vpn, websocket,
 };
 
 pub type ServiceRegistration = (ServiceSpec, Box<dyn ManagedService>);
@@ -36,33 +36,13 @@ pub struct StartedNode {
     runtime_view: RuntimeView,
     authority_transition: authority::AuthorityTransitionSignal,
     has_external_services: bool,
+    authorized_production_consensus: bool,
+    preparation: preparation::Pool,
+    #[cfg(feature = "qualification-timing")]
+    qualification_timing: Option<crate::services::qualification_timing::QualificationTiming>,
 }
 
 impl StartedNode {
-    pub fn configuration(&self) -> &NodeConfiguration {
-        &self.configuration
-    }
-
-    pub fn startup_plan(&self) -> &StartupPlan {
-        &self.startup_plan
-    }
-
-    pub fn lifecycle(&self) -> NodeLifecycleState {
-        self.lifecycle.state()
-    }
-
-    pub fn supervisor(&self) -> &Supervisor {
-        &self.supervisor
-    }
-
-    pub fn supervisor_mut(&mut self) -> &mut Supervisor {
-        &mut self.supervisor
-    }
-
-    pub fn runtime_view(&self) -> RuntimeView {
-        Arc::clone(&self.runtime_view)
-    }
-
     pub fn run(mut self) -> Result<(), StartError> {
         let running = Arc::new(AtomicBool::new(true));
         let signal_state = Arc::clone(&running);
@@ -76,9 +56,15 @@ impl StartedNode {
             return Err(error);
         }
         while running.load(Ordering::Acquire) {
-            let tick = self
-                .supervisor
-                .poll_all()
+            if let Err(reason) = self.preparation.handle().health() {
+                self.fail_and_shutdown();
+                return Err(StartError::AuthorityTransition(reason));
+            }
+            let poll = self.supervisor.poll_all();
+            if matches!(poll, Err(SupervisorError::Cancelled)) {
+                break;
+            }
+            let tick = poll
                 .map_err(StartError::Supervisor)
                 .and_then(|_| self.advance_readiness())
                 .and_then(|_| self.refresh_runtime_view());
@@ -107,6 +93,9 @@ impl StartedNode {
             self.refresh_runtime_view()?;
             return Err(StartError::ShutdownFailures(report.failed));
         }
+        self.preparation
+            .shutdown()
+            .map_err(StartError::AuthorityTransition)?;
         self.lifecycle
             .transition(NodeLifecycleState::Stopped)
             .map_err(StartError::Lifecycle)?;
@@ -138,49 +127,46 @@ impl StartedNode {
         if !report.clean() {
             return Err(StartError::ShutdownFailures(report.failed));
         }
+        self.preparation
+            .shutdown()
+            .map_err(StartError::AuthorityTransition)?;
+        self.preparation = preparation::Pool::new().map_err(StartError::AuthorityTransition)?;
         let mut registrations = Vec::new();
-        register_builtin_services(
+        self.authorized_production_consensus = false;
+        let authorized_production_consensus = register_builtin_services(
             &self.configuration,
             &self.runtime_view,
             &mut registrations,
             self.authority_transition.clone(),
+            self.preparation.handle(),
         )?;
         require_complete_service_set(&self.startup_plan, &registrations)?;
         let mut supervisor = Supervisor::new(registrations).map_err(StartError::Supervisor)?;
+        #[cfg(feature = "qualification-timing")]
+        if self.qualification_timing.is_some() {
+            supervisor.enable_poll_timing(true);
+        }
         supervisor.start_all().map_err(StartError::Supervisor)?;
         self.supervisor = supervisor;
+        self.authorized_production_consensus = authorized_production_consensus;
         self.refresh_runtime_view()
     }
 
     fn fail_and_shutdown(&mut self) {
         let _ = self.lifecycle.transition(NodeLifecycleState::Failed);
         let _ = self.supervisor.shutdown();
+        let _ = self.preparation.shutdown();
         let _ = self.refresh_runtime_view();
     }
 
     fn advance_readiness(&mut self) -> Result<(), StartError> {
-        let all_ready = self
-            .supervisor
-            .observations()
-            .iter()
-            .all(|service| service.readiness == ServiceReadiness::Ready);
-        match (self.lifecycle.state(), all_ready) {
-            (NodeLifecycleState::Starting, true) if self.startup_plan.shadow_before_active => {
-                self.lifecycle
-                    .transition(NodeLifecycleState::Shadowing)
-                    .map_err(StartError::Lifecycle)?;
-            }
-            (NodeLifecycleState::Starting, true) => {
-                self.lifecycle
-                    .transition(NodeLifecycleState::Ready)
-                    .map_err(StartError::Lifecycle)?;
-                self.lifecycle
-                    .transition(NodeLifecycleState::Active)
-                    .map_err(StartError::Lifecycle)?;
-            }
-            _ => {}
-        }
-        Ok(())
+        advance_lifecycle_readiness(
+            &mut self.lifecycle,
+            self.startup_plan.shadow_before_active,
+            self.authorized_production_consensus,
+            &self.supervisor.observations(),
+        )
+        .map_err(StartError::Lifecycle)
     }
 
     fn refresh_runtime_view(&self) -> Result<(), StartError> {
@@ -199,9 +185,133 @@ impl StartedNode {
     }
 }
 
+fn advance_lifecycle_readiness(
+    lifecycle: &mut LifecycleController,
+    shadow_before_active: bool,
+    authorized_production_consensus: bool,
+    services: &[ServiceObservation],
+) -> Result<(), LifecycleTransitionError> {
+    let all_ready = !services.is_empty()
+        && services.iter().all(|service| {
+            service.state == ServiceState::Running
+                && service.health == ServiceHealth::Healthy
+                && service.readiness == ServiceReadiness::Ready
+        });
+    match (lifecycle.state(), all_ready) {
+        (NodeLifecycleState::Starting, true) if shadow_before_active => {
+            lifecycle.transition(NodeLifecycleState::Shadowing)?;
+        }
+        (NodeLifecycleState::Starting, true) => {
+            lifecycle.transition(NodeLifecycleState::Ready)?;
+            lifecycle.transition(NodeLifecycleState::Active)?;
+        }
+        (NodeLifecycleState::Shadowing, true) if authorized_production_consensus => {
+            lifecycle.transition(NodeLifecycleState::Ready)?;
+            lifecycle.transition(NodeLifecycleState::Active)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// CLI entry point for the complete configured supervised service graph.
 pub fn run(config_path: &Path) -> Result<(), StartError> {
+    let configuration = load(config_path).map_err(StartError::Configuration)?;
+    // Fail before custody unlock, lifecycle transition, or listener creation.
+    let capacity_authority =
+        authority::load(&configuration).map_err(StartError::AuthorityTransition)?;
+    validate_processing_memory(&configuration, capacity_authority.as_deref())
+        .map_err(StartError::AuthorityTransition)?;
+    drop(capacity_authority);
+    super::selected_network::verify(&configuration).map_err(StartError::AuthorityTransition)?;
     start_with_services(config_path, Vec::new())?.run()
+}
+
+/// Read-only configuration/public-authority checks. Never registers or starts
+/// services, opens storage, reads private custody, or binds a listener.
+pub fn preflight(config_path: &Path) -> Result<serde_json::Value, String> {
+    let metadata = std::fs::symlink_metadata(config_path)
+        .map_err(|error| format!("inspect preflight configuration: {error}"))?;
+    if !config_path.is_absolute()
+        || !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > 1024 * 1024
+    {
+        return Err("preflight requires a bounded regular absolute configuration".into());
+    }
+    let configuration = load(config_path).map_err(|error| error.to_string())?;
+    if configuration.apqe_transport.is_some() {
+        crate::services::apqe_transport::preflight(&configuration)?;
+    } else {
+        configuration
+            .require_native_post_quantum_transport()
+            .map_err(|error| error.to_string())?;
+    }
+    let genesis_hash = super::selected_network::verify(&configuration)?;
+    let verified_authority = authority::load(&configuration)?;
+    validate_processing_memory(&configuration, verified_authority.as_deref())?;
+    let plan = build_startup_plan(&configuration).map_err(|error| error.to_string())?;
+    let public_identity =
+        identity::load_public_identity(&configuration.public_identity_path, configuration.role)?;
+    let consensus_key_id = preflight_voting_binding(
+        configuration.role,
+        configuration.consensus.mode,
+        verified_authority.as_deref(),
+        public_identity.node_address.as_str(),
+    )?;
+    Ok(serde_json::json!({
+        "configuration_verified": true,
+        "engineering_transport_profile": configuration.apqe_transport.as_ref().map(|v| &v.profile),
+        "production_approved": false,
+        "signed_genesis_verified": true,
+        "genesis_hash": genesis_hash,
+        "signed_authority_verified": verified_authority.is_some(),
+        "startup_plan_verified": true,
+        "network_id": configuration.network_id,
+        "chain_id": configuration.chain_id,
+        "role": configuration.role,
+        "consensus_mode": configuration.consensus.mode,
+        "public_identity_verified": true,
+        "node_address": public_identity.node_address.as_str(),
+        "validator_membership_verified": consensus_key_id.is_some(),
+        "consensus_key_id": consensus_key_id,
+        "active_validator_count": verified_authority.as_ref().map(|a| a.registry.active_count()),
+        "required_services": plan.required_services,
+        "private_keys_verified": false,
+        "vpn_service_verified": false,
+        "read_only": true
+    }))
+}
+
+fn validate_processing_memory(
+    configuration: &NodeConfiguration,
+    authority: Option<&authority::VerifiedAuthority>,
+) -> Result<(), String> {
+    if configuration.etdag.enabled
+        && authority.is_some_and(authority::VerifiedAuthority::processing_profile_enabled)
+    {
+        crate::services::processing_store::validate_processing_world_capacity(
+            configuration.storage.world_memory_budget_bytes,
+        )?;
+    }
+    Ok(())
+}
+
+fn preflight_voting_binding(
+    role: synergy_protocol_types::NodeRole,
+    mode: ConsensusMode,
+    authority: Option<&authority::VerifiedAuthority>,
+    node_address: &str,
+) -> Result<Option<String>, String> {
+    if mode != ConsensusMode::ValidateAndVote {
+        return Ok(None);
+    }
+    if role != synergy_protocol_types::NodeRole::Validator {
+        return Err("voting preflight requires the validator role".into());
+    }
+    let authority = authority.ok_or("voting preflight requires signed frozen authority")?;
+    let (key_id, _) = authority.consensus_binding(node_address)?;
+    Ok(Some(key_id.to_owned()))
 }
 
 /// Starts a fully supplied concrete runtime through the canonical lifecycle
@@ -212,8 +322,22 @@ pub fn start_with_services(
     mut registrations: Vec<ServiceRegistration>,
 ) -> Result<StartedNode, StartError> {
     let configuration = load(config_path).map_err(StartError::Configuration)?;
+    if configuration.apqe_transport.is_some() {
+        crate::services::apqe_transport::verify_runtime(&configuration)
+            .map_err(StartError::AuthorityTransition)?;
+    } else {
+        #[cfg(not(test))]
+        configuration
+            .require_native_post_quantum_transport()
+            .map_err(|error| StartError::AuthorityTransition(error.to_string()))?;
+    }
+    #[cfg(feature = "qualification-timing")]
+    let qualification_timing =
+        crate::services::qualification_timing::from_environment(&configuration, config_path)
+            .map_err(StartError::AuthorityTransition)?;
     let has_external_services = !registrations.is_empty();
     let authority_transition = authority::AuthorityTransitionSignal::default();
+    let preparation = preparation::Pool::new().map_err(StartError::AuthorityTransition)?;
     let mut lifecycle = LifecycleController::new();
     lifecycle
         .transition(NodeLifecycleState::Configured)
@@ -225,16 +349,21 @@ pub fn start_with_services(
         lifecycle: lifecycle.state(),
         services: Vec::new(),
     }));
-    register_builtin_services(
+    let authorized_production_consensus = register_builtin_services(
         &configuration,
         &runtime_view,
         &mut registrations,
         authority_transition.clone(),
+        preparation.handle(),
     )?;
     let startup_plan = build_startup_plan(&configuration)?;
     require_complete_service_set(&startup_plan, &registrations)?;
 
     let mut supervisor = Supervisor::new(registrations).map_err(StartError::Supervisor)?;
+    #[cfg(feature = "qualification-timing")]
+    if qualification_timing.is_some() {
+        supervisor.enable_poll_timing(true);
+    }
     lifecycle
         .transition(NodeLifecycleState::Starting)
         .map_err(StartError::Lifecycle)?;
@@ -267,6 +396,10 @@ pub fn start_with_services(
         runtime_view,
         authority_transition,
         has_external_services,
+        authorized_production_consensus: authorized_production_consensus && !has_external_services,
+        preparation,
+        #[cfg(feature = "qualification-timing")]
+        qualification_timing,
     })
 }
 
@@ -275,8 +408,18 @@ fn register_builtin_services(
     runtime_view: &RuntimeView,
     registrations: &mut Vec<ServiceRegistration>,
     authority_transition: authority::AuthorityTransitionSignal,
-) -> Result<(), StartError> {
-    let authenticated_ingress = ingress::AuthenticatedIngress::default();
+    preparation: preparation::Handle,
+) -> Result<bool, StartError> {
+    let mut authorized_production_consensus = false;
+    let authenticated_ingress = ingress::AuthenticatedIngress::with_world_budget(
+        synergy_state::world_resources::WorldResourceBudget::new(
+            configuration.storage.world_memory_budget_bytes,
+        ),
+    );
+    let wallet_admission = configuration
+        .etdag
+        .enabled
+        .then(protected_admission::AdmissionHandle::default);
     let verified_authority =
         authority::load(configuration).map_err(|reason| StartError::ServiceRegistration {
             service: "authority",
@@ -320,10 +463,12 @@ fn register_builtin_services(
         push_builtin(
             registrations,
             "etdag",
-            etdag::registration(
+            etdag::registration_with_preparation(
                 configuration,
                 Arc::clone(&authority),
                 authenticated_ingress.clone(),
+                wallet_admission.clone(),
+                Some(preparation.clone()),
             )
             .map_err(|reason| StartError::ServiceRegistration {
                 service: "etdag",
@@ -358,11 +503,12 @@ fn register_builtin_services(
     push_builtin(
         registrations,
         "sync",
-        sync::registration(
+        sync::registration_with_preparation(
             configuration,
             verified_authority.clone(),
             authority_transition,
             authenticated_ingress.clone(),
+            Some(preparation.clone()),
         )
         .map_err(|reason| StartError::ServiceRegistration {
             service: "sync",
@@ -387,7 +533,7 @@ fn register_builtin_services(
         push_builtin(
             registrations,
             "posy",
-            posy::registration(
+            posy::registration_with_preparation(
                 configuration,
                 verified_authority
                     .clone()
@@ -396,21 +542,28 @@ fn register_builtin_services(
                         reason: "PoSy requires a verified frozen authority binding".into(),
                     })?,
                 authenticated_ingress.clone(),
+                Some(preparation.clone()),
             )
             .map_err(|reason| StartError::ServiceRegistration {
                 service: "posy",
                 reason,
             })?,
         )?;
+        // Canonical PoSy registration has verified active signed membership and
+        // consensus-key possession. Role placement alone cannot set this marker.
+        authorized_production_consensus =
+            configuration.consensus.mode == ConsensusMode::ValidateAndVote;
     }
     if configuration.rpc.enabled {
         let query_store: Arc<dyn synergy_rpc::provider::CanonicalReadProvider> = Arc::new(
-            rpc::CanonicalQueryStore::load(configuration.storage.data_directory.clone()).map_err(
-                |reason| StartError::ServiceRegistration {
-                    service: "rpc",
-                    reason,
-                },
-            )?,
+            rpc::CanonicalQueryStore::load_with_world_budget(
+                configuration.storage.data_directory.clone(),
+                Arc::clone(authenticated_ingress.world_budget()),
+            )
+            .map_err(|reason| StartError::ServiceRegistration {
+                service: "rpc",
+                reason,
+            })?,
         );
         let websocket_hub = Arc::new(
             WsServer::new(
@@ -426,11 +579,16 @@ fn register_builtin_services(
         push_builtin(
             registrations,
             "rpc",
-            rpc::registration(
+            rpc::registration_with_preparation(
                 &configuration.rpc,
                 Arc::clone(runtime_view),
                 Arc::clone(&query_store),
                 Arc::clone(&websocket_hub),
+                wallet_admission.clone(),
+                Some(preparation.clone()),
+                verified_authority
+                    .as_ref()
+                    .map(|authority| (authority.epoch.network_id.clone(), authority.epoch.epoch)),
             )
             .map_err(|reason| StartError::ServiceRegistration {
                 service: "rpc",
@@ -483,7 +641,8 @@ fn register_builtin_services(
                 reason,
             }
         })?,
-    )
+    )?;
+    Ok(authorized_production_consensus)
 }
 
 fn push_builtin(
@@ -705,5 +864,140 @@ impl std::error::Error for StartError {
             | Self::AuthorityTransition(_)
             | Self::ShutdownFailures(_) => None,
         }
+    }
+}
+
+#[cfg(feature = "qualification-timing")]
+impl Drop for StartedNode {
+    fn drop(&mut self) {
+        crate::services::qualification_timing::clear_process_handle();
+        if let Some(collector) = self.qualification_timing.take() {
+            let report = collector.finish();
+            eprintln!(
+                "qualification timing report: written={} dropped={} failures={} complete={}",
+                report.written,
+                report.dropped,
+                report.failures,
+                report.complete()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::*;
+
+    #[test]
+    fn voting_preflight_requires_exact_active_membership_without_private_custody() {
+        use synergy_posy::{ValidatorRecord, ValidatorStatus, POSY_MIN_VALIDATOR_COUNT};
+        let mut entries = (0..POSY_MIN_VALIDATOR_COUNT)
+            .map(|i| {
+                (
+                    ValidatorRecord {
+                        validator_id: format!("validator-{i}"),
+                        consensus_key_id: format!("consensus-{i}"),
+                        frozen_voting_weight: 1,
+                        status: ValidatorStatus::Active,
+                    },
+                    vec![1],
+                )
+            })
+            .collect::<Vec<_>>();
+        entries.push((
+            ValidatorRecord {
+                validator_id: "shadow".into(),
+                consensus_key_id: "shadow-key".into(),
+                frozen_voting_weight: 1,
+                status: ValidatorStatus::Shadow,
+            },
+            vec![1],
+        ));
+        let authority = authority::qualification_authority(entries);
+        let role = synergy_protocol_types::NodeRole::Validator;
+        let check = |mode, authority, id| preflight_voting_binding(role, mode, authority, id);
+        assert_eq!(
+            check(
+                ConsensusMode::ValidateAndVote,
+                Some(authority.as_ref()),
+                "validator-0"
+            )
+            .unwrap()
+            .as_deref(),
+            Some("consensus-0")
+        );
+        for id in ["unregistered", "shadow"] {
+            assert!(check(ConsensusMode::ValidateAndVote, Some(authority.as_ref()), id).is_err());
+        }
+        assert!(check(ConsensusMode::ValidateAndVote, None, "validator-0").is_err());
+        assert!(check(ConsensusMode::Observe, None, "unregistered")
+            .unwrap()
+            .is_none());
+        assert!(preflight_voting_binding(
+            synergy_protocol_types::NodeRole::ObserverLight,
+            ConsensusMode::ValidateAndVote,
+            Some(authority.as_ref()),
+            "validator-0"
+        )
+        .is_err());
+    }
+
+    fn starting() -> LifecycleController {
+        let mut lifecycle = LifecycleController::new();
+        lifecycle
+            .transition(NodeLifecycleState::Configured)
+            .unwrap();
+        lifecycle.transition(NodeLifecycleState::Starting).unwrap();
+        lifecycle
+    }
+
+    fn ready_service() -> ServiceObservation {
+        ServiceObservation {
+            id: ServiceId::new("posy").unwrap(),
+            state: ServiceState::Running,
+            health: ServiceHealth::Healthy,
+            readiness: ServiceReadiness::Ready,
+        }
+    }
+
+    #[test]
+    fn authorized_production_validator_leaves_shadow_only_after_complete_readiness() {
+        let mut lifecycle = starting();
+        let ready = ready_service();
+        advance_lifecycle_readiness(&mut lifecycle, true, true, std::slice::from_ref(&ready))
+            .unwrap();
+        assert_eq!(lifecycle.state(), NodeLifecycleState::Shadowing);
+        let mut pending = ready.clone();
+        pending.readiness = ServiceReadiness::Pending {
+            reason: "verified catch-up pending".into(),
+        };
+        advance_lifecycle_readiness(&mut lifecycle, true, true, &[pending]).unwrap();
+        assert_eq!(lifecycle.state(), NodeLifecycleState::Shadowing);
+        advance_lifecycle_readiness(&mut lifecycle, true, true, &[ready]).unwrap();
+        assert_eq!(lifecycle.state(), NodeLifecycleState::Active);
+    }
+
+    #[test]
+    fn unauthorized_or_external_shadow_and_unhealthy_graph_cannot_activate() {
+        let ready = ready_service();
+        let mut lifecycle = starting();
+        advance_lifecycle_readiness(&mut lifecycle, true, false, std::slice::from_ref(&ready))
+            .unwrap();
+        advance_lifecycle_readiness(&mut lifecycle, true, false, std::slice::from_ref(&ready))
+            .unwrap();
+        assert_eq!(lifecycle.state(), NodeLifecycleState::Shadowing);
+        let mut unhealthy = ready.clone();
+        unhealthy.health = ServiceHealth::Unhealthy {
+            reason: "authority verification failed".into(),
+        };
+        let mut stopped = ready.clone();
+        stopped.state = ServiceState::Stopped;
+        for services in [vec![], vec![unhealthy], vec![stopped]] {
+            advance_lifecycle_readiness(&mut lifecycle, true, true, &services).unwrap();
+            assert_eq!(lifecycle.state(), NodeLifecycleState::Shadowing);
+        }
+        lifecycle.transition(NodeLifecycleState::Failed).unwrap();
+        advance_lifecycle_readiness(&mut lifecycle, true, true, &[ready]).unwrap();
+        assert_eq!(lifecycle.state(), NodeLifecycleState::Failed);
     }
 }

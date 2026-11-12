@@ -1,0 +1,12 @@
+[package]
+name = "synergy-runtime-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+[dependencies]
+serde_json.workspace = true
+synergy-admin-api = { path = "../crates/synergy-admin-api" }
+synergy-node-core = { path = "../crates/synergy-node-core" }
+synergy-simulation = { path = "../simulation" }

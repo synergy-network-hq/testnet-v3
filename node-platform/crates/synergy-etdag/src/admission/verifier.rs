@@ -40,3 +40,22 @@ pub fn verify_admission_request(
         &request.signature,
     )
 }
+
+/// Verify original processing authorization against an independently governed
+/// frozen context. Group assignment and inclusion are deliberately absent.
+/// The supplied verifier must bind the key to the wallet using canonical Aegis
+/// identity authority; shape checks alone do not establish that authority.
+pub fn verify_processing_admission_request(
+    request: &super::ProcessingAdmissionRequest,
+    expected_context: &super::ProcessingContext,
+    verifier: &impl AdmissionSignatureVerifier,
+) -> Result<(), EtdagError> {
+    request.validate_context(expected_context)?;
+    verifier.verify_wallet_signature(
+        &request.sender_wallet,
+        &request.signature_algorithm,
+        &request.signer_public_key,
+        &request.signing_bytes()?,
+        &request.signature,
+    )
+}

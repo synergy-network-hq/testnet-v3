@@ -21,16 +21,19 @@ pub enum ExecutionError<E> {
 /// Fully executed candidate state for one block body. This is proposal
 /// material only; it has no authority to finalize or persist itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BlockExecutionOutcome {
+pub struct BlockExecutionOutcome<S = WorldState> {
     pub block_height: u64,
-    pub state: WorldState,
+    pub state: S,
     pub state_root: String,
     pub receipts: Vec<TransactionReceipt>,
     pub total_gas_used: u64,
     pub total_fees_nwei: u128,
 }
 
-impl BlockExecutionOutcome {
+pub type BudgetedBlockExecutionOutcome =
+    BlockExecutionOutcome<synergy_state::world_resources::BudgetedWorld>;
+
+impl<S> BlockExecutionOutcome<S> {
     /// Constructs metadata accepted by the finalized-state store. The caller
     /// must invoke durable commit only after PoSy verifies finality.
     pub fn finalized_state(

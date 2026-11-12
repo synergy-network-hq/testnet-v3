@@ -879,7 +879,7 @@ mod test_mldsa44_clean {
                 "sign_verify wrong length"
             );
 
-            let ctx = vec![1u8; 10];
+            let ctx = [1u8; 10];
             assert_eq!(
                 0,
                 PQCLEAN_MLDSA44_CLEAN_crypto_sign_ctx(
@@ -918,7 +918,7 @@ mod test_mldsa44_clean {
             unpacked_m.set_len(mlen);
             assert!(unpacked_m == msg, "unequal messages");
 
-            let ctx_alt = vec![0u8; 10];
+            let ctx_alt = [0u8; 10];
             assert_eq!(
                 -1,
                 PQCLEAN_MLDSA44_CLEAN_crypto_sign_open_ctx(
@@ -1073,7 +1073,7 @@ mod test_mldsa44_avx2 {
                 "sign_verify wrong length"
             );
 
-            let ctx = vec![1u8; 10];
+            let ctx = [1u8; 10];
             assert_eq!(
                 0,
                 PQCLEAN_MLDSA44_AVX2_crypto_sign_ctx(
@@ -1112,7 +1112,7 @@ mod test_mldsa44_avx2 {
             unpacked_m.set_len(mlen);
             assert!(unpacked_m == msg, "unequal messages");
 
-            let ctx_alt = vec![0u8; 10];
+            let ctx_alt = [0u8; 10];
             assert_eq!(
                 -1,
                 PQCLEAN_MLDSA44_AVX2_crypto_sign_open_ctx(
@@ -1266,7 +1266,7 @@ mod test_mldsa44_aarch64 {
                 "sign_verify wrong length"
             );
 
-            let ctx = vec![1u8; 10];
+            let ctx = [1u8; 10];
             assert_eq!(
                 0,
                 PQCLEAN_MLDSA44_AARCH64_crypto_sign_ctx(
@@ -1308,7 +1308,7 @@ mod test_mldsa44_aarch64 {
             unpacked_m.set_len(mlen);
             assert!(unpacked_m == msg, "unequal messages");
 
-            let ctx_alt = vec![0u8; 10];
+            let ctx_alt = [0u8; 10];
             assert_eq!(
                 -1,
                 PQCLEAN_MLDSA44_AARCH64_crypto_sign_open_ctx(
@@ -1459,7 +1459,7 @@ mod test_mldsa65_clean {
                 "sign_verify wrong length"
             );
 
-            let ctx = vec![1u8; 10];
+            let ctx = [1u8; 10];
             assert_eq!(
                 0,
                 PQCLEAN_MLDSA65_CLEAN_crypto_sign_ctx(
@@ -1498,7 +1498,7 @@ mod test_mldsa65_clean {
             unpacked_m.set_len(mlen);
             assert!(unpacked_m == msg, "unequal messages");
 
-            let ctx_alt = vec![0u8; 10];
+            let ctx_alt = [0u8; 10];
             assert_eq!(
                 -1,
                 PQCLEAN_MLDSA65_CLEAN_crypto_sign_open_ctx(
@@ -1653,7 +1653,7 @@ mod test_mldsa65_avx2 {
                 "sign_verify wrong length"
             );
 
-            let ctx = vec![1u8; 10];
+            let ctx = [1u8; 10];
             assert_eq!(
                 0,
                 PQCLEAN_MLDSA65_AVX2_crypto_sign_ctx(
@@ -1692,7 +1692,7 @@ mod test_mldsa65_avx2 {
             unpacked_m.set_len(mlen);
             assert!(unpacked_m == msg, "unequal messages");
 
-            let ctx_alt = vec![0u8; 10];
+            let ctx_alt = [0u8; 10];
             assert_eq!(
                 -1,
                 PQCLEAN_MLDSA65_AVX2_crypto_sign_open_ctx(
@@ -1846,7 +1846,7 @@ mod test_mldsa65_aarch64 {
                 "sign_verify wrong length"
             );
 
-            let ctx = vec![1u8; 10];
+            let ctx = [1u8; 10];
             assert_eq!(
                 0,
                 PQCLEAN_MLDSA65_AARCH64_crypto_sign_ctx(
@@ -1888,7 +1888,7 @@ mod test_mldsa65_aarch64 {
             unpacked_m.set_len(mlen);
             assert!(unpacked_m == msg, "unequal messages");
 
-            let ctx_alt = vec![0u8; 10];
+            let ctx_alt = [0u8; 10];
             assert_eq!(
                 -1,
                 PQCLEAN_MLDSA65_AARCH64_crypto_sign_open_ctx(
@@ -2039,7 +2039,7 @@ mod test_mldsa87_clean {
                 "sign_verify wrong length"
             );
 
-            let ctx = vec![1u8; 10];
+            let ctx = [1u8; 10];
             assert_eq!(
                 0,
                 PQCLEAN_MLDSA87_CLEAN_crypto_sign_ctx(
@@ -2078,7 +2078,7 @@ mod test_mldsa87_clean {
             unpacked_m.set_len(mlen);
             assert!(unpacked_m == msg, "unequal messages");
 
-            let ctx_alt = vec![0u8; 10];
+            let ctx_alt = [0u8; 10];
             assert_eq!(
                 -1,
                 PQCLEAN_MLDSA87_CLEAN_crypto_sign_open_ctx(
@@ -2233,7 +2233,7 @@ mod test_mldsa87_avx2 {
                 "sign_verify wrong length"
             );
 
-            let ctx = vec![1u8; 10];
+            let ctx = [1u8; 10];
             assert_eq!(
                 0,
                 PQCLEAN_MLDSA87_AVX2_crypto_sign_ctx(
@@ -2272,7 +2272,7 @@ mod test_mldsa87_avx2 {
             unpacked_m.set_len(mlen);
             assert!(unpacked_m == msg, "unequal messages");
 
-            let ctx_alt = vec![0u8; 10];
+            let ctx_alt = [0u8; 10];
             assert_eq!(
                 -1,
                 PQCLEAN_MLDSA87_AVX2_crypto_sign_open_ctx(
@@ -2426,7 +2426,7 @@ mod test_mldsa87_aarch64 {
                 "sign_verify wrong length"
             );
 
-            let ctx = vec![1u8; 10];
+            let ctx = [1u8; 10];
             assert_eq!(
                 0,
                 PQCLEAN_MLDSA87_AARCH64_crypto_sign_ctx(
@@ -2468,7 +2468,7 @@ mod test_mldsa87_aarch64 {
             unpacked_m.set_len(mlen);
             assert!(unpacked_m == msg, "unequal messages");
 
-            let ctx_alt = vec![0u8; 10];
+            let ctx_alt = [0u8; 10];
             assert_eq!(
                 -1,
                 PQCLEAN_MLDSA87_AARCH64_crypto_sign_open_ctx(

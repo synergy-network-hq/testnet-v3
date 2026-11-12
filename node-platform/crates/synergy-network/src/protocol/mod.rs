@@ -7,6 +7,7 @@ mod envelope;
 mod framing;
 mod id;
 mod registry;
+mod session_payload;
 mod size_limits;
 mod version;
 
@@ -20,6 +21,10 @@ pub use envelope::{DecodedEnvelope, OutboundEnvelope};
 pub use framing::{FrameError, FRAME_HEADER_BYTES, FRAME_MAGIC, FRAME_VERSION};
 pub use id::{protocol_id, protocol_kind, ProtocolIdError};
 pub use registry::{ProtocolRegistration, ProtocolRegistry, ProtocolRegistryError};
+pub use session_payload::{
+    decode_session_payload, encode_session_payload, MAX_SESSION_PAYLOAD_BYTES,
+    SESSION_PAYLOAD_HEADER_BYTES,
+};
 pub use size_limits::{FrameLimitError, FrameLimits};
 pub use version::ProtocolVersion;
 

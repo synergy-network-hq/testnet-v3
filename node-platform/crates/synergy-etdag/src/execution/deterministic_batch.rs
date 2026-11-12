@@ -24,6 +24,8 @@ pub struct PreparedProtectedBatch {
     pub protected_batch_root: EtdagDigest,
     pub reveal_transcript_root: EtdagDigest,
     pub transactions: Vec<PreparedTransaction>,
+    pub reveal_authorization: ProtectedRevealAuthorization,
+    pub parent_evidence: super::ParentProposalRevealEvidence,
 }
 
 impl PreparedProtectedBatch {
@@ -32,9 +34,34 @@ impl PreparedProtectedBatch {
         self.context_root.validate()?;
         self.protected_batch_root.validate()?;
         self.reveal_transcript_root.validate()?;
+        self.reveal_authorization.validate()?;
+        self.parent_evidence.material.validate()?;
+        self.parent_evidence.next_batch.validate()?;
         if self.context.root()? != self.context_root
             || self.context.target_height != self.target_height
-            || self.transactions.is_empty()
+            || self.reveal_authorization.context_root != self.context_root
+            || self.reveal_authorization.target_height != self.target_height
+            || self.reveal_authorization.protected_batch_root != self.protected_batch_root
+            || self.parent_evidence.material.height.checked_add(1) != Some(self.target_height)
+            || self.parent_evidence.material.next_batch_root != self.protected_batch_root
+            || self.parent_evidence.next_batch.protected_batch_root != self.protected_batch_root
+            || self.parent_evidence.next_batch.context_root != self.context_root
+            || self.parent_evidence.next_batch.target_height != self.target_height
+            || self
+                .parent_evidence
+                .next_batch
+                .ordered_transaction_ids
+                .len()
+                != self.transactions.len()
+        {
+            return Err(EtdagError::InvalidExecutionInput);
+        }
+        if self.transactions.is_empty()
+            && self.reveal_transcript_root
+                != EtdagDigest::from_canonical(
+                    "SYNERGY_ETDAG_BATCH_REVEAL_TRANSCRIPTS_V1",
+                    &Vec::<(EtdagDigest, EtdagDigest)>::new(),
+                )?
         {
             return Err(EtdagError::InvalidExecutionInput);
         }
@@ -42,12 +69,18 @@ impl PreparedProtectedBatch {
         let mut envelopes = std::collections::BTreeSet::new();
         let mut order_keys = std::collections::BTreeSet::new();
         let mut previous: Option<&EtdagDigest> = None;
-        for transaction in &self.transactions {
+        for (transaction, expected_id) in self
+            .transactions
+            .iter()
+            .zip(&self.parent_evidence.next_batch.ordered_transaction_ids)
+        {
             transaction.vertex_id.validate()?;
             transaction.envelope_id.validate()?;
             transaction.content_blind_order_key.validate()?;
             transaction.reveal_authorization.validate()?;
             if transaction.plaintext.is_empty()
+                || &transaction.envelope_id != expected_id
+                || transaction.reveal_authorization != self.reveal_authorization
                 || transaction.reveal_authorization.context_root != self.context_root
                 || transaction.reveal_authorization.target_height != self.target_height
                 || transaction.reveal_authorization.protected_batch_root
@@ -70,6 +103,8 @@ pub fn prepare_deterministic_batch(
     input: &DeterministicProtectedExecutionInput,
     vertex_envelopes: &BTreeMap<EtdagDigest, EtdagDigest>,
     revealed: &[RevealedTransaction],
+    authorization: &crate::reveal::VerifiedRevealAuthorization,
+    parent_evidence: super::ParentProposalRevealEvidence,
 ) -> Result<PreparedProtectedBatch, EtdagError> {
     input.validate()?;
     context.validate()?;
@@ -142,6 +177,8 @@ pub fn prepare_deterministic_batch(
         protected_batch_root: input.protected_batch_root.clone(),
         reveal_transcript_root: input.reveal_transcript_root.clone(),
         transactions,
+        reveal_authorization: authorization.authorization().clone(),
+        parent_evidence,
     };
     batch.validate()?;
     Ok(batch)

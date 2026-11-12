@@ -4,7 +4,8 @@
 //! does not perform network I/O; node runtimes and smoke scripts use these
 //! constants to keep JSON-RPC wiring aligned with the crate ABI.
 
-use super::{EVM_PRECOMPILE_ADDRESS_HEX, TESTNET_CHAIN_ID_HEX, TESTNET_NETWORK_ID};
+use super::SynergyNetwork;
+use crate::integrations::IntegrationError;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RpcExposure {
@@ -81,19 +82,24 @@ pub const TRUSTED_ONLY_METHODS: &[SynergyRpcMethod] = &[
     SynergyRpcMethod::AegisLicenseSummary,
 ];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EvmPrecompileRoute {
-    pub chain_id_hex: &'static str,
-    pub network_id: &'static str,
-    pub address: &'static str,
+    pub chain_id_hex: String,
+    pub network_id: String,
+    pub address: String,
     pub call_method: &'static str,
     pub estimate_method: &'static str,
 }
 
-pub const EVM_PRECOMPILE_ROUTE: EvmPrecompileRoute = EvmPrecompileRoute {
-    chain_id_hex: TESTNET_CHAIN_ID_HEX,
-    network_id: TESTNET_NETWORK_ID,
-    address: EVM_PRECOMPILE_ADDRESS_HEX,
-    call_method: "eth_call",
-    estimate_method: "eth_estimateGas",
-};
+impl EvmPrecompileRoute {
+    pub fn for_network(network: &SynergyNetwork) -> Result<Self, IntegrationError> {
+        network.validate()?;
+        Ok(Self {
+            chain_id_hex: format!("0x{:x}", network.chain_id),
+            network_id: network.network_id.clone(),
+            address: network.evm_precompile_address.clone(),
+            call_method: "eth_call",
+            estimate_method: "eth_estimateGas",
+        })
+    }
+}

@@ -11,5 +11,12 @@ pub const TIMEOUT_CERTIFICATE_DOMAIN: &str = "SYNERGY_POSY_SIMPLIFIED_TC_V1";
 pub const FINALITY_DOMAIN: &str = "SYNERGY_POSY_SIMPLIFIED_FINALITY_V1";
 
 pub fn is_consensus_signing_domain(domain: &str) -> bool {
-    matches!(domain, PROPOSAL_DOMAIN | VOTE_DOMAIN | TIMEOUT_VOTE_DOMAIN)
+    matches!(
+        domain,
+        PROPOSAL_DOMAIN
+            | VOTE_DOMAIN
+            | TIMEOUT_VOTE_DOMAIN
+            | crate::PROPOSAL_ECHO_DOMAIN
+            | crate::PROPOSAL_READY_DOMAIN
+    )
 }

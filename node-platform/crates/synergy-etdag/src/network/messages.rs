@@ -3,7 +3,7 @@ use synergy_data_availability::{AvailabilityProof, DataShard};
 
 use crate::{
     certificates::{BatchValidationCertificate, CanonicalCertificate},
-    execution::PreparedProtectedBatch,
+    execution::{PreparedProtectedBatch, ProcessingDecryptShare, ProcessingVertex},
     AvailabilityCertificate, AvailabilityVote, DecryptShareMessage, EtdagDigest, EtdagError,
     TransactionVertex,
 };
@@ -103,10 +103,19 @@ impl CertifiedExecutionHandoff {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum EtdagNetworkMessage {
+    /// Node-native replay inputs, carried under the authenticated ETDAG envelope.
+    /// These bytes confer no execution, reveal or consensus authority.
+    ProcessingProposalInputsV1(Vec<u8>),
+    ProcessingVertexV1(ProcessingVertex),
+    ProcessingAvailabilityVoteV1(AvailabilityVote),
+    ProcessingAvailabilityCertificateV1(AvailabilityCertificate),
+    ProcessingDecryptShareV1(ProcessingDecryptShare),
     Vertex(TransactionVertex),
     AvailabilityVote(AvailabilityVote),
     AvailabilityCertificate(AvailabilityCertificate),
+    CutoffMarker(crate::ordering::ProtectedCutMarker),
     ShardCustody(ShardCustodyMessage),
     DecryptShare(DecryptShareMessage),
     Certificate(CanonicalCertificate),

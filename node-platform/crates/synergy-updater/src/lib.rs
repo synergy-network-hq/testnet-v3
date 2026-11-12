@@ -7,6 +7,7 @@ mod activation;
 mod audit;
 mod channel;
 mod compatibility;
+mod coordinator;
 mod discovery;
 mod drain;
 mod health;
@@ -22,6 +23,9 @@ pub use activation::{ActivationDecision, ActivationGate};
 pub use audit::{AuditEvent, AuditOutcome, AuditSink, UpdatePhase};
 pub use channel::ReleaseChannel;
 pub use compatibility::{CompatibilityGate, RuntimeVersions};
+pub use coordinator::{
+    ArtifactSource, UpdateCoordinator, UpdateError, UpdateOutcome, UpdateRequest, UpdateRuntime,
+};
 pub use discovery::{discover_release, ReleaseCatalog, ReleaseDiscovery};
 pub use drain::{DrainCoordinator, DrainReceipt};
 pub use health::{HealthGate, HealthObservation};

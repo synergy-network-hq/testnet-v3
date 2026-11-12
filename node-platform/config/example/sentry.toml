@@ -1,0 +1,6 @@
+schema_version = 1
+role = "sentry"
+network_manifest = "../../../networks/testnet-v3/network-manifest.json"
+data_directory = "/var/lib/synergy-node/sentry"
+admin_socket = "/run/synergy-node/sentry.sock"
+role_profile = "../../roles/sentry.toml"

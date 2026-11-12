@@ -1,6 +1,5 @@
 use super::{
-    verify_admission_request, AdmissionRequest, AdmissionResourceLimits,
-    AdmissionSignatureVerifier,
+    verify_admission_request, AdmissionRequest, AdmissionResourceLimits, AdmissionSignatureVerifier,
 };
 use crate::{EtdagDigest, EtdagError};
 

@@ -2,6 +2,37 @@ use crate::{EtdagDigest, EtdagError};
 
 const DOMAIN_ORDER_SEED: &str = "PoSy/ETDAG/OrderSeed/v3";
 
+/// Use the immutable target context as the canonical finalized-authority
+/// commitment. The node must authenticate that context before calling this.
+pub fn derive_target_order_seed(
+    context: &crate::TargetAdmissionContextV3,
+    cut: &super::VerifiedProtectedCut,
+) -> Result<EtdagDigest, EtdagError> {
+    let context_root = context.root()?;
+    if cut.proof().context_root != context_root
+        || cut.proof().target_height != context.target_height
+        || context.finalized_epoch_seed_root.len() != 64
+    {
+        return Err(EtdagError::ContextMismatch);
+    }
+    let mut randomness = [0u8; 32];
+    for (index, pair) in context
+        .finalized_epoch_seed_root
+        .as_bytes()
+        .chunks_exact(2)
+        .enumerate()
+    {
+        let pair = std::str::from_utf8(pair).map_err(|_| EtdagError::InvalidDigest)?;
+        randomness[index] = u8::from_str_radix(pair, 16).map_err(|_| EtdagError::InvalidDigest)?;
+    }
+    derive_order_seed(
+        randomness,
+        &context_root,
+        cut.semantic_root(),
+        context.target_height,
+    )
+}
+
 /// Derive the frozen-runtime ETDAG seed from authenticated finalized context
 /// and the certified DAG cut. `epoch_randomness` is the raw 32-byte PoSy Hash,
 /// whose canonical JSON wire shape is a byte array (not a hex string).

@@ -30,12 +30,16 @@ mod tests {
     };
 
     fn transaction(nonce: u64) -> SignedTransaction {
+        let sender = synergy_address::derive_object_address("synq", b"block-test-sender").unwrap();
+        let receiver =
+            synergy_address::derive_object_address("synq", b"block-test-receiver").unwrap();
         SignedTransaction {
+            identity_authorization: None,
             unsigned: UnsignedTransaction {
-                network: NetworkBinding::testnet_v3("synergy-testnet-v3").unwrap(),
+                network: NetworkBinding::new(1266, "synergy-testnet-v3").unwrap(),
                 class: TransactionClass::User,
-                sender: "sender".into(),
-                receiver: "receiver".into(),
+                sender,
+                receiver,
                 amount_nwei: 1,
                 nonce,
                 fee_limit: FeeLimit {
@@ -65,7 +69,7 @@ mod tests {
         builder.push(tx, receipt).unwrap();
         let block = builder
             .build(
-                NetworkBinding::testnet_v3("synergy-testnet-v3").unwrap(),
+                NetworkBinding::new(1266, "synergy-testnet-v3").unwrap(),
                 1,
                 "parent",
                 1,

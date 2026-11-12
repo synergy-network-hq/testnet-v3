@@ -14,12 +14,15 @@ impl RevealTranscript {
     pub fn root(&self, threshold: usize) -> Result<EtdagDigest, EtdagError> {
         self.authorization.validate()?;
         let mut validators = BTreeSet::new();
+        let mut indices = BTreeSet::new();
         if self.transcript_version != 1 || threshold == 0 {
             return Err(EtdagError::UnauthorizedReveal);
         }
         for share in &self.shares {
             share.validate()?;
-            if share.authorization != self.authorization || !validators.insert(&share.validator_id)
+            if share.authorization != self.authorization
+                || !validators.insert(&share.validator_id)
+                || !indices.insert(share.share_index)
             {
                 return Err(EtdagError::UnauthorizedReveal);
             }

@@ -95,6 +95,30 @@ impl AdminOperation {
         }
     }
 
+    pub const fn audit_label(&self) -> &'static str {
+        match self {
+            Self::Read(_) => "read",
+            Self::Lifecycle(_) => "lifecycle",
+            Self::Config(_) => "config",
+            Self::Identity(_) => "identity",
+            Self::Peers(_) => "peers",
+            Self::Sync(_) => "sync",
+            Self::Validator(_) => "validator",
+            Self::Vpn(_) => "vpn",
+            Self::Sentry(_) => "sentry",
+            Self::Posy(_) => "posy",
+            Self::Etdag(_) => "etdag",
+            Self::Storage(_) => "storage",
+            Self::Telemetry(_) => "telemetry",
+            Self::Upgrade(_) => "upgrade",
+            Self::CrossChain(_) => "cross_chain",
+            Self::Ai(_) => "ai",
+            Self::Ownership(_) => "ownership",
+            Self::Naming(_) => "naming",
+            Self::Rewards(_) => "rewards",
+        }
+    }
+
     pub fn validate(&self) -> Result<(), crate::AdminError> {
         match self {
             Self::Read(_) | Self::Telemetry(TelemetryOperation::Snapshot) => Ok(()),

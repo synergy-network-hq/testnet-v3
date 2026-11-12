@@ -12,9 +12,57 @@
         "null"
       ]
     },
+    "aegis_provider": {
+      "additionalProperties": false,
+      "properties": {
+        "authenticated_report_sha256": {
+          "type": "string"
+        },
+        "report_path": {
+          "type": "string"
+        }
+      },
+      "type": [
+        "object",
+        "null"
+      ]
+    },
     "aegis_signing_key_path": {
       "type": [
         "string",
+        "null"
+      ]
+    },
+    "apqe_transport": {
+      "additionalProperties": false,
+      "properties": {
+        "custody_path": {
+          "type": "string"
+        },
+        "custody_unlock_path": {
+          "type": "string"
+        },
+        "enrollment_path": {
+          "type": "string"
+        },
+        "genesis_trust_key_sha256": {
+          "type": "string"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "registry_path": {
+          "type": "string"
+        },
+        "registry_trust_key_path": {
+          "type": "string"
+        },
+        "registry_trust_key_sha256": {
+          "type": "string"
+        }
+      },
+      "type": [
+        "object",
         "null"
       ]
     },
@@ -25,6 +73,12 @@
       "additionalProperties": false,
       "properties": {
         "authority_binding": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "authority_recovery_certificate_path": {
           "type": [
             "string",
             "null"

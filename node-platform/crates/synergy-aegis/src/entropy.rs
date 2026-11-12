@@ -1,6 +1,5 @@
 //! Aegis-owned entropy boundary. Consumers never open an entropy device directly.
-use std::fs::File;
-use std::io::Read;
+use synergy_address_engine::apqe::Primitives;
 
 pub trait AegisEntropy: Send + Sync {
     fn fill(&self, output: &mut [u8]) -> Result<(), EntropyError>;
@@ -14,8 +13,8 @@ impl AegisEntropy for OperatingSystemEntropy {
         if output.is_empty() || output.len() > 1024 * 1024 {
             return Err(EntropyError::InvalidRequest);
         }
-        File::open("/dev/urandom")
-            .and_then(|mut file| file.read_exact(output))
+        Primitives
+            .random_bytes(output)
             .map_err(|_| EntropyError::Unavailable)
     }
 }

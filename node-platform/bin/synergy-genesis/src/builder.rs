@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use sha3::{Digest, Sha3_256};
+use synergy_aegis::{AegisHashEngine, AegisSha3_256};
 
 use crate::etdag::GenesisEtdag;
 use crate::network::GenesisNetwork;
@@ -18,7 +18,7 @@ pub struct UnsignedGenesis {
 
 impl UnsignedGenesis {
     pub fn validate(&self) -> Result<(), String> {
-        if self.format_version != 1
+        if !matches!(self.format_version, 1 | 2)
             || self.initial_state_root.trim().is_empty()
             || self.authority_trust_key_id.trim().is_empty()
         {
@@ -36,10 +36,15 @@ impl UnsignedGenesis {
 
     pub fn genesis_hash(&self) -> Result<String, String> {
         let bytes = self.canonical_bytes()?;
-        let mut hasher = Sha3_256::new();
-        hasher.update(b"SYNERGY_CHAIN1266_GENESIS_V1");
-        hasher.update((bytes.len() as u64).to_be_bytes());
-        hasher.update(bytes);
-        Ok(format!("{:x}", hasher.finalize()))
+        // Existing historical namespaces and length framing remain unchanged.
+        let domain = if self.format_version == 1 {
+            b"SYNERGY_CHAIN1266_GENESIS_V1".as_slice()
+        } else {
+            b"SYNERGY_GENESIS_V2".as_slice()
+        };
+        let digest = AegisSha3_256
+            .sha3_256_segments(&[domain, &(bytes.len() as u64).to_be_bytes(), &bytes])
+            .map_err(|_| "APQE Genesis hash unavailable")?;
+        Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
     }
 }

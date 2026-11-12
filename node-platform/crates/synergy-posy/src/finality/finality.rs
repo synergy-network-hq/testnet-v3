@@ -46,6 +46,15 @@ impl ThreeQcFinality {
         certificate: SimplifiedQuorumCertificate,
     ) -> PosyResult<Option<FinalizedBlockRecord>> {
         let height = certificate.context.height;
+        if self
+            .last_finalized
+            .as_ref()
+            .is_some_and(|record| height < record.height)
+        {
+            return Err(PosyError::invalid(
+                "quorum certificate is below the retained finalized boundary",
+            ));
+        }
         if let Some(existing) = self.certificates.get(&height) {
             if existing.id()? != certificate.id()? {
                 return Err(PosyError::Conflict(
@@ -100,6 +109,12 @@ impl ThreeQcFinality {
         self.certificates.insert(height, certificate);
         if let Some(record) = &finalized {
             self.last_finalized = Some(record.clone());
+        }
+        if let Some(record) = self.last_finalized.as_ref() {
+            // Future finality depends only on the latest three certified
+            // heights. Historical conflicts are checked by the durable owner.
+            let retain_from = record.height;
+            self.certificates.retain(|height, _| *height >= retain_from);
         }
         Ok(finalized)
     }
@@ -156,6 +171,28 @@ mod tests {
             block_id: qc.block_id.clone(),
             qc_id: qc.id().unwrap(),
         }
+    }
+
+    #[test]
+    fn finalized_projection_retains_only_the_current_three_qc_tail() {
+        let mut state = ThreeQcFinality::default();
+        let first = qc(1, genesis());
+        state.accept(first.clone()).unwrap();
+        let mut previous = first.clone();
+        for height in 2..=300 {
+            let next = qc(height, parent_of(&previous));
+            state.accept(next.clone()).unwrap();
+            assert!(state.certificates.len() <= 3);
+            previous = next;
+        }
+        assert_eq!(state.last_finalized().unwrap().height, 298);
+        assert_eq!(
+            state.certificates.keys().copied().collect::<Vec<_>>(),
+            vec![298, 299, 300]
+        );
+        assert!(state.accept(first).is_err());
+        assert_eq!(state.certificates.len(), 3);
+        assert_eq!(state.last_finalized().unwrap().height, 298);
     }
 
     #[test]

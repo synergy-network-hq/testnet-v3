@@ -17,6 +17,16 @@ use crate::{
     signature::verify_signature,
 };
 
+/// Injected primitive only; policy, domain, address and canonical framing remain
+/// owned by this verifier. The callback receives the original raw signed bytes.
+pub type SignatureCheck<'a> = dyn Fn(
+        AlgorithmId,
+        &[u8],
+        &crate::keys::SynQSignature,
+        &SynQPublicKey,
+    ) -> Result<(), AegisSynQError>
+    + 'a;
+
 #[derive(Debug, Clone)]
 pub struct AegisSynQVerifier {
     pub policy: SynQSecurityPolicy,
@@ -27,21 +37,26 @@ impl AegisSynQVerifier {
         Self { policy }
     }
 
-    pub fn testnet_1266() -> Self {
-        Self::new(SynQSecurityPolicy::testnet_1266_policy())
-    }
-
     pub fn verify_synq_transaction(
         &self,
         tx: &SynQTransactionEnvelope,
         context: &VerificationContext,
     ) -> Result<VerifiedSynQTransaction, AegisSynQError> {
+        self.verify_synq_transaction_with(tx, context, &verify_signature)
+    }
+
+    pub fn verify_synq_transaction_with(
+        &self,
+        tx: &SynQTransactionEnvelope,
+        context: &VerificationContext,
+        signature_check: &SignatureCheck<'_>,
+    ) -> Result<VerifiedSynQTransaction, AegisSynQError> {
         match tx {
             SynQTransactionEnvelope::ContractDeploy(deploy) => self
-                .verify_contract_deploy(deploy, context)
+                .verify_contract_deploy_with(deploy, context, signature_check)
                 .map(VerifiedSynQTransaction::ContractDeploy),
             SynQTransactionEnvelope::ContractCall(call) => self
-                .verify_contract_call(call, context)
+                .verify_contract_call_with(call, context, signature_check)
                 .map(VerifiedSynQTransaction::ContractCall),
         }
     }
@@ -50,6 +65,15 @@ impl AegisSynQVerifier {
         &self,
         deploy: &ContractDeployEnvelope,
         context: &VerificationContext,
+    ) -> Result<VerifiedContractDeploy, AegisSynQError> {
+        self.verify_contract_deploy_with(deploy, context, &verify_signature)
+    }
+
+    fn verify_contract_deploy_with(
+        &self,
+        deploy: &ContractDeployEnvelope,
+        context: &VerificationContext,
+        signature_check: &SignatureCheck<'_>,
     ) -> Result<VerifiedContractDeploy, AegisSynQError> {
         let payload = &deploy.signing_payload;
         self.validate_context(payload, context)?;
@@ -77,7 +101,12 @@ impl AegisSynQVerifier {
             return Err(AegisSynQError::PayloadHashMismatch);
         }
 
-        self.verify_payload_signature(payload, &deploy.signature, &deploy.public_key)?;
+        self.verify_payload_signature(
+            payload,
+            &deploy.signature,
+            &deploy.public_key,
+            signature_check,
+        )?;
 
         Ok(VerifiedContractDeploy {
             deployer: payload.signer_address,
@@ -91,6 +120,15 @@ impl AegisSynQVerifier {
         &self,
         call: &ContractCallEnvelope,
         context: &VerificationContext,
+    ) -> Result<VerifiedContractCall, AegisSynQError> {
+        self.verify_contract_call_with(call, context, &verify_signature)
+    }
+
+    fn verify_contract_call_with(
+        &self,
+        call: &ContractCallEnvelope,
+        context: &VerificationContext,
+        signature_check: &SignatureCheck<'_>,
     ) -> Result<VerifiedContractCall, AegisSynQError> {
         let payload = &call.signing_payload;
         self.validate_context(payload, context)?;
@@ -117,7 +155,7 @@ impl AegisSynQVerifier {
             return Err(AegisSynQError::PayloadHashMismatch);
         }
 
-        self.verify_payload_signature(payload, &call.signature, &call.public_key)?;
+        self.verify_payload_signature(payload, &call.signature, &call.public_key, signature_check)?;
 
         Ok(VerifiedContractCall {
             caller: payload.signer_address,
@@ -240,7 +278,18 @@ impl AegisSynQVerifier {
         if public_key.bytes.len() > self.policy.max_public_key_size_bytes {
             return Err(AegisSynQError::OversizedPublicKey);
         }
-        let derived = derive_synq_address(public_key, algorithm, network)?;
+        let derived = match self.policy.signer_format_version {
+            2 => derive_synq_address(public_key, algorithm, network)?,
+            1 => {
+                let chain = self
+                    .policy
+                    .required_chain_id
+                    .ok_or(AegisSynQError::InvalidNetwork)?;
+                let tag = u16::try_from(chain.0).map_err(|_| AegisSynQError::InvalidNetwork)?;
+                crate::address::derive_with_tag(public_key, algorithm, 1, tag)?
+            }
+            _ => return Err(AegisSynQError::InvalidNetwork),
+        };
         if derived == expected {
             Ok(())
         } else {
@@ -253,11 +302,12 @@ impl AegisSynQVerifier {
         payload: &SynQSigningPayload,
         signature: &crate::keys::SynQSignature,
         public_key: &SynQPublicKey,
+        signature_check: &SignatureCheck<'_>,
     ) -> Result<(), AegisSynQError> {
         if signature.bytes.len() > self.policy.max_signature_size_bytes {
             return Err(AegisSynQError::OversizedSignature);
         }
         let canonical = canonicalize_signing_payload(payload)?;
-        verify_signature(payload.algorithm_id, &canonical, signature, public_key)
+        signature_check(payload.algorithm_id, &canonical, signature, public_key)
     }
 }

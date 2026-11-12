@@ -1,0 +1,6 @@
+schema_version = 1
+role = "observer-light"
+network_manifest = "../../../networks/testnet-v3/network-manifest.json"
+data_directory = "/var/lib/synergy-node/observer-light"
+admin_socket = "/run/synergy-node/observer-light.sock"
+role_profile = "../../roles/observer_light.toml"

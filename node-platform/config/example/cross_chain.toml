@@ -1,0 +1,6 @@
+schema_version = 1
+role = "cross-chain"
+network_manifest = "../../../networks/testnet-v3/network-manifest.json"
+data_directory = "/var/lib/synergy-node/cross-chain"
+admin_socket = "/run/synergy-node/cross-chain.sock"
+role_profile = "../../roles/cross_chain.toml"

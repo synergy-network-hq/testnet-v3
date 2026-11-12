@@ -1,0 +1,2 @@
+syntax = "proto3"; package synergy.etdag.v1;
+message Vertex { bytes id = 1; repeated bytes parents = 2; bytes envelope_commitment = 3; uint64 target_height = 4; }

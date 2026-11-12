@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.synergy.network/etdag-parameters/v1",
+  "title": "etdag-parameters",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "target_offset_blocks",
+    "max_envelope_bytes"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "target_offset_blocks": {
+      "type": "integer",
+      "const": 5
+    },
+    "max_envelope_bytes": {
+      "type": "integer",
+      "minimum": 1
+    }
+  },
+  "$defs": {
+    "hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "signature": {
+      "type": "object",
+      "required": [
+        "key_id",
+        "algorithm",
+        "value"
+      ],
+      "properties": {
+        "key_id": {
+          "type": "string"
+        },
+        "algorithm": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,23 @@
+schema_version = 1
+role = "validator"
+plane = "consensus_candidate"
+capabilities = ["identity", "durable_storage", "telemetry", "health", "sync", "network_transport", "admin_api", "propose_blocks", "vote_consensus", "execute_transactions"]
+
+[ports]
+p2p = 24000
+admin = 26000
+metrics = 27000
+
+[storage]
+data_directory = "/var/lib/synergy-node/validator"
+maximum_bytes = 107374182400
+pruning = "role_policy"
+
+[keys]
+raw_export_forbidden = true
+posy_signing = true
+
+[readiness]
+requires_manifest = true
+requires_identity = true
+requires_healthy_dependencies = true

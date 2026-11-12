@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.synergy.network/etdag-ingress-keys/v1",
+  "title": "etdag-ingress-keys",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "generation",
+    "keys",
+    "signature"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "keys": {
+      "type": "array",
+      "minItems": 1
+    },
+    "signature": {
+      "$ref": "#/$defs/signature"
+    }
+  },
+  "$defs": {
+    "hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "signature": {
+      "type": "object",
+      "required": [
+        "key_id",
+        "algorithm",
+        "value"
+      ],
+      "properties": {
+        "key_id": {
+          "type": "string"
+        },
+        "algorithm": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

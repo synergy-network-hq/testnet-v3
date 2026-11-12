@@ -15,6 +15,10 @@ pub enum RequiredRecord {
     Missing,
     Exact(Vec<u8>),
     MissingOrExact(Vec<u8>),
+    /// Missing or byte-identical to the write at this same path. The backend
+    /// resolves the write under the compare-and-commit lock; no second payload
+    /// allocation is needed for a large immutable record.
+    MissingOrSameWrite,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

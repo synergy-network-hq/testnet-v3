@@ -5,7 +5,15 @@ use synergy_aegis::{
 
 use crate::build::UnsignedManifest;
 
-pub const MANIFEST_SIGNING_DOMAIN: &str = "SYNERGY-CHAIN1266-NETWORK-MANIFEST-SIGNING-V1";
+pub const MANIFEST_SIGNING_DOMAIN: &str = "SYNERGY-NETWORK-MANIFEST-SIGNING-V2";
+// Exact domain needed to verify intentionally pinned V1 artifacts.
+fn signing_domain(format_version: u32) -> &'static str {
+    if format_version == 1 {
+        "SYNERGY-CHAIN1266-NETWORK-MANIFEST-SIGNING-V1"
+    } else {
+        MANIFEST_SIGNING_DOMAIN
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -32,7 +40,7 @@ pub fn sign(
         .sign(
             &signer_key_id,
             &SigningContext {
-                domain: MANIFEST_SIGNING_DOMAIN.into(),
+                domain: signing_domain(unsigned.format_version).into(),
                 chain_id: unsigned.chain_id,
                 epoch: None,
                 height: None,
@@ -73,7 +81,7 @@ pub fn verify(
     verifier
         .verify(
             &SigningContext {
-                domain: MANIFEST_SIGNING_DOMAIN.into(),
+                domain: signing_domain(signed.unsigned.format_version).into(),
                 chain_id: signed.unsigned.chain_id,
                 epoch: None,
                 height: None,

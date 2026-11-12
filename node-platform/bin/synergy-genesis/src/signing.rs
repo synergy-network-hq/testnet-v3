@@ -5,7 +5,15 @@ use synergy_aegis::{
 
 use crate::builder::UnsignedGenesis;
 
-pub const GENESIS_SIGNING_DOMAIN: &str = "SYNERGY-CHAIN1266-GENESIS-SIGNING-V1";
+pub const GENESIS_SIGNING_DOMAIN: &str = "SYNERGY-GENESIS-SIGNING-V2";
+// Exact domain needed to verify intentionally pinned V1 artifacts.
+fn signing_domain(format_version: u32) -> &'static str {
+    if format_version == 1 {
+        "SYNERGY-CHAIN1266-GENESIS-SIGNING-V1"
+    } else {
+        GENESIS_SIGNING_DOMAIN
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -31,7 +39,7 @@ pub fn sign(
         .sign(
             &signer_key_id,
             &SigningContext {
-                domain: GENESIS_SIGNING_DOMAIN.into(),
+                domain: signing_domain(unsigned.format_version).into(),
                 chain_id: unsigned.network.chain_id,
                 epoch: Some(0),
                 height: Some(0),
@@ -71,7 +79,7 @@ pub fn verify(
     verifier
         .verify(
             &SigningContext {
-                domain: GENESIS_SIGNING_DOMAIN.into(),
+                domain: signing_domain(signed.unsigned.format_version).into(),
                 chain_id: signed.unsigned.network.chain_id,
                 epoch: Some(0),
                 height: Some(0),

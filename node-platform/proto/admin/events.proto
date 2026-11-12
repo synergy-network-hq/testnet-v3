@@ -1,0 +1,3 @@
+syntax = "proto3"; package synergy.admin.v1;
+message EventSubscription { uint64 after_sequence = 1; repeated string kinds = 2; }
+message AdminEvent { uint64 sequence = 1; uint64 timestamp_ms = 2; string kind = 3; bytes payload = 4; }

@@ -6,8 +6,10 @@ use crate::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum ConsensusEvent {
     Proposal(SimplifiedProposal),
+    ProposalDelivery(crate::ProposalDeliveryEnvelope),
     BlockVote(BlockVote),
     TimeoutVote(TimeoutVote),
     QuorumCertificate(SimplifiedQuorumCertificate),

@@ -72,12 +72,17 @@ mod tests {
     }
 
     fn transaction(nonce: u64) -> SignedTransaction {
+        let signer_public_key = vec![1_u8; synergy_address::FN_DSA_1024_PUBLIC_KEY_BYTES];
+        let sender = synergy_address::derive_standard_account_address(&signer_public_key).unwrap();
+        let receiver =
+            synergy_address::derive_object_address("synq", b"ingress-test-receiver").unwrap();
         SignedTransaction {
+            identity_authorization: None,
             unsigned: UnsignedTransaction {
-                network: NetworkBinding::testnet_v3("synergy-testnet-v3").unwrap(),
+                network: NetworkBinding::new(1266, "synergy-testnet-v3").unwrap(),
                 class: TransactionClass::User,
-                sender: "sender".into(),
-                receiver: "receiver".into(),
+                sender,
+                receiver,
                 amount_nwei: 1,
                 nonce,
                 fee_limit: FeeLimit {
@@ -87,15 +92,15 @@ mod tests {
                 timestamp_unix: 1,
                 payload: vec![],
             },
-            signer_public_key: vec![1],
+            signer_public_key,
             signature: vec![2],
-            signature_algorithm: "ML-DSA-87".into(),
+            signature_algorithm: "FN-DSA-1024".into(),
         }
     }
 
     #[test]
     fn user_admission_is_bounded_and_requires_aegis_verification() {
-        let network = NetworkBinding::testnet_v3("synergy-testnet-v3").unwrap();
+        let network = NetworkBinding::new(1266, "synergy-testnet-v3").unwrap();
         let mut ingress = TransactionIngress::new(network, 1, 2).unwrap();
         ingress.admit_verified(transaction(1), &Accept).unwrap();
         assert_eq!(

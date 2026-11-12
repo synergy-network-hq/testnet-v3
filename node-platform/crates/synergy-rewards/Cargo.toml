@@ -12,4 +12,5 @@ serde_json.workspace = true
 synergy-address = { path = "../synergy-address" }
 synergy-node-ownership = { path = "../synergy-node-ownership" }
 synergy-protocol-types = { path = "../synergy-protocol-types" }
+synergy-state = { path = "../synergy-state" }
 synergy-storage = { path = "../synergy-storage" }

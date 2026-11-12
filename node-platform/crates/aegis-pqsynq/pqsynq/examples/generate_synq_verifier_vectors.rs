@@ -29,11 +29,18 @@ fn hash32(label: &[u8]) -> Hash32 {
 }
 
 fn valid_deploy() -> ContractDeployEnvelope {
-    let verifier = AegisSynQVerifier::testnet_1266();
+    let verifier = AegisSynQVerifier::new(pqsynq::SynQSecurityPolicy::for_network(
+        ChainId(1266),
+        NetworkId("synergy-testnet".into()),
+    ));
     let (public_key, secret_key) = Sign::mldsa65().keygen().unwrap();
     let public_key = SynQPublicKey::new(public_key);
     let signer_address = verifier
-        .derive_synq_address(&public_key, AlgorithmId::MlDsa65, NetworkId::testnet())
+        .derive_synq_address(
+            &public_key,
+            AlgorithmId::MlDsa65,
+            NetworkId("synergy-testnet".into()),
+        )
         .unwrap();
     let bytecode_hash = hash32(b"vector-bytecode");
     let manifest_hash = hash32(b"vector-manifest");
@@ -48,8 +55,8 @@ fn valid_deploy() -> ContractDeployEnvelope {
     );
     let signing_payload = SynQSigningPayload {
         domain_tag: DomainTag::SynqContractDeployV1,
-        chain_id: ChainId::testnet_1266(),
-        network_id: NetworkId::testnet(),
+        chain_id: ChainId(1266),
+        network_id: NetworkId("synergy-testnet".into()),
         protocol_version: 1,
         algorithm_id: AlgorithmId::MlDsa65,
         signature_purpose: SignaturePurpose::ContractDeploy,
@@ -90,7 +97,11 @@ fn vector(
             _ => "Unexpected",
         }),
         expected_error_code: expected_error.as_ref().map(AegisSynQError::code),
-        context: VerificationContext::testnet(NOW),
+        context: VerificationContext::for_network(
+            ChainId(1266),
+            NetworkId("synergy-testnet".into()),
+            NOW,
+        ),
         envelope,
     }
 }

@@ -15,7 +15,7 @@ impl TransactionId {
         hasher.update(b"SYNERGY_TRANSACTION_ID_V1");
         hasher.update((bytes.len() as u64).to_be_bytes());
         hasher.update(bytes);
-        Ok(Self(hex(&hasher.finalize())))
+        Ok(Self(hex(hasher.finalize())))
     }
 
     pub fn validate(&self) -> Result<(), TransactionError> {

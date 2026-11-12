@@ -6,18 +6,16 @@
 
 use crate::{OverlayScope, RegistryError, TransportRoute, VerifiedTransportRegistry};
 use base64::{engine::general_purpose, Engine as _};
-use ed25519_dalek::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex};
+use synergy_address_engine::apqe::crypto_engine::CryptoEngine;
+use synergy_aegis::{
+    AegisPolicy, AegisVerifier, KeyId, PqvmVerifier, Signature, SignatureAlgorithm, SigningContext,
+};
 
 pub const SNAPSHOT_VERSION: u32 = 2;
-pub const EXPECTED_NETWORK: &str = "synergy-testnet-v3-validator-transport-v1";
-pub const EXPECTED_REGISTRY_ID: &str = "synergy-testnet-v3-block-zero-transport-v1";
-pub const EXPECTED_CHAIN_ID: u64 = 1266;
-pub const EXPECTED_NETWORK_ID: &str = "testnet";
-pub const EXPECTED_RELEASE_ID: &str = "testnet-v3";
-pub const EXPECTED_PROTOCOL_VERSION: &str = "posy/3.0";
 pub const MAX_SNAPSHOT_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,10 +37,22 @@ pub struct SignedTransportSnapshot {
     pub transports: Vec<SnapshotTransport>,
     pub signature: String,
 }
-#[derive(Debug, Clone)]
+/// Expected tuple from the authenticated selected network, never the candidate snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotContext {
+    pub network: String,
+    pub registry_id: String,
+    pub chain_id: u64,
+    pub network_id: String,
+    pub release_id: String,
+    pub protocol_version: String,
+}
+#[derive(Clone)]
 pub struct SnapshotTrust {
-    verifying_key: VerifyingKey,
+    verifying_key: Vec<u8>,
+    verifier: PqvmVerifier,
     provider_plan_sha256: String,
+    context: SnapshotContext,
 }
 #[derive(Debug, Clone)]
 pub struct VerifiedSnapshot {
@@ -63,7 +73,7 @@ impl VerifiedSnapshot {
     #[cfg(test)]
     pub(crate) fn from_routes_for_test(generation: u64, routes: Vec<TransportRoute>) -> Self {
         Self {
-            registry_id: EXPECTED_REGISTRY_ID.into(),
+            registry_id: "fixture-transport-v1".into(),
             generation,
             registry: VerifiedTransportRegistry::from_verified_snapshot(generation, routes)
                 .unwrap(),
@@ -83,6 +93,7 @@ pub struct SnapshotAcceptance {
 pub enum SnapshotError {
     InvalidDocument(String),
     InvalidSignature,
+    Provider(String),
     Registry(RegistryError),
     Coverage(RegistryError),
     RegistryChanged,
@@ -93,6 +104,9 @@ impl std::fmt::Display for SnapshotError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidDocument(s) => write!(f, "invalid transport snapshot: {s}"),
+            Self::Provider(message) => {
+                write!(f, "native APQE registry provider unavailable: {message}")
+            }
             Self::InvalidSignature => f.write_str("invalid validator transport snapshot signature"),
             Self::Registry(e) => write!(f, "invalid transport routes: {e:?}"),
             Self::Coverage(e) => write!(f, "incomplete transport coverage: {e:?}"),
@@ -115,28 +129,56 @@ impl SnapshotTrust {
     pub fn from_encoded(
         public_key: &str,
         provider_plan_sha256: String,
+        context: SnapshotContext,
     ) -> Result<Self, SnapshotError> {
-        let encoded = public_key.trim().strip_prefix("ed25519:").ok_or_else(|| {
-            SnapshotError::InvalidDocument(
-                "transport public key must use ed25519: base64 encoding".into(),
-            )
-        })?;
-        let decoded = general_purpose::STANDARD.decode(encoded).map_err(|error| {
-            SnapshotError::InvalidDocument(format!("decode transport public key: {error}"))
-        })?;
-        let bytes: [u8; 32] = decoded.try_into().map_err(|_| {
-            SnapshotError::InvalidDocument("transport public key must be 32 bytes".into())
-        })?;
-        let verifying_key = VerifyingKey::from_bytes(&bytes).map_err(|_| {
-            SnapshotError::InvalidDocument("transport public key is not valid Ed25519".into())
-        })?;
-        Self::new(verifying_key, provider_plan_sha256)
+        let _ = (public_key, provider_plan_sha256, context);
+        Err(SnapshotError::InvalidDocument("explicit authenticated APQE transport-registry provider required; classical trust is forbidden".into()))
     }
 
-    pub fn new(
-        verifying_key: VerifyingKey,
+    pub fn from_encoded_with_provider(
+        public_key: &str,
         provider_plan_sha256: String,
+        context: SnapshotContext,
+        engine: Arc<Mutex<CryptoEngine>>,
     ) -> Result<Self, SnapshotError> {
+        let encoded = public_key.strip_prefix("ml-dsa-87:").ok_or_else(|| {
+            SnapshotError::InvalidDocument(
+                "native registry trust requires ML-DSA-87; classical algorithms are forbidden"
+                    .into(),
+            )
+        })?;
+        let verifying_key = general_purpose::STANDARD.decode(encoded).map_err(|_| {
+            SnapshotError::InvalidDocument("invalid registry public key base64".into())
+        })?;
+        if verifying_key.len() != 2592 {
+            return Err(SnapshotError::InvalidDocument(
+                "ML-DSA-87 registry public key must be 2592 bytes".into(),
+            ));
+        }
+        let verifier = PqvmVerifier::with_apqe(
+            AegisPolicy {
+                allowed_algorithms: vec![SignatureAlgorithm::MlDsa87],
+                maximum_message_bytes: MAX_SNAPSHOT_BYTES,
+                maximum_signature_bytes: 4627,
+            },
+            engine,
+        )
+        .map_err(|e| SnapshotError::InvalidDocument(e.to_string()))?;
+        if context.chain_id == 0
+            || [
+                &context.network,
+                &context.registry_id,
+                &context.network_id,
+                &context.release_id,
+                &context.protocol_version,
+            ]
+            .iter()
+            .any(|v| v.trim().is_empty() || v.len() > 256 || v.contains(char::is_control))
+        {
+            return Err(SnapshotError::InvalidDocument(
+                "invalid selected transport context".into(),
+            ));
+        }
         if !lower_hex_64(&provider_plan_sha256) {
             return Err(SnapshotError::InvalidDocument(
                 "provider-plan hash must be lowercase SHA-256".into(),
@@ -144,11 +186,13 @@ impl SnapshotTrust {
         }
         Ok(Self {
             verifying_key,
+            verifier,
             provider_plan_sha256,
+            context,
         })
     }
-    pub fn verifying_key(&self) -> VerifyingKey {
-        self.verifying_key
+    pub fn verifying_key(&self) -> &[u8] {
+        &self.verifying_key
     }
 }
 
@@ -174,16 +218,16 @@ pub fn verify_snapshot(
     if snapshot.version != SNAPSHOT_VERSION {
         return invalid("unsupported snapshot version");
     };
-    if snapshot.network != EXPECTED_NETWORK {
+    if snapshot.network != trust.context.network {
         return invalid("unexpected network");
     };
-    if snapshot.registry_id != EXPECTED_REGISTRY_ID {
+    if snapshot.registry_id != trust.context.registry_id {
         return invalid("unexpected registry id");
     };
-    if snapshot.chain_id != EXPECTED_CHAIN_ID
-        || snapshot.network_id != EXPECTED_NETWORK_ID
-        || snapshot.release_id != EXPECTED_RELEASE_ID
-        || snapshot.protocol_version != EXPECTED_PROTOCOL_VERSION
+    if snapshot.chain_id != trust.context.chain_id
+        || snapshot.network_id != trust.context.network_id
+        || snapshot.release_id != trust.context.release_id
+        || snapshot.protocol_version != trust.context.protocol_version
     {
         return invalid("unexpected chain network release or protocol tuple");
     };
@@ -214,9 +258,27 @@ pub fn verify_snapshot(
     }
     let signature = decode_signature(&snapshot.signature)?;
     trust
-        .verifying_key
-        .verify_strict(&signed_payload(snapshot)?, &signature)
-        .map_err(|_| SnapshotError::InvalidSignature)?;
+        .verifier
+        .verify(
+            &SigningContext {
+                domain: "SYNERGY-TRANSPORT-REGISTRY-ATTESTATION-V1".into(),
+                chain_id: trust.context.chain_id,
+                epoch: None,
+                height: None,
+            },
+            &signed_payload(snapshot)?,
+            &Signature {
+                algorithm: SignatureAlgorithm::MlDsa87,
+                key_id: KeyId::new("transport-registry-attestation")
+                    .map_err(|e| SnapshotError::InvalidDocument(e.to_string()))?,
+                bytes: signature,
+            },
+            &trust.verifying_key,
+        )
+        .map_err(|error| match error {
+            synergy_aegis::VerificationError::Provider(message) => SnapshotError::Provider(message),
+            _ => SnapshotError::InvalidSignature,
+        })?;
     let registry =
         VerifiedTransportRegistry::from_verified_snapshot(snapshot.configuration_version, routes)
             .map_err(SnapshotError::Registry)?;
@@ -283,17 +345,22 @@ impl SnapshotAcceptance {
 fn invalid(message: &str) -> Result<VerifiedSnapshot, SnapshotError> {
     Err(SnapshotError::InvalidDocument(message.into()))
 }
-fn decode_signature(value: &str) -> Result<Signature, SnapshotError> {
-    let encoded = value
-        .trim()
-        .strip_prefix("ed25519:")
-        .ok_or_else(|| SnapshotError::InvalidDocument("signature needs ed25519 prefix".into()))?;
-    let bytes: [u8; 64] = general_purpose::STANDARD
+fn decode_signature(value: &str) -> Result<Vec<u8>, SnapshotError> {
+    let encoded = value.strip_prefix("ml-dsa-87:").ok_or_else(|| {
+        SnapshotError::InvalidDocument(
+            "native registry signature requires ML-DSA-87; classical algorithms are forbidden"
+                .into(),
+        )
+    })?;
+    let bytes = general_purpose::STANDARD
         .decode(encoded)
-        .map_err(|_| SnapshotError::InvalidDocument("signature is not base64".into()))?
-        .try_into()
-        .map_err(|_| SnapshotError::InvalidDocument("signature must be 64 bytes".into()))?;
-    Ok(Signature::from_bytes(&bytes))
+        .map_err(|_| SnapshotError::InvalidDocument("signature is not base64".into()))?;
+    if bytes.len() != 4627 {
+        return Err(SnapshotError::InvalidDocument(
+            "ML-DSA-87 registry signature must be 4627 bytes".into(),
+        ));
+    }
+    Ok(bytes)
 }
 fn signed_payload(snapshot: &SignedTransportSnapshot) -> Result<Vec<u8>, SnapshotError> {
     serde_json::to_vec(&json!({"version":snapshot.version,"network":snapshot.network,"registry_id":snapshot.registry_id,"chain_id":snapshot.chain_id,"network_id":snapshot.network_id,"release_id":snapshot.release_id,"protocol_version":snapshot.protocol_version,"provider_plan_sha256":snapshot.provider_plan_sha256,"configuration_version":snapshot.configuration_version,"transports":snapshot.transports})).map_err(|e|SnapshotError::InvalidDocument(format!("cannot serialize signed payload: {e}")))
@@ -307,13 +374,125 @@ fn lower_hex_64(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    pub const EXPECTED_NETWORK: &str = "synergy-testnet-v3-validator-transport-v1";
+    pub const EXPECTED_REGISTRY_ID: &str = "synergy-testnet-v3-block-zero-transport-v1";
+    pub const EXPECTED_CHAIN_ID: u64 = 1266;
+    pub const EXPECTED_NETWORK_ID: &str = "testnet";
+    pub const EXPECTED_RELEASE_ID: &str = "testnet-v3";
+    pub const EXPECTED_PROTOCOL_VERSION: &str = "posy/3.0";
+
     use super::*;
-    use ed25519_dalek::{Signer, SigningKey};
-    const SEED: [u8; 32] = [7; 32];
+    use synergy_address_engine::{
+        apqe::{provider::SignOptions, SecretBytes},
+        types::Algorithm,
+    };
+    struct SigningKey {
+        engine: Arc<Mutex<CryptoEngine>>,
+        public: Vec<u8>,
+        secret: SecretBytes,
+    }
+    impl SigningKey {
+        fn sign(&self, message: &[u8]) -> Vec<u8> {
+            self.engine
+                .lock()
+                .unwrap()
+                .sign(
+                    Algorithm::MlDsa87,
+                    self.secret.as_bytes(),
+                    message,
+                    SignOptions::default(),
+                )
+                .unwrap()
+        }
+        fn trust(&self, context: SnapshotContext) -> SnapshotTrust {
+            SnapshotTrust::from_encoded_with_provider(
+                &format!(
+                    "ml-dsa-87:{}",
+                    general_purpose::STANDARD.encode(&self.public)
+                ),
+                "a".repeat(64),
+                context,
+                self.engine.clone(),
+            )
+            .unwrap()
+        }
+    }
+    #[test]
+    fn classical_registry_trust_and_signatures_are_unconditionally_rejected() {
+        for algorithm in ["ed25519:", "ecdsa:", "rsa:", "secp256k1:"] {
+            assert!(SnapshotTrust::from_encoded(
+                &format!("{algorithm}{}", general_purpose::STANDARD.encode([0; 32])),
+                "a".repeat(64),
+                fixture_context()
+            )
+            .is_err());
+            assert!(decode_signature(&format!(
+                "{algorithm}{}",
+                general_purpose::STANDARD.encode([0; 64])
+            ))
+            .is_err());
+        }
+    }
+    fn fixture_context() -> SnapshotContext {
+        SnapshotContext {
+            network: EXPECTED_NETWORK.into(),
+            registry_id: EXPECTED_REGISTRY_ID.into(),
+            chain_id: EXPECTED_CHAIN_ID,
+            network_id: EXPECTED_NETWORK_ID.into(),
+            release_id: EXPECTED_RELEASE_ID.into(),
+            protocol_version: EXPECTED_PROTOCOL_VERSION.into(),
+        }
+    }
     fn key() -> (SigningKey, SnapshotTrust) {
-        let key = SigningKey::from_bytes(&SEED);
-        let trust = SnapshotTrust::new(key.verifying_key(), "a".repeat(64)).unwrap();
+        let engine = synergy_aegis::load_authenticated_native_engine(
+            std::path::Path::new(
+                &std::env::var("APQE_TRUSTED_NATIVE_REPORT").expect("explicit native report"),
+            ),
+            &std::env::var("APQE_AUTHENTICATED_REPORT_SHA256")
+                .expect("authenticated report digest"),
+        )
+        .unwrap();
+        let pair = engine
+            .lock()
+            .unwrap()
+            .generate_keypair(Algorithm::MlDsa87)
+            .unwrap();
+        let key = SigningKey {
+            engine,
+            public: pair.public_key,
+            secret: pair.private_key,
+        };
+        let trust = key.trust(fixture_context());
         (key, trust)
+    }
+
+    #[test]
+    #[ignore = "requires explicitly authenticated immutable APQE native artifacts"]
+    fn signed_snapshot_is_bound_to_the_selected_network_on_every_chain() {
+        let (key, _) = key();
+        for chain_id in [1266, 9001, 9002] {
+            let mut context = fixture_context();
+            context.chain_id = chain_id;
+            context.network_id = format!("network-{chain_id}");
+            let trust = key.trust(context.clone());
+            let mut candidate = snapshot(&key, 1, "10.69.10.2:5622");
+            candidate.chain_id = chain_id;
+            candidate.network_id = context.network_id;
+            candidate.signature = format!(
+                "ml-dsa-87:{}",
+                general_purpose::STANDARD.encode(key.sign(&signed_payload(&candidate).unwrap()))
+            );
+            assert!(verify_snapshot(&candidate, &trust).is_ok());
+            let mut other = candidate.clone();
+            other.chain_id += 1;
+            assert!(verify_snapshot(&other, &trust).is_err());
+            other = candidate.clone();
+            other.network_id.push_str("-different-incarnation");
+            assert!(verify_snapshot(&other, &trust).is_err());
+            other = candidate;
+            other.signature = format!("ml-dsa-87:{}", general_purpose::STANDARD.encode([0u8; 64]));
+            assert!(verify_snapshot(&other, &trust).is_err());
+        }
     }
     fn snapshot(key: &SigningKey, generation: u64, dial: &str) -> SignedTransportSnapshot {
         let mut value = SignedTransportSnapshot {
@@ -333,12 +512,41 @@ mod tests {
             signature: String::new(),
         };
         value.signature = format!(
-            "ed25519:{}",
-            general_purpose::STANDARD.encode(key.sign(&signed_payload(&value).unwrap()).to_bytes())
+            "ml-dsa-87:{}",
+            general_purpose::STANDARD.encode(key.sign(&signed_payload(&value).unwrap()))
         );
         value
     }
     #[test]
+    #[ignore = "requires explicitly authenticated immutable APQE native artifacts"]
+    fn signed_private_overlay_allocations_accept_only_the_authorized_endpoint() {
+        let (key, trust) = key();
+        for dial in [
+            "10.69.106.160:5622",
+            "10.69.11.219:5622",
+            "10.69.56.215:5622",
+            "10.69.184.171:5622",
+            "10.69.140.27:5622",
+            "172.20.1.2:5622",
+        ] {
+            let signed = snapshot(&key, 1, dial);
+            assert!(verify_snapshot(&signed, &trust).is_ok());
+            let mut tampered = signed;
+            tampered.transports[0].dial_address = "192.168.1.2:5622".into();
+            assert_eq!(
+                verify_snapshot(&tampered, &trust).unwrap_err(),
+                SnapshotError::InvalidSignature
+            );
+        }
+        for dial in ["8.8.8.8:5622", "127.0.0.1:5622", "10.69.11.219:5623"] {
+            assert!(matches!(
+                verify_snapshot(&snapshot(&key, 1, dial), &trust),
+                Err(SnapshotError::Registry(_))
+            ));
+        }
+    }
+    #[test]
+    #[ignore = "requires explicitly authenticated immutable APQE native artifacts"]
     fn signed_identity_complete_snapshot_is_admitted() {
         let (key, trust) = key();
         let value = verify_snapshot(&snapshot(&key, 7, "10.69.10.7:5622"), &trust).unwrap();
@@ -352,6 +560,7 @@ mod tests {
         );
     }
     #[test]
+    #[ignore = "requires explicitly authenticated immutable APQE native artifacts"]
     fn tampering_provider_binding_or_signature_fails_closed() {
         let (key, trust) = key();
         let mut bad = snapshot(&key, 1, "10.69.10.1:5622");
@@ -368,6 +577,7 @@ mod tests {
         ));
     }
     #[test]
+    #[ignore = "requires explicitly authenticated immutable APQE native artifacts"]
     fn incomplete_active_coverage_rollback_and_equivocation_are_rejected() {
         let (key, trust) = key();
         let mut acceptance = SnapshotAcceptance::default();

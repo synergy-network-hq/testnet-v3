@@ -15,7 +15,7 @@ mod transaction;
 mod wal;
 
 pub use column::*;
-pub use database::{AtomicStore, StorageError};
+pub use database::{AtomicStore, AtomicStoreReader, StorageError};
 pub use disk_guard::{DiskGuard, DiskObservation};
 pub use integrity::IntegrityDigest;
 pub use migration::{write_schema_version, SchemaVersion};

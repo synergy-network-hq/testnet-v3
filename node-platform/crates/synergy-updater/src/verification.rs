@@ -1,5 +1,5 @@
 use sha3::{Digest, Sha3_256};
-use synergy_aegis::{AegisVerifier, SigningContext};
+use synergy_aegis::{AegisVerifier, KeyId, SigningContext};
 
 use crate::{discovery::release_is_newer, SignedReleaseMetadata};
 
@@ -12,6 +12,8 @@ pub struct VerifiedRelease {
 pub enum VerificationError {
     InvalidMetadata,
     NonMonotonicSequence,
+    UngovernedSigner,
+    GovernedKeyMismatch,
     InvalidEncoding,
     InvalidSignature,
     ArtifactLength,
@@ -22,6 +24,8 @@ pub fn verify_release(
     verifier: &dyn AegisVerifier,
     chain_id: u64,
     installed_sequence: u64,
+    governed_signer_key_id: &KeyId,
+    governed_public_key: &[u8],
     signed: SignedReleaseMetadata,
     artifact: &[u8],
 ) -> Result<VerifiedRelease, VerificationError> {
@@ -32,6 +36,12 @@ pub fn verify_release(
     if !release_is_newer(&signed.release, installed_sequence) {
         return Err(VerificationError::NonMonotonicSequence);
     }
+    if &signed.signature.key_id != governed_signer_key_id {
+        return Err(VerificationError::UngovernedSigner);
+    }
+    if signed.public_key.as_slice() != governed_public_key {
+        return Err(VerificationError::GovernedKeyMismatch);
+    }
     if signed.release.artifact.length != artifact.len() as u64 {
         return Err(VerificationError::ArtifactLength);
     }
@@ -41,12 +51,12 @@ pub fn verify_release(
     }
     let bytes = signed
         .release
-        .signing_bytes()
+        .signing_bytes(chain_id)
         .map_err(|_| VerificationError::InvalidEncoding)?;
     verifier
         .verify(
             &SigningContext {
-                domain: "synergy.software.release.v1".into(),
+                domain: "synergy.software.release.v2".into(),
                 chain_id,
                 epoch: None,
                 height: None,

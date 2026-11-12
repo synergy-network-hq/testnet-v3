@@ -1,7 +1,7 @@
 //! Canonical binary serialization for SynQ signing payloads.
 
+use crate::hash::Sha256;
 use alloc::vec::Vec;
-use sha2::{Digest, Sha256};
 
 use crate::{error::AegisSynQError, payload::SynQSigningPayload};
 

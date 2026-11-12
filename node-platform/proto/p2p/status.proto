@@ -1,0 +1,2 @@
+syntax = "proto3"; package synergy.p2p.v1;
+message Status { uint64 finalized_height = 1; uint64 epoch = 2; bytes finalized_hash = 3; repeated string capabilities = 4; }

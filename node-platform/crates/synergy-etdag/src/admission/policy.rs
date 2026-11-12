@@ -17,8 +17,7 @@ impl EtdagAdmission {
         context: TargetAdmissionContext,
         parameters: &EtdagParameters,
     ) -> Result<Self, EtdagError> {
-        context.validate()?;
-        parameters.validate()?;
+        context.validate_with_parameters(parameters)?;
         Ok(Self {
             context,
             capacity: parameters.max_outstanding_nonce_slots,
@@ -75,6 +74,7 @@ mod tests {
 
     fn context() -> TargetAdmissionContext {
         TargetAdmissionContext {
+            target_height_offset: 5,
             source_finalized_height: 10,
             target_height: 15,
             active_validator_set_root: "set".into(),

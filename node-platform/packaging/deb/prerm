@@ -1,0 +1,3 @@
+#!/bin/sh
+set -eu
+systemctl stop synergy-node.service 2>/dev/null || true

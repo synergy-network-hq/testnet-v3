@@ -25,7 +25,7 @@ pub enum SnapshotValidationError {
 
 impl SnapshotManifest {
     pub fn validate_structure(&self) -> Result<(), SnapshotValidationError> {
-        if self.chain_id != 1266
+        if self.chain_id == 0
             || self.genesis_hash.trim().is_empty()
             || self.finalized_height == 0
             || self.finalized_block_id.trim().is_empty()

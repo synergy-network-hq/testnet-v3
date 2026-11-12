@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::{FeeLimit, TransactionAction, TransactionClass, TransactionError, TransactionId};
 
-pub const SYNERGY_TESTNET_V3_CHAIN_ID: u64 = 1266;
 pub const MAX_ADDRESS_BYTES: usize = 256;
 pub const MAX_TRANSACTION_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 
@@ -13,9 +12,9 @@ pub struct NetworkBinding {
 }
 
 impl NetworkBinding {
-    pub fn testnet_v3(network_id: impl Into<String>) -> Result<Self, TransactionError> {
+    pub fn new(chain_id: u64, network_id: impl Into<String>) -> Result<Self, TransactionError> {
         let binding = Self {
-            chain_id: SYNERGY_TESTNET_V3_CHAIN_ID,
+            chain_id,
             network_id: network_id.into(),
         };
         binding.validate()?;
@@ -23,7 +22,11 @@ impl NetworkBinding {
     }
 
     pub fn validate(&self) -> Result<(), TransactionError> {
-        if self.chain_id != SYNERGY_TESTNET_V3_CHAIN_ID || self.network_id.trim().is_empty() {
+        if self.chain_id == 0
+            || self.network_id.trim().is_empty()
+            || self.network_id.len() > 128
+            || self.network_id.contains(char::is_control)
+        {
             return Err(TransactionError::InvalidNetworkBinding);
         }
         Ok(())
@@ -106,6 +109,9 @@ pub struct SignedTransaction {
     pub signer_public_key: Vec<u8>,
     pub signature: Vec<u8>,
     pub signature_algorithm: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_authorization:
+        Option<synergy_identity::authorization::IdentityAuthorizationCarrier>,
 }
 
 impl SignedTransaction {

@@ -176,3 +176,253 @@ Implementations expose bounded, non-consensus measurements for proposal latency,
 10. ETDAG, security, operations, release, governance, and all existing Testnet-v3 launch controls pass.
 
 Until then the profile remains a proposal and Testnet-v3 launch status remains blocked.
+
+
+### Recovery clarification R1 — operator approved 2026-10-09; activation gated on validation
+
+Observed fresh-chain trigger: Val5 accepted the quorum-valid H196/round0 timeout with a mandatory carry for the same candidate later certified by QC196/round0. The other validators certified that candidate before accepting the timeout, then formed their first timeout at H197/round0. Because timeout IDs include height, these are different lease-control paths despite identical certified block ancestry. Replaying Val5's accepted timeout before its older-round QC preserves a takeover reference that cannot accept the other path. Four validators continue finalizing; Val5 retains finalized H194. The earlier approved protected cutoff clarification does not authorize this change.
+
+Operator-approved narrow authorization:
+
+1. During restart or authenticated state-sync recovery, a complete independently verified three-QC finality chain may select its referenced timeout closure as the canonical certified-history path. Each QC, every required TC, count and weight quorum, frozen authority, parent link, protected root and durable finalized record must verify before installing recovered state.
+2. An accepted local timeout omitted from that certified path may be superseded only at a height already covered by this verified chain, only when its highest parent equals that certified candidate's parent and its unique mandatory carry equals the exact same stable candidate. Missing carry, different candidate/parent, missing timeout predecessor, conflicting finalized record, unsupported epoch transition or invalid proof remains a safety failure. A timeout alone can never supersede a QC or finalize a block.
+3. Keep every original timeout, vote authorization, lock, QC, finalized record and signer journal intact. Recovery changes the active projection of fully certified history; it never erases evidence or permits a forbidden signature. Outstanding uncertified-tip timeouts remain active and must be restored. No local timer, peer claim or operator height edit grants recovery authority.
+4. Ordinary live proposal/TC admission, deterministic proposer selection, strict quorum, PQC verification, mandatory carry, three-QC finality and epoch membership rules remain unchanged. There is no new certificate or second consensus coordinator.
+5. Approval authorizes implementation and testing of this exact rule, followed by binding the ratified amendment commitment into a governance-signed release before activation on this fresh stability profile. Activation requires a regression reproducing timeout-before-older-QC plus the alternate next-height timeout path, conflict/missing-proof fail-closed tests, and preserved-journal Val5 catch-up. It does not approve moving public routing or converting Val1 before existing live acceptance gates pass.
+
+Status: operator explicitly approved R1 in this chat on 2026-10-09. Implementation and validation are authorized; deployment remains gated on the listed proof tests and governance-signed release commitment. The preliminary ordering experiment was reverted because it lacked those checks. This approval does not claim live recovery or amend the protected cutoff rule.
+
+### Live lease convergence clarification R2 — operator approved 2026-10-10
+
+Observed trigger: all five validators finalized the same H5797. Val2/Val3 accepted TC5799/round0 before QC5799 and retained round1 into H5800; Val4/Val6 accepted that QC first, advanced to H5800/round0, and rejected the delayed original-height TC. Their next-height timeout reports therefore cannot form one quorum. Restart and reconnection do not reconcile the different lease projections. R1 clause4 leaves this live admission rule unchanged and requires subsequent certified history that the split prevents from forming.
+
+Approved narrow authorization:
+
+1. A validator may reconcile a delayed, independently quorum-verified timeout certificate from an earlier height in its current proposer lease, without requiring a subsequent three-QC finality witness, only after verifying its complete exact timeout-predecessor closure and the contiguous locally verified QC suffix from its original height to the current parent.
+2. The delayed timeout's highest parent must equal the original-height QC's parent, and its unique mandatory carry must equal that QC's exact stable candidate. The suffix must use the same frozen authority and lease, preserve contiguous parent/block/protected-root bindings, and introduce no conflicting certified candidate or incompatible timeout closure. Missing carry/proof, a different lease, or contradictory certified evidence cannot authorize reconciliation.
+3. Reconciliation installs the same successor lease round and takeover reference that accepting this timeout before that matching QC would have produced. It never moves finalized height, replaces a certified block, lowers an accepted round, clears a signing restriction, or treats a timeout as finality. Any already accepted later timeout closure must be verified as a compatible extension; incompatible valid evidence remains fail-closed. All original QCs, TCs, locks, votes, delivery and signer journals remain intact.
+4. This reconciliation is automatic during live authenticated message delivery and restart restoration. Reliable delivery retains the exact signed timeout evidence needed by lagging peers until its lease no longer governs their possible current slot. The existing single PoSy driver owns the operation; no operator action, timer-only round change, new certificate, quorum reduction or identity reset supplies authority.
+5. Activation requires genuine-signature tests covering both TC/QC arrival orders, dropped/reordered delivery and automatic convergence, retained-state restart, conflicting/missing/invalid proof rejection, and continued three-QC finality with unchanged quorum. Bind the ratified R2 commitment into a governance-signed release before fleet activation. A reset to H0 does not substitute for these gates.
+
+Status: operator explicitly approved this exact R2 rule in this chat on 2026-10-10. Implementation and validation are authorized. Fleet activation remains gated on the genuine-signature convergence, restart, rejection and finality tests above and a governance-signed release binding the ratified R2 commitment. Approval does not claim implementation completion or live recovery.
+
+### Recovery amendment R3 — operator approved for implementation and validation
+
+Observed trigger on the funded five-validator chain: all validators remain at finalized H47 with block `6cd3635b2f4505ed244f57cd05d34a72515caa8275124d95e4e331575c377f27`. The genuine wallet envelope for target H51 has a verified availability certificate on every validator, with all five availability votes observed. At the same accepted cutoff context, Val2/Val4/Val6 durably signed an empty frontier, while Val3/Val5 signed the frontier containing the transaction. Neither semantic closure has four agreeing markers. A later-arriving valid availability certificate cannot alter an already signed marker. This is a shared cutoff/recovery defect, not misconduct by a validator. No TPS result has been established.
+
+Proposed narrow authorization:
+
+1. Only the existing PoSy driver may authorize a replacement close generation for an uncommitted protected target T when the proposer for H=T-1 is blocked on that target's cut. Authority must be a completely verified, strictly advancing timeout-predecessor closure for H, under the same frozen Genesis/epoch/lease authority. The timeout must have no mandatory carry. A wall-clock timer, RPC request, service restart, or operator cannot authorize a generation.
+2. Before replacement, reject recovery if any accepted VC/QC/protected proposal carry or consumed/finalized execution binds the affected cut. An already certified or carry-bound proposal must recover its exact original evidence. Missing proof, conflicting certified evidence, wrong target/domain/lease/parent, and nonadvancing timeout paths remain fail-closed. The implementation must formally resolve the exact exclusion predicates against production proposal/VC/QC/carry stores and prove them before activation; this proposal does not declare those predicates implemented.
+3. The replacement cutoff context deterministically binds the original cutoff context, target T, exact verified timeout identity/predecessor path and certified parent. Admission and new availability voting remain closed. Existing authenticated vertices and valid original availability certificates may converge through reliable delivery. A validator may sign one complete cutoff marker for this new context; it must never overwrite or re-sign a different marker in the original context. Existing capacity, wallet authorization, ancestor, signature, 4-of-5 marker/availability and semantic-closure equality checks remain unchanged.
+4. Retain every original close marker, context, VAC, timeout, QC, lock, vote and signing record. Persist the new generation and its exact authorization before broadcasting. Restart/rejoin must reconstruct the greatest compatible verified generation and original history without an H0 reset. If availability delivery causes another split, only a later compatible quorum timeout may authorize another generation; no independent ETDAG timeout/round engine is introduced.
+5. The existing PoSy proposal/vote/QC path binds the selected recovered cut and deterministic protected batch. Three-QC finality, parent binding, governed proposer selection and mandatory-carry preservation remain unchanged. Never merge incompatible marker closures, lower quorum, substitute an empty batch, or force a locally preferred transaction into a certified cut.
+6. Activation requires the genuine-signature H47/H51 3-empty/2-transaction counterexample to recover automatically with retained markers and finalized successful transfer; both delayed-VAC arrival orders; 4/5 online progress and 3/5 fail-closed; repeated timeout generations; retained-state restart/rejoin; rejection of invalid/stale/missing/conflicting timeout, parent and carry evidence; rejection of VC/QC/consumed-cut replacement; and continued identical three-QC finality. Bind the approved R3 rule into a signed release/activation commitment only after these gates pass. The first successful live transfer must precede the measured TPS baseline.
+
+Status: operator approved by the direct user message `approved` on 2026-10-10 following the R3 approval request. Approval authorizes implementation and validation of this narrow rule; it does not establish completion, safety qualification, deployment, TPS capacity, or a clean reliability soak. The six activation requirements above remain mandatory.
+
+### Admission measurement amendment A1 — isolated experiment approved 2026-10-12; live activation not approved
+
+**Scope of requested approval:** implement and run bounded isolated qualification
+experiments with a governed target offset D in6..16, retaining the current F+5
+profile as the control. This is an experimental range, not a selected production
+parameter or a claim that16 is sufficient. It does not authorize live activation,
+a live reset, a production release, a TPS claim or soak commencement. A final
+measured timing/parameter report and production amendment remain separately
+reviewable before activation. If no tested combination meets the contract,
+stop and revise the design rather than expanding the range automatically.
+
+Measured need: native isolated run9 had a224.383ms target window but274.791ms
+HTTP intake. Run10 under100ms egress delay admitted a genuine transfer locally,
+but remote receipt followed cutoff and no availability certificate formed.
+Five validators finalized identical empty material with unchanged wallet effects.
+There is no successful complete admission-to-VAC sample and therefore no honest
+production p99, final cadence or final offset to approve yet. The experiment
+allows that missing path to be measured without reopening a closed target.
+Exact evidence and independently reviewed owner design are in `ARCHITECTURE.md`,
+section “HTTP scheduling measurement and selected preparation direction”.
+
+1. Each experimental incarnation has fresh synthetic custody and a distinct
+   signed network/profile identity. The single signed ETDAG parameter commitment
+   selects D. Configuration may only match that commitment; no unsigned local
+   override, automatic tuning, or mixed-offset nodes are allowed. Current-profile
+   parsing retains exact F+5 semantics. Experimental evidence cannot authorize
+   the current profile or any live validator incarnation.
+2. Non-Genesis source finality F opens target T=F+D. Genesis opens targets3..D;
+   H1/H2 execution bootstrap is unchanged. For T≤D the source is the governed
+   Genesis reference; otherwise it is the exact verified finalized record T−D.
+   Signing, verification, source roots, storage, RPC, telemetry and recovery use
+   that same mapping. Signed target/context/encryption bindings remain immutable;
+   material is never retargeted after authoring.
+3. VC(T−2) still closes T, VC(T−1) still authorizes reveal, and ordinary target
+   execution with three-QC finality remains unchanged. Retain four-of-five count
+   and weight quorum, native cryptography, original cutoff/reveal evidence,
+   existing timeout recovery and every signing/safety journal. No new certificate,
+   coordinator, admission reservation, uncertified empty fallback or delayed
+   cutoff is introduced.
+4. Genesis opening and bounded source/target reconstruction must cover D without
+   deleting evidence needed by supported recovery. Keep existing byte/count
+   ceilings; reject a candidate that cannot fit them. Cancel stale generations
+   and forbid overlapping active signers. Experimental fresh incarnations retain
+   their diagnostic history; no production state is copied or reset.
+5. Change inventory: `synergy-etdag` parameters and both context versions' target
+   validation; `synergy-config` default/profile validation; node ETDAG bootstrap,
+   opening and source retention; execution's next-batch, cutoff, execution and
+   batch source-authority derivation; native keytool/client context validation;
+   baseline source verification and source-root reconstruction. Use one governed
+   mapping, not independent rewritten constants at each caller.
+6. Before running any candidate, validate overflow, wrong offset/profile/root,
+   wrong incarnation, Genesis boundaries, source substitution, cutoff and reveal,
+   restart reconstruction and old-evidence rejection. Then qualify the exact
+   diagnostic Linux bytes with genuine nonempty transfers and all-five identical
+   finalized wallet effects. Measure the complete path through durable quorum
+   availability and finality; record rejection and missing boundaries explicitly.
+7. Compare the current control and smallest candidate offsets under the same
+   workload, supported delay and one-validator outage. Derive a proposed cadence
+   from eligible healthy proposal-to-QC p99 plus25percent rounded up to100ms;
+   require at least50percent admission headroom and actual fault/load qualification.
+   Recovered/observed cohorts and failed operations cannot supply a healthy p99.
+   This experiment does not waive integrated runtime, exact-artifact, five-host,
+   TPS or soak entry gates.
+
+Status: operator explicitly approved “Approve isolated A1 experiment” on
+2026-10-12. This authorizes the bounded implementation and isolated experiments
+above only. A production parameter selection and live activation remain unapproved.
+
+
+### Timeout proof variant amendment T1 — proposal only; operator approval pending (2026-10-13)
+
+**Status: NOT APPROVED.** This section requests review of timeout-proof reconciliation.
+It authorizes no implementation, protocol activation, validator restart, identity change,
+journal deletion or live release. Closure IDs, four-of-five quorum and three-QC finality
+remain unchanged. A separate explicit approval is required before implementing these semantics.
+
+**Observed boundary and limits.** Section 10, lines 135–139, permits differing reports
+and excludes report subsets, reported highest QCs and carry results from the closure ID.
+The current implementation at
+`node-platform/crates/synergy-posy/src/engine/state_machine.rs`,
+`accept_verified_timeout_certificate`, rejects a duplicate closure when its derived
+parent or carry differs. The runtime at
+`node-platform/bin/synergy-node/src/services/posy.rs`,
+`peer_error_is_fatal`, treats this verified-certificate conflict as fatal.
+On 2026-10-13 Val3 stopped with that error and durable delivery slot H10866/R2.
+Stored H10866/R1 contains one candidate-bearing report among four; stored H10865/R0
+contains two candidate-bearing reports among four. These are different closures:
+they do not identify the incoming failing variant or prove that variant valid.
+An isolated genuine-signature counterexample must independently establish the permitted
+same-closure subset variation before this proposal can be qualified.
+
+**Narrow existing-contract correction (separate from this unapproved proposal).**
+A fully verified duplicate closure with the identical verified parent, noncontradictory
+overlapping signed reports and no incoming carry is weaker than an already accepted
+carry-bearing proof. Reject it as a stale/invalid duplicate without clearing carry,
+changing projection, issuing signatures or stopping the owner. Parent conflicts,
+same-validator contradictory signed reports and different carry candidates retain
+their existing fail-closed classification. This is rejection
+under Section 10, not the union/upgrade semantics proposed below. Candidate equality
+continues to compare every native stable subject field; no signature-bearing
+certificate is substituted for that semantic comparison.
+A stronger duplicate at an already certified historical height is redundant only
+when its carry exactly equals that independently verified QC's complete stable
+candidate subject, both timeout parents equal the QC parent, and overlapping
+signed reports agree. The stored timeout authority and all active signing state
+remain unchanged. This historical exception does not implement carry union.
+
+**Additional narrow rejection — operator approved 2026-10-23.** After complete
+native verification, reject a duplicate at the active height as invalid rather
+than stopping the owner when the accepted carry is absent, the incoming carry
+is present, the verified parents are identical and overlapping signed reports
+agree. Preserve the first accepted timeout and every carry, round, signing
+permission, lock, finality record and durable original. This grants no carry
+upgrade or report union. Historical mismatches, incompatible carry candidates,
+parent conflicts and contradictory signed reports retain their existing
+fail-closed handling. Qualify actual five-validator convergence and restart;
+the rejection alone is not evidence of recovery or release readiness.
+
+**Proposed rules.**
+
+1. Independently authenticate every incoming report and its complete QC ancestry under
+   the exact frozen chain, incarnation, epoch and timeout closure. Reject invalid,
+   nonquorate or wrong-predecessor input without mutable consensus effects. Keep the
+   existing closure ID; a duplicate proof never advances the takeover offset again.
+2. Retain a bounded canonical union of reports indexed by validator for each closure.
+   The union contains at most the frozen validator count (five initially), remains under
+   existing byte limits, and is not a new certificate. Equivalent signature variants
+   for identical signed report bytes are evidence variants. Different signed report
+   bytes from one validator constitute contradictory timeout evidence: retain the
+   incident and fail closed; never silently select one report.
+3. Derive mandatory carry from the authenticated union using the existing two-report
+   threshold and stable candidate identity. Carry may strengthen from absent to one
+   candidate; it may never disappear. Two incompatible mandatory candidates fail
+   closed. A subset lacking a previously verified carry is weaker evidence, not
+   permission to clear that carry or unlock a conflicting vote.
+4. Derive the maximum reported parent only from fully verified, compatible QC ancestry.
+   Equivalent proofs of one certified block merge. A later parent must demonstrably
+   extend the accepted ancestry; incompatible certified blocks or state commitments
+   retain durable SafetyHalt. Neither lexical ordering nor arrival time resolves a
+   fork. A duplicate timeout cannot regress a parent, lock or finalized pointer.
+5. Record both the closure reference and exact authorizing report-set digest in durable
+   vote/proposal authorization. Before issuing any new safety-sensitive signature,
+   reconcile strengthened constraints against existing delivered proposals, durable
+   votes, locks and QCs. Do not overwrite or retract an issued signature. If a pending
+   unsigned proposal conflicts, reject it and proceed only through already supported
+   sequential timeout authority. If reconciliation would require rewriting a durable
+   vote, changing a certified block, erasing a lock or inventing authority, halt with
+   the exact incompatible boundary; this amendment promises no automatic recovery
+   for that unresolved safety condition.
+6. For historical closures, retain evidence and compare it with the already certified
+   candidate and ancestry; do not reinterpret or replace historical commits. A compatible
+   stronger variant changes no committed material. An incompatible certified result
+   remains SafetyHalt. Live projection is derived from the complete verified journal,
+   not an empty restart or whichever proof arrived last.
+7. Persist the merged evidence and verified projection transition atomically before
+   publishing dependent signatures. Restart must reconstruct the same monotone parent,
+   carry, predecessor chain and exact authorization digests from retained records.
+   Cancel obsolete worker results; no overlapping signer or journal namespace reset.
+8. Qualification must cover every four-of-five subset of one genuine five-report set,
+   both arrival orders for no-carry/carry variants, five-report union, signature variants,
+   same-validator contradictions, parent advancement and incompatible parents, late
+   evidence before and after proposal/vote/QC boundaries, restart at each durable
+   transition, retention and duplicate replay. Require unchanged closure references,
+   no extra takeover increment, identical finalized execution and explicit unresolved
+   safety cases. A passing subset reproducer is not full protocol qualification.
+
+**Unresolved review requirement.** The design must prove that permitted late carry
+strengthening cannot authorize two conflicting height-wide signing paths, including
+a no-carry-authorized fresh vote issued before the stronger evidence arrives. If the
+existing journals and sequential timeout rules cannot preserve both safety and supported
+liveness in that case, revise this design before approval or implementation. Do not
+convert the current fatal error into a blanket ignored exception.
+
+### Retention clarification R4 — operator approved 2026-10-14; activation pending
+
+This proposal narrows R3 clause 4's lifetime retention requirement. It does not
+change admission, cutoff, reveal, quorum, finality, signing or timeout authority.
+It is separate from the bounded in-memory recovery corrections, which preserve
+all durable originals and may be qualified under the existing approved rules.
+
+1. An obsolete protected-target journal may be retired only after its exact target
+   is both canonically finalized and durably executed on this validator. Use
+   independently verified local finalized and execution commitments, never peer
+   height, a consumed flag alone, service health or an unsigned operator watermark.
+2. Retain all targets above `min(F, E) - max(8, governed_lookahead + 2)`, including
+   every future, unexecuted and still-recoverable target. Finalized targets cannot
+   reopen. Missing or contradictory durable commitment evidence prevents retirement.
+3. Preserve PoSy signing journals, votes, locks, QCs, TCs, finalized records,
+   execution candidates, receipts and committed account state. Retire only the
+   proven obsolete protected-pipeline journal, using bounded incremental cleanup
+   through its existing owner; no full-history rewrite or copied runtime directory.
+4. Retirement removes the old target's raw ETDAG markers, VACs, generation and
+   reveal transcripts. Those raw audit proofs are not preserved in execution
+   candidates; commitments, finalized transactions and receipts remain. This
+   explicit audit-history tradeoff requires operator approval before deletion.
+5. Qualification must prove restart and historical catch-up without retired
+   journals; identical committed wallet effects and receipts; retention of delayed
+   execution and every live target; rejection of insufficient/conflicting watermarks;
+   symlink/path protection; and bounded cleanup work during sustained production.
+
+Status: operator explicitly approved the R4 retirement rule on 2026-10-14,
+including the raw historical ETDAG audit-proof tradeoff in clause 4. Implementation
+and qualification are authorized. No existing protected journal has been deleted
+under R4. Bind activation to the qualified binary and an explicitly R4-bound signed
+release; candidate sequence 21 preserves the previous retention behavior.

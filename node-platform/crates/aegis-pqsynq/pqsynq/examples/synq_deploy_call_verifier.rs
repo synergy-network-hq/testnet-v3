@@ -24,8 +24,8 @@ fn signed_payload(
 ) -> (SynQSigningPayload, SynQSignature) {
     let payload = SynQSigningPayload {
         domain_tag,
-        chain_id: ChainId::testnet_1266(),
-        network_id: NetworkId::testnet(),
+        chain_id: ChainId(1266),
+        network_id: NetworkId("synergy-testnet".into()),
         protocol_version: 1,
         algorithm_id: AlgorithmId::MlDsa65,
         signature_purpose: purpose,
@@ -43,12 +43,23 @@ fn signed_payload(
 }
 
 fn main() {
-    let verifier = AegisSynQVerifier::testnet_1266();
-    let context = VerificationContext::testnet(NOW_UNIX);
+    let verifier = AegisSynQVerifier::new(pqsynq::SynQSecurityPolicy::for_network(
+        ChainId(1266),
+        NetworkId("synergy-testnet".into()),
+    ));
+    let context = VerificationContext::for_network(
+        ChainId(1266),
+        NetworkId("synergy-testnet".into()),
+        NOW_UNIX,
+    );
     let (public_key, secret_key) = Sign::mldsa65().keygen().expect("ML-DSA-65 keypair");
     let public_key = SynQPublicKey::new(public_key);
     let signer_address = verifier
-        .derive_synq_address(&public_key, AlgorithmId::MlDsa65, NetworkId::testnet())
+        .derive_synq_address(
+            &public_key,
+            AlgorithmId::MlDsa65,
+            NetworkId("synergy-testnet".into()),
+        )
         .expect("testnet SynQ address");
 
     let bytecode_hash = hash32(b"example-counter-bytecode");
@@ -112,7 +123,7 @@ fn main() {
 
     println!("chain_id=1266");
     println!("network=synergy-testnet");
-    println!("address={}", verified_call.caller.to_testnet_debug_string());
+    println!("address={}", verified_call.caller.to_execution_signer_id());
     println!("deploy=verified");
     println!("call=verified");
 }
