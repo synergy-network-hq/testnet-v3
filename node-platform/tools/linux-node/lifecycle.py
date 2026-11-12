@@ -482,10 +482,10 @@ def _installation_stage(root):
     return 'uncommissioned' if (root/'data/metadata/schema-version').exists() else 'fresh'
 
 
-def _fresh_conformance(root, manifest, registered, stage):
+def _fresh_conformance(root, manifest, registered, stage, pending_upgrade_sha256=None):
     # Re-import the NEW installed policy, not a stale module from the upgrader.
-    code = "import sys,json;from pathlib import Path;sys.dont_write_bytecode=True;sys.path.insert(0,str(Path(sys.argv[1])/'tools'));from conformance import installed;root=Path(sys.argv[1]);manifest=json.loads((root/'package.json').read_text());print(json.dumps(installed(root,manifest,host=sys.argv[2]=='1',stage=sys.argv[3])))"
-    result = json.loads(native([sys.executable,'-B','-c',code,root,str(int(registered)),stage]))
+    code = "import sys,json;from pathlib import Path;sys.dont_write_bytecode=True;sys.path.insert(0,str(Path(sys.argv[1])/'tools'));from conformance import installed;root=Path(sys.argv[1]);manifest=json.loads((root/'package.json').read_text());print(json.dumps(installed(root,manifest,host=sys.argv[2]=='1',stage=sys.argv[3],pending_upgrade_sha256=sys.argv[4] or None)))"
+    result = json.loads(native([sys.executable,'-B','-c',code,root,str(int(registered)),stage,pending_upgrade_sha256 or '']))
     require(result.get('conformant') is True, 'replacement release conformance failed')
     return result
 
@@ -520,8 +520,13 @@ def upgrade(root, package):
     """Crash-resumable software-only replacement. Never starts PoSy or VPN."""
     _require_operator()
     package = Path(package)
+    contained = package == root/'tmp/update-master'
+    if contained:
+        from apqe_layout import require_frozen_tree
+        require_frozen_tree(package)
     manifest = verify_package(package)
     token = digest(package/'package.json')
+    staged = {'pending_upgrade_sha256': token} if contained else {}
     with _lifecycle_lock(root):
         intent_path = root/UPGRADE_INTENT
         resumed = intent_path.exists()
@@ -549,7 +554,7 @@ def upgrade(root, package):
                 require(owned['synergy-node.service'].get('MainPID') == '0' and owned['synergy-node.service'].get('ActiveState') in ('inactive','failed'), 'stop PoSy before upgrading')
             if stage != 'fresh' and receipt.get('role') != 'rpc_gateway': recover_consensus_archives(root)
             from conformance import installed
-            installed(root,host=plan is not None,stage=stage,schema=read(package/'assets/node-config.schema.json'),allow_legacy_integrations=True)
+            installed(root,host=plan is not None,stage=stage,schema=read(package/'assets/node-config.schema.json'),allow_legacy_integrations=True,**staged)
             if receipt['package_sha256'] == token:
                 return {'package_sha256':token,'already_current':True,'consensus_started':False,'automatic_restart':False}
             candidate_plan = json.loads(native([sys.executable,'-B',package/'tools/lifecycle.py','render-units','--root',root])) if plan else {}
@@ -608,11 +613,13 @@ def upgrade(root, package):
             native(['systemctl','daemon-reload'])
         _replace_bytes(root,root/'package.json',(package/'package.json').read_bytes(),0o600,token)
         _replace_bytes(root,root/'installation.json',json.dumps(new_receipt,sort_keys=True,indent=2).encode()+b'\n',0o600,token)
-        _fresh_conformance(root,manifest,registered,intent['stage'])
+        _fresh_conformance(root,manifest,registered,intent['stage'],**staged)
         completed={'format':'synergy-software-upgrade-completed-v1','root':str(root),'old_package_sha256':receipt['package_sha256'],
             'new_package_sha256':token,'resumed':resumed,'consensus_started':False,'automatic_restart':False}
         _replace_bytes(root,root/UPGRADE_COMPLETED,json.dumps(completed,sort_keys=True,indent=2).encode()+b'\n',0o600,token)
         intent_path.unlink();_sync_directory(intent_path.parent)
+        if contained:
+            shutil.rmtree(package);_sync_directory(package.parent)
     return dict(completed,package_sha256=token,vpn_stopped=False,vpn_restart_required=registered,custody_or_state_copied=False)
 
 

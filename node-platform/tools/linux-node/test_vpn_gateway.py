@@ -85,6 +85,9 @@ class GatewayVpnTests(unittest.TestCase):
         with patch.object(vpn.os,'geteuid',return_value=0),patch.object(vpn.sys,'platform','linux'), \
                 patch.object(vpn,'native') as native,patch.object(vpn,'status',return_value=self.live),patch.object(lifecycle,'mutate_owned_service'):
             result=vpn.enroll(self.root,json.dumps(request))
+        up=[call.args[0] for call in native.call_args_list if 'up' in call.args[0]]
+        self.assertEqual(len(up),1)
+        self.assertIn('--disable-dns',up[0])
         self.assertIn(['ping','-n','-I','wt0','-c','1','-W','2','10.69.1.2'],[call.args[0] for call in native.call_args_list])
         self.assertNotIn('required_gateway_tcp',result)
 

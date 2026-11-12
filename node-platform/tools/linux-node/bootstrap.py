@@ -199,8 +199,109 @@ def bootstrap(stream):
         raise
 
 
+def stage_engineering_update(stream, release_id, pin):
+    """Adopt a sealed candidate and its controller on a quiescent engineering host.
+
+    The root operator supplies the independently authenticated pin. This
+    neither grants an upgrade request nor replaces installed validator files.
+    """
+    import ctypes
+    import fcntl
+    require(os.geteuid()==0 and sys.platform=='linux' and os.uname().machine=='x86_64','Linux x86_64 root target required')
+    require(re.fullmatch(r'[a-zA-Z0-9._-]{1,128}',release_id) and re.fullmatch(r'[a-f0-9]{64}',pin),'Exact update release and manifest pin required')
+    require(ROOT.resolve()==ROOT and stat.S_IMODE(ROOT.lstat().st_mode)==0o700 and ROOT.stat().st_uid==0,'Private canonical installation required')
+    os.umask(0o077)
+    root=ROOT
+    old=root/'tmp/controller'
+    pending=root/'tmp/update-master'
+    replacement=root/'tmp/controller-update'
+    # Import the enrolled engine only after independently checking its pins.
+    policy_path=old/'policy.json'
+    require(policy_path.resolve()==policy_path and stat.S_IMODE(policy_path.lstat().st_mode)==0o600
+            and policy_path.stat().st_uid==0,'Unsafe host policy')
+    policy=json.loads(policy_path.read_bytes())
+    require(set(policy.get('engine_files',{}))==set(ENGINE),'Incomplete enrolled engine')
+    for name in ENGINE:
+        path=old/name if name=='controller.py' else old/'tools'/name
+        require(path.resolve()==path and path.is_file() and path.stat().st_uid==0
+                and not path.stat().st_mode&0o022
+                and hashlib.sha256(path.read_bytes()).hexdigest()==policy['engine_files'][name],
+                'Enrolled controller engine drift')
+    sys.path.insert(0,str(old/'tools'))
+    sys.path.insert(0,str(old))
+    from controller import HOST_REMOVAL, VPN_ENROLLMENT, control_inventory
+    from lifecycle import _sealed_receipt, _unit_state, _assert_no_application_processes, _sync_directory, UPGRADE_INTENT
+    from synergy_linux import verify_package
+    lock=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:
+        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        receipt,_=_sealed_receipt(root)
+        network=receipt['network_id']
+        require(receipt.get('role')=='validator' and re.fullmatch(r'nodenetwork-formation-disposable-[a-z0-9]+(?:-[a-z0-9]+)*',network),
+                'This controller staging operation is limited to disposable formation')
+        control_inventory(root)
+        require(not any((old/'grants').iterdir())
+                and not any((old/name).exists() for name in (HOST_REMOVAL,VPN_ENROLLMENT))
+                and not (root/UPGRADE_INTENT).exists(),'Prior operator request requires reconciliation')
+        status=_unit_state('synergy-node.service')
+        require(status.get('MainPID','0')=='0' and status.get('ActiveState') in ('inactive','failed'),
+                'Stop the validator before adopting an update')
+        vpn=_unit_state('synergy-vpn.service')
+        _assert_no_application_processes(root,vpn_pid=vpn.get('MainPID'))
+        require(not any(p.exists() or p.is_symlink() for p in (pending,replacement)),'Prior update staging requires reconciliation')
+        pending.mkdir(mode=0o700)
+        exchanged=False
+        try:
+            manifest=extract(stream,pending,{'manifest_sha256':pin,'release_id':release_id})
+            require(verify_package(pending)==manifest,'Candidate verification differs')
+            shutil.copytree(old,replacement)
+            for name in ENGINE:
+                target=replacement/name if name=='controller.py' else replacement/'tools'/name
+                target.unlink()
+                save(target,(pending/'tools'/name).read_bytes())
+            policy['engine_files']={name:manifest['files']['tools/'+name] for name in ENGINE}
+            releases=policy['releases']
+            selected={'manifest_sha256':pin,'inventory_authenticated':True,'networks':{network:receipt['chain_id']}}
+            require(release_id not in releases or releases[release_id]==selected,'Release ID already names another inventory')
+            releases[release_id]=selected
+            (replacement/'policy.json').unlink()
+            save(replacement/'policy.json',json.dumps(policy,sort_keys=True).encode())
+            for path in sorted(replacement.rglob('*'),key=lambda p:-len(p.parts)):
+                if path.is_dir():_sync_directory(path)
+                else:
+                    with path.open('rb') as f:os.fsync(f.fileno())
+            _sync_directory(replacement)
+            _sync_directory(root/'tmp')
+            # Keep all fixed SSH, sudo, and authorized-key paths resolvable.
+            exchange=ctypes.CDLL(None,use_errno=True).renameat2
+            exchange.argtypes=(ctypes.c_int,ctypes.c_char_p,ctypes.c_int,ctypes.c_char_p,ctypes.c_uint)
+            exchange.restype=ctypes.c_int
+            if exchange(-100,os.fsencode(old),-100,os.fsencode(replacement),2):
+                raise OSError(ctypes.get_errno(),'Controller directory exchange failed')
+            exchanged=True
+            _sync_directory(root/'tmp')
+            control_inventory(root)
+            shutil.rmtree(replacement)
+            _sync_directory(root/'tmp')
+        except Exception:
+            if not exchanged:
+                if replacement.exists():shutil.rmtree(replacement)
+                shutil.rmtree(pending)
+                _sync_directory(root/'tmp')
+            raise
+        return {'stagedRelease':release_id,'manifestSha256':pin,'controllerAdopted':True,'validatorUpgraded':False}
+    finally:
+        os.close(lock)
+
+
 def main():
-    try:result={'version':1,'ok':True,'result':bootstrap(sys.stdin.buffer)}
+    try:
+        if len(sys.argv)==4 and sys.argv[1]=='--stage-engineering-update':
+            operation=stage_engineering_update(sys.stdin.buffer,sys.argv[2],sys.argv[3])
+        else:
+            require(len(sys.argv)==1,'Unsupported bootstrap invocation')
+            operation=bootstrap(sys.stdin.buffer)
+        result={'version':1,'ok':True,'result':operation}
     except Exception:result={'version':1,'ok':False,'error':{'code':'bootstrap_refused','message':'Bootstrap validation or enrollment failed; no validator activated'}}
     print(json.dumps(result,sort_keys=True))
 

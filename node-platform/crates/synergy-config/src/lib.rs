@@ -33,7 +33,7 @@ pub use telemetry::{LogFormat, TelemetryConfiguration};
 pub use update::{
     UpdateChannel, UpdateConfiguration, UpdateMode, DEFAULT_MAXIMUM_UPDATE_ARTIFACT_BYTES,
 };
-pub use validation::{ConfigError, NativeTransportPolicyError};
+pub use validation::{is_disposable_formation_network, ConfigError, NativeTransportPolicyError};
 pub use vpn::{TransportContext, VpnConfiguration, VpnMode};
 
 #[cfg(test)]
@@ -105,6 +105,56 @@ mod tests {
         let mut invalid = configuration(NodeRole::ObserverLight);
         invalid.chain_id = 0;
         assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn native_formation_namespace_still_requires_the_exact_apqe_trust_profile() {
+        let mut cfg = configuration(NodeRole::Validator);
+        cfg.chain_id = 999998;
+        cfg.network_id = "nodenetwork-formation-disposable-20261112".into();
+        cfg.aegis_key_bindings_path = None;
+        cfg.aegis_signing_key_path = None;
+        cfg.genesis_path = Some("/opt/Synergy/network/genesis.json".into());
+        cfg.consensus.mode = ConsensusMode::ValidateAndVote;
+        cfg.etdag.enabled = true;
+        cfg.consensus.authority_binding = Some("/opt/Synergy/network/authority.json".into());
+        cfg.consensus.authority_trust_key_path =
+            Some("/opt/Synergy/network/authority-root.pub".into());
+        cfg.aegis_provider = Some(ApqeProviderConfiguration {
+            report_path: "/opt/Synergy/lib/apqe/build-report.json".into(),
+            authenticated_report_sha256: "1".repeat(64),
+        });
+        cfg.apqe_transport = Some(ApqeTransportConfiguration {
+            profile: ApqeTransportProfile::EngineeringCanaryPqVsessionV1,
+            registry_path: "/opt/Synergy/network/transport-registry.json".into(),
+            registry_trust_key_path: "/opt/Synergy/network/transport-root.pub".into(),
+            registry_trust_key_sha256: "2".repeat(64),
+            genesis_trust_key_sha256: "3".repeat(64),
+            enrollment_path: "/opt/Synergy/keys/apqe/enrollment.json".into(),
+            custody_path: "/opt/Synergy/keys/apqe/custody.json".into(),
+            custody_unlock_path: "/opt/Synergy/keys/apqe/unlock".into(),
+        });
+        assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
+        for other in [
+            "mainnet",
+            "nodenetwork-formation-disposable-",
+            "nodenetwork-formation-disposable--bad",
+        ] {
+            let mut candidate = cfg.clone();
+            candidate.network_id = other.into();
+            assert!(candidate.validate().is_err(), "{other}");
+        }
+        for without in ["provider", "genesis", "authority", "root"] {
+            let mut candidate = cfg.clone();
+            match without {
+                "provider" => candidate.aegis_provider = None,
+                "genesis" => candidate.genesis_path = None,
+                "authority" => candidate.consensus.authority_binding = None,
+                "root" => candidate.consensus.authority_trust_key_path = None,
+                _ => unreachable!(),
+            }
+            assert!(candidate.validate().is_err(), "{without}");
+        }
     }
 
     #[test]

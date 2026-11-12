@@ -115,7 +115,7 @@ def enroll(root, secret_input):
         mutate_owned_service(root, 'start', 'synergy-vpn.service')
         native([root / 'tools/netbird-client', 'up', '--management-url', request['management_url'],
                 '--setup-key-file', secret, '--hostname', request['hostname'], '--interface-name', 'wt0',
-                '--mtu', '1280', '--disable-auto-connect=false', '--no-browser'], timeout=90)
+                '--mtu', '1280', '--disable-auto-connect=false', '--disable-dns', '--no-browser'], timeout=90)
     finally:
         secret.unlink(missing_ok=True)
         key = None

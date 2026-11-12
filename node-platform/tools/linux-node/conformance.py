@@ -253,7 +253,81 @@ def verify_external_services(root,names):
                     _outside_path(candidate,root,allowed)
 
 
-def installed(root, expected_manifest=None, host=False, initialized=True, schema=None, stage=None, allow_legacy_integrations=False):
+def approved_upgrade_members(root, candidate_pin, stage):
+    """Inspect exact pending files only while applying a sealed software upgrade."""
+    from apqe_layout import BOUND_CUSTODY, FORMATION_PUBLIC_INPUTS, require_frozen_tree, validate_stage
+    from controller import Controller, FORMATION_CONTEXT, FORMATION_CUSTODY, FORMATION_INTENT, GENESIS_BIND_INTENT, GENESIS_STAGE, GENESIS_STAGE_RECEIPT
+    from synergy_linux import verify_package
+    paths = set()
+
+    def tree(path, expected=None):
+        require_frozen_tree(path)
+        children = list(path.rglob('*'))
+        if expected is not None:
+            require({p.relative_to(path).as_posix() for p in children if p.is_file()} == set(expected),
+                    'pending upgrade input has an unexpected file inventory')
+            require({p.relative_to(path).as_posix() for p in children if p.is_dir()}
+                    == {str(d) for file in expected for d in Path(file).parents if str(d) != '.'},
+                    'pending upgrade input has an unexpected directory inventory')
+        for p in [path, *children]:
+            st = p.lstat()
+            require(st.st_uid == os.geteuid() and (p.is_dir() or st.st_nlink == 1),
+                    'pending upgrade input is foreign or has linked files')
+            paths.add(p.relative_to(root).as_posix())
+
+    if candidate_pin is not None:
+        from synergy_linux import VOLATILE
+        require(re.fullmatch(r'[0-9a-f]{64}', candidate_pin) is not None, 'exact pending upgrade pin required')
+        package = root/'tmp/update-master'
+        require_frozen_tree(package)
+        require(digest(package/'package.json') == candidate_pin, 'pending upgrade package differs')
+        manifest = verify_package(package)
+        names = set(manifest['files']) | {'package.json'}
+        directories = set(DIRECTORIES) | set(VOLATILE) | {
+            'roles/'+role for role in read(package/'roles/roles.json')['roles']}
+        directories.update(str(d) for name in names for d in Path(name).parents if str(d) != '.')
+        require({p.relative_to(package).as_posix() for p in package.rglob('*') if p.is_file()} == names
+                and {p.relative_to(package).as_posix() for p in package.rglob('*') if p.is_dir()} <= directories,
+                'pending upgrade master has an unexpected inventory')
+        tree(package)
+
+    pending = root/FORMATION_CUSTODY
+    if stage != 'fresh' or not (pending.exists() or pending.is_symlink()):
+        return paths
+    c = Controller(root)
+    context, _ = c.formation_context()
+    formation_pin = context['formation_sha256']
+    c.exact_request_receipt(FORMATION_INTENT, 'formation_prepare', 'formation_sha256', formation_pin)
+    paths.update({FORMATION_CONTEXT, FORMATION_INTENT})
+    tree(pending, {'formation-registration.json', 'formation.enc.json', 'unlock'})
+
+    identity_network = root/GENESIS_STAGE
+    if identity_network.exists() or identity_network.is_symlink():
+        pins = c.genesis_pins()
+        require(c.genesis_stage_request(pins), 'pending Genesis staging receipt required')
+        tree(identity_network, set(pins) | {GENESIS_STAGE_RECEIPT})
+        bound = root/'tmp/pending-validator-custody'
+        require(bound.exists() == (root/GENESIS_BIND_INTENT).exists(), 'incomplete formation binding')
+        if bound.exists() or bound.is_symlink():
+            c.exact_request_receipt(GENESIS_BIND_INTENT, 'genesis_bind', 'genesis_sha256', pins['genesis.json'])
+            tree(bound, set(BOUND_CUSTODY) | {'bundle/validator.pub.json'})
+            paths.add(GENESIS_BIND_INTENT)
+    public = root/'tmp/commissioning-public'
+    if public.exists() or public.is_symlink():
+        pins = c.policy().get('validator_commissioning_files', {})
+        require(set(pins) == FORMATION_PUBLIC_INPUTS, 'exact pending public commissioning approval required')
+        tree(public, pins)
+        require(all(digest(public/name) == expected for name, expected in pins.items()),
+                'pending public commissioning digest differs')
+    assembled = root/'tmp/commissioning'
+    if assembled.exists() or assembled.is_symlink():
+        from apqe_layout import INPUTS
+        tree(assembled, INPUTS | {'commissioning.json'})
+        validate_stage(assembled, root, root)
+    return paths
+
+
+def installed(root, expected_manifest=None, host=False, initialized=True, schema=None, stage=None, allow_legacy_integrations=False, pending_upgrade_sha256=None):
     stage=stage or ('commissioned' if initialized else 'fresh')
     require(stage in ('fresh','uncommissioned','commissioned'),'unknown installation stage')
     gateway = read(Path(root)/'installation.json').get('role') == 'rpc_gateway'
@@ -300,6 +374,7 @@ def installed(root, expected_manifest=None, host=False, initialized=True, schema
     if (root/'tmp/controller').exists():
         from controller import control_inventory
         control_files,control_dirs=control_inventory(root)
+    pending_upgrade=approved_upgrade_members(root,pending_upgrade_sha256,stage) if pending_upgrade_sha256 is not None else set()
     unknown=[]; runtime=0; directories=0; runtime_names=[]
     for current,dirs,files in os.walk(root,followlinks=False):
         for name in dirs+files:
@@ -308,6 +383,7 @@ def installed(root, expected_manifest=None, host=False, initialized=True, schema
             require(st.st_uid==root.stat().st_uid,'ownership drift: '+relative)
             private_socket = relative in ('run/admin.sock','run/netbird.sock') and stat.S_ISSOCK(st.st_mode) and stat.S_IMODE((root/'run').stat().st_mode)==0o700
             require(private_socket or not st.st_mode&0o022,'writable by group/other: '+relative)
+            if relative in pending_upgrade: continue
             if stat.S_ISDIR(st.st_mode):
                 # A directory must be a known static/role path or a prefix of a
                 # permitted runtime filename, checked with its children below.

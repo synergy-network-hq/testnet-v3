@@ -44,6 +44,23 @@ impl fmt::Display for NativeTransportPolicyError {
 }
 impl std::error::Error for NativeTransportPolicyError {}
 
+/// Explicit engineering namespace shared by the NodeNetwork formation signer
+/// and runtime. Namespace selection grants neither authority nor qualification.
+pub fn is_disposable_formation_network(network_id: &str) -> bool {
+    network_id.len() <= 128
+        && network_id
+            .strip_prefix("nodenetwork-formation-disposable-")
+            .is_some_and(|suffix| {
+                !suffix.is_empty()
+                    && suffix.split('-').all(|segment| {
+                        !segment.is_empty()
+                            && segment
+                                .bytes()
+                                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+                    })
+            })
+}
+
 impl NodeConfiguration {
     /// A signature-authenticated TCP socket is not a PQ confidentiality channel.
     /// No configuration flag can waive this missing protocol implementation.
@@ -106,10 +123,11 @@ impl NodeConfiguration {
                 || self.genesis_path.is_none()
                 || self.consensus.authority_binding.is_none()
                 || self.consensus.authority_trust_key_path.is_none()
-                || !self.network_id.starts_with("posy-")
-                || !self.network_id.contains("-canary-")
+                || !(is_disposable_formation_network(&self.network_id)
+                    || (self.network_id.starts_with("posy-")
+                        && self.network_id.contains("-canary-")))
             {
-                return Err(invalid("apqe_transport", "requires isolated canary incarnation, explicit provider, signed Genesis and governed authority"));
+                return Err(invalid("apqe_transport", "requires an isolated engineering incarnation, explicit provider, signed Genesis and governed authority"));
             }
             for (name, path) in [
                 ("apqe_transport.registry_path", &transport.registry_path),
