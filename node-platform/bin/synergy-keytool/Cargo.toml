@@ -20,6 +20,7 @@ synergy-updater = { path = "../../crates/synergy-updater" }
 
 synergy-genesis = { path = "../synergy-genesis" }
 synergy-posy = { path = "../../crates/synergy-posy" }
+synergy-state = { path = "../../crates/synergy-state" }
 synergy-etdag = { path = "../../crates/synergy-etdag" }
 synergy-transaction = { path = "../../crates/synergy-transaction" }
 chrono = { version = "=0.4.44", default-features = false, features = ["std"] }

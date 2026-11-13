@@ -8,6 +8,11 @@ use pqrust_traits::sign::PublicKey as _;
 use serde::Deserialize;
 use synergy_aegis::KeyPurpose;
 use synergy_genesis::authority::{AuthorityPayload, ProtectedCutoffRelationship};
+use synergy_identity::authorization::{
+    canonical_binding_commitment_if_present, first_use_binding_update,
+    resolve_transaction_binding_with_verifier, IdentityAuthorizationCarrier,
+    IDENTITY_AUTHORIZATION_BINDINGS_STATE_KEY,
+};
 use synergy_identity::PublicNodeIdentity;
 use synergy_posy::FrozenValidatorRegistry;
 
@@ -67,9 +72,98 @@ struct PrepareGenesisInput {
     validators: Vec<ValidatorPublicCustody>,
     #[serde(default)]
     formation_registrations: Vec<PathBuf>,
+    #[serde(default)]
+    canary_testing_treasury: Option<CanaryTestingTreasury>,
     network: synergy_genesis::network::GenesisNetwork,
     authority_trust_key_id: String,
     seed_source: SeedSource,
+}
+
+const CANARY_TESTING_ALLOCATION_NWEI: u128 = 5_000_000_000_000_000;
+
+/// Optional, explicit allocation for a new engineering Canary. The owner
+/// supplies public possession proofs; this command never reads spending keys.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CanaryTestingTreasury {
+    address: String,
+    authorization: IdentityAuthorizationCarrier,
+}
+
+fn prepare_canary_testing_treasury(
+    request: &mut PrepareGenesisInput,
+    engine: Option<&crate::provider::Engine>,
+) -> Result<(), String> {
+    let Some(treasury) = request.canary_testing_treasury.take() else {
+        return Ok(());
+    };
+    let verifier = synergy_aegis::ApqeIdentityVerifier::new(
+        engine
+            .ok_or("Canary testing treasury requires authenticated native formation and APQE")?
+            .clone(),
+    )?;
+    let decoded = synergy_address::decode_address(&treasury.address)?;
+    if decoded.hrp != "syna" || treasury.authorization.binding.identity_address != treasury.address
+    {
+        return Err("Canary testing treasury requires the selected ordinary syna identity".into());
+    }
+    let signer = treasury
+        .authorization
+        .binding
+        .authorization_policy
+        .principals
+        .iter()
+        .find(|principal| {
+            principal.status == synergy_identity::authorization::BindingStatus::Active
+                && principal.algorithm.as_deref() == Some("ML-DSA-87")
+        })
+        .and_then(|principal| principal.public_key.as_deref())
+        .ok_or("Canary testing treasury has no active ML-DSA-87 signing key")?;
+    let signer =
+        synergy_address_engine::snts07::decode_lower_hex("treasury signing key", signer, 2592)?;
+    let state = &mut request
+        .authority
+        .protected
+        .as_mut()
+        .ok_or("Canary testing treasury requires the native ETDAG policy")?
+        .initial_world_state;
+    let protocol = std::collections::BTreeMap::from([(
+        IDENTITY_AUTHORIZATION_BINDINGS_STATE_KEY.into(),
+        state
+            .protocol
+            .get(IDENTITY_AUTHORIZATION_BINDINGS_STATE_KEY)
+            .cloned()
+            .unwrap_or_else(|| b"{}".to_vec()),
+    )]);
+    if state.accounts.contains_key(&treasury.address)
+        || canonical_binding_commitment_if_present(&protocol, &treasury.address)?.is_some()
+    {
+        return Err("Canary testing treasury is already present in the formation state".into());
+    }
+    let commitment = resolve_transaction_binding_with_verifier(
+        &protocol,
+        &treasury.address,
+        &treasury.authorization,
+        &signer,
+        request.network.chain_id,
+        &request.network.network_id,
+        request.network.activation_unix,
+        Some(&verifier),
+    )?;
+    let bindings = first_use_binding_update(&protocol, &treasury.address, &commitment)?
+        .ok_or("missing Canary testing treasury insertion")?;
+    state
+        .protocol
+        .insert(IDENTITY_AUTHORIZATION_BINDINGS_STATE_KEY.into(), bindings);
+    state.accounts.insert(
+        treasury.address,
+        synergy_state::AccountState {
+            balance_nwei: CANARY_TESTING_ALLOCATION_NWEI,
+            nonce: 0,
+            code_hash: None,
+        },
+    );
+    Ok(())
 }
 
 fn current_genesis_format() -> u32 {
@@ -486,6 +580,7 @@ fn prepare_genesis_with_formation(
         "explicit fresh Genesis recipe",
     )?)
     .map_err(|e| format!("decode fresh Genesis recipe: {e}"))?;
+    prepare_canary_testing_treasury(&mut request, formation.as_ref().map(|(_, engine)| engine))?;
     let registrations = std::mem::take(&mut request.formation_registrations);
     let (genesis, authority_input) = derive_genesis(request)?;
     let authority = if let Some((context, engine)) = formation {
@@ -1062,6 +1157,126 @@ pub(crate) mod tests {
         assert_eq!(derived.authority.finalized_epoch_seed_root, "a".repeat(64));
         explicit["authority"]["finalized_epoch_seed_root"] = serde_json::json!("b".repeat(64));
         assert!(derive_genesis(serde_json::from_value(explicit).unwrap()).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires the independently authenticated native APQE provider"]
+    fn canary_genesis_allocation_requires_a_spendable_network_scoped_treasury() {
+        use sha3::{Digest, Sha3_256};
+        use synergy_address_engine::{apqe::provider::SignOptions, types::Algorithm};
+        use synergy_identity::authorization::*;
+
+        fn hex(bytes: &[u8]) -> String {
+            bytes.iter().map(|b| format!("{b:02x}")).collect()
+        }
+        let engine = crate::provider::native_test_engine();
+        let provider = engine.lock().unwrap();
+        let root = provider.generate_keypair(Algorithm::FnDsa1024).unwrap();
+        let signer = provider.generate_keypair(Algorithm::MlDsa87).unwrap();
+        let address =
+            synergy_address::derive_key_controlled_address("syna", &root.public_key).unwrap();
+        let signer_hash = hex(&Sha3_256::digest(&signer.public_key));
+        let mut binding: IdentityAuthorizationBinding = serde_json::from_value(serde_json::json!({
+            "schema_version":AUTH_BINDING_SCHEMA_VERSION,"binary_encoding":AUTH_BINDING_BINARY_ENCODING,
+            "identity_id":"test-treasury","identity_address":address,
+            "identity_root":{"algorithm":"FN-DSA-1024","public_key":hex(&root.public_key),
+                "public_key_sha3_256":hex(&Sha3_256::digest(&root.public_key))},
+            "authorization_policy":{"policy_type":"single-key","threshold":1,"principals":[{
+                "principal_id":"treasury","principal_type":"public-key","algorithm":"ML-DSA-87",
+                "public_key":hex(&signer.public_key),"public_key_sha3_256":signer_hash,
+                "status":"active","purposes":["transaction-signing"]}]},
+            "authorization_scopes":[{"signature_domain":AEGIS_TRANSACTION_AUTHORIZATION_DOMAIN,
+                "chain_id":1266,"network_id":"stability-fixture","purpose":"transaction-signing"}],
+            "current_auth_key_hash":signer_hash,"auth_key_history":[],"supersession_history":[],
+            "effective_at":"1970-01-01T00:00:10Z","binding_payload_sha3_256":"",
+            "proofs":{"identity_root":{"algorithm":"FN-DSA-1024","signature":""}}
+        })).unwrap();
+        let payload = canonical_binding_payload(&binding).unwrap();
+        binding.binding_payload_sha3_256 = hex(&Sha3_256::digest(&payload));
+        let message = [AUTH_BINDING_SIGNATURE_DOMAIN, &payload].concat();
+        binding.proofs.identity_root.signature = hex(&provider
+            .sign(
+                Algorithm::FnDsa1024,
+                root.private_key.as_bytes(),
+                &message,
+                SignOptions::default(),
+            )
+            .unwrap());
+        binding.proofs.authorization_key_possession = vec![AuthorizationKeyPossessionProof {
+            principal_id: "treasury".into(),
+            algorithm: "ML-DSA-87".into(),
+            signature: hex(&provider
+                .sign(
+                    Algorithm::MlDsa87,
+                    signer.private_key.as_bytes(),
+                    &message,
+                    SignOptions::default(),
+                )
+                .unwrap()),
+        }];
+        drop(provider);
+        let carrier = IdentityAuthorizationCarrier {
+            schema_version: AUTHORIZATION_CARRIER_SCHEMA_VERSION,
+            signature_domain: AEGIS_TRANSACTION_AUTHORIZATION_DOMAIN.into(),
+            binding,
+        };
+        let mut recipe = genesis_recipe();
+        let (unfunded, _) =
+            derive_genesis(serde_json::from_value(recipe.clone()).unwrap()).unwrap();
+        recipe["canary_testing_treasury"] =
+            serde_json::json!({"address":address,"authorization":carrier});
+        let mut absent_provider = serde_json::from_value(recipe.clone()).unwrap();
+        assert!(prepare_canary_testing_treasury(&mut absent_provider, None).is_err());
+        let mut wrong_network: PrepareGenesisInput =
+            serde_json::from_value(recipe.clone()).unwrap();
+        wrong_network.network.chain_id += 1;
+        assert!(
+            prepare_canary_testing_treasury(&mut wrong_network, Some(&engine))
+                .unwrap_err()
+                .contains("does not grant signed scope")
+        );
+        let mut bad_proof: PrepareGenesisInput = serde_json::from_value(recipe.clone()).unwrap();
+        bad_proof
+            .canary_testing_treasury
+            .as_mut()
+            .unwrap()
+            .authorization
+            .binding
+            .proofs
+            .authorization_key_possession[0]
+            .signature
+            .replace_range(..2, "gg");
+        assert!(prepare_canary_testing_treasury(&mut bad_proof, Some(&engine)).is_err());
+        let mut valid: PrepareGenesisInput = serde_json::from_value(recipe).unwrap();
+        prepare_canary_testing_treasury(&mut valid, Some(&engine)).unwrap();
+        valid.canary_testing_treasury = Some(CanaryTestingTreasury {
+            address: address.clone(),
+            authorization: carrier.clone(),
+        });
+        assert!(prepare_canary_testing_treasury(&mut valid, Some(&engine))
+            .unwrap_err()
+            .contains("already present"));
+        let (funded, derived) = derive_genesis(valid).unwrap();
+        let world = derived.authority.protected.unwrap().initial_world_state;
+        assert_eq!(world.accounts.len(), 1);
+        assert_eq!(world.accounts[&address].balance_nwei, 5_000_000_000_000_000);
+        assert_eq!(world.accounts[&address].nonce, 0);
+        let verifier = synergy_aegis::ApqeIdentityVerifier::new(engine).unwrap();
+        assert!(resolve_transaction_binding_with_verifier(
+            &world.protocol,
+            &address,
+            &carrier,
+            &signer.public_key,
+            1266,
+            "stability-fixture",
+            1_700_000_000,
+            Some(&verifier),
+        )
+        .is_ok());
+        assert_ne!(
+            funded.genesis_hash().unwrap(),
+            unfunded.genesis_hash().unwrap()
+        );
     }
 
     #[test]
