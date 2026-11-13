@@ -137,10 +137,30 @@ fn write_public(path: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 pub(super) fn cli(config: &str, custody: &str, output: &str) -> Result<(), String> {
+    issue(Path::new(config), custody, output, None)
+}
+
+pub(super) fn issue_successor(
+    config: &Path,
+    custody: &str,
+    output: &str,
+    proposal: &Path,
+    previous: &VerifiedAuthority,
+    next: &VerifiedAuthority,
+) -> Result<(), String> {
+    issue(config, custody, output, Some((Stamp::capture(proposal)?, previous, next)))
+}
+
+fn issue(
+    config: &Path,
+    custody: &str,
+    output: &str,
+    successor: Option<(Stamp, &VerifiedAuthority, &VerifiedAuthority)>,
+) -> Result<(), String> {
     if io::stdin().is_terminal() {
         return Err("registry unlock must arrive through a private stdin pipe".into());
     }
-    let [config_path, custody_path, output] = [config, custody, output].map(Path::new);
+    let [config_path, custody_path, output] = [config, Path::new(custody), Path::new(output)];
     if [config_path, custody_path, output].iter().any(|p| {
         !p.is_absolute()
             || p.components()
@@ -170,12 +190,15 @@ pub(super) fn cli(config: &str, custody: &str, output: &str) -> Result<(), Strin
             selected.genesis_trust_key_sha256.clone(),
         ],
     )?;
+    let (previous, next) = successor.as_ref()
+        .map(|(_, previous, next)| (*previous, *next))
+        .unwrap_or((&recovery.previous, &recovery.next));
     let payload = advance_payload(
         &base.payload,
-        recovery.previous.epoch.epoch,
-        &sha256(recovery.previous.binding_bytes()),
-        recovery.next.epoch.epoch,
-        &sha256(recovery.next.binding_bytes()),
+        previous.epoch.epoch,
+        &sha256(previous.binding_bytes()),
+        next.epoch.epoch,
+        &sha256(next.binding_bytes()),
         transport::clock()?,
     )?;
     let root = transport::read(&selected.registry_trust_key_path, 8192, false)?;
@@ -198,7 +221,10 @@ pub(super) fn cli(config: &str, custody: &str, output: &str) -> Result<(), Strin
         payload,
     )?;
     let bytes = serde_json::to_vec(&signed).map_err(|e| e.to_string())?;
-    if !certificate_stamp.unchanged() || !base.stamps.iter().all(Stamp::unchanged) {
+    if !certificate_stamp.unchanged()
+        || !base.stamps.iter().all(Stamp::unchanged)
+        || successor.as_ref().is_some_and(|(stamp, _, _)| !stamp.unchanged())
+    {
         return Err("authenticated recovery or transport inputs changed during issuance".into());
     }
     let mut builder = fs::DirBuilder::new();

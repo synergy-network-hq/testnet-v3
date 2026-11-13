@@ -24,6 +24,10 @@ fn run(args: impl IntoIterator<Item = String>) -> Result<(), String> {
         args.next();
         return services::authority::recovery::cli(args);
     }
+    if args.peek().is_some_and(|arg| arg == "authority-successor") {
+        args.next();
+        return services::authority::recovery::successor::cli(args);
+    }
     let cli = Cli::parse(args)?;
     match &cli.command {
         Command::Help => println!("{HELP}"),

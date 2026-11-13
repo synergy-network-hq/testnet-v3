@@ -401,12 +401,48 @@ fn activate_observer(configuration: &NodeConfiguration) -> Result<serde_json::Va
 }
 
 fn activate(configuration: &NodeConfiguration) -> Result<serde_json::Value, String> {
-    let (certificate, verified) = configured_certificate(configuration)?;
+    let (_, verified) = configured_certificate(configuration)?;
+    activate_verified(configuration, &verified.previous, &verified.next, &verified.witness, false)
+}
+
+fn activate_verified(
+    configuration: &NodeConfiguration,
+    previous: &VerifiedAuthority,
+    next: &VerifiedAuthority,
+    witness: &Witness,
+    observer: bool,
+) -> Result<serde_json::Value, String> {
     let current = load(configuration)?.ok_or("current authority is missing")?;
-    let repeated = current.binding_bytes() == verified.next.binding_bytes();
-    if !repeated && current.binding_bytes() != verified.previous.binding_bytes() {
+    let repeated = current.binding_bytes() == next.binding_bytes();
+    if !repeated && current.binding_bytes() != previous.binding_bytes() {
         return Err("activation current authority differs from certified predecessor".into());
     }
+    if observer {
+        require_observer(configuration)?;
+    } else {
+        require_validator_boundary(configuration, witness)?;
+    }
+    if repeated {
+        load_transition_finality_prefix(configuration, &current)?
+            .ok_or("activation restart lacks its durable transition")?;
+    } else {
+        verify_and_persist_transition(
+            configuration,
+            previous,
+            &witness.finalized,
+            &serde_json::to_vec(&witness.certificates).map_err(|e| e.to_string())?,
+            next.binding_bytes().to_vec(),
+            &AuthorityTransitionSignal::default(),
+        )?;
+    }
+    Ok(serde_json::json!({
+        "status": if observer { "observer-trust-activated" } else { "activated" },
+        "epoch": next.epoch.epoch, "finalized_height": witness.finalized.height,
+        "repeated": repeated, "genesis_trust_pin_preserved": true,
+    }))
+}
+
+fn require_validator_boundary(configuration: &NodeConfiguration, witness: &Witness) -> Result<(), String> {
     let layout = NodeStorageLayout::new(configuration.storage.data_directory.clone())
         .map_err(|e| e.to_string())?;
     // Open the canonical owners before reading the anchor: AtomicStore recovery
@@ -424,7 +460,7 @@ fn activate(configuration: &NodeConfiguration) -> Result<serde_json::Value, Stri
         .map_err(|e| e.to_string())?;
     let finality =
         synergy_posy::persistence::FinalityStore::new(&root).map_err(|e| e.to_string())?;
-    let anchor = &verified.witness.finalized;
+    let anchor = &witness.finalized;
     let tip = state
         .current()
         .ok_or("activation requires existing recovered execution state")?;
@@ -464,24 +500,11 @@ fn activate(configuration: &NodeConfiguration) -> Result<serde_json::Value, Stri
     {
         return Err("activation execution candidate differs from certified anchor".into());
     }
-    if repeated {
-        load_transition_finality_prefix(configuration, &current)?
-            .ok_or("activation restart lacks its durable transition")?;
-    } else {
-        verify_and_persist_transition(
-            configuration,
-            &verified.previous,
-            anchor,
-            &serde_json::to_vec(&verified.witness.certificates).map_err(|e| e.to_string())?,
-            certificate.successor_authority_binding,
-            &AuthorityTransitionSignal::default(),
-        )?;
-    }
-    Ok(
-        serde_json::json!({"status":"activated", "epoch":verified.next.epoch.epoch,
-        "finalized_height":anchor.height, "repeated":repeated, "genesis_trust_pin_preserved":true}),
-    )
+    Ok(())
 }
+
+#[path = "authority_successor.rs"]
+pub(crate) mod successor;
 
 #[path = "authority_recovery_approval.rs"]
 mod approval;
