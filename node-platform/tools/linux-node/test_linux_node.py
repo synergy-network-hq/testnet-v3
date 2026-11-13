@@ -102,13 +102,49 @@ class RefusalTests(unittest.TestCase):
 
     def test_uninstall_requires_nonempty_matching_server_retirement_before_any_service_operation(self):
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp); (root / 'evidence').mkdir()
+            root = Path(temp).resolve()/'synergy'
+            root.mkdir(mode=0o700)
+            (root / 'evidence').mkdir()
             node.write_new(root / 'evidence/vpn-enrollment.json', {})
             node.write_new(root / 'evidence/vpn-server-binding.json', {'peer_id':None})
             node.write_new(root / 'evidence/vpn-retirement.json', {'peer_id':None,'retired':True,'absence_verified':True})
-            with patch.object(lifecycle.os, 'geteuid', return_value=0), patch.object(lifecycle.sys,'platform','linux'), patch.object(lifecycle,'native') as operation:
+            with patch.object(lifecycle, '_require_operator'), patch.object(lifecycle, '_mountinfo_text', return_value=''), \
+                 patch.object(lifecycle,'native') as operation:
                 with self.assertRaises(ValueError): lifecycle.remove(root, str(root))
                 operation.assert_not_called()
             self.assertTrue(root.is_dir())
+
+    def test_uninstall_preserves_reconciliation_state_when_enrollment_did_not_return(self):
+        from controller import VPN_ATTEMPT
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()/'synergy'
+            root.mkdir(mode=0o700)
+            (root/'evidence').mkdir(mode=0o700)
+            attempt = root/VPN_ATTEMPT
+            node.write_new(attempt, {'format':'nodenetwork-vpn-attempt-v1'})
+            with patch.object(lifecycle, '_require_operator'), patch.object(lifecycle, '_mountinfo_text', return_value=''), \
+                 patch.object(lifecycle, 'native') as operation:
+                with self.assertRaisesRegex(ValueError,'reconcile with the coordinator'):
+                    lifecycle.remove(root, str(root))
+                operation.assert_not_called()
+            self.assertTrue(attempt.is_file())
+
+    def test_uninstall_accepts_only_retirement_for_the_exact_native_bound_peer(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()/'synergy'
+            root.mkdir(mode=0o700)
+            (root/'evidence').mkdir(mode=0o700)
+            node.write_new(root/'evidence/vpn-enrollment.json',
+                           {'native_enrollment_verified':True,'wireguard_public_key':'expected-key'})
+            node.write_new(root/'evidence/vpn-server-binding.json',
+                           {'peer_id':'expected-peer','server_binding_verified':True,'wireguard_public_key':'expected-key'})
+            retirement = root/'evidence/vpn-retirement.json'
+            for peer in ('unrelated-peer','expected-peer'):
+                retirement.unlink(missing_ok=True)
+                node.write_new(retirement,{'peer_id':peer,'retired':True,'absence_verified':True})
+                if peer=='expected-peer': lifecycle.require_vpn_retired_for_removal(root)
+                else:
+                    with self.assertRaisesRegex(ValueError,'exact VPN registration retirement required'):
+                        lifecycle.require_vpn_retired_for_removal(root)
 
 if __name__ == '__main__': unittest.main()

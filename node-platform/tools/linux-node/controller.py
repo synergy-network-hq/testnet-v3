@@ -693,9 +693,11 @@ class Controller:
         if op=='recovery_preflight':
             return {'qualified':False,'blocker':'Checkpoint import is not exposed until the selected release recovery procedure is qualified','certifiedStateChanged':False}
         if op=='uninstall_preflight':
-            host=host_removal_plan(self.root)
-            return {'root':str(self.root),'inventory':self.inventory(),'destructive':True,
-                    'managedAccountRemoval':host is not None,'forensicErasureProven':False}
+            with life._lifecycle_lock(self.root):
+                life.require_vpn_retired_for_removal(self.root)
+                host=host_removal_plan(self.root)
+                return {'root':str(self.root),'inventory':self.inventory(),'destructive':True,
+                        'managedAccountRemoval':host is not None,'forensicErasureProven':False}
         if op=='commission' and (self.exists(FORMATION_CUSTODY) or self.exists(FORMATION_INTENT)):
             from apqe_layout import FORMATION_PUBLIC_INPUTS
             self.require_bound_validator_vpn()

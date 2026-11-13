@@ -637,17 +637,42 @@ def upgrade(root, package):
     return dict(completed,package_sha256=token,vpn_stopped=False,vpn_restart_required=registered,custody_or_state_copied=False)
 
 
+def require_vpn_retired_for_removal(root):
+    """Fail closed if an interrupted enrollment may still own a remote peer."""
+    from controller import Controller, VPN_ATTEMPT, require as require_vpn
+    enrollment_path = root/'evidence/vpn-enrollment.json'
+    binding_path = root/'evidence/vpn-server-binding.json'
+    present = lambda path: path.exists() or path.is_symlink()
+    if not present(enrollment_path):
+        vpn_state = root/'vpn'
+        require_vpn(not present(root/VPN_ATTEMPT) and not present(binding_path)
+                    and not vpn_state.is_symlink() and not (vpn_state.exists() and any(vpn_state.iterdir())),
+                    'VPN enrollment may have succeeded; reconcile with the coordinator before removal',
+                    'vpn_reconciliation_required')
+        return
+    require_vpn(present(binding_path) and present(root/'evidence/vpn-retirement.json'),
+                'Verify exact VPN registration retirement with the coordinator before removal',
+                'vpn_retirement_required')
+    controller = Controller(root)
+    local = controller.public_json(enrollment_path, True)
+    binding = controller.public_json(binding_path, True)
+    retirement = controller.public_json(root/'evidence/vpn-retirement.json', True)
+    peer = binding.get('peer_id')
+    require_vpn(local.get('native_enrollment_verified') is True and binding.get('server_binding_verified') is True
+                and local.get('wireguard_public_key') and binding.get('wireguard_public_key') == local['wireguard_public_key']
+                and isinstance(peer, str) and peer and retirement.get('peer_id') == peer
+                and retirement.get('retired') is True and retirement.get('absence_verified') is True,
+                'exact VPN registration retirement required', 'vpn_retirement_required')
+
+
 def remove(root, confirmation):
     require(confirmation == str(root), 'exact --destroy-root confirmation required')
     _require_operator()
-    require(not (root/UPGRADE_INTENT).exists(), 'finish recorded upgrade before uninstall')
-    if (root/'evidence/vpn-enrollment.json').exists():
-        enrollment=read(root/'evidence/vpn-server-binding.json');retirement=read(root/'evidence/vpn-retirement.json')
-        require(enrollment['peer_id'] and retirement['peer_id'] == enrollment['peer_id']
-                and retirement['retired'] is True and retirement['absence_verified'] is True, 'exact VPN registration retirement required')
     _reject_installation_mounts(root)
     guard = None
     with _lifecycle_lock(root):
+        require(not (root/UPGRADE_INTENT).exists(), 'finish recorded upgrade before uninstall')
+        require_vpn_retired_for_removal(root)
         if (root/'tmp/controller/policy.json').exists():
             from controller import Controller, host_removal_plan
             guard = Controller(root).policy().get('root_guard_sha256')

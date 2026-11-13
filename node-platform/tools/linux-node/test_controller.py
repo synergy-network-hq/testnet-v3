@@ -69,6 +69,17 @@ class ControllerTests(unittest.TestCase):
         with self.assertRaisesRegex(c.Refused,'Unexpected'):c.control_inventory(self.root)
         extra.unlink();(self.control/'tools/lifecycle.py').write_text('changed')
         with self.assertRaisesRegex(c.Refused,'bytes differ'):c.control_inventory(self.root)
+    def test_uninstall_review_surfaces_uncertain_enrollment_before_grant(self):
+        (self.root/'evidence').mkdir(mode=0o700)
+        self.save(self.root/c.VPN_ATTEMPT,{'format':'nodenetwork-vpn-attempt-v1'})
+        with patch.object(c.platform,'system',return_value='Linux'), \
+             patch.object(c.platform,'machine',return_value='x86_64'), \
+             patch('synergy_linux.safe_root',return_value=self.root), \
+             patch.object(self.controller,'authorize') as authorize:
+            result=c.serve(c.canonical(request('uninstall_preflight')),self.controller)
+            self.assertFalse(result['ok'])
+            self.assertEqual(result['error']['code'],'vpn_reconciliation_required')
+            authorize.assert_not_called()
     def test_controller_refuses_symlink_and_hardlink_files(self):
         path=self.control/'policy.json';path.unlink();path.symlink_to(self.control/'controller.py')
         with self.assertRaises(c.Refused):self.controller.policy()
