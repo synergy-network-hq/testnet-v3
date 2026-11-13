@@ -9,6 +9,18 @@ import lifecycle
 import synergy_linux as node
 import vpn
 
+def operator_ancestry(root):
+    """Model a root operator's OS-owned ancestors on a non-root test machine."""
+    original = Path.stat
+    ancestors = set(root.parents)
+    def inspect(path, *args, **kwargs):
+        result = original(path, *args, **kwargs)
+        if path in ancestors:
+            fields = list(result); fields[4] = os.geteuid()
+            return os.stat_result(fields)
+        return result
+    return patch.object(Path, 'stat', inspect)
+
 class RefusalTests(unittest.TestCase):
     def test_in_root_bootstrap_installs_only_pinned_master_into_empty_root(self):
         import hashlib
@@ -68,6 +80,39 @@ class RefusalTests(unittest.TestCase):
             node.write_new(path, {'first': True})
             with self.assertRaises(FileExistsError): node.write_new(path, {'second': True})
             self.assertEqual(node.read(path), {'first': True})
+
+    def test_legacy_root_requires_existing_matching_receipt_and_exact_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp).resolve()
+            root = parent/'Synergy'
+            with patch.object(node, 'LEGACY_EXISTING_ROOT', root), operator_ancestry(root):
+                with self.assertRaisesRegex(ValueError, 'absent'):
+                    node.safe_root(root)
+                with self.assertRaisesRegex(ValueError, 'lowercase'):
+                    node.safe_root(root, existing=False)
+                root.mkdir(mode=0o700)
+                with self.assertRaises(FileNotFoundError): node.safe_root(root)
+                node.write_new(root/'installation.json', {'format':node.MARKER,'root':str(root)})
+                self.assertEqual(node.safe_root(root), root)
+                with self.assertRaisesRegex(ValueError, 'lowercase'):
+                    node.safe_root(parent/'elsewhere'/'Synergy')
+                (root/'installation.json').write_text(json.dumps({'format':node.MARKER,'root':'/wrong'}))
+                with self.assertRaisesRegex(ValueError, 'receipt/root'):
+                    node.safe_root(root)
+
+    def test_legacy_root_does_not_relax_ancestry_or_receipt_checks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            parent = Path(temp).resolve()
+            actual = parent/'actual'; actual.mkdir(mode=0o700)
+            root = parent/'Synergy'; root.symlink_to(actual, target_is_directory=True)
+            with patch.object(node, 'LEGACY_EXISTING_ROOT', root), operator_ancestry(root):
+                with self.assertRaisesRegex(ValueError, 'symlink'): node.safe_root(root)
+                root.unlink(); root.mkdir(mode=0o700)
+                node.write_new(root/'installation.json', {'format':'foreign','root':str(root)})
+                with self.assertRaisesRegex(ValueError, 'receipt/root'): node.safe_root(root)
+                (root/'installation.json').unlink()
+                (root/'installation.json').symlink_to(actual/'receipt.json')
+                with self.assertRaisesRegex(ValueError, 'non-symlink'): node.safe_root(root)
 
     def test_package_rejects_unlisted_directory_symlinks_before_elf_checks(self):
         with tempfile.TemporaryDirectory() as temp:

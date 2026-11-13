@@ -216,6 +216,64 @@ R5_RELEASE = 'synergy-linux-389c509e47e55219'
 R5_MANIFEST_SHA256 = '43eae3fdc42a2bff9e0ba2fa369d708fb60d14e90c6e18a6f344f5071c6cb23b'
 
 
+def compose_existing_root_compatibility(original, output, expected_manifest):
+    """Update only the canonical root validator around a pinned native release."""
+    from synergy_linux import digest, verify_package
+    original, output = Path(original), Path(output)
+    require(re.fullmatch('[a-f0-9]{64}', expected_manifest) is not None,
+            'exact base manifest SHA-256 required')
+    require(original.is_absolute() and original.resolve() == original
+            and digest(original/'package.json') == expected_manifest,
+            'base package manifest pin mismatch')
+    baseline = verify_package(original)
+    require(output.is_absolute() and output.name == 'synergy'
+            and not output.exists() and not output.is_symlink()
+            and output.parent.is_dir() and output.parent.resolve() == output.parent
+            and output.parent.stat().st_uid == os.geteuid()
+            and output.parent.stat().st_mode & 0o777 == 0o700
+            and not output.is_relative_to(original) and not original.is_relative_to(output),
+            'fresh lowercase output under a private direct workspace required')
+    member = 'tools/synergy_linux.py'
+    require(member in baseline['files'], 'base lacks canonical root validator')
+    tooling_path = Path(__file__).parent/'synergy_linux.py'
+    tooling = tooling_path.read_bytes()
+    tooling_pin = hashlib.sha256(tooling).hexdigest()
+    manifest = dict(baseline)
+    manifest['runtime_baseline'] = {
+        'release_id': baseline['release_id'], 'manifest_sha256': expected_manifest,
+        'source_sha256': baseline['source_sha256'],
+        'immutable_files': {n:h for n,h in baseline['files'].items() if n != member},
+    }
+    manifest['files'] = dict(baseline['files'], **{member:tooling_pin})
+    manifest['source_sha256'] = content_sha256({'baseline':expected_manifest, member:tooling_pin})
+    manifest['release_id'] = 'synergy-linux-existing-root-' + manifest['source_sha256'][:16]
+    manifest['acceptance_status'] = 'CANDIDATE_REQUIRES_RECORDED_ACCEPTANCE_GATES'
+    manifest['existing_root_compatibility'] = '/opt/Synergy'
+    output.mkdir(mode=0o700)
+    try:
+        for directory in DIRECTORIES: (output/directory).mkdir(mode=0o700)
+        for role in json.loads((original/'roles/roles.json').read_bytes())['roles']:
+            require(re.fullmatch('[a-z_]+',role) is not None, 'invalid role name')
+            (output/'roles'/role).mkdir(mode=0o700)
+        for name, expected in manifest['files'].items():
+            data = tooling if name == member else (original/name).read_bytes()
+            require(hashlib.sha256(data).hexdigest() == expected, 'base changed during composition: '+name)
+            path=output/name;path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+            with path.open('xb') as stream: stream.write(data)
+            path.chmod(0o700 if path.parent.name in ('bin','tools') else 0o600)
+        (output/'package.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')
+        (output/'package.json').chmod(0o600)
+        verify_package(output)
+        require(digest(original/'package.json') == expected_manifest
+                and tooling_path.read_bytes() == tooling, 'composition inputs changed')
+    except BaseException:
+        shutil.rmtree(output)
+        raise
+    return {'master':str(output),'release_id':manifest['release_id'],
+            'package_sha256':digest(output/'package.json'),
+            'runtime_release':baseline['release_id'],'qualified':False}
+
+
 def compose_r5_controller(original, output):
     """New tooling release, preserving every authenticated R5 runtime byte."""
     from synergy_linux import digest, verify_package
@@ -379,6 +437,14 @@ def promote_r5_controller(candidate, candidate_pin, current_pin, preserve):
 
 
 def main():
+    if sys.argv[1:2] == ['existing-root-compatibility']:
+        p = argparse.ArgumentParser(description='Compose approved existing-root tooling without rebuilding native artifacts')
+        p.add_argument('--base',type=Path,required=True)
+        p.add_argument('--base-sha256',required=True)
+        p.add_argument('--output',type=Path,required=True)
+        args=p.parse_args(sys.argv[2:])
+        print(json.dumps(compose_existing_root_compatibility(args.base,args.output,args.base_sha256),sort_keys=True))
+        return
     global MASTER
     if sys.argv[1:2] == ['recover-master-promotion']:
         p = argparse.ArgumentParser(description='Recover interrupted generated master promotion from pinned artifacts')

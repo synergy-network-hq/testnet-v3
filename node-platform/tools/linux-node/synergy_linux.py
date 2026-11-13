@@ -22,6 +22,9 @@ sys.dont_write_bytecode = True
 MARKER = 'synergy-universal-linux-v1'
 VOLATILE = ('keys', 'data', 'run', 'logs', 'cache', 'tmp', 'vpn', 'snapshots', 'recovery', 'evidence')
 BOOTSTRAP_MASTER = Path('tmp/bootstrap-master')
+# Existing sealed Canary installations may be managed in place. This is not
+# an alternative provisioning root: install/bootstrap still require lowercase.
+LEGACY_EXISTING_ROOT = Path('/opt/Synergy')
 # Column order, SQLite affinity, NOT NULL and primary-key position are part of
 # the native storage ABI. Table names alone cannot establish compatibility.
 CONSENSUS_ARCHIVE_COLUMNS = {
@@ -104,7 +107,8 @@ def write_new(path, value, mode=0o600):
 
 def safe_root(value, existing=True):
     root = Path(value)
-    require(root.is_absolute() and root.name == 'synergy' and '..' not in root.parts,
+    legacy_existing = existing and root == LEGACY_EXISTING_ROOT
+    require(root.is_absolute() and (root.name == 'synergy' or legacy_existing) and '..' not in root.parts,
             'explicit absolute installation root ending in lowercase synergy required')
     require(len(root.parts) >= 3, 'installation root is too broad')
     for parent in [root, *root.parents]:

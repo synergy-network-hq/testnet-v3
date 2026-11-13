@@ -100,6 +100,32 @@ class LifecycleTests(unittest.TestCase):
         for name,expected in before.items():self.assertEqual(((self.root/name).stat().st_ino,(self.root/name).read_bytes()),expected)
         self.assertEqual(node.read(self.root/'package.json'),self.new)
         self.assertFalse((self.root/life.UPGRADE_INTENT).exists())
+
+    def test_legacy_root_upgrade_preserves_identity_state_and_absolute_config(self):
+        from test_linux_node import operator_ancestry
+        legacy=self.base/'Synergy'
+        self.root.rename(legacy); self.root=legacy
+        self.receipt['root']=str(legacy)
+        save(legacy/'installation.json',self.receipt)
+        protected=('keys/apqe/custody.json','data/consensus/signing-journal',
+                   'network/genesis.json','config/node.json','vpn/default.json')
+        for name in protected:
+            save(legacy/name,{'preserve_path':str(legacy/name)})
+        for name in ('authority.json','authority-root.pub','network-manifest.json',
+                     'p2p-bindings.json','transport-registry.json'):
+            save(legacy/'network'/name,b'public-fixture')
+        before={name:((legacy/name).stat().st_ino,(legacy/name).read_bytes()) for name in protected}
+        with patch.object(node,'LEGACY_EXISTING_ROOT',legacy),operator_ancestry(legacy),self.upgrade_context(), \
+             patch.object(life,'recover_consensus_archives'):
+            self.assertEqual(node.safe_root(legacy),legacy)
+            result=life.upgrade(legacy,self.candidate)
+            self.assertEqual(node.safe_root(legacy),legacy)
+        self.assertFalse(result['consensus_started'])
+        self.assertFalse(result['vpn_stopped'])
+        self.assertEqual(self.operations,[])
+        self.assertEqual(node.read(legacy/'installation.json')['root'],str(legacy))
+        for name,expected in before.items():
+            self.assertEqual(((legacy/name).stat().st_ino,(legacy/name).read_bytes()),expected)
     def test_upgrade_cannot_change_or_remove_the_registered_guard_source(self):
         import root_guard
         guard = b'current registered guard'
