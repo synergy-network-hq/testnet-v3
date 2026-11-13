@@ -234,7 +234,7 @@ def compose_existing_root_compatibility(original, output, expected_manifest):
             and not output.is_relative_to(original) and not original.is_relative_to(output),
             'fresh lowercase output under a private direct workspace required')
     tooling_paths = { 'tools/'+name:Path(__file__).parent/name
-                      for name in ('synergy_linux.py','lifecycle.py','canary_rpc_relay.py') }
+                      for name in ('synergy_linux.py','lifecycle.py','canary_rpc_relay.py','conformance.py') }
     require(set(tooling_paths) <= set(baseline['files']), 'base lacks canonical lifecycle tooling')
     tooling = {name:path.read_bytes() for name,path in tooling_paths.items()}
     tooling_pins = {name:hashlib.sha256(data).hexdigest() for name,data in tooling.items()}

@@ -24,11 +24,20 @@ class ConformanceTests(unittest.TestCase):
             directory=root/'data/blocks/processing-proposal-inputs-v1-epoch-00000000000000000002'
             directory.mkdir(parents=True,exist_ok=True)
             (directory/'proposal-inputs-v1.json').write_text('{}')
+            pending=root/'data/etdag/protected-pipeline/processing-v1-epoch-00000000000000000002'
+            pending.mkdir(parents=True)
+            (pending/'pending-v1.json').write_text('{}')
+            for member in ('slots','completions','finalized','progress'):
+                (pending/member).mkdir()
+                (pending/member/'0000.json').write_text('{}')
             self.assertTrue(c.installed(root,manifest)['conformant'])
         for suffix in ('-epoch-2','-epoch-00000000000000000002-extra','-epoch-../../keys'):
             path='data/blocks/processing-proposal-inputs-v1'+suffix
             self.assertFalse(any(re.fullmatch(rule,path) for rule in c.RUNTIME_DIRECTORIES))
             self.assertFalse(any(rule.fullmatch(path+'/proposal-inputs-v1.json') for rule in c.RULES))
+            path='data/etdag/protected-pipeline/processing-v1'+suffix
+            self.assertFalse(any(re.fullmatch(rule,path) for rule in c.RUNTIME_DIRECTORIES))
+            self.assertFalse(any(rule.fullmatch(path+'/pending-v1.json') for rule in c.RULES))
 
     def fixture(self, root):
         root.chmod(0o700)

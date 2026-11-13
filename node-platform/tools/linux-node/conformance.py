@@ -64,8 +64,8 @@ RUNTIME_FILES = (
  r'data/blocks/processing-proposal-inputs-v1(?:-epoch-[0-9]{20})?/proposal-inputs-v1\.json',
  r'data/blocks/processing-proposal-inputs-v1(?:-epoch-[0-9]{20})?/(certified/[0-9]{20}|certified-ids/[0-9a-f]{64}|certified-groups/[0-9a-f]{128}|(?:inputs|validations)/[0-9]{2})\.json',
  r'data/etdag/admission-receipts/[0-9a-f]{128}/receipt-[0-9a-f]{128}\.json',
- r'data/etdag/protected-pipeline/processing-v1/pending-v1\.json',
- r'data/etdag/protected-pipeline/processing-v1/(slots|completions|finalized|progress)/[0-9]{4}\.json',
+ r'data/etdag/protected-pipeline/processing-v1(?:-epoch-[0-9]{20})?/pending-v1\.json',
+ r'data/etdag/protected-pipeline/processing-v1(?:-epoch-[0-9]{20})?/(slots|completions|finalized|progress)/[0-9]{4}\.json',
 )
 RUNTIME_DIRECTORIES = (
  r'keys/(root|p2p|consensus|ingress|authority|transport|wallets|apqe)',
@@ -85,8 +85,8 @@ RUNTIME_DIRECTORIES = (
  r'data/blocks/processing-proposal-inputs-v1(?:-epoch-[0-9]{20})?/(certified|certified-ids|certified-groups|inputs|validations)',
  r'data/etdag/(admission-receipts|protected-pipeline|availability-shards)',
  r'data/etdag/admission-receipts/[0-9a-f]{128}',
- r'data/etdag/protected-pipeline/(reveal-shares|processing-v1)',
- r'data/etdag/protected-pipeline/processing-v1/(slots|completions|finalized|progress)',
+ r'data/etdag/protected-pipeline/(reveal-shares|processing-v1(?:-epoch-[0-9]{20})?)',
+ r'data/etdag/protected-pipeline/processing-v1(?:-epoch-[0-9]{20})?/(slots|completions|finalized|progress)',
 )
 RULES = tuple(re.compile('(?:'+p+')\\Z') for p in RUNTIME_FILES)
 PARAMETERS = ('node_name', 'public_identity_path', 'aegis_signing_key_path',
