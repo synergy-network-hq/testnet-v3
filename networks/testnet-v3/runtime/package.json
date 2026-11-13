@@ -1,6 +1,0 @@
-{
-  "dependencies": {
-    "@synergy-network/aegis-pqvm": "^1.2.1",
-    "aegis-pqvm": "^1.2.1"
-  }
-}
