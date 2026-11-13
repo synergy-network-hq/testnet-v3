@@ -2,7 +2,7 @@
 
 Status: **unratified; independent gates below remain open**. Established authority is the October 2026 Address and Identity Specification (AID) §§6.1, 8.3–8.5 and Appendix B, the later CTO scope decisions, and compatible Security Implementation Specification v9.1 controls AI-002, AI-020 and 33/VTE. This candidate narrows the initial release to SNRG transfer and protected D/P device replacement. It does not generalize contract execution or relax EX-01/native PQ authority.
 
-Use [the registry](protected-action-registry-v1.json) and [CDDL](protected-actions-v1.cddl) together. Only the action payload decoder and the isolated WorldState lifecycle are implemented in this revision; proposed content framing, sponsorship, policy scheduling, DKG verification and public admission are **not executable deployment contracts yet**. No implicit switch is allowed.
+Use [the registry](protected-action-registry-v1.json) and [CDDL](protected-actions-v1.cddl) together. Core implements the action payload decoder and isolated WorldState enrollment, transfer, sponsor commit and ordinary policy replacement. Content framing, sponsored reveal, recovery, consensus scheduling, qualified DKG verification and public admission are **not executable deployment contracts yet**. No implicit switch is allowed.
 
 ## Namespace and bytes
 

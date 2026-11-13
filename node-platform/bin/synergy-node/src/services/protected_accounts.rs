@@ -11,7 +11,9 @@ use synergy_address_engine::apqe::{
         CurrentAccountState, EnrolledRole, IntentConstraints, NativeAction, NativePolicy, Role,
         RoleSignature, VerifiedSignatureQuorum, NATIVE_TX_CONTEXT,
     },
-    enrollment::{CanonicalEnrollment, EnrollmentSignature, UnactivatedWireProfile},
+    enrollment::{
+        CanonicalEnrollment, CanonicalPublicPolicy, EnrollmentSignature, UnactivatedWireProfile,
+    },
     enrollment_commit::{
         EnrollmentCommitment, PendingEnrollmentCommitment, UnactivatedCommitmentProfile,
         REVEAL_WINDOW_SECONDS,
@@ -33,9 +35,10 @@ use synergy_state::{
 
 const COMMIT_PREFIX: &str = "apqe-protected-account-candidate/v1/commit/";
 const ACCOUNT_PREFIX: &str = "apqe-protected-account-candidate/v1/policy/";
+const TRANSITION_PREFIX: &str = "apqe-protected-account-candidate/v1/transition/";
 const MAX_ENROLLMENT_BYTES: usize = 24 * 1024;
 // Internal bounded state values, not RPC or consensus-action wire assignments.
-const MAX_STORED_POLICY_BYTES: usize = MAX_ENROLLMENT_BYTES * 4 + 4096;
+const MAX_STORED_POLICY_BYTES: usize = (MAX_ENROLLMENT_BYTES + 10 * 1024) * 4 + 4096;
 const MAX_STORED_COMMIT_BYTES: usize = 1024;
 const SPONSOR_SIGNATURE_DOMAIN: &str = "AEGIS/ENROLL-SPONSOR/v1";
 const SPONSOR_CONTEXT: &[u8] = b"AEGIS.ENROLL.SPONSOR.V1";
@@ -84,6 +87,24 @@ struct PolicyRecord {
     policy_hash: [u8; 32],
     enrollment: Vec<u8>,
     registered_height: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    replacement_policy: Option<Vec<u8>>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScheduledPolicyChange {
+    network: Network,
+    account: [u8; 20],
+    reference: [u8; 32],
+    old_epoch: u64,
+    old_hash: [u8; 32],
+    new_hash: [u8; 32],
+    policy: Vec<u8>,
+    activation_at: u64,
+    included_height: u64,
+    included_time: u64,
+    replace: u8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -459,6 +480,7 @@ impl<'a> CandidateProtectedAccounts<'a> {
                 policy_hash: *record.policy_hash(),
                 enrollment: record.enrollment_bytes().to_vec(),
                 registered_height: inclusion.height,
+                replacement_policy: None,
             },
         )
     }
@@ -549,6 +571,32 @@ impl<'a> CandidateProtectedAccounts<'a> {
         Ok(record)
     }
 
+    fn canonical_policy<'p>(
+        &self,
+        record: &'p PolicyRecord,
+        enrollment: &'p CanonicalEnrollment<'_>,
+    ) -> Result<CanonicalPublicPolicy<'p>, String> {
+        let bytes = match &record.replacement_policy {
+            Some(policy) if record.policy_epoch > 0 => policy.as_slice(),
+            None if record.policy_epoch == enrollment.policy().policy_epoch => {
+                enrollment.canonical_policy()
+            }
+            _ => return Err("protected policy epoch has no matching policy source".into()),
+        };
+        let policy = CanonicalPublicPolicy::decode(bytes, self.wire).map_err(display)?;
+        if enrollment.genesis() != self.chain.native_genesis()
+            || enrollment.account().as_bytes() != &record.account
+            || policy.policy().genesis != enrollment.genesis()
+            || policy.policy().account != enrollment.account()
+            || &policy.policy().evm_public_key != enrollment.evm_public_key()
+            || policy.policy().policy_epoch != record.policy_epoch
+            || policy.hash().map_err(display)? != record.policy_hash
+        {
+            return Err("protected account policy does not match its canonical state".into());
+        }
+        Ok(policy)
+    }
+
     /// Verifies only a candidate spend's signatures and current nonce/policy.
     /// The caller must supply the selected action decoder; no action assignment
     /// or fee semantics are inferred from an unsigned label. A returned quorum
@@ -562,6 +610,30 @@ impl<'a> CandidateProtectedAccounts<'a> {
         max_action_payload: usize,
         decode_selected_spend: impl FnOnce(&NativeIntentBody<'_>) -> Result<T, String>,
         signatures: &[RoleSignature; 2],
+    ) -> Result<(T, VerifiedSignatureQuorum), String> {
+        self.verify_native_pair(
+            provider,
+            finalized,
+            world,
+            encoded_intent,
+            max_action_payload,
+            signatures,
+            |body| decode_selected_spend(body).map(|data| (data, NativeAction::Spend)),
+            finalized.position.consensus_time,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn verify_native_pair<'i, T>(
+        &self,
+        provider: &PqProvider<Mldsa87>,
+        finalized: &FinalizedSnapshot<'_>,
+        world: &WorldState,
+        encoded_intent: &'i [u8],
+        max_action_payload: usize,
+        signatures: &[RoleSignature; 2],
+        decode: impl FnOnce(&NativeIntentBody<'i>) -> Result<(T, NativeAction), String>,
+        consensus_time: u64,
     ) -> Result<(T, VerifiedSignatureQuorum), String> {
         if !std::ptr::eq(self, finalized.registry) {
             return Err("protected intent requires the selected finalized parent".into());
@@ -577,13 +649,7 @@ impl<'a> CandidateProtectedAccounts<'a> {
         }
         let enrollment =
             CanonicalEnrollment::decode(&record.enrollment, self.wire).map_err(display)?;
-        if enrollment.genesis() != self.chain.native_genesis()
-            || enrollment.account() != body.account
-            || enrollment.policy().policy_epoch != record.policy_epoch
-            || enrollment.policy_hash().map_err(display)? != record.policy_hash
-        {
-            return Err("protected account policy does not match its canonical enrollment".into());
-        }
+        let current = self.canonical_policy(&record, &enrollment)?;
         let address = body.account.to_native(&Primitives).map_err(display)?;
         let ledger = world
             .accounts
@@ -601,12 +667,12 @@ impl<'a> CandidateProtectedAccounts<'a> {
             policy_epoch: record.policy_epoch,
             next_nonce: ledger.nonce,
             height: finalized.position.height,
-            consensus_time: finalized.position.consensus_time,
-            recovery_vetoed: false, // Only ordinary D/P spending is eligible here.
+            consensus_time,
+            recovery_vetoed: false, // External-share recovery remains disabled.
         };
         intent.check_state(&state).map_err(display)?;
-        let decoded = decode_selected_spend(body)?;
-        let [d, p, r] = enrollment.policy().roles;
+        let (decoded, action) = decode(body)?;
+        let [d, p, r] = current.policy().roles;
         let enrolled =
             |role, registered: synergy_address_engine::apqe::enrollment::RoleRecord<'_>| {
                 Ok::<_, String>(EnrolledRole {
@@ -636,7 +702,7 @@ impl<'a> CandidateProtectedAccounts<'a> {
                 nonce: body.transaction_nonce,
                 valid_from_height: 0, // The published outer body only signs the upper bound.
                 valid_until_height: body.valid_until_finalized_height,
-                action: NativeAction::Spend,
+                action,
             },
         );
         let quorum = verify_signature_quorum_for_caller_validated_transcript(
@@ -648,6 +714,275 @@ impl<'a> CandidateProtectedAccounts<'a> {
         )
         .map_err(display)?;
         Ok((decoded, quorum))
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    fn schedule_ordinary_replacement(
+        &self,
+        provider: &PqProvider<Mldsa87>,
+        finalized: &FinalizedSnapshot<'_>,
+        world: &mut WorldState,
+        inclusion: Position,
+        encoded: &[u8],
+        signatures: &[RoleSignature; 2],
+        possession: &Signature<Mldsa87>,
+        fee: &synergy_execution::FeeSchedule,
+        gas: u64,
+    ) -> Result<[u8; 32], String> {
+        use super::protected_action_wire::{decode, Payload, MAX_POLICY, POLICY_SCHEDULE};
+        use synergy_address_engine::apqe::policy_transition::{
+            check_policy_replacement, PolicyReplacementRequest, ReplacementMode,
+        };
+        if inclusion.height <= finalized.position.height
+            || inclusion.consensus_time < finalized.position.consensus_time
+        {
+            return Err("invalid policy scheduling position".into());
+        }
+        let limit = MAX_POLICY + 128;
+        let intent = CanonicalNativeIntent::decode(encoded, limit).map_err(display)?;
+        let body = intent.body();
+        let (data, _) = self.verify_native_pair(
+            provider,
+            finalized,
+            world,
+            encoded,
+            limit,
+            signatures,
+            |body| {
+                if body.action_type != POLICY_SCHEDULE {
+                    return Err("expected POLICY_CHANGE_SCHEDULE".into());
+                }
+                let data = decode(POLICY_SCHEDULE, body.action_payload)?;
+                let Payload::Schedule { activation_at, .. } = data else {
+                    return Err("expected policy change payload".into());
+                };
+                Ok((data, NativeAction::RoutinePolicyChange { activation_at }))
+            },
+            inclusion.consensus_time,
+        )?;
+        let Payload::Schedule {
+            role,
+            old_policy,
+            new_policy,
+            new_policy_hash,
+            activation_at,
+            ..
+        } = data
+        else {
+            return Err("invalid policy schedule".into());
+        };
+        let record = self.read_policy(world, body.account)?;
+        let enrollment =
+            CanonicalEnrollment::decode(&record.enrollment, self.wire).map_err(display)?;
+        let current = self.canonical_policy(&record, &enrollment)?;
+        let proposed = CanonicalPublicPolicy::decode(new_policy, self.wire).map_err(display)?;
+        let replace = if role == 0 { Role::D } else { Role::P };
+        let checked = check_policy_replacement(
+            &current,
+            &proposed,
+            PolicyReplacementRequest {
+                mode: ReplacementMode::Ordinary,
+                replace,
+                expected_old_policy_hash: old_policy,
+                expected_new_policy_hash: new_policy_hash,
+                activation_at,
+            },
+            inclusion.consensus_time,
+        )
+        .map_err(display)?;
+        provider
+            .verify(
+                intent.digest().map_err(display)?.as_bytes(),
+                possession,
+                &PublicKey::from_bytes(
+                    checked.proposed_policy().policy().roles[usize::from(role)].auth_public_key,
+                )
+                .map_err(debug)?,
+                SignOptions::Pure {
+                    context: b"AEGIS.NEW.ROLE.POP.V1",
+                },
+            )
+            .map_err(debug)?;
+        let mut hash = Primitives
+            .hash_stream(HashAlgorithm::Sha3256)
+            .map_err(debug)?;
+        hash.update(b"AEGIS/PROTECTED-PENDING/v1");
+        hash.update(encoded);
+        let reference: [u8; 32] = hash
+            .finalize()
+            .try_into()
+            .map_err(|_| "invalid pending digest length")?;
+        let key = transition_key(body.account);
+        let mut diff = engineering_policy_fee(body, fee, gas)?;
+        diff.protocol_changes.push(ProtocolChange {
+            key,
+            expected_value: None,
+            value: Some(encode(&ScheduledPolicyChange {
+                network: self.network,
+                account: *body.account.as_bytes(),
+                reference,
+                old_epoch: record.policy_epoch,
+                old_hash: old_policy,
+                new_hash: new_policy_hash,
+                policy: new_policy.to_vec(),
+                activation_at,
+                included_height: inclusion.height,
+                included_time: inclusion.consensus_time,
+                replace: role,
+            })?),
+        });
+        diff.apply(world).map_err(debug)?;
+        Ok(reference)
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    fn cancel_ordinary_replacement(
+        &self,
+        provider: &PqProvider<Mldsa87>,
+        finalized: &FinalizedSnapshot<'_>,
+        world: &mut WorldState,
+        inclusion: Position,
+        encoded: &[u8],
+        signatures: &[RoleSignature; 2],
+        fee: &synergy_execution::FeeSchedule,
+        gas: u64,
+    ) -> Result<(), String> {
+        use super::protected_action_wire::{decode, Payload, POLICY_CANCEL};
+        if inclusion.height <= finalized.position.height
+            || inclusion.consensus_time < finalized.position.consensus_time
+        {
+            return Err("invalid policy cancellation position".into());
+        }
+        let intent = CanonicalNativeIntent::decode(encoded, 40).map_err(display)?;
+        let body = intent.body();
+        let (reference, _) = self.verify_spend(
+            provider,
+            finalized,
+            world,
+            encoded,
+            40,
+            |body| match decode(body.action_type, body.action_payload)? {
+                Payload::Pending(reference) if body.action_type == POLICY_CANCEL => Ok(reference),
+                _ => Err("expected POLICY_CHANGE_CANCEL".into()),
+            },
+            signatures,
+        )?;
+        let key = transition_key(body.account);
+        let bytes = world
+            .protocol
+            .get(&key)
+            .ok_or("no pending ordinary policy change")?;
+        let pending: ScheduledPolicyChange = decode_stored_policy_change(bytes)?;
+        if pending.reference != reference
+            || pending.network != self.network
+            || pending.account != *body.account.as_bytes()
+            || pending.old_epoch != body.policy_epoch
+            || inclusion.consensus_time >= pending.activation_at
+        {
+            return Err("policy cancellation target, epoch or deadline differs".into());
+        }
+        let mut diff = engineering_policy_fee(body, fee, gas)?;
+        diff.protocol_changes.push(ProtocolChange {
+            key,
+            expected_value: Some(bytes.clone()),
+            value: None,
+        });
+        diff.apply(world).map_err(debug)
+    }
+
+    /// Isolated per-account activation; no public submission or scheduler.
+    #[cfg(test)]
+    fn activate_ordinary_replacement(
+        &self,
+        finalized: &FinalizedSnapshot<'_>,
+        world: &mut WorldState,
+        inclusion: Position,
+        account: AccountIdentifier,
+    ) -> Result<(), String> {
+        use synergy_address_engine::apqe::policy_transition::{
+            check_policy_replacement, PolicyReplacementRequest, ReplacementMode,
+        };
+        if !std::ptr::eq(self, finalized.registry)
+            || inclusion.height <= finalized.position.height
+            || inclusion.consensus_time < finalized.position.consensus_time
+        {
+            return Err("invalid policy activation position".into());
+        }
+        let key = transition_key(account);
+        let bytes = finalized
+            .world
+            .protocol
+            .get(&key)
+            .ok_or("policy schedule not finalized")?;
+        let pending = decode_stored_policy_change(bytes)?;
+        if pending.network != self.network
+            || pending.account != *account.as_bytes()
+            || pending.included_height > finalized.position.height
+            || pending.included_time > finalized.position.consensus_time
+            || pending.activation_at > inclusion.consensus_time
+        {
+            return Err("policy schedule not eligible at this activation position".into());
+        }
+        let mut record = self.read_policy(finalized.world, account)?;
+        let address = account.to_native(&Primitives).map_err(display)?;
+        if record != self.read_policy(world, account)?
+            || record.policy_epoch != pending.old_epoch
+            || record.policy_hash != pending.old_hash
+            || !world
+                .accounts
+                .get(&address)
+                .is_some_and(|a| a.code_hash.is_none())
+        {
+            return Err("activation policy changed or ledger account unavailable".into());
+        }
+        let policy = CanonicalPublicPolicy::decode(&pending.policy, self.wire).map_err(display)?;
+        {
+            let enrollment =
+                CanonicalEnrollment::decode(&record.enrollment, self.wire).map_err(display)?;
+            let current = self.canonical_policy(&record, &enrollment)?;
+            let replace = match pending.replace {
+                0 => Role::D,
+                1 => Role::P,
+                _ => return Err("invalid recorded replacement role".into()),
+            };
+            let _checked = check_policy_replacement(
+                &current,
+                &policy,
+                PolicyReplacementRequest {
+                    mode: ReplacementMode::Ordinary,
+                    replace,
+                    expected_old_policy_hash: pending.old_hash,
+                    expected_new_policy_hash: pending.new_hash,
+                    activation_at: pending.activation_at,
+                },
+                pending.included_time,
+            )
+            .map_err(display)?;
+        }
+        let policy_key = account_key(account);
+        let expected = world.protocol.get(&policy_key).cloned();
+        record.policy_epoch = policy.policy().policy_epoch;
+        record.policy_hash = pending.new_hash;
+        record.replacement_policy = Some(pending.policy);
+        StateDiff {
+            changes: vec![],
+            protocol_changes: vec![
+                ProtocolChange {
+                    key,
+                    expected_value: Some(bytes.clone()),
+                    value: None,
+                },
+                ProtocolChange {
+                    key: policy_key,
+                    expected_value: expected,
+                    value: Some(encode(&record)?),
+                },
+            ],
+        }
+        .apply(world)
+        .map_err(debug)
     }
 
     /// Candidate execution is test-only until an actual admission profile binds
@@ -757,7 +1092,9 @@ impl CandidateEnrollmentWrite {
                 .iter()
                 .any(|change| change.account == self.address)
             || authorized_fee_diff.protocol_changes.iter().any(|change| {
-                change.key.starts_with(ACCOUNT_PREFIX) || change.key.starts_with(COMMIT_PREFIX)
+                change.key.starts_with(ACCOUNT_PREFIX)
+                    || change.key.starts_with(COMMIT_PREFIX)
+                    || change.key.starts_with(TRANSITION_PREFIX)
             })
         {
             return Err("protected enrollment conflicts with existing state or fee writes".into());
@@ -781,6 +1118,55 @@ fn eligible_account(world: &WorldState, address: &str) -> bool {
                 synergy_identity::authorization::IDENTITY_AUTHORIZATION_BINDINGS_STATE_KEY,
             ),
         }
+}
+
+#[cfg(test)]
+fn transition_key(account: AccountIdentifier) -> String {
+    account_key(account).replacen(ACCOUNT_PREFIX, TRANSITION_PREFIX, 1)
+}
+
+#[cfg(test)]
+fn decode_stored_policy_change(bytes: &[u8]) -> Result<ScheduledPolicyChange, String> {
+    decode(bytes, super::protected_action_wire::MAX_POLICY * 4 + 4096)
+}
+
+#[cfg(test)]
+fn engineering_policy_fee(
+    body: &NativeIntentBody<'_>,
+    fee: &synergy_execution::FeeSchedule,
+    gas: u64,
+) -> Result<StateDiff, String> {
+    fee.validate().map_err(debug)?;
+    let sender = body.account.to_native(&Primitives).map_err(display)?;
+    let amount = u128::from(gas) * u128::from(fee.base_fee_per_gas_nwei);
+    if gas == 0
+        || gas > body.gas_limit
+        || body.intent_id == [0; 32]
+        || fee.collector.starts_with("synw")
+        || (body.maximum_total_fee[..16] == [0; 16]
+            && body.maximum_total_fee[16..] < amount.to_be_bytes()[..])
+    {
+        return Err("policy change exceeds signed fee or gas authorization".into());
+    }
+    Ok(StateDiff {
+        changes: vec![
+            AccountChange {
+                account: sender,
+                debit_nwei: amount,
+                credit_nwei: 0,
+                expected_nonce: Some(body.transaction_nonce),
+                code_hash: None,
+            },
+            AccountChange {
+                account: fee.collector.clone(),
+                debit_nwei: 0,
+                credit_nwei: amount,
+                expected_nonce: None,
+                code_hash: None,
+            },
+        ],
+        ..StateDiff::default()
+    })
 }
 
 fn commit_key(commitment: EnrollmentCommitment) -> String {
@@ -1093,7 +1479,7 @@ mod tests {
         encoded: &[u8],
     ) -> Signature<Mldsa87> {
         use synergy_address_engine::{apqe::native_manifest::validator_engine, types::Algorithm};
-        let mut engine = unsafe { validator_engine(report, pin) }.unwrap();
+        let engine = unsafe { validator_engine(report, pin) }.unwrap();
         Signature::from_bytes(
             &engine
                 .sign(
@@ -1544,5 +1930,248 @@ mod tests {
             )
             .is_err());
         assert_eq!(state_root(&too_expensive).unwrap(), before);
+
+        // Use the same independently reloaded enrollment and genuine test
+        // signing keys. The candidate must survive a second durable restart.
+        use super::super::protected_action_wire::{POLICY_CANCEL, POLICY_SCHEDULE};
+        let replacement = provider.generate_keypair().unwrap();
+        let mut changed_roles = policy.roles;
+        changed_roles[0] = RoleRecord {
+            role_id: 0,
+            participant_id: [91; 32],
+            key_version: 2,
+            auth_algorithm: 1,
+            auth_public_key: replacement.0.as_bytes(),
+        };
+        let proposed = PublicPolicy {
+            policy_epoch: 1,
+            roles: changed_roles,
+            ..policy
+        }
+        .encode(&wire)
+        .unwrap();
+        let proposed_hash = CanonicalPublicPolicy::decode(&proposed, &wire)
+            .unwrap()
+            .hash()
+            .unwrap();
+        let activate_at = 8203;
+        let mut schedule_payload = vec![0xa7, 0, 1, 1, 0, 2, 0x58, 32];
+        schedule_payload.extend_from_slice(&new_hash);
+        schedule_payload.extend_from_slice(&[3, 0x59]);
+        schedule_payload.extend_from_slice(&(proposed.len() as u16).to_be_bytes());
+        schedule_payload.extend_from_slice(&proposed);
+        schedule_payload.extend_from_slice(&[4, 0x58, 32]);
+        schedule_payload.extend_from_slice(&proposed_hash);
+        schedule_payload.extend_from_slice(&[5, 1, 6, 0x19]);
+        schedule_payload.extend_from_slice(&(activate_at as u16).to_be_bytes());
+        let schedule_intent = NativeIntentBody {
+            action_type: POLICY_SCHEDULE,
+            action_payload: &schedule_payload,
+            ..body
+        }
+        .encode(12_000)
+        .unwrap();
+        let sign_policy = |encoded: &[u8], context, d: usize| {
+            let digest = CanonicalNativeIntent::decode(encoded, 12_000)
+                .unwrap()
+                .digest()
+                .unwrap();
+            [Role::D, Role::P].map(|role| RoleSignature {
+                role,
+                signature: provider
+                    .sign(
+                        digest.as_bytes(),
+                        &keys[if role == Role::D { d } else { 1 }].1,
+                        SignOptions::Pure { context },
+                    )
+                    .unwrap(),
+            })
+        };
+        let policy_proofs = sign_policy(&schedule_intent, NATIVE_TX_CONTEXT, 0);
+        let target_digest = CanonicalNativeIntent::decode(&schedule_intent, 12_000)
+            .unwrap()
+            .digest()
+            .unwrap();
+        let new_pop = provider
+            .sign(
+                target_digest.as_bytes(),
+                &replacement.1,
+                SignOptions::Pure {
+                    context: b"AEGIS.NEW.ROLE.POP.V1",
+                },
+            )
+            .unwrap();
+        let wrong_pop = provider
+            .sign(
+                target_digest.as_bytes(),
+                &keys[0].1,
+                SignOptions::Pure {
+                    context: b"AEGIS.NEW.ROLE.POP.V1",
+                },
+            )
+            .unwrap();
+        let stage = |world: &mut WorldState, time, pop| {
+            registry.schedule_ordinary_replacement(
+                &provider,
+                &snapshot,
+                world,
+                position(4, time),
+                &schedule_intent,
+                &policy_proofs,
+                pop,
+                &schedule,
+                1,
+            )
+        };
+        let mut pending_world = spend_base.clone();
+        assert!(stage(&mut pending_world, 1004, &new_pop).is_err());
+        assert!(stage(&mut pending_world, 1003, &wrong_pop).is_err());
+        assert_eq!(pending_world, spend_base);
+        let reference = stage(&mut pending_world, 1003, &new_pop).unwrap();
+        assert!(stage(&mut pending_world, 1003, &new_pop).is_err());
+        assert_eq!(
+            registry
+                .read_policy(&pending_world, enrollment.account())
+                .unwrap()
+                .policy_epoch,
+            0
+        );
+        assert_eq!(pending_world.accounts[&address].nonce, 1);
+        assert!(registry
+            .activate_ordinary_replacement(
+                &snapshot,
+                &mut pending_world,
+                position(5, activate_at),
+                enrollment.account()
+            )
+            .is_err());
+
+        let pending_disk = Scratch::new();
+        let parent = finalized(4, &pending_world);
+        FinalizedStateStore::load(&pending_disk.0)
+            .unwrap()
+            .commit_verified_world_state(parent.0.clone(), &pending_world)
+            .unwrap();
+        let persisted = FinalizedStateStore::load(&pending_disk.0)
+            .unwrap()
+            .current_world_state()
+            .unwrap()
+            .unwrap();
+        let finalized_pending = registry
+            .finalized_snapshot(&persisted, &parent.0, &parent.1, 1003)
+            .unwrap();
+        let mut cancel_payload = vec![0xa2, 0, 1, 1, 0x58, 32];
+        cancel_payload.extend_from_slice(&reference);
+        let cancel_intent = NativeIntentBody {
+            transaction_nonce: 1,
+            action_type: POLICY_CANCEL,
+            action_payload: &cancel_payload,
+            ..body
+        }
+        .encode(40)
+        .unwrap();
+        let cancel_proofs = sign_policy(&cancel_intent, NATIVE_TX_CONTEXT, 0);
+        let cancel = |world: &mut WorldState, time| {
+            registry.cancel_ordinary_replacement(
+                &provider,
+                &finalized_pending,
+                world,
+                position(5, time),
+                &cancel_intent,
+                &cancel_proofs,
+                &schedule,
+                1,
+            )
+        };
+        let mut canceled = persisted.clone();
+        assert!(cancel(&mut canceled, activate_at).is_err());
+        cancel(&mut canceled, activate_at - 1).unwrap();
+        assert!(registry
+            .activate_ordinary_replacement(
+                &finalized_pending,
+                &mut canceled,
+                position(5, activate_at),
+                enrollment.account()
+            )
+            .is_err());
+        assert_eq!(canceled.accounts[&address].nonce, 2);
+        assert_eq!(
+            registry
+                .read_policy(&canceled, enrollment.account())
+                .unwrap()
+                .policy_epoch,
+            0
+        );
+
+        let mut activated = persisted.clone();
+        let activate = |world: &mut WorldState, time| {
+            registry.activate_ordinary_replacement(
+                &finalized_pending,
+                world,
+                position(5, time),
+                enrollment.account(),
+            )
+        };
+        assert!(activate(&mut activated, activate_at - 1).is_err());
+        assert_eq!(activated, persisted);
+        activate(&mut activated, activate_at).unwrap();
+        let root = state_root(&activated).unwrap();
+        assert!(activate(&mut activated, activate_at).is_err());
+        assert_eq!(state_root(&activated).unwrap(), root);
+        assert_eq!(activated.accounts[&address], persisted.accounts[&address]);
+        let current_record = registry
+            .read_policy(&activated, enrollment.account())
+            .unwrap();
+        assert_eq!(current_record.policy_epoch, 1);
+        assert_eq!(current_record.policy_hash, proposed_hash);
+        let post = finalized(5, &activated);
+        let post_snapshot = registry
+            .finalized_snapshot(&activated, &post.0, &post.1, activate_at)
+            .unwrap();
+        let new_intent = NativeIntentBody {
+            policy_epoch: 1,
+            transaction_nonce: 1,
+            valid_until_finalized_height: 5,
+            ..body
+        }
+        .encode(128)
+        .unwrap();
+        let old_key = sign_policy(&new_intent, NATIVE_TX_CONTEXT, 0);
+        let digest = CanonicalNativeIntent::decode(&new_intent, 128)
+            .unwrap()
+            .digest()
+            .unwrap();
+        let new_key = [
+            RoleSignature {
+                role: Role::D,
+                signature: provider
+                    .sign(
+                        digest.as_bytes(),
+                        &replacement.1,
+                        SignOptions::Pure {
+                            context: NATIVE_TX_CONTEXT,
+                        },
+                    )
+                    .unwrap(),
+            },
+            sign_policy(&new_intent, NATIVE_TX_CONTEXT, 0)
+                .into_iter()
+                .last()
+                .unwrap(),
+        ];
+        let verify = |bytes, sigs| {
+            registry.verify_spend(
+                &provider,
+                &post_snapshot,
+                &activated,
+                bytes,
+                128,
+                super::super::protected_action_wire::decode_transfer,
+                sigs,
+            )
+        };
+        assert!(verify(&intent, &ordinary).is_err());
+        assert!(verify(&new_intent, &old_key).is_err());
+        assert!(verify(&new_intent, &new_key).is_ok());
     }
 }
