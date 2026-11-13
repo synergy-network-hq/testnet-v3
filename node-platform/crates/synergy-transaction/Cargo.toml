@@ -14,7 +14,7 @@ synergy-address = { path = "../synergy-address" }
 synergy-identity = { path = "../synergy-identity" }
 
 [dev-dependencies]
+aegis-pqvm = { path = "../aegis-pqvm", default-features = false, features = ["mldsa"] }
 serde_json.workspace = true
 hex = "0.4.3"
-aegis-pqvm = { path = "../aegis-pqvm", default-features = false, features = ["mldsa", "fndsa"] }
-pqrust-traits = { path = "../aegis-pqvm/vendor/pqcrypto-traits" }
+synergy-address-engine = { version = "=2.0.0", path = "../../../../21-Aegis-Engine/synergy-address-engine" }

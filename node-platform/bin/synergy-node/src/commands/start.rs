@@ -323,8 +323,6 @@ pub fn start_with_services(
     mut registrations: Vec<ServiceRegistration>,
 ) -> Result<StartedNode, StartError> {
     let configuration = load(config_path).map_err(StartError::Configuration)?;
-    let verified_genesis_hash =
-        super::selected_network::verify(&configuration).map_err(StartError::AuthorityTransition)?;
     if configuration.apqe_transport.is_some() {
         crate::services::apqe_transport::verify_runtime(&configuration)
             .map_err(StartError::AuthorityTransition)?;
@@ -334,6 +332,8 @@ pub fn start_with_services(
             .require_native_post_quantum_transport()
             .map_err(|error| StartError::AuthorityTransition(error.to_string()))?;
     }
+    let verified_genesis_hash =
+        super::selected_network::verify(&configuration).map_err(StartError::AuthorityTransition)?;
     #[cfg(feature = "qualification-timing")]
     let qualification_timing =
         crate::services::qualification_timing::from_environment(&configuration, config_path)

@@ -23,6 +23,8 @@ pub(crate) mod preparation;
 pub(crate) mod processing_pipeline;
 pub(crate) mod processing_proposals;
 pub(crate) mod processing_store;
+mod protected_accounts;
+mod protected_action_wire;
 pub mod protected_admission;
 pub mod rpc;
 pub mod sentry;

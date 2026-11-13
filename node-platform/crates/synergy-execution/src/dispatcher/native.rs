@@ -46,6 +46,7 @@ pub enum NativeDispatchError {
     ZeroValueTransfer,
     WrongNetwork,
     InvalidContext,
+    AccountNotEnrolled,
 }
 
 #[derive(Debug)]
@@ -110,6 +111,11 @@ impl TransactionExecutor for NativeTransferDispatcher {
         if transaction.unsigned.amount_nwei == 0 {
             return Err(NativeDispatchError::ZeroValueTransfer);
         }
+        // The legacy transfer path cannot authenticate a protected account
+        // registration. Do not credit synw until the governed registry is live.
+        if transaction.unsigned.receiver.starts_with("synw") {
+            return Err(NativeDispatchError::AccountNotEnrolled);
+        }
 
         Ok(TransactionDispatch {
             state_diff: StateDiff {
@@ -138,6 +144,9 @@ impl TransactionExecutor for NativeTransferDispatcher {
 
 impl std::fmt::Display for NativeDispatchError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if matches!(self, Self::AccountNotEnrolled) {
+            return formatter.write_str("ACCOUNT_NOT_ENROLLED");
+        }
         write!(formatter, "{self:?}")
     }
 }
@@ -156,3 +165,50 @@ impl<E: std::fmt::Display> std::fmt::Display for CanonicalNativeDispatchError<E>
 }
 
 impl<E: std::fmt::Display + std::fmt::Debug> std::error::Error for CanonicalNativeDispatchError<E> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use synergy_transaction::{FeeLimit, NetworkBinding, TransactionClass, UnsignedTransaction};
+
+    #[test]
+    fn legacy_transfer_cannot_credit_an_unregistered_protected_recipient() {
+        let network = NetworkBinding::new(99999, "candidate").unwrap();
+        let mut transaction = SignedTransaction {
+            unsigned: UnsignedTransaction {
+                network: network.clone(),
+                class: TransactionClass::User,
+                sender: "ordinary-sender".into(),
+                receiver: "synw52908400098527886E0F7030069857D2E4169EE7".into(),
+                amount_nwei: 1,
+                nonce: 0,
+                fee_limit: FeeLimit {
+                    gas_limit: NATIVE_TRANSFER_GAS,
+                    max_fee_per_gas_nwei: 40,
+                },
+                timestamp_unix: 1,
+                payload: vec![],
+            },
+            signer_public_key: vec![],
+            signature: vec![],
+            signature_algorithm: "ML-DSA-87".into(),
+            identity_authorization: None,
+        };
+        let context = TransactionExecutionContext {
+            network: &network,
+            block_height: 1,
+            transaction_index: 0,
+        };
+        let world = WorldState::default();
+        assert_eq!(
+            NativeTransferDispatcher
+                .execute(&transaction, &TransactionAction::Transfer, context, &world)
+                .unwrap_err(),
+            NativeDispatchError::AccountNotEnrolled
+        );
+        transaction.unsigned.receiver = "ordinary-recipient".into();
+        assert!(NativeTransferDispatcher
+            .execute(&transaction, &TransactionAction::Transfer, context, &world)
+            .is_ok());
+    }
+}

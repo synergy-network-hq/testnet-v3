@@ -40,11 +40,25 @@ fn production_start_registration_and_both_socket_directions_are_guarded() {
     for entry in ["pub fn registration(", "fn start(&mut self, cancellation:"] {
         guarded(network, entry, "require_native_session_profile()");
     }
-    guarded(
-        include_str!("../../../bin/synergy-node/src/commands/start.rs"),
-        "pub fn start_with_services(",
-        "require_native_post_quantum_transport()",
-    );
+    let startup = include_str!("../../../bin/synergy-node/src/commands/start.rs")
+        .split_once("pub fn start_with_services(")
+        .unwrap()
+        .1
+        .split_once("#[cfg(feature = \"qualification-timing\")]")
+        .unwrap()
+        .0;
+    let secure = startup
+        .find("apqe_transport::verify_runtime(&configuration)")
+        .unwrap();
+    let fallback = startup.find("#[cfg(not(test))]").unwrap();
+    let enforced = startup
+        .find("require_native_post_quantum_transport()")
+        .unwrap();
+    let identity = startup
+        .find("selected_network::verify(&configuration)")
+        .unwrap();
+    assert!(startup.contains("if configuration.apqe_transport.is_some()"));
+    assert!(secure < fallback && fallback < enforced && enforced < identity);
     let challenge = session
         .split_once("fn challenge()")
         .unwrap()

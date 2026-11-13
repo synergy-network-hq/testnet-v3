@@ -1,0 +1,43 @@
+; Unratified candidate. RFC 8949 section 4.2.1, exact keys, no extensions.
+; .size on uint is the maximum integer width, not a preferred wire width.
+native-intent = {
+  0: 1, 1: bytes32, 2: account-id, 3: u64, 4: u64, 5: action-id,
+  6: bstr, 7: u64, 8: bytes32, 9: u64, 10: bytes32
+}
+action-id = 28673..28682
+u64 = uint .size 8
+bytes32 = bstr .size 32
+digest64 = bstr .size 64
+account-id = bstr .size 20
+role-id = 0..2
+role-proof = [1, 1, u64, role-id, bytes32, digest64, bstr .size 4627]
+dp-proofs = [role-proof, role-proof] ; roles D, P in that order
+commit = {0: 1, 1: bytes32}
+reveal = {0: 1, 1: bstr .size (1..24576), 2: bytes32}
+transfer = {0: 1, 1: account-id, 2: bytes32}
+policy-schedule = {
+  0: 1, 1: 0..1, 2: bytes32, 3: bstr .size (1..10240),
+  4: bytes32, 5: 1, 6: u64
+}
+recovery-schedule = {
+  0: 1, 1: 0..1, 2: bytes32, 3: bstr .size (1..10240),
+  4: bytes32, 5: 1, 6: u64, 7: bytes32
+}
+pending-ref = {0: 1, 1: bytes32} ; cancel, veto, deterministic activation
+; Sponsor intent: v1, Genesis, sponsor canonical syna bytes, nonce,
+; action ID, exact payload SHA3-256, total fee cap, expiry height.
+sponsor-intent = {
+  0: 1, 1: bytes32, 2: tstr, 3: u64, 4: (28673 / 28674),
+  5: bytes32, 6: bytes32, 7: u64
+}
+; Detected via distinct activated encrypted content profile, never legacy tags.
+; Same ordinal identifies payload codec and proof mode; mismatch is invalid.
+enroll-commit-content = [28673, bstr, bstr, bstr]
+enroll-reveal-content = [
+  28674, bstr, bstr, bstr, dp-proofs, role-proof, bstr .size 65, bytes32
+]
+protected-native-content = [
+  (28675 / 28676 / 28677 / 28679 / 28680 / 28681), bstr,
+  [1*2 role-proof], role-proof / null
+]
+; No submitted activation content. The scheduler supplies the pending-ref only.

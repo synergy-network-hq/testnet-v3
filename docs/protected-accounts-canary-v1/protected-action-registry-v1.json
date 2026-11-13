@@ -1,0 +1,67 @@
+{
+  "profile": "protected_unified_v1",
+  "status": "UNRATIFIED_DISABLED",
+  "namespace": "APQE NativeIntentBody.action_type u16",
+  "actions": [
+    {
+      "id": 28673,
+      "name": "ACCOUNT_ENROLL_COMMIT",
+      "version": 1,
+      "authorization": "SPONSOR"
+    },
+    {
+      "id": 28674,
+      "name": "ACCOUNT_ENROLL_REVEAL",
+      "version": 1,
+      "authorization": "D+P enrollment + R possession + ownership + DKG + SPONSOR"
+    },
+    {
+      "id": 28675,
+      "name": "PROTECTED_TRANSFER",
+      "version": 1,
+      "authorization": "D+P"
+    },
+    {
+      "id": 28676,
+      "name": "POLICY_CHANGE_SCHEDULE",
+      "version": 1,
+      "authorization": "D+P + new-key PoP"
+    },
+    {
+      "id": 28677,
+      "name": "POLICY_CHANGE_CANCEL",
+      "version": 1,
+      "authorization": "D+P"
+    },
+    {
+      "id": 28678,
+      "name": "POLICY_CHANGE_ACTIVATE",
+      "version": 1,
+      "authorization": "SYSTEM"
+    },
+    {
+      "id": 28679,
+      "name": "RECOVERY_SCHEDULE",
+      "version": 1,
+      "authorization": "R + survivor + new-key PoP + continuity"
+    },
+    {
+      "id": 28680,
+      "name": "RECOVERY_VETO",
+      "version": 1,
+      "authorization": "replaced role"
+    },
+    {
+      "id": 28681,
+      "name": "RECOVERY_CANCEL",
+      "version": 1,
+      "authorization": "D+P"
+    },
+    {
+      "id": 28682,
+      "name": "RECOVERY_ACTIVATE",
+      "version": 1,
+      "authorization": "SYSTEM"
+    }
+  ]
+}

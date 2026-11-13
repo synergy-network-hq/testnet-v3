@@ -41,6 +41,9 @@ pub fn verify_with_admission<V: AegisTransactionVerifier>(
     context: TransactionAdmissionContext<'_>,
 ) -> Result<(), TransactionError> {
     transaction.validate_structure()?;
+    if transaction.unsigned.sender.starts_with("synw") {
+        return Err(TransactionError::InvalidSignature);
+    }
     if transaction.signature_algorithm != "ML-DSA-87"
         && transaction.signature_algorithm != "ml_dsa_87"
     {
@@ -91,14 +94,89 @@ pub fn verify_with_admission<V: AegisTransactionVerifier>(
 mod tests {
     use super::*;
     use crate::{FeeLimit, NetworkBinding, TransactionClass, UnsignedTransaction};
-    use aegis_pqvm::pqc::signatures::{fndsa::fndsa1024, mldsa::mldsa87};
-    use pqrust_traits::sign::{DetachedSignature as _, PublicKey as _};
     use sha3::{Digest, Sha3_256};
+    use std::{path::PathBuf, sync::Mutex};
+    use synergy_address_engine::{
+        apqe::{
+            crypto_engine::CryptoEngine,
+            provider::{
+                variants::{Fndsa1024, Mldsa87},
+                PqProvider, Profile, SignOptions,
+            },
+        },
+        types::Algorithm,
+    };
     use synergy_identity::authorization::*;
 
-    struct RealAccountVerifier;
+    struct RealAccountVerifier(Mutex<CryptoEngine>);
+    impl RealAccountVerifier {
+        fn pinned_validation() -> Self {
+            let pin = |variant: &str| {
+                let path = PathBuf::from(
+                    std::env::var_os(format!("CORE_APQE_{variant}_LIBRARY")).unwrap(),
+                );
+                let sha =
+                    hex::decode(std::env::var(format!("CORE_APQE_{variant}_SHA256")).unwrap())
+                        .unwrap()
+                        .try_into()
+                        .unwrap();
+                (path, sha)
+            };
+            let (fn_path, fn_sha) = pin("FNDSA1024");
+            let (ml_path, ml_sha) = pin("MLDSA87");
+            // The engineering test operator supplies immutable local artifacts
+            // and their hashes from an independently selected build report.
+            let engine = unsafe {
+                CryptoEngine::new()
+                    .with_fndsa1024(
+                        PqProvider::<Fndsa1024>::open_verified(
+                            fn_path,
+                            fn_sha,
+                            Profile::Validation,
+                        )
+                        .unwrap(),
+                    )
+                    .with_mldsa87(
+                        PqProvider::<Mldsa87>::open_verified(ml_path, ml_sha, Profile::Validation)
+                            .unwrap(),
+                    )
+            };
+            Self(Mutex::new(engine))
+        }
+    }
+
+    impl AuthorizationSignatureVerifier for RealAccountVerifier {
+        fn verify(
+            &self,
+            algorithm: &str,
+            public: &[u8],
+            message: &[u8],
+            signature: &[u8],
+        ) -> Result<(), String> {
+            let selected = match algorithm {
+                "FN-DSA-1024" => Algorithm::FnDsa1024,
+                "ML-DSA-87" => Algorithm::MlDsa87,
+                _ => return Err("unsupported authorization proof in fixture".into()),
+            };
+            match self.0.lock().unwrap().verify(
+                selected,
+                public,
+                message,
+                signature,
+                SignOptions::default(),
+            ) {
+                Ok(true) => Ok(()),
+                Ok(false) => Err("invalid authorization proof".into()),
+                Err(error) => Err(error.to_string()),
+            }
+        }
+    }
+
     impl AegisTransactionVerifier for RealAccountVerifier {
         type Error = String;
+        fn authorization_verifier(&self) -> Option<&dyn AuthorizationSignatureVerifier> {
+            Some(self)
+        }
         fn verify_transaction(
             &self,
             message: &[u8],
@@ -109,29 +187,58 @@ mod tests {
             if algorithm != "ML-DSA-87" {
                 return Ok(false);
             }
-            let key = mldsa87::PublicKey::from_bytes(key).map_err(|_| "invalid account key")?;
-            let signature = mldsa87::DetachedSignature::from_bytes(signature)
-                .map_err(|_| "invalid account signature")?;
-            Ok(mldsa87::verify_detached_signature(&signature, message, &key).is_ok())
+            self.0
+                .lock()
+                .unwrap()
+                .verify(
+                    Algorithm::MlDsa87,
+                    key,
+                    message,
+                    signature,
+                    SignOptions::default(),
+                )
+                .map_err(|error| error.to_string())
         }
     }
 
     fn sha3(bytes: &[u8]) -> String {
         hex::encode(Sha3_256::digest(bytes))
     }
-    fn signed_transaction() -> (SignedTransaction, IdentityAuthorizationBindingCommitment) {
-        let (root, root_secret) = fndsa1024::keypair();
-        let (key, secret) = mldsa87::keypair();
+    fn signed_transaction(
+        verifier: &RealAccountVerifier,
+    ) -> (SignedTransaction, IdentityAuthorizationBindingCommitment) {
+        let (root, key) = {
+            let engine = verifier.0.lock().unwrap();
+            (
+                engine.generate_keypair(Algorithm::FnDsa1024).unwrap(),
+                engine.generate_keypair(Algorithm::MlDsa87).unwrap(),
+            )
+        };
+        let sign = |algorithm,
+                    key: &synergy_address_engine::apqe::crypto_engine::EncodedKeyPair,
+                    message: &[u8]| {
+            verifier
+                .0
+                .lock()
+                .unwrap()
+                .sign(
+                    algorithm,
+                    key.private_key.as_bytes(),
+                    message,
+                    SignOptions::default(),
+                )
+                .unwrap()
+        };
         let sender =
-            synergy_address::derive_key_controlled_address("syna", root.as_bytes()).unwrap();
-        let key_hash = sha3(key.as_bytes());
+            synergy_address::derive_key_controlled_address("syna", &root.public_key).unwrap();
+        let key_hash = sha3(&key.public_key);
         let mut binding: IdentityAuthorizationBinding = serde_json::from_value(serde_json::json!({
             "schema_version":AUTH_BINDING_SCHEMA_VERSION,"binary_encoding":AUTH_BINDING_BINARY_ENCODING,
             "identity_id":"account", "identity_address":sender,
-            "identity_root":{"algorithm":"FN-DSA-1024","public_key":hex::encode(root.as_bytes()),"public_key_sha3_256":sha3(root.as_bytes())},
+            "identity_root":{"algorithm":"FN-DSA-1024","public_key":hex::encode(&root.public_key),"public_key_sha3_256":sha3(&root.public_key)},
             "authorization_policy":{"policy_type":"single-key","threshold":1,"principals":[{
                 "principal_id":"account","principal_type":"public-key","algorithm":"ML-DSA-87",
-                "public_key":hex::encode(key.as_bytes()),"public_key_sha3_256":key_hash,"status":"active","purposes":["transaction-signing"]}]},
+                "public_key":hex::encode(&key.public_key),"public_key_sha3_256":key_hash,"status":"active","purposes":["transaction-signing"]}]},
             "authorization_scopes":[{"signature_domain":AEGIS_TRANSACTION_AUTHORIZATION_DOMAIN,
                 "chain_id":1266,"network_id":"testnet","purpose":"transaction-signing"}],
             "current_auth_key_hash":key_hash,"auth_key_history":[],"supersession_history":[],
@@ -143,14 +250,19 @@ mod tests {
         let mut proof_message = AUTH_BINDING_SIGNATURE_DOMAIN.to_vec();
         proof_message.extend_from_slice(&payload);
         binding.proofs.identity_root.signature =
-            hex::encode(fndsa1024::detached_sign(&proof_message, &root_secret).as_bytes());
+            hex::encode(sign(Algorithm::FnDsa1024, &root, &proof_message));
         binding.proofs.authorization_key_possession = vec![AuthorizationKeyPossessionProof {
             principal_id: "account".into(),
             algorithm: "ML-DSA-87".into(),
-            signature: hex::encode(mldsa87::detached_sign(&proof_message, &secret).as_bytes()),
+            signature: hex::encode(sign(Algorithm::MlDsa87, &key, &proof_message)),
         }];
         let commitment =
-            IdentityAuthorizationBindingCommitment::from_verified_binding(&binding, 10).unwrap();
+            IdentityAuthorizationBindingCommitment::from_verified_binding_with_verifier(
+                &binding,
+                10,
+                Some(verifier),
+            )
+            .unwrap();
         let unsigned = UnsignedTransaction {
             network: NetworkBinding::new(1266, "testnet").unwrap(),
             class: TransactionClass::User,
@@ -165,13 +277,11 @@ mod tests {
             timestamp_unix: 999999,
             payload: vec![],
         };
-        let signature = mldsa87::detached_sign(&unsigned.signing_bytes().unwrap(), &secret)
-            .as_bytes()
-            .to_vec();
+        let signature = sign(Algorithm::MlDsa87, &key, &unsigned.signing_bytes().unwrap());
         (
             SignedTransaction {
                 unsigned,
-                signer_public_key: key.as_bytes().to_vec(),
+                signer_public_key: key.public_key,
                 signature,
                 signature_algorithm: "ML-DSA-87".into(),
                 identity_authorization: Some(IdentityAuthorizationCarrier {
@@ -185,9 +295,10 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires explicitly pinned native FN-DSA-1024 and ML-DSA-87 validation artifacts"]
     fn real_account_signatures_need_current_dual_binding_and_external_consensus_time() {
-        let (transaction, commitment) = signed_transaction();
-        let verifier = RealAccountVerifier;
+        let verifier = RealAccountVerifier::pinned_validation();
+        let (transaction, commitment) = signed_transaction(&verifier);
         let admit =
             |tx: &SignedTransaction, binding: &IdentityAuthorizationBindingCommitment, time| {
                 verify_with_admission(
@@ -200,6 +311,14 @@ mod tests {
                 )
             };
         assert!(admit(&transaction, &commitment, 10).is_ok());
+        // The exact canonical synw address grants no legacy carrier authority.
+        let mut protected_sender = transaction.clone();
+        protected_sender.unsigned.sender = "synw52908400098527886E0F7030069857D2E4169EE7".into();
+        assert!(protected_sender.validate_structure().is_ok());
+        assert!(matches!(
+            admit(&protected_sender, &commitment, 10),
+            Err(TransactionError::InvalidSignature)
+        ));
         assert!(verify(&transaction, &verifier).is_err());
         // Envelope time is far in the future; it still cannot activate the binding.
         assert!(admit(&transaction, &commitment, 9).is_err());

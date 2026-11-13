@@ -1183,6 +1183,9 @@ pub fn resolve_transaction_binding_with_verifier(
     consensus_timestamp_unix: u64,
     verifier: Option<&dyn AuthorizationSignatureVerifier>,
 ) -> Result<IdentityAuthorizationBindingCommitment, String> {
+    if sender.starts_with("synw") {
+        return Err("protected wallet requires a registered D/P policy; legacy carrier is ineligible".into());
+    }
     let binding = match canonical_binding_commitment_if_present(protocol, sender)? {
         Some(binding) => binding,
         None => IdentityAuthorizationBindingCommitment::from_verified_binding_with_verifier(
