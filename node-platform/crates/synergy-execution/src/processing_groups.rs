@@ -132,6 +132,43 @@ fn metadata(
     Ok(meta)
 }
 
+/// Unactivated engineering proposal. Validate the original scope and all
+/// counters before constructing a compare-and-swap of empty metadata only.
+#[cfg(any(test, feature = "engineering-processing-epoch-rollover"))]
+pub(crate) fn propose_empty_epoch_metadata(
+    parent: &WorldState,
+    previous: &EtdagDigest,
+    next: &EtdagDigest,
+) -> Result<ProtocolChange, ProcessingRegistryError> {
+    let old = metadata(parent, previous)?;
+    if old.groups != 0
+        || old.claims != 0
+        || parent
+            .protocol
+            .range::<str, _>((
+                Bound::Included("etdag-processing-groups-v1/"),
+                Bound::Unbounded,
+            ))
+            .take_while(|(key, _)| key.starts_with("etdag-processing-groups-v1/"))
+            .any(|(key, _)| key != META)
+    {
+        return Err(invalid(
+            "epoch proposal cannot retire outstanding processing groups/claims",
+        ));
+    }
+    Ok(ProtocolChange {
+        key: META.into(),
+        expected_value: parent.protocol.get(META).cloned(),
+        value: Some(encode(&Metadata {
+            namespace_root: next.clone(),
+            last_number: 0,
+            last_root: processing_genesis_group_root(next)?,
+            groups: 0,
+            claims: 0,
+        })?),
+    })
+}
+
 /// Caller retains its native proof/decoder reservation. This read grants no
 /// authority until the exact parent candidate has been PoSy-authenticated.
 pub fn processing_group_state(

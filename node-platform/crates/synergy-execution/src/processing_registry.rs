@@ -120,6 +120,42 @@ struct RegistryMetadata {
     count: usize,
 }
 
+#[cfg(any(test, feature = "engineering-processing-epoch-rollover"))]
+pub(crate) fn propose_empty_epoch_metadata(
+    parent: &WorldState,
+    previous: &EtdagDigest,
+    next: &EtdagDigest,
+    budget: &Arc<WorldResourceBudget>,
+) -> Result<ProtocolChange, ProcessingRegistryError> {
+    let registry = ParentProcessingRegistry::read(parent, previous, budget)?;
+    if !registry.records().is_empty()
+        || parent
+            .protocol
+            .range::<str, _>((
+                Bound::Included("etdag-processing-ready-v1/"),
+                Bound::Unbounded,
+            ))
+            .take_while(|(key, _)| key.starts_with("etdag-processing-ready-v1/"))
+            .any(|(key, _)| key != META_KEY)
+    {
+        return Err(ProcessingRegistryError::Corrupt(
+            "epoch proposal cannot retire outstanding processing-ready entries".into(),
+        ));
+    }
+    Ok(ProtocolChange {
+        key: META_KEY.into(),
+        expected_value: parent.protocol.get(META_KEY).cloned(),
+        value: Some(
+            serde_json::to_vec(&RegistryMetadata {
+                namespace_root: next.clone(),
+                generation: 0,
+                count: 0,
+            })
+            .map_err(|e| ProcessingRegistryError::Corrupt(e.to_string()))?,
+        ),
+    })
+}
+
 #[derive(Debug)]
 pub enum ProcessingRegistryError {
     Resource(WorldResourceError),

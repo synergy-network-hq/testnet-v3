@@ -11,6 +11,8 @@ mod executor;
 mod fees;
 mod processing_candidate;
 mod processing_groups;
+#[cfg(any(test, feature = "engineering-processing-epoch-rollover"))]
+mod processing_epoch;
 mod processing_registry;
 mod receipts;
 mod rollback;
@@ -46,6 +48,8 @@ pub use processing_groups::{
     processing_member_claim_optional, processing_order_tip, verify_processing_record_assignment,
     ProcessingGroupState, ProcessingGroupTransition, ProcessingMemberClaim,
 };
+#[cfg(feature = "engineering-processing-epoch-rollover")]
+pub use processing_epoch::{propose_empty_processing_epoch_transition, ProcessingEpochTransition};
 pub use processing_registry::{
     ParentProcessingRegistry, ParentProcessingSelection, ProcessingReadinessVerifier,
     ProcessingReadyRecord, ProcessingRegistryError, ProcessingRegistryTransition,
