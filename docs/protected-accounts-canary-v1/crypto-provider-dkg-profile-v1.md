@@ -1,6 +1,6 @@
 # Protected Accounts Canary v1: cryptography and provider decision record
 
-Status: **engineering evidence and proposed rules; not ratified; activation disabled.** The [register](evidence/crypto-governance-register.tsv) distinguishes an extracted value, earlier engineering evidence, and a missing approval. A primitive implementation or passing test does not grant the corresponding consensus action.
+Status: **engineering evidence and proposed rules; not ratified; activation disabled.** The [consolidated register](decision-register-v1.tsv) distinguishes an extracted value, earlier engineering evidence, and a missing approval. A primitive implementation or passing test does not grant the corresponding consensus action.
 
 ## Governing technical sources
 

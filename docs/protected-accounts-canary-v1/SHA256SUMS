@@ -1,9 +1,9 @@
 fdfb80283ad9fc296ef341aa3f88c4e54606c6057a7c692376a0c619ca699508  ./CANARY_RATIFICATION_DECISION_MEMO.md
 875b8954516306321807345a0889e33630a6e4aa13f005fb0aed62437e9fa695  ./canary-genesis-activation-candidate-v1.md
-1f14bda6241c5adfa315528b46b71ef0623e45de3ca59a64b6c2b41096d55f51  ./crypto-provider-dkg-profile-v1.md
+08cfb2762fa046a1773bc658a74c9c55b987bb946ad4fc92d83db9754b597ebd  ./crypto-provider-dkg-profile-v1.md
 119a9e841659aa7023573af25854f108a023c84fb399724483ed760ce3f902cd  ./decision-register-v1.tsv
 49d2dfbb2d7e3795fe1b0307196ddfc6d847d56ff815f3077b1ac814baa36461  ./policy-recovery-state-machine-v1.md
-28a00c7506839967c7f25b514116623512c41ead5af4b9f5802807b44d798958  ./protected-accounts-canary-v1.md
+03154a260b99034087bcc2e2b5162e78bece30dfe3c7d7a8771f804f2ddd1d86  ./protected-accounts-canary-v1.md
 aee5e1e0cdc826fc00061d29696adfa291a878cd8689e8d247e49a2cef697bce  ./protected-action-registry-v1.json
 a80223355b314d20388c51beb6bb6b9b44d509b8d6282694fcf48bfac3dc3324  ./protected-actions-v1.cddl
 4dfd6d62c1745785362ff494ae39f637f6f244aa52df5e3da239b251f387372f  ./protected-conformance-v1/action-payloads.json
