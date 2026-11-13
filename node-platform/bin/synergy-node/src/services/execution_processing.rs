@@ -429,7 +429,7 @@ impl ExecutionService {
             Err(e) if candidate_resource_pressure(&e) => return Ok(false),
             Err(e) => return Err(e.to_string()),
         }
-        if !self.pin_processing_candidate(&candidate)? {
+        if !self.pin_processing_candidate(&owner.store, &candidate)? {
             return Ok(false);
         }
         if !historical {

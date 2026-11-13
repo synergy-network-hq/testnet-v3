@@ -1,6 +1,8 @@
 //! Sparse proof dependencies of the approved processing profile. These pins
 //! preserve native replay/retirement evidence; they confer no consensus power.
 use super::*;
+use crate::services::processing_proposals::ProcessingProposalStore;
+use std::sync::Mutex;
 
 // Reclaim only positively unreferenced, finalized dependencies before any new
 // source pin or retry can return resource backpressure. Otherwise a full index
@@ -64,6 +66,7 @@ fn release_obsolete_processing_pins(
 impl ExecutionService {
     pub(super) fn pin_processing_candidate(
         &mut self,
+        current_store: &Arc<Mutex<ProcessingProposalStore>>,
         candidate: &ExecutionCandidate,
     ) -> Result<bool, String> {
         let synergy_etdag::execution::CandidateProtectedMaterial::Processing(material) =
@@ -73,15 +76,10 @@ impl ExecutionService {
         };
         let mut required = Vec::new();
         if material.ordered_group.is_some() {
-            let store = Arc::clone(
-                &self
-                    .processing
-                    .as_ref()
-                    .ok_or("processing pin lacks native owner")?
-                    .store,
-            );
+            // The poll loop holds the owner while committing a QC. Resolve the
+            // parent from its current or authenticated prior-epoch journal.
             let authority = self.processing_authority_at(candidate.height)?;
-            let Some(parent) = self.processing_parent(&store, authority)? else {
+            let Some(parent) = self.processing_parent(current_store, authority)? else {
                 return Ok(false);
             };
             let (next, _, open) =
