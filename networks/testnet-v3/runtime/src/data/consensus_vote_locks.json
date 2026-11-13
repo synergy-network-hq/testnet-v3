@@ -1,0 +1,13 @@
+{
+  "0:1:test_validator": {
+    "validator_address": "test_validator",
+    "block_hash": "d3d77419a5d820c790565b583c72fd643f2aaaaa4349c16d8e125db9146ef943",
+    "block_index": 1,
+    "epoch_number": 0,
+    "first_round_number": 1,
+    "latest_round_number": 1,
+    "proposer": "test_validator",
+    "created_at": 1778846145,
+    "updated_at": 1778846145
+  }
+}

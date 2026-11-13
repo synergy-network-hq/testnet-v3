@@ -1,0 +1,355 @@
+// Post-Quantum Staking Contract
+// Complete staking system with PQC-secured rewards and withdrawals
+
+pragma synq ^1.0.0;
+
+contract PQCStaking {
+    // Staking token address
+    Address public stakingToken;
+    
+    // Reward token address (can be same as staking token)
+    Address public rewardToken;
+    
+    // Staking parameters
+    UInt256 public rewardRate; // Rewards per block
+    UInt256 public totalStaked;
+    UInt256 public lastUpdateBlock;
+    UInt256 public rewardPerTokenStored;
+    
+    // Staker information
+    struct Staker {
+        UInt256 stakedAmount;
+        UInt256 rewardDebt;
+        UInt256 lastStakeBlock;
+        UInt256 totalEarned;
+        Bool active;
+    }
+    
+    mapping(Address => Staker) public stakers;
+    Address[] public stakerList;
+    
+    // Lock periods
+    UInt256 public minLockPeriod; // Minimum blocks to lock
+    UInt256 public maxLockPeriod; // Maximum blocks to lock
+    mapping(Address => UInt256) public lockUntil; // Block number when stake unlocks
+    
+    // PQC withdrawal key
+    MLDSAPublicKey public withdrawalKey;
+    Bool public withdrawalsEnabled;
+    
+    // Events
+    event Staked(Address indexed staker, UInt256 amount, UInt256 lockUntil);
+    event Unstaked(Address indexed staker, UInt256 amount);
+    event RewardClaimed(Address indexed staker, UInt256 amount);
+    event RewardRateUpdated(UInt256 oldRate, UInt256 newRate);
+    event WithdrawalKeyUpdated(MLDSAPublicKey newKey);
+    
+    // Constructor
+    constructor(
+        Address _stakingToken,
+        Address _rewardToken,
+        UInt256 _rewardRate,
+        UInt256 _minLockPeriod,
+        UInt256 _maxLockPeriod,
+        MLDSAPublicKey _withdrawalKey
+    ) {
+        stakingToken = _stakingToken;
+        rewardToken = _rewardToken;
+        rewardRate = _rewardRate;
+        minLockPeriod = _minLockPeriod;
+        maxLockPeriod = _maxLockPeriod;
+        withdrawalKey = _withdrawalKey;
+        totalStaked = 0;
+        lastUpdateBlock = block.number;
+        rewardPerTokenStored = 0;
+        withdrawalsEnabled = true;
+    }
+    
+    // Update reward calculations
+    function updateReward() private {
+        if (totalStaked == 0) {
+            lastUpdateBlock = block.number;
+            return;
+        }
+        
+        UInt256 blocksSinceUpdate = block.number - lastUpdateBlock;
+        UInt256 newRewards = (blocksSinceUpdate * rewardRate * 1e18) / totalStaked;
+        rewardPerTokenStored = rewardPerTokenStored + newRewards;
+        lastUpdateBlock = block.number;
+    }
+    
+    // Calculate reward per token
+    function rewardPerToken() public -> UInt256 {
+        if (totalStaked == 0) {
+            return rewardPerTokenStored;
+        }
+        
+        UInt256 blocksSinceUpdate = block.number - lastUpdateBlock;
+        UInt256 newRewards = (blocksSinceUpdate * rewardRate * 1e18) / totalStaked;
+        return rewardPerTokenStored + newRewards;
+    }
+    
+    // Calculate earned rewards for staker
+    function earned(Address staker) public -> UInt256 {
+        Staker storage s = stakers[staker];
+        if (s.stakedAmount == 0) {
+            return 0;
+        }
+        
+        UInt256 currentRewardPerToken = rewardPerToken();
+        UInt256 reward = (s.stakedAmount * (currentRewardPerToken - s.rewardDebt)) / 1e18;
+        return reward;
+    }
+    
+    // Stake tokens
+    function stake(UInt256 amount, UInt256 lockPeriod) public {
+        require(amount > 0, "Amount must be positive");
+        require(lockPeriod >= minLockPeriod, "Lock period too short");
+        require(lockPeriod <= maxLockPeriod, "Lock period too long");
+        
+        updateReward();
+        
+        Staker storage s = stakers[msg.sender];
+        
+        // Claim pending rewards before staking more
+        if (s.stakedAmount > 0) {
+            UInt256 pendingReward = earned(msg.sender);
+            if (pendingReward > 0) {
+                s.totalEarned = s.totalEarned + pendingReward;
+                // Transfer reward (in real implementation)
+                // rewardToken.transfer(msg.sender, pendingReward);
+            }
+        }
+        
+        // Update staker info
+        if (!s.active) {
+            s.active = true;
+            stakerList.push(msg.sender);
+        }
+        
+        s.stakedAmount = s.stakedAmount + amount;
+        s.rewardDebt = (s.stakedAmount * rewardPerTokenStored) / 1e18;
+        s.lastStakeBlock = block.number;
+        
+        UInt256 newLockUntil = block.number + lockPeriod;
+        if (lockUntil[msg.sender] < newLockUntil) {
+            lockUntil[msg.sender] = newLockUntil;
+        }
+        
+        totalStaked = totalStaked + amount;
+        
+        // Transfer staking tokens (in real implementation)
+        // stakingToken.transferFrom(msg.sender, address(this), amount);
+        
+        emit Staked(msg.sender, amount, lockUntil[msg.sender]);
+    }
+    
+    // Unstake tokens
+    function unstake(UInt256 amount) public {
+        require(amount > 0, "Amount must be positive");
+        
+        Staker storage s = stakers[msg.sender];
+        require(s.stakedAmount >= amount, "Insufficient staked amount");
+        require(block.number >= lockUntil[msg.sender], "Stake still locked");
+        
+        updateReward();
+        
+        // Claim pending rewards
+        UInt256 pendingReward = earned(msg.sender);
+        if (pendingReward > 0) {
+            s.totalEarned = s.totalEarned + pendingReward;
+            // Transfer reward (in real implementation)
+            // rewardToken.transfer(msg.sender, pendingReward);
+            emit RewardClaimed(msg.sender, pendingReward);
+        }
+        
+        s.stakedAmount = s.stakedAmount - amount;
+        s.rewardDebt = (s.stakedAmount * rewardPerTokenStored) / 1e18;
+        
+        totalStaked = totalStaked - amount;
+        
+        // If fully unstaked, mark as inactive
+        if (s.stakedAmount == 0) {
+            s.active = false;
+        }
+        
+        // Transfer staking tokens back (in real implementation)
+        // stakingToken.transfer(msg.sender, amount);
+        
+        emit Unstaked(msg.sender, amount);
+    }
+    
+    // Claim rewards
+    function claimRewards() public {
+        Staker storage s = stakers[msg.sender];
+        require(s.stakedAmount > 0, "No staked amount");
+        
+        updateReward();
+        
+        UInt256 pendingReward = earned(msg.sender);
+        require(pendingReward > 0, "No rewards to claim");
+        
+        s.totalEarned = s.totalEarned + pendingReward;
+        s.rewardDebt = (s.stakedAmount * rewardPerTokenStored) / 1e18;
+        
+        // Transfer reward (in real implementation)
+        // rewardToken.transfer(msg.sender, pendingReward);
+        
+        emit RewardClaimed(msg.sender, pendingReward);
+    }
+    
+    // Emergency withdrawal with PQC signature (if withdrawals disabled)
+    @gas_cost(base: 100000, dilithium_verify: 35000)
+    function emergencyWithdraw(
+        UInt256 amount,
+        Bytes messageToSign,
+        MLDSASignature signature
+    ) public {
+        require(!withdrawalsEnabled, "Normal withdrawals enabled");
+        
+        Staker storage s = stakers[msg.sender];
+        require(s.stakedAmount >= amount, "Insufficient staked amount");
+        
+        // Verify PQC signature
+        require_pqc {
+            let isValid = verifyMLDSASignature(
+                withdrawalKey,
+                messageToSign,
+                signature
+            );
+            require(isValid, "Invalid withdrawal signature");
+        } or revert("PQC verification failed");
+        
+        s.stakedAmount = s.stakedAmount - amount;
+        totalStaked = totalStaked - amount;
+        
+        if (s.stakedAmount == 0) {
+            s.active = false;
+        }
+        
+        // Transfer staking tokens back (in real implementation)
+        // stakingToken.transfer(msg.sender, amount);
+        
+        emit Unstaked(msg.sender, amount);
+    }
+    
+    // Update reward rate (requires withdrawal key)
+    @gas_cost(base: 75000, dilithium_verify: 35000)
+    function updateRewardRate(
+        UInt256 newRate,
+        Bytes messageToSign,
+        MLDSASignature signature
+    ) public {
+        require_pqc {
+            let isValid = verifyMLDSASignature(
+                withdrawalKey,
+                messageToSign,
+                signature
+            );
+            require(isValid, "Invalid signature");
+        } or revert("PQC verification failed");
+        
+        updateReward();
+        
+        UInt256 oldRate = rewardRate;
+        rewardRate = newRate;
+        
+        emit RewardRateUpdated(oldRate, newRate);
+    }
+    
+    // Update withdrawal key
+    @gas_cost(base: 100000, dilithium_verify: 35000)
+    function updateWithdrawalKey(
+        MLDSAPublicKey newKey,
+        Bytes messageToSign,
+        MLDSASignature signature
+    ) public {
+        require_pqc {
+            let isValid = verifyMLDSASignature(
+                withdrawalKey,
+                messageToSign,
+                signature
+            );
+            require(isValid, "Invalid signature");
+        } or revert("PQC verification failed");
+        
+        withdrawalKey = newKey;
+        emit WithdrawalKeyUpdated(newKey);
+    }
+    
+    // Enable/disable withdrawals
+    @gas_cost(base: 50000, dilithium_verify: 35000)
+    function setWithdrawalsEnabled(
+        Bool enabled,
+        Bytes messageToSign,
+        MLDSASignature signature
+    ) public {
+        require_pqc {
+            let isValid = verifyMLDSASignature(
+                withdrawalKey,
+                messageToSign,
+                signature
+            );
+            require(isValid, "Invalid signature");
+        } or revert("PQC verification failed");
+        
+        withdrawalsEnabled = enabled;
+    }
+    
+    // Get staker information
+    function getStakerInfo(Address staker) public -> (
+        UInt256,
+        UInt256,
+        UInt256,
+        UInt256,
+        UInt256,
+        Bool
+    ) {
+        Staker storage s = stakers[staker];
+        return (
+            s.stakedAmount,
+            earned(staker),
+            s.totalEarned,
+            s.lastStakeBlock,
+            lockUntil[staker],
+            s.active
+        );
+    }
+    
+    // Get total stakers
+    function getStakerCount() public -> UInt256 {
+        return stakerList.length;
+    }
+    
+    // Check if stake is locked
+    function isLocked(Address staker) public -> Bool {
+        return block.number < lockUntil[staker];
+    }
+    
+    // Get time until unlock
+    function timeUntilUnlock(Address staker) public -> UInt256 {
+        if (block.number >= lockUntil[staker]) {
+            return 0;
+        }
+        return lockUntil[staker] - block.number;
+    }
+    
+    // Compound rewards (re-stake earned rewards)
+    function compound() public {
+        Staker storage s = stakers[msg.sender];
+        require(s.stakedAmount > 0, "No staked amount");
+        
+        updateReward();
+        
+        UInt256 pendingReward = earned(msg.sender);
+        require(pendingReward > 0, "No rewards to compound");
+        
+        s.totalEarned = s.totalEarned + pendingReward;
+        s.rewardDebt = ((s.stakedAmount + pendingReward) * rewardPerTokenStored) / 1e18;
+        
+        s.stakedAmount = s.stakedAmount + pendingReward;
+        totalStaked = totalStaked + pendingReward;
+        
+        emit Staked(msg.sender, pendingReward, lockUntil[msg.sender]);
+    }
+}

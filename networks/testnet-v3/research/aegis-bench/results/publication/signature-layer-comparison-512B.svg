@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="650" viewBox="0 0 1200 650">
+<rect width="100%" height="100%" fill="white"/>
+<g font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" fill="#1d2733">
+<text x="600.0" y="35.0" font-size="18" text-anchor="middle">Signature cost by implementation layer, 512-byte payload</text>
+<line x1="110" y1="460.0" x2="1165" y2="460.0" stroke="#d9e0e6" stroke-width="1"/>
+<text x="98.0" y="464.0" font-size="11" text-anchor="end">10^1</text>
+<line x1="110" y1="362.5" x2="1165" y2="362.5" stroke="#d9e0e6" stroke-width="1"/>
+<text x="98.0" y="366.5" font-size="11" text-anchor="end">10^2</text>
+<line x1="110" y1="265.0" x2="1165" y2="265.0" stroke="#d9e0e6" stroke-width="1"/>
+<text x="98.0" y="269.0" font-size="11" text-anchor="end">10^3</text>
+<line x1="110" y1="167.5" x2="1165" y2="167.5" stroke="#d9e0e6" stroke-width="1"/>
+<text x="98.0" y="171.5" font-size="11" text-anchor="end">10^4</text>
+<line x1="110" y1="70.0" x2="1165" y2="70.0" stroke="#d9e0e6" stroke-width="1"/>
+<text x="98.0" y="74.0" font-size="11" text-anchor="end">10^5</text>
+<rect x="118.2" y="317.6" width="42.2" height="142.4" fill="#C06C84"/>
+<text x="139.3" y="478.0" font-size="9" text-anchor="end" transform="rotate(-38 139.3 478.0)">ML-DSA-65 / Aegis sign_domain</text>
+<rect x="176.8" y="352.7" width="42.2" height="107.3" fill="#C06C84"/>
+<text x="197.9" y="478.0" font-size="9" text-anchor="end" transform="rotate(-38 197.9 478.0)">ML-DSA-65 / Aegis verify_cache_miss</text>
+<rect x="235.4" y="307.9" width="42.2" height="152.1" fill="#C06C84"/>
+<text x="256.5" y="478.0" font-size="9" text-anchor="end" transform="rotate(-38 256.5 478.0)">ML-DSA-87 / Aegis sign_domain</text>
+<rect x="294.0" y="335.4" width="42.2" height="124.6" fill="#C06C84"/>
+<text x="315.1" y="478.0" font-size="9" text-anchor="end" transform="rotate(-38 315.1 478.0)">ML-DSA-87 / Aegis verify_cache_miss</text>
+<rect x="352.7" y="188.7" width="42.2" height="271.3" fill="#355C7D"/>
+<text x="373.8" y="478.0" font-size="9" text-anchor="end" transform="rotate(-38 373.8 478.0)">FN-DSA-1024 / manager sign</text>
+<rect x="411.3" y="390.4" width="42.2" height="69.6" fill="#355C7D"/>
+<text x="432.4" y="478.0" font-size="9" text-anchor="end" transform="rotate(-38 432.4 478.0)">FN-DSA-1024 / manager verify_valid</text>
+<rect x="469.9" y="319.3" width="42.2" height="140.7" fill="#355C7D"/>
+<text x="491.0" y="478.0" font-size="9" text-anchor="end" transform="rotate(-38 491.0 478.0)">ML-DSA-65 / manager sign</text>
+<rect x="528.5" y="365.2" width="42.2" height="94.8" fill="#355C7D"/>
+<text x="549.6" y="478.0" font-size="9" text-anchor="end" transform="rotate(-38 549.6 478.0)">ML-DSA-65 / manager verify_valid</text>
+<rect x="587.1" y="308.2" width="42.2" height="151.8" fill="#355C7D"/>
+<text x="608.2" y="478.0" font-size="9" text-anchor="end" transform="rotate(-38 608.2 478.0)">ML-DSA-87 / manager sign</text>
+<rect x="645.7" y="344.0" width="42.2" height="116.0" fill="#355C7D"/>
+<text x="666.8" y="478.0" font-size="9" text-anchor="end" transform="rotate(-38 666.8 478.0)">ML-DSA-87 / manager verify_valid</text>
+<rect x="704.3" y="130.3" width="42.2" height="329.7" fill="#355C7D"/>
+<text x="725.4" y="478.0" font-size="9" text-anchor="end" transform="rotate(-38 725.4 478.0)">SLH-DSA-SHAKE-128f-simple / manager sign</text>
+<rect x="762.9" y="249.0" width="42.2" height="211.0" fill="#355C7D"/>
+<text x="784.0" y="478.0" font-size="9" text-anchor="end" transform="rotate(-38 784.0 478.0)">SLH-DSA-SHAKE-128f-simple / manager verify_valid</text>
+<rect x="821.5" y="188.8" width="42.2" height="271.2" fill="#2A9D8F"/>
+<text x="842.6" y="478.0" font-size="9" text-anchor="end" transform="rotate(-38 842.6 478.0)">FN-DSA-1024 / direct sign</text>
+<rect x="880.1" y="390.3" width="42.2" height="69.7" fill="#2A9D8F"/>
+<text x="901.2" y="478.0" font-size="9" text-anchor="end" transform="rotate(-38 901.2 478.0)">FN-DSA-1024 / direct verify_valid</text>
+<rect x="938.8" y="317.5" width="42.2" height="142.5" fill="#2A9D8F"/>
+<text x="959.9" y="478.0" font-size="9" text-anchor="end" transform="rotate(-38 959.9 478.0)">ML-DSA-65 / direct sign</text>
+<rect x="997.4" y="365.4" width="42.2" height="94.6" fill="#2A9D8F"/>
+<text x="1018.5" y="478.0" font-size="9" text-anchor="end" transform="rotate(-38 1018.5 478.0)">ML-DSA-65 / direct verify_valid</text>
+<rect x="1056.0" y="309.3" width="42.2" height="150.7" fill="#2A9D8F"/>
+<text x="1077.1" y="478.0" font-size="9" text-anchor="end" transform="rotate(-38 1077.1 478.0)">ML-DSA-87 / direct sign</text>
+<rect x="1114.6" y="344.1" width="42.2" height="115.9" fill="#2A9D8F"/>
+<text x="1135.7" y="478.0" font-size="9" text-anchor="end" transform="rotate(-38 1135.7 478.0)">ML-DSA-87 / direct verify_valid</text>
+<line x1="110" y1="70" x2="110" y2="460" stroke="#1d2733"/>
+<line x1="110" y1="460" x2="1165" y2="460" stroke="#1d2733"/>
+<text x="25.0" y="265.0" font-size="12" text-anchor="middle" transform="rotate(-90 25.0 265.0)">Median latency (microseconds, log scale)</text>
+</g></svg>

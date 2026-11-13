@@ -1,0 +1,7 @@
+{
+  "network": {
+    "chain_id": 1264,
+    "network_id": "synergy-testnet-v3"
+  },
+  "note": "Replace with the canonical Synergy Testnet v3 genesis before install."
+}

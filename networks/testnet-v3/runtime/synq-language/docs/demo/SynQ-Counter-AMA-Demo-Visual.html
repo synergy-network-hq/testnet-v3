@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SynQ Counter AMA Demo</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #111416;
+      --panel: #1b2024;
+      --line: #364048;
+      --text: #f4f7f8;
+      --muted: #aab7bd;
+      --mint: #62d7a3;
+      --cyan: #6ac7ff;
+      --gold: #f3c969;
+      --red: #ff7d7d;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    main { max-width: 1180px; margin: 0 auto; padding: 32px; }
+    header { display: flex; justify-content: space-between; gap: 24px; align-items: end; border-bottom: 1px solid var(--line); padding-bottom: 22px; }
+    h1 { margin: 0; font-size: 34px; line-height: 1.05; }
+    h2 { margin: 0 0 14px; font-size: 18px; }
+    .subtitle { margin: 10px 0 0; color: var(--muted); max-width: 720px; }
+    .status { border: 1px solid var(--mint); color: var(--mint); padding: 10px 14px; font-weight: 700; }
+    .grid { display: grid; gap: 16px; margin-top: 22px; }
+    .cards { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .two { grid-template-columns: 1.2fr .8fr; }
+    .card, .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; }
+    .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
+    .value { margin-top: 8px; font-size: 20px; font-weight: 750; overflow-wrap: anywhere; }
+    .hash { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--cyan); }
+    .pipeline { display: grid; grid-template-columns: repeat(7, 1fr); gap: 10px; }
+    .step { border: 1px solid var(--line); border-radius: 8px; padding: 14px; min-height: 112px; }
+    .step strong { display: block; margin-bottom: 8px; }
+    .ok { color: var(--mint); }
+    .warn { color: var(--gold); }
+    .bad { color: var(--red); }
+    .counter { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; text-align: center; }
+    .counter .value { font-size: 44px; color: var(--mint); }
+    .foot { color: var(--muted); font-size: 13px; line-height: 1.5; }
+    @media (max-width: 900px) {
+      main { padding: 18px; }
+      header, .two { display: block; }
+      .cards, .pipeline, .counter { grid-template-columns: 1fr; }
+      .status { margin-top: 16px; display: inline-block; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>SynQ Counter Smart Contract Alpha Demo</h1>
+      <p class="subtitle">Local proof path: source to artifacts, ML-DSA-65 pqsynq verification, existing pqvm admission, AIVM Counter overlay, gas lanes, and deterministic receipt.</p>
+    </div>
+    <div class="status">LOCAL DEMO PASS</div>
+  </header>
+
+  <section class="grid cards">
+    <div class="card"><div class="label">Chain</div><div class="value">1264</div></div>
+    <div class="card"><div class="label">Network</div><div class="value">synergy-testnet</div></div>
+    <div class="card"><div class="label">Signature</div><div class="value">ML-DSA-65</div></div>
+    <div class="card"><div class="label">Normalized Node Alias</div><div class="value">synergy-testnet-v3 -> synergy-testnet</div></div>
+  </section>
+
+  <section class="grid">
+    <div class="panel">
+      <h2>Pipeline</h2>
+      <div class="pipeline">
+        <div class="step"><strong>1. Source</strong><span class="ok">Counter.synq</span><br><span class="foot">/Volumes/xcode/Synergy-Network-Projects/synq-language/contracts/Counter.synq</span></div>
+        <div class="step"><strong>2. Build</strong><span class="ok">bytecode + ABI + manifest</span></div>
+        <div class="step"><strong>3. CLI Deploy</strong><span class="ok">pqsynq ML-DSA-65 verified</span></div>
+        <div class="step"><strong>4. CLI Calls</strong><span class="ok">increment/get envelopes verified</span></div>
+        <div class="step"><strong>5. pqvm Admission</strong><span class="ok">outer path preserved</span></div>
+        <div class="step"><strong>6. AIVM</strong><span class="ok">quantumvm-backed local run</span></div>
+        <div class="step"><strong>7. Receipt</strong><span class="ok">deterministic hash</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="grid cards">
+    <div class="card"><div class="label">Bytecode Hash</div><div class="value hash">6b8b2d0d1433c0c4941bfc41054a58a004e9cc46e475926f0f70d3d309e92533</div></div>
+    <div class="card"><div class="label">ABI Hash</div><div class="value hash">ea9c1f48cad5f0d39d299d854ba578f6909a8475093aa8c616b1ee186c599b26</div></div>
+    <div class="card"><div class="label">Manifest Hash</div><div class="value hash">6334f5a98926f3c5eeb4f9337a9602841e5cc9b77b59f0e648203a296d290332</div></div>
+    <div class="card"><div class="label">State Root</div><div class="value hash">1bd01d6d3270341d2f6613b4de853e840575be6b82d71fccd8dd7da751fa344c</div></div>
+    <div class="card"><div class="label">Receipt Hash</div><div class="value hash">f5b8e3bde36244ea08aea937abca982db2b78d48ab3ad7162a503686202cb39c</div></div>
+  </section>
+
+  <section class="grid two">
+    <div class="panel">
+      <h2>Counter State</h2>
+      <div class="counter">
+        <div class="card"><div class="label">Before</div><div class="value">0</div></div>
+        <div class="card"><div class="label">After Increment</div><div class="value">1</div></div>
+        <div class="card"><div class="label">Get</div><div class="value">1</div></div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Metering</h2>
+      <div class="card"><div class="label">Ordinary Gas</div><div class="value">31</div></div>
+      <div class="card" style="margin-top: 12px;"><div class="label">PQ-Gas</div><div class="value">50000</div></div>
+    </div>
+  </section>
+
+  <section class="grid">
+    <div class="panel">
+      <h2>Negative Paths</h2>
+      <p class="foot"><span class="ok">PASS</span> wrong chain preserves AEGIS-CHAIN; wrong domain preserves AEGIS-DOMAIN; invalid signature preserves AEGIS-SIG; malformed carrier preserves AEGIS-CANON.</p>
+      <p class="foot"><span class="warn">Not claimed:</span> public RPC listener, live TESTNET deploy, persisted chain storage, public AIVM RPC handlers, or production audit readiness.</p>
+    </div>
+  </section>
+</main>
+</body>
+</html>

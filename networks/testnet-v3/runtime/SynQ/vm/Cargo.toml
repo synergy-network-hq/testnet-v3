@@ -1,0 +1,17 @@
+[package]
+name = "synq-vm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Core dependencies from workspace
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+
+# PQC shims for SynQ
+pqc_shims = { package = "synq-pqc-shims", path = "../pqc-shims" }
+
+# PQC libraries
+pqcrypto = { workspace = true }
+ruint = { workspace = true }

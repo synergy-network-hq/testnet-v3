@@ -1,0 +1,34 @@
+{
+  "name": "sxcp-evm-testnet-kit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "clean": "hardhat clean",
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "deploy:sepolia": "hardhat run scripts/deploy-suite.js --network sepolia",
+    "deploy:amoy": "hardhat run scripts/deploy-suite.js --network amoy",
+    "wire:sepolia-to-amoy": "hardhat run scripts/wire-endpoint.js --network sepolia --source sepolia --remote amoy",
+    "wire:amoy-to-sepolia": "hardhat run scripts/wire-endpoint.js --network amoy --source amoy --remote sepolia",
+    "export:testnet-config": "node scripts/export-testnet-relayer-config.js --source sepolia --destination amoy",
+    "demo:publish:sepolia": "hardhat run scripts/publish-intent.js --network sepolia --source sepolia --destination amoy",
+    "demo:attest:on-amoy": "hardhat run scripts/submit-attestation.js --network amoy --source sepolia --destination amoy"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.2.0",
+    "dotenv": "^16.4.5",
+    "esbuild": "^0.28.1",
+    "ws": "^8.21.0"
+  },
+  "overrides": {
+    "esbuild": "^0.28.1",
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-ethers": "^4.0.6",
+    "chai": "^4.5.0",
+    "ethers": "^6.15.0",
+    "hardhat": "^3.1.12"
+  }
+}

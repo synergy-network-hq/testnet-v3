@@ -1,0 +1,10 @@
+# Server-side WireGuard peer snippet for Archive Validator M4.
+# Add this peer to each hub/server WireGuard config only after replacing the
+# public key placeholder with the Archive Validator M4 WireGuard public key.
+
+[Peer]
+# Name = Archive Validator M4
+PublicKey = ARCHIVE_VALIDATOR_M4_PUBLIC_KEY_BASE64
+AllowedIPs = 10.69.0.220/32
+Endpoint = 73.79.66.255:51819
+PersistentKeepalive = 25

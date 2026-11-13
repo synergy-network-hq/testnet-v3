@@ -1,0 +1,21 @@
+# Limitations
+
+- The primary host is an interactive 8 GiB Apple M2 development machine. Background desktop and Codex processes were active; load averages are preserved. Results do not establish x86-64 Linux validator performance.
+- The production dependency selects portable code and does not enable optional Aegis NEON. No AVX2, optimized AArch64, cross-architecture, compiler, or feature comparison was measured.
+- CPU frequency, temperature, energy, and hardware counters were unavailable. `getrusage` CPU time includes worker activity and peak RSS is a process high-water mark.
+- Fixed run ordering can correlate algorithm groups with temporal system noise. No samples are removed; a randomized-order independent replication remains desirable.
+- Direct, PQCManager, Aegis, and protocol operations perform different semantic work. Their timing differences cannot be interpreted as a pure wrapper instruction count.
+- Randomized signing produces broader and sometimes multimodal distributions. Medians, tails, raw samples, and confidence intervals are retained; one average is insufficient.
+- Exact transaction and frame sizes reflect the current JSON/canonical encodings, including decimal byte arrays and nested carrier/envelope structure. A future encoding change would require remeasurement.
+- Authentication-byte deltas remove cryptographic identity/witness fields while retaining structure. They are an operational serialization delta, not merely mathematical signature length.
+- The P2P handshake component mirrors a private signing payload at the frozen source SHA and uses the exact public message representation. Socket setup, Genesis identity loading, capability negotiation, peer authorization, and network delay are excluded.
+- The controlled load suite measures unique-signature Aegis verification bursts, thread creation, queue admission, and joins. It is neither RPC throughput nor accepted/committed/finalized TPS.
+- Validator scaling assumes one successful steady round, all peers connected, no timeout/retry/replay/sync traffic, and cache retention. N=6 matches configuration but the aggregate remains derived because a six-node round was not instantiated.
+- No disposable node topology was available. End-to-end throughput, propagation, finality, CPU, memory, storage, bandwidth, geographic effects, failures, and recovery are not measured.
+- The authorized live RPC-gateway snapshot found the service inactive. No live performance number is inferred from binaries, journals, or historical artifacts.
+- Current Chain 1266 uses `coordinated_round_robin_v1`, which has no vote, QC, VC, or TC. Disabled typed-PoSy source cannot be reported as current consensus behavior.
+- No equivalent current classical production path was established, so no classical comparison is presented. This prevents a superiority claim.
+- The identity workbook’s ML-KEM-768 policy and runtime ML-KEM-1024 implementation are different parameter sets. No value is transferred between them.
+- HQC-256 malformed ciphertext caused a caught dependency panic in every negative sample. Valid KEM samples passed, but the negative path is not robust error handling.
+- The working tree contains unrelated pre-existing changes outside the benchmark inputs. The exact commit, runtime status, harness, binaries, Genesis, and evidence files are separately identified and hashed.
+- Performance measurements cannot establish cryptographic security, post-quantum security reductions, lifecycle security, governance safety, or downgrade resistance.

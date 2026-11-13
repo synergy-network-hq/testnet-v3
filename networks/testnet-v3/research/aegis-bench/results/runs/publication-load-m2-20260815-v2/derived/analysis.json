@@ -1,0 +1,35 @@
+{
+  "classification": "DERIVED",
+  "raw_sample_count": 2400,
+  "summary_group_count": 24,
+  "failed_safety_sample_count": 0,
+  "failed_safety_results": [],
+  "bootstrap_resamples": 2000,
+  "bootstrap_confidence": 0.95,
+  "bootstrap_statistic": "median",
+  "bootstrap_seed": "sha256 of grouping key",
+  "percentile_method": "linear interpolation at (n-1)*p",
+  "outlier_policy": "MAD flags reported; all samples retained",
+  "inputs": [
+    {
+      "path": "research/aegis-bench/results/runs/publication-load-m2-20260815-v2/raw/publication-load-m2-20260815-v2-load-workers1.csv",
+      "sha256": "2cfbc581ebc9eecbdfaae45378254da0c1e516cd523b3e4ac120eb90ec8a5140",
+      "rows": "800"
+    },
+    {
+      "path": "research/aegis-bench/results/runs/publication-load-m2-20260815-v2/raw/publication-load-m2-20260815-v2-load-workers2.csv",
+      "sha256": "bc27804bc5ea24da85b940ae3c6a2638d69a74397ae1ec7293788150bdc36eef",
+      "rows": "800"
+    },
+    {
+      "path": "research/aegis-bench/results/runs/publication-load-m2-20260815-v2/raw/publication-load-m2-20260815-v2-load-workers4.csv",
+      "sha256": "d947520cf8ebf9749051353422be041f22270729758b84769ba60930935bfdaa",
+      "rows": "800"
+    }
+  ],
+  "plots": [
+    "research/aegis-bench/results/runs/publication-load-m2-20260815-v2/derived/controlled-load-throughput.svg",
+    "research/aegis-bench/results/runs/publication-load-m2-20260815-v2/derived/controlled-load-tail-latency.svg",
+    "research/aegis-bench/results/runs/publication-load-m2-20260815-v2/derived/controlled-load-cpu-vs-throughput.svg"
+  ]
+}

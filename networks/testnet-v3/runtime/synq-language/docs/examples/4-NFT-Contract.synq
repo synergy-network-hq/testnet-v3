@@ -1,0 +1,351 @@
+// Post-Quantum NFT Contract (ERC721-like)
+// Complete NFT implementation with PQC verification for minting and transfers
+
+pragma synq ^1.0.0;
+
+contract PQCNFT {
+    // Token metadata
+    String public name;
+    String public symbol;
+    UInt256 public totalSupply;
+    UInt256 public maxSupply;
+    
+    // Token storage
+    mapping(UInt256 => Address) public ownerOf;
+    mapping(Address => UInt256) public balanceOf;
+    mapping(UInt256 => Address) public tokenApprovals;
+    mapping(Address => mapping(Address => Bool)) public operatorApprovals;
+    
+    // Token metadata
+    mapping(UInt256 => String) public tokenURI;
+    mapping(UInt256 => String) public tokenName;
+    mapping(UInt256 => String) public tokenDescription;
+    
+    // PQC minting key
+    MLDSAPublicKey public mintingKey;
+    Bool public publicMintingEnabled;
+    
+    // Royalty information
+    mapping(UInt256 => Address) public royaltyRecipient;
+    mapping(UInt256 => UInt256) public royaltyPercentage; // Basis points (10000 = 100%)
+    
+    // Events
+    event Transfer(Address indexed from, Address indexed to, UInt256 indexed tokenId);
+    event Approval(Address indexed owner, Address indexed approved, UInt256 indexed tokenId);
+    event ApprovalForAll(Address indexed owner, Address indexed operator, Bool approved);
+    event Mint(Address indexed to, UInt256 indexed tokenId, String tokenURI);
+    event Burn(UInt256 indexed tokenId);
+    event RoyaltyUpdated(UInt256 indexed tokenId, Address recipient, UInt256 percentage);
+    
+    // Constructor
+    constructor(
+        String _name,
+        String _symbol,
+        UInt256 _maxSupply,
+        MLDSAPublicKey _mintingKey
+    ) {
+        name = _name;
+        symbol = _symbol;
+        maxSupply = _maxSupply;
+        mintingKey = _mintingKey;
+        totalSupply = 0;
+        publicMintingEnabled = false;
+    }
+    
+    // Standard NFT Functions
+    
+    // Get total supply
+    function totalSupply() public -> UInt256 {
+        return totalSupply;
+    }
+    
+    // Get balance of address
+    function balanceOf(Address owner) public -> UInt256 {
+        require(owner != Address(0), "Balance query for zero address");
+        return balanceOf[owner];
+    }
+    
+    // Get owner of token
+    function ownerOf(UInt256 tokenId) public -> Address {
+        Address owner = ownerOf[tokenId];
+        require(owner != Address(0), "Token does not exist");
+        return owner;
+    }
+    
+    // Approve token transfer
+    function approve(Address to, UInt256 tokenId) public {
+        Address owner = ownerOf[tokenId];
+        require(owner == msg.sender || operatorApprovals[owner][msg.sender], "Not authorized");
+        require(to != owner, "Approval to current owner");
+        
+        tokenApprovals[tokenId] = to;
+        emit Approval(owner, to, tokenId);
+    }
+    
+    // Get approved address for token
+    function getApproved(UInt256 tokenId) public -> Address {
+        require(ownerOf[tokenId] != Address(0), "Token does not exist");
+        return tokenApprovals[tokenId];
+    }
+    
+    // Set approval for all
+    function setApprovalForAll(Address operator, Bool approved) public {
+        require(operator != msg.sender, "Approve to caller");
+        operatorApprovals[msg.sender][operator] = approved;
+        emit ApprovalForAll(msg.sender, operator, approved);
+    }
+    
+    // Check if operator is approved
+    function isApprovedForAll(Address owner, Address operator) public -> Bool {
+        return operatorApprovals[owner][operator];
+    }
+    
+    // Transfer token
+    function transferFrom(
+        Address from,
+        Address to,
+        UInt256 tokenId
+    ) public {
+        require(ownerOf[tokenId] == from, "Transfer from incorrect owner");
+        require(to != Address(0), "Transfer to zero address");
+        require(
+            msg.sender == from ||
+            msg.sender == tokenApprovals[tokenId] ||
+            operatorApprovals[from][msg.sender],
+            "Transfer not authorized"
+        );
+        
+        // Clear approval
+        if (tokenApprovals[tokenId] != Address(0)) {
+            tokenApprovals[tokenId] = Address(0);
+        }
+        
+        balanceOf[from] = balanceOf[from] - 1;
+        balanceOf[to] = balanceOf[to] + 1;
+        ownerOf[tokenId] = to;
+        
+        emit Transfer(from, to, tokenId);
+    }
+    
+    // Safe transfer (with data)
+    function safeTransferFrom(
+        Address from,
+        Address to,
+        UInt256 tokenId,
+        Bytes data
+    ) public {
+        transferFrom(from, to, tokenId);
+        // In real implementation, would check if recipient is contract and call onERC721Received
+    }
+    
+    // Mint NFT (requires PQC signature)
+    @gas_cost(base: 100000, mldsa_verify: 35000)
+    function mint(
+        Address to,
+        String _tokenURI,
+        String _tokenName,
+        String _tokenDescription,
+        Bytes messageToSign,
+        MLDSASignature signature
+    ) public -> UInt256 {
+        require(to != Address(0), "Mint to zero address");
+        require(totalSupply < maxSupply, "Max supply reached");
+        
+        // Verify PQC signature
+        require_pqc {
+            let isValid = verifyMLDSASignature(
+                mintingKey,
+                messageToSign,
+                signature
+            );
+            require(isValid, "Invalid minting signature");
+        } or revert("PQC verification failed");
+        
+        UInt256 tokenId = totalSupply;
+        totalSupply = totalSupply + 1;
+        
+        ownerOf[tokenId] = to;
+        balanceOf[to] = balanceOf[to] + 1;
+        tokenURI[tokenId] = _tokenURI;
+        tokenName[tokenId] = _tokenName;
+        tokenDescription[tokenId] = _tokenDescription;
+        
+        emit Mint(to, tokenId, _tokenURI);
+        emit Transfer(Address(0), to, tokenId);
+        
+        return tokenId;
+    }
+    
+    // Public minting (if enabled)
+    function publicMint(
+        Address to,
+        String _tokenURI,
+        String _tokenName,
+        String _tokenDescription
+    ) public -> UInt256 {
+        require(publicMintingEnabled, "Public minting disabled");
+        require(to != Address(0), "Mint to zero address");
+        require(totalSupply < maxSupply, "Max supply reached");
+        
+        UInt256 tokenId = totalSupply;
+        totalSupply = totalSupply + 1;
+        
+        ownerOf[tokenId] = to;
+        balanceOf[to] = balanceOf[to] + 1;
+        tokenURI[tokenId] = _tokenURI;
+        tokenName[tokenId] = _tokenName;
+        tokenDescription[tokenId] = _tokenDescription;
+        
+        emit Mint(to, tokenId, _tokenURI);
+        emit Transfer(Address(0), to, tokenId);
+        
+        return tokenId;
+    }
+    
+    // Batch mint
+    @gas_cost(base: 150000, mldsa_verify: 35000, per_token: 50000)
+    function batchMint(
+        Address[] recipients,
+        String[] tokenURIs,
+        String[] tokenNames,
+        String[] tokenDescriptions,
+        Bytes messageToSign,
+        MLDSASignature signature
+    ) public {
+        require(recipients.length == tokenURIs.length, "Array length mismatch");
+        require(recipients.length == tokenNames.length, "Array length mismatch");
+        require(recipients.length == tokenDescriptions.length, "Array length mismatch");
+        require(recipients.length > 0, "Empty arrays");
+        require(totalSupply + recipients.length <= maxSupply, "Would exceed max supply");
+        
+        // Verify PQC signature
+        require_pqc {
+            let isValid = verifyMLDSASignature(
+                mintingKey,
+                messageToSign,
+                signature
+            );
+            require(isValid, "Invalid minting signature");
+        } or revert("PQC verification failed");
+        
+        for (i in 0..recipients.length) {
+            require(recipients[i] != Address(0), "Invalid recipient");
+            
+            UInt256 tokenId = totalSupply;
+            totalSupply = totalSupply + 1;
+            
+            ownerOf[tokenId] = recipients[i];
+            balanceOf[recipients[i]] = balanceOf[recipients[i]] + 1;
+            tokenURI[tokenId] = tokenURIs[i];
+            tokenName[tokenId] = tokenNames[i];
+            tokenDescription[tokenId] = tokenDescriptions[i];
+            
+            emit Mint(recipients[i], tokenId, tokenURIs[i]);
+            emit Transfer(Address(0), recipients[i], tokenId);
+        }
+    }
+    
+    // Burn token
+    function burn(UInt256 tokenId) public {
+        Address owner = ownerOf[tokenId];
+        require(owner == msg.sender || operatorApprovals[owner][msg.sender], "Not authorized");
+        
+        // Clear approval
+        if (tokenApprovals[tokenId] != Address(0)) {
+            tokenApprovals[tokenId] = Address(0);
+        }
+        
+        balanceOf[owner] = balanceOf[owner] - 1;
+        ownerOf[tokenId] = Address(0);
+        totalSupply = totalSupply - 1;
+        
+        emit Transfer(owner, Address(0), tokenId);
+        emit Burn(tokenId);
+    }
+    
+    // Set token URI
+    function setTokenURI(UInt256 tokenId, String _tokenURI) public {
+        require(ownerOf[tokenId] == msg.sender, "Not token owner");
+        tokenURI[tokenId] = _tokenURI;
+    }
+    
+    // Set royalty information
+    function setRoyalty(
+        UInt256 tokenId,
+        Address recipient,
+        UInt256 percentage
+    ) public {
+        require(ownerOf[tokenId] == msg.sender, "Not token owner");
+        require(percentage <= 10000, "Royalty too high"); // Max 100%
+        
+        royaltyRecipient[tokenId] = recipient;
+        royaltyPercentage[tokenId] = percentage;
+        
+        emit RoyaltyUpdated(tokenId, recipient, percentage);
+    }
+    
+    // Get royalty information
+    function getRoyalty(UInt256 tokenId) public -> (Address, UInt256) {
+        return (royaltyRecipient[tokenId], royaltyPercentage[tokenId]);
+    }
+    
+    // Calculate royalty amount
+    function calculateRoyalty(UInt256 tokenId, UInt256 salePrice) public -> UInt256 {
+        UInt256 percentage = royaltyPercentage[tokenId];
+        if (percentage == 0) {
+            return 0;
+        }
+        return (salePrice * percentage) / 10000;
+    }
+    
+    // Enable/disable public minting (requires minting key)
+    @gas_cost(base: 75000, mldsa_verify: 35000)
+    function setPublicMinting(
+        Bool enabled,
+        Bytes messageToSign,
+        MLDSASignature signature
+    ) public {
+        require_pqc {
+            let isValid = verifyMLDSASignature(
+                mintingKey,
+                messageToSign,
+                signature
+            );
+            require(isValid, "Invalid signature");
+        } or revert("PQC verification failed");
+        
+        publicMintingEnabled = enabled;
+    }
+    
+    // Update minting key
+    @gas_cost(base: 100000, mldsa_verify: 35000)
+    function updateMintingKey(
+        MLDSAPublicKey newKey,
+        Bytes messageToSign,
+        MLDSASignature signature
+    ) public {
+        require_pqc {
+            let isValid = verifyMLDSASignature(
+                mintingKey,
+                messageToSign,
+                signature
+            );
+            require(isValid, "Invalid signature");
+        } or revert("PQC verification failed");
+        
+        mintingKey = newKey;
+    }
+    
+    // Get token metadata
+    function getTokenMetadata(UInt256 tokenId) public -> (String, String, String) {
+        require(ownerOf[tokenId] != Address(0), "Token does not exist");
+        return (tokenName[tokenId], tokenDescription[tokenId], tokenURI[tokenId]);
+    }
+    
+    // Get tokens owned by address
+    function tokensOfOwner(Address owner) public -> UInt256[] {
+        // In real implementation, would maintain an array or use events
+        // For now, return empty array
+        return [];
+    }
+}

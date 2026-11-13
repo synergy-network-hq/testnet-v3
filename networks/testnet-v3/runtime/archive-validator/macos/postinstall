@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+command -v aegis-pqvm >/dev/null 2>&1 || {
+  echo "aegis-pqvm is required and unavailable; archive validator install fails closed." >&2
+  exit 1
+}
+
+STORAGE_VOLUME="/Volumes/Synergy_Archive"
+STORAGE_ROOT="${STORAGE_VOLUME}/archive-validator"
+[[ -d "${STORAGE_VOLUME}" ]] || {
+  echo "required archive storage volume is not mounted: ${STORAGE_VOLUME}" >&2
+  exit 1
+}
+/sbin/mount | grep -F " on ${STORAGE_VOLUME} " >/dev/null || {
+  echo "required archive storage volume is not mounted as a filesystem: ${STORAGE_VOLUME}" >&2
+  exit 1
+}
+
+install -d -m 0755 /usr/local/synergy/bin
+install -d -m 0755 "${STORAGE_ROOT}/config"
+install -d -m 0750 "${STORAGE_ROOT}/data"
+install -d -m 0750 "${STORAGE_ROOT}/workspace/config"
+install -d -m 0750 "${STORAGE_ROOT}/snapshots"
+install -d -m 0750 "${STORAGE_ROOT}/evidence"
+install -d -m 0750 "${STORAGE_ROOT}/tmp"
+install -d -m 0755 "${STORAGE_ROOT}/logs"
+if [[ -f "${STORAGE_ROOT}/config/archive-validator.toml" ]]; then
+  cp "${STORAGE_ROOT}/config/archive-validator.toml" "${STORAGE_ROOT}/workspace/config/node.toml"
+fi
+rm -rf "${STORAGE_ROOT}/workspace/data"
+ln -s ../data "${STORAGE_ROOT}/workspace/data"
+
+for plist in \
+  io.synergynetwork.archive-validator.plist \
+  io.synergynetwork.archive-snapshot-api.plist \
+  io.synergynetwork.archive-snapshot-worker.plist
+do
+  launchctl bootstrap system "/Library/LaunchDaemons/${plist}"
+  launchctl enable "system/${plist%.plist}"
+done
+
+if ! /usr/local/synergy/bin/synergy-archive status >/dev/null 2>&1; then
+  for label in \
+    io.synergynetwork.archive-snapshot-worker \
+    io.synergynetwork.archive-snapshot-api \
+    io.synergynetwork.archive-validator
+  do
+    launchctl bootout "system/${label}" >/dev/null 2>&1 || true
+  done
+  echo "archive validator post-install health check failed; services unloaded." >&2
+  exit 1
+fi

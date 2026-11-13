@@ -1,0 +1,7 @@
+algorithm,public_key_bytes,private_key_bytes,signature_bytes_min,signature_bytes_max,ciphertext_bytes,shared_secret_bytes
+BLAKE3,,,,,,
+FN-DSA-1024,1793,,1268,1270,,
+JSON,1952,,1270,3309,,
+ML-DSA-65,1952,,3309,3309,,
+ML-DSA-87,2592,4896,4627,4627,,
+canonical-json,,,,,,

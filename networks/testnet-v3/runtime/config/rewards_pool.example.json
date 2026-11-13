@@ -1,0 +1,8 @@
+{
+  "address": "replace-with-testnet-rewards-pool-address",
+  "public_key": "replace-with-public-key",
+  "private_key": "generate-locally-and-do-not-commit",
+  "address_type": "WalletPrimary",
+  "algorithm": "FN-DSA-1024",
+  "created_at": "1970-01-01T00:00:00Z"
+}

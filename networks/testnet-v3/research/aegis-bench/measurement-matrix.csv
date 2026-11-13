@@ -1,0 +1,29 @@
+category,operation_or_metric,classification,status,evidence_boundary
+primitive,key generation all six runtime algorithms,MEASURED,COMPLETE,PQCManager exact current runtime path
+primitive,direct key generation sign and verify for the three Aegis signature implementations,MEASURED,COMPLETE,portable primitive entry points below PQCManager
+primitive,sign and verify across 32 to 16384 bytes,MEASURED,COMPLETE,ML-DSA-65 ML-DSA-87 FN-DSA-1024 SLH-DSA
+primitive,encapsulate and decapsulate,MEASURED,COMPLETE,ML-KEM-1024 and HQC-256
+primitive,key signature ciphertext and shared-secret sizes,MEASURED,COMPLETE,lengths only; secret material never persisted
+aegis,domain signing and algorithm dispatch,MEASURED,COMPLETE,transaction block and peer domains
+aegis,verification cache miss,MEASURED,COMPLETE,policy checks transcript hash bounded worker and primitive
+aegis,verification cache hit,MEASURED,COMPLETE,policy checks transcript hash and positive cache
+negative,tampered signatures and transaction payloads,MEASURED,COMPLETE,runtime Aegis public and typed transaction rejection
+negative,tampered KEM ciphertext,MEASURED,COMPLETE,ML-KEM implicit rejection and caught HQC library panic classified exactly
+negative,wrong domain role lifecycle state key and algorithm,MEASURED,COMPLETE,Aegis fail-closed policy matrix
+lifecycle,registration lookup active check revocation rotation and root scaling,MEASURED,COMPLETE,Aegis lifecycle and registry sizes 1 through 10000
+protocol,public ML-DSA-87 transaction components and end-to-end admission,MEASURED,COMPLETE,actual synergy_sendTransaction object and validators
+protocol,Aegis typed transaction envelope carrier and admission,MEASURED,COMPLETE,actual Aegis submission types and validators
+protocol,coordinated assignment producer block commit and package,MEASURED,COMPLETE,current Chain 1266 coordinated_round_robin_v1
+protocol,typed PoSy vote QC VC and TC,NOT_MEASURED,CURRENTLY_DISABLED,not part of the current Chain 1266 release mode
+protocol,P2P validator and support-node handshake,MEASURED,COMPLETE,field-for-field mirror of private signing payload plus exact public NetworkMessage representation
+cold_start,fresh-process initialization and first-operation distributions,MEASURED,COMPLETE,30 independent processes
+load,controlled local bounded verification-pool bursts,MEASURED,COMPLETE,three independent runs; verification throughput not transaction TPS
+scaling,validator count and authentication bytes or calls,DERIVED,COMPLETE,source formulas and exact measured frames; no instantiated multi-node timing
+system,isolated node transaction throughput and finality latency,NOT_MEASURED,NO_DISPOSABLE_TOPOLOGY,no faithful isolated node topology was available
+system,multi-node CPU memory storage and network under load,NOT_MEASURED,NO_DISPOSABLE_TOPOLOGY,controlled crypto pool does not substitute for node telemetry
+hardware,x86-64 AVX2 and AArch64 optimized comparisons,NOT_MEASURED,UNAVAILABLE,one ARM host and production build selected portable paths
+classical,production-equivalent classical signature baseline,NOT_MEASURED,NO_EQUIVALENT_PATH,no equivalent current production path was established
+live,passive deployed state and artifact inventory,EXISTING_TELEMETRY,OBSERVED_INACTIVE,one workbook-authorized persistent SSH session; service inactive
+live,block interval TPS finality Aegis CPU memory and network,NOT_MEASURED,SERVICE_INACTIVE,no live process or listener during the authorized snapshot
+live,shared-testnet saturation destructive restart or fault injection,NOT_MEASURED,EXCLUDED,unsafe and not authorized
+energy,operation energy and joules per transaction,NOT_MEASURED,UNAVAILABLE,no calibrated authorized counter

@@ -1,0 +1,10 @@
+module,algorithm,operation,iterations,avg_duration
+aegis-pqvm,ML-KEM-512,keypair,100,avg
+aegis-pqvm,ML-KEM-512,encapsulate,100,avg
+aegis-pqvm,ML-KEM-512,decapsulate,100,avg
+aegis-pqvm,ML-DSA-44,keypair,100,avg
+aegis-pqvm,ML-DSA-44,sign(detached),100,avg
+aegis-pqvm,ML-DSA-44,verify(detached),100,avg
+aegis-pqvm,FN-DSA-512,keypair,100,avg
+aegis-pqvm,FN-DSA-512,sign(detached),100,avg
+aegis-pqvm,FN-DSA-512,verify(detached),100,avg

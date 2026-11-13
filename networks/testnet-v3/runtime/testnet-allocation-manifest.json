@@ -1,0 +1,361 @@
+{
+  "address_migration_status": "PENDING_FRESH_P3_IDENTITY_BINDING",
+  "allocation_hash": null,
+  "allocations": [
+    {
+      "account_id": "VNS-A01",
+      "address": null,
+      "alias": "tnv3-val-security-reserve",
+      "amount_nwei": "2638950000000000000",
+      "control_reference": "shared custody policy VNS / 4-of-5",
+      "name": "Validator Security Reserve"
+    },
+    {
+      "account_id": "VNS-A02",
+      "address": null,
+      "alias": "validator-01",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-01 encrypted key bundle",
+      "name": "validator-01"
+    },
+    {
+      "account_id": "VNS-A03",
+      "address": null,
+      "alias": "validator-02",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-02 encrypted key bundle",
+      "name": "validator-02"
+    },
+    {
+      "account_id": "VNS-A04",
+      "address": null,
+      "alias": "validator-03",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-03 encrypted key bundle",
+      "name": "validator-03"
+    },
+    {
+      "account_id": "VNS-A05",
+      "address": null,
+      "alias": "validator-04",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-04 encrypted key bundle",
+      "name": "validator-04"
+    },
+    {
+      "account_id": "VNS-A06",
+      "address": null,
+      "alias": "validator-05",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-05 encrypted key bundle",
+      "name": "validator-05"
+    },
+    {
+      "account_id": "VNS-A07",
+      "address": null,
+      "alias": "validator-06",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-06 encrypted key bundle",
+      "name": "validator-06"
+    },
+    {
+      "account_id": "VNS-A08",
+      "address": null,
+      "alias": "validator-07",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-07 encrypted key bundle",
+      "name": "validator-07"
+    },
+    {
+      "account_id": "VNS-A09",
+      "address": null,
+      "alias": "validator-08",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-08 encrypted key bundle",
+      "name": "validator-08"
+    },
+    {
+      "account_id": "VNS-A10",
+      "address": null,
+      "alias": "validator-09",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-09 encrypted key bundle",
+      "name": "validator-09"
+    },
+    {
+      "account_id": "VNS-A11",
+      "address": null,
+      "alias": "validator-10",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-10 encrypted key bundle",
+      "name": "validator-10"
+    },
+    {
+      "account_id": "VNS-A12",
+      "address": null,
+      "alias": "validator-11",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-11 encrypted key bundle",
+      "name": "validator-11"
+    },
+    {
+      "account_id": "VNS-A13",
+      "address": null,
+      "alias": "validator-12",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-12 encrypted key bundle",
+      "name": "validator-12"
+    },
+    {
+      "account_id": "VNS-A14",
+      "address": null,
+      "alias": "validator-13",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-13 encrypted key bundle",
+      "name": "validator-13"
+    },
+    {
+      "account_id": "VNS-A15",
+      "address": null,
+      "alias": "validator-14",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-14 encrypted key bundle",
+      "name": "validator-14"
+    },
+    {
+      "account_id": "VNS-A16",
+      "address": null,
+      "alias": "validator-15",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-15 encrypted key bundle",
+      "name": "validator-15"
+    },
+    {
+      "account_id": "VNS-A17",
+      "address": null,
+      "alias": "validator-16",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-16 encrypted key bundle",
+      "name": "validator-16"
+    },
+    {
+      "account_id": "VNS-A18",
+      "address": null,
+      "alias": "validator-17",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-17 encrypted key bundle",
+      "name": "validator-17"
+    },
+    {
+      "account_id": "VNS-A19",
+      "address": null,
+      "alias": "validator-18",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-18 encrypted key bundle",
+      "name": "validator-18"
+    },
+    {
+      "account_id": "VNS-A20",
+      "address": null,
+      "alias": "validator-19",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-19 encrypted key bundle",
+      "name": "validator-19"
+    },
+    {
+      "account_id": "VNS-A21",
+      "address": null,
+      "alias": "validator-20",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-20 encrypted key bundle",
+      "name": "validator-20"
+    },
+    {
+      "account_id": "VNS-A22",
+      "address": null,
+      "alias": "validator-21",
+      "amount_nwei": "50000000000000",
+      "control_reference": "validator-21 encrypted key bundle",
+      "name": "validator-21"
+    },
+    {
+      "account_id": "SAL-A01",
+      "address": null,
+      "alias": "tnv3-sale-reserve",
+      "amount_nwei": "2240000000000000000",
+      "control_reference": "sale reserve custody identity; SaleClaim not deployed on Testnet-v3",
+      "name": "Token Sales Reserve"
+    },
+    {
+      "account_id": "ECO-A01",
+      "address": null,
+      "alias": "tnv3-eco-reserve",
+      "amount_nwei": "1559000000000000000",
+      "control_reference": "shared custody policy ECO / 4-of-5",
+      "name": "Ecosystem / Developer Reserve"
+    },
+    {
+      "account_id": "ECO-A02",
+      "address": null,
+      "alias": "tnv3-eco-faucet",
+      "amount_nwei": "1000000000000000",
+      "control_reference": "faucet service key / rate limits and rotation required",
+      "name": "Testnet Faucet Operating Wallet"
+    },
+    {
+      "account_id": "LIQ-A01",
+      "address": null,
+      "alias": "tnv3-liq-reserve",
+      "amount_nwei": "1440000000000000000",
+      "control_reference": "shared custody policy LIQ / 4-of-5",
+      "name": "Liquidity & Market Infrastructure Reserve"
+    },
+    {
+      "account_id": "MKT-A01",
+      "address": null,
+      "alias": "tnv3-mkt-reserve",
+      "amount_nwei": "1260000000000000000",
+      "control_reference": "shared custody policy MKT / 4-of-5",
+      "name": "Marketing & Growth Reserve"
+    },
+    {
+      "account_id": "PAR-A01",
+      "address": null,
+      "alias": "tnv3-partner-reserve",
+      "amount_nwei": "894000000000000000",
+      "control_reference": "shared custody policy PAR / 4-of-5",
+      "name": "Strategic Partnerships / Integrations Reserve"
+    },
+    {
+      "account_id": "DAO-A01",
+      "address": null,
+      "alias": "tnv3-dao-reserve",
+      "amount_nwei": "720000000000000000",
+      "control_reference": "shared custody policy DAO / 4-of-5",
+      "name": "DAO / Governance Reserve"
+    },
+    {
+      "account_id": "TRE-A01",
+      "address": null,
+      "alias": "tnv3-treasury-reserve",
+      "amount_nwei": "720000000000000000",
+      "control_reference": "shared custody policy TRE / 4-of-5",
+      "name": "Foundation / Treasury Reserve"
+    },
+    {
+      "account_id": "TEM-A01",
+      "address": null,
+      "alias": "tnv3-team-vesting",
+      "amount_nwei": "340000000000000000",
+      "control_reference": "deployed TeamVesting contract instance",
+      "name": "Shared Team & Support Vesting Contract"
+    },
+    {
+      "account_id": "TEM-A02",
+      "address": null,
+      "alias": "tnv3-team-unassigned-reserve",
+      "amount_nwei": "186000000000000000",
+      "control_reference": "shared custody policy TEM / 4-of-5",
+      "name": "Unassigned Team & Support Reserve"
+    },
+    {
+      "account_id": "SYS-01",
+      "address": null,
+      "alias": "tnv3-system-fee-collector",
+      "amount_nwei": "0",
+      "control_reference": "protocol fee-collector control",
+      "name": "Network Fee Collector"
+    },
+    {
+      "account_id": "SYS-02",
+      "address": null,
+      "alias": "tnv3-system-treasury-recovery",
+      "amount_nwei": "0",
+      "control_reference": "governance recovery contract identity",
+      "name": "Treasury Recovery Account"
+    },
+    {
+      "account_id": "SYS-03",
+      "address": null,
+      "alias": "tnv3-system-slashing-settlement",
+      "amount_nwei": "0",
+      "control_reference": "protocol slashing settlement contract identity",
+      "name": "Slashing Settlement Account"
+    },
+    {
+      "account_id": "SYS-04",
+      "address": "syn0000000000000000000000000000000",
+      "alias": "tnv3-system-burn",
+      "amount_nwei": "0",
+      "control_reference": "consensus-reserved / no private key",
+      "name": "Canonical Burn Address"
+    }
+  ],
+  "chain_id": 1266,
+  "generated_from": "launch/posy-v3-genesis-inputs/fresh-p3-genesis-with-executed-deployment.json",
+  "grand_total_nwei": "12000000000000000000",
+  "network_id": "testnet",
+  "nwei_per_snrg": "1000000000",
+  "schema_version": 4,
+  "source_model": "fresh PoSy v3 allocation plan pending all-21 validator identity binding and executed Genesis",
+  "total_supply_cap_nwei": "12000000000000000000",
+  "protocol_version": "posy/3.0",
+  "release_id": "testnet-v3",
+  "status": "P3_PUBLIC_ALLOCATION_PLAN_PENDING_IDENTITY_BINDING",
+  "validator_allocation": {
+    "pre_generated_identity_count": 21,
+    "initial_active_validator_ids": [
+      "validator-02",
+      "validator-03",
+      "validator-04",
+      "validator-05",
+      "validator-06"
+    ],
+    "initial_active_account_ids": [
+      "VNS-A03",
+      "VNS-A04",
+      "VNS-A05",
+      "VNS-A06",
+      "VNS-A07"
+    ],
+    "initial_active_bonded_total_nwei": "250000000000000",
+    "future_inactive_validator_ids": [
+      "validator-01",
+      "validator-07",
+      "validator-08",
+      "validator-09",
+      "validator-10",
+      "validator-11",
+      "validator-12",
+      "validator-13",
+      "validator-14",
+      "validator-15",
+      "validator-16",
+      "validator-17",
+      "validator-18",
+      "validator-19",
+      "validator-20",
+      "validator-21"
+    ],
+    "future_inactive_account_ids": [
+      "VNS-A02",
+      "VNS-A08",
+      "VNS-A09",
+      "VNS-A10",
+      "VNS-A11",
+      "VNS-A12",
+      "VNS-A13",
+      "VNS-A14",
+      "VNS-A15",
+      "VNS-A16",
+      "VNS-A17",
+      "VNS-A18",
+      "VNS-A19",
+      "VNS-A20",
+      "VNS-A21",
+      "VNS-A22"
+    ],
+    "future_inactive_bonded_total_nwei": "800000000000000",
+    "activation_policy": "Only validator-02 through validator-06 are active at Genesis; validator-01 and validator-07 through validator-21 require a finalized governed epoch transition."
+  }
+}

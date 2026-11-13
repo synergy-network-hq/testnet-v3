@@ -1,0 +1,11 @@
+pragma synq ^1.0.0;
+
+contract HQCKEM192DecapFixture {
+    function run() {
+        hqckem_hqckem192_decapsulate(
+            Bytes("{{CIPHERTEXT_HEX}}"),
+            Bytes("{{PRIVATE_KEY_HEX}}")
+        );
+        revert("halt");
+    }
+}

@@ -1,0 +1,26 @@
+[validator]
+# Validator identification
+name = "My Synergy Validator"
+website = "https://my-validator.com"
+description = "Reliable Synergy Network validator"
+
+# Validator keys (generate securely)
+private_key_path = "config/validator/private_key.txt"
+public_key = "0x..." # Will be generated
+
+# Performance settings
+max_block_size = 1048576  # 1MB
+max_tx_pool_size = 1000
+enable_metrics = true
+metrics_port = 6060
+
+# Backup settings
+backup_enabled = true
+backup_interval_hours = 24
+backup_retention_days = 30
+backup_path = "~/synergy/backups"
+
+# Security settings
+enable_firewall = true
+allowed_rpc_ips = ["127.0.0.1", "::1"]
+rate_limit_per_minute = 1000

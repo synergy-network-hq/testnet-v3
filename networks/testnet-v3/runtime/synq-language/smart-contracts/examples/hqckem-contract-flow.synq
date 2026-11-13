@@ -1,0 +1,29 @@
+pragma synq ^1.0.0;
+
+contract HQCKEMContractFlow {
+    // This example is intentionally non-runnable with static values.
+    // Test harnesses replace the placeholders with runtime-generated vectors.
+    function hqckem128_demo() {
+        hqckem_hqckem128_decapsulate(
+            Bytes("REPLACE_WITH_RUNTIME_CIPHERTEXT_HEX"),
+            Bytes("REPLACE_WITH_RUNTIME_PRIVATE_KEY_HEX")
+        );
+        revert("stop");
+    }
+
+    function hqckem192_demo() {
+        hqckem_hqckem192_decapsulate(
+            Bytes("REPLACE_WITH_RUNTIME_CIPHERTEXT_HEX"),
+            Bytes("REPLACE_WITH_RUNTIME_PRIVATE_KEY_HEX")
+        );
+        revert("stop");
+    }
+
+    function hqckem256_demo() {
+        hqckem_hqckem256_decapsulate(
+            Bytes("REPLACE_WITH_RUNTIME_CIPHERTEXT_HEX"),
+            Bytes("REPLACE_WITH_RUNTIME_PRIVATE_KEY_HEX")
+        );
+        revert("stop");
+    }
+}

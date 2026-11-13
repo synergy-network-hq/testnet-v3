@@ -1,0 +1,27 @@
+Refund Transaction Template (Bitcoin Testnet)
+--------------------------------------------
+
+This template allows the sender to refund the HTLC output after the timeout
+has passed. The transaction must set `nLockTime` to the same timeout as the
+HTLC and use a non‑final sequence number.
+
+Inputs:
+  * Previous TXID: `<FUNDING_TXID>`
+  * Output index: `<OUTPUT_INDEX>` (the HTLC output)
+
+Unlocking script (scriptSig):
+
+```
+<SENDER_SIGNATURE> <SENDER_PUBKEY> OP_FALSE
+```
+
+* `<SENDER_SIGNATURE>` – Signature created with the sender’s private key
+* `<SENDER_PUBKEY>` – Sender’s public key
+* `OP_FALSE` – Pushes zero to select the “else” branch (refund path)
+
+Outputs:
+  * Send the entire value minus fees back to the sender’s address.
+
+Set `nLockTime` equal to `<TIMEOUT>` and use a sequence number less than
+`0xffffffff` (e.g., `0xfffffffe`) so the refund transaction is only valid
+after the timeout has been reached.

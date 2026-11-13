@@ -1,0 +1,11 @@
+[package]
+name = "synergy-admin-api"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Typed local administration contract shared by Synergy CLI and Control Panel"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+synergy-node-core = { path = "../synergy-node-core" }

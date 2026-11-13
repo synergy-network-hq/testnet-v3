@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package synergy.aivm;
+
+// Model Manifest message
+message ModelManifest {
+  string model_id = 1;
+  string version = 2;
+  string author = 3;
+  string license = 4;
+  string entrypoint = 5;
+  repeated Dependency dependencies = 6;
+  ResourceRequirement resources = 7;
+  string checksum = 8;
+  string description = 9;
+  string created_at = 10;
+  string updated_at = 11;
+}
+
+// Dependencies for AI model
+message Dependency {
+  string name = 1;
+  string version = 2;
+}
+
+// Resources required for AI job
+message ResourceRequirement {
+  double cpu = 1;
+  double gpu = 2;
+  double memory_mb = 3;
+}
+
+// Job request to AIVM
+message AIJobRequest {
+  string job_id = 1;
+  string model_id = 2;
+  string model_version = 3;
+  bytes input_payload = 4;
+  repeated string allowed_providers = 5;
+}
+
+// Job response from AIVM
+message AIJobResponse {
+  string job_id = 1;
+  bytes output_payload = 2;
+  bool success = 3;
+  string error_message = 4;
+}

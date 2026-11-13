@@ -1,0 +1,123 @@
+#!/bin/bash
+# Synergy Testnet - Send SNRG Tokens to Validator
+# Usage: ./send-tokens.sh <recipient_address> <amount>
+
+set -e
+
+# Colors
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
+# Configuration
+FAUCET_ADDRESS="synw1lfgerdqglc6p74p9u6k8ghfssl59q8jzhuwm07"
+FAUCET_KEYS="/opt/synergy/synergy-testnet/config/faucet/identity.json"
+RPC_ENDPOINT="http://localhost:48638/rpc"
+TESTNET_BIN="/opt/synergy/synergy-testnet/target/release/synergy-testnet"
+
+# Check arguments
+if [ $# -lt 2 ]; then
+    echo -e "${RED}Error: Missing arguments${NC}"
+    echo "Usage: $0 <recipient_address> <amount>"
+    echo ""
+    echo "Examples:"
+    echo "  $0 synv1abc123... 1000000      # Send 1M SNRG"
+    echo "  $0 synv1xyz789... 5000000      # Send 5M SNRG"
+    exit 1
+fi
+
+RECIPIENT="$1"
+AMOUNT="$2"
+
+# Validate recipient address format
+if [[ ! "$RECIPIENT" =~ ^syn[vwaszbjkmnulfro][0-9a-z]{38,42}$ ]]; then
+    echo -e "${RED}Error: Invalid Synergy address format${NC}"
+    echo "Address must start with syn and be lowercase"
+    exit 1
+fi
+
+# Check if faucet keys exist
+if [ ! -f "$FAUCET_KEYS" ]; then
+    echo -e "${RED}Error: Faucet identity file not found: $FAUCET_KEYS${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}===================================${NC}"
+echo -e "${GREEN}Synergy Testnet - Send Tokens${NC}"
+echo -e "${GREEN}===================================${NC}"
+echo ""
+echo "From:      $FAUCET_ADDRESS"
+echo "To:        $RECIPIENT"
+echo "Amount:    $AMOUNT SNRG"
+echo ""
+
+# Get faucet balance
+echo "Checking faucet balance..."
+FAUCET_BALANCE=$(curl -s -X POST "$RPC_ENDPOINT" \
+  -H "Content-Type: application/json" \
+  -d "{\"jsonrpc\":\"2.0\",\"method\":\"synergy_getTokenBalance\",\"params\":[\"$FAUCET_ADDRESS\",\"SNRG\"],\"id\":1}" \
+  | jq -r '.result // "0"')
+
+echo "Faucet Balance: $FAUCET_BALANCE SNRG"
+
+# Check if sufficient balance
+if [ "$FAUCET_BALANCE" -lt "$AMOUNT" ]; then
+    echo -e "${RED}Error: Insufficient faucet balance${NC}"
+    echo "Requested: $AMOUNT SNRG"
+    echo "Available: $FAUCET_BALANCE SNRG"
+    exit 1
+fi
+
+echo ""
+echo -e "${YELLOW}Ready to send tokens.${NC}"
+read -p "Proceed? (yes/no): " confirm
+
+if [ "$confirm" != "yes" ]; then
+    echo "Transaction cancelled."
+    exit 0
+fi
+
+# Create and send transaction
+echo ""
+echo "Creating transaction..."
+
+# Get nonce
+NONCE=$(curl -s -X POST "$RPC_ENDPOINT" \
+  -H "Content-Type: application/json" \
+  -d "{\"jsonrpc\":\"2.0\",\"method\":\"account_getNonce\",\"params\":[\"$FAUCET_ADDRESS\"],\"id\":1}" \
+  | jq -r '.result.nonce // 0')
+
+echo "Nonce: $NONCE"
+
+# Send transaction using synergy-testnet CLI
+RESULT=$("$TESTNET_BIN" transaction send \
+  --from "$FAUCET_ADDRESS" \
+  --to "$RECIPIENT" \
+  --amount "$AMOUNT" \
+  --nonce "$NONCE" \
+  --keys "$FAUCET_KEYS" \
+  --rpc "$RPC_ENDPOINT" 2>&1)
+
+if [ $? -eq 0 ]; then
+    TX_HASH=$(echo "$RESULT" | grep -oP 'Transaction hash: \K[0-9a-f]+')
+    echo -e "${GREEN}✅ Transaction sent successfully!${NC}"
+    echo "Transaction Hash: $TX_HASH"
+    echo ""
+    echo "Waiting for confirmation..."
+    sleep 5
+
+    # Check recipient balance
+    NEW_BALANCE=$(curl -s -X POST "$RPC_ENDPOINT" \
+      -H "Content-Type: application/json" \
+      -d "{\"jsonrpc\":\"2.0\",\"method\":\"synergy_getTokenBalance\",\"params\":[\"$RECIPIENT\",\"SNRG\"],\"id\":1}" \
+      | jq -r '.result // "0"')
+
+    echo "Recipient new balance: $NEW_BALANCE SNRG"
+    echo ""
+    echo -e "${GREEN}Transaction completed successfully!${NC}"
+else
+    echo -e "${RED}❌ Transaction failed${NC}"
+    echo "$RESULT"
+    exit 1
+fi

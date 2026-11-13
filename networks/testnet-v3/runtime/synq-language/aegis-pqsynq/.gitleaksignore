@@ -1,0 +1,38 @@
+# GitLeaks ignore file for Aegis project
+# This file prevents false positives in secret scanning
+
+# Documentation examples with variable names that look like secrets
+README.md
+WASM_USAGE_GUIDE.md
+docs/
+*.md
+
+# Test files and examples
+tests/
+test/
+examples/
+demos/
+
+# Generated code
+aegis_crypto_core/pkg/
+*.wasm
+*.d.ts
+
+# Third-party vendor code
+aegis_crypto_core/tools/wasi-sdk-20.0/
+pqrust/pqclean/
+pqrust/.venv/
+
+# Configuration files with example values
+package.json
+Cargo.toml
+pyproject.toml
+*.yml
+*.yaml
+
+# Specific patterns that are false positives
+# These are legitimate code examples, not actual secrets:
+# - "secret_key" variable names in documentation
+# - "shared_secret" variable names in examples
+# - Base64 encoded test data
+# - JWT-like patterns in documentation

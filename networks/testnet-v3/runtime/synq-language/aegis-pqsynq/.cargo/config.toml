@@ -1,0 +1,45 @@
+[alias]
+# Build and run tests for the wasm32-wasip1 target with the "wasm" feature.
+# Note: Executing the produced .wasm artifacts requires a WASI runtime (e.g., wasmtime).
+test-wasm = "test -p aegis_crypto_core --target wasm32-wasip1 --features wasm"
+
+# List tests for wasm target (useful to confirm which tests will compile under wasm).
+list-wasm = "test -p aegis_crypto_core --target wasm32-wasip1 --features wasm -- --list"
+
+# Run SPHINCS+ tests on native without enabling wasm/js bindings.
+test-native-sphincs = "test -p aegis_crypto_core --tests --no-default-features --features slhdsa"
+
+# Build and run browser-based wasm tests using wasm-bindgen-test on wasm32-unknown-unknown.
+test-wasm-browser = "test -p aegis_crypto_core --target wasm32-unknown-unknown --features wasm,js-bindings -- --test-threads=1"
+
+[target.wasm32-unknown-unknown]
+rustflags = [
+  "-C",
+  "target-feature=+crt-static",
+  # Force our memory settings to override wasm-pack's defaults
+  "-C",
+  "link-arg=--initial-memory=4194304",
+  "-C",
+  "link-arg=--max-memory=4194304",
+  # Additional memory configuration to ensure it's not overridden
+  "-C",
+  "link-arg=--import-memory",
+  "-C",
+  "link-arg=--export-memory",
+  # Override wasm-bindgen's memory settings
+  "-C",
+  "link-arg=--no-entry",
+  "-C",
+  "link-arg=--export-table",
+]
+
+# Also configure for wasm32-wasip1 target
+[target.wasm32-wasip1]
+rustflags = [
+  "-C",
+  "target-feature=+crt-static",
+  "-C",
+  "link-arg=--initial-memory=4194304",
+  "-C",
+  "link-arg=--max-memory=4194304",
+]

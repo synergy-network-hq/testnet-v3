@@ -1,0 +1,46 @@
+[snapshots]
+create_only_at_finalized_height = true
+require_valid_qc = true
+compression = "zstd"
+compression_level = 3
+compression_long_window = 27
+chunk_size_bytes = 536870912
+snapshot_classes = ["validator-pruned", "support-relayer", "support-observer", "indexer-replay", "support-rpc", "archive-full"]
+sign_manifests = true
+sign_catalog = true
+staging_then_atomic_publish = true
+prune_grace_seconds = 0
+free_space_safety_margin_bytes = 21474836480
+publish_root = "/Volumes/Synergy_Archive/archive-validator/snapshots"
+catalog_path = "/Volumes/Synergy_Archive/archive-validator/snapshots/catalog.json"
+catalog_signature_path = "/Volumes/Synergy_Archive/archive-validator/snapshots/catalog.json.sig"
+
+[snapshots.classes.validator-pruned]
+allowed_roles = ["validator", "onboarding_validator", "quarantined_validator"]
+interval_finalized_blocks = 5000
+retain_launch = 2
+
+[snapshots.classes.support-rpc]
+allowed_roles = ["rpc", "rpc_gateway"]
+interval_finalized_blocks = 5000
+retain_launch = 2
+
+[snapshots.classes.support-observer]
+allowed_roles = ["observer"]
+interval_finalized_blocks = 5000
+retain_launch = 2
+
+[snapshots.classes.support-relayer]
+allowed_roles = ["relayer"]
+interval_finalized_blocks = 5000
+retain_launch = 2
+
+[snapshots.classes.indexer-replay]
+allowed_roles = ["indexer", "explorer", "atlas_indexer", "explorer_indexer"]
+interval_finalized_blocks = 5000
+retain_launch = 2
+
+[snapshots.classes.archive-full]
+allowed_roles = ["archive", "archive_validator", "snapshot_authority"]
+interval_finalized_blocks = 15000
+retain_launch = 2

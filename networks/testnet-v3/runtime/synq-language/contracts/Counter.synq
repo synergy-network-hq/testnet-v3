@@ -1,0 +1,12 @@
+contract Counter {
+    counter: UInt256 public;
+
+    @public function increment() -> UInt256 {
+        counter = counter + 1;
+        return counter;
+    }
+
+    @public function get() -> UInt256 {
+        return counter;
+    }
+}

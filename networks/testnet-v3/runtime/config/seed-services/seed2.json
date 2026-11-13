@@ -1,0 +1,28 @@
+{
+  "label": "seed2",
+  "seed_id": "seed2",
+  "chain_id": "synergy-testnet",
+  "listen_host": "0.0.0.0",
+  "port": 5621,
+  "admin_token_env": "SEED_ADMIN_TOKEN",
+  "allow_dynamic_registration": true,
+  "state_file": "/var/lib/synergy-seed/seed2-peers.json",
+  "default_ttl_seconds": 900,
+  "max_ttl_seconds": 3600,
+  "dialback_timeout_seconds": 1.5,
+  "static_dialback_on_start": true,
+  "replication_timeout_seconds": 1.0,
+  "replication_peers": [
+    "http://seed1.synergynode.xyz:5621",
+    "http://seed3.synergynode.xyz:5621"
+  ],
+  "public_bootstrap_roles": ["relayer"],
+  "bootnodes": [],
+  "static_peers": [],
+  "static_registry": [
+    { "role": "relayer", "node_name": "relay1", "public_endpoint": "relay1.synergynode.xyz:5622", "protocol_version": "synergy-p2p/1", "app_version": "static" },
+    { "role": "relayer", "node_name": "relay2", "public_endpoint": "relay2.synergynode.xyz:5622", "protocol_version": "synergy-p2p/1", "app_version": "static" },
+    { "role": "relayer", "node_name": "relay3", "public_endpoint": "relay3.synergynode.xyz:5622", "protocol_version": "synergy-p2p/1", "app_version": "static" }
+  ],
+  "dnsaddr_bootstrap": []
+}

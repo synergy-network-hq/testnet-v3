@@ -1,0 +1,1875 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Detailed chain, consensus, validator, P2P, mempool, and gas dashboard for the Synergy runtime metrics exported from each node.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Highest Validator Height",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(synergy_chain_height{job=\"synergy-validators\"})",
+          "legendFormat": "height",
+          "instant": true
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "description": "Highest block height reported by any validator target. Unit: blocks."
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Lowest Validator Height",
+      "gridPos": {
+        "x": 4,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "min(synergy_chain_height{job=\"synergy-validators\"})",
+          "legendFormat": "height",
+          "instant": true
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "description": "Lowest block height reported by any validator target. Unit: blocks."
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Validator Height Difference",
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(synergy_chain_height{job=\"synergy-validators\"}) - min(synergy_chain_height{job=\"synergy-validators\"})",
+          "legendFormat": "difference",
+          "instant": true
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "description": "Difference between the highest and lowest reporting validator block height. A small number means validators are aligned."
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Validators Currently Syncing",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(synergy_sync_in_progress{job=\"synergy-validators\"})",
+          "legendFormat": "{{instance_label}}",
+          "instant": true
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "description": "Validators Currently Syncing for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Active Validators in Registry",
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(synergy_validator_status_total{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\",status=\"active\"})",
+          "legendFormat": "{{instance_label}}",
+          "instant": true
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "description": "Active Validators in Registry for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Pending Validator Registrations",
+      "gridPos": {
+        "x": 20,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(synergy_validator_pending_total{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"})",
+          "legendFormat": "{{instance_label}}",
+          "instant": true
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "description": "Pending Validator Registrations for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Average Block Time",
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "300 / clamp_min(max(delta(synergy_chain_height{job=\"synergy-validators\"}[5m])), 1)",
+          "legendFormat": "seconds/block",
+          "instant": true
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "description": "Average seconds per block over the selected window. Lower is faster. This answers: \"How quickly are blocks being created?\" Formula for the 5 minute panel: 300 / max(delta(synergy_chain_height{job=\"synergy-validators\"}[5m])). The denominator is clamped to 1 so a stalled window is visible instead of blank."
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Block Production Rate by Validator",
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "60 * rate(synergy_chain_height{job=\"synergy-validators\"}[5m])",
+          "legendFormat": "{{instance_label}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "description": "Per-validator block-height movement in blocks per minute. Val5 remains visible even when it is down, quarantined, or producing zero blocks."
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Peer Count by Node",
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "synergy_p2p_peers_connected{job=~\"synergy-validators|synergy-relayers|synergy-archive-validators|synergy-rpc-gateways|synergy-explorer\"} or synergy_peer_count{job=~\"synergy-validators|synergy-relayers|synergy-archive-validators|synergy-rpc-gateways|synergy-explorer\"} or synergy_validator_peer_count{job=\"synergy-validators\"}",
+          "legendFormat": "{{instance_label}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "description": "Current peer count for every node exposing peer metrics, including validators, relayers, RPC gateway, explorer, and archive validator when configured. Missing peer metrics should be treated as N/A."
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Consensus-Ready Validators",
+      "gridPos": {
+        "x": 8,
+        "y": 12,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count(synergy_node_qrpc_up{role=\"validator\"} == 1)",
+          "legendFormat": "{{instance_label}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "description": "Consensus-Ready Validators for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Best Validator Peer Height vs Local Height",
+      "gridPos": {
+        "x": 16,
+        "y": 12,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "synergy_chain_height{job=\"synergy-validators\"}",
+          "legendFormat": "{{instance_label}} local"
+        },
+        {
+          "refId": "B",
+          "expr": "synergy_p2p_best_validator_peer_height{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"}",
+          "legendFormat": "{{instance_label}} best peer"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "description": "Best Validator Peer Height vs Local Height for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Peer Reported Heights",
+      "gridPos": {
+        "x": 0,
+        "y": 19,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "synergy_p2p_peer_height{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"}",
+          "legendFormat": "{{instance_label}} {{peer}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "description": "Peer Reported Heights for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Peer Last-Seen Age",
+      "gridPos": {
+        "x": 12,
+        "y": 19,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "synergy_p2p_peer_last_seen_age_seconds{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"}",
+          "legendFormat": "{{instance_label}} {{peer}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "description": "Peer Last-Seen Age for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Mempool Pending Transactions",
+      "gridPos": {
+        "x": 0,
+        "y": 27,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(synergy_mempool_pending_transactions{job=~\"synergy-validators|synergy-relayers\"} or (up{job=~\"synergy-validators|synergy-relayers\"} * 0))",
+          "legendFormat": "{{instance_label}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "description": "Mempool Pending Transactions for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Mempool Fees Total",
+      "gridPos": {
+        "x": 8,
+        "y": 27,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(synergy_mempool_fee_nwei_total{job=~\"synergy-validators|synergy-relayers\"} or (up{job=~\"synergy-validators|synergy-relayers\"} * 0))",
+          "legendFormat": "{{instance_label}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "description": "Mempool Fees Total for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Recent Gas Utilization Ratio",
+      "gridPos": {
+        "x": 16,
+        "y": 27,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(synergy_chain_recent_gas_utilization_ratio{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"} or (up{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"} * 0))",
+          "legendFormat": "{{instance_label}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "description": "Recent Gas Utilization Ratio for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Latest Block Transactions",
+      "gridPos": {
+        "x": 0,
+        "y": 34,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(synergy_chain_latest_block_transactions{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"} or (up{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"} * 0))",
+          "legendFormat": "{{instance_label}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "description": "Latest Block Transactions for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Recent Avg Transactions Per Block",
+      "gridPos": {
+        "x": 8,
+        "y": 34,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(synergy_chain_recent_avg_transactions_per_block{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"} or (up{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"} * 0))",
+          "legendFormat": "{{instance_label}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "description": "Recent Avg Transactions Per Block for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "Recent Avg Gas Per Block",
+      "gridPos": {
+        "x": 16,
+        "y": 34,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(synergy_chain_recent_avg_gas_nwei_per_block{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"} or (up{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"} * 0))",
+          "legendFormat": "{{instance_label}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "description": "Recent Avg Gas Per Block for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Validator Produced Blocks Total",
+      "gridPos": {
+        "x": 0,
+        "y": 41,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (name, status, validator) (synergy_validator_blocks_produced_total{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"})",
+          "legendFormat": "{{name}} {{status}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "description": "Validator Produced Blocks Total for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Validator Missed Blocks and Vote Windows",
+      "gridPos": {
+        "x": 12,
+        "y": 41,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (name, status, validator) (synergy_validator_missed_blocks_total{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"})",
+          "legendFormat": "{{name}} missed blocks"
+        },
+        {
+          "refId": "B",
+          "expr": "max by (name, status, validator) (synergy_validator_missed_vote_window{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"})",
+          "legendFormat": "{{name}} missed vote window"
+        },
+        {
+          "refId": "C",
+          "expr": "max by (name, status, validator) (synergy_validator_consecutive_missed_votes{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"})",
+          "legendFormat": "{{name}} consecutive missed votes"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "description": "Validator Missed Blocks and Vote Windows for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Validator Synergy Score",
+      "gridPos": {
+        "x": 0,
+        "y": 49,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (name, status, validator) (synergy_validator_synergy_score{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"} or synergy_validator_score{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"})",
+          "legendFormat": "{{name}} {{status}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "description": "Validator Synergy Score for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "Validator Uptime Percent",
+      "gridPos": {
+        "x": 8,
+        "y": 49,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (name, status, validator) (synergy_validator_uptime_percent{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"})",
+          "legendFormat": "{{name}} {{status}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "description": "Validator Uptime Percent for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "id": 24,
+      "type": "timeseries",
+      "title": "Validator Average Block Time",
+      "gridPos": {
+        "x": 16,
+        "y": 49,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (label) (synergy_validator_average_block_time_seconds{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"})",
+          "legendFormat": "{{name}} {{status}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "description": "Registry-reported average seconds per block for each voting validator."
+    },
+    {
+      "id": 25,
+      "type": "table",
+      "title": "Sync Status by Node",
+      "gridPos": {
+        "x": 0,
+        "y": 56,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "synergy_sync_info{job=~\"synergy-validators|synergy-relayers\"}",
+          "legendFormat": "{{instance_label}}",
+          "instant": true
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "inspect": false
+          }
+        },
+        "overrides": []
+      },
+      "description": "Sync Status by Node for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "id": 26,
+      "type": "table",
+      "title": "Peer Details",
+      "gridPos": {
+        "x": 12,
+        "y": 56,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "synergy_p2p_peer_info{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"}",
+          "legendFormat": "{{instance_label}}",
+          "instant": true
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "inspect": false
+          }
+        },
+        "overrides": []
+      },
+      "description": "Peer Details for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "id": 27,
+      "type": "stat",
+      "title": "Live Validators Reported",
+      "gridPos": {
+        "x": 0,
+        "y": 63,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(synergy_live_validators{job=\"synergy-validators\"})",
+          "legendFormat": "{{instance_label}}",
+          "instant": true
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "description": "Live Validators Reported for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "id": 28,
+      "type": "stat",
+      "title": "Validator Cluster Count",
+      "gridPos": {
+        "x": 6,
+        "y": 63,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(synergy_validator_clusters_total)",
+          "legendFormat": "{{instance_label}}",
+          "instant": true
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "description": "Validator Cluster Count for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "id": 29,
+      "type": "timeseries",
+      "title": "Cluster Shuffle Total",
+      "gridPos": {
+        "x": 12,
+        "y": 63,
+        "w": 12,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (instance_label) (synergy_cluster_shuffle_total{job=\"synergy-validators\"})",
+          "legendFormat": "{{instance_label}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "description": "Cluster Shuffle Total for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "Cluster Shuffle Rate per Minute",
+      "gridPos": {
+        "x": 0,
+        "y": 70,
+        "w": 12,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "60 * rate(synergy_cluster_shuffle_total{job=\"synergy-validators\"}[5m])",
+          "legendFormat": "{{instance_label}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "description": "Cluster Shuffle Rate per Minute for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Ready Validators vs Total",
+      "gridPos": {
+        "x": 12,
+        "y": 70,
+        "w": 12,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(synergy_status_ready_validators{job=\"synergy-validators\"})",
+          "legendFormat": "ready"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "total",
+          "expr": "max(synergy_validators_total{job=\"synergy-validators\"})"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "description": "Ready Validators vs Total for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "id": 32,
+      "type": "stat",
+      "title": "Average Block Time, 15m",
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "900 / clamp_min(max(delta(synergy_chain_height{job=\"synergy-validators\"}[15m])), 1)",
+          "legendFormat": "seconds/block",
+          "instant": true
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "description": "Average seconds per block over the last 15 minutes. Formula: 900 / max(delta(synergy_chain_height{job=\"synergy-validators\"}[15m])). Lower is faster."
+    },
+    {
+      "id": 33,
+      "type": "stat",
+      "title": "Current Block Production Rate",
+      "gridPos": {
+        "x": 6,
+        "y": 4,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "60 * max(rate(synergy_chain_height{job=\"synergy-validators\"}[5m]))",
+          "legendFormat": "blocks/min",
+          "instant": true
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "description": "Current canonical block production rate in blocks per minute using the highest validator block-height slope. Higher means blocks are being produced faster."
+    },
+    {
+      "id": 34,
+      "type": "timeseries",
+      "title": "Block Height by Node",
+      "gridPos": {
+        "x": 12,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "synergy_chain_height{job=\"synergy-validators\"} or synergy_chain_height{job=~\"synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"}",
+          "legendFormat": "{{instance_label}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "description": "Block height for validators plus non-voting chain nodes such as relayers, RPC gateway, explorer, and archive validator."
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": [
+    "synergy",
+    "testnet",
+    "observer"
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "network",
+        "label": "Network",
+        "type": "custom",
+        "query": "testnet",
+        "current": {
+          "selected": true,
+          "text": "testnet",
+          "value": "testnet"
+        },
+        "options": [
+          {
+            "selected": true,
+            "text": "testnet",
+            "value": "testnet"
+          }
+        ],
+        "hide": 0,
+        "skipUrlSync": false
+      },
+      {
+        "name": "role",
+        "label": "Role",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(up, role)",
+        "query": "label_values(up, role)",
+        "refresh": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "node",
+        "label": "Node",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(up, host)",
+        "query": "label_values(up, host)",
+        "refresh": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "instance",
+        "label": "Instance",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(up, instance)",
+        "query": "label_values(up, instance)",
+        "refresh": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "job",
+        "label": "Job",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(up, job)",
+        "query": "label_values(up, job)",
+        "refresh": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "5s",
+      "10s",
+      "30s",
+      "1m",
+      "5m",
+      "15m"
+    ]
+  },
+  "timezone": "browser",
+  "title": "Synergy Testnet Consensus and Chain",
+  "uid": "synergy-testnet-consensus-chain",
+  "version": 1,
+  "weekStart": ""
+}

@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="650" viewBox="0 0 1100 650">
+<rect width="100%" height="100%" fill="white"/>
+<g font-family="-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif" fill="#1d2733">
+<text x="550.0" y="33.0" font-size="18" text-anchor="middle">Coordinated committed-package wire scaling</text>
+<line x1="105" y1="565.0" x2="855" y2="565.0" stroke="#d9e0e6"/>
+<text x="95.0" y="569.0" font-size="11" text-anchor="end">10^4</text>
+<line x1="105" y1="440.0" x2="855" y2="440.0" stroke="#d9e0e6"/>
+<text x="95.0" y="444.0" font-size="11" text-anchor="end">10^5</text>
+<line x1="105" y1="315.0" x2="855" y2="315.0" stroke="#d9e0e6"/>
+<text x="95.0" y="319.0" font-size="11" text-anchor="end">10^6</text>
+<line x1="105" y1="190.0" x2="855" y2="190.0" stroke="#d9e0e6"/>
+<text x="95.0" y="194.0" font-size="11" text-anchor="end">10^7</text>
+<line x1="105" y1="65.0" x2="855" y2="65.0" stroke="#d9e0e6"/>
+<text x="95.0" y="69.0" font-size="11" text-anchor="end">10^8</text>
+<line x1="105.0" y1="65" x2="105.0" y2="565" stroke="#eef1f4"/>
+<text x="105.0" y="585.0" font-size="10" text-anchor="middle">1</text>
+<line x1="355.0" y1="65" x2="355.0" y2="565" stroke="#eef1f4"/>
+<text x="355.0" y="585.0" font-size="10" text-anchor="middle">8</text>
+<line x1="605.0" y1="65" x2="605.0" y2="565" stroke="#eef1f4"/>
+<text x="605.0" y="585.0" font-size="10" text-anchor="middle">64</text>
+<line x1="680.3" y1="65" x2="680.3" y2="565" stroke="#eef1f4"/>
+<text x="680.3" y="585.0" font-size="10" text-anchor="middle">128</text>
+<line x1="693.0" y1="65" x2="693.0" y2="565" stroke="#eef1f4"/>
+<text x="693.0" y="585.0" font-size="10" text-anchor="middle">128</text>
+<line x1="695.4" y1="65" x2="695.4" y2="565" stroke="#eef1f4"/>
+<text x="695.4" y="585.0" font-size="10" text-anchor="middle">128</text>
+<line x1="695.9" y1="65" x2="695.9" y2="565" stroke="#eef1f4"/>
+<text x="695.9" y="585.0" font-size="10" text-anchor="middle">128</text>
+<line x1="696.4" y1="65" x2="696.4" y2="565" stroke="#eef1f4"/>
+<text x="696.4" y="585.0" font-size="10" text-anchor="middle">128</text>
+<line x1="696.8" y1="65" x2="696.8" y2="565" stroke="#eef1f4"/>
+<text x="696.8" y="585.0" font-size="10" text-anchor="middle">128</text>
+<line x1="697.3" y1="65" x2="697.3" y2="565" stroke="#eef1f4"/>
+<text x="697.3" y="585.0" font-size="10" text-anchor="middle">128</text>
+<line x1="697.8" y1="65" x2="697.8" y2="565" stroke="#eef1f4"/>
+<text x="697.8" y="585.0" font-size="10" text-anchor="middle">128</text>
+<line x1="704.5" y1="65" x2="704.5" y2="565" stroke="#eef1f4"/>
+<text x="704.5" y="585.0" font-size="10" text-anchor="middle">128</text>
+<line x1="779.7" y1="65" x2="779.7" y2="565" stroke="#eef1f4"/>
+<text x="779.7" y="585.0" font-size="10" text-anchor="middle">256</text>
+<line x1="855.0" y1="65" x2="855.0" y2="565" stroke="#eef1f4"/>
+<text x="855.0" y="585.0" font-size="10" text-anchor="middle">512</text>
+<polyline points="105.0,453.5 355.0,371.4 605.0,253.4 680.3,216.1 693.0,209.8 695.4,208.6 695.9,208.4 696.4,208.1 696.8,207.9 697.3,207.7 697.8,207.4 704.5,204.1 779.7,166.6 855.0,129.1" fill="none" stroke="#355C7D" stroke-width="2"/>
+<circle cx="105.0" cy="453.5" r="3" fill="#355C7D"/>
+<circle cx="355.0" cy="371.4" r="3" fill="#355C7D"/>
+<circle cx="605.0" cy="253.4" r="3" fill="#355C7D"/>
+<circle cx="680.3" cy="216.1" r="3" fill="#355C7D"/>
+<circle cx="693.0" cy="209.8" r="3" fill="#355C7D"/>
+<circle cx="695.4" cy="208.6" r="3" fill="#355C7D"/>
+<circle cx="695.9" cy="208.4" r="3" fill="#355C7D"/>
+<circle cx="696.4" cy="208.1" r="3" fill="#355C7D"/>
+<circle cx="696.8" cy="207.9" r="3" fill="#355C7D"/>
+<circle cx="697.3" cy="207.7" r="3" fill="#355C7D"/>
+<circle cx="697.8" cy="207.4" r="3" fill="#355C7D"/>
+<circle cx="704.5" cy="204.1" r="3" fill="#355C7D"/>
+<circle cx="779.7" cy="166.6" r="3" fill="#355C7D"/>
+<circle cx="855.0" cy="129.1" r="3" fill="#355C7D"/>
+<line x1="880" y1="81" x2="910" y2="81" stroke="#355C7D" stroke-width="3"/>
+<text x="917.0" y="85.0" font-size="10" text-anchor="start">authentication bytes</text>
+<polyline points="105.0,446.0 355.0,363.4 605.0,245.2 680.3,208.0 693.0,201.7 695.4,200.5 695.9,200.2 696.4,200.0 696.8,199.8 697.3,199.5 697.8,199.3 704.5,196.0 779.7,158.5 855.0,121.0" fill="none" stroke="#C06C84" stroke-width="2"/>
+<circle cx="105.0" cy="446.0" r="3" fill="#C06C84"/>
+<circle cx="355.0" cy="363.4" r="3" fill="#C06C84"/>
+<circle cx="605.0" cy="245.2" r="3" fill="#C06C84"/>
+<circle cx="680.3" cy="208.0" r="3" fill="#C06C84"/>
+<circle cx="693.0" cy="201.7" r="3" fill="#C06C84"/>
+<circle cx="695.4" cy="200.5" r="3" fill="#C06C84"/>
+<circle cx="695.9" cy="200.2" r="3" fill="#C06C84"/>
+<circle cx="696.4" cy="200.0" r="3" fill="#C06C84"/>
+<circle cx="696.8" cy="199.8" r="3" fill="#C06C84"/>
+<circle cx="697.3" cy="199.5" r="3" fill="#C06C84"/>
+<circle cx="697.8" cy="199.3" r="3" fill="#C06C84"/>
+<circle cx="704.5" cy="196.0" r="3" fill="#C06C84"/>
+<circle cx="779.7" cy="158.5" r="3" fill="#C06C84"/>
+<circle cx="855.0" cy="121.0" r="3" fill="#C06C84"/>
+<line x1="880" y1="105" x2="910" y2="105" stroke="#C06C84" stroke-width="3"/>
+<text x="917.0" y="109.0" font-size="10" text-anchor="start">full NetworkMessage frame</text>
+<polyline points="105.0,556.6 355.0,471.2 605.0,352.4 680.3,315.2 693.0,308.8 695.4,307.6 695.9,307.4 696.4,307.1 696.8,306.9 697.3,306.7 697.8,306.5 704.5,303.1 779.7,265.6 855.0,228.1" fill="none" stroke="#6C5B7B" stroke-width="2"/>
+<circle cx="105.0" cy="556.6" r="3" fill="#6C5B7B"/>
+<circle cx="355.0" cy="471.2" r="3" fill="#6C5B7B"/>
+<circle cx="605.0" cy="352.4" r="3" fill="#6C5B7B"/>
+<circle cx="680.3" cy="315.2" r="3" fill="#6C5B7B"/>
+<circle cx="693.0" cy="308.8" r="3" fill="#6C5B7B"/>
+<circle cx="695.4" cy="307.6" r="3" fill="#6C5B7B"/>
+<circle cx="695.9" cy="307.4" r="3" fill="#6C5B7B"/>
+<circle cx="696.4" cy="307.1" r="3" fill="#6C5B7B"/>
+<circle cx="696.8" cy="306.9" r="3" fill="#6C5B7B"/>
+<circle cx="697.3" cy="306.7" r="3" fill="#6C5B7B"/>
+<circle cx="697.8" cy="306.5" r="3" fill="#6C5B7B"/>
+<circle cx="704.5" cy="303.1" r="3" fill="#6C5B7B"/>
+<circle cx="779.7" cy="265.6" r="3" fill="#6C5B7B"/>
+<circle cx="855.0" cy="228.1" r="3" fill="#6C5B7B"/>
+<line x1="880" y1="129" x2="910" y2="129" stroke="#6C5B7B" stroke-width="3"/>
+<text x="917.0" y="133.0" font-size="10" text-anchor="start">unsigned structural bytes</text>
+<text x="480.0" y="630.0" font-size="12" text-anchor="middle">Signed Aegis transactions per block (log2 scale)</text>
+<text x="24.0" y="315.0" font-size="12" text-anchor="middle" transform="rotate(-90 24.0 315.0)">Bytes (log scale)</text>
+</g></svg>

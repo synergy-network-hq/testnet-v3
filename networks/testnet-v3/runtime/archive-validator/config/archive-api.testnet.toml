@@ -1,0 +1,7 @@
+[api]
+enabled = true
+bind = "0.0.0.0:48640"
+public_url = "http://73.79.66.255:48640"
+read_only = true
+enable_resumable_downloads = true
+rate_limit_enabled = true

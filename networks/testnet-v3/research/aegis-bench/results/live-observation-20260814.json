@@ -1,0 +1,71 @@
+{
+  "classification": "EXISTING_TELEMETRY",
+  "observation_kind": "LIVE TESTNET OBSERVATION",
+  "observed_at_utc": "2026-08-14T23:53:36Z",
+  "observation_window_start_utc": "2026-08-14T23:53:36Z",
+  "observation_window_end_utc": null,
+  "observation_window_end_reason": "The sanitized snapshot recorded its command timestamp but did not retain a separate session-close timestamp; no duration metric is inferred.",
+  "load_context": "No generated load; service inactive; host one-minute load average 0.07.",
+  "scope": "single workbook-authorized RPC gateway host; passive read-only snapshot",
+  "connection": {
+    "alias": "synergy-rpc",
+    "sessions_opened": 1,
+    "mutations_performed": 0,
+    "load_generated": 0
+  },
+  "host": {
+    "operating_system": "Ubuntu 26.04 LTS",
+    "kernel": "Linux 7.0.0-14-generic",
+    "architecture": "x86_64",
+    "uptime_days_approximate": 57.6,
+    "load_average_1m": 0.07,
+    "memory_usage_percent_host_summary": 3,
+    "swap_usage_percent_host_summary": 0
+  },
+  "service": {
+    "unit": "synergy-chain1266-role@rpc-gateway.service",
+    "unit_file_state": "enabled",
+    "active_state": "inactive",
+    "sub_state": "dead",
+    "last_active_enter_utc": "2026-08-03T10:33:32Z",
+    "last_inactive_enter_utc": "2026-08-03T10:39:07Z",
+    "last_result": "success",
+    "restart_count": 0,
+    "running_synergy_process_count": 0,
+    "running_synergy_listener_count": 0,
+    "last_filtered_journal_height": 0
+  },
+  "artifact_provenance": {
+    "role_service_wrapper_path": "/usr/local/libexec/synergy/chain1266-role-service",
+    "role_service_wrapper_sha256": "4f0b535c57772383bd7839848ebebf5bff61ee49d73201bc8c0ede2346c95389",
+    "legacy_release_guard_path": "/opt/synergy/testnet-v3/bin/synergy-release-guard",
+    "legacy_release_guard_sha256": "8f0976a5387bd6f14d1431c9d8f67886aaa98e945c1b4071042bc1a9f05c4604",
+    "versioned_node_artifact_count": 10,
+    "version_string_in_artifact_names": "20.0.0",
+    "selected_node_artifact": null,
+    "selected_node_artifact_reason": "service was inactive and no active selection symlink was present"
+  },
+  "not_measured": [
+    {
+      "metric": "live finality or confirmation latency",
+      "classification": "NOT_MEASURED",
+      "reason": "authorized RPC gateway service was inactive and its last filtered journal height was zero"
+    },
+    {
+      "metric": "live transaction throughput",
+      "classification": "NOT_MEASURED",
+      "reason": "no running Synergy process or listener existed during the observation window"
+    },
+    {
+      "metric": "live Aegis CPU, memory, network, and PQ-operation counters",
+      "classification": "NOT_MEASURED",
+      "reason": "no running Synergy process existed; host-wide values cannot be attributed to Aegis"
+    },
+    {
+      "metric": "six-validator live network health",
+      "classification": "NOT_MEASURED",
+      "reason": "one authorized RPC gateway snapshot cannot establish validator fleet state"
+    }
+  ],
+  "redaction": "No hostname, IP address, login source, credential, environment, private endpoint, or key material is retained."
+}

@@ -1,0 +1,49 @@
+[package]
+name = "aegis-pqvm"
+version = "0.1.0"
+edition = "2021"
+authors = ["Synergy Blockchain Labs, Inc."]
+description = "Aegis Post-Quantum Virtual Machine core cryptography and integration toolkit."
+license = "Proprietary"
+
+[lib]
+doctest = false
+
+[features]
+default = ["mlkem", "fndsa", "security"]
+mlkem = []
+fndsa = []
+security = []
+serialization = ["serde", "serde-big-array"]
+benchmarks = ["criterion"]
+evm = []
+substrate = []
+cosmwasm = []
+move = []
+solana = []
+avx2 = []
+neon = []
+aes = []
+
+[dependencies]
+rand = "0.8"
+sha3 = "0.10"
+libc = "0.2"
+paste = "1.0"
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"], optional = true }
+serde-big-array = { version = "0.5", optional = true }
+criterion = { version = "0.5", optional = true }
+pqcrypto-internals = { path = "vendor/pqcrypto-internals" }
+pqcrypto-traits = { path = "vendor/pqcrypto-traits" }
+
+[dev-dependencies]
+tempfile = "3.10"
+serde_json = "1.0"
+
+[build-dependencies]
+cc = "1"
+glob = "0.3"
+
+[package.metadata.docs.rs]
+features = ["serialization"]

@@ -1,0 +1,69 @@
+# Compatibility projection only. The production runtime loads the finalized
+# Genesis-bound JSON manifest and rejects this file as an override source.
+# These labels are descriptive mirrors only; the Genesis parameter root is the
+# sole consensus authority.
+# Decision ID: TV3-POSY-PARAMS-2026-07-28-01
+[consensus]
+algorithm = "posy/2.2"
+block_time = 2
+stake_required = "50000 SNRG"
+validators = 6
+slashing_penalty = "synergy_score_decay"
+reward_per_block = "2 SNRG"
+tx_pool_limit = 5000
+minimum_stake_period = "24 hours"
+
+[consensus.parameters]
+cluster_size = 6
+clusters = 1
+epoch_length = 1000
+activation_boundary = "genesis_or_declared_epoch_boundary"
+rotation_interval = 1000
+checkpoint_interval = 50
+count_quorum_rule = "strict_more_than_two_thirds"
+weight_quorum_rule = "strict_more_than_two_thirds"
+proposer_selection = "full_cluster_deterministic_ranked_rotation"
+initial_availability_quorum = 5
+initial_decryption_threshold = 2
+proposal_timeout_ms = 1500
+prevote_timeout_ms = 1500
+precommit_timeout_ms = 1500
+max_round_timeout_ms = 10000
+
+[consensus.security]
+sybil_resistance = true
+validator_rotation = true
+rotation_randomness = "finalized_qc_derived_epoch_seed"
+min_uptime_threshold = 0.85
+slashing_tiers = "light, moderate, severe"
+cartel_detection_enabled = true
+cartel_correlation_threshold = 0.85
+cartel_timing_threshold = 0.9
+cartel_size_threshold = 10
+
+[consensus.cryptography]
+pqc_algorithm = "ML-DSA-65"
+signature_scheme = "ML-DSA-65"
+key_encapsulation = "ML-KEM-1024"
+hybrid_signing_enabled = false
+key_rotation_interval = 180
+key_overlap_period = 30
+address_encoding = "Bech32m"
+security_level = "NIST Level 5"
+
+[consensus.synergy_scoring]
+stake_cap = 0.05
+decay_rate = 0.0001
+contribution_coefficients = [0.5, 0.3, 0.2]
+reputation_uptime_weight = 0.3
+reputation_accuracy_weight = 0.3
+reputation_slashing_weight = 0.4
+
+[consensus.governance]
+dao_enabled = true
+proposal_bond_requirement = 0.05
+approval_thresholds = { parameter = 0.5, protocol = 0.67, emergency = 0.8 }
+discussion_period_days = 7
+voting_period_days = 3
+timelock_period_days = 2
+quorum_requirement = 0.4

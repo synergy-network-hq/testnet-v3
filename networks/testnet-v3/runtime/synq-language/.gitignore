@@ -1,0 +1,127 @@
+# Rust / Cargo build output
+/target/
+**/target/
+**/*.rs.bk
+*.rlib
+*.rmeta
+*.crate
+
+# Cargo.lock files are intentionally tracked for reproducible workspace builds.
+
+# Rust fuzzing, benchmarks, and profiling
+**/fuzz/artifacts/
+**/fuzz/corpus/
+**/fuzz/coverage/
+criterion/
+**/criterion/
+*.profraw
+*.profdata
+flamegraph.svg
+perf.data
+perf.data.old
+
+# Native compiler output
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+*.dSYM/
+
+# Node.js / TypeScript
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+build/
+**/build/
+out/
+**/out/
+coverage/
+**/coverage/
+.nyc_output/
+*.tsbuildinfo
+.npm/
+.pnpm-store/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Python
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+**/.venv/
+venv/
+**/venv/
+env/
+ENV/
+.pytest_cache/
+**/.pytest_cache/
+.mypy_cache/
+**/.mypy_cache/
+.ruff_cache/
+**/.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# WebAssembly and downloaded toolchains
+pkg/
+**/pkg/
+wasm-pack.log
+**/tools/wasi-sdk-*/
+wasi-sdk-*.tar.gz
+wasi-sdk-*.tar.xz
+
+# Generated artifacts, archives, logs, and temporary files
+artifacts/
+**/artifacts/
+*.log
+*.tmp
+*.temp
+*.out
+*.err
+*.bak
+*.backup
+*.orig
+*.rej
+*~
+*.zip
+!docs.zip
+*.tar
+*.tar.gz
+*.tgz
+*.tar.xz
+*.7z
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+secrets/
+.secret/
+
+# Editors and IDEs
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.json.example
+.idea/
+*.iml
+*.swp
+*.swo
+
+# Operating-system metadata
+.DS_Store
+**/.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+Desktop.ini

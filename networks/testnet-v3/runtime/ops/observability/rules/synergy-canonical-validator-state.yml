@@ -1,0 +1,19 @@
+groups:
+  - name: synergy-canonical-validator-state
+    interval: 30s
+    rules:
+      # The validator status gauge is replicated by each validator target.
+      # max() preserves the registry count without summing duplicate samples.
+      - record: synergy_canonical_active_validator_count
+        expr: max(synergy_validator_status_total{job="synergy-validators",status="active"})
+
+      - alert: SynergyActiveValidatorCountBelowQuorum
+        expr: synergy_canonical_active_validator_count < 4
+        for: 5m
+        labels:
+          severity: critical
+          network: synergy-testnet
+        annotations:
+          summary: "Active validator count is below quorum safety threshold"
+          description: "Only {{ $value | printf \"%.0f\" }} active validators are visible in the canonical registry view."
+          runbook: "Inspect validator qRPC probes and registry metrics."

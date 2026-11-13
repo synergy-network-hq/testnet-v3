@@ -1,0 +1,17 @@
+[Unit]
+Description=Synergy Archive Snapshot API
+After=synergy-archive-validator.service
+Requires=synergy-archive-validator.service
+
+[Service]
+Type=simple
+User=synergy
+Group=synergy
+ExecStart=/usr/local/bin/synergy-archive serve
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

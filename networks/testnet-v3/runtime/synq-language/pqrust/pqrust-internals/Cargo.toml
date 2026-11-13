@@ -1,0 +1,21 @@
+[package]
+name = "pqrust-internals"
+version = "0.2.11"
+edition = "2021"
+description = "bindings to common cryptography"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rustpq/pqrust"
+
+links = "pqrust_internals"
+
+[build-dependencies]
+cc = { version = "1.0", features = ["parallel"] }
+dunce = "1.0"
+
+[dependencies]
+getrandom = { version = "0.3", features = ["std", "wasm_js"], optional = true }
+libc = "0.2"
+
+[features]
+default = ["getrandom"]
+pqcrypto-compat-export = []

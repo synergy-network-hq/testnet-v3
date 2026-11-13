@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "status": "PROPOSED_NOT_ACTIVATED",
+  "chain_id": 1266,
+  "network_id": "testnet",
+  "release_id": "testnet-v3",
+  "protocol_version": "posy/3.0",
+  "activation_boundary": "fresh_genesis_block_zero",
+  "activation_epoch": 0,
+  "activation_height": 1,
+  "initial_epoch_only": true,
+  "cluster_count": 1,
+  "validators": [
+    {"validator_id":"validator-02","consensus_key_id":"REQUIRED_APPROVED_ML_DSA_65_KEY_2","frozen_voting_weight":"REQUIRED_GOVERNED_INTEGER_WEIGHT_2"},
+    {"validator_id":"validator-03","consensus_key_id":"REQUIRED_APPROVED_ML_DSA_65_KEY_3","frozen_voting_weight":"REQUIRED_GOVERNED_INTEGER_WEIGHT_3"},
+    {"validator_id":"validator-04","consensus_key_id":"REQUIRED_APPROVED_ML_DSA_65_KEY_4","frozen_voting_weight":"REQUIRED_GOVERNED_INTEGER_WEIGHT_4"},
+    {"validator_id":"validator-05","consensus_key_id":"REQUIRED_APPROVED_ML_DSA_65_KEY_5","frozen_voting_weight":"REQUIRED_GOVERNED_INTEGER_WEIGHT_5"},
+    {"validator_id":"validator-06","consensus_key_id":"REQUIRED_APPROVED_ML_DSA_65_KEY_6","frozen_voting_weight":"REQUIRED_GOVERNED_INTEGER_WEIGHT_6"}
+  ],
+  "private_material_present": false
+}

@@ -1,0 +1,35 @@
+[Unit]
+Description=Add a validator peer to innernet interface %i
+Documentation=https://github.com/tonarino/innernet
+Requires=innernet-server@%i.service
+After=innernet-server@%i.service
+ConditionPathExists=/run/validator-vpn-coordinator/add-peer/%i.env
+
+[Service]
+Type=oneshot
+# innernet-server v2.0.0 requires UID 0 for add-peer as well as serve.
+User=root
+Group=root
+UMask=0077
+EnvironmentFile=-/etc/default/validator-vpn-coordinator
+EnvironmentFile=/run/validator-vpn-coordinator/add-peer/%i.env
+ExecStart=/usr/local/libexec/validator-vpn-coordinator-add-peer %i
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+LockPersonality=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+IPAddressDeny=any
+IPAddressAllow=127.0.0.1
+IPAddressAllow=::1
+ReadWritePaths=/etc/innernet-server /var/lib/innernet-server /var/lib/validator-vpn-coordinator

@@ -1,0 +1,11 @@
+[package]
+name = "quantumvm"
+version = "1.0.0"
+edition = "2021"
+
+[features]
+default = []
+pqc-aegis = ["dep:pqsynq"]
+
+[dependencies]
+pqsynq = { package = "aegis-pqsynq", path = "../aegis-pqsynq/pqsynq", default-features = false, features = ["mlkem", "mldsa", "fndsa", "hqckem"], optional = true }

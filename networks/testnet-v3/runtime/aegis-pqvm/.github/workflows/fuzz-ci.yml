@@ -1,0 +1,42 @@
+name: PQVM Fuzz CI
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - 'aegis-pqvm/fuzz/**'
+      - 'aegis-pqvm/src/integrations/**'
+      - 'aegis-pqvm/.github/workflows/fuzz-ci.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'aegis-pqvm/fuzz/**'
+      - 'aegis-pqvm/src/integrations/**'
+      - 'aegis-pqvm/.github/workflows/fuzz-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: aegis-pqvm
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Fuzz smoke - ABI decode target
+        run: cargo fuzz run abi_decode -- -max_total_time=30
+
+      - name: Fuzz smoke - dispatcher target
+        run: cargo fuzz run dispatch_deterministic -- -max_total_time=30

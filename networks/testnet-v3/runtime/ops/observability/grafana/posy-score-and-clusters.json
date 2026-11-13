@@ -1,0 +1,803 @@
+{
+  "description": "PoSy (Proof of Synergy) validator scoring, score breakdown components, cluster membership, and cluster quorum readiness.",
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "PoSy Score per Validator",
+      "id": 1,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (label, address) (synergy_validator_score)",
+          "legendFormat": "{{label}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.4
+              },
+              {
+                "color": "green",
+                "value": 0.6
+              }
+            ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "mean"
+          ]
+        }
+      },
+      "description": "PoSy Score per Validator for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "type": "bargauge",
+      "title": "Current Score (lowest first)",
+      "id": 2,
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "bottomk(20, max by (label, address) (synergy_validator_score))",
+          "legendFormat": "{{label}}",
+          "instant": true
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.4
+              },
+              {
+                "color": "green",
+                "value": 0.6
+              }
+            ]
+          }
+        }
+      },
+      "description": "Current Score (lowest first) for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "type": "piechart",
+      "title": "Active vs Inactive Validators",
+      "id": 3,
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count(max by (label, address) (synergy_validator_active) == 1)",
+          "legendFormat": "active",
+          "instant": true
+        },
+        {
+          "refId": "B",
+          "expr": "count(max by (label, address) (synergy_validator_active) == 0) or vector(0)",
+          "legendFormat": "inactive",
+          "instant": true
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "right",
+          "showLegend": true,
+          "values": [
+            "value",
+            "percent"
+          ]
+        },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "description": "Active vs Inactive Validators for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "type": "timeseries",
+      "title": "Score Category - Total Score",
+      "id": 10,
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "synergy_validator_score_category{category=\"total_score\"}",
+          "legendFormat": "{{label}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "max": 1
+        }
+      },
+      "description": "Live total-score component emitted by the validator registry. This panel only covers voting validators; the Archive Validator is intentionally excluded."
+    },
+    {
+      "type": "timeseries",
+      "title": "Score Category - Components",
+      "id": 11,
+      "gridPos": {
+        "x": 8,
+        "y": 16,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "synergy_validator_score_category{category=\"components\"}",
+          "legendFormat": "{{label}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "max": 1
+        }
+      },
+      "description": "Live component-score flag emitted by the validator registry. This panel only covers voting validators; the Archive Validator is intentionally excluded."
+    },
+    {
+      "type": "timeseries",
+      "title": "Score Category - Address Flag",
+      "id": 12,
+      "gridPos": {
+        "x": 16,
+        "y": 16,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "synergy_validator_score_category{category=\"address\"}",
+          "legendFormat": "{{label}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "max": 1
+        }
+      },
+      "description": "Live validator-address score flag emitted by the validator registry. This panel only covers voting validators; the Archive Validator is intentionally excluded."
+    },
+    {
+      "type": "timeseries",
+      "title": "Validator Uptime Percent",
+      "id": 13,
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (name, status, validator) (synergy_validator_uptime_percent{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"})",
+          "legendFormat": "{{label}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "max": 100
+        }
+      },
+      "description": "Registry-reported uptime percentage for voting validators. This panel avoids the unavailable collaboration category."
+    },
+    {
+      "type": "stat",
+      "title": "Status-Ready Validators",
+      "id": 20,
+      "gridPos": {
+        "x": 8,
+        "y": 24,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(synergy_status_ready_validators{job=\"synergy-validators\"})",
+          "legendFormat": "ready",
+          "instant": true
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "BELOW QUORUM",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "QUORUM OK",
+                  "color": "green"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "description": "Status-Ready Validators for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "type": "table",
+      "title": "Validator Peer Count",
+      "id": 21,
+      "gridPos": {
+        "x": 16,
+        "y": 24,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "synergy_validator_peer_count{job=\"synergy-validators\"} or synergy_p2p_peers_connected{job=\"synergy-validators\"}",
+          "instant": true,
+          "format": "table",
+          "legendFormat": "{{instance_label}}"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "instance": true
+            },
+            "renameByName": {
+              "cluster": "Cluster",
+              "address": "Validator",
+              "Value": "Member"
+            }
+          }
+        }
+      ],
+      "description": "Validator Peer Count for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "type": "stat",
+      "title": "Live Validators Reported",
+      "id": 22,
+      "gridPos": {
+        "x": 0,
+        "y": 32,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(synergy_live_validators{job=\"synergy-validators\"})",
+          "legendFormat": "live"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.4
+              },
+              {
+                "color": "green",
+                "value": 0.6
+              }
+            ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "mean"
+          ]
+        }
+      },
+      "description": "Live Validators Reported for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "type": "stat",
+      "title": "Validator Cluster Count",
+      "id": 23,
+      "gridPos": {
+        "x": 6,
+        "y": 32,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(synergy_validator_clusters_total)",
+          "legendFormat": "clusters"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.4
+              },
+              {
+                "color": "green",
+                "value": 0.6
+              }
+            ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "mean"
+          ]
+        }
+      },
+      "description": "Validator Cluster Count for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "type": "timeseries",
+      "title": "Cluster Shuffle Total",
+      "id": 24,
+      "gridPos": {
+        "x": 12,
+        "y": 32,
+        "w": 12,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (instance_label) (synergy_cluster_shuffle_total{job=\"synergy-validators\"})",
+          "instant": true,
+          "format": "table",
+          "legendFormat": "{{instance_label}}"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "instance": true
+            },
+            "renameByName": {
+              "cluster": "Cluster",
+              "address": "Validator",
+              "Value": "Member"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        }
+      },
+      "description": "Cluster Shuffle Total for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "type": "timeseries",
+      "title": "Cluster Shuffle Rate per Minute",
+      "id": 25,
+      "gridPos": {
+        "x": 0,
+        "y": 39,
+        "w": 12,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "60 * rate(synergy_cluster_shuffle_total{job=\"synergy-validators\"}[5m])",
+          "instant": true,
+          "format": "table",
+          "legendFormat": "{{instance_label}}"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "instance": true
+            },
+            "renameByName": {
+              "cluster": "Cluster",
+              "address": "Validator",
+              "Value": "Member"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        }
+      },
+      "description": "Cluster Shuffle Rate per Minute for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "type": "timeseries",
+      "title": "Ready Validators vs Total",
+      "id": 26,
+      "gridPos": {
+        "x": 12,
+        "y": 39,
+        "w": 12,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(synergy_status_ready_validators{job=\"synergy-validators\"})",
+          "instant": true,
+          "format": "table",
+          "legendFormat": "ready"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "total",
+          "expr": "max(synergy_validators_total{job=\"synergy-validators\"})"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "instance": true
+            },
+            "renameByName": {
+              "cluster": "Cluster",
+              "address": "Validator",
+              "Value": "Member"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        }
+      },
+      "description": "Ready Validators vs Total for Synergy Testnet operations. Check units and legend for interpretation."
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "synergy",
+    "testnet",
+    "posy"
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "network",
+        "label": "Network",
+        "type": "custom",
+        "query": "testnet",
+        "current": {
+          "selected": true,
+          "text": "testnet",
+          "value": "testnet"
+        },
+        "options": [
+          {
+            "selected": true,
+            "text": "testnet",
+            "value": "testnet"
+          }
+        ],
+        "hide": 0,
+        "skipUrlSync": false
+      },
+      {
+        "name": "role",
+        "label": "Role",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(up, role)",
+        "query": "label_values(up, role)",
+        "refresh": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "node",
+        "label": "Node",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(up, host)",
+        "query": "label_values(up, host)",
+        "refresh": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "instance",
+        "label": "Instance",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(up, instance)",
+        "query": "label_values(up, instance)",
+        "refresh": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "job",
+        "label": "Job",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(up, job)",
+        "query": "label_values(up, job)",
+        "refresh": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "title": "Synergy \u00b7 PoSy Score & Clusters",
+  "uid": "synergy-posy",
+  "version": 1
+}

@@ -1,0 +1,209 @@
+# -----------------------------------------------------------------------------
+# Rust / Cargo
+# -----------------------------------------------------------------------------
+target/
+**/target/
+
+# Keep Cargo.lock for applications/binaries.
+# If this repository is intended to be a pure library-only workspace, revisit this.
+# Cargo.lock
+
+# Cargo backup files
+**/*.rs.bk
+**/*.rlib
+**/*.rmeta
+
+# Cargo publish/package output
+*.crate
+
+# -----------------------------------------------------------------------------
+# Rust fuzzing
+# -----------------------------------------------------------------------------
+**/fuzz/artifacts/
+**/fuzz/corpus/
+**/fuzz/coverage/
+**/fuzz/target/
+**/fuzz/*.profraw
+**/fuzz/*.profdata
+
+# -----------------------------------------------------------------------------
+# Rust benchmark / profiling output
+# -----------------------------------------------------------------------------
+criterion/
+**/criterion/
+*.profraw
+*.profdata
+flamegraph.svg
+perf.data
+perf.data.old
+
+# -----------------------------------------------------------------------------
+# WebAssembly / wasm-pack / wasm-bindgen
+# -----------------------------------------------------------------------------
+pkg/
+pkg-*/
+**/pkg/
+**/pkg-*/
+wasm-pack.log
+
+*.wasm
+*.wasm.d.ts
+
+# Allow checked-in WASM package files only if intentionally published.
+# Remove the following exceptions if generated pkg output should never be committed.
+# !aegis_crypto_core/pkg-minimal/
+# !aegis_crypto_core/pkg-minimal/package.json
+# !aegis_crypto_core/pkg-minimal/*.js
+# !aegis_crypto_core/pkg-minimal/*.d.ts
+
+# -----------------------------------------------------------------------------
+# Node / JavaScript / TypeScript
+# -----------------------------------------------------------------------------
+node_modules/
+**/node_modules/
+
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+.npm/
+.pnpm-store/
+.yarn/
+!.yarn/releases/
+!.yarn/plugins/
+!.yarn/sdks/
+!.yarn/versions/
+
+dist/
+build/
+coverage/
+.nyc_output/
+
+*.tsbuildinfo
+
+# -----------------------------------------------------------------------------
+# Python tooling
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+
+.venv/
+venv/
+env/
+ENV/
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# -----------------------------------------------------------------------------
+# WASI SDK / external toolchains
+# -----------------------------------------------------------------------------
+aegis_crypto_core/tools/wasi-sdk-*/
+**/tools/wasi-sdk-*/
+wasi-sdk-*.tar.gz
+wasi-sdk-*.tar.xz
+
+# -----------------------------------------------------------------------------
+# Generated artifacts / reports / logs
+# -----------------------------------------------------------------------------
+artifacts/
+**/artifacts/
+
+*.log
+*.tmp
+*.temp
+*.out
+*.err
+
+# Keep policy/report markdown if intentionally versioned.
+!**/artifacts/*.md
+
+# -----------------------------------------------------------------------------
+# Test-generated vectors and temporary fixtures
+# -----------------------------------------------------------------------------
+**/tests/tmp/
+**/tests/temp/
+**/tests/output/
+**/tests/generated/
+**/tests/**/actual/
+**/tests/**/snapshots.new/
+
+# Keep pinned vectors if they are canonical fixtures.
+!**/tests/vectors/manifest.json
+!**/tests/vectors/pinned_vectors.json
+
+# -----------------------------------------------------------------------------
+# Backups
+# -----------------------------------------------------------------------------
+*.bak
+*.backup
+*.orig
+*.rej
+*~
+
+# -----------------------------------------------------------------------------
+# Environment / secrets
+# -----------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.jks
+*.keystore
+
+secrets/
+.secret/
+private/
+keys/
+
+# -----------------------------------------------------------------------------
+# IDEs / editors
+# -----------------------------------------------------------------------------
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.json.example
+
+.idea/
+*.iml
+
+*.swp
+*.swo
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# -----------------------------------------------------------------------------
+# OS / filesystem noise
+# -----------------------------------------------------------------------------
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# -----------------------------------------------------------------------------
+# Archives / release bundles
+# -----------------------------------------------------------------------------
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.tar.xz
+*.7z
+*.rar
+
+# -----------------------------------------------------------------------------
+# Local project scratch files
+# -----------------------------------------------------------------------------
+pqsynq.txt
+Cargo.toml.workspace.bak

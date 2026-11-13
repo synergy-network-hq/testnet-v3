@@ -1,0 +1,55 @@
+📜 Synergy AIVM License v1.0 (Proprietary)
+
+Copyright (c) 2025 Synergy Network. All rights reserved.
+
+1. Grant of License
+
+Synergy Network (“Licensor”) grants you (“Licensee”) a limited, revocable, non-exclusive, non-transferable license to:
+
+View and evaluate the source code of the Synergy AIVM (“Software”) for research and contribution purposes only.
+
+Run the Software locally in non-production, non-commercial environments.
+
+2. Restrictions
+
+You may NOT, without prior written consent from Synergy Network:
+
+Use the Software in production or for any commercial purpose.
+
+Copy, distribute, sublicense, sell, lease, rent, or host the Software.
+
+Modify or create derivative works of the Software outside of contributions submitted directly to the official Synergy Network repositories.
+
+Remove or alter copyright notices, trademarks, or attribution.
+
+Use the Software to build competing virtual machines or networks.
+
+3. Contributions
+
+By submitting code, documentation, or other contributions (“Contributions”) to the Software:
+
+You grant Synergy Network an irrevocable, worldwide, royalty-free license to use, modify, and relicense your Contributions as part of the Software.
+
+You affirm that your Contributions are your original work or you have the right to license them.
+
+4. Ownership
+
+The Software is and remains the exclusive property of Synergy Network. No rights or licenses are granted except as expressly stated in this License.
+
+5. Termination
+
+This License will automatically terminate if you breach any of its terms. Upon termination, you must immediately cease use of the Software and destroy all copies.
+
+6. Disclaimer of Warranty
+
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.
+
+7. Limitation of Liability
+
+IN NO EVENT SHALL SYNERGY NETWORK BE LIABLE FOR ANY DAMAGES ARISING OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THIS LICENSE, INCLUDING BUT NOT LIMITED TO LOSS OF PROFITS, DATA, OR BUSINESS INTERRUPTION.
+
+8. Future Licensing
+
+Synergy Network reserves the right, at its sole discretion, to release future versions of the Software under different license terms, including but not limited to open-source licenses (such as MIT).
+
+End of License

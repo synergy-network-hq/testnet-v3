@@ -1,0 +1,45 @@
+[Unit]
+Description=Innernet server for validator VPN interface %i
+Documentation=https://github.com/tonarino/innernet
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/innernet-server/%i.conf
+ConditionPathExists=/var/lib/innernet-server/%i.db
+
+[Service]
+Type=simple
+# innernet-server v2.0.0 rejects every command unless getuid() == 0. Keep
+# this explicit; relying on systemd's default would make that requirement
+# easy to break during a later unit hardening change.
+User=root
+Group=root
+UMask=0077
+Environment=RUST_LOG=info
+EnvironmentFile=-/etc/default/validator-vpn-coordinator
+ExecStart=/usr/bin/innernet-server --config-dir=/etc/innernet-server --data-dir=/var/lib/innernet-server serve %i --no-write-hosts
+Restart=on-failure
+RestartSec=5s
+
+# The daemon needs WireGuard/netlink access, but does not need a general
+# capability set or write access outside its two state directories.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+LockPersonality=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+ReadWritePaths=/etc/innernet-server /var/lib/innernet-server
+
+[Install]
+WantedBy=multi-user.target

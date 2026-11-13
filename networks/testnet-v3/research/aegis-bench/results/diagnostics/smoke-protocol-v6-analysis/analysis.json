@@ -1,0 +1,26 @@
+{
+  "classification": "DERIVED",
+  "raw_sample_count": 347,
+  "summary_group_count": 347,
+  "failed_safety_sample_count": 0,
+  "failed_safety_results": [],
+  "bootstrap_resamples": 2000,
+  "bootstrap_confidence": 0.95,
+  "bootstrap_statistic": "median",
+  "bootstrap_seed": "sha256 of grouping key",
+  "percentile_method": "linear interpolation at (n-1)*p",
+  "outlier_policy": "MAD flags reported; all samples retained",
+  "inputs": [
+    {
+      "path": "research/aegis-bench/results/diagnostics/smoke-protocol-v6.csv",
+      "sha256": "9315f467d2f9168dff44aaa3e8e239305479ca3b346360689f4de77c811f84d2",
+      "rows": "347"
+    }
+  ],
+  "plots": [
+    "research/aegis-bench/results/diagnostics/smoke-protocol-v6-analysis/transaction-component-latency-512B.svg",
+    "research/aegis-bench/results/diagnostics/smoke-protocol-v6-analysis/coordinated-block-wire-scaling.svg",
+    "research/aegis-bench/results/diagnostics/smoke-protocol-v6-analysis/coordinated-network-message-scaling.svg",
+    "research/aegis-bench/results/diagnostics/smoke-protocol-v6-analysis/cryptographic-object-sizes.svg"
+  ]
+}

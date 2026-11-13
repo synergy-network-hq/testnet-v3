@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>io.synergynetwork.archive-validator</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__BIN_ROOT__/synergy-archive-validator-node</string>
+    <string>start</string>
+    <string>--config</string><string>__WORKSPACE__/config/node.toml</string>
+  </array>
+  <key>WorkingDirectory</key><string>__WORKSPACE__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>__BIN_ROOT__:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>SYNERGY_PROJECT_ROOT</key><string>__WORKSPACE__</string>
+    <key>SYNERGY_CONFIG_PATH</key><string>__WORKSPACE__/config/node.toml</string>
+    <key>SYNERGY_CONSENSUS_FORK_MIGRATION_FILE</key><string>__WORKSPACE__/config/consensus-fork-migration.json</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>__LOG_ROOT__/archive-validator.out.log</string>
+  <key>StandardErrorPath</key><string>__LOG_ROOT__/archive-validator.err.log</string>
+</dict>
+</plist>

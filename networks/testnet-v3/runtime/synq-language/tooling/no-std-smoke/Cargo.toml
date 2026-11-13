@@ -1,0 +1,14 @@
+[package]
+name = "pqsynq-no-std-smoke"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+pqc-aegis = ["dep:pqsynq"]
+
+[dependencies]
+pqsynq = { package = "aegis-pqsynq", path = "../../aegis-pqsynq/pqsynq", default-features = false, features = ["mlkem", "mldsa", "fndsa", "hqckem"], optional = true }

@@ -1,0 +1,58 @@
+[package]
+name = "aegis-klc-rb"
+version = "0.1.0"
+edition = "2021"
+authors = ["Aegis PQC Team"]
+description = "Self-contained Aegis key lifecycle manager and quantum randomness beacon"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/synergy-network-hq/aegis"
+homepage = "https://synergy-network.io"
+keywords = ["post-quantum", "cryptography", "key-lifecycle", "beacon", "lifecycle", "randomness"]
+categories = ["cryptography"]
+
+[lib]
+name = "aegis_klc_rb"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+
+[dependencies]
+# Post-quantum cryptography crates
+pqrust-mlkem = "0.1"
+pqrust-mldsa = "0.1"
+pqrust-traits = "0.1"
+
+# Cryptographic primitives
+sha3 = "0.10"
+blake3 = "1.5"
+subtle = "2.5"
+zeroize = "1.8"
+getrandom = { version = "0.2", features = ["std"] }
+rand = { version = "0.8", default-features = false, features = ["std", "rand_chacha"] }
+
+# Utilities
+hex = "0.4"
+base64 = "0.22.1"
+
+# Optional serialization
+serde = { version = "1.0", optional = true, features = ["derive"] }
+serde_json = { version = "1.0", optional = true }
+
+# WASM support (optional)
+wasm-bindgen = { version = "0.2", optional = true }
+js-sys = { version = "0.3", optional = true }
+
+# WASM-specific dependencies
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+
+[features]
+default = ["mlkem", "mldsa", "serde"]
+mlkem = []
+mldsa = []
+serde = ["dep:serde", "dep:serde_json"]
+wasm = ["dep:wasm-bindgen", "dep:js-sys", "mlkem", "mldsa"]
+hardware-entropy = []
+
+[dev-dependencies]
+criterion = "0.7.0"

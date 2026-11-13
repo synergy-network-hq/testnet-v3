@@ -1,0 +1,331 @@
+name: Build Testnet Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+concurrency:
+  group: build-testnet-binaries-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Keep release binaries compatible with the Ubuntu 22.04 baseline used
+          # by the control-panel installer and documented Linux requirements.
+          - os: ubuntu-22.04
+            label: linux-amd64
+            binary_suffix: ""
+          - os: windows-latest
+            label: windows-amd64
+            binary_suffix: .exe
+          - os: macos-14
+            label: macos-arm64
+            binary_suffix: ""
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Checkout SynQ and AIVM submodules
+        shell: bash
+        env:
+          SYNQ_LANGUAGE_DEPLOY_KEY: ${{ secrets.SYNQ_LANGUAGE_DEPLOY_KEY }}
+          SYNERGY_AIVM_DEPLOY_KEY: ${{ secrets.SYNERGY_AIVM_DEPLOY_KEY }}
+          AEGIS_PQSYNQ_DEPLOY_KEY: ${{ secrets.AEGIS_PQSYNQ_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${SYNQ_LANGUAGE_DEPLOY_KEY}" && -n "${SYNERGY_AIVM_DEPLOY_KEY}" && -n "${AEGIS_PQSYNQ_DEPLOY_KEY}" ]]; then
+            mkdir -p "${HOME}/.ssh"
+            chmod 700 "${HOME}/.ssh"
+            printf '%s\n' "${SYNQ_LANGUAGE_DEPLOY_KEY}" > "${HOME}/.ssh/synq_language_deploy_key"
+            printf '%s\n' "${SYNERGY_AIVM_DEPLOY_KEY}" > "${HOME}/.ssh/synergy_aivm_deploy_key"
+            printf '%s\n' "${AEGIS_PQSYNQ_DEPLOY_KEY}" > "${HOME}/.ssh/aegis_pqsynq_deploy_key"
+            chmod 600 "${HOME}/.ssh/"*_deploy_key
+            ssh-keyscan github.com >> "${HOME}/.ssh/known_hosts"
+
+            cat > "${HOME}/.ssh/config" <<'EOF'
+          Host github.com-synq-language
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/synq_language_deploy_key
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+
+          Host github.com-synergy-aivm
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/synergy_aivm_deploy_key
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+
+          Host github.com-aegis-pqsynq
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/aegis_pqsynq_deploy_key
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+          EOF
+
+            git config --global url."git@github.com-synq-language:synergy-network-hq/synq-language.git".insteadOf "https://github.com/synergy-network-hq/synq-language.git"
+            git config --global url."git@github.com-synergy-aivm:synergy-network-hq/synergy-aivm.git".insteadOf "https://github.com/synergy-network-hq/synergy-aivm.git"
+            git config --global url."git@github.com-aegis-pqsynq:synergy-network-hq/aegis-pqsynq".insteadOf "https://github.com/synergy-network-hq/aegis-pqsynq"
+          else
+            echo "Deploy-key secrets are not fully configured; using public HTTPS submodule URLs."
+          fi
+
+          git submodule sync --recursive
+          git submodule update --init --recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install Linux release dependencies
+        if: matrix.label == 'linux-amd64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ripgrep
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.os }}-${{ matrix.label }}
+
+      - name: Enforce PQC-only consensus-critical paths
+        shell: bash
+        run: scripts/testnet/check-pqc-consensus-guard.sh
+
+      - name: Enforce PQC RNG symbol ownership
+        shell: bash
+        run: scripts/testnet/check-pqc-rng-symbol-ownership.sh
+
+      - name: Enforce release manifest portability
+        shell: bash
+        run: scripts/testnet/check-release-manifests.sh
+
+      - name: Enforce dynamic validator topology
+        shell: bash
+        run: scripts/testnet/check-no-hardcoded-validator-topology.sh
+
+      - name: Build release binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Build all available binary targets
+          # See src/Cargo.toml for available [[bin]] sections
+          cargo build --release --locked -p synergy-testnet \
+            --bin synergy-testnet \
+            --bin generate-node-keys \
+            --bin synergy-address-engine \
+            --bin wallet-pqc-cli \
+            --bin synergy-sts \
+            --bin synergy-rpc-gateway-node \
+            --bin synergy-archive \
+            --bin synergy-node \
+            --bin synergy-indexer-and-explorer-node
+
+      - name: Verify Linux glibc compatibility baseline
+        if: matrix.label == 'linux-amd64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          max_glibc="$(
+            readelf --version-info target/release/synergy-testnet \
+              | sed -n 's/.*Name: GLIBC_\([0-9.]\+\).*/\1/p' \
+              | sort -V \
+              | tail -n 1
+          )"
+          if [[ -z "${max_glibc}" ]]; then
+            echo "Unable to determine the Linux runtime glibc requirement." >&2
+            exit 1
+          fi
+          if [[ "$(printf '%s\n%s\n' '2.35' "${max_glibc}" | sort -V | tail -n 1)" != '2.35' ]]; then
+            echo "Linux runtime requires GLIBC_${max_glibc}; maximum supported baseline is GLIBC_2.35." >&2
+            exit 1
+          fi
+          echo "Linux runtime glibc requirement verified: GLIBC_${max_glibc} <= GLIBC_2.35"
+
+      - name: Package binaries
+        id: package
+        shell: bash
+        env:
+          MATRIX_LABEL: ${{ matrix.label }}
+          MATRIX_SUFFIX: ${{ matrix.binary_suffix }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REF: ${{ github.ref }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          python <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import shutil
+
+          label = os.environ["MATRIX_LABEL"]
+          suffix = os.environ["MATRIX_SUFFIX"]
+          repo = os.environ["GITHUB_REPOSITORY"]
+          github_ref = os.environ["GITHUB_REF"]
+          ref_name = os.environ.get("GITHUB_REF_NAME") or os.environ["GITHUB_SHA"]
+          event_name = os.environ["GITHUB_EVENT_NAME"]
+
+          # Available binaries (matching src/Cargo.toml [[bin]] sections)
+          binaries = [
+              "synergy-testnet",
+              "generate-node-keys",
+              "synergy-address-engine",
+              "wallet-pqc-cli",
+              "synergy-sts",
+              "synergy-rpc-gateway-node",
+              "synergy-archive",
+              "synergy-node",
+              "synergy-indexer-and-explorer-node",
+          ]
+
+          dist = pathlib.Path("dist")
+          target = pathlib.Path("target") / "release"
+
+          binaries_info = {}
+          base_url = (
+              f"https://github.com/{repo}/releases/download/{ref_name}"
+              if event_name == "release" or github_ref.startswith("refs/tags/v")
+              else ""
+          )
+
+          for binary in binaries:
+              source = target / f"{binary}{suffix}"
+              staged_name = f"{binary}-{label}{suffix}"
+              staged = dist / staged_name
+              shutil.copyfile(source, staged)
+              digest = hashlib.sha256(staged.read_bytes()).hexdigest()
+              (dist / f"{staged_name}.sha256").write_text(f"{digest}  {staged_name}\n", encoding="utf-8")
+
+              binaries_info[binary] = {
+                  "url": f"{base_url}/{staged_name}" if base_url else staged_name,
+                  "sha256": digest,
+              }
+
+          manifest_path = dist / f"latest-{label}.json"
+          manifest = {
+              "version": ref_name,
+              "binaries": {
+                  label: binaries_info,
+              },
+          }
+          manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+          print(f"manifest_path={manifest_path}")
+          PY
+
+          if [[ "${MATRIX_LABEL}" == "linux-amd64" ]]; then
+            cp scripts/install-synergy-sts.sh dist/install-synergy-sts.sh
+            cp scripts/install-synergy-sts.ps1 dist/install-synergy-sts.ps1
+            install -m 0755 "target/release/synergy-archive${MATRIX_SUFFIX}" archive-validator/bin/synergy-archive
+            ./archive-validator/package-archive-validator.sh --linux
+            cp archive-validator/synergy-archive-validator-testnet-v3-linux-x64.zip dist/
+            cp archive-validator/synergy-archive-validator-testnet-v3.zip dist/
+            cp archive-validator/dist/SHA256SUMS.linux dist/SHA256SUMS.archive-validator-linux
+            cp archive-validator/dist/SHA256SUMS dist/SHA256SUMS.archive-validator
+          fi
+          if [[ "${MATRIX_LABEL}" == "macos-arm64" ]]; then
+            ./archive-validator/package-archive-validator-macos-m4.sh
+            cp archive-validator/dist/synergy-archive-validator-testnet-v3-macos-m4-storage-volume.zip dist/
+            cp archive-validator/dist/synergy-archive-validator-testnet-v3-macos-m4-storage-volume.zip.sha256 dist/
+          fi
+
+      - name: Upload workflow artifact
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.label }}
+          path: dist/*
+
+      - name: Upload release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+
+  merge-manifest:
+    name: Publish unified latest.json
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name != 'release'
+
+    steps:
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Merge per-platform manifests into latest.json
+        shell: bash
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import json
+          import os
+          import pathlib
+          from datetime import datetime, timezone
+
+          ref_name = os.environ.get("GITHUB_REF_NAME") or os.environ["GITHUB_SHA"]
+          artifacts = pathlib.Path("artifacts")
+
+          merged = {
+              "version": ref_name,
+              "build_date": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "binaries": {},
+          }
+
+          for manifest_path in sorted(artifacts.glob("*/latest-*.json")):
+              fragment = json.loads(manifest_path.read_text())
+              merged["binaries"].update(fragment.get("binaries", {}))
+
+          if not merged["binaries"]:
+              raise SystemExit("No per-platform manifests found under artifacts/")
+
+          out = artifacts / "latest.json"
+          out.write_text(json.dumps(merged, indent=2), encoding="utf-8")
+          print(f"Wrote unified manifest with platforms: {list(merged['binaries'].keys())}")
+          PY
+
+      - name: Upload unified manifest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: latest-manifest
+          path: artifacts/latest.json
+
+      - name: Upload unified manifest to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/latest.json
