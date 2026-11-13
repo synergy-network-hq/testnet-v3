@@ -417,6 +417,31 @@ impl ProposalDelivery {
 
     /// Republish only this authority's bounded active window. Earlier epochs
     /// remain durable, but must never be reinterpreted by the current verifier.
+    pub fn stored_ready_window(
+        &self,
+        active_height: u64,
+        epoch: &SimplifiedEpochContext,
+        registry: &FrozenValidatorRegistry,
+        verifier: &impl ConsensusSignatureVerifier,
+    ) -> PosyResult<Vec<ProposalDeliveryEnvelope>> {
+        epoch.validate_against(registry)?;
+        Self::replay_window(active_height, epoch)
+            .filter_map(|height| {
+                self.stored_ready_envelope(height, epoch, registry, verifier)
+                    .transpose()
+            })
+            .collect()
+    }
+
+    fn replay_window(
+        active_height: u64,
+        epoch: &SimplifiedEpochContext,
+    ) -> std::ops::RangeInclusive<u64> {
+        active_height
+            .saturating_sub(8)
+            .max(epoch.epoch_start_height)..=active_height.min(epoch.epoch_end_height)
+    }
+
     pub fn stored_validation_window(
         &self,
         active_height: u64,
@@ -425,11 +450,7 @@ impl ProposalDelivery {
         verifier: &impl ConsensusSignatureVerifier,
     ) -> PosyResult<Vec<ProposalValidationCertificate>> {
         epoch.validate_against(registry)?;
-        let start = active_height
-            .saturating_sub(8)
-            .max(epoch.epoch_start_height);
-        let end = active_height.min(epoch.epoch_end_height);
-        (start..=end)
+        Self::replay_window(active_height, epoch)
             .filter_map(|height| {
                 self.stored_validation(height, epoch, registry, verifier)
                     .transpose()
@@ -771,6 +792,17 @@ mod cache_tests {
                 &Check,
             )
             .unwrap();
+        let ready = |certificate: &ProposalValidationCertificate| ProposalDeliveryEnvelope {
+            statement: ProposalDeliveryStatement {
+                phase: ProposalDeliveryPhase::Ready,
+                ..certificate.echoes[0].clone()
+            },
+            validation_certificate: Some(certificate.clone()),
+        };
+        let old_ready = ready(&old_certificate);
+        owner
+            .persist_ready_envelope(&old_ready, &previous, &previous_registry, &Check)
+            .unwrap();
         drop(owner);
         let before = std::fs::read(root.join("delivery.json")).unwrap();
         assert!(ProposalDelivery::open(&root, &current, &current_registry, &Check).is_err());
@@ -784,6 +816,16 @@ mod cache_tests {
         assert_eq!(owner.record.statements[0].context.epoch, 1);
         assert!(owner.activate((9999, 0)).is_err());
         owner.activate((10001, 0)).unwrap();
+        assert!(owner
+            .stored_ready_window(10001, &current, &current_registry, &Check)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            owner
+                .stored_ready_envelope(10000, &previous, &previous_registry, &Check)
+                .unwrap(),
+            Some(old_ready)
+        );
         assert!(owner
             .stored_validation_window(10001, &current, &current_registry, &Check)
             .unwrap()
@@ -824,6 +866,16 @@ mod cache_tests {
         owner
             .persist_validation(&certificate, &current, &current_registry, &Check)
             .unwrap();
+        let current_ready = ready(&certificate);
+        owner
+            .persist_ready_envelope(&current_ready, &current, &current_registry, &Check)
+            .unwrap();
+        assert_eq!(
+            owner
+                .stored_ready_window(10001, &current, &current_registry, &Check)
+                .unwrap(),
+            vec![current_ready]
+        );
         assert_eq!(
             owner
                 .stored_validation_window(10001, &current, &current_registry, &Check)
@@ -860,6 +912,16 @@ mod cache_tests {
             .unwrap();
         assert!(owner
             .stored_validation_window(10002, &current, &current_registry, &Check)
+            .is_err());
+        owner
+            .evidence
+            .put_once_atomic(&[synergy_storage::StorageWrite {
+                relative_path: "ready-h10002.json".into(),
+                bytes: serde_json::to_vec(&ready(&bad)).unwrap(),
+            }])
+            .unwrap();
+        assert!(owner
+            .stored_ready_window(10002, &current, &current_registry, &Check)
             .is_err());
         drop(owner);
         assert!(ProposalDelivery::open(&root, &current, &current_registry, &Check).is_ok());

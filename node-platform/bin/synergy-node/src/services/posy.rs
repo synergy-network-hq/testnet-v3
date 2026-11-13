@@ -3602,19 +3602,17 @@ impl ManagedService for PosyService {
         }
         self.republish_validation_history()?;
         let height = self.driver.state_machine().active_slot().0;
-        for target in height.saturating_sub(8)..=height {
-            if let Some(envelope) = self
-                .delivery
-                .stored_ready_envelope(
-                    target,
-                    &self.authority.epoch,
-                    &self.authority.registry,
-                    self.authority.as_ref(),
-                )
-                .map_err(|e| e.to_string())?
-            {
-                self.broadcast(&ConsensusEvent::ProposalDelivery(envelope))?;
-            }
+        for envelope in self
+            .delivery
+            .stored_ready_window(
+                height,
+                &self.authority.epoch,
+                &self.authority.registry,
+                self.authority.as_ref(),
+            )
+            .map_err(|e| e.to_string())?
+        {
+            self.broadcast(&ConsensusEvent::ProposalDelivery(envelope))?;
         }
         if let Some(local) = self.local_signer.as_ref() {
             let statements = self.delivery.local_statements(local.validator_id());
