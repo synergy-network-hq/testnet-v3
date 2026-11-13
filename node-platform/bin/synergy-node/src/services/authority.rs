@@ -889,7 +889,32 @@ pub(super) fn load_transition_context(
     let bytes = store
         .read_bounded(&path)
         .map_err(|error| format!("read authority transition witness: {error}"))?;
-    let stored: StoredEpochTransition = serde_json::from_slice(&bytes)
+    verify_stored_transition(configuration, current, &bytes).map(Some)
+}
+
+pub(super) fn transition_witness_path(
+    configuration: &NodeConfiguration,
+    current: &VerifiedAuthority,
+) -> Result<Option<std::path::PathBuf>, String> {
+    if current.epoch.epoch <= 1 {
+        return Ok(None);
+    }
+    let layout = NodeStorageLayout::new(configuration.storage.data_directory.clone())
+        .map_err(|error| format!("construct canonical storage layout: {error}"))?;
+    Ok(Some(layout.consensus().join("authority-transitions").join(
+        format!("epoch-{:020}.json", current.epoch.epoch),
+    )))
+}
+
+/// The transition owner publishes this single immutable witness with
+/// write_atomic before switching authority. Transport observers authenticate
+/// the published file; journal recovery remains with the storage owner.
+pub(super) fn verify_stored_transition(
+    configuration: &NodeConfiguration,
+    current: &VerifiedAuthority,
+    bytes: &[u8],
+) -> Result<VerifiedTransitionContext, String> {
+    let stored: StoredEpochTransition = serde_json::from_slice(bytes)
         .map_err(|error| format!("decode authority transition witness: {error}"))?;
     if stored.version != 1 || stored.next_epoch != current.epoch.epoch {
         return Err("stored authority transition identifies a different epoch".into());
@@ -918,12 +943,12 @@ pub(super) fn load_transition_context(
     {
         return Err("stored authority transition differs from current anchor".into());
     }
-    Ok(Some(VerifiedTransitionContext {
+    Ok(VerifiedTransitionContext {
         previous,
         finalized: stored.finalized,
         certificates,
         current_epoch_root: current.epoch.root().map_err(|e| e.to_string())?,
-    }))
+    })
 }
 
 pub fn verify_and_persist_transition(

@@ -7,6 +7,16 @@ use synergy_posy::{block_vote_signing_bytes, BlockVote, ConsensusObjectContext};
 #[test]
 #[ignore = "requires pinned native APQE artifacts"]
 fn native_quorum_recovery_activation_restart_and_interrupted_witness() {
+    exercise_native_recovery(false);
+}
+
+#[test]
+#[ignore = "requires pinned native APQE artifacts"]
+fn native_transport_verifies_published_transition_without_writer() {
+    exercise_native_recovery(true);
+}
+
+fn exercise_native_recovery(read_only_transport: bool) {
     for end in [10_u64, 20] {
         let (root, mut config) =
             crate::services::socket_qualification::sync_poll_native_test_configuration();
@@ -496,6 +506,10 @@ fn native_quorum_recovery_activation_restart_and_interrupted_witness() {
                 .0,
             witness.finalized
         );
+        if read_only_transport {
+            verify_published_witness_without_writer(&config, &restarted, &witness.finalized);
+            continue;
+        }
         assert_eq!(fs::read(&journal).unwrap(), journal_before);
         assert_eq!(
             fs::read(config.consensus.authority_trust_key_path.as_ref().unwrap()).unwrap(),
@@ -547,6 +561,33 @@ fn native_quorum_recovery_activation_restart_and_interrupted_witness() {
             next_bytes
         );
     }
+}
+
+fn verify_published_witness_without_writer(
+    config: &NodeConfiguration,
+    restarted: &VerifiedAuthority,
+    finalized: &FinalizedBlockRecord,
+) {
+    // Verify the atomically published proof with the writer unavailable.
+    let published_path = transition_witness_path(config, restarted).unwrap().unwrap();
+    let writer_lock = published_path.with_file_name(".synergy-writer.lock");
+    let saved_lock = writer_lock.with_extension("saved");
+    fs::rename(&writer_lock, &saved_lock).unwrap();
+    fs::create_dir(&writer_lock).unwrap();
+    assert!(load_transition_finality_prefix(config, restarted).is_err());
+    let published =
+        crate::services::apqe_transport::read(&published_path, 4 * 1024 * 1024, false).unwrap();
+    let authenticated = verify_stored_transition(config, restarted, &published).unwrap();
+    assert_eq!(authenticated.finalized, *finalized);
+    let mut altered: StoredEpochTransition = serde_json::from_slice(&published).unwrap();
+    altered.next_epoch += 1;
+    assert!(verify_stored_transition(
+        config,
+        restarted,
+        &serde_json::to_vec(&altered).unwrap()
+    ).is_err());
+    fs::remove_dir(&writer_lock).unwrap();
+    fs::rename(&saved_lock, &writer_lock).unwrap();
 }
 
 /// Native five-custody fixture transition. Reuses production recovery verifiers;

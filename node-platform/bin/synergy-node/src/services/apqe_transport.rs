@@ -163,7 +163,7 @@ impl Snapshot {
             root_path,
             config.manifest_path.as_path(),
         ];
-        let before: Vec<_> = paths
+        let mut before: Vec<_> = paths
             .iter()
             .map(|p| Stamp::capture(p))
             .collect::<Result<_, _>>()?;
@@ -182,7 +182,11 @@ impl Snapshot {
             authority::load(config)?.ok_or("canary requires authenticated PoSy membership")?;
         // Successor membership requires the canonical durable finalized transition
         // witness. A freshly root-signed epoch alone cannot activate membership.
-        authority::load_transition_finality_prefix(config, &current)?;
+        if let Some(witness) = authority::transition_witness_path(config, &current)? {
+            before.push(Stamp::capture(&witness)?);
+            let bytes = read(&witness, 4 * 1024 * 1024, false)?;
+            authority::verify_stored_transition(config, &current, &bytes)?;
+        }
         let registry_bytes = read(&selected.registry_path, 1024 * 1024, false)?;
         let signed: SignedRegistry = serde_json::from_slice(&registry_bytes)
             .map_err(|e| format!("decode APQE transport registry: {e}"))?;
