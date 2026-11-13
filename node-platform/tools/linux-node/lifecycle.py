@@ -453,7 +453,7 @@ def _replace_bytes(root, path, data, mode, token):
         if temporary.exists(): temporary.unlink();_sync_directory(temporary.parent)
 
 
-def _assert_no_application_processes(root, vpn_pid=None, proc=Path('/proc')):
+def _assert_no_application_processes(root, vpn_pid=None, proc=Path('/proc'), invoking_lifecycle=None):
     # sudo and the invoking Python interpreter may retain this command in argv.
     # Permit only actual ancestors invoking this lifecycle operation, never a
     # native application image. A running VPN is permitted only through the
@@ -471,8 +471,8 @@ def _assert_no_application_processes(root, vpn_pid=None, proc=Path('/proc')):
         except FileNotFoundError: continue
         native_image=image.removesuffix(' (deleted)')
         if vpn_pid and process.name == str(vpn_pid) and native_image == str(root/'bin/netbird'): continue
-        invokes_lifecycle=(str(root/'tools/lifecycle.py') in arguments
-            and any(value in ('upgrade','uninstall','replace-application','finish-replacement') for value in arguments)
+        invokes_lifecycle=(str(invoking_lifecycle or root/'tools/lifecycle.py') in arguments
+            and any(value in ('upgrade','uninstall','replace-application','finish-replacement','retire-delivery-stage') for value in arguments)
             and '--root' in arguments and str(root) in arguments)
         invokes_recovery=(str(root/'tools/activate_authority_recovery.py') in arguments
             and 'apply' in arguments and '--root' in arguments and str(root) in arguments)
@@ -482,6 +482,85 @@ def _assert_no_application_processes(root, vpn_pid=None, proc=Path('/proc')):
         require(not native_image.startswith(str(root)+'/') and not any(
             value.startswith(str(root)+'/') for value in arguments),
             'application process remains; mutation refused')
+
+
+def retire_delivery_stage(root, package, package_sha256, stage_name, committed_sha256, stage_sha256, signer_sha256, witness):
+    """Retire one cryptographically superseded, never-committed delivery write."""
+    import fcntl
+    _require_operator()
+    from apqe_layout import require_frozen_tree
+    package = Path(package)
+    require(not package.is_relative_to(root) and not root.is_relative_to(package),
+            'recovery package must be outside the installation')
+    require_frozen_tree(package)
+    for pin in (package_sha256, committed_sha256, stage_sha256, signer_sha256):
+        require(re.fullmatch(r'[0-9a-f]{64}', pin or '') is not None, 'exact recovery SHA-256 pins required')
+    require(digest(package/'package.json') == package_sha256, 'recovery package digest mismatch')
+    manifest = verify_package(package)
+    engine = package/'tools/lifecycle.py'
+    require(Path(__file__).resolve() == engine and digest(engine) == manifest['files']['tools/lifecycle.py'],
+            'invoke the exact sealed recovery lifecycle')
+    match = re.fullmatch(r'delivery\.tmp-([1-9][0-9]{0,9})-(0|[1-9][0-9]{0,19})', stage_name or '')
+    require(match is not None and int(match[1]) > 1, 'exact delivery staging basename required')
+    require(0 < len(witness) <= 4*1024*1024, 'bounded delivery-stage finality witness required')
+    with _lifecycle_lock(root):
+        receipt, _ = _sealed_receipt(root)
+        require(receipt.get('role') == 'validator', 'registered validator required')
+        for intent in (UPGRADE_INTENT, REPLACEMENT_INTENT, AUTHORITY_RECOVERY_INTENT):
+            require(not (root/intent).exists() and not (root/intent).is_symlink(),
+                    'reconcile outstanding lifecycle intent before retiring stage')
+        owned = _attributed_units(root)
+        stopped = owned['synergy-node.service']
+        require(stopped.get('MainPID') == '0' and stopped.get('ActiveState') in ('inactive','failed'),
+                'stop the registered PoSy owner before retiring stage')
+        _assert_no_application_processes(root, vpn_pid=owned['synergy-vpn.service'].get('MainPID'),
+                                         invoking_lifecycle=engine)
+        require(not (Path('/proc')/match[1]).exists(), 'delivery staging writer PID is still live')
+        directory = root/'data/consensus/posy'
+        for path in (directory, directory.parent, directory.parent.parent):
+            st = path.lstat()
+            require(stat.S_ISDIR(st.st_mode) and st.st_uid == os.geteuid() and not st.st_mode & 0o022,
+                    'unsafe PoSy storage ancestry')
+        def private_file(name, pin=None):
+            path = directory/name
+            st = path.lstat()
+            require(stat.S_ISREG(st.st_mode) and st.st_uid == os.geteuid() and st.st_nlink == 1
+                    and stat.S_IMODE(st.st_mode) == 0o600 and st.st_size <= 4*1024*1024,
+                    'unsafe PoSy recovery member: '+name)
+            if pin is not None:
+                require(st.st_size > 0 and digest(path) == pin, 'PoSy recovery member digest mismatch: '+name)
+            return st
+        lock_name = '.synergy-writer.lock'
+        metadata = private_file(lock_name)
+        lock = os.open(directory/lock_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            fd_metadata = os.fstat(lock)
+            require((metadata.st_dev,metadata.st_ino)==(fd_metadata.st_dev,fd_metadata.st_ino),
+                    'PoSy writer lock replaced')
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            def pinned():
+                require({p.name for p in directory.glob('delivery.tmp-*')} == {stage_name},
+                        'exactly one delivery staging member required')
+                return [private_file(name,pin) for name,pin in (
+                    ('delivery.json',committed_sha256), (stage_name,stage_sha256), ('sign-once.json',signer_sha256))]
+            before = pinned()
+            verified = json.loads(native([package/'bin/synergy-node','verify-delivery-stage',
+                root/'config/node.json',stage_name,committed_sha256,stage_sha256,signer_sha256],data=witness))
+            require(verified.get('verified') is True and verified.get('stage') == stage_name
+                    and verified.get('committed_sha256') == committed_sha256
+                    and verified.get('stage_sha256') == stage_sha256
+                    and verified.get('signer_sha256') == signer_sha256
+                    and verified.get('witness_sha256') == _hash_bytes(witness),
+                    'native proof is not bound to the exact stage, journals and finality witness')
+            require(all((a.st_dev,a.st_ino,a.st_ctime_ns)==(b.st_dev,b.st_ino,b.st_ctime_ns)
+                        for a,b in zip(before,pinned())), 'PoSy recovery members changed during verification')
+            (directory/stage_name).unlink()
+            _sync_directory(directory)
+            return {'retired_uncommitted_delivery_stage':stage_name,'finalized':verified['finalized'],
+                    'committed_delivery_preserved':True,'signing_journal_preserved':True,
+                    'consensus_started':False}
+        finally:
+            os.close(lock)
 
 
 def _installation_stage(root):
@@ -1069,8 +1148,10 @@ def _replace_application_locked(root, package, staged, authorization):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command',choices=['register','render-units','storage-recover','start-check','relay-start-check','health','start','stop','restart','uninstall','upgrade','commission','commission-check','replace-application','finish-replacement'])
+    parser.add_argument('command',choices=['register','render-units','storage-recover','start-check','relay-start-check','health','start','stop','restart','uninstall','upgrade','retire-delivery-stage','commission','commission-check','replace-application','finish-replacement'])
     parser.add_argument('--root',required=True);parser.add_argument('--destroy-root');parser.add_argument('--package');parser.add_argument('--staged');parser.add_argument('--replace-root')
+    for option in ('package-sha256','stage-name','committed-sha256','stage-sha256','signer-sha256'):
+        parser.add_argument('--'+option)
     args=parser.parse_args();root=safe_root(args.root)
     if args.command == 'render-units': result={'units':rendered_units(root),'wrapper':wrapper_text(root)}
     elif args.command == 'register': result=register(root)
@@ -1091,6 +1172,10 @@ def main():
         result=finish_replacement(root,Path(args.package),Path(args.staged))
     elif args.command == 'upgrade':
         require(args.package,'sealed --package required');result=upgrade(root,args.package)
+    elif args.command == 'retire-delivery-stage':
+        require(args.package,'sealed recovery --package required')
+        result=retire_delivery_stage(root,args.package,args.package_sha256,args.stage_name,
+            args.committed_sha256,args.stage_sha256,args.signer_sha256,sys.stdin.buffer.read(4*1024*1024+1))
     elif args.command == 'health': result=json.loads(native([root/'bin/synergy-node','health','--admin-socket',root/'run/admin.sock']))
     else:
         if args.command in ('start','restart'): start_check(root)

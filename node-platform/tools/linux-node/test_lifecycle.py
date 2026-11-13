@@ -336,6 +336,46 @@ life.upgrade(root,candidate)
         after=sqlite3.connect(archive.as_uri()+'?mode=ro',uri=True)
         self.assertEqual(after.execute('SELECT bytes FROM evidence').fetchone()[0],old);after.close()
         self.assertEqual((self.root/'data/metadata/schema-version').read_bytes(),b'synergy-node-storage:1')
+
+    def test_delivery_stage_retirement_preserves_committed_delivery_and_signing(self):
+        self.register_fixture()
+        self.receipt['role']='validator'
+        save(self.root/'installation.json',self.receipt)
+        directory=self.root/'data/consensus/posy'
+        committed=directory/'delivery.json'
+        signer=directory/'sign-once.json'
+        stage=directory/'delivery.tmp-4294967294-123'
+        for path,data in ((committed,b'committed'),(signer,b'sign-once'),(stage,b'staging'),
+                          (directory/'.synergy-writer.lock',b'')):
+            save(path,data)
+        before=[(p.stat().st_ino,p.read_bytes()) for p in (committed,signer)]
+        pins=[node.digest(p) for p in (committed,stage,signer)]
+        package_pin=node.digest(self.candidate/'package.json')
+        witness=b'linked public witness'
+        proof={'verified':True,'stage':stage.name,'committed_sha256':pins[0],
+               'stage_sha256':pins[1],'signer_sha256':pins[2],
+               'witness_sha256':hashlib.sha256(witness).hexdigest(),'finalized':{'height':100}}
+        with self.upgrade_context(), patch.object(life,'__file__',self.candidate/'tools/lifecycle.py'), \
+             patch.object(life,'_unit_state',side_effect=self.state), patch.object(life,'native') as verifier:
+            verifier.return_value=b'{"verified":false}'
+            with self.assertRaisesRegex(ValueError,'native proof'):
+                life.retire_delivery_stage(self.root,self.candidate,package_pin,stage.name,*pins,witness)
+            self.assertTrue(stage.is_file())
+            verifier.return_value=json.dumps(proof).encode()
+            other=directory/'delivery.tmp-4294967294-124'
+            save(other,b'unreviewed')
+            with self.assertRaisesRegex(ValueError,'exactly one'):
+                life.retire_delivery_stage(self.root,self.candidate,package_pin,stage.name,*pins,witness)
+            other.unlink()
+            with self.assertRaisesRegex(ValueError,'member digest mismatch'):
+                life.retire_delivery_stage(self.root,self.candidate,package_pin,stage.name,*pins[:2],'0'*64,witness)
+            result=life.retire_delivery_stage(self.root,self.candidate,package_pin,stage.name,*pins,witness)
+        self.assertEqual(result['finalized']['height'],100)
+        self.assertEqual(verifier.call_args.kwargs['data'],witness)
+        self.assertFalse(result['consensus_started'])
+        self.assertFalse(stage.exists())
+        self.assertEqual([(p.stat().st_ino,p.read_bytes()) for p in (committed,signer)],before)
+        self.assertEqual(self.operations,[])
     def test_recovery_never_creates_missing_archive_and_refuses_unsafe_paths(self):
         save(self.root/'data/metadata/schema-version',b'synergy-node-storage:1')
         directory=self.root/'data/consensus/posy';directory.mkdir(parents=True,mode=0o700)

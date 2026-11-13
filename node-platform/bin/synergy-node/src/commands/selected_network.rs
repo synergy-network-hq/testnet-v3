@@ -30,7 +30,7 @@ fn read(path: &Path, maximum: u64) -> Result<Vec<u8>, String> {
 
 /// Trust comes from the configured public key, never from the candidate Genesis.
 /// No private keys, database, listeners or services are opened here.
-pub(super) fn verify(configuration: &NodeConfiguration) -> Result<String, String> {
+pub(crate) fn verify(configuration: &NodeConfiguration) -> Result<String, String> {
     verify_with_custody_binding(configuration).map(|(hash, _)| hash)
 }
 pub(crate) fn verify_with_custody_binding(
