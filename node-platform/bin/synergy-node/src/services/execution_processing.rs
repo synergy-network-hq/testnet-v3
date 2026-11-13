@@ -72,6 +72,62 @@ fn retry_processing_store<T>(
     }
 }
 
+// A build request is a transient PoSy observation, not a certificate. Replay
+// may already have advanced beyond it; this says nothing about the validity of
+// a different block at the current execution height.
+fn processing_build_is_obsolete(
+    parent_height: u64,
+    parent_block: &str,
+    execution_height: u64,
+    execution_block: &str,
+) -> Result<bool, String> {
+    if parent_height == execution_height && parent_block != execution_block {
+        return Err(format!(
+            "native processing slot conflicts with execution parent at height {execution_height}: request={parent_block}, execution={execution_block}"
+        ));
+    }
+    Ok(parent_height < execution_height)
+}
+
+#[cfg(test)]
+mod slot_regression {
+    use super::processing_build_is_obsolete;
+
+    #[test]
+    fn finalized_replay_obsoletes_old_slot_without_accepting_same_height_conflict() {
+        let request_parent_height = 12_074;
+        let request_parent = "parent-before-replay";
+        assert!(!processing_build_is_obsolete(
+            request_parent_height,
+            request_parent,
+            request_parent_height,
+            request_parent,
+        )
+        .unwrap());
+        let replay_tip = request_parent_height + 2;
+        let replay_block = "verified-replay-tip";
+        assert!(processing_build_is_obsolete(
+            request_parent_height,
+            request_parent,
+            replay_tip,
+            replay_block,
+        )
+        .unwrap());
+        assert!(processing_build_is_obsolete(replay_tip, request_parent, replay_tip, replay_block)
+            .unwrap_err()
+            .contains("conflicts with execution parent at height 12076"));
+        assert!(!processing_build_is_obsolete(replay_tip, replay_block, replay_tip, replay_block)
+            .unwrap());
+        assert!(!processing_build_is_obsolete(
+            replay_tip + 1,
+            "requires-next-certified-parent",
+            replay_tip,
+            replay_block,
+        )
+        .unwrap());
+    }
+}
+
 impl ExecutionService {
     pub(super) fn processing_authority_at(
         &self,
@@ -259,18 +315,8 @@ impl ExecutionService {
         request: &ProcessingBuildRequest,
         snapshot: &ProcessingSnapshot,
     ) -> Result<bool, String> {
-        if request.parent.height() <= self.execution_height {
-            if request.parent.height() != self.execution_height
-                || request.parent.block_id()
-                    != self
-                        .candidates
-                        .get(&self.execution_height)
-                        .map_or(self.authority.anchor_parent.block_id(), |c| {
-                            c.block_id.as_str()
-                        })
-            {
-                return Err("native processing slot conflicts with execution parent".into());
-            }
+        if request.parent.height() == self.execution_height {
+            // The owner checked the exact block before consuming any inputs.
             return Ok(true);
         }
         if request.parent.height() > self.execution_height + 1 {
@@ -415,7 +461,6 @@ impl ExecutionService {
     }
 
     pub(super) fn poll_processing_execution(&mut self) -> Result<(), String> {
-        let request = self.ingress.processing_build_request()?;
         let Some(snapshot) = self.ingress.processing_snapshot()? else {
             return Ok(());
         };
@@ -439,7 +484,9 @@ impl ExecutionService {
                     break;
                 }
             }
-            match request {
+            // Read the latest slot after bounded finalized replay. Even this
+            // observation can be behind the local verified execution tip.
+            match self.ingress.processing_build_request()? {
                 Some(request) => self.poll_processing_owner(&mut owner, request, &snapshot),
                 None => Ok(()),
             }
@@ -454,6 +501,20 @@ impl ExecutionService {
         request: Arc<ProcessingBuildRequest>,
         snapshot: &ProcessingSnapshot,
     ) -> Result<(), String> {
+        let execution_block = self
+            .candidates
+            .get(&self.execution_height)
+            .map_or(self.authority.anchor_parent.block_id(), |candidate| {
+                candidate.block_id.as_str()
+            });
+        if processing_build_is_obsolete(
+            request.parent.height(),
+            request.parent.block_id(),
+            self.execution_height,
+            execution_block,
+        )? {
+            return Ok(());
+        }
         // Sync establishes finalized state; the current proposal supplies the
         // two certified, unfinalized predecessors needed to reconstruct its
         // native parent. Import inputs only; commit still uses local PoSy QCs
