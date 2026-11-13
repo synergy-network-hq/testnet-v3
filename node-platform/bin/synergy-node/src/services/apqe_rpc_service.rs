@@ -519,10 +519,28 @@ struct RuntimeIdentity<'a> {
     #[serde(borrow)]
     network_identity: &'a str,
     epoch: u64,
+    #[serde(borrow)]
+    genesis_hash: &'a str,
     finalized_height: u64,
 }
 
 fn verify_runtime_identity(bytes: &[u8], admission: &Admission) -> Result<(), String> {
+    verify_runtime_incarnation(
+        bytes,
+        admission.payload.chain_id,
+        &admission.payload.network_id,
+        admission.payload.epoch,
+        &admission.base.payload.genesis_hash,
+    )
+}
+
+fn verify_runtime_incarnation(
+    bytes: &[u8],
+    chain_id: u64,
+    network_id: &str,
+    epoch: u64,
+    genesis_hash: &str,
+) -> Result<(), String> {
     #[derive(Deserialize)]
     struct RuntimeReply<'a> {
         #[serde(borrow)]
@@ -531,11 +549,12 @@ fn verify_runtime_identity(bytes: &[u8], admission: &Admission) -> Result<(), St
     let identity = serde_json::from_slice::<RuntimeReply<'_>>(bytes)
         .map_err(|_| "local canonical RPC did not report authenticated chain identity")?
         .result;
-    if identity.chain_id != admission.payload.chain_id
-        || identity.network_identity != admission.payload.network_id
-        || identity.epoch != admission.payload.epoch
+    if identity.chain_id != chain_id
+        || identity.network_identity != network_id
+        || identity.epoch != epoch
+        || identity.genesis_hash != genesis_hash
     {
-        return Err("local canonical RPC differs from the admitted Canary chain/epoch".into());
+        return Err("local canonical RPC differs from the admitted Canary incarnation or epoch".into());
     }
     let _latest_finalized_height = identity.finalized_height;
     Ok(())
@@ -722,6 +741,25 @@ fn send_http(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_loopback_runtime_with_matching_chain_and_epoch_but_wrong_genesis() {
+        let expected = "a".repeat(64);
+        let mut reply = json!({"result": {
+            "chain_id": 99999, "network_identity": "fresh-canary", "epoch": 1,
+            "finalized_height": 0, "genesis_hash": expected,
+        }});
+        let verify = |value: &serde_json::Value| {
+            verify_runtime_incarnation(
+                &serde_json::to_vec(value).unwrap(), 99999, "fresh-canary", 1, &expected,
+            )
+        };
+        assert!(verify(&reply).is_ok());
+        reply["result"]["genesis_hash"] = json!("b".repeat(64));
+        assert!(verify(&reply).is_err());
+        reply["result"].as_object_mut().unwrap().remove("genesis_hash");
+        assert!(verify(&reply).is_err());
+    }
 
     #[test]
     fn binds_null_large_numbers_and_errors_without_reencoding() {

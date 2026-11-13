@@ -30,6 +30,7 @@ pub type ServiceRegistration = (ServiceSpec, Box<dyn ManagedService>);
 /// passed startup. The caller must retain this value for the process lifetime.
 pub struct StartedNode {
     configuration: NodeConfiguration,
+    verified_genesis_hash: String,
     startup_plan: StartupPlan,
     lifecycle: LifecycleController,
     supervisor: Supervisor,
@@ -135,6 +136,7 @@ impl StartedNode {
         self.authorized_production_consensus = false;
         let authorized_production_consensus = register_builtin_services(
             &self.configuration,
+            &self.verified_genesis_hash,
             &self.runtime_view,
             &mut registrations,
             self.authority_transition.clone(),
@@ -223,7 +225,6 @@ pub fn run(config_path: &Path) -> Result<(), StartError> {
     validate_processing_memory(&configuration, capacity_authority.as_deref())
         .map_err(StartError::AuthorityTransition)?;
     drop(capacity_authority);
-    super::selected_network::verify(&configuration).map_err(StartError::AuthorityTransition)?;
     start_with_services(config_path, Vec::new())?.run()
 }
 
@@ -322,6 +323,8 @@ pub fn start_with_services(
     mut registrations: Vec<ServiceRegistration>,
 ) -> Result<StartedNode, StartError> {
     let configuration = load(config_path).map_err(StartError::Configuration)?;
+    let verified_genesis_hash =
+        super::selected_network::verify(&configuration).map_err(StartError::AuthorityTransition)?;
     if configuration.apqe_transport.is_some() {
         crate::services::apqe_transport::verify_runtime(&configuration)
             .map_err(StartError::AuthorityTransition)?;
@@ -351,6 +354,7 @@ pub fn start_with_services(
     }));
     let authorized_production_consensus = register_builtin_services(
         &configuration,
+        &verified_genesis_hash,
         &runtime_view,
         &mut registrations,
         authority_transition.clone(),
@@ -390,6 +394,7 @@ pub fn start_with_services(
 
     Ok(StartedNode {
         configuration,
+        verified_genesis_hash,
         startup_plan,
         lifecycle,
         supervisor,
@@ -405,6 +410,7 @@ pub fn start_with_services(
 
 fn register_builtin_services(
     configuration: &NodeConfiguration,
+    verified_genesis_hash: &str,
     runtime_view: &RuntimeView,
     registrations: &mut Vec<ServiceRegistration>,
     authority_transition: authority::AuthorityTransitionSignal,
@@ -588,7 +594,11 @@ fn register_builtin_services(
                 Some(preparation.clone()),
                 verified_authority
                     .as_ref()
-                    .map(|authority| (authority.epoch.network_id.clone(), authority.epoch.epoch)),
+                    .map(|authority| rpc::VerifiedRpcNetwork {
+                        network_id: authority.epoch.network_id.clone(),
+                        epoch: authority.epoch.epoch,
+                        genesis_hash: verified_genesis_hash.to_owned(),
+                    }),
             )
             .map_err(|reason| StartError::ServiceRegistration {
                 service: "rpc",

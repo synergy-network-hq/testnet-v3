@@ -605,6 +605,13 @@ const RPC_OWNER_IDLE: Duration = Duration::from_millis(1);
 const MAX_WS_EVENTS_PER_POLL: usize = 64;
 const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
+#[derive(Clone)]
+pub(crate) struct VerifiedRpcNetwork {
+    pub network_id: String,
+    pub epoch: u64,
+    pub genesis_hash: String,
+}
+
 pub fn registration_with_preparation(
     configuration: &RpcConfiguration,
     runtime: RuntimeView,
@@ -612,7 +619,7 @@ pub fn registration_with_preparation(
     websocket_hub: Arc<WsServer>,
     admission: Option<super::protected_admission::AdmissionHandle>,
     preparation: Option<super::preparation::Handle>,
-    network_identity: Option<(String, u64)>,
+    network_identity: Option<VerifiedRpcNetwork>,
 ) -> Result<(ServiceSpec, Box<dyn ManagedService>), String> {
     let (spec, service) = registration_service(
         configuration,
@@ -676,7 +683,7 @@ fn registration_service(
     websocket_hub: Arc<WsServer>,
     admission: Option<super::protected_admission::AdmissionHandle>,
     preparation: Option<super::preparation::Handle>,
-    network_identity: Option<(String, u64)>,
+    network_identity: Option<VerifiedRpcNetwork>,
 ) -> Result<(ServiceSpec, RpcService), String> {
     if !configuration.enabled {
         return Err("RPC service cannot be registered when RPC is disabled".into());
@@ -723,7 +730,7 @@ struct RuntimeDispatcher {
     query_store: Arc<dyn CanonicalReadProvider>,
     admission: Option<super::protected_admission::AdmissionHandle>,
     preparation: Option<super::preparation::Handle>,
-    network_identity: Option<(String, u64)>,
+    network_identity: Option<VerifiedRpcNetwork>,
     telemetry_samples: Mutex<TelemetrySamples>,
 }
 
@@ -847,8 +854,9 @@ impl RuntimeDispatcher {
             "chain_id":runtime.chain_id,"role":runtime.role,"services":runtime.services,"lifecycle":runtime.lifecycle,
             "process_id":std::process::id(),"release":{"package_version":env!("CARGO_PKG_VERSION"),"artifact_digest":null,"source_revision":null},
             "transport":self.admission.as_ref().map(|handle|handle.transport_observations()).transpose().map_err(RpcError::unavailable)?,
-            "network_identity":self.network_identity.as_ref().map(|(network,_)|network),
-            "epoch":self.network_identity.as_ref().map(|(_,epoch)|epoch),
+            "network_identity":self.network_identity.as_ref().map(|identity|&identity.network_id),
+            "epoch":self.network_identity.as_ref().map(|identity|identity.epoch),
+            "genesis_hash":self.network_identity.as_ref().map(|identity|&identity.genesis_hash),
             "finalized_height":latest_height,"common_finalized_commitment":common_commitment,
             "commitment_comparison":"request identical at_height from each validator; never compare unmatched observation tips",
             "latest_sampled_block_transaction_count":block.as_ref().map(|block|block.transaction_count),
@@ -1058,7 +1066,7 @@ struct RpcService {
     websocket_hub: Arc<WsServer>,
     admission: Option<super::protected_admission::AdmissionHandle>,
     preparation: Option<super::preparation::Handle>,
-    network_identity: Option<(String, u64)>,
+    network_identity: Option<VerifiedRpcNetwork>,
     websocket_connections: Vec<WsConnection>,
     pending_http: Vec<PendingHttp>,
     next_websocket_id: u64,
@@ -2017,7 +2025,11 @@ mod nonblocking_http_tests {
             query_store: service.query_store,
             admission: None,
             preparation: None,
-            network_identity: Some(("test".into(), 1)),
+            network_identity: Some(VerifiedRpcNetwork {
+                network_id: "test".into(),
+                epoch: 1,
+                genesis_hash: "a".repeat(64),
+            }),
             telemetry_samples: Mutex::new(TelemetrySamples::default()),
         };
         for _ in 0..16 {
@@ -2087,12 +2099,17 @@ mod nonblocking_http_tests {
             query_store: service.query_store,
             admission: Some(admission),
             preparation: None,
-            network_identity: Some(("verified-incarnation".into(), 7)),
+            network_identity: Some(VerifiedRpcNetwork {
+                network_id: "verified-incarnation".into(),
+                epoch: 7,
+                genesis_hash: "a".repeat(64),
+            }),
             telemetry_samples: Mutex::new(TelemetrySamples::default()),
         };
         let observed = dispatcher.chain_telemetry(json!({})).unwrap();
         assert_eq!(observed["network_identity"], "verified-incarnation");
         assert_eq!(observed["epoch"], 7);
+        assert_eq!(observed["genesis_hash"], "a".repeat(64));
         assert!(observed["admission_window"].is_null());
         if root.exists() {
             fs::remove_dir_all(root).unwrap();
