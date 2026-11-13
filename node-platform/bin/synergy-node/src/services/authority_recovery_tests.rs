@@ -413,7 +413,16 @@ fn exercise_native_recovery(read_only_transport: bool) {
             false
         );
         assert_eq!(activate_observer(&observer).unwrap()["repeated"], true);
-        assert_eq!(load(&observer).unwrap().unwrap().epoch.epoch, 2);
+        let observer_authority = load(&observer).unwrap().unwrap();
+        assert_eq!(observer_authority.epoch.epoch, 2);
+        if read_only_transport {
+            verify_published_witness_without_writer(
+                &observer,
+                &observer_authority,
+                &witness.finalized,
+            );
+            continue;
+        }
         assert!(
             !NodeStorageLayout::new(observer.storage.data_directory.clone())
                 .unwrap()
@@ -506,10 +515,6 @@ fn exercise_native_recovery(read_only_transport: bool) {
                 .0,
             witness.finalized
         );
-        if read_only_transport {
-            verify_published_witness_without_writer(&config, &restarted, &witness.finalized);
-            continue;
-        }
         assert_eq!(fs::read(&journal).unwrap(), journal_before);
         assert_eq!(
             fs::read(config.consensus.authority_trust_key_path.as_ref().unwrap()).unwrap(),
