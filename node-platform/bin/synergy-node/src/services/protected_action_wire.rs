@@ -130,6 +130,61 @@ pub(super) fn decode_transfer(
     }
 }
 
+pub(super) struct SponsorIntent<'a> {
+    pub genesis: [u8; 32],
+    pub payer: &'a str,
+    pub nonce: u64,
+    pub action: u16,
+    pub payload_hash: [u8; 32],
+    pub max_fee: [u8; 32],
+    pub valid_until: u64,
+}
+
+pub(super) fn decode_sponsor(bytes: &[u8]) -> Result<SponsorIntent<'_>, &'static str> {
+    let mut r = Reader(bytes);
+    for byte in [0xa8, 0, 1, 1] {
+        r.byte(byte)?;
+    }
+    let genesis = r.nonzero32()?;
+    r.byte(2)?;
+    // A funds-bearing native address is short, canonical lowercase text.
+    r.byte(0x78)?;
+    let n = usize::from(r.take(1)?[0]);
+    if !(24..=128).contains(&n) {
+        return Err("INVALID_SPONSOR_PAYER");
+    }
+    let payer = std::str::from_utf8(r.take(n)?).map_err(|_| "INVALID_SPONSOR_PAYER")?;
+    if !payer.starts_with("syna1") || !payer.is_ascii() {
+        return Err("INVALID_SPONSOR_PAYER");
+    }
+    r.byte(3)?;
+    let nonce = r.uint()?;
+    r.byte(4)?;
+    let action = match r.uint()? {
+        x if x == u64::from(ENROLL_COMMIT) => ENROLL_COMMIT,
+        x if x == u64::from(ENROLL_REVEAL) => ENROLL_REVEAL,
+        _ => return Err("INVALID_SPONSOR_ACTION"),
+    };
+    r.byte(5)?;
+    let payload_hash = r.nonzero32()?;
+    r.byte(6)?;
+    let max_fee = r.nonzero32()?;
+    r.byte(7)?;
+    let valid_until = r.uint()?;
+    if !r.0.is_empty() {
+        return Err("NONCANONICAL_PROTECTED_PAYLOAD");
+    }
+    Ok(SponsorIntent {
+        genesis,
+        payer,
+        nonce,
+        action,
+        payload_hash,
+        max_fee,
+        valid_until,
+    })
+}
+
 struct Reader<'a>(&'a [u8]);
 impl<'a> Reader<'a> {
     fn take(&mut self, n: usize) -> Result<&'a [u8], &'static str> {

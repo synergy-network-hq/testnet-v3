@@ -19,8 +19,12 @@ use synergy_address_engine::apqe::{
     enrollment_registry::{CandidateEnrollmentVerifier, FinalizedEnrollmentContext, RegistryError},
     identity::{ChainId, NativeAccountCoordinate, NativeGenesisHash},
     native_intent::{CanonicalNativeIntent, NativeIntentBody},
-    provider::{variants::Mldsa87, PqProvider, PublicKey},
-    Primitives,
+    provider::{variants::Mldsa87, PqProvider, PublicKey, SignOptions, Signature},
+    HashAlgorithm, Primitives,
+};
+use synergy_aegis::ApqeIdentityVerifier;
+use synergy_identity::authorization::{
+    canonical_binding_commitment_if_present, IdentityAuthorizationCarrier,
 };
 use synergy_posy::FinalizedBlockRecord;
 use synergy_state::{
@@ -33,6 +37,25 @@ const MAX_ENROLLMENT_BYTES: usize = 24 * 1024;
 // Internal bounded state values, not RPC or consensus-action wire assignments.
 const MAX_STORED_POLICY_BYTES: usize = MAX_ENROLLMENT_BYTES * 4 + 4096;
 const MAX_STORED_COMMIT_BYTES: usize = 1024;
+const SPONSOR_SIGNATURE_DOMAIN: &str = "AEGIS/ENROLL-SPONSOR/v1";
+const SPONSOR_CONTEXT: &[u8] = b"AEGIS.ENROLL.SPONSOR.V1";
+const SPONSOR_PURPOSE: &str = "protected-enrollment-sponsorship";
+
+pub(super) struct SponsorProof<'a> {
+    pub(super) intent: &'a [u8],
+    pub(super) binding: &'a IdentityAuthorizationCarrier,
+    pub(super) signing_key: &'a PublicKey<Mldsa87>,
+    pub(super) signature: &'a Signature<Mldsa87>,
+}
+
+fn sponsor_digest(encoded: &[u8]) -> Result<Vec<u8>, String> {
+    let mut hash = Primitives
+        .hash_stream(HashAlgorithm::Sha3512)
+        .map_err(debug)?;
+    hash.update(SPONSOR_SIGNATURE_DOMAIN.as_bytes());
+    hash.update(encoded);
+    Ok(hash.finalize())
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -200,6 +223,167 @@ impl<'a> CandidateProtectedAccounts<'a> {
             }],
             ..StateDiff::default()
         })
+    }
+
+    /// Engineering-only admission/fee preparation. Identity scope, intent
+    /// signature and a spendable fee must all pass before staging any debit.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_sponsor_fee(
+        &self,
+        provider: &PqProvider<Mldsa87>,
+        identity_verifier: &ApqeIdentityVerifier,
+        network_id: &str,
+        finalized: &FinalizedSnapshot<'_>,
+        world: &WorldState,
+        inclusion: Position,
+        action: u16,
+        action_payload: &[u8],
+        proof: &SponsorProof<'_>,
+        fee_schedule: &synergy_execution::FeeSchedule,
+        gas_used: u64,
+    ) -> Result<(StateDiff, u128), String> {
+        use super::protected_action_wire::decode_sponsor;
+        let sponsor = decode_sponsor(proof.intent)?;
+        if !std::ptr::eq(self, finalized.registry)
+            || inclusion.height <= finalized.position.height
+            || inclusion.consensus_time < finalized.position.consensus_time
+            || sponsor.genesis != self.network.genesis
+            || sponsor.valid_until < finalized.position.height
+            || sponsor.action != action
+            || sponsor.payload_hash.as_slice()
+                != Primitives
+                    .hash(HashAlgorithm::Sha3256, action_payload)
+                    .map_err(debug)?
+        {
+            return Err(
+                "sponsor intent not bound to this finalized network, action or expiry".into(),
+            );
+        }
+        if self.network.native_chain[..24] != [0; 24]
+            || synergy_address::decode_address(sponsor.payer)?.hrp != "syna"
+        {
+            return Err("unsupported sponsor network or address".into());
+        }
+        let chain_id = u64::from_be_bytes(self.network.native_chain[24..].try_into().unwrap());
+        let commitment =
+            canonical_binding_commitment_if_present(&finalized.world.protocol, sponsor.payer)?
+                .ok_or("sponsor is not registered in finalized state")?;
+        if canonical_binding_commitment_if_present(&world.protocol, sponsor.payer)?.as_ref()
+            != Some(&commitment)
+        {
+            return Err("sponsor binding changed in execution state".into());
+        }
+        let payer = proof
+            .binding
+            .identity_address_for_key_for_admission_at_with_verifier(
+                SPONSOR_SIGNATURE_DOMAIN,
+                chain_id,
+                network_id,
+                "ML-DSA-87",
+                proof.signing_key.as_bytes(),
+                SPONSOR_PURPOSE,
+                finalized.position.consensus_time,
+                &commitment.binding_payload_sha3_256,
+                Some(identity_verifier),
+            )?;
+        if payer != sponsor.payer
+            || proof.binding.binding.identity_root.public_key_sha3_256
+                != commitment.identity_root_public_key_sha3_256
+            || commitment.effective_at_unix > finalized.position.consensus_time
+        {
+            return Err("sponsor payer differs from finalized binding".into());
+        }
+        provider
+            .verify(
+                &sponsor_digest(proof.intent)?,
+                proof.signature,
+                proof.signing_key,
+                SignOptions::Pure {
+                    context: SPONSOR_CONTEXT,
+                },
+            )
+            .map_err(debug)?;
+        fee_schedule.validate().map_err(debug)?;
+        let fee = u128::from(gas_used) * u128::from(fee_schedule.base_fee_per_gas_nwei);
+        if gas_used == 0
+            || fee_schedule.collector == payer
+            || fee_schedule.collector.starts_with("synw")
+            || (sponsor.max_fee[..16] == [0; 16] && sponsor.max_fee[16..] < fee.to_be_bytes()[..])
+            || !world.accounts.get(&payer).is_some_and(|account| {
+                account.code_hash.is_none()
+                    && account.nonce == sponsor.nonce
+                    && account.nonce < u64::MAX
+                    && account.balance_nwei >= fee
+            })
+        {
+            return Err("sponsor nonce, funds or fee cap insufficient".into());
+        }
+        Ok((
+            StateDiff {
+                changes: vec![
+                    AccountChange {
+                        account: payer,
+                        debit_nwei: fee,
+                        credit_nwei: 0,
+                        expected_nonce: Some(sponsor.nonce),
+                        code_hash: None,
+                    },
+                    AccountChange {
+                        account: fee_schedule.collector.clone(),
+                        debit_nwei: 0,
+                        credit_nwei: fee,
+                        expected_nonce: None,
+                        code_hash: None,
+                    },
+                ],
+                ..StateDiff::default()
+            },
+            fee,
+        ))
+    }
+
+    /// No network routes call this candidate. A paid deterministic duplicate
+    /// has an explicit outcome; signing/fee/wire errors never enter settlement.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    fn execute_sponsored_commit(
+        &self,
+        provider: &PqProvider<Mldsa87>,
+        identity_verifier: &ApqeIdentityVerifier,
+        network_id: &str,
+        finalized: &FinalizedSnapshot<'_>,
+        world: &mut WorldState,
+        inclusion: Position,
+        payload: &[u8],
+        proof: &SponsorProof<'_>,
+        fee_schedule: &synergy_execution::FeeSchedule,
+        gas_used: u64,
+    ) -> Result<(bool, u128), String> {
+        use super::protected_action_wire::{decode, Payload, ENROLL_COMMIT};
+        let Payload::Commit(hash) = decode(ENROLL_COMMIT, payload)? else {
+            return Err("expected enrollment commitment".into());
+        };
+        let (fee_diff, fee) = self.prepare_sponsor_fee(
+            provider,
+            identity_verifier,
+            network_id,
+            finalized,
+            world,
+            inclusion,
+            ENROLL_COMMIT,
+            payload,
+            proof,
+            fee_schedule,
+            gas_used,
+        )?;
+        let commitment = EnrollmentCommitment::from_bytes(hash);
+        if world.protocol.contains_key(&commit_key(commitment)) {
+            fee_diff.apply(world).map_err(debug)?;
+            return Ok((false, fee));
+        }
+        let commit = self.prepare_commit(world, commitment, inclusion)?;
+        StateDiff::apply_ordered_atomic(&[&commit, &fee_diff], world).map_err(debug)?;
+        Ok((true, fee))
     }
 
     /// The finalized snapshot is independent of the working proposal overlay:
@@ -696,6 +880,233 @@ mod tests {
                 protected_execution_root: "b".repeat(64),
             },
         )
+    }
+
+    #[test]
+    #[ignore = "requires independently authenticated engineering and validation APQE artifacts"]
+    fn protected_sponsor_pays_once_and_paid_duplicate_never_changes_commitment() {
+        use std::sync::{Arc, Mutex};
+        use synergy_address_engine::{apqe::native_manifest::validator_engine, types::Algorithm};
+        use synergy_identity::authorization::*;
+
+        let report = PathBuf::from(std::env::var_os("APQE_TRUSTED_NATIVE_REPORT").unwrap());
+        let report_pin = hex(&std::env::var("APQE_AUTHENTICATED_REPORT_SHA256").unwrap())
+            .try_into()
+            .unwrap();
+        let engine = Arc::new(Mutex::new(
+            unsafe { validator_engine(&report, report_pin) }.unwrap(),
+        ));
+        let verifier = ApqeIdentityVerifier::new(engine.clone()).unwrap();
+        let provider = unsafe {
+            PqProvider::<Mldsa87>::open_verified(
+                PathBuf::from(std::env::var_os("CORE_APQE_MLDSA87_LIBRARY").unwrap()),
+                hex(&std::env::var("CORE_APQE_MLDSA87_SHA256").unwrap())
+                    .try_into()
+                    .unwrap(),
+                Profile::Validation,
+            )
+        }
+        .unwrap();
+        let engine = engine.lock().unwrap();
+        let root = engine.generate_keypair(Algorithm::FnDsa1024).unwrap();
+        let signer = engine.generate_keypair(Algorithm::MlDsa87).unwrap();
+        let key = PublicKey::from_bytes(&signer.public_key).unwrap();
+        let address =
+            synergy_address::derive_key_controlled_address("syna", &root.public_key).unwrap();
+        let hex_string =
+            |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let hash =
+            |bytes: &[u8]| hex_string(&Primitives.hash(HashAlgorithm::Sha3256, bytes).unwrap());
+        let mut binding: IdentityAuthorizationBinding = serde_json::from_value(serde_json::json!({
+            "schema_version":AUTH_BINDING_SCHEMA_VERSION,"binary_encoding":AUTH_BINDING_BINARY_ENCODING,
+            "identity_id":"engineering-only-sponsor","identity_address":address,
+            "identity_root":{"algorithm":"FN-DSA-1024","public_key":hex_string(&root.public_key),
+                "public_key_sha3_256":hash(&root.public_key)},
+            "authorization_policy":{"policy_type":"single-key","threshold":1,"principals":[{
+                "principal_id":"sponsor","principal_type":"public-key","algorithm":"ML-DSA-87",
+                "public_key":hex_string(&signer.public_key),"public_key_sha3_256":hash(&signer.public_key),
+                "status":"active","purposes":[SPONSOR_PURPOSE]}]},
+            "authorization_scopes":[{"signature_domain":SPONSOR_SIGNATURE_DOMAIN,
+                "chain_id":99999,"network_id":"test-sponsor", "purpose":SPONSOR_PURPOSE}],
+            "current_auth_key_hash":hash(&signer.public_key),"auth_key_history":[],"supersession_history":[],
+            "effective_at":"1970-01-01T00:00:10Z","binding_payload_sha3_256":"",
+            "proofs":{"identity_root":{"algorithm":"FN-DSA-1024","signature":""}}
+        })).unwrap();
+        let bytes = canonical_binding_payload(&binding).unwrap();
+        binding.binding_payload_sha3_256 = hash(&bytes);
+        let message = [AUTH_BINDING_SIGNATURE_DOMAIN, &bytes].concat();
+        binding.proofs.identity_root.signature = hex_string(
+            &engine
+                .sign(
+                    Algorithm::FnDsa1024,
+                    root.private_key.as_bytes(),
+                    &message,
+                    SignOptions::default(),
+                )
+                .unwrap(),
+        );
+        binding.proofs.authorization_key_possession = vec![AuthorizationKeyPossessionProof {
+            principal_id: "sponsor".into(),
+            algorithm: "ML-DSA-87".into(),
+            signature: hex_string(
+                &engine
+                    .sign(
+                        Algorithm::MlDsa87,
+                        signer.private_key.as_bytes(),
+                        &message,
+                        SignOptions::default(),
+                    )
+                    .unwrap(),
+            ),
+        }];
+        let carrier = IdentityAuthorizationCarrier {
+            schema_version: AUTHORIZATION_CARRIER_SCHEMA_VERSION,
+            signature_domain: SPONSOR_SIGNATURE_DOMAIN.into(),
+            binding,
+        };
+        drop(engine);
+        let admitted = IdentityAuthorizationBindingCommitment::from_verified_binding_with_verifier(
+            &carrier.binding,
+            1000,
+            Some(&verifier),
+        )
+        .unwrap();
+        let mut base = WorldState::default();
+        base.protocol.insert(
+            IDENTITY_AUTHORIZATION_BINDINGS_STATE_KEY.into(),
+            serde_json::to_vec(&std::collections::BTreeMap::from([(
+                address.clone(),
+                admitted,
+            )]))
+            .unwrap(),
+        );
+        base.accounts.insert(
+            address.clone(),
+            AccountState {
+                balance_nwei: 100,
+                ..Default::default()
+            },
+        );
+        let wire = wire();
+        let genesis = NativeGenesisHash::from_bytes([0x11; 32]);
+        let registry = registry(&wire, genesis, [0x22; 32]);
+        let (pointer, certificate) = finalized(1, &base);
+        let snapshot = registry
+            .finalized_snapshot(&base, &pointer, &certificate, 1000)
+            .unwrap();
+        let mut world = base.clone();
+        let mut payload = vec![0xa2, 0, 1, 1, 0x58, 32];
+        payload.extend_from_slice(&[0x33; 32]);
+        let schedule = synergy_execution::FeeSchedule {
+            base_fee_per_gas_nwei: 2,
+            collector: "test-collector".into(),
+        };
+        let intent_for = |nonce: u8, cap: u8, expiry: u8| {
+            let mut bytes = vec![0xa8, 0, 1, 1, 0x58, 32];
+            bytes.extend_from_slice(genesis.as_bytes());
+            bytes.extend_from_slice(&[2, 0x78, address.len().try_into().unwrap()]);
+            bytes.extend_from_slice(address.as_bytes());
+            bytes.extend_from_slice(&[3, nonce, 4, 0x19, 0x70, 1, 5, 0x58, 32]);
+            bytes.extend_from_slice(&Primitives.hash(HashAlgorithm::Sha3256, &payload).unwrap());
+            bytes.extend_from_slice(&[6, 0x58, 32]);
+            bytes.extend_from_slice(&[0; 31]);
+            bytes.extend_from_slice(&[cap, 7, expiry]);
+            bytes
+        };
+        let execute = |world: &mut WorldState,
+                       encoded: &[u8],
+                       signed: &[u8],
+                       network,
+                       content: &[u8]| {
+            // Open the same authenticated engineering provider for contextual
+            // signing; the test verifies independently with the validation ABI.
+            let signature =
+                verifier_test_signer(&report, report_pin, signer.private_key.as_bytes(), signed);
+            registry.execute_sponsored_commit(
+                &provider,
+                &verifier,
+                network,
+                &snapshot,
+                world,
+                position(2, 1001),
+                content,
+                &SponsorProof {
+                    intent: encoded,
+                    binding: &carrier,
+                    signing_key: &key,
+                    signature: &signature,
+                },
+                &schedule,
+                5,
+            )
+        };
+        let first = intent_for(0, 10, 1);
+        assert_eq!(
+            execute(&mut world, &first, &first, "test-sponsor", &payload).unwrap(),
+            (true, 10)
+        );
+        let after_first = state_root(&world).unwrap();
+        let second = intent_for(1, 10, 1);
+        let mut changed_payload = payload.clone();
+        changed_payload[6] ^= 1;
+        for (encoded, signed, network, content) in [
+            (first.clone(), first.clone(), "test-sponsor", &payload),
+            (second.clone(), first.clone(), "test-sponsor", &payload),
+            (second.clone(), second.clone(), "other-network", &payload),
+            (
+                second.clone(),
+                second.clone(),
+                "test-sponsor",
+                &changed_payload,
+            ),
+            (
+                intent_for(1, 9, 1),
+                intent_for(1, 9, 1),
+                "test-sponsor",
+                &payload,
+            ),
+            (
+                intent_for(1, 10, 0),
+                intent_for(1, 10, 0),
+                "test-sponsor",
+                &payload,
+            ),
+        ] {
+            assert!(execute(&mut world, &encoded, &signed, network, content).is_err());
+            assert_eq!(state_root(&world).unwrap(), after_first);
+        }
+        let records = world.protocol.clone();
+        assert_eq!(
+            execute(&mut world, &second, &second, "test-sponsor", &payload).unwrap(),
+            (false, 10)
+        );
+        assert_eq!(world.protocol, records);
+        assert_eq!(world.accounts[&address].balance_nwei, 80);
+        assert_eq!(world.accounts[&address].nonce, 2);
+        assert_eq!(world.accounts[&schedule.collector].balance_nwei, 20);
+    }
+
+    fn verifier_test_signer(
+        report: &std::path::Path,
+        pin: [u8; 32],
+        key: &[u8],
+        encoded: &[u8],
+    ) -> Signature<Mldsa87> {
+        use synergy_address_engine::{apqe::native_manifest::validator_engine, types::Algorithm};
+        let mut engine = unsafe { validator_engine(report, pin) }.unwrap();
+        Signature::from_bytes(
+            &engine
+                .sign(
+                    Algorithm::MlDsa87,
+                    key,
+                    &sponsor_digest(encoded).unwrap(),
+                    SignOptions::Pure {
+                        context: SPONSOR_CONTEXT,
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap()
     }
 
     struct Scratch(PathBuf);
