@@ -435,6 +435,49 @@ fn validate_persisted_snapshot(
     Ok(())
 }
 
+// The optional predecessor/floor must come from the verified successor
+// transition, never from the untrusted request or its remote peer.
+fn snapshot_request_resume_epoch(
+    request_epoch: u64,
+    height: u64,
+    current_epoch: u64,
+    predecessor: Option<(u64, u64)>,
+) -> Result<bool, String> {
+    if request_epoch == current_epoch {
+        return Ok(true);
+    }
+    if predecessor.is_some_and(|(epoch, floor)| {
+        epoch.checked_add(1) == Some(current_epoch)
+            && request_epoch == epoch
+            && height > 0
+            && height <= floor
+    }) {
+        return Ok(false);
+    }
+    Err("persisted snapshot acquisition has no verified transition into current authority".into())
+}
+
+#[cfg(test)]
+mod snapshot_epoch_resume_tests {
+    use super::snapshot_request_resume_epoch as resume;
+    #[test]
+    fn prior_request_retires_only_under_exact_verified_transition_floor() {
+        assert!(!resume(1, 9998, 2, Some((1, 9998))).unwrap());
+        assert!(!resume(1, 9997, 2, Some((1, 9998))).unwrap());
+        assert!(resume(2, 10001, 2, None).unwrap());
+        for (epoch, height, current, transition) in [
+            (1, 9998, 2, None),
+            (1, 9999, 2, Some((1, 9998))),
+            (1, 0, 2, Some((1, 9998))),
+            (1, 9998, 3, Some((2, 19998))),
+            (3, 10001, 2, Some((1, 9998))),
+            (1, 9998, 2, Some((0, 9998))),
+        ] {
+            assert!(resume(epoch, height, current, transition).is_err());
+        }
+    }
+}
+
 pub fn registration_with_preparation(
     configuration: &NodeConfiguration,
     authority: Option<Arc<VerifiedAuthority>>,
@@ -525,11 +568,38 @@ fn construct_sync(
             let verifier = authority
                 .as_ref()
                 .ok_or("persisted snapshot acquisition requires frozen authority")?;
-            validate_persisted_snapshot(&persisted, &manifest, verifier)?;
+            let transition = if persisted.epoch != verifier.epoch.epoch {
+                let transition =
+                    super::authority::load_transition_context(configuration, verifier)?.ok_or(
+                        "previous snapshot acquisition lacks verified authority transition",
+                    )?;
+                transition.verify_current(verifier)?;
+                Some(transition)
+            } else {
+                None
+            };
+            let resume = snapshot_request_resume_epoch(
+                persisted.epoch,
+                persisted.height,
+                verifier.epoch.epoch,
+                transition
+                    .as_ref()
+                    .map(|t| (t.previous_authority().epoch.epoch, t.finalized().height)),
+            )?;
+            let snapshot_verifier = transition
+                .as_ref()
+                .map(|t| t.previous_authority().as_ref())
+                .unwrap_or(verifier.as_ref());
+            validate_persisted_snapshot(&persisted, &manifest, snapshot_verifier)?;
             if let Some(snapshot) = persisted.manifest.as_ref() {
-                verify_snapshot_manifest(verifier.as_ref(), snapshot)?;
+                verify_snapshot_manifest(snapshot_verifier, snapshot)?;
             }
-            if persisted
+            if !resume {
+                // Only disposable request progress is retired. Certified state,
+                // snapshot contents and signing-safety records are untouched.
+                snapshot_store.clear_active()?;
+                None
+            } else if persisted
                 .manifest
                 .as_ref()
                 .is_some_and(|snapshot| !SnapshotChunkStore::supports(snapshot))

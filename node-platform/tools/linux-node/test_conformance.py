@@ -16,6 +16,20 @@ from test_consensus_schema import native_schema
 SOURCE=Path(__file__).resolve().parents[2]
 
 class ConformanceTests(unittest.TestCase):
+    def test_epoch_scoped_processing_store_is_exactly_inventoried(self):
+        import re
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp).resolve()/'synergy';root.mkdir()
+            manifest,_=self.fixture(root)
+            directory=root/'data/blocks/processing-proposal-inputs-v1-epoch-00000000000000000002'
+            directory.mkdir(parents=True,exist_ok=True)
+            (directory/'proposal-inputs-v1.json').write_text('{}')
+            self.assertTrue(c.installed(root,manifest)['conformant'])
+        for suffix in ('-epoch-2','-epoch-00000000000000000002-extra','-epoch-../../keys'):
+            path='data/blocks/processing-proposal-inputs-v1'+suffix
+            self.assertFalse(any(re.fullmatch(rule,path) for rule in c.RUNTIME_DIRECTORIES))
+            self.assertFalse(any(rule.fullmatch(path+'/proposal-inputs-v1.json') for rule in c.RULES))
+
     def fixture(self, root):
         root.chmod(0o700)
         for relative in c.DIRECTORIES:(root/relative).mkdir(parents=True)

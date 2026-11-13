@@ -156,6 +156,30 @@ pub struct ProposalDelivery {
     verified_validation_bytes: RefCell<usize>,
 }
 impl ProposalDelivery {
+    /// The caller must authenticate the predecessor through the successor's
+    /// finalized transition witness. Historical statements are still verified
+    /// with their original authority, never reinterpreted as successor votes.
+    pub fn open_after_verified_epoch_transition<V: ConsensusSignatureVerifier>(
+        root: &Path,
+        current: (&SimplifiedEpochContext, &FrozenValidatorRegistry, &V),
+        previous: (&SimplifiedEpochContext, &FrozenValidatorRegistry, &V),
+    ) -> PosyResult<Self> {
+        if previous.0.epoch.checked_add(1) != Some(current.0.epoch)
+            || previous.0.epoch_end_height.checked_add(1) != Some(current.0.epoch_start_height)
+            || previous.0.chain_id != current.0.chain_id
+            || previous.0.network_id != current.0.network_id
+            || previous.0.protocol_version != current.0.protocol_version
+        {
+            return Err(PosyError::invalid(
+                "delivery predecessor is not the sequential epoch",
+            ));
+        }
+        match Self::open(root, current.0, current.1, current.2) {
+            Ok(owner) => Ok(owner),
+            Err(_) => Self::open(root, previous.0, previous.1, previous.2),
+        }
+    }
+
     pub fn open(
         root: &Path,
         epoch: &SimplifiedEpochContext,
@@ -615,6 +639,136 @@ mod cache_tests {
         ) -> PosyResult<()> {
             Ok(())
         }
+    }
+    #[test]
+    fn successor_reopens_verified_previous_delivery_without_reinterpreting_or_clearing_it() {
+        struct Check;
+        impl ConsensusSignatureVerifier for Check {
+            fn verify_consensus_signature(
+                &self,
+                _: &str,
+                _: &[u8],
+                _: &crate::ValidatorRecord,
+                _: &str,
+                _: u64,
+                signature: &[u8],
+            ) -> PosyResult<()> {
+                if signature == [7] {
+                    Ok(())
+                } else {
+                    Err(PosyError::invalid("bad test signature"))
+                }
+            }
+        }
+        let root =
+            std::env::temp_dir().join(format!("posy-delivery-successor-{}", std::process::id()));
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(root.clone());
+        let registry = |epoch| {
+            FrozenValidatorRegistry::new(
+                epoch,
+                (0..5)
+                    .map(|i| crate::ValidatorRecord {
+                        validator_id: format!("v{i}"),
+                        consensus_key_id: format!("k{i}"),
+                        frozen_voting_weight: 1,
+                        status: crate::ValidatorStatus::Active,
+                    })
+                    .collect(),
+            )
+            .unwrap()
+        };
+        let previous_registry = registry(1);
+        let current_registry = registry(2);
+        let epoch = |number, start, end, registry: &FrozenValidatorRegistry| {
+            SimplifiedEpochContext::from_frozen_registry(
+                99999,
+                "delivery-transition".into(),
+                number,
+                start,
+                end,
+                "a".repeat(64),
+                "b".repeat(64),
+                registry,
+            )
+            .unwrap()
+        };
+        let previous = epoch(1, 1, 10000, &previous_registry);
+        let current = epoch(2, 10001, 20000, &current_registry);
+        let context = ConsensusObjectContext::for_height(&previous, 10000, 0).unwrap();
+        let candidate = CertifiedCandidateSubject::new(
+            context.clone(),
+            "old-block".into(),
+            "parent".into(),
+            crate::SimplifiedFinalityParent::QuorumCertificate {
+                height: 9999,
+                block_id: "parent".into(),
+                qc_id: "c".repeat(64),
+            },
+            "d".repeat(64),
+        )
+        .unwrap();
+        let mut owner =
+            ProposalDelivery::open(&root, &previous, &previous_registry, &Check).unwrap();
+        owner.activate((10000, 0)).unwrap();
+        owner
+            .admit(
+                ProposalDeliveryStatement {
+                    context,
+                    phase: ProposalDeliveryPhase::Echo,
+                    candidate,
+                    validator_id: "v0".into(),
+                    key_id: "k0".into(),
+                    signature: vec![7],
+                },
+                (10000, 0),
+                &previous,
+                &previous_registry,
+                &Check,
+            )
+            .unwrap();
+        drop(owner);
+        let before = std::fs::read(root.join("delivery.json")).unwrap();
+        assert!(ProposalDelivery::open(&root, &current, &current_registry, &Check).is_err());
+        let mut owner = ProposalDelivery::open_after_verified_epoch_transition(
+            &root,
+            (&current, &current_registry, &Check),
+            (&previous, &previous_registry, &Check),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(root.join("delivery.json")).unwrap(), before);
+        assert_eq!(owner.record.statements[0].context.epoch, 1);
+        assert!(owner.activate((9999, 0)).is_err());
+        owner.activate((10001, 0)).unwrap();
+        drop(owner);
+        assert!(ProposalDelivery::open(&root, &current, &current_registry, &Check).is_ok());
+        let mut corrupt: serde_json::Value = serde_json::from_slice(&before).unwrap();
+        corrupt["statements"][0]["signature"] = serde_json::json!([8]);
+        let corrupt = serde_json::to_vec(&corrupt).unwrap();
+        AtomicStore::new(&root, 4 * 1024 * 1024)
+            .unwrap()
+            .write_atomic("delivery.json", &corrupt)
+            .unwrap();
+        assert!(ProposalDelivery::open_after_verified_epoch_transition(
+            &root,
+            (&current, &current_registry, &Check),
+            (&previous, &previous_registry, &Check)
+        )
+        .is_err());
+        assert_eq!(std::fs::read(root.join("delivery.json")).unwrap(), corrupt);
+        let mut wrong = current.clone();
+        wrong.network_id = "other".into();
+        assert!(ProposalDelivery::open_after_verified_epoch_transition(
+            &root,
+            (&wrong, &current_registry, &Check),
+            (&previous, &previous_registry, &Check)
+        )
+        .is_err());
     }
     #[test]
     fn large_verified_validation_cache_evicts_by_bytes_and_reloads_exact_history() {

@@ -167,12 +167,24 @@ pub fn registration_with_preparation(
             )?;
         }
     }
-    let mut delivery = ProposalDelivery::open(
-        &root,
-        &authority.epoch,
-        &authority.registry,
-        authority.as_ref(),
-    )
+    let delivery_transition =
+        authority::load_transition_context(configuration, authority.as_ref())?;
+    let mut delivery = if let Some(transition) = delivery_transition.as_ref() {
+        transition.verify_current(authority.as_ref())?;
+        let previous = transition.previous_authority();
+        ProposalDelivery::open_after_verified_epoch_transition(
+            &root,
+            (&authority.epoch, &authority.registry, authority.as_ref()),
+            (&previous.epoch, &previous.registry, previous.as_ref()),
+        )
+    } else {
+        ProposalDelivery::open(
+            &root,
+            &authority.epoch,
+            &authority.registry,
+            authority.as_ref(),
+        )
+    }
     .map_err(|e| format!("load authenticated proposal delivery: {e}"))?;
     delivery
         .activate(state_machine.active_slot())
