@@ -640,6 +640,7 @@ def upgrade(root, package):
 def require_vpn_retired_for_removal(root):
     """Fail closed if an interrupted enrollment may still own a remote peer."""
     from controller import Controller, VPN_ATTEMPT, require as require_vpn
+    from vpn import RETIREMENT, RETIREMENT_LIMIT, validate_retirement_receipt
     enrollment_path = root/'evidence/vpn-enrollment.json'
     binding_path = root/'evidence/vpn-server-binding.json'
     present = lambda path: path.exists() or path.is_symlink()
@@ -650,19 +651,17 @@ def require_vpn_retired_for_removal(root):
                     'VPN enrollment may have succeeded; reconcile with the coordinator before removal',
                     'vpn_reconciliation_required')
         return
-    require_vpn(present(binding_path) and present(root/'evidence/vpn-retirement.json'),
+    retirement_path = root/'evidence'/RETIREMENT
+    require_vpn(present(binding_path) and present(retirement_path),
                 'Verify exact VPN registration retirement with the coordinator before removal',
                 'vpn_retirement_required')
     controller = Controller(root)
-    local = controller.public_json(enrollment_path, True)
-    binding = controller.public_json(binding_path, True)
-    retirement = controller.public_json(root/'evidence/vpn-retirement.json', True)
-    peer = binding.get('peer_id')
-    require_vpn(local.get('native_enrollment_verified') is True and binding.get('server_binding_verified') is True
-                and local.get('wireguard_public_key') and binding.get('wireguard_public_key') == local['wireguard_public_key']
-                and isinstance(peer, str) and peer and retirement.get('peer_id') == peer
-                and retirement.get('retired') is True and retirement.get('absence_verified') is True,
-                'exact VPN registration retirement required', 'vpn_retirement_required')
+    try:
+        raw, local, binding = (controller.direct(path, True, maximum=RETIREMENT_LIMIT).read_bytes()
+                               for path in (retirement_path, enrollment_path, binding_path))
+        validate_retirement_receipt(raw, local, binding)
+    except (ValueError, KeyError, TypeError, OSError, RecursionError):
+        require_vpn(False, 'exact VPN registration retirement required', 'vpn_retirement_required')
 
 
 def remove(root, confirmation):

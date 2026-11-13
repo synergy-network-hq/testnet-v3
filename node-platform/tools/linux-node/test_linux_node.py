@@ -134,17 +134,28 @@ class RefusalTests(unittest.TestCase):
             root = Path(temp).resolve()/'synergy'
             root.mkdir(mode=0o700)
             (root/'evidence').mkdir(mode=0o700)
-            node.write_new(root/'evidence/vpn-enrollment.json',
-                           {'native_enrollment_verified':True,'wireguard_public_key':'expected-key'})
-            node.write_new(root/'evidence/vpn-server-binding.json',
-                           {'peer_id':'expected-peer','server_binding_verified':True,'wireguard_public_key':'expected-key'})
+            local = root/'evidence/vpn-enrollment.json'
+            binding = root/'evidence/vpn-server-binding.json'
+            key = 'AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE='
+            node.write_new(local, {'native_enrollment_verified':True,'wireguard_public_key':key,
+                                   'overlay_address':'100.64.1.2/16','hostname':'reviewed-peer',
+                                   'management_url':'https://control.example'})
+            node.write_new(binding, {'peer_id':'expected-peer','server_binding_verified':True,'wireguard_public_key':key,
+                                     'ip':'100.64.1.2','peer_name':'reviewed-peer','hostname':'reviewed-host'})
             retirement = root/'evidence/vpn-retirement.json'
-            for peer in ('unrelated-peer','expected-peer'):
+            receipt = {'format':'synergy-vpn-retirement-v1','account_id':'verified-account',
+                       **vpn.retirement_binding(local.read_bytes(),binding.read_bytes()),
+                       'retired':True,'absence_verified':True}
+            for value in ({'peer_id':'expected-peer','retired':True,'absence_verified':True},
+                          dict(receipt,peer_id='unrelated-peer'),receipt):
                 retirement.unlink(missing_ok=True)
-                node.write_new(retirement,{'peer_id':peer,'retired':True,'absence_verified':True})
-                if peer=='expected-peer': lifecycle.require_vpn_retired_for_removal(root)
+                node.write_new(retirement,value)
+                if value==receipt: lifecycle.require_vpn_retired_for_removal(root)
                 else:
                     with self.assertRaisesRegex(ValueError,'exact VPN registration retirement required'):
                         lifecycle.require_vpn_retired_for_removal(root)
+            local.write_bytes(local.read_bytes()+b'\n')
+            with self.assertRaisesRegex(ValueError,'exact VPN registration retirement required'):
+                lifecycle.require_vpn_retired_for_removal(root)
 
 if __name__ == '__main__': unittest.main()

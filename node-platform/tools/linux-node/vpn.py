@@ -6,12 +6,17 @@ The coordinator retains the management credential and binds the returned public
 WireGuard key to the newly registered server peer before accepting completion.
 """
 import argparse
+import base64
+import hashlib
+import http.client
 import ipaddress
 import json
 import os
 from pathlib import Path
 import re
 import socket
+import ssl
+import stat
 import subprocess
 import sys
 import time
@@ -166,10 +171,222 @@ def bind_server(root, server_peer):
     return {'peer_id': server_peer['id'], 'server_binding_verified': True}
 
 
+RETIREMENT = 'vpn-retirement.json'
+RETIREMENT_INTENT = 'vpn-retirement-intent.json'
+RETIREMENT_LIMIT = 16384
+
+
+def retirement_hash(raw):
+    return hashlib.sha256(raw).hexdigest()
+
+
+def retirement_input(path, limit=RETIREMENT_LIMIT):
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb') as source:
+        meta = os.fstat(source.fileno())
+        require(stat.S_ISREG(meta.st_mode) and meta.st_uid == 0 and meta.st_nlink == 1
+                and not meta.st_mode & 0o077 and 0 < meta.st_size <= limit,
+                'bounded private root-owned retirement input required')
+        raw = source.read(limit + 1)
+        require(len(raw) == meta.st_size, 'retirement input changed while reading')
+        return raw
+
+
+def retirement_json(raw):
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            require(key not in result, 'duplicate retirement field')
+            result[key] = value
+        return result
+    return json.loads(raw, object_pairs_hook=unique)
+
+
+def management_origin(value):
+    require(isinstance(value, str) and re.fullmatch(r'https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?/?', value),
+            'explicit HTTPS management origin required')
+    parsed = urlparse(value)
+    require(parsed.hostname and (parsed.port is None or parsed.port > 0), 'invalid HTTPS management origin')
+    return 'https://' + parsed.hostname + (f':{parsed.port}' if parsed.port not in (None, 443) else '')
+
+
+def retirement_binding(enrollment, binding):
+    local, remote = retirement_json(enrollment), retirement_json(binding)
+    require(isinstance(local, dict) and isinstance(remote, dict)
+            and local.get('native_enrollment_verified') is True and remote.get('server_binding_verified') is True,
+            'verified enrollment and server binding required')
+    peer, key = remote.get('peer_id'), local.get('wireguard_public_key')
+    require(isinstance(peer, str) and re.fullmatch(r'[A-Za-z0-9_-]{1,100}', peer)
+            and isinstance(key, str) and re.fullmatch(r'[A-Za-z0-9+/]{43}=', key)
+            and base64.b64encode(base64.b64decode(key, validate=True)).decode() == key
+            and key == remote.get('wireguard_public_key'), 'invalid or different VPN identity')
+    name, hostname = local.get('hostname'), remote.get('hostname')
+    require(isinstance(name, str) and re.fullmatch(r'[A-Za-z0-9_-]{1,63}', name)
+            and name == remote.get('peer_name') and isinstance(hostname, str)
+            and re.fullmatch(r'[A-Za-z0-9_.-]{1,253}', hostname), 'different VPN peer name or hostname')
+    ip = ipaddress.ip_interface(local['overlay_address']).ip
+    require(str(ip) == remote.get('ip') and not (ip.is_unspecified or ip.is_multicast or ip.is_loopback),
+            'invalid or different overlay address')
+    return {'peer_id': peer, 'peer_name': name, 'hostname': hostname, 'ip': str(ip),
+            'management_origin': management_origin(local['management_url']),
+            'enrollment_sha256': retirement_hash(enrollment), 'binding_sha256': retirement_hash(binding)}
+
+
+def _management_request(origin, token, method, path):
+    """No redirects/proxies; only the independently pinned HTTPS origin gets the token."""
+    parsed = urlparse(origin)
+    connection = http.client.HTTPSConnection(parsed.hostname, parsed.port or 443,
+                                            timeout=8, context=ssl.create_default_context())
+    try:
+        connection.request(method, path, headers={'Authorization': 'Token ' + token,
+                           'Accept': 'application/json', 'Connection': 'close', 'Cache-Control': 'no-cache'})
+        with connection.getresponse() as response:
+            code = response.status
+            if code != 200 or method == 'DELETE':
+                return code, None
+            require(response.headers.get_content_type() == 'application/json', 'management JSON response required')
+            body, limit, deadline = bytearray(), 2 * 1024 * 1024, time.monotonic() + 8
+            while True:
+                require(time.monotonic() < deadline, 'management response deadline exceeded')
+                chunk = response.read1(min(65536, limit + 1 - len(body)))
+                if not chunk:
+                    break
+                body.extend(chunk)
+                require(len(body) <= limit, 'management response exceeds limit')
+            return code, retirement_json(body)
+    except (OSError, http.client.HTTPException, ValueError, RecursionError):
+        raise ValueError('VPN management request failed; any pending retirement must be reconciled') from None
+    finally:
+        connection.close()
+
+
+def _retirement_write(path, record):
+    # Both callers hold the private directory's lifecycle lock. The canonical
+    # writer safely resumes stale staging from a crash and syncs the directory.
+    from lifecycle import _replace_bytes
+    require(not path.exists() and not path.is_symlink(), 'retirement record already exists')
+    data = json.dumps(record, sort_keys=True, indent=2).encode() + b'\n'
+    _replace_bytes(path.parent, path, data, 0o600, retirement_hash(data))
+
+
+def _retire_bound_peer(work, identity, account, request):
+    peer_id = identity['peer_id']
+    path = '/api/peers/' + peer_id
+    intent = {'format': 'synergy-vpn-retirement-intent-v1', 'account_id': account, **identity}
+    intent_path, receipt_path = work / RETIREMENT_INTENT, work / RETIREMENT
+    resumed = intent_path.exists() or intent_path.is_symlink()
+    if resumed:
+        require(retirement_json(retirement_input(intent_path)) == intent, 'VPN retirement intent differs')
+    receipt = {'format': 'synergy-vpn-retirement-v1', 'account_id': account,
+               **identity, 'retired': True, 'absence_verified': True}
+    if receipt_path.exists() or receipt_path.is_symlink():
+        require(resumed and retirement_json(retirement_input(receipt_path)) == receipt,
+                'VPN retirement receipt differs')
+
+    code, accounts = request('GET', '/api/accounts')
+    require(code == 200 and isinstance(accounts, list) and len(accounts) == 1
+            and isinstance(accounts[0], dict) and accounts[0].get('id') == account,
+            'VPN management account differs')
+    code, current = request('GET', path)
+    if code == 200:
+        require(not receipt_path.exists() and isinstance(current, dict)
+                and all(current.get(remote) == identity[local] for remote, local in
+                        (('id', 'peer_id'), ('name', 'peer_name'), ('ip', 'ip'), ('hostname', 'hostname'))),
+                'VPN management peer differs')
+        if not resumed:
+            _retirement_write(intent_path, intent)
+        code, _ = request('DELETE', path)
+        require(code in (200, 204), 'VPN delete outcome uncertain; reconcile exact intent')
+        code, _ = request('GET', path)
+    else:
+        require(resumed, 'VPN peer must be attributed before initial retirement')
+    require(code == 404, 'VPN peer absence was not verified')
+    code, inventory = request('GET', '/api/peers')
+    require(code == 200 and isinstance(inventory, list) and all(isinstance(p, dict)
+            and isinstance(p.get('id'), str) and isinstance(p.get('name'), str)
+            and isinstance(p.get('ip'), str) and p['id'] != peer_id
+            and p['name'] != identity['peer_name'] and p['ip'] != identity['ip'] for p in inventory),
+            'VPN account inventory does not confirm absence')
+    if not receipt_path.exists():
+        _retirement_write(receipt_path, receipt)
+    return receipt_path
+
+
+def retire_peer(work, management, account, enrollment_pin, binding_pin):
+    """Coordinator only. The fixed credential file must never travel to the validator."""
+    from lifecycle import _lifecycle_lock, _require_operator
+    _require_operator()
+    require(work.is_absolute() and Path('/opt') not in (work, *work.parents),
+            'use a separate coordinator workspace, not an installation root')
+    for parent in (work, *work.parents):
+        meta = parent.lstat()
+        require(stat.S_ISDIR(meta.st_mode) and meta.st_uid == 0 and not meta.st_mode & 0o022,
+                'root-owned coordinator workspace ancestry required')
+    require(not work.stat().st_mode & 0o077 and re.fullmatch(r'[A-Za-z0-9_-]{1,100}', account),
+            'private coordinator workspace and exact management account required')
+    origin = management_origin(management)
+    with _lifecycle_lock(work):
+        enrollment = retirement_input(work/'vpn-enrollment.json')
+        binding = retirement_input(work/'vpn-server-binding.json')
+        identity = retirement_binding(enrollment, binding)
+        require((identity['management_origin'], identity['enrollment_sha256'], identity['binding_sha256'])
+                == (origin, enrollment_pin, binding_pin), 'VPN endpoint or reviewed binding digest differs')
+        token = retirement_input(work/'management.token', 4096).decode('ascii').removesuffix('\n')
+        require(re.fullmatch(r'[A-Za-z0-9._~-]{20,4095}', token), 'invalid coordinator token format')
+        return _retire_bound_peer(work, identity, account,
+                                  lambda method, path: _management_request(origin, token, method, path))
+
+
+def validate_retirement_receipt(raw, enrollment, binding):
+    identity = retirement_binding(enrollment, binding)
+    receipt = retirement_json(raw)
+    require(isinstance(receipt, dict) and isinstance(receipt.get('account_id'), str)
+            and re.fullmatch(r'[A-Za-z0-9_-]{1,100}', receipt['account_id'])
+            and receipt == {'format': 'synergy-vpn-retirement-v1', 'account_id': receipt['account_id'],
+                            **identity, 'retired': True, 'absence_verified': True}
+            and receipt['retired'] is True and receipt['absence_verified'] is True,
+            'retirement receipt differs from current verified VPN binding')
+    return receipt
+
+
+def record_retirement(root, raw, pin):
+    from lifecycle import _lifecycle_lock, _require_operator, _sealed_receipt
+    _require_operator()
+    require(len(raw) <= RETIREMENT_LIMIT and retirement_hash(raw) == pin,
+            'independently reviewed retirement receipt digest required')
+    with _lifecycle_lock(root):
+        _sealed_receipt(root)
+        evidence = root/'evidence'
+        meta = evidence.lstat()
+        require(stat.S_ISDIR(meta.st_mode) and meta.st_uid == 0 and not meta.st_mode & 0o077,
+                'private installation evidence directory required')
+        receipt = validate_retirement_receipt(raw, retirement_input(evidence/'vpn-enrollment.json'),
+                                              retirement_input(evidence/'vpn-server-binding.json'))
+        path = evidence/RETIREMENT
+        if path.exists() or path.is_symlink():
+            require(retirement_json(retirement_input(path)) == receipt, 'recorded retirement differs')
+        else:
+            _retirement_write(path, receipt)
+        return receipt
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('command', choices=['enroll', 'status', 'bind-server', 'verify-gateway-route']); p.add_argument('--root', required=True)
-    a = p.parse_args(); root = safe_root(a.root)
+    p.add_argument('command', choices=['enroll', 'status', 'bind-server', 'verify-gateway-route', 'retire-peer', 'record-retirement'])
+    p.add_argument('--root'); p.add_argument('--coordinator-work', type=Path)
+    p.add_argument('--management-origin'); p.add_argument('--account-id'); p.add_argument('--enrollment-sha256')
+    p.add_argument('--binding-sha256'); p.add_argument('--retirement-sha256')
+    a = p.parse_args()
+    if a.command == 'retire-peer':
+        require(a.root is None and a.coordinator_work is not None and a.management_origin and a.account_id
+                and a.enrollment_sha256 and a.binding_sha256 and a.retirement_sha256 is None,
+                'coordinator workspace, endpoint, account and reviewed binding digests required')
+        path = retire_peer(a.coordinator_work, a.management_origin, a.account_id, a.enrollment_sha256, a.binding_sha256)
+        print(json.dumps({'receipt': str(path), 'sha256': retirement_hash(retirement_input(path))}, sort_keys=True))
+        return
+    require(a.root and all(v is None for v in (a.coordinator_work, a.management_origin, a.account_id,
+                                               a.enrollment_sha256, a.binding_sha256))
+            and bool(a.retirement_sha256) == (a.command == 'record-retirement'), 'invalid VPN operation inputs')
+    root = safe_root(a.root)
     if a.command == 'enroll':
         b = sys.stdin.buffer.read(16385); require(len(b) <= 16384, 'bounded enrollment input required')
         result = enroll(root, b)
@@ -178,6 +395,8 @@ def main():
     elif a.command == 'bind-server':
         b = sys.stdin.buffer.read(16385); require(len(b) <= 16384, 'bounded public server result required')
         result = bind_server(root, json.loads(b))
+    elif a.command == 'record-retirement':
+        result = record_retirement(root, sys.stdin.buffer.read(RETIREMENT_LIMIT + 1), a.retirement_sha256)
     else:
         j = status(root); result = {'management_connected': j['management']['connected'],
                   'signal_connected': j['signal']['connected'], 'overlay_address': j['netbirdIp'],
@@ -189,4 +408,4 @@ if __name__ == '__main__':
     try: main()
     except (ValueError, OSError, KeyError, subprocess.SubprocessError) as error:
         # Native stderr may contain setup credentials; it is deliberately suppressed.
-        print(f'Synergy VPN enrollment refused: {type(error).__name__}', file=sys.stderr); sys.exit(1)
+        print(f'Synergy VPN operation refused: {type(error).__name__}', file=sys.stderr); sys.exit(1)
