@@ -49,6 +49,7 @@ const MAX_CANDIDATE_WINDOW: usize = 4;
 const MAX_CANDIDATE_SOLICITATIONS: usize = 8;
 const SNAPSHOT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 const CANDIDATE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+const CANDIDATE_ASSEMBLY_MAX_AGE: Duration = Duration::from_secs(120);
 const AUTHORITY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Retains exact request/response bytes across local outbound congestion.
@@ -1092,6 +1093,29 @@ struct IncomingCandidate {
     total_bytes: usize,
     started: Instant,
     progressed: Instant,
+    retransmitted: bool,
+}
+
+impl IncomingCandidate {
+    fn retransmission_session(&self, now: Instant) -> Option<SessionId> {
+        (!self.retransmitted
+            && now.saturating_duration_since(self.progressed) >= CANDIDATE_RESPONSE_TIMEOUT)
+            .then_some(self.peer.session_id)
+    }
+
+    fn expiry(&self, now: Instant, sent_at: Instant, outbox_pending: bool) -> Option<&'static str> {
+        if now.saturating_duration_since(self.started) >= CANDIDATE_ASSEMBLY_MAX_AGE {
+            Some("assembly-total-age-expired")
+        } else if self.retransmitted
+            && !outbox_pending
+            && now.saturating_duration_since(sent_at.max(self.progressed))
+                >= CANDIDATE_RESPONSE_TIMEOUT
+        {
+            Some("assembly-progress-timeout")
+        } else {
+            None
+        }
+    }
 }
 
 struct ActiveCandidateRequest {
@@ -1111,6 +1135,12 @@ struct ActiveCandidateRequest {
 }
 
 impl ActiveCandidateRequest {
+    fn revoke_solicitation(&mut self, peer: &AuthenticatedPeer) {
+        self.solicited.retain(|(id, session)| {
+            id != peer.node_address.as_str() || *session != peer.session_id
+        });
+    }
+
     fn record_solicitation(&mut self, peer_id: &str, session: Option<SessionId>) {
         self.solicited.retain(|(peer, _)| peer != peer_id);
         if let Some(session) = session {
@@ -1173,6 +1203,7 @@ fn push_candidate_chunk(
                 total_bytes: chunk.total_bytes,
                 started: Instant::now(),
                 progressed: Instant::now(),
+                retransmitted: false,
             },
         );
     }
@@ -2169,24 +2200,58 @@ impl SyncService {
                 .filter(|source| source.finalized_height >= height)
                 .cloned()
                 .collect::<Vec<_>>();
-            let Some((peer_id, revisit)) = candidate_retry_source(&eligible, &active.attempted)
-            else {
+            let assembly = self.candidate_assemblies.get(&height).filter(|assembly| {
+                eligible
+                    .iter()
+                    .any(|source| source.peer_id == assembly.peer.node_address.as_str())
+            });
+            let (peer_id, revisit, retransmission) = if let Some(assembly) = assembly {
+                let Some(session) = assembly.retransmission_session(Instant::now()) else {
+                    continue; // The current transfer still owns its bounded wait.
+                };
+                (assembly.peer.node_address.to_string(), false, Some(session))
+            } else if let Some((peer_id, revisit)) =
+                candidate_retry_source(&eligible, &active.attempted)
+            {
+                (peer_id, revisit, None)
+            } else {
                 continue;
             };
             let request = active.request.clone();
             let session = self.send_candidate_request(&peer_id, &request)?;
+            let sent_at = Instant::now();
+            let resumed = retransmission.is_some() && retransmission == session;
+            let abandoned = if resumed {
+                // The same exact request on the same authenticated session can
+                // refill chunks omitted by bounded ingress. No other session's
+                // bytes can join this assembly, and only one resend retains it.
+                self.candidate_assemblies
+                    .get_mut(&height)
+                    .ok_or("Sync retransmission assembly disappeared")?
+                    .retransmitted = true;
+                None
+            } else {
+                self.candidate_assemblies.remove(&height)
+            };
             let active = self
                 .active_requests
                 .get_mut(&height)
                 .ok_or("Sync request disappeared")?;
+            if let Some(abandoned) = abandoned {
+                active.revoke_solicitation(&abandoned.peer);
+            }
             active.record_solicitation(&peer_id, session);
             active.peer_id = peer_id.clone();
             if revisit {
                 active.attempted.clear();
             }
             active.attempted.insert(peer_id);
-            active.sent_at = Instant::now();
-            active.last_boundary = "request-retried";
+            active.sent_at = sent_at;
+            active.last_boundary = if resumed {
+                "assembly-request-retransmitted"
+            } else {
+                "request-retried"
+            };
             self.persist_oldest_candidate_request()?;
             if self.outbox.has_pending() {
                 return Ok(());
@@ -2267,20 +2332,21 @@ impl SyncService {
 
     fn prune_candidate_assembly(&mut self) -> Result<(), String> {
         let mut expired = Vec::new();
+        let now = Instant::now();
+        let outbox_pending = self.outbox.has_pending();
         for (height, active) in &self.candidate_assemblies {
-            let request_matches = self.active_requests.get(height).is_some_and(|r| {
-                r.request == active.request && r.peer_id == active.peer.node_address.as_str()
-            });
-            let reason = if !request_matches {
-                Some("assembly-request-source-changed")
-            } else if !self.ingress.is_current_session(&active.peer)? {
-                Some("assembly-stale-session")
-            } else if active.started.elapsed() >= Duration::from_secs(120) {
-                Some("assembly-total-age-expired")
-            } else if active.progressed.elapsed() >= CANDIDATE_RESPONSE_TIMEOUT {
-                Some("assembly-progress-timeout")
-            } else {
-                None
+            let reason = match self.active_requests.get(height) {
+                Some(request)
+                    if request.request == active.request
+                        && request.peer_id == active.peer.node_address.as_str() =>
+                {
+                    if !self.ingress.is_current_session(&active.peer)? {
+                        Some("assembly-stale-session")
+                    } else {
+                        active.expiry(now, request.sent_at, outbox_pending)
+                    }
+                }
+                _ => Some("assembly-request-source-changed"),
             };
             if let Some(reason) = reason {
                 expired.push((*height, reason));
@@ -2292,10 +2358,7 @@ impl SyncService {
                 if let Some(expired) = expired {
                     // A stalled stream cannot win the empty slot again without
                     // a new request. Keep other solicited sessions eligible.
-                    request.solicited.retain(|(id, session)| {
-                        id != expired.peer.node_address.as_str()
-                            || *session != expired.peer.session_id
-                    });
+                    request.revoke_solicitation(&expired.peer);
                 }
                 request.last_boundary = "assembly-reset";
                 request.last_rejection = Some(reason);
@@ -3072,6 +3135,213 @@ mod ordering_qualification;
 #[cfg(test)]
 mod congestion_tests {
     use super::*;
+
+    #[test]
+    fn candidate_retransmission_fills_only_missing_chunks_in_the_same_session() {
+        struct Scratch(std::path::PathBuf);
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let scratch = Scratch(std::env::temp_dir().join(format!(
+            "synergy-sync-candidate-retransmission-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        )));
+        fs::create_dir(&scratch.0).unwrap();
+        let root = fs::canonicalize(&scratch.0).unwrap();
+        let configuration = NodeConfiguration {
+            schema_version: synergy_config::CONFIG_SCHEMA_VERSION,
+            node_name: "sync-retransmission".into(),
+            role: synergy_protocol_types::NodeRole::ObserverLight,
+            chain_id: 99999,
+            network_id: "sync-retransmission".into(),
+            manifest_path: root.join("manifest.json"),
+            genesis_path: None,
+            public_identity_path: root.join("identity.json"),
+            aegis_key_bindings_path: None,
+            aegis_signing_key_path: None,
+            aegis_provider: None,
+            apqe_transport: None,
+            admin_socket_path: root.join("unused.sock"),
+            network: Default::default(),
+            p2p: Default::default(),
+            consensus: Default::default(),
+            etdag: Default::default(),
+            storage: synergy_config::StorageConfiguration {
+                data_directory: root.join("data"),
+                wal_sync: synergy_config::WalSyncPolicy::EveryCommit,
+                max_open_files: 128,
+                world_memory_budget_bytes: synergy_config::default_world_memory_budget_bytes(),
+                minimum_free_bytes: 0,
+                prune_finalized_history_after_blocks: None,
+            },
+            rpc: Default::default(),
+            telemetry: Default::default(),
+            update: Default::default(),
+            vpn: Default::default(),
+        };
+        let manifest = NetworkManifest {
+            chain_id: configuration.chain_id,
+            network_id: configuration.network_id.clone(),
+            genesis_hash: "a".repeat(64),
+            protocol_version: "sync-retransmission".into(),
+            manifest_hash: "b".repeat(64),
+        };
+        let address =
+            |seed| synergy_address::generate_class_based_address(&[seed; 1793], 1).unwrap();
+        let identity = PublicNodeIdentity::new(
+            synergy_identity::NodeAddress::parse(&address(1)).unwrap(),
+            "c".repeat(64),
+        );
+        fs::write(
+            &configuration.manifest_path,
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            &configuration.public_identity_path,
+            serde_json::to_vec(&identity).unwrap(),
+        )
+        .unwrap();
+        let (_, mut service) = construct_sync(
+            &configuration,
+            None,
+            AuthorityTransitionSignal::default(),
+            AuthenticatedIngress::default(),
+            None,
+        )
+        .unwrap();
+        let peer = |seed, session| {
+            AuthenticatedPeer::new(address(seed), SessionId(session), vec![]).unwrap()
+        };
+        let a = peer(2, 1);
+        let b = peer(3, 2);
+        for source in [&a, &b] {
+            service
+                .ingress
+                .admit_session(source.node_address.to_string(), source.session_id)
+                .unwrap();
+        }
+        let sources = [&a, &b].map(|source| VerifiedHead {
+            peer_id: source.node_address.to_string(),
+            finalized_height: 1,
+            finalized_hash: "d".repeat(64),
+            finality_evidence_id: "e".repeat(64),
+        });
+        let request = FinalizedCandidateRequest {
+            height: 1,
+            expected_parent_id: manifest.genesis_hash,
+        };
+        let size = synergy_sync::CANDIDATE_CHUNK_BYTES;
+        let bytes = vec![7; size * 2 + 1];
+        let chunk = |offset| CandidateResponseChunk {
+            request: request.clone(),
+            total_bytes: bytes.len(),
+            digest: synergy_sync::candidate_response_digest(&bytes),
+            offset,
+            bytes: bytes[offset..(offset + size).min(bytes.len())].to_vec(),
+        };
+        let check_request = |service: &SyncService, expected: &AuthenticatedPeer| {
+            let outbound = service.ingress.take_outbound().unwrap().unwrap();
+            assert_eq!(outbound.peer_id, expected.node_address.as_str());
+            assert!(matches!(
+                serde_json::from_slice::<synergy_sync::SyncWireMessage<synergy_state::WorldState>>(
+                    &outbound.payload,
+                )
+                .unwrap(),
+                synergy_sync::SyncWireMessage::FinalizedCandidateRequestV2(sent) if sent == request
+            ));
+        };
+        let expire_progress = |service: &mut SyncService| {
+            let expired = Instant::now() - CANDIDATE_RESPONSE_TIMEOUT;
+            service.active_requests.get_mut(&1).unwrap().sent_at = expired;
+            service.candidate_assemblies.get_mut(&1).unwrap().progressed = expired;
+        };
+
+        service.drive_candidate_window(&sources, 1).unwrap();
+        check_request(&service, &a);
+        service.accept_candidate_chunk(a.clone(), chunk(0)).unwrap();
+        service
+            .accept_candidate_chunk(a.clone(), chunk(size * 2))
+            .unwrap();
+        expire_progress(&mut service);
+        service.prune_candidate_assembly().unwrap();
+        service.drive_candidate_window(&sources, 1).unwrap();
+        check_request(&service, &a);
+        let partial = service.candidate_assemblies.get(&1).unwrap();
+        assert!(partial.retransmitted);
+        assert_eq!(
+            service.active_requests[&1].last_boundary,
+            "assembly-request-retransmitted"
+        );
+        let last_progress = partial.progressed;
+        service.accept_candidate_chunk(a.clone(), chunk(0)).unwrap();
+        service
+            .accept_candidate_chunk(b.clone(), chunk(size))
+            .unwrap();
+        assert_eq!(service.candidate_assemblies[&1].progressed, last_progress);
+        assert!(service.completed_candidates.is_empty());
+        service
+            .accept_candidate_chunk(a.clone(), chunk(size))
+            .unwrap();
+        let complete = service.completed_candidates.remove(&1).unwrap();
+        assert!(
+            matches!(complete.payload, CompletedCandidatePayload::Raw(actual) if actual == bytes)
+        );
+        assert!(service.candidate_assemblies.is_empty());
+        assert!(service
+            .ingress
+            .take_sync_candidate_response()
+            .unwrap()
+            .is_none());
+
+        service.accept_candidate_chunk(a.clone(), chunk(0)).unwrap();
+        expire_progress(&mut service);
+        service.drive_candidate_window(&sources, 1).unwrap();
+        check_request(&service, &a);
+        expire_progress(&mut service);
+        let retained = OutboundFrame {
+            peer_id: a.node_address.to_string(),
+            protocol: ProtocolKind::Sync,
+            payload: vec![1],
+        };
+        service.outbox.0.borrow_mut().push_back(retained);
+        service.prune_candidate_assembly().unwrap();
+        assert!(service.candidate_assemblies.contains_key(&1));
+        service.outbox.0.borrow_mut().clear();
+        service.prune_candidate_assembly().unwrap();
+        assert!(service.candidate_assemblies.is_empty());
+        assert_eq!(
+            service.active_requests[&1].last_rejection,
+            Some("assembly-progress-timeout")
+        );
+        service.drive_candidate_window(&sources, 1).unwrap();
+        check_request(&service, &b);
+        service.accept_candidate_chunk(a.clone(), chunk(0)).unwrap();
+        assert!(service.candidate_assemblies.is_empty());
+
+        service.accept_candidate_chunk(b.clone(), chunk(0)).unwrap();
+        let replacement = peer(3, 3);
+        service
+            .ingress
+            .admit_session(b.node_address.to_string(), replacement.session_id)
+            .unwrap();
+        service.prune_candidate_assembly().unwrap();
+        assert!(service.candidate_assemblies.is_empty());
+        assert_eq!(
+            service.active_requests[&1].last_rejection,
+            Some("assembly-stale-session")
+        );
+        service
+            .accept_candidate_chunk(replacement, chunk(0))
+            .unwrap();
+        assert!(service.candidate_assemblies.is_empty());
+    }
 
     fn poll_fixture() -> (std::path::PathBuf, SyncService) {
         let (root, configuration) =
