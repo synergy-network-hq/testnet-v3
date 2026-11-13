@@ -626,6 +626,28 @@ impl ProposalDelivery {
             .cloned()
             .collect()
     }
+
+    /// Preserved predecessor statements are evidence, not current-epoch
+    /// broadcasts. Selected current statements still require full verification.
+    pub fn local_statements_in_epoch(
+        &self,
+        id: &str,
+        epoch: &SimplifiedEpochContext,
+        registry: &FrozenValidatorRegistry,
+        verifier: &impl ConsensusSignatureVerifier,
+    ) -> PosyResult<Vec<ProposalDeliveryStatement>> {
+        self.record
+            .statements
+            .iter()
+            .filter(|statement| {
+                statement.validator_id == id && statement.context.epoch == epoch.epoch
+            })
+            .map(|statement| {
+                statement.verify(epoch, registry, verifier)?;
+                Ok(statement.clone())
+            })
+            .collect()
+    }
 }
 
 /// The sealed summary is produced only by native TC admission. This predicate
@@ -814,6 +836,15 @@ mod cache_tests {
         .unwrap();
         assert_eq!(std::fs::read(root.join("delivery.json")).unwrap(), before);
         assert_eq!(owner.record.statements[0].context.epoch, 1);
+        assert!(owner
+            .local_statements_in_epoch(
+                &owner.record.statements[0].validator_id,
+                &current,
+                &current_registry,
+                &Check
+            )
+            .unwrap()
+            .is_empty());
         assert!(owner.activate((9999, 0)).is_err());
         owner.activate((10001, 0)).unwrap();
         assert!(owner

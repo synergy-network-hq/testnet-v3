@@ -133,6 +133,28 @@ impl<D: TransactionExecutor, V: AegisTransactionVerifier> BlockExecutionSchedule
         readiness: &impl ProcessingReadinessVerifier,
         payloads: &impl ProcessingPayloadProvider,
     ) -> Result<BudgetedExecutionCandidate, ProcessingCandidateError> {
+        self.replay_processing_candidate_with_epoch_transition(
+            candidate,
+            context,
+            parent,
+            publications,
+            readiness,
+            payloads,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn replay_processing_candidate_with_epoch_transition(
+        &self,
+        candidate: &BudgetedExecutionCandidate,
+        context: ProcessingCandidateContext<'_>,
+        parent: &BudgetedWorld,
+        publications: &[ProcessingReadyRecord],
+        readiness: &impl ProcessingReadinessVerifier,
+        payloads: &impl ProcessingPayloadProvider,
+        epoch_transition: Option<&crate::ProcessingEpochTransition>,
+    ) -> Result<BudgetedExecutionCandidate, ProcessingCandidateError> {
         if !Arc::ptr_eq(parent.budget(), candidate.state.budget()) {
             return Err(ProcessingCandidateError::Invalid(
                 "processing replay requires the shared native World pool".into(),
@@ -142,8 +164,14 @@ impl<D: TransactionExecutor, V: AegisTransactionVerifier> BlockExecutionSchedule
         candidate
             .validate()
             .map_err(ProcessingCandidateError::Invalid)?;
-        let replayed =
-            self.execute_processing_candidate(context, parent, publications, readiness, payloads)?;
+        let replayed = self.execute_processing_candidate_with_epoch_transition(
+            context,
+            parent,
+            publications,
+            readiness,
+            payloads,
+            epoch_transition,
+        )?;
         if replayed != *candidate {
             return Err(ProcessingCandidateError::Invalid(
                 "processing candidate fails canonical parent execution/registry replay".into(),
@@ -164,6 +192,31 @@ impl<D: TransactionExecutor, V: AegisTransactionVerifier> BlockExecutionSchedule
         readiness: &impl ProcessingReadinessVerifier,
         payloads: &impl ProcessingPayloadProvider,
     ) -> Result<BudgetedExecutionCandidate, ProcessingCandidateError> {
+        self.execute_processing_candidate_with_epoch_transition(
+            context,
+            parent,
+            publications,
+            readiness,
+            payloads,
+            None,
+        )
+    }
+
+    /// The native authenticated boundary owner supplies the prepared parent and
+    /// its exact empty-registry diff. Ordinary candidates retain their original
+    /// commitment format. This API itself grants no authority over an epoch.
+    pub fn execute_processing_candidate_with_epoch_transition(
+        &self,
+        context: ProcessingCandidateContext<'_>,
+        parent: &BudgetedWorld,
+        publications: &[ProcessingReadyRecord],
+        readiness: &impl ProcessingReadinessVerifier,
+        payloads: &impl ProcessingPayloadProvider,
+        epoch_transition: Option<&crate::ProcessingEpochTransition>,
+    ) -> Result<BudgetedExecutionCandidate, ProcessingCandidateError> {
+        if let Some(transition) = epoch_transition {
+            transition.verify_prepared_parent(parent.as_ref())?;
+        }
         if context.height == 0
             || context.parent_block_id.trim().is_empty()
             || context.parent_block_id.len() > 256
@@ -325,10 +378,16 @@ impl<D: TransactionExecutor, V: AegisTransactionVerifier> BlockExecutionSchedule
             .map_err(|e| {
                 ProcessingCandidateError::Invalid(format!("processing group commitment: {e:?}"))
             })?;
-        material.transition_root = EtdagDigest::from_canonical(
-            "SYNERGY_POSY_PROCESSING_LIFECYCLE_TRANSITION_V1",
-            &(transition.diff(), groups.diff()),
-        )
+        material.transition_root = match epoch_transition {
+            None => EtdagDigest::from_canonical(
+                "SYNERGY_POSY_PROCESSING_LIFECYCLE_TRANSITION_V1",
+                &(transition.diff(), groups.diff()),
+            ),
+            Some(epoch) => EtdagDigest::from_canonical(
+                "SYNERGY_POSY_PROCESSING_EPOCH_LIFECYCLE_TRANSITION_V1",
+                &(epoch.diff(), transition.diff(), groups.diff()),
+            ),
+        }
         .map_err(|e| {
             ProcessingCandidateError::Invalid(format!("processing lifecycle commitment: {e:?}"))
         })?;
@@ -423,6 +482,148 @@ mod tests {
             },
         )
         .unwrap()
+    }
+    #[test]
+    fn processing_candidate_epoch_handoff_replays_and_reopens_without_rewriting_history() {
+        // Offline execution/storage test only; no validator or chain is run.
+        let budget = WorldResourceBudget::new(16 * 1024 * 1024);
+        let historical = crate::processing_epoch::tests::boundary_world();
+        let (previous, next) = crate::processing_epoch::tests::namespaces();
+        let original_root = state_root(&historical).unwrap();
+        let historical = BudgetedWorld::try_clone_world(&historical, &budget).unwrap();
+        let handoff = crate::propose_empty_processing_epoch_transition(
+            &historical,
+            &previous,
+            &next,
+            &budget,
+        )
+        .unwrap();
+        let mut prepared = historical.try_clone().unwrap();
+        prepared.try_apply(handoff.diff()).unwrap();
+        let network = network();
+        let context = || ProcessingCandidateContext {
+            ordered_group: None,
+            height: 10001,
+            parent_block_id: "verified-epoch-parent",
+            network: &network,
+            consensus_timestamp_unix: 1_700_010_001,
+            namespace_root: &next,
+            maximum_gas: 30_000_000,
+            maximum_bytes: 8 * 1024 * 1024,
+            finalized_authorization_state: &historical,
+        };
+        let scheduler = scheduler();
+        assert!(scheduler
+            .execute_processing_candidate_with_epoch_transition(
+                context(),
+                &historical,
+                &[],
+                &UnusedPipeline,
+                &UnusedPipeline,
+                Some(&handoff)
+            )
+            .is_err());
+        let candidate = scheduler
+            .execute_processing_candidate_with_epoch_transition(
+                context(),
+                &prepared,
+                &[],
+                &UnusedPipeline,
+                &UnusedPipeline,
+                Some(&handoff),
+            )
+            .unwrap();
+        assert!(candidate.transactions.is_empty());
+        assert_eq!(candidate.state.accounts, historical.accounts);
+        assert_eq!(state_root(&historical).unwrap(), original_root);
+        assert_ne!(candidate.state_root, original_root);
+        // Omitting the transition gives a different commitment even though
+        // the prepared metadata and resulting World happen to be identical.
+        assert!(scheduler
+            .replay_processing_candidate(
+                &candidate,
+                context(),
+                &prepared,
+                &[],
+                &UnusedPipeline,
+                &UnusedPipeline
+            )
+            .is_err());
+        scheduler
+            .replay_processing_candidate_with_epoch_transition(
+                &candidate,
+                context(),
+                &prepared,
+                &[],
+                &UnusedPipeline,
+                &UnusedPipeline,
+                Some(&handoff),
+            )
+            .unwrap();
+        let bytes = serde_json::to_vec(&candidate).unwrap();
+        let decoded = crate::decode_budgeted_candidate(&bytes, &budget).unwrap();
+        scheduler
+            .replay_processing_candidate_with_epoch_transition(
+                &decoded,
+                context(),
+                &prepared,
+                &[],
+                &UnusedPipeline,
+                &UnusedPipeline,
+                Some(&handoff),
+            )
+            .unwrap();
+        struct Temp(std::path::PathBuf);
+        impl Drop for Temp {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let temp = Temp(
+            std::env::temp_dir().join(format!(
+                "epoch-candidate-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )),
+        );
+        let mut store =
+            crate::BudgetedCandidateStore::new_budgeted(&temp.0, budget.clone()).unwrap();
+        store.put_budgeted(&candidate, &historical).unwrap();
+        drop(store);
+        let store = crate::BudgetedCandidateStore::new_budgeted(&temp.0, budget.clone()).unwrap();
+        let restored = store.get_budgeted(candidate.height).unwrap().unwrap();
+        assert_eq!(candidate, restored);
+        scheduler
+            .replay_processing_candidate_with_epoch_transition(
+                &restored,
+                context(),
+                &prepared,
+                &[],
+                &UnusedPipeline,
+                &UnusedPipeline,
+                Some(&handoff),
+            )
+            .unwrap();
+        // The next ordinary candidate uses the already committed new namespace
+        // and requires no second handoff or special empty-block authority.
+        let next_context = ProcessingCandidateContext {
+            height: 10002,
+            parent_block_id: &candidate.block_id,
+            ..context()
+        };
+        scheduler
+            .execute_processing_candidate(
+                next_context,
+                &restored.state,
+                &[],
+                &UnusedPipeline,
+                &UnusedPipeline,
+            )
+            .unwrap();
+        assert_eq!(state_root(&historical).unwrap(), original_root);
     }
     #[test]
     fn processing_candidate_empty_assembly_spans_heights_without_etdag_material_or_growth() {

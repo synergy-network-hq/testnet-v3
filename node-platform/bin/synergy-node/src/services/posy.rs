@@ -3615,7 +3615,15 @@ impl ManagedService for PosyService {
             self.broadcast(&ConsensusEvent::ProposalDelivery(envelope))?;
         }
         if let Some(local) = self.local_signer.as_ref() {
-            let statements = self.delivery.local_statements(local.validator_id());
+            let statements = self
+                .delivery
+                .local_statements_in_epoch(
+                    local.validator_id(),
+                    &self.authority.epoch,
+                    &self.authority.registry,
+                    self.authority.as_ref(),
+                )
+                .map_err(|error| error.to_string())?;
             for statement in statements {
                 self.broadcast(&ConsensusEvent::ProposalDelivery(
                     self.delivery_envelope(statement)?,

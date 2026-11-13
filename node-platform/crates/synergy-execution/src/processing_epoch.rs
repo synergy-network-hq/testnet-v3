@@ -1,9 +1,8 @@
-//! Unactivated empty-registry epoch handoff proposal.
+//! Empty-registry epoch handoff approved by the CTO on 2026-11-13.
 //!
-//! This pure write-set builder is NOT an epoch authorization API. Before any
-//! runtime integration, the native owner must authenticate the exact predecessor
-//! candidate/World and sequential successor authority, and the rule must be
-//! approved. No runtime caller, network route or default feature enables it.
+//! This pure write-set builder is NOT an epoch authorization API. The native
+//! owner authenticates the exact predecessor candidate/World and sequential
+//! successor authority before constructing a speculative prepared parent.
 //! Historical World, custody and journals are never modified by this builder.
 use std::sync::Arc;
 
@@ -20,6 +19,25 @@ pub struct ProcessingEpochTransition {
 impl ProcessingEpochTransition {
     pub fn diff(&self) -> &StateDiff {
         &self.diff
+    }
+
+    /// A scheduler receives the prepared immutable view, never permission to
+    /// rewrite the original parent. Both exact new metadata values must match.
+    pub(crate) fn verify_prepared_parent(
+        &self,
+        parent: &WorldState,
+    ) -> Result<(), ProcessingRegistryError> {
+        if self
+            .diff
+            .protocol_changes
+            .iter()
+            .any(|change| parent.protocol.get(&change.key) != change.value.as_ref())
+        {
+            return Err(ProcessingRegistryError::Corrupt(
+                "epoch handoff differs from prepared parent".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -55,7 +73,7 @@ pub fn propose_empty_processing_epoch_transition(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::{processing_order_tip, ParentProcessingRegistry};
     use synergy_state::{state_root, AccountState};
@@ -65,12 +83,12 @@ mod tests {
     const OLD: &str = "eb98d9273246e8d081d692ef500fde5e319b3cc044a20dc600fe8c7e611f45eac09fd01f425a1475e1df2744d209f3ea239cfecc720d2d1d070b73ef7f04744e";
     const NEXT: &str = "1530a4ecbe6da86cc15d9593faf4aa9e857b97f1acfb1d0c0d3ca1e1e3fc31ab7b88d9679c0831889fa54ca89c1635b5787fbedbf895035844b6488f0d041369";
 
-    fn namespaces() -> (EtdagDigest, EtdagDigest) {
+    pub(crate) fn namespaces() -> (EtdagDigest, EtdagDigest) {
         (EtdagDigest(OLD.into()), EtdagDigest(NEXT.into()))
     }
     // Public protocol metadata observed identically at finalized H9998 on
     // Val2–Val6. No private material or transaction payload is used.
-    fn boundary_world() -> WorldState {
+    pub(crate) fn boundary_world() -> WorldState {
         let mut world = WorldState::default();
         world.protocol.insert(GROUPS.into(), serde_json::to_vec(&serde_json::json!({
             "namespace_root": OLD, "last_number": 4,

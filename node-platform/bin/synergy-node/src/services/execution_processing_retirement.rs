@@ -73,12 +73,23 @@ impl ExecutionService {
         };
         let mut required = Vec::new();
         if material.ordered_group.is_some() {
+            let store = Arc::clone(
+                &self
+                    .processing
+                    .as_ref()
+                    .ok_or("processing pin lacks native owner")?
+                    .store,
+            );
+            let authority = self.processing_authority_at(candidate.height)?;
+            let Some(parent) = self.processing_parent(&store, authority)? else {
+                return Ok(false);
+            };
             let (next, _, open) =
-                synergy_execution::processing_order_tip(&self.state, &material.namespace_root)
+                synergy_execution::processing_order_tip(parent.world(), &material.namespace_root)
                     .map_err(|error| error.to_string())?;
             if open && next > 1 {
                 let previous = synergy_execution::processing_group_state(
-                    &self.state,
+                    parent.world(),
                     &material.namespace_root,
                     next - 1,
                 )

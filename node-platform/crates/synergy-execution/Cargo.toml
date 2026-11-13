@@ -6,11 +6,6 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 
-[features]
-default = []
-# Offline protocol candidate only. No node runtime or network route enables it.
-engineering-processing-epoch-rollover = []
-
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true

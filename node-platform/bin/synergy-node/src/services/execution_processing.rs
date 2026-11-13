@@ -73,7 +73,10 @@ fn retry_processing_store<T>(
 }
 
 impl ExecutionService {
-    fn processing_authority_at(&self, height: u64) -> Result<&VerifiedAuthority, String> {
+    pub(super) fn processing_authority_at(
+        &self,
+        height: u64,
+    ) -> Result<&VerifiedAuthority, String> {
         if self.authority.epoch.contains_height(height) {
             return Ok(&self.authority);
         }
@@ -107,7 +110,7 @@ impl ExecutionService {
         }
     }
 
-    fn processing_parent<'a>(
+    pub(super) fn processing_parent<'a>(
         &'a self,
         store: &Arc<Mutex<ProcessingProposalStore>>,
         next_authority: &'a VerifiedAuthority,
@@ -213,24 +216,27 @@ impl ExecutionService {
             return Ok(None);
         };
         let limits = authority.protected_parameters()?;
-        let result = self.scheduler.execute_processing_candidate(
-            ProcessingCandidateContext {
-                ordered_group: inputs.ordered_group.as_ref(),
-                height: inputs.context.height,
-                parent_block_id: inputs.parent.block_id(),
-                network: &self.network,
-                consensus_timestamp_unix: authority
-                    .consensus_timestamp_unix(inputs.context.height)?,
-                namespace_root: &namespace,
-                maximum_gas: limits.max_protected_gas,
-                maximum_bytes: limits.max_protected_bytes,
-                finalized_authorization_state: &self.finalized_state,
-            },
-            &self.state,
-            &inputs.publications,
-            &pipeline,
-            &pipeline,
-        );
+        let result = self
+            .scheduler
+            .execute_processing_candidate_with_epoch_transition(
+                ProcessingCandidateContext {
+                    ordered_group: inputs.ordered_group.as_ref(),
+                    height: inputs.context.height,
+                    parent_block_id: inputs.parent.block_id(),
+                    network: &self.network,
+                    consensus_timestamp_unix: authority
+                        .consensus_timestamp_unix(inputs.context.height)?,
+                    namespace_root: &namespace,
+                    maximum_gas: limits.max_protected_gas,
+                    maximum_bytes: limits.max_protected_bytes,
+                    finalized_authorization_state: &self.finalized_state,
+                },
+                parent.world(),
+                &inputs.publications,
+                &pipeline,
+                &pipeline,
+                parent.epoch_transition(),
+            );
         let candidate = match result {
             Ok(c) => c,
             Err(e) if retryable(&e) => return Ok(None),
@@ -609,7 +615,7 @@ impl ExecutionService {
                 .collect::<Vec<_>>();
             let pipeline = NativeProcessingPipeline::from_members(&parent, &members, &completions)?;
             let registry = match synergy_execution::ParentProcessingRegistry::read(
-                &self.state,
+                parent.world(),
                 &namespace,
                 self.ingress.world_budget(),
             ) {
@@ -630,7 +636,7 @@ impl ExecutionService {
                 })
                 .filter(|completion| {
                     synergy_execution::verify_processing_record_assignment(
-                        &self.state,
+                        parent.world(),
                         &namespace,
                         &completion.record,
                     )
@@ -639,7 +645,7 @@ impl ExecutionService {
                 .map(|completion| completion.record.clone())
                 .collect::<Vec<_>>();
             let (number, previous, open) =
-                synergy_execution::processing_order_tip(&self.state, &namespace)
+                synergy_execution::processing_order_tip(parent.world(), &namespace)
                     .map_err(|e| e.to_string())?;
             let mut group = ProcessingOrderGroup {
                 group_version: 1,
@@ -664,7 +670,7 @@ impl ExecutionService {
                     continue;
                 }
                 if synergy_execution::processing_member_claim_optional(
-                    &self.state,
+                    parent.world(),
                     &envelope.sender_id,
                     envelope.nonce_slot,
                 )
@@ -716,25 +722,28 @@ impl ExecutionService {
                 );
             }
             let group = (!group.members.is_empty() || open).then_some(group);
-            let candidate = match self.scheduler.execute_processing_candidate(
-                ProcessingCandidateContext {
-                    ordered_group: group.as_ref(),
-                    height: request.context.height,
-                    parent_block_id: request.parent.block_id(),
-                    network: &self.network,
-                    consensus_timestamp_unix: self
-                        .authority
-                        .consensus_timestamp_unix(request.context.height)?,
-                    namespace_root: &namespace,
-                    maximum_gas: limits.max_protected_gas,
-                    maximum_bytes: limits.max_protected_bytes,
-                    finalized_authorization_state: &self.finalized_state,
-                },
-                &self.state,
-                &publications,
-                &pipeline,
-                &pipeline,
-            ) {
+            let candidate = match self
+                .scheduler
+                .execute_processing_candidate_with_epoch_transition(
+                    ProcessingCandidateContext {
+                        ordered_group: group.as_ref(),
+                        height: request.context.height,
+                        parent_block_id: request.parent.block_id(),
+                        network: &self.network,
+                        consensus_timestamp_unix: self
+                            .authority
+                            .consensus_timestamp_unix(request.context.height)?,
+                        namespace_root: &namespace,
+                        maximum_gas: limits.max_protected_gas,
+                        maximum_bytes: limits.max_protected_bytes,
+                        finalized_authorization_state: &self.finalized_state,
+                    },
+                    parent.world(),
+                    &publications,
+                    &pipeline,
+                    &pipeline,
+                    parent.epoch_transition(),
+                ) {
                 Ok(c) => Arc::new(c),
                 Err(e) if retryable(&e) => return Ok(()),
                 Err(e) => return Err(e.to_string()),

@@ -132,9 +132,8 @@ fn metadata(
     Ok(meta)
 }
 
-/// Unactivated engineering proposal. Validate the original scope and all
+/// Approved empty-registry handoff. Validate the original scope and all
 /// counters before constructing a compare-and-swap of empty metadata only.
-#[cfg(any(test, feature = "engineering-processing-epoch-rollover"))]
 pub(crate) fn propose_empty_epoch_metadata(
     parent: &WorldState,
     previous: &EtdagDigest,

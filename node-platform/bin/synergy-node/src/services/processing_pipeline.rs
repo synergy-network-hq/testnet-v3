@@ -517,6 +517,8 @@ impl<'a> NativeProcessingVertex<'a> {
 /// not become an alternate finality mechanism. Finality still needs three QCs.
 pub(super) struct NativeProcessingParent<'a> {
     world: &'a BudgetedWorld,
+    epoch_world: Option<BudgetedWorld>,
+    epoch_transition: Option<synergy_execution::ProcessingEpochTransition>,
     height: u64,
     block_id: &'a str,
     authority: &'a VerifiedAuthority,
@@ -525,6 +527,12 @@ pub(super) struct NativeProcessingParent<'a> {
     _permit: WorldResourcePermit,
 }
 impl<'a> NativeProcessingParent<'a> {
+    pub(super) fn world(&self) -> &BudgetedWorld {
+        self.epoch_world.as_ref().unwrap_or(self.world)
+    }
+    pub(super) fn epoch_transition(&self) -> Option<&synergy_execution::ProcessingEpochTransition> {
+        self.epoch_transition.as_ref()
+    }
     /// H1 uses only the signed Genesis parent. There is no invented VC and
     /// Genesis cannot authorize reveal, because no successor has been committed.
     pub(super) fn genesis(
@@ -542,6 +550,8 @@ impl<'a> NativeProcessingParent<'a> {
         let permit = world.budget().reserve(16 * 1024).map_err(err)?;
         Ok(Self {
             world,
+            epoch_world: None,
+            epoch_transition: None,
             height: 0,
             block_id: authority.anchor_parent.block_id(),
             authority,
@@ -606,6 +616,8 @@ impl<'a> NativeProcessingParent<'a> {
         }
         Ok(Self {
             world: &candidate.state,
+            epoch_world: None,
+            epoch_transition: None,
             height: candidate.height,
             block_id: &candidate.block_id,
             authority,
@@ -625,6 +637,13 @@ impl<'a> NativeProcessingParent<'a> {
         transition: &super::authority::VerifiedTransitionContext,
     ) -> Result<Self, String> {
         transition.verify_current(current)?;
+        if previous.epoch.epoch.checked_add(1) != Some(current.epoch.epoch)
+            || previous.epoch.epoch_end_height != current.anchor_parent.height()
+            || current.anchor_parent.height().checked_add(1)
+                != Some(current.epoch.epoch_start_height)
+        {
+            return Err("processing handoff is not a sequential epoch boundary".into());
+        }
         if previous.epoch.root().map_err(err)?
             != transition.previous_authority().epoch.root().map_err(err)?
         {
@@ -648,8 +667,22 @@ impl<'a> NativeProcessingParent<'a> {
             return Err("processing transition parent differs from signed epoch anchor".into());
         }
         let mut verified = Self::verify(candidate, certificate, previous)?;
+        let next_namespace = processing_namespace(current, candidate.state.budget())?;
+        let epoch_transition = synergy_execution::propose_empty_processing_epoch_transition(
+            candidate.state.as_ref().as_ref(),
+            &verified.namespace,
+            &next_namespace,
+            candidate.state.budget(),
+        )
+        .map_err(err)?;
+        let mut epoch_world = candidate.state.try_clone().map_err(err)?;
+        epoch_world
+            .try_apply(epoch_transition.diff())
+            .map_err(err)?;
         verified.authority = current;
-        verified.namespace = processing_namespace(current, candidate.state.budget())?;
+        verified.namespace = next_namespace;
+        verified.epoch_world = Some(epoch_world);
+        verified.epoch_transition = Some(epoch_transition);
         Ok(verified)
     }
 
@@ -657,7 +690,7 @@ impl<'a> NativeProcessingParent<'a> {
         &self,
         vertex: &NativeProcessingVertex<'_>,
     ) -> Result<ProcessingRevealPermission, String> {
-        self.reveal_permission_in(vertex, self.world.budget())
+        self.reveal_permission_in(vertex, self.world().budget())
     }
     fn reveal_permission_in(
         &self,
@@ -668,7 +701,7 @@ impl<'a> NativeProcessingParent<'a> {
             .validation_id
             .as_ref()
             .ok_or("Genesis does not authorize processing reveal")?;
-        let world = self.world.as_ref();
+        let world = self.world().as_ref();
         let _scratch = budget.reserve(128 * 1024).map_err(err)?;
         if processing_namespace(vertex.source.authority, budget)? != self.namespace {
             return Err("processing reveal has foreign frozen authority".into());
@@ -728,7 +761,7 @@ impl NativeProcessingCompletion {
         vertex: &NativeProcessingVertex<'_>,
         shares: &[ProcessingDecryptShare],
     ) -> Result<Self, String> {
-        Self::decrypt_in(parent, vertex, shares, parent.world.budget())
+        Self::decrypt_in(parent, vertex, shares, parent.world().budget())
     }
     pub(super) fn decrypt_in(
         parent: &NativeProcessingParent<'_>,
@@ -856,7 +889,7 @@ impl NativeProcessingCompletion {
         )
         .map_err(err)?;
         let claim = synergy_execution::processing_member_claim(
-            parent.world.as_ref(),
+            parent.world().as_ref(),
             &request.sender_wallet,
             request.sender_nonce,
         )
@@ -929,9 +962,10 @@ impl<'a> NativeProcessingPipeline<'a> {
         vertices: &[&NativeProcessingVertex<'_>],
         completions: &[&'a NativeProcessingCompletion],
     ) -> Result<Self, String> {
-        let namespace = processing_namespace(parent.authority, parent.world.budget())?;
+        let namespace = processing_namespace(parent.authority, parent.world().budget())?;
         for vertex in vertices {
-            if processing_namespace(vertex.source.authority, parent.world.budget())? != namespace {
+            if processing_namespace(vertex.source.authority, parent.world().budget())? != namespace
+            {
                 return Err("processing member has foreign frozen authority".into());
             }
         }
@@ -966,7 +1000,7 @@ impl<'a> NativeProcessingPipeline<'a> {
             return Err("processing native index capacity".into());
         }
         let mut permit = parent
-            .world
+            .world()
             .budget()
             .reserve((count + completions.len()) * 4096 + 16 * 1024)
             .map_err(err)?;
@@ -1006,7 +1040,7 @@ impl<'a> NativeProcessingPipeline<'a> {
         })
     }
     fn check_parent(&self, world: &WorldState) -> Result<(), String> {
-        if !std::ptr::eq(world, self.parent.world.as_ref()) {
+        if !std::ptr::eq(world, self.parent.world().as_ref()) {
             return Err("processing verifier used with another parent World".into());
         }
         Ok(())
@@ -1741,6 +1775,18 @@ impl NativeProcessingRetirement {
         let namespace = processing_namespace(authority, budget)?;
         if material.namespace_root != namespace {
             return Err("processing retirement scope mismatch".into());
+        }
+        // A finalized empty selection consumes no identity and grants no
+        // physical deletion. In particular the first new-epoch parent retains
+        // its historical namespace; it must not be reinterpreted for retirement.
+        if material.selection.item_indices.is_empty() && candidate.transactions.is_empty() {
+            return Ok(Self {
+                height: candidate.height,
+                block_id: candidate.block_id.clone(),
+                state_root: candidate.state_root.clone(),
+                consumed: BTreeMap::new(),
+                _permit: permit,
+            });
         }
         let registry = synergy_execution::ParentProcessingRegistry::read(
             parent.state.as_ref().as_ref(),

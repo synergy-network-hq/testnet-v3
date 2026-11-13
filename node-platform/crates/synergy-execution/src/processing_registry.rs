@@ -120,7 +120,6 @@ struct RegistryMetadata {
     count: usize,
 }
 
-#[cfg(any(test, feature = "engineering-processing-epoch-rollover"))]
 pub(crate) fn propose_empty_epoch_metadata(
     parent: &WorldState,
     previous: &EtdagDigest,
