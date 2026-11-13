@@ -13,9 +13,9 @@ import sys
 
 sys.dont_write_bytecode = True
 SOURCE = Path(__file__).resolve().parents[2]
-MASTER = SOURCE.parents[1] / 'Node-Architecture/Linux/Synergy'
+MASTER = SOURCE.parents[1] / 'Node-Architecture/Linux/synergy'
 TOOLS = ('synergy_linux.py', 'lifecycle.py', 'vpn.py', 'conformance.py',
-         'test_cross_network.py', 'apqe_layout.py', 'canary_rpc_relay.py', 'controller.py', 'bootstrap.py', 'activate_authority_recovery.py')
+         'test_cross_network.py', 'apqe_layout.py', 'canary_rpc_relay.py', 'controller.py', 'bootstrap.py', 'activate_authority_recovery.py', 'root_guard.py')
 DIRECTORIES = ('bin', 'lib', 'assets', 'config', 'network', 'systemd', 'tools',
                'data', 'keys', 'logs', 'cache', 'tmp', 'run', 'vpn',
                'snapshots', 'recovery', 'evidence', 'roles')
@@ -48,6 +48,9 @@ def desired_files(templates):
 
 def check_master_inventory(master, expected, roles):
     """Refuse stale files/directories before generation, without deleting them."""
+    if master.parent.is_dir():
+        require(not any(p.name.casefold() == master.name.casefold() and p.name != master.name
+                        for p in master.parent.iterdir()), 'mixed-case master exists; use a clean lowercase output')
     if not master.exists(): return
     directories=set(DIRECTORIES) | {'roles/'+role for role in roles}
     directories.update(str(p) for name in expected for p in Path(name).parents if str(p)!='.')
@@ -235,7 +238,7 @@ def compose_r5_controller(original, output):
         data = target.read_bytes()
         require(hashlib.sha256(data).hexdigest() == expected, 'R5 member digest mismatch: '+name)
         baseline_bytes[name] = data
-    require(output.is_absolute() and output.name == 'Synergy'
+    require(output.is_absolute() and output.name == 'synergy'
             and not output.exists() and not output.is_symlink()
             and output.parent.is_dir() and output.parent.resolve() == output.parent,
             'fresh direct candidate Synergy output required')
@@ -425,11 +428,11 @@ def main():
     p.add_argument('--apqe-provider-dir', type=Path, required=True)
     p.add_argument('--apqe-report-sha256', required=True)
     p.add_argument('--engineering-output', type=Path,
-                   help='Build into a new Synergy directory under an existing private engineering workspace')
+                   help='Build into a new lowercase synergy directory under an existing private engineering workspace')
     args = p.parse_args()
     if args.engineering_output is not None:
         output = args.engineering_output
-        require(output.name == 'Synergy' and output.is_absolute()
+        require(output.name == 'synergy' and output.is_absolute()
                 and output.parent.resolve(strict=True) == output.parent
                 and not output.exists() and not output.is_symlink()
                 and output.parent.is_dir()

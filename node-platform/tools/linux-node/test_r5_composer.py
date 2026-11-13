@@ -38,8 +38,8 @@ class R5CompositionTests(unittest.TestCase):
             original.mkdir()
             (original/'package.json').write_text('{"release_id":"not-r5"}')
             with self.assertRaisesRegex(ValueError, 'manifest pin mismatch'):
-                builder.compose_r5_controller(original, root/'Synergy')
-            self.assertFalse((root/'Synergy').exists())
+                builder.compose_r5_controller(original, root/'synergy')
+            self.assertFalse((root/'synergy').exists())
 
     def test_missing_corrupted_and_linked_parent_members_refused(self):
         for kind in ('missing', 'corrupted', 'linked'):
@@ -58,6 +58,6 @@ class R5CompositionTests(unittest.TestCase):
                     (original/'runtime').symlink_to(root/'outside')
                 with patch.object(builder, 'R5_MANIFEST_SHA256', hashlib.sha256(raw).hexdigest()):
                     with self.assertRaisesRegex(ValueError, 'member'):
-                        builder.compose_r5_controller(original, root/'Synergy')
-                self.assertFalse((root/'Synergy').exists())
+                        builder.compose_r5_controller(original, root/'synergy')
+                self.assertFalse((root/'synergy').exists())
                 self.assertEqual((original/'package.json').read_bytes(), raw)

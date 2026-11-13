@@ -10,7 +10,7 @@ from rotate_transport import json_bytes, sha
 class ValidatorRelayProvisionTests(unittest.TestCase):
     def setUp(self):
         tmp=tempfile.TemporaryDirectory();self.addCleanup(tmp.cleanup)
-        base=Path(tmp.name).resolve();self.root=base/'Synergy'
+        base=Path(tmp.name).resolve();self.root=base/'synergy'
         for name in ('network','evidence','config'):(self.root/name).mkdir(parents=True,exist_ok=True)
         self.spec=base/'spec'; self.admission=base/'admission'
         self.spec.write_bytes(b'{}');self.admission.write_bytes(b'{"signed":true}')

@@ -26,8 +26,9 @@ AUTHORITY_RECOVERY_INTENT = 'evidence/authority-recovery-intent.json'
 def node_unit(root):
     return f'''[Unit]
 Description=Synergy universal validator
-After=network-online.target synergy-vpn.service
+After=network-online.target synergy-vpn.service synergy-installation-guard.service
 Requires=synergy-vpn.service
+BindsTo=synergy-installation-guard.service
 ConditionPathExists={root}/config/start-authorized.json
 
 [Service]
@@ -65,8 +66,9 @@ WantedBy=multi-user.target
 def vpn_unit(root):
     return f'''[Unit]
 Description=Synergy application-owned NetBird client
-After=network-online.target
+After=network-online.target synergy-installation-guard.service
 Wants=network-online.target
+BindsTo=synergy-installation-guard.service
 
 [Service]
 Type=exec
@@ -275,7 +277,7 @@ def recover_consensus_archives(root):
 
 def register(root):
     _require_operator()
-    require(re.fullmatch(r'/[A-Za-z0-9_/.-]+/Synergy', str(root)), 'systemd root contains unsupported characters')
+    require(re.fullmatch(r'/[A-Za-z0-9_/.-]+/synergy', str(root)), 'systemd root contains unsupported characters')
     _sealed_receipt(root)
     contents = rendered_units(root)
     paths = [UNIT_DIRECTORY/name for name in contents]
@@ -632,9 +634,14 @@ def remove(root, confirmation):
         require(enrollment['peer_id'] and retirement['peer_id'] == enrollment['peer_id']
                 and retirement['retired'] is True and retirement['absence_verified'] is True, 'exact VPN registration retirement required')
     _reject_installation_mounts(root)
+    guard = None
     with _lifecycle_lock(root):
         if (root/'tmp/controller/policy.json').exists():
-            from controller import host_removal_plan
+            from controller import Controller, host_removal_plan
+            guard = Controller(root).policy().get('root_guard_sha256')
+            if guard is not None:
+                from root_guard import check_registration
+                check_registration(guard)
             host_removal_plan(root)
         plan=_integration_plan(root)
         owned=_attributed_units(root,plan,allow_absent=True,allow_unloaded=True) if plan else {}
@@ -656,6 +663,9 @@ def remove(root, confirmation):
             host_records=remove_host_registrations(root)
         shutil.rmtree(root)
         require(not root.exists(), 'logical installation removal failed')
+    if guard is not None:
+        from root_guard import wait_for_retirement
+        wait_for_retirement()
     return {'removed_root':str(root),'logical_removal_verified':True,'forensic_erasure_proven':False,'backup_created':False,'remaining_host_managed_records':host_records}
 
 

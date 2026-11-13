@@ -21,14 +21,14 @@ import subprocess
 import sys
 import tarfile
 sys.dont_write_bytecode=True
-ROOT=Path('/opt/Synergy')
+ROOT=Path('/opt/synergy')
 LIMIT=256*1024*1024
-ENGINE=('controller.py','synergy_linux.py','lifecycle.py','conformance.py','apqe_layout.py','vpn.py','canary_rpc_relay.py')
+ENGINE=('controller.py','synergy_linux.py','lifecycle.py','conformance.py','apqe_layout.py','vpn.py','canary_rpc_relay.py','root_guard.py')
 HOST_LINKS={'sshd.conf':Path('/etc/ssh/sshd_config.d/synergy-nodenetwork.conf'),
             'sudoers':Path('/etc/sudoers.d/synergy-nodenetwork')}
 DIRECTORIES={'bin','lib','assets','config','network','systemd','tools','data','keys','logs','cache','tmp','run','vpn','snapshots','recovery','evidence','roles'}
 VALIDATOR_UNIT_PATTERNS=('synergy-node.service','synergy-vpn.service','synergy-canary-*.service',
-                         'synergy-posy-*.service')
+                         'synergy-posy-*.service','synergy-installation-guard.service')
 
 
 def require(value,message):
@@ -36,7 +36,7 @@ def require(value,message):
 
 
 def require_clean_service_namespace():
-    # A missing /opt/Synergy does not establish a clean host. Disabled units,
+    # A missing /opt/synergy does not establish a clean host. Disabled units,
     # masks, dangling registrations and loaded-but-unlinked units can survive
     # a previous deployment. Check both installed and effective namespaces
     # before writing any bootstrap files. Independently owned OS/Chain1266
@@ -110,7 +110,7 @@ def extract(stream,stage,header):
 
 
 def host_contents(public_key):
-    command='/usr/bin/sudo -n /usr/bin/python3 -I -B /opt/Synergy/tmp/controller/controller.py'
+    command='/usr/bin/sudo -n /usr/bin/python3 -I -B /opt/synergy/tmp/controller/controller.py'
     return {
       'authorized_keys':('restrict,command="'+command+'" '+public_key+'\n').encode(),
       'sshd.conf':b'''Match User synergy-nodenetwork
@@ -118,9 +118,9 @@ def host_contents(public_key):
     KbdInteractiveAuthentication no
     AuthenticationMethods publickey
     AuthorizedKeysFile none
-    AuthorizedKeysCommand /usr/bin/cat /opt/Synergy/tmp/controller/host/authorized_keys
+    AuthorizedKeysCommand /usr/bin/cat /opt/synergy/tmp/controller/host/authorized_keys
     AuthorizedKeysCommandUser root
-    ForceCommand /usr/bin/sudo -n /usr/bin/python3 -I -B /opt/Synergy/tmp/controller/controller.py
+    ForceCommand /usr/bin/sudo -n /usr/bin/python3 -I -B /opt/synergy/tmp/controller/controller.py
     PermitTTY no
     AllowTcpForwarding no
     X11Forwarding no
@@ -128,7 +128,7 @@ def host_contents(public_key):
     AllowAgentForwarding no
 Match all
 ''',
-      'sudoers':b'synergy-nodenetwork ALL=(root) NOPASSWD: NOSETENV: /usr/bin/python3 -I -B /opt/Synergy/tmp/controller/controller.py\n'}
+      'sudoers':b'synergy-nodenetwork ALL=(root) NOPASSWD: NOSETENV: /usr/bin/python3 -I -B /opt/synergy/tmp/controller/controller.py\n'}
 
 
 def bootstrap(stream):
@@ -141,6 +141,9 @@ def bootstrap(stream):
     require(globals().get('NATIVE_AUTHENTICATED_MANIFEST_SHA256')==header['manifest_sha256'],
             'No independent native release authorization')
     require(not ROOT.exists() and not ROOT.is_symlink(),'Fresh root required; no merge or overwrite')
+    old_root=ROOT.with_name('Synergy')
+    require(not old_root.exists() and not old_root.is_symlink(),
+            'Legacy mixed-case validator root requires operator retirement before installation')
     require(ROOT.parent.is_dir() and ROOT.parent.resolve()==ROOT.parent,'Unsafe installation parent')
     for ancestor in (ROOT.parent,*ROOT.parent.parents):
         metadata=ancestor.lstat()
@@ -150,9 +153,12 @@ def bootstrap(stream):
     try:grp.getgrnam('synergy-nodenetwork')
     except KeyError:pass
     else:raise ValueError('Conflicting group exists; operator review required')
+    for path in (Path('/etc/systemd/system/synergy-installation-guard.service'),
+                 Path('/etc/systemd/system/multi-user.target.wants/synergy-installation-guard.service')):
+        require(not path.exists() and not path.is_symlink(),'Previous installation retirement is incomplete')
     require_clean_service_namespace()
     ROOT.mkdir(mode=0o700);stage=ROOT/'tmp/bootstrap-master';control=ROOT/'tmp/controller'
-    linked=[];account=False
+    linked=[];account=False;guard_pin=None
     try:
         stage.mkdir(parents=True,mode=0o700)
         manifest=extract(stream,stage,header)
@@ -184,14 +190,28 @@ def bootstrap(stream):
                 and entry.pw_dir=='/nonexistent' and entry.pw_shell=='/bin/sh',
                 'Dedicated account creation differed from requested scope')
         policy['host_account']={'uid':entry.pw_uid,'gid':entry.pw_gid,'label':label}
-        save(control/'policy.json',json.dumps(policy,sort_keys=True).encode())
         for name,target in HOST_LINKS.items():target.symlink_to(control/'host'/name);linked.append(target)
         subprocess.run(['/usr/sbin/sshd','-t'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True)
         subprocess.run(['/usr/bin/systemctl','reload','ssh.service'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True)
+        # Execute only the copy whose bytes were checked against the native
+        # authenticated manifest, never a module imported from the host CWD.
+        import runpy
+        guard=runpy.run_path(str(control/'tools/root_guard.py'))
+        source=(control/'tools/root_guard.py').read_bytes()
+        guard_pin=guard['install'](ROOT,policy['host_account'],source)
+        policy['root_guard_sha256']=guard_pin
+        save(control/'policy.json',json.dumps(policy,sort_keys=True).encode())
         return {'root':str(ROOT),'stagedRelease':manifest['release_id'],'manifestSha256':header['manifest_sha256'],
                 'controllerEnrolled':True,'softwareInstalled':False,'activationAuthorized':False,'communityEnrollment':False,
-                'operatorAuthorizationRequired':True,'hostManagedRecords':['system-account:synergy-nodenetwork',*[str(p) for p in linked]]}
+                'operatorAuthorizationRequired':True,'rootDeletionGuardActive':True,
+                'hostManagedRecords':['system-account:synergy-nodenetwork',*[str(p) for p in linked],
+                                      *[str(p) for p in guard['paths']()]]}
     except Exception:
+        if guard_pin is not None:
+            # The active OS guard owns teardown once the root is gone.
+            shutil.rmtree(ROOT)
+            guard['wait_for_retirement']()
+            raise
         for target in reversed(linked):
             if target.is_symlink() and str(target.readlink()).startswith(str(control)+'/host/'):target.unlink()
         if account:subprocess.run(['/usr/sbin/userdel','synergy-nodenetwork'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)

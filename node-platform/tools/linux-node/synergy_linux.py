@@ -104,8 +104,8 @@ def write_new(path, value, mode=0o600):
 
 def safe_root(value, existing=True):
     root = Path(value)
-    require(root.is_absolute() and root.name == 'Synergy' and '..' not in root.parts,
-            'explicit absolute installation root ending in Synergy required')
+    require(root.is_absolute() and root.name == 'synergy' and '..' not in root.parts,
+            'explicit absolute installation root ending in lowercase synergy required')
     require(len(root.parts) >= 3, 'installation root is too broad')
     for parent in [root, *root.parents]:
         if parent.exists() or parent.is_symlink():
@@ -173,10 +173,10 @@ def _staged_master(root, package, expected_sha256):
     """Accept only a private, otherwise empty root prepared by the operator."""
     from apqe_layout import require_frozen_tree
     from lifecycle import _reject_installation_mounts
-    require(root.is_absolute() and root.name == 'Synergy' and root.resolve() == root,
-            'canonical Synergy root required')
+    require(root.is_absolute() and root.name == 'synergy' and root.resolve() == root,
+            'canonical lowercase synergy root required')
     require(len(root.parts) >= 3, 'installation root is too broad')
-    require(package == root/BOOTSTRAP_MASTER, 'master must be staged inside Synergy/tmp/bootstrap-master')
+    require(package == root/BOOTSTRAP_MASTER, 'master must be staged inside synergy/tmp/bootstrap-master')
     require_frozen_tree(package)
     _reject_installation_mounts(root)
     require(all(path.stat().st_nlink == 1 for path in package.rglob('*') if path.is_file()),

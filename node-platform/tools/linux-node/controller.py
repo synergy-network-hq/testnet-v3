@@ -23,12 +23,12 @@ import sys
 import time
 sys.dont_write_bytecode = True
 
-ROOT = Path('/opt/Synergy')
+ROOT = Path('/opt/synergy')
 MAX_REQUEST = 16384
 MAX_GENESIS_STAGE_REQUEST = 12*1024*1024
 GENESIS_FILES = {'genesis.json':4*1024*1024,'authority.json':1024*1024,'authority-root.pub':8192}
 ENGINE_MODULES = frozenset(('controller.py','synergy_linux.py','lifecycle.py','conformance.py',
-                            'apqe_layout.py','vpn.py','canary_rpc_relay.py'))
+                            'apqe_layout.py','vpn.py','canary_rpc_relay.py','root_guard.py'))
 READS = frozenset(('target','inventory','health','install_preflight','upgrade_preflight',
                   'recovery_preflight','uninstall_preflight','vpn_status','diagnostics','identity_preflight','identity_status',
                   'formation_preflight','formation_status','formation_export','genesis_stage_preflight','genesis_binding_preflight'))
@@ -707,8 +707,11 @@ class Controller:
                     'Exact host approval for public commissioning inputs required','authorization_required')
             self.authorize(request)
             return life.commission(self.root,self.root/'tmp/commissioning',formation_public_pins=pins)
-        if op in ('start','restart'):
-            self.require_bound_validator_vpn()
+        if op in ('register','start','restart'):
+            if op in ('start','restart'):
+                self.require_bound_validator_vpn()
+            from root_guard import check_registration
+            check_registration(self.policy().get('root_guard_sha256'))
         self.authorize(request)
         if op=='install':
             # The canonical installer independently rejects nonempty roots.

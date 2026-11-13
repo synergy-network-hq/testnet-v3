@@ -114,25 +114,25 @@ mod tests {
         cfg.network_id = "nodenetwork-formation-disposable-20261112".into();
         cfg.aegis_key_bindings_path = None;
         cfg.aegis_signing_key_path = None;
-        cfg.genesis_path = Some("/opt/Synergy/network/genesis.json".into());
+        cfg.genesis_path = Some("/opt/synergy/network/genesis.json".into());
         cfg.consensus.mode = ConsensusMode::ValidateAndVote;
         cfg.etdag.enabled = true;
-        cfg.consensus.authority_binding = Some("/opt/Synergy/network/authority.json".into());
+        cfg.consensus.authority_binding = Some("/opt/synergy/network/authority.json".into());
         cfg.consensus.authority_trust_key_path =
-            Some("/opt/Synergy/network/authority-root.pub".into());
+            Some("/opt/synergy/network/authority-root.pub".into());
         cfg.aegis_provider = Some(ApqeProviderConfiguration {
-            report_path: "/opt/Synergy/lib/apqe/build-report.json".into(),
+            report_path: "/opt/synergy/lib/apqe/build-report.json".into(),
             authenticated_report_sha256: "1".repeat(64),
         });
         cfg.apqe_transport = Some(ApqeTransportConfiguration {
             profile: ApqeTransportProfile::EngineeringCanaryPqVsessionV1,
-            registry_path: "/opt/Synergy/network/transport-registry.json".into(),
-            registry_trust_key_path: "/opt/Synergy/network/transport-root.pub".into(),
+            registry_path: "/opt/synergy/network/transport-registry.json".into(),
+            registry_trust_key_path: "/opt/synergy/network/transport-root.pub".into(),
             registry_trust_key_sha256: "2".repeat(64),
             genesis_trust_key_sha256: "3".repeat(64),
-            enrollment_path: "/opt/Synergy/keys/apqe/enrollment.json".into(),
-            custody_path: "/opt/Synergy/keys/apqe/custody.json".into(),
-            custody_unlock_path: "/opt/Synergy/keys/apqe/unlock".into(),
+            enrollment_path: "/opt/synergy/keys/apqe/enrollment.json".into(),
+            custody_path: "/opt/synergy/keys/apqe/custody.json".into(),
+            custody_unlock_path: "/opt/synergy/keys/apqe/unlock".into(),
         });
         assert!(cfg.validate().is_ok(), "{:?}", cfg.validate());
         for other in [

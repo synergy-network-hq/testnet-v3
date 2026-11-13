@@ -39,7 +39,7 @@ class ConformanceTests(unittest.TestCase):
 
     def test_exact_release_runtime_schema_and_independent_records(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp).resolve()/'Synergy';root.mkdir();manifest,_=self.fixture(root)
+            root=Path(tmp).resolve()/'synergy';root.mkdir();manifest,_=self.fixture(root)
             self.assertTrue(c.installed(root,manifest)['conformant'])
             p=root/'data/consensus/posy/finality';p.mkdir(parents=True)
             (p/'h7.json').write_text('{"independent":"state"}');os.chmod(p/'h7.json',0o600)
@@ -49,7 +49,7 @@ class ConformanceTests(unittest.TestCase):
 
     def test_unknown_executable_and_empty_directory_are_not_excluded(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp).resolve()/'Synergy';root.mkdir();manifest,_=self.fixture(root)
+            root=Path(tmp).resolve()/'synergy';root.mkdir();manifest,_=self.fixture(root)
             extra=root/'data/obsolete-release';extra.mkdir()
             with self.assertRaisesRegex(ValueError,'undeclared'):c.installed(root,manifest)
             extra.rmdir();extra=root/'keys/root';extra.mkdir();secret=extra/'root.secret.key';secret.write_text('fixture');secret.chmod(0o700)
@@ -57,7 +57,7 @@ class ConformanceTests(unittest.TestCase):
 
     def test_native_recovery_journal_is_declared_without_a_wildcard(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp).resolve()/'Synergy';root.mkdir();manifest,_=self.fixture(root)
+            root=Path(tmp).resolve()/'synergy';root.mkdir();manifest,_=self.fixture(root)
             directory=root/'data/consensus/posy';directory.mkdir(parents=True)
             journal=directory/'recovery.json';journal.write_text('{}');journal.chmod(0o600)
             self.assertTrue(c.installed(root,manifest)['conformant'])
@@ -77,7 +77,7 @@ class ConformanceTests(unittest.TestCase):
 
     def test_native_processing_group_digest_is_512_bits_not_block_id(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp).resolve()/'Synergy';root.mkdir();manifest,_=self.fixture(root)
+            root=Path(tmp).resolve()/'synergy';root.mkdir();manifest,_=self.fixture(root)
             directory=root/'data/blocks/processing-proposal-inputs-v1/certified-groups'
             directory.mkdir(parents=True,mode=0o700)
             member=directory/('ab'*64+'.json');member.write_text('{}');member.chmod(0o600)
@@ -87,7 +87,7 @@ class ConformanceTests(unittest.TestCase):
 
     def test_additive_archive_schema_and_exact_segment_names(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp).resolve()/'Synergy';root.mkdir();manifest,_=self.fixture(root)
+            root=Path(tmp).resolve()/'synergy';root.mkdir();manifest,_=self.fixture(root)
             directory=root/'data/consensus/posy';directory.mkdir(parents=True,mode=0o700)
             archive=directory/'consensus-evidence-v1.sqlite3'
             connection=sqlite3.connect(archive)
@@ -105,14 +105,14 @@ class ConformanceTests(unittest.TestCase):
 
     def test_software_and_selected_release_drift_fail(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp).resolve()/'Synergy';root.mkdir();manifest,_=self.fixture(root)
+            root=Path(tmp).resolve()/'synergy';root.mkdir();manifest,_=self.fixture(root)
             with self.assertRaisesRegex(ValueError,'selected canonical'):c.installed(root,{'files':{}})
             (root/'bin/synergy-node').write_bytes(b'changed')
             with self.assertRaisesRegex(ValueError,'software drift'):c.installed(root,manifest)
 
     def test_symlink_and_storage_format_fail(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp).resolve()/'Synergy';root.mkdir();manifest,_=self.fixture(root)
+            root=Path(tmp).resolve()/'synergy';root.mkdir();manifest,_=self.fixture(root)
             (root/'data/link').symlink_to(root/'bin')
             with self.assertRaisesRegex(ValueError,'symlink'):c.installed(root,manifest)
             (root/'data/link').unlink();(root/'data/metadata/schema-version').write_bytes(b'wrong:1')
@@ -120,7 +120,7 @@ class ConformanceTests(unittest.TestCase):
 
     def test_native_schema_rejects_unknown_nested_or_top_level_field(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp).resolve()/'Synergy';root.mkdir();_,config=self.fixture(root)
+            root=Path(tmp).resolve()/'synergy';root.mkdir();_,config=self.fixture(root)
             schema=generate(SOURCE)
             for dotted in ('diagnostics','consensus.extra_queue'):
                 changed=copy.deepcopy(config)
@@ -132,16 +132,16 @@ class ConformanceTests(unittest.TestCase):
             self.assertEqual(schema,json.loads((SOURCE/'schemas/node-config.schema.json').read_text()))
 
     def test_only_documented_identity_parameters_normalize(self):
-        config={'node_name':'a','chain_id':9001,'network_id':'n','consensus':{'signing_key_path':'/opt/Synergy/keys/a','round_timeout_ms':5000}}
-        different=copy.deepcopy(config);different['node_name']='b';different['consensus']['signing_key_path']='/opt/Synergy/keys/b'
-        self.assertEqual(c.normalized_config(config,Path('/opt/Synergy')),c.normalized_config(different,Path('/opt/Synergy')))
+        config={'node_name':'a','chain_id':9001,'network_id':'n','consensus':{'signing_key_path':'/opt/synergy/keys/a','round_timeout_ms':5000}}
+        different=copy.deepcopy(config);different['node_name']='b';different['consensus']['signing_key_path']='/opt/synergy/keys/b'
+        self.assertEqual(c.normalized_config(config,Path('/opt/synergy')),c.normalized_config(different,Path('/opt/synergy')))
         different['consensus']['round_timeout_ms']=6000
-        self.assertNotEqual(c.normalized_config(config,Path('/opt/Synergy')),c.normalized_config(different,Path('/opt/Synergy')))
+        self.assertNotEqual(c.normalized_config(config,Path('/opt/synergy')),c.normalized_config(different,Path('/opt/synergy')))
 
     def test_endpoint_normalization_preserves_ports_scope_and_count(self):
         config={'network':{'listen_addresses':['10.1.0.1:5622'],
                            'advertised_addresses':['[fd01::1]:5622']}}
-        normalized=lambda value:c.normalized_config(value,Path('/opt/Synergy'))
+        normalized=lambda value:c.normalized_config(value,Path('/opt/synergy'))
         same=copy.deepcopy(config)
         same['network']['listen_addresses']=['10.1.0.2:5622']
         same['network']['advertised_addresses']=['[fd01::2]:5622']
@@ -152,7 +152,7 @@ class ConformanceTests(unittest.TestCase):
 
     def test_root_security_and_sealed_executable_modes(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp).resolve()/'Synergy';root.mkdir();manifest,_=self.fixture(root)
+            root=Path(tmp).resolve()/'synergy';root.mkdir();manifest,_=self.fixture(root)
             root.chmod(0o755)
             with self.assertRaisesRegex(ValueError,'root ownership or permissions'):c.installed(root,manifest)
             root.chmod(0o700);(root/'bin/synergy-node').chmod(0o600)
@@ -186,7 +186,7 @@ class ConformanceTests(unittest.TestCase):
 
     def test_uncommissioned_checks_present_configuration_identity_and_history(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root=Path(tmp).resolve()/'Synergy';root.mkdir();manifest,config=self.fixture(root)
+            root=Path(tmp).resolve()/'synergy';root.mkdir();manifest,config=self.fixture(root)
             for path in (root/'network').iterdir():path.unlink()
             with patch('synergy_linux.verify_identity',return_value={'native_possession_verified':True}) as verify:
                 self.assertTrue(c.installed(root,manifest,stage='uncommissioned')['identity_possession_verified'])

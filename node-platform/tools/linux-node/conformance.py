@@ -474,8 +474,17 @@ def installed(root, expected_manifest=None, host=False, initialized=True, schema
         expected_wrapper=f'#!/bin/sh\nexport HOME={root} TMPDIR={root}/tmp XDG_CONFIG_HOME={root}/vpn XDG_CACHE_HOME={root}/cache NB_STATE_DIR={root}/vpn NB_DNS_STATE_FILE={root}/vpn/state.json\nexec {root}/bin/netbird --daemon-addr unix://{root}/run/netbird.sock "$@"\n'
         require((root/'tools/netbird-client').read_text()==expected_wrapper,'NetBird wrapper drift')
         registered=subprocess.run(['systemctl','list-unit-files','--no-legend','--no-pager','synergy*','posy*'],capture_output=True,text=True,check=True)
-        verify_external_services(root,{line.split()[0] for line in registered.stdout.splitlines() if line.strip()}
-                                 - set(lifecycle.rendered_units(root)))
+        external={line.split()[0] for line in registered.stdout.splitlines() if line.strip()} - set(lifecycle.rendered_units(root))
+        controller=root/'tmp/controller/policy.json'
+        if controller.exists() or controller.is_symlink():
+            from controller import Controller
+            from root_guard import UNIT, check_registration
+            pin=Controller(root).policy().get('root_guard_sha256')
+            if pin is not None:
+                require(UNIT in external,'guard registration not found in effective inventory')
+                check_registration(pin)
+                external.remove(UNIT)
+        verify_external_services(root,external)
         output['host_integrations_checked']=True
     return output
 

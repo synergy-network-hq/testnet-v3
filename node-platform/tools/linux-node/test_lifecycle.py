@@ -35,7 +35,7 @@ class LifecycleTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory()
         self.base=Path(self.temp.name).resolve()
-        self.root=self.base/'Synergy'; self.root.mkdir(mode=0o700)
+        self.root=self.base/'synergy'; self.root.mkdir(mode=0o700)
         self.old=package(self.root,'old')
         self.receipt={'format':node.MARKER,'root':str(self.root),'package_sha256':node.digest(self.root/'package.json'),'package_files':self.old['files']}
         save(self.root/'installation.json',self.receipt)

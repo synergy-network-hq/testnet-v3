@@ -12,7 +12,7 @@ class GatewayRotationTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         base = Path(tmp.name).resolve()
-        self.root = base/'Synergy'
+        self.root = base/'synergy'
         self.stage = base/'stage'
         self.stage.mkdir()
         self.pin_key = sha(b'trust-root')

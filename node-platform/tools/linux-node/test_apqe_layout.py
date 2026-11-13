@@ -16,7 +16,7 @@ class ApqeLayoutTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory()
         self.base=Path(self.temp.name).resolve()
-        self.root=self.base/'Synergy';self.root.mkdir(mode=0o700)
+        self.root=self.base/'synergy';self.root.mkdir(mode=0o700)
         (self.root/'tmp').mkdir(mode=0o700)
         self.stage=self.base/'staged';self.stage.mkdir(mode=0o700)
         self.software=self.base/'package';self.software.mkdir(mode=0o700)

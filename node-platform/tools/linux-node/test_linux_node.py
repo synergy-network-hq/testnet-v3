@@ -14,7 +14,7 @@ class RefusalTests(unittest.TestCase):
         import hashlib
         from conformance import DIRECTORIES
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp).resolve()/'Synergy'
+            root = Path(temp).resolve()/'synergy'
             stage = root/node.BOOTSTRAP_MASTER
             stage.mkdir(parents=True, mode=0o700)
             root.chmod(0o700); (root/'tmp').chmod(0o700)
@@ -54,12 +54,12 @@ class RefusalTests(unittest.TestCase):
     def test_root_refuses_symlink_existing_and_broad_targets(self):
         with tempfile.TemporaryDirectory() as temp:
             parent = Path(temp).resolve()
-            for value in ('/', '/Synergy', str(parent / 'Other'), str(parent / '..' / 'Synergy')):
+            for value in ('/', '/Synergy', str(parent / 'Synergy'), str(parent / 'Other'), str(parent / '..' / 'synergy')):
                 with self.assertRaises(ValueError): node.safe_root(value, existing=False)
             actual = parent / 'actual'; actual.mkdir()
             link = parent / 'alias'; link.symlink_to(actual, target_is_directory=True)
-            with self.assertRaises(ValueError): node.safe_root(str(link / 'Synergy'), existing=False)
-            root = parent / 'Synergy'; root.mkdir()
+            with self.assertRaises(ValueError): node.safe_root(str(link / 'synergy'), existing=False)
+            root = parent / 'synergy'; root.mkdir()
             with self.assertRaises(ValueError): node.safe_root(str(root), existing=False)
 
     def test_public_receipts_are_exclusive(self):

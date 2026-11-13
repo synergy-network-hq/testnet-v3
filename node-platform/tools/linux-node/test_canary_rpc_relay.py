@@ -11,15 +11,15 @@ from test_lifecycle import LifecycleTests, save
 
 class ConfigurationTests(unittest.TestCase):
     def setUp(self):
-        self.root=Path('/opt/Synergy')
+        self.root=Path('/opt/synergy')
         self.validator={'listen_address':'10.69.1.2:8551','role':{'kind':'validator','validator_address':'synv1abc','gateway_vpn_ip':'10.69.1.3'}}
         self.gateway={'listen_address':'127.0.0.1:8552','role':{'kind':'gateway','gateway_address':'synv5abc','validator_address':'synv1abc','validator_relay_port':8551,'allowed_origins':['https://example.com']}}
     def test_role_specific_paths_and_unit_no_autostart(self):
         value=relay.configuration(self.root,self.gateway)
-        self.assertEqual(value['role']['custody_path'],'/opt/Synergy/keys/apqe/gateway-transport.encrypted.json')
+        self.assertEqual(value['role']['custody_path'],'/opt/synergy/keys/apqe/gateway-transport.encrypted.json')
         self.assertNotIn('custody_path',relay.configuration(self.root,self.validator)['role'])
         text=relay.unit_text(self.root)
-        self.assertIn('canary-rpc-relay check /opt/Synergy/config/canary-rpc-relay.json',text)
+        self.assertIn('canary-rpc-relay check /opt/synergy/config/canary-rpc-relay.json',text)
         self.assertIn('MemoryMax=268435456',text)
         self.assertNotIn('synergy-node start',text)
     def test_rejects_listener_origin_role_and_path_injection(self):
@@ -31,14 +31,14 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaises(ValueError):relay.unit_text(Path('/opt/evil\nExecStart=bad/Synergy'))
     def test_native_check_failure_removes_only_created_candidate(self):
         with tempfile.TemporaryDirectory() as temp:
-            root=Path(temp)/'Synergy';(root/'config').mkdir(parents=True)
+            root=Path(temp)/'synergy';(root/'config').mkdir(parents=True)
             save(root/'config/node.json',{'chain_id':99999})
             with patch.object(life,'_require_operator'),patch.object(life,'_sealed_receipt'),patch.object(relay,'native',side_effect=ValueError('bad signature')):
                 with self.assertRaisesRegex(ValueError,'bad signature'):relay.configure(root,self.gateway)
             self.assertEqual([p.name for p in (root/'config').iterdir()],['node.json'])
     def test_configuration_publishes_only_after_actual_native_check(self):
         with tempfile.TemporaryDirectory() as temp:
-            root=Path(temp)/'Synergy';(root/'config').mkdir(parents=True)
+            root=Path(temp)/'synergy';(root/'config').mkdir(parents=True)
             save(root/'config/node.json',{'chain_id':99999})
             def checked(args):
                 self.assertFalse((root/relay.CONFIG).exists())
@@ -87,7 +87,7 @@ class RelayLifecycleTests(LifecycleTests):
 
 class GatewayCommissioningTests(unittest.TestCase):
     def fixture(self, base):
-        root=base/'Synergy'; root.mkdir(mode=0o700)
+        root=base/'synergy'; root.mkdir(mode=0o700)
         staged=base/'staged'; staged.mkdir(mode=0o700)
         receipt={'role':'rpc_gateway','chain_id':99999,'network_id':'canary','root':str(root)}
         save(root/'installation.json',receipt); (root/'keys').mkdir(mode=0o700)

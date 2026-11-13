@@ -61,7 +61,7 @@ def node_pin(path):return hashlib.sha256((path/'package.json').read_bytes()).hex
 class DisjointServiceTests(unittest.TestCase):
     def setUp(self):
         temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup)
-        self.base=Path(temporary.name).resolve();self.root=self.base/'Synergy';self.root.mkdir()
+        self.base=Path(temporary.name).resolve();self.root=self.base/'synergy';self.root.mkdir()
         self.units=self.base/'etc/systemd/system';self.units.mkdir(parents=True)
         self.external=self.base/'external';self.external.mkdir()
         self.name='synergy-chain1266-rpc-tunnel.service'

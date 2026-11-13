@@ -196,8 +196,10 @@ def commission_gateway(root, staged, expected_sha256):
 
 
 def unit_text(root):
-    require(re.fullmatch(r'/[A-Za-z0-9_/.-]+/Synergy', str(root)), 'unsafe service root')
+    require(re.fullmatch(r'/[A-Za-z0-9_/.-]+/synergy', str(root)), 'unsafe service root')
     return f'''[Unit]
+BindsTo=synergy-installation-guard.service
+After=synergy-installation-guard.service
 Description=Synergy authenticated Canary RPC relay
 After=network-online.target synergy-vpn.service
 Requires=synergy-vpn.service

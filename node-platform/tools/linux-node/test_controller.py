@@ -19,7 +19,7 @@ def request(op, parameters=None):
 class ControllerTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory()
-        self.root=Path(self.temp.name).resolve()/'Synergy'
+        self.root=Path(self.temp.name).resolve()/'synergy'
         self.control=self.root/'tmp/controller'
         (self.control/'grants').mkdir(parents=True,mode=0o700)
         (self.control/'tools').mkdir(mode=0o700)
@@ -292,15 +292,22 @@ class ControllerTests(unittest.TestCase):
              patch.object(self.controller,'authorize') as authorize, \
              patch.object(lifecycle,'commission') as commission, \
              patch.object(lifecycle,'start_check') as start_check, \
-             patch.object(lifecycle,'mutate_owned_service') as mutate:
+             patch.object(lifecycle,'mutate_owned_service') as mutate, \
+             patch('root_guard.check_registration') as guard:
             for field in ready:
                 vpn.return_value={**ready,field:not ready[field]}
                 for operation in ('commission','start','restart'):
                     with self.subTest(field=field,operation=operation), self.assertRaises(c.Refused) as refusal:
                         self.controller.dispatch(request(operation))
                     self.assertEqual(refusal.exception.code,'vpn_readiness_required')
-            for action in (binding,authorize,commission,start_check,mutate):action.assert_not_called()
+            for action in (binding,authorize,commission,start_check,mutate,guard):action.assert_not_called()
             vpn.return_value=ready
+            guard.side_effect=ValueError('registration differs')
+            with self.assertRaisesRegex(ValueError,'registration differs'):
+                self.controller.dispatch(request('start'))
+            authorize.assert_not_called()
+            start_check.assert_not_called()
+            guard.side_effect=None
             for operation in ('start','restart'):
                 self.assertEqual(self.controller.dispatch(request(operation))['requested'],operation)
             self.assertEqual(authorize.call_count,2)

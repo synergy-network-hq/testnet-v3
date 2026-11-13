@@ -32,7 +32,7 @@ class BootstrapTests(unittest.TestCase):
     def test_valid_inventory_extracts_only_beneath_fresh_stage(self):
         data,header=self.archive()
         with tempfile.TemporaryDirectory() as temporary:
-            stage=Path(temporary)/'Synergy';stage.mkdir()
+            stage=Path(temporary)/'synergy';stage.mkdir()
             result=b.extract(data,stage,header)
             self.assertEqual(result['release_id'],'qualified-test-only')
             self.assertEqual(len(list((stage/'roles').iterdir())),21)

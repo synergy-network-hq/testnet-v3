@@ -28,14 +28,14 @@ def authorize_bootstrap_software_only(package,ssh,include_register=False):
     selection={'release_id':manifest['release_id'],'manifest_sha256':hashlib.sha256(raw).hexdigest(),
                'network_id':'nodenetwork-isolated-qualification','chain_id':999999,'node_name':'validator-bootstrap-test'}
     requests=[{'version':1,'operation':'install','parameters':selection},
-              {'version':1,'operation':'uninstall','parameters':{'confirmation':'/opt/Synergy'}}]
+              {'version':1,'operation':'uninstall','parameters':{'confirmation':'/opt/synergy'}}]
     if include_register:requests.append({'version':1,'operation':'register','parameters':{}})
     # This fixed root operator procedure is deliberately tied to the known
     # disposable image and cannot activate, provision custody, or join consensus.
     code="""import hashlib,json,os,socket,sys,time
 from pathlib import Path
 assert os.geteuid()==0 and socket.gethostname()=='synergy-disposable-acceptance'
-root=Path('/opt/Synergy');control=root/'tmp/controller'
+root=Path('/opt/synergy');control=root/'tmp/controller'
 assert not (root/'installation.json').exists()
 requests=json.loads(sys.stdin.buffer.read());selection=requests[0]['parameters']
 assert selection['network_id']=='nodenetwork-isolated-qualification' and selection['chain_id']==999999
@@ -94,7 +94,7 @@ def qualify_repeat_managed(package,ssh,expected_pin,public_key):
     assert_absent="""import grp,os,pwd,socket,subprocess
 from pathlib import Path
 assert os.geteuid()==0 and socket.gethostname()=='synergy-disposable-acceptance'
-assert not Path('/opt/Synergy').exists()
+assert not Path('/opt/synergy').exists()
 try: pwd.getpwnam('synergy-nodenetwork')
 except KeyError: pass
 else: raise AssertionError('managed account remains')
@@ -103,7 +103,7 @@ except KeyError: pass
 else: raise AssertionError('unexpected managed group remains')
 for path in (Path('/etc/ssh/sshd_config.d/synergy-nodenetwork.conf'),Path('/etc/sudoers.d/synergy-nodenetwork')):
     assert not path.exists() and not path.is_symlink()
-assert not any(p.is_symlink() and str(p.readlink()).startswith('/opt/Synergy/') for p in Path('/etc/systemd/system').rglob('*'))
+assert not any(p.is_symlink() and str(p.readlink()).startswith('/opt/synergy/') for p in Path('/etc/systemd/system').rglob('*'))
 subprocess.run(['/usr/sbin/sshd','-t'],check=True)
 """
     def root_command(code):return ssh+['sudo -n /usr/bin/python3 -I -B -c '+shlex.quote(code)]
@@ -113,7 +113,7 @@ subprocess.run(['/usr/sbin/sshd','-t'],check=True)
     # The shell execs the exact granted command as the dedicated user. Keep the
     # runuser test ancestor distinct from the installed controller command.
     controller='sudo -n /usr/sbin/runuser -u synergy-nodenetwork -- /bin/sh -c '+shlex.quote(
-        'exec /usr/bin/sudo -n /usr/bin/python3 -I -B /opt/Synergy/tmp/controller/controller.py')
+        'exec /usr/bin/sudo -n /usr/bin/python3 -I -B /opt/synergy/tmp/controller/controller.py')
     def invoke(operation,parameters=None):
         data=canonical({'version':1,'operation':operation,'parameters':parameters or {}})
         return json.loads(subprocess.check_output(ssh+[controller],input=data,timeout=30))
@@ -143,7 +143,7 @@ subprocess.run(['/usr/sbin/sshd','-t'],check=True)
         assert result('target')['installed'] is True
         assert result('register')['services_started'] is False
         assert result('uninstall_preflight')['managedAccountRemoval'] is True
-        assert result('uninstall',{'confirmation':'/opt/Synergy'})['remaining_host_managed_records']==[]
+        assert result('uninstall',{'confirmation':'/opt/synergy'})['remaining_host_managed_records']==[]
         subprocess.run(root_command(assert_absent),check=True,timeout=20)
         print(json.dumps({'cycle':cycle,'canonical_bootstrap':True,'controller_account_exercised':True,
                           'native_install':True,'services_registered':True,'logical_removal':True,
@@ -155,10 +155,10 @@ def audit_uninstalled_bootstrap_host(ssh):
     code="""import grp,json,os,pwd,socket,subprocess
 from pathlib import Path
 assert os.geteuid()==0 and socket.gethostname()=='synergy-disposable-acceptance'
-assert not Path('/opt/Synergy').exists()
+assert not Path('/opt/synergy').exists()
 for name in ('/etc/ssh/sshd_config.d/synergy-nodenetwork.conf','/etc/sudoers.d/synergy-nodenetwork'):
     path=Path(name);assert not path.exists() and not path.is_symlink()
-assert not any(p.is_symlink() and str(p.readlink()).startswith('/opt/Synergy/') for p in Path('/etc/systemd/system').rglob('*'))
+assert not any(p.is_symlink() and str(p.readlink()).startswith('/opt/synergy/') for p in Path('/etc/systemd/system').rglob('*'))
 try:
     account=pwd.getpwnam('synergy-nodenetwork')
 except KeyError:account=None
@@ -182,16 +182,16 @@ def qualify(package, ssh):
     pin=hashlib.sha256((package/'package.json').read_bytes()).hexdigest()
     params={'release_id':manifest['release_id'],'manifest_sha256':pin,
             'network_id':'nodenetwork-disposable-qualification','chain_id':999999,'node_name':'disposable-controller'}
-    subprocess.run(ssh+['sudo -n test ! -e /opt/Synergy'],check=True)
+    subprocess.run(ssh+['sudo -n test ! -e /opt/synergy'],check=True)
     names=('controller.py','synergy_linux.py','lifecycle.py','conformance.py','apqe_layout.py','vpn.py','canary_rpc_relay.py')
     files={name:(package/'tools'/name).read_bytes() for name in names}
-    policy={'format':'synergy-nodenetwork-host-policy-v1','root':'/opt/Synergy',
+    policy={'format':'synergy-nodenetwork-host-policy-v1','root':'/opt/synergy',
             'community_enrollment':False,'qualification_scope':'disposable-test-only',
             'qualified_operations':['install','uninstall','register','stop'],
             'engine_files':{name:hashlib.sha256(data).hexdigest() for name,data in files.items()},
             'releases':{manifest['release_id']:{'manifest_sha256':pin,'inventory_authenticated':True,
                          'networks':{params['network_id']:params['chain_id']}}}}
-    process=subprocess.Popen(ssh+["sudo -n sh -c 'umask 077; mkdir -p /opt/Synergy/tmp/controller/tools /opt/Synergy/tmp/controller/grants; tar --no-same-owner -xf - -C /opt/Synergy/tmp'"],stdin=subprocess.PIPE)
+    process=subprocess.Popen(ssh+["sudo -n sh -c 'umask 077; mkdir -p /opt/synergy/tmp/controller/tools /opt/synergy/tmp/controller/grants; tar --no-same-owner -xf - -C /opt/synergy/tmp'"],stdin=subprocess.PIPE)
     with tarfile.open(fileobj=process.stdin,mode='w|') as tar:
         for path in sorted(package.rglob('*')):
             if path.name.startswith('._'):continue
@@ -203,13 +203,13 @@ def qualify(package, ssh):
             if name!='controller.py':entry('controller/tools/'+name,data)
         entry('controller/policy.json',canonical(policy))
     process.stdin.close();assert process.wait()==0
-    command='sudo -n /usr/bin/python3 -I -B /opt/Synergy/tmp/controller/controller.py'
+    command='sudo -n /usr/bin/python3 -I -B /opt/synergy/tmp/controller/controller.py'
     def invoke(op,parameters=None,approve=False):
         req={'version':1,'operation':op,'parameters':parameters or {}};raw=canonical(req)
         if approve:
             key=hashlib.sha256(raw).hexdigest()
-            grant=canonical({'root':'/opt/Synergy','request_sha256':key,'expires_at':int(time.time())+120})
-            create="sudo -n python3 -c 'import sys,os; f=os.open(\"/opt/Synergy/tmp/controller/grants/"+key+".json\",os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600); os.write(f,sys.stdin.buffer.read()); os.close(f)'"
+            grant=canonical({'root':'/opt/synergy','request_sha256':key,'expires_at':int(time.time())+120})
+            create="sudo -n python3 -c 'import sys,os; f=os.open(\"/opt/synergy/tmp/controller/grants/"+key+".json\",os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600); os.write(f,sys.stdin.buffer.read()); os.close(f)'"
             subprocess.run(ssh+[create],input=grant,check=True)
         response=json.loads(subprocess.check_output(ssh+[command],input=raw))
         return response
@@ -224,10 +224,10 @@ def qualify(package, ssh):
     inventory=invoke('inventory');assert inventory['ok'];members=len(inventory['result']['members'])
     assert not invoke('start')['ok']
     registered=invoke('register',approve=True);assert registered['ok'],registered
-    subprocess.run(ssh+["sudo -n sh -c 'test -L /etc/systemd/system/synergy-node.service && test \"$(readlink /etc/systemd/system/synergy-node.service)\" = /opt/Synergy/systemd/synergy-node.service && test -f /opt/Synergy/systemd/synergy-node.service && test ! -d /opt/Synergy/data'"],check=True)
+    subprocess.run(ssh+["sudo -n sh -c 'test -L /etc/systemd/system/synergy-node.service && test \"$(readlink /etc/systemd/system/synergy-node.service)\" = /opt/synergy/systemd/synergy-node.service && test -f /opt/synergy/systemd/synergy-node.service && test ! -d /opt/synergy/data'"],check=True)
     scope=invoke('uninstall_preflight');assert scope['ok'] and scope['result']['destructive']
-    removed=invoke('uninstall',{'confirmation':'/opt/Synergy'},approve=True);assert removed['ok'],removed
-    subprocess.run(ssh+["sudo -n python3 -c 'from pathlib import Path; import subprocess; assert not Path(\"/opt/Synergy\").exists(); assert not any(p.is_symlink() and str(p.readlink()).startswith(\"/opt/Synergy/\") for p in Path(\"/etc/systemd/system\").rglob(\"*\")); r=subprocess.check_output([\"systemctl\",\"show\",\"synergy-node.service\",\"synergy-vpn.service\",\"--property=LoadState,FragmentPath,MainPID\"],text=True); assert \"LoadState=loaded\" not in r and \"MainPID=0\" in r; print(\"root-and-systemd-residual-audit passed\")'"],check=True)
+    removed=invoke('uninstall',{'confirmation':'/opt/synergy'},approve=True);assert removed['ok'],removed
+    subprocess.run(ssh+["sudo -n python3 -c 'from pathlib import Path; import subprocess; assert not Path(\"/opt/synergy\").exists(); assert not any(p.is_symlink() and str(p.readlink()).startswith(\"/opt/synergy/\") for p in Path(\"/etc/systemd/system\").rglob(\"*\")); r=subprocess.check_output([\"systemctl\",\"show\",\"synergy-node.service\",\"synergy-vpn.service\",\"--property=LoadState,FragmentPath,MainPID\"],text=True); assert \"LoadState=loaded\" not in r and \"MainPID=0\" in r; print(\"root-and-systemd-residual-audit passed\")'"],check=True)
     print(json.dumps({'release':manifest['release_id'],'manifest_sha256':pin,'actual_native_install':True,
                       'inventory_members':members,'rooted_unit_registration':True,'first_pass_uninstall':True,
                       'root_and_systemd_residual_audit':True,'consensus_qualified':False,

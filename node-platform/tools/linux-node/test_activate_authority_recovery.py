@@ -14,7 +14,7 @@ from apqe_layout import PUBLIC
 class ActivationTests(unittest.TestCase):
     def setUp(self):
         temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup)
-        base=Path(temporary.name).resolve();self.root=base/'Synergy';self.stage=base/'stage'
+        base=Path(temporary.name).resolve();self.root=base/'synergy';self.stage=base/'stage'
         self.root.mkdir(mode=0o700);self.stage.mkdir(mode=0o700)
         self.role='validator';self.network='disposable-canary';self.calls=[]
         self.initial_receipt={'role':'validator','chain_id':99999,'network_id':self.network,'package_sha256':'f'*64}
