@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import sys
 sys.dont_write_bytecode = True
-from synergy_linux import consensus_archive_version, digest, native, read, require, safe_root, verify_identity, verify_package, write_new
+from synergy_linux import LEGACY_EXISTING_ROOT, consensus_archive_version, digest, native, read, require, safe_root, verify_identity, verify_package, write_new
 
 UNITS = ('synergy-node.service', 'synergy-vpn.service')
 RELAY_UNIT = 'synergy-canary-rpc-relay.service'
@@ -23,13 +23,26 @@ REPLACEMENT_INTENT = 'evidence/application-replacement-intent.json'
 AUTHORITY_RECOVERY_INTENT = 'evidence/authority-recovery-intent.json'
 
 
+def guard_dependencies(root):
+    # The approved existing-root path predates the Portal deletion guard. Do
+    # not attach BindsTo to a nonexistent unit during its software upgrade.
+    # A configured/registered guard always remains mandatory; fresh installs
+    # retain the normal guard dependency regardless of installation stage.
+    if Path(root) == LEGACY_EXISTING_ROOT:
+        policy = Path(root)/'tmp/controller/policy.json'
+        guard = UNIT_DIRECTORY/'synergy-installation-guard.service'
+        if not any(p.exists() or p.is_symlink() for p in (policy,guard)):
+            return '', ''
+    return ' synergy-installation-guard.service', 'BindsTo=synergy-installation-guard.service\n'
+
+
 def node_unit(root):
+    after, binding = guard_dependencies(root)
     return f'''[Unit]
 Description=Synergy universal validator
-After=network-online.target synergy-vpn.service synergy-installation-guard.service
+After=network-online.target synergy-vpn.service{after}
 Requires=synergy-vpn.service
-BindsTo=synergy-installation-guard.service
-ConditionPathExists={root}/config/start-authorized.json
+{binding}ConditionPathExists={root}/config/start-authorized.json
 
 [Service]
 Type=exec
@@ -64,12 +77,12 @@ WantedBy=multi-user.target
 
 
 def vpn_unit(root):
+    after, binding = guard_dependencies(root)
     return f'''[Unit]
 Description=Synergy application-owned NetBird client
-After=network-online.target synergy-installation-guard.service
+After=network-online.target{after}
 Wants=network-online.target
-BindsTo=synergy-installation-guard.service
-
+{binding}
 [Service]
 Type=exec
 User=root

@@ -126,6 +126,19 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(node.read(legacy/'installation.json')['root'],str(legacy))
         for name,expected in before.items():
             self.assertEqual(((legacy/name).stat().st_ino,(legacy/name).read_bytes()),expected)
+
+    def test_legacy_service_rendering_does_not_bind_to_absent_guard(self):
+        legacy=self.base/'legacy'/'Synergy';legacy.mkdir(parents=True,mode=0o700)
+        with patch.object(life,'LEGACY_EXISTING_ROOT',legacy):
+            for render in (life.node_unit,life.vpn_unit):
+                self.assertNotIn('synergy-installation-guard.service',render(legacy))
+                self.assertIn('BindsTo=synergy-installation-guard.service',render(self.root))
+            policy=legacy/'tmp/controller/policy.json';save(policy,{'fixture':True})
+            self.assertIn('BindsTo=synergy-installation-guard.service',life.vpn_unit(legacy))
+            policy.unlink()
+            guard=self.units/'synergy-installation-guard.service'
+            guard.symlink_to('/nonexistent-guard')
+            self.assertIn('BindsTo=synergy-installation-guard.service',life.vpn_unit(legacy))
     def test_upgrade_cannot_change_or_remove_the_registered_guard_source(self):
         import root_guard
         guard = b'current registered guard'

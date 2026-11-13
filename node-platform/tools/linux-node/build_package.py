@@ -217,7 +217,7 @@ R5_MANIFEST_SHA256 = '43eae3fdc42a2bff9e0ba2fa369d708fb60d14e90c6e18a6f344f5071c
 
 
 def compose_existing_root_compatibility(original, output, expected_manifest):
-    """Update only the canonical root validator around a pinned native release."""
+    """Update existing-root boundary and service tooling around a pinned runtime."""
     from synergy_linux import digest, verify_package
     original, output = Path(original), Path(output)
     require(re.fullmatch('[a-f0-9]{64}', expected_manifest) is not None,
@@ -233,19 +233,19 @@ def compose_existing_root_compatibility(original, output, expected_manifest):
             and output.parent.stat().st_mode & 0o777 == 0o700
             and not output.is_relative_to(original) and not original.is_relative_to(output),
             'fresh lowercase output under a private direct workspace required')
-    member = 'tools/synergy_linux.py'
-    require(member in baseline['files'], 'base lacks canonical root validator')
-    tooling_path = Path(__file__).parent/'synergy_linux.py'
-    tooling = tooling_path.read_bytes()
-    tooling_pin = hashlib.sha256(tooling).hexdigest()
+    tooling_paths = { 'tools/'+name:Path(__file__).parent/name
+                      for name in ('synergy_linux.py','lifecycle.py') }
+    require(set(tooling_paths) <= set(baseline['files']), 'base lacks canonical lifecycle tooling')
+    tooling = {name:path.read_bytes() for name,path in tooling_paths.items()}
+    tooling_pins = {name:hashlib.sha256(data).hexdigest() for name,data in tooling.items()}
     manifest = dict(baseline)
     manifest['runtime_baseline'] = {
         'release_id': baseline['release_id'], 'manifest_sha256': expected_manifest,
         'source_sha256': baseline['source_sha256'],
-        'immutable_files': {n:h for n,h in baseline['files'].items() if n != member},
+        'immutable_files': {n:h for n,h in baseline['files'].items() if n not in tooling},
     }
-    manifest['files'] = dict(baseline['files'], **{member:tooling_pin})
-    manifest['source_sha256'] = content_sha256({'baseline':expected_manifest, member:tooling_pin})
+    manifest['files'] = dict(baseline['files'], **tooling_pins)
+    manifest['source_sha256'] = content_sha256({'baseline':expected_manifest, 'tooling':tooling_pins})
     manifest['release_id'] = 'synergy-linux-existing-root-' + manifest['source_sha256'][:16]
     manifest['acceptance_status'] = 'CANDIDATE_REQUIRES_RECORDED_ACCEPTANCE_GATES'
     manifest['existing_root_compatibility'] = '/opt/Synergy'
@@ -256,7 +256,7 @@ def compose_existing_root_compatibility(original, output, expected_manifest):
             require(re.fullmatch('[a-z_]+',role) is not None, 'invalid role name')
             (output/'roles'/role).mkdir(mode=0o700)
         for name, expected in manifest['files'].items():
-            data = tooling if name == member else (original/name).read_bytes()
+            data = tooling[name] if name in tooling else (original/name).read_bytes()
             require(hashlib.sha256(data).hexdigest() == expected, 'base changed during composition: '+name)
             path=output/name;path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
             with path.open('xb') as stream: stream.write(data)
@@ -265,7 +265,8 @@ def compose_existing_root_compatibility(original, output, expected_manifest):
         (output/'package.json').chmod(0o600)
         verify_package(output)
         require(digest(original/'package.json') == expected_manifest
-                and tooling_path.read_bytes() == tooling, 'composition inputs changed')
+                and all(path.read_bytes() == tooling[name] for name,path in tooling_paths.items()),
+                'composition inputs changed')
     except BaseException:
         shutil.rmtree(output)
         raise
