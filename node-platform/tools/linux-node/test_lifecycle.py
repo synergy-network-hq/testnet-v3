@@ -128,13 +128,21 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual(((legacy/name).stat().st_ino,(legacy/name).read_bytes()),expected)
 
     def test_legacy_service_rendering_does_not_bind_to_absent_guard(self):
+        from test_linux_node import operator_ancestry
         legacy=self.base/'legacy'/'Synergy';legacy.mkdir(parents=True,mode=0o700)
-        with patch.object(life,'LEGACY_EXISTING_ROOT',legacy):
+        save(legacy/'installation.json',{'format':node.MARKER,'root':str(legacy)})
+        save(legacy/'config/canary-rpc-relay.json',{})
+        with patch.object(life,'LEGACY_EXISTING_ROOT',legacy), \
+             patch.object(node,'LEGACY_EXISTING_ROOT',legacy),operator_ancestry(legacy):
             for render in (life.node_unit,life.vpn_unit):
                 self.assertNotIn('synergy-installation-guard.service',render(legacy))
                 self.assertIn('BindsTo=synergy-installation-guard.service',render(self.root))
+            units=life.rendered_units(legacy)
+            self.assertEqual(set(units),set(life.UNITS)|{life.RELAY_UNIT})
+            self.assertTrue(all('synergy-installation-guard.service' not in text for text in units.values()))
             policy=legacy/'tmp/controller/policy.json';save(policy,{'fixture':True})
             self.assertIn('BindsTo=synergy-installation-guard.service',life.vpn_unit(legacy))
+            self.assertIn('BindsTo=synergy-installation-guard.service',life.rendered_units(legacy)[life.RELAY_UNIT])
             policy.unlink()
             guard=self.units/'synergy-installation-guard.service'
             guard.symlink_to('/nonexistent-guard')

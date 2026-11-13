@@ -196,12 +196,15 @@ def commission_gateway(root, staged, expected_sha256):
 
 
 def unit_text(root):
-    require(re.fullmatch(r'/[A-Za-z0-9_/.-]+/synergy', str(root)), 'unsafe service root')
+    import synergy_linux as boundary
+    from lifecycle import guard_dependencies
+    legacy = Path(root) == boundary.LEGACY_EXISTING_ROOT
+    require(re.fullmatch(r'/[A-Za-z0-9_/.-]+/synergy', str(root)) or legacy, 'unsafe service root')
+    if legacy: boundary.safe_root(root)
+    after, binding = guard_dependencies(root)
     return f'''[Unit]
-BindsTo=synergy-installation-guard.service
-After=synergy-installation-guard.service
-Description=Synergy authenticated Canary RPC relay
-After=network-online.target synergy-vpn.service
+{binding}Description=Synergy authenticated Canary RPC relay
+After=network-online.target synergy-vpn.service{after}
 Requires=synergy-vpn.service
 ConditionPathExists={root}/{CONFIG}
 

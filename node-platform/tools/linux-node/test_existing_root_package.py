@@ -21,6 +21,7 @@ class ExistingRootPackageTests(unittest.TestCase):
             (self.base/'bin'/name).write_bytes(b'\x7fELF\x02\x01\x01'+bytes(11)+b'\x3e\x00')
         (self.base/'tools/synergy_linux.py').write_bytes(b'old root validator')
         (self.base/'tools/lifecycle.py').write_bytes(b'old lifecycle')
+        (self.base/'tools/canary_rpc_relay.py').write_bytes(b'old relay')
         self.files={p.relative_to(self.base).as_posix():node.digest(p)
                     for p in self.base.rglob('*') if p.is_file()}
         node.write_new(self.base/'package.json',{'format':node.MARKER,'architecture':'x86_64',
@@ -37,9 +38,9 @@ class ExistingRootPackageTests(unittest.TestCase):
         self.assertEqual(manifest['runtime_baseline']['manifest_sha256'],self.pin)
         self.assertEqual(manifest['runtime_baseline']['source_sha256'],'a'*64)
         for name,pin in self.files.items():
-            if name not in ('tools/synergy_linux.py','tools/lifecycle.py'):
+            if name not in ('tools/synergy_linux.py','tools/lifecycle.py','tools/canary_rpc_relay.py'):
                 self.assertEqual(node.digest(self.output/name),pin)
-        for name in ('synergy_linux.py','lifecycle.py'):
+        for name in ('synergy_linux.py','lifecycle.py','canary_rpc_relay.py'):
             self.assertEqual((self.output/'tools'/name).read_bytes(),
                              (build.SOURCE/'tools/linux-node'/name).read_bytes())
         for name in node.VOLATILE: self.assertEqual(list((self.output/name).iterdir()),[])
