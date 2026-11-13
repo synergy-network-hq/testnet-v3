@@ -112,6 +112,29 @@ fn authorization_state_root(world: &synergy_state::WorldState) -> String {
         .unwrap_or_default();
     synergy_block::hash_block_bytes(bytes)
 }
+fn authorization_refresh_source(
+    current_root: &str,
+    frozen_source: u64,
+    observed_height: u64,
+    world: &synergy_state::WorldState,
+) -> Result<Option<(u64, String)>, String> {
+    if observed_height < frozen_source {
+        return Ok(None);
+    }
+    let root = authorization_state_root(world);
+    if root == current_root {
+        return Ok(None);
+    }
+    let updated = synergy_identity::registration::authorization_update_height(&world.protocol)?;
+    if updated == 0 || updated > observed_height {
+        return Err(
+            "changed canonical authorization lacks its exact finalized update height".into(),
+        );
+    }
+    // A successor already authenticates its source World. An older table
+    // update does not require reopening an anchor outside that source floor.
+    Ok(Some((updated.max(frozen_source), root)))
+}
 fn deliver_processing_retry_slice<'a>(
     payloads: impl Iterator<Item = &'a [u8]> + Clone,
     peers: impl Iterator<Item = &'a str> + Clone,
@@ -460,7 +483,12 @@ impl EtdagService {
             members: BTreeMap::new(),
             ingress: self.ingress.clone(),
         };
-        verifier.source(&context, &verifier.scratch)?;
+        // The successor source is an authenticated finalized World, not
+        // Genesis. Starting with Genesis here falsely detects an authorization
+        // change and attempts to reopen its old update-height context.
+        let authorization_root = verifier
+            .source(&context, &verifier.scratch)?
+            .authorization_root();
         let pending = PendingProcessingStore::open(
             &self.pipeline_root.join(if self.authority.epoch.epoch == 1 {
                 "processing-v1".to_owned()
@@ -494,7 +522,7 @@ impl EtdagService {
             finalized_store: None,
             finalized_retry: None,
             finalized_retry_cursor: 0,
-            authorization_root: authorization_state_root(&self.initial_wallet_world),
+            authorization_root,
             requested_source: None,
             context_published: publish_genesis,
         });
@@ -1023,6 +1051,11 @@ impl EtdagService {
         // balances/nonce. Inclusion still verifies both against the real parent.
         // Refresh only on an authorization transition, avoiding per-height pins.
         if let Some((height, world)) = self.ingress.processing_finalized_world()? {
+            // Execution may still be replaying toward the already verified
+            // source. Older observations cannot roll its authorization back.
+            if height < work.verifier.context.authority.source_finalized_height {
+                return Ok(());
+            }
             let root = authorization_state_root(&world);
             if root == work.authorization_root
                 && !work.context_published
@@ -1036,25 +1069,23 @@ impl EtdagService {
                 }
                 work.context_published = true;
             }
-            if root != work.authorization_root
-                && work
+            if let Some((source_height, root)) = authorization_refresh_source(
+                &work.authorization_root,
+                work.verifier.context.authority.source_finalized_height,
+                height,
+                &world,
+            )? {
+                if work
                     .requested_source
                     .as_ref()
                     .is_none_or(|(_, pending)| pending != &root)
-            {
-                let source_height =
-                    synergy_identity::registration::authorization_update_height(&world.protocol)?;
-                if source_height == 0 || source_height > height {
-                    return Err(
-                        "changed canonical authorization lacks its exact finalized update height"
-                            .into(),
-                    );
+                {
+                    let target = source_height
+                        .checked_add(self.authority.protected_parameters()?.target_height_offset)
+                        .ok_or("processing authorization anchor overflow")?;
+                    let context = work.verifier.context_for_anchor(target)?;
+                    work.requested_source = Some((context, root));
                 }
-                let target = source_height
-                    .checked_add(self.authority.protected_parameters()?.target_height_offset)
-                    .ok_or("processing authorization anchor overflow")?;
-                let context = work.verifier.context_for_anchor(target)?;
-                work.requested_source = Some((context, root));
             }
         }
         let Some((context, root)) = &work.requested_source else {
@@ -1883,6 +1914,47 @@ impl EtdagService {
 mod paced_retry_tests {
     use super::deliver_processing_retry_slice;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn successor_authorization_refresh_preserves_verified_source_and_rejects_rollback() {
+        use super::{authorization_refresh_source as refresh, authorization_state_root};
+        use synergy_identity::{
+            authorization::IDENTITY_AUTHORIZATION_BINDINGS_STATE_KEY as TABLE,
+            registration::AUTHORIZATION_UPDATED_HEIGHT_STATE_KEY as UPDATED,
+        };
+        let mut world = synergy_state::WorldState::default();
+        world
+            .protocol
+            .insert(TABLE.into(), b"registered-table".to_vec());
+        world
+            .protocol
+            .insert(UPDATED.into(), serde_json::to_vec(&4638u64).unwrap());
+        let restored = authorization_state_root(&world);
+        assert_eq!(refresh(&restored, 9998, 9998, &world).unwrap(), None);
+        let genesis = synergy_state::WorldState::default();
+        assert_ne!(restored, authorization_state_root(&genesis));
+        assert_eq!(refresh(&restored, 9998, 9997, &genesis).unwrap(), None);
+        assert_eq!(
+            refresh(&authorization_state_root(&genesis), 9998, 9998, &world).unwrap(),
+            Some((9998, restored.clone()))
+        );
+        world
+            .protocol
+            .insert(TABLE.into(), b"new-authorized-table".to_vec());
+        world
+            .protocol
+            .insert(UPDATED.into(), serde_json::to_vec(&10002u64).unwrap());
+        assert_eq!(
+            refresh(&restored, 9998, 10003, &world).unwrap(),
+            Some((10002, authorization_state_root(&world)))
+        );
+        for invalid in [0u64, 10004] {
+            world
+                .protocol
+                .insert(UPDATED.into(), serde_json::to_vec(&invalid).unwrap());
+            assert!(refresh(&restored, 9998, 10003, &world).is_err());
+        }
+    }
 
     #[test]
     fn capsule_input_rejection_is_local_but_custody_failure_remains_fatal() {

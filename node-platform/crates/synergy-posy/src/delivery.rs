@@ -415,6 +415,28 @@ impl ProposalDelivery {
         Ok(Some(envelope))
     }
 
+    /// Republish only this authority's bounded active window. Earlier epochs
+    /// remain durable, but must never be reinterpreted by the current verifier.
+    pub fn stored_validation_window(
+        &self,
+        active_height: u64,
+        epoch: &SimplifiedEpochContext,
+        registry: &FrozenValidatorRegistry,
+        verifier: &impl ConsensusSignatureVerifier,
+    ) -> PosyResult<Vec<ProposalValidationCertificate>> {
+        epoch.validate_against(registry)?;
+        let start = active_height
+            .saturating_sub(8)
+            .max(epoch.epoch_start_height);
+        let end = active_height.min(epoch.epoch_end_height);
+        (start..=end)
+            .filter_map(|height| {
+                self.stored_validation(height, epoch, registry, verifier)
+                    .transpose()
+            })
+            .collect()
+    }
+
     pub fn stored_validation(
         &self,
         height: u64,
@@ -716,6 +738,23 @@ mod cache_tests {
         let mut owner =
             ProposalDelivery::open(&root, &previous, &previous_registry, &Check).unwrap();
         owner.activate((10000, 0)).unwrap();
+        let old_certificate = ProposalValidationCertificate {
+            context: context.clone(),
+            candidate: candidate.clone(),
+            echoes: (0..4)
+                .map(|i| ProposalDeliveryStatement {
+                    context: context.clone(),
+                    phase: ProposalDeliveryPhase::Echo,
+                    candidate: candidate.clone(),
+                    validator_id: format!("v{i}"),
+                    key_id: format!("k{i}"),
+                    signature: vec![7],
+                })
+                .collect(),
+        };
+        owner
+            .persist_validation(&old_certificate, &previous, &previous_registry, &Check)
+            .unwrap();
         owner
             .admit(
                 ProposalDeliveryStatement {
@@ -745,6 +784,83 @@ mod cache_tests {
         assert_eq!(owner.record.statements[0].context.epoch, 1);
         assert!(owner.activate((9999, 0)).is_err());
         owner.activate((10001, 0)).unwrap();
+        assert!(owner
+            .stored_validation_window(10001, &current, &current_registry, &Check)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            owner
+                .stored_validation(10000, &previous, &previous_registry, &Check)
+                .unwrap(),
+            Some(old_certificate.clone())
+        );
+        let context = ConsensusObjectContext::for_height(&current, 10001, 0).unwrap();
+        let candidate = CertifiedCandidateSubject::new(
+            context.clone(),
+            "new-block".into(),
+            "old-block".into(),
+            crate::SimplifiedFinalityParent::QuorumCertificate {
+                height: 10000,
+                block_id: "old-block".into(),
+                qc_id: "c".repeat(64),
+            },
+            "d".repeat(64),
+        )
+        .unwrap();
+        let certificate = ProposalValidationCertificate {
+            context: context.clone(),
+            candidate: candidate.clone(),
+            echoes: (0..4)
+                .map(|i| ProposalDeliveryStatement {
+                    context: context.clone(),
+                    phase: ProposalDeliveryPhase::Echo,
+                    candidate: candidate.clone(),
+                    validator_id: format!("v{i}"),
+                    key_id: format!("k{i}"),
+                    signature: vec![7],
+                })
+                .collect(),
+        };
+        owner
+            .persist_validation(&certificate, &current, &current_registry, &Check)
+            .unwrap();
+        assert_eq!(
+            owner
+                .stored_validation_window(10001, &current, &current_registry, &Check)
+                .unwrap(),
+            vec![certificate]
+        );
+        // A bad current-epoch record must still fail. The predecessor boundary
+        // must not turn normal signature failures into ignored history.
+        let mut bad = old_certificate.clone();
+        bad.context = ConsensusObjectContext::for_height(&current, 10002, 0).unwrap();
+        bad.candidate = CertifiedCandidateSubject::new(
+            bad.context.clone(),
+            "next-block".into(),
+            "new-block".into(),
+            crate::SimplifiedFinalityParent::QuorumCertificate {
+                height: 10001,
+                block_id: "new-block".into(),
+                qc_id: "c".repeat(64),
+            },
+            "d".repeat(64),
+        )
+        .unwrap();
+        for echo in &mut bad.echoes {
+            echo.context = bad.context.clone();
+            echo.candidate = bad.candidate.clone();
+        }
+        bad.echoes[0].signature = vec![8];
+        owner
+            .evidence
+            .put_once_atomic(&[synergy_storage::StorageWrite {
+                relative_path: "validation-h10002.json".into(),
+                bytes: serde_json::to_vec(&bad).unwrap(),
+            }])
+            .unwrap();
+        assert!(owner
+            .stored_validation_window(10002, &current, &current_registry, &Check)
+            .is_err());
         drop(owner);
         assert!(ProposalDelivery::open(&root, &current, &current_registry, &Check).is_ok());
         let mut corrupt: serde_json::Value = serde_json::from_slice(&before).unwrap();

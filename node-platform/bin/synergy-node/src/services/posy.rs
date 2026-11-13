@@ -3400,13 +3400,16 @@ fn republish_verified_validation_history(
     authority: &VerifiedAuthority,
     ingress: &AuthenticatedIngress,
 ) -> Result<(), String> {
-    for height in active_height.saturating_sub(8)..=active_height {
-        if let Some(certificate) = delivery
-            .stored_validation(height, &authority.epoch, &authority.registry, authority)
-            .map_err(|e| e.to_string())?
-        {
-            ingress.submit_proposal_validation(certificate)?;
-        }
+    for certificate in delivery
+        .stored_validation_window(
+            active_height,
+            &authority.epoch,
+            &authority.registry,
+            authority,
+        )
+        .map_err(|e| e.to_string())?
+    {
+        ingress.submit_proposal_validation(certificate)?;
     }
     Ok(())
 }
