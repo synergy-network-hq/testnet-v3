@@ -530,6 +530,18 @@ def upgrade(root, package):
     token = digest(package/'package.json')
     staged = {'pending_upgrade_sha256': token} if contained else {}
     with _lifecycle_lock(root):
+        policy_path = root/'tmp/controller/policy.json'
+        if policy_path.exists() or policy_path.is_symlink():
+            from controller import Controller
+            from root_guard import check_registration, render
+            policy = Controller(root).policy()
+            guard_pin = policy.get('root_guard_sha256')
+            if guard_pin is not None:
+                check_registration(guard_pin)
+                guard_member = 'tools/root_guard.py'
+                require(guard_member in manifest['files'] and
+                        _hash_bytes(render(root,policy['host_account'],(package/guard_member).read_bytes())) == guard_pin,
+                        'Update changes the registered deletion guard; authenticated guard migration required')
         intent_path = root/UPGRADE_INTENT
         resumed = intent_path.exists()
         if resumed:

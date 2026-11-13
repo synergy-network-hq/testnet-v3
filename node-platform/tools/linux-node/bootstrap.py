@@ -274,6 +274,14 @@ def stage_engineering_update(stream, release_id, pin):
         try:
             manifest=extract(stream,pending,{'manifest_sha256':pin,'release_id':release_id})
             require(verify_package(pending)==manifest,'Candidate verification differs')
+            guard_pin=policy.get('root_guard_sha256')
+            if guard_pin is not None:
+                from root_guard import check_registration, render
+                check_registration(guard_pin)
+                guard_source=pending/'tools/root_guard.py'
+                require('tools/root_guard.py' in manifest['files'] and
+                        hashlib.sha256(render(root,policy['host_account'],guard_source.read_bytes())).hexdigest()==guard_pin,
+                        'Update changes the registered deletion guard; authenticated guard migration required')
             shutil.copytree(old,replacement)
             for name in ENGINE:
                 target=replacement/name if name=='controller.py' else replacement/'tools'/name
