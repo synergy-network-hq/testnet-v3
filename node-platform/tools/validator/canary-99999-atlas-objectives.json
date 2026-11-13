@@ -34,22 +34,22 @@
       "name": "Wallet real APQE runtime adapter",
       "status": "passed",
       "started_at": null,
-      "updated_at": "2026-11-09T12:13:16.052763+00:00",
-      "detail": "Ordinary macOS syna pilot only: actual APQE custody, native HTTPS, encrypted signing, reviewed one-shot transfer and finalized readback verified. Protected D+P/mobile/browser remain unqualified and gated."
+      "updated_at": "2026-11-13T22:21:07.407767+00:00",
+      "detail": "Ordinary macOS Wallet pilot verified with native custody, local APQE signing and public encrypted submission on Canary. Production desktop and mobile release qualification are separate."
     },
     {
       "name": "Canary Wallet transfer and finalized receipt",
       "status": "passed",
       "started_at": null,
-      "updated_at": "2026-11-09T12:11:09.728430+00:00",
-      "detail": "Actual macOS Wallet signed and user submitted once through public Canary RPC. Tx 6856d335\u2026b79414 applied at finalized H4638; verified certificate, gas, nonce and sender/recipient balances. Ordinary syna pilot; protected D+P remains unqualified."
+      "updated_at": "2026-11-13T22:21:07.407767+00:00",
+      "detail": "Funding applied at H17586. Independent Wallet return transaction b6b5bd61\u202618a53b applied at H17647. Public RPC and validators agreed on receipt and finalized balances/nonces."
     },
     {
       "name": "Wallet persistence and failure handling",
       "status": "passed",
       "started_at": null,
-      "updated_at": "2026-11-09T12:13:16.052763+00:00",
-      "detail": "Clean read-only relaunch and private unlock restored exact H4638 finalized transfer and certificate from persisted history; live balance 1,160,000 nWei nonce1. Submission disabled. Initial queued acknowledgement remains historical beside authoritative finality."
+      "updated_at": "2026-11-13T22:21:07.407767+00:00",
+      "detail": "Relaunch and unlock restored the H17647 receipt and certificate. Finalized Wallet balance was 1,160,000 nWei at nonce 1. This checkpoint covers the ordinary desktop pilot."
     },
     {
       "name": "Transport registry renewal compatibility and rollback",
@@ -81,10 +81,10 @@
     },
     {
       "name": "Val5 catch-up and block-production latency",
-      "status": "passed",
+      "status": "in_progress",
       "started_at": "2026-11-09T11:34:43.135530+00:00",
-      "updated_at": "2026-11-12T04:57:21.998607+00:00",
-      "detail": "Val5 recovered from H9981 to the common H9998, with four authenticated peers and 45 seconds without automatic restart. All five then matched exact block/state roots. The fleet is now stopped for a separate universal epoch-2 startup failure; sustained new finality is not yet accepted."
+      "updated_at": "2026-11-13T22:21:07.407767+00:00",
+      "detail": "All five have the corrected software and no restarts in the latest check. Val5 is replaying with four authenticated peers; full agreement and sustained timing have not been qualified."
     },
     {
       "name": "Certified checkpoint and recovery qualification",
@@ -125,15 +125,15 @@
       "name": "Shared validator master rollout",
       "status": "passed",
       "started_at": null,
-      "updated_at": "2026-11-12T04:57:21.998607+00:00",
-      "detail": "Master 314a7e342f57 installed and verified on all six hosts through shared lifecycle. Only the node executable changed. No manual architecture edits. All five validators are currently stopped after the new epoch startup failed closed."
+      "updated_at": "2026-11-13T22:21:07.407767+00:00",
+      "detail": "Corrected validator package ca2c250b\u2026777b installed on Val2\u2013Val6 through the managed lifecycle. No validator state or keys were copied."
     },
     {
       "name": "APQE Wallet Link and paired transfer qualification",
       "status": "pending",
       "started_at": null,
-      "updated_at": "2026-11-11T22:34:16.943998+00:00",
-      "detail": "The ordinary standalone Wallet pilot passed earlier. Pairing, review, submission and finalized readback via the paired Wallet remain gated on restored Canary RPC and finality."
+      "updated_at": "2026-11-13T22:21:07.407767+00:00",
+      "detail": "Desktop ordinary Wallet transfer has finalized. Independent device pairing, native approvals, and recovery still require qualification."
     },
     {
       "name": "Lost-root recovery verifier on disposable Linux",
@@ -179,10 +179,10 @@
     },
     {
       "name": "Retire legacy Canary deployment",
-      "status": "in_progress",
+      "status": "pending",
       "started_at": "2026-11-12T05:46:27.428761+00:00",
-      "updated_at": "2026-11-12T05:46:27.428761+00:00",
-      "detail": "Existing Canary is scheduled for retirement. Old-chain recovery and Epoch 2 rollout work have stopped. Validator deletion awaits replacement qualification and explicit cutover approval."
+      "updated_at": "2026-11-13T22:21:07.407767+00:00",
+      "detail": "Current chain 99999 remains the active qualification network. No retirement or destructive reset is authorized by the present work."
     },
     {
       "name": "Portal and dApp Hub replacement source",
@@ -211,6 +211,24 @@
       "started_at": null,
       "updated_at": "2026-11-12T05:46:27.428761+00:00",
       "detail": "After disposable qualification and approved removal, provision five new validators through Portal and NodeNetwork. Verify fresh Genesis, authenticated peers, sustained matching finality and public RPC."
+    },
+    {
+      "name": "Certified processing execution recovery",
+      "status": "passed",
+      "detail": "Validators no longer exit on the processing pin owner error. The original funding and desktop Wallet sends then finalized without resubmission. Source correction 4337861.",
+      "updated_at": "2026-11-13T22:21:07.407767+00:00"
+    },
+    {
+      "name": "Epoch-2 terminal finality and Val5 replay",
+      "status": "in_progress",
+      "detail": "Val2/3/4/6 matched three-QC finality at H19998, the signed epoch-2 terminal boundary. Val5 archive reached H17708 with four authenticated peers. Epoch 3 and sustained five-host finality remain open.",
+      "updated_at": "2026-11-13T22:21:07.407767+00:00"
+    },
+    {
+      "name": "Production ordinary Wallet and signed mobile delivery",
+      "status": "in_progress",
+      "detail": "Ordinary desktop pilot proved funding, send, and history across restart. Normal production workflows, mobile native authorization, and signed Android/iOS artifacts are not yet qualified.",
+      "updated_at": "2026-11-13T22:21:07.407767+00:00"
     }
   ]
 }
