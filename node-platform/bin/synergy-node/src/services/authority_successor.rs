@@ -265,6 +265,76 @@ fn export_boundary(config: &NodeConfiguration, output: &Path) -> Result<(), Stri
     )
 }
 
+// A single offline execution owner, with no signer, network service, or node
+// process. Input is an explicitly supplied scratch copy of a certified
+// boundary (public authority, Worlds, replay inputs and validation proofs).
+#[cfg(test)]
+#[test]
+#[ignore = "requires an authenticated Canary boundary export and scratch storage"]
+fn native_terminal_replay_checks_exact_successor_on_existing_canary_evidence() {
+    use crate::services::{execution, ingress::AuthenticatedIngress};
+    use synergy_node_core::CancellationToken;
+
+    let path = |key| PathBuf::from(std::env::var_os(key).expect(key));
+    let config = synergy_config::load(&path("SYNERGY_TEST_TERMINAL_CONFIG")).unwrap();
+    let decode = |file: &Path| fs::read(file).unwrap();
+    let proposal: Proposal =
+        serde_json::from_slice(&decode(&path("SYNERGY_TEST_TERMINAL_PROPOSAL"))).unwrap();
+    let preceding: Witness =
+        serde_json::from_slice(&decode(&path("SYNERGY_TEST_TERMINAL_PRECEDING"))).unwrap();
+    let expected = &proposal.witness;
+    let (previous, next) = verify(&config, &proposal).unwrap();
+    let mut prior_finality = synergy_posy::ThreeQcFinality::default();
+    for qc in preceding.certificates {
+        qc.verify(&previous.epoch, &previous.registry, previous.as_ref())
+            .unwrap();
+        prior_finality.accept(qc).unwrap();
+    }
+    assert_eq!(prior_finality.last_finalized(), Some(&preceding.finalized));
+    let layout = NodeStorageLayout::new(config.storage.data_directory.clone()).unwrap();
+    let root = layout.consensus().join("posy");
+    let certificates = VerifiedQuorumCertificateStore::new(&root).unwrap();
+    for qc in &expected.certificates {
+        certificates
+            .put_verified(qc, &previous.epoch, &previous.registry, previous.as_ref())
+            .unwrap();
+    }
+    let finality = FinalityStore::new(&root).unwrap();
+    finality
+        .commit_exactly_once(&expected.finalized, Some(&preceding.finalized))
+        .unwrap();
+    require_validator_boundary(&config, expected).unwrap();
+    assert_eq!(
+        verify_processing_boundary(&config, &previous, &next, expected).unwrap_err(),
+        "certified terminal execution candidate is unavailable"
+    );
+    let ingress = AuthenticatedIngress::with_world_budget(
+        synergy_state::world_resources::WorldResourceBudget::new(
+            config.storage.world_memory_budget_bytes,
+        ),
+    );
+    let (_, mut owner) = execution::registration(&config, previous.clone(), ingress.clone())
+        .unwrap();
+    ingress
+        .submit_finality(
+            expected.finalized.clone(),
+            serde_json::to_vec(&expected.certificates).unwrap(),
+        )
+        .unwrap();
+    owner.start(&CancellationToken::default()).unwrap();
+    owner.poll().unwrap();
+    owner.stop().unwrap();
+    require_validator_boundary(&config, expected).unwrap();
+    verify_processing_boundary(&config, &previous, &next, expected).unwrap();
+    assert_eq!(
+        finality.get(expected.finalized.height).unwrap().as_ref(),
+        Some(&expected.finalized)
+    );
+    assert!(finality.get(expected.finalized.height + 1).unwrap().is_none());
+    assert!(finality.get(expected.finalized.height + 2).unwrap().is_none());
+    assert!(!root.join("sign-once.json").exists());
+}
+
 fn write_public(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if !path.is_absolute() {
         return Err("public successor output must be absolute".into());
