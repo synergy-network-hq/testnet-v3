@@ -86,6 +86,19 @@ def verify_certificate(root, certificate, certificate_sha, authority_sha):
             'native verifier did not authenticate exact quorum recovery certificate')
 
 
+def _canary_successor_range(payload):
+    epoch, first, last = (payload[key] for key in
+                          ('epoch', 'epoch_start_height', 'epoch_end_height'))
+    require(payload.get('chain_id') == 99999 and all(type(n) is int for n in (epoch, first, last))
+            and 2 <= epoch < (1 << 64) - 1 and 0 < first <= last <= (1 << 64) - 1001,
+            'bounded Canary predecessor range required')
+    expected_first = 10001 if epoch == 2 else 20001 + 1000 * (epoch - 3)
+    expected_last = 20000 if epoch == 2 else expected_first + 999
+    require((first, last) == (expected_first, expected_last),
+            'predecessor is outside the established 1,000-block Canary continuation schedule')
+    return epoch + 1, last + 1, last + 1000
+
+
 def _semantic(before, proposed, role, root, successor=None):
     cert = json.loads(proposed[CERT] if successor is None else successor)
     if successor is not None:
@@ -106,9 +119,8 @@ def _semantic(before, proposed, role, root, successor=None):
                       'consensus_parameter_root','protected'}
         require({k:v for k,v in old_payload.items() if k not in adjustable}
                 == {k:v for k,v in new_payload.items() if k not in adjustable}
-                and (old_payload['epoch'], old_payload['epoch_end_height']) == (2, 20000)
                 and (new_payload['epoch'], new_payload['epoch_start_height'],
-                     new_payload['epoch_end_height']) == (3, 20001, 21000),
+                     new_payload['epoch_end_height']) == _canary_successor_range(old_payload),
                 'only the exact 1,000-block Canary successor with unchanged authority inputs is supported')
         prior_policy, next_policy = old_payload['protected'], new_payload['protected']
         time_key = 'epoch_start_timestamp_ms'
@@ -167,11 +179,16 @@ def _stage_location(root,stage,successor):
 def _verify_successor(root, stage, proof_path, proof_sha, proposed, registry, admission):
     node = root/'bin/synergy-node'
     config = root/CONFIG
+    proof = checked(proof_path)
+    require(sha(proof) == proof_sha, 'exact successor proof pin required')
+    old_payload = json.loads(bytes(json.loads(proof)['previous_authority_binding']))['payload']
+    next_epoch, _, _ = _canary_successor_range(old_payload)
     result = json.loads(native([node,'authority-successor','check',config,proof_path]))
     require(result.get('status') == 'successor-proof-verified'
             and result.get('successor_proposal_sha256') == proof_sha
             and result.get('successor_authority_sha256') == sha(proposed[AUTHORITY])
-            and result.get('epoch') == 3 and result.get('finalized_height') == 19998
+            and result.get('epoch') == next_epoch
+            and result.get('finalized_height') == old_payload['epoch_end_height'] - 2
             and result.get('genesis_trust_pin_preserved') is True,
             'native verifier did not authenticate exact successor proof')
     cmd = [node,'authority-successor','check-network',config,proof_path,registry,

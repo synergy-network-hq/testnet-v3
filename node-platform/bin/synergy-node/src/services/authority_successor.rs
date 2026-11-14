@@ -86,19 +86,41 @@ fn verify(
     Ok((previous, next))
 }
 
+const CANARY_EPOCH_BLOCKS: u64 = 1_000;
+
+fn canary_successor_range(chain: u64, epoch: u64, first: u64, last: u64) -> Option<(u64, u64, u64)> {
+    if chain != 99999 {
+        return None;
+    }
+    let expected_first = if epoch == 2 {
+        10_001
+    } else {
+        epoch.checked_sub(3)?.checked_mul(CANARY_EPOCH_BLOCKS)?.checked_add(20_001)?
+    };
+    let expected_last = if epoch == 2 {
+        20_000
+    } else {
+        expected_first.checked_add(CANARY_EPOCH_BLOCKS - 1)?
+    };
+    if (first, last) != (expected_first, expected_last) {
+        return None;
+    }
+    Some((epoch.checked_add(1)?, last.checked_add(1)?, last.checked_add(CANARY_EPOCH_BLOCKS)?))
+}
+
 fn successor_payload(
     mut payload: AuthorityPayload,
     boundary: &SimplifiedQuorumCertificate,
 ) -> Result<AuthorityPayload, String> {
-    if payload.chain_id != 99999
-        || (
-            payload.epoch,
-            payload.epoch_start_height,
-            payload.epoch_end_height,
-        ) != (2, 10001, 20000)
-        || boundary.context.height != payload.epoch_end_height
-    {
-        return Err("only exact Canary epoch 2 is supported by this operational bridge".into());
+    let (epoch, first, last) = canary_successor_range(
+        payload.chain_id,
+        payload.epoch,
+        payload.epoch_start_height,
+        payload.epoch_end_height,
+    )
+    .ok_or("predecessor is outside the established 1,000-block Canary continuation schedule")?;
+    if boundary.context.height != payload.epoch_end_height {
+        return Err("successor requires the certified last height of the predecessor".into());
     }
     let policy = payload
         .protected
@@ -113,9 +135,9 @@ fn successor_payload(
         .checked_add(policy.target_block_time_ms)
         .ok_or("successor epoch clock overflow")?;
     payload.consensus_parameter_root = policy.commitment()?;
-    payload.epoch = 3;
-    payload.epoch_start_height = 20001;
-    payload.epoch_end_height = 21000;
+    payload.epoch = epoch;
+    payload.epoch_start_height = first;
+    payload.epoch_end_height = last;
     payload.anchor_parent = SimplifiedFinalityParent::QuorumCertificate {
         height: boundary.context.height,
         block_id: boundary.block_id.clone(),
@@ -123,6 +145,19 @@ fn successor_payload(
     };
     payload.validate()?;
     Ok(payload)
+}
+
+#[cfg(test)]
+#[test]
+fn canary_schedule_preserves_the_signed_bridge_and_continues_in_exact_windows() {
+    assert_eq!(canary_successor_range(99999, 2, 10001, 20000), Some((3, 20001, 21000)));
+    assert_eq!(canary_successor_range(99999, 3, 20001, 21000), Some((4, 21001, 22000)));
+    assert_eq!(canary_successor_range(99999, 4, 21001, 22000), Some((5, 22001, 23000)));
+    assert_eq!(canary_successor_range(99999, 3, 20002, 21001), None);
+    assert_eq!(canary_successor_range(99999, 3, 20001, 22000), None);
+    assert_eq!(canary_successor_range(1266, 3, 20001, 21000), None);
+    assert_eq!(canary_successor_range(99999, 1, 1, 10000), None);
+    assert_eq!(canary_successor_range(99999, u64::MAX, 20001, 21000), None);
 }
 
 fn stored_transition(

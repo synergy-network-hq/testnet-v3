@@ -12,6 +12,16 @@ from apqe_layout import PUBLIC
 
 
 class ActivationTests(unittest.TestCase):
+    def test_canary_successor_range_keeps_signed_epoch_two_and_rejects_scope_drift(self):
+        old = dict(chain_id=99999, epoch=2, epoch_start_height=10001, epoch_end_height=20000)
+        self.assertEqual(recovery._canary_successor_range(old), (3, 20001, 21000))
+        current = dict(old, epoch=3, epoch_start_height=20001, epoch_end_height=21000)
+        self.assertEqual(recovery._canary_successor_range(current), (4, 21001, 22000))
+        for invalid in (dict(current, chain_id=1266), dict(current, epoch_end_height=21001),
+                        dict(current, epoch_start_height=20002), dict(old, epoch=1)):
+            with self.assertRaises(ValueError):
+                recovery._canary_successor_range(invalid)
+
     def setUp(self):
         temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup)
         base=Path(temporary.name).resolve();self.root=base/'synergy';self.stage=base/'stage'
