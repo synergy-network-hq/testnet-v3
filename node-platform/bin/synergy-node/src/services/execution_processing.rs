@@ -89,9 +89,31 @@ fn processing_build_is_obsolete(
     Ok(parent_height < execution_height)
 }
 
+/// Ordinary replay is bounded by finality. A complete epoch is the only
+/// exception: its two remaining certified candidates are needed by the next
+/// authority, even though neither can yet be finalized.
+fn needs_terminal_replay(epoch_end: u64, finalized: u64, executed: u64) -> bool {
+    finalized != 0
+        && finalized.checked_add(2) == Some(epoch_end)
+        && (finalized..epoch_end).contains(&executed)
+}
+
 #[cfg(test)]
 mod slot_regression {
-    use super::processing_build_is_obsolete;
+    use super::{needs_terminal_replay, processing_build_is_obsolete};
+
+    #[test]
+    fn terminal_replay_is_limited_to_the_two_unfinalized_epoch_candidates() {
+        let end = 20_000;
+        assert!(!needs_terminal_replay(end, end - 3, end - 3));
+        assert!(!needs_terminal_replay(end, end - 2, end - 3));
+        assert!(needs_terminal_replay(end, end - 2, end - 2));
+        assert!(needs_terminal_replay(end, end - 2, end - 1));
+        assert!(!needs_terminal_replay(end, end - 2, end));
+        assert!(!needs_terminal_replay(end, end - 1, end - 1));
+        assert!(!needs_terminal_replay(2, 0, 0));
+        assert!(!needs_terminal_replay(u64::MAX, u64::MAX, u64::MAX));
+    }
 
     #[test]
     fn finalized_replay_obsoletes_old_slot_without_accepting_same_height_conflict() {
@@ -473,10 +495,8 @@ impl ExecutionService {
             // replay of already certified historical inputs imported by Sync.
             // Only the trusted PoSy finality floor authorizes this bounded pass;
             // the existing replay path still verifies each next QC/input/VC.
-            let finalized = self
-                .ingress
-                .latest_finality()?
-                .map_or(0, |record| record.height);
+            let finality = self.ingress.latest_finality()?;
+            let finalized = finality.as_ref().map_or(0, |record| record.height);
             for _ in 0..MAX_BATCHES_PER_POLL {
                 if self.execution_height >= finalized
                     || !self.promote_processing_next(&mut owner, &snapshot)?
@@ -488,11 +508,61 @@ impl ExecutionService {
             // observation can be behind the local verified execution tip.
             match self.ingress.processing_build_request()? {
                 Some(request) => self.poll_processing_owner(&mut owner, request, &snapshot),
-                None => Ok(()),
+                None => {
+                    if let Some(finality) = finality.as_ref() {
+                        self.replay_terminal_processing_tail(&mut owner, &snapshot, finality)?;
+                    }
+                    Ok(())
+                }
             }
         })();
         self.processing = Some(owner);
         result
+    }
+
+    fn replay_terminal_processing_tail(
+        &mut self,
+        owner: &mut ProcessingExecutionState,
+        snapshot: &ProcessingSnapshot,
+        finalized: &synergy_posy::FinalizedBlockRecord,
+    ) -> Result<(), String> {
+        let end = self.authority.epoch.epoch_end_height;
+        if !needs_terminal_replay(end, finalized.height, self.execution_height) {
+            return Ok(());
+        }
+        let mut witness = synergy_posy::ThreeQcFinality::default();
+        let mut tail = Vec::with_capacity(2);
+        for height in finalized.height..=end {
+            let Some(qc) = self
+                .qc_store
+                .get_verified(
+                    height,
+                    &self.authority.epoch,
+                    &self.authority.registry,
+                    self.authority.as_ref(),
+                )
+                .map_err(|e| e.to_string())?
+            else {
+                return Ok(()); // No complete local proof yet.
+            };
+            witness.accept(qc.clone()).map_err(|e| e.to_string())?;
+            if height > finalized.height {
+                tail.push(qc);
+            }
+        }
+        if witness.last_finalized() != Some(finalized) {
+            return Err("terminal processing witness disagrees with local finality".into());
+        }
+        // Ordinary QC-selected replay checks VC, parent, state and ETDAG inputs.
+        // This does not apply finality or produce a vote for either candidate.
+        for qc in tail {
+            if qc.context.height > self.execution_height
+                && !self.commit_processing_qc(owner, snapshot, &qc)?
+            {
+                break;
+            }
+        }
+        Ok(())
     }
 
     fn poll_processing_owner(
