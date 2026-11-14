@@ -58,6 +58,20 @@ class ActivationTests(unittest.TestCase):
 
     def native(self,args):
         args=[str(v) for v in args];self.calls.append(args)
+        if args[1]=='authority-successor':
+            raw=Path(args[4]).read_bytes();proof=recovery.sha(raw)
+            if args[2]=='check':
+                return recovery.encode({'status':'successor-proof-verified','successor_proposal_sha256':proof,
+                    'successor_authority_sha256':recovery.sha(self.new_authority),'epoch':3,
+                    'finalized_height':19998,'genesis_trust_pin_preserved':True})
+            if args[2]=='check-network':
+                return recovery.encode({'status':'successor-network-verified','successor_proposal_sha256':proof,
+                    'registry_sha256':recovery.sha(Path(args[5]).read_bytes()),'admission_sha256':None})
+            if args[2]=='check-local':
+                return recovery.encode({'status':'successor-local-boundary-verified','successor_proposal_sha256':proof})
+            if args[2]=='activate':
+                self.write(self.root/recovery.AUTHORITY,self.new_authority)
+                return recovery.encode({'status':'activated','genesis_trust_pin_preserved':True})
         if args[1:3]==['authority-recovery','check']:
             raw=Path(args[4]).read_bytes()
             cert=json.loads(raw)
@@ -190,6 +204,114 @@ class ActivationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'separately pinned'):life.verify_authority_recovery_pin(self.root,config,receipt,policy)
         path=self.root/recovery.CERT;raw=path.read_bytes();path.unlink();other=self.stage/'alias';self.write(other,raw);path.symlink_to(other)
         with self.assertRaisesRegex(ValueError,'activation pin'):life.verify_authority_recovery_pin(self.root,config,receipt)
+
+
+    def successor_fixture(self):
+        self.stage=self.root/'tmp/authority-successor'
+        self.stage.mkdir(parents=True,mode=0o700)
+        policy={'epoch_start_timestamp_ms':300000,'target_block_time_ms':2000,
+                'ingress_kem_registry':{'records':[]}}
+        payload={'epoch':2,'epoch_start_height':10001,'epoch_end_height':20000,
+                 'chain_id':99999,'network_id':self.network,'protected':policy}
+        self.old_authority=recovery.encode({'payload':payload})
+        self.new_authority=recovery.encode({'payload':dict(payload,epoch=3,
+            epoch_start_height=20001,epoch_end_height=21000,
+            protected=dict(policy,epoch_start_timestamp_ms=20300000))})
+        self.registry['payload'].update(epoch=2,authority_binding_sha256=recovery.sha(self.old_authority))
+        self.next_registry=copy.deepcopy(self.registry)
+        self.next_registry['payload'].update(epoch=3,generation=5,
+                                              authority_binding_sha256=recovery.sha(self.new_authority))
+        proof=recovery.encode({'previous_authority_binding':list(self.old_authority),
+                               'successor_authority_binding':list(self.new_authority)})
+        self.write(self.stage/recovery.SUCCESSOR_PROOF,proof)
+        self.write(self.stage/Path(recovery.REGISTRY).name,recovery.encode(self.next_registry))
+        cert=recovery.encode({'fixed_original_recovery':True})
+        self.write(self.root/recovery.CERT,cert)
+        for target in (recovery.RECEIPT,recovery.START):
+            value=json.loads((self.root/target).read_bytes())
+            value['authority_recovery_certificate_sha256']=recovery.sha(cert)
+            if target==recovery.START:
+                value['public_file_sha256'].update({'authority.json':recovery.sha(self.old_authority),
+                    'transport-registry.json':recovery.sha(recovery.encode(self.registry))})
+            self.write(self.root/target,recovery.encode(value))
+        config=json.loads((self.root/recovery.CONFIG).read_bytes())
+        config['consensus']['authority_recovery_certificate_path']=str(self.root/recovery.CERT)
+        self.write(self.root/recovery.CONFIG,recovery.encode(config))
+        self.write(self.root/recovery.AUTHORITY,self.old_authority)
+        self.write(self.root/recovery.REGISTRY,recovery.encode(self.registry))
+        self.protected.update({name:(self.root/name).read_bytes()
+                                for name in (recovery.CERT,recovery.CONFIG,recovery.RECEIPT)})
+
+    def test_successor_preflight_and_restart_preserve_certificate_and_local_safety(self):
+        self.successor_fixture()
+        pin=recovery.prepare(self.root,self.stage,True)['plan_sha256']
+        self.assertEqual((self.root/recovery.AUTHORITY).read_bytes(),self.old_authority)
+        native=self.native
+        def refuse(args):
+            if args[1:3]==['authority-successor','check-local']:raise ValueError('terminal work not drained')
+            return native(args)
+        with patch.object(recovery,'native',side_effect=refuse):
+            with self.assertRaisesRegex(ValueError,'not drained'):
+                recovery.apply(self.root,self.stage,pin,True)
+        self.assertFalse((self.root/recovery.INTENT).exists())
+        real=life._replace_bytes
+        def interrupt(root,path,*args):
+            if path==root/recovery.REGISTRY:raise OSError('interrupted after authority write')
+            return real(root,path,*args)
+        with patch.object(life,'_replace_bytes',side_effect=interrupt):
+            with self.assertRaisesRegex(OSError,'interrupted'):
+                recovery.apply(self.root,self.stage,pin,True)
+        self.assertEqual((self.root/recovery.AUTHORITY).read_bytes(),self.new_authority)
+        self.assertTrue((self.root/recovery.INTENT).exists())
+        self.assertTrue(recovery.apply(self.root,self.stage,pin,True)['activation_installed'])
+        self.assertFalse(self.stage.exists())
+        self.assertTrue(recovery.apply(self.root,self.stage,pin,True)['repeated'])
+        self.protected_unchanged()
+
+    def test_successor_stage_cleanup_recovers_after_partial_unlink(self):
+        self.successor_fixture()
+        pin=recovery.prepare(self.root,self.stage,True)['plan_sha256']
+        unlink=Path.unlink
+        removed=[]
+        def interrupt(path, *args, **kwargs):
+            if path.parent==self.stage:
+                if removed: raise OSError('interrupted during successor cleanup')
+                removed.append(path)
+            return unlink(path,*args,**kwargs)
+        with patch.object(Path,'unlink',interrupt):
+            with self.assertRaisesRegex(OSError,'during successor cleanup'):
+                recovery.apply(self.root,self.stage,pin,True)
+        self.assertFalse(removed[0].exists())
+        self.assertTrue((self.root/recovery.COMPLETED).exists())
+        self.assertTrue((self.root/recovery.INTENT).exists())
+        with self.assertRaisesRegex(ValueError,'authority recovery'):
+            life._start_check_locked(self.root)
+        foreign=self.stage/'unapproved'
+        self.write(foreign,b'foreign')
+        with self.assertRaisesRegex(ValueError,'undeclared successor staging'):
+            recovery.apply(self.root,self.stage,pin,True)
+        self.assertEqual(foreign.read_bytes(),b'foreign')
+        foreign.unlink()
+        self.assertTrue(recovery.apply(self.root,self.stage,pin,True)['repeated'])
+        self.assertFalse(self.stage.exists())
+        self.assertFalse((self.root/recovery.INTENT).exists())
+        self.assertEqual(len([v for v in self.calls if v[1:3]==['authority-successor','activate']]),1)
+        self.protected_unchanged()
+
+    def test_successor_refuses_invalid_transport_before_intent(self):
+        self.successor_fixture()
+        pin=recovery.prepare(self.root,self.stage,True)['plan_sha256']
+        native=self.native
+        def refuse(args):
+            if args[1:3]==['authority-successor','check-network']:
+                raise ValueError('invalid ML-DSA-87 registry signature')
+            return native(args)
+        with patch.object(recovery,'native',side_effect=refuse):
+            with self.assertRaisesRegex(ValueError,'signature'):
+                recovery.apply(self.root,self.stage,pin,True)
+        self.assertFalse((self.root/recovery.INTENT).exists())
+        self.assertEqual((self.root/recovery.AUTHORITY).read_bytes(),self.old_authority)
+        self.protected_unchanged()
 
 
 if __name__=='__main__':unittest.main()

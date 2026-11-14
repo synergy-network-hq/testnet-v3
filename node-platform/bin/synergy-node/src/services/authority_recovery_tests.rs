@@ -7,17 +7,24 @@ use synergy_posy::{block_vote_signing_bytes, BlockVote, ConsensusObjectContext};
 #[test]
 #[ignore = "requires pinned native APQE artifacts"]
 fn native_quorum_recovery_activation_restart_and_interrupted_witness() {
-    exercise_native_recovery(false);
+    exercise_native_recovery(false, false);
 }
 
 #[test]
 #[ignore = "requires pinned native APQE artifacts"]
 fn native_transport_verifies_published_transition_without_writer() {
-    exercise_native_recovery(true);
+    exercise_native_recovery(true, false);
 }
 
-fn exercise_native_recovery(read_only_transport: bool) {
-    for end in [10_u64, 20] {
+#[test]
+#[ignore = "requires pinned native APQE artifacts"]
+fn native_offline_successor_rejects_changed_governed_scope_and_boundary() {
+    exercise_native_recovery(true, true);
+}
+
+fn exercise_native_recovery(read_only_transport: bool, long_boundary: bool) {
+    let ends: &[u64] = if long_boundary { &[10_000] } else { &[10, 20] };
+    for &end in ends {
         let (root, mut config) =
             crate::services::socket_qualification::sync_poll_native_test_configuration();
         struct Cleanup(std::path::PathBuf);
@@ -27,6 +34,9 @@ fn exercise_native_recovery(read_only_transport: bool) {
             }
         }
         let _cleanup = Cleanup(root.clone());
+        if long_boundary {
+            config.chain_id = 99999;
+        }
         config.consensus.mode = synergy_config::ConsensusMode::Observe;
         config.apqe_transport = None;
         config.vpn = synergy_config::VpnConfiguration::default();
@@ -69,6 +79,7 @@ fn exercise_native_recovery(read_only_transport: bool) {
             &fs::read(config.consensus.authority_binding.as_ref().unwrap()).unwrap(),
         )
         .unwrap();
+        binding.payload.chain_id = config.chain_id;
         // The shared poll fixture has signed authority/provider inputs but no
         // signed Genesis. Construct the exact format-2 artifact here rather
         // than assuming that an optional fixture Genesis path exists.
@@ -172,6 +183,7 @@ fn exercise_native_recovery(read_only_transport: bool) {
         .unwrap();
         let mut manifest: serde_json::Value =
             serde_json::from_slice(&fs::read(&config.manifest_path).unwrap()).unwrap();
+        manifest["chain_id"] = serde_json::json!(config.chain_id);
         manifest["genesis_hash"] = serde_json::json!(genesis.genesis_hash);
         fs::write(
             &config.manifest_path,
@@ -191,12 +203,21 @@ fn exercise_native_recovery(read_only_transport: bool) {
         let posy = layout.consensus().join("posy");
         let qcs = synergy_posy::VerifiedQuorumCertificateStore::new(&posy).unwrap();
         let atomic = synergy_posy::persistence::AtomicConsensusTransitionStore::new(&posy).unwrap();
-        let mut parent = previous.anchor_parent.clone();
+        let begin = if long_boundary { end - 2 } else { 1 };
+        let mut parent = if long_boundary {
+            SimplifiedFinalityParent::QuorumCertificate {
+                height: begin - 1,
+                block_id: "b".repeat(64),
+                qc_id: "c".repeat(64),
+            }
+        } else {
+            previous.anchor_parent.clone()
+        };
         let mut finality = ThreeQcFinality::default();
         let mut final_records = Vec::new();
         let mut certificates = Vec::new();
         let mut anchor_candidate = None;
-        for height in 1..=end {
+        for height in begin..=end {
             let material = synergy_etdag::execution::ProtectedProposalMaterial {
                 material_version: 2,
                 height,
@@ -265,17 +286,23 @@ fn exercise_native_recovery(read_only_transport: bool) {
                 .unwrap();
             finality.accept(qc.clone()).unwrap();
             if let Some(record) = finality.last_finalized() {
-                atomic
-                    .commit_verified_qc_and_finality(
-                        &qc,
-                        record,
-                        final_records.last(),
-                        &previous.epoch,
-                        &previous.registry,
-                        previous.as_ref(),
-                    )
-                    .unwrap();
-                final_records.push(record.clone());
+                if long_boundary {
+                    // This observer-only proof fixture certifies three isolated
+                    // QCs; it never imports synthetic historical execution.
+                    final_records.push(record.clone());
+                } else {
+                    atomic
+                        .commit_verified_qc_and_finality(
+                            &qc,
+                            record,
+                            final_records.last(),
+                            &previous.epoch,
+                            &previous.registry,
+                            previous.as_ref(),
+                        )
+                        .unwrap();
+                    final_records.push(record.clone());
+                }
             } else {
                 qcs.put_verified(&qc, &previous.epoch, &previous.registry, previous.as_ref())
                     .unwrap();
@@ -298,17 +325,19 @@ fn exercise_native_recovery(read_only_transport: bool) {
                 .unwrap(),
         };
         let record = &binding.payload.validators[0].record;
-        crate::services::posy::epoch_boundary_qualification::qualify_terminal_epoch_timeout(
-            &config,
-            previous.clone(),
-            Arc::new(make_signer(
+        if !long_boundary {
+            crate::services::posy::epoch_boundary_qualification::qualify_terminal_epoch_timeout(
+                &config,
+                previous.clone(),
+                Arc::new(make_signer(
+                    &record.consensus_key_id,
+                    &keys[0].public_key,
+                    keys[0].private_key.as_bytes(),
+                )),
+                &record.validator_id,
                 &record.consensus_key_id,
-                &keys[0].public_key,
-                keys[0].private_key.as_bytes(),
-            )),
-            &record.validator_id,
-            &record.consensus_key_id,
-        );
+            );
+        }
         let mut next = binding.clone();
         next.signer_key_id = "recovery-test-replacement".into();
         next.payload.epoch = 2;
@@ -415,6 +444,17 @@ fn exercise_native_recovery(read_only_transport: bool) {
         assert_eq!(activate_observer(&observer).unwrap()["repeated"], true);
         let observer_authority = load(&observer).unwrap().unwrap();
         assert_eq!(observer_authority.epoch.epoch, 2);
+        if long_boundary {
+            successor::qualify_offline_successor(
+                &observer,
+                &observer_authority,
+                &next,
+                &keys,
+                &new_signer,
+                &engine,
+            );
+            continue;
+        }
         if read_only_transport {
             verify_published_witness_without_writer(
                 &observer,
@@ -586,11 +626,10 @@ fn verify_published_witness_without_writer(
     assert_eq!(authenticated.finalized, *finalized);
     let mut altered: StoredEpochTransition = serde_json::from_slice(&published).unwrap();
     altered.next_epoch += 1;
-    assert!(verify_stored_transition(
-        config,
-        restarted,
-        &serde_json::to_vec(&altered).unwrap()
-    ).is_err());
+    assert!(
+        verify_stored_transition(config, restarted, &serde_json::to_vec(&altered).unwrap())
+            .is_err()
+    );
     fs::remove_dir(&writer_lock).unwrap();
     fs::rename(&saved_lock, &writer_lock).unwrap();
 }
