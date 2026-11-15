@@ -786,6 +786,10 @@ fn execute_sts_transaction(
     sts_payload: StsSignedPayload,
     synq_context: SynQExecutionContext,
 ) -> Result<TransactionReceipt, String> {
+    #[cfg(feature = "engineering-nf1-sales")]
+    if nft_sales::is_sale(&sts_payload.tx) {
+        return nft_sales::execute(id, tx, state, &sts_payload, synq_context);
+    }
     let sender = tx.sender_uma_or_account.clone();
     let sender_balance = state.balances_nwei.get(&sender).copied().unwrap_or(0);
     let fee_nwei = tx.max_fee_nwei;
@@ -862,6 +866,10 @@ fn execute_sts_transaction(
         }
     }
 }
+
+#[cfg(feature = "engineering-nf1-sales")]
+#[path = "execution/nft_sales.rs"]
+mod nft_sales;
 
 fn charge_fee_to_collector(
     state: &mut ExecutionState,

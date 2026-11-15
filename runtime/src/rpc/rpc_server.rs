@@ -3492,6 +3492,12 @@ fn handle_json_rpc(
 
         "synergy_stsGetNft" | "sts_getNft" | "sts_get_nft" => sts_nft_json(&params, chain),
 
+        #[cfg(feature = "engineering-nf1-sales")]
+        "sts_getNftSaleCapabilities" => sts_nft_sale_capabilities_json(chain),
+
+        #[cfg(feature = "engineering-nf1-sales")]
+        "sts_getNftSaleListing" => sts_nft_sale_listing_json(&params, chain),
+
         "synergy_stsGetNftsByOwner" | "sts_getNftsByOwner" | "sts_get_nfts_by_owner" => {
             sts_nfts_by_owner_json(&params, chain)
         }
@@ -6239,6 +6245,8 @@ fn ip_in_prefix(peer_ip: IpAddr, network_ip: IpAddr, prefix: u8) -> bool {
 
 fn rpc_method_exposure(method: &str) -> Option<RpcMethodExposure> {
     match method {
+        #[cfg(feature = "engineering-nf1-sales")]
+        "sts_getNftSaleCapabilities" | "sts_getNftSaleListing" => Some(RpcMethodExposure::PublicRead),
         "synergy_subscribe"
         | "synergy_unsubscribe"
         | "synergy_getAccountNonce"
@@ -8124,7 +8132,7 @@ fn transaction_receipt_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> V
                     let block = entry.body.as_ref().expect("cached authority entry has a body");
                     let tx = &block.transactions[index];
                     let status = if receipt.status == crate::execution::ReceiptStatus::Success { "0x1" } else { "0x0" };
-                    json!({
+                    let response = json!({
                         "transactionHash": tx.hash(),
                         "transactionIndex": index,
                         "blockHash": block.hash,
@@ -8137,7 +8145,14 @@ fn transaction_receipt_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> V
                         "feeCharged": receipt.fee_breakdown.as_ref().map(|fee| u128_rpc_value(fee.total_network_fee_nwei)),
                         "finalized": true,
                         "chain": chain_identity_json(),
-                    })
+                    });
+                    #[cfg(feature = "engineering-nf1-sales")]
+                    let response = {
+                        let mut response = response;
+                        response["executionTxId"] = json!(receipt.tx_id.0);
+                        response
+                    };
+                    response
                 }
                 Ok(_) => Value::Null,
                 Err(error) => json!({"error": error}),
@@ -8583,6 +8598,87 @@ fn sts_nft_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
             }),
         },
         Err(error) => sts_unavailable_json(error.message),
+    }
+}
+
+#[cfg(feature = "engineering-nf1-sales")]
+fn finalized_nft_sale_report(chain: &Arc<Mutex<BlockChain>>) -> Result<StsReplayReport, String> {
+    use crate::rpc::single_authority_finality_rpc::{
+        genesis_binds_single_authority, single_authority_finalized_head_for_rpc,
+    };
+
+    let genesis = canonical_genesis()?;
+    if genesis.chain_id() != crate::execution::TESTNET_V3_GENESIS_CHAIN_ID
+        || !genesis_binds_single_authority(genesis)
+    {
+        return Err("NF1 sales require Chain 1266 single-authority finality".to_string());
+    }
+    let state = finalized_synq_query_state()?;
+    let head = single_authority_finalized_head_for_rpc(genesis)?
+        .ok_or_else(|| "Chain 1266 finalized head is unavailable".to_string())?;
+    // The journal can advance just before the corresponding state snapshot
+    // becomes available. Never serve a listing under a different state root.
+    if crate::execution::compute_state_root_after(&state)? != head.state_root {
+        return Err("Chain 1266 finalized state snapshot has not reached the head".to_string());
+    }
+    let chain = chain
+        .lock()
+        .map_err(|_| "Chain 1266 state is unavailable".to_string())?;
+    Ok(sts_report_from_finalized_execution_state(
+        &chain,
+        state,
+        head.height,
+        head.block_hash.to_hex(),
+    ))
+}
+
+#[cfg(feature = "engineering-nf1-sales")]
+fn sts_nft_sale_capabilities_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
+    match finalized_nft_sale_report(chain) {
+        Ok(report) => json!({
+            "success": true,
+            "supported": true,
+            "protocol": "sts-nf1-sales-v1",
+            "operations": ["list_nft_for_snrg", "cancel_nft_sale", "buy_nft_for_snrg"],
+            "source": report.source,
+            "replay": sts_replay_metadata_json(&report),
+        }),
+        Err(error) => sts_unavailable_json(error),
+    }
+}
+
+#[cfg(feature = "engineering-nf1-sales")]
+fn sts_nft_sale_listing_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
+    let Some(nft_id) = sts_rpc_nft_param(params, 0) else {
+        return json!("Missing NF1 NFT ID parameter");
+    };
+    if crate::sts::validate_sts_object_id(crate::sts::TokenClass::NF1StandardNft, &nft_id).is_err() {
+        return json!("Invalid NF1 NFT ID");
+    }
+    match finalized_nft_sale_report(chain) {
+        Ok(report) => {
+            let item = report
+                .state
+                .nft_sale_listing(&nft_id)
+                .filter(|listing| listing.is_active_at(report.latest_height))
+                .map(|listing| {
+                    json!({
+                        "listing_id": listing.listing_id,
+                        "nft_id": listing.nft_id,
+                        "seller": listing.seller,
+                        "price_nwei": listing.price_nwei.to_string(),
+                        "expires_at_height": listing.expires_at_height,
+                    })
+                });
+            json!({
+                "success": true,
+                "nft_id": nft_id,
+                "item": item,
+                "source": report.source,
+                "replay": sts_replay_metadata_json(&report),
+            })
+        }
+        Err(error) => sts_unavailable_json(error),
     }
 }
 
@@ -11633,6 +11729,14 @@ mod tests {
         );
         assert_eq!(report.scanned_blocks, 0);
         assert_eq!(definition.symbol, "TGLD");
+    }
+
+    #[test]
+    fn nft_sale_read_methods_follow_the_engineering_feature() {
+        let expected =
+            cfg!(feature = "engineering-nf1-sales").then_some(RpcMethodExposure::PublicRead);
+        assert_eq!(rpc_method_exposure("sts_getNftSaleCapabilities"), expected);
+        assert_eq!(rpc_method_exposure("sts_getNftSaleListing"), expected);
     }
 
     #[test]

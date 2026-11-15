@@ -192,6 +192,9 @@ path = "bin/audit-testnet-v3-address-migration.rs"
 # custody decryptor. Kept behind a feature so the default library build and the
 # release five-run gate are unaffected.
 ceremony = []
+# Local qualification only. This changes transaction execution and must be
+# activated by a network release before an authority enables it on a live chain.
+engineering-nf1-sales = []
 
 [[bin]]
 name = "synergy-genesis-ceremony"
