@@ -4619,7 +4619,19 @@ impl ProofOfSynergy {
         tx: &crate::transaction::Transaction,
     ) -> Result<(), String> {
         let pqc_manager = Arc::new(Mutex::new(PQCManager::new()));
-        Self::validate_transaction_detailed(tx, &pqc_manager)
+        Self::validate_transaction_detailed(tx, &pqc_manager)?;
+        #[cfg(feature = "engineering-nf1-sales")]
+        if let Some(data) = tx
+            .data
+            .as_deref()
+            .filter(|_| crate::aegis_tx_tool::is_legacy_aegis_carrier_transaction(tx))
+        {
+            let envelope = crate::aegis_tx_tool::decode_aegis_carrier_data(data)?;
+            crate::rpc::rpc_server::require_current_nf1_sale_activation(
+                &envelope.transaction.payload,
+            )?;
+        }
+        Ok(())
     }
 
     fn validate_transaction(

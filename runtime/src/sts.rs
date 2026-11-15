@@ -8,6 +8,11 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "engineering-nf1-sales")]
+mod nft_sales;
+#[cfg(feature = "engineering-nf1-sales")]
+pub use nft_sales::NftSaleListing;
+
 pub const STS_TESTNET_CHAIN_ID: u64 = 1_266;
 pub const STS_TESTNET_NETWORK: &str = "synergy-testnet-v3";
 pub const STS_PAYLOAD_PREFIX: &[u8] = b"synergy-sts-v1:";
@@ -151,6 +156,18 @@ pub enum StsError {
     ReservedTokenIdentity,
     UnsafeTokenPractice,
     ImageAlreadySet,
+    #[cfg(feature = "engineering-nf1-sales")]
+    NftSaleExecutionContextRequired,
+    #[cfg(feature = "engineering-nf1-sales")]
+    NftSaleAlreadyListed,
+    #[cfg(feature = "engineering-nf1-sales")]
+    NftSaleListingNotFound,
+    #[cfg(feature = "engineering-nf1-sales")]
+    NftSaleTermsMismatch,
+    #[cfg(feature = "engineering-nf1-sales")]
+    NftSaleInvalidExpiry,
+    #[cfg(feature = "engineering-nf1-sales")]
+    NftSaleExpired,
 }
 
 impl fmt::Display for StsError {
@@ -760,6 +777,24 @@ pub enum StsTx {
     },
     CreateNftCollection(CreateNftCollectionParams),
     MintNft(MintNftParams),
+    #[cfg(feature = "engineering-nf1-sales")]
+    ListNftForSnrg {
+        nft_id: String,
+        price_nwei: u128,
+        expires_at_height: u64,
+    },
+    #[cfg(feature = "engineering-nf1-sales")]
+    CancelNftSale {
+        nft_id: String,
+        listing_id: String,
+    },
+    #[cfg(feature = "engineering-nf1-sales")]
+    BuyNftForSnrg {
+        nft_id: String,
+        listing_id: String,
+        expected_seller: String,
+        price_nwei: u128,
+    },
     TransferNft {
         nft_id: String,
         from: String,
@@ -971,6 +1006,10 @@ pub struct StsState {
     pub nft_collections: BTreeMap<String, NftCollection>,
     #[serde(default)]
     pub nft_instances: BTreeMap<String, NftInstance>,
+    // Omitting empty sale state preserves the serialized roots of pre-listing blocks.
+    #[cfg(feature = "engineering-nf1-sales")]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    nft_sale_listings: BTreeMap<String, NftSaleListing>,
     #[serde(default)]
     pub multi_asset_collections: BTreeMap<String, MultiAssetCollection>,
     #[serde(default)]
@@ -995,6 +1034,8 @@ impl StsState {
             next_snapshot_id: 1,
             nft_collections: BTreeMap::new(),
             nft_instances: BTreeMap::new(),
+            #[cfg(feature = "engineering-nf1-sales")]
+            nft_sale_listings: BTreeMap::new(),
             multi_asset_collections: BTreeMap::new(),
             multi_asset_items: BTreeMap::new(),
             multi_asset_balances: BTreeMap::new(),
@@ -1081,6 +1122,10 @@ impl StsState {
                 }
             }
             StsTx::MintNft(params) => self.mint_nft(sender, params.clone()).map(|_| ()),
+            #[cfg(feature = "engineering-nf1-sales")]
+            StsTx::ListNftForSnrg { .. }
+            | StsTx::CancelNftSale { .. }
+            | StsTx::BuyNftForSnrg { .. } => Err(StsError::NftSaleExecutionContextRequired),
             StsTx::TransferNft {
                 nft_id,
                 from,
@@ -1632,6 +1677,8 @@ impl StsState {
             nft.updated_at = timestamp;
             nft.collection_id.clone()
         };
+        #[cfg(feature = "engineering-nf1-sales")]
+        self.nft_sale_listings.remove(nft_id);
         self.push_event(StsEvent {
             event_type: "StsNftTransferred".to_string(),
             token_id: Some(nft_id.to_string()),
@@ -1683,6 +1730,8 @@ impl StsState {
             nft.updated_at = timestamp;
             nft.collection_id.clone()
         };
+        #[cfg(feature = "engineering-nf1-sales")]
+        self.nft_sale_listings.remove(nft_id);
         self.push_event(StsEvent {
             event_type: "StsNftBurned".to_string(),
             token_id: Some(nft_id.to_string()),
@@ -3692,6 +3741,12 @@ pub fn estimate_sts_gas(tx: &StsTx) -> u64 {
         StsTx::SetFungibleImage { .. } => 35_000,
         StsTx::CreateNftCollection(_) => 135_000,
         StsTx::MintNft(_) => 75_000,
+        #[cfg(feature = "engineering-nf1-sales")]
+        StsTx::ListNftForSnrg { .. } => 65_000,
+        #[cfg(feature = "engineering-nf1-sales")]
+        StsTx::CancelNftSale { .. } => 45_000,
+        #[cfg(feature = "engineering-nf1-sales")]
+        StsTx::BuyNftForSnrg { .. } => 85_000,
         StsTx::TransferNft { .. } => 50_000,
         StsTx::BurnNft { .. } => 45_000,
         StsTx::FreezeNft { .. } | StsTx::ThawNft { .. } => 40_000,

@@ -786,6 +786,14 @@ fn execute_sts_transaction(
     sts_payload: StsSignedPayload,
     synq_context: SynQExecutionContext,
 ) -> Result<TransactionReceipt, String> {
+    #[cfg(feature = "engineering-nf1-sales")]
+    if nft_sales::is_sale(&sts_payload.tx) {
+        if !nf1_sales_enabled_for_execution_at(synq_context.runtime_block_height) {
+            // Preserve the legacy decoder's response to an unknown STS operation.
+            return Err(crate::sts::StsError::InvalidMetadata.to_string());
+        }
+        return nft_sales::execute(id, tx, state, &sts_payload, synq_context);
+    }
     let sender = tx.sender_uma_or_account.clone();
     let sender_balance = state.balances_nwei.get(&sender).copied().unwrap_or(0);
     let fee_nwei = tx.max_fee_nwei;
@@ -861,6 +869,44 @@ fn execute_sts_transaction(
             })
         }
     }
+}
+
+#[cfg(feature = "engineering-nf1-sales")]
+#[path = "execution/nft_sales.rs"]
+mod nft_sales;
+
+/// Identify a decoded NF1 sale without interpreting its validity at any height.
+#[cfg(feature = "engineering-nf1-sales")]
+pub(crate) fn is_nf1_sale_payload(payload: &[u8]) -> bool {
+    crate::sts::decode_sts_payload(payload)
+        .is_ok_and(|payload| payload.is_some_and(|payload| nft_sales::is_sale(&payload.tx)))
+}
+
+#[cfg(feature = "engineering-nf1-sales")]
+pub(crate) fn nf1_sales_enabled_for_execution_at(height: u64) -> bool {
+    #[cfg(test)]
+    if let Some(activation) = NF1_SALES_TEST_ACTIVATION.with(std::cell::Cell::get) {
+        return height >= activation;
+    }
+    crate::nf1_sales_activation::enabled_at(height)
+}
+
+#[cfg(all(test, feature = "engineering-nf1-sales"))]
+thread_local! {
+    static NF1_SALES_TEST_ACTIVATION: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(all(test, feature = "engineering-nf1-sales"))]
+pub(crate) fn with_nf1_sales_test_activation<T>(height: u64, test: impl FnOnce() -> T) -> T {
+    struct Restore(Option<u64>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            NF1_SALES_TEST_ACTIVATION.with(|activation| activation.set(self.0));
+        }
+    }
+    let _restore =
+        Restore(NF1_SALES_TEST_ACTIVATION.with(|activation| activation.replace(Some(height))));
+    test()
 }
 
 fn charge_fee_to_collector(
@@ -1764,6 +1810,71 @@ mod tests {
         );
         assert_ne!(result.state_root_after, state_root_before);
         assert_eq!(result.state.fee_events.len(), state.fee_events.len() + 1);
+    }
+
+    #[test]
+    fn historical_nf1_execution_matches_the_pre_sales_roots() {
+        let _ledger_guard = reward_ledger_test_scope();
+        use crate::sts::{
+            encode_sts_payload, CreateNftCollectionParams, StsSignedPayload, StsTx, TokenClass,
+        };
+        const TIMESTAMP: u64 = 1_790_000_000;
+        const HEIGHT: u64 = 12;
+        let sender = crate::address::generate_wallet_address("historical-nf1-execution-fixture");
+        let mut transaction = tx(&sender, &sender, 0, 1, "sts:global");
+        transaction.gas_limit = 135_000;
+        transaction.max_fee_nwei = 5_400_000;
+        transaction.payload = encode_sts_payload(&StsSignedPayload::new(
+            StsTx::CreateNftCollection(CreateNftCollectionParams {
+                class: TokenClass::NF1StandardNft,
+                creator: sender.clone(),
+                creator_nonce: 16,
+                name: "Historical NFT Fixture".to_owned(),
+                symbol: "HISTNF".to_owned(),
+                metadata_uri: None,
+                metadata_hash: None,
+                metadata_mutable: false,
+                image_uri: None,
+                image_hash: None,
+                collection_authority: None,
+                mint_authority: None,
+                metadata_authority: None,
+                royalty_basis_points: None,
+                royalty_recipient: None,
+                transferable: true,
+                requires_issuer_approval: false,
+                created_at: TIMESTAMP,
+            }),
+        ))
+        .unwrap();
+        let mut state = ExecutionState::new().with_balance(&sender, 1_000_000_000);
+        state.mark_authorized_at(&transaction, TIMESTAMP).unwrap();
+        let evaluate = || {
+            execute_block_contents(
+                &ExecutionBlockContext {
+                    height: Height(HEIGHT),
+                    timestamp_ms: TIMESTAMP * 1_000,
+                },
+                std::slice::from_ref(&transaction),
+                &state,
+            )
+            .unwrap()
+        };
+        #[cfg(not(feature = "engineering-nf1-sales"))]
+        let result = evaluate();
+        #[cfg(feature = "engineering-nf1-sales")]
+        let result = with_nf1_sales_test_activation(HEIGHT + 1, evaluate);
+        assert_eq!(result.receipts[0].status, ReceiptStatus::Success);
+        // Golden vectors captured with the default runtime, where sale
+        // operations are absent from the STS transaction enum.
+        assert_eq!(
+            result.state_root_after.to_hex(),
+            "24cd6771567de899f816419acdd8e32717e11eeb0c33d2e0f8dc4c08bed390a1"
+        );
+        assert_eq!(
+            result.receipt_root.to_hex(),
+            "8f4e8270c4f990acb1dd41cad7076877a22037426c5369aa7c72829f934e2982"
+        );
     }
 
     #[test]

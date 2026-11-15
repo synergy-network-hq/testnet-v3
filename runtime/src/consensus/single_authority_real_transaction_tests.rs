@@ -845,3 +845,7 @@ fn t02_fixture_genesis_resolves_through_canonical_genesis() {
     }
     assert_eq!(resolved, fixture.genesis_hash);
 }
+
+#[cfg(feature = "engineering-nf1-sales")]
+#[path = "single_authority_real_nft_sale_tests.rs"]
+mod nft_sale;

@@ -4,47 +4,47 @@
 //! break the sign-once and one-block-per-height guarantees, so writable open
 //! must be exclusive. Read-only inspection never takes the writer role.
 
-use std::collections::HashSet;
+use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
 
-static HELD_WRITER_PATHS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
-
-fn held() -> &'static Mutex<HashSet<PathBuf>> {
-    HELD_WRITER_PATHS.get_or_init(|| Mutex::new(HashSet::new()))
-}
-
-/// RAII writer claim. Dropping it releases the path for reuse.
+/// RAII writer claim. Keep the lock file in place when releasing the lock so
+/// every upgraded process locks the same inode.
 #[derive(Debug)]
 pub struct SingleAuthorityWriterLock {
     path: PathBuf,
+    _file: File,
 }
 
 impl SingleAuthorityWriterLock {
     pub fn acquire(path: &Path) -> Result<Self, String> {
-        let canonical = path.to_path_buf();
-        let mut guard = held()
-            .lock()
-            .map_err(|_| "single-authority writer lock poisoned".to_string())?;
-        if !guard.insert(canonical.clone()) {
-            return Err(format!(
-                "single-authority writable state {} is already open for writing; \
-                 refusing a second writer",
-                canonical.display()
-            ));
+        let lock_path = path.with_extension("writer.lock");
+        if let Some(parent) = lock_path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("Create single-authority lock directory: {error}"))?;
         }
-        Ok(Self { path: canonical })
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|error| format!("Open writer lock {}: {error}", lock_path.display()))?;
+        file.try_lock().map_err(|error| {
+            format!(
+                "single-authority writable state {} is already open for writing or cannot be locked: {error}",
+                path.display()
+            )
+        })?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            _file: file,
+        })
     }
 
     pub fn path(&self) -> &Path {
         &self.path
-    }
-}
-
-impl Drop for SingleAuthorityWriterLock {
-    fn drop(&mut self) {
-        if let Ok(mut guard) = held().lock() {
-            guard.remove(&self.path);
-        }
     }
 }

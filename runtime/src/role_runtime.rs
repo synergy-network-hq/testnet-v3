@@ -1321,7 +1321,8 @@ fn resolve_chain1266_startup_release_id(
     config: &NodeConfig,
     profile: &'static crate::role_profiles::RoleProfile,
     config_path: &Path,
-) -> Result<String, String> {
+    binary_name: &'static str,
+) -> Result<(String, Option<crate::nf1_sales_activation::VerifiedNf1SalesActivation>), String> {
     use crate::consensus::chain1266_startup_dispatch::{
         dispatch_chain1266_startup, Chain1266StartupDispatch,
     };
@@ -1335,7 +1336,7 @@ fn resolve_chain1266_startup_release_id(
 
     match dispatch {
         Chain1266StartupDispatch::SingleAuthorityV2 => {
-            verify_chain1266_incarnation5_single_authority_startup(config)
+            verify_chain1266_incarnation5_single_authority_startup(config, binary_name)
         }
         Chain1266StartupDispatch::CoordinatedV1 | Chain1266StartupDispatch::NonChain1266 => {
             crate::desired_state::verify_chain1266_desired_state(
@@ -1343,6 +1344,7 @@ fn resolve_chain1266_startup_release_id(
                 &config.identity.node_id,
                 config_path,
             )
+            .map(|release_id| (release_id, None))
         }
     }
 }
@@ -1351,10 +1353,13 @@ fn resolve_chain1266_startup_release_id(
 /// and hands them to the one existing V2 verifier plus the launch pins.
 fn verify_chain1266_incarnation5_single_authority_startup(
     config: &NodeConfig,
-) -> Result<String, String> {
-    use crate::consensus::chain1266_startup_dispatch::{
-        verify_single_authority_v2_activation, SingleAuthorityLaunchPins,
+    binary_name: &'static str,
+) -> Result<(String, Option<crate::nf1_sales_activation::VerifiedNf1SalesActivation>), String> {
+    use crate::consensus::chain1266_startup_dispatch::LAUNCH_RELEASE_ID;
+    use crate::nf1_sales_activation::{
+        verify_installed_activation, MAX_NF1_SALES_ACTIVATION_BYTES, NF1_SALES_ACTIVATION_PATH,
     };
+    use std::io::Read;
 
     let desired_state_path = crate::utils::resolve_data_path(INSTALLED_DESIRED_STATE_V2_PATH);
     let authorization_path =
@@ -1390,13 +1395,54 @@ fn verify_chain1266_incarnation5_single_authority_startup(
     // applied later by `resolve_installed_signed_consensus_startup` when the
     // consensus driver is selected.
     let expectation = build_genesis_startup_expectation(config)?;
-    verify_single_authority_v2_activation(
+    let manifest = match fs::File::open(crate::utils::resolve_data_path(NF1_SALES_ACTIVATION_PATH)) {
+        Ok(file) => {
+            let mut bytes = Vec::new();
+            file.take((MAX_NF1_SALES_ACTIVATION_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)
+                .map_err(|error| format!("Read NF1 sales activation manifest: {error}"))?;
+            Some(bytes)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("Open NF1 sales activation manifest: {error}")),
+    };
+    let binary_digest = if manifest.is_some() {
+        running_role_binary_sha256()?
+    } else {
+        String::new()
+    };
+    let activation = verify_installed_activation(
+        manifest.as_deref(),
         &desired_state_bytes,
         &signed,
         &expectation,
         &resolve_local_validator_address(config),
-        &SingleAuthorityLaunchPins::incarnation5(),
-    )
+        binary_name,
+        &binary_digest,
+    )?;
+    if activation.is_some() && !cfg!(feature = "engineering-nf1-sales") {
+        return Err("This binary does not support NF1 sales activation".to_string());
+    }
+    Ok((LAUNCH_RELEASE_ID.to_string(), activation))
+}
+
+fn running_role_binary_sha256() -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+
+    #[cfg(target_os = "linux")]
+    let path = Path::new("/proc/self/exe");
+    #[cfg(not(target_os = "linux"))]
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("Resolve running executable: {error}"))?;
+    #[cfg(not(target_os = "linux"))]
+    let path = executable.as_path();
+
+    let mut executable = fs::File::open(path)
+        .map_err(|error| format!("Open running executable {}: {error}", path.display()))?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut executable, &mut hasher)
+        .map_err(|error| format!("Hash running executable: {error}"))?;
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// Startup expectation derived purely from the canonical Genesis document and
@@ -2491,6 +2537,7 @@ fn single_authority_durable_paths(
 fn build_single_authority_runtime_inputs(
     config: &NodeConfig,
     plan: &SingleAuthorityStartupPlan,
+    paths: crate::consensus::single_authority_startup::SingleAuthorityDurablePaths,
 ) -> Result<
     crate::consensus::single_authority_driver::SingleAuthorityRuntimeInputs,
     String,
@@ -2529,9 +2576,6 @@ fn build_single_authority_runtime_inputs(
         );
     }
 
-    let paths = single_authority_durable_paths(plan);
-    crate::consensus::single_authority_startup::require_durable_binding_agreement(plan, &paths)?;
-
     Ok(
         crate::consensus::single_authority_driver::SingleAuthorityRuntimeInputs {
             chain_id: plan.chain_id,
@@ -2562,12 +2606,23 @@ fn build_single_authority_runtime_inputs(
 fn spawn_single_authority_driver(
     config: &NodeConfig,
     plan: &SingleAuthorityStartupPlan,
+    execution_activation: Option<&crate::nf1_sales_activation::VerifiedNf1SalesActivation>,
     running: Arc<AtomicBool>,
 ) -> Result<SingleAuthorityWorker, String> {
-    let inputs = build_single_authority_runtime_inputs(config, plan)?;
+    let paths = single_authority_durable_paths(plan);
+    let inputs = build_single_authority_runtime_inputs(config, plan, paths.clone())?;
     let target_block_time_ms = inputs.target_block_time_ms;
     let mut driver =
-        crate::consensus::single_authority_driver::SingleAuthorityDriver::start(inputs)?;
+        crate::consensus::single_authority_driver::SingleAuthorityDriver::start_with_preflight(
+            inputs,
+            || {
+                crate::consensus::single_authority_startup::prepare_durable_single_authority_startup(
+                    plan,
+                    &paths,
+                    execution_activation,
+                )
+            },
+        )?;
     install_finalized_execution_state_snapshot(driver.execution_state().clone())
         .map_err(|error| format!("install single-authority execution-state snapshot: {error}"))?;
 
@@ -4217,10 +4272,11 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
             // verifier; incarnation 5 with single_authority_v1 is governed
             // exclusively by the ML-DSA-87 signed DesiredStateV2 and must never
             // invoke or accept V1.
-            let release_id = resolve_chain1266_startup_release_id(
+            let (release_id, execution_activation) = resolve_chain1266_startup_release_id(
                 &config,
                 desired_role_profile,
                 &effective_config_path,
+                binary_name,
             )
             .unwrap_or_else(|error| {
                 eprintln!("Failed to validate Chain 1266 desired state: {error}");
@@ -4817,7 +4873,12 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                         "target_block_time_ms" => plan.target_block_time_ms
                     );
                     // No network handle, no ingress, no peers.
-                    match spawn_single_authority_driver(&config, &plan, Arc::clone(&running)) {
+                    match spawn_single_authority_driver(
+                        &config,
+                        &plan,
+                        execution_activation.as_ref(),
+                        Arc::clone(&running),
+                    ) {
                         Ok(worker) => Some(FinalizedConsensusWorker::SingleAuthority(worker)),
                         Err(error) => {
                             eprintln!("Consensus startup failed closed: {error}");
@@ -4892,6 +4953,7 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                                 match spawn_single_authority_driver(
                                     &config,
                                     &plan,
+                                    execution_activation.as_ref(),
                                     Arc::clone(&running),
                                 ) {
                                     Ok(worker) => {
