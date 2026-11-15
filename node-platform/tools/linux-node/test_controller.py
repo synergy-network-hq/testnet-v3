@@ -131,12 +131,19 @@ class ControllerTests(unittest.TestCase):
         path=self.root/'tmp/pending-validator-custody'
         pin='b'*64
         selection={'chain_id':'999999','network_id':'test-network','genesis_sha256':pin,
-                   'genesis_authority_verified':True}
+                   'genesis_authority_verified':True,'schema':'nodenetwork-existing-identity-network-v1'}
         with patch.object(lifecycle,'_sealed_receipt'), \
              patch.object(self.controller,'identity_network',return_value=(selection,[])), \
              patch.object(self.controller,'authorize') as authorize, \
              patch.object(synergy_linux,'native') as native:
             self.assertEqual(self.controller.identity_status(),{'pending':False})
+            native.assert_not_called()
+            req=request('identity_generate',{'genesis_sha256':pin})
+            key=self.controller.exact_request_receipt(
+                c.IDENTITY_INTENT,'identity_generate','genesis_sha256',pin,create=True)
+            self.assertEqual(key,c.request_digest(req))
+            with self.assertRaisesRegex(c.Refused,'Interrupted identity preparation'):
+                self.controller.identity_status()
             native.assert_not_called()
             path.mkdir()
             native.return_value=c.canonical({'address':'synv11lrh6jcxaejkj4zv994j7qwn2rk6u3ar4emn',
@@ -145,6 +152,7 @@ class ControllerTests(unittest.TestCase):
             status=self.controller.identity_status()
             self.assertTrue(status['pending'])
             self.assertTrue(status['possession_verified'])
+            self.assertEqual(status['request_sha256'],key)
             self.assertNotIn('unlock',status)
             self.assertIn('verify-validator-custody',native.call_args.args[0])
             native.side_effect=ValueError('incomplete')

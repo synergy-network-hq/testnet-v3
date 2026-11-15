@@ -890,6 +890,10 @@ def _commission_locked(root, staged, formation_public_pins):
             'fresh installation selection differs from commissioned inputs')
     pending=root/'tmp/pending-validator-custody'
     identity_network=root/'tmp/identity-network'
+    existing_intent=root/'tmp/existing-network-identity-request.json'
+    existing_join=existing_intent.exists() or existing_intent.is_symlink()
+    require(not existing_join or (not formed and pending.exists()),
+            'Existing-network custody preparation is incomplete or conflicts with formation')
     if pending.exists() or pending.is_symlink():
         from apqe_layout import require_frozen_tree
         require_frozen_tree(pending)
@@ -908,6 +912,14 @@ def _commission_locked(root, staged, formation_public_pins):
         network_names={'genesis.json','authority.json','authority-root.pub'}
         actual_names={path.name for path in identity_network.iterdir()}
         approved_names=(network_names,network_names|{'stage-request.json'}) if formed else (network_names,)
+        if existing_join:
+            from controller import Controller, IDENTITY_INTENT
+            controller=Controller(root)
+            selection,_=controller.identity_network()
+            require(selection.get('schema')=='nodenetwork-existing-identity-network-v1'
+                    and 'stage_request_sha256' in selection, 'Certified existing-network staging receipt is required')
+            controller.exact_request_receipt(IDENTITY_INTENT,'identity_generate','genesis_sha256',selection['genesis_sha256'])
+            approved_names=(network_names|{'stage-request.json'},)
         require(actual_names in approved_names
                 and all(digest(identity_network/name)==digest(staged/'network'/name) for name in network_names),
                 'Commissioning network differs from prepared APQE identity')
@@ -918,6 +930,8 @@ def _commission_locked(root, staged, formation_public_pins):
     if pending.exists():
         shutil.rmtree(pending)
         shutil.rmtree(identity_network)
+    if existing_join:
+        existing_intent.unlink()
     if formed:
         shutil.rmtree(formation)
         shutil.rmtree(root/'tmp/commissioning-public')

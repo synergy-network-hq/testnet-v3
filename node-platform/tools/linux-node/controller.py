@@ -38,6 +38,7 @@ FORMATION_CONTEXT = 'tmp/formation-context.json'
 FORMATION_CUSTODY = 'tmp/pre-genesis-validator'
 FORMATION_INTENT = 'tmp/formation-prepare-request.json'
 GENESIS_BIND_INTENT = 'tmp/genesis-bind-request.json'
+IDENTITY_INTENT = 'tmp/existing-network-identity-request.json'
 GENESIS_STAGE = 'tmp/identity-network'
 GENESIS_STAGE_WORK = 'tmp/.identity-network-stage'
 GENESIS_STAGE_RECEIPT = 'stage-request.json'
@@ -259,7 +260,8 @@ class Controller:
         require(keys.is_dir() and not keys.is_symlink(),'Canonical private keys directory required')
         require(not (self.root/'data').exists() and not (self.root/'data').is_symlink()
                 and not pending.exists() and not pending.is_symlink() and not list(keys.iterdir())
-                and not self.exists(FORMATION_CUSTODY) and not self.exists(FORMATION_INTENT),
+                and not self.exists(FORMATION_CUSTODY) and not self.exists(FORMATION_INTENT)
+                and not self.exists(IDENTITY_INTENT),
                 'Existing custody, incomplete generation or node data must be reconciled before identity provisioning')
         return self.identity_network()
 
@@ -534,10 +536,17 @@ class Controller:
         with _lifecycle_lock(self.root):
             _sealed_receipt(self.root)
             path = self.root/'tmp/pending-validator-custody'
-            if not path.exists() and not path.is_symlink(): return {'pending':False}
+            if not path.exists() and not path.is_symlink():
+                require(not self.exists(IDENTITY_INTENT),
+                        'Interrupted identity preparation requires local reconciliation','reconciliation_required')
+                return {'pending':False}
             try:
                 selection, flags = self.identity_network()
-                return {'pending':True, **self.checked_custody(selection,flags,'verify-validator-custody')}
+                result=self.checked_custody(selection,flags,'verify-validator-custody')
+                if self.exists(IDENTITY_INTENT):
+                    result['request_sha256']=self.exact_request_receipt(
+                        IDENTITY_INTENT,'identity_generate','genesis_sha256',selection['genesis_sha256'])
+                return {'pending':True, **result}
             except (Refused,OSError,ValueError,KeyError,TypeError,subprocess.SubprocessError):
                 raise Refused('reconciliation_required','Pending custody could not be verified. Preserve the files and reconcile locally before trying again.') from None
 
@@ -548,7 +557,12 @@ class Controller:
             pin = selection['genesis_sha256']
             require(request['parameters']['genesis_sha256']==pin,'The reviewed Genesis artifact changed; inspect it again')
             self.authorize(request)
-            return self.checked_custody(selection,flags,'provision-validator-custody')
+            scoped=selection.get('schema')=='nodenetwork-existing-identity-network-v1'
+            if scoped:
+                key=self.exact_request_receipt(IDENTITY_INTENT,'identity_generate','genesis_sha256',pin,create=True)
+            result=self.checked_custody(selection,flags,'provision-validator-custody')
+            if scoped: result['request_sha256']=key
+            return result
 
     def vpn_status(self):
         import lifecycle as life
