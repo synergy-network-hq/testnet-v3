@@ -5,6 +5,9 @@ use crate::services::qualification_timing::{
     processing_span as diagnostic_span, ProcessingStage as DiagnosticStage,
 };
 
+#[path = "etdag_processing_recovery.rs"]
+mod historical_recovery;
+
 use super::*;
 use crate::services::processing_pipeline::*;
 use crate::services::processing_store::{
@@ -53,6 +56,7 @@ pub(super) struct ProcessingWork {
     authorization_root: String,
     requested_source: Option<(ProcessingContext, String)>,
     context_published: bool,
+    recovered_order: Option<crate::services::apqe_transport::Stamp>,
 }
 struct LiveVerifier {
     transition: Option<crate::services::authority::VerifiedTransitionContext>,
@@ -525,6 +529,7 @@ impl EtdagService {
             authorization_root,
             requested_source: None,
             context_published: publish_genesis,
+            recovered_order: None,
         });
         if let Some(handle) = &self.wallet_admission {
             let response = if publish_genesis {
@@ -1130,6 +1135,7 @@ impl EtdagService {
         Ok(())
     }
     fn poll_pending_work_inner(&mut self, work: &mut ProcessingWork) -> Result<(), String> {
+        self.recover_historical_member(work)?;
         self.reconcile_finalized_processing(work)?;
         self.refresh_processing_context(work)?;
         self.retry_finalized_processing_shares(work)?;

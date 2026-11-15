@@ -544,6 +544,84 @@ fn verify_completion(
 }
 
 impl PendingProcessingStore {
+    /// Install the exact original request and authenticated ordering evidence
+    /// together. A donor's slot number, reveal progress and finalized bit do
+    /// not cross this boundary. The owner must bind the member to a local QC.
+    pub(super) fn recover_ordered_member(
+        &mut self,
+        original: &[u8],
+        donor_progress: &[u8],
+        verifier: &impl ProcessingAdmissionAuthenticator,
+        verify_ordered: impl FnOnce(&ProcessingContext, &WalletProcessingAdmission, &ProcessingProgressEvidence, &Arc<WorldResourceBudget>) -> Result<(), String>,
+    ) -> Result<PendingProcessingIdentity, ProcessingStoreError> {
+        if original.is_empty() || original.len() > MAX_SLOT_BYTES || donor_progress.is_empty() || donor_progress.len() > MAX_SLOT_BYTES {
+            return Err(invalid("historical processing record exceeds bound"));
+        }
+        let workspace = self.budget.reserve_with_headroom(
+            reservation(original.len(), self.limits)?, PROCESSING_INTAKE_HEADROOM_BYTES,
+        )?.into_budget();
+        let _original = workspace.reserve(read_reservation(original.len())?)?;
+        let _sideband = workspace.reserve(completion_reservation(donor_progress.len())?)?;
+        let pending: StoredPending = serde_json::from_slice(original).map_err(|e| invalid(e.to_string()))?;
+        if pending.version != 2 {
+            return Err(invalid("historical import cannot grant legacy KEM recovery"));
+        }
+        let admission = verify_stored(&pending, &self.header.namespace_root, verifier)?;
+        let identity = identity(&admission);
+        let original_root = encoded_root(original);
+        let mut progress: progress::StoredProgress = serde_json::from_slice(donor_progress).map_err(|e| invalid(e.to_string()))?;
+        if progress.version != 1 || progress.namespace_root != self.header.namespace_root || progress.identity != identity
+            || progress.admission_record_root != original_root || progress.evidence.availability.is_none() {
+            return Err(invalid("historical availability has a different original request"));
+        }
+        // The local ordered group is required before the reveal World can be
+        // replayed. Do not authorize future reveal or accept its donor shares.
+        progress.evidence.reveal_validation = None;
+        progress.evidence.shares.clear();
+        verify_ordered(&pending.context, &admission, &progress.evidence, &workspace)
+            .map_err(ProcessingStoreError::Verification)?;
+        if let Some(index) = self.slots.iter().position(|entry| entry.as_ref().is_some_and(|entry| entry.identity.envelope_id == identity.envelope_id)) {
+            let entry = self.slots[index].as_ref().expect("located entry");
+            if entry.encoded_root != original_root || entry.progress.is_none() {
+                return Err(invalid("historical import conflicts with existing ordered member"));
+            }
+            self.read_entry(index, entry)?;
+            let stored: progress::StoredProgress = serde_json::from_slice(
+                &self.read_progress(index, entry.progress.as_ref().expect("checked progress"))?,
+            ).map_err(|e| invalid(e.to_string()))?;
+            if stored.version != 1 || stored.namespace_root != progress.namespace_root
+                || stored.identity != progress.identity || stored.admission_record_root != original_root
+                || !stored.evidence.preserves(&progress.evidence) {
+                return Err(invalid("historical import conflicts with existing progress"));
+            }
+            return Ok(identity);
+        }
+        if self.slots.iter().flatten().any(|entry| entry.identity.sender_wallet == identity.sender_wallet && entry.identity.sender_nonce == identity.sender_nonce) {
+            return Err(ProcessingStoreError::NonceClaimed);
+        }
+        let slot = self.slots.iter().position(Option::is_none).ok_or(ProcessingStoreError::Full)?;
+        let bytes = encode(&progress)?;
+        if bytes.len() > MAX_SLOT_BYTES { return Err(invalid("historical availability encoding exceeds bound")); }
+        let index = progress::ProgressIndex { root: encoded_root(&bytes), bytes: bytes.len() };
+        self.replace_records(vec![(slot_path(slot), original.to_vec()), (progress::path(slot), bytes)])?;
+        self.slots[slot] = Some(PendingEntry {
+            historical_kem_recovery: false,
+            identity: identity.clone(),
+            encoded_root: original_root,
+            encoded_bytes: original.len(),
+            context: pending.context,
+            authorization_timestamp_unix: pending.authorization_timestamp_unix,
+            admission_wire_root: encoded_root(pending.admission_json.as_bytes()),
+            completion: None,
+            progress: Some(index),
+            finalized: None,
+            finalized_record_root: None,
+            finalized_state_root: None,
+            workspace: Arc::clone(&workspace),
+        });
+        Ok(identity)
+    }
+
     /// One consistent recovery snapshot. Failure preserves every durable byte
     /// and drops all partially restored reservations. Payloads are read and
     /// authenticated one at a time; only compact indexes remain resident.

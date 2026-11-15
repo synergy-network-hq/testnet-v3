@@ -355,7 +355,7 @@ this one if progress stops again.
 
 ## C1266-2026-07-30-005 — Excessive finalized block time
 
-**Status:** Open  
+**Status:** Resolved  
 **Severity:** P0 launch-performance defect  
 **Detected:** 2026-07-30 21:02:14 UTC  
 **First bad height:** 1; the defect affects the healthy path from Genesis  
@@ -3944,224 +3944,1869 @@ ATLAS_P1_RELEASE_AUTHORIZATION_VERIFIED release_id=chain1266-incarnation-4-rc30 
 - `atlas-indexer`: `PASS` — CHAIN1266_ROLE_STOPPED
 
 
----
 
-## C1266-2026-09-04-001 — Testnet-v3 recovery and NetBird five-validator launch
+## C1266-2026-10-06-001 - Single-authority restart OOM and public RPC outage
 
 **Status:** Open
-**Severity:** P0
-**Detected:** 2026-09-04 UTC
-**First bad height:** No live Testnet-v3 height established
-**Last agreed finalized height:** None
-**Last agreed finalized block ID:** None
+**Severity:** P0 chain liveness
+**Detected:** 2026-10-06 03:16 UTC
+**First bad height:** 2632441
+**Last agreed finalized height:** 2632440
+**Last agreed finalized block ID:** `abf7c01857d229d6ce373028784332cea15b8193dc2d3629fe2f48d45a928e8e`
 
 ### Affected and responsible nodes
 
-- Affected: validators 02 through 06 and BootSeed hosts 1 through 3.
-- Responsible component under current investigation: recovered launch deployment state and seed/runtime availability. No validator identity, stake, ownership binding, or canonical SGEN is implicated or will be regenerated.
-
-### Recovery actions and outcomes
-
-1. **Relocated the canonical execution workspace to synergy-val4 after external-volume recovery.**
-   **Outcome:** Testnet-v3 revision 4aa6ae8463b1deababfe6b222dbc9251b1938ba1 is a clean Val4 checkout; the recovered NCP source containing the headless dynamic-NetBird support is present on Val4. No validator or seed service changed in this action.
-2. **Read the historical Chain 1266 incident record before mutation.**
-   **Outcome:** historical qualification branches and static-peer/legacy transport paths will not be used; the next action is canonical seed-service recovery only.
-
-### Residual risks and next observation
-
-- Verify all three seed HTTP endpoints, then deploy only verified validator/NCP artifacts through NCP and diagnose the first missing live transition if H1 does not finalize.
-
-### Source evidence
-
-- /home/node/synergy-network/01-Core-Protocol/testnet-v3
-3. **Installed the current seed1 script, guard, configuration, unit, and an assumed current source genesis file.**
-   **Outcome:** seed1 guard failed closed with ; the unit requires the separately pinned seed-support genesis SHA-256 , while the top-level source genesis has a different hash. No validator changed and seeds2-3 were untouched.
-4. **Selected the exact guard-approved seed-support genesis from healthy seed3 for seed services only.**
-   **Outcome:** pending installation and health verification on seeds1-3; this does not modify or distribute validator genesis configuration.
-
-5. **Built the headless NCP control CLI from the recovered Val4 source and validated both focused NetBird advertisement tests.**
-   **Outcome:** release binary deployment to validators 02 through 06 is beginning; no validator runtime or identity is changed by this step.
-
-6. **Completed frozen native validator build and verified the canonical SGEN hash.**
-   **Outcome:** deploying validator binary SHA-256 eead22289f1b4e215418aa9a605e50862fab283121363a29e9d1e8034d7bb56b to validators 02 through 06 before NCP-controlled preflight; SGEN SHA-256 is 439e18b91d71be45fa2ec8ba87167689e06413790303fe3568375498d73b3a8b.
-
-
-7. **Amendment to action 3.** The guard failure was a genesis SHA-256 mismatch. The expected seed-support genesis hash was ee554cfb93bbe760540721e91ba69404716180621e2fc0e6483c87576fa7f253.
-   **Outcome:** the exact support file was verified from the healthy Seed3 service before installation; this seed-only support file is not a validator genesis input.
-
-8. **Seed service recovery.**
-   **Outcome:** Seed1, Seed2, and Seed3 are active with local health checks passing. Seed1 has the required inbound TCP/5621 firewall allowance. No legacy seed service was enabled.
-
-9. **Headless NCP deployment.**
-   **Outcome:** the canonical headless NCP CLI was installed on validator-02 through validator-06; all installed binaries match SHA-256 035779d614d5a7de4b9ecb3c56531b55ce1cd9373434360eb561d365bc2f9eeb.
-
-10. **Canonical validator runtime deployment.**
-   **Outcome:** the canonical validator binary was installed on validator-02 through validator-06; all installed binaries match SHA-256 eead22289f1b4e215418aa9a605e50862fab283121363a29e9d1e8034d7bb56b. Live NCP preflight is next.
-
-11. **validator-02 live NCP start.**
-   **Outcome:** NCP verified NetBird health and launched the canonical binary, but the process exited before H0 at the configuration-authority gate: canonical Testnet-v3 Genesis has no finalized consensus parameter manifest.
-
-12. **Live missing transition isolation.**
-   **Outcome:** the frozen signed SGEN verifies and carries the Genesis-bound simplified PoSy v3 activation. The runtime startup guard still requires the retired JSON consensus_parameters compatibility wrapper, even though the SGEN loader intentionally uses the activation binding. No Genesis, identity, transport, or remaining validator was modified. The next change is limited to making that guard accept the signed activation manifest.
-
-13. **SGEN activation runtime compatibility correction.**
-   **Outcome:** the startup configuration guard now validates the verified Genesis-bound simplified PoSy v3 activation when the frozen signed SGEN intentionally omits the retired consensus_parameters JSON wrapper. Focused frozen-SGEN regression test passed. Rebuilt validator SHA-256: f251bc8d7cca999db65dbd5c446b08225fd0313a60aa87ce21a0b99ffefeee91. Deploying to validator-02 for the live rerun.
-
-14. **validator-02 SGEN configuration comparison.**
-   **Outcome:** the repaired activation guard reached the next check and rejected the NCP-generated 500 ms override. The frozen SGEN commits a 2000 ms cadence. This is a configuration handoff defect: NCP must reconcile its managed config to the frozen SGEN cadence, and the runtime NCP parser must accept that exact signed cadence. No runtime, Genesis, identity, or transport change is being made.
-
-15. **Cadence correction and SGEN reissue authorization.**
-   **Outcome:** the operator set the required cadence to 500 ms, within the current 100-1500 ms launch envelope, and authorized a replacement signed SGEN using the existing authorities. The uncompleted 2000 ms NCP/runtime configuration path was reverted before deployment. The reissue must preserve the same membership, authority set, identities, and 36 deterministic H0 operations; only the governed cadence parameter may change. No validator has been started from the obsolete 2000 ms SGEN.
-
-16. **Correction to action 15: governed derivative rebinding.**
-   **Outcome:** changing the approved 500 ms cadence necessarily changes the simplified PoSy activation root, parameter root, release-decision digest, Genesis hash, and ETDAG membership-anchor commitment. The five-validator membership root, identities, authority roster, all 36 H0 operation bytes, and all H0 execution roots remain required to be identical.
-
-17. **Unsigned 500 ms SGEN staging and verification.**
-   **Outcome:** the no-overwrite reissue command produced build/testnet-v3/sgen-500ms/genesis.unsigned.sgen with file SHA-256 662fed4caf4915348304fc7618ef30c1a32a82562eb02fbb840c3d9511272217. It verifies Chain 1266, testnet, posy/3.0, validators 02-06, 36 H0 operations, target 500 ms, membership root 4a059c97a3bf88216a9fc94fa81304dc26303424bc04620dc47d47f64f11ce9b, execution root 55ca242d074ea2844520d7c6fd4c26af3b35904e6173357ac4c18516e88ffdc6, AIVM root 9c11bc3f6ef9379fdd875ecdc887301af3239197aa1fd0a8fc490785dd5c3854, and receipt root fbf68f46186d661fbdf19d30003ae541a5d056f440dac6bc20e93676f05e271a. The existing authority signer has not been invoked; no custody data was opened and no validator state changed.
-
-
-## C1266-2026-09-05-001 — Replace lost Genesis authority custody and resume 500 ms launch
-
-**Status:** Open
-**Severity:** P0
-**Detected:** 2026-09-05 00:55 UTC
-**First bad height:** Pre-H0; no running canonical validator observed
-**Last agreed finalized height:** Not established
-**Last agreed finalized block ID:** Not established
-
-### Affected and responsible nodes
-Validators 02-06. The immediate blocker is missing August 23 Genesis authority custody, not validator identity or NetBird transport.
+Val1 authority-node-01, Chain 1266 incarnation 5, single_authority_v1.
+Index database retains the same last block. RPC gateway has a separate outage.
+Val4's failed legacy five-validator service is unrelated to this diagnosis.
 
 ### Symptoms and evidence
-The operator's supplied continuation authorizes creation of replacement bundles after the recovery search did not recover the three current authority bundles. The earlier instruction approves 500 ms nominal cadence. Val4 canonical Testnet source is clean at 84869dcaa952c5f8c2448338e115794af75d4e4c. The 500 ms staged SGEN verifies unsigned, with five validators and 36 H0 operations; it has not been deployed. All five NCP runtimes report stopped. NetBird reports management/signal connected and four connected peers on every validator. Val2 has validator binary f251bc8d7cca999db65dbd5c446b08225fd0313a60aa87ce21a0b99ffefeee91; Val3-6 retain eead22289f1b4e215418aa9a605e50862fab283121363a29e9d1e8034d7bb56b.
 
-### Confirmed cause
-The SGEN verifier embeds the authority public freeze at compile time. Replacing missing authority keys therefore requires coherent public bindings and rebuilt verifier binaries. H0 carries independently signed authority operations; replacing only outer signatures must not silently leave the on-chain governance and registry under inaccessible keys. The full replacement boundary is being checked before key creation.
+Last production: 2026-09-10 06:19:00 UTC / 01:19 CDT, about 26 days ago.
+Val1 durable head, last committed block, live RPC and synergy-index's
+synergy_explorer_v3 blocks table agree on the height and hash above.
+Index insertion time: 06:19:00.738856 UTC on September 10.
+Val1 has over 18891 restarts, approximately 22.9 GiB process memory peaks and
+repeated kernel OOM/SIGKILL deaths. Host RAM is about 23 GiB; swap is absent.
+Finality log is 14512838669 bytes; committed blocks are 50985951398 bytes.
+PID 2322890 was observed reading the finality log: offset grew from
+8589918208 to 10737397760 while RSS grew from 8600464 to 12548584 KiB.
+
+### Confirmed cause and inference
+
+Ubuntu unattended-upgrade updated libc6 from 2.43-2ubuntu2.3 to
+2.43-2ubuntu2.4, ending September 10 at 06:18:59 UTC. Its dpkg log explicitly
+lists systemctl restart synergy-chain1266-authority.service among restarted
+services. Systemd records clean stop at 06:19:00-01 and immediate restart;
+first recovery process was OOM-killed at 06:21:45. Automatic retries continue.
+Confirmed blocker: memory exhaustion during restart history recovery.
+Strong inference: excessive history materialization in the deployed runtime;
+the exact allocating source function has not been verified.
+Binary SHA-256: d1336198df04301281fcaef327f1504298a37b215cf340e0ad745c20936eff1d.
 
 ### Recovery actions and outcomes
-1. Read the applicable operating instructions and incident log, then verified Val4, staged unsigned SGEN, native Address Engine and fleet readiness.
-   Outcome: no node or custody mutation; Linux keygen verified as x86-64 ELF SHA256 8ba3a9a3b27712447629eef0c95fb69934ffeed5456d1119882b50f062876403.
-2. Inspected the canonical Address Engine generation path and GitHub source.
-   Outcome: retired generate-authority is unusable; current migration tool matches upstream blob 29dbba7f5191bc07ae17dea7f244107265b9cf4c and has no general three-role Genesis bundle generator. No retired guard has been bypassed.
 
-### Final outcome
-Open. Signing, replacement custody, canonical deployment, H0/H1-H20 and restart/import validation remain pending.
+1. Read required instructions, memory and complete incident log; checked live
+services, kernel/service logs, history sizes, file descriptors, durable tip,
+RPC, index DB and package-update records. Outcome: diagnosis established.
+No runtime restart, stop, reset, key, config, binary or DB mutation performed.
+2. Appended this diagnostic entry in place on other-mini's external SSD.
 
-### Residual risks and next observation
-Preserve all validator keys, owner/stake bindings and dynamic discovery. Verify replacement authority scope, encrypted custody and durable locations, then coherent SGEN/runtime trust before startup.
+### Final outcome, residual risks and next observation
+
+Unresolved. Index's authority RPC tunnel returns the same stopped tip;
+its explorer service is active but old Atlas API port 3020 has no listener.
+RPC role service is inactive, ports 5640/5660 have no listener and nginx
+proxies to those ports. Public rpc.synergy-network.io returns HTTP 502.
+Gateway systemd retains an August 3 exit timestamp but no recent unit log;
+that does not establish the entire outage duration or current front-end routing.
+Next repair: locate exact deployed source and implement bounded history
+recovery preserving finalized state; prove advancing successor blocks, stable
+memory and restart recovery. Verify Atlas and public RPC separately.
 
 ### Source evidence
-User attachment 84587a55-dc91-490c-b25a-f13516d2597b; canonical Val4 runtime/src/sgen.rs, runtime/src/bin/synergy-genesis-ceremony.rs and Address Engine src/bin/migrate_snts07_artifact.rs.
 
-### C1266-2026-09-05-001 — custody generation checkpoint (2026-09-05T05:32Z)
+Val1 journalctl service/kernel logs; /var/log/apt/history.log.1.gz;
+/var/log/unattended-upgrades/unattended-upgrades-dpkg.log.1.gz;
+/var/lib/synergy/node/data/consensus/chain-1266-incarnation-5/;
+/proc/2322890/fdinfo/10 and status; index synergy_explorer_v3.blocks;
+index RPC tunnel; gateway service/listeners/nginx and public RPC request.
 
-- New canonical Address Engine helper passes 4 release tests: CLI rejection, prior profile, no-clobber/private publication, ephemeral cryptographic round trip and both binding scopes.
-- Public-only dry run verified all three old bindings, prior freeze SHA256 f52a13c6b3b89f85996af26e9d2c676c18269170d4aa44b3be5339d0fce8fafa; no keys generated by dry run.
-- Existing workbook Testnet-v3 Identities has separate custody passphrases for each root and authorization row. Reuse those exact values through non-echoing SSH terminal prompts; no secrets in arguments, logs, files, or tool output.
-- Canonical replacement output reserved for /home/node/synergy-network/28-Operations-Infrastructure/credentials/testnet-v3-authorities-20260905. Parent directory was absent and has now been created mode0700. Effective boundary records current 2026-09-05T05:32:02Z, preceding configured H0 GENESIS_NOW_UNIX1800000000.
-- Generation, independent public verification, encrypted backup, workbook update, H0 recomposition, deployment and chain-running evidence remain pending.
+### Source-location and allocation follow-up - 2026-10-06
 
-### C1266-2026-09-05-001 — replacement custody and public records verified (2026-09-05T05:50Z)
+The single-authority source is retained in the existing SSD repository:
+/Volumes/PortableSSD/Synergy-Network/01-Core-Protocol/testnet-v3,
+branch release/chain1266-single-authority,
+commit bc6a7ea3febc4abc63429da9954fb958e53500d7.
+Local branch and origin-tracking branch both resolve to this commit;
+GitHub independently retains the same branch and commit. The working tree
+is on main, so filename searches of the checkout do not expose this source.
+No clone, copied source tree, checkout switch or pull was performed.
 
-- Created3 replacement authorities using existing workbook Testnet-v3 Identities passphrases, 12 non-echoing terminal prompts. All cryptographic generation checks passed. No secrets emitted or stored in plaintext.
-- Custody manifest SHA25655660bdafc7634ea6ea9c74a1875ee00f659a018aed862a9bbe0eb56d0569790; all26 artifacts hash/mode0600 checked remotely and exact encrypted backup verified at Mac credentials/testnet-v3-authorities-20260905.
-- Sole credentials workbook updated in place61 public metadata cells and reimported. Existing credential cells/styles preserved, no workbook copy/sidecar. Serializer initially rejected x: namespace/date-cell differences before saving; corrected prefix/numeric handling. ZipInfo metadata reuse caused in-memory CRC failure before saving; copying ZipInfo corrected it. Readback and unchanged package-part verification passed.
-- New public freeze SHA256e27772ff64005cb50a2fd3b79808bdf3850b5ca744dd4fe3d5fd862c158df522 validates exact prior authority linkage. Published canonical freeze and retained prior public evidence build/authority-replacement-20260905/prior-authority-freeze.json.
--13 freeze tests and9 executed-source projection tests pass, plus4 AE generator tests. New500ms predeployment source dcf09ddb9e33b7432374731e28248194353d99672e14c0383390f7fdc2e31aff preserves validators02–06 and36 allocations.
-- First runtime build rejected omitted ceremony feature (no code defect); corrected --features ceremony build running. Signed genesis and H0 replay not yet proven. User clarifies wallet edits belong to other task; this task must supply compiled public governed trust package only, then continue authorized chain work.
+The branch's historical C1266-2026-08-16-009 entry binds the currently
+installed d1336198...eff1d binary to the August 16 bounded-recovery build:
+base c3429743c3ff4e78b44e020672d23a10ac988172 plus recorded runtime
+diff digest b6abb7a86f5d69d9710166ec726d4995df8b1ee97472d5b50ffc323f8caa6c5b.
+The later August 17 checkpoint is source lineage, not yet a proven exact
+byte-for-byte reconstruction of that build's source diff.
 
-### C1266-2026-09-05-001 — public trust package completed; live chain pending
+A remaining full-history allocation is visible in the retained source:
+role_runtime.rs:2533 calls require_durable_binding_agreement before
+constructing authority worker inputs. single_authority_startup.rs:308
+calls store.recover(); single_authority_finality_store.rs:441-449 reads
+the entire finality log into a byte vector, then lines 450-472 deserialize
+all records into a second vector. This preflight precedes the bounded
+WritableStore/driver path and matches the observed finality-file read and
+rising process RSS. It is a concrete missed bounded-recovery path; exact
+runtime-to-checkpoint equivalence remains subject to source-diff verification.
 
-- Dry-run and execute passed identical candidate input7a68783bb25ccfea3ed9f9c1c92c7ec17bca8e8a854b87560c5583a0674be226, all9deploy27init receipts. H0 execution5524d1159428eaf8ab0c05a6cebe904785cc81ee59ec75d8474ddf095e46df8f, AIVM1c2fe2bda1221d06851dfc4cf5f81fba11c0ff529f33435b3ad9ce0eaa756ece, receipta5463763a46bbec2d87aea7dfb7b4d885ebb4fcc9b7ca27b19627b584b0b584b.
-- First signed composition1b77c7... lacked governed ETDAG policy. Exporter refused it. Root cause: predeployment builder clears ETDAG and compose did not bind it. Fixed payload_from_h0_evidence to atomically bind approved canonical ETDAG/consensus before signing; preserve500ms activation and all H0/member roots. Added3 regression tests; all9SGEN tests pass including historical signature fixture pinned to original public authority and SGEN SHA.
-- Final signed Genesis hash ebf217e760f48cdf6d102d417b64848461edd3b0382acbdb7a6c8fcd847241af; output build/testnet-v3/authority-replacement-20260905/final/genesis.sgen. All3 canonical ML-DSA signatures and deterministic H0 replay verified by exporter. Old pre-policy signed artifact is not release authority.
-- Public trust JSON SHA2568eb4a162c0245141b39773ffc37d959c69462290ee67a2f25b0a5f658fb50b1b. Public ZIP SHA2561e51523024bb04955491949fdaa3140d2a39f96b7fde77f7cc0ebe049ab17164. Contains JSON, signed SGEN, README, checksums only; secret-field checks passed. Archive readback matches every member.
-- Exporter initial path emitted serde OsStr Unix-byte object; archive validator caught it before delivery. Changed filename to checkedUTF8str, rebuilt, re-exported and validated.
-- Public anchor is derived using canonical chain function and finalSGEN hash; no independent membership signature claimed. Native chain schema supplied; other-task wallet normalizer requires alignment if incompatible. No wallet edits performed.
-- Live validators remain unmodified by this checkpoint. No H1/H20, runtime deployment or restart/rejoin claim. User requested immediate public authority package handoff to separate wallet task. Next chain step rebuild/deploy matching validator runtime+finalSGEN via canonical NCP and verify live progress. Git commit/push and production-authority-view reconciliation remain pending.
+Repair must stream the preflight while preserving validation of every
+record's chain identity, release identity, linkage and durable-head binding.
+No validator runtime, binary, service, chain state, keys or configuration
+was changed during this source investigation. Incident remains open.
 
-## 2026-09-05 Testnet-v3 NetBird and fresh-authority launch update
+### Repair execution - 2026-10-06T10:09:58.182721+00:00
 
-- Validator NetBird static addresses are governed as `validator-02=10.69.10.2`, `validator-03=10.69.10.3`, `validator-04=10.69.10.4`, `validator-05=10.69.10.5`, and `validator-06=10.69.10.6`; `10.69.10.1` remains reserved for future validator-01. The previously observed `10.69.132/210/110/248/112.x` addresses are not used for validator transport.
-- The fresh public transport registry is SHA-256 `67b67bbec6d1db7720a1353f238c40b7cfd9bed19ee4fdc610ced82711b72b56`; the signed snapshot is SHA-256 `5fa08118c21755ce5ecf88901417f2ac4bc3bf0a82e8c76eea76e878b8f6a6cc` and is served locally on each validator through the loopback snapshot proxy.
-- Fresh governed Genesis is installed on validator-02..06 with genesis hash `ebf217e760f48cdf6d102d417b64848461edd3b0382acbdb7a6c8fcd847241af`, `posy/3.0`, and the 500 ms finalized activation manifest.
-- Runtime source was corrected so the simplified driver and protected Genesis bootstrap normalize the fresh `/consensus/posy_v3_activation` manifest into the finalized Genesis-bound consensus parameter object. The release binary was built and deployed to all five validators (SHA-256 `77a9fb3ad36afc94c2de373bfc816c181b09c3e455cef9722d3559baf176dcba`).
-- NCP source was corrected so every managed validator child inherits `SYNERGY_PROJECT_ROOT`, `SYNERGY_CONFIG_PATH`, and `SYNERGY_GENESIS_FILE`. `cargo check --bin synergy-control` and the focused runtime-status test passed; the rebuilt NCP binary was deployed to all five validators (SHA-256 `0660f871b284587b22b7d639c2bddf6e15f08fc294bb4469f1bba471d3ff7fe7`).
-- Current launch blocker: fresh Genesis derives epoch-context root `6e74560089534934cb51aa52f66173a42b0c5c9739c9b803cb8f5bef349a9455`, but the required public ingress-KEM registry artifact for normal protected H3 is absent. Existing registry files are bound to the retired root `48828a060571115c84bc3d0797e1f21b1cda9221211f23774a07f33591744263` and older Genesis; they must not be relabeled or copied as fresh authority.
-- Validator processes were stopped after this failed-closed check. No chain finality or height advancement is claimed. The remaining required input is the governed public H3 ingress-KEM registry (and subsequent heights as required), with no private KEM custody material.
+User authorized code repair, replacement binary deployment and chain restart.
+Pre-action gate: canonical instructions, memory and full incident log read.
+Val1 remains in OOM recovery loop at height 2632440; SHA d1336198...eff1d.
+Plan: stop only the failing authority unit to end OOM churn, repair the
+release branch preflight with streaming validation, use the existing Linux
+build cache, run safety/recovery regressions, install a checksum-verified
+replacement and prove successor finality plus restart recovery. No reset.
 
-### 2026-09-05 full startup-path preflight
+#### Action: stop OOM churn - 2026-10-06T10:10:49.056156+00:00
 
-A complete preflight was run before another launch attempt. Confirmed:
+Stopped only synergy-chain1266-authority.service on Val1. Verified
+ActiveState=inactive, SubState=dead, MainPID=0. Host available memory
+returned to about 22 GiB. Existing chain data and binary are untouched.
 
-- All five validator SGEN files have SHA-256 `8373bba021f291f4f1d5ee39a9a1dcc1bffb3d5fb24f4f763acb257668745bcc` and the fresh genesis derives epoch-context root `6e74560089534934cb51aa52f66173a42b0c5c9739c9b803cb8f5bef349a9455`.
-- All five installed validator binaries are the same runtime build (`77a9fb3ad36afc94c2de373bfc816c181b09c3e455cef9722d3559baf176dcba`); all five NCP binaries are the same environment-propagating build (`9564118bb97ad8fc743d9593723fef0b0daa1106971783aa0515328dc8edbb38`).
-- Every validator has the same public transport registry and `/etc/synergy/chain1266/transport-snapshot.env`, binding the signed snapshot to `10.69.10.2` through `10.69.10.6`; no old unauthorized validator addresses appear in that transport state.
-- The fresh public trust package contains only README, checksums, signed/unsigned Genesis, and trust JSON. It contains no ingress-KEM public bundle or registry artifact.
-- Validator data roots show the fresh finality metadata directory on validator-03, -05, and -06, while -02 and -04 stopped earlier at peer-readiness because the other nodes failed closed. This is a consequence of the common artifact blocker, not a separate authority mismatch.
-- Runtime source inspection found two legacy typed-PoSy `genesis.consensus_parameters()` requirements at lines 1931 and 2136, but the active fresh simplified startup path reaches the explicit fresh activation fallback and does not report those paths. They remain out of scope until a typed profile is selected.
-- Boot/seed preflight found all three seed services still on the retired Genesis/`posy/2.2` authority. Bootnode/seed NetBird peers are absent, and no dedicated support-node 10.69 range has been governed. These are independent post-validator blockers.
+#### Recovery progress: source repair and Atlas services - 2026-10-06T10:21:00Z
+- Canonical SSD Git branch release/chain1266-single-authority now contains repair commit 2b66f096e7f75841b597cca19b590bc36d74766c. Shared streaming finality inspection validates every record without retaining history or modifying the durable head; durable-binding preflight uses that inspector. Regression tests cover 10,000-record bounded inspection, old foreign release records, stale-head nonmutation, and real startup preflight beyond the 8,192-record tail.
+- Existing /root/launch-src Linux build cache on Val1 synchronized to that source; no new source clone or checkout was created. Release-profile single-authority regression tests are compiling. Production authority remains stopped, with data, genesis, signing journal and keys preserved.
+- On synergy-index, verified deployed Atlas API/indexer support incarnation 5, single_authority_v1 and canonical genesis 2272fe2b48c6e2019b27223f61ba8d8a82b58656fe9daab50c81f224a301ca74. Started existing synergy-testnet-v3-atlas-api.service and synergy-testnet-v3-atlas-indexer.service. Database was last indexed at 2632440 with hash abf7c01857d229d6ce373028784332cea15b8193dc2d3629fe2f48d45a928e8e. New ingestion remains dependent on authority RPC recovery.
+- RPC gateway installed native runtime units bind older incarnation-4 release. They have not been started as incarnation 5; current public RPC still needs restoration.
 
-The full blocker set is therefore: (1) missing governed fresh public ingress-KEM registries beginning at H3; (2) boot/seed services still require fresh authority/configuration and dedicated NetBird enrollment; and (3) the dedicated boot/seed third-octet range is not specified in current authority. No further validator launch was attempted after this preflight.
+#### Recovery progress: regression fixtures and gateway transport - 2026-10-06T10:26:00Z
+- First Linux release regression run: 91 passed, 2 failed. New long-history test fixture generated a zero block hash after 255 records; corrected to domain-derived height hashes. Existing head-ahead test had an impossible log offset, triggering committed-history truncation before intended height guard; corrected offset to actual committed log length. Production checks were not relaxed. Follow-up canonical SSD commit 59e72d16c84156f5042519af549c6028c625b0ed. Re-running all single-authority tests.
+- Gateway forwarding restored via enabled synergy-chain1266-rpc-tunnel.service, matching the index's existing authority-forwarding model. Reused its existing transport key; Val1 authorization constrained to gateway source address, RPC/WS permitopen ports and no shell. Val1 host key strictly pinned against existing trusted operator known_hosts (ED25519 SHA256:GZuZgyT5hDPXwPCU1zfig/rqu5eJHBJoZ/EYGrT2wlc). Older native gateway runtimes remain stopped.
+- Val1 existing authority override now limits failed startups to three per 30 minutes with 30-second retry spacing. This contains repeated failure; bounded recovery repair addresses the cause. Security package updates remain enabled.
 
+#### Recovery progress - 2026-10-06T10:30:46.176665+00:00
+- Follow-up regression result: 92 passed; one newly added fixture still used the wrapping hash expression because an initial textual substitution matched an earlier test. Corrected the exact 10,000-record fixture; restored unrelated existing fixture. Canonical repair tip is now 5388907e521bb806235cc5a9bb6d1c03ed586529. Tests and production binary build are running; deployment remains gated on passing tests.
+- Found Val1 authority unit disabled at boot and Atlas API/indexer units static with no boot dependency. Existing Atlas units now have Install/WantedBy=multi-user.target and are enabled. Val1 will be enabled when the repaired binary is installed.
 
-### 2026-09-05 production call-path audit correction
+#### Recovery progress - 2026-10-06T10:36:00.042185+00:00
+- Linux production build completed successfully (cargo build --locked --release -p synergy-testnet --bin synergy-validator-node; 5m15s). Source parity verified across every runtime/src Rust file plus workspace/package Cargo manifests, Cargo.lock and embedded runtime-binding JSON: 181 files match canonical SSD commit 5388907e521bb806235cc5a9bb6d1c03ed586529 byte-for-byte. Final test compile now owns the build lock.
 
-The preceding claim of a complete startup-path preflight is withdrawn: file presence, hashes and startup guards did not examine the downstream producers. No successful finalized height was established.
+#### Deployment attempt: bounded durable-binding preflight - 2026-10-06T10:41:57.383732+00:00
+- All 93 Linux release-profile single-authority tests passed, 0 failed (2.62s test execution). Production build successful. New Linux x86-64 validator v20.0.0 SHA256 dc40b4044a63599f8d3b6fbee782e3f1e34b77b9d2db5f25e1c0d0d7f1b61143, canonical source tip 5388907e521bb806235cc5a9bb6d1c03ed586529.
+- Install atomically; retain previous d1336198df04301281fcaef327f1504298a37b215cf340e0ad745c20936eff1d binary for rollback. Enable and start existing authority service. Signed desired state, start authorization, genesis, authority identity/key, durable logs and execution state remain unchanged. Resume expected from finalized height 2632440, hash abf7c01857d229d6ce373028784332cea15b8193dc2d3629fe2f48d45a928e8e. Verify bounded recovery memory, continuity and actual production, then controlled restart.
 
-Confirmed additional source defects: ProductionProtectedPipelineLifecycle.on_finalization returns before successor target registration for H1/H2 bootstrap commitments; OrderSeed events are only constructed in tests, despite an implemented production finality-bound verifier; normal startup installs evidence receiving but no cutoff/reveal producer, and assemble_target_execution_input has no production caller. These are implementation gaps, not requests for the operator to invent public artifacts. They remain unresolved pending verified repairs.
+#### Recovery progress - 2026-10-06T10:45:31.250626+00:00
+- Repaired binary installed and authority started at 2026-10-06T10:41:59Z, PID 2333034, NRestarts=0. Startup finality preflight traversed complete 14,512,838,669-byte log with approximately 60 MiB RSS; bounded driver scan then held approximately 70 MiB RSS. Original finalized head remains 2632440 pending completed body/state recovery.
+- Repair Git commits published to GitHub existing release/chain1266-single-authority branch at exact tip 5388907e521bb806235cc5a9bb6d1c03ed586529. Used existing local GitHub account and in-memory Git pack; no credential files, clones, worktrees or source copies created. SSD main HEAD/working tree/index preserved.
 
-Transport repair checkpoint: replacement audit worker changed all five loopback proxies to fetch the exact HTTPS snapshot URL on every request and replaced the root directory HTTP server with an exact-route loopback handler running as nobody. Parent independently observed HTTP200 and identical proxy SHA256 f32cb919bcc28560025191439c44fc4a21416863a2e7b3106f40cce8354dc3f7 on validators02..06. Invalid-route and complete payload verification remain pending. The former HTTP directory contained the signer private file; no private file was fetched or output. No key rotation was performed.
+#### Live recovery evidence - 2026-10-06T10:50:49.159659+00:00
+- PID 2333034 completed both full finality-log scans without restart. Body scan progressed past 25,353,478,144 bytes (approximately half of 50,985,951,398 bytes) with VmRSS/VmHWM approximately 115 MiB. Durable head remains 2632440 until completed recovery. NRestarts=0. Existing driver production path caps its body tail and RPC cache; no full-history retention in ordinary block production.
 
-Two original/replacement audit worker sets encountered model/workspace usage limits. Parent continues execution. Next scoped source repair removes bootstrap finalization's early return and adds a callback regression; no chain restart until production prerequisite gaps are resolved.
-
-
-### 2026-09-05 verified repairs and admission/finality dependency conflict
-
-- Snapshot repairs independently verified: all five loopback proxies run identical SHA256 f32cb919bcc28560025191439c44fc4a21416863a2e7b3106f40cce8354dc3f7 and return HTTP200; Val4 proxy and coordinator serve signed snapshot SHA256 5fa08118c21755ce5ecf88901417f2ac4bc3bf0a82e8c76eea76e878b8f6a6cc. An isolated HTTP test returned two changing upstream responses, rejected other routes with404 and failed upstream requests with502. Hub runs as nobody, listens only on127.0.0.1:8642, returns404 for directory/unrelated routes. Backups have suffix pre-20260905-safe-serving (hub unit) and pre-20260905-safe-refresh (validator proxy).
-- Runtime source now invokes the existing production order-seed verifier with exact durable finalized authority at initial and successor registration. H1/H2 callbacks no longer skip successor registration. No cutoff, availability or reveal proof is fabricated by these repairs.
-- Regression first failed because the test read the durable envelope as a bare record; corrected to decode its record member. The next run proved creation and seed verification but exposed a real repeated-registration conflict. Corrected only identical normal-target/source/storage registration to be idempotent; changed target or storage remains rejected. Latest focused regression run is pending in /tmp/posy-lifecycle-regression-20260905.log. No rebuilt runtime deployed at this checkpoint.
-- New critical dependency conflict: protected_material.rs requires the H(n+1) pre-reveal commitment before proposing Hn. protected_pipeline_runtime.rs creates target F+3 only after finalization of F. state.rs commits H1 only when QC(H3) is accepted. Therefore H3 cannot be proposed without H4, while H4 cannot be created before QC(H3). PROTECTED_PIPELINE_PROTOCOL.md explicitly says exact three-height lookahead; POSY-00E section9 specifies three-QC finality. Fixing producer wiring alone cannot resolve this cycle.
-- Proposed governed resolution awaiting explicit operator decision: preserve three-QC finality and H1/H2 bootstrap; preserve H3 as first normal target from H0; prepare steady-state targets four heights ahead from verified historical finality, with matching historical-source validation and governed policy/signature reissue. This proposal has NOT been applied to the frozen protocol, Genesis or wallet trust package. Generic continuation messages are not treated as authorization to alter frozen consensus rules.
-- Remaining implementation gaps include fresh ML-KEM-1024 ingress custody/public publication and live VAC/cutoff/reveal/assembly producers. The installed validator04 public identity exposes ML-KEM-768 entropy, not an ML-KEM-1024 ingress key. Known ingress-custody filename searches under /var/lib/synergy on all five hosts and the Val4 credential directory returned no matches; this bounded search is not proof against every possible archival filename.
-- NetBird executable is /opt/synergy/ncp/bin/netbird (not on sudo PATH). Val4 currently reports10.69.10.4/16 with management and signal connected. No addresses or identity keys changed during this repair pass.
-
-
-### 2026-09-05 protected regression closure and fleet state
-
-- The bootstrap/successor/seed and duplicate-registration regression group passed: 3 tests, 0 failures (/tmp/posy-lifecycle-regression-20260905.log).
-- The broader protected filter initially passed47 and failed3. Two older adapter test sources lacked load_pre_reveal_commitment, so build_local correctly returned not-ready; the third test incorrectly required the legacy Genesis consensus_parameters field. No production readiness guard was relaxed. Adapter fixtures now supply a separate, cryptographically certified child-height commitment, and an added negative test requires no proposal when execution is ready but that child commitment is missing. Genesis parameter normalization was extracted into one function shared by the driver and its activation test.
-- Final command: cd runtime && cargo test --release -p synergy-testnet --lib protected -- --test-threads=2. Result: 51 passed, 0 failed, 1486 filtered out; execution5.18s. Output /tmp/posy-protected-regression-20260905.log. This is a scoped regression suite, not a complete test-suite or fleet finality claim.
-- Independent ncp-validator-status calls on validators02,03,04,05,06 all returned running:false. The newly validated source has NOT been deployed. Existing live transport repair remains distinct from runtime source validation.
-- Still pending: explicit resolution of the frozen exact-H+3/three-QC dependency conflict; production ingress ML-KEM-1024 custody and public registry publication; transaction availability/cutoff/reveal/execution-assembly producer integration; public boot/seed authority and NetBird enrollment; autonomous desired-address allocation beyond the initial five. No new Genesis signature, changed consensus policy, rotated identity, or validator IP mutation was performed in this checkpoint.
-
-
-### 2026-09-06 governed amendment authorized and implementation resumed
-
-User explicitly authorized the proposed four-height admission amendment and signed trust reissue: yes, whatever is needed to get the chain going. This supersedes the preceding pending-approval status. No further approval is required for that amendment or necessary launch repairs. Preserve the three-QC finality rule, Genesis-bound H1/H2 bootstrap, H3 first normal target, validator identities, and chosen VPN addressing.
-
-A new worker group began independently inspecting admission/history, additive ingress custody, and NetBird completion. All three encountered account usage limits before reporting completed changes. Parent continues directly and must verify any partial files before use. No reset credit was consumed.
-
-Implementation in progress: governed source/target helper supports existing offset3 and amended offset4 (F0 prepares H3 and H4); production target/ordering validation uses the governed helper; finality sink retains records/state roots only after full certificate and execution replay; adapter validates exact historical admission authority; startup restores the pending target window from that verified history. Cargo check is running in /tmp/posy-admission-check-20260906.log. No deployment or authority re-signing yet.
-
-
-### 2026-09-06 verified admission and ingress checkpoint; Terra workers
-
-- Admission/history amendment passed cargo check and 51 protected release tests; focused governed-source helper and three real-QC finality tests passed. Logs: /tmp/posy-admission-check-20260906.log and /tmp/posy-amendment-tests-20260906.log. This is source validation, not deployed finality.
-- Additive ML-KEM-1024 ingress custody was provisioned on validators02..06 without replacing consensus identities. Each public record is authenticated by the existing frozen ML-DSA-65 validator key. Runtime public verifier initially rejected the algorithm spelling: frozen runtime keys use mldsa65, while Address Engine public identity uses ML-DSA-65. Corrected the representation check, retaining signature verification. Actual five-record bundle now passes signed SGEN membership verification and H3/H4/H5 registry derivation.
-- Public bundle SHA256 fb2e82a24f87d7303b71c80b739d745817d83c5598608108b539483267ded290 independently verified installed on all five at node_root/data/posy-v3-ingress-identities.json. Private ingress custody remains encrypted under identity/etdag-ingress-kem.enc.json; no secret printed.
-- Production assembly call sites are implemented; cargo check passed /tmp/posy-assembly-check-20260906.log. New wire variants for real vertex proposals and VAC votes require pending producer/coordinator integration.
-- Cutoff audit found a substantive agreement defect: different valid four-of-five marker subsets can contain unequal certified transaction ancestor closures and produce different cuts. Real cryptographic counterexample test added; repair binds exact target-T frontier into existing T-2 PoSy proposal and authenticated VC. No extra voting round or fabricated proof is authorized.
-- User requested gpt-5.6-terra for subagents due Astra usage. Three replacement Terra workers now own cutoff agreement, live producer, and NetBird completion. Earlier workers errored on account usage limits; no reset was consumed. Shell ENOENT on replacements came from absent configured SSD cwd; workdir /, login false resolves remote SSH.
-- No new runtime deployment, new Genesis signature, or advancing finalized block verified at this checkpoint.
+### Recovery verified / incident C1266-2026-10-06-001 restored - 2026-10-06T10:59:49.353655+00:00
+- Cause confirmed: require_durable_binding_agreement used full-history recover(), allocating the entire 14.5 GB finality log and decoded records before bounded driver startup. Automatic libc-update service restart exposed the historical-memory growth; subsequent startup attempts OOM-killed at approximately 22.8 GiB, repeating over 19,000 times. Repair replaces preflight with read-only streaming inspection of every record, retaining zero history while preserving binding/linkage/checksum/head validation.
+- Repaired Linux binary SHA256 dc40b4044a63599f8d3b6fbee782e3f1e34b77b9d2db5f25e1c0d0d7f1b61143 installed on Val1. Original binary retained at /usr/local/bin/synergy-validator-node.pre-streaming-preflight-20261006. Canonical SSD and GitHub release/chain1266-single-authority source tip 5388907e521bb806235cc5a9bb6d1c03ed586529. All 93 single-authority release regression tests passed.
+- Authority started 2026-10-06T10:41:59Z; first resumed finalized block 2632441 timestamp 2026-10-06T10:55:35Z (13m36s full-history startup). First successor hash ce2dee7841906936b1d01a86604faa37384fad60fa023e3942eb83754aa8dd2e, parent abf7c01857d229d6ce373028784332cea15b8193dc2d3629fe2f48d45a928e8e exactly matching old stopped tip. Genesis remains 2272fe2b48c6e2019b27223f61ba8d8a82b58656fe9daab50c81f224a301ca74. No reset, truncation, genesis replacement or authority-key change.
+- Verified continuing finalized production through at least height 2632638, hash d34b4c379909725feab7b2b296f338b3534767d631ff8e88f17ae9d0590c619e, PID 2333034, NRestarts=0. Full finality scans approximately 60-70 MiB RSS; body recovery approximately 115 MiB; steady production approximately 244 MiB RSS, observed VmHWM approximately 325 MiB. No new OOM or service restart since deployment.
+- Atlas API/indexer resumed ingestion. Database successor 2632441 matches validator hash and parent. Readiness HTTP 200 locally and publicly, database/RPC checks true, one-block lag, index age approximately 1 second. Public HTTP RPC returns advancing height and exact successor block using decimal-string block parameter; public WebSocket handshake 101 and live block-number reply verified. Public endpoint is an existing read-only facade; transaction submission was not tested. Gateway local authority-forwarded RPC verifies incarnation 5 and correct genesis.
+- Authority, Atlas API/indexer, and gateway tunnel are enabled at boot. Authority restart cap three starts per 30 minutes, with 30-second failure retries. Existing security updates remain enabled. Gateway older incarnation-4 native runtimes remain stopped; current-chain reads use restricted SSH forwarding with pinned host key.
+- Validation decision: completed deployment startup exercised the entire existing finality/body/receipt corpus and then produced approximately 200 continuing blocks, beyond the previous OOM window. An additional manual stop/restart after production was not performed because measured full-history replay would add another approximately 14 minutes of chain downtime. Production is left running. Startup remains linear in retained history; this repair bounds memory and does not introduce a checkpoint shortcut or discard validation.
 
 
-### 2026-09-06 full dependency correction and integrated source checkpoint
+## C1266-2026-10-08-001 — PoSy validator fleet restoration and authority transition
 
-The four-height proposal is superseded BEFORE signing/deployment. Binding target T frontier in existing proposal T-2 introduces a dependency missing from the earlier H/H+1-only test: proposal H3 also requires H5 admission; offset4 sources H5 from F1, which cannot finalize before QC(H3). The full graph therefore needs offset5. Genesis prepares H3/H4/H5 and steady state F+5; three-QC finality and H1/H2 Genesis bootstrap are unchanged. The existing explicit authorization for necessary launch amendments applies. Canonical unsigned manifest now uses offset5 under SNRG-GOV-ETDAG-P3-ADMISSION-20260906-01; no signed authority or deployed consensus policy changed. Added governed_five_height_admission_breaks_full_cutoff_reveal_finality_cycle across 9999 proposal heights, including the old offset4 counterexample.
+**Status:** Open
+**Severity:** P0 launch liveness
+**Detected:** 2026-10-08T05:39:44.003779+00:00
+**First bad height:** No non-Genesis finality yet established for val2–val6.
+**Last agreed finalized height:** Not yet established; val4 finality directory has metadata only.
+**Last agreed finalized block ID:** Not established for PoSy. Existing single-authority chain remains separate and live.
 
-All replacement workers were explicitly created with gpt-5.6-terra as requested. They later failed with workspace out-of-credits even after the user reported an account usage reset. Parent continued source integration; no additional reset credit used. Terra producer initially omitted pre-VC frontier production, durable local proposal persistence, individual-vote authentication before cache, and marker-specific voting. Parent corrected these paths and added real cryptographic quorum/invalid-vote/fsync-before-publication regression. Remaining integrated runtime/restart evidence is pending.
+### Affected and responsible nodes
 
-Material now commits exact frontier into the protected execution root (absence preserves legacy transcript bytes), validates frozen target and verified historical finality, and retains the genuine existing PoSy VC with the durable cutoff frontier. Marker selection requires exact certified parents and signer-independent candidate ID. Coordinator/role code queues production work and emits cutoff/reveal only from verified VC callbacks. First integrated cargo check passed /tmp/posy-frontier-integration-check-20260906.log before later producer/durability changes.
+Validators 02–06; shared transport publisher/configuration binding. Val1's
+single-authority service is active, zero restarts since October 6, RPC height
+2768141 observed. User requests reliable PoSy on val2–val6 before replacing
+the single-authority role on val1. No reset or identity rotation is authorized
+as a debugging shortcut.
 
-Edit failures: an import was inserted before Rust inner module documentation and a nonexistent TargetAdmissionContext epoch_context_root was referenced; corrected using actual target epoch/seed/frozen roots. A receiver-validation insertion initially matched the earlier activated-adapter implementation and placed it in build_local. Repeated compile exposed that there are two SimplifiedMaterialAdapter impls; corrected using the exact `for SimplifiedProtectedMaterialAdapter<A>` boundary with expected_finalized signature assertion. Later producer imports were missed because rustfmt had removed BTreeSet; corrected against actual import. No failed build was deployed. Current focused release test log /tmp/posy-frontier-protected-tests-20260906-r4.log; real fleet finality remains unverified.
+### Symptoms and evidence
+
+All five PoSy units failed September 10 at readiness (3 remote validators
+required; 0 observed). All five installed Genesis files have SHA-256
+`a0e64b155dc8e0c48534b20e4f3d9ca3450e569b0a796b79afa982e1ed95ba6b`;
+PoSy semantic Genesis is `cf33d53f5c98c079480f4b45d2ac6b85728aa5d216e553e01289839e9c7b50a9`.
+VPN addresses remain 10.69.10.2–6; val4 can ping every other validator.
+The live signed transport snapshot resolves a different ceremony's identities,
+so it has no routes for the installed Genesis members. Hub's preserved
+`pre-20260905-launch/validator-vpn-provider-r2.json` has the exact installed
+identities and transport addresses, SHA-256
+`00d779cb66709e6574c17bed17f2f6b32f9fe0b3ef278981e82da75d4b1418fc`.
+Current incompatible provider plan hash is
+`67b67bbec6d1db7720a1353f238c40b7cfd9bed19ee4fdc610ced82711b72b56`.
+
+### Confirmed cause
+
+First broken boundary: configured peer identity to authenticated transport
+resolution. Publisher plan and deployed Genesis bind different ceremonies.
+This does not yet establish that transport repair alone restores finality.
+
+### Recovery actions and outcomes
+
+1. Read instructions, canonical memory and full incident log; inspected all six
+   services, Genesis bindings, provider publisher and live snapshot, and VPN reachability.
+   Outcome: mismatch verified without node mutation.
+2. User corrected the canonical workspace location to this Mac's external SSD.
+   Updated applicable workspace/Core Protocol/Testnet instructions and local entry points.
+   No source clones, checkout resets or validator state changes.
+3. Planned recovery: preserve current public publisher artifacts/configuration;
+   restore the existing Genesis-compatible provider plan; sign a monotonically
+   newer snapshot with the existing transport-attestation key; verify signature,
+   exact routes and plan bindings; align five stopped validators' plan pins;
+   then launch and trace the next broken boundary with safety history preserved.
+
+### Final outcome, residual risks and next observation
+
+Open. No PoSy chain-running claim. Public Val1 Genesis is different
+(`2272fe2b48c6e2019b27223f61ba8d8a82b58656fe9daab50c81f224a301ca74`);
+public cutover and val1 membership activation need verified transition handling.
+Do not replace public routing or delete single-authority history during five-node qualification.
+
+### Source evidence
+
+SSH journals/config hashes on synergy-val2..6; hub public publisher and provider
+plan; val4 installed Genesis and finality directory; val1 local RPC/service.
+
+### Transport repair applied — 2026-10-08
+
+Restored the preserved Genesis-compatible public provider plan on synergy-vpn.
+Retained the existing attestation key; verified its public key and signature.
+Publisher now increments snapshot generation instead of hardcoding 1. Published
+generation 2, snapshot SHA-256
+`f915a3b866404e4b1f14afbc1857be86d6ecc1400f9839662cd281aed9a8c6f4`.
+All five validator loopback proxies independently returned these exact bytes.
+Updated only the provider-plan hash pin in each transport-snapshot.env to
+`00d779cb66709e6574c17bed17f2f6b32f9fe0b3ef278981e82da75d4b1418fc`.
+Prior public provider/snapshot/publisher and each previous environment file retained
+at `/var/backups/synergy/posy-transport-20261008` on the corresponding host.
+No identity, Genesis, quorum, release binary, or safety state changed. Coordinated
+existing-release startup is next; finality remains unverified.
+
+### Transport registry refresh planned — 2026-10-08
+
+Observation after the generation-2 transport publication: the loopback proxy on val2–val6 serves the repaired signed snapshot and the pinned provider-plan hash is correct, but each validator's persisted `data/validator_transport_registry.json` remains generation 1 with the retired provider-plan hash. The validator binary therefore rejects the configured fresh provider plan and fails closed after waiting for three remote PoSy validators. The next bounded repair is an atomic replacement of only that derived transport-registry file from the locally verified generation-2 snapshot, with per-node backups; safety stores, identities, genesis, quorum, release artifacts, and validator keys remain untouched. Validation gates are exact snapshot/hash comparison, service readiness, mutual P2P handshakes, and sustained advancing finality.
+
+### Public-only validator identity/custody mismatch confirmed — 2026-10-08
+
+Read-only verification of the deployed PoSy validator configuration and the preserved
+public identity/custody records found that the running val2–val6 release is not
+backed by the preserved validator ceremony identities. The deployed Genesis freezes
+operator identities beginning `synv11s5vvm...`, `synv11pveg...`,
+`synv11gswn...`, `synv11u0tf...`, and `synv11gkx...`; the preserved workbook and
+public ceremony records identify val2–val6 with a different public identity set.
+The deployed validator TOML files are explicitly public-only and set
+`producer_ids = []`, while each node has only a local ML-DSA-65 private file that
+is not provenance-bound to the frozen Genesis identity in the release metadata.
+
+The five nodes remain online at Genesis height 0 with authenticated four-peer
+meshes and five ready validators, but simplified target-admission/ETDAG producers
+are not installed and `consensus_ready` remains 0. No key was generated, rotated,
+replaced, decrypted, or copied; no Genesis, quorum, safety state, or Val1 service
+was changed. The next action requires locating the exact custody bundle that
+produced the deployed Genesis or authorizing a fresh, governance-bound Genesis
+rebuild; the preserved workbook alone does not establish that mapping.
+
+### Authorized validator identity rebuild initiated — 2026-10-08
+
+The operator explicitly authorized rebuilding val2–val6 validator identities and
+updating the existing desktop credentials workbook in place. This is a governed
+identity/Genesis replacement, not a liveness shortcut: the current five-node
+release will remain isolated at height 0 until the replacement public identities,
+consensus keys, Genesis, deployment artifacts, and workbook records are
+consistent. No copy of `/Users/jhutzler/Desktop/node-machine-credentials.xlsx`
+will be created.
+
+The rebuild must preserve five-validator 4/5 quorum, PQC verification, one PoSy
+control plane, and three-QC finality. Existing Val1 single-authority state and
+all old validator safety state remain preserved until the replacement fleet has
+passed independent Genesis and finality checks.
+
+### Rebuild tooling compile blocker — 2026-10-08
+
+The canonical local `synergy-keytool` build stopped on a malformed uncommitted
+`node-platform/crates/synergy-address/src/snts_registry.rs`: an extra duplicated
+tail caused an unexpected closing delimiter, and a required canonical constant was
+missing. The file is outside the validator runtime change and is being restored to
+its repository version so the existing key tooling can compile. No validator host,
+Genesis, safety state, or workbook data changed in this repair step.
+
+### Diagnostic correction and continuation — 2026-10-08
+
+The earlier identity/custody entry overstated the cause: `producer_ids = []` is
+required by the simplified PoSy profile and is not evidence of missing signing
+material. A different preserved public ceremony is confirmed, but an absent
+public-key byte sequence inside a private-key encoding does not prove a key
+mismatch. No cryptographic correspondence test has yet established mismatch.
+Current val4 journal reaches authenticated peer readiness and starts the PoSy
+worker without a reported key error; the driver then remains uninstalled.
+Read-only thread backtrace inspection is the next diagnostic action. Val1 remains
+active, NRestarts=0, and RPC height 2772298; no public cutover is authorized by
+these observations. The operator has already authorized the identity rebuild.
+The original Desktop workbook remains the only permitted workbook target.
+
+
+## C1266-2026-10-08-002 — Fresh PoSy replacement qualification
+
+**Status:** Open; source repaired, deployment not qualified.  
+**Severity:** P0 replacement-chain launch blocker; existing Val1 service retained.  
+**Detected:** 2026-10-08; live confirmation through 12:31 UTC.  
+**First bad height:** H1 in the deployed replacement cluster.  
+**Last observed finalized block:** H0, `cf33d53f5c98c079480f4b45d2ac6b85728aa5d216e553e01289839e9c7b50a9` on Val4. Fresh five-node agreement is not claimed.
+
+### Authority and diagnostic amendments
+
+The operator explicitly confirmed that the replacement is a completely fresh
+chain. Val2–Val6 must qualify first; Val1 conversion follows that qualification.
+The earlier claim that the simplified driver remains uninstalled is retracted:
+read-only GDB backtraces show the driver alive in its receive loop. Two broadcast
+workers wait on writes; incoming message handling repeatedly validates finality
+state. Val4 safety state contains 251 timeout certificates, no QCs, no last vote,
+and finalized H0. Network logs contain framed-write deadline failures. These
+observations do not establish a key mismatch or one faulty validator.
+
+The earlier claim that the removed address-registry constant was required is
+also retracted. The unused constant removal is preserved; duplicated trailing
+source was the compile failure. No safety-state reset was performed.
+
+### Actions and exact results
+
+1. Repaired corrupted duplicated/garbled source regions in canonical
+   node-platform (identity, authority, RPC, network session, PoSy service,
+   execution state diff, storage WAL/disk guard, ETDAG admission/ordering,
+   roles, snapshot, address registry, keytool, and vendored ML-DSA test tail).
+   Valid surrounding edits were retained. Scoped cargo check passed; the
+   initial node/PoSy/storage/state test run passed 24 tests. No runtime deployed.
+2. Fixed node keytool address derivation: require an FN-DSA-1024 identity-root
+   public key and derive canonical SNTS addresses independently of the ML-DSA-65
+   operational P2P pair. Two real key-generation/signature tests passed.
+3. Built node/keytool release binaries on the backing host against the same
+   physical SSD checkout. The local mount is SMB; SHA256 comparison confirmed
+   shared source bytes. No copied source checkout was created. These are macOS
+   build artifacts, not Linux deployment artifacts.
+4. Edited exactly 42 relocated path cells in the original Desktop credentials
+   workbook. Verified unrelated OOXML parts byte-for-byte and retained inode.
+   No workbook copy was created. No passphrase changed.
+5. Added read-only Address Engine custody verification using existing crypto
+   primitives, bounded files/stdin, memory-only decryption and zeroization.
+   All six bundles successfully decrypted using their workbook passphrases;
+   all 30 key pairs and all six canonical addresses verified cryptographically.
+   Updated six status cells in that same workbook with candidate-only status.
+   No validator identity regeneration is necessary to recover these bundles;
+   they remain distinct from the currently deployed Genesis roster.
+6. Corrected canonical ETDAG target validation to permit Genesis H0 -> H3/H4/H5
+   while preserving strict F+5 thereafter and overflow rejection.
+7. Removed the execution fallback that allowed uncertified empty candidates
+   beyond H2 as finality advanced. H3 onward now waits for verified protected
+   material. Tests across node/ETDAG/PoSy/keytool passed 30/30.
+
+### Outcome and remaining boundary
+
+The canonical runtime still needs qualified protected-material production and
+signed fresh-network artifact integration. ETDAG service currently receives
+certificates/handoffs but has no complete production path for creating them;
+its prepared-batch and ordering types reject empty batches. Do not disguise
+this gap by restoring the unsafe execution fallback or fabricating evidence.
+The network JSON launch files are empty placeholders and are not deployment
+inputs. No new Genesis, release, key deployment, or Val1 cutover occurred.
+
+Val1 remains active/running with NRestarts=0; RPC height advanced from 2772298 to
+2788320, Genesis `2272fe2b48c6e2019b27223f61ba8d8a82b58656fe9daab50c81f224a301ca74`.
+Next required proof: real protected material -> proposal -> votes -> QC ->
+three-QC finality across five processes, then Linux build/deployment, sustained
+matching finalized tips, restart/rejoin, and public-tier agreement.
+
+### Contract review amendment and focused validation — 2026-10-08
+
+The protected-material gap must not be filled by adding a batch-vote producer.
+`protocol/posy-v3/PROTECTED_PIPELINE_PROTOCOL.md` and
+`CURRENT_PROTECTED_FLOW.md` explicitly remove active DCC/BVC/BOC/BTC dependence
+in favor of authenticated cutoff evidence, deterministic cut/order, and the
+exact parent-PoSy reveal authorization. Their older H+3 language is superseded
+by the current governing H+5 startup rules. Canonical ETDAG still depends on
+`BatchValidationCertificate` in `CertifiedExecutionHandoff`; PoSy proposal and
+execution-candidate types do not yet carry the complete H/H+1/H+2 commitment
+contract. This requires completing the canonical caller migration, not signing
+new launch artifacts around the incomplete path. No incompatible implementation
+was deployed and no fabricated certificates or empty-batch bypass was added.
+
+Focused validation: node/ETDAG/keytool Clippy passed with warnings denied.
+Address Engine custody verifier passed cargo check, release build, Clippy with
+warnings denied, and 34 library tests. Six real custody bundles also passed
+memory-only cryptographic correspondence checks. The operator requested efficient
+execution to conserve usage; avoid repeating these checks absent relevant changes.
+
+### Service liveness and recovery qualification amendment — 2026-10-08
+
+Status remains OPEN/P0 for replacement launch. No fresh fleet finalized block
+is claimed; H1 remains the first unresolved deployed production boundary and
+the prior H0 observation remains the last recorded replacement finalized tip.
+Responsible component is the shared runtime, not an individual validator.
+
+Actions and evidence, in order:
+
+1. Added bounded exact-byte retries for PoSy proposals, votes, QCs and timeout
+   certificates. Remote malformed, unauthenticated, stale and premature events
+   are rejected without failing the service. Verified certified conflicts and
+   local durability/signing failures still fail closed. Initial real-signature
+   loss/reordering, timeout and restart service tests passed.
+2. Read-only Val4 refresh: role service active, PID 3590310, NRestarts=0. Its
+   2026-10-08 14:02:08 UTC metrics still reported zero completed protected
+   inputs, zero BVC traffic and 48,658 received BOCs. This does not prove chain
+   health or identify an operator/key failure; no live mutation was attempted.
+3. Added a queue-pressure regression leaving only one free outbound slot per
+   tick. It failed: only the first peer received the first retained message.
+   Fixed retry scheduling to resume after the last accepted delivery. The same
+   test then passed, delivering every retained signed message to every peer
+   without resigning or exceeding the queue bound.
+4. Four real ML-DSA signers certified 22 heights with the initial proposer
+   offline and first vote deliveries dropped, reaching identical finalized H20.
+   Source inspection found Sync incorrectly demanding timeout certificates at
+   every height instead of carrying them across the governed leader lease.
+   Changed witness assembly to follow exact signed takeover IDs to their
+   original slots; verification checks contiguous rounds, previous IDs and
+   same-lease monotonic heights. No fictitious timeout certificates are added.
+   The offline service then replayed verified Sync to the same finalized H20
+   and preserved that state across durable restart. Removing the required
+   timeout proof is rejected.
+5. A broader parallel test run failed because wall-clock timestamps collided
+   in test directory names. Added a process-local atomic sequence; rerun passed
+   all 35 tests (node 12, PoSy 11, ETDAG 12). Node/PoSy all-target Clippy passed
+   with warnings denied. These are real-cryptography service tests using
+   deterministic execution fixtures, not ETDAG or socket-fleet qualification.
+
+Remaining launch boundary is unchanged: governed protected cutoff/commitment/
+reveal production, signed fresh-network artifacts, Linux release and deployment,
+sustained matching fleet finality, public-tier agreement and Val1 conversion.
+The protected-material implementation was not completed in this amendment.
+No service, validator key, chain database, or credentials workbook was mutated
+in this checkpoint. Prior in-place workbook changes remain the canonical record.
+
+Release validation: `CARGO_INCREMENTAL=0 cargo build --locked --release -p synergy-node` completed successfully in 38 seconds on the backing macOS host against the canonical SSD checkout. Focused `git diff --check` passed. This is not a Linux release or a deployment.
+
+## C1266-2026-10-08-002 — source-only protected pipeline checkpoint
+
+Status: OPEN/P0. Responsible component: shared replacement runtime.
+Last recorded replacement finalized height remains H0; no new live observation.
+
+
+### 2026-10-08 protected-pipeline verification checkpoint (C1266-2026-10-08-002)
+
+IMPLEMENTED / VALIDATED_LOCAL: authenticated count-and-weight cutoff verification,
+complete certified ancestor closure, deterministic protected batch commitments,
+parent-PoSy-proof reveal authorization, and bounded atomic per-target recovery.
+Recovery now requires the caller's expected cutoff commitment rather than trusting
+the stored record to choose its own authority. Execution additionally waits for the
+matching parent QC in the local verified PoSy store; an unrelated parent is rejected.
+
+Validation: node 16/16 and ETDAG 12/12 tests passed. The four real-ML-DSA protected
+qualification tests passed again after the recovery and local-parent corrections.
+Node/ETDAG all-target Clippy with `-D warnings` passed (the filesystem emitted
+incremental-cache hard-link fallback warnings). These are local service/crypto
+checks, not live network qualification.
+
+CALLERS_MIGRATED: PARTIAL. The ETDAG runtime still uses its old ordering/batch
+certificate handoff. The new durable pipeline is not yet registered as the runtime
+owner. Missing production boundaries include governed target-context creation,
+durable cutoff signing and gossip, H/H+1/H+2 candidate commitments, parent-proof
+handoff, and nonempty reveal preparation. Different cutoff-frontier subsets also
+require qualification against the protocol's single semantic-cut requirement.
+Do not infer that identical empty-frontier test results prove that property for
+heterogeneous frontiers. Fresh signed network artifacts, Linux release, deployment,
+sustained matching finalized tips, restart/rejoin, public tiers and Val1 conversion
+remain unverified. No live service, key, chain database or workbook changed here.
+
+Release check: `CARGO_INCREMENTAL=0 cargo build --locked --release -p synergy-node` passed on the backing macOS host in 41.05 seconds. Changed Rust-file whitespace checks passed. The broader log diff reports four existing Markdown hard-break whitespace lines at 4247-4250; append-only incident history was preserved. This build is not a Linux release or deployment.
+
+### 2026-10-08 19:00 UTC — parallel launch implementation and qualification (C1266-2026-10-08-002)
+
+Status remains OPEN/P0. First unresolved replacement height remains H1; last
+recorded replacement finality is H0, with no newly verified finalized block ID.
+Responsible component is the shared replacement runtime, not a validator host.
+The operator explicitly authorized consensus subagents.
+
+Recovery actions and exact outcomes:
+
+1. Implemented ECHO/READY delivery and immutable proposal-validation evidence,
+   historical READY proof recovery, exact signature replay, height-wide vote
+   guards and verified-finalized-floor journal compaction. Added regressions for
+   Byzantine split evidence, stale-slot isolation and missing historical proof.
+2. Integrated signed complete protected epoch policy, initial state and KEM
+   registry; verified durable finality history; durable collecting/cutoff/VAC
+   ownership and authenticated marker retries. Nonempty threshold reveal still
+   lacks a production crypto provider and complete authenticated wire schema.
+3. Found a protocol circularity: existing proposal H requires completed cutoff
+   H+2, but authoritative POSY-00D 0D.11 closes H+2 only on VC(H). Documented a
+   concrete pending clarification in PROTECTED_PIPELINE_PROTOCOL.md and asked
+   operator approval required by AGENTS Section19.3. No amendment is active;
+   H/H+1/H+2 proposal-material integration and signing/deployment remain gated.
+4. First combined test attempts failed at two keytool ambiguous Into literals
+   and one old VC fixture field. Corrected those specific compilation errors.
+   Next node run passed19/20; sole failure was obsolete retry-tail bound9 after
+   adding bounded historical proof delivery. Corrected bound19 and eliminated
+   repeated cryptographic verification of already verified exact proof bytes.
+5. Shared authority signing test initially failed because its fixture had only
+   one validator; the real minimum-five check correctly rejected it. Corrected
+   the fixture without weakening validation. Latest combined suite PASSED:
+   node22, ETDAG12, PoSy14, keytool5 (53 total), Genesis/updater compiled with
+   zero tests. Node service suite took87.55seconds and still uses deterministic
+   execution fixtures, not complete protected sockets or live validators.
+6. Release Clippy found test-module ordering in keytool release.rs. Moved tests
+   after production functions without suppressing the warning. Rerun pending.
+   First Linux preflight failed because cargo zigbuild --version is unsupported;
+   corrected to cargo-zigbuild --version. Linux build rerun is pending.
+7. Read-only host preflight at18:59–19:00UTC verified strict BatchMode SSH,
+   passwordless sudo availability, synchronized clocks, sufficient memory/disk,
+   VPN addresses10.69.10.2–.6 and listening5622 on allfive. Existing role services
+   remain active with NRestarts0: Val2 PID90992, Val3 PID3646962,
+   Val4 PID3590310, Val5 PID4132383, Val6 PID3619060. Established TCP sockets
+   exist across the mesh, with queued data; this does not prove authenticated
+   message processing, QC advancement or finality. No live mutation occurred.
+8. SMB source operations intermittently blocked for tens ofseconds. Pending
+   in-place writes eventually completed; root verified authority file intact
+   on the backing host. No source mirror, worktree, alternate ledger or workbook
+   copy was created. Five canonical migration ledgers were updated in place.
+
+Next required observations: approved cutoff authority, complete proposal/material
+wiring, authenticated socket-runtime finality/restart qualification, verified
+Linux artifacts and live deployment, advancing matching finalized tips and public
+tiers, then Val1 membership conversion. No validator service, identity, chain
+state or credentials workbook changed during this checkpoint.
+
+### Additional restart/transport qualification — 2026-10-08 (C1266-2026-10-08-002)
+
+Status remains OPEN/P0; no fresh finalized block is claimed. Subsequent attempts:
+
+1. Real closed-target restart regression exposed service ordering: ETDAG starts
+   before PoSy and required VCs restored only in PoSy.start. Moved independently
+   verified last-eight-height VC restoration to registration before any service
+   starts. Genuine closed-target regression passed.
+2. Reserved the existing global64 outbound frames: PoSy16, ETDAG16, Sync8,
+   six other protocols4each. A full peer channel now retains exact queued frames
+   and services other peers instead of dropping work and removing the sender.
+   Authenticated inbound capacity bursts no longer fail the networking service;
+   router bounds/telemetry and protocol verification remain unchanged. Queue
+   isolation/exact-retention/burst regressions passed.
+3. Sync previously failed after every eligible source had been attempted once,
+   including locally congested sends. Added a bounded exact outgoing queue,
+   excluded local queue wait from request timers and revisited only independently
+   verified sources after timeout. Both congestion/revisit regressions passed.
+   Execution restores a consumed authenticated Sync request when its response
+   cannot enter the queue, then yields rather than failing or forgetting it.
+4. Node suite24/24 passed before the final Sync/inbound additions; focused Sync2
+   and ingress2 tests then passed. Together with the earlier combined53 suite,
+   five additional distinct regressions passed (58 distinct tests total).
+   Existing bounded-router4/4 tests also passed. Strict package Clippy passed;
+   node all-target Clippy with clippy::all denied passed, retaining only the
+   two intentionally unwired protected-material Rust dead-code warnings.
+5. Latest Linux x86-64 ELF release built successfully in41.74seconds:
+   SHA256 f83774e08d38634919d13d80ae392c79de68156a2c3ade792f6c938b8be4c9e6.
+   This candidate includes the restart and transport fixes, but no approved
+   cutoff clarification or complete protected proposal-material integration.
+   Native Linux execution is not verified. A control-socket check for an in-memory
+   smoke transfer found no multiplex socket; no second SSH connection or transfer
+   was opened. Trusted-host keytool executable was separately built successfully.
+6. Focused changed-source git diff --check passed. Five canonical ledgers were
+   reconciled in place. Signed artifacts were not generated, validators were not
+   restarted or changed, and the Desktop credentials workbook was untouched.
+
+The cutoff clarification still requires explicit operator approval. Nonempty
+reveal also needs the governed provider/schema migration; current source must
+not advertise that path as production ready. Complete socket runtime, signed
+fresh launch artifacts, deployment, sustained matching finality, public tiers
+and Val1 conversion remain open.
+
+### Protected crypto/custody checkpoint — 2026-10-09 UTC (C1266-2026-10-08-002)
+
+Status OPEN/P0. Three parallel agents implemented canonical protected crypto/schema, keytool/config support and durable nonempty recovery hooks. Governed ML-KEM-1024 uses AES-256-GCM and legacy GF256 semantics; count quorum remains4/5 and reveal threshold derives n-Q+1 (2/5), with exact role/commitment/context checks. Fixed AES tag padding and static registry/target context confusion; added key schedule coverage validation to reject delayed H3 activation and rotation gaps.
+
+Validation: ETDAG18/client1/config4 tests passed; keytool7/Genesis1 passed in separate scoped run. Earlier node27 suite had25 passes and two structurally stale one-byte KEM ciphertext fixtures failing new1568-byte validation; fixtures were corrected. The subsequent focused node attempt intersected an explicitly in-progress runtime integration (missing accept_reveal_share/reconcile_reveals), so node qualification is pending a coherent checkpoint, not claimed passed. A first combined package build also encountered a module declaration before its provider file landed; after source coherency the package tests passed. New AES dependencies were resolved into the existing Cargo.lock.
+
+The former custody keys are768 and are not launch-compatible with1024. No real keys were generated, no credential/workbook copy was created, and no validator mutation/deployment occurred. Existing Linux hash is historical to the preceding transport checkpoint. Cutoff amendment approval, complete runtime/socket qualification, signed launch artifacts, live matching finality/public tiers and Val1 conversion remain open.
+
+### Approved cutoff clarification — 2026-10-08 America/Chicago (C1266-2026-10-08-002)
+
+Operator explicitly approved the linked concrete clarification: proposal H names the H+2 boundary and VC(H) closes it. Fresh signed policy now requires versioned cutoff_relationship=vc_event_context_v1; runtime assembly/independent verification is assigned in parallel. No quorum, signatures, leases or three-QC finality change. This supersedes the prior pending-approval status only. Deployment/fresh finality remain unverified.
+
+### Public custody role correction and V2 checkpoint — 2026-10-08 America/Chicago (C1266-2026-10-08-002)
+
+Public-only inspection of the five canonical identity.pub.json records at workbook-referenced paths proves existing ML-KEM-768 is entropy_contribution_key, NOT protected ingress. Those bundles have no ingress KEM role. Their existing consensus ML-DSA-65 and FN-DSA-1024 identity remain valid; node_identity_key is Ed25519, while the new runtime transport requires a separate operational ML-DSA-65 role. Do not replace entropy768 as an ingress fix. Provision only the missing roles bound to existing identity, and update the original workbook when actual custody changes occur. Earlier wording conflating768 with ingress is superseded. No encrypted custody or secret content was read in this inspection.
+
+Full node28/28 tests passed after materialV2 fixture migration, including nonemptyreveal restart/tamper and prior transport/PoSy tests. Keytool9/9 passed including publicfreshauthority preparation/nooverwrite. StrictClippy passed crypto/client/Genesis/keytool/config; nodealltargetClippy with clippy::all denied passed before newestV2material assembly. The approved H/H+1/H+2 production assembly is implemented; causalH1-H6test and authenticatedsocketqualification are in progress. Independent source review fixed actual envelope-vs-vertex lookup in both nonemptyruntime reveal paths; a real distinct-ID regression now covers selection. No deployment or fresh finality claim.
+
+### Approved material causal validation — 2026-10-08 America/Chicago (C1266-2026-10-08-002)
+
+Production H1-through-H6 assembly regression passed with genuine ML-DSA VC/cutoff evidence. Protected cache regression passed through 200 heights; genuine nonempty threshold reveal/restart/disk-tamper regression passed with distinct envelope and vertex IDs. The first socket harness compile failed ambiguous KeyId conversion and the first fixture execution failed wrong identity-address key algorithm; fixture corrections were applied before retry. Full authenticated socket qualification is currently running; no result or live deployment is claimed. Independent inspection identified a potential ordinary transaction contract mismatch between FN-DSA address derivation and ML-DSA-87 transaction verification, now under source review. Original Desktop credentials workbook and live validators remain untouched in this checkpoint.
+
+### Authenticated socket finality and rejoin boundary — 2026-10-09 America/Chicago (C1266-2026-10-08-002)
+
+Accepted macOS TCP sockets inherited nonblocking listener mode, causing immediate handshake WouldBlock and zero peers. configure_tcp_stream now explicitly sets blocking mode with deadlines; delayed-byte regression passed. Real five-service authenticated socket fleet independently matched finalized H6 and H70 across five validators, then H74 across four after one validator stopped (governed quorum unchanged). Restarting that validator recovered H70 but PoSy polling fatally rejected a newer QC before verified catch-up: quorum certificate is not for the next certified height. Full qualification FAILED at that rejoin boundary; minimal bounded recovery fix and shorter socket regression assigned, no deployment claim. The first 180-second H70 fixture budget also timed out during healthy progression at H28; fixture now uses height-range overall limit plus a separate60-second no-finality-progress watchdog.
+
+Real identity dual-possession and transaction scoped binding tests passed (identity5, transaction4, Genesis2). Canonical public identity loader4 tests passed; no root public key copies or actual custody generation occurred. Signed deterministic epoch timestamp fields migrate existing frozen protected-material semantics; production execution/replay/sync now uses externally governed time and finalized authorization state, with full node integration still awaiting central validation. All five hosts revalidated trustedSSH, sudo-n availability, NTP sync, overlay10.69.10.2..6 and listening5622; existing immutable role services remain active. Original workbook and live node state remain untouched.
+
+### Nonempty execution and bounded recovery checkpoint — 2026-10-09 (C1266-2026-10-08-002)
+
+Genuine authenticated five-node nonempty socket qualification PASSED through H8 (107.34 seconds): committed dual FN-DSA identity/ML-DSA-87 account authorization, funded signed transfer, ML-KEM-1024 encrypted envelope, independently verified durable VACs on all five, genuine authenticated threshold reveal, exact duplicate receipt, closed-target rejection and continued matching finality. First attempts exposed test-only signer/provider and absent-pending-file assumptions; those were corrected. Actual runtime H3 stalled because exact reveal transcript proof variants entered execution authority. Execution now binds the stable independently verified parent reveal authorization while retaining every exact transcript and all threshold/crypto/recovery verification. All five produced identical H3 state/material roots despite different valid transcript roots. The production causal/semantic/tamper regression passed.
+
+Updated non-socket node suite PASSED33/33, including authenticated reordered future-QC/canonical-witness recovery. Canonical fresh Genesis producer PASSED6/6; independently signed identical-snapshot/content-conflict regression PASSED. Focused rejoin first stayed alive but stuck at H6, then exposed finality-before-local-candidate and legitimate snapshot signer-proof collisions. Sync now requests from durable Execution commits, keeps canonical prefix replay alongside snapshot download, and installs only the exact local verified prefix; Execution retains queued finality until its matching candidate is durably committed. Snapshot content equality excludes independently verified signer-proof variants but preserves exact finalized block/context/state/chunk bindings and the initial proof. Latest real focused test has caught the returning validator up to matching H11; complete durable Execution H16 acceptance remains pending.
+
+Linux release build and current strict Clippy are in progress. The typed local signed-vertex admission boundary remains internally qualified; an external transaction submission owner is not yet wired. No real custody generation, artifact signing, live deployment, node restart or original Desktop workbook mutation occurred. Live stability, public-tier migration and Val1 replacement remain open.
+
+### Fresh custody provisioning preflight — 2026-10-09T11:03:03.399256+00:00 (C1266-2026-10-08-002)
+
+Focused authenticated restart/rejoin PASSED through matching PoSy and durable Execution H16 (147.01s). Existing-key import possession/no-overwrite tests PASSED2/2. Current Linux keytool SHA256 fb3e1e1942e726eeea8e0db7050708f271a8cdfbe0cfd05a213b64f4b16857dc. Long five-node qualification continues advancing; below-quorum halt/recovery test is running separately.
+
+Pre-action plan: provision only missing operational P2P ML-DSA-65 and ingress ML-KEM-1024 directly in final root-owned /etc/synergy/posy-stability/custody on val2–val6; import existing verified consensus custody through bounded non-PTY stdin. Export public bundles only to canonical identity operational directories. Use one authenticated pinned ControlMaster per host with fallback disabled. All five final deployment namespaces were absent at preflight; sudo and wt0 verified. Existing services and chain history remain retained until fresh signed deployment. Original Desktop workbook remains sole allowed workbook. No live-chain claim.
+
+### Signed fresh deployment preparation — 2026-10-09T14:18:11.472811+00:00
+
+Full authenticated socket qualification PASSED617.76s: matching durable H70/four-nodeH74/rejoinH80. Separate below-quorum halt/recovery PASSED175.06s, restores to matching durableH12. Missing transport65/ingress1024 generated directly final custody on all5; existing consensus imported with genuine possession verified. Initial completion-ordering receiver defect corrected before continuing; no private bytes logged or copied to repository. Public operational exports complete. Runtime requires owner-only0600 private files; corrected provisioning/service custody permissions accordingly.
+
+Actual signed Genesis/complete authority and signed Linux release prepared using val2 existing consensus65 with distinct governed signature contexts; native Linux signature/digest verification passed. Dedicated fresh transport locator snapshot signed by newly generated protected Ed25519 attestation custody, unchanged locator signature contract, separate from PQC consensus; pins are in fresh configs. Canonical public artifacts: node-platform/networks/testnet/posy-stability. Manifest hash explicitly commits exact signed Genesis file SHA256; it is not claimed independently signed.
+
+Next controlled action: after all5 installed signature/hash/unit checks, stop only old validator02..06 role units, daemon-reload and start/enable dedicated synergy-posy-stability.service concurrently, preserving old services/data and Val1 authority. Read actual logs/admin/RPC/durable finality; no running-chain claim until matching advancement.
+
+### Native fleet started / live Sync repair — 2026-10-09T14:26:30.630221+00:00
+
+All5 native signed sequence1 releases verified and dedicated services enabled/started; old validator role units stopped without state deletion. All services initially healthy/ready; actual RPC independently matched H5 block/state/protected roots on4. Val3 failed on ordinary delayed or superseded finalized-candidate responses; Val5/Val6 also restarted. Four remained advancing through independently matching durable/RPC H107 (block7b0204058a338e9473a605a72109f15343e7a68896d9648a618f812461e7c855); Val3 stopped at durableH16 after restart cap. This is live production but not stable five-node acceptance.
+
+Repair rejects unactionable delayed/wrong-source/old-request candidate and snapshot responses before ingress mutation, recording rejection without failing Sync; current-request signature/context/execution validation remains unchanged. Authenticated focused restart/rejoin PASSED162.71s, strict Clippy passed, Linux repair SHA2566b94606a3509e7482388ac90028e04a7116f2ccbe3ed16230dcc2e01b1448d1e. Signed sequence2 repair staged and verification underway. Next start repaired Val3 and prove catch-up before sequential fleet rollout. No history reset or quorum change.
+
+Original Desktop workbook edited55targetedcells in place, original inode retained; all unrelated OOXML parts preserved. Custody passphrases reconciled from cryptographically successful original-envelope column without secret output; operational paths/ports/root0600 custody/releaseGenesis binding and pending live qualification recorded. No workbook copy/backup.
+
+### Guarded rolling repair progress — 2026-10-09T14:34:33.954841+00:00
+
+Sequence2 repair signatures/digests independently verified on all5 hosts. Val3 started repaired binary with retained durableH16/custody; advanced through independently matchingH130 with NRestarts0 while other nodes approachedH193. Val5 old binary then reached bounded restart cap and failed on the same superseded response boundary. Suspended original rolling waiter (no mutation had occurred), started already-verified repaired Val5 from its retained near-current durable state, NRestarts0. Remaining guarded rollout order6,2,4 requires all5 running and matching actual finalized RPC block/state/certificate before every subsequent restart; cannot reset or skip safety history. Public evidence remains append-only live-observations.jsonl.
+
+### Certified recovery path defect — 2026-10-09
+
+Four native validators independently match durable/RPC H340 and continue advancing; Val5 retained durableH194 but failed after the restart cap. Its stored timeout H196/r0 was accepted before the compatible older-round QC196/r0. Startup incorrectly replays every stored timeout before the QC, although that QC does not reference this timeout; Sync then rejects the different certified H197 timeout chain. Guarded rollout remains paused. Planned repair selects only the verified timeout closure required by each stored QC during certified-history replay, retaining outstanding timeout replay at the uncertified tip, all signing journals, all original records and exact quorum/signature/finality checks. No validator state reset or consensus policy change.
+
+### Recovery amendment approval boundary — 2026-10-09
+
+Live4 independently matched finalizedH405, with unchanged healthy service PIDs/restart counts; Val5 remains failed at retainedH194. R1 proposal appended to canonical POSY-00E-SIMPLIFIED-CONSENSUS-AMENDMENT.md; inactive, pending operator approval. Existing Section10/12 TC persistence/conflict semantics and AOS19.6 prohibit activating the proposed supersession as an ordinary caller repair. Preliminary ordering experiment passed focused restart118.71s, Clippy and Linuxbuild but did not validate superseded local TC mandatory carry or complete finalized-history authority; root reverted only its experimental source diff. No new signed release, runtime deployment or state deletion. Guarded rolling owner was interrupted by validated PID38183 and cannot restart Val2/4 while approval is pending. Existing signed deployed sequence1/2 runtime and original workbook remain unchanged this continuation.
+
+### R1 approved implementation checkpoint — 2026-10-09
+
+Operator explicitly approved exact R1 recovery amendment. Complete instruction/memory/incident gate read this continuation. Four validators match actual durable/RPC H479; Val5 retains failedH194. Three subagents assigned isolated proof verifier, genuine-signature regression and independent review; root alone owns runtime/build/SSH/workbook. Implement only certified three-QC-backed timeout supersession with exact parent/mandatory carry, durable finality equality, no extra certified closure proofs and preserved uncertified-tip state. No deployed change or reset yet.
+
+### R1 causal and Sync projection validation — 2026-10-09
+
+R1 operator approval implemented with pure three-QC/carry/parent/quorum/closure verifier and staged startup/authenticated Sync reconstruction. Genuine ML-DSA-65 four-of-five regression reproduces local timeout-before-older-QC and alternate next-height timeout; canonical referenced-carry, early one-QC restart, missing/invalid/conflicting proof and immutable-prefix tests passed4.19s. Journal namespaces unchanged in tests. Strict node/PoSy all-target Clippy passed after factoring recovery-transition return type. PoSy14tests and genuine execution bootstrap2tests passed. Focused full-runtime restart/rejoin and Linux release build now in progress; no R1 deployment yet.
+
+Livefour matchedH683. Val3 had one spontaneous restart caused by delayed/queued verified execution Sync candidate failing next-transition check; it rejoined with exactmatchingRPCfinality. Repair validates historical candidate against exact durable block/state commitments, retains future gaps, deduplicates matching pending transitions and reexecutes from finalized parent, with wrongroot/block/height/payload negatives. Val5 remainsfailedH194. SHA256-only pre-recovery inventory captured1524originalconsensusJSONrecords for later preservation comparison; no original data copied or reset.
+
+### R1 signed release staging and controlled Val5 recovery — 2026-10-09
+
+Focused genuine authenticated restart/rejoin PASSED119.55s with five matchingH16; strict Clippy and Linux release build PASSED51.94s. Genuine R1 startup/Sync alternate-timeout, canonical referenced carry, early restart and negatives PASSED4.19s. Sequence3 release id posy-stability-20261009-r1-recovery governance-signed by existing ML-DSA-65 authority, protocol_activation_commitment posy-r1:sha3-256:059a958368d57440379d2480e411f2693acf42e148d424821d665b8e43de20d8. Binary7179656bytes SHA256b9e373ef2681c92b575885e8cf3330c1573371eb2c9244b36c3cae987eeddcdc. Identical immutable synergy-node-r1-recovery and release-r1.json installed and native pinned release signature/artifact verification PASSED all5. No source copied.
+
+Next controlled action: only failedVal5 dedicatedunit selects signedR1 binary; add pinnedreleaseverification ExecStartPre; daemonreload/resetfailed/start with ALL original state/custody/signing evidence retained. Require actual sustainedcatchup and preservation before another validator restart. Val1/publicrouting untouched.
+
+### Val5 R1 first activation failure and certified-tip preservation — 2026-10-09
+
+Sequence3 Val5 activation retainedoriginaldata but startup failedclosed at ProposalDelivery activation: delivery journal rollback. No QCdescendant above196 was stored, yet backwardthreeQC194..196 let projectionomit outstandingTC196 and dropactive197round1toround0. Stopped dedicatedservice after observed secondretry; nootherhostrestart. Fix requires storedQCdescendant beforestartup supersedeslocaltiptimeout; otherwise normalTCfirstrestore retained. Genuine certified-tipQC1..3+TC3carryQC3/noQC4 regression PASSED; combinedR1regression4.45s andstrictClippy passed. Linuxbuild47.62spassed. Governance-signedsequence4 posy-stability-20261009-r1-tip-recovery retains exactR1commitment; binarySHA2560d973f24e1984d0dac9dd1f14872f0e1a8158f222ac103a722da8365954fd323. Stagedidenticalrelease all5, nativepinnedsignature/artifactcheckspassed. NextretryVal5only withpreservedtipTC; noreset/journaledit.
+
+### Val5 retained-state progression and Atlas staff dashboard — 2026-10-09
+
+Signed sequence4 Val5 recovered from finalized194 through902 with zero automatic restarts; at common902 allfive independent RPC finalized block/state commitments exactly matched. Current records3108; all1524 pre-recovery consensusJSON records remain, only legitimately evolving delivery.json/sign-once.json digests changed. Original state/custody retained. Four peers independently advanced1494; five-node tip parity/reliability acceptance remains open.
+
+Atlas production staff page deployed and target-browser verified at https://atlas.synergy-network.io/staff/posy. Only footer Staff Login link; existing secure password/cookie gate and authenticated-only origin telemetry route. Unauthorized telemetry401. Real15 animated charts:5chain series +2histories pervalidator, status timelines and actualtest evidence. Backend authenticated200 fresh5roster; publisher uses actual durable finalized pointer and existing ownerSSH masters. No fabricated verified quorum/soak pass. Local launchagent io.synergy.atlas-posy-telemetry owns observation publication; stale readings explicitly surfaced if publisher stops. Canonical public source assets preserved; compressed generateddeploymentmedia satisfy Pages25MiB limit. Worker redirect:error failed beforeoriginrequest; manual redirect with explicitnon2xxfailclosed fixedtarget200, no bearerforwarding toredirectdestination. Source/build/scopedlint and focusedauth/securitytests passed; fullfrontendlint remains blocked by preexisting AppleDouble files.
+
+Catchup source review found canonical multi-TC ancestry incorrectly compared to active terminalTC, causing repeated full-prefix recovery. Minimal round-aware detection preserves realdivergence/oldslotrestoration, allsignature/quorum/staging/durablechecks. GenuineMLDSA65 R1regression passed4.57s including repeatednormalwitness no-restage and realwrongterminal/oldslotcases. StrictClippy passed. DirectLinuxCargo build failed missingcrossCcompiler; canonical build-linux.sh correctedtargettoolchain, passed69s. Sequence5 candidate binarySHA256c248f713ed35af6392766eb58e6b2687de66bb7b95fae4188147580898d9c925 prepared with unchanged approvedR1commitment. Plan: sign/stage/nativeverify all5, controlledVal5only restart preservingalljournals, require actualcatchup/preservation before anyotherrestart. Val1 and publicchain unchanged.
+
+### Val5 sequence5 restart boundary — 2026-10-09
+
+Sequence5 signedstaging/nativeartifactverification passedall5. Fourpeers exactmatchingcanonicalRPC H1570 confirmed before Val5only unit changed to verified release-r1-performance.json floor4. Val5 startup Execution refused `certified H1048 lacks durable executed candidate`; retained durablefinalized1047, certifiedSyncprefixahead. Two automatic retries observed then rootstopped dedicatedservice toavoidchurn; no state/custody/journal deletion or otherhostrestart. Previous seq4 runtime had advanced to1047 whilecandidates/certifiedhistorywere asynchronously catchingup. Existing restarttestdidnotcoverpersistedverifiedQCprefix ahead ofexecutedcandidates. Repair must retain verified consensus/finalityauthority whilequeueing exactnot-yet-executed certified transitions until authenticatedSynccandidate arrives, validateeverycandidate against certifiedcommitments beforeexecution/finality. Source-only causalrepair delegated; chainfourcontinuesadvancing1581. Atlas stafftelemetry reportsactualoffline/recovery state, notcompletion.
+
+### Certified execution-gap restart and block cadence repair — 2026-10-09
+
+Genuine authenticated five-service certified-execution-gap restart/rejoin regression PASSED104.04s: retain genuineQC/journals, restart with missingunfinalizedcandidate, fetch/reexecute exact authenticatedtransition, resume matchingfinality. Startup now waits at missingcandidate instead of rejectinglegitimateQCahead; anypresentinvalidcandidate still fails. Ordered historicalfinality uses existing independently verifiedthreeQC authority, never skips candidate/rootexecution.
+
+Operator reiterated wallclockblocktarget0.5–1.5s. Signed target_block_time_ms1000 is deterministicconsensustimestamp metadata, not a wallclockpacer. Actual finalizedcadence above target. NativeVal2 NetBirdstatus subprocess measured70.71/70.38/135.25ms and was called every50ms synchronousruntimepoll. VPNstatus/registry observation now1scadence withforcedstartupverification, independent authenticateddials, preservedfailclosedfresherrors/readiness. Causalprocess-cadenceregression passed1/1; genuineexecutionbootstrap2/2 passed11.05s; strictClippy passed1.71s; canonicalLinuxbuild passed49.02s. Signedsequence6 planned/staged binarySHA256ffd122b0d6ca55b23f578cc70a43e4a8314545d8b1936a586198d144ebd77761, unchangedR1activationcommitment. NextactionVal5only afterallnativeverification, preserveeveryrecord; laterall-fiveguardedrollingupdate and actualcadenceacceptance. No 0.5–1.5s achievement claimed. Atlas nowdisplaysactualseconds and explicitlylabelledoperator targetband/above-targetreading.
+
+### Sequence6 retained-state recovery resumed — 2026-10-09
+
+All5 signedsequence6 nativeartifactverification passed. FourpeerexactcommonRPC H1762 confirmed before Val5unitselectedrelease-r1-startup-performance.json floor5. Val5startedPID781915 withzeroautorestarts, actualexecutedfinality1047→1137 whiletip1806. Nojournal/state/identityreset. Originalothernodeunits retaineduntilall-fivecatchupguard. Atlas productiondeployment74a1cf50 targetbrowser verifiedactualblocktime3.126s, operator0.5–1.5s shadedtargetband/above-targetflag, live15charts. Runtime targetnotmetyet; nofinalacceptanceclaim. Catchupthroughput source inspection underway beforeanyfurtheroptimization.
+
+
+### 2026-10-09T16:41:22.877134+00:00 — H1931 stalled Val3 retained-state R1 repair
+
+All five durable execution pointers now report H1931. Older Val3 has seven automatic restarts and a retained TC1933/r2 beyond the peers timeout projection; chain has stopped advancing. Signed seq7 r1-gap-wait has been installed and native signature/hash verified on Val2–Val6 (SHA256 3f70e98b2982bd4c28c185cc62f836243c38cb436ac62c79aa14f3d7e6eca8f7). Genuine authenticated execution-gap restart test passed in 101.18s, strict Clippy passed, Linux release build passed. Seq7 avoids repeated historical proof loading while the next executed candidate is missing; approved R1 semantics and all journals/quorum checks retained. Unstripped symbols support instruction-address profiling. Root will first restart only already divergent Val3 onto seq7 using pinned signed release verification floor6; waiting for all-five advancement before this repair would deadlock recovery. No data, identity, timeout or QC journals reset. Healthy remaining rollout still requires all-five matching advancing durable finality. User block interval requirement is measured 0.5–1.5 seconds, still unproven.
+
+
+### 2026-10-09T16:45:59.639440+00:00 — retained Val3 recovery progressing; timing target still unmet
+
+Val3 sequence7 PID695566/restarts0 advanced1931→2010 without resetting any retained history. Otherfour reached2045. Allfive RPC responses at commonH1970 matched exactly. Peer QC arrival spacing over30observations was median1.97–2.02s/mean2.29s with8.5–8.8s maximum, outside required measured0.5–1.5s. These arrival measurements do not substitute for finalized cadence acceptance. Root instruction-address-only perf observation on unstripped Val3 showed30.58%Keccak permutation,13.68%MLDSA65 Montgomery reduction,3.58%NTT and3.67%JSON integer parse over432samples; no raw stacks/private data captured. Source review additionally found native readiness remainsfalse on otherwise all-service-ready signer nodes because lifecycle never leavesShadowing; healthy rollout gate remains closed while proper authorized lifecycle transition is investigated. No readiness gate weakened.
+
+
+### 2026-10-09T17:02:00.127161+00:00 — bounded recovery queues caused repeated Val3 exits
+
+Continuation live verification: Val2/4/5 finalized H2418; Val3 retained H2353 with four automatic restarts on signed sequence7. Val3 journals report alternating `PoSy finality queue is full` and `protected material cache full` during catch-up. Val6 remains active at original PID153812/restarts0; one compound admin observation failed, so its current height is not claimed from that call. No runtime mutation performed in this continuation. Separate source agents are investigating recoverable bounded queue pressure, the failed exact-signature-cache negative test, and a narrowly authenticated legacy readiness migration gate. Initial cache test command was terminal exit101 (one pass, one failure), so dependent Clippy/build/deployment did not execute. Fresh validation is required before any sequence8 release.
+
+
+### 2026-10-09T17:08:06.577056+00:00 — repair failed legacy Val2 with verified sequence7
+
+Val3/4/5/6 reached H2450 and their native service observations are all healthy/ready (legacy lifecycle remains shadowing). Val2 retained H2424, failed seven times on `stale, skipped, or non-sequential timeout certificate`, and hit systemd restart limit. Root will verify and activate already-signed sequence7 R1 on failed Val2, preserving original identity/configuration and all safety/history data. This is recovery of a failed validator, not a healthy rolling restart; the remaining four are preserved. Sequence8 source validation/build is concurrently running only on canonical build host; no sequence8 runtime activation is authorized by a mere build start.
+
+
+### 2026-10-09T17:13:52.098383+00:00 — local disk capacity failure isolated; recovery validation rerun on SSD
+
+Sequence8 focused checks passed: exact-signature-cache2/2, authorized-readiness2/2, durable finality backpressure1/1, execution cache-pruning1/1 and prior pipeline-cache regression1/1. Expanded genuine offline/rejoin test reached H48 then failed writing its owned temporary signing journal: ENOSPC. Build host internal Data volume had only220MiB free; canonical external SSD had1.2TiB free. This is a test-environment capacity failure, not successful consensus qualification. No production data was removed. Rerun uses TMPDIR at canonical node-platform/target/test-tmp (mode0700), with fresh owned fixtures and normal test cleanup; output target/r1-stable-recovery-validation.log. Dependent Clippy/Linuxbuild remain gated on genuine test success. Live Val2 sequence7 recovered to matching all-five H2572; sustained/target-cadence and complete resilience proof still pending.
+
+
+### 2026-10-09T17:34:12.265678+00:00 — sequence8 validated; signed staging and retained Val3 repair
+
+Sequence8 r1-stable-recovery passed the genuine 70-block offline/execution-gap/rejoin test (978.49s), with all five agreeing on durable block/world-state at H84 and zero full Sync projection rebuilds in that fixture. This is historical common-height agreement, not a claim that the test lagging node reached the peers live tip. Strict Clippy passed2.87s; native Linux build passed49.28s; approved R1 timeout-before-older-QC causal regression passed6.10s with journals retained. Focused signature-cache2, lifecycle-readiness2, durable-notification coalescing1, execution cache-pruning1 and prior cache regression1 passed. Artifact length12374768; SHA256 ed886294d19513476cca707a83bd1c9b3d868208f9b113acee05983d688a2b53; SHA3-256 2d5777eae2eee5c73db85b1ff13bab46bba2635e5084be7afc8dcef086958b8c. Same approved R1 activation commitment; no quorum, identity, finality, or cutoff semantics changed. Root will stage immutable signed sequence8 on allfive, verify native artifact/signature/trust pins, then repair recurrently failing/lagging Val3 with all journals retained. Healthy remaining rolling restarts require allfive matching advancing finality and actual service readiness; known legacy readiness defect is narrowly authenticated, while sequence8 must report native ready=true.
+
+
+### 2026-10-09T17:46:42.951243+00:00 — sequence8 Val3 caught live tip; guarded fleet rollout
+
+Native signature/artifact verification passed allfive before Val3 activation. Val3 PID708917 sequence8 retained all state, recovered from H3116 through H3418 with zero automatic restarts, lifecycle active and native ready=true. Root all-five matching advancing finality guard passed at H3417; observed heights3417/3418. Root next updates Val5 to already-signed/staged sequence8 after a fresh all-five gate, then guarded sequential rollout to2/4/6 (skip already-correct3). Each restart must regain all-five matching advancing finality with no automatic retry before the next mutation. Measured0.5–1.5s and sustained resilience remain unproven. Source-only bounded authenticated candidate prefetch is separately under test/review and is not included in sequence8.
+
+
+### 2026-10-09T17:59:05.420787+00:00 — Val5 sequence8 rejoined; remaining rollout waits for Val3
+
+Fresh all-five matching advancement H3477 preceded Val5 activation. Val5 signed sequence8 native readiness and all-five matching advancement H3512 verified with retained state, PID809645/restarts0. Remaining guarded rollout started but has not passed its initial all-five gate: later peersH3782, Val3H3686/PID708917/restarts0/Sync pending. No further validator restart until gate passes. Last100 Val5 durable world-state file commit intervals median1.94s/mean2.15s/max7.92s,16/100within0.5–1.5s; this is filesystem commit timing evidence and not a timestamp-derived claim. Source-only bounded prefetch passed4focusedtests +source retry1 +strictClippy. Independent review found queued response could be purged on reconnect after bookkeeping marked it awaiting; root added current-session invalidation and5s retry of still-uncommitted height, exact durable parent/proofs unchanged. Genuine70gap/restart/reordered-response qualification running; not released.
+
+
+### 2026-10-09T18:07:13.412383+00:00 — Atlas observation bounded; prefetch qualification continues
+
+Publisher previously parsed all candidate history H1..tip on allfive everypoll and stopped cumulative totals aboveH10000. Replaced with per-node RAM cursor anchored against exact durable finalized-history, max256 new committed candidates/16MiB perprobe, checked height/block/state/parent, unknown total until complete. Synthetic incremental/reset/fork/missing/bound checks and root source/syntax review passed. Launchagent restarted, fresh origintelemetry verified H3979 with five actual synchronization rows and completed sequence8 local-regression evidence. Soak/below-quorum remain pending. No consensus/runtime state changed by this telemetry repair. It reduces proven O(height) observation work; not claimed root cause of cadence. Root genuine prefetch qualification progressed beyond64; dependent release signing/deployment awaits terminal success.
+
+
+### 2026-10-09T18:47:43.583306+00:00 — H4076 historical Sync witness overflow; recovery scope
+
+Observed Val3/4/6 failed at durableH4076; Val2 activeH4076 after3automaticrestarts; Val5 activeH4075/restarts0. Val2/3 journals identify Execution serve_sync_requests fatal: Sync candidate witness exceeds protocol bound. Val3 QC4078 isround46 with exacttakeoverTC; full FinalitySyncWitness includes referenced46TCleaseclosure, eachTCincludesauthenticatedreportsandhighestQCproofs. Onelegitimatehistoricalresponse exceeds1MiB; nestedJSONbytearraysalsoexpandagainst1MiBframebound. Allproofs/TCjournalsretained. Rootsourcecontainsoversizedresponse nonfatally andchecksfullserializedframe beforeoutbound; thiscontainscrashbutdoesnotyetdeliverlargeproof. Fullproofchunkedtransport remainsrequired. Prefetchlongtestfailed661.71sonfixtureonly: secondimmediaterestartdialsallrejected1–3speerbackoff withnoVPNretryowner. Focused8gapfixture nowretriesmissingpeersatproduction5scadence; rootcausaltest+Clippy+buildrunning. No newrelease deployed. Remainingseq8rolloutterminaltimeoutatinitialallfivegate, noadditionalmutations.
+
+OperatoraddedmaximumETDAGorderedTPSloadqualificationandAtlasTPSstats: measureaccepted/ordered/finalizedratesseparately, sustainedandpeakwithwindows, latency/backlog/errors/resourceuse; progressiveloadonlyafterbaselinechainreliability. NoTPScapacityclaimyet.
+
+
+### 2026-10-09T18:51:54.642537+00:00 — sequence9 verified; failed validator recovery
+
+Focused genuine8gap/outstanding-request restart/reorderedresponse test passed201.13s afterfixturemissing-peerredialrepair; allfiveexactdurablestatequalificationpassed. StrictClippy1.75s andLinuxbuild51.23spassed. Seq9binary12421728bytes SHA2563887f72cd246b5b83771a1244ca80a543b17debf71ac0b813cc1cf5d297e6087 SHA3bfedf400d8b76ff9473f2f23ad6c4cddd4a9832c81ddd189eeaf00960ca93845; nativeexistingauthoritysignatures/artifactverificationspassedallfive. Includesbounded4heightprefetch/sequentialexecution/session-lossretry andnonfataloversizedhistoricalresponsecontainment. Fulllargeproofdeliverynotimplemented; skipsunsupportedoversizedresponsewithouttruncatingauthority. RootwillrecoverfailedVal3/4/6 sequentiallywithoriginalstate/custody usingpinnedseq9floor8. ThisisfailedfleetrecoveryatH4076, nothealthyrollingrestart; requiringadvancementbeforebringingbackquorumwoulddeadlock. NohealthyVal2/5restartinthestep.
+
+
+### 2026-10-09T18:58:39.898095+00:00 — Val2 failed legacy release recovery
+
+Seq9 Val3/4/6 stayed native ready atH4080/restarts0. Legacyseq7Val2 nowfailedH4080/restarts7; Val5behind4075. RootwillrecoverfailedVal2usingalreadyverifiedsignedseq9withoriginalstate/custody. LargeprooftransportstillrequiredforVal5. Userpriority: onceallfiveatadvancingtip, runboundedTPSbaselinebeforeadditionalrecoverytests/maxload.
+
+
+### 2026-10-09T19:27:33.871698+00:00 — full-proof chunk recovery qualification and sequence10 staging
+
+Genuine 46-TC oversized-proof causal regression passed9.38s: exact reversed-chunk reconstruction, normal PoSy staging, preserved journals, and rejection of altered TC signature even with recomputed transport digest. Authenticated8gap/outstanding-request restart/reordered chunk responses passed224.69s; strict node/sync all-target Clippy passed3.50s. Linux release build passed52.26s. Sequence10 candidate r1-chunk-recovery artifact12511440bytes SHA256951c39b55c98744ebda44ee2044ce8349df804bd198d7ce4044b4d7b6a6d2144 SHA3-25694d9b97520d1fbb7c15daaa564938c66e853472a14f54b9c57a3054f42e88bec retains exact approvedR1 activation commitment. Bounded chunk assembly retains complete proof and existing signatures/quorum/sequential execution checks. Immutable staging/signing/native verification is in progress; no sequence10 service activation yet.
+
+Compatibility review establishes old seq9 Sync decoder rejects new V2 requests and propagates fatal polling error. Therefore no mixed-version rolling activation: after all-five native verification and guarded unit preflight, stop all five old services, verify stopped, install pinned sequence10 unit commands, then start upgraded fleet. Preserve all original state/custody/journals. This is an operational transport upgrade, not a chain reset or semantic amendment. All-five advancing matching finality, actual0.5–1.5s cadence and retained-state live recovery remain unproven. User-requested bounded TPS baseline follows all-five tip synchronization before further recovery tests.
+
+### 2026-10-09 — sequence10 coordinated activation completed
+
+Before activation, Val2/3/4/6 matched durable H5797 and Val5 retained H4075; all had zero automatic restarts. Native release signature/artifact verification and unit-command preflight passed on all five. Root stopped all five dedicated services and verified inactive/MainPID0 before changing any unit. All five units then bound signed release-r1-chunk-recovery.json, sequence10/floor9; systemd unit validation and daemon reload passed before starting the upgraded fleet. Initial live executable checks show the expected binary on all five, PIDs Val2=1295954, Val3=764805, Val4=888600, Val5=876440, Val6=723512, all NRestarts0. Initial retained heights were unchanged while startup loaded state; native readiness was not yet available. No state, custody, identity or journal reset. Read-only all-five matching advancement guard is running; activation alone is not recovery or chain-stability acceptance.
+
+### 2026-10-10 — all-five catch-up and reproduced live lease split
+
+Val5 recovered to H5797; all five native-ready validators match exact finalized block/state with original PIDs and zero automatic restarts. They remain stalled. Operator authorizes fresh H0 reset if needed, but now requires causal permanent repair and automatic recovery before TPS baseline. Administrative disconnect of all ten peer edges succeeded through the existing exact-session control; no subsequent advancement observed. No reset performed.
+
+Live journals identify Val2/3 active delivery H5800/r1 with retained TC5799/r0; Val4/6 H5800/r0 without that TC, despite matching QC5799 stable subject. Source admits a TC only at its original current slot, retains takeover across same-lease QC advancement, and drops old-height TC retries. Genuine-signature causal test authenticated_live_tc_qc_arrival_order_reproduces_successor_round_split passed0.87s, proving identical certified ancestry but different successor rounds and mutually rejected next-height timeout votes. This is unresolved-defect evidence, not a successful repair. Proposed R2 in the canonical simplified-consensus amendment awaits explicit operator approval because R1 clause4 leaves live TC admission unchanged.
+
+Separate transport cleanup hardening now shuts both socket clones before writer join and cleans failed session admission; blocked-writer regression passed0.11s. Earlier indefinite-deadlock hypothesis is corrected: TCP setup already supplies a configured write timeout. The cleanup improvement is source-only and is not claimed as this consensus stall's root cause or deployed repair. TPS admission work is incomplete; current Genesis has no funded accounts and RPC has no live wallet admission. No TPS result claimed.
+
+### 2026-10-10 — approved R2 convergence repair qualified; sequence11 staging
+
+Operator explicitly approved canonical R2. Four focused R2 state-machine tests, complete PoSy unit suite21/21, genuine signed opposite-order/restart/continued-finality test1.01s, authenticated dropped-TC production-retry convergence6.75s, and existing R1 genuine retained-history recovery10.21s passed. The socket convergence qualification polls Network and PoSy only; executable live chain recovery remains an activation acceptance gate. All-target strict node/PoSy Clippy passed4.20s. First Linux build hit internal Zig-cache ENOSPC; rerun with external qualification-volume temporary/cache paths passed57.84s. No production storage was deleted.
+
+Sequence11 r2-lease-convergence artifact12560728bytes SHA2562f0484dfd4f5e4cc8070a6de3433c6eb6e7d7ff285cb370a73418f2bd34a4b5f SHA3-256151d3eb37f16aeb0c018d9f02dd59f224753f5942e6056e45e4c19c12f85cd73. Activation commitment posy-r1-r2:sha3-256:66c5487be69d182733d24998b24ea5b0707674f9325a77526278d206a22bc945 hashes canonical JSON (sorted keys, compact separators) containing prior ratified r1_commitment and complete approved R2 section as ratified_r2_utf8 (trailing single newline). Runtime preserves R1 supersession and original immutable journals; retries admitted TC closure throughout current lease and restores compatible original-height carry after certified-prefix replay. Network cleanup shuts both sockets before writer join. Guard self-test passed compatibility1positive10negative and readiness3positive25negative.
+
+Root will stage/sign/native-verify exact sequence11 on allfive, preflight pinned unit commands, and perform coordinated stalled-fleet activation with original identities/state/custody. No H0 reset, quorum reduction, history deletion or public routing change. Live matching advancement and automatic recovery are not yet claimed.
+
+### 2026-10-10 — signed sequence11 coordinated activation completed
+
+Allfive prior seq10 native-ready validators agreed exact durableH5797/restarts0 before mutation. Every sequence11 native signature/artifact verification and pinned unit preflight passed. Root stopped allfive and verified inactive/MainPID0 before any unit edit; allfive signed sequence11/floor10 unit commands validated and reloaded before starts. NewPIDs Val2=1699845 Val3=1128226 Val4=1349481 Val5=1232876 Val6=1126755, initial allNRestarts0. All original state/journals/custody retained; no chain reset or identity change. Root is observing native readiness and all-five RPC/durable matching advancement beyond the originalH5797 stall. Activation alone is not a live recovery claim.
+
+### 2026-10-10 — R2 live advancement; remaining execution catch-up and Atlas TPS deployment
+
+Sequence11 resumed the original chain without reset; all-five exact matching RPC/durable finalized H5808 and native readiness were verified. Subsequent sustained observation failed the all-five live-tip gate: Val3 execution fell behind while consensus delivery slots converged. Latest read observes Val2/4/5/6 exact H6512/block377b4943ba51f1077a683ad10682e0a37fd7e7f0c034c32a32980e47bfaee25c and Val3 H5993. All retain activation PIDs and NRestarts0; Val3 native readiness is false. Do not claim stable all-five operation or TPS baseline.
+
+Source causal control demonstrates NetworkService reads128 events before draining router capped16 per peer, dropping an authenticated Sync frame behind32 PoSy frames. Incremental eight-event drain regression passes and production-TC retry convergence passes5.81s. Broader genuine eight-gap/outstanding-request restart/reordered-prefetch test failed237.04s solely at concurrent-response capture qualification; exact cause remains under investigation. Diagnostic rerun records received response heights and restart cursor. No new release, node activation or reset while this gate is unresolved. Temporary SMB/build-host filesystem responsiveness interruption recovered; source size/content verified after write completion.
+
+Atlas TPS frontend deployed to Pages deploymentb18cc3e6 (build1791582957356). Live production index200 and StaffPosyPage-DjH288__.js exact local/remote SHA256 verified; TPS labels/animated chart bundle present. Unauthenticated staff telemetry remains401. Existing canonical/public/generated workers reconciled in place, retaining newer API proxy routes and authenticated private telemetry. Authenticated rendered metrics were not checked. Accepted/ordered TPS instrumentation and funded submission remain incomplete; no capacity result claimed.
+
+### C1266-20261010-NETWORK-DRAIN — sequence12 staging and retained Val3 repair
+
+Detected 2026-10-10; severityP0 reliability; statusOPEN. First observed new lag after matching H5808; latest exact four-validatorH6512 block377b4943ba51f1077a683ad10682e0a37fd7e7f0c034c32a32980e47bfaee25c, Val3H5993. Responsible shared NetworkService staging drops confirmed by old-order causal control; this is not validator misconduct. Its contribution to sustained live catch-up remains an inference until activation observation.
+
+Diagnostic rerun genuine authenticated outstanding-request restart/reordered-prefetch qualification passed249.83s with execution/finality assertions unchanged. Previous237.04s concurrent-capture failure remains recorded; diagnostic-only change does not establish its exact cause. Strict node all-target Clippy passed1.63s; Linux release build52.40s. Seq12 r2-network-drain12562424bytes SHA25671e6fdc81f0e6e45bce085e59675fdc4a148f86c05f44c25cb2c51b6130bccc7 SHA3ddbabd6969e12ce0b8140ece11ff8229a9f32a9479cb153fd59830f5eb357928, approved R1/R2 activation commitment unchanged. Rollout guard self-tests pass1positive10negative compatibility/3positive25negative readiness. Root stages immutable signed release allfive, native verifies signature/hash, then repairs only lagging Val3 with original safety/identity/custody retained and remainingfour preserved. All-five native-ready matching advancement is required before healthy rolling restart. No reset or TPS baseline claimed.
+
+### 2026-10-10 — Val3 stopped with VPN polling failure; activation resumed after PID0 verification
+
+Val3 preflight and signed seq12 verification passed at retainedH6056/blockd5f5dce5e1dc6980d2a0652f34f287fe6f65196c829be6ced528b2e5af7ea210. systemctl stop returned nonzero; independent show confirmsfailed/MainPID0/NRestarts0. Journal reports VPN NetBird polling failure during stop. No unit edit had occurred. Root resumes only after confirming no process remains, preservingstate and remainingfour. This stop failure remains recorded, not successful normal shutdown.
+
+### 2026-10-10 — Val3 sequence12 activation completed
+
+Pinned signed seq12/floor11 unit edit, systemd validation/reload/start passed. Retained execution {"finalized_height": 6059, "finalized_block_id": "82bc7e5a41b03c21824b330934263ff60fb04cd09096744a92013be8b3a99de3", "state_root": "b061c812b068a55c332cd4c4aecd545398c0081c14d26ec2d45017be56846a20"}; service {"ActiveState": "active", "SubState": "running", "MainPID": "1136326", "NRestarts": "0"}. Otherfour unchanged; no reset. Live catch-up gate pending.
+
+### C1266-20261010-PREFETCH-ASSEMBLY — bounded concurrent recovery qualified
+
+StatusOPEN/P0; retained chain production slowed/stopped aroundH7100 while Val3 continuescatchup. Exactcurrentdurabledeliveryshows Val2/4/5/6 shareH7103/r12, subsequentlyVal2/5H7104/r15: no same-height round split established. Val5 missingdeliveryECHO evidence while otherthree holdsamecandidate; sharednetworkloss remains plausible, not provedfromslot alone. Allautomaticrestartsremain0.
+
+ConfirmedsharedSyncadapterdefect: fourheightprefetchhadone64MiBassembly; authenticatedinterleavedchunksforothereligibleheightswereignored. Rootreplacedwithfourheightmap sharing the original64MiBaggregatecap, exactpeer/session/requestbinding, progress/agepruningandunchangedPoSy/sequentialexecutionchecks. Causalcontrol oldassemblyrejectssecondheight; interleaved4response/changedsession/count/aggregateboundregressionpasses0.13s. Genuineauthenticatedoutstandingrequestrestart withauthenticchunksinterleavedacrossheights passed208.71s; strictClippy2.28s/Linuxbuild52.35s. Seq13 r2-prefetch-assembly12578552bytes SHA2562b8f67c8622574537801841999efde5558fb398540c6a86b6fff8da9be8e436b SHA345134dbf7064b3869c7dbaad3d30df895f3c71e4ea6eccc28ffc576dced89387, unchangedapprovedR1/R2commitment. Anembeddedguardquotingerrorcaughtbydirectcompile before anyremoteeditwasfixed; self-testnowcompilesallremote code to preventrepetition.
+
+Rootwillimmutable-stage/sign/nativeverifyallfive, thenrepairlaggingVal3retainedstate. Additionalstalleddeliveryrepairrequirescurrentexactevidenceandpreflight; healthyrolloutstillrequiresallfiveadvancing. No reset, identitychangeorquorumreduction; noTPSresult. Operatorprovidedexistingarchivealias synergy-archiveforfutureverifiedsnapshotwork; noarchivechangeorcredentialretention.
+
+### 2026-10-10 — sequence13 staged; retained Val3 repair started
+
+Allfive native signatures/artifact verifications passed. Val3 before {"finalized_height": 6558, "finalized_block_id": "ae99626c9f18aa79137b2ae13946c7751d3fe31a2648c19495adca005afad500", "state_root": "b061c812b068a55c332cd4c4aecd545398c0081c14d26ec2d45017be56846a20"}; service {"ActiveState": "active", "SubState": "running", "MainPID": "1136326", "NRestarts": "0"}. Pinned unit preflight passed. Root updates onlylaggingVal3 with original journals/custody; otherfour retained.
+
+Val3 seq13 stop attempt: {"stop_returncode": 0, "stopped_state": {"ActiveState": "inactive", "MainPID": "0"}}; processabsence verified beforeunitmutation.
+
+Val3 sequence13 activation complete: {"commitment": {"finalized_height": 6559, "finalized_block_id": "d0b43e4754d2b7a3c6846a48b9ddb36e38d1c5b8ae2831ecf376b9178540eac8", "state_root": "b061c812b068a55c332cd4c4aecd545398c0081c14d26ec2d45017be56846a20"}, "service": {"ActiveState": "active", "SubState": "running", "MainPID": "1140111", "NRestarts": "0"}, "exe": "/usr/local/libexec/synergy/posy-stability/synergy-node-r2-prefetch-assembly"}. Startup/catch-up/all-five advancing acceptancepending.
+
+### C1266-20261010-FLEET-DELIVERY — coordinated retained-state network repair
+
+StatusOPEN/P0. Fourleadingvalidators retainmatchingproposal7299/blockd8e19612b382319cd2981c25986bc5de7a14608827ae7730648b42c125d5ee5b andprotectedrootba1a614b936f0d456c8eddae3de7d9a4935baca741768c43a1deac4538de8262; ECHOdeliveryincomplete duringrepeatedlongtimeouts. Allfourstillseq11withconfirmedburstloss mechanism; Val3seq13continuescatchup. Thisisdegraded/stalled-fleet deliveryrepair, nothealthyrollingacceptance. Allfour signedseq13/artifact/unitpreflights passed. Rootstopsthefourlegacyservices, confirmsPID0beforealledits, validates/reloadsallfourbeforestarts; Val3staysrunningwithoriginalPID. No reset, quorumchangeorhistorydeletion. Before {"2": {"commitment": {"finalized_height": 7308, "finalized_block_id": "1ae0b18ad0291fb0b0966cf3b590784647b30e28aa4bd968e82308946da71d03", "state_root": "b061c812b068a55c332cd4c4aecd545398c0081c14d26ec2d45017be56846a20"}, "service": {"ActiveState": "active", "SubState": "running", "MainPID": "1699845", "NRestarts": "0"}}, "4": {"commitment": {"finalized_height": 7308, "finalized_block_id": "1ae0b18ad0291fb0b0966cf3b590784647b30e28aa4bd968e82308946da71d03", "state_root": "b061c812b068a55c332cd4c4aecd545398c0081c14d26ec2d45017be56846a20"}, "service": {"ActiveState": "active", "SubState": "running", "MainPID": "1349481", "NRestarts": "0"}}, "5": {"commitment": {"finalized_height": 7308, "finalized_block_id": "1ae0b18ad0291fb0b0966cf3b590784647b30e28aa4bd968e82308946da71d03", "state_root": "b061c812b068a55c332cd4c4aecd545398c0081c14d26ec2d45017be56846a20"}, "service": {"ActiveState": "active", "SubState": "running", "MainPID": "1232876", "NRestarts": "0"}}, "6": {"commitment": {"finalized_height": 7308, "finalized_block_id": "1ae0b18ad0291fb0b0966cf3b590784647b30e28aa4bd968e82308946da71d03", "state_root": "b061c812b068a55c332cd4c4aecd545398c0081c14d26ec2d45017be56846a20"}, "service": {"ActiveState": "active", "SubState": "running", "MainPID": "1126755", "NRestarts": "0"}}}.
+
+Val2 coordinatedseq13stop: {"stop_returncode": 0, "stopped_state": {"ActiveState": "inactive", "MainPID": "0"}}.
+
+Val4 coordinatedseq13stop: {"stop_returncode": 0, "stopped_state": {"ActiveState": "inactive", "MainPID": "0"}}.
+
+Val5 coordinatedseq13stop: {"stop_returncode": 0, "stopped_state": {"ActiveState": "inactive", "MainPID": "0"}}.
+
+Val6 coordinatedseq13stop: {"stop_returncode": 0, "stopped_state": {"ActiveState": "inactive", "MainPID": "0"}}.
+
+Fourremainingseq13activationcomplete; Val3originalPID1140111preserved. After {"2": {"commitment": {"finalized_height": 7309, "finalized_block_id": "e146ca5090c8da05b3054f9234cf12b9d30922ae3e2e8ca487912d1bede78f4d", "state_root": "b061c812b068a55c332cd4c4aecd545398c0081c14d26ec2d45017be56846a20"}, "service": {"ActiveState": "active", "SubState": "running", "MainPID": "1719354", "NRestarts": "0"}}, "4": {"commitment": {"finalized_height": 7309, "finalized_block_id": "e146ca5090c8da05b3054f9234cf12b9d30922ae3e2e8ca487912d1bede78f4d", "state_root": "b061c812b068a55c332cd4c4aecd545398c0081c14d26ec2d45017be56846a20"}, "service": {"ActiveState": "active", "SubState": "running", "MainPID": "1372278", "NRestarts": "0"}}, "5": {"commitment": {"finalized_height": 7309, "finalized_block_id": "e146ca5090c8da05b3054f9234cf12b9d30922ae3e2e8ca487912d1bede78f4d", "state_root": "b061c812b068a55c332cd4c4aecd545398c0081c14d26ec2d45017be56846a20"}, "service": {"ActiveState": "active", "SubState": "running", "MainPID": "1250578", "NRestarts": "0"}}, "6": {"commitment": {"finalized_height": 7309, "finalized_block_id": "e146ca5090c8da05b3054f9234cf12b9d30922ae3e2e8ca487912d1bede78f4d", "state_root": "b061c812b068a55c332cd4c4aecd545398c0081c14d26ec2d45017be56846a20"}, "service": {"ActiveState": "active", "SubState": "running", "MainPID": "1146215", "NRestarts": "0"}}}. All-five actualready/commonadvancingtipacceptancepending.
+
+### C1266-20261010-SEQ13-COMMON-HEAD
+
+All five retained-state validators passed native readiness and exact matching finalized block/state verification at H7541 and then H7558 with zero restart deltas. This establishes advancing common finality after seq13; sustained stability, target block timing, and genuine transaction TPS remain unqualified. No reset or identity changes occurred.
+
+Archive host alias synergy-archive passed strict-host-key BatchMode SSH: Darwin 27.0.0, approximately 115 GiB available on root volume. No synergy-node executable was found on PATH; passwordless sudo is unavailable. No archive installation, authority changes, snapshots, or credential storage occurred. Archive custody credentials remain user-provided and were not written into this incident log.
+
+### C1266-20261010-WALLET-ADMISSION — genuine TPS prerequisite
+
+Status OPEN; severity P1 baseline blocker. Recorded at 2026-10-10T21:41:42.963552+00:00. Last previously proven all-five finalized agreement H7558; first bad transaction height unavailable because current Genesis has no funded wallet accounts and protected wallet submission was unwired. Responsible component is shared node admission integration, not validator misconduct.
+
+Actions: implemented bounded owner admission queue, canonical signed wallet proof and ciphertext commitment, actual ingress-key context RPC, receipt RPC, and accepted/ordered process counters. Wallet tooling generates verified FNDSA root/ML-DSA-87 account bindings and encrypted signed transfers without secret output. HTTP accepted streams now explicitly enter blocking mode under existing bounded timeouts; genuine macOS socket qualification had proven inherited nonblocking mode could discard request bodies. Historical vertices retain their original transcript. Later wallet rounds use the owner’s authenticated quorum-parent checks; an accidental pure-carrier round-zero-only restriction was removed before deployment.
+
+Validation: final genuine HTTP five-validator transfer test passed 131.59s, exact applied account state and canonical receipt on all five; tampered signed metadata rejected; duplicate submission did not increment accepted count; actual ordered counter checked. Four focused ETDAG transcript/commitment/shape tests passed 0.04s. Node/keytool/client all-target Clippy passed. Linux node and keytool built successfully; final node SHA256 197e81ea73e0e635a0a514f9c7e1e4d3cc6696fd27ba2d9e805275556c1efd62. Rollout guard passed 1 positive/10 negative compatibility and 3 positive/25 negative readiness cases. Telemetry counter-delta, restart, and reset checks passed. No live activation, funded Genesis reset, or TPS result yet. Next action is immutable signed staging, funded launch qualification, then bounded finalized-success TPS baseline before additional recovery testing.
+
+### C1266-20261010-VAL5-TC-VARIANT — automatic retained-state restart
+
+Status OPEN; severity P1 reliability. Detected journal failure 2026-10-10 18:20:19: authenticated timeout proof variant changes accepted parent or carry. First bad height and exact offending proof remain uncollected; last earlier proven common finality H7558. Shared certified-peer conflict classification is responsible for service termination; legitimate-versus-conflicting variant causality remains unproven. Val5 restarted automatically at 18:20:34 and rejoined with retained journals; no manual reset or history deletion. Latest service probes show Val2/3/4/6 original PIDs and NRestarts0, Val5 PID1255497 NRestarts1 with no additional restart. A running service is not sufficient to close this incident. Preserve fail-closed certified conflict checks while collecting exact proof context; do not claim a clean stability soak or permanent repair.
+
+Wallet baseline preparation: immutable node sequence14 (12878680 bytes, SHA3 47340f2d40f88703c1beee3e9aa2aba9526e19a61fb959b9a2f5388183dcdd35) staged and natively signature-verified on all five machines; no activation. Signed wallet helper verified on Val2. Generated 32 funded FNDSA/ML-DSA-87 wallet bindings on Val2 with exclusive private files; no private bytes exported. Fresh funded Genesis hash6cf3f8467e4fc6dc8293b8f4fb3aa56f7e641261e66e3703b423e105624cc144 and authority natively verified on Val2, same existing validators and governed parameters. Initial all-host public configuration staging attempt failed because the standalone synergy-genesis verifier is installed only on Val2; Val3 direct check confirms executable absent. Existing validator processes/configurations stayed unchanged. Retrying only public/configuration preflight using each host’s existing native authority verifier and the exact Val2-verified signed Genesis bytes; no verifier installation or signature bypass.
+
+### C1266-20261010-FUNDED-BASELINE-LAUNCH
+
+Status OPEN/P1 TPS qualification; original empty-account chain is advancing and not being reset to conceal a stall. Preflight proves exact common finalized RPC block/state at H14361 then H14367; Val2/3/4/6 restart counters0, Val5 counter1 unchanged from recorded automatic TC-variant recovery. Last common H14367 block220698df8667d878576c5d184dd2c0618b9415d8b83537778bf98bbd8a250763; stateb061c812b068a55c332cd4c4aecd545398c0081c14d26ec2d45017be56846a20. All five native readiness/health pass. First bad transaction height is not applicable: baseline has not begun. Root will use the user's explicit fresh-chain/H0 authorization to activate signed funded network synergy-posy-baseline-20261010 with the same five validators, identity/key custody, governed parameters, and approved R1/R2 commitment. Native authority verification and strict sequence14 unit preflight pass on all five. Original /var/lib/synergy/posy-stability/data and its QCs, TCs, safety/signing journals remain untouched; fresh network writes only new baseline-data. Stop all five and prove PID0 before changing canonical node configuration; compare exact original/desired configuration hashes; strict signed artifact unit edit; validate/reload all before any start. Next gate is exact advancing all-five finality, followed by a genuine transfer canary and bounded TPS baseline. No maximum-TPS or clean stability claim is authorized by these preflights.
+
+Funded launch stopped services [{"validator": 2, "state": {"ActiveState": "inactive", "MainPID": "0"}}, {"validator": 3, "state": {"ActiveState": "inactive", "MainPID": "0"}}, {"validator": 4, "state": {"ActiveState": "inactive", "MainPID": "0"}}, {"validator": 5, "state": {"ActiveState": "inactive", "MainPID": "0"}}, {"validator": 6, "state": {"ActiveState": "inactive", "MainPID": "0"}}].
+
+Funded launch configuration and signed units activated [{"validator": 2, "config": {"config_replaced": true, "original_data_preserved": true}, "unit": {"unit_commands_verified": true, "change_required": true, "execute": true}}, {"validator": 3, "config": {"config_replaced": true, "original_data_preserved": true}, "unit": {"unit_commands_verified": true, "change_required": true, "execute": true}}, {"validator": 4, "config": {"config_replaced": true, "original_data_preserved": true}, "unit": {"unit_commands_verified": true, "change_required": true, "execute": true}}, {"validator": 5, "config": {"config_replaced": true, "original_data_preserved": true}, "unit": {"unit_commands_verified": true, "change_required": true, "execute": true}}, {"validator": 6, "config": {"config_replaced": true, "original_data_preserved": true}, "unit": {"unit_commands_verified": true, "change_required": true, "execute": true}}].
+
+Funded launch initial start [{"validator": 2, "service": {"ActiveState": "active", "SubState": "running", "MainPID": "1796096", "NRestarts": "0"}, "commitment": null, "exe": "/usr/local/libexec/synergy/posy-stability/synergy-node-wallet-admission"}, {"validator": 3, "service": {"ActiveState": "active", "SubState": "running", "MainPID": "1204916", "NRestarts": "0"}, "commitment": null, "exe": "/usr/local/libexec/synergy/posy-stability/synergy-node-wallet-admission"}, {"validator": 4, "service": {"ActiveState": "active", "SubState": "running", "MainPID": "1460833", "NRestarts": "0"}, "commitment": null, "exe": "/usr/local/libexec/synergy/posy-stability/synergy-node-wallet-admission"}, {"validator": 5, "service": {"ActiveState": "active", "SubState": "running", "MainPID": "1317294", "NRestarts": "0"}, "commitment": null, "exe": "/usr/local/libexec/synergy/posy-stability/synergy-node-wallet-admission"}, {"validator": 6, "service": {"ActiveState": "active", "SubState": "running", "MainPID": "1223219", "NRestarts": "0"}, "commitment": null, "exe": "/usr/local/libexec/synergy/posy-stability/synergy-node-wallet-admission"}].
+
+### C1266-20261010-FUNDED-CUT-SPLIT — first genuine live transfer exposes cutoff liveness failure
+
+Status OPEN/P0 block-production stall. Detected during the genuine canary; last agreed/first stalled finalized height H47, block6cd3635b2f4505ed244f57cd05d34a72515caa8275124d95e4e331575c377f27, state65dc252a3d62b7b982c1e15ccf9ecf30e06ce220ab986b32c31e5f61d479ca66. All five current sequence14 services retain activation PIDs/NRestarts0. Earlier journal error lines are historical and do not establish a new fatal event.
+
+Canary: native wallet-tool signed/encrypted request accepted for targetH51, vertex44bc8c49682230f3a8e6e890bc6c377eea3bb172ef0ed7c6e1d69a44b72e52c7ff6cf001b07851ee924da6b31fb45a04e10f266b6e9e682b30dc183ae73f770c. Process accepted_total1, ordered_total0. The 90-second finalized-transfer observation failed; no TPS load applied. A diagnostic helper initially failed because its nested newline was not escaped; corrected read-only probe collected durable evidence, without node changes.
+
+Confirmed boundary: targetH51 certificate present on all five; five votes observed for the vertex. Exact cutoff context176a418cd0dcfa7bab4f5219e7d1c89ce59981f2eda96cefbb2af5284162c4d92d89ff3af3e8b7371aff8cc089fec66ec644d4dee0217abe1b5cb92615ba5cb3. Val2/4/6 retained empty marker frontiers; Val3/5 retained the wallet vertex frontier. Both groups lack required4-of5 identical semantic closure. All five have no committed cut forH51. The current code groups closures and the core verifier correctly prohibits counting conflicting closures as one quorum. Delayed certificate arrival cannot replace signed marker history. Responsible component is shared cutoff-generation/recovery orchestration, not validator misconduct. Exact intra-poll ordering remains a regression-test obligation.
+
+Recovery: no restart, reset, marker deletion, quorum reduction or semantic bypass attempted. Proposed recovery amendmentR3 appended to canonical POSY-00E document; pending operator approval under AOS19.6 before implementation. It proposes existing verified timeout authority for a new uncommitted close generation, retaining all original history and existing quorums. Next required boundary is approval, genuine counterexample/rejection/restart qualification, signed activation, then successful canary and finalized-success TPS baseline.
+
+### C1266-20261010-R3-APPROVAL — timeout-path predicate qualified; runtime activation pending
+
+Direct operator message `approved` authorizes the six R3 requirements at canonical POSY-00E line209. Updated that section status in place; no requirement relaxed. Incident remains OPEN/P0. Read-only live verification: all five sequence14 processes retain original activation PIDs, NRestarts0, finalizedH47 block6cd3635b2f4505ed244f57cd05d34a72515caa8275124d95e4e331575c377f27 and identical state65dc252a3d62b7b982c1e15ccf9ecf30e06ce220ab986b32c31e5f61d479ca66. No service, chain state, key, configuration, signing history or workbook mutation. No TPS load.
+
+Source implementation: existing SimplifiedConsensusStateMachine exports verified_cut_recovery_timeout_path. Requires current unfinalized/uncertified targetH+1, accepted advancing complete timeout closure, exact terminal height/round/parent, reverified domain/lease/quorum/signatures, absent mandatory carry and absent current accepted proposal. Rejects repeated generation TC or a previous TC outside the accepted path. Export does not mutate the control plane. This is explicitly only the timeout-path predicate, not sufficient recovery authorization; no runtime caller is enabled.
+
+Validation on canonical backing-host checkout b338dcc: three new focused R3 tests plus complete synergy-posy library suite24/24 passed; all-target synergy-posy Clippy with warnings denied passed. Tests use existing unit signature stub and do NOT satisfy genuine-signature/live R3 activation gates. Focused cases cover path advancement/completeness, wrong target/unknown previous generation, mandatory carry, accepted proposal, inherited earlier-height timeout, wrong network/parent, strict quorum and export immutability.
+
+Independent subagent review confirmed persistence currently retains one marker per target, marker retry frames are height-keyed, and generation-aware history plus external PoSy verification are required. Critical remaining boundary: retained VC/READY/QC/proposal/cut/consumed exclusions and historical verification on restart, followed by immutable per-generation markers and atomic authorization persistence. Then all six R3 qualification gates, signed activation, live successful canary, and measured finalized-success TPS baseline. No release built/staged/deployed for R3.
+
+Efficiency notes: one nonexistent test-path lookup corrected by scoped rg file inventory; one malformed sed range corrected before reread. Broad SMB git status was terminated after no output; exact backing-host revision/scoped diff inspection succeeded. No repeated broad scan, release build or fleet restart.
+
+R3 durable-store review: original cutoff is VC(T-2); prohibiting affected-cut certificate is VC(T-1). Check immutable validation-hH.json, ready-hH.json optional VC, verified QC store including crash-atomic transition recovery, retained lease TC carry, protected batch/prepared/consumed records and finalized execution, plus pending/deferred/RAM bindings. Successful later certification means restart cannot require current absence of VC/QC; it must verify historical authorization against the certified parent prefix and require later material to bind the selected replacement generation. Compact delivery.json/READY journals may be overwritten by later rounds and cannot alone prove historical absence. This remains an implementation/qualification obligation, not a deployed fix.
+
+2026-10-10T23:30:32.424090+00:00
+
+### C1266-20261010-R3-RUNTIME-QUALIFICATION — source implementation; activation pending
+
+R3 approval remains in force. Implemented durable generation selection/retained original markers, compact native TC/VC journal references, explicit authority-domain verification, retained candidate/VC/READY/QC batch-binding checks, private driver-to-ETDAG authorization queue and acknowledgement draining. PoSy remains the sole timeout/round owner. No live validator mutation, release, signing-key change, chain reset or TPS load in this qualification step.
+
+Validation: three structural persistence tests passed (0.13s); genuine ML-DSA cut qualification passed initially (3.62s), then passed with two retained generations, restart and wrong-network rejection. The extended test initially expected an error on a previously authorized generation; API correctly returns idempotent false, and the assertion now verifies no transition/current marker unchanged. Production socket H51 genuine wallet regression is running; all five reached matching QC13 during setup. Completion, successful transfer, retained-state restart and deployment remain unverified.
+
+Engineering corrections: the initial test filter matched zero tests and was not accepted as evidence; mock fixture digest widths were corrected; compact proof borrow-check errors were corrected. An overlapping SMB source write/remote formatter left a duplicate file tail; the proven tail was removed in place and compilation passed. One remote Python edit had shell quoting failure before mutation and was rerun with full shell quoting. No source or credentials workbook copies were created. Future writes/formatting/builds must remain sequential.
+
+R3 socket qualification result: setup timed out after902.54s before H51 canary admission; focused two-generation cryptographic test passed. This does not establish recovery success. Fixture halted the whole PoSy service at F46, including candidate/sync/deferred processing. Removing that fixture-only halt while retaining authenticated H49+ packet delay and adding 60s no-progress diagnostics; no production deployment or live node mutation.
+
+R3 qualification update: second socket setup attempt failed546.17s with all five finalized/executed46 and no initial H51 file. Confirmed open_collecting is in-memory until evidence persistence; disk-file-existence was an invalid fixture gate. Replace with published governed wallet admission context target51/source46. Explicit original VC-to-terminal certified parent linkage and same-lease verified TC cache refresh added; genuine two-generation restart/domain test passed4.15s after changes. Deployment, genuine socket recovery, and TPS baseline remain pending.
+
+R3 genuine socket regression passed: authenticated five-validator H51 real-wallet transfer reproduced 3-empty/2-transaction original marker split, both delayed VAC arrival orders, automatic PoSy TC→R3 recovery, retained old markers, validator restart/rejoin, matching finalized transaction/balance/nonce and continued finality through H58. Test duration682.85s. This is local socket qualification only. Explicit 4/5-online and 3/5-fail-closed R3 variants, invalid/stale/missing/conflicting TC/parent/carry, VC/QC/consumed exclusions, signed R3 activation and live deployment remain incomplete. No TPS baseline or live validator change.
+
+R3 safety gate update: focused genuine timeout-path test passed with same-lease cache refresh for newly arrived round1/round2 certificates and rejection of a genuine mandatory-carry timeout; test duration4.77s. Existing authenticated socket 3/5 test passed: held finalized H6 and QC H8 unchanged for full configured30s timeout, then recovered to matching finality/execution after validators rejoined (187.14s). Existing authenticated four-validator restart/rejoin test passed: four online validators progressed through finality H10, the restarted fifth rejoined, chain advanced through H16 (154.68s). Whole-repository Clippy had one cloned-ref lint in qualification test; corrected to slice::from_ref and clean rerun pending. Invalid/stale/missing/conflicting parent/QC/protected-record R3 variants, signed release/activation, live deployment, and TPS baseline remain outstanding.
+Whole-workspace cargo clippy --locked --all-targets -- -D warnings passes after the qualification lint correction. The first post-edit clippy attempt correctly failed on cloned_ref_to_slice_refs; fixed with std::slice::from_ref and clean rerun.
+R3 focused durable-evidence checks: genuine signed H1 QC candidate conflict rejected by native QC-store invariant; durable H2 VC and H2 QC independently reject a missing selected batch; retained execution-candidate proof accepts only the exact recovered batch and rejects no-batch/wrong-batch. Combined with prior timeout identity/signature/missing/domain/carry and repeated-generation/restart tests, focused genuine R3 qualification passes5.06s before execution-candidate additions and4.92s with them. Whole-target Clippy rerun pending.
+
+
+2026-10-11 UTC live refresh: Val2–Val6 services are active/running, admin health and readiness are healthy/ready, and all five systemd restart counts are 0. All five durable finalized-state records match H47 block 6cd3635b2f4505ed244f57cd05d34a72515caa8275124d95e4e331575c377f27 and state root 65dc252a3d62b7b982c1e15ccf9ecf30e06ce220ab986b32c31e5f61d479ca66. Installed authority and manifest report network_id synergy-posy-stability-20261009; Atlas telemetry schema is configured for the same id. No transfer or TPS baseline has been run. Sequence-15 R3 unsigned release metadata was prepared for the current Linux artifact (SHA3-256 601d67bcd727b5a0c14a0d3b251520a1e29c38c38bcc7f8bdabbc85cb962a273), binding the cumulative canonical R1/R2/R3 rule text (UTF-8 section bodies before each Status line; SHA3-256 233f4634a74497ee88ebf267eb6d89604a864c25f891741943baf69e7c057989). It remains unsigned and undeployed: SSH to other-mini is available, but noninteractive sudo requires a password to access the governed release signer. No production configuration, process, or chain state was changed during this refresh.
+
+### 2026-10-11T04:04:38Z — R3 recovery qualification checkpoint; activation still gated
+
+Direct read-only verification through each existing Val2–Val6 SSH master: all five services are active/running, healthy/ready, with systemd restart count 0. All five use network_id synergy-posy-baseline-20261010 and report the same finalized H47 block 6cd3635b2f4505ed244f57cd05d34a72515caa8275124d95e4e331575c377f27, state root 65dc252a3d62b7b982c1e15ccf9ecf30e06ce220ab986b32c31e5f61d479ca66. RPC queries at H48 and H51 return null on all five. Durable H51 protected-pipeline records retain the same original cutoff context; Val2/Val4/Val6 signed empty frontiers, Val3/Val5 signed the wallet vertex frontier; all five show zero replacement generations and no committed cut. No process, config, safety journal, database, or chain state was changed.
+
+R3 qualification checks rerun: PoSy R3 timeout-path tests 3/3 passed; ETDAG generation persistence tests 3/3 passed; genuine-signature native-store H47/H51 split recovery test passed (2.95s). Strict Clippy for synergy-node, synergy-posy, and synergy-etdag all targets passed with warnings denied. Canonical Linux release build completed successfully; artifact length 7,776,072, SHA3-256 37824aa46bb7791cda0efd8ce946786176e1e3a54b57551ae874ff5b630369ec, SHA-256 568a8d5c0add5a55189cb5fcbeef88219ad4110b6804a5d0e13a54691bfd4549. Zig emitted target-version warnings during dependency compilation, but the build script completed its ELF check and returned success.
+
+Activation remains blocked: R3-specific 4/5 progress and 3/5 fail-closed coverage, remaining invalid/stale/missing/conflicting proof and retained-evidence exclusion cases, and canonical commitment derivation are not yet independently complete. Existing seq15 unsigned metadata does not match the rebuilt artifact. No release was signed/staged/deployed; no live canary or TPS load was run.
+
+
+### 2026-10-11 — R3 authenticated 4/5 recovery gate remains unverified
+
+Verified the canonical SSD over SSH at `/Volumes/PortableSSD/Synergy-Network`. The genuine-signature socket qualification was extended to exercise 3/5 fail-closed followed by 4/5 recovery while preserving the active target slot. The 3/5 phase retained all original H51 markers and produced no recovery generation or committed cut. The 4/5 phase did not commit within its 180-second bound: all four participating fixtures remained at finalized H47 with the same marker root, zero recovery generations, and no committed cut. This is a local qualification failure; no validator runtime, release signing, staging, or deployment was changed. The sequence-15 activation commitment encoding remains unverified, so R3 signing/activation stays gated. No successful transfer or TPS baseline has been run.
+
+
+### C1266-2026-10-11-R3-QUALIFICATION — 2026-10-11T08:35:57.210851+00:00
+
+Status: OPEN; severity P0; qualification checkpoint for the existing H51 protected-cut stall. First affected target H51; last live verified finalized height H47, block `6cd3635b2f4505ed244f57cd05d34a72515caa8275124d95e4e331575c377f27`. Affected Val2–Val6; responsibility remains shared PoSy/ETDAG cutoff recovery, not validator misconduct. Live state was not rechecked or mutated in this checkpoint.
+
+Actions/results in chronological order: (1) The earlier interactive-shell qualification ended without a terminal result at setup H34; process absence was verified before replacement. (2) Detached genuine-signature socket qualification `authenticated_socket_r3_h51_late_vac_split_recovers_real_wallet_and_restart` completed successfully: 1 passed, 0 failed, 611.73 seconds, exit 0; remote log `/tmp/r3-h51-current-2.log`. It recovered the split with four participating owners, rejoined/restarted the fifth with retained markers, reached matching H58, and asserted sender nonce1, receiver balance7, and applied transaction receipt on all five. (3) Review found its 3/5 observation was only five seconds versus configured 30-second timeout. Source now derives full configured timeout plus one second; corrected qualification is running on other-mini as cargo PID38809, log `/tmp/r3-h51-full-timeout.log`, exit file `/tmp/r3-h51-full-timeout.exit`. Its result is PENDING. (4) Independent read-only commitment verifier and three tests passed: sequence15 commitment is SHA3-256 of concatenated UTF-8 pre-Status R1/R2/R3 sections, each with one final LF, exactly matching `233f4634a74497ee88ebf267eb6d89604a864c25f891741943baf69e7c057989`. (5) Bounded TPS harness now compares common finalized history and measures load-window versus drain rates separately; three mock-RPC tests passed. No transactions submitted.
+
+Outcome: successful local recovery evidence, not live recovery or launch acceptance. Remaining gates include corrected full-timeout qualification, remaining activation coverage audit, current artifact metadata/build/signature verification, guarded live deployment, successful live transfer, sustained finality/recovery, and measured TPS baseline. No signing, staging, reset, node restart, public routing change, or validator state mutation occurred in this checkpoint.
+
+
+### 2026-10-11 — R3 full-timeout qualification exposes fifth-validator rejoin failure
+
+Follow-up to C1266-2026-10-11-R3-QUALIFICATION; status OPEN, severity P0. Existing live last-agreed finalized H47 block remains the prior observation; no live mutation or fresh live claim. Corrected full-timeout socket qualification exited101 after661.03s (0passed/1failed), log `/tmp/r3-h51-full-timeout.log`. Failure at socket_qualification.rs3822: `production PoSy timeout did not automatically recover the H51 cut`. Four participating fixtures recovered and progressed to finalized H60 while fifth remained finalized H47, activeH50/r0 without accepted TC. This supersedes any interpretation of the prior short-observation pass as complete rejoin qualification. Cause remains under investigation: timeout/recovered-cut authority delivery or reconstruction for the lagging fifth; no validator fault is established. No automatic retry was started. Source-only causal inspection continues; signing/deployment/TPS remain gated on resolving and validating this retained-state rejoin failure.
+
+
+### 2026-10-11 — retained-TC transport repair qualification
+
+Continuation of C1266-2026-10-11-R3-QUALIFICATION, OPEN/P0; prior live H47 block unchanged as last verified observation. Source inspection confirmed retry pruning dropped exact verified H50 timeout evidence once the advanced validators changed proposer lease, despite a frozen validator with unknown/lagging verified progress. `posy.rs` now retains signed timeout evidence across lease boundaries until every frozen peer's verified finalized progress exceeds that timeout height. Native signature, quorum, original-slot/ancestry checks are unchanged. Focused `timeout_retry_waits_for_every_validator_to_verify_progress_past_its_height` test PASSED1/1 after7.21s compilation; covers activeH63/TC H50 with lagging, unknown and all-advanced peers. Full authenticated H47/H51 recovery qualification now running as cargoPID86890, log `/tmp/r3-h51-retained-tc.log`, exitfile `/tmp/r3-h51-retained-tc.exit`; result PENDING. No live node mutation, release signing, or TPS submission. Historical recovered-generation reconstruction remains unproven until the full rejoin result.
+
+
+### 2026-10-11 — sequence15 rollout tooling offline checkpoint
+
+Existing R3 incident remains OPEN/P0; no live observation/change in this checkpoint. `roll-r1-tip.py --self-test` independently PASSED R3 EDIT2positive/10negative, chunk compatibility1positive/10negative, readiness3positive/25negative. Source supports sequence15 candidate hash/approvedR3commitment and exact oldrelease/binary/floor tuples including installedsequence14/floor13. Advancing-only rollout gates remain in force; this is not a stalled-fleet activation authorization or execution. Candidate artifact pin currently references pre-retention-fix ELF and MUST be refreshed after final Linux build; unsigned metadata is not release authority. Full retention-fix recovery qualification remains activePID86890, log `/tmp/r3-h51-retained-tc.log`; terminal result pending.
+
+
+### 2026-10-11 — retained-TC full recovery result and bounded admission diagnostics
+
+R3 incident remains OPEN/P0. Full authenticated retention-fix qualification FAILED after667.88s, exit101, log `/tmp/r3-h51-retained-tc.log`; four progressed beyond finalizedH69 while fifth remainedH47/active50/r0 without accepted TC. Transport retention alone does not establish recovery. No live validator mutation. Added opt-in cfg(test)-only H50 timeout receipt/admission diagnostics bounded12 receipts and12 rejections per validator. Focused retention regression passed after6.42s compilation. New full qualification includes four-only matching H54 finalized execution before fifth rejoin; running cargoPID91650 with diagnostics, `/tmp/r3-h51-diagnostic.log`, exitfile `/tmp/r3-h51-diagnostic.exit`. No unchanged blind retry: new instrumentation separates delivery absence from native admission rejection.
+
+Linux candidate build PASSED exit0 (74s), artifact7798408bytes, SHA3-256 `0a3641624e7039881918a02b3a1ad3e6bae43585e450b79350870406b3d0a035`, SHA256 `d13b80deef93fec9217226b970f71fe561b4c5ce81924e53712fa5e473d5ba47`. Unsigned sequence15 metadata and rollout pin refreshed; activation commitment independently MATCH. Strict scoped Clippy passed; strengthened genuine R3 committed-cut negative/restart test passed3.43s. No signed activation, staging, deployment, reset or TPS load; fifth rejoin remains the gating failure.
+
+Diagnostic runPID91650 was deliberately interrupted during setup (child91652 terminated, no terminal recovery result) after review found native TC verification failures preceded its logging. Extended same bounded cfg(test) diagnostics to native verification rejection, then launched replacement cargoPID92431, `/tmp/r3-h51-diagnostic-complete.log`, exitfile `/tmp/r3-h51-diagnostic-complete.exit`. Production behavior unchanged. Sequence15 immutable staging tool local artifact checks and create-new/path/idempotence guards independently passed; no remote staging or signing. Current recovery result remains pending.
+
+
+### 2026-10-11 — genuine four-validator finality proven; socket fixture reconnect repaired
+
+R3 incident OPEN/P0; no live recovery claim or validator runtime mutation. Instrumented full test `/tmp/r3-h51-diagnostic-complete.log` FAILED727.45s exit101. Four fixtures passed explicit exact H54 finalized-state equality, applied wallet balance7/nonce1/receipt and retainedmarkers before fifth returned, then advancedH71. Fifth remainedH47/active50/r0 with no decoded H50 TC receipt/native rejection. Logs show outboundconnection4 EAGAIN timeout and inbound buffer failures. Scoped source comparison establishes socketfixture idle60s, fifth allservicespaused longer, production VPN reconnect service omitted; unlike existing socketrecovery fixtures, R3 return loop never requested missingpeer redial.
+
+Corrected fixture-only fifth return/restart to use established immediate/every5s `redial_missing_socket_peers`, matching production VPN's existing authenticated registry redial owner. Focused retention regression compiled/passed13.48s. Production consensus unchanged. Corrected full genuine socket test running cargoPID1072, log `/tmp/r3-h51-peer-redial.log`, exitfile `/tmp/r3-h51-peer-redial.exit`. Native TC admission diagnostics remain bounded and opt-in cfg(test).
+
+Parallel preparation: strict diagnostic Clippy passed3.32s; immutable staging and exactseq14->15 stalledactivation offlineguards independently passed, no signedmanifest or liveactivation. TPSremote signer public binding verified on actualVal2 existingwallet-01; all32 fundedwallet publicfile paths discovered, noprivatebytesread/exported. Harnessremote-native authoring/offlinechecks and6mocktests passed. Reestablished missingVal2SSHmaster once, after authoritative socketabsence; allMac-to-Mac control remainsThunderboltmaster. No transactions submitted. A direct find withoutsudo failedpermission before metadata discovery; corrected using existing owner sudo-n policy.
+
+
+### 2026-10-11 — fifth peer reconnected but H50 timeout remains undelivered
+
+Corrected socket fixture fulltest `/tmp/r3-h51-peer-redial.log` FAILED771.27s exit101 at socket_qualification.rs3930. Four finalizedH76; fifth synv11p233zx946f89j4afw9kczrk3hsddm5s8l6d remainedF47/active50/r0. Periodic redial confirmed fifth authenticatedpeers4, yet bounded decodedH50TC receipt/nativeverification logs contain onlyfouradvancedowners, nofifth. Reconnection was necessaryfixture repair but insufficient; exact nextbrokenboundary is signedTCretrycache/publish/networkdelivery beforefifthdecodedadmission. No livechange, signing, staging orTPS. Do not claim redialfixedrejoin.
+
+FinalLinuxbuild and strictClippy passed. Candidate7798472bytes SHA3beb03723d21117f8f76e90597257e542eff691f5f86edb00b0ca8fdc0a2b8184 SHA256a8331e2016077da9a9774479288a661f6b6b09817ae50d9420bfe6876fccb441. Unsignedmetadata/rolloutpin refreshed; offlineguards andR3commitmentMATCH. Other-mini master expired, exactsocketabsence verified, bridge0route verified and single replacementmasterestablished. Atlasreportintegration subagent hitusage limit; nocompletionclaim/sourcechangesassumed.
+
+
+### 2026-10-11 — asymmetric ghost sessions explain failed timeout redelivery
+
+R3 incident OPEN/P0. Delivery-boundary qualification `/tmp/r3-h51-delivery-boundary.log` FAILED773.77s exit101. Four advancing owners retained H50/r0 and H50/r1 timeout retry bytes but authenticated peer inventories excluded the fifth. Fifth active50/r0 reported four stale authenticated peers and verified heads46/47, preventing fixture redial. Source review confirms NetworkSession close can drop Closed on a full bounded event channel; NetworkService finished-thread cleanup removes senders without discarding exact router/ingress sessions. This leaves ghost authenticated entries after socket death. Causal production cleanup and focused exact-session/replacement regressions are being implemented; no deployment or passing recovery claim. Added short genuine signed socket idle-expiry/lease-change regression to avoid repeated H46 setup during causal validation; execution pending. Atlas baseline report source integration verified with three Python tests and frontend TypeScript check; backend check pending. No live validator mutation, reset, signing, transaction submission or workbook changes.
+
+
+Session cleanup implemented in network.rs: finished-reader and disconnected-sender cleanup discard exact ingress/router sessions; queued authentication cannot resurrect a finished connection; replacement sessions remain intact. All4 network regressions PASS (0.01s); strict scoped Clippy PASS. Genuine signed socket idle-expiry/lease-change retry regression PASS65.41s, `/tmp/r3-short-reconnect.log`, exit0; confirms automatic delivery of retained original TC after actual expiry/reconnect without manual replay. Full H47/H51 wallet/finality/restart qualification now running `/tmp/r3-h51-session-cleanup.log`; result pending. Linux rebuild running `/tmp/r3-session-cleanup-linux.log`; prior artifact pin is stale until refreshed. No signing, activation or live mutation. Atlas frontend and backend TypeScript checks PASS; no Atlas deployment claimed.
+
+
+Host restart interruption: user restarted other-mini during full qualification; Thunderbolt link became inactive and SSH closed. User unlocked Mac; bridge0 route and single SSH master restored. Previous detached full qualification was interrupted (no terminal result) and /tmp logs cleared by reboot; it is PARTIAL/UNKNOWN, not failed or passed. No VPS validator was changed by this developer-host restart. Restarted full unchanged-source qualification after this corrected host precondition as wrapperPID1358, now persistently logging canonical node-platform/target/r3-h51-session-cleanup.log and exitfile. Linux build already PASSED60s; current artifact7798856bytes SHA3e09a7dbe13cffd73b632ff093fc2c186fb8fc0ab5afc64877fe773156d8651f6 SHA2564bc5a40a2a8a751ea21b0487514e799bfb2b81c95e5ffa36989ae62fa4a3e81b; unsigned metadata/pin refreshed. All9 ETDAG tests PASS7.17s including genuine recovery and consumed exclusion; strict scopedClippy PASS after final source. Temporary prior logs lost in restart; completed tool outputs remain evidence but no qualification manifest fabricated. SSD SMB remounted via existing stored credentials over172.31.77.2; no source copy.
+
+
+Post-reboot live read-only observation: Val2–6 all active/running, zero NRestarts, exact durable/RPC H47 block6cd3635b2f4505ed244f57cd05d34a72515caa8275124d95e4e331575c377f27 and root65dc252a3d62b7b982c1e15ccf9ecf30e06ce220ab986b32c31e5f61d479ca66. Restored exactly one SSH master per validator and index on other-mini after socketabsence; no validator runtime mutation. Atlas canonical backend bundled and syntax checked; deployed only /opt/synergy/atlas-posy-staff/staffServer.mjs, restarted only synergy-atlas-posy-staff.service, active. Publisher restarted once PID1933, canonical target/atlas-posy-telemetry.log. Authenticated private endpoint HTTP200, baseline20261010, stale=false, TPSfields present. Browser https://atlas.synergy-network.io/staff/posy independently shows Live telemetry/H47/32wallets, accepted/ordered/finalizedTPS0, allfive cards status stalled after30s. Baseline remains pending; zero traffic is not capacity. New baseline summary UI fields sourcevalidated but no frontend deployment claimed. Local SMB-native esbuild execution stalled after remount quarantine; terminated exactchild and rebuilt on backinghost with login-resolved nvmNode24.21.0, no sourcecopy/securitybypass. Full recovery qualification wrapper1358 remains running with persistent logs.
+
+
+Full post-reboot qualification FAILED710.79s exit101 at4123, canonical target/r3-h51-session-cleanup.log. Unlike prior transport failure, allfive native Sync owners advanced beyondH58 (lastdiagnosticF72); allpeerinventories4 and verifiedheadsadvanced. Remaining test predicate required fifth localR3generation+committedcut beforeF51 while normalSync consumed finalizedhistory first. To preserve ratherthan weaken the explicit retained-generation prefinality restart gate, fixture-only fifthreturn now polls network/ETDAG/PoSy with nativeTCtraffic while holding H50+ nontimeoutPoSyframes and skipping fifthSync until durablecut+restart; then normalauthenticatedretry/Sync resumes. All original generation, marker, commit, prefinality assertions retained. Productionartifact unchanged. No signing/staging/livevalidator change orTPS. Corrected scheduling fulltest pending.
+
+Prefinality scheduling run wrapper2567 child2569 intentionallyinterrupted after fourfinalizedH58 and fifthnativeTC50received but rejected active49/parentQC48. Fixture retained all previouslyheld fifthPoSyframes, including requiredH49QC; skippingSync exposed this predecessor delivery dependency. Correcting hold to retain onlyH50+nontimeout and deliver authentic prior-height certificates/timeouts. No safetyassertionremoved, productioncodeunchanged, no validatorruntimechanges. Prior terminalresult PARTIAL/UNKNOWN because interrupted; notactivationproof. StrictClippyPASS; governedVal2signercustodymode0600/root/4032bytes and matching publicauthority verified read-only, no secretbytes exported/signing.
+
+Review BEFORE rerun found ETDAG prunes historical retryframes at ownfinality(etdag.rs1118-1133), so fifthlocalH51cut reconstruction afterfourF54 was an invalidfixture requirement; verifiedfinalizedSync is nativepermitted recovery and finalizedcut replacement mustremainrejected. R3clauses4/6 independently reviewed: test now restarts an actualfour-quorum R3author BEFOREH51finality, compares completegenerationarray/exactauthorization, retainedmarkers andcommittedbatch immediatelynativeopen; thenfouronlyfinalizeH54/exactwallet. FifthusesnormalverifiedSync, exactH54state/wallet/receipt/originalmarker, thenretainedstaterestart/allfiveH58. No obsoletehistoricalgenerationisfabricated orclaimed, no additionalETDAGhistorydeliveryengineintroduced. Earlierexperimentalscheduling removed. All3/5failclosed/4/5gatesretained; sourcecompile/fullresultpending.
+
+Full separated-author restart qualification FAILED539.84s exit101,target/r3-h51-author-restart-rejoin.log595: fifthfirstnetworkpoll acceptnetworkconnection IoInvalidargument22. Priorassertions passed nativeR3authorpre-finalityrestart exactgeneration/marker/committed equality andfour-onlyH54wallet/exactstate. Source listener.accept conflates actualaccept andacceptedstreamconfiguration. SmallcausalTCPprobe onothermini proved FINaccepted/configured normally; clientSO_LINGER(1,0)RSTbeforeaccept ->actualacceptsuccess,setblockingtruepass,TCP_NODELAYEINVAL22. Thus deadqueuedconnection configuration was escalating toservicefatal whilelistenerhealthy. Scoped fix will classifyacceptedstreamconfigurationfailure anddiscardonlythatconnection withinexistingboundedacceptloop, preserving genuineaccept/listenerfailure. No fullrerun untilfocusedregression; previousLinuxartifactnowwillrequire rebuild afterproductionfix. No livevalidatorchange/signing/TPS.
+
+AcceptedStreamConfiguration classification fix implemented; onlyindividualstreamsetupfailure isdiscarded byboundednetworkacceptloop, genuineIo listenererrors preserved. Portableunit firstpassedthenfullsuite exposed nonblockingacceptqueue race(OkNone beforeconnectqueued); bounded2swait added, all19synergy-network tests PASS0.06s. Initialnodefilterservices::network::tests matched0, correctedburst_tests matches4/4PASS0.00s. StrictscopedClippyPASS. Fullgenuinequalification wrapper3778 target/r3-h51-listener-recovery.log+exit running; Linuxbuildwrapper3781 target/r3-listener-linux-build.log+exit running. Candidateunsignedpinwillrefresh onlyafterbuildsuccess. No releaseauthoritysigned or livevalidatorchange/TPS.
+
+Fullgenuinequalification PASSED602.49s exit0,target/r3-h51-listener-recovery.log:3/5fulltimeoutfailclosed,4/5R3recovery,actualauthorpre-finalityrestart exactgeneration/authorization/history/batch,4onlyH54exactwallet, fifthnormalSync+restart,allfiveH58exactfinalizedexecution/worldstate. All19network+4sessiontests andstrictClippyPASS. LinuxbuildPASS60s7795592bytes SHA3ed2d34d55d845949218c50bac2dedbda77714a9f6e5e8ef149e6a3871159fded SHA256c8b61a65e06484210dabbb7f8bb3c5bbac8ed5ccdf45953ded27b7122016e7d0. Unsignedpin/offlineguards/activationcommitmentMATCH(verificationfirstcalledwithoutrequiredargs exit2,correctedcanonicalargsPASS). Rootreviewed seven-category qualificationmanifestcreate-new r3-qualification.json references exactsource/loghashes+prior9ETDAGnegativepass. Nextauthorizedactions: nativeVal2release signinginexistingcustody;immutablecandidatefilesstage;exactseq14H47fleetpreflight;stopallPID0/editverify/startall;preserveeveryjournal/key/configdata;verifyadvancingidenticalfinality+firstliveappliedtransfer beforeTPS. No protocolcertredesignactivation; userrequestedfewer certificates reviewed separately.
+
+Qualifiedseq15 signed nativelyexistingVal2custody; immutablecandidatebinary/release staged+nativeverifiedall5. Othermini masterexpired;socketabsence+bridge0routeverified thenexactonereplacementmaster3600, noWiFi. Activationwrapper4754 target/r3-live-activation.log FAILEDexit1 afterexactH47preflight stopallPID0/unitverify/startall: Val4restartcountincrease triggeredabort. Actualjournald startupfailure registerposy/loadretainedR2timeoutleaseevidencelimitexceeded. No rollback/journaldeletion. Containedrestartloop bystopall5; independentlyMainPID0everyhost,Val2/4/6failed Val3/5inactive. Data/keys/configbaselinepreserved. Signedseq15 installedunits remain. LivechainNOTRUNNING,TPSNOTRUN. Sourcecausalboundedretainedhistoryloaderinvestigationstarted; donotblindlyraiselimit/reset.
+
+
+### 2026-10-11 — retained-timeout loader repair and sequence16 staging
+
+R3 incident remains OPEN/P0; fleet last verified intentionally stopped at identical H47 after sequence15 startup failed closed. Root cause: R2 loaded/budgeted entire lease including active-height retained TC tail before filtering historical evidence. R2 now selects older slots before bounded loading; R3 resolves required ancestry using exact native-verified slots, with bounded RAM cache and original proof checks. No journal deletion, quorum/signature change or protocol amendment. Five timeout-store tests PASS0.15s including unrelated oversized tail, required invalid/missing proof and original namespace/integrity limits; initial parallel-test path collision corrected with test-only atomic fixture uniqueness, standalone failing test PASS before full rerun. Strict Clippy PASS. Linux build PASS; sequence16 ELF7781576bytes SHA3 `8850162e502467e75e661c9817fd8bc6a8f7aa63343bd21f7461621f7c8cd003`, SHA256 `28163ae00b86defe4db3a0c195961b65220a2e03d1cd35458e3999fdb5691cb3`. Genuine authenticated H51 recovery qualification running: target/r3-retained-h51-recovery.log, terminal result PENDING. Sequence16 signed natively existing Val2 custody, immutable candidate/release staged and native signature/artifact verified all five; no services started. Canonical signed-envelope write initially failed bytes/text TypeError leaving empty file; exact zero-byte partial file repaired in place from a second native signing result and metadata equality verified. Sequence15 files retained unchanged. Stopped-fleet guarded activation tools offline tests PASS; qualified hash pin/manifest and runtime activation await full result. Live chain NOTRUNNING; TPS NOTRUN.
+
+
+### 2026-10-11 — sequence16 live recovery and first applied transfer verified
+
+Full genuine H51 retained-loader recovery qualification PASS628.01s exit0 (target/r3-retained-h51-recovery.log); root-reviewed artifact-bound canonical r3-retained-qualification.json created. Guarded sequence16 activation PASSexit0 after two exact stopped H47/native signed sequence15 snapshots, stopallPID0, native stagedsignature/hash/unit verification, then startall. Four matching advancing finality gates H48,H53,H80,H94; allfiveactive, zero automaticrestarts. First live H51 transfer appliedidenticalallfive: block `6128509cf9e849658a72fe5e42600d9fad99195ad44c384a79a430988c185970`, state `a6536dccd9df3bdb70dcc3505f824a522ec439efe221b3bbe97712ffbf6a2e73`, tx `2cc625115d20f18156597e6b4159f2759b75e815baf7a1ecef91cd81c42d5950`, receipt applied/gas21000/noerror. Subsequent fiveobservations matching finalized history H182, zero restarts; Atlas publisher observed allfiveH211 thenH217/218. Node keys/history/config preserved, Val1 untouched. TPS harness firstcall rejected relativeoutputpath beforehostcalls; corrected absolutepath attempt failedpreflight val3readyfalse, report tps-baseline-1tps-30s.json has failureonly/no transaction submissions. Subsequent chainadvancedH189allready but Val4 admissioncontexttemporarilyunavailable. Bounded sampler repair is in progress; baselineTPS remains NOTMEASURED. Do not conflate recovered advancing fleet with completed live restart/rejoin soak or TPS.
+
+
+### 2026-10-11 — bounded ETDAG primitive cache qualification, sequence17 preparation
+
+Sequence16 livefleetcontinuesadvancing zero restarts, AtlasallfiveH334. TPSattempts beforeload failed readiness/contexttransitions and nodeStatusRPCtimeout; all three failure-only reports contain no submittedtransactions. Sampler nowretries only exacttransition errors up tooriginal5sRPCbudget, keepswrongchain/quorum/root/F+5/stalllimits, uses alreadyverifiedsampledcontext toavoidfreshcontextvsoldtiprace. Val3loopback nodeStatusmeasure includes5.225sreadyfalse (notSSHlatency); sourceRPCblockingparser architecturalrisk identified but noidleconnections observed, no broadRPCrewriteactivated. NativeETDAGduplicateverification proven in certificatepath: availabilityvalidation followed constituentvotevalidation. authority.rs exactsuccess-only boundedcache reuses existing primitivecache afterfrozenkey/status/algorithm checks; all certificateauthority/quorum/context checksretained. Threecachetests PASS0.53s, nineETDAGtests PASS6.99s, genuinewalletauthenticatedsocket PASS112.58s, strictClippyPASS, LinuxbuildPASS62s. Initialtestfixture minimumvalidator failure corrected tofive testidentities beforepassingrerun. Sequence17 artifact7783176bytes SHA3 `fabd22210e371020c4571a9a4c1d46c96967825c370a8841635b6e89f1fcdd9b`, SHA256 `28eab9b8486391e1c26e4f190338cee342c6cc0faf9f15602ab99f940e34b78e`; nativeVal2custodysigned, staginginprogress. SameR1/R2/R3activationcommitment; nosemanticamendment. PlannedVal5pilotretainedstaterestart/rejoin thencompatiblequorumpreservingrollingupgrade; performanceimprovement/TPS remainunverified. Priorseq16fullrecoveryqualification retainedasitsownartifactevidence, notmisreportedasseq17fullR3rerun.
+
+
+### 2026-10-11 — sequence17 all-five restart/rejoin verified; RPC isolation qualification
+
+Sequence17 Val5 retained-state restart/rejoin PASS through H763/H783, followed guarded quorum-preserving Val3/2/4/6 upgrades with matching advancing finality H941,H960,H1001,H1018, zero automatic restarts; target/r3-etdag-cache-rollout.exit=0. Every validator now has a genuine live retained-state restart/rejoin proof. Baseline attempt tps-baseline-cache-1tps-30s.json failed before submission on protected admission context RPC timeout; TPS remains NOTMEASURED. Blocking HTTP reads/writes in the shared managed-service poll loop are a confirmed architectural defect, not yet proven sole cause of observed loopback delays. rpc.rs now retains bounded nonblocking HTTP connections, absolute deadlines and partial responses; existing handler work remains synchronous, no protocol changes. Causal idle/partial-body vs healthy HTTP test and split WebSocket handshake/ping/disconnect tests PASS (2/2,0.01s). Wallet integration initially failed because test helper assumed a single blocking poll; fixture changed to nonblocking reads with bounded service pumping, rerun pending. Strict Clippy initially rejected unnecessary usize cast, corrected. Linux build and genuine wallet qualification pending; no sequence18 signing/staging/live activation yet. Keys, journals, Val1 and workbook preserved.
+
+Sequence18 qualified: HTTP/WebSocket2testsPASS0.01s; genuinewalletsocketPASS114.59s after causal fixturepump correction; strictClippyPASS; LinuxbuildPASS57.10s. ELF7785704bytes SHA3 5e359fa39688198586e5ddb3b755e5058012e8d905b666aeb87e3e83c0226e34 SHA256 42c288ccad433c49d8cbc653de0838042d02ee77727dc38c253a7297b5a89d9f. Canonicalunsignedmetadata/pin updated, existingVal2custodynativesigned canonicalenvelope; stagingallfive underway. SameR1/R2/R3commitment, floor17, no protocolchange. AuthorizedVal5pilotthenquorumpreservingrollingupgradeplanned; TPS onlyaftermatchingadvancingallfiveproof.
+
+Sequence18 live rollout PASSexit0: Val5pilotH3140/sustained3163, Val3rejoin3327, Val2rejoin3372, Val4rejoin3416, Val6rejoin3470; allfiveAtlas3476 zero automaticrestarts. Baseline rpc-isolated attempt passedRPC sampling but preflight failed cadence outside0.5–1.5s beforetxsubmission. Performancegoal now measured explicitly using new --measure-outside-cadence-target flag (default remainsstrict), reportseparatecadence_target_met; originalquorum/hash/state/6sfinalitystall/30stxdeadline retained. Offlineharness+6mockHTTPtestsPASS. New boundedmeasured1TPS30sattempt underway, resultpending. Livequorumlossprocedure prepared/offlineguardsPASS, notexecuted.
+
+Postseq18 baseline evidence: initialcadencegatefailedbeforeload; measuredattemptstatsRPCtimeoutwasbudget-shrink samplerdefect (eachrequestnoworiginal5s, transientretrybounded); nextattemptVal3ingresscontexttemporarilyunavailable despiteverifiedadvancingfinality. Sampler nowrequiresliveF+5ingressonlysubmittingVal2 andobservesnon-submitcanonicaldurableheight+RPChash/state/cert withsame2blockbound/domain. LatestBlocknullAPI unsupported; correctedtoexistingAtlasdurablepointermethod, notnewRPC. Preflightcadencemetadatafirstincorrectfleetdictshape producedTypeError beforeload; fixednestedmetadata+regression. AlignedheightobservationsnowreadallfivepublicdurablepointersafterRPCsampling toavoidstalecontextvsfreshpeerfalse spread. Nativeauthoring initiallypointedoldreleasekeytoolwithoutwalletcommand; existingrootownedELFwallet-admissionkeytool verified5269352bytesSHA2567b440ff52393b5b4957ae43b1ed744def674d2385495b698af7caddb03678b5b, runnerpathcorrected. Firstloadqueuedone tx0b95b24c9ae6261daf681989daaf08da36bbace25d31d7b23fa2e232417e3085 nonce0, rejectedbeforeadmission; nofinalizedTPSclaim. Reportnowretainstarget/receipt/rejectionreason. Hotpathrefreshescontextimmediatelybeforeauthoring withVal2sourcefinality; allfivesourceproofretainedatfinalization. Pendingtxlookupgatedoncommontipreachingtarget topreventguaranteednegativefullhistoryscans. Eightmocktests+offlinePASS; freshadmissionbaselinepending. Noquorum/protocol/journalchanges.
+
+Baselinecurrentloadboundary: correctednativewalletcommandqueuestransactionbutETDAGrejects freshlocaladmissionclosed (bounded-snapshot reporttarget4068, nonce0, txe9665e66e28ae89f7e009d888b969012223f1f9579ec167b4cba6a61ad3b71ca). Nativeauthoringmeasured0.439s; waitnewtargetwindowattempt insteadRPCsubmissionerror beforequeue response, noresultclaim. No repeatedunchangedattemptplanned. Chainallfivecontinuesadvancing >H4133. Livequorumrecoverytest nowauthorizednextindependentvalidation, exactseq18guardsandcleanupinplace; target/live-quorum-recovery-seq18.log planned. Preservealljournals/config/identities; Val1untouched.
+
+Livequorumloss/recovery seq18 PASSexit0,target/live-quorum-recovery-seq18.log: all5preflightH4194nativehash/unit/domainverified; exactVal5+6stopPID0; after20ssettle+10sobservation remaining3identicalstationaryH4200block0837a566a1cf55525d03caec4643ce8ab0b053da2bf56827b58b86dc7a12f0ff/statea6536dcc...; startVal5 restored4matchingcommonfinalityH4201 automatically; startVal6 all5advancingverifiedcommonH4225 thenAtlasall5H4243. Allzeroautomaticrestarts; noreset/historyloss/TCinjection/manualreplay. SourceTPSfirstbrokenboundary nowconfirmed same-tickstalecontext: ETDAGpublishopentarget→PoSyverifiedVCcloses→RPCcachedcontextserved. NarrowAdmissionHandlelivecutoffguardimplementedbyagentpendingqualification, nosemanticamendment. AtlaslivequorumcardhistoricalPASSupdateinprogress; sustainedsoakpending; baselineTPSstillNOTMEASURED.
+
+### 2026-10-11T17:20:06.469419+00:00 — sequence 19 live admission cutoff guard qualified
+
+Confirmed same-tick ETDAG cached-context/PoSy verified-cutoff race. Bound AdmissionHandle to existing authenticated ingress; context retrieval and fresh enqueue consult live verified cutoff, preserving duplicate receipts and final ETDAG cutoff enforcement. Genuine signed VC regression: 2 tests pass. Real wallet authenticated five-validator socket transfer: PASS111.23s. Strict Clippy PASS; native Linux build PASS58.41s. Signed sequence19 same R1/R2/R3 activation commitment; ELF7792488bytes SHA3 eb7c8182c971b7d3bc893fa7c8b2fec50c095520efa366a825cbd4d9ef84fdb3. Staging underway; live deployment and TPS baseline not yet established. Runner exact closed-context transient classification qualified with10 offline tests; submission rejection remains fatal.
+
+## C1266-2026-10-14-FAUCET — Testnet v3 Genesis faucet transaction admission
+
+Status OPEN; operational repair for the running chain-1266 authority on Val1. The user confirmed that PoSy and ETDAG are not active on this chain and authorized a narrowly scoped current-chain admission upgrade and authority restart to enable the funded faucet, without a Genesis reset. The public Forge faucet remained gated because its legacy upstream advertised chain 1264.
+
+Pre-change evidence: the Val1 authority was active with PID 2333034, zero automatic restarts, and advancing finalized head above height 3,249,645. The chain context was chain ID 1266, incarnation 5, Genesis hash `2272fe2b48c6e2019b27223f61ba8d8a82b58656fe9daab50c81f224a301ca74`. Genesis funded ECO-A02 `syns10a8prj2pvm3lwtd2zf8ke54zhq8ux3804kl2` with 1,000,000,000,000,000 nwei; its FN-DSA encrypted custody bundle and passphrase were located in the testnet-v3 identity archive and the node-machine credentials workbook. No secret bytes were logged.
+
+The current runtime rejects public transaction submission at the RPC guard and accepts only ML-DSA account Aegis carriers in the execution path; plain transfers and DAG/batch submit routes remain gated. A source patch on release branch commit `be59ca4` adds only a signed-Genesis-address FN-DSA carrier exception and enables `synergy_submitAegisTransaction` when the loaded canonical Genesis binds this chain. A purpose-built signer verifies the custody identity and caps each payout at 10 SNRG. Local `cargo check` and the focused RPC exposure test passed; a real custody signing-envelope check passed without broadcasting. Exact matching source files were staged on Val1 and the Linux release build passed, producing authority SHA-256 `e12e2c4daaa7556dc2dc0f1e9f81ee8650fa256c0d2f3f68a89ebd91b621ef4e` and signer SHA-256 `3dd55108c9da58c73ea4c186b939caafc06279da165187ee6ac952cf852af523`. The pre-change installed authority SHA-256 is `dc40b4044a63599f8d3b6fbee782e3f1e34b77b9d2db5f25e1c0d0d7f1b61143`.
+
+Next gate: retain the installed binary for rollback; perform one guarded authority restart with durable-head and state checks; submit one signed, bounded canary; verify an applied receipt and recipient balance before enabling the public faucet. No on-chain payout or completed activation is claimed in this entry.
+
+### 2026-10-15 00:06 UTC amendment — guarded upgrade and canary outcome
+
+The guarded `be59ca4` authority cutover completed after durable-history replay: `/root/chain1266-faucet-cutover.log` reports `CUTOVER_PASS` and advancing height 3,253,790. The installed authority SHA-256 is `e12e2c4daaa7556dc2dc0f1e9f81ee8650fa256c0d2f3f68a89ebd91b621ef4e`; the prior binary remains preserved at `/usr/local/bin/synergy-validator-node.pre-faucet-be59ca4-20261014`. At 00:06 UTC the service was active, PID 2180500, `NRestarts=0`, finalized height 3,255,053, block ID `cf956cddc988065f9c0e12c3d351cc8d62cffbc2ba651ca5a90a8fd3ebf105dc`. No signing conflict was observed in the guarded cutover.
+
+A bounded 1 SNRG canary from the Genesis-funded ECO-A02 account was accepted and durably finalized in block 3,254,301. The canonical execution snapshot shows the recipient balance increased to 1,000,000,000 nwei and the sender balance decreased to 999,998,999,799,960 nwei; the durable receipt reports `SUCCESS`, gas used 21,000, and the transfer's fee. This proves on-chain settlement, but the public receipt, nonce, and balance methods still read legacy state and reported null, zero, and zero. Faucet cutover therefore remained gated. Runtime commit `90fb15e` now projects these reads from finalized execution state, the recovered committed nonce index, and the bounded durable receipt tail; it also updates public Testnet v3 labels. Local `cargo check --lib` and the focused finalized-head RPC test passed. The next required action is a guarded build/restart of that commit, followed by receipt/balance/nonce verification and a second payout through the actual faucet service before public cutover.
+
+### 2026-10-15 UTC amendment — canonical read-path cutover and live faucet payout
+
+The guarded deployment of `90fb15e` on Val1 installed authority SHA-256 `123884913335b1156d1fc67892eb6ec0a6cb028459e7074ad2599a247473d72a`. Durable history replay completed, the service stayed active with zero automatic restarts, and finality advanced past height 3,255,398. The cutover script reported failure only because the generic RPC wrapper placed a successful finalized receipt in `error.data` when its receipt object included an empty `error` field; no rollback was attempted after the authority resumed finalizing. Canonical balance, nonce, and receipt reads were verified against the 1 SNRG canary. A source-level wrapper fix changes that receipt field to `executionError`, but is not yet deployed; preserve this compatibility caveat for clients.
+
+Forge faucet service commit `585201a2` accepts only a matching finalized successful receipt from that compatibility field. One live public 10 SNRG request to `synw1zp7cxme7xm838663yrd43lxtxlw0ck90z4am` finalized as `syntxn-441013965ff89449f66d0d62b0f3efacb42d595f23ff13ddddd74efa7fe3241a`. The v3 faucet replaced the chain-1264 PM2 process on the established public hostname. Live direct and Forge GET routes reported chain 1266 and the funded ECO-A02 balance; repeat POSTs returned HTTP 429 cooldown. No further payout was sent.
+
+## C1266-2026-10-20-001 — Single-authority signed-slot replay conflict at height 3556906
+
+**Status:** Open  
+**Severity:** P0 chain liveness  
+**Detected:** 2026-10-20 03:54 UTC  
+**First bad height:** 3556906  
+**Last agreed finalized height:** 3556905  
+**Last agreed finalized block ID:** `f67e0504769bc3ecb8d39a445cb987a6f74ba282cbb89a4c91201b5a3ef139f9`
+
+### Affected and responsible nodes
+
+Val1 `synergy-chain1266-authority.service`, Chain 1266 incarnation 5,
+`single_authority_v1`. The public RPC, Atlas ingestion, STS activation and all
+new transaction ingress remain downstream of this stopped finalized tip. No
+other validator is responsible for the single-authority failure.
+
+### Symptoms and evidence
+
+The installed authority binary remains SHA-256
+`123884913335b1156d1fc67892eb6ec0a6cb028459e7074ad2599a247473d72a`.
+Systemd reports 100 automatic restarts, approximately 19.3–22.5 GiB peak
+memory per full-history startup, and repeated process exits after about
+15–17 minutes. The authority log repeatedly fails closed with:
+`single-authority height 3556906 is already bound to a different signing
+subject; refusing to authorize a second block for one height`.
+
+The durable finality head and committed-block tail agree at height 3556905,
+block `f67e0504...39f9`, state root
+`fd980674eec186a86c6a0ed37b3af39310511218ac7b5251c8e9bbbf933dd441`.
+The compact signing journal already contains a verified ML-DSA-65 signature
+for height 3556906, parent `f67e0504...39f9`, canonical block hash
+`2ef836db353bd0df214a38f978de4500975d3b902221ed6a1a62d78001785430`,
+and signing-payload digest
+`daddbfb1a9add66fc6f9f35779b5958c98835d783ddda00ef8dfd65064e4379d`.
+Its hot state correctly remains `finalized_through: 3556905`. No height-3556906
+committed block or finality record exists.
+
+### Confirmed cause
+
+The immediate safety boundary is confirmed: startup reaches the already-signed
+active slot, but `produce_next_block` constructs a new block with the current
+wall-clock timestamp before consulting the sign-once journal. The resulting
+block hash differs from the durable signed subject, so the journal correctly
+rejects a second subject. Exact reconstruction/replay of the already-authorized
+block remains to be proven before repair; the signing guard must not be bypassed
+or the journal edited to permit a new signature.
+
+### Recovery actions and outcomes
+
+1. **Read the complete incident ledger and captured service, finality-head,
+   committed-tail, signing-journal and binary evidence through one persistent
+   Val1 connection.**  
+   **Outcome:** the chain is safely stopped at one finalized parent with one
+   durable signed successor subject. No service, binary, journal, chain state,
+   Genesis, key or configuration mutation occurred.
+2. **Stopped only `synergy-chain1266-authority.service` to contain the repeated
+   19–22.5 GiB full-history recovery loop.**  
+   **Outcome:** the unit is inactive/dead with `MainPID=0`; approximately
+   22 GiB is available. Finality, committed bodies, receipts, execution state,
+   signing journal, Genesis, custody and installed binary remain unchanged.
+3. **Implemented source-only exact-candidate durability and replay in the
+   existing release worktree.** Each new unsigned block body is atomically
+   staged before sign-once authorization. Restart loads and verifies that exact
+   height/parent/hash/payload/binding before replaying the durable signature.
+   The pre-existing orphaned height 3556906 may use only a bounded empty-block
+   timestamp reconstruction that must equal the already-signed hash; all other
+   legacy bodies fail closed.  
+   **Outcome:** compilation and crash-after-signature regression are in
+   progress; no binary has been installed and the authority remains stopped.
+4. **Prepared to stage the two reviewed repair source files into the existing
+   Val1 `/root/launch-src` build tree for Linux compilation and focused tests.**
+   The remote files were first proven byte-identical to the release-worktree
+   base revisions; the existing SSH multiplex connection will be reused.
+   **Outcome:** this is build-source staging only. The installed authority
+   binary, service, chain data, journal, Genesis, keys and configuration remain
+   unchanged, and the authority remains stopped. Local compilation was unable
+   to proceed on the SMB-backed workspace because that filesystem does not
+   support Rust incremental lock files, so validation is moving to Val1's
+   existing native build cache with `CARGO_INCREMENTAL=0`.
+5. **Compiled and tested the exact-candidate repair on Val1's Linux build
+   host.** The five first-block/restart cases passed, including exact
+   reconstruction of live height 3556906 at timestamp `1792359665`, replay of
+   a legacy signed orphan without re-signing, and replay of the new staged
+   candidate format. The complete focused `single_authority` suite passed:
+   96 passed, 0 failed. Source checksums matched the canonical worktree before
+   compilation. **Outcome:** validation passed; only pre-existing compiler
+   warnings remain. No release binary has yet been installed and the authority
+   remains stopped.
+6. **Prepared the validated Linux release for an atomic authority install and
+   one guarded recovery start.** The release artifact reports Synergy Testnet
+   Node v20.0.0, is 47,009,448 bytes, and has SHA-256
+   `80135fca6635fa4eed15a1df02dc9683634335e573b231fc5c6be84938293067`.
+   The still-installed v20.0.0 binary remains 46,970,160 bytes with SHA-256
+   `123884913335b1156d1fc67892eb6ec0a6cb028459e7074ad2599a247473d72a`.
+   **Outcome:** build provenance and artifact identity are recorded before the
+   install. The next action is an atomic replacement followed by exactly one
+   service start; no chain data, journal, Genesis, keys or configuration will
+   be rewritten.
+7. **Atomically installed the validated release and started the authority once
+   at 2026-10-20 21:22:55 UTC.** The installed SHA-256 is
+   `80135fca6635fa4eed15a1df02dc9683634335e573b231fc5c6be84938293067`;
+   systemd reported `active/running`, `MainPID=492763`, and `NRestarts=0`
+   immediately after start. **Outcome:** full-history replay is in progress.
+   Do not restart again during this observation window. The durable head and
+   signed journal have not been manually altered.
+8. **Completed the guarded full-history replay and exact signed-slot recovery.**
+   At 2026-10-20 21:39 UTC the same service process remained active with
+   `NRestarts=0` and resumed advancing finality. Canonical RPC returned height
+   3556906 as the exact pre-existing signed block
+   `2ef836db353bd0df214a38f978de4500975d3b902221ed6a1a62d78001785430`,
+   parent `f67e0504769bc3ecb8d39a445cb987a6f74ba282cbb89a4c91201b5a3ef139f9`,
+   timestamp `1792359665`, with zero transactions. Two observations three
+   seconds apart advanced from height 3556922 to 3556925; the signing-journal
+   compact file contained no pending entries or safety halts and its hot state
+   subsequently reported `finalized_through: 3556941`. **Outcome:** the
+   already-authorized subject was finalized exactly once, no second subject
+   was signed, and successor finality resumed. A controlled retained-state
+   restart proof remains required before closing the incident.
+9. **Verified the controlled retained-state restart and sustained recovery on
+   2026-10-23.** The authority remained on the process started at
+   2026-10-20 21:40:01 UTC (`MainPID=497934`, `NRestarts=0`) with installed
+   SHA-256
+   `80135fca6635fa4eed15a1df02dc9683634335e573b231fc5c6be84938293067`.
+   Canonical loopback RPC bound the running node to chain ID 1266,
+   incarnation 5, and Genesis hash
+   `2272fe2b48c6e2019b27223f61ba8d8a82b58656fe9daab50c81f224a301ca74`.
+   Two observations four seconds apart advanced finalized height from 3741799
+   to 3741803. The compact signing journal contained no entries or safety
+   halts and its hot state subsequently reported `finalized_through: 3741822`.
+   **Outcome:** retained-state restart recovery and sustained successor
+   finality are proven without rewriting history, Genesis, keys, or the
+   signing journal. The incident is closed; STS activation is tracked as
+   separate deployment work.
+
+### Final outcome
+
+Resolved. The repair deterministically reconstructed the exact signed
+height-3556906 block, verified and finalized the already-authorized subject
+once, resumed successor finality, and passed a retained-state restart with
+sustained finality and no automatic restart.
+
+### Residual risks and next observation
+
+Continue preserving the signed journal, exact recovered block, Genesis, keys,
+and finalized history. The installed repair and crash-after-signature
+regression remain required for future releases; never reset or truncate this
+history as an operational shortcut.
+
+### Source evidence
+
+- Val1 `/var/log/synergy/chain1266-authority.log`
+- Val1 `/var/lib/synergy/node/data/consensus/chain-1266-incarnation-5/`
+- `runtime/src/consensus/single_authority_driver.rs`
+- `runtime/src/consensus/single_authority_signing_journal.rs`
+
+---
+
+## C1266-2026-10-23-STS-001 — Activate Synergy Token System on single authority
+
+**Status:** In progress  
+**Severity:** P0 release activation  
+**Detected:** 2026-10-23 07:01:35 UTC  
+**First bad height:** Not applicable; this is a feature activation on an advancing chain  
+**Last agreed finalized block ID:** To be captured immediately before the guarded restart
+
+### Affected and responsible components
+
+- `synergy-chain1266-authority.service` on `synergy-val1`.
+- The Chain 1266 STS execution path, finalized read-only STS RPC, public native
+  Aegis transaction ingress, and `synergy-sts` CLI.
+- This is not validator misconduct. The deployed v20.0.0 runtime still binds
+  STS to legacy chain 1264 metadata and lets a legacy standalone STS snapshot
+  shadow consensus-owned finalized execution state.
+
+### Symptoms and evidence
+
+- The live native RPC reports Chain 1266, incarnation 5, network
+  `synergy-testnet-v3`, and Genesis
+  `2272fe2b48c6e2019b27223f61ba8d8a82b58656fe9daab50c81f224a301ca74`.
+- Before activation, `sts_getNativeAsset` reports the legacy chain 1264 STS
+  identity, so token creation must not be attempted against the deployed
+  authority.
+- The public native RPC reaches the typed
+  `synergy_submitAegisTransaction` validation path, but the existing CLI does
+  not enforce the exact Chain 1266 identity, receipt success, or finalized
+  token visibility before reporting success.
+
+### Activation actions and outcomes
+
+1. **Bound STS to Chain 1266 and network `synergy-testnet-v3`, while preserving
+   the `synergy-sts-v1:` wire prefix and explicitly rejecting legacy chain
+   1264/generic-testnet semantics.**  
+   **Outcome:** source and unit tests pass; no transaction has been broadcast.
+2. **Changed single-authority STS RPC reads to the consensus-owned finalized
+   execution state and prevented the legacy standalone snapshot from
+   shadowing it.**  
+   **Outcome:** focused STS RPC tests pass, including finalized-state source
+   selection.
+3. **Hardened `synergy-sts` submission with exact chain/incarnation/network/
+   Genesis and Aegis-capability preflight, local and RPC envelope verification,
+   finalized receipt validation, and post-create token lookup.**  
+   **Outcome:** all six CLI tests pass. Focused Aegis admission, role-runtime,
+   launch-identity, public-gateway, and retained-state tests also pass.
+4. **Built the exact staged source on Val1 with Cargo locked dependencies.**
+   Source SHA-256 values match the canonical release worktree. The candidate
+   validator is v20.0.0, 45 MiB, SHA-256
+   `7e801d60edb54093b31f5e98e13f39a560d911f03af8cfeea6b137ee99a2e196`;
+   the candidate CLI is v20.0.0, 12 MiB, SHA-256
+   `d287be9cff510ea2f7054faf831ad1790eac5caa7d5a553bfc649003f12fd9ce`.
+   **Outcome:** optimized build completed successfully. The running authority
+   remains unchanged at PID 497934, `NRestarts=0`, pending one guarded install
+   and restart.
+5. **Atomically installed candidate
+   `7e801d60edb54093b31f5e98e13f39a560d911f03af8cfeea6b137ee99a2e196`
+   and started the authority once at 2026-10-23 07:02:09 UTC.** The prior
+   installed binary was moved intact to the one rollback path
+   `/usr/local/bin/synergy-validator-node.pre-sts-80135fca`.
+   **Outcome:** full retained-history replay completed on PID 1648355 with
+   `NRestarts=0`; finalized height advanced from the pre-restart 3745528 to
+   3745828 in a four-second observation, the signing journal remained empty,
+   and STS reads became available from
+   `finalized_chain1266_execution_state`. The response correctly reported only
+   native SNRG before the first STS token, but its replay metadata incorrectly
+   reported height 0 and the Genesis hash.
+6. **Corrected finalized STS read metadata to bind the durable
+   single-authority finalized-head height and block hash, not the compact
+   in-memory chain placeholder.**
+   **Outcome:** the four focused STS RPC tests pass. The rebuilt v20.0.0
+   validator candidate has SHA-256
+   `49369281473320ec27031cb2031360ff21824620bfff4885a8943d95a27d5d57`.
+   One final guarded retained-state restart is required to install and prove
+   this metadata correction.
+7. **Activated the exact STS network domain in the Atlas indexer.** The
+   canonical TypeScript source now accepts only chain 1266 and network
+   `synergy-testnet-v3`. A full local build was rejected for deployment because
+   it lacked newer live RPC-tail changes; the original indexer was restored
+   immediately. The first upload also had owner-only permissions, causing
+   three automatic service restart attempts before restoration; no chain or
+   database state was lost. The deployed live artifact was then changed only
+   at the two network-domain constants, preserving its working bounded RPC
+   ingest path. Its SHA-256 is
+   `a7d00e2b6effff0537d54ef7ec0253fb6962454fdf9769d399d570b0a271db34`.
+   **Outcome:** `synergy-testnet-v3-atlas-indexer.service` is active on PID
+   2035585 with `NRestarts=0` since the successful start and is indexing
+   advancing Chain 1266 block ranges. The pre-change artifact is retained as
+   one rollback file.
+
+### Required completion evidence
+
+- Record the exact pre-restart finalized head and installed/candidate hashes.
+- Atomically install once, restart once, and wait for full retained-history
+  replay without a second restart.
+- Prove the same Chain 1266 identity, advancing finalized tips, empty signing
+  journal/safety halts, and finalized STS read source.
+- Prove the public gateway and v20.0.0 CLI preflight against the deployed
+  runtime without broadcasting a real token transaction.
+- A real create/transfer canary remains a separate explicit-approval gate.
+
+### 2026-10-23 16:25 UTC amendment — runtime and CLI activation verified
+
+8. **Installed the finalized-head metadata correction and performed the one
+   guarded retained-state restart.** Immediately before the restart, finalized
+   height was 3746309. The installed v20.0.0 authority now has SHA-256
+   `49369281473320ec27031cb2031360ff21824620bfff4885a8943d95a27d5d57`.
+   **Outcome:** `synergy-chain1266-authority.service` has remained
+   `active/running` on PID 1655202 since 2026-10-23 07:32:38 UTC with
+   `NRestarts=0`. A later four-second observation advanced finalized height
+   from 3774442 to 3774446. The signing journal contained zero entries and
+   zero safety halts; its compact hot state reported finalized-through 3774429.
+   No fatal, panic, signing-conflict, safety-halt, or OOM line was observed
+   after this start.
+9. **Verified the finalized STS runtime boundary on the live authority.** The
+   node reports chain ID 1266, incarnation 5, network
+   `synergy-testnet-v3`, and Genesis
+   `2272fe2b48c6e2019b27223f61ba8d8a82b58656fe9daab50c81f224a301ca74`.
+   `sts_getTokens` reports source `finalized_chain1266_execution_state`, a
+   current finalized height and block hash, and exactly one native SNRG entry
+   before the first user-created STS token. **Outcome:** the legacy snapshot
+   no longer shadows consensus-owned finalized state and its metadata is no
+   longer pinned to height zero or Genesis.
+10. **Installed and exercised the v20.0.0 `synergy-sts` CLI without a chain
+    mutation.** `/usr/local/bin/synergy-sts` has SHA-256
+    `d287be9cff510ea2f7054faf831ad1790eac5caa7d5a553bfc649003f12fd9ce`.
+    `--version` and `native-info` passed against Chain 1266. An offline
+    token-create exercise correctly rejected an unbounded default mint
+    authority, then succeeded with `--no-mint-authority`, producing a valid
+    deterministic Chain 1266 B1 payload, token address and fee estimate.
+    **Outcome:** authoring and safety preflight work; no transaction was
+    submitted or broadcast.
+11. **Verified both public RPC hostnames.**
+    `https://testnet-rpc.synergy-network.io` and
+    `https://rpc.synergy-network.io` returned the exact chain identity,
+    advancing finalized height, native SNRG, and finalized STS token state.
+    A deliberately malformed `synergy_submitAegisTransaction` request reached
+    native envelope validation and was rejected for the missing envelope. The
+    legacy `synergy_sendTransaction` route remained denied/fail-closed.
+    **Outcome:** the public gateway exposes the intended native path without
+    accepting a legacy or malformed transaction.
+12. **Verified the Atlas materializer after the scoped domain patch.** The
+    live artifact remains SHA-256
+    `a7d00e2b6effff0537d54ef7ec0253fb6962454fdf9769d399d570b0a271db34`.
+    PostgreSQL terminated one connection with administrator-command code
+    `57P01` at 06:32:31 CDT; systemd restarted the indexer after five seconds.
+    **Outcome:** the same patched artifact is currently `active/running` on
+    PID 2048961 with `NRestarts=1` and continuously indexed through heights
+    3774411--3774452 during the final observation. The restart was a database
+    administration event, not a reverted STS patch or chain-state loss.
+13. **Pushed the activation source and repaired the public CLI release path.**
+    Commit `4be183d55cc3123674526c0e1ca76dc34caa4ebb` contains the Chain 1266
+    STS activation. A workflow-only default-branch PR added the manual release
+    entry point without merging the release branch's divergent history. The
+    first run, `39985595881`, failed before compilation because the locked
+    sibling SynQ tree was absent; no release was created. Commit
+    `3d877dd180d0ba67a75d93fe3249a2ce25f2be38` adds the same exact locked
+    dependency checkout used by the immutable Chain 1266 release workflow.
+    **Outcome:** replacement run `39986046460` passed dependency checkout on
+    the active Linux AMD64, Linux ARM64, and macOS ARM64 runners and is
+    compiling; macOS AMD64 is queued. Publication remains pending this run's
+    terminal result.
+
+**Activation status:** The STS runtime, finalized read path, public ingress,
+CLI authoring path, and Atlas materializer are activated and live-verified.
+The only intentionally unexecuted acceptance boundary is the first real
+token-create and transfer canary, because that mutates Chain 1266 and remains
+behind explicit approval.
+
+### 2026-10-23 19:53 UTC amendment — local CLI build and release verification
+
+14. **Stopped relying on GitHub Actions for subsequent CLI builds at the
+    operator's direction.** Run `39987352360` had already reached a terminal
+    success before its cancellation request was accepted and had published
+    the immutable `synergy-sts-v20.0.0` release. Its four Unix assets were
+    therefore left intact; they were not deleted or overwritten.
+15. **Built both macOS architectures locally on the Mac mini from the
+    canonical release worktree and locked dependency graph.** The Apple
+    Silicon binary is v20.0.0, Mach-O arm64, SHA-256
+    `af5fa11a44b56d89b5991aa4a0d438544a6115056005f715f0dd386cbff330c0`.
+    The Intel binary is v20.0.0, Mach-O x86_64, SHA-256
+    `48a439fc5e2ce1ac4e16c97a07de70a552d59b490d33b0e6ddf4bc74a899d89c`.
+    **Outcome:** the Intel binary executed successfully through Rosetta and
+    both architectures reported the correct Chain 1266 native asset against
+    `https://testnet-rpc.synergy-network.io`.
+16. **Retained the locally built Linux AMD64 artifact already installed on
+    Val1.** `/usr/local/bin/synergy-sts` remains v20.0.0, ELF x86_64, SHA-256
+    `d287be9cff510ea2f7054faf831ad1790eac5caa7d5a553bfc649003f12fd9ce`.
+    The Ubuntu host `synergy-dev-tower` was verified as Ubuntu 26.04 x86_64,
+    but it does not mount the canonical SSD and has no Rust toolchain, so no
+    duplicate source checkout was created there. **Outcome:** the Val1 Linux
+    binary queried finalized STS state successfully at height 3784479.
+17. **Attempted a local Windows AMD64 cross-build on the Mac mini using
+    Rust's `x86_64-pc-windows-gnu` target and Homebrew MinGW-w64.** The build
+    reached the upstream `pqcrypto-sphincsplus` C sources, which include the
+    Linux-only header `features.h`; MinGW correctly rejected that source.
+    **Outcome:** no cryptographic compatibility bypass was introduced and no
+    unverified Windows executable was published. A native Windows-tower build
+    remains required for the Windows asset.
+18. **Exercised the published shell installer in an isolated install
+    directory.** It selected `synergy-sts-macos-arm64`, verified the published
+    checksum, installed v20.0.0, passed its post-install smoke check, and
+    returned the exact Chain 1266 / `synergy-testnet-v3` native metadata from
+    the public RPC. The installed release asset's SHA-256 is
+    `af1dcdfa665a3c0f73692b10279e55991155ac100a0ad7c92568d6caa424d0eb`.
+19. **Repeated the live service boundary checks after local builds.** At
+    19:53 UTC the authority remained active on PID 1655202 with `NRestarts=0`
+    since 07:32:38 UTC. Public `sts_getTokens` reported finalized source,
+    height 3784515, the current snapshot hash, and only native SNRG before the
+    first STS token. Atlas API and indexer services remained active on PIDs
+    2048954 and 2048961, and both local and public token endpoints returned
+    the native Chain 1266 registry.
+
+**Remaining acceptance gates:** Build and run the Windows AMD64 CLI natively
+on the Windows tower, then publish its executable, checksum, and PowerShell
+installer without replacing the verified Unix assets. The first real token
+create and transfer remain separate explicit-approval mutations.
+
+
+## C1266-2026-10-24-R8-001 — Approved isolated transport transition
+
+**Status:** Authorized, preflight complete; rolling activation next.
+**Severity:** P0 isolated stability recovery.
+**Detected/authorization recorded:** 2026-10-24T23:32:10.824544+00:00
+**First bad height:** Historical isolated H131034; approximately43s pause, next QC H131037 round2. Exact causal operation remains UNPROVED.
+**Last agreed finalized block ID:** Exact common commitment will be captured by the guarded transition before staging; preflight heads H179863–179865.
+
+Affected: isolated Val2–Val6 only, production excluded. Shared runtime redundant-proof queue mechanism independently demonstrated; no validator misconduct attribution. Human explicitly approved pinned r8 SHA25645c4d52bd3013b93b9fbbf484619ee1436366fb50cae98a96629c44feb1e3c9e, standard sequence13, order4/6/2/3/5, one restart each, original qualification then conditional new24h soak. Fresh exact preflight preserves original PIDs except approved Val4r7, NRestarts0,1GiB/swap0/OOM0. Evidence: /Volumes/PortableSSD/Synergy-Network/01-Core-Protocol/node-platform/target/posy-async-conformance-audit-20261021/transport-sparse1-r7-post-activation-inventory-20261024T233149Z.json.
+
+Attempt1 planned: create-only binary/release/drop-in, native all-five signature verification, one guarded rolling restart per approved host, original5s Sync readiness from actual process start and matching advancing finality after each. No state/custody/config/old-unit removal, no automatic retry or rollback. Original qualification pending; no new soak running. Failed sync-prune1 run and incomplete r7 capture remain preserved. Outcome and exact identities will be appended after action.
+
+### 2026-10-24T23:35:51.154070+00:00 — R8 attempt1 rolling result
+
+Standard native signed sequence13 verified allfive. Rolling4/6/2/3/5 completed maximum one restart each; actual new PIDs {'4': 1856184, '6': 1528981, '2': 1609905, '3': 1539009, '5': 1583633}. Exact runtime45c4d52bd3013b93b9fbbf484619ee1436366fb50cae98a96629c44feb1e3c9e, original5s Sync readiness everyhost PASS, matching advancing native common commitments checked aftereach; details /Volumes/PortableSSD/Synergy-Network/01-Core-Protocol/node-platform/target/posy-async-conformance-audit-20261021/sync-known-head1-r8-transition-20261024T233210Z.jsonl. State/custody/config/oldunits preserved, caps1GiB/swap0/OOM0 and NRestarts0. Finite original qualification next; no newsoak started, no43s rootcause closure claim.
+
+### 2026-10-24T23:55:05.711838+00:00 — R8 qualification FAILED; new native33s pause
+
+Memory30 passed30/30/30 and allfive effects;64height retirement passed. Sustained600s0.1TPS qualification failed23:46:49.941981 with32 submitted/admitted,31 observed finalized,1 pending, on Val4 relayed synergy_chainTelemetry5.00851s timeout. No newsoak began and no further restart/load retry/rollback occurred. All5 original one-restart approvals consumed. Native allfive finalityH180871→180872 gap33.089601–33.292433s independently violates unchanged30s. NextQC180874round3, verifiedTC0/1/2 timedoutproposersVal6/4/5. SavedTCP shows multi-MB queues toward Val4 and retransmission/backoff; exact causal operation remains unproved, including whether relayedRPCtimeout shares cause. Validators recovered without operator restart; exact23:48:45r8/PIDs/caps/OOM0 preserved. Review: /Volumes/PortableSSD/Synergy-Network/01-Core-Protocol/node-platform/target/posy-async-conformance-audit-20261021/sync-known-head1-r8-distributed-qualification-failed-review-20261024.json. Single exact pending NEW32 transfer lookup nullallfive; no effect/finality inference or resubmission. NEXT bounded nativeowner/proposal/outbox/read evidence forH180874 plus savedTCP peer sequence, preserving all failed/raw evidence and original gates.
+
+### 2026-10-25T00:08:31.539861+00:00 — H180874 signed-slot boundary narrowed
+
+Read-only exact native signed-slot filenames (canonical runtime BLAKE3 domain/order) show Val6r0proposal before its own timeout by4.819918s, while Val2/3/5 ECHOs followed their own timeout0.831–1.231s. Val4r1proposal signature absent. R2 block-vote signatures exist only on Val3/5/6,3<4quorum; Val2/4 r2ECHOs followed own timeout5.627924/4.587945s. All signed-slot hashes/mtimes and same-host interval limitations retained in E/sync-known-head1-r8-height180874-handoff-timeline-review-20261024.json. Val3 retained native owner polls continued subsecond through failure, not all-host scheduling proof. Exact network/read/processing-input delay still unproved; no speculative runtime edit or further restart/load. Two-host same-r8 diagnostic packet prepared fe918f2da910fd24131dd5630efa9d402b6c51d065f5bfa006a826ab650e54c7; new explicit authorization required before staging/restarts. No newsoak.
+
+### 2026-10-25T13:19:00.518878+00:00 — R8 diagnostic attempt2 authorized, before mutation
+
+Human explicitly answered “Approve two-host r8 diagnostic capture” to reviewed packet SHA256fe918f2da910fd24131dd5630efa9d402b6c51d065f5bfa006a826ab650e54c7. Exactly one same sequence13/r8 diagnostic restart each isolated Val6 then Val4; fresh exact allfive preflight and advancing identical common commitments required before staging and after each restart. Fixed3600s native sparse trace, bounded passive TCP/detector and exact resource observers only; no load, resubmission, qualification retry, soak, binary replacement or automatic rollback. Existing state/custody/config/old units and original5s readiness/30s finality/1GiB/swap0 preserved. Write-ahead restart markers required. No restart or capture yet. Authority: /Volumes/PortableSSD/Synergy-Network/01-Core-Protocol/node-platform/target/posy-async-conformance-audit-20261021/r8-handoff-diagnostic1-20261025T000754Z-human-authority.json.
+
+### 2026-10-25T13:26:27.136351+00:00 — R8 diagnostic attempt2 launch outcome
+
+Approved same-r8 restarts executed exactly once orderVal6thenVal4. NewPIDs1801096/2163528; original5s Sync ready0.530366/0.432972s from actual process starts PASS. Existing sequence13/binary/config/custody/oldunits preserved, NRestarts0/1GiB/swap0/OOM0 at guarded checks; other3 PIDs unchanged. Native advancing identical allfive commitments aftereach and pre-armH238894 PASS. Passive TCP armed13:23:14.210640/13:23:15.622024UTC; two3600s resource streams started13:23:14.621139/13:23:16.027573. Four bounded64MiB/swap0/CPU25% observer units active at13:24 initialaudit; Val6 passive max1212/oom0 at initialaudit, preserve pressure/completeness caveat. Native and passive windows fixed, no extension/rearm/returnrestart. Both fresh restart approvals consumed. No workload, qualification retry, binary replacement or soak. Review /Volumes/PortableSSD/Synergy-Network/01-Core-Protocol/node-platform/target/posy-async-conformance-audit-20261021/r8-handoff-diagnostic1-20261025T000754Z-launch-review.json. Capture outcome and causal findings pending actual terminal records.
+
+### 2026-10-25T13:29:23.282956+00:00 — R8 diagnostic bounded13:27 audit; retention limitation
+
+Val4 sparse8192 retained completions reached in43.777345s,8126 failed records and8116 dispatch records; dispatch failures indicate nonblocking queue admission rejection, not TCP loss. No full-hour per-frame coverage claim; total dropped/open/expired counters pending native end. Val6 retained183records; all4 passive/resource observers active and no end records yet. Both sampled validator caps/swap/OOM remained unchanged; Val6 passive observer bounded64MiB memory.max hit(max7520),oom/kill0. No adjustment/rearm/restart/extension; preserve pressure and incompleteness. Evidence /Volumes/PortableSSD/Synergy-Network/01-Core-Protocol/node-platform/target/posy-async-conformance-audit-20261021/r8-handoff-diagnostic1-20261025T000754Z-readonly-audit-20261025T132749Z.json. Native/resource actual terminal audit due after14:23:20UTC, not timer-only completion.
+
+### 2026-10-25T13:49:46.964612+00:00 — R8 diagnostic first-trigger passive freeze; new H239861 timeout
+
+Both passive rings naturally froze on FIRST armed stagnation at finalizedH239858: Val6 end13:36:14.604141UTC/elapsed780.398804s; Val4 end13:36:15.504247UTC/779.889583s. Both passive units inactive/success and original PIDs absent at13:40:22–23 read-only check. Resource PIDs1801613/2163807 still live then; native/resource3600s windows NOT yet verified ended. No rearm/restart/extension. Val6 tcpdump reports163741 kernel drops; Val4 reports0, but retained rings cover only13:36:04.135680–14.240597 and13:36:02.699840–14.254715 respectively, before round1 recovery. All8 PCAP files copied read-only to canonicalSSD with matching source hashes. Structural parsing is NOT independent signature verification or proof of application receipt/completeness.
+
+New H239861 round0 selected proposer Val3; retained allfive signed-slot history has no r0proposal/ECHO and no Val3r0timeout. Other4 timeout votes formedTC0; Val6 signedr1proposal13:36:14.403937, followed by allfive votes/QC. Durable native finality file intervals H239858→239859 are5.086163sVal3 and6.277889–6.295900sothers; this new~6.3s event is NOT the historical33s/43s failure. Frozen wire shows byte-identical ProposalDelivery/QC payloads repeatedly sent towardVal3 at distinct authenticated-frame sequence numbers (e.g. Val6 H239858 delivery28copies70202B/QC27copies48756B). This establishes repeated wire work, NOT why Val3 lacked proposal authorization or a historical root cause. Val3 processing input/parent/proposal gating remains unproved; no speculative fix. Review E/r8-handoff-diagnostic1-20261025T000754Z-h239861-freeze-review-20261025.json SHA2564fa6c1bdeec38dac640bbdd19a5c5cfa639f3676d7c543f955a8b668a47298e0 pins source streams, native history, signing slots and structural analysis. NEXT after14:23:20UTC one bounded actual native transport-window-end +resource end+all4 recorded observerPIDs absent audit; before then offline frozen/source analysis only, no unchanged active polling. Both restart permissions consumed, no workload/qualification retry/soak/binary change/rollback. Earlier active-passive statements are historical snapshots superseded by this amendment.
+
+---
+
+## C1266-2026-10-27-RECOVERY-001 — Authorized retained-state Linux recovery after storage qualification failure
+
+**Status:** Open; source integration and pre-deployment safety qualification in progress; actual fleet remains stopped.  
+**Severity:** P0 functional and resource qualification blocker.  
+**Detected:** Storage failure and operator stop recorded 2026-10-26 22:52:09.966412 UTC; this recovery entry recorded 2026-10-27 11:06:25 UTC before recovery host mutations.  
+**First bad height:** Not established as one consensus height. The storage defect is cumulative; the transaction failure occurred before admission.  
+**Last agreed finalized height:** Not yet independently established for this recovery entry. The fresh stopped preflight does not read finalized heads.  
+**Last agreed finalized block ID:** Not yet independently established; must be captured from native retained-state evidence before a continuity claim.
+
+### Network identity and authorization boundary
+
+This entry concerns only Val2–Val6 on selected network
+`synergy-linux-rebuild-20261025-31303316dd024ce685a1dc99`, numeric chain ID
+`1266`, with signed Genesis file SHA-256
+`a34547918d494bb35b0eca9fc26bacb5ccbaf6bf4f49d58e0154391224bf6a20`.
+It is a distinct network from the preceding historical r8 isolated chain and
+Val1's single-authority chain. Reuse of numeric ID1266 does not identify those
+histories as one chain. Historical H180871/H239858 and the current sign-once
+floor10167 are not substituted for a verified current finalized head.
+
+The current [emergency execution directive](/Users/jhutzler/.codex/attachments/19d07aa7-d8a3-486d-9962-63d5c0934344/goal-objective.md),
+SHA-256 `0dd36d097d3ce307a1a1288e7a38b9793d8f1a9fc04a95ed05769258be609984`,
+explicitly authorizes completing the shared corrections, one uniform tested
+non-destructive Linux upgrade on Val2 then Val3/4/5/6, all-five package and
+safety-state verification before controlled coordinated startup, legitimate
+encrypted transaction qualification, and then a new remotely supervised24h
+soak and controlled TPS ladder. This supersedes the earlier engineering
+report's pending-approval boundary for that workflow. It does not authorize
+data wipes, new identities/keys/Genesis/network, signing-journal resets,
+history deletion, authorization bypass, weaker consensus, or irreversible
+migration without verified recovery. Old interrupted soak intervals may not
+be reused as a new24h result.
+
+### Affected and responsible nodes
+
+All five validators Val2–Val6 share the historical-file proliferation defect
+and workload authorization integration gap. Responsibility is in the common
+runtime and workload preparation, not an individual validator or operator.
+VPN coordinator and Val1/public-chain state are outside this recovery's
+mutation scope. The same canonical package and installer are required on
+every validator; per-host independent safety state remains distinct.
+
+### Symptoms, confirmed cause and limits of inference
+
+- The Oct26 storage qualification measured approximately7.02–7.21 new PoSy
+  files and220–225KB logical history per finalized block. Required history
+  cannot be arbitrarily removed to satisfy a file-count gate. Indexed exact
+  evidence storage is implemented and isolated-tested; actual complete
+  retained-state compatibility remains an explicit deployment safety gate.
+- The prior11 workload requests were rejected `invalid_authority` with
+  `identity has no canonical finalized authorization binding`; admitted and
+  finalized count0 is not measured consensus capacity. Funding32 wallets did
+  not authorize them. Legitimate registration through the existing encrypted
+  native-action path is being integrated and tested; no wallet exception or
+  finalized binding is claimed by this entry.
+- The [integrated recovery report](../../docs/refactor/INTEGRATED_LINUX_RECOVERY_REPORT_20261027.md)
+  records the memory/retention, exact-byte archive, package and encrypted
+  socket-test results and their limits. The old-release570s memory evidence
+  attributes growth principally to file cache/slab with stable anonymous
+  memory; it is not24h OOM closure. Historical33s/43s stalls still lack a
+  proven causal blocking operation.
+- The former candidate manifest
+  `5a9e87db51f431cf7490806ad98e813206a44e2d34fbb08d3b3a25f4f95a91bf`
+  is held pending authorization-registration completion and final integrated
+  release qualification. It has not been installed by this recovery entry.
+
+### Recovery actions and outcomes in chronological order
+
+1. **Operator stop on Oct26 after failed storage qualification.**
+   `target/qualification-20261026T223352Z/OPERATOR-STOP-RESULT.json` records
+   request22:52:09.966412 UTC and all-five inactive/dead/MainPID0 with old PIDs
+   absent by22:52:10.516888 UTC, stop exits0, NRestarts0. The qualification
+   workload/controller was stopped; data, keys and VPN were not changed.
+   **Outcome:** failed prior qualification preserved; no24h completion or
+   successful TPS claim.
+2. **Offline shared engineering and five-validator comparison.** The linked
+   integrated report and [upgrade packet](../../docs/refactor/INTEGRATED_LINUX_UPGRADE_PACKET_20261027.md)
+   record completed measured tests, content-bound candidate and exact
+   state-preserving upgrade mechanism. **Outcome:** reusable engineering
+   evidence exists; corrected-release live conformance/finality is not proven.
+3. **Fresh read-only all-five stopped preflight, Oct27 11:02:47.430879–11:02:48.635109 UTC.**
+   All five report inactive/dead/MainPID0/NRestarts0, no systemd drop-ins,
+   MemoryMax1073741824, swap0, TasksMax512. Owned VPN services remain active.
+   Every installed node is SHA-256
+   `9b989c5f39df9fcc05f7f1c57d7b5fd6ec77101558b49322216dddf941d927c4`,
+   package manifest
+   `fe6ed3f0f061e2a272b0b5efca180eaa300ab3b7be5625bb1c4676565be81ae8`;
+   selected network/Genesis/authority/transport artifact hashes agree.
+   Independent PoSy file counts Val2/3/4/5/6 are
+   72865/71606/73258/72195/73093, not expected byte-identical histories.
+   **Outcome:** old-release stopped baseline verified; no running-executable,
+   current finalized-head, OOM-counter or corrected-release health claim.
+4. **Read applicable root/Core/Testnet policy and this full5413-line log;
+   append this recovery incident before host mutation.** Global AOS policy
+   and supporting package paths referenced by local rules are absent on this
+   Mac; no contents or additional permissions are inferred. **Outcome:**
+   append-only recovery record established. This action changes only this
+   log; deployment, migration, start, transaction submission and new soak are
+   still unexecuted in this entry.
+
+### Final outcome, residual risks and next required observation
+
+Open. Complete legitimate registration and final integrated checks, freeze
+one new uniform release, rehearse full actual retained public consensus state
+without signer/node startup, then execute the authorized non-destructive
+upgrade with exact per-host identity/configuration/network/safety-state
+preservation evidence. Do not start PoSy until all five pass the corrected
+package/state gates. Append each real upgrade/start attempt and exact outcome
+separately, including unsuccessful attempts. Startup alone does not establish
+recovery: require advancing identical finalized block/state commitments,
+unchanged signing/quorum safety, actual encrypted transfer effects and bounded
+public-tier/Atlas lag. Original5s readiness,30s finality/maxgap, measured
+0.5–1.5s mean cadence,1GiB/swap0/OOM0 gates remain. A fresh soak requires its
+own truthful actual UTC start/release identities and full measured interval.
+
+### Source evidence
+
+- Current recovery directory: `node-platform/target/controlled-network-recovery-20261027T110225Z/`.
+- `authority.json` SHA-256 `804cbb9a9a0b7df2760f51e3562f0165aedd68514976cc6dfb1bbab82dcfe6a2`.
+- `stopped-preflight.json` SHA-256 `a13c890312d3e6eaefb547ef9c5a45634903577628c32503397c80edb12d5a48`.
+- Prior terminal stop and interrupted workload: `node-platform/target/qualification-20261026T223352Z/`.
+- Prior integrated evidence index: `node-platform/target/engineering-recovery-20261026/COMPLETION-EVIDENCE-MANIFEST.json`.
+- Canonical continuation: `docs/refactor/IMPLEMENTATION_STATUS.md`.
+
+### 2026-10-30 — Actual five-validator integration directive, before deployment
+
+The user explicitly prioritizes real Val2–Val6 integration over isolated synthetic
+scale benchmarks and authorizes non-destructive deployment, coordinated startup,
+real encrypted execution, measured finalized TPS and conditional fresh24h soak.
+Existing identity/Genesis/network/history/signing floors/journals and original
+quorum/threeQC,5s readiness,30s finality,1GiB/swap0 remain unchanged. The new
+`real-fleet-integration-directive-authority-20261030.json` in the current recovery
+evidence root records this revised qualification policy, without marking any
+incomplete isolated benchmark passed. Successful all-five schema2 copy-only
+migration/import/reindex/startup-safety rehearsals are reused. Actual06:40UTC
+read-only check found all-five inactive/dead/PID0. Before any deployment, refresh
+protected source/archive integrity, authenticated identity/membership and capacity;
+then freeze/build/seal one canonical production package and use the universal
+upgrade owner. No node start/deployment is claimed by this pre-execution entry.
+Append actual attempts/outcomes separately; no automatic rollback after new writes.
+
+
+### 2026-10-30 — Production package and guarded layout correction
+
+Canonical master `Node-Architecture/Linux/Synergy` sealed release
+`synergy-linux-f54ce336d89c2ec1`, package SHA256
+`abe5189e9f4b15ed238488133be55ed6ae59a5b02de26a6f31facdab75944e9f`,
+node SHA256 `8ef2d886dbabeb59298a2976b2e3c1620d1415a48f7ee031658559abf7fb58ca`.
+First Val2 staging rejected a transfer archive missing empty role directories,
+before application intent or installed-file changes. Corrected transfer retains
+those directories. Guarded `packaging2-20261030` application dispatched after all
+five original-package/stopped/no-prior-APPLY checks passed; result remains pending.
+No start, rollback, identity replacement or state reset. Latest user evidence
+lifecycle policy supersedes prior raw-output retention: used failed-build,
+transfer and test artifacts deleted; only immediate upgrade safety inputs remain.
+
+
+### 2026-10-30 — Operator authorizes fresh-chain reset
+
+All-five uniform package upgrade completed and conformance passed; no node was
+started. Operator now explicitly orders old chain files erased and a fresh chain,
+superseding the earlier preservation of historical chain data. Preserve existing
+validator/authority/transport/wallet custody, VPN enrollment, installation and caps.
+Before deletion verify stopped services and native identity possession; remove old
+start authorization and selected public chain inputs, erase the full active data
+root and initialize empty native storage. Do not resume/sign the old domain.
+Commission a fresh authenticated network identity/Genesis at epoch1/H1 with
+configured chain1266 retained; ordinary transaction replay isolation requires the
+new network identity. Existing wallet keys require correctly re-signed fresh
+network authorization, not edited carriers. Actual reset result pending below.
+
+
+Fresh reset result: all5 old active data deleted and native init completed; only
+empty writer lock plus22-byte schema marker remain. First postcheck expected one
+file and failed because native AtomicStore also creates the lock; read-only
+all5 follow-up confirmed actual completed reset, no retry. All pre-reset custody
+file hashes matched (Val2 120, others12), native possession passed, VPN PIDs
+unchanged, allnodesPID0/start authorization absent. Fresh authenticated newnetwork
+commissioning pending; old-domain startup remains prohibited.
+
+### C1266-2026-10-30-SYNC — pruned execution recovery, controlled upgrade intent
+
+Status: OPEN; shared runtime recovery defect, not a validator identity fault.
+The fresh selected network is synergy-testnet-20261030-7dc4b8b008814f428511001f4a43511f,
+Genesis164c4a3cc6aa78c7a57d8c676b5f49a3047d90d2f546be5f298d903fb8e8d2dc.
+Its prior fresh launch and five accepted encrypted intents are recorded in the
+current implementation handoff; the old-domain prohibition above is not a
+prohibition on this subsequently authenticated fresh network.
+Val5 execution stopped atH5746/block3df321bd04457a12c49393208bc3348a30221a95f656fad3c58bd42935c64bea.
+Sync byte-vector overcharging delayed replay; its correction then exposed all
+providers exiting on legitimate requests for already-pruned H5747 candidates.
+Val5 was intentionally stopped; no accepted intent is being resubmitted.
+Latest actual all-five read around21:11UTC: four providers active with unchanged
+PIDs2249812/2155001/2769210/2161954 and restart counters4/4/5/5, agreeingH28109,
+block58e0632e2f571c4edb9556b09d05cd4358f47647c30af1df8f69eddd4e4b0349.
+Val5 inactive/PID0, unchangedH5746. All caps1GiB/swap0. These are point checks.
+
+User explicitly authorizes completing Sync recovery, returning Val5 to agreement,
+and testing genuine encrypted effects within30s. Sealed combined release
+synergy-linux-9420b7592e7a70bb/packagec27602855ab329a821c7f4854deddad3556d49223bcd86dc3403ec82b12f09a8,
+node2afdd9da9537039f3f0e14b14c7d5c783d548ea71f5026129aa6c176ef8084e1,
+contains the nonfatal missing-candidate path and native stopped-only certified
+checkpoint recovery. Native70-block pruned-gap/rejection/interruption/restart
+regression and strict Clippy passed; real-host installation has not yet occurred.
+Next actions: protected-state-preserving universal software upgrade; keep Val5
+stopped; upgrade providers; stop the final provider during native checkpoint
+export/import so remaining three cannot outpace retention. Restore services
+through original5s readiness; compare all-five advancing commitments and new
+once-only encrypted transaction effects under30s. No reset, identity/key/Genesis
+replacement, quorum/finality relaxation, cap increase, or automatic rollback.
+Record actual outcomes in the current continuation; no soak/TPS PASS inferred.
+
+Current-source seal update21:39UTC: pure paged/full R1/R2 replay and all retained-byte assertions PASS1/0 after preparing the lazy legacy index and requiring the exact earlier conflict rejection. Production executable unchanged. Final combined release synergy-linux-1d71523b2b371f45, packagea71a1e02ac0f5c726226ca6821c3351bb70e7f7f9afd82653e9fca1c0a19b382, node2afdd9da9537039f3f0e14b14c7d5c783d548ea71f5026129aa6c176ef8084e1 supersedes uninstalled9420 staging. No node install/start yet.
+
+21:42UTC pre-application: final1d71523b2b371f45 staged package verification and authenticated native preflight PASS allfive; obsolete uninstalled9420 stages deleted. Next apply software only to already-stopped Val5, hashing all protected members before/after and retaining VPN PID/executable. No state transfer/start at this step.
+
+2026-10-30T21:42:04.020628+00:00 Val5 software-only universal upgrade PASS:684 protected members unchanged, VPN PID/executable unchanged, installed conformance PASS, remains inactive/PID0. Beginning controlled provider sequence2,3,4,6; final6 held for checkpoint, no load.
+
+2026-10-30T21:42:04.021333+00:00 Val2: attempting one attributed native stop then identical software-only upgrade; protected-state verification before restart. No reset or rollback.
+
+2026-10-30T21:42:13.940098+00:00 Val2: software upgraded, conformance and protected member hashes/inodes/modes unchanged (775), VPN unchanged; PID0. Native checkpoint not yet applied.
+
+2026-10-30T21:42:13.941333+00:00 Val2: attempting one normal start; original5s readiness measured from actual exec, no deadline extension.
+
+2026-10-30T21:42:15.484340+00:00 Val2: start PASS in 0.481944s from actual exec, running /proc hash2afdd9, PID2400784, NRestarts0, originalcaps. Other acceptance remains pending.
+
+2026-10-30T21:42:15.485215+00:00 Val3: attempting one attributed native stop then identical software-only upgrade; protected-state verification before restart. No reset or rollback.
+
+2026-10-30T21:42:26.822265+00:00 Val3: software upgraded, conformance and protected member hashes/inodes/modes unchanged (617), VPN unchanged; PID0. Native checkpoint not yet applied.
+
+2026-10-30T21:42:26.823371+00:00 Val3: attempting one normal start; original5s readiness measured from actual exec, no deadline extension.
+
+2026-10-30T21:42:28.664872+00:00 Val3: start PASS in 0.627021s from actual exec, running /proc hash2afdd9, PID2302997, NRestarts0, originalcaps. Other acceptance remains pending.
+
+2026-10-30T21:42:28.665669+00:00 Val4: attempting one attributed native stop then identical software-only upgrade; protected-state verification before restart. No reset or rollback.
+
+2026-10-30T21:42:46.343723+00:00 Val4: software upgraded, conformance and protected member hashes/inodes/modes unchanged (617), VPN unchanged; PID0. Native checkpoint not yet applied.
+
+2026-10-30T21:42:46.345093+00:00 Val4: attempting one normal start; original5s readiness measured from actual exec, no deadline extension.
+
+2026-10-30T21:42:48.473895+00:00 Val4: start PASS in 0.511659s from actual exec, running /proc hash2afdd9, PID2932365, NRestarts0, originalcaps. Other acceptance remains pending.
+
+2026-10-30T21:42:48.474722+00:00 Val6: attempting one attributed native stop then identical software-only upgrade; protected-state verification before restart. No reset or rollback.
+
+2026-10-30T21:42:59.107668+00:00 Val6: software upgraded, conformance and protected member hashes/inodes/modes unchanged (620), VPN unchanged; PID0. Native checkpoint not yet applied.
+
+2026-10-30T21:43:20.110650+00:00 Val6 remains stopped after protected software upgrade atH29732. Attempting one native certified checkpoint export extending preserved Val5 H5746 anchor, isolated transient1GiB/swap0. No signer opened or state reset.
+
+2026-10-30T21:47:44.601385+00:00 Native checkpoint export result {"unit_exit": 0, "result": "{\"exit\": 0, \"stdout\": \"{\\n  \\\"bytes\\\": 1608877758,\\n  \\\"checkpoint_height\\\": 29732,\\n  \\\"exported\\\": true,\\n  \\\"from_height\\\": 5746,\\n  \\\"pages\\\": 2400,\\n  \\\"signing\\\": false\\n}\\n\", \"stderr\": \"\", \"memory\": {\"memory.max\": \"1073741824\", \"memory.peak\": \"1073741824\", \"memory.events\": \"low 0\\nhigh 0\\nmax 1497\\noom 0\\noom_kill 0\\noom_group_kill 0\\nsock_throttled 0\", \"memory.swap.current\": \"0\"}}\n", "stderr": ""}
+
+2026-10-30T21:48:03.941921+00:00 Native export PASS2400 pages/H5746→29732,1608877758prefix bytes; offline cgroup file-cache reclaim max1497/oom0/swap0, process anonymous memory28MiB at bounded check. Starting exact four-file public bundle streaming transfer V6→V5 with full byte hashes, no Mac copy/archive.
+
+2026-10-30T21:54:17.970171+00:00 Public checkpoint transfer PASS, exact four filenames/sizes/SHA256 and destination fsync; no custody or journal transferred. Native import pending.
+
+2026-10-30T21:55:07.572571+00:00 All four transferred files SHA256/size verified. Precise prefix1608814809 bytes; exporter bytes1608877758 includes candidate+replay. Attempting one stopped native Val5 import under1GiB/swap0, full prefix/native ECHO verification before canonical commits, then forward-only signing floor. No copied private state.
+
+2026-10-30T22:08:42.843842+00:00 Val5 checkpoint import result {"unit_exit": 0, "result": "{\"exit\": 0, \"stdout\": \"{\\n  \\\"block_id\\\": \\\"ef63222f42f8968d97511b5af493d6f4824ab5341a48b377e2a4f78e16634d1f\\\",\\n  \\\"checkpoint_height\\\": 29732,\\n  \\\"from_height\\\": 5746,\\n  \\\"imported\\\": true,\\n  \\\"pages\\\": 2400,\\n  \\\"signing\\\": false,\\n  \\\"signing_floor_advanced_after_verified_commit\\\": true,\\n  \\\"skipped_transitions_locally_reexecuted\\\": false,\\n  \\\"state_root\\\": \\\"59e62288ff69520c35d4be7325c458e9f6212789653c1c2942a1ec1ff66a4ce6\\\"\\n}\\n\", \"stderr\": \"\", \"memory\": {\"memory.max\": \"1073741824\", \"memory.peak\": \"525062144\", \"memory.events\": \"low 0\\nhigh 0\\nmax 0\\noom 0\\noom_kill 0\\noom_group_kill 0\\nsock_throttled 0\", \"memory.swap.current\": \"0\"}}\n", "stderr": "", "observed_utc": "2026-10-30T22:08:42.745362+00:00", "custody_config_network_unchanged": true, "signing_floor_before": 5746, "signing_floor_after": 29732, "above_floor_reservations_preserved": true, "finalized": {"finalized_height": 29732, "finalized_block_id": "ef63222f42f8968d97511b5af493d6f4824ab5341a48b377e2a4f78e16634d1f", "state_root": "59e62288ff69520c35d4be7325c458e9f6212789653c1c2942a1ec1ff66a4ce6"}}
+
+2026-10-30T22:09:00.337394+00:00 Val5: post-import authenticated start preflight PASS; attempting one normal service start, original5s gate from actual exec.
+
+2026-10-30T22:09:03.810892+00:00 Val5: actual running hash2afdd9, PID2234813, readiness1.389351s PASS, NRestarts0, originalcaps. All-five advancing agreement still pending.
+
+2026-10-30T22:09:03.811842+00:00 Val6: post-import authenticated start preflight PASS; attempting one normal service start, original5s gate from actual exec.
+
+2026-10-30T22:09:05.390096+00:00 Val6: actual running hash2afdd9, PID2313108, readiness0.511678s PASS, NRestarts0, originalcaps. All-five advancing agreement still pending.
+
+2026-10-30T22:52:14.458257+00:00 Once-only encrypted nonce5 txe02553056578f82c8853d63b4003140fa62aa45cf2be60498aa52fa10b963dab gate PASS allfive {"2": {"verified": true, "height": 31782, "elapsed": 22.207983291}, "3": {"verified": true, "height": 31782, "elapsed": 22.597352125}, "4": {"verified": true, "height": 31782, "elapsed": 22.948556291}, "5": {"verified": true, "height": 31782, "elapsed": 26.650877958}, "6": {"verified": true, "height": 31782, "elapsed": 22.374629416}} stages {"deadline_started_seconds": 0.0, "context_received_seconds": 0.003262, "native_admission_signed_seconds": 0.073487, "submit_response_seconds": 0.117669}
+
+Independentwallet tx0df20b33e60c44d6f260a253cca50945cee894956a20126b2427367b10f26d5a nonce0 was accepted exactlyonce. Timing verifier aborted on Val6 RPC error finalized state lacks canonical candidate metadata; no30s PASS. Read-only reconciliation all5appliedH31845/block479a032f48c42fd0580dd3a15284caf07cf6b0d080bdfe4879ca143d4e0c46ae/finalityc55ed062946637138ab5fb9eb8a1739eb01a5f1fea772cd9aca717100f46a684, nonce1/exactfee840000/balancesall5. Neverresubmit; source RPC scan race under correction.
+
+2026-10-30T23:06:25.658917+00:00 Stale RPC candidate-pin reader correction verified16 focused tests/strictClippy; async qualification policy correction128 tests PASS. Sealed canonical universal release synergy-linux-d3eedc19c9fb0d66 package5a1bb984234b9a3b63d828ee166f64f698c4ca729c07adb7ce4e8b748b223ed7/node d8a998080632e270d56e179347a1f3d08e88dd6343417d2bc570737fb582d7e0. Preparing non-destructive rolling software upgrade Val2→3→4→5→6, one normal start each with original5s readiness; unchanged keys/genesis/signing history/resourcecaps/VPN, no reset or automaticrollback. Fresh precheck all5 original PIDs/hash2afdd9/NRestarts0/OOM0/swap0; last common sampledH32202/32203, Val5briefSyncpending not a currentfullhealth claim. User explicitly superseded transaction30s acceptance; block gap30s unchanged.
+
+2026-10-30T23:08:41.542108+00:00 Val2: attempt one software-only rolling stop/upgrade to d3eedc19c9fb0d66; original5s launch follows protected-state/conformance checks, no reset/rollback.
+
+2026-10-30T23:08:50.189457+00:00 Val2: upgrade PASS; 737 protected members unchanged; VPN unchanged, conformance PASS; attempting one normal start.
+
+2026-10-30T23:08:51.513277+00:00 Val2: actual running d8a998 PASS PID2431350, readiness0.415437s, NRestarts0/originalcaps.
+
+2026-10-30T23:08:51.514058+00:00 Val3: attempt one software-only rolling stop/upgrade to d3eedc19c9fb0d66; original5s launch follows protected-state/conformance checks, no reset/rollback.
+
+2026-10-30T23:09:02.000785+00:00 Val3: upgrade PASS; 595 protected members unchanged; VPN unchanged, conformance PASS; attempting one normal start.
+
+2026-10-30T23:09:04.457122+00:00 Val3: actual running d8a998 PASS PID2333189, readiness0.692592s, NRestarts0/originalcaps.
+
+2026-10-30T23:09:04.457690+00:00 Val4: attempt one software-only rolling stop/upgrade to d3eedc19c9fb0d66; original5s launch follows protected-state/conformance checks, no reset/rollback.
+
+2026-10-30T23:09:23.351000+00:00 Val4: upgrade PASS; 597 protected members unchanged; VPN unchanged, conformance PASS; attempting one normal start.
+
+2026-10-30T23:09:25.593736+00:00 Val4: actual running d8a998 PASS PID2965286, readiness0.510503s, NRestarts0/originalcaps.
+
+2026-10-30T23:09:25.594282+00:00 Val5: attempt one software-only rolling stop/upgrade to d3eedc19c9fb0d66; original5s launch follows protected-state/conformance checks, no reset/rollback.
+
+2026-10-30T23:09:34.744658+00:00 Val5: upgrade PASS; 663 protected members unchanged; VPN unchanged, conformance PASS; attempting one normal start.
+
+2026-10-30T23:09:36.831167+00:00 Val5: actual running d8a998 PASS PID2252308, readiness0.667729s, NRestarts0/originalcaps.
+
+2026-10-30T23:09:36.831910+00:00 Val6: attempt one software-only rolling stop/upgrade to d3eedc19c9fb0d66; original5s launch follows protected-state/conformance checks, no reset/rollback.
+
+2026-10-30T23:09:44.466960+00:00 Val6: upgrade PASS; 619 protected members unchanged; VPN unchanged, conformance PASS; attempting one normal start.
+
+2026-10-30T23:09:45.718720+00:00 Val6: actual running d8a998 PASS PID2333844, readiness0.332320s, NRestarts0/originalcaps.
+
+
+## C1266-2026-10-31-RECEIPT — live processing milestone journal/schema recovery
+
+2026-10-31T08:23:09.907962+00:00 Receipt-stage release4996cf15f1caca4a installed allfive with protected state/config/custody unchanged and same normalized configuration153a5881458dc517b839dea409beea825a82738434a69b9ad5cec18261855e8e. Fresh encrypted nonce14 txf0e451042551c6396b6e45f1067a9595836793d7fa6dda798687e4312f8480fe admitted once; never resubmit. Val2 ETDAG failed at unsupported receipt observation authority because durable schema omitted new processing stages. Automatic restart then rejected native128hex certified-group names under erroneous64hex conformance pattern. Otherfour exact appliedH57069/block6b98a0427adfc7effbf1aafb275673e8d945b1c1be4c8ca11f1bb87d3bd552b5, sendernonce15/state92ad4868766a8216499d628bbc0b069ba53890b97408bcb119786e50cb236eb1. No allfive/timing PASS. Source corrections retain original admission finalized=false, require structured finalization observation, support exact native512bit group IDs. Pausing all node services via attributed lifecycle to prevent history outrunning failed Val2 while building, preserving VPN/keys/state. No reset/rollback/newintent/load/soak.
+
+2026-10-31T08:29:07.841188+00:00 Native Val2 checkpoint importH57065→57173 PASS12pages/7.17MB, original signing floor advances only after certified commits; config/custody/network unchanged. Corrected release synergy-linux-ce9cbc5027b20e49 package637180e9cdf5cf433387802f43309c207ce74160a74dce1edd3644dce897fb0b node8bafde8a2af81dad6e31e8100324fe1a5c0af1931c30c958d693edb2a401ff5e installed allfive while stopped, protected files unchanged818/633/645/664/627, VPNPIDs unchanged. Five durable receipt tests and15 conformance tests PASS. Attempting one coordinated normal start each, original5s readiness, no newintent until advancing allfive commitments and consumednonce15 effects verified.
+
+2026-10-31T08:39:49.771516+00:00 Allfive coordinated starts passed original5s readiness, but Val2 then failed ETDAG polling: finalized processing parent is unavailable. Allfive nodes stopped again via attributed lifecycle; synergy-vpn.service remains active. Source/data analysis narrows actual fatal path to retirement scanning unrelated authorization-source pinH32895 (receivernonce4) for pending sendernonce14, demanding already-pruned parentH32894. Correction filters exact sender/nonce before full native retirement verification; it never retires on nonce advancement alone. Pending f0e451 remains preserved; checkpoint-imported equivalent state does not establish an exact local consumption proof. Regression verification in progress; no TPS/soak/newsubmission.
+
+2026-10-31T08:43:46.047164+00:00 Exact-replay-identity retirement-scan correction PASS native encrypted/order/reveal/three-QC regression (including missing unrelated/matching parent rejection) and strict releaseClippy. Sealed new universal package61003cc642d2a712ebc3097a6ed3c4cc21d3e9c4944bb60faac431342ff8c09d. Allfive inactive originalcaps/VPNactive; Val2H57173, Val3/4H57257, Val5/6H57258, commonstate92ad4868. Attempt one native stopped Val6 export→Val2 import H57173→57258 under1GiB/swap0, public four-file bundle only; preserve pending original, custody and signing reservations. Then identical software-only upgrade and coordinated5s starts; no newintent before advancing exactfive agreement.
+
+2026-10-31T08:50:01.710040+00:00 Val2: stopped software-only upgrade61003cc6 PASS; 824 protected members bytes/inode/mode/owner unchanged; VPN unchanged, full installed conformance PASS. No start yet.
+
+2026-10-31T08:50:15.984747+00:00 Val3: stopped software-only upgrade61003cc6 PASS; 673 protected members bytes/inode/mode/owner unchanged; VPN unchanged, full installed conformance PASS. No start yet.
+
+2026-10-31T08:50:22.017549+00:00 Native stopped Val2 import H57173→57258 PASS9pages, certified blockc04b298b/state92ad4868; signing floor advanced only after verified commit, no signing/no local skipped-transition reexecution. Peak15941632/max0/oom0/swap0 under1GiB. Public bundle retained until recovered live verification.
+
+2026-10-31T08:50:50.287290+00:00 Val4: stopped software-only upgrade61003cc6 PASS; 685 protected members bytes/inode/mode/owner unchanged; VPN unchanged, full installed conformance PASS. No start yet.
+
+2026-10-31T08:51:03.851854+00:00 Val5: stopped software-only upgrade61003cc6 PASS; 706 protected members bytes/inode/mode/owner unchanged; VPN unchanged, full installed conformance PASS. No start yet.
+
+2026-10-31T08:51:21.152659+00:00 Val6: stopped software-only upgrade61003cc6 PASS; 669 protected members bytes/inode/mode/owner unchanged; VPN unchanged, full installed conformance PASS. No start yet.
+
+2026-10-31T08:51:34.537424+00:00 {"val": 6, "pid": "2520904", "readiness_seconds": 0.3416904299519956, "running_exe": "d6365a0b1421d88375469a9a5b6d5a2650b72fb3816f90dbd8d3ad2c73e7daf3", "NRestarts": "0", "startup_passed": true}
+
+2026-10-31T08:51:34.784967+00:00 {"val": 2, "pid": "2620351", "readiness_seconds": 0.5081933690235019, "running_exe": "d6365a0b1421d88375469a9a5b6d5a2650b72fb3816f90dbd8d3ad2c73e7daf3", "NRestarts": "0", "startup_passed": true}
+
+2026-10-31T08:51:34.786807+00:00 {"val": 3, "pid": "2518830", "readiness_seconds": 0.47619547392241657, "running_exe": "d6365a0b1421d88375469a9a5b6d5a2650b72fb3816f90dbd8d3ad2c73e7daf3", "NRestarts": "0", "startup_passed": true}
+
+2026-10-31T08:51:35.416079+00:00 {"val": 4, "pid": "3172920", "readiness_seconds": 0.5480278939940035, "running_exe": "d6365a0b1421d88375469a9a5b6d5a2650b72fb3816f90dbd8d3ad2c73e7daf3", "NRestarts": "0", "startup_passed": true}
+
+2026-10-31T08:51:36.053857+00:00 {"val": 5, "pid": "2408727", "readiness_seconds": 0.7009627500083297, "running_exe": "d6365a0b1421d88375469a9a5b6d5a2650b72fb3816f90dbd8d3ad2c73e7daf3", "NRestarts": "0", "startup_passed": true}
+
+2026-10-31T08:55:00.126883+00:00 Independent encrypted acceptance {"verified": true, "transaction_id": "7486374ca3b3a3d00453ce93e3ff0413834828c16cad9b0054fa87c5ec62f5ae", "block_height": 57395, "block_hash": "062b0e08305d8435e64c353815c473d73b711a7804345171b8e0e98d7890608e", "finality_certificate_id": "ce71a307cee57b48d845852719f7dccb55a1d1c31ee3f7f38b6a9caf70ae13b9", "state_root": "cc23e0c4d5a970d69db3d3824f3fc7685202959ac9c39a2e6cd570ee4c70a96a", "all_five_exact_effects": true, "handoff_consumed": "caller may now delete the remote disposable handoff", "observed_after_controller_start_seconds": {"2": 12.472067, "3": 12.472087, "4": 12.472093, "6": 12.472098, "5": 14.751054}, "sender_nonce": 4, "sender_balance": "997999999995414199", "receiver_balance": "998997999999992508411", "gas_used": 21000, "workdir": "/var/lib/synergy-qualification/latency-20261031T085443Z"}; directly consumed timing {"handoff": true, "transaction_id": "7486374ca3b3a3d00453ce93e3ff0413834828c16cad9b0054fa87c5ec62f5ae", "receipt_id": "006d9d7dde00c8b438bf4597fbcdc7d416f9a8ca0cf95f10ec09041bb1ce9a087423e4e66ad022b96f62a225842fae91fc49ddad710bc3efb8035fb1abb67894", "sender": "syna1v6tv38me46y2sussfgv8f589q3j6q3udckg3", "nonce": 3, "stage_elapsed_seconds": {"context_started_seconds": 0.0, "context_received_seconds": 0.004416, "native_admission_signed_seconds": 0.077239, "submit_response_seconds": 0.113279}, "receipt_stages": [{"stage": "queued", "elapsed_seconds": 0.119963, "proof": null}, {"stage": "accepted", "elapsed_seconds": 0.497433, "proof": null}, {"stage": "certified", "elapsed_seconds": 1.302801, "proof": {"context_root": "fe54a5b0df3a82bd4cf662ae533d8dec12ab2f4c4ee3247630a5297bbd47a1a75ecd46f5d7f8dffc9b6edf578e098d108ab3a3101d2ce1d184f105a57ccfaebe", "finalized": false, "verified_vote_count": 4, "vertex_id": "ae1079e5cc5e044930e89043f7d318e7ab2664f5d31bfd2f3a330c7c209d8ce2647b4faa24d7f4410559fb5c311bb21556c18b2cdd13189919d658aaf54e0ca7"}}, {"stage": "reveal_authorized", "elapsed_seconds": 5.973825, "proof": {"finalized": false, "proposal_block_id": "2ee3e0dfe74fd54bd949cfa20e8c90ea20dd9754acf2599e80fa8418c9e703f5", "proposal_height": 57390}}, {"stage": "execution_completed", "elapsed_seconds": 6.555236, "proof": {"finalized": false}}, {"stage": "finalized", "elapsed_seconds": 11.134117, "proof": {"finalized": true, "finalized_block_id": "062b0e08305d8435e64c353815c473d73b711a7804345171b8e0e98d7890608e", "finalized_height": 57395}}], "observation_error": null, "workdir": "/var/lib/synergy-qualification/latency-20261031T085443Z"}; durable handoff reopened equal.
+
+### Permissionless release preflight detects pre-existing Val2 recovery failure — 2026-10-31T12:28:30.420992+00:00
+
+Sealed candidate synergy-linux-725038bd2ec6ee2f package 750ba62179e77a35e46d344e27927e4054d7ea750be2bf2a083dc31b94b61870 is not staged or deployed. Fresh read-only fleet preflight finds Val2 MainPID0/auto-restart/NRestarts249, startup fail-closed: certified processing archive differs from native QC. Val3–6 retain original active PIDs/NRestarts0; original caps, live VPNs preserved. Parent authorizes stopping only Val2 automatic failure loop to preserve failed state and diagnose archive/QC disagreement; no upgrade, DB mutation, reset or autostart.
+
+Val2 stop verified inactive/MainPID0, VPN2050334 unchanged. Read-only70archive scan isolatesH65187 inputround1>QCround0; exact block/parent/root match, originalarchive unchanged SHA256a6868ad4644c987ec1d787eaa2857af95d824c526469efc54729f8b95a61f9c0. Originalexit11:21:49UTC, firststartupfailure11:22:05. Four peers independently matchedH67645; allfourcgroupmax/oom/kill0/swap0. Candidate deployment paused for exact runtime correction; no archive/state mutation.
+
+### Corrected permissionless/recovery coherent fleet upgrade — 2026-10-31T12:38:31.979658+00:00
+
+Authorized new identical release synergy-linux-628f8ad840cfc4b5/packageaa29d326fed65090e720b4a3721b6f7b95239ce940266ebfa0a68a37fa0637d0/node1120c1d41ff4ecabaca2b431a2bf30ace41382c677cc4c12430ad08364550cc2 staged only after fresh sealed installed conformance, unchanged resource policy and four-live common commitments. Val2 already stopped for demonstrated H65187 replay envelope defect; original archive will remain untouched. Planned controlled action: verify staged identical package allfive, stop remaining four, software-only lifecycle upgrade with protected bytes/metadata comparison, coordinated native startup original5s deadline and exact advancing common commitments. No transactions/workload/reset.
+
+Upgrade completedallfive: protectedbytes/inode/mode/uid/gid unchanged996/816/827/847/809; VPNsunchanged; stagingremoved. Original5s startsPASS at12:42:33UTC readiness.645839/.511239/.546749/.837694/.416464s PIDs2680219/2596129/3257901/2476789/2598464, allnewnodehash/NRestarts0/capsunchanged. Val2 originalH65187archive hash unchanged. LiveSync stuckH65185 requesting65186; ALL4providers reportcandidate-unavailable bytes0. Authorized native stoppedVal6export→Val2import from exactH65185 anchor, no manualDBmutation/signing/reset.
+
+
+### Val5 certified-input staging exhaustion — 2026-10-31T18:50:14.034437+00:00
+
+Val5 exited13:54:02UTC: processing proposal staging is full; restarted once and remainsH70391 while four peers agree/advanceH76053. Allfour explicitly lack nextcandidateH70392. Native full32-slot certified-import/migration/encrypted-execution regression and strictClippy PASS. New source-frozen universalrelease synergy-linux-dcc9268fc57b95fe package4b6817a54276bd94514c591902ba60fc18e8acb9985abaf93c9415b87c1d7951 noded8e93de8d9aef1bcdaa5ecc4757d512f7b26837706f20bc633c3248aec8ae1aa. Authorized coherent software-only upgrade: stage/verify allfive, stop once, preserve protected bytes/metadata and VPN; native stopped Val6 export→Val5 import authenticated checkpoint, forward signing-floor only, original1GiB/swap0/5s readiness. No new transaction until exact advancing allfive agreement. No reset, key replacement, speculative-slot eviction, quorum/cap changes or workload.
+
+2026-10-31T19:51:40.968296+00:00 Native stopped Val5 checkpoint import H70391→76196 completed: systemd Result=success/ExecMainStatus0, durable execution block3d602e5225ad8382ddb484fe5f4e6c0762e2afe67ec62aea7dc54f9c01ea8af1/state43c3bd615ab3d54be8c6d0c714f7dee8e4de450da56d4b1070146bcf138ad59a, signingfloor76196 forward from70439.581pages,467996433prefixbytes; fourfiletransfer sizes/SHA256 verified. Original1GiB/swap0/TasksMax512; systemd reports226.6MiBpeak/4m10s. Custody/config/network exact snapshot passed before postcheck. Wrapper postcheck wrongly required entire processing directory unchanged; expected new certified checkpoint archive and generation header caused this assertion AFTER successful native import. No retry. Read-only verifies all32 original input files and32VCs still present with pre-import mtimes; no original staged input deletion. Full before/after byte-comparison result for stagedfiles was not returned, so not claimed. No starts yet; awaiting fee/SynID corrected package for one coordinated start.
+
+2026-10-31T19:56UTC Allfive coordinated starts on dcc9268fc57b95fe passed original5s readiness: V2=1.252917,V3=.963964,V4=.565221,V5=3.689084,V6=.696969s; PIDs2798432/2713246/3393802/2574609/2716597. Read-only exact native finalized block/QC/state/protected commitment H76312 matched allfive; Val5 advancing, live sampled lag one block, original caps unchanged. User actual mobile wallet funding1SNRG authored/submitted ONCE from receiver nonce6: f6ff67a010a42c734cf53980b5ee548cfbe596dde9b1f7ca9c56932a4d670345. Sole handoff latency-mobile-fund-20261031T195644Z retained pending immediate allfive exact receipt verification; never resubmit.
+
+2026-10-31T20:03:19.758341+00:00 Funding exact allfive Applied H76350/block edc4b7e86c885536ce4c3a356c1afca5d38234df15d043c6f16f77fde26bc465 verified; mobile balance1SNRG/nonce0/noauthorizationbinding allfive. Consumed handoff and V5/V6 checkpoint bundles deleted. Signed naming + selected-runtime fee-policy correction strictClippy and focused tests PASS, iOS Release build/install PASS; wallet at Unlock, no outbound mobile submission. Sealed identical universal release synergy-linux-58db14bdb6534672 package7e89c7f38044e817c811e1e64c872529cbc1e8e14c98be2626cae35416b64dbe/node10418aad801e298c3c78be0e9661459e77cdeadb0445b5976388324dde9c324c, features[]. Authorized software-only allfive upgrade staged outside managed roots, native authenticated selected-network preflight required before stop; preserve state/custody/VPN/caps, one coordinated original5s start. No reset/rollback/newworkload/soak.
+
+2026-10-31T20:08:23.372752+00:00 Release58db14bdb6534672 allfive installed/running, protectedfiles unchanged1136/885/892/904/874/VPNunchanged, normalizedconfiguration153a5881… allfivePASS. Readiness.619093/.599431/.417798/.808036/.435050s; PIDs2803007/2717706/3399090/2578458/2721195. Exactallfive block/QC/state H76750 verified; Val5 advancing3blocksbehindhealthySyncPending, notzero-lagclaim. Mobilefunding allfiveverified; wallet atUnlockafterinplaceupdate, nooutboundsendyet.
+
+2026-10-31T20:09:04.371126+00:00 Newrelease advancingexactallfive commonH76750→76784; allfiveSyncReady sampled, V5oneblockbehindothers. OriginalPIDs/NRestarts0/memory.events max0/oom0/kill0 and1GiB/swap0. Gateway23ca08f deployed/selectednetworkpubliccontext+nativeSynIDreadsPASS, unsignedwrite/adminblocked; rawruntimefee40/21000/1098576present. MobileatUnlock,useraway; genuineoutboundsend remainsunsubmitted,pendingauthorizeduserunlock. NoTPS/soakclaim.
+
+### C1266-2026-10-31-POST-WALLET-UNLOCK — recurring runtime exit
+
+2026-10-31T20:56:35.904754+00:00 Restored Atlaspublisher revealed V2/3/4/6 originalPIDs gone,NRestarts19,exit1/activating; V5originalPID2578458NRestarts0H78309/state0a9300c9…/gap336s. No manualrestartsoroutboundmobileSend. Walletnormalunlockcompleted; automaticnamingintent possibility unresolved, do not resubmit. Parenthaltsallnodeunitsonce via lifecycle stop tostopfailureloop/preserve failedstate and diagnose native logs; VPN/state/custody/genesis untouched. No rollback/reset/load/soak.
+
+2026-10-31T21:54:57.569168+00:00 Read-only confirmation: allfive inactive/MainPID0 after lifecycle stop. Native V2/3/4/6 repeat ETDAG pending processing verification: UnauthorizedReveal. Exact crypto substage remains under investigation; no reveal bypass or state reset. Dashboard publisher fresh with current recovery/blocked test plan; no workload or outbound mobile Send.
+
+## C1266-2026-11-13-001 — Unattended restart interrupted signature journal publication
+
+**Status:** Recovery authorized; verification pending
+**Severity:** P0 single-authority liveness
+**Detected:** 2026-11-13 22:18 UTC; last finalized at 06:15:41 UTC
+**First unfinalized height:** 5319454
+**Last finalized height and block:** 5319453 / `768b8396da84a9b29c3dbace6f6767977210c57a02fe7a2b08f3315d4df64beb`
+
+### Affected components and confirmed cause
+
+Val1 (`synergy-chain1266-authority.service`), Testnet v3, Chain 1266 incarnation 5, `single_authority_v1`. Ubuntu's unattended libc upgrade invoked needrestart, which explicitly restarted the authority at 06:15:42 UTC. The pending block and complete signature were written, but the canonical journal replacement was interrupted. The initial startup and three retries failed closed; systemd stopped retrying at 07:05:02 UTC. The observer's Nginx service independently failed its startup configuration check on 2026-11-05 at 05:51:40 UTC because a Portal upstream hostname did not resolve. The hostname now resolves and the configuration test passes; public RPC still returns 502 before recovery.
+
+### Recovery actions and outcomes
+
+1. Read-only inspection found the exact staged candidate `16b0aee71d0ac77a68123bd4ac2a01bfdcbb59af3f3ce3f5df0775561aaacf6c` and a complete Signed journal entry in `single-authority-signing-journal.tmp-1655202`. Verified the full journal subject matches the halted record and staged candidate; recomputed candidate hash and payload digest; verified the original ML-DSA-65 signature with the public authority key pinned by the deployed configuration and used by the finalized parent. Finalized head, signing hot state and committed block tail agree. No live state changed during diagnosis.
+2. User requested restored block production and public RPC until PoSy replacement. Plan: preserve the halted journal for verification, atomically publish only the already verified Signed entry, defer needrestart restarts of this unit, and start the authority once. Start observer Nginx after a successful config check; confirm exact recovered block and advancing public and local finality. No fresh signature at the affected height is authorized.
+
+### Outcome and remaining checks
+
+Pending live actions. Source: Val1 unattended-upgrades dpkg log (line 566), unit journal, canonical/hot/temp signing journal, staged candidate and durable chain tail; observer Nginx unit journal and config check. Verify the two services and public JSON-RPC responses before recording recovery.
+
+### 2026-11-13 22:29 UTC — Recovery started
+
+3. Added a unit-specific needrestart override, validated the effective rule against both unit name forms, rechecked the signed artifacts and stopped service, preserved the halted journal, and atomically published the exact verified Signed journal. Reset the systemd failure counter and started the authority once. At 22:29:06 UTC the unit reported active/running, PID 4116259, NRestarts=0. Startup RPC bound at 22:29:07 UTC; finality verification remains pending.
+4. Observer Nginx passed its existing configuration check and started at 22:29:05 UTC, PID 1251254, NRestarts=0. The public RPC health route returned HTTP 200. This confirms the proxy is reachable; finalized block RPC verification remains pending.
+5. Correlated the November 5 observer outage with unattended upgrades: Nginx was restarted in the same batch as systemd-resolved and attempted its configuration test while DNS was unavailable. Added and validated a needrestart override for only Nginx on the observer, leaving package updates enabled. Nginx remained active on its original recovery PID.
+6. Verified all three public HTTP RPC hostnames returned Chain 1266 incarnation 5 and the pinned Genesis. Finality and range calls still reported the missing bounded RPC cache during startup; val1 was advancing through the retained finality log. The active Atlas indexer was retrying and had indexed through height 5319451 before recovery.

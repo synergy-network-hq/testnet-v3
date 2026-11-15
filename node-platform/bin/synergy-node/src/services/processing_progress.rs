@@ -10,12 +10,12 @@ pub(super) struct ProgressIndex {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StoredProgress {
-    version: u32,
-    namespace_root: EtdagDigest,
-    identity: PendingProcessingIdentity,
-    admission_record_root: EtdagDigest,
-    evidence: ProcessingProgressEvidence,
+pub(super) struct StoredProgress {
+    pub(super) version: u32,
+    pub(super) namespace_root: EtdagDigest,
+    pub(super) identity: PendingProcessingIdentity,
+    pub(super) admission_record_root: EtdagDigest,
+    pub(super) evidence: ProcessingProgressEvidence,
 }
 pub(super) fn path(slot: usize) -> String {
     format!("progress/{slot:04}.json")
