@@ -118,6 +118,7 @@ pub(crate) fn qualification_authority_with_provider(
     Arc::new(VerifiedAuthority {
         registry,
         epoch,
+        timeout_predecessor: None,
         anchor_parent: SimplifiedFinalityParent::Genesis {
             genesis_hash: "c".repeat(64),
             block_id: "qualification-genesis".into(),
@@ -177,6 +178,8 @@ pub struct VerifiedAuthority {
     pub registry: FrozenValidatorRegistry,
     pub epoch: SimplifiedEpochContext,
     pub anchor_parent: SimplifiedFinalityParent,
+    // Only a verified, sequential transition can attach the previous epoch.
+    timeout_predecessor: Option<Arc<VerifiedAuthority>>,
     verifier: PqvmVerifier,
     wallet_verifier: PqvmVerifier,
     identity_verifier: Option<synergy_aegis::ApqeIdentityVerifier>,
@@ -259,6 +262,7 @@ impl Clone for VerifiedAuthority {
             registry: self.registry.clone(),
             epoch: self.epoch.clone(),
             anchor_parent: self.anchor_parent.clone(),
+            timeout_predecessor: self.timeout_predecessor.clone(),
             verifier: self.verifier.clone(),
             wallet_verifier: self.wallet_verifier.clone(),
             identity_verifier: self.identity_verifier.clone(),
@@ -657,7 +661,14 @@ pub fn load(configuration: &NodeConfiguration) -> Result<Option<Arc<VerifiedAuth
         return Ok(None);
     }
     let bytes = read_bounded(binding_path, MAX_AUTHORITY_BYTES, "PoSy authority binding")?;
-    verify_binding_bytes(configuration, bytes).map(Some)
+    let mut authority = verify_binding_bytes(configuration, bytes)?;
+    if let Some(path) = transition_witness_path(configuration, &authority)? {
+        // Read the immutable published witness without claiming its writer lock.
+        let bytes = read_bounded(&path, 4 * 1024 * 1024, "authority transition witness")?;
+        let transition = verify_stored_transition(configuration, &authority, &bytes)?;
+        Arc::make_mut(&mut authority).timeout_predecessor = Some(transition.previous);
+    }
+    Ok(Some(authority))
 }
 
 pub fn verify_binding_bytes(
@@ -774,6 +785,7 @@ fn verify_binding_with_explicit_key(
     Ok(Arc::new(VerifiedAuthority {
         registry,
         epoch,
+        timeout_predecessor: None,
         anchor_parent: binding.payload.anchor_parent,
         verifier,
         wallet_verifier: super::apqe_provider::verifier(
@@ -1157,6 +1169,28 @@ impl VoteVerifier for VerifiedAuthority {
 }
 
 impl ConsensusSignatureVerifier for VerifiedAuthority {
+    fn verify_timeout_boundary_parent(
+        &self,
+        successor: &SimplifiedEpochContext,
+        proof: &SimplifiedQuorumCertificate,
+    ) -> PosyResult<()> {
+        let previous = self.timeout_predecessor.as_ref().ok_or_else(|| {
+            PosyError::invalid("timeout boundary requires an authenticated predecessor")
+        })?;
+        if successor != &self.epoch
+            || proof.context.height != previous.epoch.epoch_end_height
+            || proof.context.height.checked_add(1) != Some(successor.epoch_start_height)
+            || previous.epoch.epoch.checked_add(1) != Some(successor.epoch)
+            || self.anchor_parent.quorum_certificate_reference().as_ref()
+                != Some(&proof.reference()?)
+        {
+            return Err(PosyError::invalid("timeout parent differs from authenticated epoch anchor"));
+        }
+        // The stable QC ID does not commit to signatures. Verify the complete
+        // supplied QC, including its actual quorum, using the previous roster.
+        proof.verify(&previous.epoch, &previous.registry, previous.as_ref())
+    }
+
     fn verify_consensus_signature(
         &self,
         domain: &str,

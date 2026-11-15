@@ -2,7 +2,10 @@
 use super::*;
 use synergy_address_engine::{apqe::provider::SignOptions, types::Algorithm};
 use synergy_aegis::{AegisSigner, PqvmSigner};
-use synergy_posy::{block_vote_signing_bytes, BlockVote, ConsensusObjectContext};
+use synergy_posy::{
+    block_vote_signing_bytes, timeout_vote_signing_bytes, BlockVote, ConsensusObjectContext,
+    SimplifiedConsensusStateMachine, SimplifiedTimeoutCertificate, TimeoutVote,
+};
 
 #[test]
 #[ignore = "requires pinned native APQE artifacts"]
@@ -456,6 +459,69 @@ fn exercise_native_recovery(read_only_transport: bool, long_boundary: bool) {
             continue;
         }
         if read_only_transport {
+            // Reproduce a timeout before the successor has issued its first QC.
+            // The vote belongs to the new epoch; its parent proof belongs to the old one.
+            let first = observer_authority.epoch.epoch_start_height;
+            let timeouts = keys
+                .iter()
+                .zip(&binding.payload.validators)
+                .take(4)
+                .map(|(key, validator)| {
+                    let mut vote = TimeoutVote {
+                        context: ConsensusObjectContext::for_height(&observer_authority.epoch, first, 0)
+                            .unwrap(),
+                        lease_index: 0,
+                        timed_out_proposer: observer_authority.epoch.authorized_proposer(first, 0).unwrap().into(),
+                        highest_parent: observer_authority.anchor_parent.clone(),
+                        previous_tc_id: None,
+                        last_voted_candidate: None,
+                        validator_id: validator.record.validator_id.clone(),
+                        key_id: validator.record.consensus_key_id.clone(),
+                        signature: Vec::new(),
+                    };
+                    vote.signature = engine.lock().unwrap().sign(
+                        Algorithm::MlDsa65,
+                        key.private_key.as_bytes(),
+                        &timeout_vote_signing_bytes(&vote).unwrap(),
+                        SignOptions::default(),
+                    ).unwrap();
+                    vote
+                })
+                .collect::<Vec<_>>();
+            let boundary = witness.certificates.last().unwrap();
+            let proof = SimplifiedTimeoutCertificate::from_votes_with_qc_proofs(
+                timeouts.clone(),
+                vec![boundary.clone()],
+            ).unwrap();
+            let verify = |proof: &SimplifiedTimeoutCertificate| {
+                proof.verify(&observer_authority.epoch, &observer_authority.registry, observer_authority.as_ref())
+            };
+            verify(&proof).unwrap();
+            let mut corrupt = proof.clone();
+            corrupt.highest_qc_proofs[0].participants[0].signature[0] ^= 1;
+            assert_eq!(corrupt.highest_qc_proofs[0].id().unwrap(), boundary.id().unwrap());
+            assert!(verify(&corrupt).is_err(), "a matching QC ID does not authenticate signatures");
+            let mut stale = proof.clone();
+            stale.highest_qc_proofs[0] = witness.certificates[1].clone();
+            assert!(verify(&stale).is_err());
+            let mut missing = proof.clone();
+            missing.highest_qc_proofs.clear();
+            assert!(verify(&missing).is_err());
+            let mut subquorum = proof.clone();
+            subquorum.reports.pop();
+            assert!(verify(&subquorum).is_err());
+
+            let mut machine = SimplifiedConsensusStateMachine::new(
+                observer_authority.epoch.clone(),
+                observer_authority.registry.clone(),
+                observer_authority.anchor_parent.clone(),
+            ).unwrap();
+            machine.seed_epoch_transition_finality(witness.finalized.clone(), witness.certificates.clone()).unwrap();
+            for vote in timeouts {
+                machine.accept_timeout_vote(vote, observer_authority.as_ref()).unwrap();
+            }
+            assert_eq!(machine.active_slot(), (first, 1));
+            assert_eq!(machine.last_finalized(), Some(&witness.finalized));
             verify_published_witness_without_writer(
                 &observer,
                 &observer_authority,

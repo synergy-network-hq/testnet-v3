@@ -132,7 +132,14 @@ impl SimplifiedTimeoutCertificate {
         self.mandatory_carry_candidate()?;
         let mut proofs = BTreeMap::new();
         for proof in &self.highest_qc_proofs {
-            proof.verify(epoch_context, validators, verifier)?;
+            if self.context.height == epoch_context.epoch_start_height
+                && proof.context.height.checked_add(1) == Some(self.context.height)
+                && proof.context.epoch.checked_add(1) == Some(epoch_context.epoch)
+            {
+                verifier.verify_timeout_boundary_parent(epoch_context, proof)?;
+            } else {
+                proof.verify(epoch_context, validators, verifier)?;
+            }
             if proofs.insert(proof.id()?, proof).is_some() {
                 return Err(PosyError::invalid(
                     "timeout certificate repeats a highest-QC proof",
