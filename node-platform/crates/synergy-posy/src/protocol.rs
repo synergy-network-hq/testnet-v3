@@ -1,6 +1,8 @@
 use serde::Serialize;
 
-use crate::{PosyError, PosyResult, ValidatorRecord};
+use crate::{
+    PosyError, PosyResult, SimplifiedEpochContext, SimplifiedQuorumCertificate, ValidatorRecord,
+};
 
 pub const POSY_SIMPLIFIED_PROTOCOL_VERSION: &str = "posy/3.0";
 pub const POSY_SIMPLIFIED_PROPOSAL_DOMAIN: &str = "PoSy/Consensus/v3/Proposal";
@@ -15,6 +17,16 @@ pub type SignatureBytes = Vec<u8>;
 /// Crypto adapters own signature algorithm details. The PoSy core owns only
 /// the governed domain, transcript, frozen key binding, and epoch context.
 pub trait ConsensusSignatureVerifier {
+    /// Verify a first-slot timeout's preceding-epoch parent against its
+    /// authenticated transition evidence. Ordinary users have no such authority.
+    fn verify_timeout_boundary_parent(
+        &self,
+        _successor: &SimplifiedEpochContext,
+        _parent: &SimplifiedQuorumCertificate,
+    ) -> PosyResult<()> {
+        Err(PosyError::invalid("unverified timeout epoch boundary parent"))
+    }
+
     fn verify_consensus_signature(
         &self,
         domain: &str,
