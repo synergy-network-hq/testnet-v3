@@ -57,14 +57,35 @@ pub struct ProcessingProposalMaterial {
     /// imposes no dependency on unfinished processing or a future block.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ordered_group: Option<super::ProcessingGroupCommitment>,
+    /// POSY-00E subject authorized by a future activated epoch-transition
+    /// policy. Version 1 never carries it and keeps its exact historic bytes.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "decode_epoch_transition_subject"
+    )]
+    pub epoch_transition_subject_root: Option<String>,
 }
+
+fn decode_epoch_transition_subject<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    String::deserialize(deserializer).map(Some)
+}
+
 impl ProcessingProposalMaterial {
     pub fn validate(&self) -> Result<(), EtdagError> {
+        if self.material_version != 1 || self.epoch_transition_subject_root.is_some() {
+            return Err(EtdagError::InvalidExecutionInput);
+        }
+        self.validate_common()
+    }
+
+    fn validate_common(&self) -> Result<(), EtdagError> {
         if let Some(group) = &self.ordered_group {
             group.validate()?;
         }
-        if self.material_version != 1
-            || self.profile_id != crate::PROCESSING_PROFILE_ID
+        if self.profile_id != crate::PROCESSING_PROFILE_ID
             || self.height == 0
             || self.selection.maximum_gas == 0
             || self.selection.maximum_bytes == 0
@@ -106,6 +127,41 @@ impl ProcessingProposalMaterial {
         serde_json::to_vec(&("SYNERGY_POSY_PROCESSING_MATERIAL_V1", self))
             .map_err(|error| EtdagError::Corrupt(error.to_string()))
     }
+
+    /// Produce the explicit engineering epoch-close commitment from ordinary
+    /// executed processing material. The caller supplies the independently
+    /// derived subject, never a claim copied from an incoming candidate.
+    /// This does not enable version 2 in the ordinary validator.
+    pub fn with_epoch_close_subject(
+        mut self,
+        subject_root: String,
+    ) -> Result<(Self, Vec<u8>), EtdagError> {
+        self.validate()?;
+        self.material_version = 2;
+        self.epoch_transition_subject_root = Some(subject_root);
+        let commitment = self.epoch_close_commitment_bytes()?;
+        Ok((self, commitment))
+    }
+
+    // Default candidate validation still rejects this version.
+    fn epoch_close_commitment_bytes(&self) -> Result<Vec<u8>, EtdagError> {
+        let root = self
+            .epoch_transition_subject_root
+            .as_deref()
+            .ok_or(EtdagError::InvalidExecutionInput)?;
+        if self.material_version != 2
+            || root.len() != 64
+            || !root
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || !root.bytes().any(|b| b != b'0')
+        {
+            return Err(EtdagError::InvalidExecutionInput);
+        }
+        self.validate_common()?;
+        serde_json::to_vec(&("SYNERGY_POSY_PROCESSING_MATERIAL_V2", self))
+            .map_err(|error| EtdagError::Corrupt(error.to_string()))
+    }
 }
 
 /// Candidate persistence/transport preserves old material bytes exactly. The
@@ -136,6 +192,28 @@ impl CandidateProtectedMaterial {
             Self::Processing(material) => material.commitment_bytes(),
         }
     }
+    /// Extract a schema-v2 epoch subject only from the exact protected material
+    /// committed by a previously authenticated closing QC's height and root.
+    pub fn epoch_subject_from_commitment(
+        &self,
+        height: u64,
+        protected_root: &str,
+        hash: impl FnOnce(&[u8]) -> String,
+    ) -> Result<&str, EtdagError> {
+        let Self::Processing(material) = self else {
+            return Err(EtdagError::ContextMismatch);
+        };
+        if material.height != height
+            || hash(&material.epoch_close_commitment_bytes()?) != protected_root
+        {
+            return Err(EtdagError::ContextMismatch);
+        }
+        material
+            .epoch_transition_subject_root
+            .as_deref()
+            .ok_or(EtdagError::ContextMismatch)
+    }
+
     pub fn as_legacy(&self) -> Option<&ProtectedProposalMaterial> {
         match self {
             Self::Legacy(material) => Some(material),
@@ -184,8 +262,67 @@ mod processing_material_tests {
             .unwrap(),
             transition_root: root("verified-empty-transition"),
             ordered_group: None,
+            epoch_transition_subject_root: None,
         }
     }
+    #[test]
+    fn close_subject_is_committed_and_requires_distinct_material_version() {
+        let historic = processing();
+        let encoded = serde_json::to_vec(&historic).unwrap();
+        assert!(!std::str::from_utf8(&encoded)
+            .unwrap()
+            .contains("epoch_transition_subject_root"));
+        let mut noncanonical: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        noncanonical["epoch_transition_subject_root"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<ProcessingProposalMaterial>(noncanonical).is_err());
+        let mut close = historic.clone();
+        close.epoch_transition_subject_root = Some("a".repeat(64));
+        assert!(close.commitment_bytes().is_err());
+        close.material_version = 2;
+        let authenticated = close.epoch_close_commitment_bytes().unwrap();
+        assert!(
+            close.commitment_bytes().is_err(),
+            "v2 must remain disabled in live execution"
+        );
+        assert_ne!(authenticated, historic.commitment_bytes().unwrap());
+        assert_eq!(
+            serde_json::from_slice::<ProcessingProposalMaterial>(
+                &serde_json::to_vec(&close).unwrap()
+            )
+            .unwrap(),
+            close
+        );
+        let carrier: CandidateProtectedMaterial = close.clone().into();
+        // A rejecting boundary must distinguish authenticated bytes from
+        // injected subject or height. The production adapter supplies the
+        // block commitment hash.
+        let hash = |bytes: &[u8]| EtdagDigest::from_domain_bytes("test-material", bytes).0;
+        let digest = hash(&authenticated);
+        assert_eq!(
+            carrier
+                .epoch_subject_from_commitment(100, &digest, hash)
+                .unwrap(),
+            "a".repeat(64)
+        );
+        assert!(carrier
+            .epoch_subject_from_commitment(101, &digest, hash)
+            .is_err());
+        assert!(carrier
+            .epoch_subject_from_commitment(100, "wrong", hash)
+            .is_err());
+        close.epoch_transition_subject_root = Some("b".repeat(64));
+        assert_ne!(authenticated, close.epoch_close_commitment_bytes().unwrap());
+        for invalid in [
+            None,
+            Some("0".repeat(64)),
+            Some("A".repeat(64)),
+            Some("a".repeat(63)),
+        ] {
+            close.epoch_transition_subject_root = invalid;
+            assert!(close.epoch_close_commitment_bytes().is_err());
+        }
+    }
+
     #[test]
     fn processing_material_is_distinct_and_legacy_bytes_are_preserved() {
         let legacy = ProtectedProposalMaterial {

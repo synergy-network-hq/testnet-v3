@@ -1,9 +1,27 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    canonical_hash, require_nonempty, FrozenValidatorRegistry, PosyError, PosyResult, ValidatorId,
+    canonical_hash, parse_hash_bytes, require_nonempty, FrozenValidatorRegistry, PosyError,
+    PosyResult, SimplifiedFinalityParent, ValidatorId,
     POSY_LEADER_LEASE_BLOCKS, POSY_SIMPLIFIED_PROTOCOL_VERSION,
 };
+
+/// Exact POSY-00E certified parent and finalized seed, with the execution
+/// subject that authorized their successor. This evidence is carried once
+/// per epoch; historical externally signed contexts have no such field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct V3EpochTransitionAnchor {
+    pub previous_epoch: u64,
+    pub previous_epoch_context_root: [u8; 32],
+    pub certified_parent_height: u64,
+    pub certified_parent_block_id: String,
+    pub certified_parent_qc_id: [u8; 32],
+    pub finalized_seed_height: u64,
+    pub finalized_seed_block_id: String,
+    pub finalized_seed_qc_id: [u8; 32],
+    pub transition_subject_root: [u8; 32],
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SimplifiedEpochContext {
@@ -21,6 +39,8 @@ pub struct SimplifiedEpochContext {
     pub leader_lease_blocks: u64,
     pub leader_ring: Vec<ValidatorId>,
     pub leader_ring_root: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    v3_transition_anchor: Option<V3EpochTransitionAnchor>,
 }
 
 impl SimplifiedEpochContext {
@@ -59,6 +79,7 @@ impl SimplifiedEpochContext {
                 &leader_ring,
             )?,
             leader_ring,
+            v3_transition_anchor: None,
         };
         context.validate_against(registry)?;
         Ok(context)
@@ -85,6 +106,61 @@ impl SimplifiedEpochContext {
             || self.frozen_voting_weight_root != registry.frozen_weight_root()?
         {
             return Err(PosyError::invalid("frozen epoch context root mismatch"));
+        }
+        if let Some(anchor) = &self.v3_transition_anchor {
+            if anchor.previous_epoch.checked_add(1) != Some(self.epoch)
+                || anchor.certified_parent_height.checked_add(1) != Some(self.epoch_start_height)
+                || anchor.finalized_seed_height.checked_add(2)
+                    != Some(anchor.certified_parent_height)
+                || anchor.finalized_seed_qc_id
+                    != parse_hash_bytes(&self.finalized_epoch_seed_root)?
+                || anchor.finalized_seed_qc_id == anchor.certified_parent_qc_id
+                || [
+                    anchor.previous_epoch_context_root,
+                    anchor.certified_parent_qc_id,
+                    anchor.finalized_seed_qc_id,
+                    anchor.transition_subject_root,
+                ]
+                .contains(&[0; 32])
+                || self.leader_ring
+                    != crate::derive_epoch_leader_ring(&self.finalized_epoch_seed_root, registry)?
+            {
+                return Err(PosyError::invalid("invalid derived epoch context anchor"));
+            }
+            require_nonempty(&anchor.certified_parent_block_id, "certified parent block ID")?;
+            require_nonempty(&anchor.finalized_seed_block_id, "finalized seed block ID")?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn with_verified_transition_anchor(
+        mut self,
+        anchor: V3EpochTransitionAnchor,
+        registry: &FrozenValidatorRegistry,
+    ) -> PosyResult<Self> {
+        self.v3_transition_anchor = Some(anchor);
+        self.validate_against(registry)?;
+        Ok(self)
+    }
+
+    pub(crate) fn is_consensus_derived(&self) -> bool {
+        self.v3_transition_anchor.is_some()
+    }
+
+    pub(crate) fn verify_transition_parent(
+        &self,
+        parent: &SimplifiedFinalityParent,
+    ) -> PosyResult<()> {
+        if let Some(anchor) = &self.v3_transition_anchor {
+            let parent = parent.quorum_certificate_reference().ok_or_else(|| {
+                PosyError::invalid("derived epoch requires its certified predecessor")
+            })?;
+            if anchor.certified_parent_height != parent.height
+                || anchor.certified_parent_block_id != parent.block_id
+                || anchor.certified_parent_qc_id != parse_hash_bytes(&parent.qc_id)?
+            {
+                return Err(PosyError::invalid("derived epoch parent differs from its context"));
+            }
         }
         Ok(())
     }

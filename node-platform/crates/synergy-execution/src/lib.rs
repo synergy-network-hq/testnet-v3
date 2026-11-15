@@ -40,7 +40,7 @@ pub use executor::DeterministicExecutor;
 pub use fees::{FeeSchedule, FeeSettlement};
 pub use processing_candidate::{
     processing_payload_root, ProcessingCandidateContext, ProcessingCandidateError,
-    ProcessingPayloadError, ProcessingPayloadProvider,
+    ProcessingEpochClose, ProcessingPayloadError, ProcessingPayloadProvider,
 };
 pub use processing_groups::{
     processing_group_state, processing_group_transition, processing_member_claim,

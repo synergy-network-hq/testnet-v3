@@ -20,6 +20,59 @@ struct Proposal {
     successor_authority_binding: Vec<u8>,
 }
 
+/// Compact public inputs for offline proof qualification. Decoding this
+/// structure never activates a successor or authorizes peer membership.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DerivedEpochProof {
+    authorization: EpochTransitionAuthorization,
+    finalized: FinalizedBlockRecord,
+    witness: synergy_posy::FinalitySyncWitness,
+    closing_material: synergy_etdag::execution::CandidateProtectedMaterial,
+    next_validators: Vec<ValidatorRecord>,
+}
+
+fn verify_derived_epoch(
+    previous: &VerifiedAuthority,
+    proof: &DerivedEpochProof,
+) -> Result<(SimplifiedEpochContext, SimplifiedFinalityParent), String> {
+    if proof.next_validators.iter().any(|validator| !validator.may_sign_consensus()) {
+        return Err("derived epoch proof includes a validator outside the active set".into());
+    }
+    let next_registry = FrozenValidatorRegistry::new(
+        proof.authorization.next_epoch,
+        proof.next_validators.clone(),
+    )
+    .map_err(|e| e.to_string())?;
+    // Until this consumer can reconstruct an on-chain membership or policy
+    // change, qualify only the unchanged governed set. A proof is not an
+    // independent source of validator eligibility or consensus parameters.
+    let expected = unchanged_successor_subject(previous)?;
+    if proof.authorization != expected {
+        return Err("epoch subject differs from independently derived rollover policy".into());
+    }
+    let subject = proof
+        .closing_material
+        .epoch_subject_from_commitment(
+            proof.finalized.height,
+            &proof.finalized.protected_execution_root,
+            synergy_block::hash_block_bytes,
+        )
+        .map_err(|e| format!("epoch closure lacks its exact protected transition subject: {e:?}"))?;
+    proof
+        .authorization
+        .derive_from_finalized_subject(
+            &previous.epoch,
+            &previous.registry,
+            &next_registry,
+            &proof.finalized,
+            &proof.witness,
+            subject,
+            previous,
+        )
+        .map_err(|e| format!("authenticate consensus-derived epoch: {e}"))
+}
+
 fn verify(
     config: &NodeConfiguration,
     proposal: &Proposal,
@@ -88,6 +141,43 @@ fn verify(
 
 const CANARY_EPOCH_BLOCKS: u64 = 1_000;
 
+fn unchanged_successor_subject(
+    previous: &VerifiedAuthority,
+) -> Result<EpochTransitionAuthorization, String> {
+    let next_epoch = previous.epoch.epoch.checked_add(1).ok_or("epoch overflow")?;
+    let policy = previous
+        .protected
+        .as_ref()
+        .ok_or("previous authority lacks ETDAG policy")?;
+    let next_policy = successor_time_policy(
+        policy,
+        previous.epoch.epoch_start_height,
+        previous.epoch.epoch_end_height,
+    )?;
+    let registry =
+        FrozenValidatorRegistry::new(next_epoch, previous.registry.active().cloned().collect())
+            .map_err(|e| e.to_string())?;
+    EpochTransitionAuthorization::for_governed_successor(
+        &previous.epoch,
+        &registry,
+        next_policy.commitment()?,
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn successor_time_policy(
+    policy: &ProtectedEpochPolicy,
+    first: u64,
+    last: u64,
+) -> Result<ProtectedEpochPolicy, String> {
+    let mut next = policy.clone();
+    next.epoch_start_timestamp_ms = policy
+        .timestamp_for_height_ms(first, last, last)?
+        .checked_add(policy.target_block_time_ms)
+        .ok_or("successor epoch clock overflow")?;
+    Ok(next)
+}
+
 fn canary_successor_range(chain: u64, epoch: u64, first: u64, last: u64) -> Option<(u64, u64, u64)> {
     if chain != 99999 {
         return None;
@@ -124,17 +214,12 @@ fn successor_payload(
     }
     let policy = payload
         .protected
-        .as_mut()
+        .as_ref()
         .ok_or("predecessor lacks ETDAG policy")?;
-    policy.epoch_start_timestamp_ms = policy
-        .timestamp_for_height_ms(
-            payload.epoch_start_height,
-            payload.epoch_end_height,
-            payload.epoch_end_height,
-        )?
-        .checked_add(policy.target_block_time_ms)
-        .ok_or("successor epoch clock overflow")?;
-    payload.consensus_parameter_root = policy.commitment()?;
+    let next_policy =
+        successor_time_policy(policy, payload.epoch_start_height, payload.epoch_end_height)?;
+    payload.consensus_parameter_root = next_policy.commitment()?;
+    payload.protected = Some(next_policy);
     payload.epoch = epoch;
     payload.epoch_start_height = first;
     payload.epoch_end_height = last;
@@ -442,7 +527,7 @@ fn check_staged_network(
 pub(crate) fn cli(args: impl Iterator<Item = String>) -> Result<(), String> {
     let args: Vec<_> = args.take(10).collect();
     let [command, config, proposal_path, extra @ ..] = args.as_slice() else {
-        return Err("usage: authority-successor check|activate|activate-observer CONFIG PROPOSAL; export-boundary CONFIG WITNESS; prepare-payload CONFIG WITNESS OUTPUT; bundle CONFIG WITNESS SIGNED_AUTHORITY OUTPUT; check-local CONFIG PROPOSAL; registry CONFIG PROPOSAL CUSTODY OUTPUT; check-network CONFIG PROPOSAL REGISTRY WORKSPACE [ADMISSION]; issue-admission CONFIG PROPOSAL REGISTRY WORKSPACE ENROLLMENT CUSTODY UNLOCK OUTPUT".into());
+        return Err("usage: authority-successor check|activate|activate-observer CONFIG PROPOSAL; check-derived CONFIG PROOF; export-boundary CONFIG WITNESS; prepare-payload CONFIG WITNESS OUTPUT; bundle CONFIG WITNESS SIGNED_AUTHORITY OUTPUT; check-local CONFIG PROPOSAL; registry CONFIG PROPOSAL CUSTODY OUTPUT; check-network CONFIG PROPOSAL REGISTRY WORKSPACE [ADMISSION]; issue-admission CONFIG PROPOSAL REGISTRY WORKSPACE ENROLLMENT CUSTODY UNLOCK OUTPUT".into());
     };
     let config = Path::new(config);
     if !config.is_absolute() {
@@ -460,6 +545,21 @@ pub(crate) fn cli(args: impl Iterator<Item = String>) -> Result<(), String> {
     }
     if command == "export-boundary" && extra.is_empty() {
         return export_boundary(&configuration, Path::new(proposal_path));
+    }
+    if command == "check-derived" && extra.is_empty() {
+        let previous = load(&configuration)?.ok_or("missing authenticated predecessor")?;
+        let bytes = apqe_transport::read(Path::new(proposal_path), 4 * 1024 * 1024, false)?;
+        let proof: DerivedEpochProof = serde_json::from_slice(&bytes)
+            .map_err(|e| format!("decode derived epoch proof: {e}"))?;
+        let (context, certified_parent) = verify_derived_epoch(&previous, &proof)?;
+        println!("{}", serde_json::json!({
+            "status": "consensus-derived-context-verified",
+            "context_root": context.root().map_err(|e| e.to_string())?,
+            "context": context,
+            "certified_parent": certified_parent,
+            "activated": false,
+        }));
+        return Ok(());
     }
     if command == "prepare-payload" && extra.len() == 1 {
         let previous = load(&configuration)?.ok_or("missing installed predecessor")?;
@@ -604,6 +704,40 @@ pub(super) fn qualify_offline_successor(
     use synergy_address_engine::{apqe::provider::SignOptions, types::Algorithm};
     use synergy_aegis::AegisSigner;
     use synergy_posy::{block_vote_signing_bytes, BlockVote, ConsensusObjectContext};
+    // A native cryptographic test of the candidate proof path: the old
+    // validators certify the executed subject, and no successor signer is
+    // invoked before the derived context is authenticated.
+    let next_validators = signed_previous
+        .payload
+        .validators
+        .iter()
+        .map(|validator| validator.record.clone())
+        .collect::<Vec<_>>();
+    let authorization = unchanged_successor_subject(previous).unwrap();
+    assert_ne!(
+        authorization.next_consensus_parameter_root,
+        previous.epoch.consensus_parameter_root
+    );
+    let root = synergy_etdag::EtdagDigest::from_domain_bytes("epoch-closure-test", b"namespace");
+    let closing_material = synergy_etdag::execution::ProcessingProposalMaterial {
+        material_version: 2,
+        profile_id: synergy_etdag::PROCESSING_PROFILE_ID.into(),
+        height: authorization.finalized_height,
+        namespace_root: root.clone(),
+        selection: synergy_etdag::execution::ProcessingReadyView {
+            namespace_root: root.clone(),
+            items: Vec::new(),
+        }
+        .select(21_000, 128 * 1024)
+        .unwrap(),
+        transition_root: root,
+        ordered_group: None,
+        epoch_transition_subject_root: Some(authorization.subject_root_v2().unwrap()),
+    };
+    let protected_root = synergy_block::hash_block_bytes(&serde_json::to_vec(&(
+        "SYNERGY_POSY_PROCESSING_MATERIAL_V2",
+        &closing_material,
+    )).unwrap());
     let mut parent = SimplifiedFinalityParent::QuorumCertificate {
         height: 19997,
         block_id: "d".repeat(64),
@@ -625,7 +759,11 @@ pub(super) fn qualify_offline_successor(
                     parent_block_id: parent.block_id().into(),
                     parent: parent.clone(),
                     takeover_tc_id: None,
-                    protected_execution_root: "f".repeat(64),
+                    protected_execution_root: if height == authorization.finalized_height {
+                        protected_root.clone()
+                    } else {
+                        "f".repeat(64)
+                    },
                     validator_id: record.validator_id.clone(),
                     key_id: record.consensus_key_id.clone(),
                     signature: vec![],
@@ -652,9 +790,46 @@ pub(super) fn qualify_offline_successor(
         };
         certificates.push(qc);
     }
+    let mut derived = DerivedEpochProof {
+        authorization,
+        finalized: finality.last_finalized().unwrap().clone(),
+        witness: synergy_posy::FinalitySyncWitness {
+            quorum_certificates: certificates.clone().try_into().unwrap(),
+            timeout_certificates: Vec::new(),
+        },
+        closing_material: closing_material.clone().into(),
+        next_validators,
+    };
+    let (next_context, parent) = verify_derived_epoch(previous, &derived).unwrap();
+    assert_eq!(next_context.finalized_epoch_seed_root, certificates[0].id().unwrap());
+    assert_eq!(parent.quorum_certificate_reference().unwrap(), certificates[2].reference().unwrap());
+
+    let mut foreign_material = closing_material.clone();
+    foreign_material.epoch_transition_subject_root = Some("a".repeat(64));
+    derived.closing_material = foreign_material.into();
+    assert!(verify_derived_epoch(previous, &derived)
+        .unwrap_err()
+        .contains("protected transition subject"));
+    derived.closing_material = closing_material.into();
+    derived.next_validators[0].frozen_voting_weight += 1;
+    assert!(verify_derived_epoch(previous, &derived).is_err());
+    derived.next_validators[0].frozen_voting_weight -= 1;
+
+    let saved_root = derived.authorization.next_consensus_parameter_root.clone();
+    derived.authorization.next_consensus_parameter_root = previous.epoch.consensus_parameter_root.clone();
+    assert!(verify_derived_epoch(previous, &derived)
+        .unwrap_err()
+        .contains("independently derived rollover policy"));
+    derived.authorization.next_consensus_parameter_root = saved_root;
+
+    // Change a signature without changing the QC subject/ID.
+    derived.witness.quorum_certificates[2].participants[0].signature[0] ^= 1;
+    assert!(verify_derived_epoch(previous, &derived).is_err());
+
     let mut candidate = signed_previous.clone();
     candidate.payload =
         successor_payload(signed_previous.payload.clone(), &certificates[2]).unwrap();
+    assert_eq!(candidate.payload.consensus_parameter_root, next_context.consensus_parameter_root);
     let sign = |payload: &AuthorityPayload| {
         signer
             .sign(

@@ -128,19 +128,18 @@ pub fn registration_with_preparation(
         .map_err(|error| format!("load PoSy recovery journal: {error:?}"))?;
     let finality = FinalityStore::new(&root)
         .map_err(|error| format!("open PoSy finality store: {error:?}"))?;
-    if let Some((finalized, certificates)) =
-        authority::load_transition_finality_prefix(configuration, authority.as_ref())?
-    {
+    let delivery_transition =
+        authority::load_transition_context(configuration, authority.as_ref())?;
+    if let Some(transition) = delivery_transition.as_ref() {
+        let finalized = transition.finalized();
         let committed = finality
             .get(finalized.height)
             .map_err(|error| format!("load transition finality commit: {error}"))?
             .ok_or("epoch transition finality is not durably committed")?;
-        if committed != finalized {
+        if &committed != finalized {
             return Err("epoch transition witness conflicts with durable PoSy finality".into());
         }
-        state_machine
-            .seed_epoch_transition_finality(finalized, certificates)
-            .map_err(|error| format!("seed successor epoch finality: {error}"))?;
+        transition.seed_successor(authority.as_ref(), &mut state_machine)?;
     }
     let certificates = VerifiedQuorumCertificateStore::new(&root)
         .map_err(|error| format!("open PoSy verified-QC store: {error:?}"))?;
@@ -167,8 +166,6 @@ pub fn registration_with_preparation(
             )?;
         }
     }
-    let delivery_transition =
-        authority::load_transition_context(configuration, authority.as_ref())?;
     let mut delivery = if let Some(transition) = delivery_transition.as_ref() {
         transition.verify_current(authority.as_ref())?;
         let previous = transition.previous_authority();
@@ -335,24 +332,18 @@ pub(super) fn replay_verified_safety_state_from_floor(
 ) -> Result<Option<synergy_posy::FinalizedBlockRecord>, String> {
     // Recovery is staged: a failed proof must not leave partially restored
     // control state available to a caller, and never writes signing evidence.
-    let mut recovered = SimplifiedConsensusStateMachine::new(
-        authority.epoch.clone(),
-        authority.registry.clone(),
-        authority.anchor_parent.clone(),
-    )
-    .map_err(|error| format!("construct staged PoSy recovery: {error}"))?;
-    if authority.epoch.epoch > 1 {
-        let record = state_machine
-            .last_finalized()
-            .cloned()
-            .ok_or("successor recovery lacks verified transition finality")?;
-        let tail = state_machine
-            .finality_witness(record.height)
-            .ok_or("successor recovery lacks verified transition QC tail")?;
-        recovered
-            .seed_epoch_transition_finality(record, tail)
-            .map_err(|error| format!("seed staged PoSy transition recovery: {error}"))?;
-    }
+    let mut recovered = if authority.epoch.epoch > 1 {
+        state_machine
+            .staged_epoch_transition_recovery()
+            .map_err(|error| format!("seed staged PoSy transition recovery: {error}"))?
+    } else {
+        SimplifiedConsensusStateMachine::new(
+            authority.epoch.clone(),
+            authority.registry.clone(),
+            authority.anchor_parent.clone(),
+        )
+        .map_err(|error| format!("construct staged PoSy recovery: {error}"))?
+    };
     seed_committed_recovery_anchor(
         &mut recovered,
         authority,

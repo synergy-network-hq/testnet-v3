@@ -37,6 +37,14 @@ pub struct ProcessingCandidateContext<'a> {
     pub finalized_authorization_state: &'a WorldState,
 }
 
+/// Explicit input from the epoch authority owner, after it independently
+/// derives the POSY-00E subject from governed state. An incoming proposal
+/// or a transport proof must never supply this expected input.
+pub struct ProcessingEpochClose<'a> {
+    pub epoch_end_height: u64,
+    pub subject_root: &'a str,
+}
+
 /// Bytes remain charged by their existing ETDAG/durable owner. A provider must
 /// retrieve a missing canonical payload or return a retryable resource/storage
 /// error; absence never removes an item from the mandatory parent selection.
@@ -200,6 +208,75 @@ impl<D: TransactionExecutor, V: AegisTransactionVerifier> BlockExecutionSchedule
             payloads,
             None,
         )
+    }
+
+    /// Engineering epoch-close proposal construction through the normal
+    /// deterministic processing executor. Live callers require a separately
+    /// approved activation rule before choosing this path.
+    pub fn execute_processing_epoch_close(
+        &self,
+        close: ProcessingEpochClose<'_>,
+        context: ProcessingCandidateContext<'_>,
+        parent: &BudgetedWorld,
+        publications: &[ProcessingReadyRecord],
+        readiness: &impl ProcessingReadinessVerifier,
+        payloads: &impl ProcessingPayloadProvider,
+    ) -> Result<BudgetedExecutionCandidate, ProcessingCandidateError> {
+        let height = context.height;
+        if height == 0 || height.checked_add(2) != Some(close.epoch_end_height) {
+            return Err(ProcessingCandidateError::Invalid(
+                "epoch-close subject must be included exactly at E-2".into(),
+            ));
+        }
+        let mut candidate =
+            self.execute_processing_candidate(context, parent, publications, readiness, payloads)?;
+        let synergy_etdag::execution::CandidateProtectedMaterial::Processing(material) =
+            candidate.protected_material
+        else {
+            return Err(ProcessingCandidateError::Invalid(
+                "epoch-close candidate lacks processing material".into(),
+            ));
+        };
+        let (material, commitment) = material
+            .with_epoch_close_subject(close.subject_root.into())
+            .map_err(|e| ProcessingCandidateError::Invalid(format!("epoch-close subject: {e:?}")))?;
+        candidate.protected_material = material.into();
+        candidate.protected_execution_root = synergy_block::hash_block_bytes(&commitment);
+        let _scratch = parent.budget().reserve(8192)?;
+        candidate.block_id = candidate
+            .commitment_id()
+            .map_err(ProcessingCandidateError::Invalid)?;
+        candidate
+            .validate_epoch_close(height, close.subject_root)
+            .map_err(ProcessingCandidateError::Invalid)?;
+        Ok(candidate)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn replay_processing_epoch_close(
+        &self,
+        close: ProcessingEpochClose<'_>,
+        candidate: &BudgetedExecutionCandidate,
+        context: ProcessingCandidateContext<'_>,
+        parent: &BudgetedWorld,
+        publications: &[ProcessingReadyRecord],
+        readiness: &impl ProcessingReadinessVerifier,
+        payloads: &impl ProcessingPayloadProvider,
+    ) -> Result<BudgetedExecutionCandidate, ProcessingCandidateError> {
+        if !Arc::ptr_eq(parent.budget(), candidate.state.budget()) {
+            return Err(ProcessingCandidateError::Invalid(
+                "epoch-close replay requires the shared native World pool".into(),
+            ));
+        }
+        let replayed = self.execute_processing_epoch_close(
+            close, context, parent, publications, readiness, payloads,
+        )?;
+        if replayed != *candidate {
+            return Err(ProcessingCandidateError::Invalid(
+                "epoch-close candidate fails canonical parent execution/registry replay".into(),
+            ));
+        }
+        Ok(replayed)
     }
 
     /// The native authenticated boundary owner supplies the prepared parent and
@@ -624,6 +701,59 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state_root(&historical).unwrap(), original_root);
+    }
+    #[test]
+    fn processing_epoch_close_commits_and_replays_only_the_expected_subject() {
+        let budget = WorldResourceBudget::new(4 * 1024 * 1024);
+        let world = crate::processing_epoch::tests::boundary_world();
+        let (namespace, _) = crate::processing_epoch::tests::namespaces();
+        let parent = BudgetedWorld::try_clone_world(&world, &budget).unwrap();
+        let network = network();
+        let scheduler = scheduler();
+        let context = || ProcessingCandidateContext {
+            ordered_group: None,
+            height: 9998,
+            parent_block_id: "verified-boundary-parent",
+            network: &network,
+            consensus_timestamp_unix: 1_700_009_998,
+            namespace_root: &namespace,
+            maximum_gas: 30_000_000,
+            maximum_bytes: 8 * 1024 * 1024,
+            finalized_authorization_state: &world,
+        };
+        let subject = "a".repeat(64);
+        let close = || ProcessingEpochClose {
+            epoch_end_height: 10000,
+            subject_root: &subject,
+        };
+        let ordinary = scheduler
+            .execute_processing_candidate(context(), &parent, &[], &UnusedPipeline, &UnusedPipeline)
+            .unwrap();
+        let candidate = scheduler
+            .execute_processing_epoch_close(
+                close(), context(), &parent, &[], &UnusedPipeline, &UnusedPipeline,
+            )
+            .unwrap();
+        assert_eq!(ordinary.state_root, candidate.state_root);
+        assert_ne!(ordinary.protected_execution_root, candidate.protected_execution_root);
+        assert_ne!(ordinary.block_id, candidate.block_id);
+        assert!(candidate.validate().is_err());
+        let bytes = serde_json::to_vec(&candidate).unwrap();
+        assert!(crate::decode_budgeted_candidate(&bytes, &budget).is_err());
+        let replay = |expected| scheduler.replay_processing_epoch_close(
+            expected, &candidate, context(), &parent, &[], &UnusedPipeline, &UnusedPipeline,
+        );
+        assert_eq!(replay(close()).unwrap(), candidate);
+        let other = "b".repeat(64);
+        assert!(replay(ProcessingEpochClose {
+            subject_root: &other,
+            ..close()
+        }).is_err());
+        assert!(replay(ProcessingEpochClose {
+            epoch_end_height: 10001,
+            ..close()
+        }).is_err());
+        assert_eq!(parent.as_ref(), &world);
     }
     #[test]
     fn processing_candidate_empty_assembly_spans_heights_without_etdag_material_or_growth() {

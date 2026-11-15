@@ -302,15 +302,40 @@ impl<W: AsRef<WorldState>> ExecutionCandidate<W> {
     }
 
     pub(crate) fn validate_with_world_size(&self) -> Result<usize, String> {
-        self.protected_material
-            .validate()
-            .map_err(|e| format!("invalid protected candidate material: {e:?}"))?;
         let protected_root = hash_block_bytes(
             &self
                 .protected_material
                 .commitment_bytes()
                 .map_err(|e| format!("encode protected candidate material: {e:?}"))?,
         );
+        self.validate_committed_body(&protected_root)
+    }
+
+    /// Explicit engineering-only epoch-close validation. Ordinary decode,
+    /// replay, and durable storage still reject this candidate version.
+    pub(crate) fn validate_epoch_close(
+        &self,
+        expected_height: u64,
+        expected_subject: &str,
+    ) -> Result<(), String> {
+        if self.height != expected_height
+            || self
+                .protected_material
+                .epoch_subject_from_commitment(
+                    expected_height,
+                    &self.protected_execution_root,
+                    hash_block_bytes,
+                )
+                .map_err(|e| format!("invalid epoch-close candidate material: {e:?}"))?
+                != expected_subject
+        {
+            return Err("epoch-close candidate differs from the governed subject".into());
+        }
+        self.validate_committed_body(&self.protected_execution_root)
+            .map(|_| ())
+    }
+
+    fn validate_committed_body(&self, protected_root: &str) -> Result<usize, String> {
         if self.height == 0
             || self.protected_material.height() != self.height
             || protected_root != self.protected_execution_root

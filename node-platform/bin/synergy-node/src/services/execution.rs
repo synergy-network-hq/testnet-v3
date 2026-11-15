@@ -2648,6 +2648,7 @@ mod bootstrap_tests {
             .unwrap(),
             transition_root: root,
             ordered_group: None,
+            epoch_transition_subject_root: None,
         };
         let state =
             BudgetedWorld::try_clone_world(&WorldState::default(), ingress.world_budget()).unwrap();

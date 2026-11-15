@@ -516,7 +516,11 @@ fn exercise_native_recovery(read_only_transport: bool, long_boundary: bool) {
                 observer_authority.registry.clone(),
                 observer_authority.anchor_parent.clone(),
             ).unwrap();
-            machine.seed_epoch_transition_finality(witness.finalized.clone(), witness.certificates.clone()).unwrap();
+            load_transition_context(&observer, &observer_authority)
+                .unwrap()
+                .unwrap()
+                .seed_successor(&observer_authority, &mut machine)
+                .unwrap();
             for vote in timeouts {
                 machine.accept_timeout_vote(vote, observer_authority.as_ref()).unwrap();
             }

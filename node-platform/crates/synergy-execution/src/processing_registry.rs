@@ -237,6 +237,7 @@ impl ParentProcessingSelection<'_, '_> {
                 &transition.diff,
             )?,
             ordered_group: None,
+            epoch_transition_subject_root: None,
         };
         material.validate()?;
         Ok(material)

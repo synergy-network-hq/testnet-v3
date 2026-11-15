@@ -152,6 +152,69 @@ impl FinalitySyncWitness {
         })
     }
 
+    /// Require the complete and exact takeover closure rather than admitting
+    /// an unrelated, albeit valid, timeout as part of an epoch transition.
+    pub(crate) fn verify_exact_timeout_closure(
+        &self,
+        epoch: &SimplifiedEpochContext,
+        validators: &FrozenValidatorRegistry,
+        verifier: &impl ConsensusSignatureVerifier,
+    ) -> PosyResult<()> {
+        let closure = self.verified_timeout_closure(epoch, validators, verifier)?;
+        let by_id = closure
+            .values()
+            .map(|tc| Ok((tc.id()?, tc)))
+            .collect::<PosyResult<BTreeMap<_, _>>>()?;
+        let mut referenced = BTreeSet::new();
+        let mut by_lease_round = BTreeMap::new();
+        for qc in &self.quorum_certificates {
+            let lease = epoch.lease_index(qc.context.height)?;
+            let mut predecessor = qc.takeover_tc_id.as_deref();
+            for _ in 0..qc.context.round {
+                let id =
+                    predecessor.ok_or_else(|| PosyError::invalid("missing epoch timeout proof"))?;
+                let timeout = by_id
+                    .get(id)
+                    .ok_or_else(|| PosyError::invalid("missing epoch timeout proof"))?;
+                if by_lease_round
+                    .insert((lease, timeout.context.round), id)
+                    .is_some_and(|prior| prior != id)
+                {
+                    return Err(PosyError::Conflict(
+                        "epoch closing QCs reference conflicting timeout closures".into(),
+                    ));
+                }
+                if let Some(certified) = self
+                    .quorum_certificates
+                    .iter()
+                    .find(|certified| certified.context.height == timeout.context.height)
+                {
+                    let wrong_carry = match timeout.mandatory_carry_candidate()? {
+                        Some(candidate) => candidate != certified.subject()?,
+                        None => false,
+                    };
+                    if timeout.highest_parent()? != certified.parent || wrong_carry {
+                        return Err(PosyError::Conflict(
+                            "epoch timeout diverges from the certified parent or mandatory carry"
+                                .into(),
+                        ));
+                    }
+                }
+                referenced.insert(id);
+                predecessor = timeout.previous_tc_id.as_deref();
+            }
+            if predecessor.is_some() {
+                return Err(PosyError::invalid("invalid epoch timeout proof ancestry"));
+            }
+        }
+        if referenced.len() != by_id.len() {
+            return Err(PosyError::invalid(
+                "epoch witness includes an unreferenced timeout",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn verified_timeout_closure(
         &self,
         epoch: &SimplifiedEpochContext,

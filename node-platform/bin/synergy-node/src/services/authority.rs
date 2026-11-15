@@ -861,6 +861,40 @@ impl VerifiedTransitionContext {
     pub(super) fn certificates(&self) -> &[SimplifiedQuorumCertificate; 3] {
         &self.certificates
     }
+    /// Initialize the single PoSy projection from an authenticated predecessor.
+    /// Signed continuation and future consensus-derived authority share this
+    /// carryover path; neither is allowed to inject a raw three-QC prefix.
+    pub(super) fn seed_successor(
+        &self,
+        current: &VerifiedAuthority,
+        machine: &mut synergy_posy::SimplifiedConsensusStateMachine,
+    ) -> Result<(), String> {
+        self.verify_current(current)?;
+        let previous = self.previous_authority();
+        let authorization = EpochTransitionAuthorization {
+            previous_epoch: previous.epoch.epoch,
+            previous_epoch_context_root: previous.epoch.root().map_err(|e| e.to_string())?,
+            finalized_height: self.finalized.height,
+            next_epoch: current.epoch.epoch,
+            next_epoch_start_height: current.epoch.epoch_start_height,
+            next_epoch_end_height: current.epoch.epoch_end_height,
+            next_consensus_parameter_root: current.epoch.consensus_parameter_root.clone(),
+            next_active_validator_set_root: current.epoch.active_validator_set_root.clone(),
+            next_validator_consensus_key_root: current.epoch.validator_consensus_key_root.clone(),
+            next_frozen_voting_weight_root: current.epoch.frozen_voting_weight_root.clone(),
+        };
+        machine
+            .seed_verified_epoch_transition(
+                &authorization,
+                &previous.epoch,
+                &previous.registry,
+                self.finalized.clone(),
+                self.certificates.clone(),
+                previous.as_ref(),
+            )
+            .map_err(|e| format!("seed successor epoch finality: {e}"))
+    }
+
     pub(super) fn verify_current(&self, current: &VerifiedAuthority) -> Result<(), String> {
         if current.epoch.root().map_err(|e| e.to_string())? != self.current_epoch_root {
             return Err("verified transition belongs to a different successor authority".into());

@@ -126,6 +126,7 @@ impl SimplifiedConsensusStateMachine {
     ) -> PosyResult<Self> {
         epoch.validate_against(&validators)?;
         anchor_parent.validate_for_child_height(epoch.epoch_start_height)?;
+        epoch.verify_transition_parent(&anchor_parent)?;
         Ok(Self {
             active_height: epoch.epoch_start_height,
             active_round: 0,
@@ -146,11 +147,129 @@ impl SimplifiedConsensusStateMachine {
         })
     }
 
-    pub fn seed_epoch_transition_finality(
+    /// Authenticate the old-epoch tail before installing it in the new
+    /// projection. Next membership/seed provenance remains the caller's
+    /// governed-state responsibility, not authority supplied by this witness.
+    pub fn seed_verified_epoch_transition(
+        &mut self,
+        authorization: &crate::EpochTransitionAuthorization,
+        previous: &SimplifiedEpochContext,
+        previous_registry: &FrozenValidatorRegistry,
+        finalized: crate::FinalizedBlockRecord,
+        certificates: [SimplifiedQuorumCertificate; 3],
+        verifier: &impl ConsensusSignatureVerifier,
+    ) -> PosyResult<()> {
+        if self.epoch.is_consensus_derived() {
+            return Err(PosyError::invalid(
+                "derived epochs require the finalized execution subject and exact timeout closure",
+            ));
+        }
+        authorization.verify_finality(
+            previous,
+            previous_registry,
+            &self.epoch,
+            &self.validators,
+            &finalized,
+            &certificates,
+            verifier,
+        )?;
+        self.seed_epoch_transition_finality(finalized, certificates)
+    }
+
+    /// Build the next projection from this completed epoch and its finalized
+    /// execution subject. This stages an in-memory value; the owner must
+    /// authenticate its durable finality/World, persist the transition and
+    /// reconcile signing locks before using it to sign.
+    pub fn derive_successor_projection(
+        &self,
+        authorization: &crate::EpochTransitionAuthorization,
+        next_registry: FrozenValidatorRegistry,
+        witness: crate::FinalitySyncWitness,
+        committed_subject_root: &str,
+        verifier: &impl ConsensusSignatureVerifier,
+    ) -> PosyResult<Self> {
+        if !self.epoch_complete {
+            return Err(PosyError::NotReady("epoch has not certified its boundary".into()));
+        }
+        let finalized = self.last_finalized().ok_or_else(|| {
+            PosyError::NotReady("completed epoch has no closing finality".into())
+        })?;
+        let accepted = self.finality_witness(finalized.height).ok_or_else(|| {
+            PosyError::NotReady("completed epoch has no accepted closing QC tail".into())
+        })?;
+        for (local, supplied) in accepted.iter().zip(&witness.quorum_certificates) {
+            if local.id()? != supplied.id()? {
+                return Err(PosyError::Conflict(
+                    "epoch transition conflicts with locally accepted certification".into(),
+                ));
+            }
+        }
+        let (next, parent) = authorization.derive_from_finalized_subject(
+            &self.epoch,
+            &self.validators,
+            &next_registry,
+            finalized,
+            &witness,
+            committed_subject_root,
+            verifier,
+        )?;
+        if parent != self.highest_parent {
+            return Err(PosyError::Conflict(
+                "epoch transition conflicts with the locally accepted terminal parent".into(),
+            ));
+        }
+        let mut successor = Self::new(next, next_registry, parent)?;
+        successor.seed_epoch_transition_finality(finalized.clone(), witness.quorum_certificates)?;
+        Ok(successor)
+    }
+
+    /// Build a separate recovery projection from this machine's admitted
+    /// transition prefix. Only a pristine successor can supply this prefix;
+    /// there is no API to provide replacement records or certificates.
+    pub fn staged_epoch_transition_recovery(&self) -> PosyResult<Self> {
+        let record = self.last_finalized().ok_or_else(|| {
+            PosyError::invalid("successor recovery lacks verified transition finality")
+        })?;
+        if record.height.checked_add(3) != Some(self.epoch.epoch_start_height)
+            || self.active_slot() != (self.epoch.epoch_start_height, 0)
+            || self.epoch_complete
+            || self.accepted_proposal.is_some()
+            || self.locked_qc.is_some()
+            || !self.accepted_tcs.is_empty()
+        {
+            return Err(PosyError::invalid(
+                "successor recovery requires its initial transition prefix",
+            ));
+        }
+        let certificates = self.finality_witness(record.height).ok_or_else(|| {
+            PosyError::invalid("successor recovery lacks its admitted transition QC tail")
+        })?;
+        let mut staged = Self::new(
+            self.epoch.clone(),
+            self.validators.clone(),
+            self.highest_parent.clone(),
+        )?;
+        staged.seed_epoch_transition_finality(record.clone(), certificates)?;
+        Ok(staged)
+    }
+
+    fn seed_epoch_transition_finality(
         &mut self,
         finalized: crate::FinalizedBlockRecord,
         certificates: [SimplifiedQuorumCertificate; 3],
     ) -> PosyResult<()> {
+        if self.active_slot() != (self.epoch.epoch_start_height, 0)
+            || !self.certified_qcs.is_empty()
+            || !self.accepted_tcs.is_empty()
+            || self.last_finalized().is_some()
+            || self.locked_qc.is_some()
+            || self.accepted_proposal.is_some()
+            || self.epoch_complete
+        {
+            return Err(PosyError::Conflict(
+                "epoch transition requires an uninitialized projection".into(),
+            ));
+        }
         let boundary = certificates
             .last()
             .ok_or_else(|| PosyError::invalid("epoch transition QC tail is empty"))?;
@@ -1132,6 +1251,265 @@ mod tests {
             }
         }
         certified.expect("strict dual quorum formed")
+    }
+
+    #[test]
+    fn successive_1000_block_epochs_carry_finality_through_restart_projection() {
+        let registry = registry();
+        let genesis = genesis_parent();
+        let context = SimplifiedEpochContext::from_frozen_registry(
+            99999,
+            "canary-boundary-regression".into(),
+            7,
+            1,
+            1000,
+            hash('a'),
+            hash('b'),
+            &registry,
+        )
+        .unwrap();
+        let mut active = SimplifiedConsensusStateMachine::new(context, registry, genesis).unwrap();
+        for boundary in [1000, 2000] {
+            while !active.epoch_complete() {
+                certify_next(&mut active);
+            }
+            let finalized = active.last_finalized().unwrap().clone();
+            assert_eq!(finalized.height, boundary - 2);
+            let witness = crate::FinalitySyncWitness {
+                quorum_certificates: active.finality_witness(finalized.height).unwrap(),
+                timeout_certificates: Vec::new(),
+            };
+            let next_registry = FrozenValidatorRegistry::new(
+                active.epoch.epoch + 1,
+                active.validators.active().cloned().collect(),
+            )
+            .unwrap();
+            let auth = crate::EpochTransitionAuthorization::for_governed_successor(
+                &active.epoch,
+                &next_registry,
+                hash('b'),
+            )
+            .unwrap();
+            let mut forged = witness.clone();
+            forged.quorum_certificates[2].block_id = hash('f');
+            assert!(matches!(
+                active.derive_successor_projection(
+                    &auth, next_registry.clone(), forged,
+                    &auth.subject_root_v2().unwrap(), &AcceptAllSignatures
+                ),
+                Err(PosyError::Conflict(_))
+            ));
+            let mut next = active.derive_successor_projection(
+                &auth, next_registry, witness,
+                &auth.subject_root_v2().unwrap(), &AcceptAllSignatures
+            ).unwrap();
+            let mut restarted = next.staged_epoch_transition_recovery().unwrap();
+            assert_eq!(restarted.last_finalized(), Some(&finalized));
+            for finalizing in [boundary - 1, boundary] {
+                certify_next(&mut next);
+                certify_next(&mut restarted);
+                assert_eq!(next.last_finalized().unwrap().height, finalizing);
+                assert_eq!(next.last_finalized(), restarted.last_finalized());
+            }
+            active = restarted;
+        }
+        assert_eq!(active.epoch.epoch, 9);
+        assert_eq!(active.active_slot(), (2003, 0));
+    }
+
+    #[test]
+    fn consensus_derived_epoch_rejects_uncommitted_roster_and_uses_finalized_qc_seed() {
+        let mut old = machine();
+        let mut timeouts = Vec::new();
+        let tail = (1..=20)
+            .map(|height| {
+                if height == 18 {
+                    let takeover = timeout_for(&old, None);
+                    old.accept_timeout_certificate(takeover.clone(), &AcceptAllSignatures)
+                        .unwrap();
+                    timeouts.push(takeover);
+                }
+                certify_next(&mut old)
+            })
+            .collect::<Vec<_>>();
+        let finalized = old.last_finalized().unwrap();
+        let witness = crate::FinalitySyncWitness {
+            quorum_certificates: [tail[17].clone(), tail[18].clone(), tail[19].clone()],
+            timeout_certificates: timeouts,
+        };
+        let mut records: Vec<_> = old.validators.active().cloned().collect();
+        records.push(ValidatorRecord {
+            validator_id: "new-validator".into(),
+            consensus_key_id: "new-key".into(),
+            frozen_voting_weight: 1,
+            status: ValidatorStatus::Active,
+        });
+        let registry = FrozenValidatorRegistry::new(8, records.clone()).unwrap();
+        let auth = crate::EpochTransitionAuthorization::for_governed_successor(
+            &old.epoch,
+            &registry,
+            hash('b'),
+        )
+        .unwrap();
+        assert_eq!((auth.finalized_height, auth.next_epoch_start_height, auth.next_epoch_end_height), (18, 21, 1020));
+        let committed = auth.subject_root_v2().unwrap();
+        let verify = |w: &crate::FinalitySyncWitness, r: &FrozenValidatorRegistry, root: &str| {
+            auth.derive_from_finalized_subject(
+                &old.epoch,
+                &old.validators,
+                r,
+                finalized,
+                w,
+                root,
+                &AcceptAllSignatures,
+            )
+        };
+        let (next, parent) = verify(&witness, &registry, &committed).unwrap();
+        assert_eq!(next.finalized_epoch_seed_root, tail[17].id().unwrap());
+        assert_ne!(next.finalized_epoch_seed_root, tail[19].id().unwrap());
+        assert_eq!(parent, old.highest_parent);
+        let mut foreign_parent = parent.clone();
+        if let SimplifiedFinalityParent::QuorumCertificate { qc_id, .. } = &mut foreign_parent {
+            *qc_id = hash('e');
+        }
+        assert!(SimplifiedConsensusStateMachine::new(
+            next.clone(),
+            registry.clone(),
+            foreign_parent
+        ).is_err());
+        assert!(serde_json::to_value(&next).unwrap().get("v3_transition_anchor").is_some());
+        assert!(serde_json::to_value(&old.epoch).unwrap().get("v3_transition_anchor").is_none());
+        assert!(verify(&witness, &registry, &hash('c')).is_err());
+
+        let unchanged = FrozenValidatorRegistry::new(8, old.validators.active().cloned().collect()).unwrap();
+        assert!(verify(&witness, &unchanged, &committed).is_err());
+        records.reverse();
+        let reordered = FrozenValidatorRegistry::new(8, records).unwrap();
+        assert_eq!(verify(&witness, &reordered, &committed).unwrap(), (next, parent));
+
+        // The same valid block votes cannot replace the inherited takeover proof.
+        assert_eq!(witness.quorum_certificates[2].context.round, 1);
+        let mut missing_timeout = witness.clone();
+        missing_timeout.timeout_certificates.clear();
+        let error = verify(&missing_timeout, &registry, &committed).unwrap_err();
+        assert!(error.to_string().contains("timeout closure"), "{error}");
+    }
+
+    #[test]
+    fn verified_epoch_transition_preserves_context_quorum_and_three_qc_pipeline() {
+        let mut old = machine();
+        let tail = (1..=20).map(|_| certify_next(&mut old)).collect::<Vec<_>>();
+        let qcs = [tail[17].clone(), tail[18].clone(), tail[19].clone()];
+        let finalized = old.last_finalized().unwrap().clone();
+        let registry =
+            FrozenValidatorRegistry::new(8, old.validators.active().cloned().collect()).unwrap();
+        let next = SimplifiedEpochContext::from_frozen_registry(
+            1266,
+            "testnet-v3".into(),
+            8,
+            21,
+            40,
+            hash('a'),
+            hash('b'),
+            &registry,
+        )
+        .unwrap();
+        let auth = crate::EpochTransitionAuthorization {
+            previous_epoch: 7,
+            previous_epoch_context_root: old.epoch.root().unwrap(),
+            finalized_height: 18,
+            next_epoch: 8,
+            next_epoch_start_height: 21,
+            next_epoch_end_height: 40,
+            next_consensus_parameter_root: next.consensus_parameter_root.clone(),
+            next_active_validator_set_root: next.active_validator_set_root.clone(),
+            next_validator_consensus_key_root: next.validator_consensus_key_root.clone(),
+            next_frozen_voting_weight_root: next.frozen_voting_weight_root.clone(),
+        };
+        let mut successor = SimplifiedConsensusStateMachine::new(
+            next.clone(),
+            registry.clone(),
+            old.highest_parent.clone(),
+        )
+        .unwrap();
+        for kind in 0..4 {
+            let mut bad = qcs.clone();
+            match kind {
+                0 => bad[1].context.epoch = 8,
+                1 => {
+                    bad[0].participants.pop();
+                }
+                2 => {
+                    bad[0].participants = (1..5)
+                        .map(|i| ParticipantSignature {
+                            validator_id: format!("validator-{i}"),
+                            key_id: format!("key-{i}"),
+                            signature: vec![i as u8],
+                        })
+                        .collect();
+                }
+                _ => bad[1].parent = genesis_parent(),
+            }
+            assert!(successor
+                .seed_verified_epoch_transition(
+                    &auth,
+                    &old.epoch,
+                    &old.validators,
+                    finalized.clone(),
+                    bad,
+                    &AcceptAllSignatures
+                )
+                .is_err());
+            assert!(successor.last_finalized().is_none());
+            assert!(successor.certified_qcs.is_empty());
+        }
+        let mut foreign = next.clone();
+        foreign.network_id = "foreign".into();
+        assert!(auth.validate(&old.epoch, &foreign, &registry).is_err());
+        let mut wrong_record = finalized.clone();
+        wrong_record.block_id = "substituted".into();
+        assert!(successor
+            .seed_verified_epoch_transition(
+                &auth,
+                &old.epoch,
+                &old.validators,
+                wrong_record,
+                qcs.clone(),
+                &AcceptAllSignatures
+            )
+            .is_err());
+        successor
+            .seed_verified_epoch_transition(
+                &auth,
+                &old.epoch,
+                &old.validators,
+                finalized.clone(),
+                qcs.clone(),
+                &AcceptAllSignatures,
+            )
+            .unwrap();
+        assert_eq!(successor.last_finalized(), Some(&finalized));
+        assert_eq!(successor.certified_qcs[&20].context.epoch, 7);
+        let staged = successor.staged_epoch_transition_recovery().unwrap();
+        assert_eq!(staged.last_finalized(), successor.last_finalized());
+        assert_eq!(staged.certified_qcs, successor.certified_qcs);
+
+        assert!(successor
+            .seed_verified_epoch_transition(
+                &auth,
+                &old.epoch,
+                &old.validators,
+                finalized,
+                qcs,
+                &AcceptAllSignatures
+            )
+            .is_err());
+        for expected in 19..=21 {
+            certify_next(&mut successor);
+            assert_eq!(successor.last_finalized().unwrap().height, expected);
+        }
+        assert_eq!(successor.certified_qcs[&21].context.epoch, 8);
+        assert!(successor.staged_epoch_transition_recovery().is_err());
     }
 
     #[test]
