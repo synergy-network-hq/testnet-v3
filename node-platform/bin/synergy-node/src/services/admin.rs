@@ -1108,15 +1108,17 @@ impl RuntimeAdminService {
         let authority = self.authority.as_ref().ok_or_else(|| {
             AdminError::unavailable("verified frozen PoSy authority is unavailable")
         })?;
-        let finalized = self
+        let (finalized, witness) = self
             .ingress
-            .latest_finality()
+            .latest_finality_with_witness()
             .map_err(AdminError::unavailable)?
             .ok_or_else(|| {
                 AdminError::unavailable(
                     "finalized epoch-closing record is unavailable for membership authority",
                 )
             })?;
+        crate::services::authority::verify_transition_witness(authority, &finalized, &witness)
+            .map_err(AdminError::invalid_request)?;
         let target_epoch = authority
             .epoch
             .epoch

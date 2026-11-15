@@ -794,7 +794,7 @@ fn verify_binding_with_explicit_key(
     }))
 }
 
-fn verify_transition_witness(
+pub(super) fn verify_transition_witness(
     previous: &VerifiedAuthority,
     finalized: &FinalizedBlockRecord,
     finality_witness: &[u8],
