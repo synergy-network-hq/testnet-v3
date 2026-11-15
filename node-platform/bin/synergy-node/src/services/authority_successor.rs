@@ -22,7 +22,7 @@ struct Proposal {
 
 /// Compact public inputs for offline proof qualification. Decoding this
 /// structure never activates a successor or authorizes peer membership.
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DerivedEpochProof {
     authorization: EpochTransitionAuthorization,
@@ -32,10 +32,103 @@ struct DerivedEpochProof {
     next_validators: Vec<ValidatorRecord>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DerivedEpochProofChain {
+    version: u32,
+    origin_context_root: String,
+    transitions: Vec<DerivedEpochProof>,
+}
+
+struct VerifiedDerivedEpoch {
+    context: SimplifiedEpochContext,
+    parent: SimplifiedFinalityParent,
+    registry: FrozenValidatorRegistry,
+    policy: ProtectedEpochPolicy,
+}
+
+/// Read-only proof cursor. It cannot return a live authority binding, peer
+/// registry or signing capability. Only a verified closure can advance it.
+struct DerivedEpochVerifier<'a> {
+    origin: &'a VerifiedAuthority,
+    context: SimplifiedEpochContext,
+    registry: FrozenValidatorRegistry,
+    policy: Arc<ProtectedEpochPolicy>,
+}
+
+impl<'a> DerivedEpochVerifier<'a> {
+    fn new(origin: &'a VerifiedAuthority) -> Result<Self, String> {
+        Ok(Self {
+            origin,
+            context: origin.epoch.clone(),
+            registry: origin.registry.clone(),
+            policy: origin
+                .protected
+                .clone()
+                .ok_or("previous authority lacks ETDAG policy")?,
+        })
+    }
+
+    fn advance(
+        &mut self,
+        proof: &DerivedEpochProof,
+    ) -> Result<SimplifiedFinalityParent, String> {
+        let verified = verify_derived_epoch_in_scope(
+            &self.context, &self.registry, &self.policy, self, proof,
+        )?;
+        self.context = verified.context;
+        self.registry = verified.registry;
+        self.policy = Arc::new(verified.policy);
+        Ok(verified.parent)
+    }
+}
+
+impl ConsensusSignatureVerifier for DerivedEpochVerifier<'_> {
+    fn verify_consensus_signature(
+        &self,
+        domain: &str,
+        payload: &[u8],
+        validator: &ValidatorRecord,
+        key_id: &str,
+        epoch: u64,
+        signature: &[u8],
+    ) -> PosyResult<()> {
+        self.origin.verify_consensus_signature_in_epoch(
+            domain, payload, validator, key_id, self.context.epoch, epoch, signature,
+        )
+    }
+
+    fn verify_timeout_boundary_parent(
+        &self,
+        successor: &SimplifiedEpochContext,
+        proof: &SimplifiedQuorumCertificate,
+    ) -> PosyResult<()> {
+        // Closing proofs for derived 1,000-block epochs are confined to the
+        // last lease. They cannot include a first-lease boundary parent.
+        if self.context != self.origin.epoch || successor != &self.context {
+            return Err(PosyError::invalid("closing proof references another epoch's boundary"));
+        }
+        self.origin.verify_timeout_boundary_parent(successor, proof)
+    }
+}
+
+#[cfg(test)]
 fn verify_derived_epoch(
     previous: &VerifiedAuthority,
     proof: &DerivedEpochProof,
 ) -> Result<(SimplifiedEpochContext, SimplifiedFinalityParent), String> {
+    let mut cursor = DerivedEpochVerifier::new(previous)?;
+    let parent = cursor.advance(proof)?;
+    Ok((cursor.context, parent))
+}
+
+fn verify_derived_epoch_in_scope(
+    previous: &SimplifiedEpochContext,
+    previous_registry: &FrozenValidatorRegistry,
+    policy: &ProtectedEpochPolicy,
+    verifier: &impl ConsensusSignatureVerifier,
+    proof: &DerivedEpochProof,
+) -> Result<VerifiedDerivedEpoch, String> {
     if proof.next_validators.iter().any(|validator| !validator.may_sign_consensus()) {
         return Err("derived epoch proof includes a validator outside the active set".into());
     }
@@ -47,7 +140,8 @@ fn verify_derived_epoch(
     // Until this consumer can reconstruct an on-chain membership or policy
     // change, qualify only the unchanged governed set. A proof is not an
     // independent source of validator eligibility or consensus parameters.
-    let expected = unchanged_successor_subject(previous)?;
+    let (expected, next_policy) =
+        unchanged_successor_subject(previous, previous_registry, policy)?;
     if proof.authorization != expected {
         return Err("epoch subject differs from independently derived rollover policy".into());
     }
@@ -59,18 +153,24 @@ fn verify_derived_epoch(
             synergy_block::hash_block_bytes,
         )
         .map_err(|e| format!("epoch closure lacks its exact protected transition subject: {e:?}"))?;
-    proof
+    let (context, parent) = proof
         .authorization
         .derive_from_finalized_subject(
-            &previous.epoch,
-            &previous.registry,
+            previous,
+            previous_registry,
             &next_registry,
             &proof.finalized,
             &proof.witness,
             subject,
-            previous,
+            verifier,
         )
-        .map_err(|e| format!("authenticate consensus-derived epoch: {e}"))
+        .map_err(|e| format!("authenticate consensus-derived epoch: {e}"))?;
+    Ok(VerifiedDerivedEpoch {
+        context,
+        parent,
+        registry: next_registry,
+        policy: next_policy,
+    })
 }
 
 fn verify(
@@ -142,27 +242,26 @@ fn verify(
 const CANARY_EPOCH_BLOCKS: u64 = 1_000;
 
 fn unchanged_successor_subject(
-    previous: &VerifiedAuthority,
-) -> Result<EpochTransitionAuthorization, String> {
-    let next_epoch = previous.epoch.epoch.checked_add(1).ok_or("epoch overflow")?;
-    let policy = previous
-        .protected
-        .as_ref()
-        .ok_or("previous authority lacks ETDAG policy")?;
+    previous: &SimplifiedEpochContext,
+    previous_registry: &FrozenValidatorRegistry,
+    policy: &ProtectedEpochPolicy,
+) -> Result<(EpochTransitionAuthorization, ProtectedEpochPolicy), String> {
+    let next_epoch = previous.epoch.checked_add(1).ok_or("epoch overflow")?;
     let next_policy = successor_time_policy(
         policy,
-        previous.epoch.epoch_start_height,
-        previous.epoch.epoch_end_height,
+        previous.epoch_start_height,
+        previous.epoch_end_height,
     )?;
     let registry =
-        FrozenValidatorRegistry::new(next_epoch, previous.registry.active().cloned().collect())
+        FrozenValidatorRegistry::new(next_epoch, previous_registry.active().cloned().collect())
             .map_err(|e| e.to_string())?;
-    EpochTransitionAuthorization::for_governed_successor(
-        &previous.epoch,
+    let subject = EpochTransitionAuthorization::for_governed_successor(
+        previous,
         &registry,
         next_policy.commitment()?,
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    Ok((subject, next_policy))
 }
 
 fn successor_time_policy(
@@ -527,7 +626,7 @@ fn check_staged_network(
 pub(crate) fn cli(args: impl Iterator<Item = String>) -> Result<(), String> {
     let args: Vec<_> = args.take(10).collect();
     let [command, config, proposal_path, extra @ ..] = args.as_slice() else {
-        return Err("usage: authority-successor check|activate|activate-observer CONFIG PROPOSAL; check-derived CONFIG PROOF; export-boundary CONFIG WITNESS; prepare-payload CONFIG WITNESS OUTPUT; bundle CONFIG WITNESS SIGNED_AUTHORITY OUTPUT; check-local CONFIG PROPOSAL; registry CONFIG PROPOSAL CUSTODY OUTPUT; check-network CONFIG PROPOSAL REGISTRY WORKSPACE [ADMISSION]; issue-admission CONFIG PROPOSAL REGISTRY WORKSPACE ENROLLMENT CUSTODY UNLOCK OUTPUT".into());
+        return Err("usage: authority-successor check|activate|activate-observer CONFIG PROPOSAL; check-derived|check-derived-chain CONFIG PROOF; export-boundary CONFIG WITNESS; prepare-payload CONFIG WITNESS OUTPUT; bundle CONFIG WITNESS SIGNED_AUTHORITY OUTPUT; check-local CONFIG PROPOSAL; registry CONFIG PROPOSAL CUSTODY OUTPUT; check-network CONFIG PROPOSAL REGISTRY WORKSPACE [ADMISSION]; issue-admission CONFIG PROPOSAL REGISTRY WORKSPACE ENROLLMENT CUSTODY UNLOCK OUTPUT".into());
     };
     let config = Path::new(config);
     if !config.is_absolute() {
@@ -546,17 +645,34 @@ pub(crate) fn cli(args: impl Iterator<Item = String>) -> Result<(), String> {
     if command == "export-boundary" && extra.is_empty() {
         return export_boundary(&configuration, Path::new(proposal_path));
     }
-    if command == "check-derived" && extra.is_empty() {
+    if matches!(command.as_str(), "check-derived" | "check-derived-chain") && extra.is_empty() {
         let previous = load(&configuration)?.ok_or("missing authenticated predecessor")?;
         let bytes = apqe_transport::read(Path::new(proposal_path), 4 * 1024 * 1024, false)?;
-        let proof: DerivedEpochProof = serde_json::from_slice(&bytes)
-            .map_err(|e| format!("decode derived epoch proof: {e}"))?;
-        let (context, certified_parent) = verify_derived_epoch(&previous, &proof)?;
+        let mut cursor = DerivedEpochVerifier::new(&previous)?;
+        let proofs = if command == "check-derived-chain" {
+            let chain: DerivedEpochProofChain = serde_json::from_slice(&bytes)
+                .map_err(|e| format!("decode derived epoch proof chain: {e}"))?;
+            if chain.version != 1
+                || chain.origin_context_root != cursor.context.root().map_err(|e| e.to_string())?
+                || !(1..=16).contains(&chain.transitions.len())
+            {
+                return Err("invalid proof-chain version, origin or length".into());
+            }
+            chain.transitions
+        } else {
+            vec![serde_json::from_slice(&bytes)
+                .map_err(|e| format!("decode derived epoch proof: {e}"))?]
+        };
+        let mut certified_parent = None;
+        for proof in &proofs {
+            certified_parent = Some(cursor.advance(proof)?);
+        }
         println!("{}", serde_json::json!({
             "status": "consensus-derived-context-verified",
-            "context_root": context.root().map_err(|e| e.to_string())?,
-            "context": context,
+            "context_root": cursor.context.root().map_err(|e| e.to_string())?,
+            "context": cursor.context,
             "certified_parent": certified_parent,
+            "verified_transitions": proofs.len(),
             "activated": false,
         }));
         return Ok(());
@@ -693,34 +809,18 @@ pub(crate) fn cli(args: impl Iterator<Item = String>) -> Result<(), String> {
 }
 
 #[cfg(test)]
-pub(super) fn qualify_offline_successor(
-    config: &NodeConfiguration,
-    previous: &VerifiedAuthority,
-    signed_previous: &SignedAuthorityBinding,
+fn signed_derived_test_proof(
+    previous: &SimplifiedEpochContext,
+    authorization: EpochTransitionAuthorization,
+    next_validators: Vec<ValidatorRecord>,
     keys: &[synergy_address_engine::apqe::crypto_engine::EncodedKeyPair],
-    signer: &synergy_aegis::PqvmSigner,
     engine: &Arc<Mutex<synergy_address_engine::apqe::crypto_engine::CryptoEngine>>,
-) {
+) -> DerivedEpochProof {
     use synergy_address_engine::{apqe::provider::SignOptions, types::Algorithm};
-    use synergy_aegis::AegisSigner;
     use synergy_posy::{block_vote_signing_bytes, BlockVote, ConsensusObjectContext};
-    // A native cryptographic test of the candidate proof path: the old
-    // validators certify the executed subject, and no successor signer is
-    // invoked before the derived context is authenticated.
-    let next_validators = signed_previous
-        .payload
-        .validators
-        .iter()
-        .map(|validator| validator.record.clone())
-        .collect::<Vec<_>>();
-    let authorization = unchanged_successor_subject(previous).unwrap();
-    assert_ne!(
-        authorization.next_consensus_parameter_root,
-        previous.epoch.consensus_parameter_root
-    );
     let root = synergy_etdag::EtdagDigest::from_domain_bytes("epoch-closure-test", b"namespace");
-    let closing_material = synergy_etdag::execution::ProcessingProposalMaterial {
-        material_version: 2,
+    let (closing_material, commitment) = synergy_etdag::execution::ProcessingProposalMaterial {
+        material_version: 1,
         profile_id: synergy_etdag::PROCESSING_PROFILE_ID.into(),
         height: authorization.finalized_height,
         namespace_root: root.clone(),
@@ -732,28 +832,27 @@ pub(super) fn qualify_offline_successor(
         .unwrap(),
         transition_root: root,
         ordered_group: None,
-        epoch_transition_subject_root: Some(authorization.subject_root_v2().unwrap()),
-    };
-    let protected_root = synergy_block::hash_block_bytes(&serde_json::to_vec(&(
-        "SYNERGY_POSY_PROCESSING_MATERIAL_V2",
-        &closing_material,
-    )).unwrap());
+        epoch_transition_subject_root: None,
+    }
+    .with_epoch_close_subject(authorization.subject_root_v2().unwrap())
+    .unwrap();
+    let protected_root = synergy_block::hash_block_bytes(&commitment);
     let mut parent = SimplifiedFinalityParent::QuorumCertificate {
-        height: 19997,
+        height: authorization.finalized_height - 1,
         block_id: "d".repeat(64),
         qc_id: "e".repeat(64),
     };
     let mut finality = ThreeQcFinality::default();
     let mut certificates = Vec::new();
-    for height in 19998..=20000 {
+    for height in authorization.finalized_height..=previous.epoch_end_height {
         let votes = keys
             .iter()
             .take(4)
             .enumerate()
             .map(|(index, key)| {
-                let record = &signed_previous.payload.validators[index].record;
+                let record = &next_validators[index];
                 let mut vote = BlockVote {
-                    context: ConsensusObjectContext::for_height(&previous.epoch, height, 0)
+                    context: ConsensusObjectContext::for_height(previous, height, 0)
                         .unwrap(),
                     block_id: format!("{height:064x}"),
                     parent_block_id: parent.block_id().into(),
@@ -790,27 +889,70 @@ pub(super) fn qualify_offline_successor(
         };
         certificates.push(qc);
     }
-    let mut derived = DerivedEpochProof {
+    DerivedEpochProof {
         authorization,
         finalized: finality.last_finalized().unwrap().clone(),
         witness: synergy_posy::FinalitySyncWitness {
-            quorum_certificates: certificates.clone().try_into().unwrap(),
+            quorum_certificates: certificates.try_into().unwrap(),
             timeout_certificates: Vec::new(),
         },
-        closing_material: closing_material.clone().into(),
+        closing_material: closing_material.into(),
         next_validators,
+    }
+}
+
+#[cfg(test)]
+pub(super) fn qualify_offline_successor(
+    config: &NodeConfiguration,
+    previous: &VerifiedAuthority,
+    signed_previous: &SignedAuthorityBinding,
+    keys: &[synergy_address_engine::apqe::crypto_engine::EncodedKeyPair],
+    signer: &synergy_aegis::PqvmSigner,
+    engine: &Arc<Mutex<synergy_address_engine::apqe::crypto_engine::CryptoEngine>>,
+) {
+    use synergy_aegis::AegisSigner;
+    // The old validator keys certify each closing subject; no successor
+    // authority signature is used for this consecutive-epoch verification.
+    let mut cursor = DerivedEpochVerifier::new(previous).unwrap();
+    let validators = signed_previous.payload.validators.iter()
+        .map(|validator| validator.record.clone())
+        .collect::<Vec<_>>();
+    let next_subject = |cursor: &DerivedEpochVerifier<'_>| {
+        unchanged_successor_subject(&cursor.context, &cursor.registry, &cursor.policy)
+            .unwrap().0
     };
+    let mut derived = signed_derived_test_proof(
+        &cursor.context, next_subject(&cursor), validators.clone(), keys, engine,
+    );
+    cursor.advance(&derived).unwrap();
+    let second = signed_derived_test_proof(
+        &cursor.context, next_subject(&cursor), validators, keys, engine,
+    );
+    assert!(verify_derived_epoch(previous, &second).is_err());
+    cursor.advance(&second).unwrap();
+    assert_eq!(cursor.context.epoch_start_height, 21001);
+    let final_root = cursor.context.root().unwrap();
+    assert!(cursor.advance(&derived).is_err());
+    assert_eq!(cursor.context.root().unwrap(), final_root);
+
+    let certificates = derived.witness.quorum_certificates.clone();
+    let finalized = derived.finalized.clone();
     let (next_context, parent) = verify_derived_epoch(previous, &derived).unwrap();
+    assert_ne!(next_context.consensus_parameter_root, previous.epoch.consensus_parameter_root);
     assert_eq!(next_context.finalized_epoch_seed_root, certificates[0].id().unwrap());
     assert_eq!(parent.quorum_certificate_reference().unwrap(), certificates[2].reference().unwrap());
 
-    let mut foreign_material = closing_material.clone();
+    let closing_material = derived.closing_material.clone();
+    let synergy_etdag::execution::CandidateProtectedMaterial::Processing(foreign_material) =
+        &mut derived.closing_material
+    else {
+        panic!("derived fixture requires processing material");
+    };
     foreign_material.epoch_transition_subject_root = Some("a".repeat(64));
-    derived.closing_material = foreign_material.into();
     assert!(verify_derived_epoch(previous, &derived)
         .unwrap_err()
         .contains("protected transition subject"));
-    derived.closing_material = closing_material.into();
+    derived.closing_material = closing_material;
     derived.next_validators[0].frozen_voting_weight += 1;
     assert!(verify_derived_epoch(previous, &derived).is_err());
     derived.next_validators[0].frozen_voting_weight -= 1;
@@ -850,8 +992,8 @@ pub(super) fn qualify_offline_successor(
         version: 1,
         previous_authority_binding: previous.binding_bytes().to_vec(),
         witness: Witness {
-            finalized: finality.last_finalized().unwrap().clone(),
-            certificates: certificates.try_into().unwrap(),
+            finalized,
+            certificates,
         },
         successor_authority_binding: serde_json::to_vec(&candidate).unwrap(),
     };

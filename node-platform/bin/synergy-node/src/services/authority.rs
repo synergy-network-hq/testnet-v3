@@ -1234,6 +1234,28 @@ impl ConsensusSignatureVerifier for VerifiedAuthority {
         epoch: u64,
         signature: &[u8],
     ) -> PosyResult<()> {
+        self.verify_consensus_signature_in_epoch(
+            domain, payload, validator, key_id, self.epoch.epoch, epoch, signature,
+        )
+    }
+}
+
+impl VerifiedAuthority {
+    // The ordinary verifier pins self.epoch. An offline successor proof
+    // consumer can advance its expected scope only after it has verified the
+    // finalized transition and independently proven that the key set is
+    // unchanged. Both use this same APQE implementation and cache.
+    #[allow(clippy::too_many_arguments)]
+    fn verify_consensus_signature_in_epoch(
+        &self,
+        domain: &str,
+        payload: &[u8],
+        validator: &ValidatorRecord,
+        key_id: &str,
+        expected_epoch: u64,
+        epoch: u64,
+        signature: &[u8],
+    ) -> PosyResult<()> {
         let key = self
             .keys
             .get(&validator.validator_id)
@@ -1241,7 +1263,7 @@ impl ConsensusSignatureVerifier for VerifiedAuthority {
         if &key.validator != validator
             || key.validator.consensus_key_id != key_id
             || key.algorithm != SignatureAlgorithm::MlDsa65
-            || epoch != self.epoch.epoch
+            || epoch != expected_epoch
         {
             return Err(PosyError::invalid(
                 "consensus signature authority binding mismatch",
