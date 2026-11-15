@@ -385,12 +385,26 @@ class Controller:
         with _lifecycle_lock(self.root):
             require(not any(self.exists(path) for path in (GENESIS_STAGE,GENESIS_STAGE_WORK,GENESIS_BIND_INTENT,
                     'tmp/pending-validator-custody','data')),'Genesis is already staged or requires reconciliation')
-            selection,flags=self.formation_context()
             pins=self.genesis_pins()
-            formation=self.formation_result(selection,flags,'verify-validator-formation')
+            # New networks bind pre-Genesis custody. Joining an existing
+            # network checks its signed Genesis before creating fresh custody.
+            # Neither path can switch modes after formation has started.
+            policy=self.policy()
+            existing=policy.get('validator_identity_mode')=='existing_network'
+            if existing:
+                require('validator_formation_sha256' not in policy and not any(self.exists(path)
+                        for path in (FORMATION_CONTEXT,FORMATION_CUSTODY,FORMATION_INTENT)),
+                        'Existing-network staging conflicts with Genesis formation')
+                selection,flags=self.identity_release()
+                formation=None
+            else:
+                selection,flags=self.formation_context()
+                formation=self.formation_result(selection,flags,'verify-validator-formation')
+            scope=({'address':formation['address']} if formation else
+                   {'network_id':selection['network_id'],'chain_id':str(selection['chain_id']),'membership_granted':False})
             if request is None:
-                return {'schema':'nodenetwork-genesis-stage-policy-v1','address':formation['address'],
-                        **self.genesis_pin_result(pins)}
+                schema='nodenetwork-existing-genesis-stage-policy-v1' if existing else 'nodenetwork-genesis-stage-policy-v1'
+                return {'schema':schema,**scope,**self.genesis_pin_result(pins)}
             contents=genesis_artifact_bytes(request['parameters']['artifacts'])
             require(all(hashlib.sha256(contents[name]).hexdigest()==pins[name] for name in GENESIS_FILES),
                     'Public upload differs from independently approved Genesis pins')
@@ -402,18 +416,21 @@ class Controller:
                     with (work/name).open('xb') as stream:
                         os.fchmod(stream.fileno(),0o600)
                         stream.write(raw);stream.flush();os.fsync(stream.fileno())
-                verified=self.genesis_review('review-validator-genesis-binding',selection,flags,pins,work)
-                require(not verified['bound'] and verified['address']==formation['address'],
-                        'Genesis does not admit the exact prepared local custody')
+                if existing:
+                    self.verify_identity_network(selection,flags,pins,work)
+                else:
+                    verified=self.genesis_review('review-validator-genesis-binding',selection,flags,pins,work)
+                    require(not verified['bound'] and verified['address']==formation['address'],
+                            'Genesis does not admit the exact prepared local custody')
                 write_new(work/GENESIS_STAGE_RECEIPT,{'format':'nodenetwork-genesis-stage-request-v1',
                           'request_sha256':request_sha256,**self.genesis_pin_result(pins)})
                 work.rename(self.root/GENESIS_STAGE)
                 sync_directory(work.parent)
             finally:
                 if work.exists(): shutil.rmtree(work)
-            return {'schema':'nodenetwork-genesis-stage-v1','address':formation['address'],
-                    **self.genesis_pin_result(pins),'request_sha256':request_sha256,
-                    'genesis_authority_verified':True,'membership_verified':True,'staged':True}
+            schema='nodenetwork-existing-genesis-stage-v1' if existing else 'nodenetwork-genesis-stage-v1'
+            return {'schema':schema,**scope,**self.genesis_pin_result(pins),'request_sha256':request_sha256,
+                    'genesis_authority_verified':True,'membership_verified':not existing,'staged':True}
 
     def genesis_stage_request(self,pins):
         folder=self.root/GENESIS_STAGE
@@ -469,25 +486,35 @@ class Controller:
                 response['request_sha256']=self.exact_request_receipt(GENESIS_BIND_INTENT,'genesis_bind','genesis_sha256',pin)
             return response
 
-    def identity_network(self):
+    def identity_release(self):
         from lifecycle import _sealed_receipt
-        from synergy_linux import digest, native, read
         receipt, manifest = _sealed_receipt(self.root)
         require(receipt['role']=='validator','A validator package is required')
         self.direct(self.root/'installation.json',True)
-        pins = self.genesis_pins()
-        staged = self.root/GENESIS_STAGE
+        report = 'lib/apqe/build-report.json'
+        flags = ['--apqe-report',self.root/report,'--apqe-report-sha256',manifest['files'][report]]
+        return receipt, flags
+
+    def verify_identity_network(self, receipt, flags, pins, staged):
+        from synergy_linux import digest, native, read
         files = {name:self.direct(staged/name,maximum=limit) for name,limit in GENESIS_FILES.items()}
         require(all(digest(path)==pins[name] for name,path in files.items()),'Approved identity network inputs changed')
         network=read(files['genesis.json'])['unsigned']['network']
         require(network['chain_id']==receipt['chain_id'] and network['network_id']==receipt['network_id'],
                 'Signed Genesis selects a different installation network')
-        report = 'lib/apqe/build-report.json'
-        flags = ['--apqe-report',self.root/report,'--apqe-report-sha256',manifest['files'][report]]
         native([self.root/'bin/synergy-genesis','verify-binding',files['genesis.json'],
                 files['authority-root.pub'],files['authority.json'],*flags])
         return {'network_id':receipt['network_id'],'chain_id':str(receipt['chain_id']),
-                'genesis_sha256':pins['genesis.json'],'genesis_authority_verified':True},flags
+                'genesis_sha256':pins['genesis.json'],'genesis_authority_verified':True}
+
+    def identity_network(self):
+        receipt, flags = self.identity_release()
+        pins=self.genesis_pins()
+        verified=self.verify_identity_network(receipt,flags,pins,self.root/GENESIS_STAGE)
+        if self.policy().get('validator_identity_mode')=='existing_network':
+            verified.update(self.genesis_stage_request(pins),
+                            schema='nodenetwork-existing-identity-network-v1',membership_granted=False)
+        return verified, flags
 
     def checked_custody(self, selection, flags, command):
         from synergy_linux import native

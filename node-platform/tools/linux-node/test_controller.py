@@ -228,6 +228,47 @@ class ControllerTests(unittest.TestCase):
             self.assertIn('verify-validator-formation',native.call_args.args[0])
             with self.assertRaisesRegex(c.Refused,'reconciled'):self.controller.formation_prepare(req)
 
+    def test_existing_chain_stages_signed_genesis_without_genesis_membership(self):
+        public={'genesis.json':'{"unsigned":{"network":{"chain_id":99999,"network_id":"existing-network"}}}',
+                'authority.json':'{}','authority-root.pub':base64.b64encode(b'public-test-key').decode()}
+        contents=c.genesis_artifact_bytes(public)
+        pins={name:hashlib.sha256(raw).hexdigest() for name,raw in contents.items()}
+        self.policy.update(qualified_operations=['genesis_stage'],validator_identity_network=pins,
+                           validator_identity_mode='existing_network')
+        self.save(self.control/'policy.json',self.policy)
+        req=request('genesis_stage',{'artifacts':public})
+        key=c.request_digest(req)
+        grant=self.control/'grants'/(key+'.json')
+        release={'network_id':'existing-network','chain_id':99999}
+        with patch.object(self.controller,'identity_release',return_value=(release,[])), \
+             patch.object(self.controller,'formation_context') as formation, \
+             patch('synergy_linux.native') as native:
+            policy=self.controller.genesis_stage()
+            self.assertEqual(policy['schema'],'nodenetwork-existing-genesis-stage-policy-v1')
+            self.assertFalse(policy['membership_granted'])
+            self.assertNotIn('address',policy)
+            with self.assertRaisesRegex(c.Refused,'one-time'):
+                self.controller.genesis_stage(req)
+            self.save(grant,{'root':str(self.root),'request_sha256':key,'expires_at':int(time.time())+60})
+            native.side_effect=ValueError('invalid Genesis signature')
+            with self.assertRaisesRegex(ValueError,'invalid Genesis'):
+                self.controller.genesis_stage(req)
+            self.assertFalse((self.root/c.GENESIS_STAGE).exists())
+            self.assertFalse((self.root/c.GENESIS_STAGE_WORK).exists())
+            self.assertFalse(grant.exists())
+            native.side_effect=None
+            self.save(grant,{'root':str(self.root),'request_sha256':key,'expires_at':int(time.time())+60})
+            result=self.controller.genesis_stage(req)
+            self.assertFalse(result['membership_verified'])
+            self.assertFalse(result['membership_granted'])
+            self.assertEqual(result['request_sha256'],key)
+            self.assertEqual(self.controller.identity_network()[0]['stage_request_sha256'],key)
+            self.assertIn('verify-binding',native.call_args.args[0])
+            self.assertFalse((self.root/'tmp/pending-validator-custody').exists())
+            with self.assertRaisesRegex(c.Refused,'already staged'):
+                self.controller.genesis_stage(req)
+            formation.assert_not_called()
+
     def test_public_genesis_upload_exact_bytes_native_membership_and_reconciliation(self):
         public={'genesis.json':'{"text":"café"}','authority.json':'{}',
                 'authority-root.pub':base64.b64encode(b'\xff\x00\x82').decode()}
