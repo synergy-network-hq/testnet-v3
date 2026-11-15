@@ -204,3 +204,7 @@ required-features = ["ceremony"]
 [[bin]]
 name = "recompute-testnet-v3-genesis"
 path = "bin/recompute-testnet-v3-genesis.rs"
+
+[[bin]]
+name = "chain1266-nf1-sales-activation"
+path = "bin/chain1266-nf1-sales-activation.rs"

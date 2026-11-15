@@ -37,6 +37,7 @@ pub mod genesis;
 pub mod genesis_deployment;
 pub mod logging;
 pub mod node;
+pub mod nf1_sales_activation;
 pub mod p2p;
 pub mod recovery;
 pub mod rewards;

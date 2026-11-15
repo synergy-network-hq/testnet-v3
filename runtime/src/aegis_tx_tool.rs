@@ -416,6 +416,10 @@ pub fn verify_aegis_submission_envelope_at(
             envelope.transaction.sender_uma_or_account
         ));
     }
+    // Unknown STS operations cannot execute. Reject them before a carrier can
+    // enter the mempool, including sales on a build without the sale protocol.
+    crate::sts::decode_sts_payload(&envelope.transaction.payload)
+        .map_err(|error| error.to_string())?;
     crate::synq_admission::verify_transaction_payload_for_chain_admission(
         &envelope.transaction,
         consensus_timestamp_unix,
@@ -704,5 +708,28 @@ mod tests {
         let mut tampered_carrier = report.rpc_transaction.clone();
         tampered_carrier.amount = tampered_carrier.amount.saturating_add(1);
         assert!(validate_legacy_aegis_carrier_transaction(&tampered_carrier).is_err());
+    }
+
+    #[cfg(not(feature = "engineering-nf1-sales"))]
+    #[test]
+    fn aegis_ingress_rejects_nf1_sale_when_feature_is_absent() {
+        let mut payload = crate::sts::STS_PAYLOAD_PREFIX.to_vec();
+        payload.extend_from_slice(
+            br#"{
+                "version":1,
+                "chain_id":1266,
+                "network":"synergy-testnet-v3",
+                "tx":{
+                    "op":"list_nft_for_snrg",
+                    "data":{"nft_id":"local-test","price_nwei":100,"expires_at_height":30}
+                }
+            }"#,
+        );
+        let error = sign_with_new_aegis_transaction_key(AegisTxBuildOptions {
+            payload,
+            ..AegisTxBuildOptions::default()
+        })
+        .unwrap_err();
+        assert_eq!(error, crate::sts::StsError::InvalidMetadata.to_string());
     }
 }

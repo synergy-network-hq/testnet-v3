@@ -1,0 +1,101 @@
+name: Chain 1266 NF1 sale candidate
+
+on:
+  pull_request:
+    branches:
+      - release/chain1266-single-authority
+    paths:
+      - '.github/workflows/chain1266-nf1-sale-candidate.yml'
+      - 'launch/CHAIN_1266_DEPENDENCIES.lock.json'
+      - 'runtime/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chain1266-nf1-sale-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  qualification:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-22.04
+    timeout-minutes: 55
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Check out pinned SynQ source
+        env:
+          DEPENDENCY_READ_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          lock=launch/CHAIN_1266_DEPENDENCIES.lock.json
+          [[ "$(jq -er '.schema_version' "$lock")" == 1 ]]
+          [[ "$(jq -er '.synq.repository' "$lock")" == synergy-network-hq/synq-language ]]
+          [[ "$(git rev-parse HEAD:runtime/aegis-pqvm)" == "$(jq -er '.aegis.revision' "$lock")" ]]
+          revision="$(jq -er '.synq.revision' "$lock")"
+          submodule="$(jq -er '.synq.submodules["aegis-pqsynq"]' "$lock")"
+          [[ "$revision" =~ ^[0-9a-f]{40}$ && "$submodule" =~ ^[0-9a-f]{40}$ ]]
+          dependency="$GITHUB_WORKSPACE/../synq-language"
+          git init --quiet "$dependency"
+          git -C "$dependency" fetch --depth 1 https://github.com/synergy-network-hq/synq-language.git "$revision"
+          git -C "$dependency" checkout --detach --quiet FETCH_HEAD
+          [[ "$(git -C "$dependency" rev-parse HEAD)" == "$revision" ]]
+          [[ "$(git -C "$dependency" rev-parse HEAD:aegis-pqsynq)" == "$submodule" ]]
+          git init --quiet "$dependency/aegis-pqsynq"
+          header="$(printf 'x-access-token:%s' "$DEPENDENCY_READ_TOKEN" | base64 -w 0)"
+          echo "::add-mask::$header"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $header" \
+            -C "$dependency/aegis-pqsynq" fetch --depth 1 \
+            https://github.com/synergy-network-hq/aegis-pqsynq.git "$submodule"
+          git -C "$dependency/aegis-pqsynq" checkout --detach --quiet FETCH_HEAD
+          [[ "$(git -C "$dependency/aegis-pqsynq" rev-parse HEAD)" == "$submodule" ]]
+
+      - name: Install Linux build dependencies
+        run: |
+          rustup toolchain install 1.93.0 --profile minimal
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang cmake libclang-dev pkg-config libssl-dev
+
+      - name: Qualify default and activated execution
+        run: |
+          cargo +1.93.0 test --locked --manifest-path runtime/Cargo.toml -p synergy-testnet --lib nf1 -- --test-threads=1
+          cargo +1.93.0 test --locked --manifest-path runtime/Cargo.toml -p synergy-testnet --lib \
+            --features engineering-nf1-sales nf1 -- --test-threads=1
+          cargo +1.93.0 test --locked --manifest-path runtime/Cargo.toml -p synergy-testnet --lib \
+            --features engineering-nf1-sales nft_sale -- --test-threads=1
+          cargo +1.93.0 test --locked --manifest-path runtime/Cargo.toml -p synergy-testnet --lib \
+            --features engineering-nf1-sales single_authority_startup -- --test-threads=1
+          cargo +1.93.0 test --locked --manifest-path runtime/Cargo.toml -p synergy-testnet --lib \
+            single_authority_perf_tests::p0 -- --test-threads=1
+          cargo +1.93.0 test --locked --manifest-path runtime/Cargo.toml -p synergy-testnet \
+            --bin chain1266-nf1-sales-activation
+
+      - name: Build unsigned Linux authority candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo +1.93.0 build --locked --release --manifest-path runtime/Cargo.toml -p synergy-testnet \
+            --features engineering-nf1-sales --bin synergy-validator-node \
+            --bin chain1266-nf1-sales-activation --bin chain1266-single-authority-bootstrap
+          mkdir -p candidate
+          for binary in synergy-validator-node chain1266-nf1-sales-activation chain1266-single-authority-bootstrap; do
+            install -m 755 "runtime/target/release/$binary" "candidate/$binary"
+          done
+          git rev-parse HEAD > candidate/SOURCE_REVISION
+          cp launch/CHAIN_1266_DEPENDENCIES.lock.json candidate/
+          (cd candidate && sha256sum synergy-validator-node chain1266-{nf1-sales-activation,single-authority-bootstrap} \
+            SOURCE_REVISION CHAIN_1266_DEPENDENCIES.lock.json > SHA256SUMS)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-chain1266-nf1-authority-${{ github.event.pull_request.head.sha }}
+          path: candidate/
+          if-no-files-found: error

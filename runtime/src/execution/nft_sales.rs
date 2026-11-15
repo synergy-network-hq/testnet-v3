@@ -223,7 +223,10 @@ pub(super) fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::execution::{execute_block_contents, ExecutionBlockContext, ExecutionResult};
+    use crate::execution::{
+        execute_block_contents, with_nf1_sales_test_activation, ExecutionBlockContext,
+        ExecutionResult,
+    };
     use crate::sts::{
         encode_sts_payload, CreateNftCollectionParams, MintNftParams, TokenClass,
         STS_TESTNET_CHAIN_ID, STS_TESTNET_NETWORK,
@@ -234,12 +237,24 @@ mod tests {
     const TIME: u64 = 1_795_000_000;
 
     fn step(
-        mut state: ExecutionState,
+        state: ExecutionState,
         sender: &str,
         nonce: u64,
         height: u64,
         op: StsTx,
     ) -> ExecutionResult {
+        with_nf1_sales_test_activation(10, || execute_step(&state, sender, nonce, height, op))
+            .expect("native-sale block execution")
+    }
+
+    fn execute_step(
+        state: &ExecutionState,
+        sender: &str,
+        nonce: u64,
+        height: u64,
+        op: StsTx,
+    ) -> Result<ExecutionResult, String> {
+        let mut state = state.clone();
         let gas_limit = estimate_sts_gas(&op);
         let transaction = Transaction {
             version: 1,
@@ -282,10 +297,9 @@ mod tests {
             &[transaction],
             &state,
         )
-        .expect("native-sale block execution")
     }
 
-    fn listed() -> (ExecutionState, String, String, String, String) {
+    fn minted() -> (ExecutionState, String, String, String) {
         let seller = crate::address::generate_wallet_address("spark-nf1-local-seller");
         let buyer = crate::address::generate_wallet_address("spark-nf1-local-buyer");
         let mut state = ExecutionState::new()
@@ -331,6 +345,11 @@ mod tests {
                 },
             )
             .expect("NF1 instance");
+        (state, seller, buyer, nft_id)
+    }
+
+    fn listed() -> (ExecutionState, String, String, String, String) {
+        let (state, seller, buyer, nft_id) = minted();
         let list = step(
             state,
             &seller,
@@ -364,6 +383,42 @@ mod tests {
             expected_seller: seller.into(),
             price_nwei: price,
         }
+    }
+
+    #[test]
+    fn native_nf1_sale_requires_the_pinned_activation_height() {
+        let _guard = crate::rewards::reward_ledger_test_guard();
+        let (before, seller, _, nft_id) = minted();
+        let original = compute_state_root_after(&before).unwrap();
+        let sale = StsTx::ListNftForSnrg {
+            nft_id: nft_id.clone(),
+            price_nwei: PRICE,
+            expires_at_height: 25,
+        };
+        let payload = encode_sts_payload(&StsSignedPayload::new(sale.clone())).unwrap();
+        assert!(crate::execution::is_nf1_sale_payload(&payload));
+        with_nf1_sales_test_activation(10, || {
+            let legacy_error = crate::sts::StsError::InvalidMetadata.to_string();
+            let early = execute_step(&before, &seller, 0, 9, sale.clone()).unwrap_err();
+            assert_eq!(early, legacy_error);
+            assert_eq!(compute_state_root_after(&before).unwrap(), original);
+
+            let active = execute_step(&before, &seller, 0, 10, sale.clone()).unwrap();
+            assert_eq!(active.receipts[0].status, ReceiptStatus::Success);
+            assert!(active.state.sts_state.nft_sale_listing(&nft_id).is_some());
+            assert_ne!(active.state_root_after, original);
+
+            // Removing or replacing an activation can never reinterpret a
+            // finalized sale block as an ordinary failed transaction.
+            let missing_at_height = with_nf1_sales_test_activation(11, || {
+                execute_step(&before, &seller, 0, 10, sale.clone())
+            });
+            assert_eq!(missing_at_height.unwrap_err(), legacy_error);
+
+            let replay = execute_step(&before, &seller, 0, 10, sale).unwrap();
+            assert_eq!(replay.state_root_after, active.state_root_after);
+            assert_eq!(replay.receipt_root, active.receipt_root);
+        });
     }
 
     #[test]

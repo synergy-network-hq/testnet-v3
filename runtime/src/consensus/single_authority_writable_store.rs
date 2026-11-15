@@ -30,7 +30,15 @@ pub struct WritableSingleAuthorityStore {
 impl WritableSingleAuthorityStore {
     /// Exclusive writable open: one O(n) validation scan, then cached.
     pub fn open(store: SingleAuthorityFinalityStore) -> Result<Self, String> {
+        Self::open_with_preflight(store, || Ok(()))
+    }
+
+    pub(crate) fn open_with_preflight(
+        store: SingleAuthorityFinalityStore,
+        preflight: impl FnOnce() -> Result<(), String>,
+    ) -> Result<Self, String> {
         let writer = SingleAuthorityWriterLock::acquire(store.log_path())?;
+        preflight()?;
         let startup = store.recover_startup_with_tail(8_192)?;
         Ok(Self {
             cached_tail: startup.finalized,

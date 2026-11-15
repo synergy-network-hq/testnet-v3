@@ -114,6 +114,13 @@ pub struct SingleAuthorityDriver {
 impl SingleAuthorityDriver {
     /// Startup: open durable components, reconcile, resolve the next height.
     pub fn start(inputs: SingleAuthorityRuntimeInputs) -> Result<Self, String> {
+        Self::start_with_preflight(inputs, || Ok(()))
+    }
+
+    pub(crate) fn start_with_preflight(
+        inputs: SingleAuthorityRuntimeInputs,
+        preflight: impl FnOnce() -> Result<(), String>,
+    ) -> Result<Self, String> {
         if inputs.authority_public_key.algorithm != PQCAlgorithm::MLDSA65 {
             return Err(format!(
                 "single-authority block signing requires ML-DSA-65, found {:?}",
@@ -125,7 +132,7 @@ impl SingleAuthorityDriver {
             inputs.finality_head_path.clone(),
             inputs.chain_binding(),
         )?;
-        let writable = WritableSingleAuthorityStore::open(store)?;
+        let writable = WritableSingleAuthorityStore::open_with_preflight(store, preflight)?;
 
         // Genesis is finalized height 0 and is NOT in the authority finality
         // log: it is bound by the ML-DSA-87 start authorization. Its state root
@@ -521,6 +528,8 @@ impl SingleAuthorityDriver {
                     ));
                 }
                 None => {
+                    #[cfg(feature = "engineering-nf1-sales")]
+                    let transactions = exclude_preactivation_nf1_sales(transactions, height);
                     let block = Block::new(
                         height,
                         transactions,
@@ -619,6 +628,44 @@ impl SingleAuthorityDriver {
             &authorized,
         )
     }
+}
+
+/// Drops unactivated sales from a fresh input batch before its body becomes
+/// durable. Later nonces from those senders must be resubmitted without a gap.
+/// This never modifies previously staged candidates or replayed blocks.
+#[cfg(feature = "engineering-nf1-sales")]
+fn exclude_preactivation_nf1_sales(
+    mut transactions: Vec<Transaction>,
+    height: u64,
+) -> Vec<Transaction> {
+    use crate::aegis_tx_tool::decode_aegis_carrier_data;
+    use crate::execution::{is_nf1_sale_payload, nf1_sales_enabled_for_execution_at};
+
+    if nf1_sales_enabled_for_execution_at(height) {
+        return transactions;
+    }
+    let mut excluded_nonces = BTreeMap::<String, u64>::new();
+    for carrier in &transactions {
+        let is_sale = carrier
+            .data
+            .as_deref()
+            .and_then(|data| decode_aegis_carrier_data(data).ok())
+            .is_some_and(|envelope| is_nf1_sale_payload(&envelope.transaction.payload));
+        if is_sale {
+            excluded_nonces
+                .entry(carrier.sender.to_ascii_lowercase())
+                .and_modify(|nonce| *nonce = (*nonce).min(carrier.nonce))
+                .or_insert(carrier.nonce);
+        }
+    }
+    if !excluded_nonces.is_empty() {
+        transactions.retain(|carrier| {
+            excluded_nonces
+                .get(&carrier.sender.to_ascii_lowercase())
+                .is_none_or(|nonce| carrier.nonce < *nonce)
+        });
+    }
+    transactions
 }
 
 impl SingleAuthorityDriver {

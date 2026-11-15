@@ -29,7 +29,10 @@ use crate::desired_state_v2::{
     SignedDesiredStateV2, MLDSA87_PUBLIC_KEY_LEN,
 };
 use crate::desired_state_v2_canonical::verify_canonical_and_signature;
+use crate::nf1_sales_activation::{self, ActivationCheckpoint, VerifiedNf1SalesActivation};
 use base64::{engine::general_purpose, Engine as _};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 /// Launch constants this release will start. They are asserted, never derived
@@ -287,10 +290,28 @@ pub fn verify_genesis_identity(expectation: &StartupExpectation) -> Result<(), S
 
 /// Every durable single-authority surface must already carry this exact
 /// incarnation binding, or startup fails closed.
+#[cfg(test)]
 pub fn require_durable_binding_agreement(
     plan: &SingleAuthorityStartupPlan,
     paths: &SingleAuthorityDurablePaths,
 ) -> Result<(), String> {
+    prepare_durable_single_authority_startup(plan, paths, None)
+}
+
+pub fn prepare_durable_single_authority_startup(
+    plan: &SingleAuthorityStartupPlan,
+    paths: &SingleAuthorityDurablePaths,
+    activation: Option<&VerifiedNf1SalesActivation>,
+) -> Result<(), String> {
+    let marker_path = paths
+        .finality_head_path
+        .with_file_name("nf1-sales-activation.fingerprint");
+    let activation_fingerprint = activation
+        .map(|policy| policy.manifest().fingerprint())
+        .transpose()?;
+    let marker_is_new =
+        check_nf1_activation_marker(&marker_path, activation_fingerprint.as_deref())?;
+    let mut observed_checkpoint = None;
     let binding = SingleAuthorityChainBinding {
         first_authority_height: plan.authority_start_height,
         chain_id: plan.chain_id,
@@ -314,9 +335,17 @@ pub fn require_durable_binding_agreement(
         if record.release_id != plan.release_id {
             return Err("durable finality record is bound to a different release".to_string());
         }
+        if activation.is_some_and(|policy| policy.manifest().checkpoint.height == record.height) {
+            observed_checkpoint = Some(ActivationCheckpoint {
+                height: record.height,
+                block_hash: record.block_hash.to_hex(),
+                state_root: record.state_root.to_hex(),
+            });
+        }
         Ok(())
     })?;
-    if let Some(head) = store.load_head()? {
+    let durable_head = store.load_head()?;
+    if let Some(head) = durable_head.as_ref() {
         if head.chain_incarnation != plan.chain_incarnation || head.chain_id != plan.chain_id {
             return Err(
                 "durable finalized head is bound to a different chain incarnation".to_string(),
@@ -324,7 +353,9 @@ pub fn require_durable_binding_agreement(
         }
         match recovery.finalized.as_ref() {
             Some(latest)
-                if latest.height == head.height && latest.block_hash == head.block_hash => {}
+                if latest.height == head.height
+                    && latest.block_hash == head.block_hash
+                    && latest.state_root == head.state_root => {}
             Some(latest) => {
                 return Err(format!(
                     "durable head {} does not match the last finality record {}",
@@ -336,6 +367,23 @@ pub fn require_durable_binding_agreement(
             }
         }
     }
+
+    let anchored = if let Some(policy) = activation {
+        let head = durable_head
+            .as_ref()
+            .ok_or("NF1 sales activation requires an existing durable finalized head")?;
+        if marker_is_new && head.height >= policy.manifest().activation_height {
+            return Err(
+                "The legacy chain has already reached the proposed NF1 activation height".into(),
+            );
+        }
+        let checkpoint = observed_checkpoint
+            .as_ref()
+            .ok_or("NF1 sales activation checkpoint is absent from the durable finality log")?;
+        Some(policy.verify_checkpoint(checkpoint)?)
+    } else {
+        None
+    };
 
     // Bind and compact the signing journal only after the finality log/head
     // have recovered.  This preserves the historical V1 journal as an audit
@@ -360,6 +408,15 @@ pub fn require_durable_binding_agreement(
     )?;
     journal.require_signing_allowed(&namespace)?;
     for entry in journal.entries()? {
+        if marker_is_new
+            && activation
+                .is_some_and(|policy| entry.subject.height >= policy.manifest().activation_height)
+        {
+            return Err(
+                "The legacy signing journal already reaches the proposed NF1 activation height"
+                    .into(),
+            );
+        }
         if entry.subject.chain_incarnation != plan.chain_incarnation
             || entry.subject.chain_id != plan.chain_id
         {
@@ -380,7 +437,57 @@ pub fn require_durable_binding_agreement(
     ] {
         require_namespaced_path(path, &namespace_component)?;
     }
+    if let Some(policy) = anchored {
+        if marker_is_new {
+            let fingerprint = activation_fingerprint
+                .as_deref()
+                .ok_or("NF1 sales activation marker is missing its verified fingerprint")?;
+            write_nf1_activation_marker(&marker_path, fingerprint)?;
+        }
+        nf1_sales_activation::install_anchored(policy)?;
+    }
     Ok(())
+}
+
+fn check_nf1_activation_marker(path: &Path, expected: Option<&str>) -> Result<bool, String> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(expected.is_some()),
+        Err(error) => return Err(format!("Open durable NF1 activation marker: {error}")),
+    };
+    let expected = expected.ok_or("Durable NF1 activation requires its installed signed policy")?;
+    let mut contents = Vec::new();
+    file.take((expected.len() + 1) as u64)
+        .read_to_end(&mut contents)
+        .map_err(|error| format!("Read durable NF1 activation marker: {error}"))?;
+    if contents != expected.as_bytes() {
+        return Err(
+            "Durable NF1 activation fingerprint differs from the installed signed policy".into(),
+        );
+    }
+    Ok(false)
+}
+
+fn write_nf1_activation_marker(path: &Path, fingerprint: &str) -> Result<(), String> {
+    let temp = path.with_extension(format!("tmp-{}", std::process::id()));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+        .map_err(|error| format!("Create temporary NF1 activation marker: {error}"))?;
+    let result = file
+        .write_all(fingerprint.as_bytes())
+        .and_then(|()| file.sync_all())
+        .and_then(|()| fs::hard_link(&temp, path));
+    drop(file);
+    let _ = fs::remove_file(&temp);
+    result.map_err(|error| format!("Publish durable NF1 activation marker: {error}"))?;
+    let parent = path
+        .parent()
+        .ok_or("Durable NF1 activation marker has no parent")?;
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("Sync durable NF1 activation marker directory: {error}"))
 }
 
 fn require_namespaced_path(path: &Path, namespace_component: &str) -> Result<(), String> {

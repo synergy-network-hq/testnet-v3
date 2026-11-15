@@ -99,16 +99,23 @@ fn finalize_sts(
     driver: &mut SingleAuthorityDriver,
     dir: &TempDir,
     envelope: &AegisTxSubmissionEnvelope,
+    excluded_candidates: &[AegisTxSubmissionEnvelope],
 ) -> (crate::block::Block, TransactionReceipt) {
-    let legacy = admit_single_authority_transaction(envelope, driver.chain(), &[], now_unix())
-        .expect("canonical signed admission");
+    let mut candidates = Vec::new();
+    for candidate in std::iter::once(envelope).chain(excluded_candidates) {
+        let legacy =
+            admit_single_authority_transaction(candidate, driver.chain(), &candidates, now_unix())
+                .expect("canonical signed admission");
+        candidates.push(legacy);
+    }
+    let expected_hash = candidates[0].hash();
     let height = driver.next_height();
     let block = driver
-        .produce_next_block(vec![legacy.clone()])
+        .produce_next_block(candidates)
         .expect("produce signed and finalized STS block");
     assert_eq!(block.block_index, height);
     assert_eq!(block.transactions.len(), 1);
-    assert_eq!(block.transactions[0].hash(), legacy.hash());
+    assert_eq!(block.transactions[0].hash(), expected_hash);
     block
         .verify_proposer_signature()
         .expect("authority signature");
@@ -130,6 +137,12 @@ fn finalize_sts(
 
 #[test]
 fn t03_real_signed_nf1_sale_is_finalized_with_native_payment() {
+    // Create and mint replay under pre-activation rules. The listing is the
+    // first sale operation at the activation boundary.
+    crate::execution::with_nf1_sales_test_activation(3, exercise_sale);
+}
+
+fn exercise_sale() {
     let dir = TempDir::new("nf1-sale");
     let mut seller = StsAccount::new();
     let mut buyer = StsAccount::new();
@@ -145,30 +158,52 @@ fn t03_real_signed_nf1_sale_is_finalized_with_native_payment() {
     let mut driver = SingleAuthorityDriver::start(inputs(&dir, &fixture, &public, &private))
         .expect("local isolated Chain 1266 driver");
 
-    let create = seller.sign(
-        0,
+    let collection_params = CreateNftCollectionParams {
+        class: TokenClass::NF1StandardNft,
+        creator: seller.address.clone(),
+        creator_nonce: 0,
+        name: "Spark Sale Fixture".to_string(),
+        symbol: "SPARKSALE".to_string(),
+        metadata_uri: None,
+        metadata_hash: None,
+        metadata_mutable: false,
+        image_uri: None,
+        image_hash: None,
+        collection_authority: None,
+        mint_authority: None,
+        metadata_authority: None,
+        royalty_basis_points: None,
+        royalty_recipient: None,
+        transferable: true,
+        requires_issuer_approval: false,
+        created_at: now_unix(),
+    };
+    let create = seller.sign(0, StsTx::CreateNftCollection(collection_params.clone()));
+    const PRICE_NWEI: u128 = 1_000_000_000;
+    let premature_list = seller.sign(
+        1,
+        StsTx::ListNftForSnrg {
+            nft_id: "future-nf1-sale".to_string(),
+            price_nwei: PRICE_NWEI,
+            expires_at_height: 30,
+        },
+    );
+    let following_nonce = seller.sign(
+        2,
         StsTx::CreateNftCollection(CreateNftCollectionParams {
-            class: TokenClass::NF1StandardNft,
-            creator: seller.address.clone(),
-            creator_nonce: 0,
-            name: "Spark Sale Fixture".to_string(),
-            symbol: "SPARKSALE".to_string(),
-            metadata_uri: None,
-            metadata_hash: None,
-            metadata_mutable: false,
-            image_uri: None,
-            image_hash: None,
-            collection_authority: None,
-            mint_authority: None,
-            metadata_authority: None,
-            royalty_basis_points: None,
-            royalty_recipient: None,
-            transferable: true,
-            requires_issuer_approval: false,
-            created_at: now_unix(),
+            creator_nonce: 2,
+            symbol: "FUTURE".to_string(),
+            ..collection_params
         }),
     );
-    finalize_sts(&mut driver, &dir, &create);
+    // Defend the fresh candidate even if an upstream gate was bypassed. The
+    // lower valid create is finalized, and mint can reuse the excluded nonce.
+    finalize_sts(
+        &mut driver,
+        &dir,
+        &create,
+        &[premature_list, following_nonce],
+    );
     let collection_id = driver
         .execution_state()
         .sts_state
@@ -193,7 +228,7 @@ fn t03_real_signed_nf1_sale_is_finalized_with_native_payment() {
             minted_at: now_unix(),
         }),
     );
-    finalize_sts(&mut driver, &dir, &mint);
+    finalize_sts(&mut driver, &dir, &mint, &[]);
     let nft_id = driver
         .execution_state()
         .sts_state
@@ -204,7 +239,6 @@ fn t03_real_signed_nf1_sale_is_finalized_with_native_payment() {
         .nft_id
         .clone();
 
-    const PRICE_NWEI: u128 = 1_000_000_000;
     let list = seller.sign(
         2,
         StsTx::ListNftForSnrg {
@@ -213,7 +247,7 @@ fn t03_real_signed_nf1_sale_is_finalized_with_native_payment() {
             expires_at_height: 30,
         },
     );
-    finalize_sts(&mut driver, &dir, &list);
+    finalize_sts(&mut driver, &dir, &list, &[]);
     let before = driver.execution_state();
     let listing = before
         .sts_state
@@ -236,7 +270,7 @@ fn t03_real_signed_nf1_sale_is_finalized_with_native_payment() {
             price_nwei: PRICE_NWEI,
         },
     );
-    let (block, receipt) = finalize_sts(&mut driver, &dir, &buy);
+    let (block, receipt) = finalize_sts(&mut driver, &dir, &buy, &[]);
     let after = driver.execution_state();
     assert_eq!(after.sts_state.nft(&nft_id).unwrap().owner, buyer.address);
     assert!(after.sts_state.nft_sale_listing(&nft_id).is_none());

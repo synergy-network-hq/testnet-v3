@@ -8602,7 +8602,16 @@ fn sts_nft_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
 }
 
 #[cfg(feature = "engineering-nf1-sales")]
-fn finalized_nft_sale_report(chain: &Arc<Mutex<BlockChain>>) -> Result<StsReplayReport, String> {
+pub(crate) fn require_current_nf1_sale_activation(payload: &[u8]) -> Result<(), String> {
+    if crate::execution::is_nf1_sale_payload(payload) {
+        finalized_nf1_sale_head()?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "engineering-nf1-sales")]
+fn finalized_nf1_sale_head(
+) -> Result<crate::consensus::single_authority_finality_store::SingleAuthorityFinalizedHead, String> {
     use crate::rpc::single_authority_finality_rpc::{
         genesis_binds_single_authority, single_authority_finalized_head_for_rpc,
     };
@@ -8613,9 +8622,32 @@ fn finalized_nft_sale_report(chain: &Arc<Mutex<BlockChain>>) -> Result<StsReplay
     {
         return Err("NF1 sales require Chain 1266 single-authority finality".to_string());
     }
-    let state = finalized_synq_query_state()?;
     let head = single_authority_finalized_head_for_rpc(genesis)?
         .ok_or_else(|| "Chain 1266 finalized head is unavailable".to_string())?;
+    if !crate::nf1_sales_activation::enabled_at(head.height) {
+        return Err("NF1 sales are unavailable at the current finalized height".to_string());
+    }
+    Ok(head)
+}
+
+#[cfg(feature = "engineering-nf1-sales")]
+fn finalized_nft_sale_report(chain: &Arc<Mutex<BlockChain>>) -> Result<Arc<StsReplayReport>, String> {
+    use crate::consensus::single_authority_finality_store::SingleAuthorityFinalizedHead;
+    use std::sync::OnceLock;
+
+    static LAST_REPORT: OnceLock<Mutex<Option<(SingleAuthorityFinalizedHead, Arc<StsReplayReport>)>>> =
+        OnceLock::new();
+    let mut cache = LAST_REPORT
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map_err(|_| "Chain 1266 sale snapshot is unavailable".to_string())?;
+    let head = finalized_nf1_sale_head()?;
+    if let Some((cached_head, report)) = cache.as_ref() {
+        if cached_head == &head {
+            return Ok(Arc::clone(report));
+        }
+    }
+    let state = finalized_synq_query_state()?;
     // The journal can advance just before the corresponding state snapshot
     // becomes available. Never serve a listing under a different state root.
     if crate::execution::compute_state_root_after(&state)? != head.state_root {
@@ -8624,12 +8656,14 @@ fn finalized_nft_sale_report(chain: &Arc<Mutex<BlockChain>>) -> Result<StsReplay
     let chain = chain
         .lock()
         .map_err(|_| "Chain 1266 state is unavailable".to_string())?;
-    Ok(sts_report_from_finalized_execution_state(
+    let report = Arc::new(sts_report_from_finalized_execution_state(
         &chain,
         state,
         head.height,
         head.block_hash.to_hex(),
-    ))
+    ));
+    *cache = Some((head, Arc::clone(&report)));
+    Ok(report)
 }
 
 #[cfg(feature = "engineering-nf1-sales")]
@@ -8638,7 +8672,7 @@ fn sts_nft_sale_capabilities_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
         Ok(report) => json!({
             "success": true,
             "supported": true,
-            "protocol": "sts-nf1-sales-v1",
+            "protocol": crate::nf1_sales_activation::NF1_SALES_PROTOCOL,
             "operations": ["list_nft_for_snrg", "cancel_nft_sale", "buy_nft_for_snrg"],
             "source": report.source,
             "replay": sts_replay_metadata_json(&report),
